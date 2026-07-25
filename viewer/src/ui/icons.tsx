@@ -95,11 +95,16 @@ export function StatusIcon({
       {category === "done" && (
         <>
           <circle cx="7" cy="7" r="6" fill="currentColor" />
+          {/* Scaled out from the centre by about a quarter. The old check sat
+              in the middle of a 12px disc looking like a tick someone had
+              dropped in rather than the mark the disc was drawn for. Its
+              furthest point reaches 3.9 from centre and the stroke adds 0.9,
+              so it still clears the r=6 rim with room to spare. */}
           <path
-            d="M4.4 7.2 L6.2 9 L9.6 5.2"
+            d="M3.8 7.2 L6.1 9.5 L10.2 4.8"
             fill="none"
             stroke="var(--color-bg)"
-            strokeWidth="1.6"
+            strokeWidth="1.8"
             strokeLinecap="round"
             strokeLinejoin="round"
           />

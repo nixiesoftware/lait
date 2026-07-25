@@ -12,5 +12,14 @@ Dockerfile text eol=lf
 # across platforms and CI's rebuild-and-diff check doesn't fire on line endings.
 src/serve/assets/** linguist-generated=true
 src/serve/assets/** text eol=lf
+# Vite copies this file through into the bundle, so its line endings end up in
+# `src/serve/assets/index.html`. Checked out as CRLF on Windows, the HTML
+# transform re-joins a line that already ends in a carriage return and emits a
+# doubled one; the `eol=lf` rule above then collapses only the pair, leaving
+# exactly one CRLF in the committed blob. A Linux build emits a bare newline
+# there, so CI's rebuild-and-diff fired on every commit made from Windows — the
+# same one line, forever. Pinning the *source* to LF is the fix: with no
+# carriage return to double, both platforms build the same bytes.
+viewer/index.html text eol=lf
 # `npm ci` needs the lockfile byte-stable across platforms.
 viewer/package-lock.json text eol=lf

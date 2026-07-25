@@ -26,6 +26,24 @@ const NAMED: Record<string, string> = {
   teal: "light-dark(#0d9488, #2dd4bf)",
 };
 
+/**
+ * The catalog colours a person may choose from — the palette above minus the
+ * `grey` alias. This is the vocabulary a colour picker offers: every name here
+ * resolves to a designed, theme-aware token, so a chosen colour is one we can
+ * promise contrast for. Order runs warm-to-cool from the neutral.
+ */
+export const CATALOG_COLORS = [
+  "gray",
+  "red",
+  "orange",
+  "yellow",
+  "green",
+  "teal",
+  "blue",
+  "purple",
+  "pink",
+] as const;
+
 /** A CSS colour for a catalog colour name. Accepts a literal hex passthrough,
  *  since nothing stops a catalog from carrying one. */
 export function catalogColor(name: string): string {
@@ -77,4 +95,23 @@ export function avatarColor(deviceKey: string): string {
     h = Math.imul(h, 0x01000193);
   }
   return AVATAR[Math.abs(h) % AVATAR.length] ?? AVATAR[0]!;
+}
+
+/**
+ * A label chip's edge, mixed from the label's own colour.
+ *
+ * Border only — no fill. A tinted ground was the first attempt and it was
+ * wrong: in a list row a label sits beside a project name and a date, and a
+ * washed pill outweighs both, which is not the label's importance. Every dark
+ * Linear surface draws the same conclusion — dot, quiet text, no fill — and
+ * the colour still arrives, just through the dot instead of the whole shape.
+ *
+ * `color-mix` rather than an opacity utility because these colours arrive as
+ * `var(--color-*)` tokens and `light-dark()` pairs, not hex — Tailwind's `/30`
+ * syntax cannot reach inside either. Mixing in `oklab` keeps the hairline at
+ * the same perceived lightness across hues, so a yellow edge does not come out
+ * louder than a blue one at the same percentage.
+ */
+export function labelSurface(color: string): { borderColor: string } {
+  return { borderColor: `color-mix(in oklab, ${catalogColor(color)} 34%, transparent)` };
 }

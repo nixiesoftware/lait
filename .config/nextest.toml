@@ -51,9 +51,19 @@ slow-timeout = { period = "30s", terminate-after = 3 }
 # and legitimately run for minutes in the dev profile, slower still when
 # nextest packs the whole suite onto every core. They get a wider budget
 # instead of a weaker iteration count.
+#
+# Measured evidence for the budget below, both a single test on an idle machine
+# with dependencies optimized (so the profile note above is not the cause):
+# 83.6 s on a 12-core Windows dev box, 109.6 s on Linux — CPU-bound, one core
+# saturated. The test is unchanged since it landed and passes everywhere; what
+# moved is the size of the suite around it. nextest scales concurrency to
+# num-cpus, so on GitHub's 2-core windows-latest those ~85 s of core time are
+# shared with 737 other tests, and the wall clock ran past the 300 s this used
+# to allow. 5 × 120 s keeps a genuine wedge surfacing within ten minutes while
+# giving the slowest supported runner ~7× the measured single-machine time.
 [[profile.default.overrides]]
 filter = 'binary(ceremony_frontier_isolation) + binary(mechanics_sparse_ceremony)'
-slow-timeout = { period = "60s", terminate-after = 5 }
+slow-timeout = { period = "120s", terminate-after = 5 }
 
 # The smoke-scale performance gate builds a ~500-request corpus through the
 # real daemon and restarts it twice. Measured evidence: ~27 s wall on a warm

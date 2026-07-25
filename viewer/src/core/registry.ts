@@ -26,9 +26,76 @@
 import { parseBinding, type Binding } from "./keys";
 import type { Field } from "./overlay";
 
-/** The root surfaces. A view is not a route — there is no URL to be wrong about,
- *  and the browser's back button belongs to the browser. */
-export type View = "list" | "board" | "inbox" | "activity" | "members";
+/** The root surfaces. These are also the stable view segments in the viewer URL;
+ *  see `route.ts` for the canonical, machine-independent route contract. */
+export type View =
+  | "overview"
+  | "list"
+  | "board"
+  | "calendar"
+  | "timeline"
+  | "projects"
+  | "inbox"
+  | "my-issues"
+  | "activity"
+  | "settings";
+
+/** The work-view render modes a saved view / the switcher toggles between —
+ *  the same filtered query, drawn four ways. A strict subset of `View`. */
+export const WORK_VIEWS = ["list", "board", "calendar", "timeline"] as const;
+export type WorkView = (typeof WORK_VIEWS)[number];
+export function isWorkView(v: View): v is WorkView {
+  return (WORK_VIEWS as readonly string[]).includes(v);
+}
+
+/** Surfaces owned by one project home. Workspace destinations must never retain
+ * one of these routes without a canonical project key. */
+export const PROJECT_VIEWS = ["overview", "list", "board", "calendar", "activity"] as const;
+export type ProjectView = (typeof PROJECT_VIEWS)[number];
+
+/**
+ * The three layouts of a project's issues — one query, drawn three ways.
+ *
+ * They are still routes, because a board is a place you can send someone. They
+ * are not *destinations*: the nav offers "Issues" once and the layout is chosen
+ * beside grouping and ordering, with the other things that decide how the same
+ * rows are drawn rather than which rows they are.
+ */
+export const ISSUE_MODES = ["list", "board", "calendar"] as const;
+export type IssueMode = (typeof ISSUE_MODES)[number];
+export function isIssueMode(v: View): v is IssueMode {
+  return (ISSUE_MODES as readonly string[]).includes(v);
+}
+
+/** What the layout switcher calls each mode. Distinct from `PROJECT_VIEW_LABEL`,
+ *  where `list` is the destination "Issues" rather than the drawing "List". */
+export const ISSUE_MODE_LABEL: Record<IssueMode, string> = {
+  list: "List",
+  board: "Board",
+  calendar: "Calendar",
+};
+
+/** The faces the sidebar tree lists, and the hops the trail can name. Board and
+ *  Calendar are layouts of Issues, so they collapse into it. */
+export const PROJECT_NAV_VIEWS = ["overview", "list", "activity"] as const;
+
+/** The nav face a route belongs to: a board is somewhere inside Issues. */
+export function navViewFor(v: ProjectView): ProjectView {
+  return isIssueMode(v) ? "list" : v;
+}
+
+/** What each project view is called, wherever it is offered — the sidebar's
+ *  project tree and the header trail name the same faces. */
+export const PROJECT_VIEW_LABEL: Record<ProjectView, string> = {
+  overview: "Overview",
+  list: "Issues",
+  board: "Board",
+  calendar: "Calendar",
+  activity: "Activity",
+};
+export function isProjectView(v: View): v is ProjectView {
+  return (PROJECT_VIEWS as readonly string[]).includes(v);
+}
 
 /**
  * A field a picker can be opened on.
@@ -54,6 +121,9 @@ export interface Ctx {
   readOnly: boolean;
   /** The focused issue's canonical ref, when a list/board has one. */
   selection: string | null;
+  /** How many issues carry a bulk-selection check. Gates the bulk commands
+   *  (and lets Esc mean "clear checks" only while there are checks to clear). */
+  checkedCount: number;
   /** True while an overlay owns input (palette, modal, editor). */
   overlay: boolean;
   /** Imperative surface the app exposes to commands. */
@@ -62,18 +132,23 @@ export interface Ctx {
 
 export interface AppApi {
   openPalette(): void;
+  openIssueSearch(): void;
   closePalette(): void;
   toggleShortcuts(): void;
   toggleSidebar(): void;
   toggleDetail(): void;
-  goto(view: View): void;
+  /** The one navigation verb. `project` names the destination's project when
+   *  the caller knows it; omitted keeps the current one, `null` clears it. */
+  goto(view: View, project?: string | null): void;
   openFilter(): void;
+  /** Reset every filter facet to the neutral state (show all). */
+  clearFilter(): void;
   toast(message: string): void;
   refresh(): void;
   select(reff: string | null): void;
   /** Show `value` for `(doc, field)` now, send the write, and let the doorbell
    *  retire the guess. See core/overlay.ts. */
-  predict(doc: string, field: Field, value: string, send: () => Promise<unknown>): void;
+  predict(doc: string, field: Field, value: string, send: () => Promise<unknown>): Promise<boolean>;
   createIssue(): void;
   deleteIssue(reff: string): void;
   pickSpace(id: string): void;
@@ -91,9 +166,29 @@ export interface AppApi {
   /** Copy the selected issue's ref to the clipboard (UI.md §5.1 `y`). */
   yankRef(): void;
   /** The project whose board is on screen; `null` = the daemon's default chain. */
-  pickProject(key: string | null): void;
   /** Open the new-project composer. */
   createProject(): void;
+
+  /** Clear the tombstone on a deleted issue (no-ops with a toast otherwise). */
+  restoreIssue(reff: string): void;
+  /** Assign the selected issue to me (UI.md's `start` without the status move). */
+  assignMe(): void;
+  /** Send the selected issue to its column's top or bottom. */
+  moveTo(pos: "top" | "bottom"): void;
+  /** Toggle the bulk-selection check on the selected issue. */
+  toggleCheck(): void;
+  /** Check every visible issue. */
+  checkAll(): void;
+  /** Drop every bulk-selection check. */
+  clearChecks(): void;
+  /** Open the display-options popover (group / order / deleted). */
+  openDisplay(): void;
+  /** Show the current project's workflow — states, transitions, gates. */
+  openWorkflow(): void;
+  /** Show the space's role definitions. */
+  openRoles(): void;
+  /** Set this browser's appearance without touching shared space state. */
+  setTheme(theme: "system" | "light" | "dark"): void;
 }
 
 export interface Command {

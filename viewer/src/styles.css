@@ -22,15 +22,20 @@
   --color-bg: light-dark(#ffffff, #0b0b0d);
   --color-raised: light-dark(#fafafa, #131316);
   --color-hover: light-dark(#f2f2f4, #1a1a1f);
-  --color-active: light-dark(#e9e9ee, #202027);
+  --color-active: light-dark(#ededf0, #202027);
   --color-line: light-dark(#e6e6ea, #26262d);
   --color-line-strong: light-dark(#d2d2d9, #34343d);
 
   --color-fg: light-dark(#17171a, #e9e9ec);
   --color-dim: light-dark(#5c5c66, #a0a0aa);
-  --color-mute: light-dark(#8b8b95, #6e6e78);
+  /* Muted copy still appears at the dense 11–12px scale throughout the viewer,
+     so it must clear normal-text contrast rather than relying on "secondary"
+     styling as an exemption. */
+  --color-mute: light-dark(#72727d, #858590);
 
-  --color-accent: light-dark(#2f6bff, #5b8cff);
+  /* The dark-theme blue is intentionally deeper than the light-theme value:
+     white labels remain AA while focus rings still clear non-text contrast. */
+  --color-accent: light-dark(#2f6bff, #416fe0);
   --color-accent-fg: #ffffff;
   --color-danger: light-dark(#d1242f, #f0616d);
   --color-ok: light-dark(#1a7f37, #3fb950);
@@ -46,9 +51,13 @@
      depends on; rows are tight and the spacing has to be predictable. */
   --spacing: 4px;
 
-  --radius-sm: 4px;
-  --radius-DEFAULT: 6px;
-  --radius-lg: 10px;
+  /* Tailwind v4 generates `rounded-*` from named radius tokens. There is no
+     `radius-DEFAULT` namespace entry, so the old 6px value never reached the
+     common `rounded` utility. Keep a deliberate three-step hierarchy instead:
+     tight marks, ordinary controls, floating surfaces. */
+  --radius-sm: 3px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
 
   --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
@@ -66,7 +75,29 @@
   --text-lg--line-height: 22px;
 
   --ease-out: cubic-bezier(0.2, 0, 0.2, 1);
-  --shadow-overlay: light-dark(0 8px 30px rgb(0 0 0 / 0.12), 0 8px 30px rgb(0 0 0 / 0.5));
+  /* `light-dark()` returns a *colour*, so it wraps the colour and nothing else.
+     These three tokens each used to wrap the whole shadow — geometry included —
+     which is not a value `box-shadow` accepts, so every popover, menu and
+     floating bar in the app has been computing `box-shadow: none`. It looked
+     deliberate because the surfaces also carry a border. */
+  --shadow-overlay: 0 8px 30px light-dark(rgb(0 0 0 / 0.12), rgb(0 0 0 / 0.5));
+  /* The middle tier, and deliberately unused. A shadow is a claim to be off the
+     page, so only things that float carry one: `overlay` for a surface anchored
+     to the control that opened it, `float` for the one that is not anchored to
+     anything. A board card, a segmented selector and an inline toast are all *on*
+     the page — they had this and it read as elevation they had not earned. Kept
+     as the scale's middle step for a surface that lifts without floating; there
+     is currently no such surface. */
+  --shadow-raised: 0 2px 4px light-dark(rgb(0 0 0 / 0.10), rgb(0 0 0 / 0.55));
+  /* For the one surface that is genuinely *hovering* over the work rather than
+     opening from a control: the bulk bar. `overlay` is tuned for a popover
+     anchored to the thing it belongs to, so it stops short of reading as a
+     separate object. Two layers: a tight contact shadow under the near edge and
+     a wide ambient one — that pairing is what reads as "lifted" rather than
+     "pasted". */
+  --shadow-float:
+    0 2px 6px light-dark(rgb(0 0 0 / 0.06), rgb(0 0 0 / 0.4)),
+    0 20px 56px -12px light-dark(rgb(0 0 0 / 0.22), rgb(0 0 0 / 0.75));
 }
 
 /* Dark by default; the OS decides unless the user overrode it. `color-scheme` is
@@ -87,11 +118,43 @@
   color-scheme: dark;
 }
 
+/* Compact is the issue tracker's default. Comfortable is deliberately a root
+   scale, not a handful of taller list rows: cards, toolbars, menus, controls and
+   type must keep the same rhythm when the user asks for more breathing room. */
+:root[data-density="comfortable"] {
+  --spacing: 4.5px;
+  --text-2xs: 11px;
+  --text-2xs--line-height: 15px;
+  --text-xs: 12px;
+  --text-xs--line-height: 17px;
+  --text-sm: 13px;
+  --text-sm--line-height: 18px;
+  --text-base: 14px;
+  --text-base--line-height: 21px;
+  --text-lg: 16px;
+  --text-lg--line-height: 23px;
+}
+
+@media (forced-colors: active) {
+  :focus-visible {
+    outline-color: Highlight;
+  }
+  [aria-current="true"],
+  [aria-selected="true"],
+  [aria-pressed="true"] {
+    forced-color-adjust: none;
+    border-color: Highlight;
+  }
+}
+
 @layer base {
   html,
   body,
   #root {
     height: 100%;
+  }
+  #root {
+    height: 100dvh;
   }
 
   body {
@@ -147,6 +210,31 @@
   ::selection {
     @apply bg-accent/25;
   }
+
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--color-line-strong) transparent;
+  }
+
+  *::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  *::-webkit-scrollbar-thumb {
+    background: var(--color-line-strong);
+    background-clip: content-box;
+    border: 3px solid transparent;
+    border-radius: 999px;
+  }
+
+  *::-webkit-scrollbar-thumb:hover {
+    background-color: var(--color-mute);
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -155,5 +243,375 @@
   *::after {
     animation-duration: 0.01ms !important;
     transition-duration: 0.01ms !important;
+  }
+}
+
+/* One motion language for every transient surface. Individual transform
+   properties keep these compatible with Radix's translate-based positioning. */
+@keyframes ui-overlay-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes ui-surface-in {
+  from { opacity: 0; scale: 0.985; }
+  to { opacity: 1; scale: 1; }
+}
+
+@keyframes ui-drawer-in {
+  from { translate: -16px 0; opacity: 0.6; }
+  to { translate: 0 0; opacity: 1; }
+}
+
+@keyframes ui-detail-in {
+  from { translate: 10px 0; opacity: 0; }
+  to { translate: 0 0; opacity: 1; }
+}
+
+.ui-overlay { animation: ui-overlay-in 140ms var(--ease-out) both; }
+.ui-surface { animation: ui-surface-in 160ms var(--ease-out) both; }
+.ui-drawer { animation: ui-drawer-in 180ms var(--ease-out) both; }
+.ui-detail { animation: ui-detail-in 160ms var(--ease-out) both; }
+
+/* Exits. A surface that fades in and then vanishes reads as a glitch, not a
+   close. Radix keeps its Content/Overlay mounted while `data-state="closed"` as
+   long as a CSS animation is running on it, so the `[data-state="closed"]`
+   variant *is* the close animation — no JS, and it only ever engages on the
+   Radix-driven surfaces (dialogs, popovers, menus, the drawer). The manually
+   mounted overlays (palette, search, shortcuts) carry no `data-state`, so they
+   keep their enter-only behaviour and unmount instantly, as before. The
+   class+attribute selector outranks the bare `.ui-*` enter rule, so on close the
+   exit wins without touching the entrance. Exits run a touch quicker than
+   entrances — leaving should feel lighter than arriving. */
+@keyframes ui-overlay-out {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
+@keyframes ui-surface-out {
+  from { opacity: 1; scale: 1; }
+  to { opacity: 0; scale: 0.985; }
+}
+
+@keyframes ui-drawer-out {
+  from { translate: 0 0; opacity: 1; }
+  to { translate: -16px 0; opacity: 0; }
+}
+
+.ui-overlay[data-state="closed"] { animation: ui-overlay-out 120ms var(--ease-out) both; }
+.ui-surface[data-state="closed"] { animation: ui-surface-out 130ms var(--ease-out) both; }
+.ui-drawer[data-state="closed"] { animation: ui-drawer-out 150ms var(--ease-out) both; }
+
+/* ---------------------------------------------------------------------------
+   Prose.
+
+   Issue bodies are documents. Agents write them like documentation — headings,
+   fenced code, ordered steps — so they are typeset like documentation, after
+   Hashnode's article page and Mintlify's docs body.
+
+   Two rules do most of the work here, and neither can be expressed as a uniform
+   flex `gap`, which is what this replaces:
+
+   1. **A heading belongs to what follows it.** Its space above is more than
+      twice its space below, so a section reads as a group instead of the
+      heading floating between two equal gaps.
+   2. **Adjacency decides spacing.** `+` selectors mean the first block has no
+      top margin, a paragraph after a paragraph gets one measure, and a list
+      after its own lead-in paragraph gets less — the parser can't tell us that,
+      but the cascade can.
+
+   Sizes are on the `.prose` element so both the class and its `--prose-*`
+   overrides cascade; comments reuse the same scale at a tighter rhythm, because
+   a reply is the same kind of text as a description, just less of it. */
+.prose {
+  font-size: 0.9375rem; /* 15px — 13px over a 700px measure ran to ~97ch */
+  line-height: 1.65;
+}
+
+.prose > * + * {
+  margin-top: 0.875em;
+}
+
+.prose h1,
+.prose h2,
+.prose h3,
+.prose h4 {
+  line-height: 1.3;
+  text-wrap: balance;
+}
+
+.prose > h1 { font-size: 1.5rem; font-weight: 650; letter-spacing: -0.011em; }
+.prose > h2 { font-size: 1.1875rem; font-weight: 650; letter-spacing: -0.008em; }
+.prose > h3 { font-size: 1rem; font-weight: 600; }
+.prose > h4 { font-size: 0.9375rem; font-weight: 600; color: var(--color-dim); }
+
+.prose > * + h1 { margin-top: 2em; }
+.prose > * + h2 { margin-top: 1.75em; }
+.prose > * + h3 { margin-top: 1.5em; }
+.prose > * + h4 { margin-top: 1.35em; }
+
+/* A heading owns the block under it: less air below than above. */
+.prose > h1 + *,
+.prose > h2 + *,
+.prose > h3 + *,
+.prose > h4 + * {
+  margin-top: 0.6em;
+}
+
+/* A list that answers the paragraph before it is part of that sentence. */
+.prose > p + ul,
+.prose > p + ol {
+  margin-top: 0.5em;
+}
+
+.prose li + li {
+  margin-top: 0.3em;
+}
+
+/* Code and quotes are figures: they get room on both sides regardless of what
+   they follow, because they interrupt the reading rather than continue it.
+
+   `.prose-figure` is here because a fenced block is no longer a bare `<pre>` —
+   it is a panel wrapping a language strip, a copy button and the `<pre>`. The
+   child combinator would otherwise walk straight past it and the block would
+   take the ordinary paragraph gap. */
+.prose > pre,
+.prose > blockquote,
+.prose > .prose-figure {
+  margin-top: 1.25em;
+}
+
+.prose > pre + *,
+.prose > blockquote + *,
+.prose > .prose-figure + * {
+  margin-top: 1.25em;
+}
+
+.prose > hr {
+  margin-top: 2em;
+  margin-bottom: 2em;
+}
+
+/* Syntax colour.
+
+   Shiki tokenises with `defaultColor: false`, so every span carries both
+   `--shiki-light` and `--shiki-dark` and no inline `color` of its own. Which
+   one wins is decided here, by the same two-part switch the theme tokens use:
+   the media query answers the system preference, `[data-theme]` answers a
+   manual override. Highlighting therefore survives a theme flip without
+   re-tokenising, and a token that predates a grammar change simply inherits.
+
+   Dark leads because the app does; the light branch is the override. */
+.shiki-block span {
+  color: var(--shiki-dark);
+}
+
+/* A long line has to stay reachable, so the block scrolls rather than wraps —
+   but the platform scrollbar is a 15px band of chrome under three lines of
+   shell. Thin it and tint it from our own tokens so it reads as part of the
+   panel. Hiding it outright is the one option not on the table: unlike the
+   bulk bar, there is content out there to get to. */
+.shiki-block {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-line-strong) transparent;
+}
+
+.shiki-block::-webkit-scrollbar {
+  height: 8px;
+}
+
+.shiki-block::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.shiki-block::-webkit-scrollbar-thumb {
+  background: var(--color-line-strong);
+  border-radius: 4px;
+}
+
+@media (prefers-color-scheme: light) {
+  .shiki-block span {
+    color: var(--shiki-light);
+  }
+}
+
+:root[data-theme="light"] .shiki-block span {
+  color: var(--shiki-light);
+}
+
+:root[data-theme="dark"] .shiki-block span {
+  color: var(--shiki-dark);
+}
+
+/* The tighter rhythm for a comment: same type, less air, since a reply is
+   usually one or two paragraphs rather than a document. */
+.prose-tight {
+  font-size: 0.9375rem;
+  line-height: 1.6;
+}
+
+.prose-tight > * + * {
+  margin-top: 0.625em;
+}
+
+/* ---------------------------------------------------------------------------
+   The live Markdown editor.
+
+   Milkdown is headless on purpose: it ships a ProseMirror document and no
+   opinion about how it looks, so the editing surface wears the same `.prose`
+   layer the read-only renderer does. The rules below are only the ones a
+   contenteditable needs and static prose does not.
+
+   `@milkdown/kit` ships ProseMirror's own stylesheet, but importing it would
+   pull in a set of colours and a caret style we have already decided; these
+   four declarations are the parts that actually matter. */
+.milkdown-host {
+  position: relative;
+}
+
+.milkdown .ProseMirror {
+  outline: none;
+  /* The document keeps its measure while typing — the parent caps width, and a
+     contenteditable will happily grow past it on a long unbroken token. */
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+/* An empty document has nothing to click, so it needs a line to aim at. The
+   placeholder rides on the first paragraph rather than the root: ProseMirror
+   always keeps one, and attaching to the root leaves the text sitting above
+   the caret instead of behind it. */
+.milkdown .ProseMirror.is-empty > p:first-child::before,
+.milkdown .ProseMirror > p.is-empty:first-child::before {
+  content: attr(data-placeholder);
+  color: var(--color-mute);
+  float: left;
+  height: 0;
+  pointer-events: none;
+}
+
+/* ProseMirror marks the node the caret is in; nothing should move when it does.
+   Milkdown's own presets assume a theme package for these, and without them a
+   selected image or an active list item silently inherits browser defaults. */
+.milkdown .ProseMirror .ProseMirror-selectednode {
+  outline: 2px solid var(--color-accent);
+  border-radius: var(--radius-md);
+}
+
+.milkdown .ProseMirror-gapcursor:after {
+  border-top-color: var(--color-fg);
+}
+
+/* GFM tables are editable here, so they get cell borders the read-only renderer
+   does not need — you have to see the cell you are in. */
+.milkdown .ProseMirror table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+
+.milkdown .ProseMirror th,
+.milkdown .ProseMirror td {
+  border: 1px solid var(--color-line);
+  padding: 6px 12px;
+  vertical-align: top;
+}
+
+.milkdown .ProseMirror th {
+  background: color-mix(in oklab, var(--color-active) 30%, transparent);
+  font-weight: 600;
+  text-align: left;
+}
+
+.milkdown .ProseMirror .selectedCell {
+  background: color-mix(in oklab, var(--color-accent) 12%, transparent);
+}
+
+/* A fenced block in the editor is still a `<pre>`, but it is being typed into,
+   so it takes the panel's shape without Shiki's colour — highlighting a buffer
+   under the caret would fight every keystroke. The read-only renderer keeps the
+   coloured version. */
+.milkdown .ProseMirror pre {
+  background: var(--color-bg);
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-lg);
+  padding: 12px;
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+  overflow-x: auto;
+}
+
+/* A focused issue becomes a document with a stable Linear-style property rail.
+   The split pane stays single-column until it has enough *container* width; the
+   browser window is not the relevant measurement when panels are resizable. */
+.issue-detail {
+  container-type: inline-size;
+}
+
+/* Too narrow for a rail, so the aside collapses into Linear's compact metadata
+   strip: one wrapping row of controls above the body. The group captions go
+   with it — "Labels" over a single label chip is a caption doing nothing — and
+   `display: contents` dissolves the sections and their lists so every row
+   becomes a direct flex child of the strip and wraps against its siblings
+   rather than against its group.
+
+   The terms are already `sr-only` at every width (the rail dropped its label
+   column), so nothing needs hiding here that isn't hidden already. */
+@container (max-width: 699px) {
+  .issue-detail-properties {
+    flex-flow: row wrap;
+    gap: 2px 8px;
+  }
+
+  .issue-detail-properties .rail-section,
+  .issue-detail-properties .rail-section > dl {
+    display: contents;
+  }
+
+  .issue-detail-properties .rail-caption {
+    display: none;
+  }
+
+  .issue-detail-properties .issue-property {
+    width: auto;
+    min-width: 0;
+    gap: 0;
+  }
+
+  .issue-detail-properties .issue-property > dd {
+    flex: none;
+    max-width: 220px;
+  }
+}
+
+@container (min-width: 700px) {
+  .issue-detail-body {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 264px;
+    align-content: start;
+    column-gap: 40px;
+  }
+
+  /* The measure is capped, not filled. `saans` runs 6.92px per character at
+     15px, so the old 13px body across a 630px column was ~105 characters per
+     line — nearly half again the 65–75 a reader tracks comfortably. 35rem at
+     15px is ~81, which is where documentation sites sit.
+
+     The cap lands on the whole column rather than on `.prose` alone so the
+     title, relations, timeline and composer share one left edge and one right
+     edge with the body text. Left-aligned, not centred: the rail is pinned
+     right, and centring the column would leave the two drifting apart as the
+     window grows. */
+  .issue-detail-body > *:not(.issue-detail-properties) {
+    grid-column: 1;
+    width: 100%;
+    max-width: 35rem;
+  }
+
+  .issue-detail-properties {
+    grid-column: 2;
+    grid-row: 1 / span 40;
+    border-left: 1px solid var(--color-line);
+    padding-left: 20px;
   }
 }
