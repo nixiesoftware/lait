@@ -1,0 +1,14 @@
+# Clippy's `result_large_err` defaults to 128 bytes. `control::Response` is 224
+# — it is the control plane's response enum, carrying whole DTOs by design — and
+# the world router returns `Result<(Response, bool), Response>` from nine
+# handlers. The `Err` there is not an error type: it is *the response to send
+# instead*, a short-circuit that skips the "and continue" flag. Both arms are the
+# same enum, so the lint is measuring the shape of the success path.
+#
+# Boxing to satisfy it would put a heap allocation on every short-circuit in the
+# control plane and change nine signatures plus their call sites, to save copying
+# a struct that is about to be serialised to a socket anyway.
+#
+# 256 rather than "off": it admits the type we have with a little headroom, and
+# still fires on an error genuinely worth boxing.
+large-error-threshold = 256
