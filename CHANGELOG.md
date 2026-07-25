@@ -2,7 +2,8 @@
 
 ## v0.6.0 — one word for one thing
 
-> **A naming flag day, and a clean break.** The thing lait organises work in is a
+> **A naming flag day, a clean break, and the release where the tracker became a
+> product.** The thing lait organises work in is a
 > **space** — the CLI has said so since v0.5.0, and now the code, the on-disk state,
 > and the wire say it too. `lait-engine` is now **`lait-fabric`**, and `UserId` is now
 > **`DeviceId`**. Nothing is migrated: **founders must re-init, everyone else must
@@ -56,6 +57,63 @@
   otherwise the same length it always was: a host is still 32 raw bytes on the wire,
   because the identity did not change even though its name did.
 
+### The web client
+
+`lait serve` is a real client now, not a viewer over the control plane.
+
+- **One shell.** A persistent header, a project tree in the sidebar, and one
+  breadcrumb grammar on every surface. Board, calendar and timeline are *layouts*
+  of Issues rather than sibling destinations, and there is one navigation verb
+  behind all of them.
+- **An issue body is a document.** 15px prose on a capped measure, spacing by
+  adjacency rather than a flat gap, tables, GitHub-style callouts, anchored
+  headings, and fenced code coloured by Shiki from a lazily-loaded grammar. The
+  colours resolve through the app's own theme tokens, so a theme switch needs no
+  re-highlight.
+- **The body compiles as you type.** Milkdown, chosen over Tiptap and Lexical
+  because its document is parsed and serialized by remark: descriptions are plain
+  CRDT text that `lait show` prints verbatim, and an editor that normalised on
+  save would rewrite an agent's issue the moment a human touched one word. Two
+  known deviations are documented and tested rather than hidden.
+- **Settings, filters, bulk, search.** A space rename, a labels page, a workflow
+  editor, roles and access; a wide filter popover; range selection; saved,
+  scoped display state and a durable density preference.
+
+### The tracker grew up
+
+- Comments have identity, threads and reactions. Issues have due dates, estimates,
+  followers, milestones, cycles, initiatives, teams, triage, templates and
+  attachments. Projects have an overview, a lead, planned dates, an updates feed,
+  and can be archived or deleted.
+- Deletion is a signed, reversible authority op, and the trash is a destination
+  rather than an appendix.
+
+### Agents are members
+
+- A sponsored member is a member: same grants, same surfaces, no `agent-*` verbs.
+  The daemon is multi-tenant, so agents act as themselves in one store instead of
+  borrowing a human's identity.
+
+### Authority and ceremonies
+
+- Scheme-neutral authority vocabulary and proposals; authority grants are ordinary
+  signed nodes; a canonical `SigningPlan` with any-K threshold signing; DKG
+  transcripts bound to the proposals that authorised them.
+- Revoke wins over a concurrent invite redemption, behind a causal rekey fence.
+  Detached message signatures are domain-separated and space-bound.
+
+### The network seam
+
+- iroh is sealed behind `lait-net` and the daemon drives the network through a
+  transport seam, so the protocol names no concrete transport type. The legacy
+  architecture is deleted rather than deprecated.
+
+### Convergence
+
+- Multi-writer bodies converge on constituent heads with name-identified
+  containers. Contact transfers are O(changed) via signed holdings declarations.
+  The beacon substrate makes steady-state sync live — a write reaches a peer
+  without a re-join.
 ## v0.5.2 — the board works, history is durable, and issues have a shape
 
 v0.5.0 put a board in the browser but left it read-rich and write-poor: you could
