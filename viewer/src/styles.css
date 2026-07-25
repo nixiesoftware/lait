@@ -302,6 +302,158 @@
 .ui-surface[data-state="closed"] { animation: ui-surface-out 130ms var(--ease-out) both; }
 .ui-drawer[data-state="closed"] { animation: ui-drawer-out 150ms var(--ease-out) both; }
 
+/* ---------------------------------------------------------------------------
+   Prose.
+
+   Issue bodies are documents. Agents write them like documentation — headings,
+   fenced code, ordered steps — so they are typeset like documentation, after
+   Hashnode's article page and Mintlify's docs body.
+
+   Two rules do most of the work here, and neither can be expressed as a uniform
+   flex `gap`, which is what this replaces:
+
+   1. **A heading belongs to what follows it.** Its space above is more than
+      twice its space below, so a section reads as a group instead of the
+      heading floating between two equal gaps.
+   2. **Adjacency decides spacing.** `+` selectors mean the first block has no
+      top margin, a paragraph after a paragraph gets one measure, and a list
+      after its own lead-in paragraph gets less — the parser can't tell us that,
+      but the cascade can.
+
+   Sizes are on the `.prose` element so both the class and its `--prose-*`
+   overrides cascade; comments reuse the same scale at a tighter rhythm, because
+   a reply is the same kind of text as a description, just less of it. */
+.prose {
+  font-size: 0.9375rem; /* 15px — 13px over a 700px measure ran to ~97ch */
+  line-height: 1.65;
+}
+
+.prose > * + * {
+  margin-top: 0.875em;
+}
+
+.prose h1,
+.prose h2,
+.prose h3,
+.prose h4 {
+  line-height: 1.3;
+  text-wrap: balance;
+}
+
+.prose > h1 { font-size: 1.5rem; font-weight: 650; letter-spacing: -0.011em; }
+.prose > h2 { font-size: 1.1875rem; font-weight: 650; letter-spacing: -0.008em; }
+.prose > h3 { font-size: 1rem; font-weight: 600; }
+.prose > h4 { font-size: 0.9375rem; font-weight: 600; color: var(--color-dim); }
+
+.prose > * + h1 { margin-top: 2em; }
+.prose > * + h2 { margin-top: 1.75em; }
+.prose > * + h3 { margin-top: 1.5em; }
+.prose > * + h4 { margin-top: 1.35em; }
+
+/* A heading owns the block under it: less air below than above. */
+.prose > h1 + *,
+.prose > h2 + *,
+.prose > h3 + *,
+.prose > h4 + * {
+  margin-top: 0.6em;
+}
+
+/* A list that answers the paragraph before it is part of that sentence. */
+.prose > p + ul,
+.prose > p + ol {
+  margin-top: 0.5em;
+}
+
+.prose li + li {
+  margin-top: 0.3em;
+}
+
+/* Code and quotes are figures: they get room on both sides regardless of what
+   they follow, because they interrupt the reading rather than continue it.
+
+   `.prose-figure` is here because a fenced block is no longer a bare `<pre>` —
+   it is a panel wrapping a language strip, a copy button and the `<pre>`. The
+   child combinator would otherwise walk straight past it and the block would
+   take the ordinary paragraph gap. */
+.prose > pre,
+.prose > blockquote,
+.prose > .prose-figure {
+  margin-top: 1.25em;
+}
+
+.prose > pre + *,
+.prose > blockquote + *,
+.prose > .prose-figure + * {
+  margin-top: 1.25em;
+}
+
+.prose > hr {
+  margin-top: 2em;
+  margin-bottom: 2em;
+}
+
+/* Syntax colour.
+
+   Shiki tokenises with `defaultColor: false`, so every span carries both
+   `--shiki-light` and `--shiki-dark` and no inline `color` of its own. Which
+   one wins is decided here, by the same two-part switch the theme tokens use:
+   the media query answers the system preference, `[data-theme]` answers a
+   manual override. Highlighting therefore survives a theme flip without
+   re-tokenising, and a token that predates a grammar change simply inherits.
+
+   Dark leads because the app does; the light branch is the override. */
+.shiki-block span {
+  color: var(--shiki-dark);
+}
+
+/* A long line has to stay reachable, so the block scrolls rather than wraps —
+   but the platform scrollbar is a 15px band of chrome under three lines of
+   shell. Thin it and tint it from our own tokens so it reads as part of the
+   panel. Hiding it outright is the one option not on the table: unlike the
+   bulk bar, there is content out there to get to. */
+.shiki-block {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-line-strong) transparent;
+}
+
+.shiki-block::-webkit-scrollbar {
+  height: 8px;
+}
+
+.shiki-block::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.shiki-block::-webkit-scrollbar-thumb {
+  background: var(--color-line-strong);
+  border-radius: 4px;
+}
+
+@media (prefers-color-scheme: light) {
+  .shiki-block span {
+    color: var(--shiki-light);
+  }
+}
+
+:root[data-theme="light"] .shiki-block span {
+  color: var(--shiki-light);
+}
+
+:root[data-theme="dark"] .shiki-block span {
+  color: var(--shiki-dark);
+}
+
+/* The tighter rhythm for a comment: same type, less air, since a reply is
+   usually one or two paragraphs rather than a document. */
+.prose-tight {
+  font-size: 0.9375rem;
+  line-height: 1.6;
+}
+
+.prose-tight > * + * {
+  margin-top: 0.625em;
+}
+
 /* A focused issue becomes a document with a stable Linear-style property rail.
    The split pane stays single-column until it has enough *container* width; the
    browser window is not the relevant measurement when panels are resizable. */
@@ -309,32 +461,34 @@
   container-type: inline-size;
 }
 
-/* A split issue follows Linear's compact metadata strip: the value and its icon
-   carry the field identity, while the semantic term remains in the definition
-   list for assistive technology. This prevents nine properties from pushing the
-   description and activity below the fold in a narrow pane. */
+/* Too narrow for a rail, so the aside collapses into Linear's compact metadata
+   strip: one wrapping row of controls above the body. The group captions go
+   with it — "Labels" over a single label chip is a caption doing nothing — and
+   `display: contents` dissolves the sections and their lists so every row
+   becomes a direct flex child of the strip and wraps against its siblings
+   rather than against its group.
+
+   The terms are already `sr-only` at every width (the rail dropped its label
+   column), so nothing needs hiding here that isn't hidden already. */
 @container (max-width: 699px) {
   .issue-detail-properties {
     flex-flow: row wrap;
     gap: 2px 8px;
   }
 
+  .issue-detail-properties .rail-section,
+  .issue-detail-properties .rail-section > dl {
+    display: contents;
+  }
+
+  .issue-detail-properties .rail-caption {
+    display: none;
+  }
+
   .issue-detail-properties .issue-property {
     width: auto;
     min-width: 0;
     gap: 0;
-  }
-
-  .issue-detail-properties .issue-property > dt {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    padding: 0;
-    margin: -1px;
-    overflow: hidden;
-    clip: rect(0, 0, 0, 0);
-    white-space: nowrap;
-    border: 0;
   }
 
   .issue-detail-properties .issue-property > dd {
@@ -346,13 +500,25 @@
 @container (min-width: 700px) {
   .issue-detail-body {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) 240px;
+    grid-template-columns: minmax(0, 1fr) 264px;
     align-content: start;
-    column-gap: 32px;
+    column-gap: 40px;
   }
 
+  /* The measure is capped, not filled. `saans` runs 6.92px per character at
+     15px, so the old 13px body across a 630px column was ~105 characters per
+     line — nearly half again the 65–75 a reader tracks comfortably. 35rem at
+     15px is ~81, which is where documentation sites sit.
+
+     The cap lands on the whole column rather than on `.prose` alone so the
+     title, relations, timeline and composer share one left edge and one right
+     edge with the body text. Left-aligned, not centred: the rail is pinned
+     right, and centring the column would leave the two drifting apart as the
+     window grows. */
   .issue-detail-body > *:not(.issue-detail-properties) {
     grid-column: 1;
+    width: 100%;
+    max-width: 35rem;
   }
 
   .issue-detail-properties {

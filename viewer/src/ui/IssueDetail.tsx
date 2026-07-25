@@ -14,14 +14,17 @@ import {
   CopyPlus,
   CornerDownRight,
   Download,
+  Gauge,
   GitMerge,
   Info,
   Link2,
+  Milestone,
   MoreHorizontal,
   MoveRight,
   Paperclip,
   Plus,
   SmilePlus,
+  Tag,
   Trash2,
   UserPlus,
   X,
@@ -31,6 +34,7 @@ import { rpc } from "../api";
 import { useIssueDetail, useProjectViewerStore } from "../projectStore";
 import { clearDraft, loadDraft, saveDraft } from "../core/drafts";
 import { describeChanges, describeEvent, type NameResolver } from "../core/activity";
+import { outline } from "../core/markdown";
 import type { Field as PredictField } from "../core/overlay";
 import type { IssueField } from "../core/registry";
 import { inverseWorkAction, workTarget } from "../core/workflow";
@@ -54,7 +58,7 @@ import { Avatar, AvatarStack, memberName as nameOf } from "./Avatar";
 import { LoadingState } from "./AppState";
 import { catalogColor } from "./colors";
 import { PriorityIcon, StatusIcon } from "./icons";
-import { Markdown } from "./Markdown";
+import { Markdown, Outline } from "./Markdown";
 import { DatePicker } from "./DatePicker";
 import { NewLabelDialog } from "./NewLabel";
 import { Combobox, type Option } from "./Picker";
@@ -63,7 +67,8 @@ import {
   HeaderActions,
   MenuContent,
   MenuItem,
-  PropertyRow,
+  RailRow,
+  RailSection,
   SectionHeader,
   Toast,
 } from "./layout";
@@ -168,6 +173,18 @@ export function IssueDetail({
   useEffect(() => {
     if (issue) setDraft((current) => current || issue.title);
   }, [issue]);
+
+  // Grow the title to its content. This used to be `rows={length / 40}`, a guess
+  // at the wrap point that was calibrated for the old 18px type — at 24px it was
+  // short by a line and the title scrolled inside its own box. Measuring is both
+  // exact and immune to the next type change: reset to `auto` first, because
+  // `scrollHeight` never reports *less* than the height already set.
+  useEffect(() => {
+    const el = titleRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${el.scrollHeight}px`;
+  }, [draft]);
 
   const edit = useCallback(
     async (patch: { title?: string; description?: string }) => {
@@ -404,7 +421,7 @@ export function IssueDetail({
           ref={titleRef}
           value={draft}
           readOnly={locked}
-          rows={Math.max(1, Math.ceil(draft.length / 40))}
+          rows={1}
           onChange={(e) => setDraft(e.target.value)}
           onBlur={saveTitle}
           onKeyDown={(e) => {
@@ -418,7 +435,11 @@ export function IssueDetail({
               titleRef.current?.blur();
             }
           }}
-          className="issue-detail-title resize-none bg-transparent text-lg font-semibold outline-none"
+          // The document's own title, sized like one. It was `text-lg` (18px)
+          // over a 13px body — barely three points of hierarchy for the most
+          // important string on the page. `text-2xl` against the 15px body is
+          // the ratio Hashnode and Mintlify give an article's h1.
+          className="issue-detail-title resize-none overflow-hidden bg-transparent text-2xl leading-tight font-semibold tracking-tight outline-none"
           aria-label="Title"
         />
 
@@ -434,8 +455,18 @@ export function IssueDetail({
           Status row above already does, and it would be the one piece of this pane
           that came from somewhere else.
         */}
-        <dl className="issue-detail-properties flex flex-col gap-1 text-sm">
-          <PropertyRow label="Status">
+        <div className="issue-detail-properties flex flex-col gap-4 text-sm">
+          {/* Above the properties, because it is about the document you are
+              reading rather than the record it describes — and it disappears on
+              its own for anything shorter than three headings. */}
+          {outline(issue.description).length > 0 && (
+            <RailSection title="On this page" plain>
+              <Outline text={issue.description} />
+            </RailSection>
+          )}
+
+          <RailSection>
+          <RailRow label="Status">
             <Combobox
               variant="property"
               label="Status"
@@ -462,13 +493,12 @@ export function IssueDetail({
                 void runCommand(projectStore.setStatus(spaceId, reff, id))
               }
             />
-          </PropertyRow>
+          </RailRow>
 
-          <PropertyRow label="Priority">
+          <RailRow label="Priority">
             <Combobox
               variant="property"
               label="Priority"
-              className="capitalize"
               disabled={locked}
               open={pickerOpen("priority")}
               onOpenChange={setPicker("priority")}
@@ -477,6 +507,22 @@ export function IssueDetail({
                 label: issue.priority,
                 icon: <PriorityIcon priority={issue.priority} />,
               }}
+              // `none` is a real engine value, not an absence — but in the rail
+              // it is still an unset property, so it wears the verb. `capitalize`
+              // rides with the real values only: it would render the verb as
+              // "Set Priority".
+              face={
+                <>
+                  <PriorityIcon priority={issue.priority} />
+                  <span
+                    className={
+                      issue.priority === "none" ? "text-mute" : "min-w-0 truncate capitalize"
+                    }
+                  >
+                    {issue.priority === "none" ? "Set priority" : issue.priority}
+                  </span>
+                </>
+              }
               // Highest first: the list you scan top-down should start where the
               // urgency does.
               options={[...PRIORITY_ORDER].reverse().map((p) => ({
@@ -488,9 +534,9 @@ export function IssueDetail({
                 void runCommand(projectStore.setPriority(spaceId, reff, id))
               }
             />
-          </PropertyRow>
+          </RailRow>
 
-          <PropertyRow label="Assignees">
+          <RailRow label="Assignees">
             <Combobox
               variant="property"
               multi
@@ -502,7 +548,10 @@ export function IssueDetail({
               emptyText={members.length ? "No matches" : "No members yet"}
               face={
                 issue.assignees.length === 0 ? (
-                  <span className="text-mute">Unassigned</span>
+                  <>
+                    <UserPlus className="text-mute size-3.5 shrink-0" />
+                    <span className="text-mute">Assign</span>
+                  </>
                 ) : (
                   <span className="flex min-w-0 items-center gap-1.5">
                     <AvatarStack
@@ -535,9 +584,51 @@ export function IssueDetail({
                 void send(() => rpc(spaceId, { cmd: "assign", reff, who: [key], add }));
               }}
             />
-          </PropertyRow>
+          </RailRow>
 
-          <PropertyRow label="Labels">
+          <RailRow label="Estimate">
+            <Combobox
+              variant="property"
+              label="Estimate"
+              disabled={locked}
+              value={
+                issue.estimate != null
+                  ? { id: String(issue.estimate), label: `${issue.estimate} pt` }
+                  : null
+              }
+              face={
+                <>
+                  <Gauge className="text-mute size-3.5 shrink-0" />
+                  <span className={issue.estimate == null ? "text-mute" : "min-w-0 truncate"}>
+                    {issue.estimate != null ? `${issue.estimate} pt` : "Set estimate"}
+                  </span>
+                </>
+              }
+              // Fibonacci-ish, Linear's default scale; "None" clears. The
+              // engine stores a bare number — the scale is a team convention.
+              options={[
+                { id: "none", label: "None" },
+                ...[1, 2, 3, 5, 8, 13].map((n) => ({ id: String(n), label: `${n} pt` })),
+              ]}
+              onPick={(id) =>
+                void send(() => rpc(spaceId, { cmd: "issue_edit", reff, estimate: id }))
+              }
+            />
+          </RailRow>
+
+          <RailRow label="Due date">
+            <DueDate
+              value={issue.due_date ?? null}
+              readOnly={locked}
+              onChange={(due) =>
+                void send(() => rpc(spaceId, { cmd: "issue_edit", reff, due }))
+              }
+            />
+          </RailRow>
+          </RailSection>
+
+          <RailSection title="Labels">
+          <RailRow label="Labels">
             <Combobox
               variant="property"
               multi
@@ -552,7 +643,10 @@ export function IssueDetail({
               emptyText={labels.length ? "No matches" : "No labels yet"}
               face={
                 issue.label_names.length === 0 ? (
-                  <span className="text-mute">None</span>
+                  <>
+                    <Tag className="text-mute size-3.5 shrink-0" />
+                    <span className="text-mute">Add label</span>
+                  </>
                 ) : (
                   <span className="flex min-w-0 flex-wrap items-center gap-1">
                     {issue.label_names.map((name) => (
@@ -582,89 +676,11 @@ export function IssueDetail({
               // and then attaches it — rather than minting it gray on first use.
               onCreate={(name) => setNewLabel(name)}
             />
-          </PropertyRow>
+          </RailRow>
+          </RailSection>
 
-          <PropertyRow label="Due date">
-            <DueDate
-              value={issue.due_date ?? null}
-              readOnly={locked}
-              onChange={(due) =>
-                void send(() => rpc(spaceId, { cmd: "issue_edit", reff, due }))
-              }
-            />
-          </PropertyRow>
-
-          <PropertyRow label="Estimate">
-            <Combobox
-              variant="property"
-              label="Estimate"
-              disabled={locked}
-              value={
-                issue.estimate != null
-                  ? { id: String(issue.estimate), label: `${issue.estimate} pt` }
-                  : null
-              }
-              placeholder="None"
-              // Fibonacci-ish, Linear's default scale; "None" clears. The
-              // engine stores a bare number — the scale is a team convention.
-              options={[
-                { id: "none", label: "None" },
-                ...[1, 2, 3, 5, 8, 13].map((n) => ({ id: String(n), label: `${n} pt` })),
-              ]}
-              onPick={(id) =>
-                void send(() => rpc(spaceId, { cmd: "issue_edit", reff, estimate: id }))
-              }
-            />
-          </PropertyRow>
-
-          {(milestones.length > 0 || issue.milestone) && (
-            <PropertyRow label="Milestone">
-              <Combobox
-                variant="property"
-                label="Milestone"
-                disabled={locked}
-                value={
-                  issue.milestone
-                    ? {
-                        id: issue.milestone,
-                        label:
-                          milestones.find((m) => m.id === issue.milestone)?.name ??
-                          issue.milestone,
-                      }
-                    : null
-                }
-                placeholder="None"
-                options={[
-                  { id: "none", label: "None" },
-                  ...milestones.map((m) => ({
-                    id: m.id,
-                    label: m.name,
-                    hint: `${m.done}/${m.total}`,
-                  })),
-                ]}
-                onPick={(id) =>
-                  void send(() =>
-                    rpc(spaceId, {
-                      cmd: "issue_milestone",
-                      reff,
-                      milestone: id === "none" ? null : id,
-                    }),
-                  )
-                }
-              />
-            </PropertyRow>
-          )}
-
-          <PropertyRow label="Notifications">
-            <FollowToggle
-              issue={issue}
-              meKey={members.find((m) => m.me)?.key ?? null}
-              readOnly={locked}
-              onToggle={(on) => void send(() => rpc(spaceId, { cmd: "follow", reff, on }))}
-            />
-          </PropertyRow>
-
-          <PropertyRow label="Project">
+          <RailSection title="Project">
+          <RailRow label="Project">
             <Combobox
               variant="property"
               label="Project"
@@ -692,8 +708,68 @@ export function IssueDetail({
                 void send(() => rpc(spaceId, { cmd: "issue_move", reff, project: id }));
               }}
             />
-          </PropertyRow>
-        </dl>
+          </RailRow>
+
+          {(milestones.length > 0 || issue.milestone) && (
+            <RailRow label="Milestone">
+              <Combobox
+                variant="property"
+                label="Milestone"
+                disabled={locked}
+                value={
+                  issue.milestone
+                    ? {
+                        id: issue.milestone,
+                        label:
+                          milestones.find((m) => m.id === issue.milestone)?.name ??
+                          issue.milestone,
+                      }
+                    : null
+                }
+                face={
+                  <>
+                    <Milestone className="text-mute size-3.5 shrink-0" />
+                    <span className={issue.milestone ? "min-w-0 truncate" : "text-mute"}>
+                      {issue.milestone
+                        ? (milestones.find((m) => m.id === issue.milestone)?.name ??
+                          issue.milestone)
+                        : "Set milestone"}
+                    </span>
+                  </>
+                }
+                options={[
+                  { id: "none", label: "None" },
+                  ...milestones.map((m) => ({
+                    id: m.id,
+                    label: m.name,
+                    hint: `${m.done}/${m.total}`,
+                  })),
+                ]}
+                onPick={(id) =>
+                  void send(() =>
+                    rpc(spaceId, {
+                      cmd: "issue_milestone",
+                      reff,
+                      milestone: id === "none" ? null : id,
+                    }),
+                  )
+                }
+              />
+            </RailRow>
+          )}
+          </RailSection>
+
+          <RailSection title="Notifications">
+          <RailRow label="Notifications">
+            <FollowToggle
+              issue={issue}
+              meKey={members.find((m) => m.me)?.key ?? null}
+              readOnly={locked}
+              onToggle={(on) => void send(() => rpc(spaceId, { cmd: "follow", reff, on }))}
+            />
+          </RailRow>
+          </RailSection>
+        </div>
 
         <Description
           draftKey={{ spaceId: canonicalSpaceId, reff }}
@@ -1083,7 +1159,7 @@ function DueDate({
       variant="property"
       value={value !== null ? dueToInput(value) : null}
       disabled={readOnly}
-      placeholder="None"
+      placeholder="Add due date"
       className={tone}
       onChange={(next) => onChange(next ?? "none")}
     />
@@ -1680,7 +1756,7 @@ function Comment({
               {when(c.ts)}
             </time>
           </div>
-          <Markdown text={c.body} />
+          <Markdown text={c.body} density="tight" className="mt-0.5" />
 
           {(canAct || (c.reactions?.length ?? 0) > 0) && (
             <div className="mt-1 flex flex-wrap items-center gap-1">

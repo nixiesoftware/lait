@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Archive, ArchiveRestore, X } from "lucide-react";
+import { Archive, ArchiveRestore, UserPlus, X } from "lucide-react";
 
 import { rpc } from "../api";
 import type { MemberDto, MilestoneDto, ProjectDto, ProjectUpdateDto } from "../types";
@@ -9,7 +9,7 @@ import { ColorPicker } from "./ColorPicker";
 import { DatePicker } from "./DatePicker";
 import { Markdown } from "./Markdown";
 import { Combobox } from "./Picker";
-import { PropertyRow } from "./layout";
+import { RailRow, RailSection } from "./layout";
 import { Button, EditableSurface, IconButton, PopoverContent, Textarea } from "./primitives";
 import { when } from "./time";
 import * as Popover from "@radix-ui/react-popover";
@@ -65,9 +65,12 @@ export function ProjectOverview({
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className="min-h-0 flex-1 overflow-y-auto p-6">
-        <div className="mx-auto grid max-w-4xl gap-8 md:grid-cols-[minmax(0,1fr)_260px]">
-          {/* Title + description */}
-          <div className="min-w-0">
+        <div className="mx-auto grid max-w-4xl gap-8 md:grid-cols-[minmax(0,1fr)_264px]">
+          {/* Title + description. The measure is capped at the same 35rem the
+              issue body uses — a project overview is the same kind of document,
+              and two prose columns at different widths in one app read as two
+              apps. */}
+          <div className="min-w-0 max-w-[35rem]">
             <div className="mb-4 flex items-center gap-2">
               {!readOnly ? (
                 <Popover.Root>
@@ -102,7 +105,10 @@ export function ProjectOverview({
                   const next = e.target.value.trim();
                   if (next && next !== project.name) void edit({ name: next });
                 }}
-                className="min-w-0 flex-1 bg-transparent text-xl font-semibold outline-none"
+                // Same size as an issue title: both are the name of the document
+                // you are looking at, and the overview was a step smaller for no
+                // reason other than that it was written on a different day.
+                className="min-w-0 flex-1 bg-transparent text-2xl font-semibold tracking-tight outline-none"
                 aria-label="Project name"
               />
               {project.archived && (
@@ -143,9 +149,13 @@ export function ProjectOverview({
             />
           </div>
 
-          {/* Properties rail */}
-          <dl className="flex flex-col gap-1 text-sm md:border-l md:border-line md:pl-6">
-            <PropertyRow label="Lead">
+          {/* The same aside the issue page carries: no label column, an unset
+              property reads as the verb that sets it, and captions group the
+              runs. Two surfaces describing the same kind of object should not
+              describe it in two different grammars. */}
+          <div className="md:border-line flex flex-col gap-4 text-sm md:border-l md:pl-6">
+            <RailSection>
+            <RailRow label="Lead">
               <Combobox
                 variant="property"
                 label="Lead"
@@ -159,7 +169,14 @@ export function ProjectOverview({
                       }
                     : null
                 }
-                placeholder="No lead"
+                face={
+                  lead ? undefined : (
+                    <>
+                      <UserPlus className="text-mute size-3.5 shrink-0" />
+                      <span className="text-mute">Set lead</span>
+                    </>
+                  )
+                }
                 options={[
                   { id: "none", label: "No lead" },
                   ...members.map((m) => ({
@@ -172,44 +189,51 @@ export function ProjectOverview({
                 ]}
                 onPick={(id) => void edit({ lead: id === "none" ? "none" : id })}
               />
-            </PropertyRow>
-            <PropertyRow label="Start">
+            </RailRow>
+            <RailRow label="Start date">
               <DatePicker
                 variant="property"
                 value={toInput(project.start_date)}
                 disabled={readOnly}
-                placeholder="—"
+                placeholder="Add start date"
                 ariaLabel="Start date"
                 onChange={(next) => void edit({ start: next ?? "none" })}
               />
-            </PropertyRow>
-            <PropertyRow label="Target">
+            </RailRow>
+            <RailRow label="Target date">
               <DatePicker
                 variant="property"
                 value={toInput(project.target_date)}
                 disabled={readOnly}
-                placeholder="—"
+                placeholder="Add target date"
                 ariaLabel="Target date"
                 onChange={(next) => void edit({ target: next ?? "none" })}
               />
-            </PropertyRow>
-            <PropertyRow label="Progress">
-              <div className="flex w-full flex-col gap-1">
-                <span className="bg-line flex h-1.5 w-full gap-0.5 overflow-hidden rounded-full">
-                  {total === 0 ? null : (
-                    <>
-                      {backlog > 0 && <span className="bg-mute" style={{ flex: backlog }} />}
-                      {active > 0 && <span className="bg-accent" style={{ flex: active }} />}
-                      {done > 0 && <span className="bg-ok" style={{ flex: done }} />}
-                    </>
-                  )}
-                </span>
-                <span className="text-mute text-2xs">
-                  {done}/{total} done · {active} active
-                </span>
-              </div>
-            </PropertyRow>
-          </dl>
+            </RailRow>
+            </RailSection>
+
+            {/* Progress earns a caption rather than a row label: it is the one
+                entry here that is read rather than set, and Linear's project
+                rail gives it the same treatment. */}
+            <RailSection title="Progress">
+              <RailRow label="Progress">
+                <div className="flex w-full flex-col gap-1">
+                  <span className="bg-line flex h-1.5 w-full gap-0.5 overflow-hidden rounded-full">
+                    {total === 0 ? null : (
+                      <>
+                        {backlog > 0 && <span className="bg-mute" style={{ flex: backlog }} />}
+                        {active > 0 && <span className="bg-accent" style={{ flex: active }} />}
+                        {done > 0 && <span className="bg-ok" style={{ flex: done }} />}
+                      </>
+                    )}
+                  </span>
+                  <span className="text-mute text-2xs">
+                    {total === 0 ? "No issues yet" : `${done}/${total} done · ${active} active`}
+                  </span>
+                </div>
+              </RailRow>
+            </RailSection>
+          </div>
         </div>
       </div>
     </div>

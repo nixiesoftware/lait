@@ -395,6 +395,66 @@ export function PropertyRow({ label, children }: { label: string; children: Reac
   );
 }
 
+/**
+ * The issue's property aside, after Linear's.
+ *
+ * Two decisions carry it, and both are departures from the label/value grid
+ * this replaces.
+ *
+ * **A row has no visible term.** The glyph and the value carry the field —
+ * a coloured status dot beside "Done" is not ambiguous — so the rail spends one
+ * column instead of two, and the values start at the rail's left edge rather
+ * than 88px into it. The term stays in the `<dl>` for assistive technology and
+ * comes back as the row's tooltip, so nothing is actually lost; it just stops
+ * being printed nine times.
+ *
+ * **An unset property reads as a verb.** `Set priority`, not `Priority · None`.
+ * The old rail spent five rows on an empty issue announcing that priority,
+ * assignees, estimate, due date and milestone were all absent. A verb spends
+ * the same row offering to fix it — which is the only reason you were looking.
+ *
+ * Grouping comes from captions between runs of rows. Each group is its own
+ * `<dl>` so the caption can be a real heading rather than a `<dt>` pretending.
+ */
+export function RailSection({
+  title,
+  plain,
+  children,
+}: {
+  /** Omit on the leading group — Linear leaves its first run uncaptioned. */
+  title?: string;
+  /**
+   * Skip the `<dl>`. A rail group is normally a definition list, but not every
+   * section under a caption is a set of terms — the outline is a `<nav>`, and
+   * a `<nav>` inside a `<dl>` is invalid markup that assistive technology reads
+   * as a broken list.
+   */
+  plain?: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <section className="rail-section flex flex-col">
+      {title && (
+        <h3 className="rail-caption text-mute text-2xs mb-1 font-semibold tracking-wider uppercase">
+          {title}
+        </h3>
+      )}
+      {plain ? children : <dl className="flex flex-col gap-0.5">{children}</dl>}
+    </section>
+  );
+}
+
+export function RailRow({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    // `title` restores the term to the pointer. It is the same string as the
+    // `<dt>`, so the tooltip and the screen reader agree by construction.
+    <div className="issue-property group/prop flex min-h-7 items-center gap-2" title={label}>
+      <dt className="sr-only">{label}</dt>
+      <dd className="min-w-0 flex-1">{children}</dd>
+    </div>
+  );
+}
+
 export function Toast({
   children,
   action,

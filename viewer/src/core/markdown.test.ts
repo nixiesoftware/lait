@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 
-import { looksLikeMarkdown, parseInline, parseMarkdown, type Block } from "./markdown";
+import {
+  CALLOUT_TONES,
+  looksLikeMarkdown,
+  outline,
+  parseInline,
+  parseMarkdown,
+  type Block,
+} from "./markdown";
 
 describe("looksLikeMarkdown", () => {
   it("stays out of plain prose", () => {
@@ -88,5 +95,109 @@ describe("inlines", () => {
     const parts = parseInline("see https://example.com/a, ok");
     expect(parts[1]).toMatchObject({ kind: "link", href: "https://example.com/a" });
     expect(parts[2]).toEqual({ kind: "text", text: ", ok" });
+  });
+});
+
+describe("tables", () => {
+  it("parses a pipe table with a header and alignment", () => {
+    const [block] = parseMarkdown("| a | b | c |\n|:--|:-:|--:|\n| 1 | 2 | 3 |");
+    expect(block).toMatchObject({ kind: "table", align: ["left", "center", "right"] });
+    const table = block as Extract<Block, { kind: "table" }>;
+    expect(table.head.map((c) => (c[0] as { text: string }).text)).toEqual(["a", "b", "c"]);
+    expect(table.rows).toHaveLength(1);
+    expect(table.rows[0]!.map((c) => (c[0] as { text: string }).text)).toEqual(["1", "2", "3"]);
+  });
+
+  it("accepts rows without outer pipes", () => {
+    const [block] = parseMarkdown("a | b\n--- | ---\n1 | 2");
+    const table = block as Extract<Block, { kind: "table" }>;
+    expect(table.kind).toBe("table");
+    expect(table.head).toHaveLength(2);
+    expect(table.rows[0]).toHaveLength(2);
+  });
+
+  it("formats inside cells", () => {
+    const [block] = parseMarkdown("| a |\n| --- |\n| `x` |");
+    const table = block as Extract<Block, { kind: "table" }>;
+    expect(table.rows[0]![0]![0]).toEqual({ kind: "code", text: "x" });
+  });
+
+  it("does not eat a sentence that merely contains a pipe", () => {
+    // The delimiter row is required. Without it `a | b` is prose, and turning
+    // it into a table would silently restructure someone's paragraph.
+    const [block] = parseMarkdown("run foo | grep bar to check");
+    expect(block!.kind).toBe("paragraph");
+  });
+
+  it("ends the paragraph above it rather than being absorbed", () => {
+    const blocks = parseMarkdown("Here are the counts:\n| a |\n| --- |\n| 1 |");
+    expect(blocks.map((b) => b.kind)).toEqual(["paragraph", "table"]);
+  });
+});
+
+describe("callouts", () => {
+  it("reads GitHub alert syntax as a callout", () => {
+    const [block] = parseMarkdown("> [!WARNING]\n> Do not do this.");
+    expect(block).toMatchObject({ kind: "callout", tone: "warning" });
+    const callout = block as Extract<Block, { kind: "callout" }>;
+    expect((callout.children[0] as { text: string }).text).toBe("Do not do this.");
+  });
+
+  it("accepts every tone, case-insensitively", () => {
+    for (const tone of CALLOUT_TONES) {
+      const [block] = parseMarkdown(`> [!${tone.toUpperCase()}]\n> body`);
+      expect(block).toMatchObject({ kind: "callout", tone });
+    }
+  });
+
+  it("leaves an ordinary quote alone", () => {
+    const [block] = parseMarkdown("> just a quotation");
+    expect(block!.kind).toBe("quote");
+  });
+
+  it("does not fire on a quote that merely starts with a bracket", () => {
+    const [block] = parseMarkdown("> [!not-a-tone] still a quote");
+    expect(block!.kind).toBe("quote");
+  });
+});
+
+describe("heading anchors", () => {
+  it("slugs the heading text", () => {
+    const [block] = parseMarkdown("## Fix options, part 2");
+    expect(block).toMatchObject({ kind: "heading", id: "fix-options-part-2" });
+  });
+
+  it("de-duplicates repeated headings so an anchor is unambiguous", () => {
+    const blocks = parseMarkdown("## Notes\n\n## Notes\n\n## Notes");
+    expect(blocks.map((b) => (b as { id: string }).id)).toEqual(["notes", "notes-2", "notes-3"]);
+  });
+
+  it("always produces a usable anchor", () => {
+    const [block] = parseMarkdown("### ???");
+    expect((block as { id: string }).id).toBe("section");
+  });
+});
+
+describe("outline", () => {
+  const body = "# One\n\ntext\n\n## Two\n\n### Three\n\ntext";
+
+  it("lists the headings with their anchors and depth", () => {
+    expect(outline(body)).toEqual([
+      { id: "one", level: 1, text: "One" },
+      { id: "two", level: 2, text: "Two" },
+      { id: "three", level: 3, text: "Three" },
+    ]);
+  });
+
+  it("stays empty below the threshold", () => {
+    // An outline over two headings is longer than the thing it indexes, and
+    // most issue bodies are a paragraph.
+    expect(outline("# One\n\n## Two")).toEqual([]);
+    expect(outline("just a sentence")).toEqual([]);
+  });
+
+  it("strips formatting from the heading text", () => {
+    const entries = outline("# A `b` c\n\n## **Bold**\n\n### [x](https://a.b)");
+    expect(entries.map((e) => e.text)).toEqual(["A b c", "Bold", "x"]);
   });
 });
