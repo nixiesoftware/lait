@@ -63,14 +63,10 @@ describe("BulkBar", () => {
             states={[]}
             labels={[]}
             members={[]}
-            projects={[]}
             onStatus={() => undefined}
             onPriority={() => undefined}
             onLabel={() => undefined}
-            onLabelRemove={() => undefined}
             onAssign={() => undefined}
-            onUnassign={() => undefined}
-            onProject={() => undefined}
             onDue={() => undefined}
             onDelete={() => undefined}
             onRetryFailures={retry}

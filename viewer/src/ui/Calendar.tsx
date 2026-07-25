@@ -1,3 +1,4 @@
+import { Toolbar } from "./layout";
 import { useMemo, useState } from "react";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 
@@ -68,7 +69,9 @@ export function Calendar({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <header className="border-line flex shrink-0 items-center gap-2 border-b px-3 py-2">
+      {/* A control band, not a header: the surface is already named "Issues" one
+          row up, and this only says which month of it you are looking at. */}
+      <Toolbar className="gap-2">
         <h2 className="text-sm font-semibold tabular-nums">{monthLabel}</h2>
         <div className="ml-2 flex items-center gap-0.5">
           <IconButton label="Previous month" onClick={() => step(-1)}>
@@ -88,7 +91,7 @@ export function Calendar({
         <span className="text-mute ml-auto text-xs">
           {rows.length - undated.length} scheduled · {undated.length} undated
         </span>
-      </header>
+      </Toolbar>
 
       <div className="grid shrink-0 grid-cols-7 border-b border-line">
         {WEEKDAYS.map((d) => (

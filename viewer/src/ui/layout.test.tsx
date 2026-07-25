@@ -2,7 +2,17 @@ import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { Breadcrumbs, IssueCrumb, ProjectCrumb, WorkspaceCrumb } from "./layout";
+import {
+  Breadcrumbs,
+  HeaderActions,
+  HeaderActionsOutlet,
+  HeaderSlotProvider,
+  IssueCrumb,
+  ProjectCrumb,
+  SurfaceHeader,
+  WorkspaceCrumb,
+} from "./layout";
+import { Combobox } from "./Picker";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean })
   .IS_REACT_ACT_ENVIRONMENT = true;
@@ -71,5 +81,87 @@ describe("Breadcrumbs", () => {
       .toEqual([1, 1, 0]);
     // Only ancestors may collapse.
     expect(crumbs.filter((li) => li.className.includes("hidden"))).toHaveLength(2);
+  });
+
+  it("resolves every group-hover variant against a group that actually wraps it", () => {
+    host = document.createElement("div");
+    document.body.append(host);
+    root = createRoot(host);
+
+    act(() => {
+      root?.render(
+        <Breadcrumbs
+          items={[
+            {
+              key: "project",
+              control: true,
+              content: (
+                <Combobox
+                  variant="crumb"
+                  label="Project"
+                  swatchShape="square"
+                  value={{ id: "ENG", label: "Engine", swatch: "#f00" }}
+                  options={[{ id: "ENG", label: "Engine", swatch: "#f00" }]}
+                  onPick={() => undefined}
+                />
+              ),
+            },
+          ]}
+        />,
+      );
+    });
+
+    // A `group-hover/name:` utility whose `group/name` is nowhere above it is
+    // silent: the class compiles, matches nothing, and the affordance never
+    // arrives. The breadcrumb's project switcher shipped that way — it asked for
+    // `group/prop`, which only exists on an issue property row.
+    const orphans: string[] = [];
+    for (const el of host.querySelectorAll<HTMLElement>("*")) {
+      const wanted = [...el.classList]
+        .map((c) => /^group-(?:hover|focus-within)\/([\w-]+):/.exec(c)?.[1])
+        .filter((name): name is string => Boolean(name));
+      for (const name of new Set(wanted)) {
+        let carrier: HTMLElement | null = el.parentElement;
+        while (carrier && carrier !== host && !carrier.classList.contains(`group/${name}`)) {
+          carrier = carrier.parentElement;
+        }
+        if (!carrier || carrier === host) orphans.push(`${el.tagName}: group/${name}`);
+      }
+    }
+    expect(orphans).toEqual([]);
+  });
+
+  it("lets a view fill the shell's actions slot without remounting the header", () => {
+    host = document.createElement("div");
+    document.body.append(host);
+    root = createRoot(host);
+
+    const shell = (view: "list" | "issue") => (
+      <HeaderSlotProvider>
+        <SurfaceHeader
+          leading={<button type="button">toggle</button>}
+          trail={<Breadcrumbs items={[{ key: "p", content: <ProjectCrumb name="Engine" /> }]} />}
+          actions={view === "issue" ? <HeaderActionsOutlet /> : <button type="button">New</button>}
+        />
+        {view === "issue" && (
+          <HeaderActions>
+            <button type="button">Close issue</button>
+          </HeaderActions>
+        )}
+      </HeaderSlotProvider>
+    );
+
+    act(() => root?.render(shell("list")));
+    const header = host.querySelector("header");
+    expect(header?.textContent).toContain("New");
+
+    // Switching views must not swap the bar out from under the user — same node,
+    // different tenants. A remount is what made the old issue header arrive with
+    // its own inset and no sidebar toggle.
+    act(() => root?.render(shell("issue")));
+    expect(host.querySelector("header")).toBe(header);
+    expect(host.querySelectorAll("header")).toHaveLength(1);
+    expect(header?.textContent).toContain("Close issue");
+    expect(header?.textContent).not.toContain("New");
   });
 });

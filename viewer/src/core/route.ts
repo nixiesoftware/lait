@@ -15,7 +15,6 @@ export interface ViewerRoute {
   project: string | null;
   view: View;
   issue: string | null;
-  focused?: boolean;
   filter?: FilterState;
 }
 
@@ -78,15 +77,16 @@ export function parseRoute(location: Pick<Location, "pathname" | "search">): Vie
     priority: query.getAll("priority").filter(Boolean),
     assignees: query.getAll("assignee").filter(Boolean),
   };
+  // `focus=1` used to pick full width over the split pane. There is no split any
+  // more — an open issue is always full width — so the parameter is accepted and
+  // dropped rather than rejected: old links still open the issue they name.
   const issue = displaysIssue(view) ? clean(query.get("issue")) : null;
-  const focused = issue !== null && query.get("focus") === "1";
 
   return {
     spaceId: parts[1],
     project: projectCandidate ?? legacyOverview ?? (isProjectDestination(view) ? clean(query.get("project")) : null),
     view: legacyOverview ? "overview" : view,
     issue,
-    ...(focused ? { focused: true } : {}),
     ...(carriesFilter(view) && isActive(filter) ? { filter } : {}),
   };
 }
@@ -97,7 +97,6 @@ export function formatRoute(route: ViewerRoute): string {
   const query = new URLSearchParams();
   if (route.issue && displaysIssue(route.view)) {
     query.set("issue", route.issue);
-    if (route.focused) query.set("focus", "1");
   }
   if (carriesFilter(route.view) && route.filter && isActive(route.filter)) {
     if (route.filter.text.trim()) query.set("q", route.filter.text.trim());
@@ -122,7 +121,6 @@ export function sameRoute(a: ViewerRoute, b: ViewerRoute): boolean {
     a.project === b.project &&
     a.view === b.view &&
     a.issue === b.issue &&
-    Boolean(a.focused) === Boolean(b.focused) &&
     JSON.stringify(a.filter ?? EMPTY_FILTER) === JSON.stringify(b.filter ?? EMPTY_FILTER)
   );
 }

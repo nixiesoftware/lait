@@ -1,8 +1,13 @@
 import * as Popover from "@radix-ui/react-popover";
-import { SlidersHorizontal } from "lucide-react";
+import { Calendar, List, SlidersHorizontal, SquareKanban } from "lucide-react";
 
 import type { DisplayState, GroupBy, OrderBy } from "../core/display";
-import { Button, IconButton, PopoverContent } from "./primitives";
+import { ISSUE_MODES, ISSUE_MODE_LABEL, type IssueMode } from "../core/registry";
+import { Button, cn, IconButton, PopoverContent } from "./primitives";
+
+/** The layout switcher's glyphs. Same icons the sidebar gives the destination,
+ *  so a board is drawn as a board wherever it is named. */
+const MODE_ICON = { list: List, board: SquareKanban, calendar: Calendar } as const;
 
 /**
  * The display-options popover — Linear's `Shift+V` surface, reduced to the axes
@@ -21,15 +26,19 @@ export function DisplayOptions({
   open,
   onOpenChange,
   onChange,
+  onModeChange,
   density,
   onDensityChange,
 }: {
   display: DisplayState;
-  /** Which root surface is showing — grouping is disabled on the board. */
-  view: "list" | "board";
+  /** Which layout is showing — grouping is disabled on the board. */
+  view: IssueMode;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onChange: (d: DisplayState) => void;
+  /** Switch layout. It is a route, so this navigates — but it belongs here,
+   *  with the other choices about how the same rows are drawn. */
+  onModeChange: (mode: IssueMode) => void;
   density: "compact" | "comfortable";
   onDensityChange: (density: "compact" | "comfortable") => void;
 }) {
@@ -44,6 +53,34 @@ export function DisplayOptions({
         </IconButton>
       </Popover.Trigger>
       <PopoverContent align="end" className="flex w-64 flex-col gap-3 p-3">
+          {/* Layout leads, because everything under it is read in its terms:
+              grouping means columns on a board and headers in a list, and on a
+              calendar it means nothing at all. */}
+          <div
+            className="bg-active/40 flex gap-0.5 rounded-lg p-0.5"
+            role="group"
+            aria-label="Layout"
+          >
+            {ISSUE_MODES.map((mode) => {
+              const Glyph = MODE_ICON[mode];
+              const active = view === mode;
+              return (
+                <button
+                  key={mode}
+                  aria-pressed={active}
+                  onClick={() => onModeChange(mode)}
+                  className={cn(
+                    "flex h-7 flex-1 items-center justify-center gap-1.5 rounded-md text-xs transition-colors",
+                    active ? "bg-raised text-fg" : "text-dim hover:text-fg",
+                  )}
+                >
+                  <Glyph className="size-3.5" aria-hidden />
+                  {ISSUE_MODE_LABEL[mode]}
+                </button>
+              );
+            })}
+          </div>
+
           <Axis label="Group by">
             {(
               [

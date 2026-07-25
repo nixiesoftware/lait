@@ -17,9 +17,7 @@ import {
   GitMerge,
   Info,
   Link2,
-  Maximize2,
   MoreHorizontal,
-  Minimize2,
   MoveRight,
   Paperclip,
   Plus,
@@ -60,16 +58,13 @@ import { Markdown } from "./Markdown";
 import { DatePicker } from "./DatePicker";
 import { NewLabelDialog } from "./NewLabel";
 import { Combobox, type Option } from "./Picker";
-import { Button, ChipButton, cn, EditableSurface, IconButton, InlineAction, PopoverContent, Textarea } from "./primitives";
+import { Button, ChipButton, EditableSurface, IconButton, InlineAction, PopoverContent, Textarea } from "./primitives";
 import {
-  Breadcrumbs,
-  IssueCrumb,
+  HeaderActions,
   MenuContent,
   MenuItem,
-  ProjectCrumb,
   PropertyRow,
   SectionHeader,
-  SurfaceHeader,
   Toast,
 } from "./layout";
 import * as ask from "./dialogs";
@@ -107,9 +102,6 @@ export function IssueDetail({
   onClose,
   onPrevious,
   onNext,
-  focused,
-  onToggleFocus,
-  onOpenProject,
 }: {
   spaceId: string;
   canonicalSpaceId: string;
@@ -135,11 +127,6 @@ export function IssueDetail({
   onClose: () => void;
   onPrevious?: () => void;
   onNext?: () => void;
-  focused: boolean;
-  onToggleFocus: () => void;
-  /** Climb to the issue's own project — which is not necessarily the one the list
-   *  behind is showing (My issues and Inbox span projects). */
-  onOpenProject?: ((key: string) => void) | undefined;
 }) {
   const projectStore = useProjectViewerStore();
   const detail = useIssueDetail(spaceId, reff);
@@ -316,73 +303,37 @@ export function IssueDetail({
   const setPicker = (f: IssueField) => (o: boolean) => onOpenField(o ? f : null);
 
   return (
-    <aside
-      className={cn(
-        "issue-detail @container flex h-full min-h-0 flex-col overflow-y-auto",
-        // Full width sits straight against the sidebar seam; a second rule there
-        // reads as a 2px gutter.
-        !focused && "border-line border-l",
-      )}
-    >
-      <SurfaceHeader className="gap-2">
-        {/* The issue's own lineage — its project, then itself — not the view you
-            arrived from. "Issues" here was a guess that Board, My issues and Inbox
-            all falsified. Split and focused draw the same trail; the narrow pane
-            simply drops the project and keeps the key. */}
-        <Breadcrumbs
-          items={[
-            {
-              key: "project",
-              optional: true,
-              content: (
-                <ProjectCrumb
-                  name={project?.name ?? issue.project_key ?? "Project"}
-                  color={project ? catalogColor(project.color) : undefined}
-                />
-              ),
-              onNavigate: project && onOpenProject ? () => onOpenProject(project.key) : onClose,
-            },
-            {
-              key: issue.reff,
-              content: (
-                <IssueCrumb
-                  id={issue.key_alias ?? issue.reff}
-                  {...(focused ? { title: issue.title } : {})}
-                />
-              ),
-            },
-          ]}
+    <aside className="issue-detail @container flex h-full min-h-0 flex-col overflow-y-auto">
+      {/* The trail is the shell's — the issue is a hop on it, not a surface with
+          its own bar. What is still ours is the verbs: paging to a neighbour and
+          the overflow both need state that lives in here, so they travel up to
+          the header rather than dragging the state down to it. */}
+      <HeaderActions>
+        <IconButton label="Previous issue" onClick={onPrevious} disabled={!onPrevious}>
+          <ChevronLeft className="size-3.5" />
+        </IconButton>
+        <IconButton label="Next issue" onClick={onNext} disabled={!onNext}>
+          <ChevronRight className="size-3.5" />
+        </IconButton>
+        <IssueOverflow
+          issueRef={issue.key_alias ?? issue.reff}
+          active={state?.category === "active"}
+          locked={locked}
+          tombstone={tombstone}
+          pending={pendingAction !== null}
+          onCopyLink={() => void navigator.clipboard.writeText(window.location.href)}
+          onDuplicate={() => void duplicateIssue()}
+          onRelate={() => document.getElementById("issue-add-relation")?.click()}
+          onAssign={() => onOpenField("assignee")}
+          onMove={() => onOpenField("project")}
+          onStop={() => void runWorkAction("stop")}
+          onRestore={() => void send(() => rpc(spaceId, { cmd: "issue_restore", reff: issue.reff }))}
+          onDelete={() => onDelete(issue.reff)}
         />
-        <span className="ml-auto flex items-center gap-0.5">
-          <IconButton label="Previous issue" onClick={onPrevious} disabled={!onPrevious}>
-            <ChevronLeft className="size-3.5" />
-          </IconButton>
-          <IconButton label="Next issue" onClick={onNext} disabled={!onNext}>
-            <ChevronRight className="size-3.5" />
-          </IconButton>
-          <IconButton label={focused ? "Return to split view" : "Focus issue"} onClick={onToggleFocus}>
-            {focused ? <Minimize2 className="size-3.5" /> : <Maximize2 className="size-3.5" />}
-          </IconButton>
-          <IssueOverflow
-            issueRef={issue.key_alias ?? issue.reff}
-            active={state?.category === "active"}
-            locked={locked}
-            tombstone={tombstone}
-            pending={pendingAction !== null}
-            onCopyLink={() => void navigator.clipboard.writeText(window.location.href)}
-            onDuplicate={() => void duplicateIssue()}
-            onRelate={() => document.getElementById("issue-add-relation")?.click()}
-            onAssign={() => onOpenField("assignee")}
-            onMove={() => onOpenField("project")}
-            onStop={() => void runWorkAction("stop")}
-            onRestore={() => void send(() => rpc(spaceId, { cmd: "issue_restore", reff: issue.reff }))}
-            onDelete={() => onDelete(issue.reff)}
-          />
-          <IconButton label="Close issue" chord="Esc" onClick={onClose}>
-            <X className="size-3.5" />
-          </IconButton>
-        </span>
-      </SurfaceHeader>
+        <IconButton label="Close issue" chord="Esc" onClick={onClose}>
+          <X className="size-3.5" />
+        </IconButton>
+      </HeaderActions>
 
       <div className="issue-detail-body flex flex-col gap-4 p-4">
         {Boolean(detail.body.error || detail.secondaryError) && (

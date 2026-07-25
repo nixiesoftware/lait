@@ -75,12 +75,29 @@
   --text-lg--line-height: 22px;
 
   --ease-out: cubic-bezier(0.2, 0, 0.2, 1);
-  --shadow-overlay: light-dark(0 8px 30px rgb(0 0 0 / 0.12), 0 8px 30px rgb(0 0 0 / 0.5));
-  /* For elevated-but-not-floating surfaces — a board card lifting on hover, a
-     toast. Tailwind's default `shadow-sm` is a faint black tuned for a white page
-     and all but vanishes on the dark `raised` surface; this carries a real value
-     in dark and a soft one in light, so "lifted" reads in both. */
-  --shadow-raised: light-dark(0 1px 2px rgb(0 0 0 / 0.10), 0 2px 4px rgb(0 0 0 / 0.55));
+  /* `light-dark()` returns a *colour*, so it wraps the colour and nothing else.
+     These three tokens each used to wrap the whole shadow — geometry included —
+     which is not a value `box-shadow` accepts, so every popover, menu and
+     floating bar in the app has been computing `box-shadow: none`. It looked
+     deliberate because the surfaces also carry a border. */
+  --shadow-overlay: 0 8px 30px light-dark(rgb(0 0 0 / 0.12), rgb(0 0 0 / 0.5));
+  /* The middle tier, and deliberately unused. A shadow is a claim to be off the
+     page, so only things that float carry one: `overlay` for a surface anchored
+     to the control that opened it, `float` for the one that is not anchored to
+     anything. A board card, a segmented selector and an inline toast are all *on*
+     the page — they had this and it read as elevation they had not earned. Kept
+     as the scale's middle step for a surface that lifts without floating; there
+     is currently no such surface. */
+  --shadow-raised: 0 2px 4px light-dark(rgb(0 0 0 / 0.10), rgb(0 0 0 / 0.55));
+  /* For the one surface that is genuinely *hovering* over the work rather than
+     opening from a control: the bulk bar. `overlay` is tuned for a popover
+     anchored to the thing it belongs to, so it stops short of reading as a
+     separate object. Two layers: a tight contact shadow under the near edge and
+     a wide ambient one — that pairing is what reads as "lifted" rather than
+     "pasted". */
+  --shadow-float:
+    0 2px 6px light-dark(rgb(0 0 0 / 0.06), rgb(0 0 0 / 0.4)),
+    0 20px 56px -12px light-dark(rgb(0 0 0 / 0.22), rgb(0 0 0 / 0.75));
 }
 
 /* Dark by default; the OS decides unless the user overrode it. `color-scheme` is

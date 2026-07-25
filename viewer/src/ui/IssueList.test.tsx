@@ -52,6 +52,7 @@ describe("IssueList semantics", () => {
           deletedMode={false}
           states={[state]}
           members={[]}
+          labels={[]}
           selection={rows[0]!.reff}
           checked={checked}
           optimistic={new Set()}
@@ -86,6 +87,47 @@ describe("IssueList semantics", () => {
     expect(toggled.mock.calls.map(([reff]) => reff)).toEqual(rows.map((item) => item.reff));
   });
 
+  it("shows two labels on a row and counts the rest", () => {
+    const state: WorkflowState = { id: "backlog", name: "Backlog", category: "backlog", color: "gray" };
+    const labelled: Row = { ...row("LIST-9"), label_names: ["infra", "perf", "docs"] };
+    host = document.createElement("div");
+    document.body.append(host);
+    root = createRoot(host);
+    act(() => root?.render(
+      <TooltipProvider>
+        <IssueList
+          groups={[{ key: "backlog", kind: "status", label: "Backlog", rows: [labelled], state }]}
+          deleted={[]}
+          deletedMode={false}
+          states={[state]}
+          members={[]}
+          labels={[{ id: "lbl_infra", name: "infra", color: "blue" }]}
+          selection={null}
+          checked={new Set()}
+          optimistic={new Set()}
+          onSelect={() => undefined}
+          onToggleCheck={() => undefined}
+          onOpen={() => undefined}
+          onCreate={() => undefined}
+          readOnly={false}
+          filtered={false}
+        />
+      </TooltipProvider>,
+    ));
+
+    const rowText = host.querySelector("li[data-issue-ref]")?.textContent ?? "";
+    expect(rowText).toContain("infra");
+    expect(rowText).toContain("perf");
+    // The third would start competing with the title for truncation budget.
+    expect(rowText).not.toContain("docs");
+    expect(rowText).toContain("+1");
+    // …but the overflow says what it swallowed, so the count is not a dead end.
+    expect(host.querySelector('[title="docs"]')?.textContent).toBe("+1");
+    // A name with no matching label still renders: `label_names` is the
+    // daemon's, and a catalog that has not arrived yet must not blank the row.
+    expect(host.querySelector('[title="perf"]')).toBeTruthy();
+  });
+
   function render(current: Row, onOpen: (reff: string) => void) {
     const state: WorkflowState = { id: "backlog", name: "Backlog", category: "backlog", color: "gray" };
     const groups: RowGroup[] = [{ key: "backlog", kind: "status", label: "Backlog", rows: [current], state }];
@@ -100,6 +142,7 @@ describe("IssueList semantics", () => {
           deletedMode={false}
           states={[state]}
           members={[]}
+          labels={[]}
           selection={current.reff}
           checked={new Set()}
           optimistic={new Set()}

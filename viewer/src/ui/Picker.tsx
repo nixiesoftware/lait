@@ -8,6 +8,7 @@ import {
   cn,
   controlTrigger,
   type ControlTriggerVariant,
+  crumbGlyph,
   PopoverContent,
 } from "./primitives";
 
@@ -117,10 +118,21 @@ export function Combobox(props: Props) {
   };
 
   const single = props.multi !== true ? props.value : null;
+  // In a breadcrumb the swatch sits in the trail's shared glyph slot, so a
+  // project that is a picker starts its name at the same offset as a project
+  // that is a plain crumb. Everywhere else the swatch is just a swatch.
+  const triggerSwatch = single?.swatch ? (
+    <span className={swatch} style={{ background: single.swatch }} />
+  ) : null;
   const content = face ?? (
     <>
       {single?.icon}
-      {single?.swatch && <span className={swatch} style={{ background: single.swatch }} />}
+      {triggerSwatch &&
+        (variant === "crumb" ? (
+          <span className={crumbGlyph}>{triggerSwatch}</span>
+        ) : (
+          triggerSwatch
+        ))}
       <span className={cn("min-w-0 truncate", !single && "text-mute")}>{single?.label ?? placeholder ?? label}</span>
     </>
   );
@@ -151,12 +163,19 @@ export function Combobox(props: Props) {
         {content}
         {/* A bare trigger keeps its chevron hidden until hover: in a property list
             the value is the content and five permanent chevrons are five arrows
-            pointing at nothing. It still appears on keyboard focus. */}
+            pointing at nothing. It still appears on keyboard focus.
+
+            Each variant waits on the group that actually wraps it — `property` on
+            the property row, `crumb` on the breadcrumb item. Naming the wrong one
+            is silent: the class compiles, matches nothing, and the affordance
+            simply never arrives. */}
         <ChevronDown
           className={cn(
             "text-mute size-3 shrink-0",
             variant === "property" &&
               "opacity-0 transition-opacity group-hover/prop:opacity-100 group-focus-within/prop:opacity-100",
+            variant === "crumb" &&
+              "opacity-0 transition-opacity group-hover/crumb:opacity-100 group-focus-within/crumb:opacity-100",
           )}
         />
       </Popover.Trigger>

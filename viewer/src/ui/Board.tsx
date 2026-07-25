@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
-import { MenuContent, MenuItem } from "./layout";
+import { GroupHeader, MenuContent, MenuItem } from "./layout";
 import { CalendarClock, ChevronRight, ExternalLink, Flag, FilterX, Gauge, Info, ListChecks, MoreHorizontal, Plus, Tags, UserPlus } from "lucide-react";
 
 import { loadBoardScroll, saveBoardScroll } from "../core/boardState";
@@ -319,21 +319,27 @@ function GroupedColumn({
   const unassigned = axis === "assignee" && group.key === "unassigned";
   return (
     <section className={`flex shrink-0 flex-col ${rows.length ? "w-72" : "w-60"}`}>
-      <header className="flex h-8 shrink-0 items-center gap-2 px-1">
-        {axis === "priority" ? (
-          <PriorityIcon priority={rows[0]?.priority ?? "none"} />
-        ) : unassigned ? (
-          <span className="border-line text-mute flex size-4 items-center justify-center rounded-full border border-dashed text-[9px]">
-            ?
+      <GroupHeader
+        icon={
+          axis === "priority" ? (
+            <PriorityIcon priority={rows[0]?.priority ?? "none"} />
+          ) : unassigned ? (
+            <span className="border-line text-mute flex size-4 items-center justify-center rounded-full border border-dashed text-[9px]">
+              ?
+            </span>
+          ) : (
+            <AvatarStack members={stackFor([group.key], members)} />
+          )
+        }
+        title={
+          <span className="capitalize">
+            {axis === "assignee" && !unassigned
+              ? memberName(group.key, members.find((m) => m.key === group.key))
+              : group.label}
           </span>
-        ) : (
-          <AvatarStack members={stackFor([group.key], members)} />
-        )}
-        <h2 className="text-base font-semibold capitalize">
-          {axis === "assignee" && !unassigned ? memberName(group.key, members.find((m) => m.key === group.key)) : group.label}
-        </h2>
-        <span className="text-mute text-sm tabular-nums">{rows.length}</span>
-      </header>
+        }
+        count={rows.length}
+      />
       <ul
         aria-label={`${group.label} issues`}
         data-board-collection
@@ -447,60 +453,69 @@ function Column({
 
   return (
     <section className={`group/col flex shrink-0 flex-col transition-[width] ${collapsed ? "w-10" : rows.length ? "w-72" : "w-60"}`}>
-      <header className="flex h-8 shrink-0 items-center gap-2 px-1">
-        <IconButton
-          label={`${collapsed ? "Expand" : "Collapse"} ${col.state.name}`}
-          onClick={() => setCollapsed((value) => !value)}
-          aria-expanded={!collapsed}
-        >
-          <ChevronRight className={`size-3 transition-transform ${collapsed ? "" : "rotate-90"}`} />
-        </IconButton>
-        {!collapsed && <>
-        <StatusIcon category={col.state.category} color={catalogColor(col.state.color)} />
-        <h2 className="text-base font-semibold">{col.state.name}</h2>
-        <span className="text-mute text-sm tabular-nums">{rows.length}</span>
-        {col.state.category === "done" && (
-          <Info
-            className="text-mute size-3.5"
-            role="img"
-            aria-label="Completed issues follow completion order. Move an issue here; its completion time determines its position."
-          />
-        )}
-        {!readOnly && (
+      <GroupHeader
+        leading={
           <IconButton
-            label={`New issue in ${col.state.name}`}
-            onClick={() => onCreate(col.state.id)}
-            className="ml-auto"
+            label={`${collapsed ? "Expand" : "Collapse"} ${col.state.name}`}
+            onClick={() => setCollapsed((value) => !value)}
+            aria-expanded={!collapsed}
           >
-            <Plus className="size-3.5" />
+            <ChevronRight className={`size-3 transition-transform ${collapsed ? "" : "rotate-90"}`} />
           </IconButton>
-        )}
-        <DropdownMenu.Root>
-          <DropdownMenu.Trigger asChild>
-            <IconButton label={`${col.state.name} column actions`} className={readOnly ? "ml-auto" : ""}>
-              <MoreHorizontal className="size-3.5" />
-            </IconButton>
-          </DropdownMenu.Trigger>
-          <DropdownMenu.Portal>
-            <MenuContent align="end">
-              {!readOnly && (
-                <MenuItem onSelect={() => onCreate(col.state.id)}>
-                  <Plus className="size-3.5" />
-                  New issue
-                </MenuItem>
-              )}
-              <MenuItem
-                disabled={!rows[0]}
-                onSelect={() => rows[0] && onSelect(rows[0].reff)}
-              >
-                Open first issue
-                <span className="text-mute ml-auto tabular-nums">{rows.length}</span>
-              </MenuItem>
-            </MenuContent>
-          </DropdownMenu.Portal>
-        </DropdownMenu.Root>
-        </>}
-      </header>
+        }
+        // Collapsed, the column is a 40px rail: the chevron is the only thing
+        // that still fits, so everything the header names goes with the width.
+        {...(collapsed
+          ? { title: null }
+          : {
+              icon: <StatusIcon category={col.state.category} color={catalogColor(col.state.color)} />,
+              title: col.state.name,
+              count: rows.length,
+              meta: col.state.category === "done" ? (
+                <Info
+                  className="text-mute size-3.5"
+                  role="img"
+                  aria-label="Completed issues follow completion order. Move an issue here; its completion time determines its position."
+                />
+              ) : undefined,
+              actions: (
+                <>
+                  {!readOnly && (
+                    <IconButton
+                      label={`New issue in ${col.state.name}`}
+                      onClick={() => onCreate(col.state.id)}
+                    >
+                      <Plus className="size-3.5" />
+                    </IconButton>
+                  )}
+                  <DropdownMenu.Root>
+                    <DropdownMenu.Trigger asChild>
+                      <IconButton label={`${col.state.name} column actions`}>
+                        <MoreHorizontal className="size-3.5" />
+                      </IconButton>
+                    </DropdownMenu.Trigger>
+                    <DropdownMenu.Portal>
+                      <MenuContent align="end">
+                        {!readOnly && (
+                          <MenuItem onSelect={() => onCreate(col.state.id)}>
+                            <Plus className="size-3.5" />
+                            New issue
+                          </MenuItem>
+                        )}
+                        <MenuItem
+                          disabled={!rows[0]}
+                          onSelect={() => rows[0] && onSelect(rows[0].reff)}
+                        >
+                          Open first issue
+                          <span className="text-mute ml-auto tabular-nums">{rows.length}</span>
+                        </MenuItem>
+                      </MenuContent>
+                    </DropdownMenu.Portal>
+                  </DropdownMenu.Root>
+                </>
+              ),
+            })}
+      />
       {collapsed ? (
         <Button
           className="min-h-0 flex-1 items-start py-2 text-xs [writing-mode:vertical-rl]"
@@ -677,10 +692,10 @@ function Card({
         aria-current={selected ? "true" : undefined}
         tabIndex={selected ? 0 : -1}
         className={[
-          "bg-raised group/card cursor-default rounded border p-2 transition-[border-color,box-shadow,opacity] duration-150",
+          "bg-raised group/card cursor-default rounded border p-2 transition-[border-color,opacity] duration-150",
           selected
-            ? "border-accent ring-accent shadow-raised ring-1"
-            : "border-line hover:border-line-strong hover:shadow-raised",
+            ? "border-accent ring-accent ring-1"
+            : "border-line hover:border-line-strong",
           row.provisional ? "opacity-60" : "",
           row.tombstone ? "opacity-60" : "",
           // The card left the deck: dim the hole it came from rather than removing

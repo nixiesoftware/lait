@@ -140,21 +140,19 @@ describe("viewer routes", () => {
     });
   });
 
-  it("round-trips focused detail only when an issue can be displayed", () => {
-    const focused = formatRoute({
-      spaceId: "ws_1", project: "WEB", view: "list", issue: "iss_1", focused: true,
-    });
-    expect(focused).toBe("/spaces/ws_1/projects/WEB/issues?issue=iss_1&focus=1");
-    expect(parseRoute(new URL(focused, "http://lait.local")).focused).toBe(true);
-    expect(formatRoute({ spaceId: "ws_1", project: null, view: "activity", issue: null, focused: true }))
-      .toBe("/spaces/ws_1/activity");
+  it("accepts a legacy focus=1 link and drops the parameter", () => {
+    // There is one way to read an issue now, so `focus=1` names nothing. An old
+    // link must still open the issue it names — and then stop saying it.
+    const legacy = parseRoute(new URL("/spaces/ws_1/projects/WEB/issues?issue=iss_1&focus=1", "http://lait.local"));
+    expect(legacy.issue).toBe("iss_1");
+    expect(formatRoute(legacy)).toBe("/spaces/ws_1/projects/WEB/issues?issue=iss_1");
   });
 
   it("compares every shareable route dimension", () => {
     const route = { spaceId: "ws_1", project: "WEB", view: "list" as const, issue: "iss_1" };
     expect(sameRoute(route, { ...route })).toBe(true);
     expect(sameRoute(route, { ...route, issue: "iss_2" })).toBe(false);
-    expect(sameRoute(route, { ...route, focused: true })).toBe(false);
+    expect(sameRoute(route, { ...route, project: "APP" })).toBe(false);
   });
 
   it("resolves canonical identity to a local target and prefers our actor", () => {

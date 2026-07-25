@@ -82,9 +82,6 @@ describe("IssueDetail loading", () => {
             onPredict={async () => true}
             onNavigate={() => undefined}
             onClose={() => undefined}
-            focused
-            onToggleFocus={() => undefined}
-            onOpenProject={() => undefined}
                 />
               </TooltipProvider>
             </StrictMode>
@@ -96,13 +93,11 @@ describe("IssueDetail loading", () => {
     expect(host.textContent).not.toContain("Loading issue");
     expect(host.querySelector<HTMLTextAreaElement>('[aria-label="Title"]')?.value)
       .toBe(issue.title);
-    // The trail is the issue's lineage — its project, then itself — and the leaf
-    // is the only crumb that doesn't navigate.
-    const breadcrumb = host.querySelector('nav[aria-label="Breadcrumb"]');
-    expect(breadcrumb?.textContent).toContain("Test project");
-    expect(breadcrumb?.querySelectorAll("button")).toHaveLength(1);
-    expect(breadcrumb?.querySelector('[aria-current="page"]')?.textContent)
-      .toContain(`${issue.key_alias}${issue.title}`);
+    // The issue draws no bar of its own. It is a hop on the shell's trail and a
+    // tenant of the shell's actions slot, so a second header here would be a
+    // second inset, a second height and a second place the title could sit.
+    expect(host.querySelector("header")).toBeNull();
+    expect(host.querySelector('nav[aria-label="Breadcrumb"]')).toBeNull();
     await act(async () => {
       await Promise.resolve();
     });

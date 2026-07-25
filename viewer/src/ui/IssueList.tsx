@@ -4,12 +4,12 @@ import { CheckSquare, ChevronRight, Copy, ExternalLink, MoreHorizontal, Plus, Tr
 
 import type { RowGroup } from "../core/display";
 import { indexBy } from "../core/performance";
-import type { MemberDto, Row, WorkflowState } from "../types";
+import type { LabelDto, MemberDto, Row, WorkflowState } from "../types";
 import { Avatar, AvatarStack, memberName, stackFor } from "./Avatar";
 import { ApplicationState } from "./AppState";
 import { catalogColor } from "./colors";
 import { PriorityIcon, StatusIcon } from "./icons";
-import { MenuContent, MenuItem } from "./layout";
+import { GroupHeader, MenuContent, MenuItem } from "./layout";
 import { Button, Checkbox, IconButton, interactiveRow } from "./primitives";
 import { dueLabel, dueTone } from "./time";
 
@@ -21,10 +21,11 @@ import { dueLabel, dueTone } from "./time";
  * rearrangements of the same rows. Group *shape* changes; row identity, motion,
  * and selection never do.
  *
- * The density is the feature. Rows are a fixed 32px with a fixed column rhythm,
+ * The density is the feature. Rows are a fixed 40px with a fixed column rhythm,
  * so the eye tracks straight down the ids and the titles without re-finding them
  * on each line — which is exactly what stops being true the moment a row grows to
- * fit its content.
+ * fit its content. Fixed, but not fixed in pixels: `h-10` is ten units of
+ * `--spacing`, so the comfortable density carries the whole rhythm up with it.
  */
 export function IssueList({
   groups,
@@ -32,6 +33,7 @@ export function IssueList({
   deletedMode,
   states,
   members,
+  labels,
   selection,
   checked,
   optimistic,
@@ -53,6 +55,7 @@ export function IssueList({
   states: WorkflowState[];
   /** The ACL, for resolving assignee keys to faces. */
   members: MemberDto[];
+  labels: LabelDto[];
   selection: string | null;
   /** Bulk-selection checks, by canonical ref. */
   checked: ReadonlySet<string>;
@@ -96,10 +99,11 @@ export function IssueList({
     : groups.reduce((n, g) => n + visible(g).length, 0);
 
   return (
+    // No total across the top. Every group header already carries its own count,
+    // so the summary row spent a full band of the viewport restating their sum —
+    // and it sat between the tab strip and the first group, which is exactly
+    // where the eye starts.
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="text-mute border-line/70 flex h-7 items-center border-b px-4 text-xs">
-        {total} {deletedMode ? "deleted " : ""}{total === 1 ? "issue" : "issues"}
-      </div>
       <div className="min-h-0 flex-1 overflow-y-auto">
         {!deletedMode && groups.map((group) => (
           <Group
@@ -108,6 +112,7 @@ export function IssueList({
             rows={visible(group)}
             stateById={stateById}
             members={members}
+            labels={labels}
             selection={selection}
             checked={checked}
             optimistic={optimistic}
@@ -120,11 +125,12 @@ export function IssueList({
         ))}
         {deleted.length > 0 && (
           <section>
-            <header className="bg-bg/95 border-line/70 sticky top-0 z-10 flex h-8 items-center gap-2 border-b px-4 backdrop-blur-sm">
-              <Trash2 className="text-mute size-3.5" />
-              <h2 className="text-base font-semibold">Deleted</h2>
-              <span className="text-mute text-sm tabular-nums">{deleted.length}</span>
-            </header>
+            <GroupHeader
+              sticky
+              icon={<Trash2 className="text-mute size-3.5" />}
+              title="Deleted"
+              count={deleted.length}
+            />
             <ul>
               {deleted.map((row) => (
                 <IssueRow
@@ -132,6 +138,7 @@ export function IssueList({
                   row={row}
                   state={stateById.get(row.status)}
                   members={members}
+            labels={labels}
                   selected={row.reff === selection}
                   checked={checked.has(row.reff)}
                   anyChecked={checked.size > 0}
@@ -181,6 +188,7 @@ function Group({
   rows,
   stateById,
   members,
+  labels,
   selection,
   checked,
   optimistic,
@@ -194,6 +202,7 @@ function Group({
   rows: Row[];
   stateById: ReadonlyMap<string, WorkflowState>;
   members: MemberDto[];
+  labels: LabelDto[];
   selection: string | null;
   checked: ReadonlySet<string>;
   optimistic: ReadonlySet<string>;
@@ -218,36 +227,39 @@ function Group({
 
   return (
     <section>
-      {/* Sticky so you never lose which bucket you are reading — the one piece of
-          context a long list silently takes away. */}
-      <header className="bg-bg/95 border-line/70 sticky top-0 z-10 flex h-8 items-center gap-2 border-b px-4 backdrop-blur-sm">
-        {/* The visible slot is the same 16px column as a row checkbox. The
-            control itself remains 24px and overflows the slot symmetrically, so
-            alignment does not come at the cost of a usable pointer target. */}
-        <span className="relative flex size-4 shrink-0 items-center justify-center">
-          <IconButton
-            label={`${collapsed ? "Expand" : "Collapse"} ${title}`}
-            onClick={() => setCollapsed((value) => !value)}
-            aria-expanded={!collapsed}
-            className="absolute"
-          >
-            <ChevronRight className={`size-3 transition-transform ${collapsed ? "" : "rotate-90"}`} />
-          </IconButton>
-        </span>
-        <GroupIcon group={group} members={members} />
-        <h2 className="text-base font-semibold capitalize">{title}</h2>
-        <span className="text-mute text-sm tabular-nums">{rows.length}</span>
-        {!readOnly && group.state && (
-          <IconButton
-            label={`New issue in ${group.state.name}`}
-            onClick={() => onCreate(group.state!.id)}
-            // Revealed on hover/focus: present when wanted, silent otherwise.
-            className="ml-auto opacity-0 transition group-hover/list:opacity-100 focus-visible:opacity-100"
-          >
-            <Plus className="size-3.5" />
-          </IconButton>
-        )}
-      </header>
+      <GroupHeader
+        sticky
+        leading={
+          /* The visible slot is the same 16px column as a row checkbox. The
+             control itself remains 24px and overflows the slot symmetrically, so
+             alignment does not come at the cost of a usable pointer target. */
+          <span className="relative flex size-4 shrink-0 items-center justify-center">
+            <IconButton
+              label={`${collapsed ? "Expand" : "Collapse"} ${title}`}
+              onClick={() => setCollapsed((value) => !value)}
+              aria-expanded={!collapsed}
+              className="absolute"
+            >
+              <ChevronRight className={`size-3 transition-transform ${collapsed ? "" : "rotate-90"}`} />
+            </IconButton>
+          </span>
+        }
+        icon={<GroupIcon group={group} members={members} />}
+        title={<span className="capitalize">{title}</span>}
+        count={rows.length}
+        actions={
+          !readOnly && group.state ? (
+            <IconButton
+              label={`New issue in ${group.state.name}`}
+              onClick={() => onCreate(group.state!.id)}
+              // Revealed on hover/focus: present when wanted, silent otherwise.
+              className="opacity-0 transition group-hover/list:opacity-100 focus-visible:opacity-100"
+            >
+              <Plus className="size-3.5" />
+            </IconButton>
+          ) : undefined
+        }
+      />
       {!collapsed && <ul aria-label={`${title} issues`} data-issue-collection>
         {rows.map((row) => (
           <IssueRow
@@ -255,6 +267,7 @@ function Group({
             row={row}
             state={stateById.get(row.status)}
             members={members}
+            labels={labels}
             selected={row.reff === selection}
             checked={checked.has(row.reff)}
             anyChecked={checked.size > 0}
@@ -274,6 +287,7 @@ function IssueRow({
   row,
   state,
   members,
+  labels,
   selected,
   checked,
   anyChecked,
@@ -286,6 +300,7 @@ function IssueRow({
   row: Row;
   state: WorkflowState | undefined;
   members: MemberDto[];
+  labels: LabelDto[];
   selected: boolean;
   checked: boolean;
   /** While any check exists the whole column shows, so targets stay aligned. */
@@ -313,8 +328,11 @@ function IssueRow({
     <li
       ref={el}
       className={clsxish([
-        interactiveRow({ selected }),
-        "group/row flex h-8 items-center gap-2 px-4",
+        interactiveRow({ selected, density: "roomy" }),
+        // One step above the group header that introduces them. The header is
+        // punctuation between piles; the rows are the thing you came to read,
+        // and when the two were level the list had no figure and ground.
+        "group/row flex h-10 items-center gap-2 px-4",
         checked && !selected && "bg-accent/5 shadow-[inset_2px_0_var(--color-accent)]",
         // A row whose body hasn't synced yet is real but not yet trustworthy;
         // say so quietly rather than rendering it as settled (UI.md §3.3).
@@ -374,6 +392,7 @@ function IssueRow({
       {row.tombstone && (
         <Trash2 className="text-mute size-3 shrink-0" aria-label="Deleted" />
       )}
+      <LabelChips names={row.label_names} labels={labels} />
       {row.estimate != null && (
         <span className="text-mute shrink-0 text-2xs tabular-nums" title="Estimate">
           {row.estimate}pt
@@ -444,6 +463,46 @@ function IssueRow({
   );
 }
 
+
+/**
+ * The row's labels, to the width the row can spare.
+ *
+ * A row that ended at its title left most of its width empty and made every
+ * issue look alike; labels are the property that most often distinguishes two
+ * issues with similar titles. Two chips, then a count — the third chip would
+ * start competing with the title for the truncation budget, and a label you
+ * cannot read is only noise with a colour.
+ */
+function LabelChips({ names, labels }: { names?: string[] | undefined; labels: LabelDto[] }) {
+  if (!names?.length) return null;
+  const shown = names.slice(0, 2);
+  const rest = names.length - shown.length;
+  return (
+    <span className="flex shrink-0 items-center gap-1">
+      {shown.map((name) => {
+        const label = labels.find((candidate) => candidate.name === name);
+        return (
+          <span
+            key={name}
+            title={name}
+            className="border-line text-dim flex h-4 max-w-24 items-center gap-1 rounded-full border px-1.5 text-2xs"
+          >
+            <span
+              className="size-1.5 shrink-0 rounded-full"
+              style={{ background: label ? catalogColor(label.color) : "var(--color-mute)" }}
+            />
+            <span className="truncate">{name}</span>
+          </span>
+        );
+      })}
+      {rest > 0 && (
+        <span className="text-mute text-2xs tabular-nums" title={names.slice(2).join(", ")}>
+          +{rest}
+        </span>
+      )}
+    </span>
+  );
+}
 
 /** Tiny local join — `clsx` is a dependency, but a 3-line filter beats an import
  *  for the two call sites that need it. */

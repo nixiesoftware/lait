@@ -100,25 +100,28 @@ export function Settings({
           The space is a crumb *here only*: this page hides the workspace sidebar,
           so this is the one surface where nothing else says which space you are
           about to administer. */}
-      <SurfaceHeader className="@container gap-0.5">
-        <IconButton label="Back to app" onClick={onExit}>
-          <ArrowLeft className="size-4" />
-        </IconButton>
-        <Breadcrumbs
-          className="ml-1"
-          items={[
-            {
-              // Not `optional`: this is the one crumb that carries information no
-              // other surface element holds, so it stays at every width.
-              key: "workspace",
-              label: spaceName || "Workspace",
-              content: <WorkspaceCrumb name={spaceName || "Workspace"} />,
-              onNavigate: onExit,
-            },
-            { key: "settings", content: <DestinationCrumb icon={<Cog />} label="Settings" /> },
-          ]}
-        />
-      </SurfaceHeader>
+      <SurfaceHeader
+        leading={
+          <IconButton label="Back to app" onClick={onExit}>
+            <ArrowLeft className="size-4" />
+          </IconButton>
+        }
+        trail={
+          <Breadcrumbs
+            items={[
+              {
+                // Not `optional`: this is the one crumb that carries information
+                // no other surface element holds, so it stays at every width.
+                key: "workspace",
+                label: spaceName || "Workspace",
+                content: <WorkspaceCrumb name={spaceName || "Workspace"} />,
+                onNavigate: onExit,
+              },
+              { key: "settings", content: <DestinationCrumb icon={<Cog />} label="Settings" /> },
+            ]}
+          />
+        }
+      />
       <div className="flex min-h-0 flex-1">
         <nav className="border-line flex w-48 shrink-0 flex-col gap-0.5 border-r p-2">
           {tabs.map((t) => (

@@ -64,6 +64,13 @@ const button = cva(
           "border-line bg-raised text-dim hover:border-line-strong hover:bg-hover hover:text-fg border",
         /** Text action embedded in prose or metadata. It never grows a capsule. */
         inline: "text-dim hover:text-fg hover:underline underline-offset-2",
+        /** A circle on the floating bulk pill — the same chip treatment
+         *  `controlTrigger`'s `pill` gives the pickers beside it, so the icon
+         *  buttons and the menus read as one set of controls rather than two
+         *  kinds of thing sharing a bar. Fill answers the pointer, not
+         *  elevation: the bar is already the thing that is lifted, and a control
+         *  that lifts again inside it claims a second plane that is not there. */
+        pill: "bg-active/60 text-dim hover:bg-hover hover:text-fg rounded-full",
       },
       size: {
         /** Icon-only chrome: a 24px square, the toolbar unit. */
@@ -166,6 +173,23 @@ const field = cva(
  * standalone composer/filter control needs a visible boundary. Neither is a
  * semantic pill; true tags and reactions get their own primitive.
  */
+/**
+ * The leading glyph slot of a breadcrumb crumb.
+ *
+ * Objects keep the mark the rest of the app gives them — a project is an 8px
+ * swatch on cards and in the sidebar, a workspace destination is a 14px lucide
+ * icon — but the *slot* is one size everywhere, so a crumb's text starts at the
+ * same offset whatever kind of thing it names. Without it the trail shifted
+ * sideways as you moved between a project view and a workspace destination, and
+ * again between a project crumb and the picker that replaces it in a
+ * multi-project space.
+ *
+ * It lives here rather than in `layout` because the picker draws its own face
+ * and needs the same slot; `layout` and `Picker` both already depend on this
+ * module, and neither should depend on the other.
+ */
+export const crumbGlyph = "flex size-4 shrink-0 items-center justify-center";
+
 export const controlTrigger = cva(
   "inline-flex items-center gap-1.5 rounded-md text-sm outline-none transition-colors disabled:pointer-events-none disabled:opacity-45 data-[state=open]:bg-active",
   {
@@ -173,12 +197,22 @@ export const controlTrigger = cva(
       variant: {
         property:
           "hover:bg-hover -mx-1 min-h-7 min-w-0 px-1.5 text-left",
+        // A crumb that happens to be a switcher. Same face as `property` at the
+        // breadcrumb's own height: `min-h-7` here put a 28px control in a trail
+        // of 24px crumbs, and the taller hover box was visible against them.
+        crumb:
+          "hover:bg-hover -mx-1 min-h-6 min-w-0 px-1.5 text-left",
         chip:
           "border-line bg-bg hover:border-line-strong hover:bg-hover min-h-7 border px-2",
         filter:
           "border-line bg-raised hover:border-line-strong hover:bg-hover min-h-7 border px-2",
         toolbar:
           "text-dim hover:bg-hover hover:text-fg min-h-6 px-1.5",
+        /** Inside a floating pill. Fully rounded to match the shell it sits in,
+         *  and it lifts on hover — the bar is the one surface in the app that
+         *  is over the work rather than part of it, so its controls answer the
+         *  pointer with elevation instead of only a fill. */
+        pill: "bg-active/60 text-dim hover:bg-hover hover:text-fg min-h-7 rounded-full px-2.5",
       },
     },
     defaultVariants: { variant: "chip" },
@@ -206,6 +240,7 @@ export const interactiveRow = cva(
       density: {
         compact: "min-h-8",
         normal: "min-h-9",
+        roomy: "min-h-10",
       },
     },
     defaultVariants: {
