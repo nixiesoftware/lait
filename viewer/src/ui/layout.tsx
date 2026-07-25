@@ -1,9 +1,10 @@
-import { createContext, useContext, useMemo, useState } from "react";
+import { createContext, useContext, useId, useMemo, useState } from "react";
 
 import type { ProjectView } from "../core/registry";
 import { createPortal } from "react-dom";
 
 import { cn, crumbGlyph } from "./primitives";
+import * as ContextMenu from "@radix-ui/react-context-menu";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import {
   Activity,
@@ -418,28 +419,26 @@ export function PropertyRow({ label, children }: { label: string; children: Reac
  */
 export function RailSection({
   title,
-  plain,
   children,
 }: {
   /** Omit on the leading group — Linear leaves its first run uncaptioned. */
   title?: string;
-  /**
-   * Skip the `<dl>`. A rail group is normally a definition list, but not every
-   * section under a caption is a set of terms — the outline is a `<nav>`, and
-   * a `<nav>` inside a `<dl>` is invalid markup that assistive technology reads
-   * as a broken list.
-   */
-  plain?: boolean;
   children: React.ReactNode;
 }) {
   return (
     <section className="rail-section flex flex-col">
       {title && (
-        <h3 className="rail-caption text-mute text-2xs mb-1 font-semibold tracking-wider uppercase">
+        // Equal space above and below. The gap above comes from the rail's own
+        // `gap-3`, so this matches it: a caption used to take 16px above and
+        // 4px below, which glued it to its rows and left it drifting away from
+        // the section it was separating from. Typographically the asymmetry is
+        // defensible — a heading belongs to what follows it — but at 10px in a
+        // 264px column it just read as uneven.
+        <h3 className="rail-caption text-mute text-2xs mb-3 font-semibold tracking-wider uppercase">
           {title}
         </h3>
       )}
-      {plain ? children : <dl className="flex flex-col gap-0.5">{children}</dl>}
+      <dl className="flex flex-col gap-1">{children}</dl>
     </section>
   );
 }
@@ -448,10 +447,80 @@ export function RailRow({ label, children }: { label: string; children: React.Re
   return (
     // `title` restores the term to the pointer. It is the same string as the
     // `<dt>`, so the tooltip and the screen reader agree by construction.
-    <div className="issue-property group/prop flex min-h-7 items-center gap-2" title={label}>
+    // `py-1` so a row that grows past its minimum keeps air at both edges. A
+    // wrapped run of labels is 48px of chips in a 28px-minimum row, and without
+    // this the first and last chip sat flush against the rows above and below.
+    <div className="issue-property group/prop flex min-h-7 items-center gap-2 py-1" title={label}>
       <dt className="sr-only">{label}</dt>
       <dd className="min-w-0 flex-1">{children}</dd>
     </div>
+  );
+}
+
+/**
+ * A collapsible group in a document body — Linear's `▸ Sub-issues 0/1` and
+ * Jira's `⌄ Linked work items`, which are the same control.
+ *
+ * This replaces a stack of uppercase captions. The band between an issue's
+ * description and its activity could put seven of them on screen at once
+ * (attachments, parent, sub-issues, blocked by, blocks, related, duplicates),
+ * each a caption over one or two rows, and captions do not compress: seven of
+ * them read as seven sections regardless of how little is in each.
+ *
+ * A disclosure header is one line that carries its own count, so a group with
+ * nothing in it costs nothing and a group with three rows costs a line. Open by
+ * default, because the point is to remove chrome, not to hide the work — the
+ * collapse is there for a body with a long sub-issue list.
+ */
+export function Disclosure({
+  title,
+  count,
+  action,
+  defaultOpen = true,
+  children,
+}: {
+  title: string;
+  /** Shown beside the title — `3`, or `2/5` for a done-over-total. */
+  count?: React.ReactNode;
+  /** A trailing control, typically the `+` that adds to this group. */
+  action?: React.ReactNode;
+  defaultOpen?: boolean;
+  children: React.ReactNode;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  const id = useId();
+
+  return (
+    <section className="flex flex-col">
+      <div className="group/disc flex h-8 items-center gap-1">
+        <button
+          type="button"
+          onClick={() => setOpen((o) => !o)}
+          aria-expanded={open}
+          aria-controls={id}
+          className="text-dim hover:text-fg -ml-1 flex min-w-0 items-center gap-1 rounded px-1 py-0.5 text-sm font-medium outline-none focus-visible:ring-1 focus-visible:ring-accent/50"
+        >
+          <ChevronRight
+            className={cn("size-3.5 shrink-0 transition-transform", open && "rotate-90")}
+            aria-hidden
+          />
+          <span className="truncate">{title}</span>
+          {count !== undefined && (
+            <span className="text-mute ml-1 shrink-0 tabular-nums">{count}</span>
+          )}
+        </button>
+        {action && (
+          // Revealed on hover like the rest of the row affordances, but always
+          // present once the group is focused or the pointer is anywhere in it.
+          <span className="ml-auto opacity-0 transition-opacity group-hover/disc:opacity-100 focus-within:opacity-100">
+            {action}
+          </span>
+        )}
+      </div>
+      <div id={id} hidden={!open} className="flex flex-col gap-1 pb-1">
+        {children}
+      </div>
+    </section>
   );
 }
 
@@ -505,6 +574,53 @@ export function MenuItem({
     />
   );
 }
+
+/**
+ * The same menu, opened by the right button.
+ *
+ * A row's actions used to hang off a `⋯` that appeared on hover — a control
+ * that costs a permanent slot at the end of every line, is invisible until you
+ * go looking for it, and is unreachable on a touch device. A context menu is
+ * where people already look for per-row actions, and it costs the row nothing.
+ *
+ * Radix ships context menus as a separate primitive from dropdowns rather than
+ * a trigger option, so these two exist to keep both wearing one surface. The
+ * classes are deliberately identical to `MenuContent`/`MenuItem`: a menu should
+ * not change appearance based on which button summoned it.
+ */
+export function ContextMenuContent({
+  className,
+  ...props
+}: React.ComponentProps<typeof ContextMenu.Content>) {
+  return (
+    <ContextMenu.Content
+      className={cn(
+        "ui-surface border-line-strong bg-raised shadow-overlay z-50 min-w-48 rounded-lg border p-1 text-sm",
+        className,
+      )}
+      {...props}
+    />
+  );
+}
+
+export function ContextMenuItem({
+  danger,
+  className,
+  ...props
+}: React.ComponentProps<typeof ContextMenu.Item> & { danger?: boolean }) {
+  return (
+    <ContextMenu.Item
+      className={cn(
+        "flex h-7 cursor-default items-center gap-2 rounded-md px-2 outline-none select-none data-[disabled]:opacity-50 data-[highlighted]:bg-active",
+        danger ? "text-danger" : "text-dim",
+        className,
+      )}
+      {...props}
+    />
+  );
+}
+
+export { ContextMenu };
 
 export function MenuSeparator({
   className,

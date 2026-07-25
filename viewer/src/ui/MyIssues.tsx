@@ -68,7 +68,7 @@ export function MyIssues({
             <span className="text-mute w-20 shrink-0 truncate font-mono text-xs tabular-nums">
               {row.key_alias ?? row.reff}
             </span>
-            <span className="min-w-0 flex-1 truncate text-sm">{row.title}</span>
+            <span className="min-w-0 flex-1 truncate text-sm font-medium">{row.title}</span>
             <span className="text-mute shrink-0 text-xs capitalize">{row.priority}</span>
           </button>
         </li>

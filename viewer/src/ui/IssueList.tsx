@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
-import { CheckSquare, ChevronRight, Copy, ExternalLink, MoreHorizontal, Plus, Trash2 } from "lucide-react";
+import { CheckSquare, ChevronRight, Copy, ExternalLink, Plus, Trash2 } from "lucide-react";
 
 import type { RowGroup } from "../core/display";
 import { indexBy } from "../core/performance";
@@ -9,8 +8,8 @@ import { Avatar, AvatarStack, memberName, stackFor } from "./Avatar";
 import { ApplicationState } from "./AppState";
 import { catalogColor } from "./colors";
 import { PriorityIcon, StatusIcon } from "./icons";
-import { GroupHeader, MenuContent, MenuItem } from "./layout";
-import { Button, Checkbox, IconButton, interactiveRow } from "./primitives";
+import { ContextMenu, ContextMenuContent, ContextMenuItem, GroupHeader } from "./layout";
+import { Button, Checkbox, IconButton, interactiveRow, LabelChips } from "./primitives";
 import { dueLabel, dueTone } from "./time";
 
 /**
@@ -325,6 +324,25 @@ function IssueRow({
   }, [selected]);
 
   return (
+    <ContextMenu.Root
+      onOpenChange={(open) => {
+        // Selecting, not opening: a right click asks "what can I do to this
+        // one", so the row has to become the row the menu is about. Left click
+        // additionally calls `onOpen`, and doing that here would answer the
+        // question by navigating away from it.
+        //
+        // Selection rather than DOM focus, deliberately. Radix moves focus into
+        // the menu on open and hands it back to the trigger on close; forcing
+        // focus onto the row would fight it and cost the menu its keyboard
+        // navigation. `aria-current` and the active fill are what "this one"
+        // needs to look like.
+        if (open) onSelect(row.reff);
+      }}
+    >
+      {/* The whole row is the trigger. `asChild` keeps it an `<li>` — a wrapper
+          element here would sit between the `<ul>` and its items and break the
+          list semantics screen readers navigate by. */}
+      <ContextMenu.Trigger asChild>
     <li
       ref={el}
       className={clsxish([
@@ -334,6 +352,10 @@ function IssueRow({
         // and when the two were level the list had no figure and ground.
         "group/row flex h-10 items-center gap-2 px-4",
         checked && !selected && "bg-accent/5 shadow-[inset_2px_0_var(--color-accent)]",
+        // Radix marks its trigger while the menu is up. Matching the selected
+        // fill means the row reads as the subject of the menu on the very first
+        // frame, rather than after the selection round-trips through the app.
+        "data-[state=open]:bg-active data-[state=open]:text-fg",
         // A row whose body hasn't synced yet is real but not yet trustworthy;
         // say so quietly rather than rendering it as settled (UI.md §3.3).
         row.provisional && "opacity-60",
@@ -379,38 +401,35 @@ function IssueRow({
         )}
       </span>
       <PriorityIcon priority={row.priority} />
-      {/* Fixed width + tabular numerals: the ids form a straight edge to scan. */}
-      <span className="text-mute w-16 shrink-0 truncate font-mono text-xs tabular-nums">
+      {/* Content-width, not a fixed 64px column. The refs in one project share a
+          key, so they still form the straight edge that made the column worth
+          having — and the 8px of slack that column left on a `COMP-25` pushed
+          the status glyph away from the id it belongs to. The fixed width was
+          also quietly short: `ACCESS-100` measures ~80px and was being
+          truncated. Tabular numerals keep the digits aligned. */}
+      <span className="text-mute shrink-0 font-mono text-xs tabular-nums">
         {row.key_alias ?? row.reff}
       </span>
       {state && <StatusIcon category={state.category} color={catalogColor(state.color)} />}
       <span
-        className={clsxish(["min-w-0 flex-1 truncate", row.tombstone && "text-mute line-through"])}
+        className={clsxish(["min-w-0 flex-1 truncate font-medium", row.tombstone && "text-mute line-through"])}
       >
         {row.title}
       </span>
       {row.tombstone && (
         <Trash2 className="text-mute size-3 shrink-0" aria-label="Deleted" />
       )}
-      <LabelChips names={row.label_names} labels={labels} />
-      {row.estimate != null && (
-        <span className="text-mute shrink-0 text-2xs tabular-nums" title="Estimate">
-          {row.estimate}pt
-        </span>
-      )}
-      {row.due_date != null && (
-        <span
-          className={clsxish([
-            "shrink-0 text-2xs tabular-nums",
-            { overdue: "text-danger", soon: "text-warn", later: "text-mute" }[
-              dueTone(row.due_date)
-            ],
-          ])}
-          title="Due date"
-        >
-          {dueLabel(row.due_date)}
-        </span>
-      )}
+      {/* Two is what a dense line affords, and the rest are simply not shown:
+          a trailing `+2` is a tally of things you cannot see, competing for the
+          same edge as the date. The full set is one click away in the detail. */}
+      <LabelChips
+        names={row.label_names ?? []}
+        colorOf={(name) => labels.find((l) => l.name === name)?.color ?? "gray"}
+        max={2}
+        showOverflow={false}
+        size="sm"
+        className="shrink-0 flex-nowrap"
+      />
       {/* Unconfirmed: shown as truth because that is what makes a write feel
           instant, but never *claimed* as truth. */}
       {pending && (
@@ -423,43 +442,55 @@ function IssueRow({
       {/* Faces, not `assignee_summary` — that string is the terminal's projection
           ("you +1"), and this row has a fixed 32px rhythm to keep. */}
       <AvatarStack members={stackFor(row.assignees, members)} className="w-14 justify-end" />
-      <DropdownMenu.Root>
-        <DropdownMenu.Trigger asChild>
-          <IconButton
-            label={`Actions for ${row.key_alias ?? row.reff}`}
-            onClick={(event) => event.stopPropagation()}
-            className="opacity-0 transition-opacity group-hover/row:opacity-100 focus-visible:opacity-100 data-[state=open]:opacity-100"
-          >
-            <MoreHorizontal className="size-3.5" />
-          </IconButton>
-        </DropdownMenu.Trigger>
-        <DropdownMenu.Portal>
-          <MenuContent align="end">
-            <MenuItem onSelect={() => onOpen(row.reff)}>
-              <ExternalLink className="size-3.5" />
-              Open focused
-            </MenuItem>
-            <MenuItem
-              onSelect={() => {
-                const url = new URL(window.location.href);
-                url.searchParams.set("issue", row.reff);
-                url.searchParams.set("focus", "1");
-                void navigator.clipboard.writeText(url.toString());
-              }}
-            >
-              <Copy className="size-3.5" />
-              Copy link
-            </MenuItem>
-            {!readOnly && (
-              <MenuItem onSelect={() => onToggleCheck(row.reff, false)}>
-                <CheckSquare className="size-3.5" />
-                {checked ? "Remove from selection" : "Add to selection"}
-              </MenuItem>
-            )}
-          </MenuContent>
-        </DropdownMenu.Portal>
-      </DropdownMenu.Root>
+      {/* Last, against the row's trailing edge. A date is the one field you
+          scan down a column rather than read across a row, so it wants a
+          straight right edge of its own — putting it before the faces gave it a
+          ragged one that moved with however many people were assigned. */}
+      {row.due_date != null && (
+        <span
+          className={clsxish([
+            // A fixed, right-aligned column: `Aug 14` and `Sep 3` are different
+            // widths, and a date you read down a list has to start and end in
+            // the same place on every row or the column stops being one.
+            "w-11 shrink-0 text-right text-2xs tabular-nums",
+            { overdue: "text-danger", soon: "text-warn", later: "text-mute" }[
+              dueTone(row.due_date)
+            ],
+          ])}
+          title="Due date"
+        >
+          {dueLabel(row.due_date)}
+        </span>
+      )}
+
     </li>
+      </ContextMenu.Trigger>
+      <ContextMenu.Portal>
+        <ContextMenuContent>
+          <ContextMenuItem onSelect={() => onOpen(row.reff)}>
+            <ExternalLink className="size-3.5" />
+            Open focused
+          </ContextMenuItem>
+          <ContextMenuItem
+            onSelect={() => {
+              const url = new URL(window.location.href);
+              url.searchParams.set("issue", row.reff);
+              url.searchParams.set("focus", "1");
+              void navigator.clipboard.writeText(url.toString());
+            }}
+          >
+            <Copy className="size-3.5" />
+            Copy link
+          </ContextMenuItem>
+          {!readOnly && (
+            <ContextMenuItem onSelect={() => onToggleCheck(row.reff, false)}>
+              <CheckSquare className="size-3.5" />
+              {checked ? "Remove from selection" : "Add to selection"}
+            </ContextMenuItem>
+          )}
+        </ContextMenuContent>
+      </ContextMenu.Portal>
+    </ContextMenu.Root>
   );
 }
 
@@ -473,36 +504,6 @@ function IssueRow({
  * start competing with the title for the truncation budget, and a label you
  * cannot read is only noise with a colour.
  */
-function LabelChips({ names, labels }: { names?: string[] | undefined; labels: LabelDto[] }) {
-  if (!names?.length) return null;
-  const shown = names.slice(0, 2);
-  const rest = names.length - shown.length;
-  return (
-    <span className="flex shrink-0 items-center gap-1">
-      {shown.map((name) => {
-        const label = labels.find((candidate) => candidate.name === name);
-        return (
-          <span
-            key={name}
-            title={name}
-            className="border-line text-dim flex h-4 max-w-24 items-center gap-1 rounded-full border px-1.5 text-2xs"
-          >
-            <span
-              className="size-1.5 shrink-0 rounded-full"
-              style={{ background: label ? catalogColor(label.color) : "var(--color-mute)" }}
-            />
-            <span className="truncate">{name}</span>
-          </span>
-        );
-      })}
-      {rest > 0 && (
-        <span className="text-mute text-2xs tabular-nums" title={names.slice(2).join(", ")}>
-          +{rest}
-        </span>
-      )}
-    </span>
-  );
-}
 
 /** Tiny local join — `clsx` is a dependency, but a 3-line filter beats an import
  *  for the two call sites that need it. */

@@ -123,6 +123,31 @@ function cells(line: string): string[] {
   return out;
 }
 
+/**
+ * Join a run of lines into one paragraph, CommonMark-style.
+ *
+ * A lone newline inside a paragraph is a *space*, not a break. This used to
+ * keep every source newline and render with `pre-wrap`, which was defensible
+ * when the body was a 320px pane echoing what the CLI prints — but the body is
+ * a document at a 35rem measure now, and text hard-wrapped at 78 columns came
+ * out ragged, breaking mid-sentence wherever the author's editor happened to
+ * wrap. The rendered width is the browser's business.
+ *
+ * An intentional break survives: a line ending in two spaces or a backslash
+ * keeps its newline, which is how every other Markdown tool spells one.
+ */
+const HARD_BREAK = /( {2,}|\\)$/;
+
+function joinSoft(lines: string[]): string {
+  return lines
+    .map((line, index) => {
+      if (index === lines.length - 1) return line.trimEnd();
+      if (HARD_BREAK.test(line)) return line.replace(HARD_BREAK, "") + "\n";
+      return line.trimEnd() + " ";
+    })
+    .join("");
+}
+
 function alignments(rule: string): Align[] {
   return cells(rule).map((c) => {
     const left = c.startsWith(":");
@@ -222,11 +247,11 @@ export function parseMarkdown(text: string): Block[] {
         blocks.push({
           kind: "callout",
           tone: alert[1]!.toLowerCase() as CalloutTone,
-          children: parseInline(body.slice(1).join("\n").trim()),
+          children: parseInline(joinSoft(body.slice(1)).trim()),
         });
         continue;
       }
-      blocks.push({ kind: "quote", children: parseInline(body.join("\n")) });
+      blocks.push({ kind: "quote", children: parseInline(joinSoft(body)) });
       continue;
     }
 
@@ -270,7 +295,7 @@ export function parseMarkdown(text: string): Block[] {
       para.push(l);
       i++;
     }
-    blocks.push({ kind: "paragraph", children: parseInline(para.join("\n")) });
+    blocks.push({ kind: "paragraph", children: parseInline(joinSoft(para)) });
   }
 
   return blocks;
@@ -307,35 +332,6 @@ const INLINE: Array<{
     make: (m) => ({ kind: "link", href: m[0], children: [{ kind: "text", text: m[0] }] }),
   },
 ];
-
-/** The readable text of an inline run, with its formatting dropped. */
-export function inlineText(parts: Inline[]): string {
-  return parts
-    .map((p) => (p.kind === "text" || p.kind === "code" ? p.text : inlineText(p.children)))
-    .join("");
-}
-
-export interface OutlineEntry {
-  id: string;
-  level: 1 | 2 | 3 | 4;
-  text: string;
-}
-
-/**
- * The document's headings, for an "on this page" rail.
- *
- * Returns nothing below the threshold: an outline over two headings is longer
- * than the thing it indexes, and most issue bodies are a paragraph. It earns
- * its place only on the long, structured ones — which is exactly the shape an
- * agent writes.
- */
-export function outline(text: string, minimum = 3): OutlineEntry[] {
-  if (!looksLikeMarkdown(text)) return [];
-  const entries = parseMarkdown(text)
-    .filter((b): b is Extract<Block, { kind: "heading" }> => b.kind === "heading")
-    .map((h) => ({ id: h.id, level: h.level, text: inlineText(h.children) }));
-  return entries.length >= minimum ? entries : [];
-}
 
 export function parseInline(text: string): Inline[] {
   const out: Inline[] = [];

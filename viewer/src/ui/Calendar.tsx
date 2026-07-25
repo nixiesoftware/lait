@@ -134,7 +134,7 @@ export function Calendar({
                     className="bg-raised border-line hover:border-line-strong flex items-center gap-1 rounded border px-1 py-0.5 text-left text-2xs"
                   >
                     <PriorityIcon priority={r.priority} />
-                    <span className="min-w-0 flex-1 truncate">{r.title}</span>
+                    <span className="min-w-0 flex-1 truncate font-medium">{r.title}</span>
                   </button>
                 ))}
               </div>

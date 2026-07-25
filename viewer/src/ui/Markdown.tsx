@@ -12,7 +12,6 @@ import {
 import { highlight, isHighlightable, type Token } from "../core/highlight";
 import {
   looksLikeMarkdown,
-  outline,
   parseMarkdown,
   type Block,
   type CalloutTone,
@@ -174,44 +173,6 @@ const ALIGN = {
   center: "text-center",
   right: "text-right",
 } as const;
-
-/**
- * "On this page" — Hashnode's and Mintlify's outline rail.
- *
- * Renders nothing until a body has enough headings to be worth indexing, so it
- * is invisible on the one-paragraph issues that make up most of a tracker and
- * appears on the long structured write-ups where you actually want to jump.
- *
- * The links scroll rather than navigate. `href="#id"` would push a fragment
- * onto a URL whose shape is a route contract (`core/route.ts`), and the surface
- * that scrolls here is a panel rather than the window — so the anchor is kept
- * for middle-click and copy-link, and the default is prevented.
- */
-export function Outline({ text, className }: { text: string; className?: string }) {
-  const entries = useMemo(() => outline(text), [text]);
-  if (entries.length === 0) return null;
-  const top = Math.min(...entries.map((e) => e.level));
-
-  return (
-    <nav aria-label="On this page" className={cn("flex flex-col gap-0.5", className)}>
-      {entries.map((entry) => (
-        <a
-          key={entry.id}
-          href={`#${entry.id}`}
-          onClick={(event) => {
-            event.preventDefault();
-            document.getElementById(entry.id)?.scrollIntoView({ block: "start" });
-          }}
-          style={{ paddingLeft: `${(entry.level - top) * 12}px` }}
-          className="text-mute hover:text-fg truncate py-0.5 text-xs transition-colors"
-          title={entry.text}
-        >
-          {entry.text}
-        </a>
-      ))}
-    </nav>
-  );
-}
 
 /**
  * A callout, after Mintlify's prerequisites panel.

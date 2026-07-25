@@ -11,7 +11,7 @@ import { AvatarStack, memberName, stackFor } from "./Avatar";
 import { EmptyState } from "./AppState";
 import { catalogColor } from "./colors";
 import { PriorityIcon, StatusIcon } from "./icons";
-import { Button, IconButton } from "./primitives";
+import { Button, IconButton, LabelChips } from "./primitives";
 import { dueLabel, dueTone } from "./time";
 
 const DUE_TONE = { overdue: "text-danger", soon: "text-warn", later: "text-mute" } as const;
@@ -704,7 +704,7 @@ function Card({
         ].join(" ")}
       >
         <div className="mb-1.5 flex items-start gap-1">
-          <p className={`min-w-0 flex-1 line-clamp-2 ${row.tombstone ? "text-mute line-through" : ""}`}>
+          <p className={`min-w-0 flex-1 line-clamp-2 font-medium ${row.tombstone ? "text-mute line-through" : ""}`}>
             {row.title}
           </p>
           {!row.tombstone && (
@@ -761,24 +761,13 @@ function Card({
           row.estimate != null ||
           (row.child_total ?? 0) > 0) && (
           <div className="mb-1.5 flex flex-wrap items-center gap-1">
-            {(row.label_names ?? []).slice(0, 3).map((name) => {
-              const def = labels.find((l) => l.name === name);
-              return (
-                <span
-                  key={name}
-                  className="border-line-strong flex items-center gap-1 rounded-full border px-1.5 text-2xs"
-                >
-                  <span
-                    className="size-1.5 shrink-0 rounded-full"
-                    style={{ background: catalogColor(def?.color ?? "gray") }}
-                  />
-                  {name}
-                </span>
-              );
-            })}
-            {(row.label_names?.length ?? 0) > 3 && (
-              <span className="text-mute text-2xs">+{row.label_names!.length - 3}</span>
-            )}
+            {/* Three fits a card's width; the rest fold into `+N`. */}
+            <LabelChips
+              names={row.label_names ?? []}
+              colorOf={(name) => labels.find((l) => l.name === name)?.color ?? "gray"}
+              max={3}
+              size="sm"
+            />
             {row.due_date != null && (
               <span className={`flex items-center gap-1 text-2xs ${DUE_TONE[dueTone(row.due_date)]}`}>
                 <CalendarClock className="size-3" />

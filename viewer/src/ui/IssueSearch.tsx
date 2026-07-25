@@ -204,7 +204,7 @@ function IssueResult({ row, recent, projectById, stateById, onOpen }: { row: Row
     >
       {recent ? <Clock3 className="text-mute size-3.5" /> : <PriorityIcon priority={row.priority} />}
       <span className="text-mute w-20 shrink-0 truncate font-mono text-xs">{row.key_alias ?? row.reff}</span>
-      <span className="min-w-0 flex-1 truncate">{row.title}</span>
+      <span className="min-w-0 flex-1 truncate font-medium">{row.title}</span>
       {project && <span className="text-mute shrink-0 text-xs">{project.key}</span>}
       {state && (
         <span className="text-mute flex shrink-0 items-center gap-1 text-xs">

@@ -454,6 +454,93 @@
   margin-top: 0.625em;
 }
 
+/* ---------------------------------------------------------------------------
+   The live Markdown editor.
+
+   Milkdown is headless on purpose: it ships a ProseMirror document and no
+   opinion about how it looks, so the editing surface wears the same `.prose`
+   layer the read-only renderer does. The rules below are only the ones a
+   contenteditable needs and static prose does not.
+
+   `@milkdown/kit` ships ProseMirror's own stylesheet, but importing it would
+   pull in a set of colours and a caret style we have already decided; these
+   four declarations are the parts that actually matter. */
+.milkdown-host {
+  position: relative;
+}
+
+.milkdown .ProseMirror {
+  outline: none;
+  /* The document keeps its measure while typing — the parent caps width, and a
+     contenteditable will happily grow past it on a long unbroken token. */
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+/* An empty document has nothing to click, so it needs a line to aim at. The
+   placeholder rides on the first paragraph rather than the root: ProseMirror
+   always keeps one, and attaching to the root leaves the text sitting above
+   the caret instead of behind it. */
+.milkdown .ProseMirror.is-empty > p:first-child::before,
+.milkdown .ProseMirror > p.is-empty:first-child::before {
+  content: attr(data-placeholder);
+  color: var(--color-mute);
+  float: left;
+  height: 0;
+  pointer-events: none;
+}
+
+/* ProseMirror marks the node the caret is in; nothing should move when it does.
+   Milkdown's own presets assume a theme package for these, and without them a
+   selected image or an active list item silently inherits browser defaults. */
+.milkdown .ProseMirror .ProseMirror-selectednode {
+  outline: 2px solid var(--color-accent);
+  border-radius: var(--radius-md);
+}
+
+.milkdown .ProseMirror-gapcursor:after {
+  border-top-color: var(--color-fg);
+}
+
+/* GFM tables are editable here, so they get cell borders the read-only renderer
+   does not need — you have to see the cell you are in. */
+.milkdown .ProseMirror table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+
+.milkdown .ProseMirror th,
+.milkdown .ProseMirror td {
+  border: 1px solid var(--color-line);
+  padding: 6px 12px;
+  vertical-align: top;
+}
+
+.milkdown .ProseMirror th {
+  background: color-mix(in oklab, var(--color-active) 30%, transparent);
+  font-weight: 600;
+  text-align: left;
+}
+
+.milkdown .ProseMirror .selectedCell {
+  background: color-mix(in oklab, var(--color-accent) 12%, transparent);
+}
+
+/* A fenced block in the editor is still a `<pre>`, but it is being typed into,
+   so it takes the panel's shape without Shiki's colour — highlighting a buffer
+   under the caret would fight every keystroke. The read-only renderer keeps the
+   coloured version. */
+.milkdown .ProseMirror pre {
+  background: var(--color-bg);
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-lg);
+  padding: 12px;
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+  overflow-x: auto;
+}
+
 /* A focused issue becomes a document with a stable Linear-style property rail.
    The split pane stays single-column until it has enough *container* width; the
    browser window is not the relevant measurement when panels are resizable. */

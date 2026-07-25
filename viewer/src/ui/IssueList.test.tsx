@@ -87,7 +87,47 @@ describe("IssueList semantics", () => {
     expect(toggled.mock.calls.map(([reff]) => reff)).toEqual(rows.map((item) => item.reff));
   });
 
-  it("shows two labels on a row and counts the rest", () => {
+  it("puts row actions on the right button, not a hover control", () => {
+    const state: WorkflowState = { id: "backlog", name: "Backlog", category: "backlog", color: "gray" };
+    const rows = [row("LIST-4")];
+    host = document.createElement("div");
+    document.body.append(host);
+    root = createRoot(host);
+    act(() => root?.render(
+      <TooltipProvider>
+        <IssueList
+          groups={[{ key: "backlog", kind: "status", label: "Backlog", rows, state }]}
+          deleted={[]}
+          deletedMode={false}
+          states={[state]}
+          members={[]}
+          labels={[]}
+          selection={null}
+          checked={new Set()}
+          optimistic={new Set()}
+          onSelect={() => undefined}
+          onToggleCheck={() => undefined}
+          onOpen={() => undefined}
+          onCreate={() => undefined}
+          readOnly={false}
+          filtered={false}
+        />
+      </TooltipProvider>,
+    ));
+
+    // The `⋯` is gone: it cost a permanent slot at the end of every line to
+    // hold a control that only appeared once you hovered it.
+    expect(host.querySelector('[aria-label^="Actions for"]')).toBeNull();
+
+    // What replaces it has to stay reachable without a pointer. Radix opens a
+    // context menu on the Menu key when its trigger has focus, so the trigger
+    // must be the row itself — and the row must remain focusable.
+    const item = host.querySelector("li[data-issue-ref]") as HTMLElement;
+    expect(item).toBeTruthy();
+    expect(item.getAttribute("tabindex")).not.toBeNull();
+  });
+
+  it("shows two labels on a row and drops the rest without a tally", () => {
     const state: WorkflowState = { id: "backlog", name: "Backlog", category: "backlog", color: "gray" };
     const labelled: Row = { ...row("LIST-9"), label_names: ["infra", "perf", "docs"] };
     host = document.createElement("div");
@@ -118,11 +158,11 @@ describe("IssueList semantics", () => {
     const rowText = host.querySelector("li[data-issue-ref]")?.textContent ?? "";
     expect(rowText).toContain("infra");
     expect(rowText).toContain("perf");
-    // The third would start competing with the title for truncation budget.
+    // The third would start competing with the title for truncation budget, and
+    // it is dropped silently — a trailing `+1` is a tally of things you cannot
+    // see, sitting on the same edge as the date. The full set is in the detail.
     expect(rowText).not.toContain("docs");
-    expect(rowText).toContain("+1");
-    // …but the overflow says what it swallowed, so the count is not a dead end.
-    expect(host.querySelector('[title="docs"]')?.textContent).toBe("+1");
+    expect(rowText).not.toContain("+1");
     // A name with no matching label still renders: `label_names` is the
     // daemon's, and a catalog that has not arrived yet must not blank the row.
     expect(host.querySelector('[title="perf"]')).toBeTruthy();

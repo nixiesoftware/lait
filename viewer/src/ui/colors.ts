@@ -96,3 +96,22 @@ export function avatarColor(deviceKey: string): string {
   }
   return AVATAR[Math.abs(h) % AVATAR.length] ?? AVATAR[0]!;
 }
+
+/**
+ * A label chip's edge, mixed from the label's own colour.
+ *
+ * Border only — no fill. A tinted ground was the first attempt and it was
+ * wrong: in a list row a label sits beside a project name and a date, and a
+ * washed pill outweighs both, which is not the label's importance. Every dark
+ * Linear surface draws the same conclusion — dot, quiet text, no fill — and
+ * the colour still arrives, just through the dot instead of the whole shape.
+ *
+ * `color-mix` rather than an opacity utility because these colours arrive as
+ * `var(--color-*)` tokens and `light-dark()` pairs, not hex — Tailwind's `/30`
+ * syntax cannot reach inside either. Mixing in `oklab` keeps the hairline at
+ * the same perceived lightness across hues, so a yellow edge does not come out
+ * louder than a blue one at the same percentage.
+ */
+export function labelSurface(color: string): { borderColor: string } {
+  return { borderColor: `color-mix(in oklab, ${catalogColor(color)} 34%, transparent)` };
+}

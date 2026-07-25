@@ -169,9 +169,13 @@ export function Combobox(props: Props) {
             the property row, `crumb` on the breadcrumb item. Naming the wrong one
             is silent: the class compiles, matches nothing, and the affordance
             simply never arrives. */}
+        {/* A label chip has no chevron at all. The chip *is* the target — it is
+            already a bordered, coloured, clearly-hit-able shape — and one arrow
+            per label turns a run of four into eight things to look at. */}
         <ChevronDown
           className={cn(
             "text-mute size-3 shrink-0",
+            variant === "label" && "hidden",
             variant === "property" &&
               "opacity-0 transition-opacity group-hover/prop:opacity-100 group-focus-within/prop:opacity-100",
             variant === "crumb" &&

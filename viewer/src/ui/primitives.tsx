@@ -5,7 +5,9 @@ import * as CheckboxPrimitive from "@radix-ui/react-checkbox";
 import * as Popover from "@radix-ui/react-popover";
 import * as SwitchPrimitive from "@radix-ui/react-switch";
 import * as Tooltip from "@radix-ui/react-tooltip";
-import { Check, LoaderCircle, Pencil } from "lucide-react";
+import { Check, LoaderCircle } from "lucide-react";
+
+import { catalogColor, labelSurface } from "./colors";
 
 /**
  * The primitives every surface builds from.
@@ -139,6 +141,121 @@ export function Badge({
 }
 
 /** An actual interactive pill: reactions and removable/filter chips only. */
+/**
+ * A label, as it appears on an issue.
+ *
+ * One component because there were three: the detail rail, the list row and the
+ * board card each carried their own copy, and they had drifted to two different
+ * border tokens, two text colours, and one height between them (16px in two
+ * places, 16px-with-`h-4` in the third). Nothing chose those differences.
+ *
+ * Sized to belong to the document language rather than to hide from it. The old
+ * chip was 10px type in a 16px pill sitting in a 28px row beside 14px values —
+ * legible, but reading as a footnote about the issue instead of a property of
+ * it. `dot + tint + name` after Linear's shape and GitHub's weight: the dot is
+ * the crisp colour anchor, the tint gives the pill presence, and the name stays
+ * on a text token, so contrast never depends on which colour was picked.
+ */
+export function LabelChip({
+  name,
+  color,
+  size = "md",
+  className,
+}: {
+  name: string;
+  /** A catalog colour name (or hex). Unknown names resolve to the muted token. */
+  color: string;
+  /** `sm` for dense rows — a list line, a board card. */
+  size?: "sm" | "md";
+  className?: string;
+}) {
+  return (
+    <span
+      title={name}
+      style={labelSurface(color)}
+      className={cn(
+        "inline-flex min-w-0 items-center rounded-full border font-medium whitespace-nowrap",
+        // `text-sm` is 12px on this scale, the same size as the rail values a
+        // label sits among — a label *is* a value, and setting it a step down
+        // was what made the old 16px chip read as a footnote.
+        //
+        // Both sizes are 20px because the chip has to sit *inside* its row,
+        // not fill it. At 24px in the rail's 28px rows it left 2px of air where
+        // every bare entry beside it (`Backlog`, `5 pt`, `Aug 14`) has six, and
+        // a wrapped pair ran at a 28px pitch against the rail's 30px — the
+        // block visibly stopped tracking the column it was in.
+        //
+        // What the sizes do differ in is voice. In the rail a label is a
+        // property you are reading, so it takes the foreground at the same
+        // 12px as the values around it; in a list row it is metadata you scan
+        // past next to a date and a project, so it drops to `text-dim` and 11px
+        // and sits at their weight rather than above it.
+        size === "md" ? "text-fg h-5 gap-1.5 px-2 text-sm" : "text-dim h-5 gap-1 px-2 text-xs",
+        className,
+      )}
+    >
+      <span
+        className="size-1.5 shrink-0 rounded-full"
+        style={{ background: catalogColor(color) }}
+      />
+      {/* `capitalize` is a text transform, not a rewrite: the DOM still holds
+          the stored name, so copying a chip yields the string the engine
+          resolves — `Request::Label` matches on the name, and a display
+          convention must never become an identity change. */}
+      <span className="truncate capitalize">{name}</span>
+    </span>
+  );
+}
+
+/**
+ * A run of labels, with the tail folded into a count.
+ *
+ * `max` is the one thing that legitimately differs by surface — a list line has
+ * less room than a rail — so it is a parameter rather than three components.
+ */
+export function LabelChips({
+  names,
+  colorOf,
+  max,
+  showOverflow = true,
+  size = "md",
+  className,
+}: {
+  names: readonly string[];
+  /** Resolve a label name to its catalog colour. */
+  colorOf: (name: string) => string;
+  /** Show at most this many. Omit to show all. */
+  max?: number;
+  /**
+   * Print `+N` for what `max` dropped. On by default — silently hiding data is
+   * worse than a counter — but a list line trades that away: the row already
+   * carries an id, a status and a title, and a trailing tally of things you
+   * cannot see competes with all three.
+   */
+  showOverflow?: boolean;
+  size?: "sm" | "md";
+  className?: string;
+}) {
+  if (names.length === 0) return null;
+  const shown = max === undefined ? names : names.slice(0, max);
+  const rest = names.length - shown.length;
+  return (
+    // A wider row gap than column gap: wrapped chips otherwise stack at a
+    // tighter pitch than the rows they share a rail with, and the block reads
+    // as detached from the column.
+    <span className={cn("flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-2", className)}>
+      {shown.map((name) => (
+        <LabelChip key={name} name={name} color={colorOf(name)} size={size} />
+      ))}
+      {rest > 0 && showOverflow && (
+        <span className="text-mute shrink-0 text-xs tabular-nums" title={names.slice(shown.length).join(", ")}>
+          +{rest}
+        </span>
+      )}
+    </span>
+  );
+}
+
 export function ChipButton({
   className,
   ...props
@@ -213,6 +330,12 @@ export const controlTrigger = cva(
          *  is over the work rather than part of it, so its controls answer the
          *  pointer with elevation instead of only a fill. */
         pill: "bg-active/60 text-dim hover:bg-hover hover:text-fg min-h-7 rounded-full px-2.5",
+        /** A label chip that is its own trigger. No box of its own — the chip
+         *  already has a shape, and wrapping it in a second one would put a
+         *  rectangle around a pill. Hover dims rather than fills, so the target
+         *  is the chip itself and nothing shifts when it opens. */
+        label:
+          "min-w-0 rounded-full transition-opacity hover:opacity-75 data-[state=open]:opacity-75",
       },
     },
     defaultVariants: { variant: "chip" },
@@ -314,9 +437,22 @@ export function FieldLabel({
 }
 
 /**
- * A readable surface that can become an editor. Links and nested controls retain
- * their own behavior; keyboard users get an explicit edit action instead of a
- * clickable `div` that falsely claims the whole markdown body is a button.
+ * Prose you can type into.
+ *
+ * This used to be a hover target: the whole body lit up with a tinted panel and
+ * grew a pencil in the corner, so reading an issue meant a rectangle following
+ * your pointer down the page. The affordance was the wrong size — an issue body
+ * is the largest thing on the surface, and treating it as one big button made
+ * the page feel like a form.
+ *
+ * Now the text simply takes a caret. Clicking puts you in the editor at the
+ * point you clicked; nothing highlights beforehand, because `cursor-text` has
+ * already said everything a hover panel was trying to.
+ *
+ * The keyboard route stays explicit. A `div` that opens an editor on click is
+ * fine for a pointer and invisible to everything else, so there is still a real
+ * button — it is just `sr-only` until focused, rather than painted over the
+ * prose for everyone.
  */
 export function EditableSurface({
   children,
@@ -325,34 +461,89 @@ export function EditableSurface({
   className,
 }: {
   children: React.ReactNode;
-  onEdit: () => void;
+  /** `offset` is a best-effort caret position in the *source* text. */
+  onEdit: (offset?: number) => void;
   label?: string;
   className?: string;
 }) {
   return (
     <div
-      className={cn(
-        "group/editable hover:bg-hover/70 relative -mx-2 min-h-10 rounded-md px-2.5 py-2 transition-colors",
-        className,
-      )}
+      className={cn("relative cursor-text", className)}
       onClick={(event) => {
+        // Links, checkboxes and the code block's copy button keep their own
+        // behaviour — clicking a link should follow it, not start an edit.
         if ((event.target as HTMLElement).closest("a, button, input, select, textarea")) return;
-        onEdit();
+        onEdit(caretOffsetFromPoint(event.clientX, event.clientY));
       }}
     >
       {children}
-      <IconButton
-        label={label}
+      <button
+        type="button"
         onClick={(event) => {
           event.stopPropagation();
           onEdit();
         }}
-        className="absolute top-1 right-1 opacity-0 group-hover/editable:opacity-100 focus-visible:opacity-100"
+        className="border-line bg-raised focus:ring-accent/50 sr-only rounded-md border px-2 py-1 text-sm focus:not-sr-only focus:absolute focus:top-0 focus:right-0 focus:z-10 focus:ring-1"
       >
-        <Pencil className="size-3" />
-      </IconButton>
+        {label}
+      </button>
     </div>
   );
+}
+
+/**
+ * Where in the rendered text the pointer landed, as a character count within
+ * that text node.
+ *
+ * Rendered prose and its Markdown source are different strings — `**bold**` is
+ * six characters longer on the way in — so this cannot be an exact mapping, and
+ * the caller reconciles it against the source. `undefined` means "no idea",
+ * which the caller reads as "put the caret at the end".
+ */
+function caretOffsetFromPoint(x: number, y: number): number | undefined {
+  const doc = document as Document & {
+    caretPositionFromPoint?: (x: number, y: number) => { offsetNode: Node; offset: number } | null;
+  };
+  const pos = doc.caretPositionFromPoint?.(x, y);
+  if (pos?.offsetNode.nodeType === Node.TEXT_NODE) {
+    return sourceOffset(pos.offsetNode.textContent ?? "", pos.offset);
+  }
+  const range = doc.caretRangeFromPoint?.(x, y);
+  if (range?.startContainer.nodeType === Node.TEXT_NODE) {
+    return sourceOffset(range.startContainer.textContent ?? "", range.startOffset);
+  }
+  return undefined;
+}
+
+/** Packed so the caller can find the clicked run in the source itself. */
+const CARET_RUNS = new Map<number, string>();
+let caretSeq = 0;
+
+function sourceOffset(text: string, offset: number): number {
+  const key = caretSeq++;
+  CARET_RUNS.set(key, text.slice(0, offset));
+  // Only the most recent click can be pending; anything older is noise.
+  if (CARET_RUNS.size > 4) CARET_RUNS.delete(key - 4);
+  return key;
+}
+
+/**
+ * Turn a token from `EditableSurface` into a real offset in `source`.
+ *
+ * The rendered run is searched for in the source. A paragraph's words survive
+ * rendering unchanged, so this lands on the right line far more often than not;
+ * when the run is absent (it was inside a table cell, say) the answer is the end
+ * of the text, which is where a caret with nothing better to do belongs.
+ */
+export function resolveCaret(token: number | undefined, source: string): number {
+  if (token === undefined) return source.length;
+  const run = CARET_RUNS.get(token);
+  CARET_RUNS.delete(token);
+  if (!run) return source.length;
+  const tail = run.slice(-24);
+  if (!tail.trim()) return source.length;
+  const at = source.indexOf(tail);
+  return at === -1 ? source.length : at + tail.length;
 }
 
 /**
@@ -412,13 +603,17 @@ export function Checkbox({
   return (
     <CheckboxPrimitive.Root
       className={cn(
-        "border-line-strong bg-bg text-accent-fg data-[state=checked]:bg-accent data-[state=checked]:border-accent data-[state=indeterminate]:bg-accent data-[state=indeterminate]:border-accent flex size-4 shrink-0 items-center justify-center rounded-sm border transition-colors disabled:opacity-50",
+        // 14px, matching the status glyph it shares a row with. At 16px it was
+        // the largest mark on a list line — heavier than the status circle and
+        // the priority bars either side of it — which put the most emphasis on
+        // the one control that is only there when you are selecting.
+        "border-line-strong bg-bg text-accent-fg data-[state=checked]:bg-accent data-[state=checked]:border-accent data-[state=indeterminate]:bg-accent data-[state=indeterminate]:border-accent flex size-3.5 shrink-0 items-center justify-center rounded-sm border transition-colors disabled:opacity-50",
         className,
       )}
       {...props}
     >
       <CheckboxPrimitive.Indicator>
-        <Check className="size-3" />
+        <Check className="size-2.5" strokeWidth={3} />
       </CheckboxPrimitive.Indicator>
     </CheckboxPrimitive.Root>
   );

@@ -34,7 +34,6 @@ import { rpc } from "../api";
 import { useIssueDetail, useProjectViewerStore } from "../projectStore";
 import { clearDraft, loadDraft, saveDraft } from "../core/drafts";
 import { describeChanges, describeEvent, type NameResolver } from "../core/activity";
-import { outline } from "../core/markdown";
 import type { Field as PredictField } from "../core/overlay";
 import type { IssueField } from "../core/registry";
 import { inverseWorkAction, workTarget } from "../core/workflow";
@@ -58,12 +57,14 @@ import { Avatar, AvatarStack, memberName as nameOf } from "./Avatar";
 import { LoadingState } from "./AppState";
 import { catalogColor } from "./colors";
 import { PriorityIcon, StatusIcon } from "./icons";
-import { Markdown, Outline } from "./Markdown";
+import { Markdown } from "./Markdown";
+import { MarkdownEditor } from "./MarkdownEditor";
 import { DatePicker } from "./DatePicker";
 import { NewLabelDialog } from "./NewLabel";
 import { Combobox, type Option } from "./Picker";
-import { Button, ChipButton, EditableSurface, IconButton, InlineAction, PopoverContent, Textarea } from "./primitives";
+import { Button, ChipButton, cn, IconButton, InlineAction, LabelChip, PopoverContent } from "./primitives";
 import {
+  Disclosure,
   HeaderActions,
   MenuContent,
   MenuItem,
@@ -146,6 +147,11 @@ export function IssueDetail({
   const [pendingAction, setPendingAction] = useState<string | null>(null);
   /** A label name the picker wants to mint — opens the colour step. */
   const [newLabel, setNewLabel] = useState<string | null>(null);
+  /** The relation composer, and the inline sub-issue composer (`null` = closed).
+   *  Both live here so the overflow menu can open them when their group is not
+   *  on screen — an empty group renders nothing, including its own `+`. */
+  const [relating, setRelating] = useState(false);
+  const [subDraft, setSubDraft] = useState<string | null>(null);
   const [undoWork, setUndoWork] = useState<{
     message: string;
     action: "start" | "done" | "stop";
@@ -340,7 +346,9 @@ export function IssueDetail({
           pending={pendingAction !== null}
           onCopyLink={() => void navigator.clipboard.writeText(window.location.href)}
           onDuplicate={() => void duplicateIssue()}
-          onRelate={() => document.getElementById("issue-add-relation")?.click()}
+          onRelate={() => setRelating(true)}
+          onAddSubIssue={() => setSubDraft("")}
+          onAttach={() => document.getElementById("issue-attach")?.click()}
           onAssign={() => onOpenField("assignee")}
           onMove={() => onOpenField("project")}
           onStop={() => void runWorkAction("stop")}
@@ -455,16 +463,7 @@ export function IssueDetail({
           Status row above already does, and it would be the one piece of this pane
           that came from somewhere else.
         */}
-        <div className="issue-detail-properties flex flex-col gap-4 text-sm">
-          {/* Above the properties, because it is about the document you are
-              reading rather than the record it describes — and it disappears on
-              its own for anything shorter than three headings. */}
-          {outline(issue.description).length > 0 && (
-            <RailSection title="On this page" plain>
-              <Outline text={issue.description} />
-            </RailSection>
-          )}
-
+        <div className="issue-detail-properties flex flex-col gap-3 text-sm">
           <RailSection>
           <RailRow label="Status">
             <Combobox
@@ -629,57 +628,112 @@ export function IssueDetail({
 
           <RailSection title="Labels">
           <RailRow label="Labels">
-            <Combobox
-              variant="property"
-              multi
-              label="Labels"
-              disabled={locked}
-              open={pickerOpen("label")}
-              onOpenChange={setPicker("label")}
-              // The registry is keyed by id, but `Request::Label` resolves **names**
-              // (`replica.rs::label`), so the selection is tracked by name too —
-              // matching what we send rather than translating at the boundary.
-              selected={issue.label_names}
-              emptyText={labels.length ? "No matches" : "No labels yet"}
-              face={
-                issue.label_names.length === 0 ? (
-                  <>
-                    <Tag className="text-mute size-3.5 shrink-0" />
-                    <span className="text-mute">Add label</span>
-                  </>
-                ) : (
-                  <span className="flex min-w-0 flex-wrap items-center gap-1">
-                    {issue.label_names.map((name) => (
-                      <LabelChip key={name} name={name} labels={labels} />
-                    ))}
-                  </span>
-                )
-              }
-              options={labels.map((l) => ({
-                id: l.name,
-                label: l.name,
-                swatch: catalogColor(l.color),
-                keywords: [l.id],
-              }))}
-              onToggle={(name) => {
-                const on = issue.label_names.includes(name);
-                void send(() =>
-                  rpc(spaceId, {
-                    cmd: "label",
-                    reff,
-                    ...(on ? { remove: [name] } : { add: [name] }),
-                  }),
-                );
-              }}
-              // A brand-new label gets a colour before it exists: the picker hands
-              // the name off to the colour step, which registers it via `label_new`
-              // and then attaches it — rather than minting it gray on first use.
-              onCreate={(name) => setNewLabel(name)}
-            />
+            {/* Every chip is its own trigger. The row used to be one control
+                whose face happened to be a run of chips, so clicking any label
+                — or the gap beside it — opened the same multi-select; there was
+                no way to say "this one, but a different one". Now a chip opens
+                a picker that swaps it, and the trailing `+` is the only control
+                that adds. */}
+            <span className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-2">
+              {issue.label_names.map((name) => (
+                <Combobox
+                  key={name}
+                  variant="label"
+                  label={`Change label ${name}`}
+                  disabled={locked}
+                  value={{ id: name, label: name }}
+                  face={
+                    <LabelChip
+                      name={name}
+                      color={labels.find((l) => l.name === name)?.color ?? "gray"}
+                    />
+                  }
+                  options={[
+                    { id: "__remove__", label: `Remove ${name}` },
+                    ...labels
+                      .filter((l) => l.name === name || !issue.label_names.includes(l.name))
+                      .map((l) => ({
+                        id: l.name,
+                        label: l.name,
+                        swatch: catalogColor(l.color),
+                        keywords: [l.id],
+                      })),
+                  ]}
+                  onPick={(next) => {
+                    if (next === name) return;
+                    // One swap, two requests, in this order: the engine's label
+                    // op is add-or-remove on a name set, so a rename is a
+                    // detach and an attach. Removing first keeps the set from
+                    // briefly holding both.
+                    void send(async () => {
+                      await rpc(spaceId, { cmd: "label", reff, remove: [name] });
+                      if (next !== "__remove__") {
+                        await rpc(spaceId, { cmd: "label", reff, add: [next] });
+                      }
+                    });
+                  }}
+                />
+              ))}
+              <Combobox
+                variant="property"
+                multi
+                label="Add label"
+                disabled={locked}
+                open={pickerOpen("label")}
+                onOpenChange={setPicker("label")}
+                // The registry is keyed by id, but `Request::Label` resolves **names**
+                // (`replica.rs::label`), so the selection is tracked by name too —
+                // matching what we send rather than translating at the boundary.
+                selected={issue.label_names}
+                emptyText={labels.length ? "No matches" : "No labels yet"}
+                face={
+                  issue.label_names.length === 0 ? (
+                    <>
+                      <Tag className="text-mute size-3.5 shrink-0" />
+                      <span className="text-mute">Add label</span>
+                    </>
+                  ) : (
+                    <Plus className="text-mute size-3.5 shrink-0" />
+                  )
+                }
+                options={labels.map((l) => ({
+                  id: l.name,
+                  label: l.name,
+                  swatch: catalogColor(l.color),
+                  keywords: [l.id],
+                }))}
+                onToggle={(name) => {
+                  const on = issue.label_names.includes(name);
+                  void send(() =>
+                    rpc(spaceId, {
+                      cmd: "label",
+                      reff,
+                      ...(on ? { remove: [name] } : { add: [name] }),
+                    }),
+                  );
+                }}
+                // A brand-new label gets a colour before it exists: the picker hands
+                // the name off to the colour step, which registers it via `label_new`
+                // and then attaches it — rather than minting it gray on first use.
+                onCreate={(name) => setNewLabel(name)}
+              />
+            </span>
           </RailRow>
           </RailSection>
 
           <RailSection title="Project">
+          {graph?.parent && (
+            <RailRow label="Parent">
+              <Button
+                onClick={() => onNavigate(graph.parent!.reff)}
+                className="-mx-1 min-w-0 justify-start px-1 text-left"
+              >
+                <GitMerge className="text-mute size-3.5 shrink-0" />
+                <span className="min-w-0 truncate font-medium">{graph.parent.title}</span>
+              </Button>
+            </RailRow>
+          )}
+
           <RailRow label="Project">
             <Combobox
               variant="property"
@@ -796,6 +850,10 @@ export function IssueDetail({
             readOnly={locked}
             send={send}
             onNavigate={onNavigate}
+            adding={relating}
+            setAdding={setRelating}
+            subDraft={subDraft}
+            setSubDraft={setSubDraft}
           />
         )}
 
@@ -913,6 +971,8 @@ function IssueOverflow({
   onCopyLink,
   onDuplicate,
   onRelate,
+  onAddSubIssue,
+  onAttach,
   onAssign,
   onMove,
   onStop,
@@ -927,6 +987,8 @@ function IssueOverflow({
   onCopyLink: () => void;
   onDuplicate: () => void;
   onRelate: () => void;
+  onAddSubIssue: () => void;
+  onAttach: () => void;
   onAssign: () => void;
   onMove: () => void;
   onStop: () => void;
@@ -946,6 +1008,8 @@ function IssueOverflow({
             <>
               <MenuItem disabled={pending} onSelect={onDuplicate}><CopyPlus className="size-3.5" /> Duplicate issue</MenuItem>
               <MenuItem disabled={pending} onSelect={onRelate}><Link2 className="size-3.5" /> Add relation</MenuItem>
+              <MenuItem disabled={pending} onSelect={onAddSubIssue}><CornerDownRight className="size-3.5" /> Add sub-issue</MenuItem>
+              <MenuItem disabled={pending} onSelect={onAttach}><Paperclip className="size-3.5" /> Attach a file</MenuItem>
               <MenuItem disabled={pending} onSelect={onAssign}><UserPlus className="size-3.5" /> Assign issue</MenuItem>
               <MenuItem disabled={pending} onSelect={onMove}><MoveRight className="size-3.5" /> Move to project</MenuItem>
             </>
@@ -1027,7 +1091,6 @@ function Attachments({
 }) {
   const fileRef = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState(false);
-  if (attachments.length === 0 && readOnly) return null;
 
   const upload = async (file: File) => {
     if (file.size > MAX_ATTACHMENT_BYTES) {
@@ -1073,34 +1136,41 @@ function Attachments({
   };
 
   return (
-    <section>
-      <SectionHeader
-        title={`Attachments${attachments.length ? ` (${attachments.length})` : ""}`}
-        action={
-          !readOnly && (
-            <IconButton
-              label="Attach a file"
-              disabled={busy}
-              onClick={() => fileRef.current?.click()}
-            >
-              <Paperclip className="size-3.5" />
-            </IconButton>
-          )
-        }
-      />
+    <>
+      {/* Always mounted, never shown: the overflow menu's "Attach a file" opens
+          this picker, and it has to exist even when the section below does not.
+          The 256 KiB cap is the engine's, mirrored so the refusal happens
+          before the bytes leave the browser. */}
       <input
+        id="issue-attach"
         ref={fileRef}
         type="file"
         className="hidden"
+        disabled={busy || readOnly}
         onChange={(e) => {
           const file = e.target.files?.[0];
           e.target.value = "";
           if (file) void upload(file);
         }}
       />
-      {attachments.length === 0 ? (
-        <p className="text-mute text-sm">No files yet — attach up to 256 KiB each.</p>
-      ) : (
+      {attachments.length > 0 && (
+        <Disclosure
+          title="Attachments"
+          count={attachments.length}
+          {...(readOnly
+            ? {}
+            : {
+                action: (
+                  <IconButton
+                    label="Attach a file"
+                    disabled={busy}
+                    onClick={() => fileRef.current?.click()}
+                  >
+                    <Paperclip className="size-3.5" />
+                  </IconButton>
+                ),
+              })}
+        >
         <ul className="flex flex-col gap-1">
           {attachments.map((att) => (
             <li
@@ -1130,8 +1200,9 @@ function Attachments({
             </li>
           ))}
         </ul>
+        </Disclosure>
       )}
-    </section>
+    </>
   );
 }
 
@@ -1163,19 +1234,6 @@ function DueDate({
       className={tone}
       onChange={(next) => onChange(next ?? "none")}
     />
-  );
-}
-
-function LabelChip({ name, labels }: { name: string; labels: LabelDto[] }) {
-  const def = labels.find((l) => l.name === name);
-  return (
-    <span className="border-line-strong flex items-center gap-1 rounded-full border px-1.5 text-2xs">
-      <span
-        className="size-1.5 shrink-0 rounded-full"
-        style={{ background: catalogColor(def?.color ?? "gray") }}
-      />
-      {name}
-    </span>
   );
 }
 
@@ -1216,6 +1274,10 @@ function Relations({
   readOnly,
   send,
   onNavigate,
+  adding,
+  setAdding,
+  subDraft,
+  setSubDraft,
 }: {
   graph: GraphView;
   spaceId: string;
@@ -1226,13 +1288,20 @@ function Relations({
   readOnly: boolean;
   send: (fn: () => Promise<unknown>) => Promise<void>;
   onNavigate: (reff: string) => void;
+  /**
+   * Both composers are owned by the page, not by this section. A group that is
+   * empty does not render, so its own `+` cannot be the only way to fill it —
+   * the first relation and the first sub-issue have to be startable from the
+   * overflow menu, which lives a component up.
+   */
+  adding: boolean;
+  setAdding: (open: boolean) => void;
+  subDraft: string | null;
+  setSubDraft: (draft: string | null) => void;
 }) {
-  const [adding, setAdding] = useState(false);
   const [kind, setKind] = useState<RelationKind>("blocks");
   /** Every live issue in the space, fetched when the picker first opens. */
   const [candidates, setCandidates] = useState<Row[] | null>(null);
-  /** The inline sub-issue composer. `null` = closed. */
-  const [subDraft, setSubDraft] = useState<string | null>(null);
 
   useEffect(() => {
     if (!adding || candidates !== null) return;
@@ -1309,7 +1378,6 @@ function Relations({
   ).length;
 
   const empty =
-    !graph.parent &&
     graph.children.length === 0 &&
     graph.blocked_by.length === 0 &&
     graph.links.length === 0;
@@ -1317,29 +1385,78 @@ function Relations({
 
   const removable = !readOnly;
 
-  return (
-    <section className="border-line flex flex-col gap-3 border-t pt-3">
-      {graph.parent && (
-        <RelGroup label="Parent">
-          <RelRow
-            row={graph.parent}
-            icon={<GitMerge className="size-3" />}
-            onNavigate={onNavigate}
-            {...(removable
-              ? {
-                  onRemove: () =>
-                    confirmRemove("Detach this issue from its parent?", () =>
-                      rpc(spaceId, { cmd: "issue_parent", reff, parent: null }),
-                    ),
-                }
-              : {})}
-          />
-        </RelGroup>
-      )}
+  // Every relation that is not the parent tree, in one group. Four captions —
+  // Blocked by, Blocks, Related, Duplicates — over one row each is four
+  // sections announcing themselves louder than their contents; Linear and Jira
+  // both fold them into a single "Links" list and let each row name its own
+  // kind. `blocked_by` keeps its warning tone inside that list, because it is
+  // the one entry here that is a problem rather than a fact.
+  const links: Array<{
+    key: string;
+    row: Row;
+    kind: string;
+    tone?: "warn";
+    icon: React.ReactNode;
+    onRemove?: () => void;
+  }> = [
+    ...graph.blocked_by.map((r) => ({
+      key: `blocked-${r.reff}`,
+      row: r,
+      kind: "Blocked by",
+      tone: "warn" as const,
+      icon: <Ban className="text-warn size-3" />,
+    })),
+    ...[
+      { list: blocks, kind: "Blocks" },
+      { list: related, kind: "Related to" },
+      { list: dupes, kind: "Duplicate of" },
+    ].flatMap(({ list, kind }) =>
+      list
+        // An inbound `blocks` edge and a transitive `blocked_by` entry are the
+        // same fact from two directions, and the graph reports both — so the
+        // blocker was listed twice, once as "Blocked by" and once as
+        // "Blocks ←". The warning row is the one worth keeping.
+        .filter(
+          (l) =>
+            !(
+              kind === "Blocks" &&
+              l.direction === "in" &&
+              graph.blocked_by.some((b) => b.reff === l.row.reff)
+            ),
+        )
+        .map((l) => ({
+        key: `${kind}-${l.direction}-${l.row.reff}`,
+        row: l.row,
+        // Direction is the glyph's job. Spelling it into the label as well
+        // rendered as "← Related to ←".
+        kind,
+        icon: (
+          <span className="text-mute text-2xs" title={l.direction === "in" ? "incoming" : "outgoing"}>
+            {l.direction === "in" ? "←" : "→"}
+          </span>
+        ),
+        ...(removable ? { onRemove: () => unlink(l) } : {}),
+      })),
+    ),
+  ];
 
+  return (
+    <section className="flex flex-col">
       {(graph.children.length > 0 || subDraft !== null) && (
-        // `done/total`, Linear's sub-issue progress at a glance.
-        <RelGroup label={`Sub-issues · ${doneChildren}/${graph.children.length}`}>
+        <Disclosure
+          title="Sub-issues"
+          // `done/total`, Linear's sub-issue progress at a glance.
+          count={`${doneChildren}/${graph.children.length}`}
+          {...(readOnly
+            ? {}
+            : {
+                action: (
+                  <IconButton label="Add sub-issue" onClick={() => setSubDraft("")}>
+                    <Plus className="size-3.5" />
+                  </IconButton>
+                ),
+              })}
+        >
           {graph.children.length > 0 && (
             <div
               className="bg-line h-1.5 overflow-hidden rounded-full"
@@ -1389,83 +1506,64 @@ function Relations({
               className="border-line focus:border-line-strong placeholder:text-mute rounded border bg-transparent px-2 py-1 text-sm outline-none"
             />
           )}
-        </RelGroup>
+        </Disclosure>
       )}
 
-      {graph.blocked_by.length > 0 && (
-        <RelGroup label="Blocked by" tone="warn">
-          {graph.blocked_by.map((r) => (
+      {(links.length > 0 || adding) && (
+        <Disclosure
+          title="Links"
+          count={links.length}
+          {...(readOnly
+            ? {}
+            : {
+                action: (
+                  <IconButton
+                    id="issue-add-relation"
+                    label="Add relation"
+                    onClick={() => setAdding(true)}
+                  >
+                    <Plus className="size-3.5" />
+                  </IconButton>
+                ),
+              })}
+        >
+          {links.map((l) => (
             <RelRow
-              key={r.reff}
-              row={r}
-              icon={<Ban className="text-warn size-3" />}
+              key={l.key}
+              row={l.row}
+              icon={l.icon}
+              kind={l.kind}
+              {...(l.tone ? { tone: l.tone } : {})}
               onNavigate={onNavigate}
+              {...(l.onRemove ? { onRemove: l.onRemove } : {})}
             />
           ))}
-        </RelGroup>
+          {adding && (
+            <div className="flex items-center gap-2 py-1">
+              <Combobox
+                label="Relation"
+                value={{
+                  id: kind,
+                  label: RELATION_KINDS.find((k) => k.id === kind)?.label ?? kind,
+                }}
+                options={RELATION_KINDS.map((k) => ({ id: k.id, label: k.label }))}
+                onPick={(id) => setKind(id as RelationKind)}
+              />
+              <Combobox
+                label="Issue"
+                value={null}
+                placeholder="Issue…"
+                emptyText={candidates === null ? "Loading…" : "No issues"}
+                options={(candidates ?? []).map(issueOption)}
+                onPick={relate}
+              />
+              <IconButton label="Cancel" onClick={() => setAdding(false)}>
+                <X className="size-3.5" />
+              </IconButton>
+            </div>
+          )}
+        </Disclosure>
       )}
-
-      {blocks.length > 0 && (
-        <LinkGroup
-          label="Blocks"
-          links={blocks}
-          onNavigate={onNavigate}
-          {...(removable ? { onRemove: unlink } : {})}
-        />
-      )}
-      {related.length > 0 && (
-        <LinkGroup
-          label="Related"
-          links={related}
-          onNavigate={onNavigate}
-          {...(removable ? { onRemove: unlink } : {})}
-        />
-      )}
-      {dupes.length > 0 && (
-        <LinkGroup
-          label="Duplicates"
-          links={dupes}
-          onNavigate={onNavigate}
-          {...(removable ? { onRemove: unlink } : {})}
-        />
-      )}
-
-      {!readOnly &&
-        (adding ? (
-          <div className="flex items-center gap-2">
-            <Combobox
-              label="Relation"
-              value={{
-                id: kind,
-                label: RELATION_KINDS.find((k) => k.id === kind)?.label ?? kind,
-              }}
-              options={RELATION_KINDS.map((k) => ({ id: k.id, label: k.label }))}
-              onPick={(id) => setKind(id as RelationKind)}
-            />
-            <Combobox
-              label="Issue"
-              value={null}
-              placeholder="Issue…"
-              emptyText={candidates === null ? "Loading…" : "No issues"}
-              options={(candidates ?? []).map(issueOption)}
-              onPick={relate}
-            />
-            <IconButton label="Cancel" onClick={() => setAdding(false)}>
-              <X className="size-3.5" />
-            </IconButton>
-          </div>
-        ) : (
-          <div className="flex items-center gap-1">
-            <Button id="issue-add-relation" onClick={() => setAdding(true)} className="w-fit">
-              <Plus className="size-3" />
-              Add relation
-            </Button>
-            <Button onClick={() => setSubDraft("")} className="w-fit">
-              <Plus className="size-3" />
-              Add sub-issue
-            </Button>
-          </div>
-        ))}
     </section>
   );
 }
@@ -1480,71 +1578,29 @@ function issueOption(r: Row): Option {
   };
 }
 
-function RelGroup({
-  label,
-  tone,
-  children,
-}: {
-  label: string;
-  tone?: "warn";
-  children: React.ReactNode;
-}) {
-  return (
-    <div className="flex flex-col gap-1">
-      <h3
-        className={`text-2xs font-semibold tracking-wider uppercase ${tone === "warn" ? "text-warn" : "text-mute"}`}
-      >
-        {label}
-      </h3>
-      {children}
-    </div>
-  );
-}
-
-/** A `relates`/`duplicates` edge can point either way; `direction` is `in`/`out`. */
-function LinkGroup({
-  label,
-  links,
-  onNavigate,
-  onRemove,
-}: {
-  label: string;
-  links: LinkDto[];
-  onNavigate: (reff: string) => void;
-  onRemove?: (l: LinkDto) => void;
-}) {
-  return (
-    <RelGroup label={label}>
-      {links.map((l) => (
-        <RelRow
-          key={`${l.direction}-${l.row.reff}`}
-          row={l.row}
-          icon={
-            <span className="text-mute text-2xs" title={l.direction === "in" ? "incoming" : "outgoing"}>
-              {l.direction === "in" ? "←" : "→"}
-            </span>
-          }
-          onNavigate={onNavigate}
-          {...(onRemove ? { onRemove: () => onRemove(l) } : {})}
-        />
-      ))}
-    </RelGroup>
-  );
-}
-
 /**
  * One navigable edge: click opens that issue in this same pane. A `div` holding
  * two buttons rather than one button, because "open" and "remove" are separate
  * gestures and nested buttons are invalid HTML the keyboard can't reach.
+ *
+ * The row names its own relation now. Four groups of one — Blocked by, Blocks,
+ * Related, Duplicates — spent four captions on four rows; carrying the kind in
+ * the row lets all of them live in one list, which is how Linear and Jira both
+ * draw it.
  */
 function RelRow({
   row,
   icon,
+  kind,
+  tone,
   onNavigate,
   onRemove,
 }: {
   row: Row;
   icon: React.ReactNode;
+  /** What this edge *is* — omitted for sub-issues, where the group says it. */
+  kind?: string;
+  tone?: "warn";
   onNavigate: (reff: string) => void;
   onRemove?: () => void;
 }) {
@@ -1555,10 +1611,20 @@ function RelRow({
         className="min-w-0 flex-1 shrink justify-start px-1 text-left"
       >
         <span className="flex size-3 shrink-0 items-center justify-center">{icon}</span>
+        {kind && (
+          <span
+            className={cn(
+              "w-20 shrink-0 truncate text-2xs",
+              tone === "warn" ? "text-warn" : "text-mute",
+            )}
+          >
+            {kind}
+          </span>
+        )}
         <span className="text-mute w-16 shrink-0 truncate font-mono text-2xs tabular-nums">
           {row.key_alias ?? row.reff}
         </span>
-        <span className="min-w-0 flex-1 truncate">{row.title}</span>
+        <span className="min-w-0 flex-1 truncate font-medium">{row.title}</span>
       </Button>
       {onRemove && (
         <IconButton
@@ -1908,8 +1974,20 @@ function Event({ event: e, resolveName }: { event: ActivityEvent; resolveName: N
   );
 }
 
-/** Description: a draft you commit, not a field that saves per keystroke — a
- *  doorbell mid-typing would otherwise fight the cursor. */
+/**
+ * Description: a draft you commit, not a field that saves per keystroke — a
+ * doorbell mid-typing would otherwise fight the cursor.
+ *
+ * There is no edit mode left. The body is a live Markdown document: typing
+ * `## ` makes a heading where the caret is, and the markup never appears as
+ * markup. What used to be here — rendered prose that swapped to a raw textarea
+ * on click — meant the thing you wrote and the thing everyone read were never
+ * on screen at the same time.
+ *
+ * `readOnly` still renders through `core/markdown.ts` rather than a disabled
+ * editor: a locked issue should cost nothing to display, and the read-only
+ * renderer is the one that draws callouts and Shiki-highlighted code.
+ */
 function Description({
   draftKey,
   value,
@@ -1924,59 +2002,42 @@ function Description({
   const [draft, setDraft] = useState(
     () => loadDraft(draftKey.spaceId, draftKey.reff, "description") || value,
   );
-  const [editing, setEditing] = useState(
-    () => loadDraft(draftKey.spaceId, draftKey.reff, "description") !== "",
-  );
-
-  // Adopt server truth whenever we're not the one holding the pen.
-  useEffect(() => {
-    if (!editing) setDraft(value);
-  }, [value, editing]);
+  const dirty = useRef(draft !== value);
 
   useEffect(() => {
-    if (editing && draft !== value) {
+    if (dirty.current && draft !== value) {
       saveDraft(draftKey.spaceId, draftKey.reff, "description", draft);
     }
-  }, [draftKey.spaceId, draftKey.reff, draft, editing, value]);
+  }, [draftKey.spaceId, draftKey.reff, draft, value]);
 
-  if (readOnly || (!editing && value)) {
-    const content = value ? <Markdown text={value} /> : <span className="text-mute">No description</span>;
-    return readOnly ? (
-      <div className="min-h-10 py-2">{content}</div>
-    ) : (
-      <EditableSurface label="Edit description" onEdit={() => setEditing(true)}>
-        {content}
-      </EditableSurface>
-    );
-  }
-  if (!editing) {
+  if (readOnly) {
     return (
-      <EditableSurface label="Add description" onEdit={() => setEditing(true)}>
-        <span className="text-mute">Add description…</span>
-      </EditableSurface>
+      <div className="min-h-10 py-2">
+        {value ? <Markdown text={value} /> : <span className="text-mute">No description</span>}
+      </div>
     );
   }
+
   return (
-    <Textarea
-      autoFocus
-      value={draft}
-      rows={5}
-      onChange={(e) => setDraft(e.target.value)}
-      onBlur={() => {
-        setEditing(false);
-        if (draft !== value) {
-          clearDraft(draftKey.spaceId, draftKey.reff, "description");
-          onSave(draft);
-        }
+    <MarkdownEditor
+      value={value}
+      placeholder="Add description…"
+      className="min-h-10 py-2"
+      onChange={(markdown) => {
+        dirty.current = true;
+        setDraft(markdown);
       }}
-      onKeyDown={(e) => {
-        if (e.key === "Escape") {
-          setDraft(value);
-          clearDraft(draftKey.spaceId, draftKey.reff, "description");
-          setEditing(false);
-        }
+      onCommit={() => {
+        if (!dirty.current) return;
+        dirty.current = false;
+        clearDraft(draftKey.spaceId, draftKey.reff, "description");
+        // `draft` is a keystroke behind on the very last character, so read the
+        // committed value from state at call time rather than closing over it.
+        setDraft((current) => {
+          if (current !== value) onSave(current);
+          return current;
+        });
       }}
-      aria-label="Description"
     />
   );
 }

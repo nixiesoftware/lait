@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Archive, ArchiveRestore, UserPlus, X } from "lucide-react";
 
 import { rpc } from "../api";
@@ -8,9 +8,10 @@ import { catalogColor } from "./colors";
 import { ColorPicker } from "./ColorPicker";
 import { DatePicker } from "./DatePicker";
 import { Markdown } from "./Markdown";
+import { MarkdownEditor } from "./MarkdownEditor";
 import { Combobox } from "./Picker";
 import { RailRow, RailSection } from "./layout";
-import { Button, EditableSurface, IconButton, PopoverContent, Textarea } from "./primitives";
+import { Button, IconButton, PopoverContent } from "./primitives";
 import { when } from "./time";
 import * as Popover from "@radix-ui/react-popover";
 
@@ -153,7 +154,7 @@ export function ProjectOverview({
               property reads as the verb that sets it, and captions group the
               runs. Two surfaces describing the same kind of object should not
               describe it in two different grammars. */}
-          <div className="md:border-line flex flex-col gap-4 text-sm md:border-l md:pl-6">
+          <div className="md:border-line flex flex-col gap-3 text-sm md:border-l md:pl-6">
             <RailSection>
             <RailRow label="Lead">
               <Combobox
@@ -240,7 +241,8 @@ export function ProjectOverview({
   );
 }
 
-/** The overview paragraph — a draft you commit, mirroring the issue description. */
+/** The overview paragraph — the same live document the issue body is, so the two
+ *  surfaces are written the same way as well as read the same way. */
 function Description({
   value,
   readOnly,
@@ -250,50 +252,34 @@ function Description({
   readOnly: boolean;
   onSave: (v: string) => void;
 }) {
-  const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState(value);
-  useEffect(() => {
-    if (!editing) setDraft(value);
-  }, [value, editing]);
+  const [, setDraft] = useState(value);
+  const dirty = useRef(false);
 
-  if (readOnly || !editing) {
-    const content = value ? (
-      <Markdown text={value} />
-    ) : (
-      <span className="text-mute">
-        {readOnly ? "No description" : "Add a project overview…"}
-      </span>
-    );
-    return readOnly ? (
-      <div className="min-h-16 py-2">{content}</div>
-    ) : (
-      <EditableSurface
-        label="Edit project overview"
-        className="min-h-16"
-        onEdit={() => setEditing(true)}
-      >
-        {content}
-      </EditableSurface>
+  if (readOnly) {
+    return (
+      <div className="min-h-16 py-2">
+        {value ? <Markdown text={value} /> : <span className="text-mute">No description</span>}
+      </div>
     );
   }
+
   return (
-    <Textarea
-      autoFocus
-      value={draft}
-      rows={8}
-      placeholder="Describe this project — goals, scope, links. Markdown supported."
-      onChange={(e) => setDraft(e.target.value)}
-      onBlur={() => {
-        setEditing(false);
-        if (draft !== value) onSave(draft);
+    <MarkdownEditor
+      value={value}
+      placeholder="Describe this project — goals, scope, links."
+      className="min-h-16 py-2"
+      onChange={(markdown) => {
+        dirty.current = true;
+        setDraft(markdown);
       }}
-      onKeyDown={(e) => {
-        if (e.key === "Escape") {
-          setDraft(value);
-          setEditing(false);
-        }
+      onCommit={() => {
+        if (!dirty.current) return;
+        dirty.current = false;
+        setDraft((current) => {
+          if (current !== value) onSave(current);
+          return current;
+        });
       }}
-      aria-label="Project description"
     />
   );
 }

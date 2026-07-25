@@ -3,7 +3,6 @@ import { describe, expect, it } from "vitest";
 import {
   CALLOUT_TONES,
   looksLikeMarkdown,
-  outline,
   parseInline,
   parseMarkdown,
   type Block,
@@ -58,9 +57,12 @@ describe("blocks", () => {
     expect(blocks[0]!.kind).toBe("quote");
   });
 
-  it("keeps soft line breaks inside a paragraph", () => {
+  it("collapses a soft line break inside a paragraph", () => {
+    // Reversed with the document treatment. Keeping every source newline made
+    // sense when the body was a narrow pane echoing the CLI; at a 35rem measure
+    // it broke sentences wherever the author's editor happened to wrap.
     const [p] = parseMarkdown("line one\nline two") as [Extract<Block, { kind: "paragraph" }>];
-    expect(p.children).toEqual([{ kind: "text", text: "line one\nline two" }]);
+    expect(p.children).toEqual([{ kind: "text", text: "line one line two" }]);
   });
 
   it("reads a rule, and blank lines split paragraphs", () => {
@@ -178,26 +180,51 @@ describe("heading anchors", () => {
   });
 });
 
-describe("outline", () => {
-  const body = "# One\n\ntext\n\n## Two\n\n### Three\n\ntext";
+describe("soft line breaks", () => {
+  it("joins a hard-wrapped paragraph into one run", () => {
+    // The body is a document at a 35rem measure now. Text wrapped at 78 columns
+    // by someone's editor used to break mid-sentence wherever that editor
+    // happened to stop; the rendered width is the browser's business.
+    const [block] = parseMarkdown("one two\nthree four\nfive");
+    expect(block).toMatchObject({ kind: "paragraph" });
+    const text = (block as Extract<Block, { kind: "paragraph" }>).children
+      .map((i) => (i as { text: string }).text)
+      .join("");
+    expect(text).toBe("one two three four five");
+  });
 
-  it("lists the headings with their anchors and depth", () => {
-    expect(outline(body)).toEqual([
-      { id: "one", level: 1, text: "One" },
-      { id: "two", level: 2, text: "Two" },
-      { id: "three", level: 3, text: "Three" },
+  it("keeps a break the author actually asked for", () => {
+    // Two trailing spaces, or a trailing backslash — the two spellings every
+    // other Markdown tool accepts for "break here on purpose".
+    for (const source of ["one  \ntwo", "one\\\ntwo"]) {
+      const [block] = parseMarkdown(source);
+      const text = (block as Extract<Block, { kind: "paragraph" }>).children
+        .map((i) => (i as { text: string }).text)
+        .join("");
+      expect(text).toBe("one\ntwo");
+    }
+  });
+
+  it("still ends a paragraph at a blank line", () => {
+    expect(parseMarkdown("one\ntwo\n\nthree").map((b) => b.kind)).toEqual([
+      "paragraph",
+      "paragraph",
     ]);
   });
 
-  it("stays empty below the threshold", () => {
-    // An outline over two headings is longer than the thing it indexes, and
-    // most issue bodies are a paragraph.
-    expect(outline("# One\n\n## Two")).toEqual([]);
-    expect(outline("just a sentence")).toEqual([]);
-  });
+  it("applies the same rule inside quotes and callouts", () => {
+    const [quote] = parseMarkdown("> one\n> two");
+    expect(
+      (quote as Extract<Block, { kind: "quote" }>).children
+        .map((i) => (i as { text: string }).text)
+        .join(""),
+    ).toBe("one two");
 
-  it("strips formatting from the heading text", () => {
-    const entries = outline("# A `b` c\n\n## **Bold**\n\n### [x](https://a.b)");
-    expect(entries.map((e) => e.text)).toEqual(["A b c", "Bold", "x"]);
+    const [callout] = parseMarkdown("> [!NOTE]\n> one\n> two");
+    expect(
+      (callout as Extract<Block, { kind: "callout" }>).children
+        .map((i) => (i as { text: string }).text)
+        .join(""),
+    ).toBe("one two");
   });
 });
