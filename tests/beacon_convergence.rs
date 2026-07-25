@@ -242,22 +242,36 @@ fn a_fresh_write_converges_with_no_rejoin_and_presence_surfaces_agree() {
 
     // ---- Exit criterion 3: `who` and `status` agree, non-empty. ----
     for home in [&founder_home, &member_home] {
-        let Response::Who { peers } = req(&client, home, Request::Who) else {
-            panic!("expected Who");
+        // Presence is a beat, not something the convergence above settles.
+        // `online` is derived from liveness on its own interval, so sampling it
+        // once — the moment a comment finished converging — is a race, and the
+        // two checks above already say this file knows that: both poll. This one
+        // did not, so it passed on an idle machine and lost on a loaded CI
+        // runner, reporting peers that existed with none of them online.
+        //
+        // Bounded like its neighbours. The assertion is unchanged in meaning:
+        // presence must become non-empty, not merely happen to be non-empty at
+        // the first instant anyone looked.
+        let settled = poll_until(Duration::from_secs(10), || {
+            let Response::Who { peers } = req(&client, home, Request::Who) else {
+                panic!("expected Who");
+            };
+            let Response::Status(info) = req(&client, home, Request::Status) else {
+                panic!("expected Status");
+            };
+            let who_online = peers.iter().filter(|p| p.online).count();
+            (who_online >= 1).then_some((who_online, info.online_peers, peers))
+        });
+        let Some((who_online, status_online, peers)) = settled else {
+            panic!("peers exist but presence is empty at {}", home.display());
         };
-        let Response::Status(info) = req(&client, home, Request::Status) else {
-            panic!("expected Status");
-        };
-        let who_online = peers.iter().filter(|p| p.online).count();
+        // Checked on the settled sample rather than folded into the poll, so a
+        // persistent disagreement fails as a disagreement instead of as a
+        // timeout that says nothing about which surface was wrong.
         assert_eq!(
             who_online,
-            info.online_peers,
+            status_online,
             "who ({peers:?}) and status disagree at {}",
-            home.display()
-        );
-        assert!(
-            who_online >= 1,
-            "peers exist but presence is empty at {}",
             home.display()
         );
     }
