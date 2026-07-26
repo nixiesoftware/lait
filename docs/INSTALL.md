@@ -16,7 +16,7 @@ platform — they all land the same `lait` executable. Upgrade any install in pl
 |---|---|
 | macOS / Linux, want one command | the shell installer |
 | Windows | the PowerShell installer, Scoop, or winget |
-| Homebrew | `brew install nixie-tech-llc/tap/lait` |
+| Homebrew | `brew install nixiesoftware/tap/lait` |
 | Rust toolchain, want a prebuilt binary | `cargo binstall lait` |
 | Rust toolchain, want to build | `cargo install lait` |
 | Running an always-on seed | Docker |
@@ -24,7 +24,7 @@ platform — they all land the same `lait` executable. Upgrade any install in pl
 ## Shell installer (macOS / Linux)
 
 ```sh
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/Nixie-Tech-LLC/lait/releases/latest/download/lait-installer.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/nixiesoftware/lait/releases/latest/download/lait-installer.sh | sh
 ```
 
 Places `lait` in `~/.cargo/bin` (on `PATH` for most setups).
@@ -32,19 +32,19 @@ Places `lait` in `~/.cargo/bin` (on `PATH` for most setups).
 ## PowerShell installer (Windows)
 
 ```powershell
-powershell -ExecutionPolicy Bypass -c "irm https://github.com/Nixie-Tech-LLC/lait/releases/latest/download/lait-installer.ps1 | iex"
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/nixiesoftware/lait/releases/latest/download/lait-installer.ps1 | iex"
 ```
 
 ## Homebrew (macOS / Linux)
 
 ```sh
-brew install nixie-tech-llc/tap/lait
+brew install nixiesoftware/tap/lait
 ```
 
 ## Scoop (Windows)
 
 ```powershell
-scoop bucket add lait https://github.com/Nixie-Tech-LLC/scoop-bucket
+scoop bucket add lait https://github.com/nixiesoftware/scoop-bucket
 scoop install lait
 ```
 
@@ -73,7 +73,7 @@ Requires **Rust 1.91+** (the floor is driven by iroh 1.0.0-rc.1).
 ## From a git checkout
 
 ```sh
-git clone https://github.com/Nixie-Tech-LLC/lait
+git clone https://github.com/nixiesoftware/lait
 cd lait
 cargo build --release   # → target/release/lait
 ```

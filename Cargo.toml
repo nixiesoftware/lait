@@ -23,8 +23,8 @@ description = "A local-first, peer-to-peer, end-to-end-encrypted issue tracker b
 authors = ["onnixi <omar@onnixi.com>"]
 license = "MIT OR Apache-2.0"
 # GitHub is the canonical home: source of record, release host, and issue tracker.
-repository = "https://github.com/Nixie-Tech-LLC/lait"
-homepage = "https://github.com/Nixie-Tech-LLC/lait"
+repository = "https://github.com/nixiesoftware/lait"
+homepage = "https://github.com/nixiesoftware/lait"
 readme = "README.md"
 keywords = ["iroh", "p2p", "gossip", "crdt", "issue-tracker"]
 categories = ["command-line-utilities", "network-programming"]

@@ -122,11 +122,11 @@ jobs:
           {
             echo "Rolling **development** build from the latest \`main\` (commit \`$sha\`, built $built)."
             echo
-            echo "⚠️ **Not a stable release** — bleeding edge, for testing only. For stable, use the [latest release](https://github.com/Nixie-Tech-LLC/lait/releases/latest) or a package manager (\`brew install nixie-tech-llc/tap/lait\`, \`cargo binstall lait\`, …)."
+            echo "⚠️ **Not a stable release** — bleeding edge, for testing only. For stable, use the [latest release](https://github.com/nixiesoftware/lait/releases/latest) or a package manager (\`brew install nixiesoftware/tap/lait\`, \`cargo binstall lait\`, …)."
             echo
             echo "The binary reports its version as \`X.Y.Z-dev+$sha\`. Grab an asset below, or:"
             echo '```'
-            echo "gh release download dev -R Nixie-Tech-LLC/lait"
+            echo "gh release download dev -R nixiesoftware/lait"
             echo '```'
           } > notes.md
           # Re-point the rolling tag + recreate the prerelease so its assets are

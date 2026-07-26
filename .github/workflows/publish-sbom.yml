@@ -77,14 +77,21 @@ jobs:
         shell: bash
         run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/CycloneDX/cyclonedx-rust-cargo/releases/download/cargo-cyclonedx-0.5.5/cargo-cyclonedx-installer.sh | sh
 
-      # Emit both CycloneDX encodings. `--locked` reads the committed Cargo.lock so
-      # the SBOM reflects the exact pinned graph (no dependency resolution drift).
+      # Emit both CycloneDX encodings against the exact pinned graph.
+      #
+      # `cargo cyclonedx` 0.5.5 takes neither `--locked` nor `--frozen` — among
+      # cargo's usual options it accepts only `--manifest-path` and
+      # `--all-features`, and rejected `--locked` outright, which failed every
+      # release. The guarantee that flag reached for is kept separately:
+      # `cargo metadata --locked` fails if the committed lockfile is not already
+      # the resolved graph, so nothing can drift under the SBOM.
       - name: Generate SBOM (CycloneDX xml + json)
         shell: bash
         run: |
           set -euo pipefail
-          cargo cyclonedx --locked --format xml
-          cargo cyclonedx --locked --format json
+          cargo metadata --locked --format-version 1 >/dev/null
+          cargo cyclonedx --format xml
+          cargo cyclonedx --format json
           echo "generated:"; find . -name '*.cdx.*' -maxdepth 2 -print
 
       - name: Attach SBOM to the release

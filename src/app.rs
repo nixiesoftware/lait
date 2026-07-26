@@ -1034,7 +1034,7 @@ async fn run_config(dispatch: &Dispatch, m: &ArgMatches, out: Out) -> Result<()>
 /// release — natively, in-process, with no external updater binary. Best-effort
 /// stops a running daemon first, so it isn't left on stale code and — on Windows —
 /// isn't holding the executable open while it is swapped. Then it queries the
-/// `Nixie-Tech-LLC/lait` releases, downloads this platform's asset, verifies it,
+/// `nixiesoftware/lait` releases, downloads this platform's asset, verifies it,
 /// and self-replaces the running executable (all pure-Rust: `ureq` + rustls,
 /// gzip/zip extraction, atomic self-replace).
 async fn run_update() -> Result<()> {
@@ -1070,7 +1070,7 @@ async fn run_update() -> Result<()> {
     // async runtime so it doesn't stall the reactor.
     let status = tokio::task::spawn_blocking(move || {
         self_update::backends::github::Update::configure()
-            .repo_owner("Nixie-Tech-LLC")
+            .repo_owner("nixiesoftware")
             .repo_name("lait")
             .bin_name("lait")
             .bin_path_in_archive(update_bin_path_in_archive())

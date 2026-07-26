@@ -27,26 +27,26 @@ This directory holds the packaging definitions cargo-dist does **not** generate.
 ## Homebrew
 
 `dist-space.toml` sets the `homebrew` installer, so cargo-dist generates
-`lait.rb` (targeting `tap = "Nixie-Tech-LLC/homebrew-tap"`) and uploads it as a
+`lait.rb` (targeting `tap = "nixiesoftware/homebrew-tap"`) and uploads it as a
 release asset. It does **not** push — `publish-homebrew.yml` does, minting a
 tap-scoped token from the `integration-runners` app and committing the formula to
 `homebrew-tap/Formula/lait.rb`. One-time: the public repo
-**`github.com/Nixie-Tech-LLC/homebrew-tap`** must exist and the app secrets (below)
+**`github.com/nixiesoftware/homebrew-tap`** must exist and the app secrets (below)
 must be set. Then:
 
 ```sh
-brew install nixie-tech-llc/tap/lait
+brew install nixiesoftware/tap/lait
 ```
 
 ## Scoop
 
 `packaging/scoop/lait.json` is the manifest source. Publish it by committing it to a
-bucket repo (e.g. `github.com/Nixie-Tech-LLC/scoop-bucket`). Its `checkver: github`
+bucket repo (e.g. `github.com/nixiesoftware/scoop-bucket`). Its `checkver: github`
 + `autoupdate` block let Scoop's excavator bump the version and re-hash automatically
 from each release's `.sha256`, so you only maintain it once.
 
 ```sh
-scoop bucket add lait https://github.com/Nixie-Tech-LLC/scoop-bucket
+scoop bucket add lait https://github.com/nixiesoftware/scoop-bucket
 scoop install lait
 ```
 
@@ -63,7 +63,7 @@ a portable-zip package. Publish by opening a PR that copies these into
 ```sh
 wingetcreate update NixieTechLLC.Lait \
   --version <v> \
-  --urls https://github.com/Nixie-Tech-LLC/lait/releases/download/v<v>/lait-x86_64-pc-windows-msvc.zip \
+  --urls https://github.com/nixiesoftware/lait/releases/download/v<v>/lait-x86_64-pc-windows-msvc.zip \
   --submit
 ```
 

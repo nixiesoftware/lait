@@ -1,5 +1,5 @@
 # CD: push the cargo-dist-generated Homebrew formula (lait.rb, a release asset) to
-# the org tap so `brew install nixie-tech-llc/tap/lait` picks up the release.
+# the org tap so `brew install nixiesoftware/tap/lait` picks up the release.
 #
 # Triggered on the **Release** workflow completing (`workflow_run`) — which fires
 # even though cargo-dist creates the release with the default GITHUB_TOKEN (a
@@ -63,7 +63,7 @@ jobs:
         with:
           app-id: ${{ secrets.RUNNERS_APP_ID }}
           private-key: ${{ secrets.RUNNERS_APP_PRIVATE_KEY }}
-          owner: Nixie-Tech-LLC
+          owner: nixiesoftware
           repositories: homebrew-tap
 
       - name: Download the generated formula from the release
@@ -86,7 +86,7 @@ jobs:
         run: |
           set -euo pipefail
           git clone --depth 1 \
-            "https://x-access-token:${TAP_TOKEN}@github.com/Nixie-Tech-LLC/homebrew-tap" tap
+            "https://x-access-token:${TAP_TOKEN}@github.com/nixiesoftware/homebrew-tap" tap
           mkdir -p tap/Formula
           cp lait.rb tap/Formula/lait.rb
           cd tap

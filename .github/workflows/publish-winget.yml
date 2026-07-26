@@ -18,10 +18,18 @@
 # in job-level `env` where every step would see it.
 name: Publish to winget
 
+# NOT triggered by a release yet — it cannot succeed, so it would fail every one.
+#
+# Two blockers, both outside this file. The submit action is PowerShell and this
+# job runs on a Linux runner (`pwsh: command not found`), and winget-pkgs only
+# accepts an update to a package that already exists — the action says so:
+# "does not exist in the winget-pkgs repository. Please add atleast one version
+# of the package before using this action." So the first version has to be
+# submitted by hand, and this job needs a windows runner, before automation has
+# anything to automate.
+#
+# Until then this stays dispatch-only.
 on:
-  workflow_run:
-    workflows: ["Release"]
-    types: [completed]
   workflow_dispatch:
     inputs:
       tag:

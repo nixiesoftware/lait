@@ -20,7 +20,7 @@ services:
     # name. No image is published to GHCR yet, so use `--build` on first bring-up
     # (`docker compose up -d --build`); a bare `docker compose pull` won't find it
     # until a container-publish channel is enabled.
-    image: ghcr.io/nixie-tech-llc/lait:latest
+    image: ghcr.io/nixiesoftware/lait:latest
     container_name: lait-seed
     restart: unless-stopped
     # Persist the node identity + git-backed store across restarts.

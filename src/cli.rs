@@ -1989,9 +1989,9 @@ fn open_mail_invite(addr: &str, link: &str) -> Result<()> {
         "You're invited to my lait space.\n\n\
          1. Install lait\n   \
          macOS/Linux:  curl --proto '=https' --tlsv1.2 -LsSf \
-         https://github.com/Nixie-Tech-LLC/lait/releases/latest/download/lait-installer.sh | sh\n   \
+         https://github.com/nixiesoftware/lait/releases/latest/download/lait-installer.sh | sh\n   \
          Windows:      powershell -c \"irm \
-         https://github.com/Nixie-Tech-LLC/lait/releases/latest/download/lait-installer.ps1 | iex\"\n\n\
+         https://github.com/nixiesoftware/lait/releases/latest/download/lait-installer.ps1 | iex\"\n\n\
          2. Join the space\n   lait join {link}\n\n\
          The link carries a one-time pass, so that admits you automatically and \
          your device gets the space key (run `lait status` to see when you're \

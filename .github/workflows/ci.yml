@@ -454,8 +454,8 @@ jobs:
               || { echo "::error file=$f::missing Scoop field $path"; exit 1; }
           done
           # The download host must be the canonical GitHub release path.
-          jq -er '.architecture."64bit".url' "$f" | grep -q 'github.com/Nixie-Tech-LLC/lait/releases' \
-            || { echo "::error file=$f::Scoop url is not a Nixie-Tech-LLC/lait GitHub release"; exit 1; }
+          jq -er '.architecture."64bit".url' "$f" | grep -q 'github.com/nixiesoftware/lait/releases' \
+            || { echo "::error file=$f::Scoop url is not a nixiesoftware/lait GitHub release"; exit 1; }
           echo "Scoop manifest OK"
 
       - name: Validate winget manifests (YAML + cross-file identifier)

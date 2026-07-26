@@ -19,10 +19,24 @@
 # (`stable`, `1.91.0`) are *branches*, not tags — pinning by name is not pinning.
 name: Publish to crates.io
 
+# NOT triggered by a release yet — it cannot succeed, so it would fail every one.
+#
+# `lait` publishes fine on its own (crates.io has it through 0.4.8), but the
+# workspace carve gave it five path dependencies — comms, fabric, replica,
+# runtime, mechanics — and crates.io strips `path` on publish: every dependency
+# must resolve on crates.io by name and version. All five of those names are
+# already taken there by unrelated crates, so `cargo publish` fails verification
+# before it uploads anything.
+#
+# The fix is small and does not touch Rust: rename each member's `[package] name`
+# to `lait-<x>` (all six are free), and declare them here as
+# `x = { package = "lait-x", version = "...", path = "crates/x" }` so the local
+# alias — and therefore every `use` — stays exactly as it is. It does mean
+# claiming six new names on crates.io permanently, which is a distribution
+# decision rather than a build fix, so it waits for a deliberate yes.
+#
+# Until then this stays dispatch-only: no silent gap, no red release.
 on:
-  workflow_run:
-    workflows: ["Release"]
-    types: [completed]
   workflow_dispatch:
     inputs:
       ref:
@@ -107,7 +121,7 @@ jobs:
             echo "::notice::Publishing via crates.io trusted publishing (short-lived token)."
             export CARGO_REGISTRY_TOKEN="$OIDC_TOKEN"
           elif [ -n "${FALLBACK_TOKEN:-}" ]; then
-            echo "::warning::Trusted publishing unavailable — falling back to the long-lived CARGO_REGISTRY_TOKEN. Register the trusted publisher (crates.io -> lait -> Settings -> Trusted Publishing: Nixie-Tech-LLC/lait, workflow publish-crates.yml), then delete this secret."
+            echo "::warning::Trusted publishing unavailable — falling back to the long-lived CARGO_REGISTRY_TOKEN. Register the trusted publisher (crates.io -> lait -> Settings -> Trusted Publishing: nixiesoftware/lait, workflow publish-crates.yml), then delete this secret."
             export CARGO_REGISTRY_TOKEN="$FALLBACK_TOKEN"
           else
             echo "::error::No crates.io credential: trusted publishing is not registered and CARGO_REGISTRY_TOKEN is unset."

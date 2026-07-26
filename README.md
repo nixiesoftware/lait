@@ -51,10 +51,10 @@ they all land the same `lait`. Full matrix + verification in
 
 ```bash
 # macOS / Linux — shell installer (places lait in ~/.cargo/bin)
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/Nixie-Tech-LLC/lait/releases/latest/download/lait-installer.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/nixiesoftware/lait/releases/latest/download/lait-installer.sh | sh
 
 # Homebrew (macOS / Linux)
-brew install nixie-tech-llc/tap/lait
+brew install nixiesoftware/tap/lait
 
 # prebuilt binary via Cargo, no compile
 cargo binstall lait
@@ -65,7 +65,7 @@ cargo install lait --locked
 
 ```powershell
 # Windows — PowerShell installer
-powershell -ExecutionPolicy Bypass -c "irm https://github.com/Nixie-Tech-LLC/lait/releases/latest/download/lait-installer.ps1 | iex"
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/nixiesoftware/lait/releases/latest/download/lait-installer.ps1 | iex"
 # …or:  scoop install lait   ·   winget install NixieTechLLC.Lait
 ```
 
@@ -78,14 +78,14 @@ completions and a man page come from the binary itself
 ### Nightly / dev builds
 
 Every merge to `main` publishes prebuilt binaries to a rolling **[`dev`
-prerelease](https://github.com/Nixie-Tech-LLC/lait/releases/tag/dev)** (Linux x64,
+prerelease](https://github.com/nixiesoftware/lait/releases/tag/dev)** (Linux x64,
 macOS arm64/x64, Windows x64) — bleeding edge, for dogfooding the latest `main`.
 It's a GitHub *prerelease*, so it never shows as "Latest" and never touches the
 package managers or crates.io.
 
 ```bash
 # grab the current dev build for your platform
-gh release download dev -R Nixie-Tech-LLC/lait
+gh release download dev -R nixiesoftware/lait
 ```
 
 A dev binary reports its commit so it's unmistakable from a tagged release:
