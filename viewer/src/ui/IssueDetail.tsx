@@ -333,10 +333,10 @@ export function IssueDetail({
           the header rather than dragging the state down to it. */}
       <HeaderActions>
         <IconButton label="Previous issue" onClick={onPrevious} disabled={!onPrevious}>
-          <ChevronLeft className="size-3.5" />
+          <ChevronLeft className="size-icon-sm" />
         </IconButton>
         <IconButton label="Next issue" onClick={onNext} disabled={!onNext}>
-          <ChevronRight className="size-3.5" />
+          <ChevronRight className="size-icon-sm" />
         </IconButton>
         <IssueOverflow
           issueRef={issue.key_alias ?? issue.reff}
@@ -356,7 +356,7 @@ export function IssueDetail({
           onDelete={() => onDelete(issue.reff)}
         />
         <IconButton label="Close issue" chord="Esc" onClick={onClose}>
-          <X className="size-3.5" />
+          <X className="size-icon-sm" />
         </IconButton>
       </HeaderActions>
 
@@ -387,7 +387,7 @@ export function IssueDetail({
         )}
         {events.some((event) => event.collision) && (
           <div className="border-warn/30 bg-warn/5 text-dim flex items-start gap-2 rounded border p-3 text-sm" role="status">
-            <AlertTriangle className="text-warn mt-0.5 size-3.5 shrink-0" />
+            <AlertTriangle className="text-warn mt-0.5 size-icon-sm shrink-0" />
             <span className="min-w-0 flex-1">
               Concurrent edits converged to the current values. Review the marked history entry;
               if its outcome is not what you intended, reapply the field above as a new explicit change.
@@ -402,7 +402,7 @@ export function IssueDetail({
         )}
         {issue.provisional && (
           <div className="border-warn/30 bg-warn/5 text-dim flex gap-2 rounded border p-3 text-sm">
-            <Info className="text-warn mt-0.5 size-3.5 shrink-0" />
+            <Info className="text-warn mt-0.5 size-icon-sm shrink-0" />
             <span>
               This issue is known to the local catalog, but its body is still arriving. Metadata may be incomplete; editing stays unavailable until the projection is ready.
             </span>
@@ -411,7 +411,7 @@ export function IssueDetail({
         {!!issue.corrupt_records?.length && (
           <details className="border-danger/30 bg-danger/5 rounded border p-3 text-sm">
             <summary className="text-danger flex items-center gap-2 font-medium">
-              <AlertTriangle className="size-3.5" />
+              <AlertTriangle className="size-icon-sm" />
               {issue.corrupt_records.length} stored {issue.corrupt_records.length === 1 ? "record needs" : "records need"} attention
             </summary>
             <ul className="text-dim mt-2 flex flex-col gap-1 pl-5 text-xs">
@@ -548,7 +548,7 @@ export function IssueDetail({
               face={
                 issue.assignees.length === 0 ? (
                   <>
-                    <UserPlus className="text-mute size-3.5 shrink-0" />
+                    <UserPlus className="text-mute size-icon-sm shrink-0" />
                     <span className="text-mute">Assign</span>
                   </>
                 ) : (
@@ -597,7 +597,7 @@ export function IssueDetail({
               }
               face={
                 <>
-                  <Gauge className="text-mute size-3.5 shrink-0" />
+                  <Gauge className="text-mute size-icon-sm shrink-0" />
                   <span className={issue.estimate == null ? "text-mute" : "min-w-0 truncate"}>
                     {issue.estimate != null ? `${issue.estimate} pt` : "Set estimate"}
                   </span>
@@ -689,11 +689,11 @@ export function IssueDetail({
                 face={
                   issue.label_names.length === 0 ? (
                     <>
-                      <Tag className="text-mute size-3.5 shrink-0" />
+                      <Tag className="text-mute size-icon-sm shrink-0" />
                       <span className="text-mute">Add label</span>
                     </>
                   ) : (
-                    <Plus className="text-mute size-3.5 shrink-0" />
+                    <Plus className="text-mute size-icon-sm shrink-0" />
                   )
                 }
                 options={labels.map((l) => ({
@@ -728,7 +728,7 @@ export function IssueDetail({
                 onClick={() => onNavigate(graph.parent!.reff)}
                 className="-mx-1 min-w-0 justify-start px-1 text-left"
               >
-                <GitMerge className="text-mute size-3.5 shrink-0" />
+                <GitMerge className="text-mute size-icon-sm shrink-0" />
                 <span className="min-w-0 truncate font-medium">{graph.parent.title}</span>
               </Button>
             </RailRow>
@@ -782,7 +782,7 @@ export function IssueDetail({
                 }
                 face={
                   <>
-                    <Milestone className="text-mute size-3.5 shrink-0" />
+                    <Milestone className="text-mute size-icon-sm shrink-0" />
                     <span className={issue.milestone ? "min-w-0 truncate" : "text-mute"}>
                       {issue.milestone
                         ? (milestones.find((m) => m.id === issue.milestone)?.name ??
@@ -998,27 +998,27 @@ function IssueOverflow({
   return (
     <DropdownMenu.Root>
       <DropdownMenu.Trigger asChild>
-        <IconButton label="More issue actions"><MoreHorizontal className="size-3.5" /></IconButton>
+        <IconButton label="More issue actions"><MoreHorizontal className="size-icon-sm" /></IconButton>
       </DropdownMenu.Trigger>
       <DropdownMenu.Portal>
         <MenuContent align="end" className="min-w-52">
-          <MenuItem onSelect={onCopyLink}><Link2 className="size-3.5" /> Copy issue link</MenuItem>
-          <MenuItem onSelect={() => void navigator.clipboard.writeText(issueRef)}><Copy className="size-3.5" /> Copy reference</MenuItem>
+          <MenuItem onSelect={onCopyLink}><Link2 className="size-icon-sm" /> Copy issue link</MenuItem>
+          <MenuItem onSelect={() => void navigator.clipboard.writeText(issueRef)}><Copy className="size-icon-sm" /> Copy reference</MenuItem>
           {!locked && !tombstone && (
             <>
-              <MenuItem disabled={pending} onSelect={onDuplicate}><CopyPlus className="size-3.5" /> Duplicate issue</MenuItem>
-              <MenuItem disabled={pending} onSelect={onRelate}><Link2 className="size-3.5" /> Add relation</MenuItem>
-              <MenuItem disabled={pending} onSelect={onAddSubIssue}><CornerDownRight className="size-3.5" /> Add sub-issue</MenuItem>
-              <MenuItem disabled={pending} onSelect={onAttach}><Paperclip className="size-3.5" /> Attach a file</MenuItem>
-              <MenuItem disabled={pending} onSelect={onAssign}><UserPlus className="size-3.5" /> Assign issue</MenuItem>
-              <MenuItem disabled={pending} onSelect={onMove}><MoveRight className="size-3.5" /> Move to project</MenuItem>
+              <MenuItem disabled={pending} onSelect={onDuplicate}><CopyPlus className="size-icon-sm" /> Duplicate issue</MenuItem>
+              <MenuItem disabled={pending} onSelect={onRelate}><Link2 className="size-icon-sm" /> Add relation</MenuItem>
+              <MenuItem disabled={pending} onSelect={onAddSubIssue}><CornerDownRight className="size-icon-sm" /> Add sub-issue</MenuItem>
+              <MenuItem disabled={pending} onSelect={onAttach}><Paperclip className="size-icon-sm" /> Attach a file</MenuItem>
+              <MenuItem disabled={pending} onSelect={onAssign}><UserPlus className="size-icon-sm" /> Assign issue</MenuItem>
+              <MenuItem disabled={pending} onSelect={onMove}><MoveRight className="size-icon-sm" /> Move to project</MenuItem>
             </>
           )}
-          {active && !locked && <MenuItem disabled={pending} onSelect={onStop}><CircleDot className="size-3.5" /> Stop work</MenuItem>}
+          {active && !locked && <MenuItem disabled={pending} onSelect={onStop}><CircleDot className="size-icon-sm" /> Stop work</MenuItem>}
           {!locked && <DropdownMenu.Separator className="bg-line my-1 h-px" />}
           {!locked && (tombstone
-            ? <MenuItem onSelect={onRestore}><ArchiveRestore className="size-3.5" /> Restore issue</MenuItem>
-            : <MenuItem danger onSelect={onDelete}><Trash2 className="size-3.5" /> Delete issue</MenuItem>)}
+            ? <MenuItem onSelect={onRestore}><ArchiveRestore className="size-icon-sm" /> Restore issue</MenuItem>
+            : <MenuItem danger onSelect={onDelete}><Trash2 className="size-icon-sm" /> Delete issue</MenuItem>)}
         </MenuContent>
       </DropdownMenu.Portal>
     </DropdownMenu.Root>
@@ -1048,7 +1048,7 @@ function FollowToggle({
       onClick={() => onToggle(!following)}
       title={following ? "Stop receiving this issue's activity" : "Receive this issue's activity in your inbox"}
     >
-      {following ? <BellOff className="size-3.5" /> : <Bell className="size-3.5" />}
+      {following ? <BellOff className="size-icon-sm" /> : <Bell className="size-icon-sm" />}
       {following ? "Following" : "Follow"}
       {others > 0 && <span className="text-mute">+{others}</span>}
     </Button>
@@ -1166,7 +1166,7 @@ function Attachments({
                     disabled={busy}
                     onClick={() => fileRef.current?.click()}
                   >
-                    <Paperclip className="size-3.5" />
+                    <Paperclip className="size-icon-sm" />
                   </IconButton>
                 ),
               })}
@@ -1177,13 +1177,13 @@ function Attachments({
               key={att.id}
               className="border-line hover:bg-surface-2 group flex items-center gap-2 rounded border px-2 py-1 text-sm"
             >
-              <Paperclip className="text-mute size-3.5 shrink-0" />
+              <Paperclip className="text-mute size-icon-sm shrink-0" />
               <span className="text-ink min-w-0 flex-1 truncate">{att.name}</span>
               <span className="text-mute shrink-0 text-xs">
                 {Math.max(1, Math.round(att.size / 1024))} KiB
               </span>
               <IconButton label={`Download ${att.name}`} onClick={() => void download(att)}>
-                <Download className="size-3.5" />
+                <Download className="size-icon-sm" />
               </IconButton>
               {!readOnly && (
                 <IconButton
@@ -1194,7 +1194,7 @@ function Attachments({
                     )
                   }
                 >
-                  <Trash2 className="size-3.5" />
+                  <Trash2 className="size-icon-sm" />
                 </IconButton>
               )}
             </li>
@@ -1404,7 +1404,7 @@ function Relations({
       row: r,
       kind: "Blocked by",
       tone: "warn" as const,
-      icon: <Ban className="text-warn size-3" />,
+      icon: <Ban className="text-warn size-icon-xs" />,
     })),
     ...[
       { list: blocks, kind: "Blocks" },
@@ -1452,7 +1452,7 @@ function Relations({
             : {
                 action: (
                   <IconButton label="Add sub-issue" onClick={() => setSubDraft("")}>
-                    <Plus className="size-3.5" />
+                    <Plus className="size-icon-sm" />
                   </IconButton>
                 ),
               })}
@@ -1476,7 +1476,7 @@ function Relations({
             <RelRow
               key={r.reff}
               row={r}
-              icon={<CornerDownRight className="size-3" />}
+              icon={<CornerDownRight className="size-icon-xs" />}
               onNavigate={onNavigate}
               {...(removable
                 ? {
@@ -1522,7 +1522,7 @@ function Relations({
                     label="Add relation"
                     onClick={() => setAdding(true)}
                   >
-                    <Plus className="size-3.5" />
+                    <Plus className="size-icon-sm" />
                   </IconButton>
                 ),
               })}
@@ -1558,7 +1558,7 @@ function Relations({
                 onPick={relate}
               />
               <IconButton label="Cancel" onClick={() => setAdding(false)}>
-                <X className="size-3.5" />
+                <X className="size-icon-sm" />
               </IconButton>
             </div>
           )}
@@ -1610,7 +1610,7 @@ function RelRow({
         onClick={() => onNavigate(row.reff)}
         className="min-w-0 flex-1 shrink justify-start px-1 text-left"
       >
-        <span className="flex size-3 shrink-0 items-center justify-center">{icon}</span>
+        <span className="flex size-icon-xs shrink-0 items-center justify-center">{icon}</span>
         {kind && (
           <span
             className={cn(
@@ -1634,7 +1634,7 @@ function RelRow({
           // the list stays quiet the rest of the time.
           className="opacity-0 group-hover/rel:opacity-100 focus-visible:opacity-100"
         >
-          <X className="size-3" />
+          <X className="size-icon-xs" />
         </IconButton>
       )}
     </div>
@@ -1731,7 +1731,7 @@ function Timeline({
             title="This issue's full history, read from its change log on disk — it survives restarts and shows who made each change. (The space-wide Activity view is a lighter, per-session feed.)"
             className="cursor-help"
           >
-            <Info className="size-3" />
+            <Info className="size-icon-xs" />
           </span>
         }
       />
@@ -1853,7 +1853,7 @@ function Comment({
                         label="Add reaction"
                         className="opacity-0 transition-opacity group-hover/comment:opacity-100 focus-visible:opacity-100 data-[state=open]:opacity-100"
                       >
-                        <SmilePlus className="size-3.5" />
+                        <SmilePlus className="size-icon-sm" />
                       </IconButton>
                     </Popover.Trigger>
                     <PopoverContent align="start" className="flex gap-0.5 p-1">
@@ -1954,7 +1954,7 @@ function Event({ event: e, resolveName }: { event: ActivityEvent; resolveName: N
 
   return (
     <div className="text-mute flex items-baseline gap-2 text-xs">
-      <CircleDot className="size-3 shrink-0 translate-y-0.5" />
+      <CircleDot className="size-icon-xs shrink-0 translate-y-0.5" />
       <span className="min-w-0 flex-1">
         {/* No actor means we genuinely don't know — see core/activity.ts. Printing
             "someone" would claim we know there was a someone and lost the name. */}
@@ -1965,7 +1965,7 @@ function Event({ event: e, resolveName }: { event: ActivityEvent; resolveName: N
       {/* A concurrent overwrite is worth flagging but never worth blocking on
           (A§9): last-writer-wins already resolved it; you just get told. */}
       {e.collision && (
-        <AlertTriangle className="text-warn size-3 shrink-0" aria-label="Concurrent overwrite" />
+        <AlertTriangle className="text-warn size-icon-xs shrink-0" aria-label="Concurrent overwrite" />
       )}
       <time className="shrink-0" dateTime={tsToDate(e.ts).toISOString()}>
         {when(e.ts)}

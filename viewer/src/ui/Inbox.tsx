@@ -102,7 +102,7 @@ export function Inbox({
           kind="retry"
           title="Inbox unavailable"
           body={error}
-          action={<Button onClick={() => void load(false)}><RotateCcw className="size-3.5" />Retry</Button>}
+          action={<Button onClick={() => void load(false)}><RotateCcw className="size-icon-sm" />Retry</Button>}
         />
       );
     }
@@ -171,14 +171,14 @@ export function Inbox({
             onClick={() => void load(true)}
             className="ml-auto"
           >
-            <CheckCheck className="size-3.5" />
+            <CheckCheck className="size-icon-sm" />
             Mark {unreadCount === 1 ? "notification" : `all ${unreadCount} notifications`} read
           </Button>
         )}
         <Popover.Root>
           <Popover.Trigger asChild>
             <Button className="ml-auto" aria-label="Inbox preferences">
-              <Settings2 className="size-3.5" /> Preferences
+              <Settings2 className="size-icon-sm" /> Preferences
             </Button>
           </Popover.Trigger>
           <PopoverContent align="end" sideOffset={6} className="w-64 p-3">
@@ -221,12 +221,12 @@ export function Inbox({
 
       {entries.length === 0 ? (
         <EmptyState
-          icon={<InboxIcon className="size-5" />}
+          icon={<InboxIcon className="size-icon-lg" />}
           title="You’re all caught up"
           body="Nothing in this local space is currently addressed to you."
         />
       ) : visible.length === 0 ? (
-        <EmptyState icon={<InboxIcon className="size-5" />} title="No notifications match" body="Adjust local preferences or restore snoozed notifications." />
+        <EmptyState icon={<InboxIcon className="size-icon-lg" />} title="No notifications match" body="Adjust local preferences or restore snoozed notifications." />
       ) : (
         <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto">
           {groups.map((group) => (
@@ -293,7 +293,7 @@ export function Inbox({
                 {isUnread(e, i) ? "Mark read" : "Mark unread"}
               </Button>
               <IconButton label={`Snooze for one hour: ${e.title}`} onClick={(event) => { event.stopPropagation(); snooze(e); }} className="opacity-0 group-hover:opacity-100 group-focus-within:opacity-100">
-                <Timer className="size-3.5" />
+                <Timer className="size-icon-sm" />
               </IconButton>
             </li>
               ))}
@@ -353,7 +353,7 @@ function saveOverrides(spaceId: string, value: ReadOverrides): void {
 
 /** `assigned` | `comment` | `status` — the three ways something reaches you. */
 function KindIcon({ kind }: { kind: string }) {
-  const cls = "size-3.5 text-mute";
+  const cls = "size-icon-sm text-mute";
   if (kind === "comment") return <MessageSquare className={cls} aria-label="Comment" />;
   if (kind === "assigned") return <AtSign className={cls} aria-label="Assigned to you" />;
   return <SignalHigh className={cls} aria-label="Status change" />;

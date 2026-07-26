@@ -214,7 +214,7 @@ function Callout({ tone, children }: { tone: CalloutTone; children: React.ReactN
   return (
     <div className={cn("prose-figure rounded-lg border px-4 py-3", edge)}>
       <div className={cn("mb-1 flex items-center gap-1.5 text-[0.875em] font-semibold", colour)}>
-        <Glyph className="size-4 shrink-0" aria-hidden />
+        <Glyph className="size-icon-md shrink-0" aria-hidden />
         {label}
       </div>
       <div className="whitespace-pre-wrap">{children}</div>
@@ -263,7 +263,7 @@ function CodeBlock({ lang, text }: { lang: string | null; text: string }) {
           copied && "opacity-100",
         )}
       >
-        {copied ? <Check className="text-ok size-3" /> : <Copy className="size-3" />}
+        {copied ? <Check className="text-ok size-icon-xs" /> : <Copy className="size-icon-xs" />}
       </button>
       <pre className="shiki-block overflow-x-auto p-3 font-mono text-[0.8125rem] leading-relaxed">
         <code>

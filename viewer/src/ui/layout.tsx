@@ -275,7 +275,7 @@ export function Breadcrumbs({
               )}
               {/* The separator belongs to the crumb before it: a dropped ancestor
                   takes its chevron with it, so the trail never opens with a stray ›. */}
-              {!leaf && <ChevronRight className="text-mute mx-0.5 size-3 shrink-0" aria-hidden />}
+              {!leaf && <ChevronRight className="text-mute mx-0.5 size-icon-xs shrink-0" aria-hidden />}
             </li>
           );
         })}
@@ -290,7 +290,7 @@ export function WorkspaceCrumb({ name, agent }: { name: string; agent?: boolean 
   return (
     <>
       <span className={cn(crumbGlyph, "bg-active rounded")}>
-        <Glyph className="text-mute size-2.5" aria-hidden />
+        <Glyph className="text-mute size-icon-2xs" aria-hidden />
       </span>
       <span className="truncate">{name}</span>
     </>
@@ -341,7 +341,7 @@ export function IssueCrumb({ id, title }: { id: string; title?: string | undefin
 export function DestinationCrumb({ icon, label }: { icon?: React.ReactNode; label: string }) {
   return (
     <>
-      {icon && <span className={cn(crumbGlyph, "text-mute [&>svg]:size-3.5")}>{icon}</span>}
+      {icon && <span className={cn(crumbGlyph, "text-mute [&>svg]:size-icon-sm")}>{icon}</span>}
       <span className="truncate">{label}</span>
     </>
   );
@@ -501,7 +501,7 @@ export function Disclosure({
           className="text-dim hover:text-fg -ml-1 flex min-w-0 items-center gap-1 rounded px-1 py-0.5 text-sm font-medium outline-none focus-visible:ring-1 focus-visible:ring-accent/50"
         >
           <ChevronRight
-            className={cn("size-3.5 shrink-0 transition-transform", open && "rotate-90")}
+            className={cn("size-icon-sm shrink-0 transition-transform", open && "rotate-90")}
             aria-hidden
           />
           <span className="truncate">{title}</span>
@@ -653,7 +653,7 @@ export function MenuSubTrigger({
       {...props}
     >
       {children}
-      <ChevronRight className="text-mute ml-auto size-3 shrink-0" aria-hidden />
+      <ChevronRight className="text-mute ml-auto size-icon-xs shrink-0" aria-hidden />
     </DropdownMenu.SubTrigger>
   );
 }

@@ -86,7 +86,7 @@ export function Avatar({
       {logo ? (
         <svg
           viewBox={logo.viewBox}
-          className={size === "sm" ? "size-2.5" : "size-3"}
+          className={size === "sm" ? "size-icon-2xs" : "size-icon-xs"}
           fill={logo.fg}
           aria-hidden="true"
         >
@@ -97,7 +97,7 @@ export function Avatar({
         // otherwise render as half a character.
         [...name][0]?.toUpperCase()
       ) : (
-        <User className={size === "sm" ? "size-2.5" : "size-3"} strokeWidth={2.5} />
+        <User className={size === "sm" ? "size-icon-2xs" : "size-icon-xs"} strokeWidth={2.5} />
       )}
     </span>
   );

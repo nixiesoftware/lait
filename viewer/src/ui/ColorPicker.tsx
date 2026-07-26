@@ -45,7 +45,7 @@ export function ColorPicker({
             )}
             style={{ background: catalogColor(name) }}
           >
-            {selected && <Check className="size-3.5 text-white" />}
+            {selected && <Check className="size-icon-sm text-white" />}
           </button>
         );
       })}

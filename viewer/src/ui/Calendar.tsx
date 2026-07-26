@@ -75,10 +75,10 @@ export function Calendar({
         <h2 className="text-sm font-semibold tabular-nums">{monthLabel}</h2>
         <div className="ml-2 flex items-center gap-0.5">
           <IconButton label="Previous month" onClick={() => step(-1)}>
-            <ChevronLeft className="size-4" />
+            <ChevronLeft className="size-icon-md" />
           </IconButton>
           <IconButton label="Next month" onClick={() => step(1)}>
-            <ChevronRight className="size-4" />
+            <ChevronRight className="size-icon-md" />
           </IconButton>
         </div>
         <Button

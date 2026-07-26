@@ -1493,7 +1493,7 @@ export function App() {
 
               {projectShell && !readOnly && current && (view === "list" || view === "board" || view === "calendar") && (
                 <IconButton label="New issue" chord="C" onClick={() => run("issue.create")}>
-                  <Plus className="size-4" />
+                  <Plus className="size-icon-md" />
                 </IconButton>
               )}
             </>
@@ -1541,7 +1541,7 @@ export function App() {
         >
           {!current ? (
             <EmptyState
-              icon={<PanelLeft className="size-5" />}
+              icon={<PanelLeft className="size-icon-lg" />}
               title={
                 routeSpace
                   ? "This space is not on this device"

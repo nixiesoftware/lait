@@ -84,11 +84,11 @@ export function Settings({
     return () => window.removeEventListener("lait:nav", onNav as EventListener);
   }, []);
   const tabs: { id: Tab; label: string; icon: React.ReactNode }[] = [
-    { id: "general", label: "General", icon: <SlidersHorizontal className="size-3.5" /> },
-    { id: "members", label: "Members", icon: <Users className="size-3.5" /> },
-    { id: "labels", label: "Labels", icon: <Tag className="size-3.5" /> },
-    { id: "workflow", label: "Workflow", icon: <Palette className="size-3.5" /> },
-    { id: "access", label: "Roles & access", icon: <ShieldCheck className="size-3.5" /> },
+    { id: "general", label: "General", icon: <SlidersHorizontal className="size-icon-sm" /> },
+    { id: "members", label: "Members", icon: <Users className="size-icon-sm" /> },
+    { id: "labels", label: "Labels", icon: <Tag className="size-icon-sm" /> },
+    { id: "workflow", label: "Workflow", icon: <Palette className="size-icon-sm" /> },
+    { id: "access", label: "Roles & access", icon: <ShieldCheck className="size-icon-sm" /> },
   ];
 
   return (
@@ -103,7 +103,7 @@ export function Settings({
       <SurfaceHeader
         leading={
           <IconButton label="Back to app" onClick={onExit}>
-            <ArrowLeft className="size-4" />
+            <ArrowLeft className="size-icon-md" />
           </IconButton>
         }
         trail={
@@ -273,7 +273,7 @@ function GeneralPanel({
       </Section>
       <Section title="Identity" hint="The seed id — derived at founding from keys, not the name. It cannot be changed.">
         <div className="border-line bg-raised text-dim flex items-center gap-2 rounded border px-2 py-1.5 font-mono text-xs">
-          <Hash className="text-mute size-3.5 shrink-0" />
+          <Hash className="text-mute size-icon-sm shrink-0" />
           {spaceId}
         </div>
       </Section>
@@ -359,7 +359,7 @@ function LabelsPanel({
                         })
                     }
                   >
-                    <Trash2 className="size-3.5" />
+                    <Trash2 className="size-icon-sm" />
                   </IconButton>
                 </span>
               )}
@@ -782,7 +782,7 @@ function AccessPanel({
                 <span className="font-medium">{roleName(role)}</span>
                 {role.built_in && (
                   <span className="text-accent flex items-center gap-1 text-2xs" title="Immutable">
-                    <ShieldCheck className="size-3" />
+                    <ShieldCheck className="size-icon-xs" />
                     built-in
                   </span>
                 )}
@@ -879,7 +879,7 @@ function AccessPanel({
               loading={busy}
               onClick={() => void grant()}
             >
-              <ShieldPlus className="size-3.5" />
+              <ShieldPlus className="size-icon-sm" />
               Grant
             </Button>
           </div>
@@ -910,7 +910,7 @@ function AccessPanel({
                         className="ml-auto"
                         onClick={() => revoke(row)}
                       >
-                        <X className="size-3.5" />
+                        <X className="size-icon-sm" />
                       </IconButton>
                     )}
                   </li>

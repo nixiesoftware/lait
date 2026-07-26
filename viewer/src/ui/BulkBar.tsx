@@ -82,7 +82,7 @@ export function BulkBar({
         className="size-7"
         onClick={onClear}
       >
-        <X className="size-3.5" />
+        <X className="size-icon-sm" />
       </IconButton>
       {/* The count is the only text in the bar, so it gets the space a divider
           used to take — a gap reads as a break without drawing one. */}
@@ -110,7 +110,7 @@ export function BulkBar({
           </span>
           {!progress.pending && progress.failures.length > 0 && (
             <Button variant="ghost" className="rounded-full" onClick={onRetryFailures}>
-              <RotateCcw className="size-3" />
+              <RotateCcw className="size-icon-xs" />
               Retry failed
             </Button>
           )}
@@ -122,7 +122,7 @@ export function BulkBar({
         variant="pill"
         disabled={pending}
         value={null}
-        face={<Face icon={<SignalHigh className="size-3.5" />} label="Status" />}
+        face={<Face icon={<SignalHigh className="size-icon-sm" />} label="Status" />}
         options={states.map((s) => ({
           id: s.id,
           label: s.name,
@@ -150,7 +150,7 @@ export function BulkBar({
         disabled={pending}
         value={null}
         emptyText={members.length ? "No matches" : "No members yet"}
-        face={<Face icon={<UserRound className="size-3.5" />} label="Assign" />}
+        face={<Face icon={<UserRound className="size-icon-sm" />} label="Assign" />}
         options={members.map((m) => ({
           id: m.key,
           label: memberName(m.key, m),
@@ -166,7 +166,7 @@ export function BulkBar({
         disabled={pending}
         value={null}
         emptyText={labels.length ? "No matches" : "No labels yet"}
-        face={<Face icon={<Tag className="size-3.5" />} label="Label" />}
+        face={<Face icon={<Tag className="size-icon-sm" />} label="Label" />}
         options={labels.map((l) => ({
           id: l.name,
           label: l.name,
@@ -192,7 +192,7 @@ export function BulkBar({
         disabled={pending}
         onClick={onDelete}
       >
-        <Trash2 className="size-3.5" />
+        <Trash2 className="size-icon-sm" />
       </IconButton>
       </div>
     </div>
@@ -205,7 +205,7 @@ function Face({ icon, label }: { icon?: React.ReactNode; label: string }) {
   return (
     <>
       {icon && (
-        <span className="text-mute flex size-3.5 shrink-0 items-center justify-center">{icon}</span>
+        <span className="text-mute flex size-icon-sm shrink-0 items-center justify-center">{icon}</span>
       )}
       <span className="min-w-0 flex-1 truncate text-left">{label}</span>
     </>

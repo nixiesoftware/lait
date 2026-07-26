@@ -101,7 +101,7 @@ function Shell({
             <Dialog.Title className="font-semibold">{title}</Dialog.Title>
             <Dialog.Close asChild>
               <IconButton label="Close" chord="Esc" className="ml-auto">
-                <X className="size-4" />
+                <X className="size-icon-md" />
               </IconButton>
             </Dialog.Close>
           </header>
@@ -118,7 +118,7 @@ function ConflictNote({ heads, fix }: { heads: string[]; fix: string }) {
   if (heads.length === 0) return null;
   return (
     <p className="text-warn border-warn/40 flex items-start gap-2 rounded border p-2 text-sm">
-      <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
+      <AlertTriangle className="mt-0.5 size-icon-sm shrink-0" />
       <span>
         {heads.length} concurrent revisions are unresolved — ordinary edits are blocked until an
         admin runs <code className="font-mono text-xs">{fix}</code>.
@@ -197,7 +197,7 @@ export function WorkflowDialog({
                     <li key={t.transition_id} className="text-sm">
                       <span className="flex items-center gap-1.5">
                         <span>{t.source_state_ids.map(nameOf).join(", ")}</span>
-                        <ArrowRight className="text-mute size-3 shrink-0" />
+                        <ArrowRight className="text-mute size-icon-xs shrink-0" />
                         <span>{nameOf(t.destination_state_id)}</span>
                       </span>
                       <span className="text-mute font-mono text-2xs">
@@ -248,7 +248,7 @@ export function RolesDialog({ spaceId, onClose }: { spaceId: string; onClose: ()
             <span className="font-medium">{role.revision?.body.name ?? role.role_id}</span>
             {role.built_in && (
               <span className="text-accent flex items-center gap-1 text-2xs" title="Immutable">
-                <ShieldCheck className="size-3" />
+                <ShieldCheck className="size-icon-xs" />
                 built-in
               </span>
             )}

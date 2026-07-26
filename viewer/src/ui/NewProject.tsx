@@ -89,7 +89,7 @@ export function NewProject({
               <Dialog.Title className="font-semibold">New project</Dialog.Title>
               <Dialog.Close asChild>
                 <IconButton label="Close" chord="Esc" className="ml-auto">
-                  <X className="size-4" />
+                  <X className="size-icon-md" />
                 </IconButton>
               </Dialog.Close>
             </header>

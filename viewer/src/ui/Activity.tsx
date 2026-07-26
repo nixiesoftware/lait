@@ -87,7 +87,7 @@ export function Activity({
   if (scopedEvents.length === 0) {
     return (
       <EmptyState
-        icon={<ActivityIcon className="size-5" />}
+        icon={<ActivityIcon className="size-icon-lg" />}
         title={projectName ? `No activity in ${projectName}` : "No activity yet"}
         body={projectName ? "Changes to this project's issues will appear here." : "Changes made in this session will appear here."}
       />
@@ -132,7 +132,7 @@ export function Activity({
               (A§9): last-writer-wins already resolved it; you just get told. */}
           {e.collision && (
             <AlertTriangle
-              className="text-warn size-3.5 shrink-0"
+              className="text-warn size-icon-sm shrink-0"
               aria-label="Concurrent overwrite detected"
             />
           )}

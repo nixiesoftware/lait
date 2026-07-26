@@ -123,9 +123,9 @@ export function ProjectOverview({
                   onClick={() => void edit({ archived: !project.archived })}
                 >
                   {project.archived ? (
-                    <ArchiveRestore className="size-3.5" />
+                    <ArchiveRestore className="size-icon-sm" />
                   ) : (
-                    <Archive className="size-3.5" />
+                    <Archive className="size-icon-sm" />
                   )}
                 </IconButton>
               )}
@@ -173,7 +173,7 @@ export function ProjectOverview({
                 face={
                   lead ? undefined : (
                     <>
-                      <UserPlus className="text-mute size-3.5 shrink-0" />
+                      <UserPlus className="text-mute size-icon-sm shrink-0" />
                       <span className="text-mute">Set lead</span>
                     </>
                   )
@@ -386,7 +386,7 @@ function Milestones({
                   className="opacity-0 group-hover:opacity-100"
                   onClick={() => void remove(m.id)}
                 >
-                  <X className="size-3.5" />
+                  <X className="size-icon-sm" />
                 </IconButton>
               )}
             </li>

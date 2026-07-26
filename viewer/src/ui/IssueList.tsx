@@ -126,7 +126,7 @@ export function IssueList({
           <section>
             <GroupHeader
               sticky
-              icon={<Trash2 className="text-mute size-3.5" />}
+              icon={<Trash2 className="text-mute size-icon-sm" />}
               title="Deleted"
               count={deleted.length}
             />
@@ -156,7 +156,7 @@ export function IssueList({
             kind={deletedMode ? "empty" : filtered ? "filtered-empty" : "empty"}
             title={deletedMode ? "No deleted issues" : filtered ? "No matching issues" : "No issues yet"}
             body={deletedMode ? "Deleted issues will appear here so they can be inspected or restored." : filtered ? "Clear or adjust the current filters to see more." : "Create the first issue in this project."}
-            action={!deletedMode && !filtered && !readOnly && states[0] ? <Button variant="primary" onClick={() => onCreate(states[0]!.id)}><Plus className="size-3.5" /> New issue</Button> : undefined}
+            action={!deletedMode && !filtered && !readOnly && states[0] ? <Button variant="primary" onClick={() => onCreate(states[0]!.id)}><Plus className="size-icon-sm" /> New issue</Button> : undefined}
             className="min-h-60"
           />
         )}
@@ -232,14 +232,14 @@ function Group({
           /* The visible slot is the same 16px column as a row checkbox. The
              control itself remains 24px and overflows the slot symmetrically, so
              alignment does not come at the cost of a usable pointer target. */
-          <span className="relative flex size-4 shrink-0 items-center justify-center">
+          <span className="relative flex size-icon-md shrink-0 items-center justify-center">
             <IconButton
               label={`${collapsed ? "Expand" : "Collapse"} ${title}`}
               onClick={() => setCollapsed((value) => !value)}
               aria-expanded={!collapsed}
               className="absolute"
             >
-              <ChevronRight className={`size-3 transition-transform ${collapsed ? "" : "rotate-90"}`} />
+              <ChevronRight className={`size-icon-xs transition-transform ${collapsed ? "" : "rotate-90"}`} />
             </IconButton>
           </span>
         }
@@ -254,7 +254,7 @@ function Group({
               // Revealed on hover/focus: present when wanted, silent otherwise.
               className="opacity-0 transition group-hover/list:opacity-100 focus-visible:opacity-100"
             >
-              <Plus className="size-3.5" />
+              <Plus className="size-icon-sm" />
             </IconButton>
           ) : undefined
         }
@@ -380,7 +380,7 @@ function IssueRow({
       {/* This 16px column is shared with the group chevron above it. Keeping the
           selection affordance in that column lets priority/status/title retain
           exactly the same geometry when the checkbox appears. */}
-      <span className="flex size-4 shrink-0 items-center justify-center">
+      <span className="flex size-icon-md shrink-0 items-center justify-center">
         {!readOnly && (
           <Checkbox
             checked={checked}
@@ -417,7 +417,7 @@ function IssueRow({
         {row.title}
       </span>
       {row.tombstone && (
-        <Trash2 className="text-mute size-3 shrink-0" aria-label="Deleted" />
+        <Trash2 className="text-mute size-icon-xs shrink-0" aria-label="Deleted" />
       )}
       {/* Two is what a dense line affords, and the rest are simply not shown:
           a trailing `+2` is a tally of things you cannot see, competing for the
@@ -468,7 +468,7 @@ function IssueRow({
       <ContextMenu.Portal>
         <ContextMenuContent>
           <ContextMenuItem onSelect={() => onOpen(row.reff)}>
-            <ExternalLink className="size-3.5" />
+            <ExternalLink className="size-icon-sm" />
             Open focused
           </ContextMenuItem>
           <ContextMenuItem
@@ -479,12 +479,12 @@ function IssueRow({
               void navigator.clipboard.writeText(url.toString());
             }}
           >
-            <Copy className="size-3.5" />
+            <Copy className="size-icon-sm" />
             Copy link
           </ContextMenuItem>
           {!readOnly && (
             <ContextMenuItem onSelect={() => onToggleCheck(row.reff, false)}>
-              <CheckSquare className="size-3.5" />
+              <CheckSquare className="size-icon-sm" />
               {checked ? "Remove from selection" : "Add to selection"}
             </ContextMenuItem>
           )}

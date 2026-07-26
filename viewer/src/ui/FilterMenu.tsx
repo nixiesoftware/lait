@@ -99,7 +99,7 @@ export function FilterMenu({
     <Popover.Root open={open} onOpenChange={onOpenChange}>
       <Popover.Trigger asChild>
         <IconButton label="Filter" chord="/" variant={active ? "active" : "ghost"}>
-          <ListFilter className="size-4" />
+          <ListFilter className="size-icon-md" />
         </IconButton>
       </Popover.Trigger>
       <PopoverContent
@@ -122,7 +122,7 @@ export function FilterMenu({
             {/* Text leads because it is the one filter with no menu to open —
                 you are already typing by the time the panel has settled. */}
             <div className="border-line flex items-center gap-2 border-b px-3 py-2">
-              <ListFilter className="text-mute size-3.5 shrink-0" aria-hidden />
+              <ListFilter className="text-mute size-icon-sm shrink-0" aria-hidden />
               <input
                 ref={input}
                 value={filter.text}
@@ -145,7 +145,7 @@ export function FilterMenu({
 
             <div className="flex flex-col p-1">
               <Row
-                icon={<UserRound className="size-3.5" />}
+                icon={<UserRound className="size-icon-sm" />}
                 label="Mine"
                 onClick={() => onChange({ ...filter, mine: !filter.mine })}
                 trailing={
@@ -181,7 +181,7 @@ export function FilterMenu({
               {members.length > 0 && (
                 <Facet
                   name="Assignee"
-                  icon={<UserRound className="size-3.5" />}
+                  icon={<UserRound className="size-icon-sm" />}
                   count={counts.assignees}
                   onOpen={() => setFacet("assignees")}
                 />
@@ -189,7 +189,7 @@ export function FilterMenu({
               {labels.length > 0 && (
                 <Facet
                   name="Label"
-                  icon={<Tag className="size-3.5" />}
+                  icon={<Tag className="size-icon-sm" />}
                   count={counts.label}
                   value={filter.label ?? undefined}
                   swatch={label ? catalogColor(label.color) : undefined}
@@ -216,7 +216,7 @@ export function FilterMenu({
           <div className="flex flex-col">
             <div className="border-line flex items-center gap-1 border-b px-2 py-1.5">
               <IconButton label="Back to filters" onClick={() => setFacet(null)}>
-                <ArrowLeft className="size-3.5" />
+                <ArrowLeft className="size-icon-sm" />
               </IconButton>
               <span className="text-fg text-sm font-medium">{FACET_NAME[facet]}</span>
               {counts[facet] > 0 && (
@@ -332,7 +332,7 @@ function Row({
       onClick={onClick}
       className="text-dim hover:bg-hover hover:text-fg flex h-8 w-full items-center gap-2 rounded-md px-2 text-left text-sm outline-none focus-visible:ring-accent/50 focus-visible:ring-1"
     >
-      <span className="text-mute flex size-4 shrink-0 items-center justify-center">{icon}</span>
+      <span className="text-mute flex size-icon-md shrink-0 items-center justify-center">{icon}</span>
       <span className="min-w-0 flex-1 truncate">{label}</span>
       {trailing}
     </button>
@@ -371,7 +371,7 @@ function Facet({
               <span className="truncate">{value ?? count}</span>
             </span>
           )}
-          <ChevronRight className="text-mute size-3 shrink-0" aria-hidden />
+          <ChevronRight className="text-mute size-icon-xs shrink-0" aria-hidden />
         </>
       }
     />
@@ -406,10 +406,10 @@ function Value({
       {swatch ? (
         <span className="size-2 shrink-0 rounded-full" style={{ background: swatch }} />
       ) : (
-        <span className="flex size-4 shrink-0 items-center justify-center">{icon}</span>
+        <span className="flex size-icon-md shrink-0 items-center justify-center">{icon}</span>
       )}
       <span className="min-w-0 flex-1 truncate">{label}</span>
-      {selected && <Check className="text-accent size-3.5 shrink-0" aria-hidden />}
+      {selected && <Check className="text-accent size-icon-sm shrink-0" aria-hidden />}
     </button>
   );
 }

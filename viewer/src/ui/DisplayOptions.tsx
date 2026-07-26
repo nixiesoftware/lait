@@ -49,7 +49,7 @@ export function DisplayOptions({
     <Popover.Root open={open} onOpenChange={onOpenChange}>
       <Popover.Trigger asChild>
         <IconButton label="Display options" chord="⇧V" variant={changed ? "active" : "ghost"}>
-          <SlidersHorizontal className="size-4" />
+          <SlidersHorizontal className="size-icon-md" />
         </IconButton>
       </Popover.Trigger>
       <PopoverContent align="end" className="flex w-64 flex-col gap-3 p-3">
@@ -74,7 +74,7 @@ export function DisplayOptions({
                     active ? "bg-raised text-fg" : "text-dim hover:text-fg",
                   )}
                 >
-                  <Glyph className="size-3.5" aria-hidden />
+                  <Glyph className="size-icon-sm" aria-hidden />
                   {ISSUE_MODE_LABEL[mode]}
                 </button>
               );

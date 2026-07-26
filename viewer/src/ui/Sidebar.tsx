@@ -156,7 +156,7 @@ export function Sidebar({
       <div className="flex min-h-0 flex-1 flex-col px-2 pb-2">
       {agent && (
         <div className="border-line bg-bg text-dim mx-1 mt-2 flex items-start gap-2 rounded border p-2 text-xs">
-          <Bot className="mt-0.5 size-3.5 shrink-0" />
+          <Bot className="mt-0.5 size-icon-sm shrink-0" />
           <span>
             Observing as <strong className="text-fg">{agent}</strong>. Writes are disabled.
           </span>
@@ -186,7 +186,7 @@ export function Sidebar({
         action={
           !agent && (
             <IconButton label="New project" onClick={onCreateProject}>
-              <Plus className="size-3" />
+              <Plus className="size-icon-xs" />
             </IconButton>
           )
         }
@@ -256,11 +256,11 @@ function SpaceSwitcher({
           aria-label="Space menu"
         >
           <span className="bg-active flex size-5 shrink-0 items-center justify-center rounded">
-            {selected?.identity.kind === "agent" ? <Bot className="text-mute size-3" /> : <Folder className="text-mute size-3" />}
+            {selected?.identity.kind === "agent" ? <Bot className="text-mute size-icon-xs" /> : <Folder className="text-mute size-icon-xs" />}
           </span>
           <strong className="min-w-0 flex-1 truncate text-left text-sm">{title}</strong>
           {selected && <StatusDot status={selected.status} />}
-          <ChevronDown className="text-mute size-3 shrink-0" aria-hidden />
+          <ChevronDown className="text-mute size-icon-xs shrink-0" aria-hidden />
         </DropdownMenu.Trigger>
         {/* Verbs first, replicas behind a submenu.
             This used to inline every local space and hang "Workspace settings"
@@ -272,20 +272,20 @@ function SpaceSwitcher({
         <DropdownMenu.Portal>
           <MenuContent align="start" className="min-w-56">
             <MenuItem onSelect={onOpenSettings}>
-              <Cog className="size-3.5" /> Workspace settings
+              <Cog className="size-icon-sm" /> Workspace settings
             </MenuItem>
             <MenuItem
               disabled={!selected}
               onSelect={() => selected && void navigator.clipboard.writeText(selected.space)}
             >
-              <Copy className="size-3.5" /> Copy space ID
+              <Copy className="size-icon-sm" /> Copy space ID
             </MenuItem>
             {spaces.length > 1 && (
               <>
                 <MenuSeparator />
                 <MenuSub>
                   <MenuSubTrigger>
-                    <ArrowLeftRight className="size-3.5" /> Switch space
+                    <ArrowLeftRight className="size-icon-sm" /> Switch space
                   </MenuSubTrigger>
                   <MenuSubContent>
                     {spaces.map((space) => (
@@ -294,7 +294,7 @@ function SpaceSwitcher({
                         onSelect={() => onPick(space.id)}
                         className={cn(space.id === current && "text-fg")}
                       >
-                        {space.identity.kind === "agent" ? <Bot className="size-3.5 shrink-0" /> : <Folder className="size-3.5 shrink-0" />}
+                        {space.identity.kind === "agent" ? <Bot className="size-icon-sm shrink-0" /> : <Folder className="size-icon-sm shrink-0" />}
                         <span className="min-w-0 flex-1 truncate">{space.name || space.space}</span>
                         {/* An agent replica is a different *identity* on the same
                             data, which is the only thing worth saying twice. */}
@@ -312,7 +312,7 @@ function SpaceSwitcher({
         </DropdownMenu.Portal>
       </DropdownMenu.Root>
       <IconButton label="Search issues" chord="Q" onClick={onSearch}>
-        <Search className="size-4" />
+        <Search className="size-icon-md" />
       </IconButton>
     </div>
   );
@@ -368,7 +368,7 @@ function ProjectRow({
           className="text-mute hover:text-fg flex size-5 shrink-0 items-center justify-center rounded outline-none"
         >
           <ChevronRight
-            className={cn("size-3 transition-transform", expanded && "rotate-90")}
+            className={cn("size-icon-xs transition-transform", expanded && "rotate-90")}
             aria-hidden
           />
         </button>
@@ -397,7 +397,7 @@ function ProjectRow({
           )}
           onClick={() => onToggleFavorite(project.key)}
         >
-          {favorited ? <StarOff className="size-3" /> : <Star className="size-3" />}
+          {favorited ? <StarOff className="size-icon-xs" /> : <Star className="size-icon-xs" />}
         </IconButton>
       </div>
       {expanded && (
@@ -458,7 +458,7 @@ function Section({
     <>
       {onToggle && (
         <ChevronRight
-          className={cn("size-3 shrink-0 transition-transform", open && "rotate-90")}
+          className={cn("size-icon-xs shrink-0 transition-transform", open && "rotate-90")}
           aria-hidden
         />
       )}
@@ -502,7 +502,7 @@ function NavItem({ icon, label, active, badge, compact, onClick }: { icon: React
         }),
       )}
     >
-      <span className="text-mute [&>svg]:size-3.5">{icon}</span>
+      <span className="text-mute [&>svg]:size-icon-sm">{icon}</span>
       <span className="min-w-0 flex-1 truncate">{label}</span>
       {!!badge && <Badge tone="accent" className="justify-center tabular-nums">{badge}</Badge>}
     </button>

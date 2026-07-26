@@ -47,9 +47,46 @@
   --color-medium: light-dark(#a16207, #facc15);
   --color-low: light-dark(#64748b, #94a3b8);
 
-  /* A 4px rhythm. `p-2` is 8px, `gap-3` is 12px — the scale the tracker's density
-     depends on; rows are tight and the spacing has to be predictable. */
+  /* ── Derivation ─────────────────────────────────────────────────────────
+     Every spatial axis below states where its values come from. Tailwind
+     gives us exactly two kinds, and the difference is mechanical:
+
+       SCALAR-DERIVED — numeric utilities (`p-2`, `gap-3`, `h-7`) compile to
+         `calc(var(--spacing) * n)`. They rescale with the unit, which makes
+         this the right kind for *rhythm*: padding, gaps, row heights.
+
+       PINNED — a named entry (`--spacing-icon-sm`) compiles to the literal
+         `var(--spacing-icon-sm)`. It never reads the unit. This is the right
+         kind for anything measured against something other than our own
+         rhythm.
+
+     Choosing the wrong kind is invisible until the density toggle moves —
+     which is exactly how icons ended up growing with padding. Full rationale
+     in `docs/plans/11-geometry-token-ladder.md`. */
+
+  /* SCALAR-DERIVED. A 4px rhythm. `p-2` is 8px, `gap-3` is 12px — the scale
+     the tracker's density depends on; rows are tight and the spacing has to
+     be predictable. */
   --spacing: 4px;
+
+  /* PINNED — glyph metrics, deliberately not `--spacing × n`.
+     A lucide icon is drawn on a fixed grid with a fixed stroke width, so its
+     size is a claim about optical weight *against text* — and text sits on
+     its own perceptual ladder below, not on the 4px rhythm. Scaling a glyph
+     with padding thickens its stroke relative to the label beside it, which
+     is why comfortable density used to fatten every icon in the app by 12.5%
+     as a side effect of loosening rows.
+     Sizes pair with the type scale, not with the spacing unit:
+       2xs 10 — inside a mark (checkbox tick, avatar fallback)
+       xs  12 — dense chrome beside `text-xs`
+       sm  14 — the default; beside `text-sm` / `text-base`
+       md  16 — standalone affordances (toolbar triggers)
+       lg  20 — empty states and page-level glyphs */
+  --spacing-icon-2xs: 10px;
+  --spacing-icon-xs: 12px;
+  --spacing-icon-sm: 14px;
+  --spacing-icon-md: 16px;
+  --spacing-icon-lg: 20px;
 
   /* Tailwind v4 generates `rounded-*` from named radius tokens. There is no
      `radius-DEFAULT` namespace entry, so the old 6px value never reached the

@@ -49,7 +49,7 @@ export function MyIssues({
   if (rows.length === 0) {
     return (
       <EmptyState
-        icon={<CircleDot className="size-5" />}
+        icon={<CircleDot className="size-icon-lg" />}
         title="No issues assigned to you"
         body="Issues assigned to you across every project will appear here."
       />

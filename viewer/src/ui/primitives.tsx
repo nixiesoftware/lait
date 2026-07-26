@@ -106,7 +106,7 @@ export function Button({ className, variant, size, loading, disabled, children, 
       aria-busy={loading || undefined}
       {...rest}
     >
-      {loading && <LoaderCircle className="size-3.5 animate-spin" aria-hidden />}
+      {loading && <LoaderCircle className="size-icon-sm animate-spin" aria-hidden />}
       {children}
     </button>
   );
@@ -305,7 +305,7 @@ const field = cva(
  * and needs the same slot; `layout` and `Picker` both already depend on this
  * module, and neither should depend on the other.
  */
-export const crumbGlyph = "flex size-4 shrink-0 items-center justify-center";
+export const crumbGlyph = "flex size-icon-md shrink-0 items-center justify-center";
 
 export const controlTrigger = cva(
   "inline-flex items-center gap-1.5 rounded-md text-sm outline-none transition-colors disabled:pointer-events-none disabled:opacity-45 data-[state=open]:bg-active",
@@ -607,13 +607,13 @@ export function Checkbox({
         // the largest mark on a list line — heavier than the status circle and
         // the priority bars either side of it — which put the most emphasis on
         // the one control that is only there when you are selecting.
-        "border-line-strong bg-bg text-accent-fg data-[state=checked]:bg-accent data-[state=checked]:border-accent data-[state=indeterminate]:bg-accent data-[state=indeterminate]:border-accent flex size-3.5 shrink-0 items-center justify-center rounded-sm border transition-colors disabled:opacity-50",
+        "border-line-strong bg-bg text-accent-fg data-[state=checked]:bg-accent data-[state=checked]:border-accent data-[state=indeterminate]:bg-accent data-[state=indeterminate]:border-accent flex size-icon-sm shrink-0 items-center justify-center rounded-sm border transition-colors disabled:opacity-50",
         className,
       )}
       {...props}
     >
       <CheckboxPrimitive.Indicator>
-        <Check className="size-2.5" strokeWidth={3} />
+        <Check className="size-icon-2xs" strokeWidth={3} />
       </CheckboxPrimitive.Indicator>
     </CheckboxPrimitive.Root>
   );
@@ -636,7 +636,7 @@ export function Switch({ className, ...props }: React.ComponentProps<typeof Swit
       )}
       {...props}
     >
-      <SwitchPrimitive.Thumb className="bg-fg data-[state=checked]:bg-accent-fg pointer-events-none block size-3 translate-x-0.5 rounded-full transition-transform data-[state=checked]:translate-x-[13px]" />
+      <SwitchPrimitive.Thumb className="bg-fg data-[state=checked]:bg-accent-fg pointer-events-none block size-icon-xs translate-x-0.5 rounded-full transition-transform data-[state=checked]:translate-x-[13px]" />
     </SwitchPrimitive.Root>
   );
 }

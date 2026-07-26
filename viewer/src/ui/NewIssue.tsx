@@ -207,7 +207,7 @@ export function NewIssue({
             <DropdownMenu.Root open={templateMenu} onOpenChange={setTemplateMenu}>
               <DropdownMenu.Trigger asChild>
                 <IconButton label="Templates" className="ml-auto">
-                  <LayoutTemplate className="size-4" />
+                  <LayoutTemplate className="size-icon-md" />
                 </IconButton>
               </DropdownMenu.Trigger>
               <DropdownMenu.Portal>
@@ -231,13 +231,13 @@ export function NewIssue({
                         className="mr-0.5"
                         onClick={() => setTemplates(removeTemplate(canonicalSpaceId, t.id))}
                       >
-                        <Trash2 className="size-3.5" />
+                        <Trash2 className="size-icon-sm" />
                       </IconButton>
                     </div>
                   ))}
                   <DropdownMenu.Separator className="bg-line my-1 h-px" />
                   <MenuItem onSelect={() => void saveAsTemplate()} disabled={!title.trim()}>
-                    <LayoutTemplate className="size-3.5" />
+                    <LayoutTemplate className="size-icon-sm" />
                     Save current as template…
                   </MenuItem>
                 </MenuContent>
@@ -245,7 +245,7 @@ export function NewIssue({
             </DropdownMenu.Root>
             <Dialog.Close asChild>
               <IconButton label="Close" chord="Esc">
-                <X className="size-4" />
+                <X className="size-icon-md" />
               </IconButton>
             </Dialog.Close>
           </header>

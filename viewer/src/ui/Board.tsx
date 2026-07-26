@@ -88,7 +88,7 @@ export function Board({
         body="Every issue in this project is hidden by the current filter."
         action={
           <Button variant="primary" onClick={onClearFilter}>
-            <FilterX className="size-3.5" /> Clear filter
+            <FilterX className="size-icon-sm" /> Clear filter
           </Button>
         }
         className="min-h-60"
@@ -460,7 +460,7 @@ function Column({
             onClick={() => setCollapsed((value) => !value)}
             aria-expanded={!collapsed}
           >
-            <ChevronRight className={`size-3 transition-transform ${collapsed ? "" : "rotate-90"}`} />
+            <ChevronRight className={`size-icon-xs transition-transform ${collapsed ? "" : "rotate-90"}`} />
           </IconButton>
         }
         // Collapsed, the column is a 40px rail: the chevron is the only thing
@@ -473,7 +473,7 @@ function Column({
               count: rows.length,
               meta: col.state.category === "done" ? (
                 <Info
-                  className="text-mute size-3.5"
+                  className="text-mute size-icon-sm"
                   role="img"
                   aria-label="Completed issues follow completion order. Move an issue here; its completion time determines its position."
                 />
@@ -485,20 +485,20 @@ function Column({
                       label={`New issue in ${col.state.name}`}
                       onClick={() => onCreate(col.state.id)}
                     >
-                      <Plus className="size-3.5" />
+                      <Plus className="size-icon-sm" />
                     </IconButton>
                   )}
                   <DropdownMenu.Root>
                     <DropdownMenu.Trigger asChild>
                       <IconButton label={`${col.state.name} column actions`}>
-                        <MoreHorizontal className="size-3.5" />
+                        <MoreHorizontal className="size-icon-sm" />
                       </IconButton>
                     </DropdownMenu.Trigger>
                     <DropdownMenu.Portal>
                       <MenuContent align="end">
                         {!readOnly && (
                           <MenuItem onSelect={() => onCreate(col.state.id)}>
-                            <Plus className="size-3.5" />
+                            <Plus className="size-icon-sm" />
                             New issue
                           </MenuItem>
                         )}
@@ -715,7 +715,7 @@ function Card({
                   onClick={(event) => event.stopPropagation()}
                   className="-mr-1 -mt-1 opacity-0 group-hover/card:opacity-100 focus-visible:opacity-100 data-[state=open]:opacity-100"
                 >
-                  <MoreHorizontal className="size-3.5" />
+                  <MoreHorizontal className="size-icon-sm" />
                 </IconButton>
               </DropdownMenu.Trigger>
               <DropdownMenu.Portal>
@@ -740,16 +740,16 @@ function Card({
                   ))}
                   <DropdownMenu.Separator className="bg-line my-1 h-px" />
                   <MenuItem onSelect={() => onSelect(row.reff)}>
-                    <ExternalLink className="size-3.5" /> Open issue
+                    <ExternalLink className="size-icon-sm" /> Open issue
                   </MenuItem>
                   <MenuItem onSelect={() => onEdit(row.reff, "priority")}>
-                    <Flag className="size-3.5" /> Set priority
+                    <Flag className="size-icon-sm" /> Set priority
                   </MenuItem>
                   <MenuItem onSelect={() => onEdit(row.reff, "assignee")}>
-                    <UserPlus className="size-3.5" /> Assign
+                    <UserPlus className="size-icon-sm" /> Assign
                   </MenuItem>
                   <MenuItem onSelect={() => onEdit(row.reff, "label")}>
-                    <Tags className="size-3.5" /> Add label
+                    <Tags className="size-icon-sm" /> Add label
                   </MenuItem>
                 </MenuContent>
               </DropdownMenu.Portal>
@@ -770,13 +770,13 @@ function Card({
             />
             {row.due_date != null && (
               <span className={`flex items-center gap-1 text-2xs ${DUE_TONE[dueTone(row.due_date)]}`}>
-                <CalendarClock className="size-3" />
+                <CalendarClock className="size-icon-xs" />
                 {dueLabel(row.due_date)}
               </span>
             )}
             {row.estimate != null && (
               <span className="text-mute flex items-center gap-1 text-2xs">
-                <Gauge className="size-3" />
+                <Gauge className="size-icon-xs" />
                 {row.estimate}
               </span>
             )}
@@ -787,7 +787,7 @@ function Card({
                 }`}
                 title={`${row.child_done} of ${row.child_total} sub-issues done`}
               >
-                <ListChecks className="size-3" />
+                <ListChecks className="size-icon-xs" />
                 {row.child_done}/{row.child_total}
               </span>
             )}

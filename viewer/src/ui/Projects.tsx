@@ -74,7 +74,7 @@ export function Projects({
     return (
       <ApplicationState
         kind="empty"
-        icon={<FolderKanban className="size-5" />}
+        icon={<FolderKanban className="size-icon-lg" />}
         title="No projects yet"
         body="Projects give issues a workflow, identity, and stable place in the space."
       />
@@ -115,11 +115,11 @@ export function Projects({
                     </span>
                   )}
                   <span className="text-mute font-mono text-xs">{project.key}</span>
-                  <ArrowRight className="text-mute size-3.5 transition-transform group-hover:translate-x-0.5" />
+                  <ArrowRight className="text-mute size-icon-sm transition-transform group-hover:translate-x-0.5" />
                 </span>
                 {unavailable ? (
                   <span className="text-warn mt-auto flex items-center gap-1.5 text-xs">
-                    <AlertTriangle className="size-3.5" /> Projection unavailable
+                    <AlertTriangle className="size-icon-sm" /> Projection unavailable
                   </span>
                 ) : (
                   <>

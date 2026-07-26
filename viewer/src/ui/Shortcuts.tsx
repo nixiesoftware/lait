@@ -39,7 +39,7 @@ export function Shortcuts({ ctx, onClose }: { ctx: Ctx; onClose: () => void }) {
         <header className="border-line flex items-center border-b px-4 py-3">
           <h2 className="flex-1 text-lg font-semibold">Keyboard shortcuts</h2>
           <IconButton label="Close" chord="Esc" onClick={onClose}>
-            <X className="size-4" />
+            <X className="size-icon-md" />
           </IconButton>
         </header>
 
