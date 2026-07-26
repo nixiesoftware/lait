@@ -36,7 +36,9 @@ use runtime::{
 };
 
 use crate::config::{acquire_daemon_lock, load_or_create_identity};
-use crate::control::{control_name, CatalogScope, Doorbell, Request, Response, StatusInfo};
+use crate::control::{
+    control_name, CatalogScope, DirtyProject, Doorbell, ProjectRef, Request, Response, StatusInfo,
+};
 use crate::ids::SystemUlidSource;
 use crate::orbital::{orbital_store_root, unsupported_store_at, OrbitalMechanics};
 use crate::transport::{Transport, TransportFactory};
@@ -1736,26 +1738,37 @@ impl OrbitalDaemon {
     /// `None` when there is no docked Session to read (an un-admitted joiner).
     fn ring_state(&self) -> Option<RingState> {
         let value = self.session_query_json(crate::world::contract::IssueQuery::RingDigest)?;
-        let mut docs = std::collections::HashMap::new();
-        for entry in value.get("docs")?.as_array()? {
-            let (Some(doc), Some(project)) = (
-                entry.get("doc").and_then(|d| d.as_str()),
-                entry.get("project").and_then(|p| p.as_str()),
-            ) else {
-                continue;
-            };
-            docs.insert(
-                crate::world::contract::issue_body_id(doc),
-                (doc.to_string(), project.to_string()),
-            );
-        }
-        let mut planes = std::collections::BTreeMap::new();
-        for entry in value.get("planes")?.as_array()? {
-            let Ok(plane) = serde_json::from_value::<PlaneDigest>(entry.clone()) else {
-                continue;
-            };
-            planes.insert(plane.scope, plane.digest);
-        }
+        // Typed, and all-or-nothing. A plane this daemon cannot decode used to
+        // be skipped one entry at a time, which turns a schema mismatch into a
+        // resource that silently never refreshes — the exact failure the whole
+        // dirty-set exists to prevent. Failing the decode instead drops us to
+        // the coarse path, which is visible and correct.
+        let view: crate::world::contract::RingDigestView = match serde_json::from_value(value) {
+            Ok(view) => view,
+            Err(e) => {
+                tracing::warn!(error = %e, "ring digest did not decode; ringing coarsely");
+                return None;
+            }
+        };
+        let docs = view
+            .docs
+            .into_iter()
+            .map(|d| {
+                let project = ProjectRef {
+                    project_id: d.project_id,
+                    project_key: d.project_key,
+                };
+                (
+                    crate::world::contract::issue_body_id(&d.doc),
+                    (d.doc, project),
+                )
+            })
+            .collect();
+        let planes = view
+            .planes
+            .into_iter()
+            .map(|p| (p.plane, p.digest))
+            .collect();
         Some(RingState { docs, planes })
     }
 
@@ -1782,10 +1795,7 @@ impl OrbitalDaemon {
     fn dirty_from_scopes(
         &self,
         scopes: &[replica::ids::BodyKey],
-    ) -> (
-        std::collections::HashMap<String, Vec<String>>,
-        Vec<CatalogScope>,
-    ) {
+    ) -> (Vec<DirtyProject>, Vec<CatalogScope>) {
         let catalog_body = crate::world::contract::catalog_body_id(self.station.space_id());
         let mut catalog_dirty = false;
         let mut docs: Vec<&replica::ids::BodyId> = Vec::new();
@@ -1927,21 +1937,18 @@ impl OrbitalDaemon {
     /// This is what makes the frame actionable — and a local commit and a
     /// peer's incorporated one arrive on the same stream, so both ring alike.
     fn frame_for(&self, record: &runtime::Observation) -> Doorbell {
-        let (dirty_by_project, mut dirty_catalog) = self.dirty_from_scopes(&record.scopes);
-        // Authority is its own record, carrying no scopes. `Acl` is the name
-        // every client already reads membership by.
-        if record.authority {
-            dirty_catalog.push(CatalogScope::Acl);
-        }
+        let (dirty_by_project, dirty_catalog) = self.dirty_from_scopes(&record.scopes);
+        let body_news = !dirty_by_project.is_empty() || !dirty_catalog.is_empty();
         Doorbell {
             epoch: record.epoch.as_u64(),
             seq: record.sequence,
             reset: record.reset,
             dirty_by_project,
             dirty_catalog,
-            // An authority record advances no feed: it is membership news, and
-            // `Activity` projects issue history.
-            activity_advanced: !record.authority,
+            authority_advanced: record.authority,
+            // Authority alone advances no feed: it is membership news, and
+            // `Activity` projects issue history. One record can carry both.
+            activity_advanced: body_news,
             presence_advanced: record.authority,
         }
     }
@@ -2019,31 +2026,21 @@ impl OrbitalDaemon {
     }
 }
 
-/// One catalog plane and the digest of its committed contents, as the World
-/// reports it. `scope` is the flattened [`CatalogScope`] tag, so the plane the
-/// daemon compares is the same value the client receives.
-#[derive(serde::Deserialize)]
-struct PlaneDigest {
-    #[serde(flatten)]
-    scope: CatalogScope,
-    digest: String,
-}
-
 /// One ring's committed state, read at a single pinned root.
 struct RingState {
-    /// `Body id -> (doc id, project KEY)`.
-    docs: std::collections::HashMap<replica::ids::BodyId, (String, String)>,
+    /// `Body id -> (doc id, the project that holds it)`.
+    docs: std::collections::HashMap<replica::ids::BodyId, (String, ProjectRef)>,
     /// Digest per catalog plane.
     planes: std::collections::BTreeMap<CatalogScope, String>,
 }
 
-/// Group observed issue Bodies by project KEY, reporting whether any of them was
+/// Group observed issue Bodies by project, reporting whether any of them was
 /// absent from the index — the caller turns that miss into a coarser frame.
 fn resolve_docs(
-    index: Option<&std::collections::HashMap<replica::ids::BodyId, (String, String)>>,
+    index: Option<&std::collections::HashMap<replica::ids::BodyId, (String, ProjectRef)>>,
     docs: &[&replica::ids::BodyId],
-) -> (std::collections::HashMap<String, Vec<String>>, bool) {
-    let mut by_project: std::collections::HashMap<String, Vec<String>> = Default::default();
+) -> (Vec<DirtyProject>, bool) {
+    let mut by_project: std::collections::BTreeMap<ProjectRef, Vec<String>> = Default::default();
     let mut missed = false;
     for body in docs {
         match index.and_then(|i| i.get(*body)) {
@@ -2054,7 +2051,15 @@ fn resolve_docs(
             None => missed = true,
         }
     }
-    (by_project, missed)
+    let dirty = by_project
+        .into_iter()
+        .map(|(project, docs)| DirtyProject {
+            project_id: project.project_id,
+            project_key: project.project_key,
+            docs,
+        })
+        .collect();
+    (dirty, missed)
 }
 
 static CLOCK: std::sync::OnceLock<SystemUlidSource> = std::sync::OnceLock::new();

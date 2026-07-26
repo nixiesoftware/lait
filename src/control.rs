@@ -8,7 +8,6 @@
 //! hand-maintained projection of durable state, never an automatic dump. `Ref`s
 //! and `who-ref`s arrive as plain strings and are resolved **daemon-side**.
 
-use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::{anyhow, Context, Result};
@@ -1543,10 +1542,20 @@ pub struct Doorbell {
     pub seq: u64,
     /// `true` means ignore the rest and rebaseline from a fresh snapshot.
     pub reset: bool,
-    /// Issue-row plane: which docs (by project) moved. Re-read these rows.
-    pub dirty_by_project: HashMap<String, Vec<String>>,
+    /// Issue-row plane: which docs moved, in which project. Re-read these rows.
+    /// A list rather than a map keyed by project, because a project is named by
+    /// a stable id AND a mutable key and neither alone is a safe map key.
+    pub dirty_by_project: Vec<DirtyProject>,
     /// Catalog-structure changes.
     pub dirty_catalog: Vec<CatalogScope>,
+    /// Membership, roles, devices or keys advanced.
+    ///
+    /// Its own flag, not a catalog scope: authority is not in the catalog Body,
+    /// it converges as signed authority records, and it can move with no Body
+    /// touched at all. Calling it a catalog plane was a convenient lie that made
+    /// the dirty-set describe the wrong thing.
+    #[serde(default)]
+    pub authority_advanced: bool,
     /// New feed rows exist; pull via `Activity{since}`. Rows are never streamed.
     pub activity_advanced: bool,
     /// New presence or join rows exist; pull via `Log{since}`. Rows are never
@@ -1559,48 +1568,9 @@ pub struct Doorbell {
     pub presence_advanced: bool,
 }
 
-/// Identifies which catalog structure became dirty.
-///
-/// One variant per plane of the catalog Body, because that Body holds every
-/// structure the space has and a client should re-read only the one that moved.
-/// The variants carrying `project` are planes the catalog groups by project, so
-/// editing one project's milestones leaves another's alone; `project` is the
-/// project KEY, which is how a client names a board.
-///
-/// `Acl` is the exception: membership is not in the catalog at all. It converges
-/// as authority material and rings from the authority plane.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(tag = "scope", rename_all = "snake_case")]
-pub enum CatalogScope {
-    /// The space's own name and description.
-    Space,
-    Projects,
-    Labels,
-    /// The workflow states and their revision log.
-    Workflow,
-    Acl,
-    Boards {
-        project: String,
-    },
-    Milestones {
-        project: String,
-    },
-    Cycles {
-        project: String,
-    },
-    /// The project status-update feed.
-    Updates {
-        project: String,
-    },
-    Initiatives,
-    Teams,
-    Triage,
-    Roles,
-    /// The row index: which docs exist, their aliases and seqs, what is deleted.
-    Docs,
-    /// Issue links and parentage.
-    Relations,
-}
+/// The catalog dirty-set vocabulary lives with the projections it describes —
+/// the World produces it, the control plane only carries it.
+pub use crate::dto::{CatalogScope, DirtyProject, ProjectRef};
 
 /// A presence or transport log entry kept in the daemon's ring buffer.
 #[derive(Debug, Clone, Serialize, Deserialize)]

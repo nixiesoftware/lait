@@ -57,6 +57,16 @@ fn req(rt: &tokio::runtime::Runtime, home: &Path, r: Request) -> Response {
         .unwrap_or_else(|e| Response::err(format!("{e:#}")))
 }
 
+/// The docs a frame names under a project KEY, in frame order.
+fn named_docs(frame: &lait::control::Doorbell, key: &str) -> Vec<String> {
+    frame
+        .dirty_by_project
+        .iter()
+        .filter(|d| d.project_key == key)
+        .flat_map(|d| d.docs.clone())
+        .collect()
+}
+
 fn poll_until<T>(timeout: Duration, mut check: impl FnMut() -> Option<T>) -> Option<T> {
     let start = Instant::now();
     loop {
@@ -272,10 +282,11 @@ fn doorbell_names_the_dirty_project_and_doc() {
             .await
             .expect("read edit doorbell")
             .expect("edit doorbell present");
+        let named = named_docs(&ring, "ENG");
         assert_eq!(
-            ring.dirty_by_project.get("ENG").map(Vec::as_slice),
-            Some([doc.clone()].as_slice()),
-            "the edit doorbell must name the edited doc under its project KEY, got {ring:?}"
+            named,
+            vec![doc.clone()],
+            "the edit doorbell must name the edited doc under its project, got {ring:?}"
         );
         assert!(
             ring.dirty_catalog.is_empty(),
@@ -309,10 +320,7 @@ fn doorbell_names_the_dirty_project_and_doc() {
             .await
             .expect("read create doorbell")
             .expect("create doorbell present");
-        let named = ring
-            .dirty_by_project
-            .get("ENG")
-            .expect("the create names its project");
+        let named = named_docs(&ring, "ENG");
         assert!(
             named.len() == 1 && named[0] != doc,
             "the create must name the NEW doc ({created}), got {ring:?}"
@@ -325,15 +333,27 @@ fn doorbell_names_the_dirty_project_and_doc() {
             "a create moves the row index, got {ring:?}"
         );
         assert!(
-            ring.dirty_catalog.contains(&CatalogScope::Boards {
-                project: "ENG".into()
-            }),
+            ring.dirty_catalog.iter().any(
+                |s| matches!(s, CatalogScope::Boards { project_key, .. } if project_key == "ENG")
+            ),
             "a create puts the row on ENG's board, got {ring:?}"
+        );
+        // A project is named by its stable id as well as its display key, so a
+        // dependency can match on something a rename cannot move.
+        assert!(
+            ring.dirty_catalog.iter().any(|s| matches!(
+                s,
+                CatalogScope::Boards { project_id, .. } if project_id.starts_with("prj_")
+            )),
+            "the board plane must carry the project's stable id, got {ring:?}"
+        );
+        assert!(
+            !ring.authority_advanced,
+            "a create moves no membership, got {ring:?}"
         );
         for untouched in [
             CatalogScope::Labels,
             CatalogScope::Workflow,
-            CatalogScope::Acl,
             CatalogScope::Teams,
         ] {
             assert!(

@@ -21,7 +21,7 @@ use runtime::{
     WorldQuery,
 };
 
-use crate::dto::{ActivityEvent, FieldChange, Priority, StatusCategory};
+use crate::dto::{ActivityEvent, CatalogScope, FieldChange, Priority, StatusCategory};
 use crate::ids::{ActorId, DocId};
 
 use super::contract::{
@@ -3181,39 +3181,37 @@ fn graph_view(
 /// equal state always digests equal. A plane absent from the map digests as its
 /// empty form rather than being omitted — "emptied" has to be distinguishable
 /// from "unchanged".
-fn ring_digest(catalog: &CatalogState) -> serde_json::Value {
-    let mut planes: Vec<serde_json::Value> = Vec::new();
-    let mut plane = |scope: &str, project: Option<&str>, value: serde_json::Value| {
+fn ring_digest(catalog: &CatalogState) -> contract::RingDigestView {
+    let mut planes: Vec<contract::PlaneDigest> = Vec::new();
+    let mut plane = |plane: CatalogScope, value: serde_json::Value| {
         let bytes = serde_json::to_vec(&value).expect("plane json");
-        let digest = blake3::hash(&bytes).to_hex().to_string();
-        let mut entry = serde_json::json!({ "scope": scope, "digest": digest });
-        if let Some(project) = project {
-            entry["project"] = serde_json::json!(project);
-        }
-        planes.push(entry);
+        planes.push(contract::PlaneDigest {
+            plane,
+            digest: blake3::hash(&bytes).to_hex().to_string(),
+        });
     };
 
     plane(
-        "space",
-        None,
+        CatalogScope::Space,
         serde_json::json!([&catalog.name, &catalog.description]),
     );
-    plane("projects", None, serde_json::json!(&catalog.projects));
-    plane("labels", None, serde_json::json!(&catalog.labels));
+    plane(CatalogScope::Projects, serde_json::json!(&catalog.projects));
+    plane(CatalogScope::Labels, serde_json::json!(&catalog.labels));
     plane(
-        "workflow",
-        None,
+        CatalogScope::Workflow,
         serde_json::json!([
             serde_json::json!(&catalog.workflow),
             serde_json::json!(&catalog.workflow_revisions)
         ]),
     );
-    plane("initiatives", None, serde_json::json!(&catalog.initiatives));
-    plane("teams", None, serde_json::json!(&catalog.teams));
-    plane("triage", None, serde_json::json!(&catalog.triage));
     plane(
-        "roles",
-        None,
+        CatalogScope::Initiatives,
+        serde_json::json!(&catalog.initiatives),
+    );
+    plane(CatalogScope::Teams, serde_json::json!(&catalog.teams));
+    plane(CatalogScope::Triage, serde_json::json!(&catalog.triage));
+    plane(
+        CatalogScope::Roles,
         serde_json::json!([
             serde_json::json!(&catalog.roles),
             serde_json::json!(&catalog.role_revisions)
@@ -3221,8 +3219,7 @@ fn ring_digest(catalog: &CatalogState) -> serde_json::Value {
     );
     // The row index: which docs exist, what they are numbered, what is deleted.
     plane(
-        "docs",
-        None,
+        CatalogScope::Docs,
         serde_json::json!([
             serde_json::json!(&catalog.aliases),
             serde_json::json!(&catalog.seqs),
@@ -3230,46 +3227,54 @@ fn ring_digest(catalog: &CatalogState) -> serde_json::Value {
         ]),
     );
     plane(
-        "relations",
-        None,
+        CatalogScope::Relations,
         serde_json::json!([
             serde_json::json!(&catalog.edges),
             serde_json::json!(&catalog.parents)
         ]),
     );
 
-    // Per-project planes. Keyed by project KEY, which is how a client names a
-    // board — the `prj_` id is the catalog's business, not the doorbell's.
+    // Per-project planes, and the doc index, from the same pinned catalog: one
+    // pass, one root. Each names the project by its stable id AND its display
+    // key — a dependency matches on the id, which a rename cannot move.
+    let mut docs: Vec<contract::RingDoc> = Vec::new();
     for (id, meta) in &catalog.projects {
-        let key = meta.key.as_str();
+        let (project_id, project_key) = (id.clone(), meta.key.clone());
         plane(
-            "boards",
-            Some(key),
+            CatalogScope::Boards {
+                project_id: project_id.clone(),
+                project_key: project_key.clone(),
+            },
             serde_json::json!(catalog.boards.get(id)),
         );
         plane(
-            "milestones",
-            Some(key),
+            CatalogScope::Milestones {
+                project_id: project_id.clone(),
+                project_key: project_key.clone(),
+            },
             serde_json::json!(catalog.milestones.get(id)),
         );
         plane(
-            "cycles",
-            Some(key),
+            CatalogScope::Cycles {
+                project_id: project_id.clone(),
+                project_key: project_key.clone(),
+            },
             serde_json::json!(catalog.cycles.get(id)),
         );
         plane(
-            "updates",
-            Some(key),
+            CatalogScope::Updates {
+                project_id: project_id.clone(),
+                project_key: project_key.clone(),
+            },
             serde_json::json!(catalog.project_updates.get(id)),
         );
-    }
-
-    // The doc index, from the same pinned catalog: one pass, one root.
-    let mut docs: Vec<serde_json::Value> = Vec::new();
-    for (id, meta) in &catalog.projects {
         for (_element, doc) in catalog.boards.get(id).into_iter().flatten() {
-            docs.push(serde_json::json!({ "doc": doc, "project": meta.key }));
+            docs.push(contract::RingDoc {
+                doc: doc.clone(),
+                project_id: project_id.clone(),
+                project_key: project_key.clone(),
+            });
         }
     }
-    serde_json::json!({ "planes": planes, "docs": docs })
+    contract::RingDigestView { planes, docs }
 }
