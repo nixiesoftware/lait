@@ -62,9 +62,19 @@ pub struct Observation {
     /// Set on first observation, restart, cursor overrun, migration, or lost
     /// continuity — the consumer must rebaseline.
     pub reset: bool,
-    pub world: WorldId,
+    /// The World the scopes belong to, or `None` when the record is **space-
+    /// wide** — which authority is. The Contact driver that incorporates
+    /// authority is space-scoped and holds no World id, because authority does
+    /// not belong to one.
+    pub world: Option<WorldId>,
     pub scopes: Vec<BodyKey>,
     pub frontier: ReplicaFrontier,
+    /// The Space's **authority** advanced (membership, roles, devices, keys).
+    ///
+    /// A plane of its own because authority is not a Body: it converges through
+    /// signed authority records, so it moves without any scope and without the
+    /// Body frontier changing. A record may carry this alone.
+    pub authority: bool,
 }
 
 /// The result of a durable [`Session::submit`]: the application-defined effect
@@ -147,6 +157,23 @@ impl Broadcaster {
     /// the activation epoch; the ring discards its oldest record past
     /// capacity (slow consumers rebaseline, memory never grows unbounded).
     pub(crate) fn publish(&self, world: WorldId, scopes: Vec<BodyKey>, frontier: ReplicaFrontier) {
+        self.publish_record(Some(world), scopes, frontier, false)
+    }
+
+    /// Publish a record whose news is that **authority** advanced. Space-wide,
+    /// so it names no World; carries no scopes, because authority is not a Body;
+    /// and republishes the Body frontier unchanged, because it did not move it.
+    pub(crate) fn publish_authority(&self, frontier: ReplicaFrontier) {
+        self.publish_record(None, Vec::new(), frontier, true)
+    }
+
+    fn publish_record(
+        &self,
+        world: Option<WorldId>,
+        scopes: Vec<BodyKey>,
+        frontier: ReplicaFrontier,
+        authority: bool,
+    ) {
         let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         if state.closed {
             return;
@@ -161,6 +188,7 @@ impl Broadcaster {
             world,
             scopes,
             frontier,
+            authority,
         };
         if state.ring.len() == state.capacity {
             state.ring.pop_front();
@@ -215,9 +243,13 @@ impl ObservationStream {
             epoch: self.broadcaster.epoch,
             sequence: state.next_seq - 1,
             reset: true,
-            world: self.world.clone(),
+            world: Some(self.world.clone()),
             scopes: Vec::new(),
             frontier: state.last_frontier,
+            // A reset says "trust nothing", which subsumes every plane; flagging
+            // authority as well would only invite a consumer to treat the two as
+            // separable when rebaselining.
+            authority: false,
         }
     }
 
@@ -880,6 +912,28 @@ impl Session {
             world: self.world_id.clone(),
             position,
         }
+    }
+
+    /// Announce that the Space's **authority** advanced, so subscribers hear it.
+    ///
+    /// Runtime does not own authority — mechanics does, and a local membership,
+    /// role, device or key change never passes through [`Self::submit`]. The
+    /// composition root is the only thing holding both, so it is the only thing
+    /// that can say this happened. Remote authority arriving over Contact is
+    /// published by the driver itself; this is the local half of the same plane.
+    ///
+    /// Idempotent in effect, not in sequence: each call is one record. Call it
+    /// after the authority write is durable, never before — the ordering rule
+    /// every publication here obeys.
+    pub fn publish_authority_advanced(&self) {
+        let frontier = {
+            let inner = self.core.lock();
+            if inner.closed {
+                return;
+            }
+            inner.replica.frontier()
+        };
+        self.core.broadcaster.publish_authority(frontier);
     }
 
     /// Close this Session, consuming it. Never affects the Station.

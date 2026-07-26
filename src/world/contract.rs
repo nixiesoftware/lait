@@ -904,6 +904,15 @@ pub enum IssueQuery {
         doc: String,
         id: String,
     },
+    /// Everything the doorbell needs to describe one ring, read at ONE pinned
+    /// snapshot: a digest per catalog plane, and the doc→project index.
+    ///
+    /// The World answers this because the World owns the catalog's schema — it
+    /// is the only thing that knows a "milestone" is a plane and which project
+    /// it belongs to. The daemon compares digests between rings and never learns
+    /// what any of them mean. Both halves come from one query so they cannot
+    /// describe two different roots.
+    RingDigest,
 }
 
 impl IssueQuery {

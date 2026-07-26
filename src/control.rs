@@ -1560,14 +1560,46 @@ pub struct Doorbell {
 }
 
 /// Identifies which catalog structure became dirty.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// One variant per plane of the catalog Body, because that Body holds every
+/// structure the space has and a client should re-read only the one that moved.
+/// The variants carrying `project` are planes the catalog groups by project, so
+/// editing one project's milestones leaves another's alone; `project` is the
+/// project KEY, which is how a client names a board.
+///
+/// `Acl` is the exception: membership is not in the catalog at all. It converges
+/// as authority material and rings from the authority plane.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(tag = "scope", rename_all = "snake_case")]
 pub enum CatalogScope {
+    /// The space's own name and description.
+    Space,
     Projects,
     Labels,
+    /// The workflow states and their revision log.
     Workflow,
     Acl,
-    Boards { project: String },
+    Boards {
+        project: String,
+    },
+    Milestones {
+        project: String,
+    },
+    Cycles {
+        project: String,
+    },
+    /// The project status-update feed.
+    Updates {
+        project: String,
+    },
+    Initiatives,
+    Teams,
+    Triage,
+    Roles,
+    /// The row index: which docs exist, their aliases and seqs, what is deleted.
+    Docs,
+    /// Issue links and parentage.
+    Relations,
 }
 
 /// A presence or transport log entry kept in the daemon's ring buffer.

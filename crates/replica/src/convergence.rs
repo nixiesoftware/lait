@@ -44,6 +44,14 @@ pub struct ConvergenceOutcome {
     /// The Body keys this pass changed (accepted or opaquely retained) — the
     /// Observation scopes for remote convergence.
     pub scopes: Vec<crate::ids::BodyKey>,
+    /// Whether the **authority** frontier advanced in this pass.
+    ///
+    /// Reported separately because authority is not a Body: it converges through
+    /// the staged authority records, so an authority-only exchange carries no
+    /// units and leaves [`Self::advanced`] false. A consumer that watched only
+    /// the Body frontier would see a peer's admission arrive as data and never
+    /// as news.
+    pub authority_advanced: bool,
 }
 
 impl ConvergenceOutcome {
@@ -58,6 +66,7 @@ impl ConvergenceOutcome {
             unsupported_retained: 0,
             retryable: 0,
             scopes: Vec::new(),
+            authority_advanced: false,
         }
     }
 

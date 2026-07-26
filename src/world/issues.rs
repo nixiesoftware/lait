@@ -2739,6 +2739,9 @@ impl World for IssuesWorld {
                 entries.truncate(500);
                 Ok(projection(serde_json::to_vec(&entries).expect("inbox")))
             }
+            IssueQuery::RingDigest => Ok(projection(
+                serde_json::to_vec(&ring_digest(catalog)).expect("ring digest json"),
+            )),
             IssueQuery::Projects => {
                 let projects: Vec<crate::dto::ProjectDto> = catalog
                     .projects
@@ -3163,4 +3166,110 @@ fn graph_view(
         links,
         blocked_by,
     }
+}
+
+/// The doorbell's view of one committed state: a digest per catalog plane, plus
+/// the doc→project index the dirty-set is keyed by.
+///
+/// The plane taxonomy lives here because the catalog's schema does. Every plane
+/// is a distinct region of `CatalogState`, and the ones whose data is grouped by
+/// project get one digest *per project* — so editing ENG's milestones does not
+/// invalidate DSN's. The daemon compares these between rings; it never decodes
+/// them, and it learns nothing about what a milestone is.
+///
+/// Digest inputs are `BTreeMap`/`BTreeSet` serializations, which are ordered, so
+/// equal state always digests equal. A plane absent from the map digests as its
+/// empty form rather than being omitted — "emptied" has to be distinguishable
+/// from "unchanged".
+fn ring_digest(catalog: &CatalogState) -> serde_json::Value {
+    let mut planes: Vec<serde_json::Value> = Vec::new();
+    let mut plane = |scope: &str, project: Option<&str>, value: serde_json::Value| {
+        let bytes = serde_json::to_vec(&value).expect("plane json");
+        let digest = blake3::hash(&bytes).to_hex().to_string();
+        let mut entry = serde_json::json!({ "scope": scope, "digest": digest });
+        if let Some(project) = project {
+            entry["project"] = serde_json::json!(project);
+        }
+        planes.push(entry);
+    };
+
+    plane(
+        "space",
+        None,
+        serde_json::json!([&catalog.name, &catalog.description]),
+    );
+    plane("projects", None, serde_json::json!(&catalog.projects));
+    plane("labels", None, serde_json::json!(&catalog.labels));
+    plane(
+        "workflow",
+        None,
+        serde_json::json!([
+            serde_json::json!(&catalog.workflow),
+            serde_json::json!(&catalog.workflow_revisions)
+        ]),
+    );
+    plane("initiatives", None, serde_json::json!(&catalog.initiatives));
+    plane("teams", None, serde_json::json!(&catalog.teams));
+    plane("triage", None, serde_json::json!(&catalog.triage));
+    plane(
+        "roles",
+        None,
+        serde_json::json!([
+            serde_json::json!(&catalog.roles),
+            serde_json::json!(&catalog.role_revisions)
+        ]),
+    );
+    // The row index: which docs exist, what they are numbered, what is deleted.
+    plane(
+        "docs",
+        None,
+        serde_json::json!([
+            serde_json::json!(&catalog.aliases),
+            serde_json::json!(&catalog.seqs),
+            serde_json::json!(&catalog.tombstones)
+        ]),
+    );
+    plane(
+        "relations",
+        None,
+        serde_json::json!([
+            serde_json::json!(&catalog.edges),
+            serde_json::json!(&catalog.parents)
+        ]),
+    );
+
+    // Per-project planes. Keyed by project KEY, which is how a client names a
+    // board — the `prj_` id is the catalog's business, not the doorbell's.
+    for (id, meta) in &catalog.projects {
+        let key = meta.key.as_str();
+        plane(
+            "boards",
+            Some(key),
+            serde_json::json!(catalog.boards.get(id)),
+        );
+        plane(
+            "milestones",
+            Some(key),
+            serde_json::json!(catalog.milestones.get(id)),
+        );
+        plane(
+            "cycles",
+            Some(key),
+            serde_json::json!(catalog.cycles.get(id)),
+        );
+        plane(
+            "updates",
+            Some(key),
+            serde_json::json!(catalog.project_updates.get(id)),
+        );
+    }
+
+    // The doc index, from the same pinned catalog: one pass, one root.
+    let mut docs: Vec<serde_json::Value> = Vec::new();
+    for (id, meta) in &catalog.projects {
+        for (_element, doc) in catalog.boards.get(id).into_iter().flatten() {
+            docs.push(serde_json::json!({ "doc": doc, "project": meta.key }));
+        }
+    }
+    serde_json::json!({ "planes": planes, "docs": docs })
 }

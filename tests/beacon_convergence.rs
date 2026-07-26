@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use async_trait::async_trait;
-use lait::control::{request, Request, Response};
+use lait::control::{request, subscribe, CatalogScope, Request, Response};
 use lait::net::Network;
 use lait::orbital::run_orbital_daemon_with;
 use lait::transport::mem::MemNet;
@@ -282,6 +282,249 @@ fn a_fresh_write_converges_with_no_rejoin_and_presence_surfaces_agree() {
     let _ = founder_handle.join();
     let _ = std::fs::remove_dir_all(&founder_home);
     let _ = std::fs::remove_dir_all(&member_home);
+}
+
+/// Converging is only half of steady state: a watching client has to be *told*
+/// what moved, or it sits on a stale board next to a replica that is already
+/// right.
+///
+/// A peer's incorporated change publishes an Observation on the same stream a
+/// local commit does, so the member's doorbell must name the founder's doc under
+/// its project KEY — the same frame a local edit would ring. This is the shape
+/// the viewer re-reads by; a frame that merely says "something happened" leaves
+/// every board on screen untouched until something else forces a rebaseline.
+#[test]
+fn a_peers_change_rings_a_doorbell_that_names_what_moved() {
+    let net = MemNet::new();
+    let founder_home = temp_home("ring-f");
+    lait::orbital::form_space(&founder_home, &FOUNDER_SEED, "Beacon Space").unwrap();
+    let founder_handle = spawn_daemon(founder_home.clone(), FOUNDER_SEED, net.clone());
+    let client = tokio::runtime::Runtime::new().unwrap();
+    wait_online(&client, &founder_home);
+
+    let member_home = temp_home("ring-m");
+    admit(&client, &member_home, &MEMBER_A_SEED, &founder_home);
+    let member_handle = spawn_daemon(member_home.clone(), MEMBER_A_SEED, net.clone());
+    wait_online(&client, &member_home);
+    let founder_device = lait::crypto::device_from_seed(&FOUNDER_SEED).to_string();
+    drive_admission(&client, &member_home, &founder_device);
+
+    req(
+        &client,
+        &founder_home,
+        Request::ProjectNew {
+            name: "Beacon".into(),
+            key: "bcn".into(),
+            color: None,
+        },
+    );
+    req(
+        &client,
+        &founder_home,
+        Request::IssueNew {
+            due: None,
+            estimate: None,
+            title: "before".into(),
+            project: Some("bcn".into()),
+            project_hint: None,
+            assignees: vec![],
+            priority: None,
+            labels: vec![],
+            body: None,
+        },
+    );
+    // Wait for the issue itself to land, so the frame under test is the *edit*
+    // rather than the arrival of a doc the member had never seen.
+    let doc = poll_until(Duration::from_secs(15), || {
+        match req(
+            &client,
+            &member_home,
+            Request::List {
+                project: None,
+                filter: Default::default(),
+            },
+        ) {
+            Response::List { rows } => rows.first().map(|r| r.doc_id.as_str().to_string()),
+            _ => None,
+        }
+    })
+    .expect("the founder's issue never reached the member");
+
+    client.block_on(async {
+        let mut sub = subscribe(&member_home, 0)
+            .await
+            .expect("open the member's subscribe stream");
+        let first = sub
+            .next()
+            .await
+            .expect("read first frame")
+            .expect("first frame present");
+        assert!(first.reset, "first Subscribe frame must be a Reset");
+
+        // The founder edits. Nothing is issued at the member from here on: the
+        // change arrives through the plane, and the doorbell is the only news.
+        request(
+            &founder_home,
+            &Request::IssueEdit {
+                due: None,
+                estimate: None,
+                reff: "BCN-1".into(),
+                title: Some("after".into()),
+                status: None,
+                priority: None,
+                description: None,
+            },
+        )
+        .await
+        .expect("issue edit at the founder");
+
+        // Incorporation may ring more than once (authority material converges
+        // alongside the doc), so read until a frame names the doc rather than
+        // demanding it be the first one.
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let named = loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break None;
+            }
+            match tokio::time::timeout(remaining, sub.next()).await {
+                Ok(Ok(Some(frame))) => {
+                    if frame
+                        .dirty_by_project
+                        .get("BCN")
+                        .is_some_and(|d| d.contains(&doc))
+                    {
+                        break Some(frame);
+                    }
+                }
+                _ => break None,
+            }
+        };
+        assert!(
+            named.is_some(),
+            "the member converged but no doorbell named {doc} under BCN — a watching \
+             client has no way to know the board moved"
+        );
+
+        let _ = request(&member_home, &Request::Stop).await;
+        let _ = request(&founder_home, &Request::Stop).await;
+    });
+
+    let _ = member_handle.join();
+    let _ = founder_handle.join();
+    let _ = std::fs::remove_dir_all(&founder_home);
+    let _ = std::fs::remove_dir_all(&member_home);
+}
+
+/// Membership news must ring, not merely arrive.
+///
+/// `acl` is not a catalog path: membership lives in mechanics authority
+/// material, which converges through `staged.authority_records` rather than
+/// through Bodies. An authority-only exchange returns `units: Vec::new()`, so
+/// `incorporate_units` reports `ConvergenceOutcome::unchanged`, `advanced()` is
+/// false, and `contact_driver` never publishes an Observation — which would mean
+/// a peer's admission reaches every other node as *data* and never as *news*.
+///
+/// A already knows the plane works (`surviving_members_converge_…` proves the
+/// list converges). This pins the half that proof does not cover: that a client
+/// watching A is told.
+#[test]
+fn a_peers_admission_rings_a_doorbell_at_the_other_members() {
+    let net = MemNet::new();
+    let founder_home = temp_home("acl-f");
+    lait::orbital::form_space(&founder_home, &FOUNDER_SEED, "ACL Space").unwrap();
+    let founder_handle = spawn_daemon(founder_home.clone(), FOUNDER_SEED, net.clone());
+    let client = tokio::runtime::Runtime::new().unwrap();
+    wait_online(&client, &founder_home);
+    let founder_device = lait::crypto::device_from_seed(&FOUNDER_SEED).to_string();
+
+    let a_home = temp_home("acl-a");
+    admit(&client, &a_home, &MEMBER_A_SEED, &founder_home);
+    let a_handle = spawn_daemon(a_home.clone(), MEMBER_A_SEED, net.clone());
+    wait_online(&client, &a_home);
+    drive_admission(&client, &a_home, &founder_device);
+
+    // A is watched from here on, from its own thread: everything after this
+    // point is news A must be *told*, not news A could discover by asking.
+    let frames: Arc<std::sync::Mutex<Vec<lait::control::Doorbell>>> = Default::default();
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel::<()>();
+    let watcher = {
+        let (frames, stop, home) = (frames.clone(), stop.clone(), a_home.clone());
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async move {
+                let mut sub = subscribe(&home, 0)
+                    .await
+                    .expect("open A's subscribe stream");
+                let first = sub.next().await.expect("read").expect("present");
+                assert!(first.reset, "first Subscribe frame must be a Reset");
+                ready_tx.send(()).expect("hand back the baton");
+                while !stop.load(Ordering::SeqCst) {
+                    match tokio::time::timeout(Duration::from_millis(250), sub.next()).await {
+                        Ok(Ok(Some(frame))) => frames.lock().expect("frames").push(frame),
+                        Ok(_) => break,     // stream closed
+                        Err(_) => continue, // idle window
+                    }
+                }
+            });
+        })
+    };
+    ready_rx
+        .recv()
+        .expect("watcher subscribed and drained its Reset");
+
+    let b_home = temp_home("acl-b");
+    admit(&client, &b_home, &MEMBER_B_SEED, &founder_home);
+    let b_handle = spawn_daemon(b_home.clone(), MEMBER_B_SEED, net.clone());
+    wait_online(&client, &b_home);
+    drive_admission(&client, &b_home, &founder_device);
+
+    // Did the membership itself converge to A?
+    let converged = poll_until(Duration::from_secs(15), || {
+        match req(&client, &a_home, Request::Members) {
+            Response::Members { members } if members.len() >= 3 => Some(members.len()),
+            _ => None,
+        }
+    });
+    // A grace window so a late ring counts as a ring.
+    std::thread::sleep(Duration::from_secs(2));
+    stop.store(true, Ordering::SeqCst);
+    let _ = watcher.join();
+    let rang = frames.lock().expect("frames").clone();
+
+    let _ = req(&client, &b_home, Request::Stop);
+    let _ = b_handle.join();
+    let _ = std::fs::remove_dir_all(&b_home);
+
+    let _ = req(&client, &a_home, Request::Stop);
+    let _ = req(&client, &founder_home, Request::Stop);
+    let _ = a_handle.join();
+    let _ = founder_handle.join();
+    let _ = std::fs::remove_dir_all(&founder_home);
+    let _ = std::fs::remove_dir_all(&a_home);
+
+    assert!(
+        converged.is_some(),
+        "A never learned B's admission at all — a different bug than the one under test"
+    );
+    assert!(
+        !rang.is_empty(),
+        "A's membership converged ({converged:?} members) but nothing rang: a client \
+         watching A has no way to learn a peer joined. Authority material converges \
+         outside the Body plane, so it publishes no Observation."
+    );
+    // And it must ring as *membership*, not as some incidental Body frame that
+    // happened to arrive in the same window — otherwise this passes for the
+    // wrong reason the moment anything else converges alongside.
+    assert!(
+        rang.iter().any(|f| f
+            .dirty_catalog
+            .iter()
+            .any(|s| matches!(s, CatalogScope::Acl))),
+        "something rang at A but no frame named the ACL plane, so a client would \
+         re-read everything except the membership that actually changed: {rang:?}"
+    );
 }
 
 #[test]

@@ -89,6 +89,60 @@ describe("ProjectViewerStore", () => {
     unsubscribe();
   });
 
+  it("refreshes catalog-derived resources on a ring that names no doc", async () => {
+    // The case the old switch missed. A milestone write touches the catalog and
+    // no issue body, so the frame carries catalog planes with an EMPTY
+    // `dirty_by_project` — and milestones used to be invalidated only when some
+    // issue doc was dirty, so the list it belongs to never refreshed.
+    let milestones = [{ id: "ms_1", project_id: "prj_1", name: "v1", tombstone: false, total: 0, done: 0 }];
+    const rpc = vi.fn(async (_space: string, request: { cmd: string }) => {
+      if (request.cmd === "board") return board as Response;
+      if (request.cmd === "milestone_list") return { kind: "milestones", milestones } as Response;
+      return { kind: "ok", message: null } as Response;
+    });
+    const store = new ProjectViewerStore(rpc);
+    await store.ensureBoard("local", "ONE");
+    await store.ensureMilestones("local", "prj_1");
+    const key = projectKeys.milestones("local", "prj_1");
+    const unsubscribe = store.resources.subscribe(key, () => undefined);
+
+    milestones = [...milestones, { id: "ms_2", project_id: "prj_1", name: "v2", tombstone: false, total: 0, done: 0 }];
+    await store.handleDoorbell({
+      space: "local", epoch: 1, seq: 1, reset: false,
+      dirty_by_project: {}, dirty_catalog: [{ scope: "milestones", project: "ONE" }],
+      activity_advanced: false, presence_advanced: false,
+    });
+
+    expect(store.resources.read(key).data).toHaveLength(2);
+    unsubscribe();
+  });
+
+  it("leaves resources alone that the dirty plane does not reach", async () => {
+    // The other half of precision, and the half a coarse ring cannot give you:
+    // a milestone edit must not drag the label registry along behind it.
+    const rpc = vi.fn(async (_space: string, request: { cmd: string }) => {
+      if (request.cmd === "board") return board as Response;
+      if (request.cmd === "label_list") return { kind: "labels", labels: [] } as Response;
+      return { kind: "milestones", milestones: [] } as Response;
+    });
+    const store = new ProjectViewerStore(rpc);
+    await store.ensureBoard("local", "ONE");
+    await store.ensureLabels("local");
+    const labels = projectKeys.labels("local");
+    const unsubscribe = store.resources.subscribe(labels, () => undefined);
+    const before = rpc.mock.calls.filter((c) => c[1].cmd === "label_list").length;
+
+    await store.handleDoorbell({
+      space: "local", epoch: 1, seq: 1, reset: false,
+      dirty_by_project: {}, dirty_catalog: [{ scope: "milestones", project: "ONE" }],
+      activity_advanced: false, presence_advanced: false,
+    });
+
+    const after = rpc.mock.calls.filter((c) => c[1].cmd === "label_list").length;
+    expect(after).toBe(before);
+    unsubscribe();
+  });
+
   it("does not invalidate an unrelated selected issue", async () => {
     const rpc = vi.fn(async () => board as Response);
     const store = new ProjectViewerStore(rpc);

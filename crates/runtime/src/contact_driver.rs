@@ -558,6 +558,14 @@ async fn contact_neighbor(
             })
             .map_err(|e| ContactError::Transfer(e.to_string()))?
     };
+    // Authority is its own plane: an admission can arrive with no Body attached
+    // at all (`units` empty, Body frontier unmoved), and a subscriber that only
+    // watched scopes would never hear it. Published first — authority is durable
+    // before the Body phase runs, and the order of publication follows the order
+    // of durability.
+    if convergence.authority_advanced {
+        ctx.core.broadcaster.publish_authority(convergence.current);
+    }
     // Publish Observations only AFTER durable incorporation, grouped per
     // World (remote changes share the local commits' delivery path).
     if convergence.advanced() {

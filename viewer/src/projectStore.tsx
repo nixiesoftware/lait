@@ -6,6 +6,8 @@ import { type ResourceSnapshot, WorldViewStore } from "./core/worldViewStore";
 import type {
   ActivityEvent,
   BoardView,
+  CatalogPlane,
+  CatalogScope,
   GraphView,
   IssueView,
   LabelDto,
@@ -36,6 +38,67 @@ export const projectKeys = {
   projects: (space: string) => `${prefix(space)}projects`,
   status: (space: string) => `${prefix(space)}status`,
 };
+
+/**
+ * What a resource is derived from — the doorbell planes that can make it stale.
+ *
+ * Declared beside the loader, not in a switch somewhere else. The point is that
+ * the one place you write "here is how to fetch this" is the same place you write
+ * "and here is what invalidates it", so a new feature cannot quietly acquire a
+ * panel that never refreshes. Everything omitted means "this ring does not touch
+ * me"; an empty `Derivation` is a resource nothing invalidates but a `reset`.
+ */
+export interface Derivation {
+  /** Catalog planes this resource projects. */
+  readonly catalog?: readonly CatalogPlane[];
+  /** Stale when the doc behind this `reff` is dirty. */
+  readonly reff?: string;
+  /** Stale when a doc in this project is dirty; `null` means any project at all. */
+  readonly project?: string | null;
+  /** Stale when the activity feed advances. */
+  readonly activity?: boolean;
+}
+
+/** One doorbell, reduced to the things a `Derivation` asks about. */
+interface Ring {
+  readonly docs: ReadonlySet<string>;
+  readonly reffs: ReadonlySet<string>;
+  readonly projects: ReadonlySet<string>;
+  readonly planes: readonly CatalogScope[];
+  readonly activity: boolean;
+}
+
+/**
+ * Does this ring's catalog dirt reach that resource?
+ *
+ * A scope carrying a `project` is one project's slice of a plane, so it only
+ * reaches a resource derived from that project — or one that named no project,
+ * which means "any". Resources keyed by `prj_` id rather than KEY (milestones,
+ * say) simply do not declare a project and match the plane as a whole; that is
+ * still a world away from the catalog-wide ring it replaced.
+ */
+function planeIsStale(d: Derivation, ring: Ring): boolean {
+  if (!d.catalog?.length) return false;
+  return ring.planes.some((scope) =>
+    d.catalog!.includes(scope.scope) &&
+    (scope.project == null || d.project == null || d.project === scope.project));
+}
+
+/**
+ * Does this ring make that resource stale?
+ *
+ * Any one clause is enough — a `Derivation` is a set of independent reasons, not
+ * a conjunction. `project: null` is "any project", which is what an all-projects
+ * board is derived from.
+ */
+function isStale(d: Derivation, ring: Ring): boolean {
+  if (planeIsStale(d, ring)) return true;
+  if (d.reff !== undefined && ring.reffs.has(d.reff)) return true;
+  if (d.project !== undefined && (d.project === null ? ring.projects.size > 0 : ring.projects.has(d.project))) {
+    return true;
+  }
+  return !!d.activity && ring.activity;
+}
 
 export interface IssueDetailSnapshot {
   readonly issue: IssueView | null;
@@ -76,7 +139,7 @@ function issueFromRow(space: string, row: Row): IssueView {
 export class ProjectViewerStore {
   readonly resources: WorldViewStore;
   readonly overlay = new Overlay();
-  private loaders = new Map<string, () => Promise<unknown>>();
+  private loaders = new Map<string, { load: () => Promise<unknown>; derivation: Derivation }>();
   private rowsByDoc = new Map<string, Map<string, Row>>();
   private boardSelectors = new Map<string, {
     source: ResourceSnapshot<BoardView>;
@@ -186,7 +249,10 @@ export class ProjectViewerStore {
       if (result.kind !== "board") throw new Error("Expected board response");
       this.ingestBoard(space, result);
       return result;
-    }, force);
+      // A board is its project's rows in its project's order, columned by the
+      // workflow, labelled from the row index. `project: null` — the
+      // all-projects board — is stale on any dirty doc or any project's board.
+    }, { project, catalog: ["boards", "workflow", "docs"] }, force);
   }
 
   ensureIssue(space: string, reff: string, force = false): Promise<IssueView> {
@@ -196,7 +262,7 @@ export class ProjectViewerStore {
       if (result.kind !== "issue") throw new Error("Expected issue response");
       this.ingestIssue(space, result);
       return result;
-    }, force);
+    }, { reff }, force);
     this.resources.evict(`${prefix(space)}issue:`, 200, new Set([key]));
     return promise;
   }
@@ -213,7 +279,10 @@ export class ProjectViewerStore {
         ...result.blocked_by,
       ]) this.ingestRow(space, row);
       return result;
-    }, force);
+      // The neighbourhood is this issue plus its links, so it moves when this
+      // doc does — and when the link graph itself does, which is a plane of its
+      // own: a peer linking two OTHER issues can put this one behind a blocker.
+    }, { reff, catalog: ["relations"] }, force);
     this.resources.evict(`${prefix(space)}graph:`, 50, new Set([key]));
     return promise;
   }
@@ -224,7 +293,8 @@ export class ProjectViewerStore {
       const result = await this.rpc(space, { cmd: "history", reff });
       if (result.kind !== "activity") throw new Error("Expected history response");
       return result.events;
-    }, force);
+      // The feed is a cursor, not a scope: the doorbell can only say it advanced.
+    }, { activity: true }, force);
     this.resources.evict(`${prefix(space)}history:`, 50, new Set([key]));
     return promise;
   }
@@ -234,7 +304,12 @@ export class ProjectViewerStore {
       const result = await this.rpc(space, { cmd: "milestone_list", project });
       if (result.kind !== "milestones") throw new Error("Expected milestones response");
       return result.milestones;
-    }, force);
+      // Milestones are per-project catalog structure with a plane of their own.
+      // This used to hang off the issue plane, so a milestone written by itself
+      // — which touches no issue doc — never refreshed the list it belongs to.
+      // No `project` declared: this resource is keyed by `prj_` id and the ring
+      // names projects by KEY, so it takes the plane whole.
+    }, { catalog: ["milestones"] }, force);
   }
 
   ensureLabels(space: string, force = false): Promise<LabelDto[]> {
@@ -242,7 +317,7 @@ export class ProjectViewerStore {
       const result = await this.rpc(space, { cmd: "label_list" });
       if (result.kind !== "labels") throw new Error("Expected labels response");
       return result.labels;
-    }, force);
+    }, { catalog: ["labels"] }, force);
   }
 
   ensureMembers(space: string, force = false): Promise<MemberDto[]> {
@@ -250,7 +325,7 @@ export class ProjectViewerStore {
       const result = await this.rpc(space, { cmd: "members" });
       if (result.kind !== "members") throw new Error("Expected members response");
       return result.members;
-    }, force);
+    }, { catalog: ["acl"] }, force);
   }
 
   ensureProjects(space: string, force = false): Promise<ProjectDto[]> {
@@ -258,7 +333,7 @@ export class ProjectViewerStore {
       const result = await this.rpc(space, { cmd: "project_list" });
       if (result.kind !== "projects") throw new Error("Expected projects response");
       return result.projects;
-    }, force);
+    }, { catalog: ["projects"] }, force);
   }
 
   ensureStatus(space: string, force = false): Promise<StatusInfo> {
@@ -266,7 +341,9 @@ export class ProjectViewerStore {
       const result = await this.rpc(space, { cmd: "status" });
       if (result.kind !== "status") throw new Error("Expected status response");
       return result;
-    }, force);
+      // Status names the space and counts its projects, members and issues —
+      // and the issue count comes from the row index, not from any one doc.
+    }, { catalog: ["space", "projects", "acl", "docs"] }, force);
   }
 
   ensureIssueDetail(space: string, reff: string): void {
@@ -323,61 +400,38 @@ export class ProjectViewerStore {
     }
 
     const dirty = Object.values(doorbell.dirty_by_project).flat();
-    const affectedBoards = new Set<string>();
-    const dirtyResources = new Set<string>();
-    for (const project of Object.keys(doorbell.dirty_by_project)) {
-      for (const key of this.loaders.keys()) {
-        if (key === projectKeys.board(space, project) || key === projectKeys.board(space, null)) {
-          affectedBoards.add(key);
-        }
-      }
-    }
+    // The frame names docs; resources are keyed by `reff`. Resolving once here
+    // keeps `isStale` a pure test over sets.
+    const reffs = new Set<string>();
     for (const doc of dirty) {
       const row = this.rowsByDoc.get(space)?.get(doc);
-      if (!row) continue;
-      dirtyResources.add(projectKeys.issue(space, row.reff));
-      dirtyResources.add(projectKeys.graph(space, row.reff));
+      if (row) reffs.add(row.reff);
     }
-    for (const key of this.loaders.keys()) {
-      if (dirty.length && key.startsWith(`${scope}milestones:`)) dirtyResources.add(key);
+    const ring: Ring = {
+      docs: new Set(dirty),
+      reffs,
+      projects: new Set(Object.keys(doorbell.dirty_by_project)),
+      planes: doorbell.dirty_catalog,
+      activity: doorbell.activity_advanced,
+    };
+
+    // Every registered resource answers for itself. Nothing here knows what a
+    // milestone or a label *is* — that lives with the loader that fetches it.
+    const stale: string[] = [];
+    for (const [key, { derivation }] of this.loaders) {
+      if (key.startsWith(scope) && isStale(derivation, ring)) stale.push(key);
     }
-    for (const key of dirtyResources) this.resources.invalidate(key);
-    for (const key of affectedBoards) this.resources.invalidate(key);
-    await this.refreshActive([...affectedBoards]);
+    for (const key of stale) this.resources.invalidate(key);
+
+    // Boards first, then retire the guesses. Clearing a prediction before the
+    // authoritative rows land flashes the stale server value for a frame, which
+    // is the one thing the optimism exists to prevent.
+    const boards = stale.filter((key) => key.startsWith(`${scope}board:`));
+    await this.refreshActive(boards);
     for (const doc of dirty) this.overlay.clearDoc(doc);
     this.notifyRows(space, dirty);
-    for (const key of affectedBoards) this.resources.notify(key);
-    await this.refreshActive([...dirtyResources]);
-
-    if (doorbell.dirty_catalog.length) {
-      const keys = new Set<string>();
-      for (const dirty of doorbell.dirty_catalog) {
-        if (dirty.scope === "labels") keys.add(projectKeys.labels(space));
-        if (dirty.scope === "projects") {
-          keys.add(projectKeys.projects(space));
-          keys.add(projectKeys.status(space));
-        }
-        if (dirty.scope === "acl") {
-          keys.add(projectKeys.members(space));
-          keys.add(projectKeys.status(space));
-        }
-        if (dirty.scope === "workflow" || dirty.scope === "boards") {
-          for (const key of this.loaders.keys()) {
-            if (!key.startsWith(`${scope}board:`)) continue;
-            if (dirty.scope === "workflow" || dirty.project == null ||
-                key === projectKeys.board(space, dirty.project) ||
-                key === projectKeys.board(space, null)) keys.add(key);
-          }
-        }
-      }
-      keys.forEach((key) => this.resources.invalidate(key));
-      await this.refreshActive([...keys]);
-    }
-    if (doorbell.activity_advanced) {
-      const keys = [...this.loaders.keys()].filter((key) => key.startsWith(`${scope}history:`));
-      keys.forEach((key) => this.resources.invalidate(key));
-      await this.refreshActive(keys);
-    }
+    for (const key of boards) this.resources.notify(key);
+    await this.refreshActive(stale.filter((key) => !boards.includes(key)));
   }
 
   expirePredictions(space: string): boolean {
@@ -450,16 +504,26 @@ export class ProjectViewerStore {
     }
   }
 
-  private load<T>(key: string, loader: () => Promise<T>, force: boolean): Promise<T> {
-    this.loaders.set(key, loader);
+  /**
+   * Register a resource: how to fetch it, and what makes it stale. The
+   * `derivation` is not optional on purpose — a resource that declares nothing
+   * has to say so, which is a decision rather than an omission.
+   */
+  private load<T>(
+    key: string,
+    loader: () => Promise<T>,
+    derivation: Derivation,
+    force: boolean,
+  ): Promise<T> {
+    this.loaders.set(key, { load: loader, derivation });
     return this.resources.ensure(key, loader, { force });
   }
 
   private async refreshActive(keys: readonly string[]): Promise<void> {
     await Promise.all(keys.map(async (key) => {
-      const loader = this.loaders.get(key);
-      if (!loader || !this.resources.isActive(key)) return;
-      await this.resources.ensure(key, loader, { force: true }).catch(() => undefined);
+      const entry = this.loaders.get(key);
+      if (!entry || !this.resources.isActive(key)) return;
+      await this.resources.ensure(key, entry.load, { force: true }).catch(() => undefined);
     }));
   }
 }

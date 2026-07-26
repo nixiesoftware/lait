@@ -432,7 +432,31 @@ export const isReadOnly = (s: SpaceRow): boolean => s.identity.kind === "agent";
 
 // ---- the doorbell -----------------------------------------------------------
 
-export type CatalogScope = { scope: string; project?: string | null };
+/**
+ * The catalog planes a doorbell can name. Closed on purpose: a resource declares
+ * the planes it projects (`Derivation` in `projectStore`), and a plane the engine
+ * does not emit should fail to compile rather than silently never fire.
+ */
+export type CatalogPlane =
+  | "space"
+  | "projects"
+  | "labels"
+  | "workflow"
+  | "acl"
+  | "boards"
+  | "milestones"
+  | "cycles"
+  | "updates"
+  | "initiatives"
+  | "teams"
+  | "triage"
+  | "roles"
+  /** The row index: which docs exist, their aliases and seqs, what is deleted. */
+  | "docs"
+  /** Issue links and parentage. */
+  | "relations";
+
+export type CatalogScope = { scope: CatalogPlane; project?: string | null };
 
 /**
  * A dirty-set frame, tagged with the space it rang for.
