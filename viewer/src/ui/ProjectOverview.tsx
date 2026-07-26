@@ -158,7 +158,7 @@ export function ProjectOverview({
             <RailSection>
             <RailRow label="Lead">
               <Combobox
-                variant="property"
+                tone="quiet"
                 label="Lead"
                 disabled={readOnly}
                 value={
@@ -193,7 +193,7 @@ export function ProjectOverview({
             </RailRow>
             <RailRow label="Start date">
               <DatePicker
-                variant="property"
+                tone="quiet"
                 value={toInput(project.start_date)}
                 disabled={readOnly}
                 placeholder="Add start date"
@@ -203,7 +203,7 @@ export function ProjectOverview({
             </RailRow>
             <RailRow label="Target date">
               <DatePicker
-                variant="property"
+                tone="quiet"
                 value={toInput(project.target_date)}
                 disabled={readOnly}
                 placeholder="Add target date"
@@ -407,7 +407,7 @@ function Milestones({
             aria-label="New milestone name"
           />
           <DatePicker
-            variant="property"
+            tone="quiet"
             value={target}
             placeholder="Target"
             ariaLabel="Milestone target date"

@@ -468,7 +468,7 @@ export function IssueDetail({
           <RailSection title="Properties">
           <RailRow label="Status">
             <Combobox
-              variant="property"
+              tone="quiet"
               label="Status"
               disabled={locked}
               open={pickerOpen("status")}
@@ -497,7 +497,7 @@ export function IssueDetail({
 
           <RailRow label="Priority">
             <Combobox
-              variant="property"
+              tone="quiet"
               label="Priority"
               disabled={locked}
               open={pickerOpen("priority")}
@@ -538,7 +538,7 @@ export function IssueDetail({
 
           <RailRow label="Assignees">
             <Combobox
-              variant="property"
+              tone="quiet"
               multi
               label="Assignees"
               disabled={locked}
@@ -588,7 +588,7 @@ export function IssueDetail({
 
           <RailRow label="Estimate">
             <Combobox
-              variant="property"
+              tone="quiet"
               label="Estimate"
               disabled={locked}
               value={
@@ -639,7 +639,7 @@ export function IssueDetail({
               {issue.label_names.map((name) => (
                 <Combobox
                   key={name}
-                  variant="label"
+                  tone="bare" size="none"
                   label={`Change label ${name}`}
                   disabled={locked}
                   value={{ id: name, label: name }}
@@ -676,7 +676,7 @@ export function IssueDetail({
                 />
               ))}
               <Combobox
-                variant="property"
+                tone="quiet"
                 multi
                 label="Add label"
                 disabled={locked}
@@ -737,7 +737,7 @@ export function IssueDetail({
 
           <RailRow label="Project">
             <Combobox
-              variant="property"
+              tone="quiet"
               label="Project"
               swatchShape="square"
               disabled={locked}
@@ -768,7 +768,7 @@ export function IssueDetail({
           {(milestones.length > 0 || issue.milestone) && (
             <RailRow label="Milestone">
               <Combobox
-                variant="property"
+                tone="quiet"
                 label="Milestone"
                 disabled={locked}
                 value={
@@ -1233,7 +1233,7 @@ function DueDate({
     value !== null ? { overdue: "text-danger", soon: "text-warn", later: "" }[dueTone(value)] : "";
   return (
     <DatePicker
-      variant="property"
+      tone="quiet"
       value={value !== null ? dueToInput(value) : null}
       disabled={readOnly}
       placeholder="Add due date"

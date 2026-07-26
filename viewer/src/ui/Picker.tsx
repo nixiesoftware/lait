@@ -7,7 +7,8 @@ import { cmdkFilter } from "../core/fuzzy";
 import {
   cn,
   controlTrigger,
-  type ControlTriggerVariant,
+  type ControlSize,
+  type ControlTone,
   crumbGlyph,
   PopoverContent,
 } from "./primitives";
@@ -84,7 +85,13 @@ type Props = {
    */
   swatchShape?: "dot" | "square";
 } & Mode & {
-  variant?: ControlTriggerVariant;
+  tone?: ControlTone;
+  size?: ControlSize;
+  /** Put the swatch in a fixed-width glyph slot. A breadcrumb needs every
+   *  crumb's text to start at the same offset whatever mark precedes it — that
+   *  is a layout contract, not a look, which is why it survives as its own prop
+   *  rather than being inferred from a tone. */
+  swatchSlot?: boolean;
 };
 
 export function Combobox(props: Props) {
@@ -98,7 +105,9 @@ export function Combobox(props: Props) {
     open,
     onOpenChange,
     emptyText,
-    variant,
+    tone,
+    size,
+    swatchSlot,
     onCreate,
     swatchShape,
   } = props;
@@ -128,7 +137,7 @@ export function Combobox(props: Props) {
     <>
       {single?.icon}
       {triggerSwatch &&
-        (variant === "crumb" ? (
+        (swatchSlot ? (
           <span className={crumbGlyph}>{triggerSwatch}</span>
         ) : (
           triggerSwatch
@@ -144,7 +153,7 @@ export function Combobox(props: Props) {
     return (
       <span
         className={cn(
-          controlTrigger({ variant }),
+          controlTrigger({ tone, size }),
           "text-dim",
           className,
         )}
@@ -159,7 +168,7 @@ export function Combobox(props: Props) {
 
   return (
     <Popover.Root open={isOpen} onOpenChange={setOpen}>
-      <Popover.Trigger aria-label={label} className={cn(controlTrigger({ variant }), className)}>
+      <Popover.Trigger aria-label={label} className={cn(controlTrigger({ tone, size }), className)}>
         {content}
       </Popover.Trigger>
       <PopoverContent align="start" className="w-60 overflow-hidden p-0">

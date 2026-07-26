@@ -356,52 +356,64 @@ const field = cva(
  */
 export const crumbGlyph = "flex size-icon-md shrink-0 items-center justify-center";
 
+/**
+ * Trigger geometry, decomposed.
+ *
+ * This was seven `variant`s, which is what happens when one axis has to encode
+ * two things: `property` and `crumb` were the same face at different heights,
+ * and `chip` and `filter` the same box on different fills. Height was welded in,
+ * so "a property row, but taller" had no expression except an eighth variant.
+ *
+ * Now TONE says what a control looks like and SIZE says how tall it is, and the
+ * two compose. The call-site audit that preceded this also retired `filter` and
+ * `toolbar` outright — both had zero usages anywhere in the app.
+ */
 export const controlTrigger = cva(
-  // No radius in the base: a corner is part of a variant's identity, not a
-  // default it inherits. Keeping it here meant a variant that wanted a
-  // different shape emitted both classes and left the winner to CSS source
-  // order — `twMerge` does not know a custom `rounded-control` belongs to its
-  // border-radius group, so it cannot dedupe them for us.
+  // No radius in the base: a corner is part of a tone's identity, not a default
+  // it inherits. Keeping it here meant a tone that wanted a different shape
+  // emitted both classes and left the winner to CSS source order.
   "inline-flex items-center gap-1.5 text-sm outline-none transition-colors disabled:pointer-events-none disabled:opacity-45 data-[state=open]:bg-active",
   {
     variants: {
-      variant: {
-        /** The property rail. Fully rounded: the only chrome these rows have is
-         *  a hover fill, and at 28px a pill reads as a deliberate shape rather
-         *  than a box that happens to appear under the pointer. */
-        property:
-          "hover:bg-hover -mx-1 min-h-ctl-md min-w-0 rounded-full px-1.5 text-left",
-        // A crumb that happens to be a switcher. Same face as `property` at the
-        // breadcrumb's own height: `min-h-ctl-md` here put a 28px control in a trail
-        // of 24px crumbs, and the taller hover box was visible against them.
-        crumb:
-          "hover:bg-hover -mx-1 min-h-ctl-sm min-w-0 rounded-full px-1.5 text-left",
-        chip:
-          "border-line bg-bg hover:border-line-strong hover:bg-hover min-h-ctl-md rounded-control border px-2",
-        filter:
-          "border-line bg-raised hover:border-line-strong hover:bg-hover min-h-ctl-md rounded-control border px-2",
-        toolbar:
-          "text-dim hover:bg-hover hover:text-fg min-h-ctl-sm rounded-full px-1.5",
-        /** Inside a floating pill. Fully rounded to match the shell it sits in,
-         *  and it lifts on hover — the bar is the one surface in the app that
-         *  is over the work rather than part of it, so its controls answer the
-         *  pointer with elevation instead of only a fill. */
-        pill: "bg-active/60 text-dim hover:bg-hover hover:text-fg min-h-ctl-md rounded-full px-2.5",
-        /** A label chip that is its own trigger. No box of its own — the chip
-         *  already has a shape, and wrapping it in a second one would put a
-         *  rectangle around a pill. Hover dims rather than fills, so the target
-         *  is the chip itself and nothing shifts when it opens. */
-        label:
-          "min-w-0 rounded-full transition-opacity hover:opacity-75 data-[state=open]:opacity-75",
+      /** How tall. Declared before `tone` only for readability; `cn` resolves
+       *  any overlap through the registered ladders, not through source order. */
+      size: {
+        /** No height of its own — for a tone that brings its own shape. */
+        none: "",
+        xs: "min-h-ctl-xs",
+        sm: "min-h-ctl-sm",
+        md: "min-h-ctl-md",
+        lg: "min-h-ctl-lg",
+        xl: "min-h-ctl-xl",
+      },
+      tone: {
+        /** Chrome that is only there when you point at it — the property rail
+         *  and the breadcrumb switcher. Fully rounded: a hover fill is the only
+         *  shape it has, so a pill reads as deliberate where a rounded box reads
+         *  as something that appeared under the pointer. */
+        quiet: "hover:bg-hover -mx-1 min-w-0 rounded-full px-1.5 text-left",
+        /** A standing control with a border. Stays a box — a border makes the
+         *  shape explicit rather than only appearing on hover, and a pilled
+         *  border starts reading as a tag rather than a control. */
+        outline:
+          "border-line bg-bg hover:border-line-strong hover:bg-hover rounded-control border px-2",
+        /** Inside a floating bar. It lifts on hover: the bar is the one surface
+         *  that is over the work rather than part of it, so its controls answer
+         *  the pointer with elevation instead of only a fill. */
+        pill: "bg-active/60 text-dim hover:bg-hover hover:text-fg rounded-full px-2.5",
+        /** No box at all — the child already is one. Wrapping a label chip in a
+         *  second shape would put a rectangle around a pill, so hover dims
+         *  rather than fills and nothing shifts when it opens. Pair with
+         *  `size="none"`: the chip carries its own height. */
+        bare: "min-w-0 rounded-full transition-opacity hover:opacity-75 data-[state=open]:opacity-75",
       },
     },
-    defaultVariants: { variant: "chip" },
+    defaultVariants: { tone: "outline", size: "md" },
   },
 );
 
-export type ControlTriggerVariant = NonNullable<
-  VariantProps<typeof controlTrigger>["variant"]
->;
+export type ControlTone = NonNullable<VariantProps<typeof controlTrigger>["tone"]>;
+export type ControlSize = NonNullable<VariantProps<typeof controlTrigger>["size"]>;
 
 /** Shared list interaction states. Content layout remains the caller's concern;
  * hover, selection, focus and dividers do not. */

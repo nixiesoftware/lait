@@ -119,7 +119,7 @@ export function BulkBar({
 
       <Combobox
         label="Status"
-        variant="pill"
+        tone="pill"
         disabled={pending}
         value={null}
         face={<Face icon={<SignalHigh className="size-icon-sm" />} label="Status" />}
@@ -132,7 +132,7 @@ export function BulkBar({
       />
       <Combobox
         label="Priority"
-        variant="pill"
+        tone="pill"
         disabled={pending}
         value={null}
         className="capitalize"
@@ -146,7 +146,7 @@ export function BulkBar({
       />
       <Combobox
         label="Assign"
-        variant="pill"
+        tone="pill"
         disabled={pending}
         value={null}
         emptyText={members.length ? "No matches" : "No members yet"}
@@ -162,7 +162,7 @@ export function BulkBar({
       />
       <Combobox
         label="Add label"
-        variant="pill"
+        tone="pill"
         disabled={pending}
         value={null}
         emptyText={labels.length ? "No matches" : "No labels yet"}
@@ -176,7 +176,7 @@ export function BulkBar({
         onCreate={onLabel}
       />
       <DatePicker
-        variant="pill"
+        tone="pill"
         value={null}
         placeholder="Due"
         ariaLabel="Set due date on selected"

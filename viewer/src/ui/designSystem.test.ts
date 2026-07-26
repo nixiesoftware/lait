@@ -280,6 +280,73 @@ describe("cn understands our ladders", () => {
 });
 
 /**
+ * `controlTrigger` used to encode two things on one axis — `property` and
+ * `crumb` were the same face at two heights — so height could not be asked for
+ * separately and a taller property row needed an eighth variant. Tone and size
+ * now compose. These guard the seam that replaced it.
+ */
+describe("control triggers speak tone x size", () => {
+  const TONES = ["quiet", "outline", "pill", "bare"];
+  const SIZES = ["none", "xs", "sm", "md", "lg", "xl"];
+
+  it("no call site still passes the retired `variant` prop", () => {
+    const offenders: string[] = [];
+    const elem = /<(Combobox|DatePicker)\b((?:[^<>]|=\{[^}]*\})*?)\/?>/gs;
+
+    for (const file of tsxFiles(SRC_DIR)) {
+      const name = file.split(/[\\/]/).pop() ?? "";
+      const src = readFileSync(file, "utf8");
+      for (const m of src.matchAll(elem)) {
+        if (/\bvariant=/.test(m[2]!)) offenders.push(`${name}: <${m[1]} variant=…>`);
+      }
+    }
+    expect(
+      offenders,
+      "Triggers take `tone` and `size`, not `variant`. The seven variants were " +
+        "five live ones (two were dead) encoding look and height on one axis.\n\n" +
+        offenders.join("\n"),
+    ).toEqual([]);
+  });
+
+  it("only declared tones and sizes are used", () => {
+    const badTone = new Set<string>();
+    const badSize = new Set<string>();
+    for (const file of tsxFiles(SRC_DIR)) {
+      const src = readFileSync(file, "utf8");
+      const elem = /<(Combobox|DatePicker)\b((?:[^<>]|=\{[^}]*\})*?)\/?>/gs;
+      for (const m of src.matchAll(elem)) {
+        const t = /\btone="([a-z]+)"/.exec(m[2]!)?.[1];
+        const z = /\bsize="([a-z]+)"/.exec(m[2]!)?.[1];
+        if (t && !TONES.includes(t)) badTone.add(t);
+        if (z && !SIZES.includes(z)) badSize.add(z);
+      }
+    }
+    expect([...badTone]).toEqual([]);
+    expect([...badSize]).toEqual([]);
+  });
+
+  /**
+   * The one pairing that fails quietly. `bare` exists for a child that already
+   * has a shape — a label chip carries its own 20px height — so inheriting the
+   * default `md` would silently inflate it to 28px and nothing would error.
+   */
+  it("`bare` always opts out of the height ladder", () => {
+    const offenders: string[] = [];
+    const elem = /<(Combobox|DatePicker)\b((?:[^<>]|=\{[^}]*\})*?)\/?>/gs;
+    for (const file of tsxFiles(SRC_DIR)) {
+      const name = file.split(/[\\/]/).pop() ?? "";
+      for (const m of readFileSync(file, "utf8").matchAll(elem)) {
+        const body = m[2]!;
+        if (/\btone="bare"/.test(body) && !/\bsize="none"/.test(body)) {
+          offenders.push(`${name}: tone="bare" without size="none"`);
+        }
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+});
+
+/**
  * Rungs actually referenced in source for a given axis. A rung used here but
  * missing from the token block compiles to nothing at all — Tailwind emits no
  * utility for an undefined named entry — so the element silently falls back to

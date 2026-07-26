@@ -6,7 +6,8 @@ import {
   Button,
   cn,
   controlTrigger,
-  type ControlTriggerVariant,
+  type ControlSize,
+  type ControlTone,
   IconButton,
   PopoverContent,
 } from "./primitives";
@@ -76,7 +77,8 @@ export function DatePicker({
   value,
   onChange,
   disabled,
-  variant,
+  tone,
+  size,
   ariaLabel = "Due date",
   placeholder = "None",
   className,
@@ -89,7 +91,8 @@ export function DatePicker({
   placeholder?: string;
   /** Extra trigger classes — the caller's tone colour rides here. */
   className?: string;
-  variant?: ControlTriggerVariant;
+  tone?: ControlTone;
+  size?: ControlSize;
 }) {
   const [open, setOpen] = useState(false);
   const [view, setView] = useState<Date>(() =>
@@ -107,7 +110,7 @@ export function DatePicker({
   // A read-only field still shows its value — it just can't open a menu over it.
   if (disabled) {
     return (
-      <span className={cn(controlTrigger({ variant }), "text-dim", !value && "text-mute", className)}>
+      <span className={cn(controlTrigger({ tone, size }), "text-dim", !value && "text-mute", className)}>
         {value ? labelFor(value) : placeholder}
       </span>
     );
@@ -136,7 +139,7 @@ export function DatePicker({
     >
       <Popover.Trigger
         aria-label={ariaLabel}
-        className={cn(controlTrigger({ variant }), !value && "text-mute", className)}
+        className={cn(controlTrigger({ tone, size }), !value && "text-mute", className)}
       >
         <Calendar className="text-mute size-icon-sm shrink-0" />
         <span>{value ? labelFor(value) : placeholder}</span>

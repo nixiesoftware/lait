@@ -220,8 +220,9 @@ export type BreadcrumbItem = {
 
 /** Shared crumb geometry: a link, a static crumb and a picker crumb must land on
  *  the same baseline and the same padding, or the trail visibly steps. The picker
- *  crumb gets here through `controlTrigger`'s `crumb` variant, which is written
- *  against these same values. */
+ *  crumb gets here as `tone="quiet" size="sm"`, which resolves to these same
+ *  values — the `sm` rung IS this height, so the two cannot drift apart the way
+ *  they could when the crumb's height was hard-coded inside its own variant. */
 const crumbFace = "flex min-h-ctl-sm min-w-0 items-center gap-1.5 rounded-full transition-colors";
 
 
