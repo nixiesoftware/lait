@@ -357,6 +357,23 @@ fn adversarial_stagings_are_rejected_whole() {
     // Nothing reached the engine through any of it.
     assert!(b.read_collaborative(&body(2)).is_none());
     assert!(b.body_keys().is_empty());
+
+    // But the AUTHORITY phase did run, durably, in every one of those refusals.
+    // It is committed before the manifest and the Bodies are validated, and it
+    // is deliberately not rolled back — legitimate authority advancement is
+    // independently valid Space history that must survive a later Body failure.
+    //
+    // The consequence is easy to miss and matters to anyone watching for change:
+    // a refused staging can still have moved membership. A caller that only
+    // announces the successful path announces nothing here, and the space's
+    // members list changes with no one told. `contact_driver` therefore measures
+    // the authority frontier around the whole attempt and publishes on the error
+    // path too.
+    assert_eq!(
+        incorporator.batches.len(),
+        4,
+        "every refused staging still ran its authority phase first"
+    );
 }
 
 #[test]

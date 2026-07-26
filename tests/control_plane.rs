@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use async_trait::async_trait;
-use lait::control::{request, subscribe, Request, Response};
+use lait::control::{request, subscribe, CatalogScope, Request, Response};
 use lait::net::Network;
 use lait::orbital::run_orbital_daemon_with;
 use lait::transport::mem::MemNet;
@@ -193,6 +193,215 @@ fn stale_since_after_restart_yields_reset() {
         assert!(
             ring.activity_advanced,
             "the edit doorbell must advance activity, got {ring:?}"
+        );
+
+        let _ = request(&home, &Request::Stop).await;
+    });
+
+    let _ = handle.join();
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// A doorbell must say *what* moved, not merely that something did.
+///
+/// The Observation the Station publishes names Bodies; a client re-reads by
+/// project and doc. Without the translation in between, every live frame is an
+/// empty dirty-set — the client has news it cannot act on, so a board sits stale
+/// until something else forces a rebaseline. That is what this pins:
+///
+/// - a field edit names its doc under its project KEY, and touches no catalog
+///   plane (the edit is confined to the issue Body);
+/// - a create, which does move the catalog, rings the catalog scopes too — and
+///   still names the brand-new doc, which only works if a miss rebuilds the
+///   index rather than dropping the scope.
+#[test]
+fn doorbell_names_the_dirty_project_and_doc() {
+    let net = MemNet::new();
+    let home = temp_home("dirty");
+    lait::orbital::form_space(&home, &FOUNDER_SEED, "Ctrl Space").unwrap();
+    let handle = spawn_daemon(home.clone(), FOUNDER_SEED, net.clone());
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    wait_online(&rt, &home);
+
+    let reff = seed_project_and_issue(&rt, &home);
+    let doc = match req(
+        &rt,
+        &home,
+        Request::List {
+            project: None,
+            filter: Default::default(),
+        },
+    ) {
+        // The only row there is — `reff` may be the `ENG-1` alias rather than the
+        // canonical handle the row carries, so match on the seeding, not the text.
+        Response::List { rows } => match rows.as_slice() {
+            [row] => row.doc_id.as_str().to_string(),
+            other => panic!("expected exactly the seeded issue, got {other:?}"),
+        },
+        other => panic!("list should echo rows, got {other:?}"),
+    };
+
+    rt.block_on(async {
+        let mut sub = subscribe(&home, 0).await.expect("open subscribe stream");
+        let first = sub
+            .next()
+            .await
+            .expect("read first frame")
+            .expect("first frame present");
+        assert!(first.reset, "first Subscribe frame must be a Reset");
+
+        // A field edit: one issue Body, no catalog plane.
+        request(
+            &home,
+            &Request::IssueEdit {
+                due: None,
+                estimate: None,
+                reff: reff.clone(),
+                title: Some("renamed".into()),
+                status: None,
+                priority: None,
+                description: None,
+            },
+        )
+        .await
+        .expect("issue edit");
+
+        let ring = sub
+            .next()
+            .await
+            .expect("read edit doorbell")
+            .expect("edit doorbell present");
+        assert_eq!(
+            ring.dirty_by_project.get("ENG").map(Vec::as_slice),
+            Some([doc.clone()].as_slice()),
+            "the edit doorbell must name the edited doc under its project KEY, got {ring:?}"
+        );
+        assert!(
+            ring.dirty_catalog.is_empty(),
+            "a field edit touches no catalog plane, got {ring:?}"
+        );
+
+        // A create: a new issue Body *and* the catalog (aliases, seqs, board).
+        let created = match request(
+            &home,
+            &Request::IssueNew {
+                due: None,
+                estimate: None,
+                title: "t2".into(),
+                project: Some("ENG".into()),
+                project_hint: None,
+                assignees: vec![],
+                priority: None,
+                labels: vec![],
+                body: None,
+            },
+        )
+        .await
+        .expect("issue new")
+        {
+            Response::Ref { reff } => reff,
+            other => panic!("issue new should echo a Ref, got {other:?}"),
+        };
+
+        let ring = sub
+            .next()
+            .await
+            .expect("read create doorbell")
+            .expect("create doorbell present");
+        let named = ring
+            .dirty_by_project
+            .get("ENG")
+            .expect("the create names its project");
+        assert!(
+            named.len() == 1 && named[0] != doc,
+            "the create must name the NEW doc ({created}), got {ring:?}"
+        );
+        // Precision, not just presence. A create adds a row and puts it on a
+        // board; it does not touch the label registry, the workflow, or any
+        // other project. Ringing those would be the coarseness this replaced.
+        assert!(
+            ring.dirty_catalog.contains(&CatalogScope::Docs),
+            "a create moves the row index, got {ring:?}"
+        );
+        assert!(
+            ring.dirty_catalog.contains(&CatalogScope::Boards {
+                project: "ENG".into()
+            }),
+            "a create puts the row on ENG's board, got {ring:?}"
+        );
+        for untouched in [
+            CatalogScope::Labels,
+            CatalogScope::Workflow,
+            CatalogScope::Acl,
+            CatalogScope::Teams,
+        ] {
+            assert!(
+                !ring.dirty_catalog.contains(&untouched),
+                "a create rang {untouched:?}, which it does not touch: {ring:?}"
+            );
+        }
+
+        let _ = request(&home, &Request::Stop).await;
+    });
+
+    let _ = handle.join();
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// Two subscribers, one commit, identical frames.
+///
+/// The dirty-set is computed once per Observation and fanned out, not recomputed
+/// per subscriber. That is an efficiency win today — a viewer and a `lait watch`
+/// used to cost two full catalog reads per commit — and a correctness
+/// requirement the moment the translation holds any state carried between rings:
+/// two subscribers each advancing one shared baseline would leave the second
+/// seeing nothing changed.
+#[test]
+fn every_subscriber_sees_the_same_frame_for_one_commit() {
+    let net = MemNet::new();
+    let home = temp_home("fanout");
+    lait::orbital::form_space(&home, &FOUNDER_SEED, "Ctrl Space").unwrap();
+    let handle = spawn_daemon(home.clone(), FOUNDER_SEED, net.clone());
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    wait_online(&rt, &home);
+    let reff = seed_project_and_issue(&rt, &home);
+
+    rt.block_on(async {
+        let mut a = subscribe(&home, 0).await.expect("subscriber A");
+        let mut b = subscribe(&home, 0).await.expect("subscriber B");
+        for (who, sub) in [("A", &mut a), ("B", &mut b)] {
+            let first = sub.next().await.expect("read").expect("present");
+            assert!(first.reset, "{who}'s first frame must be a Reset");
+        }
+
+        request(
+            &home,
+            &Request::IssueEdit {
+                due: None,
+                estimate: None,
+                reff: reff.clone(),
+                title: Some("fanned out".into()),
+                status: None,
+                priority: None,
+                description: None,
+            },
+        )
+        .await
+        .expect("issue edit");
+
+        let fa = a.next().await.expect("A reads").expect("A has a frame");
+        let fb = b.next().await.expect("B reads").expect("B has a frame");
+        assert_eq!(
+            (fa.seq, &fa.dirty_by_project, &fa.dirty_catalog),
+            (fb.seq, &fb.dirty_by_project, &fb.dirty_catalog),
+            "subscribers disagreed about one commit: A={fa:?} B={fb:?}"
+        );
+        assert!(
+            !fa.dirty_by_project.is_empty(),
+            "both agreed, but on an empty dirty-set — that would pass for the \
+             wrong reason: {fa:?}"
         );
 
         let _ = request(&home, &Request::Stop).await;

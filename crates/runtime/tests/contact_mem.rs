@@ -327,7 +327,19 @@ fn two_stations_converge_through_the_public_contact_api() {
         .unwrap()
         .expect("remote convergence publishes");
     assert!(!remote_record.reset);
-    assert!(!remote_record.scopes.is_empty());
+    assert!(
+        !remote_record.scopes.is_empty(),
+        "the Bodies that converged must be named: {remote_record:?}"
+    );
+    // ONE record for one Contact. Authority and Bodies are separate durability
+    // phases but a single piece of news, and a consumer must never have to
+    // reassemble one Contact from a scopeless record plus a scoped one. These
+    // two stations already share authority, so nothing rides along here — the
+    // point being pinned is the count, not the flag.
+    assert!(
+        obs.try_next().unwrap().is_none(),
+        "a single Contact published more than one Observation"
+    );
     obs_session.undock();
     assert_eq!(read_kv(&station_b, "greeting"), b"hello");
     assert_eq!(read_kv(&station_b, "farewell"), b"bye");

@@ -36,7 +36,7 @@ use runtime::{
 };
 
 use crate::config::{acquire_daemon_lock, load_or_create_identity};
-use crate::control::{control_name, Doorbell, Request, Response, StatusInfo};
+use crate::control::{control_name, CatalogScope, Doorbell, Request, Response, StatusInfo};
 use crate::ids::SystemUlidSource;
 use crate::orbital::{orbital_store_root, unsupported_store_at, OrbitalMechanics};
 use crate::transport::{Transport, TransportFactory};
@@ -102,6 +102,33 @@ pub struct OrbitalDaemon {
     /// live `Subscribe` connection selects on this, so teardown is prompt and
     /// bounded instead of waiting out a poll interval per subscriber.
     stop_tx: tokio::sync::watch::Sender<bool>,
+    /// The previous ring's per-plane digests — the baseline a catalog change is
+    /// diffed against to recover *which* plane moved.
+    ///
+    /// This is a diff baseline, not a cache: nothing reads through it, and it is
+    /// only ever compared against state read fresh at the current root. It is
+    /// advanced exactly once per Observation, which is why the fan-out below
+    /// exists — two subscribers each advancing it would leave the second seeing
+    /// no change at all.
+    ring_planes: Mutex<Option<std::collections::BTreeMap<CatalogScope, String>>>,
+    /// The one enriched-doorbell fan-out.
+    ///
+    /// Subscribers read this rather than each opening their own Observation
+    /// stream. Translating Body scopes into a dirty-set is per-*Observation*
+    /// work, not per-subscriber work — and once that translation holds a diff
+    /// baseline it MUST be, because two subscribers each advancing the same
+    /// baseline would leave the second one seeing no change at all.
+    doorbells: tokio::sync::broadcast::Sender<Doorbell>,
+    /// Whether a live pump feeds [`Self::doorbells`].
+    ///
+    /// An async mutex, not a flag, and deliberately **held across startup**: a
+    /// boolean can say who owns the job but not whether the job is finished, and
+    /// the difference is a lost commit. A second subscriber that saw "someone is
+    /// starting" and ran ahead would send its own reset while the winner had not
+    /// yet opened the stream — and a commit in that window is in neither the
+    /// second subscriber's re-read nor the broadcast. Waiting on the lock makes
+    /// "ready" the only state a subscriber can observe.
+    pump: tokio::sync::Mutex<bool>,
     /// Control connections currently being served (idle-shutdown suppressor).
     active_conns: std::sync::atomic::AtomicU64,
     /// When the last control connection was accepted or completed — the idle
@@ -279,6 +306,9 @@ impl OrbitalDaemon {
             shutdown: Arc::new(tokio::sync::Notify::new()),
             stopping: std::sync::atomic::AtomicBool::new(false),
             stop_tx: tokio::sync::watch::channel(false).0,
+            ring_planes: Mutex::new(None),
+            doorbells: tokio::sync::broadcast::channel(256).0,
+            pump: tokio::sync::Mutex::new(false),
             active_conns: std::sync::atomic::AtomicU64::new(0),
             last_activity: Mutex::new(std::time::Instant::now()),
         })
@@ -445,10 +475,33 @@ impl OrbitalDaemon {
             // holds no membership authority, so routing them "as the agent"
             // would only ever be denied.
             RequestOwner::Session => self.route_issue(req, act_as),
-            RequestOwner::Mechanics => self.dispatch_mechanics(req, act_as),
+            // Authority never passes through the Session, so a local membership,
+            // role, device or key change publishes nothing on its own — the
+            // remote half of this plane is published by the Contact driver.
+            // Compared by frontier rather than matched per request: a new
+            // mechanics verb inherits the ring instead of quietly not having one.
+            RequestOwner::Mechanics => {
+                let before = self.mechanics.current_frontier();
+                let response = self.dispatch_mechanics(req, act_as);
+                if self.mechanics.current_frontier() != before {
+                    self.publish_authority_advanced();
+                }
+                response
+            }
             RequestOwner::Station => self.dispatch_station(req),
             RequestOwner::Observation => self.dispatch_observation(req),
             RequestOwner::Lifecycle => self.dispatch_lifecycle(req),
+        }
+    }
+
+    /// Ring the authority plane, if there is a docked Session to ring through.
+    /// Before admission there is no Session and nothing is subscribed anyway.
+    fn publish_authority_advanced(&self) {
+        if !self.ensure_session() {
+            return;
+        }
+        if let Some(session) = self.session.lock().expect("session lock").as_ref() {
+            session.publish_authority_advanced();
         }
     }
 
@@ -1669,22 +1722,254 @@ impl OrbitalDaemon {
         }
     }
 
-    async fn stream_subscribe(&self, mut write_half: tokio::io::WriteHalf<LocalStream>) {
-        // A fresh stream from the current cursor: first frame is always a reset.
+    /// One ring's worth of committed state: the doc index keyed by Body id, and
+    /// a digest per catalog plane.
+    ///
+    /// A Body id is a one-way hash of its doc id, so that correspondence only
+    /// runs *forwards*: there is nothing to invert, and the only honest way back
+    /// is to derive it from the docs the catalog names. Both halves come from
+    /// ONE `RingDigest` projection so they cannot describe two different roots,
+    /// and the whole thing is read fresh per ring rather than retained — a
+    /// derived map keyed by anything but the exact root it was read at can
+    /// answer for two roots at once (`tests/mixed_root_guard.rs`).
+    ///
+    /// `None` when there is no docked Session to read (an un-admitted joiner).
+    fn ring_state(&self) -> Option<RingState> {
+        let value = self.session_query_json(crate::world::contract::IssueQuery::RingDigest)?;
+        let mut docs = std::collections::HashMap::new();
+        for entry in value.get("docs")?.as_array()? {
+            let (Some(doc), Some(project)) = (
+                entry.get("doc").and_then(|d| d.as_str()),
+                entry.get("project").and_then(|p| p.as_str()),
+            ) else {
+                continue;
+            };
+            docs.insert(
+                crate::world::contract::issue_body_id(doc),
+                (doc.to_string(), project.to_string()),
+            );
+        }
+        let mut planes = std::collections::BTreeMap::new();
+        for entry in value.get("planes")?.as_array()? {
+            let Ok(plane) = serde_json::from_value::<PlaneDigest>(entry.clone()) else {
+                continue;
+            };
+            planes.insert(plane.scope, plane.digest);
+        }
+        Some(RingState { docs, planes })
+    }
+
+    /// Translate an Observation's Body scopes into a doorbell's dirty-set.
+    ///
+    /// This is the whole difference between a doorbell that says "something
+    /// happened somewhere" and one a client can act on. Every scope is either the
+    /// Space's single catalog Body or one issue Body; the issue ones resolve
+    /// through [`Self::doc_index`] into `(project KEY, doc id)` pairs,
+    /// which is exactly what the client re-reads by.
+    ///
+    /// A catalog hit names the *Body*, not the plane inside it — and the Body
+    /// holds every structure the space has. The plane is recovered by diffing
+    /// per-plane digests against the previous ring, which is the only method
+    /// that works for a peer's change as well as our own: convergence ships CRDT
+    /// **state**, not operations, so an incorporating node has no path list to
+    /// read. Diffing what the state became is symmetric by construction.
+    ///
+    /// Conservative where it cannot be sure — a dirty flag may over-report,
+    /// never under-report. With no baseline (first ring after a restart) every
+    /// plane is reported once; a doc scope that names no row (a tombstoned doc
+    /// is off every board) falls back to the `Docs` plane rather than being
+    /// silently dropped.
+    fn dirty_from_scopes(
+        &self,
+        scopes: &[replica::ids::BodyKey],
+    ) -> (
+        std::collections::HashMap<String, Vec<String>>,
+        Vec<CatalogScope>,
+    ) {
+        let catalog_body = crate::world::contract::catalog_body_id(self.station.space_id());
+        let mut catalog_dirty = false;
+        let mut docs: Vec<&replica::ids::BodyId> = Vec::new();
+        for key in scopes {
+            if key.body == catalog_body {
+                catalog_dirty = true;
+            } else {
+                docs.push(&key.body);
+            }
+        }
+        if !catalog_dirty && docs.is_empty() {
+            return Default::default();
+        }
+
+        let Some(state) = self.ring_state() else {
+            // No projection to read at all. Name nothing rather than claim
+            // nothing moved — the caller's `reset` path is the honest signal,
+            // and an un-admitted joiner has no subscriber to mislead anyway.
+            return Default::default();
+        };
+        let (by_project, missed) = resolve_docs(Some(&state.docs), &docs);
+
+        let mut planes: Vec<CatalogScope> = Vec::new();
+        if catalog_dirty || missed {
+            let mut baseline = self.ring_planes.lock().expect("ring planes lock");
+            match baseline.as_ref() {
+                Some(previous) => {
+                    for (scope, digest) in &state.planes {
+                        if previous.get(scope) != Some(digest) {
+                            planes.push(scope.clone());
+                        }
+                    }
+                    // A plane that vanished changed too — emptied is not absent.
+                    for scope in previous.keys() {
+                        if !state.planes.contains_key(scope) {
+                            planes.push(scope.clone());
+                        }
+                    }
+                }
+                // Nothing to compare against: report every plane once rather
+                // than guess. The next ring diffs normally.
+                None => planes.extend(state.planes.keys().cloned()),
+            }
+            *baseline = Some(state.planes);
+            // A doc we could not name is a row-index question, and that is a
+            // plane — no need to fall back to the whole catalog for it.
+            if missed && !planes.contains(&CatalogScope::Docs) {
+                planes.push(CatalogScope::Docs);
+            }
+        }
+        (by_project, planes)
+    }
+
+    /// Start the single Observation pump if it is not already running.
+    ///
+    /// One stream, one translation, one fan-out — see [`Self::doorbells`]. The
+    /// pump owns the blocking iterator through a TRACKED blocking task that
+    /// blocks in bounded windows and re-checks cancellation between them; the
+    /// async side selects on that channel and the teardown watch, so a Stop
+    /// wakes it immediately and the worker exits within one window.
+    async fn ensure_doorbell_pump(self: &Arc<Self>) {
+        use std::sync::atomic::Ordering;
+        // Held for the whole of startup: a caller that arrives mid-start blocks
+        // here and returns only once the stream is open, never in between.
+        let mut running = self.pump.lock().await;
+        if *running {
+            return;
+        }
+        // Seed the diff baseline BEFORE opening the stream. A commit landing in
+        // between is then counted as already-known rather than as a change with
+        // nothing to compare against — and it is covered regardless, because
+        // every subscriber sends itself a reset after this returns. Seeding
+        // after the stream opened would be the harmful order: the first record
+        // would diff against a baseline that already contained it and report no
+        // planes at all.
+        if let Some(state) = self.ring_state() {
+            *self.ring_planes.lock().expect("ring planes lock") = Some(state.planes);
+        }
+        let mut stream = {
+            let guard = self.session.lock().expect("session lock");
+            match guard.as_ref() {
+                Some(session) => session.observe(None),
+                None => return,
+            }
+        };
+        // Drain the initial reset record: subscribers get their own reset when
+        // they attach, so replaying this one would only duplicate it.
+        let _ = stream.try_next();
+
+        let daemon = self.clone();
+        tokio::spawn(async move {
+            let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let worker_cancel = cancel.clone();
+            let (tx, mut rx) = tokio::sync::mpsc::channel::<runtime::Observation>(64);
+            let worker = tokio::task::spawn_blocking(move || loop {
+                if worker_cancel.load(Ordering::SeqCst) {
+                    return;
+                }
+                match stream.next_timeout(Duration::from_millis(250)) {
+                    Ok(Some(record)) => {
+                        if tx.blocking_send(record).is_err() {
+                            return; // the pump went away
+                        }
+                    }
+                    Ok(None) => continue, // idle window: re-check cancellation
+                    Err(_) => return,     // station dormant: stream closed
+                }
+            });
+            let mut stop_rx = daemon.stop_tx.subscribe();
+            loop {
+                tokio::select! {
+                    changed = stop_rx.changed() => {
+                        if changed.is_err() || *stop_rx.borrow() {
+                            break;
+                        }
+                    }
+                    record = rx.recv() => {
+                        let Some(record) = record else { break }; // worker ended
+                        // Send even with no receivers: an `Err` here means only
+                        // that nobody is listening right now, which is not a
+                        // reason to stop translating or to tear the pump down.
+                        let _ = daemon.doorbells.send(daemon.frame_for(&record));
+                    }
+                }
+            }
+            cancel.store(true, Ordering::SeqCst);
+            drop(rx);
+            let _ = worker.await;
+            // Say so on the way out, so the next subscribe revives the pump
+            // rather than attaching to a fan-out nothing feeds.
+            *daemon.pump.lock().await = false;
+        });
+        *running = true;
+    }
+
+    /// Translate one Observation into the frame every subscriber receives.
+    ///
+    /// The Observation names Bodies; a client re-reads by project and doc.
+    /// This is what makes the frame actionable — and a local commit and a
+    /// peer's incorporated one arrive on the same stream, so both ring alike.
+    fn frame_for(&self, record: &runtime::Observation) -> Doorbell {
+        let (dirty_by_project, mut dirty_catalog) = self.dirty_from_scopes(&record.scopes);
+        // Authority is its own record, carrying no scopes. `Acl` is the name
+        // every client already reads membership by.
+        if record.authority {
+            dirty_catalog.push(CatalogScope::Acl);
+        }
+        Doorbell {
+            epoch: record.epoch.as_u64(),
+            seq: record.sequence,
+            reset: record.reset,
+            dirty_by_project,
+            dirty_catalog,
+            // An authority record advances no feed: it is membership news, and
+            // `Activity` projects issue history.
+            activity_advanced: !record.authority,
+            presence_advanced: record.authority,
+        }
+    }
+
+    async fn stream_subscribe(self: &Arc<Self>, mut write_half: tokio::io::WriteHalf<LocalStream>) {
         // Without standing there is no Session to observe yet — emit the reset
         // and return; the client re-subscribes after admission.
-        let (mut stream, epoch) = {
-            if !self.ensure_session() {
-                let reset = Doorbell {
-                    reset: true,
-                    ..Default::default()
-                };
-                let _ = write_line_half(&mut write_half, &reset).await;
-                return;
-            }
+        if !self.ensure_session() {
+            let reset = Doorbell {
+                reset: true,
+                ..Default::default()
+            };
+            let _ = write_line_half(&mut write_half, &reset).await;
+            return;
+        }
+        // Attach to the fan-out BEFORE reading the epoch we reset against, so
+        // nothing published in between falls into the gap. A broadcast receiver
+        // buffers from the moment it subscribes.
+        let mut frames = self.doorbells.subscribe();
+        // Returns only once the pump is READY, so the reset below is never sent
+        // against a stream that has not opened yet.
+        self.ensure_doorbell_pump().await;
+        let epoch = {
             let guard = self.session.lock().expect("session lock");
-            let session = guard.as_ref().expect("session present after ensure");
-            (session.observe(None), session.epoch().as_u64())
+            match guard.as_ref() {
+                Some(session) => session.epoch().as_u64(),
+                None => return,
+            }
         };
         let reset = Doorbell {
             epoch,
@@ -1695,34 +1980,7 @@ impl OrbitalDaemon {
         if write_line_half(&mut write_half, &reset).await.is_err() {
             return;
         }
-        // Drain the initial reset record so subsequent records are live.
-        let _ = stream.try_next();
 
-        // Bridge the blocking observation iterator through a TRACKED blocking
-        // task and an async channel. The worker owns the stream and blocks in
-        // bounded windows, re-checking the cancellation flag between them; the
-        // async side selects on the channel and the teardown watch, so a Stop
-        // wakes it immediately and the worker exits within one window. The
-        // JoinHandle is awaited — the thread is tracked, never leaked.
-        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let worker_cancel = cancel.clone();
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<runtime::Observation>(64);
-        let worker = tokio::task::spawn_blocking(move || {
-            loop {
-                if worker_cancel.load(std::sync::atomic::Ordering::SeqCst) {
-                    return;
-                }
-                match stream.next_timeout(Duration::from_millis(250)) {
-                    Ok(Some(record)) => {
-                        if tx.blocking_send(record).is_err() {
-                            return; // subscriber went away
-                        }
-                    }
-                    Ok(None) => continue, // idle window: re-check cancellation
-                    Err(_) => return,     // station dormant: stream closed
-                }
-            }
-        });
         let mut stop_rx = self.stop_tx.subscribe();
         loop {
             tokio::select! {
@@ -1731,14 +1989,17 @@ impl OrbitalDaemon {
                         break;
                     }
                 }
-                record = rx.recv() => {
-                    let Some(record) = record else { break }; // worker ended
-                    let frame = Doorbell {
-                        epoch: record.epoch.as_u64(),
-                        seq: record.sequence,
-                        reset: record.reset,
-                        activity_advanced: true,
-                        ..Default::default()
+                frame = frames.recv() => {
+                    let frame = match frame {
+                        Ok(frame) => frame,
+                        // Dropped frames: this subscriber's position is
+                        // meaningless, which is exactly what a reset says.
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => Doorbell {
+                            epoch,
+                            reset: true,
+                            ..Default::default()
+                        },
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     };
                     if write_line_half(&mut write_half, &frame).await.is_err() {
                         break;
@@ -1746,11 +2007,6 @@ impl OrbitalDaemon {
                 }
             }
         }
-        // Bounded shutdown: signal the worker and await it (it exits within
-        // one 250 ms window, or immediately on the closed channel).
-        cancel.store(true, std::sync::atomic::Ordering::SeqCst);
-        drop(rx);
-        let _ = worker.await;
     }
 
     /// Latch teardown: the atomic (for worker threads), the watch (for live
@@ -1761,6 +2017,44 @@ impl OrbitalDaemon {
         let _ = self.stop_tx.send(true);
         self.shutdown.notify_one();
     }
+}
+
+/// One catalog plane and the digest of its committed contents, as the World
+/// reports it. `scope` is the flattened [`CatalogScope`] tag, so the plane the
+/// daemon compares is the same value the client receives.
+#[derive(serde::Deserialize)]
+struct PlaneDigest {
+    #[serde(flatten)]
+    scope: CatalogScope,
+    digest: String,
+}
+
+/// One ring's committed state, read at a single pinned root.
+struct RingState {
+    /// `Body id -> (doc id, project KEY)`.
+    docs: std::collections::HashMap<replica::ids::BodyId, (String, String)>,
+    /// Digest per catalog plane.
+    planes: std::collections::BTreeMap<CatalogScope, String>,
+}
+
+/// Group observed issue Bodies by project KEY, reporting whether any of them was
+/// absent from the index — the caller turns that miss into a coarser frame.
+fn resolve_docs(
+    index: Option<&std::collections::HashMap<replica::ids::BodyId, (String, String)>>,
+    docs: &[&replica::ids::BodyId],
+) -> (std::collections::HashMap<String, Vec<String>>, bool) {
+    let mut by_project: std::collections::HashMap<String, Vec<String>> = Default::default();
+    let mut missed = false;
+    for body in docs {
+        match index.and_then(|i| i.get(*body)) {
+            Some((doc, project)) => by_project
+                .entry(project.clone())
+                .or_default()
+                .push(doc.clone()),
+            None => missed = true,
+        }
+    }
+    (by_project, missed)
 }
 
 static CLOCK: std::sync::OnceLock<SystemUlidSource> = std::sync::OnceLock::new();
