@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import * as AlertDialog from "@radix-ui/react-alert-dialog";
 import * as Dialog from "@radix-ui/react-dialog";
 
-import { Button } from "./primitives";
+import { Button, Input } from "./primitives";
 
 /**
  * Ask the user something, using our components.
@@ -146,7 +146,7 @@ export function DialogHost() {
             </div>
             <div className="p-4">
               {req.label && <label className="text-mute mb-1 block text-2xs uppercase">{req.label}</label>}
-              <input
+              <Input
                 autoFocus
                 value={value}
                 placeholder={req.placeholder}
@@ -154,7 +154,7 @@ export function DialogHost() {
                 // Radix closes on Escape; stopping propagation keeps the app's
                 // global keymap from also acting on the same keystroke.
                 onKeyDown={(e) => e.stopPropagation()}
-                className="border-line focus:border-line-strong placeholder:text-mute w-full rounded-control border bg-transparent px-2 py-1.5 text-base outline-none"
+                className="w-full"
               />
             </div>
             <div className="border-line flex justify-end gap-2 border-t p-3">

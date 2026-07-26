@@ -4,6 +4,7 @@ import * as Popover from "@radix-ui/react-popover";
 import {
   AlertTriangle,
   ArchiveRestore,
+  ArrowUp,
   Ban,
   Bell,
   BellOff,
@@ -62,7 +63,7 @@ import { MarkdownEditor } from "./MarkdownEditor";
 import { DatePicker } from "./DatePicker";
 import { NewLabelDialog } from "./NewLabel";
 import { Combobox, type Option } from "./Picker";
-import { Button, ChipButton, cn, IconButton, InlineAction, LabelChip, PopoverContent } from "./primitives";
+import { Button, ChipButton, cn, IconButton, InlineAction, Input, LabelChip, PopoverContent } from "./primitives";
 import {
   Disclosure,
   HeaderActions,
@@ -891,7 +892,13 @@ export function IssueDetail({
         />
 
         {!locked && (
-          <div className="border-line focus-within:border-line-strong rounded-control border bg-transparent">
+          /* One surface, not two stacked ones. The actions used to sit in a
+             bordered footer strip, which drew a rule across the composer and
+             spent a full row on a hint that never changes. Linear puts the
+             send control inside the field at the bottom right and lets the
+             keyboard shortcut live on its tooltip — the affordance is the
+             button, and the hint is there when you go looking for it. */
+          <div className="border-line focus-within:border-line-strong rounded-surface border bg-[var(--field-bg)]">
             <textarea
               ref={commentRef}
               value={comment}
@@ -907,12 +914,12 @@ export function IssueDetail({
                 }
               }}
               rows={3}
-              className="placeholder:text-mute block w-full resize-y bg-transparent p-2 outline-none"
+              className="placeholder:text-mute block w-full resize-none bg-transparent p-2 outline-none"
               aria-label="New comment"
               aria-describedby={commentError ? "comment-error" : undefined}
             />
-            <div className="border-line flex items-center gap-2 border-t px-2 py-1.5">
-              {commentError ? (
+            <div className="flex items-center gap-2 px-2 pb-2">
+              {commentError && (
                 <span
                   id="comment-error"
                   className="text-danger min-w-0 flex-1 truncate text-xs"
@@ -920,19 +927,18 @@ export function IssueDetail({
                 >
                   Comment not sent. Your draft is safe.
                 </span>
-              ) : (
-                <span className="text-mute min-w-0 flex-1 text-xs">
-                  Ctrl/⌘ Enter to send
-                </span>
               )}
-              <Button
+              <span className="ml-auto" />
+              <IconButton
+                label={commentError ? "Retry comment" : "Comment"}
+                chord="Ctrl/⌘ ↵"
                 variant="primary"
                 disabled={!comment.trim()}
                 loading={commentPending}
                 onClick={() => void submitComment()}
               >
-                {commentPending ? "Sending…" : commentError ? "Retry" : "Comment"}
-              </Button>
+                <ArrowUp className="size-icon-sm" />
+              </IconButton>
             </div>
           </div>
         )}
@@ -1489,7 +1495,7 @@ function Relations({
             />
           ))}
           {subDraft !== null && (
-            <input
+            <Input
               autoFocus
               value={subDraft}
               placeholder="Sub-issue title…  (Enter creates, Esc closes)"
@@ -1503,7 +1509,7 @@ function Relations({
                 if (!subDraft.trim()) setSubDraft(null);
               }}
               aria-label="New sub-issue title"
-              className="border-line focus:border-line-strong placeholder:text-mute rounded-control border bg-transparent px-2 py-1 text-sm outline-none"
+              className=""
             />
           )}
         </Disclosure>

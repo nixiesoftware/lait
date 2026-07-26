@@ -251,7 +251,7 @@ function SpaceSwitcher({
             has better homes: the status dot, the agent banner below, and the
             members tab in Settings. */}
         <DropdownMenu.Trigger
-          className="hover:bg-hover data-[state=open]:bg-active -mx-1 flex h-ctl-md min-w-0 flex-1 items-center gap-1.5 rounded-control px-1.5 outline-none"
+          className="hover:bg-hover data-[state=open]:bg-active -mx-1 flex h-ctl-md min-w-0 flex-1 items-center gap-1.5 rounded-full px-1.5 outline-none"
           aria-label="Space menu"
         >
           <span className="bg-active flex size-ctl-xs shrink-0 items-center justify-center rounded-mark">

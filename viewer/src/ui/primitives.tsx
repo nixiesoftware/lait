@@ -317,7 +317,7 @@ export function ChipButton({
 }
 
 const field = cva(
-  "border-line bg-bg placeholder:text-mute w-full rounded-control border text-sm outline-none transition-colors focus:border-line-strong focus:ring-1 focus:ring-line-strong/30 disabled:cursor-not-allowed disabled:opacity-50 aria-invalid:border-danger aria-invalid:focus:ring-danger/20",
+  "border-line bg-[var(--field-bg)] placeholder:text-mute w-full rounded-control border text-sm outline-none transition-colors focus:border-line-strong focus:ring-1 focus:ring-line-strong/30 disabled:cursor-not-allowed disabled:opacity-50 aria-invalid:border-danger aria-invalid:focus:ring-danger/20",
   {
     variants: {
       size: {

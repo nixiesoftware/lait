@@ -11,7 +11,7 @@ import { Markdown } from "./Markdown";
 import { MarkdownEditor } from "./MarkdownEditor";
 import { Combobox } from "./Picker";
 import { RailRow, RailSection } from "./layout";
-import { Button, IconButton, PopoverContent } from "./primitives";
+import { Button, IconButton, Input, PopoverContent } from "./primitives";
 import { when } from "./time";
 import * as Popover from "@radix-ui/react-popover";
 
@@ -395,14 +395,15 @@ function Milestones({
       </ol>
       {!readOnly && (
         <div className="mt-2 flex items-center gap-2">
-          <input
+          <Input
+            size="sm"
             value={draft}
             placeholder="New milestone…"
             onChange={(e) => setDraft(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === "Enter" && draft.trim()) void add();
             }}
-            className="border-line focus:border-line-strong placeholder:text-mute min-w-0 flex-1 rounded-control border bg-transparent px-2 py-1 text-sm outline-none"
+            className="min-w-0 flex-1"
             aria-label="New milestone name"
           />
           <DatePicker
@@ -412,7 +413,10 @@ function Milestones({
             ariaLabel="Milestone target date"
             onChange={setTarget}
           />
-          <Button variant="outline" disabled={!draft.trim() || adding} onClick={() => void add()}>
+          {/* `md` so the row lands on one baseline: the field and the date
+              trigger beside it are both 28px, and the default `sm` button left a
+              24px control floating between them. */}
+          <Button variant="outline" size="md" disabled={!draft.trim() || adding} onClick={() => void add()}>
             Add
           </Button>
         </div>
@@ -482,13 +486,13 @@ function Updates({
       <h2 className="text-mute mb-3 text-2xs font-semibold tracking-wider uppercase">Updates</h2>
 
       {!readOnly && (
-        <div className="border-line mb-4 rounded-surface border p-3">
+        <div className="border-line focus-within:border-line-strong mb-4 rounded-surface border bg-[var(--field-bg)] p-3 transition-colors">
           <textarea
             value={draft}
             rows={2}
             placeholder="Post a status update — what changed, what's next…"
             onChange={(e) => setDraft(e.target.value)}
-            className="placeholder:text-mute w-full resize-y bg-transparent text-sm outline-none"
+            className="placeholder:text-mute w-full resize-none bg-transparent text-sm outline-none"
             aria-label="New project update"
           />
           <div className="mt-2 flex items-center gap-2">
