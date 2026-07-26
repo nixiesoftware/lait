@@ -2,11 +2,11 @@ PackageIdentifier: NixieTechLLC.Lait
 PackageVersion: 0.4.1
 PackageLocale: en-US
 Publisher: Nixie Tech LLC
-PublisherUrl: https://github.com/Nixie-Tech-LLC
+PublisherUrl: https://github.com/nixiesoftware
 PackageName: lait
-PackageUrl: https://github.com/Nixie-Tech-LLC/lait
+PackageUrl: https://github.com/nixiesoftware/lait
 License: MIT OR Apache-2.0
-LicenseUrl: https://github.com/Nixie-Tech-LLC/lait/blob/main/LICENSE-MIT
+LicenseUrl: https://github.com/nixiesoftware/lait/blob/main/LICENSE-MIT
 ShortDescription: A local-first, peer-to-peer, end-to-end-encrypted issue tracker built on iroh + Loro CRDTs.
 Description: |-
   lait is a decentralized, offline-first alternative to Linear. Issues are Loro
