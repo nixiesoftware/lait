@@ -93,8 +93,12 @@ const button = cva(
          *  White-on-danger clears AA (see the palette note). Replaces the old
          *  `primary` + `bg-danger` override that every call site had to remember. */
         destructive: "bg-danger text-accent-fg hover:bg-danger/85",
-        /** Selected state in a segmented group. */
-        active: "bg-active text-fg",
+        /** Selected state in a segmented group. Bordered, because the thing
+         *  it alternates with is `outline`: a state change should move the
+         *  fill, not the silhouette. Without the border a selected tab was a
+         *  pixel narrower than its neighbours and the row shifted as you
+         *  moved between them. */
+        active: "border-line-strong bg-active text-fg border",
         /** A named action inside dense chrome. Unlike `primary`, this sits beside
          * icon buttons without turning the toolbar into a callout banner. */
         toolbar:

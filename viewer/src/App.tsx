@@ -72,7 +72,7 @@ import { catalogColor } from "./ui/colors";
 import * as ask from "./ui/dialogs";
 import { DialogHost } from "./ui/dialogs";
 import { Combobox } from "./ui/Picker";
-import { Button, cn, IconButton, TooltipProvider } from "./ui/primitives";
+import { Button, IconButton, TooltipProvider } from "./ui/primitives";
 import { Sidebar } from "./ui/Sidebar";
 import {
   applyFilter,
@@ -1446,6 +1446,21 @@ export function App() {
                 />
               )}
 
+            </>
+              )
+            }
+          />
+          {/* The only band under the header. Filtering used to add a second one
+              beneath it for as long as the filter was engaged; it is a panel
+              now, so the chrome no longer changes height when you narrow. */}
+          {projectShell && !fullWidthDetail && issueMode && (
+            <Toolbar>
+              <StatusSlices states={states} filter={filter} onChange={setFilter} />
+              {/* The controls belong beside the slices they act on, not up in the
+                  trail: filtering, display and "new issue" are all about THIS
+                  list, while the bar above names where you are. One row, the
+                  slices at its head and the tools at its tail. */}
+              <span className="ml-auto flex items-center gap-1">
               {projectShell && issueMode && (
                 <FilterMenu
                   filter={filter}
@@ -1492,20 +1507,11 @@ export function App() {
               )}
 
               {projectShell && !readOnly && current && (view === "list" || view === "board" || view === "calendar") && (
-                <IconButton label="New issue" chord="C" onClick={() => run("issue.create")}>
-                  <Plus className="size-icon-md" />
+                <IconButton label="New issue" chord="C" variant="outline" onClick={() => run("issue.create")}>
+                  <Plus className="size-icon-sm" />
                 </IconButton>
               )}
-            </>
-              )
-            }
-          />
-          {/* The only band under the header. Filtering used to add a second one
-              beneath it for as long as the filter was engaged; it is a panel
-              now, so the chrome no longer changes height when you narrow. */}
-          {projectShell && !fullWidthDetail && issueMode && (
-            <Toolbar>
-              <StatusSlices states={states} filter={filter} onChange={setFilter} />
+              </span>
             </Toolbar>
           )}
         </div>
@@ -2038,17 +2044,14 @@ function StatusSlices({
       {STATUS_SLICES.map((slice) => {
         const active = slice.id === selected;
         return (
-          <button
+          <Button
             key={slice.id}
+            variant={active ? "active" : "outline"}
             aria-pressed={active}
             onClick={() => onChange({ ...filter, status: idsFor(slice.categories) })}
-            className={cn(
-              "h-ctl-sm rounded-control px-2 text-sm transition-colors",
-              active ? "bg-active text-fg" : "text-dim hover:bg-hover hover:text-fg",
-            )}
           >
             {slice.label}
-          </button>
+          </Button>
         );
       })}
     </div>

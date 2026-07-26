@@ -98,8 +98,8 @@ export function FilterMenu({
   return (
     <Popover.Root open={open} onOpenChange={onOpenChange}>
       <Popover.Trigger asChild>
-        <IconButton label="Filter" chord="/" variant={active ? "active" : "ghost"}>
-          <ListFilter className="size-icon-md" />
+        <IconButton label="Filter" chord="/" variant={active ? "active" : "outline"}>
+          <ListFilter className="size-icon-sm" />
         </IconButton>
       </Popover.Trigger>
       <PopoverContent

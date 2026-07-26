@@ -48,8 +48,8 @@ export function DisplayOptions({
   return (
     <Popover.Root open={open} onOpenChange={onOpenChange}>
       <Popover.Trigger asChild>
-        <IconButton label="Display options" chord="⇧V" variant={changed ? "active" : "ghost"}>
-          <SlidersHorizontal className="size-icon-md" />
+        <IconButton label="Display options" chord="⇧V" variant={changed ? "active" : "outline"}>
+          <SlidersHorizontal className="size-icon-sm" />
         </IconButton>
       </Popover.Trigger>
       <PopoverContent align="end" className="flex w-64 flex-col gap-3 p-3">

@@ -84,7 +84,10 @@ export function Toolbar({
   return (
     <div
       className={cn(
-        "border-line/70 flex shrink-0 items-center gap-1 border-b px-2",
+        // No bottom rule: the bar and the rows under it are one surface —
+        // the slices act on the list directly, and a line between them read
+        // as a boundary between two things rather than a header for one.
+        "flex shrink-0 items-center gap-1 px-2",
         className,
         "h-bar-sm",
       )}
