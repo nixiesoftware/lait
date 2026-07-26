@@ -8,7 +8,8 @@ and private-key provisioning.
 
 | Control | Status | What it establishes |
 |---|---|---|
-| SHA-256 manifest | Published with releases | Downloaded files match the release manifest. |
+| Per-archive SHA-256 | Published with releases | A downloaded platform archive matches its `.sha256` sidecar. |
+| Source SHA-256 manifest (`sha256.sum`) | Published with releases | `source.tar.gz` matches the signed manifest. It does not cover the platform archives. |
 | GitHub build-provenance attestation | Enabled for release archives | An archive was produced by the repository's release workflow. |
 | GPG signatures for `sha256.sum` and `source.tar.gz` | Conditional on the release signing key being provisioned | The manifest or source archive was signed by the lait release key. |
 | GPG-signed Git tag | Maintainer release procedure | The source tag was signed by the lait release key. |
@@ -21,17 +22,23 @@ prove that the source or build process is free of vulnerabilities.
 
 ## Download verification
 
-Download an archive and `sha256.sum` from the same GitHub release. Verify the
-manifest before running or installing the archive:
+Each platform archive ships its own checksum file alongside it. Download both
+from the same release and verify the archive before running or installing it:
 
 ```sh
-sha256sum -c sha256.sum
+sha256sum -c lait-<target>.<archive>.sha256
 ```
 
-On macOS, use `shasum -a 256 -c sha256.sum` if GNU `sha256sum` is unavailable.
-The manifest may cover files you did not download; a missing-file warning is not
-an integrity failure for the files that were checked, but every file you intend
-to install must report `OK`.
+A verified download prints `lait-<target>.<archive>: OK`. On macOS, use
+`shasum -a 256 -c` if GNU `sha256sum` is unavailable.
+
+`sha256.sum` is a different artifact and does **not** cover the platform
+archives — it is the manifest for `source.tar.gz`, and it is what
+`sha256.sum.asc` signs (see [Source-signature verification](#source-signature-verification)).
+Running `sha256sum -c sha256.sum` next to a downloaded binary archive therefore
+reports `source.tar.gz: FAILED open or read` and checks nothing you have. That
+is the wrong file for the job, not a failed integrity check — but it is
+indistinguishable from one at a glance, so use the per-archive `.sha256` above.
 
 ## Build-provenance verification
 

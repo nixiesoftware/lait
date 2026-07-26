@@ -7,8 +7,9 @@
 # Signs with a dedicated release SUBKEY (the master key stays offline). The
 # private subkey is stored base64-encoded in the GPG_SIGNING_KEY secret; the
 # public key is committed at docs/lait-release-key.asc for verifiers. Detached
-# `.asc` signatures over `sha256.sum` (which covers every release artifact) and
-# `source.tar.gz` are attached to the release.
+# `.asc` signatures over `sha256.sum` (which covers `source.tar.gz` only — the
+# platform archives carry their own `.sha256` sidecars and a build-provenance
+# attestation) and `source.tar.gz` are attached to the release.
 #
 # Triggered on the Release workflow completing (`workflow_run`) — by then the
 # assets exist. Soft-skips if GPG_SIGNING_KEY is unset, so releases keep shipping

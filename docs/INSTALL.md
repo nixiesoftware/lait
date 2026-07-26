@@ -97,8 +97,10 @@ speeds up direct dials).
 
 ## Verifying a download
 
-Every release archive ships a `.sha256` sidecar, and the release page lists a
-unified `sha256.sum`. To check a manual download:
+Every release archive ships a `.sha256` sidecar — that is the one to use for a
+binary download. (`sha256.sum` on the release page is the signed manifest for
+`source.tar.gz`; it does not list the platform archives.) To check a manual
+download:
 
 ```sh
 sha256sum -c lait-x86_64-unknown-linux-gnu.tar.gz.sha256
