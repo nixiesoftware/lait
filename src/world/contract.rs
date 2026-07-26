@@ -915,6 +915,43 @@ pub enum IssueQuery {
     RingDigest,
 }
 
+/// One catalog plane and the digest of its committed contents.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlaneDigest {
+    /// Nested rather than flattened: `flatten` does not compose with
+    /// `deny_unknown_fields`, and silently produces a decoder that rejects
+    /// perfectly good input — which is how a "fail visibly" contract turns into
+    /// a doorbell that reports nothing at all.
+    pub plane: crate::dto::CatalogScope,
+    pub digest: String,
+}
+
+/// One doc and the project it belongs to, as the ring index names it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RingDoc {
+    pub doc: String,
+    pub project_id: String,
+    pub project_key: String,
+}
+
+/// The reply to [`IssueQuery::RingDigest`] — everything the doorbell needs to
+/// describe one ring, read at ONE pinned snapshot.
+///
+/// A typed contract on purpose. This used to be hand-built `serde_json::Value`
+/// parsed permissively on the other side, which meant a plane the daemon could
+/// not understand was silently skipped — and a plane that never fires is exactly
+/// the failure this whole dirty-set exists to prevent. Now a malformed or
+/// unrecognised plane fails the decode, and the daemon rings coarsely and
+/// visibly rather than quietly dropping it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RingDigestView {
+    pub planes: Vec<PlaneDigest>,
+    pub docs: Vec<RingDoc>,
+}
+
 impl IssueQuery {
     pub fn to_json(&self) -> Vec<u8> {
         serde_json::to_vec(self).expect("query json")
@@ -998,4 +1035,53 @@ pub fn default_workflow() -> Vec<serde_json::Value> {
         serde_json::json!({"id":"in_review","name":"In Review","category":"active","color":"yellow"}),
         serde_json::json!({"id":"done","name":"Done","category":"done","color":"green"}),
     ]
+}
+
+#[cfg(test)]
+mod ring_digest_tests {
+    use super::*;
+    use crate::dto::CatalogScope;
+
+    /// The contract must survive its own serializer.
+    ///
+    /// This exists because it did not. An earlier shape used `#[serde(flatten)]`
+    /// to merge the project into a scope and `deny_unknown_fields` to make an
+    /// unknown plane loud — a combination serde does not support, which produced
+    /// a decoder that rejected the encoder's own output. Every doorbell went out
+    /// empty and every test that asserted a dirty-set failed at once. A
+    /// "fail visibly" contract is only worth having if valid input survives it.
+    #[test]
+    fn a_ring_digest_survives_its_own_round_trip() {
+        let view = RingDigestView {
+            planes: vec![
+                PlaneDigest {
+                    plane: CatalogScope::Labels,
+                    digest: "abc".into(),
+                },
+                PlaneDigest {
+                    plane: CatalogScope::Boards {
+                        project_id: "prj_1".into(),
+                        project_key: "ENG".into(),
+                    },
+                    digest: "def".into(),
+                },
+            ],
+            docs: vec![RingDoc {
+                doc: "iss_1".into(),
+                project_id: "prj_1".into(),
+                project_key: "ENG".into(),
+            }],
+        };
+        let bytes = serde_json::to_vec(&view).expect("encode");
+        let back: RingDigestView = serde_json::from_slice(&bytes).expect("decode its own output");
+        assert_eq!(view, back);
+    }
+
+    /// And a plane this build does not know must fail LOUDLY rather than be
+    /// skipped — a silently dropped plane is a resource that never refreshes.
+    #[test]
+    fn an_unknown_plane_fails_the_decode() {
+        let json = br#"{"planes":[{"plane":{"scope":"from_the_future"},"digest":"x"}],"docs":[]}"#;
+        assert!(serde_json::from_slice::<RingDigestView>(json).is_err());
+    }
 }

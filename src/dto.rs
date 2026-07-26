@@ -869,3 +869,76 @@ mod tests {
         );
     }
 }
+
+// ----------------------------------------------------------------------------
+// Doorbell planes (the dirty-set vocabulary, shared by the World and clients)
+// ----------------------------------------------------------------------------
+
+/// The project a dirty plane belongs to, named twice on purpose.
+///
+/// `id` is the stable identity a dependency matches on; `key` is a mutable
+/// display alias that a rename changes underneath you. Matching on the key was
+/// a latent bug waiting for the first `project edit --key`, and dropping the key
+/// would force every client to resolve one before it could route or label. So
+/// both travel together, with the roles stated.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct ProjectRef {
+    pub project_id: String,
+    pub project_key: String,
+}
+
+/// Which docs moved, in which project — the issue-row plane of a doorbell.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DirtyProject {
+    pub project_id: String,
+    pub project_key: String,
+    /// The DocIds whose rows must be re-read.
+    pub docs: Vec<String>,
+}
+
+/// Identifies which catalog structure became dirty.
+///
+/// One variant per plane of the catalog Body, because that Body holds every
+/// structure the space has and a client should re-read only the one that moved.
+/// The variants carrying a [`ProjectRef`] are planes the catalog groups by
+/// project, so editing one project's milestones leaves another's alone.
+///
+/// Membership is deliberately absent: it is not in the catalog at all, and rings
+/// from the doorbell's own authority flag rather than pretending to be a catalog
+/// plane.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(tag = "scope", rename_all = "snake_case")]
+pub enum CatalogScope {
+    /// The space's own name and description.
+    Space,
+    Projects,
+    Labels,
+    /// The workflow states and their revision log.
+    Workflow,
+    Boards {
+        project_id: String,
+        project_key: String,
+    },
+    Milestones {
+        project_id: String,
+        project_key: String,
+    },
+    Cycles {
+        project_id: String,
+        project_key: String,
+    },
+    /// The project status-update feed.
+    Updates {
+        project_id: String,
+        project_key: String,
+    },
+    Initiatives,
+    Teams,
+    Triage,
+    Roles,
+    /// The row index: which docs exist, their aliases and seqs, what is deleted.
+    Docs,
+    /// Issue links and parentage.
+    Relations,
+}

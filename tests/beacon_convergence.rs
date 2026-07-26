@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use async_trait::async_trait;
-use lait::control::{request, subscribe, CatalogScope, Request, Response};
+use lait::control::{request, subscribe, Request, Response};
 use lait::net::Network;
 use lait::orbital::run_orbital_daemon_with;
 use lait::transport::mem::MemNet;
@@ -389,11 +389,11 @@ fn a_peers_change_rings_a_doorbell_that_names_what_moved() {
             }
             match tokio::time::timeout(remaining, sub.next()).await {
                 Ok(Ok(Some(frame))) => {
-                    if frame
+                    let named = frame
                         .dirty_by_project
-                        .get("BCN")
-                        .is_some_and(|d| d.contains(&doc))
-                    {
+                        .iter()
+                        .any(|d| d.project_key == "BCN" && d.docs.contains(&doc));
+                    if named {
                         break Some(frame);
                     }
                 }
@@ -518,12 +518,10 @@ fn a_peers_admission_rings_a_doorbell_at_the_other_members() {
     // happened to arrive in the same window — otherwise this passes for the
     // wrong reason the moment anything else converges alongside.
     assert!(
-        rang.iter().any(|f| f
-            .dirty_catalog
-            .iter()
-            .any(|s| matches!(s, CatalogScope::Acl))),
-        "something rang at A but no frame named the ACL plane, so a client would \
-         re-read everything except the membership that actually changed: {rang:?}"
+        rang.iter().any(|f| f.authority_advanced),
+        "something rang at A but no frame carried the authority plane, so a \
+         client would re-read everything except the membership that actually \
+         changed: {rang:?}"
     );
 }
 

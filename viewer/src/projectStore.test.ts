@@ -78,8 +78,9 @@ describe("ProjectViewerStore", () => {
       epoch: 1,
       seq: 1,
       reset: false,
-      dirty_by_project: { ONE: [row.doc_id] },
+      dirty_by_project: [{ project_id: "prj_1", project_key: "ONE", docs: [row.doc_id] }],
       dirty_catalog: [],
+      authority_advanced: false,
       activity_advanced: false,
       presence_advanced: false,
     };
@@ -109,8 +110,9 @@ describe("ProjectViewerStore", () => {
     milestones = [...milestones, { id: "ms_2", project_id: "prj_1", name: "v2", tombstone: false, total: 0, done: 0 }];
     await store.handleDoorbell({
       space: "local", epoch: 1, seq: 1, reset: false,
-      dirty_by_project: {}, dirty_catalog: [{ scope: "milestones", project: "ONE" }],
-      activity_advanced: false, presence_advanced: false,
+      dirty_by_project: [],
+      dirty_catalog: [{ scope: "milestones", project_id: "prj_1", project_key: "ONE" }],
+      authority_advanced: false, activity_advanced: false, presence_advanced: false,
     });
 
     expect(store.resources.read(key).data).toHaveLength(2);
@@ -134,12 +136,73 @@ describe("ProjectViewerStore", () => {
 
     await store.handleDoorbell({
       space: "local", epoch: 1, seq: 1, reset: false,
-      dirty_by_project: {}, dirty_catalog: [{ scope: "milestones", project: "ONE" }],
-      activity_advanced: false, presence_advanced: false,
+      dirty_by_project: [],
+      dirty_catalog: [{ scope: "milestones", project_id: "prj_1", project_key: "ONE" }],
+      authority_advanced: false, activity_advanced: false, presence_advanced: false,
     });
 
     const after = rpc.mock.calls.filter((c) => c[1].cmd === "label_list").length;
     expect(after).toBe(before);
+    unsubscribe();
+  });
+
+  it("matches a project dependency by id, not by its renameable key", async () => {
+    // The reason the ring carries both. A project KEY is a display alias that
+    // `project edit --key` moves; the `prj_` id is identity. If dependencies
+    // matched on the key, the first rename would silently detach every resource
+    // scoped to that project — a panel that stops refreshing and says nothing.
+    let milestones = [{ id: "ms_1", project_id: "prj_1", name: "v1", tombstone: false, total: 0, done: 0 }];
+    const rpc = vi.fn(async (_space: string, request: { cmd: string }) => {
+      if (request.cmd === "board") return board as Response;
+      return { kind: "milestones", milestones } as Response;
+    });
+    const store = new ProjectViewerStore(rpc);
+    await store.ensureMilestones("local", "prj_1");
+    const key = projectKeys.milestones("local", "prj_1");
+    const unsubscribe = store.resources.subscribe(key, () => undefined);
+
+    milestones = [...milestones, { id: "ms_2", project_id: "prj_1", name: "v2", tombstone: false, total: 0, done: 0 }];
+    await store.handleDoorbell({
+      space: "local", epoch: 1, seq: 1, reset: false,
+      dirty_by_project: [],
+      // Same project, renamed since this resource was registered.
+      dirty_catalog: [{ scope: "milestones", project_id: "prj_1", project_key: "RENAMED" }],
+      authority_advanced: false, activity_advanced: false, presence_advanced: false,
+    });
+    expect(store.resources.read(key).data).toHaveLength(2);
+
+    // ...and a genuinely different project still does not reach it.
+    milestones = [...milestones, { id: "ms_3", project_id: "prj_1", name: "v3", tombstone: false, total: 0, done: 0 }];
+    await store.handleDoorbell({
+      space: "local", epoch: 1, seq: 2, reset: false,
+      dirty_by_project: [],
+      dirty_catalog: [{ scope: "milestones", project_id: "prj_2", project_key: "ONE" }],
+      authority_advanced: false, activity_advanced: false, presence_advanced: false,
+    });
+    expect(store.resources.read(key).data).toHaveLength(2);
+    unsubscribe();
+  });
+
+  it("refreshes members on authority, which is not a catalog plane", async () => {
+    let members = [
+      { actor: "act_1", key: "act_1", nick: "a", alias: "", role: "admin", admin: true, me: true, devices: [] },
+    ];
+    const rpc = vi.fn(async () => ({ kind: "members", members }) as Response);
+    const store = new ProjectViewerStore(rpc);
+    await store.ensureMembers("local");
+    const key = projectKeys.members("local");
+    const unsubscribe = store.resources.subscribe(key, () => undefined);
+
+    members = [...members, {
+      actor: "act_2", key: "act_2", nick: "b", alias: "", role: "member",
+      admin: false, me: false, devices: [],
+    }];
+    await store.handleDoorbell({
+      space: "local", epoch: 1, seq: 1, reset: false,
+      dirty_by_project: [], dirty_catalog: [],
+      authority_advanced: true, activity_advanced: false, presence_advanced: true,
+    });
+    expect(store.resources.read(key).data).toHaveLength(2);
     unsubscribe();
   });
 
@@ -154,7 +217,8 @@ describe("ProjectViewerStore", () => {
     });
     await store.handleDoorbell({
       space: "local", epoch: 1, seq: 1, reset: false,
-      dirty_by_project: { ONE: [row.doc_id] }, dirty_catalog: [],
+      dirty_by_project: [{ project_id: "prj_1", project_key: "ONE", docs: [row.doc_id] }],
+      dirty_catalog: [], authority_advanced: false,
       activity_advanced: false, presence_advanced: false,
     });
     expect(store.resources.read(projectKeys.issue("local", "iss_other")).state).toBe("ready");

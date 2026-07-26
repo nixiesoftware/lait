@@ -8,6 +8,7 @@ import type {
   BoardView,
   CatalogPlane,
   CatalogScope,
+  DirtyProject,
   GraphView,
   IssueView,
   LabelDto,
@@ -40,63 +41,90 @@ export const projectKeys = {
 };
 
 /**
- * What a resource is derived from — the doorbell planes that can make it stale.
+ * A catalog plane this resource projects — optionally only that plane's slice
+ * for one project, matched by the **stable id** rather than the display key.
+ */
+export type CatalogDependency = CatalogPlane | { plane: CatalogPlane; projectId: string };
+
+/**
+ * Which issue bodies this resource is computed from.
  *
- * Declared beside the loader, not in a switch somewhere else. The point is that
- * the one place you write "here is how to fetch this" is the same place you write
- * "and here is what invalidates it", so a new feature cannot quietly acquire a
- * panel that never refreshes. Everything omitted means "this ring does not touch
- * me"; an empty `Derivation` is a resource nothing invalidates but a `reset`.
+ * Separate from `catalog` because "the milestone records of project X moved" and
+ * "an issue in project X moved" are different questions with different answers,
+ * and a single `project` field could only ever express one of them. Milestone
+ * progress needs both; a board needs its own project's issues; a graph needs
+ * neighbours it cannot enumerate in advance, so it takes `"any"`.
+ */
+export type IssueDependency = "any" | { projectId: string } | { docs: readonly string[] };
+
+/**
+ * What a resource is derived from — the planes that can make it stale.
+ *
+ * Declared beside the loader, not in a switch somewhere else: the one place you
+ * write "here is how to fetch this" is the same place you write "and here is
+ * what invalidates it", so a new feature cannot quietly acquire a panel that
+ * never refreshes. Everything omitted means "this ring does not touch me"; an
+ * empty `Derivation` is a resource nothing invalidates but a `reset`.
  */
 export interface Derivation {
   /** Catalog planes this resource projects. */
-  readonly catalog?: readonly CatalogPlane[];
-  /** Stale when the doc behind this `reff` is dirty. */
-  readonly reff?: string;
-  /** Stale when a doc in this project is dirty; `null` means any project at all. */
-  readonly project?: string | null;
+  readonly catalog?: readonly CatalogDependency[];
+  /** Issue bodies this resource is computed from. */
+  readonly issues?: IssueDependency;
+  /** Stale when membership, roles, devices or keys advance. */
+  readonly authority?: boolean;
   /** Stale when the activity feed advances. */
   readonly activity?: boolean;
 }
 
 /** One doorbell, reduced to the things a `Derivation` asks about. */
 interface Ring {
+  readonly dirty: readonly DirtyProject[];
+  /** Every dirty doc, flattened — the `{ docs }` dependency asks about these. */
   readonly docs: ReadonlySet<string>;
-  readonly reffs: ReadonlySet<string>;
-  readonly projects: ReadonlySet<string>;
   readonly planes: readonly CatalogScope[];
+  readonly authority: boolean;
   readonly activity: boolean;
 }
 
 /**
  * Does this ring's catalog dirt reach that resource?
  *
- * A scope carrying a `project` is one project's slice of a plane, so it only
- * reaches a resource derived from that project — or one that named no project,
- * which means "any". Resources keyed by `prj_` id rather than KEY (milestones,
- * say) simply do not declare a project and match the plane as a whole; that is
- * still a world away from the catalog-wide ring it replaced.
+ * A scope carrying a project is one project's slice of a plane, and it reaches
+ * only a dependency naming that same project — by **id**, because the key is a
+ * display alias a rename moves. A bare plane dependency takes the plane whole.
  */
 function planeIsStale(d: Derivation, ring: Ring): boolean {
   if (!d.catalog?.length) return false;
   return ring.planes.some((scope) =>
-    d.catalog!.includes(scope.scope) &&
-    (scope.project == null || d.project == null || d.project === scope.project));
+    d.catalog!.some((dep) =>
+      typeof dep === "string"
+        ? dep === scope.scope
+        : dep.plane === scope.scope &&
+          (scope.project_id == null || dep.projectId === scope.project_id)));
+}
+
+/** Does this ring's issue dirt reach that resource? */
+function issuesAreStale(d: Derivation, ring: Ring): boolean {
+  if (d.issues === undefined) return false;
+  if (d.issues === "any") return ring.dirty.length > 0;
+  if ("projectId" in d.issues) {
+    const wanted = d.issues.projectId;
+    return ring.dirty.some((p) => p.project_id === wanted);
+  }
+  return d.issues.docs.some((doc) => ring.docs.has(doc));
 }
 
 /**
  * Does this ring make that resource stale?
  *
  * Any one clause is enough — a `Derivation` is a set of independent reasons, not
- * a conjunction. `project: null` is "any project", which is what an all-projects
- * board is derived from.
+ * a conjunction.
  */
 function isStale(d: Derivation, ring: Ring): boolean {
   if (planeIsStale(d, ring)) return true;
-  if (d.reff !== undefined && ring.reffs.has(d.reff)) return true;
-  if (d.project !== undefined && (d.project === null ? ring.projects.size > 0 : ring.projects.has(d.project))) {
-    return true;
-  }
+  if (issuesAreStale(d, ring)) return true;
+  if (d.authority && ring.authority) return true;
   return !!d.activity && ring.activity;
 }
 
@@ -139,7 +167,18 @@ function issueFromRow(space: string, row: Row): IssueView {
 export class ProjectViewerStore {
   readonly resources: WorldViewStore;
   readonly overlay = new Overlay();
-  private loaders = new Map<string, { load: () => Promise<unknown>; derivation: Derivation }>();
+  /**
+   * A derivation may be a thunk, because some of what a resource depends on is
+   * only knowable once it has loaded: a board is registered under a project KEY
+   * but must match on the project's stable id, which arrives with the board
+   * itself. Evaluating at ring time rather than registration time means the
+   * dependency sharpens as soon as the data exists, instead of being frozen at
+   * whatever was known the first time.
+   */
+  private loaders = new Map<
+    string,
+    { load: () => Promise<unknown>; derivation: Derivation | (() => Derivation) }
+  >();
   private rowsByDoc = new Map<string, Map<string, Row>>();
   private boardSelectors = new Map<string, {
     source: ResourceSnapshot<BoardView>;
@@ -250,9 +289,20 @@ export class ProjectViewerStore {
       this.ingestBoard(space, result);
       return result;
       // A board is its project's rows in its project's order, columned by the
-      // workflow, labelled from the row index. `project: null` — the
-      // all-projects board — is stale on any dirty doc or any project's board.
-    }, { project, catalog: ["boards", "workflow", "docs"] }, force);
+      // workflow, labelled from the row index. Registered under a project KEY
+      // but matched on the project's stable id, which only arrives with the
+      // board — hence a thunk, and "any project" until the first load lands.
+    }, () => {
+      const id = this.resources.read<BoardView>(key).data?.project.id;
+      return {
+        catalog: [
+          "workflow",
+          "docs",
+          ...(id ? [{ plane: "boards" as const, projectId: id }] : ["boards" as const]),
+        ],
+        issues: id ? { projectId: id } : "any",
+      };
+    }, force);
   }
 
   ensureIssue(space: string, reff: string, force = false): Promise<IssueView> {
@@ -262,7 +312,14 @@ export class ProjectViewerStore {
       if (result.kind !== "issue") throw new Error("Expected issue response");
       this.ingestIssue(space, result);
       return result;
-    }, { reff }, force);
+      // The ring names docs, this resource is keyed by `reff` — so resolve the
+      // doc through the row we hold. Before any row exists (a deep link opened
+      // cold) there is nothing to resolve against, and "any issue" is the honest
+      // answer rather than a dependency that silently matches nothing.
+    }, () => {
+      const doc = this.resources.read<Row>(projectKeys.row(space, reff)).data?.doc_id;
+      return { issues: doc ? { docs: [doc] } : "any" };
+    }, force);
     this.resources.evict(`${prefix(space)}issue:`, 200, new Set([key]));
     return promise;
   }
@@ -279,10 +336,12 @@ export class ProjectViewerStore {
         ...result.blocked_by,
       ]) this.ingestRow(space, row);
       return result;
-      // The neighbourhood is this issue plus its links, so it moves when this
-      // doc does — and when the link graph itself does, which is a plane of its
-      // own: a peer linking two OTHER issues can put this one behind a blocker.
-    }, { reff, catalog: ["relations"] }, force);
+      // The neighbourhood is this issue plus its parent, children, links and
+      // transitive blockers — a set this resource cannot enumerate before
+      // fetching, and which changes as the graph does. So `"any"`: a blocker
+      // three hops away closing is real news here, and narrowing to the docs we
+      // happen to know about today would miss exactly that.
+    }, { issues: "any", catalog: ["relations"] }, force);
     this.resources.evict(`${prefix(space)}graph:`, 50, new Set([key]));
     return promise;
   }
@@ -306,16 +365,18 @@ export class ProjectViewerStore {
       return result.milestones;
       // Milestones are catalog structure, but their `total`/`done` progress is
       // computed from ISSUE bodies — live issues of the project targeting each
-      // milestone, done by status category. So this depends on three things at
-      // once: the milestone records, any dirty issue doc (assignment, status,
-      // tombstone), and the workflow that decides which statuses count as done.
+      // milestone, done by status category. Three dependencies, and the split
+      // between them is exactly why `catalog` and `issues` are separate fields:
+      // the milestone RECORDS of this project, the ISSUES of this project, and
+      // the workflow that decides which statuses count as done.
       //
-      // `project: null` is "any project", which is coarser than it could be:
-      // this resource is keyed by `prj_` id while the ring names projects by
-      // KEY, so there is nothing to match on yet. Correct and over-eager beats
-      // precise and wrong — a milestone bar that silently stops counting is
-      // exactly the failure this whole change exists to prevent.
-    }, { catalog: ["milestones", "workflow"], project: null }, force);
+      // `project` here is the `prj_` id, which is what the ring matches on — so
+      // unlike the boards this is precise: ENG's issues do not refresh DSN's
+      // milestone bars.
+    }, {
+      catalog: [{ plane: "milestones", projectId: project }, "workflow"],
+      issues: { projectId: project },
+    }, force);
   }
 
   ensureLabels(space: string, force = false): Promise<LabelDto[]> {
@@ -331,7 +392,9 @@ export class ProjectViewerStore {
       const result = await this.rpc(space, { cmd: "members" });
       if (result.kind !== "members") throw new Error("Expected members response");
       return result.members;
-    }, { catalog: ["acl"] }, force);
+      // Membership is not catalog structure at all — it converges as signed
+      // authority records. Its own dependency, matching its own plane.
+    }, { authority: true }, force);
   }
 
   ensureProjects(space: string, force = false): Promise<ProjectDto[]> {
@@ -348,8 +411,8 @@ export class ProjectViewerStore {
       if (result.kind !== "status") throw new Error("Expected status response");
       return result;
       // Status names the space and counts its projects, members and issues —
-      // and the issue count comes from the row index, not from any one doc.
-    }, { catalog: ["space", "projects", "acl", "docs"] }, force);
+      // the issue count from the row index, the member count from authority.
+    }, { catalog: ["space", "projects", "docs"], authority: true }, force);
   }
 
   ensureIssueDetail(space: string, reff: string): void {
@@ -405,27 +468,23 @@ export class ProjectViewerStore {
       return;
     }
 
-    const dirty = Object.values(doorbell.dirty_by_project).flat();
-    // The frame names docs; resources are keyed by `reff`. Resolving once here
-    // keeps `isStale` a pure test over sets.
-    const reffs = new Set<string>();
-    for (const doc of dirty) {
-      const row = this.rowsByDoc.get(space)?.get(doc);
-      if (row) reffs.add(row.reff);
-    }
+    const dirty = doorbell.dirty_by_project.flatMap((p) => p.docs);
     const ring: Ring = {
+      dirty: doorbell.dirty_by_project,
       docs: new Set(dirty),
-      reffs,
-      projects: new Set(Object.keys(doorbell.dirty_by_project)),
       planes: doorbell.dirty_catalog,
+      authority: doorbell.authority_advanced,
       activity: doorbell.activity_advanced,
     };
 
     // Every registered resource answers for itself. Nothing here knows what a
     // milestone or a label *is* — that lives with the loader that fetches it.
     const stale: string[] = [];
-    for (const [key, { derivation }] of this.loaders) {
-      if (key.startsWith(scope) && isStale(derivation, ring)) stale.push(key);
+    for (const [key, entry] of this.loaders) {
+      if (!key.startsWith(scope)) continue;
+      const derivation =
+        typeof entry.derivation === "function" ? entry.derivation() : entry.derivation;
+      if (isStale(derivation, ring)) stale.push(key);
     }
     for (const key of stale) this.resources.invalidate(key);
 
@@ -518,7 +577,7 @@ export class ProjectViewerStore {
   private load<T>(
     key: string,
     loader: () => Promise<T>,
-    derivation: Derivation,
+    derivation: Derivation | (() => Derivation),
     force: boolean,
   ): Promise<T> {
     this.loaders.set(key, { load: loader, derivation });

@@ -442,7 +442,6 @@ export type CatalogPlane =
   | "projects"
   | "labels"
   | "workflow"
-  | "acl"
   | "boards"
   | "milestones"
   | "cycles"
@@ -456,7 +455,23 @@ export type CatalogPlane =
   /** Issue links and parentage. */
   | "relations";
 
-export type CatalogScope = { scope: CatalogPlane; project?: string | null };
+/**
+ * The project a dirty plane belongs to, named twice on purpose: `project_id` is
+ * the stable identity a dependency matches on, `project_key` is a mutable
+ * display alias a rename changes underneath you.
+ */
+export interface ProjectRef {
+  project_id: string;
+  project_key: string;
+}
+
+/** A dirty catalog plane. The project-scoped planes carry a `ProjectRef`. */
+export type CatalogScope = { scope: CatalogPlane } & Partial<ProjectRef>;
+
+/** Which docs moved, in which project. */
+export interface DirtyProject extends ProjectRef {
+  docs: string[];
+}
 
 /**
  * A dirty-set frame, tagged with the space it rang for.
@@ -474,8 +489,13 @@ export interface SpaceDoorbell {
   epoch: number;
   seq: number;
   reset: boolean;
-  dirty_by_project: Record<string, string[]>;
+  dirty_by_project: DirtyProject[];
   dirty_catalog: CatalogScope[];
+  /**
+   * Membership, roles, devices or keys advanced. Its own flag, not a catalog
+   * plane: authority is not in the catalog and can move with no Body touched.
+   */
+  authority_advanced: boolean;
   activity_advanced: boolean;
   presence_advanced: boolean;
 }
