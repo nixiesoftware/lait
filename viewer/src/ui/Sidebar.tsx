@@ -155,7 +155,7 @@ export function Sidebar({
 
       <div className="flex min-h-0 flex-1 flex-col px-2 pb-2">
       {agent && (
-        <div className="border-line bg-bg text-dim mx-1 mt-2 flex items-start gap-2 rounded border p-2 text-xs">
+        <div className="border-line bg-bg text-dim mx-1 mt-2 flex items-start gap-2 rounded-surface border p-2 text-xs">
           <Bot className="mt-0.5 size-icon-sm shrink-0" />
           <span>
             Observing as <strong className="text-fg">{agent}</strong>. Writes are disabled.
@@ -252,10 +252,10 @@ function SpaceSwitcher({
             has better homes: the status dot, the agent banner below, and the
             members tab in Settings. */}
         <DropdownMenu.Trigger
-          className="hover:bg-hover data-[state=open]:bg-active -mx-1 flex h-ctl-md min-w-0 flex-1 items-center gap-1.5 rounded-md px-1.5 outline-none"
+          className="hover:bg-hover data-[state=open]:bg-active -mx-1 flex h-ctl-md min-w-0 flex-1 items-center gap-1.5 rounded-control px-1.5 outline-none"
           aria-label="Space menu"
         >
-          <span className="bg-active flex size-ctl-xs shrink-0 items-center justify-center rounded">
+          <span className="bg-active flex size-ctl-xs shrink-0 items-center justify-center rounded-mark">
             {selected?.identity.kind === "agent" ? <Bot className="text-mute size-icon-xs" /> : <Folder className="text-mute size-icon-xs" />}
           </span>
           <strong className="min-w-0 flex-1 truncate text-left text-sm">{title}</strong>
@@ -365,7 +365,7 @@ function ProjectRow({
           onClick={() => onToggleExpand(project.key)}
           aria-expanded={expanded}
           aria-label={expanded ? `Collapse ${project.name}` : `Expand ${project.name}`}
-          className="text-mute hover:text-fg flex size-ctl-xs shrink-0 items-center justify-center rounded outline-none"
+          className="text-mute hover:text-fg flex size-ctl-xs shrink-0 items-center justify-center rounded-control outline-none"
         >
           <ChevronRight
             className={cn("size-icon-xs transition-transform", expanded && "rotate-90")}
@@ -384,7 +384,7 @@ function ProjectRow({
           className={cn(navigationItem({ selected: active && !onFace }), "px-1.5")}
         >
           <span
-            className={cn("size-mark-xs shrink-0 rounded-sm opacity-75", active && "opacity-100")}
+            className={cn("size-mark-xs shrink-0 rounded-mark opacity-75", active && "opacity-100")}
             style={{ background: catalogColor(project.color) }}
           />
           <span className="min-w-0 flex-1 truncate">{project.name}</span>

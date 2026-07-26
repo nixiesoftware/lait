@@ -95,7 +95,7 @@ function Shell({
         <Dialog.Overlay className="ui-overlay fixed inset-0 z-50 bg-black/45 backdrop-blur-[2px]" />
         <Dialog.Content
           aria-describedby={undefined}
-          className="ui-surface border-line-strong bg-raised shadow-overlay fixed top-[10vh] left-1/2 z-50 flex max-h-[75vh] w-[min(560px,94vw)] -translate-x-1/2 flex-col overflow-hidden rounded-lg border"
+          className="ui-surface border-line-strong bg-raised shadow-overlay fixed top-[10vh] left-1/2 z-50 flex max-h-[75vh] w-[min(560px,94vw)] -translate-x-1/2 flex-col overflow-hidden rounded-surface border"
         >
           <header className="border-line flex shrink-0 items-center gap-2 border-b px-4 py-3">
             <Dialog.Title className="font-semibold">{title}</Dialog.Title>
@@ -117,7 +117,7 @@ function Shell({
 function ConflictNote({ heads, fix }: { heads: string[]; fix: string }) {
   if (heads.length === 0) return null;
   return (
-    <p className="text-warn border-warn/40 flex items-start gap-2 rounded border p-2 text-sm">
+    <p className="text-warn border-warn/40 flex items-start gap-2 rounded-surface border p-2 text-sm">
       <AlertTriangle className="mt-0.5 size-icon-sm shrink-0" />
       <span>
         {heads.length} concurrent revisions are unresolved — ordinary edits are blocked until an
@@ -243,7 +243,7 @@ export function RolesDialog({ spaceId, onClose }: { spaceId: string; onClose: ()
       {error && <p className="text-danger text-sm">{error}</p>}
       {!roles && !error && <p className="text-mute text-sm">Loading…</p>}
       {roles?.map((role) => (
-        <section key={role.role_id} className="border-line rounded border p-3">
+        <section key={role.role_id} className="border-line rounded-surface border p-3">
           <div className="flex items-center gap-2">
             <span className="font-medium">{role.revision?.body.name ?? role.role_id}</span>
             {role.built_in && (

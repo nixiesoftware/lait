@@ -38,7 +38,7 @@ const button = cva(
   // which is not optional in a keyboard-first app. `transition` (not just
   // `transition-colors`) so the `active:` press scales back smoothly on release;
   // the scale is a transform, so it costs no layout.
-  "inline-flex shrink-0 select-none items-center justify-center gap-1.5 rounded-md font-medium transition-colors disabled:pointer-events-none disabled:opacity-45",
+  "inline-flex shrink-0 select-none items-center justify-center gap-1.5 rounded-control font-medium transition-colors disabled:pointer-events-none disabled:opacity-45",
   {
     variants: {
       variant: {
@@ -272,7 +272,7 @@ export function ChipButton({
 }
 
 const field = cva(
-  "border-line bg-bg placeholder:text-mute w-full rounded-md border text-sm outline-none transition-colors focus:border-line-strong focus:ring-1 focus:ring-line-strong/30 disabled:cursor-not-allowed disabled:opacity-50 aria-invalid:border-danger aria-invalid:focus:ring-danger/20",
+  "border-line bg-bg placeholder:text-mute w-full rounded-control border text-sm outline-none transition-colors focus:border-line-strong focus:ring-1 focus:ring-line-strong/30 disabled:cursor-not-allowed disabled:opacity-50 aria-invalid:border-danger aria-invalid:focus:ring-danger/20",
   {
     variants: {
       size: {
@@ -308,7 +308,7 @@ const field = cva(
 export const crumbGlyph = "flex size-icon-md shrink-0 items-center justify-center";
 
 export const controlTrigger = cva(
-  "inline-flex items-center gap-1.5 rounded-md text-sm outline-none transition-colors disabled:pointer-events-none disabled:opacity-45 data-[state=open]:bg-active",
+  "inline-flex items-center gap-1.5 rounded-control text-sm outline-none transition-colors disabled:pointer-events-none disabled:opacity-45 data-[state=open]:bg-active",
   {
     variants: {
       variant: {
@@ -354,7 +354,7 @@ export const interactiveRow = cva(
     variants: {
       surface: {
         list: "border-line/35 border-b",
-        contained: "rounded-md",
+        contained: "rounded-control",
       },
       selected: {
         true: "bg-active text-fg",
@@ -380,7 +380,7 @@ export const interactiveRow = cva(
 
 /** One navigation hit-area and state language for the app rail and settings. */
 export const navigationItem = cva(
-  "flex w-full min-w-0 items-center gap-2 rounded-md px-2 text-left text-sm outline-none transition-colors focus-visible:ring-accent/50 focus-visible:ring-1",
+  "flex w-full min-w-0 items-center gap-2 rounded-control px-2 text-left text-sm outline-none transition-colors focus-visible:ring-accent/50 focus-visible:ring-1",
   {
     variants: {
       selected: {
@@ -487,7 +487,7 @@ export function EditableSurface({
           event.stopPropagation();
           onEdit();
         }}
-        className="border-line bg-raised focus:ring-accent/50 sr-only rounded-md border px-2 py-1 text-sm focus:not-sr-only focus:absolute focus:top-0 focus:right-0 focus:z-10 focus:ring-1"
+        className="border-line bg-raised focus:ring-accent/50 sr-only rounded-control border px-2 py-1 text-sm focus:not-sr-only focus:absolute focus:top-0 focus:right-0 focus:z-10 focus:ring-1"
       >
         {label}
       </button>
@@ -581,7 +581,7 @@ export function IconButton({
         <Tooltip.Content
           sideOffset={6}
           style={{ transformOrigin: "var(--radix-tooltip-content-transform-origin)" }}
-          className="ui-surface border-line-strong bg-raised shadow-overlay z-50 flex items-center gap-1.5 rounded border px-2 py-1 text-xs"
+          className="ui-surface border-line-strong bg-raised shadow-overlay z-50 flex items-center gap-1.5 rounded-surface border px-2 py-1 text-xs"
         >
           {label}
           {chord && <Kbd>{chord}</Kbd>}
@@ -611,7 +611,7 @@ export function Checkbox({
         // the largest mark on a list line — heavier than the status circle and
         // the priority bars either side of it — which put the most emphasis on
         // the one control that is only there when you are selecting.
-        "border-line-strong bg-bg text-accent-fg data-[state=checked]:bg-accent data-[state=checked]:border-accent data-[state=indeterminate]:bg-accent data-[state=indeterminate]:border-accent flex size-icon-sm shrink-0 items-center justify-center rounded-sm border transition-colors disabled:opacity-50",
+        "border-line-strong bg-bg text-accent-fg data-[state=checked]:bg-accent data-[state=checked]:border-accent data-[state=indeterminate]:bg-accent data-[state=indeterminate]:border-accent flex size-icon-sm shrink-0 items-center justify-center rounded-mark border transition-colors disabled:opacity-50",
         className,
       )}
       {...props}
@@ -650,7 +650,7 @@ export function Kbd({ children, className }: { children: React.ReactNode; classN
   return (
     <kbd
       className={cn(
-        "border-line-strong bg-bg text-dim rounded-sm border px-1 font-mono text-2xs leading-4",
+        "border-line-strong bg-bg text-dim rounded-mark border px-1 font-mono text-2xs leading-4",
         className,
       )}
     >
@@ -663,7 +663,7 @@ export function Kbd({ children, className }: { children: React.ReactNode; classN
  * The floating shell every Popover shares — the counterpart to `MenuContent`.
  *
  * There was a `MenuContent` for dropdowns but no equivalent for popovers, so the
- * shell string (`border-line-strong bg-raised shadow-overlay z-50 rounded-lg
+ * shell string (`border-line-strong bg-raised shadow-overlay z-50 rounded-surface
  * border`) was hand-copied into every picker, display panel, and status popover —
  * and it had already drifted (the inbox popover reached for a `bg-overlay` token
  * that doesn't exist, so it rendered with no fill). One component ends that: the
@@ -689,7 +689,7 @@ export function PopoverContent({
         sideOffset={sideOffset}
         style={{ transformOrigin: "var(--radix-popover-content-transform-origin)", ...style }}
         className={cn(
-          "ui-surface border-line-strong bg-raised shadow-overlay z-50 rounded-lg border outline-none",
+          "ui-surface border-line-strong bg-raised shadow-overlay z-50 rounded-surface border outline-none",
           className,
         )}
         {...props}

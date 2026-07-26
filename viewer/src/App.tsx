@@ -1902,13 +1902,13 @@ export function App() {
 
       {/* A half-typed sequence must be visible, or `g` reads as a dropped key. */}
       {pending.length > 0 && (
-        <div className="border-line-strong bg-raised text-dim shadow-overlay fixed bottom-4 left-4 rounded border px-2 py-1 font-mono text-sm">
+        <div className="border-line-strong bg-raised text-dim shadow-overlay fixed bottom-4 left-4 rounded-surface border px-2 py-1 font-mono text-sm">
           {pending.join(" ")} …
         </div>
       )}
       {mutationNotice && (
         <div
-          className="ui-surface border-line-strong bg-raised text-dim shadow-overlay fixed right-4 bottom-4 z-40 rounded border px-3 py-1.5 text-sm"
+          className="ui-surface border-line-strong bg-raised text-dim shadow-overlay fixed right-4 bottom-4 z-40 rounded-surface border px-3 py-1.5 text-sm"
           role="status"
           aria-live="polite"
         >
@@ -1917,7 +1917,7 @@ export function App() {
       )}
       {toast && (
         <div
-          className="border-line-strong bg-raised shadow-overlay fixed bottom-4 left-1/2 -translate-x-1/2 rounded border px-3 py-1.5 text-sm"
+          className="border-line-strong bg-raised shadow-overlay fixed bottom-4 left-1/2 -translate-x-1/2 rounded-surface border px-3 py-1.5 text-sm"
           role="status"
           aria-live="polite"
         >
@@ -2043,7 +2043,7 @@ function StatusSlices({
             aria-pressed={active}
             onClick={() => onChange({ ...filter, status: idsFor(slice.categories) })}
             className={cn(
-              "h-ctl-sm rounded-md px-2 text-sm transition-colors",
+              "h-ctl-sm rounded-control px-2 text-sm transition-colors",
               active ? "bg-active text-fg" : "text-dim hover:bg-hover hover:text-fg",
             )}
           >

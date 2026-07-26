@@ -100,7 +100,7 @@ function BlockView({ block }: { block: Block }) {
         // The scroll container is the wrapper, not the table: a wide table has
         // to be reachable without the whole page scrolling sideways, and the
         // prose measure is narrow on purpose.
-        <div className="prose-figure border-line overflow-x-auto rounded-lg border">
+        <div className="prose-figure border-line overflow-x-auto rounded-surface border">
           <table className="w-full border-collapse text-[0.875em]">
             <thead>
               <tr className="border-line/70 bg-active/30 border-b">
@@ -212,7 +212,7 @@ const CALLOUT: Record<
 function Callout({ tone, children }: { tone: CalloutTone; children: React.ReactNode }) {
   const { label, icon: Glyph, tone: colour, edge } = CALLOUT[tone];
   return (
-    <div className={cn("prose-figure rounded-lg border px-4 py-3", edge)}>
+    <div className={cn("prose-figure rounded-surface border px-4 py-3", edge)}>
       <div className={cn("mb-1 flex items-center gap-1.5 text-[0.875em] font-semibold", colour)}>
         <Glyph className="size-icon-md shrink-0" aria-hidden />
         {label}
@@ -245,7 +245,7 @@ function CodeBlock({ lang, text }: { lang: string | null; text: string }) {
   };
 
   return (
-    <div className="prose-figure border-line bg-bg group/code relative overflow-hidden rounded-lg border">
+    <div className="prose-figure border-line bg-bg group/code relative overflow-hidden rounded-surface border">
       {lang && (
         <div className="border-line/70 text-mute flex h-ctl-md items-center border-b px-3 font-mono text-2xs">
           {lang}
@@ -258,7 +258,7 @@ function CodeBlock({ lang, text }: { lang: string | null; text: string }) {
         onClick={copy}
         aria-label={copied ? "Copied" : "Copy code"}
         className={cn(
-          "border-line bg-raised text-mute hover:text-fg hover:border-line-strong absolute right-2 flex size-ctl-sm items-center justify-center rounded border opacity-0 transition-opacity group-hover/code:opacity-100 focus-visible:opacity-100",
+          "border-line bg-raised text-mute hover:text-fg hover:border-line-strong absolute right-2 flex size-ctl-sm items-center justify-center rounded-control border opacity-0 transition-opacity group-hover/code:opacity-100 focus-visible:opacity-100",
           lang ? "top-9" : "top-2",
           copied && "opacity-100",
         )}
@@ -334,7 +334,7 @@ function InlineView({ inline }: { inline: Inline }) {
       // the plain one under it — the chip has to sit in the line rather than
       // push it open.
       return (
-        <code className="bg-active/60 text-fg rounded px-1 font-mono text-[0.875em]">
+        <code className="bg-active/60 text-fg rounded-mark px-1 font-mono text-[0.875em]">
           {inline.text}
         </code>
       );

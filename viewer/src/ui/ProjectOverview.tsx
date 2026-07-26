@@ -78,10 +78,10 @@ export function ProjectOverview({
                   <Popover.Trigger asChild>
                     <button
                       aria-label="Project colour"
-                      className="hover:ring-line-strong rounded p-0.5 hover:ring-1"
+                      className="hover:ring-line-strong rounded-mark p-0.5 hover:ring-1"
                     >
                       <span
-                        className="block size-mark-xl rounded"
+                        className="block size-mark-xl rounded-mark"
                         style={{ background: catalogColor(project.color) }}
                       />
                     </button>
@@ -95,7 +95,7 @@ export function ProjectOverview({
                 </Popover.Root>
               ) : (
                 <span
-                  className="block size-mark-xl rounded"
+                  className="block size-mark-xl rounded-mark"
                   style={{ background: catalogColor(project.color) }}
                 />
               )}
@@ -113,7 +113,7 @@ export function ProjectOverview({
                 aria-label="Project name"
               />
               {project.archived && (
-                <span className="border-line text-mute rounded border px-1.5 py-px text-2xs">
+                <span className="border-line text-mute rounded-mark border px-1.5 py-px text-2xs">
                   Archived
                 </span>
               )}
@@ -364,7 +364,7 @@ function Milestones({
           return (
             <li
               key={m.id}
-              className="border-line group flex items-center gap-3 rounded border px-3 py-2"
+              className="border-line group flex items-center gap-3 rounded-surface border px-3 py-2"
             >
               <div className="min-w-0 flex-1">
                 <div className="flex items-baseline gap-2 text-sm">
@@ -402,7 +402,7 @@ function Milestones({
             onKeyDown={(e) => {
               if (e.key === "Enter" && draft.trim()) void add();
             }}
-            className="border-line focus:border-line-strong placeholder:text-mute min-w-0 flex-1 rounded border bg-transparent px-2 py-1 text-sm outline-none"
+            className="border-line focus:border-line-strong placeholder:text-mute min-w-0 flex-1 rounded-control border bg-transparent px-2 py-1 text-sm outline-none"
             aria-label="New milestone name"
           />
           <DatePicker
@@ -482,7 +482,7 @@ function Updates({
       <h2 className="text-mute mb-3 text-2xs font-semibold tracking-wider uppercase">Updates</h2>
 
       {!readOnly && (
-        <div className="border-line mb-4 rounded border p-3">
+        <div className="border-line mb-4 rounded-surface border p-3">
           <textarea
             value={draft}
             rows={2}

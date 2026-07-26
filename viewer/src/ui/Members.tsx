@@ -103,7 +103,7 @@ export function Members({
           <p className="text-dim mb-3 text-sm">People and agents with verified access to this encrypted space. Names are private labels on this device.</p>
           {members.length === 0 ? (
             <EmptyState title="No verified members" body="The local replica does not currently contain a readable membership graph." />
-          ) : <ul className="border-line divide-line divide-y rounded border">
+          ) : <ul className="border-line divide-line divide-y rounded-surface border">
             {members.map((m) => (
               <li key={m.key} className="flex items-center gap-3 p-3">
                 <Avatar deviceKey={m.key} alias={m.alias} me={m.me} className="size-avatar-lg" />
@@ -255,7 +255,7 @@ function MemberLog({ entries, members }: { entries: MemberLogEntry[]; members: M
       <h2 className="text-mute mb-2 text-2xs font-semibold tracking-wider uppercase">
         Access log · {entries.length}
       </h2>
-      <ul className="border-line divide-line divide-y rounded border">
+      <ul className="border-line divide-line divide-y rounded-surface border">
         {/* Newest first — an audit log answers "what just changed access". */}
         {[...entries].reverse().map((e) => (
           <li key={e.op} className="flex items-start gap-2 p-2.5 text-sm">
@@ -371,7 +371,7 @@ function Invite({
   return (
     <section>
       <h2 className="text-mute mb-2 text-2xs font-semibold tracking-wider uppercase">Invite</h2>
-      <div className="border-line flex flex-col gap-3 rounded border p-3">
+      <div className="border-line flex flex-col gap-3 rounded-surface border p-3">
         {!link ? (
           <>
             <div className="flex flex-wrap items-center gap-2">
@@ -415,14 +415,14 @@ function Invite({
                 <img
                   src={qr}
                   alt="Invite link QR code"
-                  className="size-[110px] shrink-0 rounded bg-white p-1"
+                  className="size-[110px] shrink-0 rounded-surface bg-white p-1"
                 />
               )}
               <div className="flex min-w-0 flex-1 flex-col gap-2">
                 <p className="text-dim text-sm">
                   They run this and they’re in — accepting the invite is the approval.
                 </p>
-                <code className="bg-bg border-line block truncate rounded border p-2 text-xs">
+                <code className="bg-bg border-line block truncate rounded-surface border p-2 text-xs">
                   lait join {link}
                 </code>
                 <div className="flex gap-2">
@@ -440,7 +440,7 @@ function Invite({
                   </Button>
                   <a
                     href={mailto(link)}
-                    className="border-line-strong hover:bg-hover flex items-center gap-1.5 rounded border px-2 py-1 text-sm"
+                    className="border-line-strong hover:bg-hover flex items-center gap-1.5 rounded-control border px-2 py-1 text-sm"
                   >
                     <Link2 className="size-icon-sm" />
                     Email it

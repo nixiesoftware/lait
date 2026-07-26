@@ -193,13 +193,13 @@ export function NewIssue({
       <Dialog.Portal>
         <Dialog.Overlay className="ui-overlay fixed inset-0 z-50 bg-black/45 backdrop-blur-[2px]" />
         <Dialog.Content
-          className="ui-surface border-line-strong bg-raised shadow-overlay fixed top-[12vh] left-1/2 z-50 flex w-[min(640px,94vw)] -translate-x-1/2 flex-col rounded-lg border"
+          className="ui-surface border-line-strong bg-raised shadow-overlay fixed top-[12vh] left-1/2 z-50 flex w-[min(640px,94vw)] -translate-x-1/2 flex-col rounded-surface border"
           // The title lives in the body as the composer's own input, so the
           // accessible name is given here rather than rendered twice.
           aria-describedby={undefined}
         >
           <header className="flex items-center gap-2 px-4 pt-3">
-            <span className="border-line text-dim rounded border px-1.5 py-px font-mono text-2xs">
+            <span className="border-line text-dim rounded-mark border px-1.5 py-px font-mono text-2xs">
               {projectKey}
             </span>
             <span className="text-mute">›</span>
@@ -219,7 +219,7 @@ export function NewIssue({
                     <p className="text-mute px-2 py-1 text-xs">None yet — fill the fields, then save.</p>
                   )}
                   {templates.map((t) => (
-                    <div key={t.id} className="hover:bg-hover flex items-center rounded">
+                    <div key={t.id} className="hover:bg-hover flex items-center rounded-control">
                       <button
                         onClick={() => applyTemplate(t)}
                         className="min-w-0 flex-1 truncate px-2 py-1.5 text-left text-sm"

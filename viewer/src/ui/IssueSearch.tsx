@@ -129,7 +129,7 @@ export function IssueSearch({
         loop
         shouldFilter={false}
         onMouseDown={(event) => event.stopPropagation()}
-        className="ui-surface border-line-strong bg-raised shadow-overlay flex h-fit max-h-[70vh] w-[min(680px,94vw)] flex-col overflow-hidden rounded-lg border"
+        className="ui-surface border-line-strong bg-raised shadow-overlay flex h-fit max-h-[70vh] w-[min(680px,94vw)] flex-col overflow-hidden rounded-surface border"
       >
         <div className="border-line flex items-center gap-3 border-b px-4">
           <Search className="text-mute size-icon-md" />
@@ -161,7 +161,7 @@ export function IssueSearch({
                   key={search}
                   value={`recent-search:${search}`}
                   onSelect={() => setQuery(search)}
-                  className="data-[selected=true]:bg-hover flex cursor-default items-center gap-3 rounded px-2 py-1.5"
+                  className="data-[selected=true]:bg-hover flex cursor-default items-center gap-3 rounded-control px-2 py-1.5"
                 >
                   <Clock3 className="text-mute size-icon-sm" />
                   <span className="truncate">{search}</span>
@@ -200,7 +200,7 @@ function IssueResult({ row, recent, projectById, stateById, onOpen }: { row: Row
       value={row.reff}
       keywords={[row.title, row.key_alias ?? "", row.project_id]}
       onSelect={() => onOpen(row.reff)}
-      className="data-[selected=true]:bg-hover flex cursor-default items-center gap-3 rounded px-2 py-1.5"
+      className="data-[selected=true]:bg-hover flex cursor-default items-center gap-3 rounded-control px-2 py-1.5"
     >
       {recent ? <Clock3 className="text-mute size-icon-sm" /> : <PriorityIcon priority={row.priority} />}
       <span className="text-mute w-20 shrink-0 truncate font-mono text-xs">{row.key_alias ?? row.reff}</span>

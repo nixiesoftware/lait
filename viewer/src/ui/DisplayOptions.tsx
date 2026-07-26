@@ -57,7 +57,7 @@ export function DisplayOptions({
               grouping means columns on a board and headers in a list, and on a
               calendar it means nothing at all. */}
           <div
-            className="bg-active/40 flex gap-0.5 rounded-lg p-0.5"
+            className="bg-active/40 flex gap-0.5 rounded-surface p-0.5"
             role="group"
             aria-label="Layout"
           >
@@ -70,7 +70,7 @@ export function DisplayOptions({
                   aria-pressed={active}
                   onClick={() => onModeChange(mode)}
                   className={cn(
-                    "flex h-ctl-md flex-1 items-center justify-center gap-1.5 rounded-md text-xs transition-colors",
+                    "flex h-ctl-md flex-1 items-center justify-center gap-1.5 rounded-control text-xs transition-colors",
                     active ? "bg-raised text-fg" : "text-dim hover:text-fg",
                   )}
                 >

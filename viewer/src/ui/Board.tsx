@@ -344,7 +344,7 @@ function GroupedColumn({
         aria-label={`${group.label} issues`}
         data-board-collection
         className={[
-          "flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto rounded p-1 transition-colors",
+          "flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto rounded-surface p-1 transition-colors",
           active && over ? "bg-hover" : "",
         ].join(" ")}
         onDragOver={(e) => {
@@ -382,7 +382,7 @@ function GroupedColumn({
         {rows.length === 0 && (
           <li
             className={[
-              "text-mute rounded border border-dashed p-4 text-center text-sm transition-colors",
+              "text-mute rounded-surface border border-dashed p-4 text-center text-sm transition-colors",
               active && over ? "border-accent text-accent" : "border-line",
             ].join(" ")}
           >
@@ -528,7 +528,7 @@ function Column({
         aria-label={`${col.state.name} issues`}
         data-board-collection
         className={[
-          "flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto rounded p-1 transition-colors",
+          "flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto rounded-surface p-1 transition-colors",
           // The whole column lights up as a target, because the drop is a *status*
           // change first and a position second — the column is the thing you are
           // choosing.
@@ -571,7 +571,7 @@ function Column({
         {rows.length === 0 && (
           <li
             className={[
-              "text-mute rounded border border-dashed p-4 text-center text-sm transition-colors",
+              "text-mute rounded-surface border border-dashed p-4 text-center text-sm transition-colors",
               active && over !== null ? "border-accent text-accent" : "border-line",
             ].join(" ")}
           >
@@ -692,7 +692,7 @@ function Card({
         aria-current={selected ? "true" : undefined}
         tabIndex={selected ? 0 : -1}
         className={[
-          "bg-raised group/card cursor-default rounded border p-2 transition-[border-color,opacity] duration-150",
+          "bg-raised group/card cursor-default rounded-surface border p-2 transition-[border-color,opacity] duration-150",
           selected
             ? "border-accent ring-accent ring-1"
             : "border-line hover:border-line-strong",

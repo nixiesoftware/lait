@@ -102,7 +102,7 @@ export function Combobox(props: Props) {
     onCreate,
     swatchShape,
   } = props;
-  const swatch = cn("size-mark-sm shrink-0", swatchShape === "square" ? "rounded-[3px]" : "rounded-full");
+  const swatch = cn("size-mark-sm shrink-0", swatchShape === "square" ? "rounded-mark" : "rounded-full");
 
   // Open state is internal *and* overridable. A keybinding needs to force it open;
   // a single-select pick needs to close it. Both have to work, so the component owns
@@ -221,7 +221,7 @@ export function Combobox(props: Props) {
                       setOpen(false);
                     }
                   }}
-                  className="data-[selected=true]:bg-active flex cursor-default items-center gap-2 rounded px-2 py-1 text-sm outline-none"
+                  className="data-[selected=true]:bg-active flex cursor-default items-center gap-2 rounded-control px-2 py-1 text-sm outline-none"
                 >
                   {o.icon}
                   {o.swatch && <span className={swatch} style={{ background: o.swatch }} />}
@@ -247,7 +247,7 @@ export function Combobox(props: Props) {
                       setQuery("");
                       if (props.multi !== true) setOpen(false);
                     }}
-                    className="data-[selected=true]:bg-active flex cursor-default items-center gap-2 rounded px-2 py-1 text-sm outline-none"
+                    className="data-[selected=true]:bg-active flex cursor-default items-center gap-2 rounded-control px-2 py-1 text-sm outline-none"
                   >
                     <Plus className="size-icon-xs shrink-0" />
                     <span className="min-w-0 flex-1 truncate">

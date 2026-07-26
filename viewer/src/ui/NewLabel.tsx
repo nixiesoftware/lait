@@ -29,7 +29,7 @@ export function NewLabelDialog({
       <Dialog.Portal>
         <Dialog.Overlay className="ui-overlay fixed inset-0 z-50 bg-black/45 backdrop-blur-[2px]" />
         <Dialog.Content
-          className="ui-surface border-line-strong bg-raised shadow-overlay fixed top-1/2 left-1/2 z-50 w-[min(360px,92vw)] -translate-x-1/2 -translate-y-1/2 rounded-lg border p-4"
+          className="ui-surface border-line-strong bg-raised shadow-overlay fixed top-1/2 left-1/2 z-50 w-[min(360px,92vw)] -translate-x-1/2 -translate-y-1/2 rounded-surface border p-4"
           aria-describedby={undefined}
         >
           <Dialog.Title className="font-semibold">New label</Dialog.Title>

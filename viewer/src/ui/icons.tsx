@@ -16,7 +16,7 @@ export function PriorityIcon({ priority, className = "" }: { priority: Priority;
   if (priority === "urgent") {
     return (
       <span
-        className={`inline-flex size-icon-md shrink-0 items-center justify-center rounded-sm bg-urgent ${className}`}
+        className={`inline-flex size-icon-md shrink-0 items-center justify-center rounded-mark bg-urgent ${className}`}
         role="img"
         aria-label="Urgent priority"
       >

@@ -362,12 +362,12 @@ export function IssueDetail({
 
       <div className="issue-detail-body flex flex-col gap-4 p-4">
         {Boolean(detail.body.error || detail.secondaryError) && (
-          <div className="border-warn/30 bg-warn/5 text-dim rounded border px-3 py-2 text-sm" role="status">
+          <div className="border-warn/30 bg-warn/5 text-dim rounded-surface border px-3 py-2 text-sm" role="status">
             Some issue details could not be refreshed. Known content remains available.
           </div>
         )}
         {tombstone && (
-          <div className="border-danger/30 bg-danger/5 text-dim rounded border px-3 py-2 text-sm">
+          <div className="border-danger/30 bg-danger/5 text-dim rounded-surface border px-3 py-2 text-sm">
             This issue is deleted. Restore it from the More actions menu.
           </div>
         )}
@@ -386,7 +386,7 @@ export function IssueDetail({
           </Toast>
         )}
         {events.some((event) => event.collision) && (
-          <div className="border-warn/30 bg-warn/5 text-dim flex items-start gap-2 rounded border p-3 text-sm" role="status">
+          <div className="border-warn/30 bg-warn/5 text-dim flex items-start gap-2 rounded-surface border p-3 text-sm" role="status">
             <AlertTriangle className="text-warn mt-0.5 size-icon-sm shrink-0" />
             <span className="min-w-0 flex-1">
               Concurrent edits converged to the current values. Review the marked history entry;
@@ -401,7 +401,7 @@ export function IssueDetail({
           </div>
         )}
         {issue.provisional && (
-          <div className="border-warn/30 bg-warn/5 text-dim flex gap-2 rounded border p-3 text-sm">
+          <div className="border-warn/30 bg-warn/5 text-dim flex gap-2 rounded-surface border p-3 text-sm">
             <Info className="text-warn mt-0.5 size-icon-sm shrink-0" />
             <span>
               This issue is known to the local catalog, but its body is still arriving. Metadata may be incomplete; editing stays unavailable until the projection is ready.
@@ -409,7 +409,7 @@ export function IssueDetail({
           </div>
         )}
         {!!issue.corrupt_records?.length && (
-          <details className="border-danger/30 bg-danger/5 rounded border p-3 text-sm">
+          <details className="border-danger/30 bg-danger/5 rounded-surface border p-3 text-sm">
             <summary className="text-danger flex items-center gap-2 font-medium">
               <AlertTriangle className="size-icon-sm" />
               {issue.corrupt_records.length} stored {issue.corrupt_records.length === 1 ? "record needs" : "records need"} attention
@@ -891,7 +891,7 @@ export function IssueDetail({
         />
 
         {!locked && (
-          <div className="border-line focus-within:border-line-strong rounded border bg-transparent">
+          <div className="border-line focus-within:border-line-strong rounded-control border bg-transparent">
             <textarea
               ref={commentRef}
               value={comment}
@@ -1175,7 +1175,7 @@ function Attachments({
           {attachments.map((att) => (
             <li
               key={att.id}
-              className="border-line hover:bg-surface-2 group flex items-center gap-2 rounded border px-2 py-1 text-sm"
+              className="border-line hover:bg-surface-2 group flex items-center gap-2 rounded-control border px-2 py-1 text-sm"
             >
               <Paperclip className="text-mute size-icon-sm shrink-0" />
               <span className="text-ink min-w-0 flex-1 truncate">{att.name}</span>
@@ -1503,7 +1503,7 @@ function Relations({
                 if (!subDraft.trim()) setSubDraft(null);
               }}
               aria-label="New sub-issue title"
-              className="border-line focus:border-line-strong placeholder:text-mute rounded border bg-transparent px-2 py-1 text-sm outline-none"
+              className="border-line focus:border-line-strong placeholder:text-mute rounded-control border bg-transparent px-2 py-1 text-sm outline-none"
             />
           )}
         </Disclosure>
@@ -1605,7 +1605,7 @@ function RelRow({
   onRemove?: () => void;
 }) {
   return (
-    <div className="group/rel -mx-1 flex items-center gap-2 rounded px-1 py-0.5 text-sm">
+    <div className="group/rel -mx-1 flex items-center gap-2 rounded-control px-1 py-0.5 text-sm">
       <Button
         onClick={() => onNavigate(row.reff)}
         className="min-w-0 flex-1 shrink justify-start px-1 text-left"
@@ -1938,7 +1938,7 @@ function Comment({
                 }}
                 rows={2}
                 aria-label="Reply"
-                className="border-line focus-within:border-line-strong placeholder:text-mute resize-y rounded border bg-transparent p-2 text-sm outline-none"
+                className="border-line focus-within:border-line-strong placeholder:text-mute resize-y rounded-control border bg-transparent p-2 text-sm outline-none"
               />
             )}
           </div>

@@ -185,7 +185,7 @@ export function Inbox({
               <h2 className="mb-1 text-sm font-medium">Inbox preferences</h2>
               <p className="text-mute mb-3 text-xs">Local controls for what is shown on this device. The daemon still delivers the complete feed.</p>
               {(["assigned", "comment", "status"] as InboxKind[]).map((kind) => (
-                <label key={kind} className="hover:bg-hover flex min-h-ctl-lg items-center gap-2 rounded px-1.5 text-sm">
+                <label key={kind} className="hover:bg-hover flex min-h-ctl-lg items-center gap-2 rounded-control px-1.5 text-sm">
                   <Checkbox
                     checked={preferences.kinds[kind]}
                     onCheckedChange={(checked) => savePreferences({

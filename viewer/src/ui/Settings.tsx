@@ -272,7 +272,7 @@ function GeneralPanel({
         </div>
       </Section>
       <Section title="Identity" hint="The seed id — derived at founding from keys, not the name. It cannot be changed.">
-        <div className="border-line bg-raised text-dim flex items-center gap-2 rounded border px-2 py-1.5 font-mono text-xs">
+        <div className="border-line bg-raised text-dim flex items-center gap-2 rounded-surface border px-2 py-1.5 font-mono text-xs">
           <Hash className="text-mute size-icon-sm shrink-0" />
           {spaceId}
         </div>
@@ -332,7 +332,7 @@ function LabelsPanel({
           ) : (
             <li
               key={l.id}
-              className="group/label hover:bg-hover -mx-2 flex items-center gap-2 rounded px-2 py-1.5"
+              className="group/label hover:bg-hover -mx-2 flex items-center gap-2 rounded-control px-2 py-1.5"
             >
               <span
                 className="size-mark-lg shrink-0 rounded-full"
@@ -370,7 +370,7 @@ function LabelsPanel({
 
       {!readOnly &&
         (creating ? (
-          <div className="border-line mt-3 flex flex-col gap-3 rounded border p-3">
+          <div className="border-line mt-3 flex flex-col gap-3 rounded-surface border p-3">
             <input
               autoFocus
               value={newName}
@@ -380,7 +380,7 @@ function LabelsPanel({
                 if (e.key === "Enter" && newName.trim()) create();
                 if (e.key === "Escape") setCreating(false);
               }}
-              className="border-line focus:border-line-strong rounded border bg-transparent px-2 py-1.5 text-sm outline-none"
+              className="border-line focus:border-line-strong rounded-control border bg-transparent px-2 py-1.5 text-sm outline-none"
               aria-label="New label name"
             />
             <ColorPicker value={newColor} onChange={setNewColor} />
@@ -414,7 +414,7 @@ function LabelEditor({
   const [name, setName] = useState(label.name);
   const [color, setColor] = useState(label.color);
   return (
-    <li className="border-line -mx-2 my-1 flex flex-col gap-3 rounded border p-3">
+    <li className="border-line -mx-2 my-1 flex flex-col gap-3 rounded-surface border p-3">
       <input
         autoFocus
         value={name}
@@ -423,7 +423,7 @@ function LabelEditor({
           if (e.key === "Enter" && name.trim()) onSave(name.trim(), color);
           if (e.key === "Escape") onCancel();
         }}
-        className="border-line focus:border-line-strong rounded border bg-transparent px-2 py-1.5 text-sm outline-none"
+        className="border-line focus:border-line-strong rounded-control border bg-transparent px-2 py-1.5 text-sm outline-none"
         aria-label="Label name"
       />
       <ColorPicker value={color} onChange={setColor} />
@@ -569,14 +569,14 @@ function WorkflowPanel({
             {draft.map((s) => (
               <li
                 key={s.state_id}
-                className="border-line -mx-1 flex items-center gap-2 rounded px-1 py-1"
+                className="border-line -mx-1 flex items-center gap-2 rounded-control px-1 py-1"
               >
                 <div className="relative">
                   <button
                     disabled={readOnly}
                     onClick={() => setEditingColor(editingColor === s.state_id ? null : s.state_id)}
                     aria-label={`Colour of ${s.name}`}
-                    className="hover:ring-line-strong rounded p-0.5 hover:ring-1 disabled:opacity-50"
+                    className="hover:ring-line-strong rounded-mark p-0.5 hover:ring-1 disabled:opacity-50"
                   >
                     <StatusIcon
                       category={s.category as "backlog"}
@@ -584,7 +584,7 @@ function WorkflowPanel({
                     />
                   </button>
                   {editingColor === s.state_id && (
-                    <div className="border-line-strong bg-raised shadow-overlay absolute left-0 top-7 z-10 rounded-lg border p-2">
+                    <div className="border-line-strong bg-raised shadow-overlay absolute left-0 top-7 z-10 rounded-surface border p-2">
                       <ColorPicker
                         value={s.color}
                         onChange={(color) => {
@@ -599,7 +599,7 @@ function WorkflowPanel({
                   value={s.name}
                   disabled={readOnly}
                   onChange={(e) => patch(s.state_id, { name: e.target.value })}
-                  className="focus:border-line-strong min-w-0 flex-1 rounded border border-transparent bg-transparent px-1.5 py-1 text-sm outline-none disabled:opacity-50"
+                  className="focus:border-line-strong min-w-0 flex-1 rounded-control border border-transparent bg-transparent px-1.5 py-1 text-sm outline-none disabled:opacity-50"
                   aria-label={`Name of ${s.name}`}
                 />
                 <span className="text-mute text-2xs capitalize">
@@ -777,7 +777,7 @@ function AccessPanel({
         {!roles && <p className="text-mute text-sm">Loading…</p>}
         <ul className="flex flex-col gap-2">
           {roles?.map((role) => (
-            <li key={role.role_id} className="border-line rounded border p-3">
+            <li key={role.role_id} className="border-line rounded-surface border p-3">
               <div className="flex items-center gap-2">
                 <span className="font-medium">{roleName(role)}</span>
                 {role.built_in && (
@@ -813,7 +813,7 @@ function AccessPanel({
         hint="Capabilities granted to an actor beyond their base membership role, at the Space or a single project."
       >
         {!readOnly && (
-          <div className="border-line mb-4 flex flex-wrap items-end gap-2 rounded border p-3">
+          <div className="border-line mb-4 flex flex-wrap items-end gap-2 rounded-surface border p-3">
             <Combobox
               label="Member"
               value={
@@ -893,7 +893,7 @@ function AccessPanel({
         )}
         <ul className="flex flex-col gap-3">
           {byActor.map(([actor, items]) => (
-            <li key={actor} className="border-line rounded border p-3">
+            <li key={actor} className="border-line rounded-surface border p-3">
               <div className="mb-2 font-medium">{nameOf(actor)}</div>
               <ul className="flex flex-col gap-1">
                 {items.map((row) => (

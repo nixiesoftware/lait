@@ -131,7 +131,7 @@ export function Calendar({
                     data-issue-ref={r.reff}
                     onClick={() => onSelect(r.reff)}
                     title={r.title}
-                    className="bg-raised border-line hover:border-line-strong flex items-center gap-1 rounded border px-1 py-0.5 text-left text-2xs"
+                    className="bg-raised border-line hover:border-line-strong flex items-center gap-1 rounded-control border px-1 py-0.5 text-left text-2xs"
                   >
                     <PriorityIcon priority={r.priority} />
                     <span className="min-w-0 flex-1 truncate font-medium">{r.title}</span>

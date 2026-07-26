@@ -171,7 +171,7 @@ describe("control heights speak one vocabulary", () => {
         .forEach((line, i) => {
           // Prose in a doc comment may legitimately name an old utility while
           // explaining history; only policed in real class strings.
-          if (/^\s*(\*|\/\/)/.test(line)) return;
+          if (/^\s*(\/\*|\*|\/\/)/.test(line)) return;
           if (CONTROL_RANGE.test(line)) {
             offenders.push(`${name}:${i + 1}  ${line.trim().slice(0, 90)}`);
           }
@@ -191,6 +191,51 @@ describe("control heights speak one vocabulary", () => {
   it("the ladder is the only control-height vocabulary in use", () => {
     expect(rungsUsed("ctl")).toEqual(["lg", "md", "sm", "xl", "xs"]);
     expect(rungsUsed("bar")).toEqual(["lg", "md", "sm"]);
+  });
+});
+
+/**
+ * Radius is the one PROJECTED axis: a corner is chosen by role
+ * (`rounded-mark|control|surface`) and each role points at a rung on the private
+ * value-named ladder. Two things this catches.
+ *
+ * Bare `rounded` is the reason the axis needed doing at all — it compiled to a
+ * hardcoded `.25rem` that read no token, and at 71 sites it was the app's most
+ * used corner. Tailwind has no `radius-DEFAULT` namespace entry, so there is no
+ * token-side fix; it can only be kept out.
+ *
+ * A rung name in a class (`rounded-8`) renders nothing, because the ladder lives
+ * outside `@theme` and so generates no utilities. That is the point — you cannot
+ * spend a raw value — but it fails silently, so it is worth naming.
+ */
+const RAW_RADIUS = /\brounded(?![-\w[])|\brounded-(sm|md|lg|xl|none|4|6|8|12|16)\b|\brounded-\[/;
+
+describe("radius is chosen by role, not by value", () => {
+  it("no bare, legacy, arbitrary or rung-named radius in class strings", () => {
+    const offenders: string[] = [];
+
+    for (const file of tsxFiles(SRC_DIR)) {
+      const name = file.split(/[\\/]/).pop() ?? "";
+      if (name.endsWith(".test.tsx")) continue;
+
+      readFileSync(file, "utf8")
+        .split("\n")
+        .forEach((line, i) => {
+          // Prose may say "fully rounded" or quote the old utility while
+          // explaining why it was wrong; only class strings are policed.
+          if (/^\s*(\/\*|\*|\/\/)/.test(line)) return;
+          if (RAW_RADIUS.test(line)) offenders.push(`${name}:${i + 1}  ${line.trim().slice(0, 90)}`);
+        });
+    }
+
+    expect(
+      offenders,
+      `Corners come from a role: rounded-mark (tight shapes), rounded-control\n` +
+        `(anything interactive), rounded-surface (panels and floating things), or\n` +
+        `rounded-full. Bare \`rounded\` is a hardcoded 4px that no token can reach,\n` +
+        `and a rung name like \`rounded-8\` silently renders nothing.\n\n` +
+        offenders.join("\n"),
+    ).toEqual([]);
   });
 });
 

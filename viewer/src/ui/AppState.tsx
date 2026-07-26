@@ -211,7 +211,7 @@ export function TrustPopover({
     <Popover.Root>
       <Popover.Trigger
         className={cn(
-          "hover:bg-hover flex h-ctl-sm min-w-6 shrink-0 items-center gap-1.5 whitespace-nowrap rounded px-2 text-xs",
+          "hover:bg-hover flex h-ctl-sm min-w-6 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-control px-2 text-xs",
           healthy ? "text-dim" : "text-warn",
         )}
         aria-label="Local and peer status"
@@ -268,7 +268,7 @@ export function TrustPopover({
             />
           </dl>
           {degraded && (
-            <section className="border-warn/30 bg-warn/5 mt-3 rounded-md border p-2.5" aria-label="Recovery required">
+            <section className="border-warn/30 bg-warn/5 mt-3 rounded-control border p-2.5" aria-label="Recovery required">
               <div className="flex items-start gap-2">
                 <AlertTriangle className="text-warn mt-0.5 size-icon-sm shrink-0" />
                 <div className="min-w-0 flex-1">
@@ -309,7 +309,7 @@ export function TrustPopover({
             </section>
           )}
           {peers === 0 && localReady && (
-            <p className="bg-bg border-line text-dim mt-3 rounded border p-2 text-xs">
+            <p className="bg-bg border-line text-dim mt-3 rounded-surface border p-2 text-xs">
               Ready locally. Changes will share when a peer connects.
             </p>
           )}

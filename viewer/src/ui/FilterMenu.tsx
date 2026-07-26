@@ -330,7 +330,7 @@ function Row({
   return (
     <button
       onClick={onClick}
-      className="text-dim hover:bg-hover hover:text-fg flex h-ctl-lg w-full items-center gap-2 rounded-md px-2 text-left text-sm outline-none focus-visible:ring-accent/50 focus-visible:ring-1"
+      className="text-dim hover:bg-hover hover:text-fg flex h-ctl-lg w-full items-center gap-2 rounded-control px-2 text-left text-sm outline-none focus-visible:ring-accent/50 focus-visible:ring-1"
     >
       <span className="text-mute flex size-icon-md shrink-0 items-center justify-center">{icon}</span>
       <span className="min-w-0 flex-1 truncate">{label}</span>
@@ -398,7 +398,7 @@ function Value({
       onClick={onClick}
       aria-pressed={selected}
       className={cn(
-        "hover:bg-hover flex h-ctl-md w-full items-center gap-2 rounded-md px-2 text-left text-sm outline-none focus-visible:ring-accent/50 focus-visible:ring-1",
+        "hover:bg-hover flex h-ctl-md w-full items-center gap-2 rounded-control px-2 text-left text-sm outline-none focus-visible:ring-accent/50 focus-visible:ring-1",
         selected ? "text-fg" : "text-dim",
         className,
       )}

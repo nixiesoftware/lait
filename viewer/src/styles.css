@@ -148,13 +148,21 @@
   --spacing-avatar-md: calc(20px * var(--scale));
   --spacing-avatar-lg: calc(24px * var(--scale));
 
-  /* Tailwind v4 generates `rounded-*` from named radius tokens. There is no
-     `radius-DEFAULT` namespace entry, so the old 6px value never reached the
-     common `rounded` utility. Keep a deliberate three-step hierarchy instead:
-     tight marks, ordinary controls, floating surfaces. */
-  --radius-sm: 3px;
-  --radius-md: 6px;
-  --radius-lg: 8px;
+  /* PROJECTED — radius is the one axis with two tiers.
+     The rungs live in `:root` below, deliberately outside `@theme` so Tailwind
+     generates no utility for them: they are the private ladder, and the only
+     public vocabulary is the three roles here. That is the closest thing CSS
+     gives us to atyard's `_internal/` — you cannot write `rounded-8`, so a
+     corner is always chosen by what the thing IS.
+
+     **These three lines are the seam.** Roundness is retuned by pointing a role
+     at a different rung, never at the ~155 call sites that flow through. That is
+     also why the rungs are named for their values (Linear's ladder) rather than
+     ordinally: a multiplier would make `--radius-8` render something other than
+     8px and the name would start lying. Remapping keeps every name honest. */
+  --radius-mark: var(--radius-4);
+  --radius-control: var(--radius-8);
+  --radius-surface: var(--radius-12);
 
   --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
@@ -200,7 +208,20 @@
 /* Dark by default; the OS decides unless the user overrode it. `color-scheme` is
    the single switch every `light-dark()` above reads — and it also fixes native
    scrollbars and form controls for free, which a class-based dark mode does not. */
+/* The private radius ladder — Linear's, named by value (4/6/8/12/16 + a pill).
+   Outside `@theme` on purpose: `@theme` is what makes Tailwind emit a utility,
+   so declaring these here gives us a tier the app can read but cannot spend.
+   Consumers reach a corner through the three roles above; these are what the
+   roles point AT. `--radius-6` and `--radius-16` are unmapped today and kept
+   because a ladder with gaps in it invites someone to reach for an arbitrary
+   value the moment a role needs a step between two others. */
 :root {
+  --radius-4: 4px;
+  --radius-6: 6px;
+  --radius-8: 8px;
+  --radius-12: 12px;
+  --radius-16: 16px;
+
   color-scheme: dark;
 }
 @media (prefers-color-scheme: light) {

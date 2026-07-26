@@ -219,7 +219,7 @@ export type BreadcrumbItem = {
  *  the same baseline and the same padding, or the trail visibly steps. The picker
  *  crumb gets here through `controlTrigger`'s `crumb` variant, which is written
  *  against these same values. */
-const crumbFace = "flex min-h-ctl-sm min-w-0 items-center gap-1.5 rounded-md transition-colors";
+const crumbFace = "flex min-h-ctl-sm min-w-0 items-center gap-1.5 rounded-control transition-colors";
 
 
 export function Breadcrumbs({
@@ -289,7 +289,7 @@ export function WorkspaceCrumb({ name, agent }: { name: string; agent?: boolean 
   const Glyph = agent ? Bot : Folder;
   return (
     <>
-      <span className={cn(crumbGlyph, "bg-active rounded")}>
+      <span className={cn(crumbGlyph, "bg-active rounded-mark")}>
         <Glyph className="text-mute size-icon-2xs" aria-hidden />
       </span>
       <span className="truncate">{name}</span>
@@ -305,7 +305,7 @@ export function ProjectCrumb({ name, color }: { name: string; color?: string | u
     <>
       <span className={crumbGlyph} aria-hidden>
         <span
-          className="size-mark-sm rounded-[3px]"
+          className="size-mark-sm rounded-mark"
           style={{ background: color ?? "var(--color-mute)" }}
         />
       </span>
@@ -498,7 +498,7 @@ export function Disclosure({
           onClick={() => setOpen((o) => !o)}
           aria-expanded={open}
           aria-controls={id}
-          className="text-dim hover:text-fg -ml-1 flex min-w-0 items-center gap-1 rounded px-1 py-0.5 text-sm font-medium outline-none focus-visible:ring-1 focus-visible:ring-accent/50"
+          className="text-dim hover:text-fg -ml-1 flex min-w-0 items-center gap-1 rounded-control px-1 py-0.5 text-sm font-medium outline-none focus-visible:ring-1 focus-visible:ring-accent/50"
         >
           <ChevronRight
             className={cn("size-icon-sm shrink-0 transition-transform", open && "rotate-90")}
@@ -535,7 +535,7 @@ export function Toast({
 }) {
   return (
     <div
-      className={cn("border-line bg-raised text-dim flex items-center gap-3 rounded-md border px-3 py-2 text-sm", className)}
+      className={cn("border-line bg-raised text-dim flex items-center gap-3 rounded-control border px-3 py-2 text-sm", className)}
       role="status"
       aria-live="polite"
     >
@@ -552,7 +552,7 @@ export function MenuContent({
   return (
     <DropdownMenu.Content
       sideOffset={4}
-      className={cn("ui-surface border-line-strong bg-raised shadow-overlay z-50 min-w-48 rounded-lg border p-1 text-sm", className)}
+      className={cn("ui-surface border-line-strong bg-raised shadow-overlay z-50 min-w-48 rounded-surface border p-1 text-sm", className)}
       {...props}
     />
   );
@@ -566,7 +566,7 @@ export function MenuItem({
   return (
     <DropdownMenu.Item
       className={cn(
-        "flex h-ctl-md cursor-default select-none items-center gap-2 rounded-md px-2 outline-none data-[highlighted]:bg-active data-[disabled]:opacity-50",
+        "flex h-ctl-md cursor-default select-none items-center gap-2 rounded-control px-2 outline-none data-[highlighted]:bg-active data-[disabled]:opacity-50",
         danger ? "text-danger" : "text-dim",
         className,
       )}
@@ -595,7 +595,7 @@ export function ContextMenuContent({
   return (
     <ContextMenu.Content
       className={cn(
-        "ui-surface border-line-strong bg-raised shadow-overlay z-50 min-w-48 rounded-lg border p-1 text-sm",
+        "ui-surface border-line-strong bg-raised shadow-overlay z-50 min-w-48 rounded-surface border p-1 text-sm",
         className,
       )}
       {...props}
@@ -611,7 +611,7 @@ export function ContextMenuItem({
   return (
     <ContextMenu.Item
       className={cn(
-        "flex h-ctl-md cursor-default items-center gap-2 rounded-md px-2 outline-none select-none data-[disabled]:opacity-50 data-[highlighted]:bg-active",
+        "flex h-ctl-md cursor-default items-center gap-2 rounded-control px-2 outline-none select-none data-[disabled]:opacity-50 data-[highlighted]:bg-active",
         danger ? "text-danger" : "text-dim",
         className,
       )}
@@ -647,7 +647,7 @@ export function MenuSubTrigger({
   return (
     <DropdownMenu.SubTrigger
       className={cn(
-        "text-dim flex h-ctl-md cursor-default select-none items-center gap-2 rounded-md px-2 outline-none data-[highlighted]:bg-active data-[state=open]:bg-active",
+        "text-dim flex h-ctl-md cursor-default select-none items-center gap-2 rounded-control px-2 outline-none data-[highlighted]:bg-active data-[state=open]:bg-active",
         className,
       )}
       {...props}
@@ -667,7 +667,7 @@ export function MenuSubContent({
       <DropdownMenu.SubContent
         sideOffset={4}
         className={cn(
-          "ui-surface border-line-strong bg-raised shadow-overlay z-50 max-h-72 min-w-52 overflow-y-auto rounded-lg border p-1 text-sm",
+          "ui-surface border-line-strong bg-raised shadow-overlay z-50 max-h-72 min-w-52 overflow-y-auto rounded-surface border p-1 text-sm",
           className,
         )}
         {...props}

@@ -98,7 +98,7 @@ export function DialogHost() {
       <AlertDialog.Root open onOpenChange={(o) => !o && settle(false)}>
         <AlertDialog.Portal>
           <AlertDialog.Overlay className="ui-overlay fixed inset-0 z-50 bg-black/45 backdrop-blur-[2px]" />
-          <AlertDialog.Content className="ui-surface border-line-strong bg-raised shadow-overlay fixed top-1/2 left-1/2 z-50 w-[min(440px,92vw)] -translate-x-1/2 -translate-y-1/2 rounded-lg border p-4">
+          <AlertDialog.Content className="ui-surface border-line-strong bg-raised shadow-overlay fixed top-1/2 left-1/2 z-50 w-[min(440px,92vw)] -translate-x-1/2 -translate-y-1/2 rounded-surface border p-4">
             <AlertDialog.Title className="text-lg font-semibold">{req.title}</AlertDialog.Title>
             {req.body && (
               <AlertDialog.Description className="text-dim mt-2">{req.body}</AlertDialog.Description>
@@ -131,7 +131,7 @@ export function DialogHost() {
     <Dialog.Root open onOpenChange={(o) => !o && settle(null)}>
       <Dialog.Portal>
         <Dialog.Overlay className="ui-overlay fixed inset-0 z-50 bg-black/45 backdrop-blur-[2px]" />
-        <Dialog.Content className="ui-surface border-line-strong bg-raised shadow-overlay fixed top-[18vh] left-1/2 z-50 w-[min(480px,92vw)] -translate-x-1/2 rounded-lg border">
+        <Dialog.Content className="ui-surface border-line-strong bg-raised shadow-overlay fixed top-[18vh] left-1/2 z-50 w-[min(480px,92vw)] -translate-x-1/2 rounded-surface border">
           <form
             onSubmit={(e) => {
               e.preventDefault();
@@ -154,7 +154,7 @@ export function DialogHost() {
                 // Radix closes on Escape; stopping propagation keeps the app's
                 // global keymap from also acting on the same keystroke.
                 onKeyDown={(e) => e.stopPropagation()}
-                className="border-line focus:border-line-strong placeholder:text-mute w-full rounded border bg-transparent px-2 py-1.5 text-base outline-none"
+                className="border-line focus:border-line-strong placeholder:text-mute w-full rounded-control border bg-transparent px-2 py-1.5 text-base outline-none"
               />
             </div>
             <div className="border-line flex justify-end gap-2 border-t p-3">

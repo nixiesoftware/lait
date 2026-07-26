@@ -137,7 +137,7 @@ export function Activity({
             />
           )}
           <span className="flex shrink-0 items-center gap-2">
-            {group.events.length > 1 && <span className="bg-raised text-mute rounded px-1.5 text-2xs">{group.events.length} changes</span>}
+            {group.events.length > 1 && <span className="bg-raised text-mute rounded-mark px-1.5 text-2xs">{group.events.length} changes</span>}
             <time className="text-mute text-xs">{when(e.ts)}</time>
           </span>
         </li>

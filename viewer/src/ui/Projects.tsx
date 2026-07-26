@@ -102,12 +102,12 @@ export function Projects({
             <li key={project.id}>
               <button
                 onClick={() => onOpen(project.key)}
-                className={`border-line bg-raised hover:border-line-strong hover:bg-hover group flex min-h-32 w-full flex-col rounded-lg border p-4 text-left transition-colors ${
+                className={`border-line bg-raised hover:border-line-strong hover:bg-hover group flex min-h-32 w-full flex-col rounded-surface border p-4 text-left transition-colors ${
                   project.archived ? "opacity-60" : ""
                 }`}
               >
                 <span className="flex w-full items-center gap-2">
-                  <span className="size-mark-lg rounded-sm" style={{ background: catalogColor(project.color) }} />
+                  <span className="size-mark-lg rounded-mark" style={{ background: catalogColor(project.color) }} />
                   <strong className="min-w-0 flex-1 truncate">{project.name}</strong>
                   {project.archived && (
                     <span className="border-line text-mute rounded-full border px-1.5 text-2xs">
