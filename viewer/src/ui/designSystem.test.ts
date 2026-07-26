@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 
@@ -374,6 +375,40 @@ describe("overlay magnitudes are named", () => {
         "from `max-h-overlay-sm|md|lg`. A loose number here is invisible until a " +
         "whole category of surface needs retuning and there is no one place to do it.\n\n" +
         offenders.join("\n"),
+    ).toEqual([]);
+  });
+});
+
+/**
+ * Colour is generated, and a generated file that is also editable stops being
+ * generated the first time someone edits it. This re-runs the generator and
+ * fails if the committed output has drifted, so the seeds and curves stay the
+ * source of truth rather than becoming a comment above the real one.
+ */
+describe("colour tokens are generated, not authored", () => {
+  it("the committed output matches the generator", () => {
+    const viewer = join(__dirname, "..", "..");
+    const run = spawnSync(
+      process.execPath,
+      [join(viewer, "tool", "generate-tokens.mjs"), "--check"],
+      { encoding: "utf8" },
+    );
+    expect(
+      run.status,
+      `tokens.generated.css has drifted from tool/generate-tokens.mjs.\n` +
+        `Edit the seeds or curves in the generator and run \`npm run tokens\`.\n\n` +
+        (run.stderr || "") + (run.stdout || ""),
+    ).toBe(0);
+  });
+
+  it("no hand-authored colour survives in styles.css", () => {
+    const css = readFileSync(join(__dirname, "..", "styles.css"), "utf8");
+    const declarations = [...css.matchAll(/^\s*--color-[\w-]+:/gm)].map((m) => m[0].trim());
+    expect(
+      declarations,
+      `Colour lives in the generator. A --color-* declaration here is a value that\n` +
+        `escaped the curves and will not move when a seed does.\n\n` +
+        declarations.join("\n"),
     ).toEqual([]);
   });
 });

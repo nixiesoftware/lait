@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@import "./tokens.generated.css";
 
 /* ── Typefaces ───────────────────────────────────────────────────────────
    Self-hosted and embedded, never fetched. `lait serve` runs on loopback and
@@ -86,44 +87,16 @@
  */
 
 @theme {
-  /* Semantic, not literal: components ask for `raised` or `line`, never a hex.
-     Renaming a shade must not mean touching a component. */
-  /* The page. Chrome sits BELOW it (`sunken`), floating surfaces ABOVE it
-     (`raised`) — so depth reads in one direction and nothing has to be
-     inverted per-context. */
-  --color-bg: light-dark(#ffffff, #0b0b0d);
-  /* Sidebar chrome: recessed, not elevated. A literal swap of `bg` and
-     `raised` would have made the sidebar darker at the cost of collapsing
-     popovers and tooltips onto the page colour — they are `raised` too, and
-     would have lost their separation. A third step keeps the sidebar dark
-     without moving anything that floats. */
-  --color-sunken: light-dark(#f4f4f6, #08080a);
-  --color-raised: light-dark(#fafafa, #131316);
-  --color-hover: light-dark(#f2f2f4, #1a1a1f);
-  --color-active: light-dark(#ededf0, #202027);
-  --color-line: light-dark(#e6e6ea, #26262d);
-  --color-line-strong: light-dark(#d2d2d9, #34343d);
+  /* Colour is GENERATED — see `tool/generate-tokens.mjs` and the block it
+     writes into `tokens.generated.css`, imported above. A seed contributes a
+     hue; lightness and chroma come from shared curves, so two families differ
+     in hue and in nothing else. Measurement is what forced the change: the four
+     accent families had drifted to OKLCH lightness 0.571 / 0.677 / 0.695 /
+     0.720 in dark mode, which is not a palette so much as four colours that
+     happen to coexist.
 
-  --color-fg: light-dark(#17171a, #e9e9ec);
-  --color-dim: light-dark(#5c5c66, #a0a0aa);
-  /* Muted copy still appears at the dense 11–12px scale throughout the viewer,
-     so it must clear normal-text contrast rather than relying on "secondary"
-     styling as an exemption. */
-  --color-mute: light-dark(#72727d, #858590);
-
-  /* The dark-theme blue is intentionally deeper than the light-theme value:
-     white labels remain AA while focus rings still clear non-text contrast. */
-  --color-accent: light-dark(#2f6bff, #416fe0);
-  --color-accent-fg: #ffffff;
-  --color-danger: light-dark(#d1242f, #f0616d);
-  --color-ok: light-dark(#1a7f37, #3fb950);
-  --color-warn: light-dark(#9a6700, #d29922);
-
-  /* Priority + status accents, so a glyph never hard-codes a colour. */
-  --color-urgent: light-dark(#d1242f, #f0616d);
-  --color-high: light-dark(#c2410c, #fb923c);
-  --color-medium: light-dark(#a16207, #facc15);
-  --color-low: light-dark(#64748b, #94a3b8);
+     Semantic, not literal, either way: components ask for `raised` or `line`,
+     never a hex. Renaming a shade must not mean touching a component. */
 
   /* ── Derivation ─────────────────────────────────────────────────────────
      Every spatial axis below states where its values come from. Tailwind
