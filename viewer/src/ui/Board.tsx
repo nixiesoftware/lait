@@ -801,7 +801,7 @@ function Card({
           <span className="ml-auto flex items-center gap-2">
             {pending && (
               <span
-                className="bg-accent size-1.5 animate-pulse rounded-full"
+                className="bg-accent size-mark-xs animate-pulse rounded-full"
                 title="Not confirmed by the daemon yet"
                 aria-label="Pending"
               />

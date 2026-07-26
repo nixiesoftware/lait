@@ -366,7 +366,7 @@ function Facet({
           {count > 0 && (
             <span className="text-accent flex min-w-0 items-center gap-1 text-xs">
               {swatch && (
-                <span className="size-1.5 shrink-0 rounded-full" style={{ background: swatch }} />
+                <span className="size-mark-xs shrink-0 rounded-full" style={{ background: swatch }} />
               )}
               <span className="truncate">{value ?? count}</span>
             </span>
@@ -404,7 +404,7 @@ function Value({
       )}
     >
       {swatch ? (
-        <span className="size-2 shrink-0 rounded-full" style={{ background: swatch }} />
+        <span className="size-mark-sm shrink-0 rounded-full" style={{ background: swatch }} />
       ) : (
         <span className="flex size-icon-md shrink-0 items-center justify-center">{icon}</span>
       )}

@@ -384,7 +384,7 @@ function ProjectRow({
           className={cn(navigationItem({ selected: active && !onFace }), "px-1.5")}
         >
           <span
-            className={cn("size-1.5 shrink-0 rounded-sm opacity-75", active && "opacity-100")}
+            className={cn("size-mark-xs shrink-0 rounded-sm opacity-75", active && "opacity-100")}
             style={{ background: catalogColor(project.color) }}
           />
           <span className="min-w-0 flex-1 truncate">{project.name}</span>
@@ -512,5 +512,5 @@ function NavItem({ icon, label, active, badge, compact, onClick }: { icon: React
 function StatusDot({ status }: { status: SpaceRow["status"] }) {
   const cls = { up: "bg-ok", idle: "bg-mute", missing: "bg-danger" }[status];
   const label = { up: "Local daemon running", idle: "Local daemon idle", missing: "Local replica unavailable" }[status];
-  return <span className={cn("size-1.5 shrink-0 rounded-full", cls)} title={label} role="img" aria-label={label} />;
+  return <span className={cn("size-mark-xs shrink-0 rounded-full", cls)} title={label} role="img" aria-label={label} />;
 }

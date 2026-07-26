@@ -216,7 +216,7 @@ export function TrustPopover({
         )}
         aria-label="Local and peer status"
       >
-        <span className={cn("size-1.5 rounded-full", healthy ? "bg-ok" : "bg-warn animate-pulse")} />
+        <span className={cn("size-mark-xs rounded-full", healthy ? "bg-ok" : "bg-warn animate-pulse")} />
         <span className="max-[1200px]:hidden">
           {trustSummary(liveness, localReady, peers, degraded)}
         </span>

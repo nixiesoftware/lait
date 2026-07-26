@@ -335,7 +335,7 @@ function LabelsPanel({
               className="group/label hover:bg-hover -mx-2 flex items-center gap-2 rounded px-2 py-1.5"
             >
               <span
-                className="size-3 shrink-0 rounded-full"
+                className="size-mark-lg shrink-0 rounded-full"
                 style={{ background: catalogColor(l.color) }}
               />
               <span className="min-w-0 flex-1 truncate text-sm">{l.name}</span>

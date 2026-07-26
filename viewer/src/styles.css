@@ -88,6 +88,24 @@
   --spacing-icon-md: 16px;
   --spacing-icon-lg: 20px;
 
+  /* PINNED — marks: the coloured shapes that carry state or identity rather
+     than meaning you read. Status dots, pending pulses, project and label
+     swatches. Same argument as icons and not the same axis: a mark has no
+     glyph inside it, so its size is chosen purely for how heavily the colour
+     reads beside the label it annotates. Scaling one with padding changes how
+     loud a status looks, which is a different claim from how roomy a row is.
+     Rungs are by the company a mark keeps, not by the shape:
+       xs 6  — inside a dense text run (status dot, pending pulse, sidebar swatch)
+       sm 8  — a crumb or picker swatch, beside `text-sm`
+       md 10 — a standalone row marker (timeline)
+       lg 12 — a list-row swatch, where the mark is the row's subject
+       xl 16 — a page-header swatch */
+  --spacing-mark-xs: 6px;
+  --spacing-mark-sm: 8px;
+  --spacing-mark-md: 10px;
+  --spacing-mark-lg: 12px;
+  --spacing-mark-xl: 16px;
+
   /* Tailwind v4 generates `rounded-*` from named radius tokens. There is no
      `radius-DEFAULT` namespace entry, so the old 6px value never reached the
      common `rounded` utility. Keep a deliberate three-step hierarchy instead:

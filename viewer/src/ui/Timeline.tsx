@@ -92,7 +92,7 @@ export function Timeline({
                   className="w-48 justify-start truncate px-1 text-left"
                 >
                   <span
-                    className="size-2.5 shrink-0 rounded-full"
+                    className="size-mark-md shrink-0 rounded-full"
                     style={{ background: catalogColor(p.color) }}
                   />
                   <span className="truncate">{p.name}</span>
@@ -128,7 +128,7 @@ export function Timeline({
                   variant="outline"
                 >
                   <span
-                    className="size-2.5 rounded-full"
+                    className="size-mark-md rounded-full"
                     style={{ background: catalogColor(p.color) }}
                   />
                   {p.name}

@@ -79,15 +79,80 @@ describe("icon axis is pinned, not scalar-derived", () => {
   });
 
   it("the ladder is the only icon size vocabulary in use", () => {
-    const seen = new Set<string>();
-    for (const file of tsxFiles(UI_DIR)) {
-      for (const m of readFileSync(file, "utf8").matchAll(/\bsize-icon-([a-z0-9]+)\b/g)) {
-        seen.add(m[1]!);
-      }
-    }
-    // A rung appearing here that is not in the token block would compile to
-    // nothing at all — Tailwind emits no utility for an undefined named entry,
-    // so the glyph would silently fall back to its intrinsic size.
-    expect([...seen].sort()).toEqual(["2xs", "lg", "md", "sm", "xs"]);
+    expect(rungsUsed("icon")).toEqual(["2xs", "lg", "md", "sm", "xs"]);
   });
 });
+
+/**
+ * A mark is a coloured shape that carries state or identity — a status dot, a
+ * pending pulse, a project or label swatch. It has no glyph inside it, so its
+ * size is chosen for how heavily the colour reads beside the label it
+ * annotates. That is a different claim from how roomy a row is, so marks are
+ * pinned too (`--spacing-mark-*`).
+ */
+const MARK_SHAPE = /\bsize-\d[\d.]*\b/;
+const IS_ROUND = /\brounded-(full|sm|\[)/;
+/*
+ * Deliberately NOT also testing for colour. The obvious reading of "a mark is
+ * a coloured shape" is `bg-*` or an inline `style={{ background }}`, but the
+ * daemon-status dot in Sidebar takes its fill from a variable
+ * (`cn("size-… rounded-full", cls)`), so a colour test silently skipped it —
+ * the guard passed while the dot sat back on a scalar utility. Shape alone
+ * turns out to be both stronger and quieter here: every real mark is round,
+ * and the non-marks are excluded below for reasons that are about behaviour
+ * rather than paint.
+ */
+/** A control part, not a mark: marks do not move. The switch thumb is
+ *  `bg-bg size-3 rounded-full transition-transform` — coloured and round, but
+ *  it slides, which makes it part of the control and heights-axis material. */
+const MOVES = /transition-transform|translate-x-/;
+/** Nor do marks hold anything. A mark is an empty shape; something that
+ *  centres a child is a container sized to fit its content, and is sized
+ *  against row rhythm. Calendar's "today" badge is the case in point —
+ *  coloured and round, but it holds the date number. */
+const HOLDS_CONTENT = /items-center|justify-center/;
+
+describe("mark axis is pinned, not scalar-derived", () => {
+  it("no coloured mark carries a numeric size-* utility", () => {
+    const offenders: string[] = [];
+
+    for (const file of tsxFiles(SRC_DIR)) {
+      const name = file.split(/[\\/]/).pop() ?? "";
+      readFileSync(file, "utf8")
+        .split("\n")
+        .forEach((line, i) => {
+          if (MOVES.test(line) || HOLDS_CONTENT.test(line)) return;
+          if (MARK_SHAPE.test(line) && IS_ROUND.test(line)) {
+            offenders.push(`${name}:${i + 1}  ${line.trim().slice(0, 90)}`);
+          }
+        });
+    }
+
+    expect(
+      offenders,
+      `Marks must use the pinned mark ladder (size-mark-xs|sm|md|lg|xl), not a\n` +
+        `numeric utility — the numeric form scales with --spacing, so loosening\n` +
+        `rows would also make every status dot louder.\n\n` +
+        offenders.join("\n"),
+    ).toEqual([]);
+  });
+
+  it("the ladder is the only mark size vocabulary in use", () => {
+    expect(rungsUsed("mark")).toEqual(["lg", "md", "sm", "xl", "xs"]);
+  });
+});
+
+/**
+ * Rungs actually referenced in source for a given axis. A rung used here but
+ * missing from the token block compiles to nothing at all — Tailwind emits no
+ * utility for an undefined named entry — so the element silently falls back to
+ * its intrinsic size rather than failing loudly.
+ */
+function rungsUsed(axis: "icon" | "mark"): string[] {
+  const seen = new Set<string>();
+  const pattern = new RegExp(`\\bsize-${axis}-([a-z0-9]+)\\b`, "g");
+  for (const file of tsxFiles(UI_DIR)) {
+    for (const m of readFileSync(file, "utf8").matchAll(pattern)) seen.add(m[1]!);
+  }
+  return [...seen].sort();
+}

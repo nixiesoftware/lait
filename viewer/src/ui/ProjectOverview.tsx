@@ -81,7 +81,7 @@ export function ProjectOverview({
                       className="hover:ring-line-strong rounded p-0.5 hover:ring-1"
                     >
                       <span
-                        className="block size-4 rounded"
+                        className="block size-mark-xl rounded"
                         style={{ background: catalogColor(project.color) }}
                       />
                     </button>
@@ -95,7 +95,7 @@ export function ProjectOverview({
                 </Popover.Root>
               ) : (
                 <span
-                  className="block size-4 rounded"
+                  className="block size-mark-xl rounded"
                   style={{ background: catalogColor(project.color) }}
                 />
               )}

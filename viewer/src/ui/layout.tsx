@@ -305,7 +305,7 @@ export function ProjectCrumb({ name, color }: { name: string; color?: string | u
     <>
       <span className={crumbGlyph} aria-hidden>
         <span
-          className="size-2 rounded-[3px]"
+          className="size-mark-sm rounded-[3px]"
           style={{ background: color ?? "var(--color-mute)" }}
         />
       </span>

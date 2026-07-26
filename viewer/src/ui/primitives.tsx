@@ -195,7 +195,7 @@ export function LabelChip({
       )}
     >
       <span
-        className="size-1.5 shrink-0 rounded-full"
+        className="size-mark-xs shrink-0 rounded-full"
         style={{ background: catalogColor(color) }}
       />
       {/* `capitalize` is a text transform, not a rewrite: the DOM still holds

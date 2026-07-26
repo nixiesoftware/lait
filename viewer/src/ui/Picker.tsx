@@ -102,7 +102,7 @@ export function Combobox(props: Props) {
     onCreate,
     swatchShape,
   } = props;
-  const swatch = cn("size-2 shrink-0", swatchShape === "square" ? "rounded-[3px]" : "rounded-full");
+  const swatch = cn("size-mark-sm shrink-0", swatchShape === "square" ? "rounded-[3px]" : "rounded-full");
 
   // Open state is internal *and* overridable. A keybinding needs to force it open;
   // a single-select pick needs to close it. Both have to work, so the component owns

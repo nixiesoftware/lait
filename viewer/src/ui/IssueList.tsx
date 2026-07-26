@@ -434,7 +434,7 @@ function IssueRow({
           instant, but never *claimed* as truth. */}
       {pending && (
         <span
-          className="bg-accent size-1.5 shrink-0 animate-pulse rounded-full"
+          className="bg-accent size-mark-xs shrink-0 animate-pulse rounded-full"
           title="Not confirmed by the daemon yet"
           aria-label="Pending"
         />

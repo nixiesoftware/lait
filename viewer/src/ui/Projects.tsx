@@ -107,7 +107,7 @@ export function Projects({
                 }`}
               >
                 <span className="flex w-full items-center gap-2">
-                  <span className="size-3 rounded-sm" style={{ background: catalogColor(project.color) }} />
+                  <span className="size-mark-lg rounded-sm" style={{ background: catalogColor(project.color) }} />
                   <strong className="min-w-0 flex-1 truncate">{project.name}</strong>
                   {project.archived && (
                     <span className="border-line text-mute rounded-full border px-1.5 text-2xs">
