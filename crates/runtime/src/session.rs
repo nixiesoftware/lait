@@ -62,19 +62,20 @@ pub struct Observation {
     /// Set on first observation, restart, cursor overrun, migration, or lost
     /// continuity — the consumer must rebaseline.
     pub reset: bool,
-    /// The World the scopes belong to, or `None` when the record is **space-
-    /// wide** — which authority is. The Contact driver that incorporates
-    /// authority is space-scoped and holds no World id, because authority does
-    /// not belong to one.
-    pub world: Option<WorldId>,
+    /// Every Body this change touched, across Worlds.
+    ///
+    /// A `BodyKey` names its own World, so grouping is recoverable from this
+    /// alone — a separate `world` field could only ever disagree with it, and
+    /// one durable change that spans Worlds is still one change.
     pub scopes: Vec<BodyKey>,
-    pub frontier: ReplicaFrontier,
-    /// The Space's **authority** advanced (membership, roles, devices, keys).
+    /// The Space's **authority** advanced in this same change (membership,
+    /// roles, devices, keys).
     ///
     /// A plane of its own because authority is not a Body: it converges through
-    /// signed authority records, so it moves without any scope and without the
-    /// Body frontier changing. A record may carry this alone.
+    /// signed authority records, so it can move with no scope at all and without
+    /// the Body frontier changing. A record may carry this alone.
     pub authority: bool,
+    pub frontier: ReplicaFrontier,
 }
 
 /// The result of a durable [`Session::submit`]: the application-defined effect
@@ -153,27 +154,16 @@ impl Broadcaster {
         }
     }
 
-    /// Publish one record for a durable commit. Sequences are monotonic within
-    /// the activation epoch; the ring discards its oldest record past
-    /// capacity (slow consumers rebaseline, memory never grows unbounded).
-    pub(crate) fn publish(&self, world: WorldId, scopes: Vec<BodyKey>, frontier: ReplicaFrontier) {
-        self.publish_record(Some(world), scopes, frontier, false)
-    }
-
-    /// Publish a record whose news is that **authority** advanced. Space-wide,
-    /// so it names no World; carries no scopes, because authority is not a Body;
-    /// and republishes the Body frontier unchanged, because it did not move it.
-    pub(crate) fn publish_authority(&self, frontier: ReplicaFrontier) {
-        self.publish_record(None, Vec::new(), frontier, true)
-    }
-
-    fn publish_record(
-        &self,
-        world: Option<WorldId>,
-        scopes: Vec<BodyKey>,
-        frontier: ReplicaFrontier,
-        authority: bool,
-    ) {
+    /// Publish ONE record for one durable change. Sequences are monotonic within
+    /// the activation epoch; the ring discards its oldest record past capacity
+    /// (slow consumers rebaseline, memory never grows unbounded).
+    ///
+    /// The unit is the semantic change, not the durability phase that produced
+    /// it: a Contact that incorporates authority *and* Bodies is one record
+    /// carrying both, because splitting it would force every consumer to handle
+    /// a scopeless record just to learn something the next one repeats. Scopes
+    /// may span Worlds; `authority` may stand alone.
+    pub(crate) fn publish(&self, scopes: Vec<BodyKey>, frontier: ReplicaFrontier, authority: bool) {
         let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         if state.closed {
             return;
@@ -185,10 +175,9 @@ impl Broadcaster {
             epoch: self.epoch,
             sequence,
             reset: false,
-            world,
             scopes,
-            frontier,
             authority,
+            frontier,
         };
         if state.ring.len() == state.capacity {
             state.ring.pop_front();
@@ -209,9 +198,11 @@ impl Broadcaster {
 /// record (consumers re-query from the committed frontier); an in-window
 /// cursor replays retained records and then follows live delivery. Dormancy
 /// ends the stream with a typed [`ObservationStreamError::StationDormant`].
+/// A stream is Station-wide, not World-scoped: it never filtered by World, and a
+/// record's own `scopes` name theirs. Carrying a World here would only have been
+/// able to imply a narrowing that does not happen.
 pub struct ObservationStream {
     broadcaster: Arc<Broadcaster>,
-    world: WorldId,
     /// The last delivered sequence (exclusive replay position); `None` before
     /// the first delivery when no valid cursor was presented.
     position: Option<u64>,
@@ -243,13 +234,12 @@ impl ObservationStream {
             epoch: self.broadcaster.epoch,
             sequence: state.next_seq - 1,
             reset: true,
-            world: Some(self.world.clone()),
             scopes: Vec::new(),
-            frontier: state.last_frontier,
             // A reset says "trust nothing", which subsumes every plane; flagging
             // authority as well would only invite a consumer to treat the two as
             // separable when rebaselining.
             authority: false,
+            frontier: state.last_frontier,
         }
     }
 
@@ -833,11 +823,9 @@ impl Session {
         // nothing is ever published before durability. A replay publishes
         // nothing (nothing committed).
         if let replica::ActionOutcome::Committed(receipt) = &outcome {
-            self.core.broadcaster.publish(
-                self.world_id.clone(),
-                receipt.scopes.clone(),
-                receipt.frontier,
-            );
+            self.core
+                .broadcaster
+                .publish(receipt.scopes.clone(), receipt.frontier, false);
         }
         drop(inner);
         let receipt = match outcome {
@@ -909,7 +897,6 @@ impl Session {
         };
         ObservationStream {
             broadcaster: self.core.broadcaster.clone(),
-            world: self.world_id.clone(),
             position,
         }
     }
@@ -933,7 +920,7 @@ impl Session {
             }
             inner.replica.frontier()
         };
-        self.core.broadcaster.publish_authority(frontier);
+        self.core.broadcaster.publish(Vec::new(), frontier, true);
     }
 
     /// Close this Session, consuming it. Never affects the Station.

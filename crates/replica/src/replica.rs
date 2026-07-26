@@ -2022,16 +2022,7 @@ impl Replica {
         bundle: crate::convergence::ValidatedContactBundle,
         authority: &dyn AuthoritySource,
     ) -> Result<ConvergenceOutcome, ReplicaCommitError> {
-        // The authority phase already ran (durably) inside `validate_contact`;
-        // its receipt is the only record of whether the Space's authority moved,
-        // and the Body pass below cannot tell — an authority-only exchange
-        // carries no units at all. Carry it out on the outcome so a subscriber
-        // hears an admission that changed no Body.
-        let receipt = bundle.authority_receipt();
-        let authority_advanced = receipt.prior_frontier != receipt.resulting_frontier;
-        let mut outcome = self.incorporate_units(ctx, &bundle.units, authority)?;
-        outcome.authority_advanced = authority_advanced;
-        Ok(outcome)
+        self.incorporate_units(ctx, &bundle.units, authority)
     }
 
     /// Build and sign the current Manifest (root + pages) over the full Body

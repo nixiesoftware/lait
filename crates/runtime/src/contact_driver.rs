@@ -531,7 +531,7 @@ async fn contact_neighbor(
     };
     let signer = crate::world::LocalIdentity::from_seed(&ctx.options.station_seed);
     let frontier = (ctx.options.mechanics.frontier)();
-    let convergence = {
+    let attempted = {
         let mut incorporator = ctx
             .options
             .mechanics
@@ -556,33 +556,34 @@ async fn contact_neighbor(
                     ctx.options.mechanics.source.as_ref(),
                 )
             })
-            .map_err(|e| ContactError::Transfer(e.to_string()))?
+            .map_err(|e| ContactError::Transfer(e.to_string()))
     };
-    // Authority is its own plane: an admission can arrive with no Body attached
-    // at all (`units` empty, Body frontier unmoved), and a subscriber that only
-    // watched scopes would never hear it. Published first — authority is durable
-    // before the Body phase runs, and the order of publication follows the order
-    // of durability.
-    if convergence.authority_advanced {
-        ctx.core.broadcaster.publish_authority(convergence.current);
-    }
-    // Publish Observations only AFTER durable incorporation, grouped per
-    // World (remote changes share the local commits' delivery path).
-    if convergence.advanced() {
-        let mut by_world: std::collections::BTreeMap<replica::WorldId, Vec<replica::BodyKey>> =
-            Default::default();
-        for key in &convergence.scopes {
-            by_world
-                .entry(key.world.clone())
-                .or_default()
-                .push(key.clone());
+    // ---- One Contact, one published change. -------------------------------
+    //
+    // Authority is durably incorporated INSIDE validation — before the manifest
+    // and the Bodies are checked — so a legitimate admission riding a malformed
+    // manifest changes membership and then fails. Measuring the authority
+    // frontier around the WHOLE attempt, rather than reading it off a successful
+    // outcome, is what catches that: the error path has real news to announce.
+    //
+    // Publication then happens once, before the result is returned, whichever
+    // way it went. The unit is the semantic change, not the durability phase
+    // that produced it — a consumer should never have to reassemble one Contact
+    // from an authority record plus a Body record.
+    let authority_advanced = (ctx.options.mechanics.frontier)() != frontier;
+    let (scopes, body_frontier) = match &attempted {
+        Ok(convergence) if convergence.advanced() => {
+            (convergence.scopes.clone(), convergence.current)
         }
-        for (world, scopes) in by_world {
-            ctx.core
-                .broadcaster
-                .publish(world, scopes, convergence.current);
-        }
+        Ok(convergence) => (Vec::new(), convergence.current),
+        Err(_) => (Vec::new(), ctx.core.frontier()),
+    };
+    if authority_advanced || !scopes.is_empty() {
+        ctx.core
+            .broadcaster
+            .publish(scopes, body_frontier, authority_advanced);
     }
+    let convergence = attempted?;
     Ok(ContactOutcome {
         bytes_moved,
         convergence,

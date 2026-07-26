@@ -304,12 +304,18 @@ export class ProjectViewerStore {
       const result = await this.rpc(space, { cmd: "milestone_list", project });
       if (result.kind !== "milestones") throw new Error("Expected milestones response");
       return result.milestones;
-      // Milestones are per-project catalog structure with a plane of their own.
-      // This used to hang off the issue plane, so a milestone written by itself
-      // — which touches no issue doc — never refreshed the list it belongs to.
-      // No `project` declared: this resource is keyed by `prj_` id and the ring
-      // names projects by KEY, so it takes the plane whole.
-    }, { catalog: ["milestones"] }, force);
+      // Milestones are catalog structure, but their `total`/`done` progress is
+      // computed from ISSUE bodies — live issues of the project targeting each
+      // milestone, done by status category. So this depends on three things at
+      // once: the milestone records, any dirty issue doc (assignment, status,
+      // tombstone), and the workflow that decides which statuses count as done.
+      //
+      // `project: null` is "any project", which is coarser than it could be:
+      // this resource is keyed by `prj_` id while the ring names projects by
+      // KEY, so there is nothing to match on yet. Correct and over-eager beats
+      // precise and wrong — a milestone bar that silently stops counting is
+      // exactly the failure this whole change exists to prevent.
+    }, { catalog: ["milestones", "workflow"], project: null }, force);
   }
 
   ensureLabels(space: string, force = false): Promise<LabelDto[]> {

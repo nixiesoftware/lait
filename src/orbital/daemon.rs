@@ -119,10 +119,16 @@ pub struct OrbitalDaemon {
     /// baseline it MUST be, because two subscribers each advancing the same
     /// baseline would leave the second one seeing no change at all.
     doorbells: tokio::sync::broadcast::Sender<Doorbell>,
-    /// Whether the pump feeding [`Self::doorbells`] is alive. Started lazily on
-    /// the first subscribe that finds a docked Session, and cleared when the
-    /// pump exits so a later subscribe revives it.
-    pump_alive: Arc<std::sync::atomic::AtomicBool>,
+    /// Whether a live pump feeds [`Self::doorbells`].
+    ///
+    /// An async mutex, not a flag, and deliberately **held across startup**: a
+    /// boolean can say who owns the job but not whether the job is finished, and
+    /// the difference is a lost commit. A second subscriber that saw "someone is
+    /// starting" and ran ahead would send its own reset while the winner had not
+    /// yet opened the stream — and a commit in that window is in neither the
+    /// second subscriber's re-read nor the broadcast. Waiting on the lock makes
+    /// "ready" the only state a subscriber can observe.
+    pump: tokio::sync::Mutex<bool>,
     /// Control connections currently being served (idle-shutdown suppressor).
     active_conns: std::sync::atomic::AtomicU64,
     /// When the last control connection was accepted or completed — the idle
@@ -302,7 +308,7 @@ impl OrbitalDaemon {
             stop_tx: tokio::sync::watch::channel(false).0,
             ring_planes: Mutex::new(None),
             doorbells: tokio::sync::broadcast::channel(256).0,
-            pump_alive: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            pump: tokio::sync::Mutex::new(false),
             active_conns: std::sync::atomic::AtomicU64::new(0),
             last_activity: Mutex::new(std::time::Instant::now()),
         })
@@ -1840,23 +1846,21 @@ impl OrbitalDaemon {
     /// blocks in bounded windows and re-checks cancellation between them; the
     /// async side selects on that channel and the teardown watch, so a Stop
     /// wakes it immediately and the worker exits within one window.
-    fn ensure_doorbell_pump(self: &Arc<Self>) {
+    async fn ensure_doorbell_pump(self: &Arc<Self>) {
         use std::sync::atomic::Ordering;
-        // Claim the right to start exactly one pump.
-        if self
-            .pump_alive
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
+        // Held for the whole of startup: a caller that arrives mid-start blocks
+        // here and returns only once the stream is open, never in between.
+        let mut running = self.pump.lock().await;
+        if *running {
             return;
         }
         // Seed the diff baseline BEFORE opening the stream. A commit landing in
         // between is then counted as already-known rather than as a change with
-        // nothing to compare against — and it is covered regardless, because the
-        // subscriber that started this pump sends itself a reset immediately
-        // after. Seeding after the stream opened would be the harmful order: the
-        // first record would diff against a baseline that already contained it
-        // and report no planes at all.
+        // nothing to compare against — and it is covered regardless, because
+        // every subscriber sends itself a reset after this returns. Seeding
+        // after the stream opened would be the harmful order: the first record
+        // would diff against a baseline that already contained it and report no
+        // planes at all.
         if let Some(state) = self.ring_state() {
             *self.ring_planes.lock().expect("ring planes lock") = Some(state.planes);
         }
@@ -1864,10 +1868,7 @@ impl OrbitalDaemon {
             let guard = self.session.lock().expect("session lock");
             match guard.as_ref() {
                 Some(session) => session.observe(None),
-                None => {
-                    self.pump_alive.store(false, Ordering::Release);
-                    return;
-                }
+                None => return,
             }
         };
         // Drain the initial reset record: subscribers get their own reset when
@@ -1915,8 +1916,9 @@ impl OrbitalDaemon {
             let _ = worker.await;
             // Say so on the way out, so the next subscribe revives the pump
             // rather than attaching to a fan-out nothing feeds.
-            daemon.pump_alive.store(false, Ordering::Release);
+            *daemon.pump.lock().await = false;
         });
+        *running = true;
     }
 
     /// Translate one Observation into the frame every subscriber receives.
@@ -1959,7 +1961,9 @@ impl OrbitalDaemon {
         // nothing published in between falls into the gap. A broadcast receiver
         // buffers from the moment it subscribes.
         let mut frames = self.doorbells.subscribe();
-        self.ensure_doorbell_pump();
+        // Returns only once the pump is READY, so the reset below is never sent
+        // against a stream that has not opened yet.
+        self.ensure_doorbell_pump().await;
         let epoch = {
             let guard = self.session.lock().expect("session lock");
             match guard.as_ref() {
