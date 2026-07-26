@@ -496,7 +496,7 @@ function NavItem({ icon, label, active, badge, compact, onClick }: { icon: React
       className={cn(
         navigationItem({
           selected: active,
-          density: compact ? "compact" : "normal",
+          size: compact ? "sm" : "md",
         }),
       )}
     >

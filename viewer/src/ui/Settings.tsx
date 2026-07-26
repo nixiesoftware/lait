@@ -128,7 +128,7 @@ export function Settings({
             <button
               key={t.id}
               onClick={() => setTab(t.id)}
-              className={cn(navigationItem({ selected: tab === t.id, density: "roomy" }))}
+              className={cn(navigationItem({ selected: tab === t.id, size: "lg" }))}
             >
               {t.icon}
               {t.label}

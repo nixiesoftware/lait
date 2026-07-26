@@ -238,7 +238,7 @@ export function FilterMenu({
                 aria-label={`Search ${FACET_NAME[facet]}`}
               />
             </div>
-            <div className="max-h-64 overflow-y-auto p-1">
+            <div className="max-h-overlay-md overflow-y-auto p-1">
               {facet === "status" &&
                 states
                   .filter((s) => matches(s.name))

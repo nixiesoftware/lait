@@ -347,6 +347,38 @@ describe("control triggers speak tone x size", () => {
 });
 
 /**
+ * Floating surfaces have two magnitudes that are easy to leave loose because
+ * neither looks like geometry at the call site: how far the surface sits from
+ * its trigger (a Radix `sideOffset` number, not a class) and how tall its list
+ * may grow before scrolling. They were five literals across six files, and two
+ * popovers had quietly drifted 2px off the shared default.
+ */
+describe("overlay magnitudes are named", () => {
+  it("no literal sideOffset and no numeric max-h", () => {
+    const offenders: string[] = [];
+    for (const file of tsxFiles(SRC_DIR)) {
+      const name = file.split(/[\\/]/).pop() ?? "";
+      if (name.endsWith(".test.tsx")) continue;
+      readFileSync(file, "utf8")
+        .split("\n")
+        .forEach((line, i) => {
+          if (/^\s*(\/\*|\*|\/\/)/.test(line)) return;
+          if (/sideOffset=\{\d+\}/.test(line) || /\bmax-h-\d/.test(line)) {
+            offenders.push(`${name}:${i + 1}  ${line.trim().slice(0, 80)}`);
+          }
+        });
+    }
+    expect(
+      offenders,
+      "Anchor distance comes from `OverlayGap` (panel|menu|tip) and a scroll cap " +
+        "from `max-h-overlay-sm|md|lg`. A loose number here is invisible until a " +
+        "whole category of surface needs retuning and there is no one place to do it.\n\n" +
+        offenders.join("\n"),
+    ).toEqual([]);
+  });
+});
+
+/**
  * Rungs actually referenced in source for a given axis. A rung used here but
  * missing from the token block compiles to nothing at all — Tailwind emits no
  * utility for an undefined named entry — so the element silently falls back to

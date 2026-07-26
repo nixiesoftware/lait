@@ -64,6 +64,28 @@ const twMerge = extendTailwindMerge({
   },
 });
 
+/**
+ * How far a floating surface sits from the thing that opened it.
+ *
+ * A number rather than a token because Radix takes `sideOffset` as a prop, not
+ * a class — but the reason for naming it is the same as every other axis: one
+ * value per CATEGORY of surface, so "move the menus further out" is one edit
+ * instead of a hunt through call sites. These were five loose literals across
+ * six files, and two popovers had drifted 2px off the shared default with no
+ * stated reason.
+ */
+export const OverlayGap = {
+  /** Anchored panels: popovers, pickers, date pickers, filters. */
+  panel: 4,
+  /** Dropdown menus. Same as `panel` today, split out so the menu family can
+   *  be retuned without touching every popover. */
+  menu: 4,
+  /** Tooltips. Deliberately looser: a tip carries no border-to-border
+   *  relationship with its trigger, so it needs the extra breathing room to
+   *  read as a label about the control rather than part of it. */
+  tip: 6,
+} as const;
+
 export function cn(...parts: ClassValue[]): string {
   return twMerge(clsx(parts));
 }
@@ -429,20 +451,22 @@ export const interactiveRow = cva(
         true: "bg-active text-fg",
         false: "hover:bg-hover",
       },
-      density: {
-        compact: "min-h-ctl-lg",
-        // D5 retired the 36px rung, so this now resolves to the same height as
-        // `compact`. Kept as a distinct name because call sites read as intent
-        // ("a normal list row"), and because the two separate again the moment
-        // the tone x size collapse gives rows a real size prop.
-        normal: "min-h-ctl-lg",
-        roomy: "min-h-ctl-xl",
+      /** Rungs, not adjectives. `compact`/`normal`/`roomy` described a row
+       *  relative to its neighbours, which is why two of them silently
+       *  collapsed onto one height when D5 retired the 36px step and nothing
+       *  could say so. A rung names the height itself, so a call site asking
+       *  for `lg` gets `lg` and two call sites agreeing is visible rather than
+       *  hidden behind two words that mean the same thing. */
+      size: {
+        md: "min-h-ctl-md",
+        lg: "min-h-ctl-lg",
+        xl: "min-h-ctl-xl",
       },
     },
     defaultVariants: {
       surface: "list",
       selected: false,
-      density: "compact",
+      size: "lg",
     },
   },
 );
@@ -459,13 +483,13 @@ export const navigationItem = cva(
         true: "bg-active text-fg",
         false: "text-dim hover:bg-hover hover:text-fg",
       },
-      density: {
-        compact: "h-ctl-sm",
-        normal: "h-ctl-md",
-        roomy: "h-ctl-lg",
+      size: {
+        sm: "h-ctl-sm",
+        md: "h-ctl-md",
+        lg: "h-ctl-lg",
       },
     },
-    defaultVariants: { selected: false, density: "normal" },
+    defaultVariants: { selected: false, size: "md" },
   },
 );
 
@@ -651,7 +675,7 @@ export function IconButton({
       </Tooltip.Trigger>
       <Tooltip.Portal>
         <Tooltip.Content
-          sideOffset={6}
+          sideOffset={OverlayGap.tip}
           style={{ transformOrigin: "var(--radix-tooltip-content-transform-origin)" }}
           // `rounded-control`, not `rounded-surface`. A tooltip is a floating
           // label at control scale, not a panel: at 26px tall the 12px surface
@@ -756,7 +780,7 @@ export function Kbd({ children, className }: { children: React.ReactNode; classN
  */
 export function PopoverContent({
   className,
-  sideOffset = 4,
+  sideOffset = OverlayGap.panel,
   style,
   ...props
 }: React.ComponentProps<typeof Popover.Content>) {

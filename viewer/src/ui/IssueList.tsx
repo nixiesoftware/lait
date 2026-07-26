@@ -347,7 +347,7 @@ function IssueRow({
     <li
       ref={el}
       className={clsxish([
-        interactiveRow({ selected, density: "roomy" }),
+        interactiveRow({ selected, size: "xl" }),
         // One step above the group header that introduces them. The header is
         // punctuation between piles; the rows are the thing you came to read,
         // and when the two were level the list had no figure and ground.

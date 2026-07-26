@@ -13,7 +13,7 @@ import {
 import type { InboxEntry } from "../types";
 import { ApplicationState, EmptyState, LoadingState } from "./AppState";
 import { Combobox } from "./Picker";
-import { Button, Checkbox, IconButton, InlineAction, interactiveRow, PopoverContent } from "./primitives";
+import { Button, Checkbox, IconButton, InlineAction, interactiveRow, OverlayGap, PopoverContent } from "./primitives";
 import { short, when } from "./time";
 
 /**
@@ -181,7 +181,7 @@ export function Inbox({
               <Settings2 className="size-icon-sm" /> Preferences
             </Button>
           </Popover.Trigger>
-          <PopoverContent align="end" sideOffset={6} className="w-64 p-3">
+          <PopoverContent align="end" sideOffset={OverlayGap.panel} className="w-64 p-3">
               <h2 className="mb-1 text-sm font-medium">Inbox preferences</h2>
               <p className="text-mute mb-3 text-xs">Local controls for what is shown on this device. The daemon still delivers the complete feed.</p>
               {(["assigned", "comment", "status"] as InboxKind[]).map((kind) => (
@@ -259,7 +259,7 @@ export function Inbox({
                 }
               }}
               className={[
-                interactiveRow({ density: "normal" }),
+                interactiveRow({ size: "lg" }),
                 "group flex items-start gap-3 px-4 py-2",
                 // `unread` counts entries past the watermark, and they are the
                 // newest — so the first N are the unread ones.

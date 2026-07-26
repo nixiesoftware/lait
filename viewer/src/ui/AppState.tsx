@@ -16,7 +16,7 @@ import {
 } from "lucide-react";
 
 import type { SpaceRow, StatusInfo } from "../types";
-import { Button, cn, PopoverContent } from "./primitives";
+import { Button, cn, OverlayGap, PopoverContent } from "./primitives";
 
 export type ApplicationStateKind =
   | "loading"
@@ -221,7 +221,7 @@ export function TrustPopover({
           {trustSummary(liveness, localReady, peers, degraded)}
         </span>
       </Popover.Trigger>
-      <PopoverContent align="end" sideOffset={6} className="w-80 p-3">
+      <PopoverContent align="end" sideOffset={OverlayGap.panel} className="w-80 p-3">
           <div className="mb-3 flex items-center gap-2">
             <ShieldCheck className="text-accent size-icon-md" />
             <div>

@@ -116,7 +116,7 @@ export function Activity({
             if (event.key === "Enter") onOpen(e.reff);
           }}
           tabIndex={0}
-          className={`${interactiveRow({ density: "normal" })} flex items-start gap-3 px-4 py-2.5`}
+          className={`${interactiveRow({ size: "lg" })} flex items-start gap-3 px-4 py-2.5`}
         >
           <span className="text-mute w-20 shrink-0 truncate font-mono text-xs tabular-nums">
             {e.reff}

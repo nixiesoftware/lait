@@ -221,6 +221,18 @@
   --spacing-bar-md: calc(36px * var(--scale));
   --spacing-bar-lg: calc(44px * var(--scale));
 
+  /* PINNED — how tall a floating list may grow before it scrolls. Not the
+     control ladder: this is a cap on a scroll container, chosen against the
+     viewport and the number of rows a person will scan, not against the height
+     of a row. Named so the three magnitudes that were loose in the app read as
+     one category with three sizes rather than three unrelated numbers.
+       sm 208 — a short pinned list (saved views)
+       md 256 — an option list you filter (pickers, filters)
+       lg 288 — a full menu */
+  --spacing-overlay-sm: 208px;
+  --spacing-overlay-md: 256px;
+  --spacing-overlay-lg: 288px;
+
   /* Avatars scale with the rows that carry them. */
   --spacing-avatar-sm: calc(16px * var(--scale));
   --spacing-avatar-md: calc(20px * var(--scale));

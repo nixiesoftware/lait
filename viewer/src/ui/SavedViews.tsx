@@ -38,7 +38,7 @@ export function SavedViews({ space, project, view, filter, display, onApply, onC
           {views.length === 0 ? (
             <p className="text-mute px-2 py-3 text-center text-sm">No saved views yet.</p>
           ) : (
-            <div className="mb-2 flex max-h-52 flex-col gap-px overflow-y-auto">
+            <div className="mb-2 flex max-h-overlay-sm flex-col gap-px overflow-y-auto">
               {views.map((view) => (
                 <div key={view.id} className="group/view relative">
                   <button onClick={() => onApply(view)} className={`${navigationItem()} pr-8`}>{view.name}</button>

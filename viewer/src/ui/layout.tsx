@@ -3,7 +3,7 @@ import { createContext, useContext, useId, useMemo, useState } from "react";
 import type { ProjectView } from "../core/registry";
 import { createPortal } from "react-dom";
 
-import { cn, crumbGlyph } from "./primitives";
+import { cn, crumbGlyph, OverlayGap } from "./primitives";
 import * as ContextMenu from "@radix-ui/react-context-menu";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import {
@@ -559,7 +559,7 @@ export function MenuContent({
 }: React.ComponentProps<typeof DropdownMenu.Content>) {
   return (
     <DropdownMenu.Content
-      sideOffset={4}
+      sideOffset={OverlayGap.menu}
       className={cn("ui-surface border-line-strong bg-raised shadow-overlay z-50 min-w-48 rounded-surface border p-1 text-sm", className)}
       {...props}
     />
@@ -673,9 +673,9 @@ export function MenuSubContent({
   return (
     <DropdownMenu.Portal>
       <DropdownMenu.SubContent
-        sideOffset={4}
+        sideOffset={OverlayGap.menu}
         className={cn(
-          "ui-surface border-line-strong bg-raised shadow-overlay z-50 max-h-72 min-w-52 overflow-y-auto rounded-surface border p-1 text-sm",
+          "ui-surface border-line-strong bg-raised shadow-overlay z-50 max-h-overlay-lg min-w-52 overflow-y-auto rounded-surface border p-1 text-sm",
           className,
         )}
         {...props}
