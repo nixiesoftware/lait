@@ -17,8 +17,7 @@ platform — they all land the same `lait` executable. Upgrade any install in pl
 | macOS / Linux, want one command | the shell installer |
 | Windows | the PowerShell installer, Scoop, or winget |
 | Homebrew | `brew install nixiesoftware/tap/lait` |
-| Rust toolchain, want a prebuilt binary | `cargo binstall lait` |
-| Rust toolchain, want to build | `cargo install lait` |
+| Rust toolchain, want to build | `cargo install --git …` |
 | Running an always-on seed | Docker |
 
 ## Shell installer (macOS / Linux)
@@ -56,17 +55,18 @@ winget install NixieTechLLC.Lait
 
 ## cargo-binstall (prebuilt, no compile)
 
-Fetches the prebuilt release archive instead of building from source:
+lait is not published to crates.io. Its workspace crates are internal
+boundaries rather than a library surface, and crates.io has no private tier
+and no delete — publishing would claim those names permanently and turn each
+internal API into a public semver commitment. Build from the repository:
 
 ```sh
-cargo binstall lait
+cargo install --locked --git https://github.com/nixiesoftware/lait lait
 ```
 
-## cargo install (from source)
-
-```sh
-cargo install lait --locked
-```
+> The `lait` crate on crates.io stops at **0.4.8** and is not maintained.
+> `cargo install lait` and `cargo binstall lait` would install that old
+> version silently — use the `--git` form above.
 
 Requires **Rust 1.91+** (the floor is driven by iroh 1.0.0-rc.1).
 

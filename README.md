@@ -56,11 +56,8 @@ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/nixiesoftware/lait/rele
 # Homebrew (macOS / Linux)
 brew install nixiesoftware/tap/lait
 
-# prebuilt binary via Cargo, no compile
-cargo binstall lait
-
 # from source (Rust 1.91+)
-cargo install lait --locked
+cargo install --locked --git https://github.com/nixiesoftware/lait lait
 ```
 
 ```powershell

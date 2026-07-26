@@ -5,6 +5,14 @@ edition = "2021"
 rust-version = "1.91"
 description = "LAIT orbital lifecycle: Runtime, Orbit, Station, World hosting, Dock/Session, Contact policy, and Observation publication. Exposes no CRDT, iroh, stream, file, key, ciphertext, mutex, or product request types."
 license = "MIT OR Apache-2.0"
+# Not published. These are lait's internal boundaries, not a library surface —
+# the descriptions above say so ("the ONLY crate that names loro", "the ONLY
+# crate that names iroh"), and those are architecture invariants rather than a
+# contract for strangers to build on. crates.io has no private tier and no
+# delete: publishing would claim the name permanently and make the API a public
+# semver commitment. `crates/journal` already carried this flag; the rest now
+# agree with it.
+publish = false
 
 [dependencies]
 # mechanics — Space/Actor/Device/Station identity and authority facts.
