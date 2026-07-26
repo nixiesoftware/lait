@@ -19,7 +19,16 @@
 @theme {
   /* Semantic, not literal: components ask for `raised` or `line`, never a hex.
      Renaming a shade must not mean touching a component. */
+  /* The page. Chrome sits BELOW it (`sunken`), floating surfaces ABOVE it
+     (`raised`) — so depth reads in one direction and nothing has to be
+     inverted per-context. */
   --color-bg: light-dark(#ffffff, #0b0b0d);
+  /* Sidebar chrome: recessed, not elevated. A literal swap of `bg` and
+     `raised` would have made the sidebar darker at the cost of collapsing
+     popovers and tooltips onto the page colour — they are `raised` too, and
+     would have lost their separation. A third step keeps the sidebar dark
+     without moving anything that floats. */
+  --color-sunken: light-dark(#f4f4f6, #08080a);
   --color-raised: light-dark(#fafafa, #131316);
   --color-hover: light-dark(#f2f2f4, #1a1a1f);
   --color-active: light-dark(#ededf0, #202027);
@@ -288,7 +297,7 @@
      mouse clicks either. `:focus-visible` is exactly that distinction, and it is
      why no component sets `outline: none`. */
   :focus-visible {
-    @apply outline-accent rounded-sm outline-2 outline-offset-2;
+    @apply outline-accent rounded-mark outline-2 outline-offset-2;
   }
 
   /*
@@ -706,12 +715,35 @@
   }
 }
 
+/* Only the LEADING caption sits flush with the rail's top edge. `first:mt-0` on
+   the caption itself would have hit every one of them — each is the first child
+   of its own section — so the rule has to select the first section. */
+.issue-detail-properties > .rail-section:first-child .rail-caption {
+  margin-top: 0;
+}
+
 @container (min-width: 700px) {
+  /* Boxed and centred, the way Linear sets an issue. The measure cap below
+     governs the text column; capping the GRID at exactly that column plus the
+     gutter and the rail means the two never drift apart as the window grows,
+     and the whole set stays centred in the pane rather than pinned left with a
+     widening void beside it. */
   .issue-detail-body {
+    /* Composed, not a round number. The cap is exactly measure + gutter + rail,
+       so any one of the three can be retuned and the total follows instead of
+       needing to be recomputed by hand. `+ 2rem` restores the element's own
+       `p-4`, which sits inside the border box — without it the columns would
+       sum to 32px less than the composition claims. */
+    --issue-rail: 264px;
+    --issue-gutter: 40px;
+    --issue-measure: 1296px;
     display: grid;
-    grid-template-columns: minmax(0, 1fr) 264px;
+    grid-template-columns: minmax(0, 1fr) var(--issue-rail);
     align-content: start;
-    column-gap: 40px;
+    column-gap: var(--issue-gutter);
+    max-width: calc(var(--issue-measure) + var(--issue-gutter) + var(--issue-rail) + 2rem);
+    margin-inline: auto;
+    width: 100%;
   }
 
   /* The measure is capped, not filled. `saans` runs 6.92px per character at
@@ -727,13 +759,24 @@
   .issue-detail-body > *:not(.issue-detail-properties) {
     grid-column: 1;
     width: 100%;
-    max-width: 35rem;
+    max-width: var(--issue-measure);
   }
 
+  /* No divider and no scroll of its own. The rail is reference material you
+     read *against* the issue, so it stays put while the body moves — and a rule
+     between them was drawing a boundary the layout already makes obvious.
+     `align-self: start` is what makes `sticky` work here: without it the grid
+     stretches the item to the full row span and a stretched box has nowhere to
+     stick to. */
   .issue-detail-properties {
     grid-column: 2;
     grid-row: 1 / span 40;
-    border-left: 1px solid var(--color-line);
-    padding-left: 20px;
+    align-self: start;
+    position: sticky;
+    /* Matches the body's own `p-4`. At `top: 0` the rail sat 16px below the
+       scroll container at rest and then snapped up to meet it on the first
+       scroll — a visible jolt that read as the eyebrow sliding out from under
+       itself. Sticking where it already sits means it never moves at all. */
+    top: 1rem;
   }
 }

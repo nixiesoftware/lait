@@ -219,7 +219,7 @@ export type BreadcrumbItem = {
  *  the same baseline and the same padding, or the trail visibly steps. The picker
  *  crumb gets here through `controlTrigger`'s `crumb` variant, which is written
  *  against these same values. */
-const crumbFace = "flex min-h-ctl-sm min-w-0 items-center gap-1.5 rounded-control transition-colors";
+const crumbFace = "flex min-h-ctl-sm min-w-0 items-center gap-1.5 rounded-full transition-colors";
 
 
 export function Breadcrumbs({
@@ -428,17 +428,18 @@ export function RailSection({
   return (
     <section className="rail-section flex flex-col">
       {title && (
-        // Equal space above and below. The gap above comes from the rail's own
-        // `gap-3`, so this matches it: a caption used to take 16px above and
-        // 4px below, which glued it to its rows and left it drifting away from
-        // the section it was separating from. Typographically the asymmetry is
-        // defensible — a heading belongs to what follows it — but at 10px in a
-        // 264px column it just read as uneven.
-        <h3 className="rail-caption text-mute text-2xs mb-3 font-semibold tracking-wider uppercase">
+        // The caption now carries ALL the separation between groups, because the
+        // rail itself no longer has a gap. Deliberately asymmetric: more above
+        // than below, so a caption belongs to the rows under it instead of
+        // floating midway between two groups. That is also what removes the
+        // seam between the properties and the metadata below them — the rail
+        // used to spend the gap twice, once as its own `gap-3` and again under
+        // every caption, which read as a break rather than a heading.
+        <h3 className="rail-caption text-mute text-2xs mt-3 mb-1 font-semibold tracking-wider uppercase">
           {title}
         </h3>
       )}
-      <dl className="flex flex-col gap-1">{children}</dl>
+      <dl className="flex flex-col">{children}</dl>
     </section>
   );
 }
@@ -447,10 +448,13 @@ export function RailRow({ label, children }: { label: string; children: React.Re
   return (
     // `title` restores the term to the pointer. It is the same string as the
     // `<dt>`, so the tooltip and the screen reader agree by construction.
-    // `py-1` so a row that grows past its minimum keeps air at both edges. A
-    // wrapped run of labels is 48px of chips in a 28px-minimum row, and without
-    // this the first and last chip sat flush against the rows above and below.
-    <div className="issue-property group/prop flex min-h-ctl-md items-center gap-2 py-1" title={label}>
+    // The vertical padding is the ONLY space between two rows — each row is a
+    // 28px control, so `py` is doubled into the gap between neighbours. Kept
+    // non-zero rather than removed: a wrapped run of labels overflows the 28px
+    // minimum, and at zero the first and last chip sit flush against the rows
+    // above and below. 2px is the least that still reads as a gap between two
+    // adjacent hover pills.
+    <div className="issue-property group/prop flex min-h-ctl-md items-center gap-2 py-0.5" title={label}>
       <dt className="sr-only">{label}</dt>
       <dd className="min-w-0 flex-1">{children}</dd>
     </div>

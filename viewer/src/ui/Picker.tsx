@@ -1,7 +1,7 @@
 import { useState } from "react";
 import * as Popover from "@radix-ui/react-popover";
 import { Command } from "cmdk";
-import { Check, ChevronDown, Plus } from "lucide-react";
+import { Check, Plus } from "lucide-react";
 
 import { cmdkFilter } from "../core/fuzzy";
 import {
@@ -161,27 +161,6 @@ export function Combobox(props: Props) {
     <Popover.Root open={isOpen} onOpenChange={setOpen}>
       <Popover.Trigger aria-label={label} className={cn(controlTrigger({ variant }), className)}>
         {content}
-        {/* A bare trigger keeps its chevron hidden until hover: in a property list
-            the value is the content and five permanent chevrons are five arrows
-            pointing at nothing. It still appears on keyboard focus.
-
-            Each variant waits on the group that actually wraps it — `property` on
-            the property row, `crumb` on the breadcrumb item. Naming the wrong one
-            is silent: the class compiles, matches nothing, and the affordance
-            simply never arrives. */}
-        {/* A label chip has no chevron at all. The chip *is* the target — it is
-            already a bordered, coloured, clearly-hit-able shape — and one arrow
-            per label turns a run of four into eight things to look at. */}
-        <ChevronDown
-          className={cn(
-            "text-mute size-icon-xs shrink-0",
-            variant === "label" && "hidden",
-            variant === "property" &&
-              "opacity-0 transition-opacity group-hover/prop:opacity-100 group-focus-within/prop:opacity-100",
-            variant === "crumb" &&
-              "opacity-0 transition-opacity group-hover/crumb:opacity-100 group-focus-within/crumb:opacity-100",
-          )}
-        />
       </Popover.Trigger>
       <PopoverContent align="start" className="w-60 overflow-hidden p-0">
           <Command filter={cmdkFilter} loop>

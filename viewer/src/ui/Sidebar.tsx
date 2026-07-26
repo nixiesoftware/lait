@@ -4,7 +4,6 @@ import {
   ArrowLeftRight,
   Bookmark,
   Bot,
-  ChevronDown,
   ChevronRight,
   Cog,
   Copy,
@@ -260,7 +259,6 @@ function SpaceSwitcher({
           </span>
           <strong className="min-w-0 flex-1 truncate text-left text-sm">{title}</strong>
           {selected && <StatusDot status={selected.status} />}
-          <ChevronDown className="text-mute size-icon-xs shrink-0" aria-hidden />
         </DropdownMenu.Trigger>
         {/* Verbs first, replicas behind a submenu.
             This used to inline every local space and hang "Workspace settings"
@@ -365,7 +363,7 @@ function ProjectRow({
           onClick={() => onToggleExpand(project.key)}
           aria-expanded={expanded}
           aria-label={expanded ? `Collapse ${project.name}` : `Expand ${project.name}`}
-          className="text-mute hover:text-fg flex size-ctl-xs shrink-0 items-center justify-center rounded-control outline-none"
+          className="text-mute hover:text-fg flex size-ctl-xs shrink-0 items-center justify-center rounded-full outline-none"
         >
           <ChevronRight
             className={cn("size-icon-xs transition-transform", expanded && "rotate-90")}

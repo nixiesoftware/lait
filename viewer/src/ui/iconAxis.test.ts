@@ -3,6 +3,8 @@ import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
+import { cn } from "./primitives";
+
 /**
  * Guards the icon axis's *derivation*, not its values.
  *
@@ -208,7 +210,7 @@ describe("control heights speak one vocabulary", () => {
  * outside `@theme` and so generates no utilities. That is the point — you cannot
  * spend a raw value — but it fails silently, so it is worth naming.
  */
-const RAW_RADIUS = /\brounded(?![-\w[])|\brounded-(sm|md|lg|xl|none|4|6|8|12|16)\b|\brounded-\[/;
+const RAW_RADIUS = /\brounded(?![-\w[:])|\brounded-(sm|md|lg|xl|none|4|6|8|12|16)\b|\brounded-\[/;
 
 describe("radius is chosen by role, not by value", () => {
   it("no bare, legacy, arbitrary or rung-named radius in class strings", () => {
@@ -236,6 +238,44 @@ describe("radius is chosen by role, not by value", () => {
         `and a rung name like \`rounded-8\` silently renders nothing.\n\n` +
         offenders.join("\n"),
     ).toEqual([]);
+  });
+});
+
+/**
+ * `tailwind-merge` only resolves a conflict between classes it knows share a
+ * group, and its vocabulary is fixed — `rounded-control` is not in it. Left
+ * unregistered, a base and a variant that both set a corner BOTH survive, and
+ * CSS source order decides which wins. That is a silent failure, so the
+ * registration in `primitives.tsx` is worth asserting rather than assuming:
+ * the config shape is easy to get subtly wrong and nothing would complain.
+ */
+describe("cn understands our ladders", () => {
+  const cases: Array<[string, string, string]> = [
+    ["rounded-control", "rounded-full", "rounded-full"],
+    ["rounded-full", "rounded-control", "rounded-control"],
+    ["rounded-surface", "rounded-mark", "rounded-mark"],
+    ["rounded-control", "rounded-lg", "rounded-lg"],
+    ["h-ctl-md", "h-ctl-lg", "h-ctl-lg"],
+    ["h-ctl-md", "h-bar-lg", "h-bar-lg"],
+    ["min-h-ctl-sm", "min-h-ctl-xl", "min-h-ctl-xl"],
+    ["size-icon-sm", "size-icon-lg", "size-icon-lg"],
+    ["size-ctl-sm", "size-mark-xs", "size-mark-xs"],
+    ["h-ctl-md", "h-8", "h-8"],
+  ];
+
+  it.each(cases)("cn(%s, %s) -> %s", (a, b, want) => {
+    expect(cn(a, b)).toBe(want);
+  });
+
+  it("leaves non-conflicting classes alone", () => {
+    expect(cn("h-ctl-md", "rounded-control", "px-2")).toBe("h-ctl-md rounded-control px-2");
+  });
+
+  // Not a quirk: `size-*` sets width and height, so it genuinely supersedes a
+  // bare height. Worth pinning — it is the one case where a ladder class
+  // disappearing from the output is correct rather than a merge bug.
+  it("size supersedes height, as it should", () => {
+    expect(cn("h-ctl-md", "size-icon-sm")).toBe("size-icon-sm");
   });
 });
 

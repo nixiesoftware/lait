@@ -463,8 +463,8 @@ export function IssueDetail({
           Status row above already does, and it would be the one piece of this pane
           that came from somewhere else.
         */}
-        <div className="issue-detail-properties flex flex-col gap-3 text-sm">
-          <RailSection>
+        <div className="issue-detail-properties flex flex-col text-sm">
+          <RailSection title="Properties">
           <RailRow label="Status">
             <Combobox
               variant="property"

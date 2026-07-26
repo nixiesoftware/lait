@@ -1377,7 +1377,7 @@ export function App() {
         collapsible
         collapsedSize={0}
         groupResizeBehavior="preserve-pixel-size"
-        className="bg-raised max-[960px]:hidden"
+        className="bg-sunken max-[960px]:hidden"
       >
         <Sidebar
           spaces={spaces}
@@ -1778,7 +1778,7 @@ export function App() {
           <Dialog.Overlay className="ui-overlay fixed inset-0 z-40 hidden bg-black/45 backdrop-blur-[2px] max-[960px]:block" />
           <Dialog.Content
             aria-describedby={undefined}
-            className="ui-drawer bg-raised shadow-overlay fixed inset-y-0 left-0 z-40 hidden w-[min(320px,88vw)] pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)] outline-none max-[960px]:block"
+            className="ui-drawer bg-sunken shadow-overlay fixed inset-y-0 left-0 z-40 hidden w-[min(320px,88vw)] pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)] outline-none max-[960px]:block"
           >
             <Dialog.Title className="sr-only">Workspace navigation</Dialog.Title>
             <Sidebar

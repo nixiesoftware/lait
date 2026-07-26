@@ -1,6 +1,6 @@
 import { cva, type VariantProps } from "class-variance-authority";
 import { clsx, type ClassValue } from "clsx";
-import { twMerge } from "tailwind-merge";
+import { extendTailwindMerge } from "tailwind-merge";
 import * as CheckboxPrimitive from "@radix-ui/react-checkbox";
 import * as Popover from "@radix-ui/react-popover";
 import * as SwitchPrimitive from "@radix-ui/react-switch";
@@ -29,6 +29,41 @@ import { catalogColor, labelSurface } from "./colors";
  * bordered buttons competes with the content it exists to serve.
  */
 
+/**
+ * Our named ladders are invisible to `tailwind-merge` out of the box.
+ *
+ * It resolves conflicts by knowing which classes belong to the same group, and
+ * that knowledge is a fixed vocabulary: it recognises `rounded-full` but has
+ * never heard of `rounded-control`, so it files them separately and keeps BOTH.
+ * Two border-radius declarations then reach the element and CSS source order —
+ * not the caller's intent — decides the corner.
+ *
+ * That failed quietly rather than loudly, which is the dangerous kind: a recipe
+ * whose variant asked for a pill kept the base's box, or didn't, depending on
+ * which rule Tailwind happened to emit last. Registering the ladders here fixes
+ * the whole class of bug once, instead of restructuring every recipe to avoid
+ * ever emitting two.
+ */
+const LADDERS = [
+  "ctl-xs", "ctl-sm", "ctl-md", "ctl-lg", "ctl-xl",
+  "bar-sm", "bar-md", "bar-lg",
+  "avatar-sm", "avatar-md", "avatar-lg",
+  "icon-2xs", "icon-xs", "icon-sm", "icon-md", "icon-lg",
+  "mark-xs", "mark-sm", "mark-md", "mark-lg", "mark-xl",
+];
+
+const twMerge = extendTailwindMerge({
+  extend: {
+    classGroups: {
+      rounded: [{ rounded: ["mark", "control", "surface"] }],
+      h: [{ h: LADDERS }],
+      "min-h": [{ "min-h": LADDERS }],
+      w: [{ w: LADDERS }],
+      size: [{ size: LADDERS }],
+    },
+  },
+});
+
 export function cn(...parts: ClassValue[]): string {
   return twMerge(clsx(parts));
 }
@@ -38,7 +73,7 @@ const button = cva(
   // which is not optional in a keyboard-first app. `transition` (not just
   // `transition-colors`) so the `active:` press scales back smoothly on release;
   // the scale is a transform, so it costs no layout.
-  "inline-flex shrink-0 select-none items-center justify-center gap-1.5 rounded-control font-medium transition-colors disabled:pointer-events-none disabled:opacity-45",
+  "inline-flex shrink-0 select-none items-center justify-center gap-1.5 font-medium transition-colors disabled:pointer-events-none disabled:opacity-45",
   {
     variants: {
       variant: {
@@ -75,10 +110,20 @@ const button = cva(
         pill: "bg-active/60 text-dim hover:bg-hover hover:text-fg rounded-full",
       },
       size: {
-        /** Icon-only chrome: a 24px square, the toolbar unit. */
-        icon: "size-ctl-sm",
-        sm: "h-ctl-sm px-2 text-sm",
-        md: "h-ctl-md px-2 text-sm",
+        /** Icon-only chrome: a 24px circle, the toolbar unit. Fully rounded for
+         *  the same reason the property rail is — the only shape these carry is a
+         *  hover fill, so a circle reads as deliberate where a rounded square
+         *  reads as a box that appeared under the pointer. */
+        icon: "size-ctl-sm rounded-full",
+        /** Pills, not boxes. A button carries no border of its own in the
+         *  common variants, so its shape is whatever the fill describes — and a
+         *  row of buttons has to agree: a ghost "Cancel" beside a primary "Save"
+         *  cannot be a pill next to a box. Shape therefore rides on size, which
+         *  every variant passes through, rather than on the ones that happen to
+         *  be quiet. */
+        sm: "h-ctl-sm rounded-full px-2 text-sm",
+        md: "h-ctl-md rounded-full px-2 text-sm",
+        /** No capsule at all — this is a text action inside prose. */
         inline: "h-auto p-0 text-xs",
       },
     },
@@ -308,23 +353,31 @@ const field = cva(
 export const crumbGlyph = "flex size-icon-md shrink-0 items-center justify-center";
 
 export const controlTrigger = cva(
-  "inline-flex items-center gap-1.5 rounded-control text-sm outline-none transition-colors disabled:pointer-events-none disabled:opacity-45 data-[state=open]:bg-active",
+  // No radius in the base: a corner is part of a variant's identity, not a
+  // default it inherits. Keeping it here meant a variant that wanted a
+  // different shape emitted both classes and left the winner to CSS source
+  // order — `twMerge` does not know a custom `rounded-control` belongs to its
+  // border-radius group, so it cannot dedupe them for us.
+  "inline-flex items-center gap-1.5 text-sm outline-none transition-colors disabled:pointer-events-none disabled:opacity-45 data-[state=open]:bg-active",
   {
     variants: {
       variant: {
+        /** The property rail. Fully rounded: the only chrome these rows have is
+         *  a hover fill, and at 28px a pill reads as a deliberate shape rather
+         *  than a box that happens to appear under the pointer. */
         property:
-          "hover:bg-hover -mx-1 min-h-ctl-md min-w-0 px-1.5 text-left",
+          "hover:bg-hover -mx-1 min-h-ctl-md min-w-0 rounded-full px-1.5 text-left",
         // A crumb that happens to be a switcher. Same face as `property` at the
         // breadcrumb's own height: `min-h-ctl-md` here put a 28px control in a trail
         // of 24px crumbs, and the taller hover box was visible against them.
         crumb:
-          "hover:bg-hover -mx-1 min-h-ctl-sm min-w-0 px-1.5 text-left",
+          "hover:bg-hover -mx-1 min-h-ctl-sm min-w-0 rounded-full px-1.5 text-left",
         chip:
-          "border-line bg-bg hover:border-line-strong hover:bg-hover min-h-ctl-md border px-2",
+          "border-line bg-bg hover:border-line-strong hover:bg-hover min-h-ctl-md rounded-control border px-2",
         filter:
-          "border-line bg-raised hover:border-line-strong hover:bg-hover min-h-ctl-md border px-2",
+          "border-line bg-raised hover:border-line-strong hover:bg-hover min-h-ctl-md rounded-control border px-2",
         toolbar:
-          "text-dim hover:bg-hover hover:text-fg min-h-ctl-sm px-1.5",
+          "text-dim hover:bg-hover hover:text-fg min-h-ctl-sm rounded-full px-1.5",
         /** Inside a floating pill. Fully rounded to match the shell it sits in,
          *  and it lifts on hover — the bar is the one surface in the app that
          *  is over the work rather than part of it, so its controls answer the
@@ -380,7 +433,10 @@ export const interactiveRow = cva(
 
 /** One navigation hit-area and state language for the app rail and settings. */
 export const navigationItem = cva(
-  "flex w-full min-w-0 items-center gap-2 rounded-control px-2 text-left text-sm outline-none transition-colors focus-visible:ring-accent/50 focus-visible:ring-1",
+  // Fully rounded, same family as the property rail and the crumb it sits
+  // under: a nav row carries no border, so a hover or selected fill is the
+  // only thing describing its shape.
+  "flex w-full min-w-0 items-center gap-2 rounded-full px-2 text-left text-sm outline-none transition-colors focus-visible:ring-accent/50 focus-visible:ring-1",
   {
     variants: {
       selected: {
@@ -581,7 +637,12 @@ export function IconButton({
         <Tooltip.Content
           sideOffset={6}
           style={{ transformOrigin: "var(--radix-tooltip-content-transform-origin)" }}
-          className="ui-surface border-line-strong bg-raised shadow-overlay z-50 flex items-center gap-1.5 rounded-surface border px-2 py-1 text-xs"
+          // `rounded-control`, not `rounded-surface`. A tooltip is a floating
+          // label at control scale, not a panel: at 26px tall the 12px surface
+          // corner is essentially half the height, which stops being a corner
+          // and renders as a pill. The surface rung is for things with enough
+          // body to carry it.
+          className="ui-surface border-line-strong bg-raised shadow-overlay z-50 flex items-center gap-1.5 rounded-control border px-2 py-1 text-xs"
         >
           {label}
           {chord && <Kbd>{chord}</Kbd>}
