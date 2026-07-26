@@ -106,7 +106,7 @@ export function Members({
           ) : <ul className="border-line divide-line divide-y rounded border">
             {members.map((m) => (
               <li key={m.key} className="flex items-center gap-3 p-3">
-                <Avatar deviceKey={m.key} alias={m.alias} me={m.me} className="size-6" />
+                <Avatar deviceKey={m.key} alias={m.alias} me={m.me} className="size-avatar-lg" />
                 <span className="min-w-0 flex-1">
                   <span className="flex items-center gap-2">
                     <span className="font-medium">

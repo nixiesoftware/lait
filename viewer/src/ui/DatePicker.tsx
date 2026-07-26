@@ -203,7 +203,7 @@ export function DatePicker({
                   })}
                   aria-pressed={isSelected}
                   className={cn(
-                    "size-7 text-sm tabular-nums",
+                    "size-ctl-md text-sm tabular-nums",
                     isSelected
                       ? "bg-accent text-accent-fg"
                       : inMonth

@@ -2012,7 +2012,7 @@ function Description({
 
   if (readOnly) {
     return (
-      <div className="min-h-10 py-2">
+      <div className="min-h-ctl-xl py-2">
         {value ? <Markdown text={value} /> : <span className="text-mute">No description</span>}
       </div>
     );
@@ -2022,7 +2022,7 @@ function Description({
     <MarkdownEditor
       value={value}
       placeholder="Add description…"
-      className="min-h-10 py-2"
+      className="min-h-ctl-xl py-2"
       onChange={(markdown) => {
         dirty.current = true;
         setDraft(markdown);

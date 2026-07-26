@@ -23,8 +23,9 @@ import { dueLabel, dueTone } from "./time";
  * The density is the feature. Rows are a fixed 40px with a fixed column rhythm,
  * so the eye tracks straight down the ids and the titles without re-finding them
  * on each line — which is exactly what stops being true the moment a row grows to
- * fit its content. Fixed, but not fixed in pixels: `h-10` is ten units of
- * `--spacing`, so the comfortable density carries the whole rhythm up with it.
+ * fit its content. Fixed, but not fixed in pixels: `h-ctl-xl` is a rung on the
+ * control ladder, scaled by `--scale`, so comfortable density carries the whole
+ * rhythm up with it.
  */
 export function IssueList({
   groups,
@@ -350,7 +351,7 @@ function IssueRow({
         // One step above the group header that introduces them. The header is
         // punctuation between piles; the rows are the thing you came to read,
         // and when the two were level the list had no figure and ground.
-        "group/row flex h-10 items-center gap-2 px-4",
+        "group/row flex h-ctl-xl items-center gap-2 px-4",
         checked && !selected && "bg-accent/5 shadow-[inset_2px_0_var(--color-accent)]",
         // Radix marks its trigger while the menu is up. Matching the selected
         // fill means the row reads as the subject of the menu on the very first

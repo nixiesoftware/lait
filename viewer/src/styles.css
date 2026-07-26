@@ -106,6 +106,48 @@
   --spacing-mark-lg: 12px;
   --spacing-mark-xl: 16px;
 
+  /* The density factor. Distinct from `--spacing` on purpose: the unit is the
+     rhythm's *quantum* and this is the system's *scale*. Splitting them is what
+     lets a comfortable layout loosen rows without also inflating the glyphs and
+     marks above, which are pinned and read this not at all. Today the two move
+     together (4 -> 4.5px is 1.125), so nothing shifts; they are separable the
+     moment we want a denser rhythm at the same control height, or vice versa. */
+  --scale: 1;
+
+  /* DERIVED, but from `--scale` rather than from the unit — and named, so the
+     app has ONE height vocabulary instead of three.
+     A control's height *is* rhythm: comfortable mode should give a row more
+     room, which is exactly what density means. That makes these the opposite
+     case from icons and marks — they are supposed to move. What they should
+     not do is arrive from five different places under three different names
+     (`size`, `density`, and a height welded into a `variant`), which is what
+     made "one notch taller" a five-file edit.
+       xs 20 — a chip or an inline label
+       sm 24 — toolbar buttons, crumbs, segmented filters
+       md 28 — the default: property rows, buttons, small fields
+       lg 32 — inputs, list rows, menu rows
+       xl 40 — issue rows and other full-width list lines */
+  --spacing-ctl-xs: calc(20px * var(--scale));
+  --spacing-ctl-sm: calc(24px * var(--scale));
+  --spacing-ctl-md: calc(28px * var(--scale));
+  --spacing-ctl-lg: calc(32px * var(--scale));
+  --spacing-ctl-xl: calc(40px * var(--scale));
+
+  /* Chrome bars — a separate axis from controls because a bar is sized by what
+     it must hold, not by the ladder. The page header is 44 because the trail's
+     leaf is a wrapping issue title and two lines of it need the room; the
+     section header is 36 because it stays deliberately one step under the rows
+     it introduces. Both are arguments about content, so they get names rather
+     than rungs, and neither should be quietly rounded onto the control ladder. */
+  --spacing-bar-sm: calc(32px * var(--scale));
+  --spacing-bar-md: calc(36px * var(--scale));
+  --spacing-bar-lg: calc(44px * var(--scale));
+
+  /* Avatars scale with the rows that carry them. */
+  --spacing-avatar-sm: calc(16px * var(--scale));
+  --spacing-avatar-md: calc(20px * var(--scale));
+  --spacing-avatar-lg: calc(24px * var(--scale));
+
   /* Tailwind v4 generates `rounded-*` from named radius tokens. There is no
      `radius-DEFAULT` namespace entry, so the old 6px value never reached the
      common `rounded` utility. Keep a deliberate three-step hierarchy instead:
@@ -178,6 +220,10 @@
    type must keep the same rhythm when the user asks for more breathing room. */
 :root[data-density="comfortable"] {
   --spacing: 4.5px;
+  /* Moves with the unit today (4 -> 4.5 is exactly 1.125), so every named
+     control height reproduces what the numeric utility used to compute and
+     nothing shifts. The two are separate variables so they can stop agreeing. */
+  --scale: 1.125;
   --text-2xs: 11px;
   --text-2xs--line-height: 15px;
   --text-xs: 12px;

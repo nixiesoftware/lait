@@ -143,14 +143,69 @@ describe("mark axis is pinned, not scalar-derived", () => {
 });
 
 /**
+ * Control heights are the opposite case from icons and marks: they are SUPPOSED
+ * to move with density, so they stay derived — just from `--scale` and under
+ * one name (`h-ctl-*`) rather than arriving from five recipes under three
+ * vocabularies. What this guards is the vocabulary, not the derivation: a raw
+ * `h-7` still renders 28px today, so nothing looks wrong, and the ladder quietly
+ * stops being the single place a height is decided.
+ */
+const CONTROL_RANGE = /\b(min-)?h-(5|6|7|8|9|10|11)\b/;
+/**
+ * Geometry that is not a control height. The timeline is a chart — its bars and
+ * rulers are plotted, not laid out on a control ladder — and the switch's track
+ * and thumb are sub-control parts below the smallest rung.
+ */
+const NOT_A_CONTROL = new Set(["Timeline.tsx"]);
+
+describe("control heights speak one vocabulary", () => {
+  it("no numeric h-* in the control range outside charts", () => {
+    const offenders: string[] = [];
+
+    for (const file of tsxFiles(SRC_DIR)) {
+      const name = file.split(/[\\/]/).pop() ?? "";
+      if (NOT_A_CONTROL.has(name) || name.endsWith(".test.tsx")) continue;
+
+      readFileSync(file, "utf8")
+        .split("\n")
+        .forEach((line, i) => {
+          // Prose in a doc comment may legitimately name an old utility while
+          // explaining history; only policed in real class strings.
+          if (/^\s*(\*|\/\/)/.test(line)) return;
+          if (CONTROL_RANGE.test(line)) {
+            offenders.push(`${name}:${i + 1}  ${line.trim().slice(0, 90)}`);
+          }
+        });
+    }
+
+    expect(
+      offenders,
+      `Control heights come from the ladder (h-ctl-xs|sm|md|lg|xl) or, for a bar\n` +
+        `sized by what it holds, h-bar-sm|md|lg. A raw h-7 renders the same 28px\n` +
+        `today, which is exactly why this is worth catching: it works, and the\n` +
+        `ladder silently stops being the one place a height is decided.\n\n` +
+        offenders.join("\n"),
+    ).toEqual([]);
+  });
+
+  it("the ladder is the only control-height vocabulary in use", () => {
+    expect(rungsUsed("ctl")).toEqual(["lg", "md", "sm", "xl", "xs"]);
+    expect(rungsUsed("bar")).toEqual(["lg", "md", "sm"]);
+  });
+});
+
+/**
  * Rungs actually referenced in source for a given axis. A rung used here but
  * missing from the token block compiles to nothing at all — Tailwind emits no
  * utility for an undefined named entry — so the element silently falls back to
  * its intrinsic size rather than failing loudly.
  */
-function rungsUsed(axis: "icon" | "mark"): string[] {
+function rungsUsed(axis: "icon" | "mark" | "ctl" | "bar"): string[] {
   const seen = new Set<string>();
-  const pattern = new RegExp(`\\bsize-${axis}-([a-z0-9]+)\\b`, "g");
+  // Any sizing utility, not just `size-*`: the control ladder is reached mostly
+  // through `h-` and `min-h-`, so a `size-`-only pattern reported three rungs
+  // where five are in use.
+  const pattern = new RegExp(`\\b(?:size|min-h|max-h|h|w)-${axis}-([a-z0-9]+)\\b`, "g");
   for (const file of tsxFiles(UI_DIR)) {
     for (const m of readFileSync(file, "utf8").matchAll(pattern)) seen.add(m[1]!);
   }

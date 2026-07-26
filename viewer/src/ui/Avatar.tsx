@@ -72,7 +72,7 @@ export function Avatar({
     <span
       className={cn(
         "inline-flex shrink-0 items-center justify-center rounded-full font-medium text-white select-none",
-        size === "sm" ? "size-4 text-[8px]" : "size-5 text-[9px]",
+        size === "sm" ? "size-avatar-sm text-[8px]" : "size-avatar-md text-[9px]",
         // `me` gets a ring rather than a different colour: the colour still has to
         // be the key's, or you'd be the one member whose avatar means something else.
         me && "ring-accent ring-1 ring-offset-1 ring-offset-[var(--color-bg)]",

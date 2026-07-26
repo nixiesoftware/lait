@@ -54,7 +54,7 @@ export function SurfaceHeader({
         // 44px, not 32. The trail's leaf is a wrapping issue title, and two lines
         // of it need the room; a bar sized to one line would have made the title
         // the only thing the bar could not hold.
-        "border-line/70 @container flex h-11 shrink-0 items-center gap-1 border-b px-2",
+        "border-line/70 @container flex h-bar-lg shrink-0 items-center gap-1 border-b px-2",
         className,
       )}
     >
@@ -86,7 +86,7 @@ export function Toolbar({
       className={cn(
         "border-line/70 flex shrink-0 items-center gap-1 border-b px-2",
         className,
-        "h-8",
+        "h-bar-sm",
       )}
     >
       {children}
@@ -141,7 +141,7 @@ export function GroupHeader({
         // made the divider between two piles of issues as loud as the page. It
         // stays one step under the rows it introduces — the header is
         // punctuation, the rows are the text.
-        "flex h-9 shrink-0 items-center gap-2",
+        "flex h-bar-md shrink-0 items-center gap-2",
         sticky
           ? "bg-bg/95 border-line/70 sticky top-0 z-10 border-b px-4 backdrop-blur-sm"
           : "px-1",
@@ -219,7 +219,7 @@ export type BreadcrumbItem = {
  *  the same baseline and the same padding, or the trail visibly steps. The picker
  *  crumb gets here through `controlTrigger`'s `crumb` variant, which is written
  *  against these same values. */
-const crumbFace = "flex min-h-6 min-w-0 items-center gap-1.5 rounded-md transition-colors";
+const crumbFace = "flex min-h-ctl-sm min-w-0 items-center gap-1.5 rounded-md transition-colors";
 
 
 export function Breadcrumbs({
@@ -379,7 +379,7 @@ export function SectionHeader({
   className?: string;
 }) {
   return (
-    <div className={cn("flex min-h-6 items-center gap-2", className)}>
+    <div className={cn("flex min-h-ctl-sm items-center gap-2", className)}>
       <h3 className="text-mute text-2xs font-semibold tracking-wider uppercase">{title}</h3>
       {meta && <span className="text-mute text-xs">{meta}</span>}
       {action && <span className="ml-auto">{action}</span>}
@@ -389,7 +389,7 @@ export function SectionHeader({
 
 export function PropertyRow({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <div className="issue-property group/prop flex min-h-7 items-center gap-2">
+    <div className="issue-property group/prop flex min-h-ctl-md items-center gap-2">
       <dt className="text-mute w-20 shrink-0">{label}</dt>
       <dd className="min-w-0 flex-1">{children}</dd>
     </div>
@@ -450,7 +450,7 @@ export function RailRow({ label, children }: { label: string; children: React.Re
     // `py-1` so a row that grows past its minimum keeps air at both edges. A
     // wrapped run of labels is 48px of chips in a 28px-minimum row, and without
     // this the first and last chip sat flush against the rows above and below.
-    <div className="issue-property group/prop flex min-h-7 items-center gap-2 py-1" title={label}>
+    <div className="issue-property group/prop flex min-h-ctl-md items-center gap-2 py-1" title={label}>
       <dt className="sr-only">{label}</dt>
       <dd className="min-w-0 flex-1">{children}</dd>
     </div>
@@ -492,7 +492,7 @@ export function Disclosure({
 
   return (
     <section className="flex flex-col">
-      <div className="group/disc flex h-8 items-center gap-1">
+      <div className="group/disc flex h-ctl-lg items-center gap-1">
         <button
           type="button"
           onClick={() => setOpen((o) => !o)}
@@ -566,7 +566,7 @@ export function MenuItem({
   return (
     <DropdownMenu.Item
       className={cn(
-        "flex h-7 cursor-default select-none items-center gap-2 rounded-md px-2 outline-none data-[highlighted]:bg-active data-[disabled]:opacity-50",
+        "flex h-ctl-md cursor-default select-none items-center gap-2 rounded-md px-2 outline-none data-[highlighted]:bg-active data-[disabled]:opacity-50",
         danger ? "text-danger" : "text-dim",
         className,
       )}
@@ -611,7 +611,7 @@ export function ContextMenuItem({
   return (
     <ContextMenu.Item
       className={cn(
-        "flex h-7 cursor-default items-center gap-2 rounded-md px-2 outline-none select-none data-[disabled]:opacity-50 data-[highlighted]:bg-active",
+        "flex h-ctl-md cursor-default items-center gap-2 rounded-md px-2 outline-none select-none data-[disabled]:opacity-50 data-[highlighted]:bg-active",
         danger ? "text-danger" : "text-dim",
         className,
       )}
@@ -647,7 +647,7 @@ export function MenuSubTrigger({
   return (
     <DropdownMenu.SubTrigger
       className={cn(
-        "text-dim flex h-7 cursor-default select-none items-center gap-2 rounded-md px-2 outline-none data-[highlighted]:bg-active data-[state=open]:bg-active",
+        "text-dim flex h-ctl-md cursor-default select-none items-center gap-2 rounded-md px-2 outline-none data-[highlighted]:bg-active data-[state=open]:bg-active",
         className,
       )}
       {...props}

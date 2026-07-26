@@ -40,7 +40,7 @@ export function ColorPicker({
             title={name}
             onClick={() => onChange(name)}
             className={cn(
-              "flex size-6 items-center justify-center rounded-full ring-offset-2 ring-offset-[var(--color-raised)] transition-[box-shadow]",
+              "flex size-ctl-sm items-center justify-center rounded-full ring-offset-2 ring-offset-[var(--color-raised)] transition-[box-shadow]",
               selected ? "ring-fg ring-2" : "hover:ring-line-strong hover:ring-2",
             )}
             style={{ background: catalogColor(name) }}

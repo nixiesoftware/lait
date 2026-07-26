@@ -76,9 +76,9 @@ const button = cva(
       },
       size: {
         /** Icon-only chrome: a 24px square, the toolbar unit. */
-        icon: "size-6",
-        sm: "h-6 px-2 text-sm",
-        md: "h-7 px-2.5 text-sm",
+        icon: "size-ctl-sm",
+        sm: "h-ctl-sm px-2 text-sm",
+        md: "h-ctl-md px-2 text-sm",
         inline: "h-auto p-0 text-xs",
       },
     },
@@ -190,7 +190,7 @@ export function LabelChip({
         // 12px as the values around it; in a list row it is metadata you scan
         // past next to a date and a project, so it drops to `text-dim` and 11px
         // and sits at their weight rather than above it.
-        size === "md" ? "text-fg h-5 gap-1.5 px-2 text-sm" : "text-dim h-5 gap-1 px-2 text-xs",
+        size === "md" ? "text-fg h-ctl-xs gap-1.5 px-2 text-sm" : "text-dim h-ctl-xs gap-1 px-2 text-xs",
         className,
       )}
     >
@@ -263,7 +263,7 @@ export function ChipButton({
   return (
     <button
       className={cn(
-        "border-line bg-bg text-dim hover:border-line-strong hover:bg-hover aria-pressed:border-accent/40 aria-pressed:bg-accent/10 aria-pressed:text-fg inline-flex h-6 items-center gap-1 rounded-full border px-1.5 text-xs outline-none transition-colors focus-visible:ring-accent/50 focus-visible:ring-1 disabled:pointer-events-none disabled:opacity-45",
+        "border-line bg-bg text-dim hover:border-line-strong hover:bg-hover aria-pressed:border-accent/40 aria-pressed:bg-accent/10 aria-pressed:text-fg inline-flex h-ctl-sm items-center gap-1 rounded-full border px-1.5 text-xs outline-none transition-colors focus-visible:ring-accent/50 focus-visible:ring-1 disabled:pointer-events-none disabled:opacity-45",
         className,
       )}
       {...props}
@@ -276,8 +276,8 @@ const field = cva(
   {
     variants: {
       size: {
-        sm: "h-7 px-2",
-        md: "h-8 px-2.5",
+        sm: "h-ctl-md px-2",
+        md: "h-ctl-lg px-2.5",
       },
     },
     defaultVariants: { size: "md" },
@@ -313,23 +313,23 @@ export const controlTrigger = cva(
     variants: {
       variant: {
         property:
-          "hover:bg-hover -mx-1 min-h-7 min-w-0 px-1.5 text-left",
+          "hover:bg-hover -mx-1 min-h-ctl-md min-w-0 px-1.5 text-left",
         // A crumb that happens to be a switcher. Same face as `property` at the
-        // breadcrumb's own height: `min-h-7` here put a 28px control in a trail
+        // breadcrumb's own height: `min-h-ctl-md` here put a 28px control in a trail
         // of 24px crumbs, and the taller hover box was visible against them.
         crumb:
-          "hover:bg-hover -mx-1 min-h-6 min-w-0 px-1.5 text-left",
+          "hover:bg-hover -mx-1 min-h-ctl-sm min-w-0 px-1.5 text-left",
         chip:
-          "border-line bg-bg hover:border-line-strong hover:bg-hover min-h-7 border px-2",
+          "border-line bg-bg hover:border-line-strong hover:bg-hover min-h-ctl-md border px-2",
         filter:
-          "border-line bg-raised hover:border-line-strong hover:bg-hover min-h-7 border px-2",
+          "border-line bg-raised hover:border-line-strong hover:bg-hover min-h-ctl-md border px-2",
         toolbar:
-          "text-dim hover:bg-hover hover:text-fg min-h-6 px-1.5",
+          "text-dim hover:bg-hover hover:text-fg min-h-ctl-sm px-1.5",
         /** Inside a floating pill. Fully rounded to match the shell it sits in,
          *  and it lifts on hover — the bar is the one surface in the app that
          *  is over the work rather than part of it, so its controls answer the
          *  pointer with elevation instead of only a fill. */
-        pill: "bg-active/60 text-dim hover:bg-hover hover:text-fg min-h-7 rounded-full px-2.5",
+        pill: "bg-active/60 text-dim hover:bg-hover hover:text-fg min-h-ctl-md rounded-full px-2.5",
         /** A label chip that is its own trigger. No box of its own — the chip
          *  already has a shape, and wrapping it in a second one would put a
          *  rectangle around a pill. Hover dims rather than fills, so the target
@@ -361,9 +361,13 @@ export const interactiveRow = cva(
         false: "hover:bg-hover",
       },
       density: {
-        compact: "min-h-8",
-        normal: "min-h-9",
-        roomy: "min-h-10",
+        compact: "min-h-ctl-lg",
+        // D5 retired the 36px rung, so this now resolves to the same height as
+        // `compact`. Kept as a distinct name because call sites read as intent
+        // ("a normal list row"), and because the two separate again the moment
+        // the tone x size collapse gives rows a real size prop.
+        normal: "min-h-ctl-lg",
+        roomy: "min-h-ctl-xl",
       },
     },
     defaultVariants: {
@@ -384,9 +388,9 @@ export const navigationItem = cva(
         false: "text-dim hover:bg-hover hover:text-fg",
       },
       density: {
-        compact: "h-6",
-        normal: "h-7",
-        roomy: "h-8",
+        compact: "h-ctl-sm",
+        normal: "h-ctl-md",
+        roomy: "h-ctl-lg",
       },
     },
     defaultVariants: { selected: false, density: "normal" },

@@ -2043,7 +2043,7 @@ function StatusSlices({
             aria-pressed={active}
             onClick={() => onChange({ ...filter, status: idsFor(slice.categories) })}
             className={cn(
-              "h-6 rounded-md px-2 text-sm transition-colors",
+              "h-ctl-sm rounded-md px-2 text-sm transition-colors",
               active ? "bg-active text-fg" : "text-dim hover:bg-hover hover:text-fg",
             )}
           >

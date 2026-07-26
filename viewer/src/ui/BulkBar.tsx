@@ -79,7 +79,7 @@ export function BulkBar({
         label="Clear selection"
         chord="Esc"
         variant="pill"
-        className="size-7"
+        className="size-ctl-md"
         onClick={onClear}
       >
         <X className="size-icon-sm" />
@@ -188,7 +188,7 @@ export function BulkBar({
       <IconButton
         label="Delete selected"
         variant="pill"
-        className="hover:bg-danger/10 hover:text-danger size-7"
+        className="hover:bg-danger/10 hover:text-danger size-ctl-md"
         disabled={pending}
         onClick={onDelete}
       >

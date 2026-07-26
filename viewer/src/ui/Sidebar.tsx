@@ -142,7 +142,7 @@ export function Sidebar({
           showing sit on one line across the whole window. It carries no bottom
           border: the rule under the work area's header separates that header
           from its content, and the sidebar has no content to separate it from. */}
-      <div className="flex h-11 shrink-0 items-center gap-0.5 px-2">
+      <div className="flex h-bar-lg shrink-0 items-center gap-0.5 px-2">
         <SpaceSwitcher
           spaces={spaces}
           current={current}
@@ -247,15 +247,15 @@ function SpaceSwitcher({
             The second line said "Member · 8 people" — a role that does not change
             and a headcount nobody navigates by, costing 12px of every screen and,
             more to the point, making the sidebar's first row a different height
-            from the work area's. Both are `h-8` now, so the space and the thing
+            from the work area's. Both are `h-bar-lg` now, so the space and the thing
             you are looking at read across at the same level. Membership itself
             has better homes: the status dot, the agent banner below, and the
             members tab in Settings. */}
         <DropdownMenu.Trigger
-          className="hover:bg-hover data-[state=open]:bg-active -mx-1 flex h-7 min-w-0 flex-1 items-center gap-1.5 rounded-md px-1.5 outline-none"
+          className="hover:bg-hover data-[state=open]:bg-active -mx-1 flex h-ctl-md min-w-0 flex-1 items-center gap-1.5 rounded-md px-1.5 outline-none"
           aria-label="Space menu"
         >
-          <span className="bg-active flex size-5 shrink-0 items-center justify-center rounded">
+          <span className="bg-active flex size-ctl-xs shrink-0 items-center justify-center rounded">
             {selected?.identity.kind === "agent" ? <Bot className="text-mute size-icon-xs" /> : <Folder className="text-mute size-icon-xs" />}
           </span>
           <strong className="min-w-0 flex-1 truncate text-left text-sm">{title}</strong>
@@ -365,7 +365,7 @@ function ProjectRow({
           onClick={() => onToggleExpand(project.key)}
           aria-expanded={expanded}
           aria-label={expanded ? `Collapse ${project.name}` : `Expand ${project.name}`}
-          className="text-mute hover:text-fg flex size-5 shrink-0 items-center justify-center rounded outline-none"
+          className="text-mute hover:text-fg flex size-ctl-xs shrink-0 items-center justify-center rounded outline-none"
         >
           <ChevronRight
             className={cn("size-icon-xs transition-transform", expanded && "rotate-90")}
@@ -392,7 +392,7 @@ function ProjectRow({
         <IconButton
           label={favorited ? `Remove ${project.name} from favorites` : `Add ${project.name} to favorites`}
           className={cn(
-            "absolute top-0.5 right-0.5 size-6 opacity-0 group-hover/project:opacity-100 focus-visible:opacity-100",
+            "absolute top-0.5 right-0.5 size-ctl-sm opacity-0 group-hover/project:opacity-100 focus-visible:opacity-100",
             active ? "bg-active hover:bg-hover" : "bg-hover",
           )}
           onClick={() => onToggleFavorite(project.key)}
@@ -467,7 +467,7 @@ function Section({
     </>
   );
   return (
-    <div className="mt-4 mb-1 flex h-5 items-center px-2">
+    <div className="mt-4 mb-1 flex h-ctl-xs items-center px-2">
       {onToggle ? (
         <button
           className="text-mute hover:text-fg flex min-w-0 items-center gap-1 text-2xs font-semibold tracking-[0.08em] uppercase"

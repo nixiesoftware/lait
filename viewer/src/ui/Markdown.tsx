@@ -247,7 +247,7 @@ function CodeBlock({ lang, text }: { lang: string | null; text: string }) {
   return (
     <div className="prose-figure border-line bg-bg group/code relative overflow-hidden rounded-lg border">
       {lang && (
-        <div className="border-line/70 text-mute flex h-7 items-center border-b px-3 font-mono text-2xs">
+        <div className="border-line/70 text-mute flex h-ctl-md items-center border-b px-3 font-mono text-2xs">
           {lang}
         </div>
       )}
@@ -258,7 +258,7 @@ function CodeBlock({ lang, text }: { lang: string | null; text: string }) {
         onClick={copy}
         aria-label={copied ? "Copied" : "Copy code"}
         className={cn(
-          "border-line bg-raised text-mute hover:text-fg hover:border-line-strong absolute right-2 flex size-6 items-center justify-center rounded border opacity-0 transition-opacity group-hover/code:opacity-100 focus-visible:opacity-100",
+          "border-line bg-raised text-mute hover:text-fg hover:border-line-strong absolute right-2 flex size-ctl-sm items-center justify-center rounded border opacity-0 transition-opacity group-hover/code:opacity-100 focus-visible:opacity-100",
           lang ? "top-9" : "top-2",
           copied && "opacity-100",
         )}

@@ -324,7 +324,7 @@ function GroupedColumn({
           axis === "priority" ? (
             <PriorityIcon priority={rows[0]?.priority ?? "none"} />
           ) : unassigned ? (
-            <span className="border-line text-mute flex size-4 items-center justify-center rounded-full border border-dashed text-[9px]">
+            <span className="border-line text-mute flex size-avatar-sm items-center justify-center rounded-full border border-dashed text-[9px]">
               ?
             </span>
           ) : (
@@ -583,7 +583,7 @@ function Column({
             find — this is, and it only exists while something is in flight. */}
         {active && rows.length > 0 && (
           <li
-            className="min-h-8 flex-1"
+            className="min-h-ctl-lg flex-1"
             onDragOver={(e) => {
               e.preventDefault();
               onOver({ at: "bottom" });
