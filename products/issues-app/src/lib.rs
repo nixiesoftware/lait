@@ -6,6 +6,7 @@
 //! daemon, control protocol, filesystem, or process lifecycle.
 
 pub mod cli;
+pub mod mcp;
 pub mod protocol;
 
 pub use protocol::{
@@ -18,7 +19,7 @@ pub fn package() -> Result<world_interface::WorldClientPackage, world_interface:
     world_interface::WorldClientPackage::new(
         issues::contract::world_id(),
         world_interface::CliMount::new("issues", cli::command, cli::parse),
-        Vec::new(),
+        mcp::tools(),
         "Work with issues, projects, planning, roles, and workflows in the selected Orbit.",
     )
 }

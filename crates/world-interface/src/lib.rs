@@ -81,7 +81,7 @@ impl CliMount {
 }
 
 pub type McpSchemaFactory = fn() -> Value;
-pub type McpCallFactory = fn(Value) -> Result<WorldCall, InterfaceError>;
+pub type McpCallFactory = fn(Value) -> Result<CliInvocation, InterfaceError>;
 
 /// One product-local MCP tool. The registry prefixes `name` with the CLI mount,
 /// so independently developed Worlds cannot both publish a global `list`.
@@ -120,7 +120,7 @@ impl McpTool {
         (self.schema)()
     }
 
-    pub fn call(&self, input: Value) -> Result<WorldCall, InterfaceError> {
+    pub fn call(&self, input: Value) -> Result<CliInvocation, InterfaceError> {
         (self.call)(input)
     }
 }
@@ -308,6 +308,10 @@ mod tests {
         .map_err(|error| InterfaceError::new(error.to_string()))
     }
 
+    fn files_invocation(input: Value) -> Result<CliInvocation, InterfaceError> {
+        files_call(input).map(CliInvocation::World)
+    }
+
     fn files_command() -> Command {
         Command::new("files").subcommand(Command::new("list"))
     }
@@ -324,7 +328,7 @@ mod tests {
                 "list",
                 "List files.",
                 empty_schema,
-                files_call,
+                files_invocation,
             )],
             "Work with files.",
         )

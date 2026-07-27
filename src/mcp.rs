@@ -1,18 +1,20 @@
-//! MCP server over stdio exposing the lait tracker as agent tools.
+//! MCP server over stdio composing shell and World-package tools.
 //!
-//! Each tool is a thin wrapper over the **same** Layer-B `Request`/`Response`
-//! the CLI uses, so an agent drives the local daemon natively and gets back the
-//! **same versioned DTO** emitted by CLI `--json`. The tool
-//! set is checked against the replica command surface by `tests/mcp_parity.rs`
-//! so the agent and human surfaces never drift.
+//! The root owns identity, Orbit scope, transport, and Mechanics tools. Each
+//! World package contributes namespaced schemas and call factories to the same
+//! RMCP router.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use rmcp::{
-    handler::server::{router::tool::ToolRouter, wrapper::Parameters},
+    handler::server::{
+        router::tool::{ToolRoute, ToolRouter},
+        wrapper::Parameters,
+    },
     model::{
         CallToolResult, Content, Implementation, ProtocolVersion, ServerCapabilities, ServerInfo,
+        Tool,
     },
     schemars, tool, tool_handler, tool_router,
     transport::stdio,
@@ -21,8 +23,9 @@ use rmcp::{
 use serde::Deserialize;
 
 use crate::{
-    cli::{client_as_scoped, scope_for_home},
-    control::{BoardPos, ErrorKind, Filter, Request, Response},
+    cli::{client_action_as_scoped, client_as_scoped, scope_for_home},
+    client_action::ClientAction,
+    control::{ErrorKind, Request, Response},
     daemon::ClientScope,
 };
 
@@ -30,31 +33,45 @@ use crate::{
 /// to drive. `tests/mcp_parity.rs` asserts every one has a tool below, so adding
 /// a `Request` without an MCP tool fails the interface-parity build gate.
 pub const REQUIRED_TRACKER_COMMANDS: &[&str] = &[
-    "issue_new",
-    "issue_edit",
-    "issue_move",
-    "issue_start",
-    "issue_done",
-    "issue_stop",
-    "inbox",
-    "assign",
-    "label",
-    "comment",
-    "issue_delete",
-    "issue_restore",
-    "issue_link",
-    "issue_unlink",
-    "issue_parent",
-    "issue_graph",
-    "issue_view",
-    "list",
-    "board",
-    "history",
-    "project_new",
-    "project_list",
-    "label_new",
-    "label_list",
-    "activity",
+    "issues_new",
+    "issues_edit",
+    "issues_move",
+    "issues_start",
+    "issues_done",
+    "issues_stop",
+    "issues_inbox",
+    "issues_assign",
+    "issues_label",
+    "issues_comment",
+    "issues_react",
+    "issues_delete",
+    "issues_restore",
+    "issues_link",
+    "issues_unlink",
+    "issues_parent",
+    "issues_graph",
+    "issues_view",
+    "issues_list",
+    "issues_board",
+    "issues_history",
+    "issues_project_new",
+    "issues_project_list",
+    "issues_label_new",
+    "issues_label_list",
+    "issues_activity",
+    "issues_role_list",
+    "issues_role_show",
+    "issues_role_create",
+    "issues_role_edit",
+    "issues_role_delete",
+    "issues_role_resolve",
+    "issues_access_list",
+    "issues_access_grant",
+    "issues_access_revoke",
+    "issues_workflow_show",
+    "issues_workflow_validate",
+    "issues_workflow_set",
+    // Shell/Mechanics tools needed alongside the product.
     "member_add",
     "member_remove",
     "agent_add",
@@ -66,40 +83,52 @@ pub const REQUIRED_TRACKER_COMMANDS: &[&str] = &[
 /// The set of MCP tool names this server exposes (kept beside the `#[tool]`
 /// methods; the parity test cross-checks it covers `REQUIRED_TRACKER_COMMANDS`).
 pub const MCP_TOOL_NAMES: &[&str] = &[
-    // replica
-    "issue_new",
-    "issue_edit",
-    "issue_move",
-    "issue_start",
-    "issue_done",
-    "issue_stop",
-    "inbox",
-    "assign",
-    "label",
-    "comment",
-    "issue_delete",
-    "issue_restore",
-    "issue_link",
-    "issue_unlink",
-    "issue_parent",
-    "issue_graph",
-    "issue_view",
-    "list",
-    "board",
-    "history",
-    "project_new",
-    "project_list",
-    "label_new",
-    "label_list",
-    "activity",
+    // Issues application package (mounted as `issues_*`).
+    "issues_new",
+    "issues_start",
+    "issues_done",
+    "issues_stop",
+    "issues_inbox",
+    "issues_edit",
+    "issues_move",
+    "issues_assign",
+    "issues_label",
+    "issues_comment",
+    "issues_react",
+    "issues_delete",
+    "issues_restore",
+    "issues_link",
+    "issues_unlink",
+    "issues_parent",
+    "issues_graph",
+    "issues_view",
+    "issues_list",
+    "issues_board",
+    "issues_history",
+    "issues_project_new",
+    "issues_project_list",
+    "issues_label_new",
+    "issues_label_list",
+    "issues_activity",
+    "issues_role_list",
+    "issues_role_show",
+    "issues_role_create",
+    "issues_role_edit",
+    "issues_role_delete",
+    "issues_role_resolve",
+    "issues_access_list",
+    "issues_access_grant",
+    "issues_access_revoke",
+    "issues_workflow_show",
+    "issues_workflow_validate",
+    "issues_workflow_set",
+    // Mechanics and shell.
     "member_add",
     "member_remove",
     "agent_add",
     "key_rotate",
     "members",
     "member_log",
-    "member_requests",
-    "member_approve",
     "member_alias",
     // transport / presence
     "status",
@@ -114,182 +143,6 @@ pub const MCP_TOOL_NAMES: &[&str] = &[
 ];
 
 // ---- tool argument schemas ----
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct IssueNewArgs {
-    /// Issue title.
-    pub title: String,
-    /// Project ref (key like `ENG` or a `prj_` id). Optional — falls back to
-    /// the store's configured `project.default`, then the sole project.
-    #[serde(default)]
-    pub project: Option<String>,
-    /// Assignee refs (`@me`, or a 64-hex key).
-    #[serde(default)]
-    pub assignees: Vec<String>,
-    /// Priority: none|low|medium|high|urgent.
-    #[serde(default)]
-    pub priority: Option<String>,
-    /// Label refs (name or `lbl_` id).
-    #[serde(default)]
-    pub labels: Vec<String>,
-    /// Optional body/description.
-    #[serde(default)]
-    pub body: Option<String>,
-    /// Due date: `YYYY-MM-DD` (UTC) or unix seconds.
-    #[serde(default)]
-    pub due: Option<String>,
-    /// Estimate points.
-    #[serde(default)]
-    pub estimate: Option<u32>,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct InboxArgs {
-    /// Mark everything read after listing.
-    #[serde(default)]
-    pub clear: bool,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct RefArg {
-    /// An issue ref: short `iss_` handle, or a `KEY-n` alias like `ENG-142`.
-    pub reff: String,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct IssueEditArgs {
-    pub reff: String,
-    #[serde(default)]
-    pub title: Option<String>,
-    #[serde(default)]
-    pub status: Option<String>,
-    #[serde(default)]
-    pub priority: Option<String>,
-    /// Replace the whole description buffer.
-    #[serde(default)]
-    pub description: Option<String>,
-    /// Due date: `YYYY-MM-DD` (UTC), unix seconds, or `none` to clear.
-    #[serde(default)]
-    pub due: Option<String>,
-    /// Estimate points, or `none` to clear.
-    #[serde(default)]
-    pub estimate: Option<String>,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct IssueMoveArgs {
-    pub reff: String,
-    /// New project, written as the issue's authoritative membership.
-    #[serde(default)]
-    pub project: Option<String>,
-    /// Board position: `top` | `bottom` | `before:<ref>` | `after:<ref>`.
-    #[serde(default)]
-    pub position: Option<String>,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct AssignArgs {
-    pub reff: String,
-    /// Who-refs to add/remove (`@me` or key).
-    pub who: Vec<String>,
-    /// Remove instead of add.
-    #[serde(default)]
-    pub remove: bool,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct LabelArgs {
-    pub reff: String,
-    #[serde(default)]
-    pub add: Vec<String>,
-    #[serde(default)]
-    pub remove: Vec<String>,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct CommentArgs {
-    pub reff: String,
-    pub body: String,
-    /// Reply to a comment (its `cmt_…` id from the issue view).
-    #[serde(default)]
-    pub reply_to: Option<String>,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct ReactArgs {
-    pub reff: String,
-    /// The target comment's id (`cmt_…`, from the issue view).
-    pub comment: String,
-    pub emoji: String,
-    /// Remove the reaction instead of adding it.
-    #[serde(default)]
-    pub remove: bool,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct LinkArgs {
-    /// The issue the link is stated from.
-    pub reff: String,
-    /// Link kind: `blocks` | `relates` | `duplicates`.
-    pub kind: String,
-    /// The issue the link points at.
-    pub target: String,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct ParentArgs {
-    pub reff: String,
-    /// Parent issue ref; omit to clear (make it a top-level issue).
-    #[serde(default)]
-    pub parent: Option<String>,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct ListArgs {
-    #[serde(default)]
-    pub project: Option<String>,
-    #[serde(default)]
-    pub mine: bool,
-    #[serde(default)]
-    pub status: Option<String>,
-    #[serde(default)]
-    pub label: Option<String>,
-    /// Include done + tombstoned issues.
-    #[serde(default)]
-    pub all: bool,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct BoardArgs {
-    /// Project ref (key or `prj_` id). Optional — falls back to the store's
-    /// configured `project.default`, then the sole project.
-    #[serde(default)]
-    pub project: Option<String>,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct ProjectNewArgs {
-    pub name: String,
-    /// Short key (the `ENG` in `ENG-142`).
-    pub key: String,
-    /// Catalog colour name or hex (default: blue).
-    #[serde(default)]
-    pub color: Option<String>,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct LabelNewArgs {
-    pub name: String,
-    #[serde(default)]
-    pub color: Option<String>,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct ActivityArgs {
-    /// Only transitions with seq greater than this (pass back the `last`).
-    #[serde(default)]
-    pub since: u64,
-}
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct MemberAddArgs {
@@ -307,84 +160,6 @@ pub struct MemberAddArgs {
 pub struct AgentAddArgs {
     /// The agent's ed25519 public key (64-hex) — the keypair the agent signs with.
     pub key: String,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct RoleShowArgs {
-    pub role: String,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct RoleCreateArgs {
-    pub name: String,
-    #[serde(default)]
-    pub description: Option<String>,
-    /// A project key/id makes it a Project-scoped role.
-    #[serde(default)]
-    pub project: Option<String>,
-    pub capabilities: Vec<String>,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct RoleEditArgs {
-    pub role: String,
-    pub expect_revision: String,
-    #[serde(default)]
-    pub name: Option<String>,
-    #[serde(default)]
-    pub description: Option<String>,
-    #[serde(default)]
-    pub capabilities: Option<Vec<String>>,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct RoleDeleteArgs {
-    pub role: String,
-    pub expect_revision: String,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct RoleResolveArgs {
-    pub role: String,
-    pub expect_heads: Vec<String>,
-    /// The complete canonical JSON replacement body.
-    pub body_json: String,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct AccessListArgs {
-    #[serde(default)]
-    pub actor: Option<String>,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct AccessGrantArgs {
-    pub actor: String,
-    pub role: String,
-    #[serde(default)]
-    pub project: Option<String>,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct AccessRevokeArgs {
-    pub grant_id: String,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct WorkflowShowArgs {
-    pub project: String,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct WorkflowValidateArgs {
-    pub body_json: String,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct WorkflowSetArgs {
-    pub project: String,
-    pub expect_heads: Vec<String>,
-    pub body_json: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -412,6 +187,18 @@ pub struct ConnectArgs {
     pub ticket: String,
 }
 
+fn mcp_string(value: &serde_json::Value, field: &str) -> Result<String, McpError> {
+    mcp_string_opt(value, field)
+        .ok_or_else(|| McpError::invalid_params(format!("Issues tool is missing '{field}'"), None))
+}
+
+fn mcp_string_opt(value: &serde_json::Value, field: &str) -> Option<String> {
+    value
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+}
+
 #[derive(Clone)]
 pub struct LaitMcp {
     home: PathBuf,
@@ -428,24 +215,6 @@ pub struct LaitMcp {
     tool_router: ToolRouter<LaitMcp>,
 }
 
-fn parse_position(s: &str) -> Option<BoardPos> {
-    match s {
-        "top" => Some(BoardPos::Top),
-        "bottom" => Some(BoardPos::Bottom),
-        other => {
-            if let Some(r) = other.strip_prefix("before:") {
-                Some(BoardPos::Before {
-                    reff: r.to_string(),
-                })
-            } else {
-                other.strip_prefix("after:").map(|r| BoardPos::After {
-                    reff: r.to_string(),
-                })
-            }
-        }
-    }
-}
-
 #[tool_router]
 impl LaitMcp {
     pub fn new(home: PathBuf) -> Self {
@@ -454,12 +223,53 @@ impl LaitMcp {
         // → the primary identity (pre-B behavior).
         let act_as = std::env::var("LAIT_AGENT").ok().filter(|s| !s.is_empty());
         let scope = scope_for_home(&home);
+        let mut tool_router = Self::tool_router();
+        tool_router.merge(Self::world_tool_router());
         Self {
             home,
             scope,
             act_as,
-            tool_router: Self::tool_router(),
+            tool_router,
         }
+    }
+
+    fn world_tool_router() -> ToolRouter<Self> {
+        let registry = crate::world::client_packages();
+        registry
+            .validate_reserved(
+                std::iter::empty::<&str>(),
+                Self::tool_router()
+                    .list_all()
+                    .iter()
+                    .map(|tool| tool.name.as_ref()),
+            )
+            .expect("World MCP tools must not collide with shell tools");
+        let mut router = ToolRouter::new();
+        for mounted in registry.mcp_tools() {
+            let schema = mounted
+                .tool
+                .schema()
+                .as_object()
+                .cloned()
+                .expect("World MCP input schema must be a JSON object");
+            let tool = mounted.tool.clone();
+            let route = ToolRoute::new_dyn(
+                Tool::new(mounted.public_name, mounted.tool.description(), schema),
+                move |context: rmcp::handler::server::tool::ToolCallContext<'_, Self>| {
+                    let tool = tool.clone();
+                    Box::pin(async move {
+                        let input =
+                            serde_json::Value::Object(context.arguments.unwrap_or_default());
+                        let invocation = tool
+                            .call(input)
+                            .map_err(|error| McpError::invalid_params(error.to_string(), None))?;
+                        context.service.run_invocation(invocation).await
+                    })
+                },
+            );
+            router.add_route(route);
+        }
+        router
     }
 
     /// Drive the daemon and return its `Response` as JSON text (the same
@@ -474,7 +284,72 @@ impl LaitMcp {
     /// message already names the next step; MCP just preserves the typing so the
     /// agent isn't told "internal error" for something it can act on.
     async fn run(&self, req: Request) -> Result<CallToolResult, McpError> {
-        match client_as_scoped(&self.home, req, &self.scope, self.act_as.as_deref()).await {
+        let response = client_as_scoped(&self.home, req, &self.scope, self.act_as.as_deref()).await;
+        Self::tool_result(response)
+    }
+
+    async fn run_invocation(
+        &self,
+        invocation: world_interface::CliInvocation,
+    ) -> Result<CallToolResult, McpError> {
+        let response = match invocation {
+            world_interface::CliInvocation::World(call) => {
+                client_action_as_scoped(
+                    &self.home,
+                    ClientAction::world(call),
+                    &self.scope,
+                    self.act_as.as_deref(),
+                )
+                .await
+            }
+            world_interface::CliInvocation::Local { operation, input } => {
+                let request = match operation.as_str() {
+                    issues_app::cli::LOCAL_INBOX => Request::Inbox {
+                        clear: input
+                            .get("clear")
+                            .and_then(serde_json::Value::as_bool)
+                            .unwrap_or(false),
+                    },
+                    issues_app::cli::LOCAL_ACCESS => {
+                        let action = input
+                            .get("action")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("ls");
+                        match action {
+                            "ls" => Request::AccessList {
+                                actor: mcp_string_opt(&input, "actor"),
+                            },
+                            "grant" => Request::AccessGrant {
+                                actor: mcp_string(&input, "actor")?,
+                                role: mcp_string(&input, "role")?,
+                                project: mcp_string_opt(&input, "project"),
+                            },
+                            "revoke" => Request::AccessRevoke {
+                                grant_id: mcp_string(&input, "grant_id")?,
+                            },
+                            other => {
+                                return Err(McpError::invalid_params(
+                                    format!("unsupported Issues access action '{other}'"),
+                                    None,
+                                ));
+                            }
+                        }
+                    }
+                    other => {
+                        return Err(McpError::invalid_params(
+                            format!("unsupported World host capability '{other}'"),
+                            None,
+                        ));
+                    }
+                };
+                client_as_scoped(&self.home, request, &self.scope, self.act_as.as_deref()).await
+            }
+        };
+        Self::tool_result(response)
+    }
+
+    fn tool_result(response: anyhow::Result<Response>) -> Result<CallToolResult, McpError> {
+        match response {
             Ok(Response::Error {
                 message,
                 error_kind,
@@ -489,316 +364,6 @@ impl LaitMcp {
             }
             Err(e) => Err(McpError::internal_error(format!("{e:#}"), None)),
         }
-    }
-
-    // ---- replica tools ----
-
-    #[tool(description = "Create an issue. Returns the resolved canonical handle.")]
-    async fn issue_new(
-        &self,
-        Parameters(a): Parameters<IssueNewArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        self.run(Request::IssueNew {
-            title: a.title,
-            project: a.project,
-            // Agents have no git branch context — the environment hint is a
-            // CLI-only input; MCP always sends none.
-            project_hint: None,
-            assignees: a.assignees,
-            priority: a.priority,
-            labels: a.labels,
-            body: a.body,
-            due: a.due,
-            estimate: a.estimate,
-        })
-        .await
-    }
-
-    #[tool(
-        description = "Start working an issue: assign yourself + move it to the first \
-                       active-category status, atomically. Returns the fresh issue snapshot."
-    )]
-    async fn issue_start(
-        &self,
-        Parameters(a): Parameters<RefArg>,
-    ) -> Result<CallToolResult, McpError> {
-        self.run(Request::IssueStart { reff: a.reff }).await
-    }
-
-    #[tool(
-        description = "Finish an issue: move it to the first done-category status (assignee \
-                       kept). Returns the fresh issue snapshot."
-    )]
-    async fn issue_done(
-        &self,
-        Parameters(a): Parameters<RefArg>,
-    ) -> Result<CallToolResult, McpError> {
-        self.run(Request::IssueDone { reff: a.reff }).await
-    }
-
-    #[tool(
-        description = "Put an issue down: back to the first backlog-category status, \
-                       unassign yourself. Returns the fresh issue snapshot."
-    )]
-    async fn issue_stop(
-        &self,
-        Parameters(a): Parameters<RefArg>,
-    ) -> Result<CallToolResult, McpError> {
-        self.run(Request::IssueStop { reff: a.reff }).await
-    }
-
-    #[tool(
-        description = "The durable inbox: remote assignments/comments/status moves addressed \
-                       to this node, newest first with an unread count. clear=true marks all read."
-    )]
-    async fn inbox(
-        &self,
-        Parameters(a): Parameters<InboxArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        self.run(Request::Inbox { clear: a.clear }).await
-    }
-
-    #[tool(description = "Edit an issue's title/status/priority (one commit = one activity row).")]
-    async fn issue_edit(
-        &self,
-        Parameters(a): Parameters<IssueEditArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        self.run(Request::IssueEdit {
-            reff: a.reff,
-            title: a.title,
-            status: a.status,
-            priority: a.priority,
-            description: a.description,
-            due: a.due,
-            estimate: a.estimate,
-        })
-        .await
-    }
-
-    #[tool(description = "Move an issue to another project and/or board position.")]
-    async fn issue_move(
-        &self,
-        Parameters(a): Parameters<IssueMoveArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        self.run(Request::IssueMove {
-            reff: a.reff,
-            project: a.project,
-            pos: a.position.as_deref().and_then(parse_position),
-        })
-        .await
-    }
-
-    #[tool(description = "Add or remove issue assignees (present-key set).")]
-    async fn assign(
-        &self,
-        Parameters(a): Parameters<AssignArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        self.run(Request::Assign {
-            reff: a.reff,
-            who: a.who,
-            add: !a.remove,
-        })
-        .await
-    }
-
-    #[tool(description = "Add and/or remove labels on an issue.")]
-    async fn label(
-        &self,
-        Parameters(a): Parameters<LabelArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        self.run(Request::Label {
-            reff: a.reff,
-            add: a.add,
-            remove: a.remove,
-        })
-        .await
-    }
-
-    #[tool(description = "Append a comment to an issue (immutable body).")]
-    async fn comment(
-        &self,
-        Parameters(a): Parameters<CommentArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        self.run(Request::Comment {
-            reff: a.reff,
-            body: a.body,
-            reply_to: a.reply_to,
-        })
-        .await
-    }
-
-    #[tool(
-        description = "Toggle an emoji reaction on a comment (comment ids come from the \
-                       issue view). Writes no history event."
-    )]
-    async fn react(
-        &self,
-        Parameters(a): Parameters<ReactArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        self.run(Request::React {
-            reff: a.reff,
-            comment: a.comment,
-            emoji: a.emoji,
-            on: !a.remove,
-        })
-        .await
-    }
-
-    #[tool(
-        description = "Delete (tombstone) an issue — a signed, reversible authority op. Agents \
-                       cannot delete."
-    )]
-    async fn issue_delete(
-        &self,
-        Parameters(a): Parameters<RefArg>,
-    ) -> Result<CallToolResult, McpError> {
-        self.run(Request::IssueDelete { reff: a.reff }).await
-    }
-
-    #[tool(description = "Restore a deleted issue (restore-wins over a concurrent delete).")]
-    async fn issue_restore(
-        &self,
-        Parameters(a): Parameters<RefArg>,
-    ) -> Result<CallToolResult, McpError> {
-        self.run(Request::IssueRestore { reff: a.reff }).await
-    }
-
-    #[tool(
-        description = "Link two issues (kinds: blocks, relates, duplicates). `reff kind target`."
-    )]
-    async fn issue_link(
-        &self,
-        Parameters(a): Parameters<LinkArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        self.run(Request::IssueLink {
-            reff: a.reff,
-            kind: a.kind,
-            target: a.target,
-        })
-        .await
-    }
-
-    #[tool(description = "Remove an issue link. `reff kind target`.")]
-    async fn issue_unlink(
-        &self,
-        Parameters(a): Parameters<LinkArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        self.run(Request::IssueUnlink {
-            reff: a.reff,
-            kind: a.kind,
-            target: a.target,
-        })
-        .await
-    }
-
-    #[tool(
-        description = "Set an issue's parent in the sub-issue hierarchy (omit parent to clear). \
-                       Concurrent conflicting parents can never converge to a cycle."
-    )]
-    async fn issue_parent(
-        &self,
-        Parameters(a): Parameters<ParentArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        self.run(Request::IssueParent {
-            reff: a.reff,
-            parent: a.parent,
-        })
-        .await
-    }
-
-    #[tool(
-        description = "An issue's graph neighborhood: parent, sub-issues, links, and the \
-                       transitively-open blockers."
-    )]
-    async fn issue_graph(
-        &self,
-        Parameters(a): Parameters<RefArg>,
-    ) -> Result<CallToolResult, McpError> {
-        self.run(Request::IssueGraph { reff: a.reff }).await
-    }
-
-    #[tool(
-        description = "Show a full issue (lazily loads the issue doc): body, comments, metadata."
-    )]
-    async fn issue_view(
-        &self,
-        Parameters(a): Parameters<RefArg>,
-    ) -> Result<CallToolResult, McpError> {
-        self.run(Request::IssueView { reff: a.reff }).await
-    }
-
-    #[tool(description = "List issue rows from the catalog cache (no issue-doc loads).")]
-    async fn list(&self, Parameters(a): Parameters<ListArgs>) -> Result<CallToolResult, McpError> {
-        self.run(Request::List {
-            project: a.project,
-            filter: Filter {
-                mine: a.mine,
-                status: a.status,
-                label: a.label,
-                all: a.all,
-            },
-        })
-        .await
-    }
-
-    #[tool(description = "Render a project's board (workflow columns x ordered rows).")]
-    async fn board(
-        &self,
-        Parameters(a): Parameters<BoardArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        self.run(Request::Board {
-            project: a.project,
-            project_hint: None,
-        })
-        .await
-    }
-
-    #[tool(description = "An issue's derived activity/time-travel feed.")]
-    async fn history(&self, Parameters(a): Parameters<RefArg>) -> Result<CallToolResult, McpError> {
-        self.run(Request::History { reff: a.reff }).await
-    }
-
-    #[tool(description = "Create a project registry entry.")]
-    async fn project_new(
-        &self,
-        Parameters(a): Parameters<ProjectNewArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        self.run(Request::ProjectNew {
-            name: a.name,
-            key: a.key,
-            color: a.color,
-        })
-        .await
-    }
-
-    #[tool(description = "List projects.")]
-    async fn project_list(&self) -> Result<CallToolResult, McpError> {
-        self.run(Request::ProjectList).await
-    }
-
-    #[tool(description = "Create a label registry entry.")]
-    async fn label_new(
-        &self,
-        Parameters(a): Parameters<LabelNewArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        self.run(Request::LabelNew {
-            name: a.name,
-            color: a.color,
-        })
-        .await
-    }
-
-    #[tool(description = "List labels.")]
-    async fn label_list(&self) -> Result<CallToolResult, McpError> {
-        self.run(Request::LabelList).await
-    }
-
-    #[tool(description = "Space-wide recent transitions (the pulled activity feed).")]
-    async fn activity(
-        &self,
-        Parameters(a): Parameters<ActivityArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        self.run(Request::Activity { since: a.since }).await
     }
 
     // ---- membership and authorization ----
@@ -854,141 +419,6 @@ impl LaitMcp {
     )]
     async fn member_log(&self) -> Result<CallToolResult, McpError> {
         self.run(Request::MemberLog).await
-    }
-
-    #[tool(description = "Every role definition: built-ins plus custom heads.")]
-    async fn role_list(&self) -> Result<CallToolResult, McpError> {
-        self.run(Request::RoleList).await
-    }
-
-    #[tool(description = "One role's pinned definition (revision, capabilities, scope).")]
-    async fn role_show(
-        &self,
-        Parameters(a): Parameters<RoleShowArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        self.run(Request::RoleShow { role: a.role }).await
-    }
-
-    #[tool(
-        description = "Create a custom role from registered capability ids (Space-scoped, or Project-scoped with `project`)."
-    )]
-    async fn role_create(
-        &self,
-        Parameters(a): Parameters<RoleCreateArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        self.run(Request::RoleCreate {
-            name: a.name,
-            description: a.description,
-            project: a.project,
-            capabilities: a.capabilities,
-        })
-        .await
-    }
-
-    #[tool(description = "Edit a custom role at an exact expected revision head.")]
-    async fn role_edit(
-        &self,
-        Parameters(a): Parameters<RoleEditArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        self.run(Request::RoleEdit {
-            role: a.role,
-            expect_revision: a.expect_revision,
-            name: a.name,
-            description: a.description,
-            capabilities: a.capabilities,
-        })
-        .await
-    }
-
-    #[tool(description = "Tombstone a custom role at an exact expected revision head.")]
-    async fn role_delete(
-        &self,
-        Parameters(a): Parameters<RoleDeleteArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        self.run(Request::RoleDelete {
-            role: a.role,
-            expect_revision: a.expect_revision,
-        })
-        .await
-    }
-
-    #[tool(description = "Resolve concurrent role heads with a complete replacement body.")]
-    async fn role_resolve(
-        &self,
-        Parameters(a): Parameters<RoleResolveArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        self.run(Request::RoleResolve {
-            role: a.role,
-            expect_heads: a.expect_heads,
-            body_json: a.body_json,
-        })
-        .await
-    }
-
-    #[tool(description = "Effective scoped capability assignments (Mechanics authority history).")]
-    async fn access_list(
-        &self,
-        Parameters(a): Parameters<AccessListArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        self.run(Request::AccessList { actor: a.actor }).await
-    }
-
-    #[tool(
-        description = "Expand a role's pinned definition and install the exact scoped assignments (authority-first, all-or-nothing)."
-    )]
-    async fn access_grant(
-        &self,
-        Parameters(a): Parameters<AccessGrantArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        self.run(Request::AccessGrant {
-            actor: a.actor,
-            role: a.role,
-            project: a.project,
-        })
-        .await
-    }
-
-    #[tool(description = "Revoke one effective assignment by its 64-hex grant id.")]
-    async fn access_revoke(
-        &self,
-        Parameters(a): Parameters<AccessRevokeArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        self.run(Request::AccessRevoke {
-            grant_id: a.grant_id,
-        })
-        .await
-    }
-
-    #[tool(description = "A project's workflow revision head(s).")]
-    async fn workflow_show(
-        &self,
-        Parameters(a): Parameters<WorkflowShowArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        self.run(Request::WorkflowShow { project: a.project }).await
-    }
-
-    #[tool(description = "Validate a canonical workflow JSON body without committing anything.")]
-    async fn workflow_validate(
-        &self,
-        Parameters(a): Parameters<WorkflowValidateArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        self.run(Request::WorkflowValidate {
-            body_json: a.body_json,
-        })
-        .await
-    }
-
-    #[tool(description = "Replace a project's workflow at exactly the current heads.")]
-    async fn workflow_set(
-        &self,
-        Parameters(a): Parameters<WorkflowSetArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        self.run(Request::WorkflowSet {
-            project: a.project,
-            expect_heads: a.expect_heads,
-            body_json: a.body_json,
-        })
-        .await
     }
 
     #[tool(
@@ -1091,10 +521,15 @@ impl LaitMcp {
 #[tool_handler]
 impl ServerHandler for LaitMcp {
     fn get_info(&self) -> ServerInfo {
+        let product_instructions = crate::world::client_packages()
+            .packages()
+            .map(|package| package.mcp_instructions())
+            .collect::<Vec<_>>()
+            .join(" ");
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::from_build_env())
             .with_protocol_version(ProtocolVersion::V_2024_11_05)
-            .with_instructions(
+            .with_instructions(format!(
                 "A local-first, peer-to-peer issue tracker. You are a member of this space \
                  with your OWN identity — you do not rebuild or re-join per session; you \
                  attach. Start by calling whoami: it reports who you are (your actor + \
@@ -1103,15 +538,15 @@ impl ServerHandler for LaitMcp {
                  device key>` once to sponsor you — then you hold write access and act as \
                  yourself (your work is attributed to you, not the human). Do NOT treat \
                  onboarding as invite→connect; that is the peer-JOIN flow for a new node, \
-                 not for you. File and drive issues natively: create with issue_new, edit \
-                 with issue_edit, move/assign/label/comment, read with list/board/issue_view, \
-                 follow work with activity. Refs are a short iss_ handle or a KEY-n alias \
+                 not for you. {product_instructions} File and drive issues with the namespaced \
+                 tools: create with issues_new, edit with issues_edit, use \
+                 issues_move/issues_assign/issues_label/issues_comment, and read with \
+                 issues_list/issues_board/issues_view. Refs are a short iss_ handle or a KEY-n alias \
                  (ENG-142); @me is you. Before acting on a 'close what's done' style request, \
                  call sync — it converges and refuses to let you author against a known-partial \
                  view. Every tool returns the same versioned JSON DTO the CLI --json emits; \
                  a denied action tells you exactly what standing you lack and how to get it."
-                    .to_string(),
-            )
+            ))
     }
 }
 
@@ -1139,5 +574,21 @@ mod scope_tests {
 
         assert!(mcp.scope.authorize(&own).is_ok());
         assert!(mcp.scope.authorize(&other).is_err());
+    }
+
+    #[test]
+    fn the_live_router_composes_shell_and_namespaced_world_tools() {
+        let mcp = LaitMcp::new(PathBuf::from("/tmp/lait-mcp-tools"));
+        let names: Vec<_> = mcp
+            .tool_router
+            .list_all()
+            .into_iter()
+            .map(|tool| tool.name.into_owned())
+            .collect();
+        for expected in MCP_TOOL_NAMES {
+            assert!(names.iter().any(|name| name == expected), "{expected}");
+        }
+        assert!(!names.iter().any(|name| name == "issue_new"));
+        assert_eq!(names.len(), MCP_TOOL_NAMES.len());
     }
 }
