@@ -1,5 +1,5 @@
 //! `issues_policy_designer` — role/access/workflow authoring parity over the
-//! REAL orbital daemon control surface (plan 50): built-in and custom roles,
+//! real process-backed SpaceBridge control surface: built-in and custom roles,
 //! revision heads and expected-revision refusal, tombstones, exact-expansion
 //! assignment/revoke through Mechanics, deterministic workflow replacement,
 //! and gate enforcement — a transition whose template grants no admin
@@ -14,7 +14,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use lait::control::{request, Request, Response};
 use lait::net::Network;
-use lait::orbital::run_orbital_daemon;
+use lait::orbital::run_space_bridge;
 use lait::transport::mem::MemNet;
 use lait::transport::{Alpn, Transport, TransportFactory};
 
@@ -94,7 +94,7 @@ fn role_access_and_workflow_authoring_round_trip_over_the_daemon() {
     let handle = std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async move {
-            if let Err(e) = run_orbital_daemon(daemon_home, &MemFactory(daemon_net)).await {
+            if let Err(e) = run_space_bridge(daemon_home, &MemFactory(daemon_net)).await {
                 eprintln!("DAEMON ERR: {e:#}");
             }
         });

@@ -16,7 +16,8 @@ use std::{
 use anyhow::{anyhow, Context, Result};
 
 use crate::{
-    control::{self, request, ErrorKind, Event, EventKind, Request, Response},
+    control::{self, request, ControlRoute, ErrorKind, Event, EventKind, Request, Response},
+    daemon::{ClientScope, LocalOrbitId, OrbitAddress},
     diagnose::{DiagnosisView, GateState},
     dto::{BoardView, IssueView, Priority, Row},
     spaces::{self, SpaceEntry, StorePresence},
@@ -655,10 +656,50 @@ pub async fn client(home: &Path, req: Request) -> Result<Response> {
 /// Ensure the daemon is up, then send one request acting as `act_as` (a local
 /// agent name, or `None` for the primary human identity).
 pub async fn client_as(home: &Path, req: Request, act_as: Option<&str>) -> Result<Response> {
+    let scope = scope_for_home(home);
+    client_as_scoped(home, req, &scope, act_as).await
+}
+
+/// The single-Orbit scope implied by a cwd/`-w`/`--home` store resolution.
+pub fn scope_for_home(home: &Path) -> ClientScope {
+    ClientScope::pinned(LocalOrbitId::for_store(home))
+}
+
+/// Resolve the complete typed address for the one Orbit under `home`.
+pub fn orbit_address_for_home(home: &Path) -> Result<OrbitAddress> {
+    let space = crate::orbital::discover_space_id(home)
+        .ok_or_else(|| anyhow!("no local Orbit under {}", home.display()))?;
+    Ok(OrbitAddress::for_store(home, space))
+}
+
+fn route_for(address: OrbitAddress, req: &Request) -> ControlRoute {
+    match control::classify(req) {
+        control::RequestOwner::World => ControlRoute::World {
+            address,
+            world: crate::world::contract::world_id().as_str().to_string(),
+        },
+        _ => ControlRoute::Space { address },
+    }
+}
+
+/// Send through a caller scope derived by a trusted client adapter.
+///
+/// The allowed set never rides on the wire: authorizing locally chooses an
+/// explicit Orbit route, and the receiving SpaceBridge independently validates
+/// that it occupies the named Orbit and Space.
+pub async fn client_as_scoped(
+    home: &Path,
+    req: Request,
+    scope: &ClientScope,
+    act_as: Option<&str>,
+) -> Result<Response> {
+    let address = orbit_address_for_home(home)?;
+    scope.authorize(&address)?;
+    let route = route_for(address, &req);
     ensure_daemon(home).await?;
     // The daemon answered the probe a moment ago, so a failure here is the
     // transport giving out mid-exchange: `3`, daemon unreachable.
-    crate::control::request_as(home, &req, act_as)
+    crate::control::request_as_routed(home, &req, Some(route), act_as)
         .await
         .map_err(|e| CliError::unreachable(format!("{e:#}")).into())
 }
@@ -2180,21 +2221,31 @@ pub async fn watch(
     exec: Option<String>,
     notify: bool,
 ) -> Result<()> {
+    let scope = scope_for_home(home);
+    let address = orbit_address_for_home(home)?;
+    scope.authorize(&address)?;
+    let space_route = ControlRoute::Space {
+        address: address.clone(),
+    };
     ensure_daemon(home).await?;
     // Default to the current high-water: `watch` follows from now, not from the
     // start of the daemon's history.
     let mut cursor = match since {
         Some(n) => n,
-        None => match request(home, &Request::Log { since: 0 }).await? {
-            Response::Events { last, .. } => last,
-            _ => 0,
-        },
+        None => {
+            match control::request_routed(home, &Request::Log { since: 0 }, space_route.clone())
+                .await?
+            {
+                Response::Events { last, .. } => last,
+                _ => 0,
+            }
+        }
     };
     eprintln!("watching from seq {cursor} (Ctrl-C to stop)\u{2026}");
 
     let mut epoch: Option<u64> = None;
     loop {
-        let mut sub = match control::subscribe(home, 0).await {
+        let mut sub = match control::subscribe_routed(home, 0, Some(space_route.clone())).await {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("watch: {e}; reconnecting\u{2026}");
@@ -2227,7 +2278,13 @@ pub async fn watch(
             if !(frame.presence_advanced || frame.reset) {
                 continue;
             }
-            match request(home, &Request::Log { since: cursor }).await {
+            match control::request_routed(
+                home,
+                &Request::Log { since: cursor },
+                space_route.clone(),
+            )
+            .await
+            {
                 Ok(Response::Events { events, last }) => {
                     for e in &events {
                         print_event(e);
@@ -2253,6 +2310,7 @@ pub async fn watch(
 mod tests {
     use super::*;
     use crate::dto::Priority;
+    use crate::ids::SpaceId;
 
     #[test]
     fn client_side_exit_codes_come_from_the_type_not_the_prose() {
@@ -2395,5 +2453,18 @@ mod tests {
         // Colored urgent badge carries an ANSI escape but the same visible text.
         let c = prio_badge(Priority::Urgent, true);
         assert!(c.contains("·U·") && c.contains('\u{1b}'));
+    }
+
+    #[test]
+    fn a_directory_selected_cli_scope_cannot_address_a_sibling_orbit() {
+        let selected = PathBuf::from("/tmp/lait-cli-selected");
+        let sibling = PathBuf::from("/tmp/lait-cli-sibling");
+        let space = SpaceId::from_digest([8; 16]);
+        let scope = scope_for_home(&selected);
+        let own = OrbitAddress::for_store(&selected, space.clone());
+        let other = OrbitAddress::for_store(&sibling, space);
+
+        assert!(scope.authorize(&own).is_ok());
+        assert!(scope.authorize(&other).is_err());
     }
 }

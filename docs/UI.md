@@ -55,12 +55,15 @@ than relying on a prompt.
 ## 3. Web
 
 `lait serve` starts a loopback-only web application that can list locally known
-spaces and attach to their daemons. It is a local client and supervisor, not an
-iroh peer and not a space member.
+spaces through the local supervision layer. It is a local client, not an iroh
+peer and not a space member.
 
 The server uses a per-run bearer capability and origin/rebinding checks. A
-browser may list navigation metadata without waking every daemon. Attaching to a
-space starts or reuses only that space's daemon under the correct local identity.
+browser may list navigation metadata without activating every Space. Attaching
+to a row starts or reuses only the Station placed in that local Orbit, under the
+correct local identity. Rows use local Orbit ids because two local stores may
+participate in the same Space. The current compatibility deployment may
+process-host that Orbit's SpaceBridge behind its historical per-home socket.
 
 The web application provides issue lists, boards, detail, inbox, activity,
 members, filters, and command actions. Server-side semantics such as reference

@@ -117,21 +117,32 @@ pub fn open_orbital_runtime(
 }
 
 pub mod ceremony;
-pub mod daemon;
 pub mod mechanics;
+pub mod space_bridge;
+pub mod world_bridge;
 
-pub use daemon::{run_orbital_daemon, run_orbital_daemon_with, OrbitalDaemon};
 pub use mechanics::{AuthorityRecord, OrbitalMechanics};
+pub use space_bridge::{run_space_bridge, run_space_bridge_with, SpaceBridge};
+pub use world_bridge::{WorldBridge, WorldBridgeRegistry, WorldBridgesBuilder};
 
 use crate::world::IssuesWorld;
 use anyhow::Result;
-use runtime::{ActivationOptions, EnterOptions, RuntimeBuilder, SpaceFormationOptions};
+use runtime::{ActivationOptions, EnterOptions, SpaceFormationOptions};
 
-/// The issues Runtime registry the product hosts (one [`IssuesWorld`]).
+/// The compile-time World bridges bundled by the issue-tracker application.
+pub(super) fn issues_worlds() -> WorldBridgesBuilder {
+    WorldBridgesBuilder::new().register(
+        IssuesWorld::registration(),
+        Arc::new(IssuesWorld::new()),
+        issues_implementation_id(),
+    )
+}
+
+/// The issues Runtime registry used by formation and direct adoption helpers.
 fn issues_registry() -> Result<WorldRegistry> {
-    RuntimeBuilder::new()
-        .register(IssuesWorld::registration(), Arc::new(IssuesWorld::new()))
+    issues_worlds()
         .build()
+        .map(|(registry, _)| registry)
         .map_err(|e| anyhow::anyhow!("world registry: {e:?}"))
 }
 

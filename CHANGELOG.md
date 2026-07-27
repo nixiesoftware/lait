@@ -39,10 +39,13 @@
 
 ### The break
 
-- **Schema v3, sync protocol v3, control protocol v2**, plus `lait/sync/2`,
+- **Schema v3, sync protocol v3, control protocol v3**, plus `lait/sync/2`,
   `lait/presence/2`, and gossip topic epoch `v3`. Old and new nodes cannot see each
   other at all: ALPN negotiation fails before a frame is exchanged, and the gossip
   topic differs.
+- **Control routes name both local Orbit and expected Space.** Two local
+  participations in the same Space remain independently addressable, and a stale
+  or confused route fails before it reaches Mechanics, Station, or a WorldBridge.
 - **v0.5.x stores are refused, not migrated.** The schema gate now has a lower bound
   as well as an upper one; opening an older store names the version and points at
   `lait init` / `lait join` rather than opening it and projecting it as spaceless.

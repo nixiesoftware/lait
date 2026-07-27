@@ -1,17 +1,19 @@
-//! The space supervisor — identity scoping, and lazy per-space daemon attach.
+//! The current multi-Space supervisor — identity scoping and lazy attachment.
 //!
-//! Every Layer-B client before this one spoke to exactly **one** daemon: the
+//! Every Layer-B client before this one spoke to exactly **one** process-backed
+//! SpaceBridge: the
 //! control channel is keyed by home ([`crate::control::control_name`]), and a CLI
 //! invocation resolves exactly one store. The browser is the first client that is
-//! *global to the machine* — a spaces picker means holding several daemons at
-//! once — so this module is the piece with no prior art in the codebase.
+//! *global to the machine* — a spaces picker means addressing several bridges
+//! at once. This is the existing catalog/supervision seam that the general
+//! LaitDaemon promotes; it must not be duplicated by another registry.
 //!
 //! Two invariants shape it.
 //!
 //! **Never spawn what you were not asked for.** `SpaceDirectory::list` answers the picker by
 //! probing (a short-timeout [`Request::Status`] that fails closed to `idle`),
-//! never by starting anything: opening the browser must not wake every daemon a
-//! user has ever registered. A space's daemon starts only when that space is
+//! never by starting anything: opening the browser must not wake every Space a
+//! user has ever registered. A SpaceBridge starts only when that Space is
 //! actually selected — see [`Supervisor::attach`].
 //!
 //! **Never cross an identity.** See [`scope`], which is the whole story.
@@ -26,13 +28,15 @@ use anyhow::{anyhow, Result};
 use serde::Serialize;
 use tokio::sync::{broadcast, Mutex};
 
-use crate::control::{self, Doorbell, Request, Response};
+use crate::control::{self, ControlRoute, Doorbell, Request, RequestOwner, Response};
+use crate::daemon::{ClientScope, LocalOrbitId, OrbitAddress};
+use crate::ids::SpaceId;
 use crate::spaces::{self, SpaceEntry, StorePresence};
 
-/// A doorbell, tagged with the space it rang for.
+/// A doorbell, tagged with the local Orbit it rang for.
 ///
-/// The tab holds one `EventSource` over N attached spaces, so the space id is the
-/// demultiplexing key. Flattened so the wire shape is a [`Doorbell`] plus one
+/// The tab holds one `EventSource` over N attached Orbits, so the local Orbit id
+/// is the demultiplexing key. Flattened so the wire shape is a [`Doorbell`] plus one
 /// field — the browser re-reads the authoritative projection for each dirty
 /// scope according to the shared subscription contract; this is still a dirty *flag*, not
 /// state.
@@ -43,7 +47,7 @@ pub struct SpaceDoorbell {
     pub doorbell: Doorbell,
 }
 
-/// Whose key a space's daemon signs with.
+/// Whose key a SpaceBridge signs with.
 ///
 /// Carried on every row because it is not cosmetic: it decides which
 /// `secret.key` [`Supervisor::attach`] must pin, and — once writes exist — whose
@@ -55,15 +59,15 @@ pub enum SpaceIdentity {
     /// The identity `lait serve` itself runs as.
     Own,
     /// A named agent's self-contained home: visible for observability, but its
-    /// daemon runs on the agent's key, not yours.
+    /// bridge runs on the agent's key, not yours.
     Agent { name: String },
 }
 
 /// One row of the spaces picker.
 #[derive(Debug, Clone, Serialize)]
 pub struct SpaceRow {
-    /// Stable, opaque handle for URLs — see [`store_handle`].
-    pub id: String,
+    /// Stable local Orbit handle for URLs and control routing.
+    pub id: LocalOrbitId,
     /// The `ws_…` space id.
     pub space: String,
     /// Display name at last open (advisory — the catalog is authoritative).
@@ -84,7 +88,7 @@ pub struct Scoped<'a> {
     pub identity: SpaceIdentity,
 }
 
-/// A stable public id for a store path.
+/// A stable local Orbit id for a store path.
 ///
 /// Derived rather than borrowed: the `ws_` id is not unique per *store* (the same
 /// space can legitimately be bound at two paths), and the store path itself
@@ -93,9 +97,8 @@ pub struct Scoped<'a> {
 /// explicitly not stable across Rust releases, which is fine for the socket name
 /// it exists for — this stays put across builds, so a bookmarked space URL keeps
 /// resolving.
-pub fn store_handle(path: &str) -> String {
-    let hash = blake3::hash(path.as_bytes());
-    hash.to_hex()[..16].to_string()
+pub fn local_orbit_id(path: &str) -> LocalOrbitId {
+    LocalOrbitId::for_store(Path::new(path))
 }
 
 /// Which registered spaces this identity may see, and whose key each runs on.
@@ -229,9 +232,15 @@ async fn status(entry: &SpaceEntry) -> (&'static str, Option<String>) {
     if spaces::presence(entry) == StorePresence::Missing {
         return ("missing", None);
     }
+    let Some(space) = SpaceId::parse(&entry.space) else {
+        return ("idle", None);
+    };
+    let route = ControlRoute::Space {
+        address: OrbitAddress::for_store(Path::new(&entry.path), space),
+    };
     let reply = tokio::time::timeout(
         Duration::from_millis(300),
-        control::request(Path::new(&entry.path), &Request::Status),
+        control::request_routed(Path::new(&entry.path), &Request::Status, route),
     )
     .await;
     match reply {
@@ -245,10 +254,9 @@ async fn status(entry: &SpaceEntry) -> (&'static str, Option<String>) {
     }
 }
 
-/// A live attachment to one space's daemon: the task pumping its doorbells into
+/// A live attachment to one SpaceBridge: the task pumping its doorbells into
 /// the shared fan-in. Dropping it aborts the pump.
 struct Attached {
-    home: PathBuf,
     /// Cleared by the pump before it announces its own death.
     ///
     /// Set explicitly rather than inferred from the `JoinHandle`, because the pump
@@ -266,12 +274,13 @@ impl Drop for Attached {
     }
 }
 
-/// Holds the N daemons the browser is currently looking at.
+/// Holds the N process-backed SpaceBridge attachments the browser is currently
+/// looking at. This is transitional placement policy, not the bridge model.
 pub struct Supervisor {
     identity: PathBuf,
     agents_base: PathBuf,
     self_contained: bool,
-    attached: Mutex<HashMap<String, Arc<Attached>>>,
+    attached: Mutex<HashMap<LocalOrbitId, Arc<Attached>>>,
     doorbells: broadcast::Sender<SpaceDoorbell>,
 }
 
@@ -295,7 +304,7 @@ impl Supervisor {
         self.doorbells.subscribe()
     }
 
-    /// The spaces this identity owns, newest-first, each with a probed status.
+    /// The local Orbits this identity may see, newest-first, each with a probed status.
     ///
     /// Probes run concurrently: sequential 300ms timeouts would make the picker's
     /// latency the *sum* of every idle space, which is exactly the case a user
@@ -315,7 +324,7 @@ impl Supervisor {
             set.spawn(async move {
                 let (status, catalog_name) = status(&e).await;
                 SpaceRow {
-                    id: store_handle(&e.path),
+                    id: local_orbit_id(&e.path),
                     space: e.space.clone(),
                     // The catalog name is authoritative (`SpaceRename` writes it);
                     // the registry alias is only a fallback for spaces we could not
@@ -337,12 +346,13 @@ impl Supervisor {
         rows
     }
 
-    /// Resolve a public space id to its home and the identity it runs under.
+    /// Resolve a local Orbit id to its home and the identity it runs under.
     ///
     /// Resolution goes through [`scope`], so a space this identity may not see is
     /// indistinguishable from one that does not exist — an agent-scoped `serve`
     /// cannot address your spaces by guessing an id.
-    pub fn resolve(&self, id: &str) -> Result<(PathBuf, SpaceIdentity)> {
+    pub fn resolve(&self, id: &str) -> Result<ResolvedOrbit> {
+        let id = LocalOrbitId::parse(id).ok_or_else(|| anyhow!("invalid local Orbit id"))?;
         let entries = spaces::list();
         let scoped = scope(
             &entries,
@@ -350,22 +360,36 @@ impl Supervisor {
             &self.agents_base,
             self.self_contained,
         );
-        scoped
+        let client_scope = ClientScope::catalog(
+            None,
+            scoped
+                .iter()
+                .map(|binding| local_orbit_id(&binding.entry.path)),
+        )?;
+        let selected = scoped
             .into_iter()
-            .find(|s| store_handle(&s.entry.path) == id)
-            .map(|s| (PathBuf::from(&s.entry.path), s.identity))
-            .ok_or_else(|| anyhow!("no such space"))
+            .find(|binding| local_orbit_id(&binding.entry.path) == id)
+            .ok_or_else(|| anyhow!("no such local Orbit"))?;
+        let space = SpaceId::parse(&selected.entry.space)
+            .ok_or_else(|| anyhow!("registered local Orbit has an invalid Space id"))?;
+        let address = OrbitAddress { orbit: id, space };
+        client_scope.authorize(&address)?;
+        Ok(ResolvedOrbit {
+            home: PathBuf::from(&selected.entry.path),
+            address,
+            identity: selected.identity,
+        })
     }
 
-    /// Ensure this space's daemon is up and its doorbells are flowing.
+    /// Ensure this SpaceBridge is up and its doorbells are flowing.
     ///
-    /// Idempotent, and the *only* place a daemon is started: attaching is what
+    /// Idempotent, and the *only* place a bridge is started: attaching is what
     /// selecting a space means. Returns the home so callers can round-trip it.
     ///
     /// Two things worth knowing before calling this on an agent's space.
     ///
     /// **The identity must be pinned, not inherited.** `identity_dir` reads
-    /// `$LAIT_HOME` and never `$LAIT_STORE`, so spawning a daemon at an agent's
+    /// `$LAIT_HOME` and never `$LAIT_STORE`, so spawning a bridge at an agent's
     /// store from a globally-scoped `serve` would open it under *your* key —
     /// which cannot unwrap a space key sealed to the agent, and would put
     /// your identity on the wire in the agent's space. Hence
@@ -373,32 +397,34 @@ impl Supervisor {
     ///
     /// **Attaching is not free the way listing is.** [`list`](Self::list) only
     /// probes, so enumerating agents has no effect on anything. Starting a
-    /// daemon brings that identity *online* — it binds an endpoint and announces
+    /// bridge brings that identity *online* — it binds an endpoint and announces
     /// presence — so watching an idle agent is what makes it visible to its
     /// space. That is usually what you want when you went looking for it, but
     /// it is a real consequence of a click, not a read.
-    pub async fn attach(&self, id: &str) -> Result<PathBuf> {
-        let (home, identity) = self.resolve(id)?;
-        // The fast path, and only the fast path, under the lock. Spawning a daemon
+    pub async fn attach(&self, id: &str) -> Result<ResolvedOrbit> {
+        let resolved = self.resolve(id)?;
+        let home = resolved.home.clone();
+        let orbit = resolved.address.orbit.clone();
+        // The fast path, and only the fast path, under the lock. Starting a bridge
         // can take seconds, and `attached` is global to every space — holding it
         // across that await would make the first attach of one slow space stall
         // RPCs to every other, which is precisely the scenario a supervisor exists
         // to avoid.
         {
             let mut attached = self.attached.lock().await;
-            if let Some(a) = attached.get(id) {
+            if let Some(a) = attached.get(&orbit) {
                 // A live attachment is reusable; a dead one is a trap. When the
-                // space's daemon stops its pump ends — and if the entry outlives
+                // SpaceBridge stops its pump ends — and if the entry outlives
                 // it, every later attach short-circuits onto a corpse and the
                 // doorbells for that space never come back. The failure is silent,
                 // which is the worst part: the browser's own stream to `serve` is
                 // still open, so the UI reports itself live while going quietly
                 // stale forever.
                 if a.alive.load(Ordering::Acquire) && !a.pump.is_finished() {
-                    return Ok(a.home.clone());
+                    return Ok(resolved);
                 }
-                attached.remove(id);
-                // The daemon this pump was reading is gone, so `ensure_daemon`'s
+                attached.remove(&orbit);
+                // The bridge this pump was reading is gone, so `ensure_daemon`'s
                 // verified-memo is now a lie — and a stale entry there does not
                 // mean "already fine", it means "never respawn this". Clear it, or
                 // the re-attach below short-circuits and we connect to nothing.
@@ -409,7 +435,7 @@ impl Supervisor {
         // A self-contained home *is* its own identity dir, so pinning it to
         // `home` is the whole fix. `Own` keeps inheriting our env, which is
         // already correct for every store the global identity signs for.
-        let pin = match identity {
+        let pin = match &resolved.identity {
             SpaceIdentity::Agent { .. } => Some(home.as_path()),
             SpaceIdentity::Own => None,
         };
@@ -423,23 +449,26 @@ impl Supervisor {
         // so the loser never creates one: a dropped `JoinHandle` detaches rather
         // than aborts, and a stray pump would quietly double every doorbell.
         let mut attached = self.attached.lock().await;
-        if let Some(a) = attached.get(id) {
+        if let Some(a) = attached.get(&orbit) {
             if a.alive.load(Ordering::Acquire) && !a.pump.is_finished() {
-                return Ok(a.home.clone());
+                return Ok(resolved);
             }
-            attached.remove(id);
+            attached.remove(&orbit);
         }
 
         let tx = self.doorbells.clone();
-        let space = id.to_string();
+        let orbit_tag = orbit.as_str().to_string();
         let pump_home = home.clone();
+        let routed_space = Some(ControlRoute::Space {
+            address: resolved.address.clone(),
+        });
         let alive = Arc::new(AtomicBool::new(true));
         let pump_alive = alive.clone();
         // `tokio::spawn` doesn't await, so the lock is held only long enough to
         // publish the entry.
         let pump = tokio::spawn(async move {
             // `since: 0` asks for a full rebaseline, matching a fresh attach.
-            match control::subscribe(&pump_home, 0).await {
+            match control::subscribe_routed(&pump_home, 0, routed_space).await {
                 Ok(mut sub) => loop {
                     match sub.next().await {
                         Ok(Some(doorbell)) => {
@@ -447,7 +476,7 @@ impl Supervisor {
                             // closed. Keep pumping: it may come back, and the
                             // daemon is up regardless of whether anyone watches.
                             let _ = tx.send(SpaceDoorbell {
-                                space: space.clone(),
+                                space: orbit_tag.clone(),
                                 doorbell,
                             });
                         }
@@ -457,12 +486,12 @@ impl Supervisor {
                         // pump died.
                         Ok(None) => break,
                         Err(e) => {
-                            tracing::warn!(space = %space, error = %e, "doorbell stream ended");
+                            tracing::warn!(orbit = %orbit_tag, error = %e, "doorbell stream ended");
                             break;
                         }
                     }
                 },
-                Err(e) => tracing::warn!(space = %space, error = %e, "subscribe failed"),
+                Err(e) => tracing::warn!(orbit = %orbit_tag, error = %e, "subscribe failed"),
             }
 
             // **One** exit, deliberately. A stream that never opened and one that
@@ -481,7 +510,7 @@ impl Supervisor {
             // re-read attaches, and attaching revives the stream. The loop closes
             // itself without this task knowing anything about repair.
             let _ = tx.send(SpaceDoorbell {
-                space,
+                space: orbit_tag,
                 doorbell: Doorbell {
                     reset: true,
                     ..Default::default()
@@ -489,22 +518,32 @@ impl Supervisor {
             });
         });
 
-        attached.insert(
-            id.to_string(),
-            Arc::new(Attached {
-                home: home.clone(),
-                alive,
-                pump,
-            }),
-        );
-        Ok(home)
+        attached.insert(orbit, Arc::new(Attached { alive, pump }));
+        Ok(resolved)
     }
 
-    /// Round-trip a request to a space's daemon, attaching it first if needed.
+    /// Round-trip a request to a SpaceBridge, attaching it first if needed.
     pub async fn request(&self, id: &str, req: &Request) -> Result<control::Response> {
-        let home = self.attach(id).await?;
-        control::request(&home, req).await
+        let resolved = self.attach(id).await?;
+        let route = match control::classify(req) {
+            RequestOwner::World => ControlRoute::World {
+                address: resolved.address,
+                world: crate::world::contract::world_id().as_str().to_string(),
+            },
+            _ => ControlRoute::Space {
+                address: resolved.address,
+            },
+        };
+        control::request_routed(&resolved.home, req, route).await
     }
+}
+
+/// One visible and authorized local Orbit binding.
+#[derive(Debug, Clone)]
+pub struct ResolvedOrbit {
+    pub home: PathBuf,
+    pub address: OrbitAddress,
+    pub identity: SpaceIdentity,
 }
 
 #[cfg(test)]
@@ -655,15 +694,15 @@ mod tests {
     }
 
     #[test]
-    fn store_handles_are_stable_and_path_distinct() {
+    fn local_orbit_ids_are_stable_full_width_and_path_distinct() {
         assert_eq!(
-            store_handle("/home/u/a/.lait"),
-            store_handle("/home/u/a/.lait")
+            local_orbit_id("/home/u/a/.lait"),
+            local_orbit_id("/home/u/a/.lait")
         );
         assert_ne!(
-            store_handle("/home/u/a/.lait"),
-            store_handle("/home/u/b/.lait")
+            local_orbit_id("/home/u/a/.lait"),
+            local_orbit_id("/home/u/b/.lait")
         );
-        assert_eq!(store_handle("/home/u/a/.lait").len(), 16);
+        assert_eq!(local_orbit_id("/home/u/a/.lait").as_str().len(), 68);
     }
 }

@@ -13,26 +13,52 @@ boundary. Each device keeps its own durable participation and can activate it
 without a central server.
 
 ```text
-Space
-  └─ local participation
-       ├─ dormant: Orbit
-       └─ active: Station
-            ├─ Mechanics
-            ├─ Replica
-            │    └─ Fabric
-            ├─ Neighbor registry and Contact
-            ├─ hosted Worlds
-            └─ docked Sessions
+LaitDaemon
+  ├─ OrbitCatalog
+  └─ StationSupervisor
+       └─ local Orbit
+            ├─ vacant
+            └─ occupied by a Station
+                 ├─ Mechanics
+                 ├─ Replica
+                 │    └─ Fabric
+                 ├─ Neighbor registry and Contact
+                 └─ exposed through a SpaceBridge
+                      └─ WorldBridgeRegistry
+                           └─ WorldBridge
+                                └─ docked Sessions
 ```
 
-An Orbit is durable, inactive participation in one Space. `Orbit::activate`
-consumes it and produces the Station, the exclusive live owner. Dormancy drains
-the Station and returns the participation to an Orbit. There is never a second
-live daemon, Replica, or product store beside a Station.
+An Orbit is one durable local participation in a Space. It persists whether it
+is vacant or occupied. Activation acquires that Orbit's exclusive operational
+lease and places a Station into it; removing the Station drains its tasks and
+releases the lease without turning the Station into an Orbit. The current
+Runtime API transfers that lease through `Orbit::activate` and
+`Station::go_dormant`; those consuming handles express ownership transfer, not
+an ontological state conversion. A SpaceBridge is the sole product-side
+entrance to the Station occupying one Orbit. There is never a second live
+Station, Replica, or product store for the same local Orbit.
 
 CLI, web, and MCP clients use one local control protocol. They do not open the
-store or CRDT engine. The daemon classifies each request to one terminal owner:
-lifecycle, Mechanics, Station, or the Issues World router.
+store or CRDT engine. An explicit control route addresses the process-level
+daemon, a local Orbit plus its expected Space, or a World reached through that
+Orbit. The CLI's cwd selects its default Orbit; MCP is pinned to its launch
+Orbit; neither inherits catalog-wide visibility.
+
+In the current compatibility deployment, trusted client adapters derive a
+`ClientScope` and authorize an explicit route before opening the historical
+per-home channel; the receiving SpaceBridge independently verifies that its
+Orbit and Space match the route. The target LaitDaemon moves that same trusted
+scope check to the connection boundary, then asks the StationSupervisor to
+place or reuse the Station in the addressed Orbit and dispatches to one terminal
+owner: lifecycle, Mechanics, Station, observation, or a WorldBridge.
+
+Bridges are logical boundaries, not mandatory processes. The target deployment
+is one per-user LaitDaemon supervising zero or more Station placements and their
+in-process SpaceBridges. A SpaceBridge or WorldBridge may move to a worker
+process for stronger fault or plugin isolation without changing its route or
+client contract. During the transition, the `lait daemon` compatibility runner
+process-hosts one SpaceBridge behind its historical per-home socket.
 
 ## 2. Crate boundaries
 
@@ -139,6 +165,11 @@ A World receives only a bounded, Manifest-pinned view and immutable principal
 facts. It cannot access storage, Loro, transport, custody secrets, or authority
 mutation. It returns declared Body operations and a non-empty authorization
 demand. Runtime validates World/schema containment before committing anything.
+
+A WorldBridge is the application-side entrance to one registered World in one
+active Space. It owns the reviewed implementation identity and the Sessions
+docked for local identities. A WorldBridgeRegistry maps `WorldId` to distinct
+bridge objects; a Session can never be reused across Worlds.
 
 A Session binds a local identity to one World at an active Station. Queries and
 mutations are authorized independently. Query results are computed from one

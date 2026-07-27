@@ -1,9 +1,9 @@
 //! End-to-end tests for control-plane dirty notifications and `Reset`
-//! recovery, driven through the **orbital daemon** over its real IPC control
+//! recovery, driven through a process-backed **SpaceBridge** over its real IPC control
 //! socket with an in-memory transport (no network sockets). See
 //! `docs/PROTOCOL.md`.
 //!
-//! Formation is `orbital::form_space` (the `lait init` heir); the orbital daemon
+//! Formation is `orbital::form_space` (the `lait init` heir); the SpaceBridge
 //! then serves `control::Request`/`Response` — including the `Subscribe`
 //! doorbell stream sourced from the Station's `ObservationStream` — exactly as
 //! the CLI/serve/MCP clients speak it. Two behaviors are proven: a wildly stale
@@ -18,9 +18,13 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use async_trait::async_trait;
-use lait::control::{request, subscribe, CatalogScope, Request, Response};
+use lait::control::{
+    request, request_routed, subscribe, CatalogScope, ControlRoute, Request, Response,
+};
+use lait::daemon::OrbitAddress;
+use lait::ids::SpaceId;
 use lait::net::Network;
-use lait::orbital::run_orbital_daemon_with;
+use lait::orbital::run_space_bridge_with;
 use lait::transport::mem::MemNet;
 use lait::transport::{Alpn, Transport, TransportFactory};
 
@@ -84,7 +88,7 @@ fn spawn_daemon(home: PathBuf, seed: [u8; 32], net: MemNet) -> std::thread::Join
     std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async move {
-            if let Err(e) = run_orbital_daemon_with(home, seed, &MemFactory(net)).await {
+            if let Err(e) = run_space_bridge_with(home, seed, &MemFactory(net)).await {
                 eprintln!("DAEMON ERR: {e:#}");
             }
         });
@@ -97,9 +101,126 @@ fn wait_online(rt: &tokio::runtime::Runtime, home: &Path) {
     });
     assert!(
         online.is_some(),
-        "orbital daemon at {} never came online",
+        "SpaceBridge at {} never came online",
         home.display()
     );
+}
+
+#[test]
+fn explicit_routes_cannot_cross_space_or_world_boundaries() {
+    let net = MemNet::new();
+    let home = temp_home("routes");
+    lait::orbital::form_space(&home, &FOUNDER_SEED, "Route Space").unwrap();
+    let space = lait::orbital::discover_space_id(&home).unwrap();
+    let address = OrbitAddress::for_store(&home, space.clone());
+    let handle = spawn_daemon(home.clone(), FOUNDER_SEED, net);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    wait_online(&rt, &home);
+
+    let response = rt
+        .block_on(request_routed(
+            &home,
+            &Request::Status,
+            ControlRoute::Space {
+                address: address.clone(),
+            },
+        ))
+        .unwrap();
+    assert!(matches!(response, Response::Status(_)));
+
+    let wrong_space = rt
+        .block_on(request_routed(
+            &home,
+            &Request::Status,
+            ControlRoute::Space {
+                address: OrbitAddress {
+                    orbit: address.orbit.clone(),
+                    space: SpaceId::from_digest([0xEE; 16]),
+                },
+            },
+        ))
+        .unwrap();
+    assert!(matches!(
+        wrong_space,
+        Response::Error { message, .. } if message.contains("this bridge owns")
+    ));
+
+    let wrong_orbit = rt
+        .block_on(request_routed(
+            &home,
+            &Request::Status,
+            ControlRoute::Space {
+                address: OrbitAddress::for_store(&home.with_extension("sibling"), space.clone()),
+            },
+        ))
+        .unwrap();
+    assert!(matches!(
+        wrong_orbit,
+        Response::Error { message, .. } if message.contains("this bridge occupies")
+    ));
+
+    let missing_world = rt
+        .block_on(request_routed(
+            &home,
+            &Request::ProjectList,
+            ControlRoute::World {
+                address: address.clone(),
+                world: "com.example.files".into(),
+            },
+        ))
+        .unwrap();
+    assert!(matches!(
+        missing_world,
+        Response::Error { message, .. } if message.contains("is not enabled")
+    ));
+
+    let wrong_level = rt
+        .block_on(request_routed(
+            &home,
+            &Request::ProjectList,
+            ControlRoute::Space {
+                address: address.clone(),
+            },
+        ))
+        .unwrap();
+    assert!(matches!(
+        wrong_level,
+        Response::Error { message, .. } if message.contains("requires a world route")
+    ));
+
+    let rejected_stop = rt
+        .block_on(request_routed(
+            &home,
+            &Request::Stop,
+            ControlRoute::Space {
+                address: OrbitAddress {
+                    orbit: address.orbit.clone(),
+                    space: SpaceId::from_digest([0xEF; 16]),
+                },
+            },
+        ))
+        .unwrap();
+    assert!(matches!(
+        rejected_stop,
+        Response::Error { message, .. } if message.contains("this bridge owns")
+    ));
+    let still_online = rt
+        .block_on(request_routed(
+            &home,
+            &Request::Status,
+            ControlRoute::Space { address },
+        ))
+        .unwrap();
+    assert!(
+        matches!(still_online, Response::Status(_)),
+        "a rejected Stop must leave the addressed SpaceBridge online"
+    );
+
+    rt.block_on(async {
+        let _ = request(&home, &Request::Stop).await;
+    });
+    let _ = handle.join();
+    let _ = std::fs::remove_dir_all(&home);
 }
 
 /// Seed a project + one issue and return the issue's canonical ref (e.g.

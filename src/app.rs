@@ -312,9 +312,9 @@ async fn dispatch(specs: &[cmdspec::Spec], matches: &ArgMatches, out: Out) -> Re
             return crate::cli::run(&home, Request::Status, out).await;
         }
         // `serve` is global to the machine, not bound to one store: it reads the
-        // space registry and attaches each space's daemon lazily, so it must
-        // not resolve (or demand) a store in the cwd — running it from anywhere
-        // is the point.
+        // space registry and attaches each SpaceBridge lazily, so it must not
+        // resolve (or demand) a store in the cwd — running it from anywhere is
+        // the point.
         Dispatch::Special(Special::Serve) => {
             let port = m
                 .get_one::<String>("port")
@@ -532,12 +532,12 @@ async fn dispatch(specs: &[cmdspec::Spec], matches: &ArgMatches, out: Out) -> Re
                             .unwrap_or_else(|_| "lait=info,warn".into()),
                     )
                     .init();
-                // The orbital daemon is the only daemon. `open` runs the preflight
-                // legacy detector: a pre-orbital (v0.x) store is refused with
-                // recreation guidance before anything binds, and an uninitialized
-                // home is told to run `lait init` — never a silent fallback to a
-                // legacy node.
-                crate::orbital::run_orbital_daemon(home, &crate::transport::DefaultFactory).await?;
+                // The current compatibility runner hosts one SpaceBridge behind
+                // the per-home control socket. `open` runs the preflight legacy
+                // detector before anything binds. Process placement is not part
+                // of Space semantics; the general Lait daemon can supervise the
+                // same bridge in-process.
+                crate::orbital::run_space_bridge(home, &crate::transport::DefaultFactory).await?;
                 std::process::exit(0);
             }
             Special::Mcp => {
@@ -733,8 +733,9 @@ fn dir_display_name(home: &std::path::Path) -> String {
 }
 
 /// `lait join <coordinates>`: the orbital join path. Bootstrap the joiner's
-/// orbital store from the invite link (`orbital::enter_space`), spawn the
-/// orbital daemon, then drive Contact to the invite's approach Station until
+/// orbital store from the invite link (`orbital::enter_space`), start its
+/// compatibility-hosted SpaceBridge, then drive Contact to the invite's
+/// approach Station until
 /// admission lands. The joiner's Contact registers it as a pending Neighbor on
 /// the inviter, whose driver reciprocally dials back to redeem the admission —
 /// so repeated joiner-side Connects converge to membership without a manual
@@ -819,7 +820,7 @@ async fn run_join_orbital(m: &ArgMatches, link: &str, out: Out) -> Result<()> {
         eprintln!("(space registry update failed: {e:#})");
     }
 
-    // Spawn the daemon (the orbital Station is the only daemon).
+    // Start the compatibility-hosted SpaceBridge for the joiner's Station.
     crate::cli::ensure_daemon(&target).await?;
 
     // Drive Contact to the approach Station until admitted (or a deadline). The

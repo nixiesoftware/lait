@@ -199,11 +199,30 @@ authorization.
 
 ## 10. Local control channel
 
-CLI, web, and MCP clients speak one typed local protocol to the per-Space daemon.
-A version handshake precedes requests. The production request classifier assigns
-every request exactly one terminal owner; there is no wildcard product fallback.
+CLI, web, and MCP clients speak one typed local protocol. A `ClientRequest` may
+carry an explicit bridge route:
 
-Product mutations and queries reach IssuesWorld through a docked Session.
+- `daemon` for the process-level catalog and supervisor;
+- `space { orbit, space }` for Mechanics, Station, observations, and lifecycle
+  through one local Orbit;
+- `world { orbit, space, world }` for product mutations and queries.
+
+`orbit` is a full, stable local identifier derived from the store binding;
+`space` is repeated as an expectation. Distinct local Orbits in the same Space
+therefore remain independently addressable, and a stale or confused binding
+fails before dispatch. A trusted client adapter validates the complete route
+against its `ClientScope`, and the receiving bridge independently validates its
+own address. The target LaitDaemon moves the first check to the connection
+boundary. In both placements, the allowed set is never accepted as a claim in
+the request.
+
+A missing route is the transitional per-home form: the socket identifies one
+Orbit and issue-family commands imply IssuesWorld. A version handshake precedes
+requests. The production request classifier assigns every request exactly one
+terminal owner; there is no wildcard product fallback.
+
+Product mutations and queries reach IssuesWorld through its WorldBridge and a
+docked Session.
 Membership, devices, custody, and ceremonies reach Mechanics. Neighbor and
 Contact operations reach Station. Lifecycle operations reach Runtime/Orbit/
 Station. Clients never open Replica or Fabric directly.

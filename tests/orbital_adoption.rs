@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use lait::orbital::{open_orbital_runtime, orbital_store_root};
+use lait::orbital::{open_orbital_runtime, orbital_store_root, WorldBridgesBuilder};
 use mechanics::ids::{ActorId, DeviceId};
 use runtime::{
     ActivationOptions, AuthorityView, PrincipalResolution, Runtime, RuntimeBuilder,
@@ -61,13 +61,19 @@ impl AuthorityView for ExampleAuthority {
 /// by the payload's byte length, a query returns the tally as decimal ASCII.
 struct TallyWorld {
     id: WorldId,
+    body_id: BodyId,
     schemas: Vec<BodySchema>,
 }
 
 impl TallyWorld {
     fn new() -> Self {
+        Self::named("dev.example.tally", 9)
+    }
+
+    fn named(id: &str, body_marker: u8) -> Self {
         Self {
-            id: WorldId::parse("dev.example.tally").unwrap(),
+            id: WorldId::parse(id).unwrap(),
+            body_id: BodyId::from_bytes([body_marker; 16]),
             schemas: vec![BodySchema {
                 id: SchemaId::parse("tally").unwrap(),
                 version: 1,
@@ -78,7 +84,7 @@ impl TallyWorld {
         }
     }
     fn body(&self) -> BodyKey {
-        BodyKey::new(self.id.clone(), BodyId::from_bytes([9u8; 16]))
+        BodyKey::new(self.id.clone(), self.body_id.clone())
     }
     fn current(&self, ctx: &WorldContext<'_>) -> u64 {
         ctx.read_body(&self.body())
@@ -130,6 +136,15 @@ impl World for TallyWorld {
     }
 }
 
+fn registration(world: &TallyWorld) -> WorldRegistration {
+    WorldRegistration {
+        id: world.id(),
+        implementation_version: WorldVersion(1),
+        schemas: world.schemas().to_vec(),
+        limits: WorldLimits::default(),
+    }
+}
+
 /// Sign and submit an intent through the frozen public action API.
 fn submit_as(
     session: &runtime::Session,
@@ -144,12 +159,7 @@ fn the_product_composes_the_orbital_runtime_for_an_independent_world() {
     let home = temp_home();
     let world = TallyWorld::new();
     let world_id = world.id();
-    let reg = WorldRegistration {
-        id: world_id.clone(),
-        implementation_version: WorldVersion(1),
-        schemas: world.schemas().to_vec(),
-        limits: WorldLimits::default(),
-    };
+    let reg = registration(&world);
     let registry = RuntimeBuilder::new()
         .register(reg, Arc::new(world))
         .build()
@@ -214,6 +224,76 @@ fn the_product_composes_the_orbital_runtime_for_an_independent_world() {
     assert_eq!(proj.bytes, b"8");
     // Runtime stamped the real committed frontier onto the projection.
     assert_eq!(proj.frontier, second.frontier);
+}
+
+#[test]
+fn one_space_bridge_docks_and_routes_two_world_bridges_independently() {
+    let home = temp_home();
+    let files = TallyWorld::named("dev.example.files", 7);
+    let notes = TallyWorld::named("dev.example.notes", 8);
+    let files_id = files.id();
+    let notes_id = notes.id();
+    let (registry, worlds) = WorldBridgesBuilder::new()
+        .register(registration(&files), Arc::new(files), [7; 32])
+        .register(registration(&notes), Arc::new(notes), [8; 32])
+        .build()
+        .unwrap();
+
+    let keys = Arc::new(replica::StaticBodyKeys::new(
+        mechanics::crypto::AuthorizedBodyKey::for_authorized_epoch([1u8; 16], [2u8; 32]),
+    ));
+    let rt = open_orbital_runtime(&home, registry, Arc::new(ExampleAuthority), keys).unwrap();
+    let writer = Runtime::identity_from_seed(&WRITER_SEED);
+    let station = rt
+        .form_space(SpaceFormationOptions::default())
+        .unwrap()
+        .activate(ActivationOptions::default())
+        .unwrap();
+
+    worlds.ensure_primary(&station, &files_id, &writer).unwrap();
+    worlds.ensure_primary(&station, &notes_id, &writer).unwrap();
+
+    let intent = |payload: &[u8]| WorldIntent {
+        schema: SchemaId::parse("tally").unwrap(),
+        schema_version: 1,
+        payload: payload.to_vec(),
+    };
+    let files_effect = worlds
+        .with_primary(&files_id, |session| {
+            submit_as(session, &writer, intent(b"file"))
+        })
+        .expect("files Session")
+        .unwrap();
+    let notes_effect = worlds
+        .with_primary(&notes_id, |session| {
+            submit_as(session, &writer, intent(b"notes"))
+        })
+        .expect("notes Session")
+        .unwrap();
+
+    assert_eq!(files_effect.effect, b"4");
+    assert_eq!(notes_effect.effect, b"5");
+    let query = WorldQuery {
+        schema: SchemaId::parse("tally").unwrap(),
+        schema_version: 1,
+        payload: vec![],
+    };
+    assert_eq!(
+        worlds
+            .with_primary(&files_id, |session| session.query(query.clone()))
+            .expect("files Session")
+            .unwrap()
+            .bytes,
+        b"4"
+    );
+    assert_eq!(
+        worlds
+            .with_primary(&notes_id, |session| session.query(query))
+            .expect("notes Session")
+            .unwrap()
+            .bytes,
+        b"5"
+    );
 }
 
 #[test]

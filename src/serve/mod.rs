@@ -9,10 +9,11 @@
 //!
 //! Two things follow, and they are the whole design:
 //!
-//! **This is a supervisor, not a client.** The control channel is keyed by home,
-//! so there is one daemon per space. A CLI invocation resolves exactly one store
-//! and talks to exactly one daemon; the browser is a picker over *all* of them,
-//! so it holds N. See [`spaces::Supervisor`].
+//! **This is currently the multi-Space supervision seam.** The compatibility
+//! control channel is still keyed by home, while the browser is a picker over
+//! all registered Spaces. [`spaces::Supervisor`] already supplies catalog-only
+//! listing, lazy attachment, and fan-in; the general Lait daemon promotes that
+//! seam from process-backed attachments to active SpaceBridges.
 //!
 //! **The socket was the authentication.** Binding the same façade to a TCP port
 //! removes the OS permission check that made auth unnecessary, and adds a caller
@@ -332,7 +333,7 @@ async fn rpc(
     }
 
     let identity = match app.sup.resolve(&id) {
-        Ok((_, identity)) => identity,
+        Ok(resolved) => resolved.identity,
         Err(e) => {
             return (
                 StatusCode::NOT_FOUND,

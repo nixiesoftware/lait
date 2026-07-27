@@ -5,8 +5,7 @@
 //! instead of a blank board. Kept deliberately free of I/O, ANSI, and daemon
 //! types: it takes primitive inputs and returns a [`DiagnosisView`] DTO, so the
 //! exact same logic backs CLI `doctor`, the `join` tail, and the MCP `doctor`
-//! tool, and is unit-tested without a
-//! running node. The orbital daemon is the only caller that
+//! tool, and is unit-tested without a running node. The active SpaceBridge
 //! gathers the inputs; everything downstream renders the DTO.
 
 use serde::{Deserialize, Serialize};

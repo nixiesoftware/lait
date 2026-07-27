@@ -18,6 +18,7 @@ use interprocess::local_socket::{
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
+use crate::daemon::OrbitAddress;
 use crate::diagnose::DiagnosisView;
 use crate::dto::{
     ActivityEvent, BoardView, Candidate, GraphView, InboxEntry, IssueView, LabelDto, MemberDto,
@@ -42,15 +43,20 @@ use crate::dto::{
 /// `Diagnose.expected_space`, `StatusInfo.space`, `IssueView.space_id`. A v1
 /// daemon cannot answer them, so v1 is retired rather than tolerated: a client
 /// that decoded a v1 answer would read absent fields as absent state.
-pub const CONTROL_PROTOCOL_VERSION: u32 = 2;
+///
+/// **v3:** explicit Space/World routes name the local Orbit as well as the
+/// expected Space. A v2 per-home route selected the Orbit only out-of-band via
+/// its socket, which cannot address two local Orbits in the same Space through
+/// one future daemon endpoint.
+pub const CONTROL_PROTOCOL_VERSION: u32 = 3;
 
 /// The oldest control protocol a client still talks to. Raising this retires a
 /// version; the gap to [`CONTROL_PROTOCOL_VERSION`] is the mixed-version window.
 ///
-/// At 2 the window is a single version, so a v0.5.x daemon still holding the
+/// At 3 the window is a single version, so a v2 daemon still holding the
 /// lock reads as *behind us* and is therefore replaceable — it is killed and
 /// respawned on the first client contact rather than being talked to.
-pub const MIN_SUPPORTED_CONTROL_PROTOCOL: u32 = 2;
+pub const MIN_SUPPORTED_CONTROL_PROTOCOL: u32 = 3;
 
 /// Whether this build can talk to a daemon advertising control protocol `peer`.
 ///
@@ -819,17 +825,42 @@ pub enum Request {
     },
 }
 
-/// The wire envelope a client sends: a [`Request`] plus an optional **acting
-/// identity** selector. This is how the multi-tenant daemon (Architecture B)
-/// stays "one surface" — the *same* `Request` set, with a modifier saying *which
-/// local member signs it*. `act_as` names a local identity (an agent profile
-/// name, an actor id, or a device id) the daemon holds a seed for; `None` (the
-/// default) is the daemon's primary — the human. It is flattened and
-/// `skip`-when-`None`, so a request with no selector serializes to *exactly* the
-/// bare `{"cmd":…}` an older client sends — the wire stays backward-compatible in
-/// both directions.
+/// An explicit path through the local bridge hierarchy.
+///
+/// `None` on [`ClientRequest::route`] is the legacy per-home path: the socket
+/// already identifies one Space and issue-family commands imply IssuesWorld.
+/// The general Lait daemon uses an explicit route so one endpoint can reject
+/// cross-Space or cross-World confusion before dispatch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "scope", rename_all = "snake_case")]
+pub enum ControlRoute {
+    /// Address the process-level catalog/supervisor.
+    Daemon,
+    /// Address Space mechanics, Station, observations, or Space lifecycle.
+    Space {
+        #[serde(flatten)]
+        address: OrbitAddress,
+    },
+    /// Address one World hosted by one Space.
+    World {
+        #[serde(flatten)]
+        address: OrbitAddress,
+        world: String,
+    },
+}
+
+/// The wire envelope a client sends: a [`Request`], an optional bridge
+/// [`ControlRoute`], and an optional **acting identity** selector.
+///
+/// `act_as` names a local identity (an agent profile name, actor id, or device
+/// id) the daemon holds a seed for. `None` is the primary human identity. Both
+/// modifiers are skipped when absent, so a legacy request serializes to exactly
+/// the bare `{"cmd":…}` shape.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClientRequest {
+    /// The bridge path this request is allowed to traverse.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route: Option<ControlRoute>,
     /// The local identity to sign+attribute this request as. `None` = the
     /// daemon's primary (human) identity, exactly as before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -842,13 +873,27 @@ impl ClientRequest {
     /// A plain request as the primary identity (the pre-B behavior).
     pub fn plain(request: Request) -> Self {
         Self {
+            route: None,
             act_as: None,
             request,
         }
     }
     /// A request acting as a named local identity.
     pub fn acting_as(request: Request, act_as: Option<String>) -> Self {
-        Self { act_as, request }
+        Self {
+            route: None,
+            act_as,
+            request,
+        }
+    }
+
+    /// A request with an explicit bridge path.
+    pub fn routed(request: Request, route: ControlRoute, act_as: Option<String>) -> Self {
+        Self {
+            route: Some(route),
+            act_as,
+            request,
+        }
     }
 }
 
@@ -859,7 +904,7 @@ fn default_true() -> bool {
 /// The terminal owner of a control request — the single orbital plane that
 /// serves it (plan 01, "External architecture"):
 ///
-/// - **Session** — product intent/query through `IssueRouter` -> Session;
+/// - **World** — product intent/query through a WorldBridge -> Session;
 /// - **Mechanics** — membership/admission/ceremony/custody/device work through
 ///   the active Orbit/Station's mechanics;
 /// - **Station** — connect/neighbor/Contact operations;
@@ -868,7 +913,7 @@ fn default_true() -> bool {
 ///   node-local configuration adapters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RequestOwner {
-    Session,
+    World,
     Mechanics,
     Station,
     Observation,
@@ -879,7 +924,7 @@ impl RequestOwner {
     /// The stable lowercase label (the generated routing table's column).
     pub fn label(&self) -> &'static str {
         match self {
-            RequestOwner::Session => "session",
+            RequestOwner::World => "world",
             RequestOwner::Mechanics => "mechanics",
             RequestOwner::Station => "station",
             RequestOwner::Observation => "observation",
@@ -896,7 +941,7 @@ impl RequestOwner {
 pub fn classify(req: &Request) -> RequestOwner {
     use RequestOwner::*;
     match req {
-        // ---- Session: product intents, queries, projections ----
+        // ---- World: product intents, queries, projections ----
         Request::IssueNew { .. }
         | Request::IssueEdit { .. }
         | Request::IssueMove { .. }
@@ -955,7 +1000,7 @@ pub fn classify(req: &Request) -> RequestOwner {
         | Request::RoleResolve { .. }
         | Request::WorkflowShow { .. }
         | Request::WorkflowValidate { .. }
-        | Request::WorkflowSet { .. } => Session,
+        | Request::WorkflowSet { .. } => World,
 
         // ---- Mechanics: membership, admission, ceremonies, custody, devices ----
         Request::MemberAdd { .. }
@@ -1779,9 +1824,28 @@ pub async fn request(home: &Path, req: &Request) -> Result<Response> {
 /// Send one request acting as a named local identity (`act_as`) — the
 /// multi-tenant path. `None` is identical to [`request`].
 pub async fn request_as(home: &Path, req: &Request, act_as: Option<&str>) -> Result<Response> {
+    request_as_routed(home, req, None, act_as).await
+}
+
+/// Send a request through an explicit bridge path.
+pub async fn request_routed(home: &Path, req: &Request, route: ControlRoute) -> Result<Response> {
+    request_as_routed(home, req, Some(route), None).await
+}
+
+/// Send a request with both an explicit bridge path and acting identity.
+pub async fn request_as_routed(
+    home: &Path,
+    req: &Request,
+    route: Option<ControlRoute>,
+    act_as: Option<&str>,
+) -> Result<Response> {
     let name = control_name(home)?;
     let stream = Stream::connect(name).await.context("connect to daemon")?;
-    let env = ClientRequest::acting_as(req.clone(), act_as.map(str::to_string));
+    let env = ClientRequest {
+        route,
+        act_as: act_as.map(str::to_string),
+        request: req.clone(),
+    };
     exchange(stream, &env).await
 }
 
@@ -1841,10 +1905,23 @@ impl Subscription {
 
 /// Open a streaming [`Request::Subscribe`] connection.
 pub async fn subscribe(home: &Path, since: u64) -> Result<Subscription> {
+    subscribe_routed(home, since, None).await
+}
+
+/// Open a subscription through an explicit Space route.
+pub async fn subscribe_routed(
+    home: &Path,
+    since: u64,
+    route: Option<ControlRoute>,
+) -> Result<Subscription> {
     let name = control_name(home)?;
     let mut stream = Stream::connect(name).await.context("connect to daemon")?;
-    let mut line =
-        serde_json::to_string(&Request::Subscribe { since }).context("encode subscribe")?;
+    let envelope = ClientRequest {
+        route,
+        act_as: None,
+        request: Request::Subscribe { since },
+    };
+    let mut line = serde_json::to_string(&envelope).context("encode subscribe")?;
     line.push('\n');
     stream
         .write_all(line.as_bytes())
@@ -1862,9 +1939,8 @@ mod tests {
 
     #[test]
     fn client_request_envelope_is_wire_backward_compatible() {
-        // No selector → serializes to EXACTLY the bare request an older client
-        // sends (the flatten + skip_serializing_if contract), so a pre-B daemon
-        // still decodes it and a bare request still decodes as `act_as: None`.
+        // No route or selector serializes to EXACTLY the bare request an older
+        // client sends (the flatten + skip_serializing_if contract).
         let bare = Request::Inbox { clear: true };
         let env = ClientRequest::plain(bare.clone());
         let env_json = serde_json::to_value(&env).unwrap();
@@ -1875,14 +1951,15 @@ mod tests {
         );
         // A bare request decodes as an envelope with no selector.
         let decoded: ClientRequest = serde_json::from_value(bare_json.clone()).unwrap();
+        assert!(decoded.route.is_none());
         assert!(decoded.act_as.is_none());
         assert_eq!(serde_json::to_value(&decoded.request).unwrap(), bare_json);
     }
 
     #[test]
-    fn client_request_flatten_round_trips_with_selector_and_scalars() {
-        // The flatten gotcha: a selector alongside a Request carrying scalar
-        // fields (bool + Option<u64>) must survive a JSON round trip. Pin it.
+    fn client_request_flatten_round_trips_with_route_selector_and_scalars() {
+        // The flatten gotcha: a route and selector alongside a Request carrying
+        // scalar fields must survive a JSON round trip.
         for req in [
             Request::Invite {
                 role: Some("contributor".into()),
@@ -1903,13 +1980,33 @@ mod tests {
                 estimate: Some(3),
             },
         ] {
-            let env = ClientRequest::acting_as(req.clone(), Some("agent-x".into()));
+            let route = ControlRoute::World {
+                address: OrbitAddress::for_store(
+                    Path::new("/tmp/test-orbit"),
+                    crate::ids::SpaceId::from_digest([4; 16]),
+                ),
+                world: "com.lait.issues".into(),
+            };
+            let env = ClientRequest::routed(req.clone(), route.clone(), Some("agent-x".into()));
             let json = serde_json::to_string(&env).unwrap();
+            assert!(
+                json.contains("\"scope\":\"world\""),
+                "route present: {json}"
+            );
+            assert!(
+                json.contains("\"orbit\":\"orb_"),
+                "local Orbit address present: {json}"
+            );
             assert!(
                 json.contains("\"act_as\":\"agent-x\""),
                 "selector present: {json}"
             );
+            assert!(
+                !json.contains("allowed_orbits") && !json.contains("default_orbit"),
+                "trusted ClientScope must not become a wire claim: {json}"
+            );
             let back: ClientRequest = serde_json::from_str(&json).unwrap();
+            assert_eq!(back.route, Some(route));
             assert_eq!(back.act_as.as_deref(), Some("agent-x"));
             assert_eq!(
                 serde_json::to_value(&back.request).unwrap(),

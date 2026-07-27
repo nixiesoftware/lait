@@ -1,12 +1,11 @@
-//! C5 step 5 — the orbital daemon serves the product control surface over the
-//! real IPC control socket, through the orbital Runtime.
+//! The process-backed SpaceBridge serves the product control surface over the
+//! real IPC control socket through the orbital Runtime.
 //!
 //! Formation happens via `OrbitalMechanics::form` (the `lait init` heir); the
-//! orbital daemon then serves `control::Request`/`Response` exactly as the CLI/
+//! SpaceBridge then serves `control::Request`/`Response` exactly as the CLI/
 //! serve/MCP clients speak it. This drives the issue family end to end
 //! (project/new/view/list/board/comment) plus status and invite over the wire,
-//! with an in-memory transport (no network sockets) — proving the daemon path
-//! works without touching the legacy node.
+//! with an in-memory transport (no network sockets).
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -17,7 +16,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use lait::control::{request, Filter, Request, Response};
 use lait::net::Network;
-use lait::orbital::run_orbital_daemon;
+use lait::orbital::run_space_bridge;
 use lait::transport::mem::MemNet;
 use lait::transport::{Alpn, Transport, TransportFactory};
 
@@ -68,7 +67,7 @@ fn poll_until<T>(timeout: Duration, mut check: impl FnMut() -> Option<T>) -> Opt
 }
 
 #[test]
-fn the_orbital_daemon_serves_the_issue_surface_over_the_control_socket() {
+fn the_space_bridge_serves_the_issue_surface_over_the_control_socket() {
     // The daemon runs on a dedicated OS thread with its own runtime (it holds a
     // blocking control accept loop); the test drives it with a separate client
     // runtime, exactly as the real CLI/daemon split works.
@@ -79,7 +78,7 @@ fn the_orbital_daemon_serves_the_issue_surface_over_the_control_socket() {
     // daemon reads, so the daemon and formation share one device seed.
     std::fs::create_dir_all(&home).unwrap();
     write_identity(&home, &FOUNDER_SEED);
-    lait::orbital::form_space(&home, &FOUNDER_SEED, "Orbital Daemon Space").unwrap();
+    lait::orbital::form_space(&home, &FOUNDER_SEED, "Space Bridge Space").unwrap();
 
     // Run the daemon on its own thread.
     let daemon_home = home.clone();
@@ -87,7 +86,7 @@ fn the_orbital_daemon_serves_the_issue_surface_over_the_control_socket() {
     let handle = std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async move {
-            if let Err(e) = run_orbital_daemon(daemon_home, &MemFactory(daemon_net)).await {
+            if let Err(e) = run_space_bridge(daemon_home, &MemFactory(daemon_net)).await {
                 eprintln!("DAEMON ERR: {e:#}");
             }
         });
@@ -99,7 +98,7 @@ fn the_orbital_daemon_serves_the_issue_surface_over_the_control_socket() {
     let online = poll_until(Duration::from_secs(20), || {
         matches!(req(&client_rt, &home, Request::Status), Response::Status(_)).then_some(())
     });
-    assert!(online.is_some(), "the orbital daemon never answered Status");
+    assert!(online.is_some(), "the SpaceBridge never answered Status");
 
     // Status reports the founder as a member of the formed Space.
     let status = req(&client_rt, &home, Request::Status);
@@ -137,7 +136,7 @@ fn the_orbital_daemon_serves_the_issue_surface_over_the_control_socket() {
             assignees: vec![],
             priority: Some("high".into()),
             labels: vec![],
-            body: Some("through the orbital daemon".into()),
+            body: Some("through the space bridge".into()),
             due: None,
             estimate: None,
         },
@@ -159,7 +158,7 @@ fn the_orbital_daemon_serves_the_issue_surface_over_the_control_socket() {
         panic!("expected Issue, got {resp:?}");
     };
     assert_eq!(view.title, "Served over the socket");
-    assert_eq!(view.description, "through the orbital daemon");
+    assert_eq!(view.description, "through the space bridge");
     assert_eq!(view.priority, lait::dto::Priority::High);
 
     // Comment routes too.
@@ -302,16 +301,16 @@ fn the_orbital_daemon_serves_the_issue_surface_over_the_control_socket() {
         "{resp:?}"
     );
 
-    // Stop the daemon.
+    // Stop the process-backed bridge.
     let _ = req(&client_rt, &home, Request::Stop);
     let _ = handle.join();
     let _ = std::fs::remove_dir_all(&home);
 }
 
-/// Write the orbital identity seed where the daemon's `load_or_create_identity`
+/// Write the orbital identity seed where the bridge runner's `load_or_create_identity`
 /// expects it (the same file the real `lait init` provisions).
 fn write_identity(home: &Path, seed: &[u8; 32]) {
-    // The daemon reads config::identity_dir(); a $LAIT_HOME-scoped run collapses
+    // The runner reads config::identity_dir(); a $LAIT_HOME-scoped run collapses
     // it onto `home`, so the seed file lives at `home/secret.key`.
     std::env::set_var("LAIT_HOME", home);
     std::fs::write(

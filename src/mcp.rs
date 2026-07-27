@@ -21,8 +21,9 @@ use rmcp::{
 use serde::Deserialize;
 
 use crate::{
-    cli::client_as,
+    cli::{client_as_scoped, scope_for_home},
     control::{BoardPos, ErrorKind, Filter, Request, Response},
+    daemon::ClientScope,
 };
 
 /// The replica command tags (`Request` serde `cmd` values) an agent must be able
@@ -414,6 +415,9 @@ pub struct ConnectArgs {
 #[derive(Clone)]
 pub struct LaitMcp {
     home: PathBuf,
+    /// Capability scope fixed when this MCP server is constructed. It does not
+    /// widen merely because the user-level daemon knows other local Orbits.
+    scope: ClientScope,
     /// The local agent identity this server acts as (from `$LAIT_AGENT`), so
     /// every tool call is signed and attributed to the *agent*, not the human
     /// whose home hosts the daemon (Architecture B). `None` = the primary
@@ -449,8 +453,10 @@ impl LaitMcp {
         // acts as, so its work is attributed to the agent (Architecture B). Unset
         // → the primary identity (pre-B behavior).
         let act_as = std::env::var("LAIT_AGENT").ok().filter(|s| !s.is_empty());
+        let scope = scope_for_home(&home);
         Self {
             home,
+            scope,
             act_as,
             tool_router: Self::tool_router(),
         }
@@ -468,7 +474,7 @@ impl LaitMcp {
     /// message already names the next step; MCP just preserves the typing so the
     /// agent isn't told "internal error" for something it can act on.
     async fn run(&self, req: Request) -> Result<CallToolResult, McpError> {
-        match client_as(&self.home, req, self.act_as.as_deref()).await {
+        match client_as_scoped(&self.home, req, &self.scope, self.act_as.as_deref()).await {
             Ok(Response::Error {
                 message,
                 error_kind,
@@ -1114,4 +1120,24 @@ pub async fn run_mcp(home: &Path) -> Result<()> {
     let service = LaitMcp::new(home.to_path_buf()).serve(stdio()).await?;
     service.waiting().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod scope_tests {
+    use super::*;
+    use crate::daemon::OrbitAddress;
+    use crate::ids::SpaceId;
+
+    #[test]
+    fn an_mcp_server_is_pinned_to_the_home_it_was_constructed_for() {
+        let home = PathBuf::from("/tmp/lait-mcp-a");
+        let sibling = PathBuf::from("/tmp/lait-mcp-b");
+        let space = SpaceId::from_digest([9; 16]);
+        let mcp = LaitMcp::new(home.clone());
+        let own = OrbitAddress::for_store(&home, space.clone());
+        let other = OrbitAddress::for_store(&sibling, space);
+
+        assert!(mcp.scope.authorize(&own).is_ok());
+        assert!(mcp.scope.authorize(&other).is_err());
+    }
 }

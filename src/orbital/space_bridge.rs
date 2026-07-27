@@ -1,14 +1,14 @@
-//! The orbital daemon (C5 step 5) — the product's control surface served over
-//! the orbital `Runtime`, replacing the legacy `Replica`/sync/gossip node.
+//! The Space bridge — the product/control entrance to one active Space.
 //!
 //! It composes [`OrbitalMechanics`] (authority/keys/membership over signed
-//! material), an issues [`Runtime`] hosting [`IssuesWorld`], and a [`Station`]
-//! with the comms Contact plane, then serves the **same** newline-delimited
-//! `control::Request`/`Response` IPC the CLI/serve/MCP speak — so those clients
-//! are unchanged. Application requests route through [`IssueRouter`] Sessions;
-//! peer exchange is Contact/Convergence over `comms`; invitation is Coordinates
-//! v1; `Subscribe` streams the Station's `ObservationStream` as `Doorbell`
-//! frames.
+//! material), a [`Runtime`] hosting the build's registered Worlds, and a
+//! [`Station`] with the comms Contact plane. [`WorldBridgeRegistry`] owns one
+//! bridge per hosted World. The current process adapter serves the **same** newline-delimited
+//! `control::Request`/`Response` IPC the CLI/serve/MCP speak, so those clients
+//! are unchanged. The current application requests route through
+//! [`IssueRouter`]; peer exchange is Contact/Convergence over `comms`;
+//! invitation is Coordinates v1; `Subscribe` streams the Station's
+//! `ObservationStream` as `Doorbell` frames.
 //!
 //! Every control request has an explicit terminal owner (see
 //! `tests/control_classification.rs`): product intents/queries route to the
@@ -29,20 +29,24 @@ use interprocess::local_socket::{
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 use mechanics::ids::{SpaceId, StationId};
-use replica::AuthorityIncorporator;
+use replica::{AuthorityIncorporator, WorldId};
 use runtime::{
     ActivationOptions, CommsOptions, ContactMechanics, ContactOptions, GossipOptions,
-    LocalIdentity, Runtime, RuntimeBuilder, Session, Station,
+    LocalIdentity, Runtime, Session, Station,
 };
 
 use crate::config::{acquire_daemon_lock, load_or_create_identity};
 use crate::control::{
-    control_name, CatalogScope, DirtyProject, Doorbell, ProjectRef, Request, Response, StatusInfo,
+    control_name, CatalogScope, ControlRoute, DirtyProject, Doorbell, ProjectRef, Request,
+    RequestOwner, Response, StatusInfo,
 };
+use crate::daemon::OrbitAddress;
 use crate::ids::SystemUlidSource;
-use crate::orbital::{orbital_store_root, unsupported_store_at, OrbitalMechanics};
+use crate::orbital::{
+    orbital_store_root, unsupported_store_at, OrbitalMechanics, WorldBridgeRegistry,
+};
 use crate::transport::{Transport, TransportFactory};
-use crate::world::{IssueRouter, IssuesWorld, RouterFacts};
+use crate::world::{IssueRouter, RouterFacts};
 
 /// Discover the single Space id under a home's orbital store root.
 fn discover_space(home: &Path) -> Result<SpaceId> {
@@ -65,8 +69,14 @@ fn discover_space(home: &Path) -> Result<SpaceId> {
     found.ok_or_else(|| anyhow!("no Space under {} — run `lait init`", root.display()))
 }
 
-/// The orbital daemon: the composed stack plus a lazily-docked routing Session.
-pub struct OrbitalDaemon {
+/// The sole product-side entrance to one active Space.
+///
+/// This is a logical boundary, not an OS-process claim. The current
+/// [`run_space_bridge`] adapter gives it a per-home control listener; a general
+/// Lait daemon can instead hold several instances and route by Space id.
+pub struct SpaceBridge {
+    /// The durable local Orbit occupied by this bridge's Station.
+    address: OrbitAddress,
     mechanics: OrbitalMechanics,
     station: Station,
     /// The canonical [`ApproachRoute`]s this Station advertises, resolved from
@@ -79,17 +89,12 @@ pub struct OrbitalDaemon {
     /// the manual `connect` nudge teach routes from a pasted Coordinates link
     /// before dialing.
     transport: Arc<dyn Transport>,
-    /// The routing Session. `None` until this device holds standing — an
-    /// un-admitted joiner serves control (Status/Connect/Members) and drives
-    /// Contact before it can dock, then docks lazily once admission lands.
-    session: Mutex<Option<Session>>,
-    /// Docked Sessions for **sponsored local agent** identities (Architecture
-    /// B): one store, N signing clients. Keyed by the agent's device; docked
-    /// lazily on first use once the agent holds standing, then reused. Each
-    /// Session signs+attributes as *that* agent, sharing the one Replica with
-    /// the human's `session` above. This is how MCP acts as its own identity
-    /// without a second daemon or a second store copy.
-    agent_sessions: Mutex<std::collections::HashMap<crate::ids::DeviceId, Session>>,
+    /// Every hosted World plus its lazily docked primary/agent Sessions.
+    ///
+    /// An un-admitted joiner still serves control and drives Contact before it
+    /// can dock. Once standing lands, each World docks independently under the
+    /// correct local identity.
+    worlds: WorldBridgeRegistry,
     identity: LocalIdentity,
     device_seed: [u8; 32],
     home: PathBuf,
@@ -138,7 +143,7 @@ pub struct OrbitalDaemon {
     last_activity: Mutex<std::time::Instant>,
 }
 
-impl OrbitalDaemon {
+impl SpaceBridge {
     /// Open and activate the orbital stack for a home, then dock the routing
     /// Session. Refuses a pre-orbital home.
     pub async fn open(
@@ -152,8 +157,7 @@ impl OrbitalDaemon {
         let space = discover_space(home)?;
         let mechanics = OrbitalMechanics::open(&orbital_store_root(home), &space, &device_seed)?;
 
-        let registry = RuntimeBuilder::new()
-            .register(IssuesWorld::registration(), Arc::new(IssuesWorld::new()))
+        let (registry, worlds) = crate::orbital::issues_worlds()
             .build()
             .map_err(|e| anyhow!("world registry: {e:?}"))?;
         let rt = Runtime::open(
@@ -263,9 +267,7 @@ impl OrbitalDaemon {
         // Dock now if we already hold standing (founder / re-opened member);
         // otherwise defer until admission lands (an un-admitted joiner cannot
         // dock, but must still serve control to drive its own Contact).
-        let session = station
-            .dock(&crate::world::contract::world_id(), &identity)
-            .ok();
+        let _ = worlds.ensure_primary(&station, &crate::world::contract::world_id(), &identity);
 
         // The implementation self-check. Receipts pin whichever implementation
         // id is ACTIVE in the ledger — not this build's — so a build whose
@@ -276,32 +278,32 @@ impl OrbitalDaemon {
             use runtime::AuthorityView;
             let device = crate::crypto::device_from_seed(&device_seed);
             if let Some(principal) = mechanics.resolve(&device) {
-                let ours = crate::orbital::issues_implementation_id();
-                let active = mechanics.active_implementation(
-                    &crate::world::contract::world_id(),
-                    &principal.authority_frontier,
-                );
-                if active != Some(ours) {
-                    tracing::warn!(
-                        "this build's IssuesWorld implementation ({}) is not the space's \
-                         active one ({}) — writes will attest the active implementation; \
-                         an admin should run `lait world-upgrade`",
-                        data_encoding::HEXLOWER.encode(&ours[..8]),
-                        active
-                            .map(|a| data_encoding::HEXLOWER.encode(&a[..8]))
-                            .unwrap_or_else(|| "none".into()),
-                    );
+                for (world, ours) in worlds.reviewed_implementations() {
+                    let active =
+                        mechanics.active_implementation(world, &principal.authority_frontier);
+                    if active != Some(*ours) {
+                        tracing::warn!(
+                            "this build's {} World implementation ({}) is not the space's \
+                             active one ({}) — writes will attest the active implementation; \
+                             an admin should activate this build's reviewed implementation",
+                            world,
+                            data_encoding::HEXLOWER.encode(&ours[..8]),
+                            active
+                                .map(|a| data_encoding::HEXLOWER.encode(&a[..8]))
+                                .unwrap_or_else(|| "none".into()),
+                        );
+                    }
                 }
             }
         }
 
         Ok(Self {
+            address: OrbitAddress::for_store(home, space),
             mechanics,
             station,
             advertised_routes,
             transport: retained_transport,
-            session: Mutex::new(session),
-            agent_sessions: Mutex::new(std::collections::HashMap::new()),
+            worlds,
             identity,
             device_seed,
             home: home.to_path_buf(),
@@ -316,22 +318,18 @@ impl OrbitalDaemon {
         })
     }
 
-    /// Ensure a routing Session exists, docking lazily once standing is held.
-    /// Returns whether a Session is available after the attempt.
-    fn ensure_session(&self) -> bool {
-        let mut guard = self.session.lock().expect("session lock");
-        if guard.is_none() && self.mechanics.am_i_member() {
-            *guard = self
-                .station
-                .dock(&crate::world::contract::world_id(), &self.identity)
-                .ok();
-        }
-        guard.is_some()
+    /// Ensure the primary identity has a Session for `world`, docking lazily
+    /// once standing is held.
+    fn ensure_world_session(&self, world: &WorldId) -> bool {
+        self.worlds
+            .ensure_primary(&self.station, world, &self.identity)
+            .is_ok()
     }
 
     /// Route an issue-family request through the docked Session, or refuse with a
     /// typed "not admitted yet" when this device holds no standing.
     fn route_issue(&self, req: Request, act_as: Option<&str>) -> Response {
+        let world = crate::world::contract::world_id();
         // Resolve which local identity signs this request: the daemon's primary
         // (human) when no selector, else a sponsored local agent provisioned
         // under this home. One store, N signing identities (Architecture B).
@@ -364,40 +362,34 @@ impl OrbitalDaemon {
             }
         }
 
-        // The primary (human) uses the always-docked `session`; a sponsored
-        // agent docks lazily into `agent_sessions`, sharing the one Replica.
+        // The primary (human) uses the World-keyed primary Session; a sponsored
+        // agent docks lazily under the same World, sharing the one Replica.
         if act_as.is_none() {
-            if !self.ensure_session() {
+            if !self.ensure_world_session(&world) {
                 return Response::err(
                     "not admitted to this space yet — run `lait connect` to reach an \
                      admin and complete admission before filing issues",
                 );
             }
-            let guard = self.session.lock().expect("session lock");
-            let session = guard.as_ref().expect("session present after ensure");
-            self.route_with(session, &self.identity, &seed, req)
+            self.worlds
+                .with_primary(&world, |session| {
+                    self.route_with(session, &self.identity, &seed, req)
+                })
+                .expect("World Session present after ensure")
         } else {
             let identity = Runtime::identity_from_seed(&seed);
-            let mut sessions = self.agent_sessions.lock().expect("agent sessions lock");
-            if !sessions.contains_key(&device) {
-                match self
-                    .station
-                    .dock(&crate::world::contract::world_id(), &identity)
-                {
-                    Ok(s) => {
-                        sessions.insert(device.clone(), s);
-                    }
-                    Err(_) => {
-                        return Response::denied(
-                            "this agent identity holds no standing in the space yet — a \
-                             human member must sponsor it (`lait members agent <key>`) \
-                             before it can author. Nothing was changed.",
-                        )
-                    }
-                }
+            match self
+                .worlds
+                .with_agent(&self.station, &world, &identity, |session| {
+                    self.route_with(session, &identity, &seed, req)
+                }) {
+                Ok(response) => response,
+                Err(_) => Response::denied(
+                    "this agent identity holds no standing in the space yet — a \
+                     human member must sponsor it (`lait members agent <key>`) \
+                     before it can author. Nothing was changed.",
+                ),
             }
-            let session = sessions.get(&device).expect("just docked");
-            self.route_with(session, &identity, &seed, req)
         }
     }
 
@@ -468,15 +460,23 @@ impl OrbitalDaemon {
     /// PRODUCTION classifier returns. Tests and the generated routing table
     /// consume the same `control::classify`; there is no second table and no
     /// wildcard terminal owner.
-    fn dispatch(&self, req: Request, act_as: Option<&str>) -> Response {
-        use crate::control::{classify, RequestOwner};
-        match classify(&req) {
+    fn dispatch(
+        &self,
+        route: Option<&ControlRoute>,
+        req: Request,
+        act_as: Option<&str>,
+    ) -> Response {
+        let owner = crate::control::classify(&req);
+        if let Err(response) = self.validate_route(route, owner) {
+            return response;
+        }
+        match owner {
             // The acting-identity selector matters where the answer is
             // identity-relative: issue authoring (who signs) and whoami (who am
             // I). Membership/station/lifecycle ops stay the daemon's — an agent
             // holds no membership authority, so routing them "as the agent"
             // would only ever be denied.
-            RequestOwner::Session => self.route_issue(req, act_as),
+            RequestOwner::World => self.route_issue(req, act_as),
             // Authority never passes through the Session, so a local membership,
             // role, device or key change publishes nothing on its own — the
             // remote half of this plane is published by the Contact driver.
@@ -496,15 +496,89 @@ impl OrbitalDaemon {
         }
     }
 
+    /// Validate the explicit broker path before any terminal owner sees the
+    /// request. A missing route is the legacy per-home protocol and remains
+    /// accepted while clients migrate to the general Lait daemon.
+    fn validate_route(
+        &self,
+        route: Option<&ControlRoute>,
+        owner: RequestOwner,
+    ) -> std::result::Result<(), Response> {
+        let Some(route) = route else {
+            return Ok(());
+        };
+        let actual_space = self.station.space_id();
+        let wrong_space = |space: &mechanics::ids::SpaceId| {
+            Response::err(format!(
+                "request targets Space {space}, but this bridge owns {actual_space}"
+            ))
+        };
+        let wrong_orbit = |address: &OrbitAddress| {
+            Response::err(format!(
+                "request targets local Orbit {}, but this bridge occupies {}",
+                address.orbit, self.address.orbit
+            ))
+        };
+        match route {
+            ControlRoute::Daemon => {
+                Err(Response::err("daemon-scoped request reached a SpaceBridge"))
+            }
+            ControlRoute::Space { address } => {
+                if address.orbit != self.address.orbit {
+                    return Err(wrong_orbit(address));
+                }
+                if &address.space != actual_space {
+                    return Err(wrong_space(&address.space));
+                }
+                if owner == RequestOwner::World {
+                    return Err(Response::err("World-owned request requires a world route"));
+                }
+                Ok(())
+            }
+            ControlRoute::World { address, world } => {
+                if address.orbit != self.address.orbit {
+                    return Err(wrong_orbit(address));
+                }
+                if &address.space != actual_space {
+                    return Err(wrong_space(&address.space));
+                }
+                if owner != RequestOwner::World {
+                    return Err(Response::err(
+                        "Space-owned request cannot be sent through a WorldBridge",
+                    ));
+                }
+                let Some(world_id) = WorldId::parse(world) else {
+                    return Err(Response::err(format!("invalid World id '{world}'")));
+                };
+                if !self.worlds.contains(&world_id) {
+                    return Err(Response::err(format!(
+                        "World '{world}' is not enabled in Space {actual_space}"
+                    )));
+                }
+                // The public Request enum is still the issue tracker's adapter.
+                // A second application will add its own typed World call; until
+                // then, do not let an issue verb borrow another World's Session.
+                if world_id != crate::world::contract::world_id() {
+                    return Err(Response::err(format!(
+                        "request belongs to {}, not World '{world}'",
+                        crate::world::contract::world_id()
+                    )));
+                }
+                Ok(())
+            }
+        }
+    }
+
     /// Ring the authority plane, if there is a docked Session to ring through.
     /// Before admission there is no Session and nothing is subscribed anyway.
     fn publish_authority_advanced(&self) {
-        if !self.ensure_session() {
+        let world = crate::world::contract::world_id();
+        if !self.ensure_world_session(&world) {
             return;
         }
-        if let Some(session) = self.session.lock().expect("session lock").as_ref() {
+        self.worlds.with_any_primary(|session| {
             session.publish_authority_advanced();
-        }
+        });
     }
 
     /// Membership, admission, device, key, ceremony and custody requests —
@@ -894,7 +968,7 @@ impl OrbitalDaemon {
             Request::Stop => Response::Ok {
                 message: Some("stopping".into()),
             },
-            // The orbital daemon has no legacy in-memory event ring — live
+            // The SpaceBridge has no legacy in-memory event ring — live
             // clients observe the Station's doorbell stream (`Subscribe`)
             // instead — so the polling log is empty by construction.
             Request::Log { since } => Response::Events {
@@ -916,47 +990,51 @@ impl OrbitalDaemon {
     /// unavailable projection into false zeros.
     fn counts(&self) -> Option<(usize, usize, String, String)> {
         use crate::world::contract::{self, IssueQuery};
-        if !self.ensure_session() {
+        let world = contract::world_id();
+        if !self.ensure_world_session(&world) {
             return None;
         }
-        let guard = self.session.lock().expect("session lock");
-        let session = guard.as_ref()?;
-        let query = |q: IssueQuery| -> Option<serde_json::Value> {
-            let bytes = session
-                .query(runtime::WorldQuery {
-                    schema: contract::issue_schema(),
-                    schema_version: contract::ISSUE_SCHEMA_VERSION,
-                    payload: q.to_json(),
+        self.worlds
+            .with_primary(&world, |session| {
+                let query = |q: IssueQuery| -> Option<serde_json::Value> {
+                    let bytes = session
+                        .query(runtime::WorldQuery {
+                            schema: contract::issue_schema(),
+                            schema_version: contract::ISSUE_SCHEMA_VERSION,
+                            payload: q.to_json(),
+                        })
+                        .ok()?
+                        .bytes;
+                    serde_json::from_slice(&bytes).ok()
+                };
+                let snapshot = query(IssueQuery::Snapshot)?;
+                let catalog = snapshot.get("catalog")?;
+                let projects = catalog.get("projects")?.as_object().map(|m| m.len())?;
+                // The catalog `name` register is the space's mutable display
+                // label (`SpaceRename` writes it); surface it so the rename is
+                // visible.
+                let name = catalog
+                    .get("name")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let description = catalog
+                    .get("description")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let issues = query(IssueQuery::List {
+                    project: None,
+                    label: None,
+                    status: None,
+                    mine: None,
+                    all: true,
+                    me: None,
                 })
-                .ok()?
-                .bytes;
-            serde_json::from_slice(&bytes).ok()
-        };
-        let snapshot = query(IssueQuery::Snapshot)?;
-        let catalog = snapshot.get("catalog")?;
-        let projects = catalog.get("projects")?.as_object().map(|m| m.len())?;
-        // The catalog `name` register is the space's mutable display label
-        // (`SpaceRename` writes it); surface it so the rename is visible.
-        let name = catalog
-            .get("name")
-            .and_then(|n| n.as_str())
-            .unwrap_or("")
-            .to_string();
-        let description = catalog
-            .get("description")
-            .and_then(|n| n.as_str())
-            .unwrap_or("")
-            .to_string();
-        let issues = query(IssueQuery::List {
-            project: None,
-            label: None,
-            status: None,
-            mine: None,
-            all: true,
-            me: None,
-        })
-        .and_then(|v| v.as_array().map(|a| a.len()))?;
-        Some((issues, projects, name, description))
+                .and_then(|v| v.as_array().map(|a| a.len()))?;
+                Some((issues, projects, name, description))
+            })
+            .flatten()
     }
 
     fn status(&self) -> Response {
@@ -1412,20 +1490,23 @@ impl OrbitalDaemon {
         &self,
         query: crate::world::contract::IssueQuery,
     ) -> Option<serde_json::Value> {
-        if !self.ensure_session() {
+        let world = crate::world::contract::world_id();
+        if !self.ensure_world_session(&world) {
             return None;
         }
-        let guard = self.session.lock().expect("session lock");
-        let session = guard.as_ref()?;
-        let bytes = session
-            .query(runtime::WorldQuery {
-                schema: crate::world::contract::issue_schema(),
-                schema_version: crate::world::contract::ISSUE_SCHEMA_VERSION,
-                payload: query.to_json(),
+        self.worlds
+            .with_primary(&world, |session| {
+                let bytes = session
+                    .query(runtime::WorldQuery {
+                        schema: crate::world::contract::issue_schema(),
+                        schema_version: crate::world::contract::ISSUE_SCHEMA_VERSION,
+                        payload: query.to_json(),
+                    })
+                    .ok()?
+                    .bytes;
+                serde_json::from_slice(&bytes).ok()
             })
-            .ok()?
-            .bytes;
-        serde_json::from_slice(&bytes).ok()
+            .flatten()
     }
 
     /// Expand a role's pinned definition (read from the Manifest-pinned
@@ -1606,7 +1687,7 @@ impl OrbitalDaemon {
             .create_tokio()
             .context("bind control channel")?;
         tracing::info!(
-            "orbital daemon online in space {}",
+            "space bridge online in space {}",
             self.station.space_id().as_str()
         );
         let idle_window = idle_window_from_env();
@@ -1622,7 +1703,7 @@ impl OrbitalDaemon {
                     // loudly instead.
                     if !self.store_dir().is_dir() {
                         tracing::error!(
-                            "orbital store at {} is gone — the daemon will not \
+                            "orbital store at {} is gone — the SpaceBridge will not \
                              outlive its store; stopping",
                             self.store_dir().display()
                         );
@@ -1630,7 +1711,7 @@ impl OrbitalDaemon {
                         break;
                     }
                     if self.should_idle_shutdown(idle_window) {
-                        tracing::info!("orbital daemon idle-shutdown after {idle_window:?}");
+                        tracing::info!("space bridge idle-shutdown after {idle_window:?}");
                         self.begin_stop();
                         break;
                     }
@@ -1647,9 +1728,25 @@ impl OrbitalDaemon {
                 }
             }
         }
-        // Cleanly stop the Station (releases the store lock, ends tasks).
-        let _ = self.station.frontier();
+        // Wake every subscription/pump before the process adapter tries to take
+        // exclusive ownership and return the Station to Orbit.
+        self.begin_stop();
         Ok(())
+    }
+
+    /// Consume the bridge and return its Station to a durable Orbit.
+    ///
+    /// World Sessions are dropped first so dormancy can reject all future
+    /// callbacks, drain Station tasks, and release the store lock last.
+    pub fn go_dormant(self) -> Result<()> {
+        let Self {
+            station, worlds, ..
+        } = self;
+        drop(worlds);
+        station
+            .go_dormant()
+            .map(|_| ())
+            .map_err(|e| anyhow!("SpaceBridge dormancy failed: {e:?}"))
     }
 
     /// This Space's on-disk store directory (the watchdog's liveness probe).
@@ -1683,7 +1780,7 @@ impl OrbitalDaemon {
         use std::sync::atomic::Ordering;
         self.active_conns.fetch_add(1, Ordering::SeqCst);
         // Decrement + stamp activity on every exit path (guard on drop).
-        struct ConnGuard<'a>(&'a OrbitalDaemon);
+        struct ConnGuard<'a>(&'a SpaceBridge);
         impl Drop for ConnGuard<'_> {
             fn drop(&mut self) {
                 self.0.active_conns.fetch_sub(1, Ordering::SeqCst);
@@ -1701,6 +1798,7 @@ impl OrbitalDaemon {
             return;
         }
         let crate::control::ClientRequest {
+            route,
             act_as,
             request: req,
         } = match serde_json::from_str::<crate::control::ClientRequest>(line.trim()) {
@@ -1710,6 +1808,14 @@ impl OrbitalDaemon {
                 return;
             }
         };
+        // Validate before handling either control-flow request. In particular,
+        // an invalidly routed Stop must not tear down this bridge, and a
+        // subscription must not bypass the same Space-boundary check applied to
+        // ordinary observation requests.
+        if let Err(response) = self.validate_route(route.as_ref(), crate::control::classify(&req)) {
+            let _ = write_line(write_half, &response).await;
+            return;
+        }
         if let Request::Subscribe { .. } = req {
             self.stream_subscribe(write_half).await;
             return;
@@ -1717,7 +1823,7 @@ impl OrbitalDaemon {
         // Stop is a real teardown request: answer, then signal the serve loop
         // to return (the caller decides whether to exit the process).
         let stop = matches!(req, Request::Stop);
-        let resp = self.dispatch(req, act_as.as_deref());
+        let resp = self.dispatch(route.as_ref(), req, act_as.as_deref());
         let _ = write_line(write_half, &resp).await;
         if stop {
             self.begin_stop();
@@ -1874,12 +1980,13 @@ impl OrbitalDaemon {
         if let Some(state) = self.ring_state() {
             *self.ring_planes.lock().expect("ring planes lock") = Some(state.planes);
         }
-        let mut stream = {
-            let guard = self.session.lock().expect("session lock");
-            match guard.as_ref() {
-                Some(session) => session.observe(None),
-                None => return,
-            }
+        let world = crate::world::contract::world_id();
+        let mut stream = match self
+            .worlds
+            .with_primary(&world, |session| session.observe(None))
+        {
+            Some(stream) => stream,
+            None => return,
         };
         // Drain the initial reset record: subscribers get their own reset when
         // they attach, so replaying this one would only duplicate it.
@@ -1956,7 +2063,8 @@ impl OrbitalDaemon {
     async fn stream_subscribe(self: &Arc<Self>, mut write_half: tokio::io::WriteHalf<LocalStream>) {
         // Without standing there is no Session to observe yet — emit the reset
         // and return; the client re-subscribes after admission.
-        if !self.ensure_session() {
+        let world = crate::world::contract::world_id();
+        if !self.ensure_world_session(&world) {
             let reset = Doorbell {
                 reset: true,
                 ..Default::default()
@@ -1971,12 +2079,12 @@ impl OrbitalDaemon {
         // Returns only once the pump is READY, so the reset below is never sent
         // against a stream that has not opened yet.
         self.ensure_doorbell_pump().await;
-        let epoch = {
-            let guard = self.session.lock().expect("session lock");
-            match guard.as_ref() {
-                Some(session) => session.epoch().as_u64(),
-                None => return,
-            }
+        let epoch = match self
+            .worlds
+            .with_primary(&world, |session| session.epoch().as_u64())
+        {
+            Some(epoch) => epoch,
+            None => return,
         };
         let reset = Doorbell {
             epoch,
@@ -2263,25 +2371,41 @@ fn write_alias(home: &Path, who: &str, name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Run the orbital daemon on `home` with the default transport, holding the
-/// daemon lock for its lifetime. Identity is the process-global one.
-pub async fn run_orbital_daemon(home: PathBuf, factory: &dyn TransportFactory) -> Result<()> {
+/// Run one process-backed SpaceBridge on `home`, holding the per-home lock for
+/// its lifetime. Identity is the process-global one.
+pub async fn run_space_bridge(home: PathBuf, factory: &dyn TransportFactory) -> Result<()> {
     let device_seed = load_or_create_identity(&crate::config::identity_dir()?)?;
-    run_orbital_daemon_with(home, device_seed, factory).await
+    run_space_bridge_with(home, device_seed, factory).await
 }
 
-/// The injectable orbital daemon: everything [`run_orbital_daemon`] does, but it
-/// takes an explicit device seed rather than reading the process-global identity
-/// — so several orbital daemons can run in one process, each its own device,
-/// sharing nothing but the runtime (the multi-node test contract).
-pub async fn run_orbital_daemon_with(
+/// The injectable process adapter: everything [`run_space_bridge`] does, but it
+/// takes an explicit device seed. Several bridges may run in one process; the
+/// process layout is deployment policy rather than part of Space semantics.
+pub async fn run_space_bridge_with(
     home: PathBuf,
     device_seed: [u8; 32],
     factory: &dyn TransportFactory,
 ) -> Result<()> {
     let _lock = acquire_daemon_lock(&home)?;
-    let daemon = Arc::new(OrbitalDaemon::open(&home, device_seed, factory).await?);
-    daemon.serve().await?;
+    let bridge = Arc::new(SpaceBridge::open(&home, device_seed, factory).await?);
+    let serve_result = bridge.clone().serve().await;
+    bridge.begin_stop();
+
+    // Connection and observation tasks retain Arc<SpaceBridge>. Give the stop
+    // broadcast a bounded window to release them before consuming the bridge.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while Arc::strong_count(&bridge) != 1 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .map_err(|_| anyhow!("SpaceBridge clients did not drain during shutdown"))?;
+    let bridge = Arc::try_unwrap(bridge)
+        .map_err(|_| anyhow!("SpaceBridge still shared after client drain"))?;
+    let dormancy_result = bridge.go_dormant();
+
+    serve_result?;
+    dormancy_result?;
     #[cfg(unix)]
     let _ = std::fs::remove_file(crate::config::socket_path(&home));
     Ok(())

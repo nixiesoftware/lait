@@ -44,7 +44,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use lait::control::{request, Filter, Request, Response};
 use lait::net::Network;
-use lait::orbital::run_orbital_daemon_with;
+use lait::orbital::run_space_bridge_with;
 use lait::transport::mem::MemNet;
 use lait::transport::{Alpn, Transport, TransportFactory};
 
@@ -120,8 +120,7 @@ fn spawn_daemon(home: &Path, seed: [u8; 32], net: &MemNet) -> std::thread::JoinH
     std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async move {
-            if let Err(e) =
-                run_orbital_daemon_with(daemon_home, seed, &MemFactory(daemon_net)).await
+            if let Err(e) = run_space_bridge_with(daemon_home, seed, &MemFactory(daemon_net)).await
             {
                 eprintln!("PERF DAEMON ERR: {e:#}");
             }

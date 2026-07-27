@@ -1,13 +1,13 @@
-//! Restart durability over the **orbital daemon** (in-process, in-memory
-//! transport): a joiner that is admitted and converged, then has its daemon
+//! Restart durability over a process-backed **SpaceBridge** (in-process, in-memory
+//! transport): a joiner that is admitted and converged, then has its bridge
 //! killed and restarted on the SAME home, must come back holding its persisted
 //! membership and reconverge with a peer that files new content while it was
 //! down.
 //!
 //! `orbital_two_node.rs` proves the cold form → invite → enter → admit →
 //! converge arc. This adds the restart in the middle: after admission, the
-//! joiner daemon is dropped, the founder files a new issue, and the joiner
-//! daemon is respawned on its persisted store. It must re-dock from persisted
+//! joiner bridge is dropped, the founder files a new issue, and the joiner
+//! bridge is respawned on its persisted store. It must re-dock from persisted
 //! membership and, once Contact is re-driven, converge to the post-restart
 //! issue — proving the orbital store survives a crash and rejoins.
 
@@ -20,7 +20,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use lait::control::{request, Filter, Request, Response};
 use lait::net::Network;
-use lait::orbital::run_orbital_daemon_with;
+use lait::orbital::run_space_bridge_with;
 use lait::transport::mem::MemNet;
 use lait::transport::{Alpn, Transport, TransportFactory};
 
@@ -75,7 +75,7 @@ fn spawn_daemon(home: PathBuf, seed: [u8; 32], net: MemNet) -> std::thread::Join
     std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async move {
-            if let Err(e) = run_orbital_daemon_with(home, seed, &MemFactory(net)).await {
+            if let Err(e) = run_space_bridge_with(home, seed, &MemFactory(net)).await {
                 eprintln!("DAEMON ERR: {e:#}");
             }
         });
@@ -88,7 +88,7 @@ fn wait_online(rt: &tokio::runtime::Runtime, home: &Path) {
     });
     assert!(
         online.is_some(),
-        "orbital daemon at {} never came online",
+        "SpaceBridge at {} never came online",
         home.display()
     );
 }
