@@ -1912,6 +1912,7 @@ impl SpaceBridge {
         }
         let crate::control::ClientRequest {
             route,
+            if_running: _,
             act_as,
             request: req,
         } = match serde_json::from_str::<crate::control::ClientRequest>(line.trim()) {

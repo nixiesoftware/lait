@@ -9,8 +9,10 @@ use std::time::Duration;
 
 use serde::Serialize;
 
-use crate::control::{self, ControlRoute, Request, Response};
-use crate::daemon::{LocalOrbitId, OrbitAddress, OrbitDirectory, StationIdentity};
+use crate::control::{ControlRoute, Request, Response};
+use crate::daemon::{
+    LaitDaemonClient, LocalOrbitId, OrbitAddress, OrbitDirectory, StationIdentity,
+};
 use crate::ids::SpaceId;
 use crate::spaces::{self, SpaceEntry, StorePresence};
 
@@ -36,7 +38,7 @@ pub struct SpaceRow {
 ///
 /// Listing must remain passive: opening the picker cannot wake every registered
 /// Orbit. The authoritative Space name is used when a live Station answers.
-async fn status(entry: &SpaceEntry) -> (&'static str, Option<String>) {
+async fn status(daemon: &LaitDaemonClient, entry: &SpaceEntry) -> (&'static str, Option<String>) {
     if spaces::presence(entry) == StorePresence::Missing {
         return ("missing", None);
     }
@@ -48,7 +50,7 @@ async fn status(entry: &SpaceEntry) -> (&'static str, Option<String>) {
     };
     let reply = tokio::time::timeout(
         Duration::from_millis(300),
-        control::request_routed(Path::new(&entry.path), &Request::Status, route),
+        daemon.request_if_running(route, &Request::Status),
     )
     .await;
     match reply {
@@ -62,11 +64,12 @@ async fn status(entry: &SpaceEntry) -> (&'static str, Option<String>) {
 }
 
 /// List visible Orbits newest-first, probing their status concurrently.
-pub async fn list(directory: &OrbitDirectory) -> Vec<SpaceRow> {
+pub async fn list(directory: &OrbitDirectory, daemon: &LaitDaemonClient) -> Vec<SpaceRow> {
     let mut probes = tokio::task::JoinSet::new();
     for binding in directory.bindings() {
+        let daemon = daemon.clone();
         probes.spawn(async move {
-            let (status, catalog_name) = status(&binding.entry).await;
+            let (status, catalog_name) = status(&daemon, &binding.entry).await;
             SpaceRow {
                 id: LocalOrbitId::for_store(Path::new(&binding.entry.path)),
                 space: binding.entry.space.clone(),

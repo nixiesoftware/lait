@@ -98,9 +98,10 @@ impl OrbitAddress {
 ///
 /// This is intentionally not serialized in `ClientRequest`: a caller cannot
 /// grant itself access by asserting a larger set. CLI/MCP construct a pinned
-/// scope from their resolved home. The web adapter constructs a broader scope
-/// only after applying its identity visibility policy. The future LaitDaemon
-/// will derive this from authenticated connection context.
+/// scope from their resolved home. The web adapter applies its broader identity
+/// visibility policy before constructing a catalog-resolved route. The
+/// LaitDaemon resolves every explicit address through its own OrbitDirectory
+/// and never accepts an allowed set as a wire claim.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientScope {
     default_orbit: Option<LocalOrbitId>,

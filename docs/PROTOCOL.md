@@ -202,7 +202,7 @@ authorization.
 CLI, web, and MCP clients speak one typed local protocol. A `ClientRequest` may
 carry an explicit bridge route:
 
-- `daemon` for the process-level catalog and supervisor;
+- `daemon` for the process-level catalog and daemon lifecycle;
 - `space { orbit, space }` for Mechanics, Station, observations, and lifecycle
   through one local Orbit;
 - `world { orbit, space, world }` for product mutations and queries.
@@ -210,16 +210,23 @@ carry an explicit bridge route:
 `orbit` is a full, stable local identifier derived from the store binding;
 `space` is repeated as an expectation. Distinct local Orbits in the same Space
 therefore remain independently addressable, and a stale or confused binding
-fails before dispatch. A trusted client adapter validates the complete route
-against its `ClientScope`, and the receiving bridge independently validates its
-own address. The target LaitDaemon moves the first check to the connection
-boundary. In both placements, the allowed set is never accepted as a claim in
-the request.
+fails before activation. A trusted client adapter validates the complete route
+against its `ClientScope`, the LaitDaemon resolves it through its own
+`OrbitDirectory`, and the receiving bridge independently validates its address.
+The allowed set is never accepted as a claim in the request.
 
-A missing route is the transitional per-home form: the socket identifies one
-Orbit and issue-family commands imply IssuesWorld. A version handshake precedes
-requests. The production request classifier assigns every request exactly one
-terminal owner; there is no wildcard product fallback.
+A missing route is accepted only by the historical per-home adapter: its socket
+identifies one Orbit and issue-family commands imply IssuesWorld. The
+identity-scoped LaitDaemon endpoint requires an explicit route. A version
+handshake precedes requests. The production request classifier assigns every
+request exactly one terminal owner; there is no wildcard product fallback.
+
+The optional `if_running: true` envelope field is reserved for passive,
+explicitly Space-routed status, identity display, and configuration reload.
+LaitDaemon resolves and validates the complete Orbit address, then queries only
+an already-live compatibility adapter; it does not place a vacant Orbit. Other
+verbs and routes reject this mode. The field is omitted for ordinary dispatch,
+preserving the existing envelope shape.
 
 Product mutations and queries reach IssuesWorld through its WorldBridge and a
 docked Session.

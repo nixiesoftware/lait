@@ -258,10 +258,9 @@ async fn dispatch(specs: &[cmdspec::Spec], matches: &ArgMatches, out: Out) -> Re
         std::env::set_var("LAIT_HOME", h);
     }
     // `-w <SEL>`: resolve the selector to a store path and pin it, so every
-    // command below binds that exact store from any directory. The pin rides
-    // the same env the daemon spawn uses (`LAIT_STORE`), so the plumbing is
-    // shared with cwd binding. `--home`/`$LAIT_HOME` still outrank it (and
-    // clap already rejects combining the two flags).
+    // command below derives the exact same Orbit route from any directory.
+    // `--home`/`$LAIT_HOME` still outrank it (and clap already rejects combining
+    // the two flags).
     if let Some(sel) = matches.get_one::<String>("space") {
         let store = resolve_space_selector(sel)?;
         std::env::set_var("LAIT_STORE", &store);
@@ -289,9 +288,8 @@ async fn dispatch(specs: &[cmdspec::Spec], matches: &ArgMatches, out: Out) -> Re
         Dispatch::Special(Special::Resume) => {
             let name = m.get_one::<String>("name").cloned().unwrap_or_default();
             let home = config::bind_session(&name)?;
-            // A named identity is a self-contained home: pin it as LAIT_HOME so the
-            // daemon we spawn uses it for both identity and store, not the global
-            // identity + repo-discovered store (DUR-5).
+            // A named identity is a self-contained home: pin it as LAIT_HOME so
+            // the identity-scoped daemon directory sees only that binding.
             std::env::set_var("LAIT_HOME", &home);
             load_or_create_identity(&home)?;
             // Under --json only the Status DTO is emitted — no human line ahead.
@@ -311,10 +309,19 @@ async fn dispatch(specs: &[cmdspec::Spec], matches: &ArgMatches, out: Out) -> Re
             }
             return crate::cli::run(&home, Request::Status, out).await;
         }
-        // `serve` is global to the machine, not bound to one store: it reads the
-        // space registry and attaches each SpaceBridge lazily, so it must not
-        // resolve (or demand) a store in the cwd — running it from anywhere is
-        // the point.
+        // The process-level daemon is identity-scoped, not store-scoped. It
+        // owns the Orbit directory and lazily places every addressed Station.
+        Dispatch::Special(Special::Daemon) => {
+            tracing_subscriber::fmt()
+                .with_env_filter(
+                    tracing_subscriber::EnvFilter::try_from_default_env()
+                        .unwrap_or_else(|_| "lait=info,warn".into()),
+                )
+                .init();
+            return crate::daemon::run_lait_daemon().await;
+        }
+        // `serve` is also global to the identity: it is now a client of the
+        // Lait daemon rather than an owner of Station placements.
         Dispatch::Special(Special::Serve) => {
             let port = m
                 .get_one::<String>("port")
@@ -446,7 +453,7 @@ async fn dispatch(specs: &[cmdspec::Spec], matches: &ArgMatches, out: Out) -> Re
                 // above stays the stable first line either way.
                 if !out.json {
                     if let Ok(Response::Ok { message: Some(m) }) =
-                        crate::control::request(&home, &Request::Id).await
+                        crate::cli::request_running(&home, &Request::Id, None).await
                     {
                         if let Some(actor_line) = m.lines().nth(1) {
                             println!("{actor_line}");
@@ -525,21 +532,6 @@ async fn dispatch(specs: &[cmdspec::Spec], matches: &ArgMatches, out: Out) -> Re
                     }
                 }
             }
-            Special::Daemon => {
-                tracing_subscriber::fmt()
-                    .with_env_filter(
-                        tracing_subscriber::EnvFilter::try_from_default_env()
-                            .unwrap_or_else(|_| "lait=info,warn".into()),
-                    )
-                    .init();
-                // The current compatibility runner hosts one SpaceBridge behind
-                // the per-home control socket. `open` runs the preflight legacy
-                // detector before anything binds. Process placement is not part
-                // of Space semantics; the general Lait daemon can place the same
-                // bridge in-process.
-                crate::orbital::run_space_bridge(home, &crate::transport::DefaultFactory).await?;
-                std::process::exit(0);
-            }
             Special::Mcp => {
                 mcp::run_mcp(&home).await?;
             }
@@ -601,6 +593,7 @@ async fn dispatch(specs: &[cmdspec::Spec], matches: &ArgMatches, out: Out) -> Re
             | Special::Init
             | Special::Join
             | Special::DeviceAccept
+            | Special::Daemon
             | Special::Serve
             | Special::Update => {
                 unreachable!("handled before home resolution")
@@ -733,9 +726,9 @@ fn dir_display_name(home: &std::path::Path) -> String {
 }
 
 /// `lait join <coordinates>`: the orbital join path. Bootstrap the joiner's
-/// orbital store from the invite link (`orbital::enter_space`), start its
-/// compatibility-hosted SpaceBridge, then drive Contact to the invite's
-/// approach Station until
+/// orbital store from the invite link (`orbital::enter_space`), ask the Lait
+/// daemon to place its SpaceBridge, then drive Contact to the invite's approach
+/// Station until
 /// admission lands. The joiner's Contact registers it as a pending Neighbor on
 /// the inviter, whose driver reciprocally dials back to redeem the admission —
 /// so repeated joiner-side Connects converge to membership without a manual
@@ -820,7 +813,8 @@ async fn run_join_orbital(m: &ArgMatches, link: &str, out: Out) -> Result<()> {
         eprintln!("(space registry update failed: {e:#})");
     }
 
-    // Start the compatibility-hosted SpaceBridge for the joiner's Station.
+    // Start the identity-scoped host; the first routed request below lazily
+    // places the joiner's Station in-process.
     crate::cli::ensure_daemon(&target).await?;
 
     // Drive Contact to the approach Station until admitted (or a deadline). The
@@ -838,9 +832,9 @@ async fn run_join_orbital(m: &ArgMatches, link: &str, out: Out) -> Result<()> {
     let mut last_err: Option<String> = None;
     let mut last_beat = started;
     while tokio::time::Instant::now() < deadline {
-        match crate::control::request(
+        match crate::cli::client(
             &target,
-            &Request::Connect {
+            Request::Connect {
                 ticket: approach.clone(),
             },
         )
@@ -855,8 +849,7 @@ async fn run_join_orbital(m: &ArgMatches, link: &str, out: Out) -> Result<()> {
             Ok(Response::Error { message, .. }) => last_err = Some(message),
             _ => {}
         }
-        if let Ok(Response::Status(info)) = crate::control::request(&target, &Request::Status).await
-        {
+        if let Ok(Response::Status(info)) = crate::cli::client(&target, Request::Status).await {
             if info.membership == "member" {
                 admitted = true;
                 break;
@@ -1012,16 +1005,16 @@ async fn run_config(dispatch: &Dispatch, m: &ArgMatches, out: Out) -> Result<()>
                 cfg.save(&path)?;
                 format!("unset {key}")
             };
-            // Daemon-read keys: never a silent wait-for-restart. Bare
-            // `control::request` (NOT `cli::client`) so we never auto-spawn a
-            // daemon just to tell it about a config change.
+            // Daemon-read keys: never a silent wait-for-restart, but never
+            // auto-spawn the host merely to deliver an advisory reload.
             let mut applied = String::new();
             if spec.daemon_read {
                 if let Some(h) = config::existing_home() {
-                    applied = match crate::control::request(&h, &Request::ConfigReload).await {
-                        Ok(_) => " (applied to the running daemon)".to_string(),
-                        Err(_) => " (applies when the daemon next starts)".to_string(),
-                    };
+                    applied =
+                        match crate::cli::request_running(&h, &Request::ConfigReload, None).await {
+                            Ok(_) => " (applied to the running daemon)".to_string(),
+                            Err(_) => " (applies when the daemon next starts)".to_string(),
+                        };
                 }
             }
             crate::cli::emit_ok(&format!("{message}{applied}"), out);
@@ -1039,31 +1032,26 @@ async fn run_config(dispatch: &Dispatch, m: &ArgMatches, out: Out) -> Result<()>
 /// and self-replaces the running executable (all pure-Rust: `ureq` + rustls,
 /// gzip/zip extraction, atomic self-replace).
 async fn run_update() -> Result<()> {
-    if let Some(home) = config::existing_home() {
-        // Only claim to have stopped something if something was there, and only
-        // after watching it go. The old check was `request(Stop).is_ok()`, which
-        // is true for any *decodable* reply — including an error, and including
-        // the "shutting down" a pre-`signal_shutdown` daemon sends and then
-        // ignores. That printed a stop that never happened and left a daemon on
-        // stale code: the exact skew `heal_foreign_daemon` now has to clean up.
-        if !matches!(
-            crate::control::probe(&home).await,
-            crate::control::Probe::Absent
-        ) {
-            match crate::cli::stop_daemon_verified(&home).await {
-                Ok(()) => {
-                    println!("stopped the running daemon");
-                    // let the OS release the file handle before the binary is swapped
-                    tokio::time::sleep(std::time::Duration::from_millis(600)).await;
-                }
-                // Worth saying out loud rather than swallowing: a daemon left
-                // running is on stale code the moment the swap lands, and on
-                // Windows it may still hold the executable open.
-                Err(e) => eprintln!(
-                    "warning: could not stop the running daemon: {e:#}\n\
-                     continuing; run `lait shutdown` after the update."
-                ),
+    let daemon_home = config::lait_daemon_home()?;
+    // Only claim to have stopped something if the process endpoint was there,
+    // and only after watching it go.
+    if !matches!(
+        crate::control::probe(&daemon_home).await,
+        crate::control::Probe::Absent
+    ) {
+        match crate::cli::stop_daemon_verified(&daemon_home).await {
+            Ok(()) => {
+                println!("stopped the running daemon");
+                // let the OS release the file handle before the binary is swapped
+                tokio::time::sleep(std::time::Duration::from_millis(600)).await;
             }
+            // Worth saying out loud rather than swallowing: a daemon left
+            // running is on stale code the moment the swap lands, and on
+            // Windows it may still hold the executable open.
+            Err(e) => eprintln!(
+                "warning: could not stop the running daemon: {e:#}\n\
+                 continuing; run `lait shutdown` after the update."
+            ),
         }
     }
 

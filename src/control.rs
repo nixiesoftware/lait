@@ -850,17 +850,23 @@ pub enum ControlRoute {
 }
 
 /// The wire envelope a client sends: a [`Request`], an optional bridge
-/// [`ControlRoute`], and an optional **acting identity** selector.
+/// [`ControlRoute`], passive-dispatch intent, and an optional **acting
+/// identity** selector.
 ///
 /// `act_as` names a local identity (an agent profile name, actor id, or device
 /// id) the daemon holds a seed for. `None` is the primary human identity. Both
-/// modifiers are skipped when absent, so a legacy request serializes to exactly
-/// the bare `{"cmd":…}` shape.
+/// Optional modifiers are skipped when absent, so a legacy request serializes
+/// to exactly the bare `{"cmd":…}` shape.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClientRequest {
     /// The bridge path this request is allowed to traverse.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub route: Option<ControlRoute>,
+    /// Ask the identity-scoped host to dispatch only when the addressed
+    /// Station already has a live compatibility adapter. This is a passive
+    /// catalog probe, not an authorization claim.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub if_running: bool,
     /// The local identity to sign+attribute this request as. `None` = the
     /// daemon's primary (human) identity, exactly as before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -874,6 +880,7 @@ impl ClientRequest {
     pub fn plain(request: Request) -> Self {
         Self {
             route: None,
+            if_running: false,
             act_as: None,
             request,
         }
@@ -882,6 +889,7 @@ impl ClientRequest {
     pub fn acting_as(request: Request, act_as: Option<String>) -> Self {
         Self {
             route: None,
+            if_running: false,
             act_as,
             request,
         }
@@ -891,7 +899,18 @@ impl ClientRequest {
     pub fn routed(request: Request, route: ControlRoute, act_as: Option<String>) -> Self {
         Self {
             route: Some(route),
+            if_running: false,
             act_as,
+            request,
+        }
+    }
+
+    /// A routed request that must not activate a vacant Orbit.
+    pub fn routed_if_running(request: Request, route: ControlRoute) -> Self {
+        Self {
+            route: Some(route),
+            if_running: true,
+            act_as: None,
             request,
         }
     }
@@ -899,6 +918,10 @@ impl ClientRequest {
 
 fn default_true() -> bool {
     true
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 /// The terminal owner of a control request — the single orbital plane that
@@ -1051,6 +1074,21 @@ pub fn classify(req: &Request) -> RequestOwner {
         | Request::Stop
         | Request::Hello { .. }
         | Request::MemberAlias { .. } => Lifecycle,
+    }
+}
+
+/// Select the terminal Space/World route for an already-authorized Orbit.
+///
+/// Process-level requests such as stopping the Lait daemon are chosen by the
+/// client surface itself; this helper covers requests whose owner lives behind
+/// a Station.
+pub fn station_route(address: OrbitAddress, request: &Request) -> ControlRoute {
+    match classify(request) {
+        RequestOwner::World => ControlRoute::World {
+            address,
+            world: crate::world::contract::world_id().as_str().to_string(),
+        },
+        _ => ControlRoute::Space { address },
     }
 }
 
@@ -1843,10 +1881,26 @@ pub async fn request_as_routed(
     let stream = Stream::connect(name).await.context("connect to daemon")?;
     let env = ClientRequest {
         route,
+        if_running: false,
         act_as: act_as.map(str::to_string),
         request: req.clone(),
     };
     exchange(stream, &env).await
+}
+
+/// Send a routed request that must not activate a vacant Orbit.
+pub async fn request_routed_if_running(
+    home: &Path,
+    req: &Request,
+    route: ControlRoute,
+) -> Result<Response> {
+    let name = control_name(home)?;
+    let stream = Stream::connect(name).await.context("connect to daemon")?;
+    exchange(
+        stream,
+        &ClientRequest::routed_if_running(req.clone(), route),
+    )
+    .await
 }
 
 /// Write one request and read one response on an already-open stream.
@@ -1918,6 +1972,7 @@ pub async fn subscribe_routed(
     let mut stream = Stream::connect(name).await.context("connect to daemon")?;
     let envelope = ClientRequest {
         route,
+        if_running: false,
         act_as: None,
         request: Request::Subscribe { since },
     };
@@ -1952,6 +2007,7 @@ mod tests {
         // A bare request decodes as an envelope with no selector.
         let decoded: ClientRequest = serde_json::from_value(bare_json.clone()).unwrap();
         assert!(decoded.route.is_none());
+        assert!(!decoded.if_running);
         assert!(decoded.act_as.is_none());
         assert_eq!(serde_json::to_value(&decoded.request).unwrap(), bare_json);
     }
@@ -2002,6 +2058,10 @@ mod tests {
                 "selector present: {json}"
             );
             assert!(
+                !json.contains("if_running"),
+                "ordinary dispatch omits passive intent: {json}"
+            );
+            assert!(
                 !json.contains("allowed_orbits") && !json.contains("default_orbit"),
                 "trusted ClientScope must not become a wire claim: {json}"
             );
@@ -2014,6 +2074,23 @@ mod tests {
                 "the flattened request must survive: {json}"
             );
         }
+    }
+
+    #[test]
+    fn passive_dispatch_intent_is_explicit_and_round_trips() {
+        let route = ControlRoute::Space {
+            address: OrbitAddress::for_store(
+                Path::new("/tmp/passive-orbit"),
+                crate::ids::SpaceId::from_digest([5; 16]),
+            ),
+        };
+        let env = ClientRequest::routed_if_running(Request::Status, route.clone());
+        let json = serde_json::to_string(&env).unwrap();
+        assert!(json.contains("\"if_running\":true"), "{json}");
+        let back: ClientRequest = serde_json::from_str(&json).unwrap();
+        assert!(back.if_running);
+        assert_eq!(back.route, Some(route));
+        assert!(matches!(back.request, Request::Status));
     }
 
     #[test]

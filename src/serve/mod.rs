@@ -9,11 +9,10 @@
 //!
 //! Two things follow, and they are the whole design:
 //!
-//! **This is a client of the host plane.** The compatibility control channel is
-//! still keyed by home, while the browser is a picker over all registered
-//! Orbits. [`crate::daemon::OrbitDirectory`] supplies discovery and
-//! [`crate::daemon::ControlRouter`] supplies lazy Station placement, routing,
-//! and doorbell fan-in.
+//! **This is a client of the host plane.** The browser is a picker over all
+//! registered Orbits. [`crate::daemon::OrbitDirectory`] supplies passive
+//! discovery; the identity-scoped Lait daemon owns lazy Station placement,
+//! routing, and doorbell fan-in.
 //!
 //! **The socket was the authentication.** Binding the same façade to a TCP port
 //! removes the OS permission check that made auth unnecessary, and adds a caller
@@ -50,7 +49,7 @@ use tokio_stream::wrappers::{errors::BroadcastStreamRecvError, BroadcastStream};
 use tokio_stream::StreamExt;
 
 use crate::control::{ErrorKind, Request};
-use crate::daemon::{ControlRouter, OrbitDirectory, StationIdentity};
+use crate::daemon::{LaitDaemonClient, OrbitDirectory, OrbitDoorbell, StationIdentity};
 use auth::{Guard, Refusal};
 
 /// The default port. Fixed rather than ephemeral so the URL is predictable and
@@ -74,8 +73,16 @@ fn cookie_name(port: u16) -> String {
 
 struct App {
     guard: Guard,
-    control: ControlRouter,
+    directory: OrbitDirectory,
+    daemon: LaitDaemonClient,
+    doorbells: tokio::sync::broadcast::Sender<ViewerEvent>,
     cookie: String,
+}
+
+#[derive(Clone)]
+enum ViewerEvent {
+    Doorbell(OrbitDoorbell),
+    Lagged,
 }
 
 /// Run the local server until interrupted.
@@ -110,11 +117,19 @@ pub async fn run(port: u16, open: bool, json: bool) -> Result<()> {
     let bound = listener.local_addr().context("read bound address")?;
 
     let token = mint_token();
+    crate::cli::ensure_lait_daemon()
+        .await
+        .context("start Lait daemon")?;
+    let daemon = LaitDaemonClient::current()?;
+    let (doorbells, _) = tokio::sync::broadcast::channel(256);
     let app = Arc::new(App {
         guard: Guard::new(token.clone(), bound.port()),
-        control: ControlRouter::new(OrbitDirectory::new(identity, agents_base, self_contained)),
+        directory: OrbitDirectory::new(identity, agents_base, self_contained),
+        daemon: daemon.clone(),
+        doorbells: doorbells.clone(),
         cookie: cookie_name(bound.port()),
     });
+    let event_pump = tokio::spawn(pump_daemon_events(daemon, doorbells));
 
     let url = format!("http://127.0.0.1:{}/?token={}", bound.port(), token);
     if json {
@@ -134,20 +149,47 @@ pub async fn run(port: u16, open: bool, json: bool) -> Result<()> {
         open_browser(&url);
     }
 
-    let serve_result = axum::serve(listener, router(app.clone()))
+    let serve_result = axum::serve(listener, router(app))
         .with_graceful_shutdown(shutdown_signal())
         .await
         .context("serve");
-    let shutdown_result = app
-        .control
-        .shutdown()
-        .await
-        .context("drain Station placements");
-    serve_result?;
-    shutdown_result
+    event_pump.abort();
+    let _ = event_pump.await;
+    serve_result
 }
 
-/// Stop accepting HTTP before the ControlRouter drains its owned placements.
+async fn pump_daemon_events(
+    daemon: LaitDaemonClient,
+    doorbells: tokio::sync::broadcast::Sender<ViewerEvent>,
+) {
+    loop {
+        match daemon.subscribe_catalog().await {
+            Ok(mut subscription) => loop {
+                match subscription.next().await {
+                    Ok(Some(doorbell)) => {
+                        let _ = doorbells.send(ViewerEvent::Doorbell(doorbell));
+                    }
+                    Ok(None) => {
+                        let _ = doorbells.send(ViewerEvent::Lagged);
+                        break;
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "Lait daemon event stream ended");
+                        let _ = doorbells.send(ViewerEvent::Lagged);
+                        break;
+                    }
+                }
+            },
+            Err(error) => {
+                tracing::debug!(%error, "Lait daemon event endpoint is unavailable");
+                let _ = doorbells.send(ViewerEvent::Lagged);
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+}
+
+/// Stop the viewer adapter without stopping the independently owned Lait daemon.
 async fn shutdown_signal() {
     let ctrl_c = async {
         tokio::signal::ctrl_c()
@@ -308,7 +350,7 @@ async fn static_asset(uri: axum::http::Uri) -> Response {
 
 async fn list_spaces(State(app): State<Arc<App>>) -> Response {
     Json(serde_json::json!({
-        "spaces": spaces::list(app.control.directory()).await
+        "spaces": spaces::list(&app.directory, &app.daemon).await
     }))
     .into_response()
 }
@@ -370,8 +412,8 @@ async fn rpc(
             .into_response();
     }
 
-    let identity = match app.control.resolve(&id) {
-        Ok(resolved) => resolved.identity,
+    let resolved = match app.directory.resolve(&id) {
+        Ok(resolved) => resolved,
         Err(e) => {
             return (
                 StatusCode::NOT_FOUND,
@@ -381,7 +423,7 @@ async fn rpc(
         }
     };
 
-    if let StationIdentity::Agent { name } = &identity {
+    if let StationIdentity::Agent { name } = &resolved.identity {
         if !policy::is_read(&req) {
             return (
                 StatusCode::FORBIDDEN,
@@ -410,7 +452,15 @@ async fn rpc(
         }
     }
 
-    match app.control.request(&id, &req).await {
+    let route = crate::control::station_route(resolved.address, &req);
+    if let Err(error) = crate::cli::ensure_lait_daemon().await {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            err_json(&error.to_string(), ErrorKind::Error),
+        )
+            .into_response();
+    }
+    match app.daemon.request(route, &req, None).await {
         Ok(resp) => Json(resp).into_response(),
         Err(e) => (
             StatusCode::BAD_REQUEST,
@@ -430,12 +480,13 @@ async fn rpc(
 async fn events(
     State(app): State<Arc<App>>,
 ) -> Sse<impl tokio_stream::Stream<Item = Result<Event, std::convert::Infallible>>> {
-    let stream = BroadcastStream::new(app.control.subscribe()).map(|r| {
+    let stream = BroadcastStream::new(app.doorbells.subscribe()).map(|r| {
         Ok(match r {
-            Ok(sd) => Event::default()
+            Ok(ViewerEvent::Doorbell(sd)) => Event::default()
                 .event("doorbell")
                 .json_data(sd)
                 .unwrap_or_else(|_| Event::default().event("lagged").data("encode")),
+            Ok(ViewerEvent::Lagged) => Event::default().event("lagged").data("daemon"),
             Err(BroadcastStreamRecvError::Lagged(n)) => {
                 Event::default().event("lagged").data(n.to_string())
             }
@@ -479,7 +530,9 @@ mod tests {
         let nowhere = std::path::PathBuf::from("/nonexistent-for-tests");
         router(Arc::new(App {
             guard: Guard::new(token.into(), 7717),
-            control: ControlRouter::new(OrbitDirectory::new(nowhere.clone(), nowhere, true)),
+            directory: OrbitDirectory::new(nowhere.clone(), nowhere.clone(), true),
+            daemon: LaitDaemonClient::at(nowhere),
+            doorbells: tokio::sync::broadcast::channel(1).0,
             cookie: cookie_name(7717),
         }))
     }

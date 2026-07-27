@@ -5,7 +5,8 @@
 //! or reuses exactly one Station host for that Orbit, and dispatches the existing
 //! control protocol. A vacant Orbit is hosted in-process; a compatible
 //! pre-existing per-home daemon is attached as an external placement. Per-home
-//! IPC remains an adapter so cwd-bound CLI and MCP clients keep the same route.
+//! IPC remains an internal compatibility adapter behind the identity-scoped
+//! Lait daemon endpoint.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -14,14 +15,14 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, Mutex, RwLock};
 
 use crate::control::{self, ControlRoute, Doorbell, Request, RequestOwner, Response};
 use crate::orbital::space_bridge::{SpaceBridgeRunner, SpaceBridgeStop};
 use crate::transport::{DefaultFactory, TransportFactory};
 
-use super::{LocalOrbitId, OrbitDirectory, ResolvedOrbit};
+use super::{LocalOrbitId, OrbitAddress, OrbitDirectory, ResolvedOrbit};
 
 /// A Station placement's current hosting strategy.
 ///
@@ -35,7 +36,7 @@ pub enum PlacementHost {
 }
 
 /// A doorbell tagged with the durable local Orbit that produced it.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrbitDoorbell {
     /// Kept as `space` on the existing web wire until that client contract gets
     /// its own versioned rename. The value is a local Orbit id, not a Space id.
@@ -103,7 +104,6 @@ impl StationPlacement {
         doorbells: broadcast::Sender<OrbitDoorbell>,
         factory: Arc<dyn TransportFactory>,
     ) -> Result<Self> {
-        crate::cli::forget_verified(&resolved.home);
         let mode = match control::probe(&resolved.home).await {
             control::Probe::Healthy => PlacementMode::Attached,
             control::Probe::Foreign { why, replaceable } => {
@@ -447,6 +447,10 @@ impl ControlRouter {
             return Err(anyhow!("the control router is shutting down"));
         }
         let resolved = self.resolve(id)?;
+        self.place_resolved(resolved).await
+    }
+
+    async fn place_resolved(&self, resolved: ResolvedOrbit) -> Result<ResolvedOrbit> {
         let orbit = resolved.address.orbit.clone();
         let doorbells = self.doorbells.clone();
         let factory = self.factory.clone();
@@ -458,19 +462,70 @@ impl ControlRouter {
         Ok(resolved)
     }
 
+    /// Place an explicitly addressed Orbit and reject a stale Space
+    /// expectation before the request reaches its SpaceBridge.
+    pub async fn place_address(&self, address: &OrbitAddress) -> Result<ResolvedOrbit> {
+        // Address validation precedes placement: a stale or confused route must
+        // not wake the Station it is subsequently refused from addressing.
+        let _lifecycle = self.lifecycle.read().await;
+        if self.shutting_down.load(Ordering::Acquire) {
+            return Err(anyhow!("the control router is shutting down"));
+        }
+        let resolved = self.resolve_address(address)?;
+        self.place_resolved(resolved).await
+    }
+
     /// Dispatch a request after ensuring its Orbit has one live placement.
     pub async fn request(&self, id: &str, request: &Request) -> Result<control::Response> {
-        let resolved = self.place(id).await?;
-        let route = match control::classify(request) {
-            RequestOwner::World => ControlRoute::World {
-                address: resolved.address,
-                world: crate::world::contract::world_id().as_str().to_string(),
-            },
-            _ => ControlRoute::Space {
-                address: resolved.address,
-            },
-        };
+        let resolved = self.resolve(id)?;
+        let route = control::station_route(resolved.address, request);
+        self.request_routed(route, request, None).await
+    }
+
+    /// Dispatch one explicitly routed host request.
+    ///
+    /// The caller-facing host socket selects no Orbit out of band, so both the
+    /// complete local address and the terminal Space/World boundary are checked
+    /// here before the compatibility adapter is opened.
+    pub async fn request_routed(
+        &self,
+        route: ControlRoute,
+        request: &Request,
+        act_as: Option<&str>,
+    ) -> Result<control::Response> {
+        let address = routed_address(&route, request)?;
+        let resolved = self.place_address(address).await?;
+        control::request_as_routed(&resolved.home, request, Some(route), act_as).await
+    }
+
+    /// Dispatch through an existing per-Orbit adapter without placing a vacant
+    /// Orbit. This keeps passive catalog reads behind the daemon boundary while
+    /// preserving their no-wake contract.
+    pub async fn request_running(
+        &self,
+        route: ControlRoute,
+        request: &Request,
+    ) -> Result<control::Response> {
+        let address = routed_address(&route, request)?;
+        let _lifecycle = self.lifecycle.read().await;
+        if self.shutting_down.load(Ordering::Acquire) {
+            return Err(anyhow!("the control router is shutting down"));
+        }
+        let resolved = self.resolve_address(address)?;
         control::request_routed(&resolved.home, request, route).await
+    }
+
+    fn resolve_address(&self, address: &OrbitAddress) -> Result<ResolvedOrbit> {
+        let resolved = self.resolve(address.orbit.as_str())?;
+        if resolved.address != *address {
+            return Err(anyhow!(
+                "local Orbit {} is registered for Space {}, not {}",
+                address.orbit,
+                resolved.address.space,
+                address.space
+            ));
+        }
+        Ok(resolved)
     }
 
     /// Stop and join every in-process placement. Externally attached
@@ -500,6 +555,34 @@ impl ControlRouter {
                 "one or more Station placements failed to shut down: {}",
                 failures.join("; ")
             ))
+        }
+    }
+}
+
+fn routed_address<'a>(route: &'a ControlRoute, request: &Request) -> Result<&'a OrbitAddress> {
+    match route {
+        ControlRoute::Daemon => Err(anyhow!(
+            "daemon-scoped request cannot be dispatched to a Station"
+        )),
+        ControlRoute::Space { address } => {
+            if control::classify(request) == RequestOwner::World {
+                return Err(anyhow!("World-owned request requires a World route"));
+            }
+            Ok(address)
+        }
+        ControlRoute::World { address, world } => {
+            if control::classify(request) != RequestOwner::World {
+                return Err(anyhow!(
+                    "Space-owned request cannot be sent through a WorldBridge"
+                ));
+            }
+            if world != crate::world::contract::world_id().as_str() {
+                return Err(anyhow!(
+                    "request belongs to {}, not World '{world}'",
+                    crate::world::contract::world_id()
+                ));
+            }
+            Ok(address)
         }
     }
 }

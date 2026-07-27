@@ -2345,10 +2345,10 @@ pub fn specs() -> Vec<Spec> {
         Spec::special("id", "Print our endpoint id.", vec![], Special::Id),
         Spec::special(
             "daemon",
-            "Run the node daemon in the foreground.",
+            "Run the identity-scoped Lait daemon in the foreground.",
             vec![A::flag(
                 "seed",
-                "Run as an always-on seed (never idle-shuts-down).",
+                "Deprecated compatibility flag; the Lait daemon is always-on.",
             )],
             Special::Daemon,
         )

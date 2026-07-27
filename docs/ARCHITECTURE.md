@@ -14,22 +14,30 @@ without a central server.
 
 ```text
 LaitDaemon
+  ├─ identity-scoped local control endpoint
   ├─ OrbitDirectory
   └─ ControlRouter
        └─ OrbitOccupancy (keyed by local Orbit)
             ├─ vacant
             └─ StationPlacement
-                 ├─ owned in-process
-                 └─ attached compatibility process
-                      └─ sole SpaceBridge for the Orbit
-                           └─ Station occupying the Orbit
-                                ├─ Mechanics
-                                ├─ Replica
-                                │    └─ Fabric
-                                ├─ Neighbor registry and Contact
-                                └─ WorldBridgeRegistry
-                                     └─ WorldBridge
-                                          └─ docked Sessions
+                 ├─ hosting
+                 │    ├─ owned in-process
+                 │    └─ attached compatibility process
+                 └─ sole SpaceBridge for the Orbit
+                      └─ Station occupying the Orbit
+                           ├─ Mechanics
+                           ├─ Replica
+                           │    └─ Fabric
+                           ├─ Neighbor registry and Contact
+                           └─ WorldBridgeRegistry
+                                └─ WorldBridge
+                                     └─ docked Sessions
+
+lait serve
+  └─ HTTP/SSE adapter -> LaitDaemon
+
+cwd CLI / pinned MCP
+  └─ explicit Orbit/World route -> LaitDaemon
 ```
 
 An Orbit is one durable local participation in a Space. It persists whether it
@@ -48,37 +56,51 @@ daemon, a local Orbit plus its expected Space, or a World reached through that
 Orbit. The CLI's cwd selects its default Orbit; MCP is pinned to its launch
 Orbit; neither inherits catalog-wide visibility.
 
-In the current compatibility deployment, trusted client adapters derive a
-`ClientScope` and authorize an explicit route before opening the historical
-per-home channel; the receiving SpaceBridge independently verifies that its
-Orbit and Space match the route. The target LaitDaemon moves that same trusted
-scope check to the connection boundary, then asks the ControlRouter to resolve
-the Orbit, place or reuse its Station host, and dispatch to one terminal owner:
-lifecycle, Mechanics, Station, observation, or a WorldBridge. `OrbitDirectory`
+Trusted cwd and MCP adapters derive a pinned `ClientScope`; the web adapter
+applies catalog identity policy. Each constructs an explicit route and opens the
+identity-scoped LaitDaemon endpoint. The daemon resolves the Orbit, validates
+its repeated Space expectation before activation, places or reuses its Station
+host, and dispatches to one terminal owner: lifecycle, Mechanics, Station,
+observation, or a WorldBridge. The receiving SpaceBridge independently
+validates its Orbit, Space, World, and terminal owner. `OrbitDirectory`
 discovers durable bindings; `StationPlacement` records where an active Station
-is hosted; neither is a second lifecycle owner.
+is hosted; neither is a second lifecycle owner. The allowed Orbit set never
+rides on the wire as a client-controlled claim.
 
-Bridges are logical boundaries, not mandatory processes. The target deployment
-is one per-user LaitDaemon routing to zero or more Station placements and their
-in-process SpaceBridges. A SpaceBridge or WorldBridge may move to a worker
+Bridges are logical boundaries, not mandatory processes. The current deployment
+is one identity-scoped LaitDaemon routing to zero or more Station placements and
+their in-process SpaceBridges. A SpaceBridge or WorldBridge may move to a worker
 process for stronger fault or plugin isolation without changing its route or
-client contract. The current ControlRouter hosts a vacant Orbit in-process and
-attaches, without taking ownership, when a compatible `lait daemon` already
-holds that Orbit. Both placements retain the historical per-home socket so
-cwd-bound CLI and MCP clients can reach the same SpaceBridge during the
-transition.
+client contract. The ControlRouter hosts a vacant Orbit in-process and attaches,
+without taking ownership, when a compatible historical per-home daemon already
+holds that Orbit. Both placement modes retain the per-home socket as an internal
+compatibility adapter, but CLI, MCP, and web requests enter through the one
+LaitDaemon endpoint.
+
+Catalog listing remains passive. The web adapter asks LaitDaemon for an
+`if_running` status; LaitDaemon may inspect an already-live per-Orbit
+compatibility adapter, but it never places a vacant Orbit for that probe.
 
 Placement and shutdown are ordered:
 
 ```text
 request
-  -> OrbitDirectory resolves + authorizes
+  -> trusted adapter authorizes ClientScope
+  -> identity-scoped LaitDaemon endpoint
+  -> OrbitDirectory resolves
+  -> validate Orbit + expected Space before activation
   -> OrbitOccupancy single-flights by local Orbit
   -> healthy existing control channel: attach
      absent control channel: acquire daemon lock -> activate -> serve in-process
 
-host shutdown
-  -> stop accepting new HTTP/control-router work
+viewer shutdown
+  -> stop HTTP and join its daemon event observer
+  -> LaitDaemon and Stations remain active
+
+explicit LaitDaemon shutdown
+  -> stop accepting process-control work
+  -> close and join daemon client connections
+  -> gate ControlRouter against new placements
   -> close and join doorbell observers
   -> signal each owned SpaceBridge
   -> join control connections and Observation pumps

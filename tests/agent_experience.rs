@@ -32,7 +32,8 @@ fn tmp_home(tag: &str) -> std::path::PathBuf {
 }
 
 /// Run `lait --home <home> …`, optionally acting as a local agent (`LAIT_AS`).
-/// `LAIT_IDLE_SECS=0` so an auto-spawned daemon never lingers between calls.
+/// `LAIT_IDLE_SECS=0` keeps each placed Station alive between calls. The
+/// identity-scoped daemon is shut down explicitly at the end of the test.
 fn lait(
     home: &std::path::Path,
     cfg: &std::path::Path,
@@ -158,5 +159,6 @@ fn a_sponsored_agent_acts_as_itself_in_one_store() {
         .iter()
         .any(|m| m["key"].as_str() == Some(&human_actor) && m["role"] == "admin"));
 
+    lait(&home, &cfg, None, &["shutdown"]);
     std::fs::remove_dir_all(&home).ok();
 }

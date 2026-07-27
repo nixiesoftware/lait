@@ -208,6 +208,20 @@ pub fn identity_dir() -> Result<PathBuf> {
     config_root()
 }
 
+/// Private runtime home of the identity-scoped Lait daemon.
+///
+/// Kept below the identity directory, but distinct from every Orbit home: the
+/// host process owns the catalog-wide control socket and process lock while
+/// each active [`crate::orbital::SpaceBridge`] independently holds its Orbit
+/// lease. A self-contained `$LAIT_HOME` therefore still gets one daemon without
+/// colliding with the Station occupying that same directory.
+pub fn lait_daemon_home() -> Result<PathBuf> {
+    let dir = identity_dir()?.join("daemon");
+    fs::create_dir_all(&dir)
+        .with_context(|| format!("create Lait daemon home {}", dir.display()))?;
+    Ok(dir)
+}
+
 /// The store this invocation WOULD bind if it already exists — WITHOUT creating
 /// one. For commands like `update` that must not spawn a stray `.lait/` just
 /// to look for a running daemon.
@@ -294,9 +308,11 @@ pub struct DaemonLock {
     _file: fs::File,
 }
 
-/// Acquire the exclusive single-instance lock for a home, guaranteeing at most
-/// one daemon per home. Returns an error if another daemon already holds it,
-/// which is how we avoid the startup race that used to spawn duplicate daemons.
+/// Acquire the exclusive operational lock for a home.
+///
+/// A Lait daemon uses this for its process home; a SpaceBridge runner uses it
+/// for an Orbit home. In both cases there is at most one live owner for that
+/// exact resource.
 pub fn acquire_daemon_lock(home: &Path) -> Result<DaemonLock> {
     use fs2::FileExt;
     let path = lock_path(home);

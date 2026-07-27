@@ -319,89 +319,28 @@ fn daemon_log_tail(path: &Path, lines: usize) -> Option<String> {
     )
 }
 
-/// Homes whose daemon this process has already verified.
-///
-/// One CLI invocation can reach [`client`] several times — `delete` peeks the
-/// issue's title before asking about it — and each [`control::probe`] is a fresh
-/// connect. That is not free: on Windows the control channel is a named pipe
-/// serving one client per accepted instance, and a client that connects while no
-/// instance is free can park (see the teardown note in `node::run_daemon`). Verify
-/// once per home, then stay out of the way.
-type VerifiedSet = std::sync::Mutex<std::collections::HashSet<PathBuf>>;
-static VERIFIED_DAEMONS: std::sync::OnceLock<VerifiedSet> = std::sync::OnceLock::new();
-
-fn already_verified(home: &Path) -> bool {
-    VERIFIED_DAEMONS
-        .get_or_init(VerifiedSet::default)
-        .lock()
-        .map(|s| s.contains(home))
-        .unwrap_or(false)
-}
-
-fn mark_verified(home: &Path) {
-    if let Ok(mut s) = VERIFIED_DAEMONS.get_or_init(VerifiedSet::default).lock() {
-        s.insert(home.to_path_buf());
-    }
-}
-
-/// Forget that `home`'s daemon was verified, so the next [`ensure_daemon`] probes
-/// again instead of trusting the memo.
-///
-/// The memo is only sound because a CLI process resolves one store and exits: it
-/// cannot outlive the daemon it verified, so re-probing would be pure cost. A
-/// long-lived ControlRouter breaks that assumption — `lait serve` can watch a daemon
-/// stop and then be asked for it again, and a stale entry there does not mean
-/// "already fine", it means **"never respawn this"**, which is exactly wrong. The
-/// symptom is a connect error that no retry can clear.
-///
-/// So the one caller that can outlive a daemon says so when it notices.
-pub(crate) fn forget_verified(home: &Path) {
-    if let Ok(mut s) = VERIFIED_DAEMONS.get_or_init(VerifiedSet::default).lock() {
-        s.remove(home);
-    }
-}
-
-/// Ensure a daemon is running for this home dir, spawning one if needed.
-///
-/// Uses whatever identity this process would use — i.e. `$LAIT_HOME` if set,
-/// else the global `secret.key`. That is right for every caller that resolved
-/// its own store, which is every CLI invocation. A router that addresses
-/// *several* homes at once cannot rely on its own env and must say which
-/// identity it means: see [`ensure_daemon_as`].
+/// Ensure the identity-scoped Lait daemon is running and the addressed Orbit
+/// exists, spawning the one host process if needed.
 pub async fn ensure_daemon(home: &Path) -> Result<()> {
-    ensure_daemon_as(home, None).await
+    if !crate::orbital::space_store_present(home) {
+        return Err(anyhow!(
+            "no space at {} — found one with `lait init`, or join one with `lait join <link>`",
+            home.display()
+        ));
+    }
+    ensure_lait_daemon().await
 }
 
-/// Ensure a daemon is running for `home`, pinning the identity it runs as.
-///
-/// `identity: Some(dir)` spawns the daemon with `LAIT_HOME=dir`, which makes
-/// [`crate::config::identity_dir`] resolve there and the daemon sign with
-/// *that* home's `secret.key`.
-///
-/// This exists because identity does not follow the store. `identity_dir` reads
-/// `$LAIT_HOME` and nothing else — never `$LAIT_STORE` — so pointing a spawn at a
-/// self-contained home's store while `LAIT_HOME` is unset opens that store under
-/// the *global* key, silently ignoring the `secret.key` sitting inside it. For a
-/// named agent's home that is not a subtle mismatch: the space key is sealed
-/// to the agent's X25519 key, so the daemon cannot unwrap it, and it would
-/// announce the wrong identity as a peer in the agent's space.
-///
-/// One process resolving one store never notices, because its own env already
-/// says which identity it is. `lait serve` holds N homes across *two* identity
-/// kinds at once and cannot express that through a process-global env var, so
-/// the choice becomes an argument.
-pub async fn ensure_daemon_as(home: &Path, identity: Option<&Path>) -> Result<()> {
-    if already_verified(home) {
-        return Ok(());
-    }
-    match control::probe(home).await {
-        control::Probe::Healthy => {
-            mark_verified(home);
-            return Ok(());
-        }
+/// Ensure the current identity's process-level Lait daemon without selecting
+/// or activating an Orbit. The web viewer uses this even for an empty catalog.
+pub async fn ensure_lait_daemon() -> Result<()> {
+    let client = crate::daemon::LaitDaemonClient::current()?;
+    let daemon_home = client.home();
+    match client.probe().await {
+        control::Probe::Healthy => return Ok(()),
         control::Probe::Foreign { why, replaceable } => {
             return Err(ForeignDaemon {
-                home: home.to_path_buf(),
+                home: daemon_home.to_path_buf(),
                 why,
                 replaceable,
             }
@@ -409,38 +348,18 @@ pub async fn ensure_daemon_as(home: &Path, identity: Option<&Path>) -> Result<()
         }
         control::Probe::Absent => {}
     }
-    // A daemon can only open an initialized store — fail fast with guidance
-    // instead of spawning a doomed process and timing out 20s later. This is a
-    // missing store, not an unreachable daemon: `1`, not `3`.
-    if !crate::orbital::space_store_present(home) {
-        return Err(anyhow!(
-            "no space at {} — found one with `lait init`, or join one with `lait join <link>`",
-            home.display()
-        ));
-    }
     let exe = std::env::current_exe().context("locate own executable")?;
-    // Keep the daemon's stderr instead of discarding it: when a spawn fails, its
-    // own message ("another lait daemon is already running for this home …") is
-    // the whole diagnosis, and `Stdio::null()` used to throw exactly that away.
-    let log_path = daemon_log_path(home);
+    let log_path = daemon_log_path(daemon_home);
     let log = std::fs::File::create(&log_path).ok();
-    // The daemon outlives us, so it must come up holding *only* what we hand it:
-    // on Windows a plain spawn would also give it every other inheritable handle
-    // we own — including a captured caller's stdout pipe, which then never sees
-    // EOF. See `daemon_spawn`.
-    //
-    // `identity` rides as an argv (`--home`), not an env var. On Windows the
-    // spawn deliberately hands the child our *own* env block so the OS keeps it
-    // correctly sorted — which means an env override there would be a
-    // process-wide `set_var`. That is fine for `LAIT_STORE` in a CLI that
-    // resolves one store and exits, and wrong for `lait serve`, which holds N
-    // homes across two identity kinds at once and would race itself. An argument
-    // is scoped to the child by construction.
+    // Passing the ordinary config root through `--home` would collapse the
+    // global catalog into a self-contained identity, so pin only an explicit
+    // self-contained `$LAIT_HOME`.
+    let identity = std::env::var_os("LAIT_HOME").map(PathBuf::from);
     let mut child =
-        crate::daemon_spawn::spawn(&exe, home, log, identity).context("spawn daemon")?;
+        crate::daemon_spawn::spawn(&exe, log, identity.as_deref()).context("spawn Lait daemon")?;
     for _ in 0..100 {
         tokio::time::sleep(Duration::from_millis(200)).await;
-        if request(home, &Request::Status).await.is_ok() {
+        if matches!(client.probe().await, control::Probe::Healthy) {
             return Ok(());
         }
         // A daemon that has already exited is never going to answer. Without this
@@ -462,8 +381,7 @@ pub async fn ensure_daemon_as(home: &Path, identity: Option<&Path>) -> Result<()
             // spawn (bind failure, held lock) still fails in about a second rather
             // than the full 20 this check exists to avoid.
             for _ in 0..12 {
-                if request(home, &Request::Status).await.is_ok() {
-                    mark_verified(home);
+                if matches!(client.probe().await, control::Probe::Healthy) {
                     return Ok(());
                 }
                 tokio::time::sleep(Duration::from_millis(100)).await;
@@ -472,7 +390,7 @@ pub async fn ensure_daemon_as(home: &Path, identity: Option<&Path>) -> Result<()
         }
     }
     Err(CliError::unreachable(format!(
-        "daemon did not come online within 20s — it is running but not answering.\n\
+        "Lait daemon did not come online within 20s — it is running but not answering.\n\
          see {log}, or run `lait daemon` in the foreground to watch it start.",
         log = log_path.display(),
     ))
@@ -522,7 +440,7 @@ pub async fn heal_from_error(e: &anyhow::Error, out: Out) -> Result<()> {
     // ("speaks control protocol v1, this build speaks v2") rather than whichever
     // field happened to fail to decode.
     eprintln!(
-        "a daemon is already running for this space{pid}: {why}",
+        "the Lait daemon is already running{pid}: {why}",
         why = f.why
     );
     match confirm("stop it and continue?", out) {
@@ -563,12 +481,16 @@ async fn wait_until_absent(home: &Path, within: Duration) -> bool {
 /// permit to a subscriber instead of the accept loop (fixed in
 /// `node::signal_shutdown`, but the daemons that need stopping are precisely the
 /// ones that predate the fix). So: ask, watch, and escalate if it lied.
-pub async fn stop_daemon_verified(home: &Path) -> Result<()> {
+pub async fn stop_daemon_verified(_home: &Path) -> Result<()> {
+    let daemon_home = crate::config::lait_daemon_home()?;
     // Read the pid before asking — a daemon that honours `stop` takes its lock
     // file with it, and we'd rather have the signal target than race for it.
-    let pid = crate::config::daemon_pid(home);
-    let _ = control::request(home, &Request::Stop).await;
-    if wait_until_absent(home, Duration::from_secs(3)).await {
+    let pid = crate::config::daemon_pid(&daemon_home);
+    let daemon = crate::daemon::LaitDaemonClient::at(daemon_home.clone());
+    let _ = daemon
+        .request(ControlRoute::Daemon, &Request::Stop, None)
+        .await;
+    if wait_until_absent(&daemon_home, Duration::from_secs(3)).await {
         return Ok(());
     }
     let Some(pid) = pid else {
@@ -584,7 +506,7 @@ pub async fn stop_daemon_verified(home: &Path) -> Result<()> {
             // a standard termination signal. An already-dead pid just returns
             // ESRCH, which the wait below treats as gone.
             unsafe { libc::kill(pid as libc::pid_t, sig) };
-            if wait_until_absent(home, Duration::from_secs(3)).await {
+            if wait_until_absent(&daemon_home, Duration::from_secs(3)).await {
                 return Ok(());
             }
         }
@@ -614,7 +536,7 @@ impl std::fmt::Display for ForeignDaemon {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "a daemon is already running for this space, but {why}  (home: {home})",
+            "the Lait daemon is already running, but {why}  (home: {home})",
             why = self.why,
             home = self.home.display(),
         )
@@ -673,12 +595,11 @@ pub fn orbit_address_for_home(home: &Path) -> Result<OrbitAddress> {
 }
 
 fn route_for(address: OrbitAddress, req: &Request) -> ControlRoute {
-    match control::classify(req) {
-        control::RequestOwner::World => ControlRoute::World {
-            address,
-            world: crate::world::contract::world_id().as_str().to_string(),
-        },
-        _ => ControlRoute::Space { address },
+    match req {
+        // `shutdown` is the explicit off-switch for the process-level host, not
+        // merely for whichever Station the cwd selected.
+        Request::Stop => ControlRoute::Daemon,
+        _ => control::station_route(address, req),
     }
 }
 
@@ -697,11 +618,33 @@ pub async fn client_as_scoped(
     scope.authorize(&address)?;
     let route = route_for(address, &req);
     ensure_daemon(home).await?;
-    // The daemon answered the probe a moment ago, so a failure here is the
-    // transport giving out mid-exchange: `3`, daemon unreachable.
-    crate::control::request_as_routed(home, &req, Some(route), act_as)
+    let daemon = crate::daemon::LaitDaemonClient::current()?;
+    // The process endpoint answered the probe a moment ago, so a failure here
+    // is the transport giving out mid-exchange: `3`, daemon unreachable.
+    daemon
+        .request(route, &req, act_as)
         .await
         .map_err(|e| CliError::unreachable(format!("{e:#}")).into())
+}
+
+/// Send through the current Lait daemon only if it is already running.
+///
+/// This preserves best-effort surfaces such as live config reload and the
+/// optional actor line in `lait id`: they must not start a background service
+/// merely to deliver an advisory request.
+pub async fn request_running(home: &Path, req: &Request, act_as: Option<&str>) -> Result<Response> {
+    if act_as.is_some() {
+        return Err(anyhow!("passive requests do not select an acting identity"));
+    }
+    let address = orbit_address_for_home(home)?;
+    let scope = scope_for_home(home);
+    scope.authorize(&address)?;
+    let route = route_for(address, req);
+    let daemon = crate::daemon::LaitDaemonClient::current()?;
+    if !matches!(daemon.probe().await, control::Probe::Healthy) {
+        return Err(anyhow!("Lait daemon is not running"));
+    }
+    daemon.request_if_running(route, req).await
 }
 
 /// Run a request, print the response, and exit with the corresponding code.
@@ -2228,24 +2171,24 @@ pub async fn watch(
         address: address.clone(),
     };
     ensure_daemon(home).await?;
+    let daemon = crate::daemon::LaitDaemonClient::current()?;
     // Default to the current high-water: `watch` follows from now, not from the
     // start of the daemon's history.
     let mut cursor = match since {
         Some(n) => n,
-        None => {
-            match control::request_routed(home, &Request::Log { since: 0 }, space_route.clone())
-                .await?
-            {
-                Response::Events { last, .. } => last,
-                _ => 0,
-            }
-        }
+        None => match daemon
+            .request(space_route.clone(), &Request::Log { since: 0 }, None)
+            .await?
+        {
+            Response::Events { last, .. } => last,
+            _ => 0,
+        },
     };
     eprintln!("watching from seq {cursor} (Ctrl-C to stop)\u{2026}");
 
     let mut epoch: Option<u64> = None;
     loop {
-        let mut sub = match control::subscribe_routed(home, 0, Some(space_route.clone())).await {
+        let mut sub = match daemon.subscribe_space(space_route.clone(), 0).await {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("watch: {e}; reconnecting\u{2026}");
@@ -2278,12 +2221,9 @@ pub async fn watch(
             if !(frame.presence_advanced || frame.reset) {
                 continue;
             }
-            match control::request_routed(
-                home,
-                &Request::Log { since: cursor },
-                space_route.clone(),
-            )
-            .await
+            match daemon
+                .request(space_route.clone(), &Request::Log { since: cursor }, None)
+                .await
             {
                 Ok(Response::Events { events, last }) => {
                     for e in &events {

@@ -1,13 +1,12 @@
 //! lait: a local-first, peer-to-peer issue tracker.
 //!
 //! One binary, four roles:
-//!   * `lait daemon` is the compatibility runner for one process-backed
-//!     SpaceBridge: its Station, mechanics, Replica, Contact, and WorldBridges.
-//!   * `lait <cmd>` is the CLI client, driving the daemon over a local IPC
-//!     control channel.
+//!   * `lait daemon` is the identity-scoped host: one local process endpoint,
+//!     an Orbit directory/router, and zero or more in-process SpaceBridges.
+//!   * `lait <cmd>` is the cwd-scoped CLI client, driving that host over local
+//!     IPC with an explicit Orbit/World route.
 //!   * `lait serve` binds that same façade to loopback HTTP + SSE so a browser
-//!     can be a client too ([`serve`], `docs/UI.md`). The only surface global
-//!     to the machine, it uses the host-plane ControlRouter across local Orbits.
+//!     can be a client too ([`serve`], `docs/UI.md`). It owns no Station.
 //!   * `lait mcp` exposes the same Layer-B façade as MCP tools for an agent.
 //!
 //! The crate is split lib + bin so integration tests, doctests, and the MCP/DTO

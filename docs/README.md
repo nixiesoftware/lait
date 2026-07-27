@@ -22,11 +22,13 @@ The normal product model is deliberately small:
   Orbit from signed Coordinates. Other commands never create stores implicitly.
 - `lait <verb>` is the scriptable and interactive CLI. `--json` returns the
   same versioned DTOs used by other clients.
-- `lait serve` supervises lazy SpaceBridge attachments and exposes the product
-  over a loopback-only HTTP/SSE surface.
+- `lait daemon` is the identity-scoped process host. It lazily places Stations
+  for addressed Orbits and remains independent of any viewer.
+- `lait serve` is a client adapter exposing the same daemon contract over a
+  loopback-only HTTP/SSE surface.
 - `lait mcp` exposes the same command contract to agents.
-- The target LaitDaemon may place a Station-backed SpaceBridge in each addressed
-  local Orbit. Each WorldBridge owns that World's docked Sessions. Clients submit
+- The LaitDaemon places a Station-backed SpaceBridge in each addressed local
+  Orbit. Each WorldBridge owns that World's docked Sessions. Clients submit
   intents and re-read Manifest-pinned projections after Observation
   notifications.
 
