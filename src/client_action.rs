@@ -8,6 +8,7 @@
 use crate::{
     control::{ControlRoute, Request},
     daemon::OrbitAddress,
+    orbital::WorldCall,
 };
 
 /// The terminal orbital boundary selected by a client command.
@@ -23,14 +24,21 @@ pub enum ClientTarget {
 
 /// A parsed command plus its already-determined orbital destination.
 ///
-/// `request` is the temporary compatibility payload shared by today's CLI,
-/// MCP, viewer, and v3 per-Orbit daemon. Product command packages can replace
-/// it with opaque `WorldCall`s without changing [`ClientTarget`] or the shell's
-/// navigation model.
+/// Space/daemon compatibility calls remain typed while product packages emit
+/// opaque [`WorldCall`]s directly. The payload therefore fixes both destination
+/// and wire shape at parse time; transport never reclassifies product intent.
 #[derive(Debug, Clone)]
 pub struct ClientAction {
     target: ClientTarget,
-    request: Request,
+    payload: ClientPayload,
+}
+
+#[derive(Debug, Clone)]
+pub enum ClientPayload {
+    /// Space/daemon compatibility surface, pending its own typed split.
+    Control(Request),
+    /// A product-owned application call.
+    World(WorldCall),
 }
 
 impl ClientAction {
@@ -49,19 +57,42 @@ impl ClientAction {
         } else {
             ClientTarget::Space
         };
-        Self { target, request }
+        Self {
+            target,
+            payload: ClientPayload::Control(request),
+        }
+    }
+
+    /// Construct a product action directly from its package-owned call.
+    pub fn world(call: WorldCall) -> Self {
+        Self {
+            target: ClientTarget::World {
+                world: call.world().as_str().to_string(),
+            },
+            payload: ClientPayload::World(call),
+        }
     }
 
     pub fn target(&self) -> &ClientTarget {
         &self.target
     }
 
-    pub fn request(&self) -> &Request {
-        &self.request
+    pub fn payload(&self) -> &ClientPayload {
+        &self.payload
     }
 
-    pub fn into_request(self) -> Request {
-        self.request
+    pub fn request(&self) -> Option<&Request> {
+        match &self.payload {
+            ClientPayload::Control(request) => Some(request),
+            ClientPayload::World(_) => None,
+        }
+    }
+
+    pub fn into_request(self) -> Option<Request> {
+        match self.payload {
+            ClientPayload::Control(request) => Some(request),
+            ClientPayload::World(_) => None,
+        }
     }
 
     /// Materialize the complete wire route after the shell resolves an Orbit.
@@ -111,5 +142,23 @@ mod tests {
             action.route(address),
             ControlRoute::World { world, .. } if world == "com.lait.issues"
         ));
+    }
+
+    #[test]
+    fn a_world_call_never_needs_request_classification() {
+        let call = WorldCall::new(
+            crate::world::contract::world_id(),
+            "issues.control",
+            1,
+            br#"{"cmd":"project_list"}"#.to_vec(),
+        )
+        .unwrap();
+        let action = ClientAction::world(call);
+        assert!(matches!(
+            action.target(),
+            ClientTarget::World { world } if world == "com.lait.issues"
+        ));
+        assert!(matches!(action.payload(), ClientPayload::World(_)));
+        assert!(action.request().is_none());
     }
 }

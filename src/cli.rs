@@ -16,7 +16,7 @@ use std::{
 use anyhow::{anyhow, Context, Result};
 
 use crate::{
-    client_action::ClientAction,
+    client_action::{ClientAction, ClientPayload},
     control::{self, request, ControlRoute, ErrorKind, Event, EventKind, Request, Response},
     daemon::{ClientScope, LocalOrbitId, OrbitAddress},
     diagnose::{DiagnosisView, GateState},
@@ -627,10 +627,17 @@ pub async fn client_action_as_scoped(
     let daemon = crate::daemon::LaitDaemonClient::current()?;
     // The process endpoint answered the probe a moment ago, so a failure here
     // is the transport giving out mid-exchange: `3`, daemon unreachable.
-    daemon
-        .request(route, action.request(), act_as)
-        .await
-        .map_err(|e| CliError::unreachable(format!("{e:#}")).into())
+    match action.payload() {
+        ClientPayload::Control(request) => daemon
+            .request(route, request, act_as)
+            .await
+            .map_err(|e| CliError::unreachable(format!("{e:#}")).into()),
+        ClientPayload::World(call) => daemon
+            .call_world(route, call.clone(), act_as)
+            .await
+            .map(crate::world::decode_reply)
+            .map_err(|e| CliError::unreachable(format!("{e:#}")).into()),
+    }
 }
 
 /// Send through the current Lait daemon only if it is already running.

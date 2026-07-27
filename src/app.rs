@@ -419,7 +419,9 @@ async fn dispatch(specs: &[cmdspec::Spec], matches: &ArgMatches, out: Out) -> Re
         // The uniform path: build one Request and round-trip the daemon.
         Dispatch::Action(f) => {
             let action = crate::client_action::ClientAction::from_legacy(f(m)?);
-            let req = action.request();
+            let req = action
+                .request()
+                .expect("legacy command registry emitted a WorldCall unexpectedly");
             use std::io::IsTerminal;
             // Ask before destroying (delete / member remove / key rotate). Gated
             // on the Request, so the list lives in one place; everything else
@@ -442,7 +444,14 @@ async fn dispatch(specs: &[cmdspec::Spec], matches: &ArgMatches, out: Out) -> Re
                 .copied()
                 .unwrap_or(false);
             if leaf.name == "new" && wants_start {
-                crate::cli::run_new_start(&home, action.into_request(), out).await?;
+                crate::cli::run_new_start(
+                    &home,
+                    action
+                        .into_request()
+                        .expect("new remains on the compatibility registry"),
+                    out,
+                )
+                .await?;
             } else if leaf.name == "members" && !out.json && std::io::stdout().is_terminal() {
                 // Bare `lait members` in an interactive terminal opens the modal
                 // picker (browse/approve); `--json` and piped/redirected output

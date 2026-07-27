@@ -2943,6 +2943,7 @@ dependencies = [
  "tracing-subscriber",
  "windows-sys 0.61.2",
  "world-bridge",
+ "world-interface",
  "zip",
 ]
 
@@ -6824,6 +6825,17 @@ dependencies = [
  "runtime",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "world-interface"
+version = "0.6.0"
+dependencies = [
+ "clap",
+ "replica",
+ "schemars",
+ "serde_json",
+ "world-bridge",
 ]
 
 [[package]]

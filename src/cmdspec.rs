@@ -399,7 +399,9 @@ fn build_sub(s: &Spec) -> Command {
 /// for bad input, or an error naming the command if it is a `Special` handler.
 pub fn parse_to_request(argv: &[&str]) -> Result<Request> {
     match parse_to_dispatch(argv)? {
-        ParsedCommand::Action(action) => Ok(action.into_request()),
+        ParsedCommand::Action(action) => action
+            .into_request()
+            .ok_or_else(|| anyhow!("WorldCall commands do not map to compatibility Requests")),
         ParsedCommand::Special { name, .. } => {
             Err(anyhow!("`{name}` is a special-dispatch command"))
         }
