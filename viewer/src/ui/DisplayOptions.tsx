@@ -48,8 +48,8 @@ export function DisplayOptions({
   return (
     <Popover.Root open={open} onOpenChange={onOpenChange}>
       <Popover.Trigger asChild>
-        <IconButton label="Display options" chord="⇧V" variant={changed ? "active" : "ghost"}>
-          <SlidersHorizontal className="size-4" />
+        <IconButton label="Display options" chord="⇧V" variant={changed ? "active" : "outline"}>
+          <SlidersHorizontal className="size-icon-sm" />
         </IconButton>
       </Popover.Trigger>
       <PopoverContent align="end" className="flex w-64 flex-col gap-3 p-3">
@@ -57,7 +57,7 @@ export function DisplayOptions({
               grouping means columns on a board and headers in a list, and on a
               calendar it means nothing at all. */}
           <div
-            className="bg-active/40 flex gap-0.5 rounded-lg p-0.5"
+            className="bg-active/40 flex gap-0.5 rounded-surface p-0.5"
             role="group"
             aria-label="Layout"
           >
@@ -70,11 +70,11 @@ export function DisplayOptions({
                   aria-pressed={active}
                   onClick={() => onModeChange(mode)}
                   className={cn(
-                    "flex h-7 flex-1 items-center justify-center gap-1.5 rounded-md text-xs transition-colors",
+                    "flex h-ctl-md flex-1 items-center justify-center gap-1.5 rounded-control text-xs transition-colors",
                     active ? "bg-raised text-fg" : "text-dim hover:text-fg",
                   )}
                 >
-                  <Glyph className="size-3.5" aria-hidden />
+                  <Glyph className="size-icon-sm" aria-hidden />
                   {ISSUE_MODE_LABEL[mode]}
                 </button>
               );

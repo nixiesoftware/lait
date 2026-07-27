@@ -76,7 +76,7 @@ export function NewProject({
       <Dialog.Portal>
         <Dialog.Overlay className="ui-overlay fixed inset-0 z-50 bg-black/45 backdrop-blur-[2px]" />
         <Dialog.Content
-          className="ui-surface border-line-strong bg-raised shadow-overlay fixed top-[18vh] left-1/2 z-50 w-[min(440px,92vw)] -translate-x-1/2 rounded-lg border"
+          className="ui-surface border-line-strong bg-raised shadow-overlay fixed top-[18vh] left-1/2 z-50 w-[min(440px,92vw)] -translate-x-1/2 rounded-surface border"
           aria-describedby={undefined}
         >
           <form
@@ -89,7 +89,7 @@ export function NewProject({
               <Dialog.Title className="font-semibold">New project</Dialog.Title>
               <Dialog.Close asChild>
                 <IconButton label="Close" chord="Esc" className="ml-auto">
-                  <X className="size-4" />
+                  <X className="size-icon-md" />
                 </IconButton>
               </Dialog.Close>
             </header>
@@ -133,7 +133,7 @@ export function NewProject({
                 <ColorPicker value={color} onChange={setColor} />
               </div>
               {failure && (
-                <p className="border-danger/25 bg-danger/5 text-danger rounded border p-2 text-xs" role="alert">
+                <p className="border-danger/25 bg-danger/5 text-danger rounded-surface border p-2 text-xs" role="alert">
                   Project not created. Your name and key are still here: {failure}
                 </p>
               )}

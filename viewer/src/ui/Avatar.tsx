@@ -72,7 +72,7 @@ export function Avatar({
     <span
       className={cn(
         "inline-flex shrink-0 items-center justify-center rounded-full font-medium text-white select-none",
-        size === "sm" ? "size-4 text-[8px]" : "size-5 text-[9px]",
+        size === "sm" ? "size-avatar-sm text-[8px]" : "size-avatar-md text-[9px]",
         // `me` gets a ring rather than a different colour: the colour still has to
         // be the key's, or you'd be the one member whose avatar means something else.
         me && "ring-accent ring-1 ring-offset-1 ring-offset-[var(--color-bg)]",
@@ -86,7 +86,7 @@ export function Avatar({
       {logo ? (
         <svg
           viewBox={logo.viewBox}
-          className={size === "sm" ? "size-2.5" : "size-3"}
+          className={size === "sm" ? "size-icon-2xs" : "size-icon-xs"}
           fill={logo.fg}
           aria-hidden="true"
         >
@@ -97,7 +97,7 @@ export function Avatar({
         // otherwise render as half a character.
         [...name][0]?.toUpperCase()
       ) : (
-        <User className={size === "sm" ? "size-2.5" : "size-3"} strokeWidth={2.5} />
+        <User className={size === "sm" ? "size-icon-2xs" : "size-icon-xs"} strokeWidth={2.5} />
       )}
     </span>
   );

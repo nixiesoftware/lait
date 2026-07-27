@@ -34,12 +34,12 @@ export function Shortcuts({ ctx, onClose }: { ctx: Ctx; onClose: () => void }) {
         aria-modal="true"
         aria-label="Keyboard shortcuts"
         onMouseDown={(e) => e.stopPropagation()}
-        className="ui-surface border-line-strong bg-raised shadow-overlay flex max-h-[70vh] w-[min(560px,92vw)] flex-col overflow-hidden rounded-lg border"
+        className="ui-surface border-line-strong bg-raised shadow-overlay flex max-h-[70vh] w-[min(560px,92vw)] flex-col overflow-hidden rounded-surface border"
       >
         <header className="border-line flex items-center border-b px-4 py-3">
           <h2 className="flex-1 text-lg font-semibold">Keyboard shortcuts</h2>
           <IconButton label="Close" chord="Esc" onClick={onClose}>
-            <X className="size-4" />
+            <X className="size-icon-md" />
           </IconButton>
         </header>
 

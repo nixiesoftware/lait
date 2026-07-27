@@ -74,7 +74,7 @@ export function Projects({
     return (
       <ApplicationState
         kind="empty"
-        icon={<FolderKanban className="size-5" />}
+        icon={<FolderKanban className="size-icon-lg" />}
         title="No projects yet"
         body="Projects give issues a workflow, identity, and stable place in the space."
       />
@@ -102,12 +102,12 @@ export function Projects({
             <li key={project.id}>
               <button
                 onClick={() => onOpen(project.key)}
-                className={`border-line bg-raised hover:border-line-strong hover:bg-hover group flex min-h-32 w-full flex-col rounded-lg border p-4 text-left transition-colors ${
+                className={`border-line bg-raised hover:border-line-strong hover:bg-hover group flex min-h-32 w-full flex-col rounded-surface border p-4 text-left transition-colors ${
                   project.archived ? "opacity-60" : ""
                 }`}
               >
                 <span className="flex w-full items-center gap-2">
-                  <span className="size-3 rounded-sm" style={{ background: catalogColor(project.color) }} />
+                  <span className="size-mark-lg rounded-mark" style={{ background: catalogColor(project.color) }} />
                   <strong className="min-w-0 flex-1 truncate">{project.name}</strong>
                   {project.archived && (
                     <span className="border-line text-mute rounded-full border px-1.5 text-2xs">
@@ -115,11 +115,11 @@ export function Projects({
                     </span>
                   )}
                   <span className="text-mute font-mono text-xs">{project.key}</span>
-                  <ArrowRight className="text-mute size-3.5 transition-transform group-hover:translate-x-0.5" />
+                  <ArrowRight className="text-mute size-icon-sm transition-transform group-hover:translate-x-0.5" />
                 </span>
                 {unavailable ? (
                   <span className="text-warn mt-auto flex items-center gap-1.5 text-xs">
-                    <AlertTriangle className="size-3.5" /> Projection unavailable
+                    <AlertTriangle className="size-icon-sm" /> Projection unavailable
                   </span>
                 ) : (
                   <>

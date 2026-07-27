@@ -16,7 +16,7 @@ import {
 } from "lucide-react";
 
 import type { SpaceRow, StatusInfo } from "../types";
-import { Button, cn, PopoverContent } from "./primitives";
+import { Button, cn, OverlayGap, PopoverContent } from "./primitives";
 
 export type ApplicationStateKind =
   | "loading"
@@ -77,11 +77,11 @@ export function ProgressState(props: Omit<React.ComponentProps<typeof Applicatio
 }
 
 function StateIcon({ kind }: { kind: ApplicationStateKind }) {
-  if (kind === "loading" || kind === "progress") return <LoaderCircle className="size-5 animate-spin" />;
-  if (kind === "filtered-empty") return <SearchX className="size-5" />;
-  if (kind === "error" || kind === "retry" || kind === "unavailable") return <AlertTriangle className="size-5" />;
-  if (kind === "success") return <CheckCircle2 className="text-ok size-5" />;
-  return <Database className="size-5" />;
+  if (kind === "loading" || kind === "progress") return <LoaderCircle className="size-icon-lg animate-spin" />;
+  if (kind === "filtered-empty") return <SearchX className="size-icon-lg" />;
+  if (kind === "error" || kind === "retry" || kind === "unavailable") return <AlertTriangle className="size-icon-lg" />;
+  if (kind === "success") return <CheckCircle2 className="text-ok size-icon-lg" />;
+  return <Database className="size-icon-lg" />;
 }
 
 export function InlineError({
@@ -103,26 +103,26 @@ export function InlineError({
 }) {
   return (
     <div className="border-danger/25 bg-danger/5 text-danger flex items-center gap-2 border-b px-3 py-2 text-sm" role="alert" data-failure-kind={failureKind}>
-      <AlertTriangle className="size-3.5 shrink-0" />
+      <AlertTriangle className="size-icon-sm shrink-0" />
       <span className="min-w-0 flex-1">
         {title && <strong className="mr-1">{title}.</strong>}
         {message}
       </span>
       {onRetry && (
         <Button variant="ghost" onClick={onRetry} className="text-danger">
-          <RefreshCw className="size-3" />
+          <RefreshCw className="size-icon-xs" />
           {retryLabel}
         </Button>
       )}
       {onCopy && (
         <Button variant="ghost" onClick={onCopy} className="text-danger">
-          <Copy className="size-3" />
+          <Copy className="size-icon-xs" />
           Copy details
         </Button>
       )}
       {onDismiss && (
         <Button variant="ghost" onClick={onDismiss} className="text-danger" aria-label="Dismiss error">
-          <X className="size-3" />
+          <X className="size-icon-xs" />
         </Button>
       )}
     </div>
@@ -211,19 +211,19 @@ export function TrustPopover({
     <Popover.Root>
       <Popover.Trigger
         className={cn(
-          "hover:bg-hover flex h-6 min-w-6 shrink-0 items-center gap-1.5 whitespace-nowrap rounded px-2 text-xs",
+          "hover:bg-hover flex h-ctl-sm min-w-6 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-control px-2 text-xs",
           healthy ? "text-dim" : "text-warn",
         )}
         aria-label="Local and peer status"
       >
-        <span className={cn("size-1.5 rounded-full", healthy ? "bg-ok" : "bg-warn animate-pulse")} />
+        <span className={cn("size-mark-xs rounded-full", healthy ? "bg-ok" : "bg-warn animate-pulse")} />
         <span className="max-[1200px]:hidden">
           {trustSummary(liveness, localReady, peers, degraded)}
         </span>
       </Popover.Trigger>
-      <PopoverContent align="end" sideOffset={6} className="w-80 p-3">
+      <PopoverContent align="end" sideOffset={OverlayGap.panel} className="w-80 p-3">
           <div className="mb-3 flex items-center gap-2">
-            <ShieldCheck className="text-accent size-4" />
+            <ShieldCheck className="text-accent size-icon-md" />
             <div>
               <p className="font-semibold">Local trust and availability</p>
               <p className="text-mute text-xs">Facts from this device, not cloud-style guesses.</p>
@@ -268,9 +268,9 @@ export function TrustPopover({
             />
           </dl>
           {degraded && (
-            <section className="border-warn/30 bg-warn/5 mt-3 rounded-md border p-2.5" aria-label="Recovery required">
+            <section className="border-warn/30 bg-warn/5 mt-3 rounded-control border p-2.5" aria-label="Recovery required">
               <div className="flex items-start gap-2">
-                <AlertTriangle className="text-warn mt-0.5 size-3.5 shrink-0" />
+                <AlertTriangle className="text-warn mt-0.5 size-icon-sm shrink-0" />
                 <div className="min-w-0 flex-1">
                   <p className="text-sm font-medium">Recovery material needs attention</p>
                   <p className="text-dim mt-0.5 text-xs leading-4">
@@ -301,7 +301,7 @@ export function TrustPopover({
                     window.setTimeout(() => setDiagnosticsCopied(false), 1600);
                   }}
                 >
-                  <Copy className="size-3" />
+                  <Copy className="size-icon-xs" />
                   {diagnosticsCopied ? "Copied" : "Copy diagnosis"}
                 </Button>
                 <span className="text-mute text-xs">Run `lait doctor` before repair.</span>
@@ -309,7 +309,7 @@ export function TrustPopover({
             </section>
           )}
           {peers === 0 && localReady && (
-            <p className="bg-bg border-line text-dim mt-3 rounded border p-2 text-xs">
+            <p className="bg-bg border-line text-dim mt-3 rounded-surface border p-2 text-xs">
               Ready locally. Changes will share when a peer connects.
             </p>
           )}
@@ -374,13 +374,13 @@ function Fact({
 }) {
   return (
     <div className="grid grid-cols-[16px_1fr_auto] items-center gap-2">
-      <span className={cn("[&>svg]:size-3.5", ok || neutral ? "text-mute" : "text-warn")}>{icon}</span>
+      <span className={cn("[&>svg]:size-icon-sm", ok || neutral ? "text-mute" : "text-warn")}>{icon}</span>
       <dt className="text-dim">{label}</dt>
       <dd className="flex items-center gap-1.5 text-right">
         {ok ? (
-          <CheckCircle2 className="text-ok size-3" />
+          <CheckCircle2 className="text-ok size-icon-xs" />
         ) : neutral ? null : (
-          <AlertTriangle className="text-warn size-3" />
+          <AlertTriangle className="text-warn size-icon-xs" />
         )}
         {value}
       </dd>

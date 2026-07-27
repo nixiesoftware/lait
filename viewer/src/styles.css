@@ -1,4 +1,74 @@
 @import "tailwindcss";
+@import "./tokens.generated.css";
+
+/* ── Typefaces ───────────────────────────────────────────────────────────
+   Self-hosted and embedded, never fetched. `lait serve` runs on loopback and
+   the binary carries its own assets, so a webfont CDN would make local-first
+   typography depend on the network — the one thing this app is built not to
+   need. These files ship inside the executable.
+
+   Only the latin ranges and the weight axis are included. Fontsource's full
+   Inter is 1.9 MB across every subset (cyrillic, greek, vietnamese) and every
+   axis; latin + latin-ext on one axis is 336 KB for both families together. A
+   subset the app never renders is still a subset the binary carries.
+
+   Variable, so the whole 100-900 range costs one file per subset rather than
+   one per weight — which is what makes shipping real italics affordable
+   alongside them (markdown emphasis in issue bodies would otherwise be
+   synthesised by the browser). */
+@font-face {
+  font-family: "Inter Variable";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 900;
+  src: url("@fontsource-variable/inter/files/inter-latin-wght-normal.woff2") format("woff2-variations");
+  unicode-range: U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD;
+}
+
+@font-face {
+  font-family: "Inter Variable";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 900;
+  src: url("@fontsource-variable/inter/files/inter-latin-ext-wght-normal.woff2") format("woff2-variations");
+  unicode-range: U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+0304,U+0308,U+0329,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C0,U+2113,U+2C60-2C7F,U+A720-A7FF;
+}
+
+@font-face {
+  font-family: "Inter Variable";
+  font-style: italic;
+  font-display: swap;
+  font-weight: 100 900;
+  src: url("@fontsource-variable/inter/files/inter-latin-wght-italic.woff2") format("woff2-variations");
+  unicode-range: U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD;
+}
+
+@font-face {
+  font-family: "Inter Variable";
+  font-style: italic;
+  font-display: swap;
+  font-weight: 100 900;
+  src: url("@fontsource-variable/inter/files/inter-latin-ext-wght-italic.woff2") format("woff2-variations");
+  unicode-range: U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+0304,U+0308,U+0329,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C0,U+2113,U+2C60-2C7F,U+A720-A7FF;
+}
+
+@font-face {
+  font-family: "Roboto Mono Variable";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 900;
+  src: url("@fontsource-variable/roboto-mono/files/roboto-mono-latin-wght-normal.woff2") format("woff2-variations");
+  unicode-range: U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD;
+}
+
+@font-face {
+  font-family: "Roboto Mono Variable";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 900;
+  src: url("@fontsource-variable/roboto-mono/files/roboto-mono-latin-ext-wght-normal.woff2") format("woff2-variations");
+  unicode-range: U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+0304,U+0308,U+0329,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C0,U+2113,U+2C60-2C7F,U+A720-A7FF;
+}
 
 /**
  * The design system — one file, and the only place a colour or a spacing value is
@@ -17,50 +87,151 @@
  */
 
 @theme {
-  /* Semantic, not literal: components ask for `raised` or `line`, never a hex.
-     Renaming a shade must not mean touching a component. */
-  --color-bg: light-dark(#ffffff, #0b0b0d);
-  --color-raised: light-dark(#fafafa, #131316);
-  --color-hover: light-dark(#f2f2f4, #1a1a1f);
-  --color-active: light-dark(#ededf0, #202027);
-  --color-line: light-dark(#e6e6ea, #26262d);
-  --color-line-strong: light-dark(#d2d2d9, #34343d);
+  /* Colour is GENERATED — see `tool/generate-tokens.mjs` and the block it
+     writes into `tokens.generated.css`, imported above. A seed contributes a
+     hue; lightness and chroma come from shared curves, so two families differ
+     in hue and in nothing else. Measurement is what forced the change: the four
+     accent families had drifted to OKLCH lightness 0.571 / 0.677 / 0.695 /
+     0.720 in dark mode, which is not a palette so much as four colours that
+     happen to coexist.
 
-  --color-fg: light-dark(#17171a, #e9e9ec);
-  --color-dim: light-dark(#5c5c66, #a0a0aa);
-  /* Muted copy still appears at the dense 11–12px scale throughout the viewer,
-     so it must clear normal-text contrast rather than relying on "secondary"
-     styling as an exemption. */
-  --color-mute: light-dark(#72727d, #858590);
+     Semantic, not literal, either way: components ask for `raised` or `line`,
+     never a hex. Renaming a shade must not mean touching a component. */
 
-  /* The dark-theme blue is intentionally deeper than the light-theme value:
-     white labels remain AA while focus rings still clear non-text contrast. */
-  --color-accent: light-dark(#2f6bff, #416fe0);
-  --color-accent-fg: #ffffff;
-  --color-danger: light-dark(#d1242f, #f0616d);
-  --color-ok: light-dark(#1a7f37, #3fb950);
-  --color-warn: light-dark(#9a6700, #d29922);
+  /* ── Derivation ─────────────────────────────────────────────────────────
+     Every spatial axis below states where its values come from. Tailwind
+     gives us exactly two kinds, and the difference is mechanical:
 
-  /* Priority + status accents, so a glyph never hard-codes a colour. */
-  --color-urgent: light-dark(#d1242f, #f0616d);
-  --color-high: light-dark(#c2410c, #fb923c);
-  --color-medium: light-dark(#a16207, #facc15);
-  --color-low: light-dark(#64748b, #94a3b8);
+       SCALAR-DERIVED — numeric utilities (`p-2`, `gap-3`, `h-7`) compile to
+         `calc(var(--spacing) * n)`. They rescale with the unit, which makes
+         this the right kind for *rhythm*: padding, gaps, row heights.
 
-  /* A 4px rhythm. `p-2` is 8px, `gap-3` is 12px — the scale the tracker's density
-     depends on; rows are tight and the spacing has to be predictable. */
+       PINNED — a named entry (`--spacing-icon-sm`) compiles to the literal
+         `var(--spacing-icon-sm)`. It never reads the unit. This is the right
+         kind for anything measured against something other than our own
+         rhythm.
+
+     Choosing the wrong kind is invisible until the density toggle moves —
+     which is exactly how icons ended up growing with padding. Full rationale
+     in `docs/plans/11-geometry-token-ladder.md`. */
+
+  /* SCALAR-DERIVED. A 4px rhythm. `p-2` is 8px, `gap-3` is 12px — the scale
+     the tracker's density depends on; rows are tight and the spacing has to
+     be predictable. */
   --spacing: 4px;
 
-  /* Tailwind v4 generates `rounded-*` from named radius tokens. There is no
-     `radius-DEFAULT` namespace entry, so the old 6px value never reached the
-     common `rounded` utility. Keep a deliberate three-step hierarchy instead:
-     tight marks, ordinary controls, floating surfaces. */
-  --radius-sm: 3px;
-  --radius-md: 6px;
-  --radius-lg: 8px;
+  /* PINNED — glyph metrics, deliberately not `--spacing × n`.
+     A lucide icon is drawn on a fixed grid with a fixed stroke width, so its
+     size is a claim about optical weight *against text* — and text sits on
+     its own perceptual ladder below, not on the 4px rhythm. Scaling a glyph
+     with padding thickens its stroke relative to the label beside it, which
+     is why comfortable density used to fatten every icon in the app by 12.5%
+     as a side effect of loosening rows.
+     Sizes pair with the type scale, not with the spacing unit:
+       2xs 10 — inside a mark (checkbox tick, avatar fallback)
+       xs  12 — dense chrome beside `text-xs`
+       sm  14 — the default; beside `text-sm` / `text-base`
+       md  16 — standalone affordances (toolbar triggers)
+       lg  20 — empty states and page-level glyphs */
+  --spacing-icon-2xs: 10px;
+  --spacing-icon-xs: 12px;
+  --spacing-icon-sm: 14px;
+  --spacing-icon-md: 16px;
+  --spacing-icon-lg: 20px;
 
-  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  /* PINNED — marks: the coloured shapes that carry state or identity rather
+     than meaning you read. Status dots, pending pulses, project and label
+     swatches. Same argument as icons and not the same axis: a mark has no
+     glyph inside it, so its size is chosen purely for how heavily the colour
+     reads beside the label it annotates. Scaling one with padding changes how
+     loud a status looks, which is a different claim from how roomy a row is.
+     Rungs are by the company a mark keeps, not by the shape:
+       xs 6  — inside a dense text run (status dot, pending pulse, sidebar swatch)
+       sm 8  — a crumb or picker swatch, beside `text-sm`
+       md 10 — a standalone row marker (timeline)
+       lg 12 — a list-row swatch, where the mark is the row's subject
+       xl 16 — a page-header swatch */
+  --spacing-mark-xs: 6px;
+  --spacing-mark-sm: 8px;
+  --spacing-mark-md: 10px;
+  --spacing-mark-lg: 12px;
+  --spacing-mark-xl: 16px;
+
+  /* The density factor. Distinct from `--spacing` on purpose: the unit is the
+     rhythm's *quantum* and this is the system's *scale*. Splitting them is what
+     lets a comfortable layout loosen rows without also inflating the glyphs and
+     marks above, which are pinned and read this not at all. Today the two move
+     together (4 -> 4.5px is 1.125), so nothing shifts; they are separable the
+     moment we want a denser rhythm at the same control height, or vice versa. */
+  --scale: 1;
+
+  /* DERIVED, but from `--scale` rather than from the unit — and named, so the
+     app has ONE height vocabulary instead of three.
+     A control's height *is* rhythm: comfortable mode should give a row more
+     room, which is exactly what density means. That makes these the opposite
+     case from icons and marks — they are supposed to move. What they should
+     not do is arrive from five different places under three different names
+     (`size`, `density`, and a height welded into a `variant`), which is what
+     made "one notch taller" a five-file edit.
+       xs 20 — a chip or an inline label
+       sm 24 — toolbar buttons, crumbs, segmented filters
+       md 28 — the default: property rows, buttons, small fields
+       lg 32 — inputs, list rows, menu rows
+       xl 40 — issue rows and other full-width list lines */
+  --spacing-ctl-xs: calc(20px * var(--scale));
+  --spacing-ctl-sm: calc(24px * var(--scale));
+  --spacing-ctl-md: calc(28px * var(--scale));
+  --spacing-ctl-lg: calc(32px * var(--scale));
+  --spacing-ctl-xl: calc(40px * var(--scale));
+
+  /* Chrome bars — a separate axis from controls because a bar is sized by what
+     it must hold, not by the ladder. The page header is 44 because the trail's
+     leaf is a wrapping issue title and two lines of it need the room; the
+     section header is 36 because it stays deliberately one step under the rows
+     it introduces. Both are arguments about content, so they get names rather
+     than rungs, and neither should be quietly rounded onto the control ladder. */
+  --spacing-bar-sm: calc(32px * var(--scale));
+  --spacing-bar-md: calc(36px * var(--scale));
+  --spacing-bar-lg: calc(44px * var(--scale));
+
+  /* PINNED — how tall a floating list may grow before it scrolls. Not the
+     control ladder: this is a cap on a scroll container, chosen against the
+     viewport and the number of rows a person will scan, not against the height
+     of a row. Named so the three magnitudes that were loose in the app read as
+     one category with three sizes rather than three unrelated numbers.
+       sm 208 — a short pinned list (saved views)
+       md 256 — an option list you filter (pickers, filters)
+       lg 288 — a full menu */
+  --spacing-overlay-sm: 208px;
+  --spacing-overlay-md: 256px;
+  --spacing-overlay-lg: 288px;
+
+  /* Avatars scale with the rows that carry them. */
+  --spacing-avatar-sm: calc(16px * var(--scale));
+  --spacing-avatar-md: calc(20px * var(--scale));
+  --spacing-avatar-lg: calc(24px * var(--scale));
+
+  /* PROJECTED — radius is the one axis with two tiers.
+     The rungs live in `:root` below, deliberately outside `@theme` so Tailwind
+     generates no utility for them: they are the private ladder, and the only
+     public vocabulary is the three roles here. That is the closest thing CSS
+     gives us to atyard's `_internal/` — you cannot write `rounded-8`, so a
+     corner is always chosen by what the thing IS.
+
+     **These three lines are the seam.** Roundness is retuned by pointing a role
+     at a different rung, never at the ~155 call sites that flow through. That is
+     also why the rungs are named for their values (Linear's ladder) rather than
+     ordinally: a multiplier would make `--radius-8` render something other than
+     8px and the name would start lying. Remapping keeps every name honest. */
+  --radius-mark: var(--radius-4);
+  --radius-control: var(--radius-8);
+  --radius-surface: var(--radius-12);
+
+  /* The fallbacks still matter: `font-display: swap` means the stack below
+     paints the first frame, and a system UI face keeps that frame close
+     enough in metrics that the swap is not a visible reflow. */
+  --font-sans: "Inter Variable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "Roboto Mono Variable", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
 
   /* Dense-UI type scale: 13px is the body size a tracker actually reads at. */
   --text-2xs: 10px;
@@ -103,7 +274,46 @@
 /* Dark by default; the OS decides unless the user overrode it. `color-scheme` is
    the single switch every `light-dark()` above reads — and it also fixes native
    scrollbars and form controls for free, which a class-based dark mode does not. */
+/* The private radius ladder — Linear's, named by value (4/6/8/12/16 + a pill).
+   Outside `@theme` on purpose: `@theme` is what makes Tailwind emit a utility,
+   so declaring these here gives us a tier the app can read but cannot spend.
+   Consumers reach a corner through the three roles above; these are what the
+   roles point AT. `--radius-6` and `--radius-16` are unmapped today and kept
+   because a ladder with gaps in it invites someone to reach for an arbitrary
+   value the moment a role needs a step between two others. */
+/* ── Field layering ──────────────────────────────────────────────────────
+   A field has to contrast with whatever holds it, and what holds it is not
+   knowable from the field's own markup: the same `Input` sits on the page, in
+   a popover, and inside a card. Carbon's answer — and atyard's `LayerTokens`
+   — is that a field INVERTS against its layer: lighter on a dark surface,
+   darker on a light one, so it stays legible wherever it lands.
+
+   In CSS this needs no context provider and no depth counter, because custom
+   properties already inherit. A surface declares the field colour for its own
+   subtree and the nearest one wins by cascade, so `--field-bg` is set once per
+   SURFACE rather than once per field. That is the whole mechanism.
+
+   The declarations hang off the surface utilities themselves so that painting
+   a surface and re-scoping its fields cannot drift apart — there is no second
+   class to remember, and a surface added later gets the behaviour for free. */
 :root {
+  --field-bg: var(--color-raised);
+}
+.bg-bg {
+  --field-bg: var(--color-raised);
+}
+.bg-raised,
+.bg-sunken {
+  --field-bg: var(--color-bg);
+}
+
+:root {
+  --radius-4: 4px;
+  --radius-6: 6px;
+  --radius-8: 8px;
+  --radius-12: 12px;
+  --radius-16: 16px;
+
   color-scheme: dark;
 }
 @media (prefers-color-scheme: light) {
@@ -123,6 +333,10 @@
    type must keep the same rhythm when the user asks for more breathing room. */
 :root[data-density="comfortable"] {
   --spacing: 4.5px;
+  /* Moves with the unit today (4 -> 4.5 is exactly 1.125), so every named
+     control height reproduces what the numeric utility used to compute and
+     nothing shifts. The two are separate variables so they can stop agreeing. */
+  --scale: 1.125;
   --text-2xs: 11px;
   --text-2xs--line-height: 15px;
   --text-xs: 12px;
@@ -166,7 +380,7 @@
      mouse clicks either. `:focus-visible` is exactly that distinction, and it is
      why no component sets `outline: none`. */
   :focus-visible {
-    @apply outline-accent rounded-sm outline-2 outline-offset-2;
+    @apply outline-accent rounded-mark outline-2 outline-offset-2;
   }
 
   /*
@@ -584,12 +798,35 @@
   }
 }
 
+/* Only the LEADING caption sits flush with the rail's top edge. `first:mt-0` on
+   the caption itself would have hit every one of them — each is the first child
+   of its own section — so the rule has to select the first section. */
+.issue-detail-properties > .rail-section:first-child .rail-caption {
+  margin-top: 0;
+}
+
 @container (min-width: 700px) {
+  /* Boxed and centred, the way Linear sets an issue. The measure cap below
+     governs the text column; capping the GRID at exactly that column plus the
+     gutter and the rail means the two never drift apart as the window grows,
+     and the whole set stays centred in the pane rather than pinned left with a
+     widening void beside it. */
   .issue-detail-body {
+    /* Composed, not a round number. The cap is exactly measure + gutter + rail,
+       so any one of the three can be retuned and the total follows instead of
+       needing to be recomputed by hand. `+ 2rem` restores the element's own
+       `p-4`, which sits inside the border box — without it the columns would
+       sum to 32px less than the composition claims. */
+    --issue-rail: 264px;
+    --issue-gutter: 40px;
+    --issue-measure: 1296px;
     display: grid;
-    grid-template-columns: minmax(0, 1fr) 264px;
+    grid-template-columns: minmax(0, 1fr) var(--issue-rail);
     align-content: start;
-    column-gap: 40px;
+    column-gap: var(--issue-gutter);
+    max-width: calc(var(--issue-measure) + var(--issue-gutter) + var(--issue-rail) + 2rem);
+    margin-inline: auto;
+    width: 100%;
   }
 
   /* The measure is capped, not filled. `saans` runs 6.92px per character at
@@ -605,13 +842,24 @@
   .issue-detail-body > *:not(.issue-detail-properties) {
     grid-column: 1;
     width: 100%;
-    max-width: 35rem;
+    max-width: var(--issue-measure);
   }
 
+  /* No divider and no scroll of its own. The rail is reference material you
+     read *against* the issue, so it stays put while the body moves — and a rule
+     between them was drawing a boundary the layout already makes obvious.
+     `align-self: start` is what makes `sticky` work here: without it the grid
+     stretches the item to the full row span and a stretched box has nowhere to
+     stick to. */
   .issue-detail-properties {
     grid-column: 2;
     grid-row: 1 / span 40;
-    border-left: 1px solid var(--color-line);
-    padding-left: 20px;
+    align-self: start;
+    position: sticky;
+    /* Matches the body's own `p-4`. At `top: 0` the rail sat 16px below the
+       scroll container at rest and then snapped up to meet it on the first
+       scroll — a visible jolt that read as the eyebrow sliding out from under
+       itself. Sticking where it already sits means it never moves at all. */
+    top: 1rem;
   }
 }

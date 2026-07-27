@@ -1,13 +1,14 @@
 import { useState } from "react";
 import * as Popover from "@radix-ui/react-popover";
 import { Command } from "cmdk";
-import { Check, ChevronDown, Plus } from "lucide-react";
+import { Check, Plus } from "lucide-react";
 
 import { cmdkFilter } from "../core/fuzzy";
 import {
   cn,
   controlTrigger,
-  type ControlTriggerVariant,
+  type ControlSize,
+  type ControlTone,
   crumbGlyph,
   PopoverContent,
 } from "./primitives";
@@ -84,7 +85,13 @@ type Props = {
    */
   swatchShape?: "dot" | "square";
 } & Mode & {
-  variant?: ControlTriggerVariant;
+  tone?: ControlTone;
+  size?: ControlSize;
+  /** Put the swatch in a fixed-width glyph slot. A breadcrumb needs every
+   *  crumb's text to start at the same offset whatever mark precedes it — that
+   *  is a layout contract, not a look, which is why it survives as its own prop
+   *  rather than being inferred from a tone. */
+  swatchSlot?: boolean;
 };
 
 export function Combobox(props: Props) {
@@ -98,11 +105,13 @@ export function Combobox(props: Props) {
     open,
     onOpenChange,
     emptyText,
-    variant,
+    tone,
+    size,
+    swatchSlot,
     onCreate,
     swatchShape,
   } = props;
-  const swatch = cn("size-2 shrink-0", swatchShape === "square" ? "rounded-[3px]" : "rounded-full");
+  const swatch = cn("size-mark-sm shrink-0", swatchShape === "square" ? "rounded-mark" : "rounded-full");
 
   // Open state is internal *and* overridable. A keybinding needs to force it open;
   // a single-select pick needs to close it. Both have to work, so the component owns
@@ -128,7 +137,7 @@ export function Combobox(props: Props) {
     <>
       {single?.icon}
       {triggerSwatch &&
-        (variant === "crumb" ? (
+        (swatchSlot ? (
           <span className={crumbGlyph}>{triggerSwatch}</span>
         ) : (
           triggerSwatch
@@ -144,7 +153,7 @@ export function Combobox(props: Props) {
     return (
       <span
         className={cn(
-          controlTrigger({ variant }),
+          controlTrigger({ tone, size }),
           "text-dim",
           className,
         )}
@@ -159,29 +168,8 @@ export function Combobox(props: Props) {
 
   return (
     <Popover.Root open={isOpen} onOpenChange={setOpen}>
-      <Popover.Trigger aria-label={label} className={cn(controlTrigger({ variant }), className)}>
+      <Popover.Trigger aria-label={label} className={cn(controlTrigger({ tone, size }), className)}>
         {content}
-        {/* A bare trigger keeps its chevron hidden until hover: in a property list
-            the value is the content and five permanent chevrons are five arrows
-            pointing at nothing. It still appears on keyboard focus.
-
-            Each variant waits on the group that actually wraps it — `property` on
-            the property row, `crumb` on the breadcrumb item. Naming the wrong one
-            is silent: the class compiles, matches nothing, and the affordance
-            simply never arrives. */}
-        {/* A label chip has no chevron at all. The chip *is* the target — it is
-            already a bordered, coloured, clearly-hit-able shape — and one arrow
-            per label turns a run of four into eight things to look at. */}
-        <ChevronDown
-          className={cn(
-            "text-mute size-3 shrink-0",
-            variant === "label" && "hidden",
-            variant === "property" &&
-              "opacity-0 transition-opacity group-hover/prop:opacity-100 group-focus-within/prop:opacity-100",
-            variant === "crumb" &&
-              "opacity-0 transition-opacity group-hover/crumb:opacity-100 group-focus-within/crumb:opacity-100",
-          )}
-        />
       </Popover.Trigger>
       <PopoverContent align="start" className="w-60 overflow-hidden p-0">
           <Command filter={cmdkFilter} loop>
@@ -192,7 +180,7 @@ export function Combobox(props: Props) {
               placeholder={`${label}…`}
               className="border-line placeholder:text-mute w-full border-b bg-transparent px-3 py-2 text-sm outline-none"
             />
-            <Command.List className="max-h-64 overflow-y-auto p-1">
+            <Command.List className="max-h-overlay-md overflow-y-auto p-1">
               {/* The create row replaces "no matches" when creating is possible:
                   an empty result with a dead end and an empty result with a way
                   forward are different answers. */}
@@ -221,7 +209,7 @@ export function Combobox(props: Props) {
                       setOpen(false);
                     }
                   }}
-                  className="data-[selected=true]:bg-active flex cursor-default items-center gap-2 rounded px-2 py-1 text-sm outline-none"
+                  className="data-[selected=true]:bg-active flex cursor-default items-center gap-2 rounded-control px-2 py-1 text-sm outline-none"
                 >
                   {o.icon}
                   {o.swatch && <span className={swatch} style={{ background: o.swatch }} />}
@@ -229,8 +217,8 @@ export function Combobox(props: Props) {
                   {o.hint && <span className="text-mute shrink-0 font-mono text-2xs">{o.hint}</span>}
                   {/* Reserve the check's width always, or every row shifts sideways
                       the moment one becomes selected. */}
-                  <span className="size-3 shrink-0">
-                    {isSelected(o.id) && <Check className="size-3" />}
+                  <span className="size-icon-xs shrink-0">
+                    {isSelected(o.id) && <Check className="size-icon-xs" />}
                   </span>
                 </Command.Item>
               ))}
@@ -247,9 +235,9 @@ export function Combobox(props: Props) {
                       setQuery("");
                       if (props.multi !== true) setOpen(false);
                     }}
-                    className="data-[selected=true]:bg-active flex cursor-default items-center gap-2 rounded px-2 py-1 text-sm outline-none"
+                    className="data-[selected=true]:bg-active flex cursor-default items-center gap-2 rounded-control px-2 py-1 text-sm outline-none"
                   >
-                    <Plus className="size-3 shrink-0" />
+                    <Plus className="size-icon-xs shrink-0" />
                     <span className="min-w-0 flex-1 truncate">
                       Create “{query.trim()}”
                     </span>

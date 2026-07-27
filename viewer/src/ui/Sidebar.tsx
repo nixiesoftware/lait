@@ -4,7 +4,6 @@ import {
   ArrowLeftRight,
   Bookmark,
   Bot,
-  ChevronDown,
   ChevronRight,
   Cog,
   Copy,
@@ -142,7 +141,7 @@ export function Sidebar({
           showing sit on one line across the whole window. It carries no bottom
           border: the rule under the work area's header separates that header
           from its content, and the sidebar has no content to separate it from. */}
-      <div className="flex h-11 shrink-0 items-center gap-0.5 px-2">
+      <div className="flex h-bar-lg shrink-0 items-center gap-0.5 px-2">
         <SpaceSwitcher
           spaces={spaces}
           current={current}
@@ -155,8 +154,8 @@ export function Sidebar({
 
       <div className="flex min-h-0 flex-1 flex-col px-2 pb-2">
       {agent && (
-        <div className="border-line bg-bg text-dim mx-1 mt-2 flex items-start gap-2 rounded border p-2 text-xs">
-          <Bot className="mt-0.5 size-3.5 shrink-0" />
+        <div className="border-line bg-bg text-dim mx-1 mt-2 flex items-start gap-2 rounded-surface border p-2 text-xs">
+          <Bot className="mt-0.5 size-icon-sm shrink-0" />
           <span>
             Observing as <strong className="text-fg">{agent}</strong>. Writes are disabled.
           </span>
@@ -186,7 +185,7 @@ export function Sidebar({
         action={
           !agent && (
             <IconButton label="New project" onClick={onCreateProject}>
-              <Plus className="size-3" />
+              <Plus className="size-icon-xs" />
             </IconButton>
           )
         }
@@ -247,20 +246,19 @@ function SpaceSwitcher({
             The second line said "Member · 8 people" — a role that does not change
             and a headcount nobody navigates by, costing 12px of every screen and,
             more to the point, making the sidebar's first row a different height
-            from the work area's. Both are `h-8` now, so the space and the thing
+            from the work area's. Both are `h-bar-lg` now, so the space and the thing
             you are looking at read across at the same level. Membership itself
             has better homes: the status dot, the agent banner below, and the
             members tab in Settings. */}
         <DropdownMenu.Trigger
-          className="hover:bg-hover data-[state=open]:bg-active -mx-1 flex h-7 min-w-0 flex-1 items-center gap-1.5 rounded-md px-1.5 outline-none"
+          className="hover:bg-hover data-[state=open]:bg-active -mx-1 flex h-ctl-md min-w-0 flex-1 items-center gap-1.5 rounded-full px-1.5 outline-none"
           aria-label="Space menu"
         >
-          <span className="bg-active flex size-5 shrink-0 items-center justify-center rounded">
-            {selected?.identity.kind === "agent" ? <Bot className="text-mute size-3" /> : <Folder className="text-mute size-3" />}
+          <span className="bg-active flex size-ctl-xs shrink-0 items-center justify-center rounded-mark">
+            {selected?.identity.kind === "agent" ? <Bot className="text-mute size-icon-xs" /> : <Folder className="text-mute size-icon-xs" />}
           </span>
           <strong className="min-w-0 flex-1 truncate text-left text-sm">{title}</strong>
           {selected && <StatusDot status={selected.status} />}
-          <ChevronDown className="text-mute size-3 shrink-0" aria-hidden />
         </DropdownMenu.Trigger>
         {/* Verbs first, replicas behind a submenu.
             This used to inline every local space and hang "Workspace settings"
@@ -272,20 +270,20 @@ function SpaceSwitcher({
         <DropdownMenu.Portal>
           <MenuContent align="start" className="min-w-56">
             <MenuItem onSelect={onOpenSettings}>
-              <Cog className="size-3.5" /> Workspace settings
+              <Cog className="size-icon-sm" /> Workspace settings
             </MenuItem>
             <MenuItem
               disabled={!selected}
               onSelect={() => selected && void navigator.clipboard.writeText(selected.space)}
             >
-              <Copy className="size-3.5" /> Copy space ID
+              <Copy className="size-icon-sm" /> Copy space ID
             </MenuItem>
             {spaces.length > 1 && (
               <>
                 <MenuSeparator />
                 <MenuSub>
                   <MenuSubTrigger>
-                    <ArrowLeftRight className="size-3.5" /> Switch space
+                    <ArrowLeftRight className="size-icon-sm" /> Switch space
                   </MenuSubTrigger>
                   <MenuSubContent>
                     {spaces.map((space) => (
@@ -294,7 +292,7 @@ function SpaceSwitcher({
                         onSelect={() => onPick(space.id)}
                         className={cn(space.id === current && "text-fg")}
                       >
-                        {space.identity.kind === "agent" ? <Bot className="size-3.5 shrink-0" /> : <Folder className="size-3.5 shrink-0" />}
+                        {space.identity.kind === "agent" ? <Bot className="size-icon-sm shrink-0" /> : <Folder className="size-icon-sm shrink-0" />}
                         <span className="min-w-0 flex-1 truncate">{space.name || space.space}</span>
                         {/* An agent replica is a different *identity* on the same
                             data, which is the only thing worth saying twice. */}
@@ -312,7 +310,7 @@ function SpaceSwitcher({
         </DropdownMenu.Portal>
       </DropdownMenu.Root>
       <IconButton label="Search issues" chord="Q" onClick={onSearch}>
-        <Search className="size-4" />
+        <Search className="size-icon-md" />
       </IconButton>
     </div>
   );
@@ -365,10 +363,10 @@ function ProjectRow({
           onClick={() => onToggleExpand(project.key)}
           aria-expanded={expanded}
           aria-label={expanded ? `Collapse ${project.name}` : `Expand ${project.name}`}
-          className="text-mute hover:text-fg flex size-5 shrink-0 items-center justify-center rounded outline-none"
+          className="text-mute hover:text-fg flex size-ctl-xs shrink-0 items-center justify-center rounded-full outline-none"
         >
           <ChevronRight
-            className={cn("size-3 transition-transform", expanded && "rotate-90")}
+            className={cn("size-icon-xs transition-transform", expanded && "rotate-90")}
             aria-hidden
           />
         </button>
@@ -384,7 +382,7 @@ function ProjectRow({
           className={cn(navigationItem({ selected: active && !onFace }), "px-1.5")}
         >
           <span
-            className={cn("size-1.5 shrink-0 rounded-sm opacity-75", active && "opacity-100")}
+            className={cn("size-mark-xs shrink-0 rounded-mark opacity-75", active && "opacity-100")}
             style={{ background: catalogColor(project.color) }}
           />
           <span className="min-w-0 flex-1 truncate">{project.name}</span>
@@ -392,12 +390,12 @@ function ProjectRow({
         <IconButton
           label={favorited ? `Remove ${project.name} from favorites` : `Add ${project.name} to favorites`}
           className={cn(
-            "absolute top-0.5 right-0.5 size-6 opacity-0 group-hover/project:opacity-100 focus-visible:opacity-100",
+            "absolute top-0.5 right-0.5 size-ctl-sm opacity-0 group-hover/project:opacity-100 focus-visible:opacity-100",
             active ? "bg-active hover:bg-hover" : "bg-hover",
           )}
           onClick={() => onToggleFavorite(project.key)}
         >
-          {favorited ? <StarOff className="size-3" /> : <Star className="size-3" />}
+          {favorited ? <StarOff className="size-icon-xs" /> : <Star className="size-icon-xs" />}
         </IconButton>
       </div>
       {expanded && (
@@ -458,7 +456,7 @@ function Section({
     <>
       {onToggle && (
         <ChevronRight
-          className={cn("size-3 shrink-0 transition-transform", open && "rotate-90")}
+          className={cn("size-icon-xs shrink-0 transition-transform", open && "rotate-90")}
           aria-hidden
         />
       )}
@@ -467,7 +465,7 @@ function Section({
     </>
   );
   return (
-    <div className="mt-4 mb-1 flex h-5 items-center px-2">
+    <div className="mt-4 mb-1 flex h-ctl-xs items-center px-2">
       {onToggle ? (
         <button
           className="text-mute hover:text-fg flex min-w-0 items-center gap-1 text-2xs font-semibold tracking-[0.08em] uppercase"
@@ -498,11 +496,11 @@ function NavItem({ icon, label, active, badge, compact, onClick }: { icon: React
       className={cn(
         navigationItem({
           selected: active,
-          density: compact ? "compact" : "normal",
+          size: compact ? "sm" : "md",
         }),
       )}
     >
-      <span className="text-mute [&>svg]:size-3.5">{icon}</span>
+      <span className="text-mute [&>svg]:size-icon-sm">{icon}</span>
       <span className="min-w-0 flex-1 truncate">{label}</span>
       {!!badge && <Badge tone="accent" className="justify-center tabular-nums">{badge}</Badge>}
     </button>
@@ -512,5 +510,5 @@ function NavItem({ icon, label, active, badge, compact, onClick }: { icon: React
 function StatusDot({ status }: { status: SpaceRow["status"] }) {
   const cls = { up: "bg-ok", idle: "bg-mute", missing: "bg-danger" }[status];
   const label = { up: "Local daemon running", idle: "Local daemon idle", missing: "Local replica unavailable" }[status];
-  return <span className={cn("size-1.5 shrink-0 rounded-full", cls)} title={label} role="img" aria-label={label} />;
+  return <span className={cn("size-mark-xs shrink-0 rounded-full", cls)} title={label} role="img" aria-label={label} />;
 }

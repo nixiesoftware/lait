@@ -1,6 +1,6 @@
 import { cva, type VariantProps } from "class-variance-authority";
 import { clsx, type ClassValue } from "clsx";
-import { twMerge } from "tailwind-merge";
+import { extendTailwindMerge } from "tailwind-merge";
 import * as CheckboxPrimitive from "@radix-ui/react-checkbox";
 import * as Popover from "@radix-ui/react-popover";
 import * as SwitchPrimitive from "@radix-ui/react-switch";
@@ -29,6 +29,63 @@ import { catalogColor, labelSurface } from "./colors";
  * bordered buttons competes with the content it exists to serve.
  */
 
+/**
+ * Our named ladders are invisible to `tailwind-merge` out of the box.
+ *
+ * It resolves conflicts by knowing which classes belong to the same group, and
+ * that knowledge is a fixed vocabulary: it recognises `rounded-full` but has
+ * never heard of `rounded-control`, so it files them separately and keeps BOTH.
+ * Two border-radius declarations then reach the element and CSS source order —
+ * not the caller's intent — decides the corner.
+ *
+ * That failed quietly rather than loudly, which is the dangerous kind: a recipe
+ * whose variant asked for a pill kept the base's box, or didn't, depending on
+ * which rule Tailwind happened to emit last. Registering the ladders here fixes
+ * the whole class of bug once, instead of restructuring every recipe to avoid
+ * ever emitting two.
+ */
+const LADDERS = [
+  "ctl-xs", "ctl-sm", "ctl-md", "ctl-lg", "ctl-xl",
+  "bar-sm", "bar-md", "bar-lg",
+  "avatar-sm", "avatar-md", "avatar-lg",
+  "icon-2xs", "icon-xs", "icon-sm", "icon-md", "icon-lg",
+  "mark-xs", "mark-sm", "mark-md", "mark-lg", "mark-xl",
+];
+
+const twMerge = extendTailwindMerge({
+  extend: {
+    classGroups: {
+      rounded: [{ rounded: ["mark", "control", "surface"] }],
+      h: [{ h: LADDERS }],
+      "min-h": [{ "min-h": LADDERS }],
+      w: [{ w: LADDERS }],
+      size: [{ size: LADDERS }],
+    },
+  },
+});
+
+/**
+ * How far a floating surface sits from the thing that opened it.
+ *
+ * A number rather than a token because Radix takes `sideOffset` as a prop, not
+ * a class — but the reason for naming it is the same as every other axis: one
+ * value per CATEGORY of surface, so "move the menus further out" is one edit
+ * instead of a hunt through call sites. These were five loose literals across
+ * six files, and two popovers had drifted 2px off the shared default with no
+ * stated reason.
+ */
+export const OverlayGap = {
+  /** Anchored panels: popovers, pickers, date pickers, filters. */
+  panel: 4,
+  /** Dropdown menus. Same as `panel` today, split out so the menu family can
+   *  be retuned without touching every popover. */
+  menu: 4,
+  /** Tooltips. Deliberately looser: a tip carries no border-to-border
+   *  relationship with its trigger, so it needs the extra breathing room to
+   *  read as a label about the control rather than part of it. */
+  tip: 6,
+} as const;
+
 export function cn(...parts: ClassValue[]): string {
   return twMerge(clsx(parts));
 }
@@ -38,7 +95,7 @@ const button = cva(
   // which is not optional in a keyboard-first app. `transition` (not just
   // `transition-colors`) so the `active:` press scales back smoothly on release;
   // the scale is a transform, so it costs no layout.
-  "inline-flex shrink-0 select-none items-center justify-center gap-1.5 rounded-md font-medium transition-colors disabled:pointer-events-none disabled:opacity-45",
+  "inline-flex shrink-0 select-none items-center justify-center gap-1.5 font-medium transition-colors disabled:pointer-events-none disabled:opacity-45",
   {
     variants: {
       variant: {
@@ -58,8 +115,12 @@ const button = cva(
          *  White-on-danger clears AA (see the palette note). Replaces the old
          *  `primary` + `bg-danger` override that every call site had to remember. */
         destructive: "bg-danger text-accent-fg hover:bg-danger/85",
-        /** Selected state in a segmented group. */
-        active: "bg-active text-fg",
+        /** Selected state in a segmented group. Bordered, because the thing
+         *  it alternates with is `outline`: a state change should move the
+         *  fill, not the silhouette. Without the border a selected tab was a
+         *  pixel narrower than its neighbours and the row shifted as you
+         *  moved between them. */
+        active: "border-line-strong bg-active text-fg border",
         /** A named action inside dense chrome. Unlike `primary`, this sits beside
          * icon buttons without turning the toolbar into a callout banner. */
         toolbar:
@@ -75,10 +136,20 @@ const button = cva(
         pill: "bg-active/60 text-dim hover:bg-hover hover:text-fg rounded-full",
       },
       size: {
-        /** Icon-only chrome: a 24px square, the toolbar unit. */
-        icon: "size-6",
-        sm: "h-6 px-2 text-sm",
-        md: "h-7 px-2.5 text-sm",
+        /** Icon-only chrome: a 24px circle, the toolbar unit. Fully rounded for
+         *  the same reason the property rail is — the only shape these carry is a
+         *  hover fill, so a circle reads as deliberate where a rounded square
+         *  reads as a box that appeared under the pointer. */
+        icon: "size-ctl-sm rounded-full",
+        /** Pills, not boxes. A button carries no border of its own in the
+         *  common variants, so its shape is whatever the fill describes — and a
+         *  row of buttons has to agree: a ghost "Cancel" beside a primary "Save"
+         *  cannot be a pill next to a box. Shape therefore rides on size, which
+         *  every variant passes through, rather than on the ones that happen to
+         *  be quiet. */
+        sm: "h-ctl-sm rounded-full px-2 text-sm",
+        md: "h-ctl-md rounded-full px-2 text-sm",
+        /** No capsule at all — this is a text action inside prose. */
         inline: "h-auto p-0 text-xs",
       },
     },
@@ -106,7 +177,7 @@ export function Button({ className, variant, size, loading, disabled, children, 
       aria-busy={loading || undefined}
       {...rest}
     >
-      {loading && <LoaderCircle className="size-3.5 animate-spin" aria-hidden />}
+      {loading && <LoaderCircle className="size-icon-sm animate-spin" aria-hidden />}
       {children}
     </button>
   );
@@ -190,12 +261,12 @@ export function LabelChip({
         // 12px as the values around it; in a list row it is metadata you scan
         // past next to a date and a project, so it drops to `text-dim` and 11px
         // and sits at their weight rather than above it.
-        size === "md" ? "text-fg h-5 gap-1.5 px-2 text-sm" : "text-dim h-5 gap-1 px-2 text-xs",
+        size === "md" ? "text-fg h-ctl-xs gap-1.5 px-2 text-sm" : "text-dim h-ctl-xs gap-1 px-2 text-xs",
         className,
       )}
     >
       <span
-        className="size-1.5 shrink-0 rounded-full"
+        className="size-mark-xs shrink-0 rounded-full"
         style={{ background: catalogColor(color) }}
       />
       {/* `capitalize` is a text transform, not a rewrite: the DOM still holds
@@ -263,7 +334,7 @@ export function ChipButton({
   return (
     <button
       className={cn(
-        "border-line bg-bg text-dim hover:border-line-strong hover:bg-hover aria-pressed:border-accent/40 aria-pressed:bg-accent/10 aria-pressed:text-fg inline-flex h-6 items-center gap-1 rounded-full border px-1.5 text-xs outline-none transition-colors focus-visible:ring-accent/50 focus-visible:ring-1 disabled:pointer-events-none disabled:opacity-45",
+        "border-line bg-bg text-dim hover:border-line-strong hover:bg-hover aria-pressed:border-accent/40 aria-pressed:bg-accent/10 aria-pressed:text-fg inline-flex h-ctl-sm items-center gap-1 rounded-full border px-1.5 text-xs outline-none transition-colors focus-visible:ring-accent/50 focus-visible:ring-1 disabled:pointer-events-none disabled:opacity-45",
         className,
       )}
       {...props}
@@ -272,12 +343,12 @@ export function ChipButton({
 }
 
 const field = cva(
-  "border-line bg-bg placeholder:text-mute w-full rounded-md border text-sm outline-none transition-colors focus:border-line-strong focus:ring-1 focus:ring-line-strong/30 disabled:cursor-not-allowed disabled:opacity-50 aria-invalid:border-danger aria-invalid:focus:ring-danger/20",
+  "border-line bg-[var(--field-bg)] placeholder:text-mute w-full rounded-control border text-sm outline-none transition-colors focus:border-line-strong focus:ring-1 focus:ring-line-strong/30 disabled:cursor-not-allowed disabled:opacity-50 aria-invalid:border-danger aria-invalid:focus:ring-danger/20",
   {
     variants: {
       size: {
-        sm: "h-7 px-2",
-        md: "h-8 px-2.5",
+        sm: "h-ctl-md px-2",
+        md: "h-ctl-lg px-2.5",
       },
     },
     defaultVariants: { size: "md" },
@@ -305,46 +376,66 @@ const field = cva(
  * and needs the same slot; `layout` and `Picker` both already depend on this
  * module, and neither should depend on the other.
  */
-export const crumbGlyph = "flex size-4 shrink-0 items-center justify-center";
+export const crumbGlyph = "flex size-icon-md shrink-0 items-center justify-center";
 
+/**
+ * Trigger geometry, decomposed.
+ *
+ * This was seven `variant`s, which is what happens when one axis has to encode
+ * two things: `property` and `crumb` were the same face at different heights,
+ * and `chip` and `filter` the same box on different fills. Height was welded in,
+ * so "a property row, but taller" had no expression except an eighth variant.
+ *
+ * Now TONE says what a control looks like and SIZE says how tall it is, and the
+ * two compose. The call-site audit that preceded this also retired `filter` and
+ * `toolbar` outright — both had zero usages anywhere in the app.
+ */
 export const controlTrigger = cva(
-  "inline-flex items-center gap-1.5 rounded-md text-sm outline-none transition-colors disabled:pointer-events-none disabled:opacity-45 data-[state=open]:bg-active",
+  // No radius in the base: a corner is part of a tone's identity, not a default
+  // it inherits. Keeping it here meant a tone that wanted a different shape
+  // emitted both classes and left the winner to CSS source order.
+  "inline-flex items-center gap-1.5 text-sm outline-none transition-colors disabled:pointer-events-none disabled:opacity-45 data-[state=open]:bg-active",
   {
     variants: {
-      variant: {
-        property:
-          "hover:bg-hover -mx-1 min-h-7 min-w-0 px-1.5 text-left",
-        // A crumb that happens to be a switcher. Same face as `property` at the
-        // breadcrumb's own height: `min-h-7` here put a 28px control in a trail
-        // of 24px crumbs, and the taller hover box was visible against them.
-        crumb:
-          "hover:bg-hover -mx-1 min-h-6 min-w-0 px-1.5 text-left",
-        chip:
-          "border-line bg-bg hover:border-line-strong hover:bg-hover min-h-7 border px-2",
-        filter:
-          "border-line bg-raised hover:border-line-strong hover:bg-hover min-h-7 border px-2",
-        toolbar:
-          "text-dim hover:bg-hover hover:text-fg min-h-6 px-1.5",
-        /** Inside a floating pill. Fully rounded to match the shell it sits in,
-         *  and it lifts on hover — the bar is the one surface in the app that
-         *  is over the work rather than part of it, so its controls answer the
-         *  pointer with elevation instead of only a fill. */
-        pill: "bg-active/60 text-dim hover:bg-hover hover:text-fg min-h-7 rounded-full px-2.5",
-        /** A label chip that is its own trigger. No box of its own — the chip
-         *  already has a shape, and wrapping it in a second one would put a
-         *  rectangle around a pill. Hover dims rather than fills, so the target
-         *  is the chip itself and nothing shifts when it opens. */
-        label:
-          "min-w-0 rounded-full transition-opacity hover:opacity-75 data-[state=open]:opacity-75",
+      /** How tall. Declared before `tone` only for readability; `cn` resolves
+       *  any overlap through the registered ladders, not through source order. */
+      size: {
+        /** No height of its own — for a tone that brings its own shape. */
+        none: "",
+        xs: "min-h-ctl-xs",
+        sm: "min-h-ctl-sm",
+        md: "min-h-ctl-md",
+        lg: "min-h-ctl-lg",
+        xl: "min-h-ctl-xl",
+      },
+      tone: {
+        /** Chrome that is only there when you point at it — the property rail
+         *  and the breadcrumb switcher. Fully rounded: a hover fill is the only
+         *  shape it has, so a pill reads as deliberate where a rounded box reads
+         *  as something that appeared under the pointer. */
+        quiet: "hover:bg-hover -mx-1 min-w-0 rounded-full px-1.5 text-left",
+        /** A standing control with a border. Stays a box — a border makes the
+         *  shape explicit rather than only appearing on hover, and a pilled
+         *  border starts reading as a tag rather than a control. */
+        outline:
+          "border-line bg-bg hover:border-line-strong hover:bg-hover rounded-control border px-2",
+        /** Inside a floating bar. It lifts on hover: the bar is the one surface
+         *  that is over the work rather than part of it, so its controls answer
+         *  the pointer with elevation instead of only a fill. */
+        pill: "bg-active/60 text-dim hover:bg-hover hover:text-fg rounded-full px-2.5",
+        /** No box at all — the child already is one. Wrapping a label chip in a
+         *  second shape would put a rectangle around a pill, so hover dims
+         *  rather than fills and nothing shifts when it opens. Pair with
+         *  `size="none"`: the chip carries its own height. */
+        bare: "min-w-0 rounded-full transition-opacity hover:opacity-75 data-[state=open]:opacity-75",
       },
     },
-    defaultVariants: { variant: "chip" },
+    defaultVariants: { tone: "outline", size: "md" },
   },
 );
 
-export type ControlTriggerVariant = NonNullable<
-  VariantProps<typeof controlTrigger>["variant"]
->;
+export type ControlTone = NonNullable<VariantProps<typeof controlTrigger>["tone"]>;
+export type ControlSize = NonNullable<VariantProps<typeof controlTrigger>["size"]>;
 
 /** Shared list interaction states. Content layout remains the caller's concern;
  * hover, selection, focus and dividers do not. */
@@ -354,42 +445,51 @@ export const interactiveRow = cva(
     variants: {
       surface: {
         list: "border-line/35 border-b",
-        contained: "rounded-md",
+        contained: "rounded-control",
       },
       selected: {
         true: "bg-active text-fg",
         false: "hover:bg-hover",
       },
-      density: {
-        compact: "min-h-8",
-        normal: "min-h-9",
-        roomy: "min-h-10",
+      /** Rungs, not adjectives. `compact`/`normal`/`roomy` described a row
+       *  relative to its neighbours, which is why two of them silently
+       *  collapsed onto one height when D5 retired the 36px step and nothing
+       *  could say so. A rung names the height itself, so a call site asking
+       *  for `lg` gets `lg` and two call sites agreeing is visible rather than
+       *  hidden behind two words that mean the same thing. */
+      size: {
+        md: "min-h-ctl-md",
+        lg: "min-h-ctl-lg",
+        xl: "min-h-ctl-xl",
       },
     },
     defaultVariants: {
       surface: "list",
       selected: false,
-      density: "compact",
+      size: "lg",
     },
   },
 );
 
 /** One navigation hit-area and state language for the app rail and settings. */
 export const navigationItem = cva(
-  "flex w-full min-w-0 items-center gap-2 rounded-md px-2 text-left text-sm outline-none transition-colors focus-visible:ring-accent/50 focus-visible:ring-1",
+  // Fully rounded, same family as the property rail and the crumb it sits
+  // under: a nav row carries no border, so a hover or selected fill is the
+  // only thing describing its shape.
+  "flex w-full min-w-0 items-center gap-2 rounded-full px-2 text-left text-sm outline-none transition-colors focus-visible:ring-accent/50 focus-visible:ring-1",
   {
     variants: {
       selected: {
         true: "bg-active text-fg",
         false: "text-dim hover:bg-hover hover:text-fg",
       },
-      density: {
-        compact: "h-6",
-        normal: "h-7",
-        roomy: "h-8",
+      size: {
+        sm: "h-ctl-sm",
+        md: "h-ctl-md",
+        lg: "h-ctl-lg",
       },
     },
-    defaultVariants: { selected: false, density: "normal" },
+    defaultVariants: { selected: false, size: "md" },
   },
 );
 
@@ -483,7 +583,7 @@ export function EditableSurface({
           event.stopPropagation();
           onEdit();
         }}
-        className="border-line bg-raised focus:ring-accent/50 sr-only rounded-md border px-2 py-1 text-sm focus:not-sr-only focus:absolute focus:top-0 focus:right-0 focus:z-10 focus:ring-1"
+        className="border-line bg-raised focus:ring-accent/50 sr-only rounded-control border px-2 py-1 text-sm focus:not-sr-only focus:absolute focus:top-0 focus:right-0 focus:z-10 focus:ring-1"
       >
         {label}
       </button>
@@ -575,9 +675,14 @@ export function IconButton({
       </Tooltip.Trigger>
       <Tooltip.Portal>
         <Tooltip.Content
-          sideOffset={6}
+          sideOffset={OverlayGap.tip}
           style={{ transformOrigin: "var(--radix-tooltip-content-transform-origin)" }}
-          className="ui-surface border-line-strong bg-raised shadow-overlay z-50 flex items-center gap-1.5 rounded border px-2 py-1 text-xs"
+          // `rounded-control`, not `rounded-surface`. A tooltip is a floating
+          // label at control scale, not a panel: at 26px tall the 12px surface
+          // corner is essentially half the height, which stops being a corner
+          // and renders as a pill. The surface rung is for things with enough
+          // body to carry it.
+          className="ui-surface border-line-strong bg-raised shadow-overlay z-50 flex items-center gap-1.5 rounded-control border px-2 py-1 text-xs"
         >
           {label}
           {chord && <Kbd>{chord}</Kbd>}
@@ -607,13 +712,13 @@ export function Checkbox({
         // the largest mark on a list line — heavier than the status circle and
         // the priority bars either side of it — which put the most emphasis on
         // the one control that is only there when you are selecting.
-        "border-line-strong bg-bg text-accent-fg data-[state=checked]:bg-accent data-[state=checked]:border-accent data-[state=indeterminate]:bg-accent data-[state=indeterminate]:border-accent flex size-3.5 shrink-0 items-center justify-center rounded-sm border transition-colors disabled:opacity-50",
+        "border-line-strong bg-bg text-accent-fg data-[state=checked]:bg-accent data-[state=checked]:border-accent data-[state=indeterminate]:bg-accent data-[state=indeterminate]:border-accent flex size-icon-sm shrink-0 items-center justify-center rounded-mark border transition-colors disabled:opacity-50",
         className,
       )}
       {...props}
     >
       <CheckboxPrimitive.Indicator>
-        <Check className="size-2.5" strokeWidth={3} />
+        <Check className="size-icon-2xs" strokeWidth={3} />
       </CheckboxPrimitive.Indicator>
     </CheckboxPrimitive.Root>
   );
@@ -636,7 +741,7 @@ export function Switch({ className, ...props }: React.ComponentProps<typeof Swit
       )}
       {...props}
     >
-      <SwitchPrimitive.Thumb className="bg-fg data-[state=checked]:bg-accent-fg pointer-events-none block size-3 translate-x-0.5 rounded-full transition-transform data-[state=checked]:translate-x-[13px]" />
+      <SwitchPrimitive.Thumb className="bg-fg data-[state=checked]:bg-accent-fg pointer-events-none block size-icon-xs translate-x-0.5 rounded-full transition-transform data-[state=checked]:translate-x-[13px]" />
     </SwitchPrimitive.Root>
   );
 }
@@ -646,7 +751,7 @@ export function Kbd({ children, className }: { children: React.ReactNode; classN
   return (
     <kbd
       className={cn(
-        "border-line-strong bg-bg text-dim rounded-sm border px-1 font-mono text-2xs leading-4",
+        "border-line-strong bg-bg text-dim rounded-mark border px-1 font-mono text-2xs leading-4",
         className,
       )}
     >
@@ -659,7 +764,7 @@ export function Kbd({ children, className }: { children: React.ReactNode; classN
  * The floating shell every Popover shares — the counterpart to `MenuContent`.
  *
  * There was a `MenuContent` for dropdowns but no equivalent for popovers, so the
- * shell string (`border-line-strong bg-raised shadow-overlay z-50 rounded-lg
+ * shell string (`border-line-strong bg-raised shadow-overlay z-50 rounded-surface
  * border`) was hand-copied into every picker, display panel, and status popover —
  * and it had already drifted (the inbox popover reached for a `bg-overlay` token
  * that doesn't exist, so it rendered with no fill). One component ends that: the
@@ -675,7 +780,7 @@ export function Kbd({ children, className }: { children: React.ReactNode; classN
  */
 export function PopoverContent({
   className,
-  sideOffset = 4,
+  sideOffset = OverlayGap.panel,
   style,
   ...props
 }: React.ComponentProps<typeof Popover.Content>) {
@@ -685,7 +790,7 @@ export function PopoverContent({
         sideOffset={sideOffset}
         style={{ transformOrigin: "var(--radix-popover-content-transform-origin)", ...style }}
         className={cn(
-          "ui-surface border-line-strong bg-raised shadow-overlay z-50 rounded-lg border outline-none",
+          "ui-surface border-line-strong bg-raised shadow-overlay z-50 rounded-surface border outline-none",
           className,
         )}
         {...props}

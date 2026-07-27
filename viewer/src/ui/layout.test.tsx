@@ -98,7 +98,7 @@ describe("Breadcrumbs", () => {
               control: true,
               content: (
                 <Combobox
-                  variant="crumb"
+                  tone="quiet" size="sm" swatchSlot
                   label="Project"
                   swatchShape="square"
                   value={{ id: "ENG", label: "Engine", swatch: "#f00" }}

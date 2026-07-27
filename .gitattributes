@@ -12,6 +12,11 @@ Dockerfile text eol=lf
 # across platforms and CI's rebuild-and-diff check doesn't fire on line endings.
 src/serve/assets/** linguist-generated=true
 src/serve/assets/** text eol=lf
+# ...except the fonts. The rule above exists for the JS/CSS bundle, and applied
+# to a woff2 it strips every 0x0D byte that happens to fall inside the compressed
+# stream — `inter-latin-ext-wght-normal.woff2` lost 3 bytes that way and would
+# have been checked out corrupt on every other machine. `binary` is -text -diff.
+src/serve/assets/*.woff2 binary
 # Vite copies this file through into the bundle, so its line endings end up in
 # `src/serve/assets/index.html`. Checked out as CRLF on Windows, the HTML
 # transform re-joins a line that already ends in a carriage return and emits a

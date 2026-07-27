@@ -6,7 +6,8 @@ import {
   Button,
   cn,
   controlTrigger,
-  type ControlTriggerVariant,
+  type ControlSize,
+  type ControlTone,
   IconButton,
   PopoverContent,
 } from "./primitives";
@@ -76,7 +77,8 @@ export function DatePicker({
   value,
   onChange,
   disabled,
-  variant,
+  tone,
+  size,
   ariaLabel = "Due date",
   placeholder = "None",
   className,
@@ -89,7 +91,8 @@ export function DatePicker({
   placeholder?: string;
   /** Extra trigger classes — the caller's tone colour rides here. */
   className?: string;
-  variant?: ControlTriggerVariant;
+  tone?: ControlTone;
+  size?: ControlSize;
 }) {
   const [open, setOpen] = useState(false);
   const [view, setView] = useState<Date>(() =>
@@ -107,7 +110,7 @@ export function DatePicker({
   // A read-only field still shows its value — it just can't open a menu over it.
   if (disabled) {
     return (
-      <span className={cn(controlTrigger({ variant }), "text-dim", !value && "text-mute", className)}>
+      <span className={cn(controlTrigger({ tone, size }), "text-dim", !value && "text-mute", className)}>
         {value ? labelFor(value) : placeholder}
       </span>
     );
@@ -136,9 +139,9 @@ export function DatePicker({
     >
       <Popover.Trigger
         aria-label={ariaLabel}
-        className={cn(controlTrigger({ variant }), !value && "text-mute", className)}
+        className={cn(controlTrigger({ tone, size }), !value && "text-mute", className)}
       >
-        <Calendar className="text-mute size-3.5 shrink-0" />
+        <Calendar className="text-mute size-icon-sm shrink-0" />
         <span>{value ? labelFor(value) : placeholder}</span>
       </Popover.Trigger>
       <PopoverContent align="start" className="w-64 p-2">
@@ -150,7 +153,7 @@ export function DatePicker({
               className="w-full justify-between"
             >
               {q.label}
-              {q.value === null && selected && <X className="text-mute size-3" />}
+              {q.value === null && selected && <X className="text-mute size-icon-xs" />}
             </Button>
           ))}
         </div>
@@ -161,7 +164,7 @@ export function DatePicker({
               label="Previous month"
               onClick={() => setView(addMonths(view, -1))}
             >
-              <ChevronLeft className="size-3.5" />
+              <ChevronLeft className="size-icon-sm" />
             </IconButton>
             <span className="text-sm font-medium">
               {view.toLocaleDateString(undefined, {
@@ -174,7 +177,7 @@ export function DatePicker({
               label="Next month"
               onClick={() => setView(addMonths(view, 1))}
             >
-              <ChevronRight className="size-3.5" />
+              <ChevronRight className="size-icon-sm" />
             </IconButton>
           </div>
 
@@ -203,7 +206,7 @@ export function DatePicker({
                   })}
                   aria-pressed={isSelected}
                   className={cn(
-                    "size-7 text-sm tabular-nums",
+                    "size-ctl-md text-sm tabular-nums",
                     isSelected
                       ? "bg-accent text-accent-fg"
                       : inMonth

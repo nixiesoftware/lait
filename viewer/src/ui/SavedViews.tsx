@@ -27,7 +27,7 @@ export function SavedViews({ space, project, view, filter, display, onApply, onC
     <Popover.Root>
       <Popover.Trigger asChild>
         <IconButton label="Local saved views">
-          <Bookmark className="size-4" />
+          <Bookmark className="size-icon-md" />
         </IconButton>
       </Popover.Trigger>
       <PopoverContent align="end" className="w-72 p-2">
@@ -38,12 +38,12 @@ export function SavedViews({ space, project, view, filter, display, onApply, onC
           {views.length === 0 ? (
             <p className="text-mute px-2 py-3 text-center text-sm">No saved views yet.</p>
           ) : (
-            <div className="mb-2 flex max-h-52 flex-col gap-px overflow-y-auto">
+            <div className="mb-2 flex max-h-overlay-sm flex-col gap-px overflow-y-auto">
               {views.map((view) => (
                 <div key={view.id} className="group/view relative">
                   <button onClick={() => onApply(view)} className={`${navigationItem()} pr-8`}>{view.name}</button>
                   <IconButton label={`Delete ${view.name}`} className="absolute top-0.5 right-0.5 opacity-0 group-hover/view:opacity-100 focus-visible:opacity-100" onClick={() => { setViews(removeView(space, project, view.id)); onChange?.(); }}>
-                    <Trash2 className="size-3" />
+                    <Trash2 className="size-icon-xs" />
                   </IconButton>
                 </div>
               ))}
@@ -52,7 +52,7 @@ export function SavedViews({ space, project, view, filter, display, onApply, onC
           <div className="border-line flex items-center gap-1 border-t pt-2">
             <Input size="sm" value={name} onChange={(event) => setName(event.target.value)} onKeyDown={(event) => event.key === "Enter" && create()} placeholder="Name this view…" className="min-w-0 flex-1" />
             <Button variant="outline" disabled={!name.trim()} onClick={create}>
-              <Plus className="size-3" /> Save
+              <Plus className="size-icon-xs" /> Save
             </Button>
           </div>
       </PopoverContent>

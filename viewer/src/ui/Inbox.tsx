@@ -13,7 +13,7 @@ import {
 import type { InboxEntry } from "../types";
 import { ApplicationState, EmptyState, LoadingState } from "./AppState";
 import { Combobox } from "./Picker";
-import { Button, Checkbox, IconButton, InlineAction, interactiveRow, PopoverContent } from "./primitives";
+import { Button, Checkbox, IconButton, InlineAction, interactiveRow, OverlayGap, PopoverContent } from "./primitives";
 import { short, when } from "./time";
 
 /**
@@ -102,7 +102,7 @@ export function Inbox({
           kind="retry"
           title="Inbox unavailable"
           body={error}
-          action={<Button onClick={() => void load(false)}><RotateCcw className="size-3.5" />Retry</Button>}
+          action={<Button onClick={() => void load(false)}><RotateCcw className="size-icon-sm" />Retry</Button>}
         />
       );
     }
@@ -161,7 +161,7 @@ export function Inbox({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="border-line flex h-9 shrink-0 items-center gap-3 border-b px-4">
+      <div className="border-line flex h-bar-md shrink-0 items-center gap-3 border-b px-4">
         <span className="text-mute text-sm">
           {entries.length} {entries.length === 1 ? "item" : "items"}
           {unreadCount > 0 && <span className="text-accent"> · {unreadCount} unread</span>}
@@ -171,21 +171,21 @@ export function Inbox({
             onClick={() => void load(true)}
             className="ml-auto"
           >
-            <CheckCheck className="size-3.5" />
+            <CheckCheck className="size-icon-sm" />
             Mark {unreadCount === 1 ? "notification" : `all ${unreadCount} notifications`} read
           </Button>
         )}
         <Popover.Root>
           <Popover.Trigger asChild>
             <Button className="ml-auto" aria-label="Inbox preferences">
-              <Settings2 className="size-3.5" /> Preferences
+              <Settings2 className="size-icon-sm" /> Preferences
             </Button>
           </Popover.Trigger>
-          <PopoverContent align="end" sideOffset={6} className="w-64 p-3">
+          <PopoverContent align="end" sideOffset={OverlayGap.panel} className="w-64 p-3">
               <h2 className="mb-1 text-sm font-medium">Inbox preferences</h2>
               <p className="text-mute mb-3 text-xs">Local controls for what is shown on this device. The daemon still delivers the complete feed.</p>
               {(["assigned", "comment", "status"] as InboxKind[]).map((kind) => (
-                <label key={kind} className="hover:bg-hover flex min-h-8 items-center gap-2 rounded px-1.5 text-sm">
+                <label key={kind} className="hover:bg-hover flex min-h-ctl-lg items-center gap-2 rounded-control px-1.5 text-sm">
                   <Checkbox
                     checked={preferences.kinds[kind]}
                     onCheckedChange={(checked) => savePreferences({
@@ -221,12 +221,12 @@ export function Inbox({
 
       {entries.length === 0 ? (
         <EmptyState
-          icon={<InboxIcon className="size-5" />}
+          icon={<InboxIcon className="size-icon-lg" />}
           title="You’re all caught up"
           body="Nothing in this local space is currently addressed to you."
         />
       ) : visible.length === 0 ? (
-        <EmptyState icon={<InboxIcon className="size-5" />} title="No notifications match" body="Adjust local preferences or restore snoozed notifications." />
+        <EmptyState icon={<InboxIcon className="size-icon-lg" />} title="No notifications match" body="Adjust local preferences or restore snoozed notifications." />
       ) : (
         <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto">
           {groups.map((group) => (
@@ -259,7 +259,7 @@ export function Inbox({
                 }
               }}
               className={[
-                interactiveRow({ density: "normal" }),
+                interactiveRow({ size: "lg" }),
                 "group flex items-start gap-3 px-4 py-2",
                 // `unread` counts entries past the watermark, and they are the
                 // newest — so the first N are the unread ones.
@@ -293,7 +293,7 @@ export function Inbox({
                 {isUnread(e, i) ? "Mark read" : "Mark unread"}
               </Button>
               <IconButton label={`Snooze for one hour: ${e.title}`} onClick={(event) => { event.stopPropagation(); snooze(e); }} className="opacity-0 group-hover:opacity-100 group-focus-within:opacity-100">
-                <Timer className="size-3.5" />
+                <Timer className="size-icon-sm" />
               </IconButton>
             </li>
               ))}
@@ -353,7 +353,7 @@ function saveOverrides(spaceId: string, value: ReadOverrides): void {
 
 /** `assigned` | `comment` | `status` — the three ways something reaches you. */
 function KindIcon({ kind }: { kind: string }) {
-  const cls = "size-3.5 text-mute";
+  const cls = "size-icon-sm text-mute";
   if (kind === "comment") return <MessageSquare className={cls} aria-label="Comment" />;
   if (kind === "assigned") return <AtSign className={cls} aria-label="Assigned to you" />;
   return <SignalHigh className={cls} aria-label="Status change" />;

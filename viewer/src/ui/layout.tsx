@@ -3,7 +3,7 @@ import { createContext, useContext, useId, useMemo, useState } from "react";
 import type { ProjectView } from "../core/registry";
 import { createPortal } from "react-dom";
 
-import { cn, crumbGlyph } from "./primitives";
+import { cn, crumbGlyph, OverlayGap } from "./primitives";
 import * as ContextMenu from "@radix-ui/react-context-menu";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import {
@@ -54,7 +54,7 @@ export function SurfaceHeader({
         // 44px, not 32. The trail's leaf is a wrapping issue title, and two lines
         // of it need the room; a bar sized to one line would have made the title
         // the only thing the bar could not hold.
-        "border-line/70 @container flex h-11 shrink-0 items-center gap-1 border-b px-2",
+        "border-line/70 @container flex h-bar-lg shrink-0 items-center gap-1 border-b px-2",
         className,
       )}
     >
@@ -84,9 +84,12 @@ export function Toolbar({
   return (
     <div
       className={cn(
-        "border-line/70 flex shrink-0 items-center gap-1 border-b px-2",
+        // No bottom rule: the bar and the rows under it are one surface —
+        // the slices act on the list directly, and a line between them read
+        // as a boundary between two things rather than a header for one.
+        "flex shrink-0 items-center gap-1 px-2",
         className,
-        "h-8",
+        "h-bar-sm",
       )}
     >
       {children}
@@ -141,7 +144,7 @@ export function GroupHeader({
         // made the divider between two piles of issues as loud as the page. It
         // stays one step under the rows it introduces — the header is
         // punctuation, the rows are the text.
-        "flex h-9 shrink-0 items-center gap-2",
+        "flex h-bar-md shrink-0 items-center gap-2",
         sticky
           ? "bg-bg/95 border-line/70 sticky top-0 z-10 border-b px-4 backdrop-blur-sm"
           : "px-1",
@@ -217,9 +220,10 @@ export type BreadcrumbItem = {
 
 /** Shared crumb geometry: a link, a static crumb and a picker crumb must land on
  *  the same baseline and the same padding, or the trail visibly steps. The picker
- *  crumb gets here through `controlTrigger`'s `crumb` variant, which is written
- *  against these same values. */
-const crumbFace = "flex min-h-6 min-w-0 items-center gap-1.5 rounded-md transition-colors";
+ *  crumb gets here as `tone="quiet" size="sm"`, which resolves to these same
+ *  values — the `sm` rung IS this height, so the two cannot drift apart the way
+ *  they could when the crumb's height was hard-coded inside its own variant. */
+const crumbFace = "flex min-h-ctl-sm min-w-0 items-center gap-1.5 rounded-full transition-colors";
 
 
 export function Breadcrumbs({
@@ -275,7 +279,7 @@ export function Breadcrumbs({
               )}
               {/* The separator belongs to the crumb before it: a dropped ancestor
                   takes its chevron with it, so the trail never opens with a stray ›. */}
-              {!leaf && <ChevronRight className="text-mute mx-0.5 size-3 shrink-0" aria-hidden />}
+              {!leaf && <ChevronRight className="text-mute mx-0.5 size-icon-xs shrink-0" aria-hidden />}
             </li>
           );
         })}
@@ -289,8 +293,8 @@ export function WorkspaceCrumb({ name, agent }: { name: string; agent?: boolean 
   const Glyph = agent ? Bot : Folder;
   return (
     <>
-      <span className={cn(crumbGlyph, "bg-active rounded")}>
-        <Glyph className="text-mute size-2.5" aria-hidden />
+      <span className={cn(crumbGlyph, "bg-active rounded-mark")}>
+        <Glyph className="text-mute size-icon-2xs" aria-hidden />
       </span>
       <span className="truncate">{name}</span>
     </>
@@ -305,7 +309,7 @@ export function ProjectCrumb({ name, color }: { name: string; color?: string | u
     <>
       <span className={crumbGlyph} aria-hidden>
         <span
-          className="size-2 rounded-[3px]"
+          className="size-mark-sm rounded-mark"
           style={{ background: color ?? "var(--color-mute)" }}
         />
       </span>
@@ -341,7 +345,7 @@ export function IssueCrumb({ id, title }: { id: string; title?: string | undefin
 export function DestinationCrumb({ icon, label }: { icon?: React.ReactNode; label: string }) {
   return (
     <>
-      {icon && <span className={cn(crumbGlyph, "text-mute [&>svg]:size-3.5")}>{icon}</span>}
+      {icon && <span className={cn(crumbGlyph, "text-mute [&>svg]:size-icon-sm")}>{icon}</span>}
       <span className="truncate">{label}</span>
     </>
   );
@@ -379,7 +383,7 @@ export function SectionHeader({
   className?: string;
 }) {
   return (
-    <div className={cn("flex min-h-6 items-center gap-2", className)}>
+    <div className={cn("flex min-h-ctl-sm items-center gap-2", className)}>
       <h3 className="text-mute text-2xs font-semibold tracking-wider uppercase">{title}</h3>
       {meta && <span className="text-mute text-xs">{meta}</span>}
       {action && <span className="ml-auto">{action}</span>}
@@ -389,7 +393,7 @@ export function SectionHeader({
 
 export function PropertyRow({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <div className="issue-property group/prop flex min-h-7 items-center gap-2">
+    <div className="issue-property group/prop flex min-h-ctl-md items-center gap-2">
       <dt className="text-mute w-20 shrink-0">{label}</dt>
       <dd className="min-w-0 flex-1">{children}</dd>
     </div>
@@ -428,17 +432,18 @@ export function RailSection({
   return (
     <section className="rail-section flex flex-col">
       {title && (
-        // Equal space above and below. The gap above comes from the rail's own
-        // `gap-3`, so this matches it: a caption used to take 16px above and
-        // 4px below, which glued it to its rows and left it drifting away from
-        // the section it was separating from. Typographically the asymmetry is
-        // defensible — a heading belongs to what follows it — but at 10px in a
-        // 264px column it just read as uneven.
-        <h3 className="rail-caption text-mute text-2xs mb-3 font-semibold tracking-wider uppercase">
+        // The caption now carries ALL the separation between groups, because the
+        // rail itself no longer has a gap. Deliberately asymmetric: more above
+        // than below, so a caption belongs to the rows under it instead of
+        // floating midway between two groups. That is also what removes the
+        // seam between the properties and the metadata below them — the rail
+        // used to spend the gap twice, once as its own `gap-3` and again under
+        // every caption, which read as a break rather than a heading.
+        <h3 className="rail-caption text-mute text-2xs mt-3 mb-1 font-semibold tracking-wider uppercase">
           {title}
         </h3>
       )}
-      <dl className="flex flex-col gap-1">{children}</dl>
+      <dl className="flex flex-col">{children}</dl>
     </section>
   );
 }
@@ -447,10 +452,13 @@ export function RailRow({ label, children }: { label: string; children: React.Re
   return (
     // `title` restores the term to the pointer. It is the same string as the
     // `<dt>`, so the tooltip and the screen reader agree by construction.
-    // `py-1` so a row that grows past its minimum keeps air at both edges. A
-    // wrapped run of labels is 48px of chips in a 28px-minimum row, and without
-    // this the first and last chip sat flush against the rows above and below.
-    <div className="issue-property group/prop flex min-h-7 items-center gap-2 py-1" title={label}>
+    // The vertical padding is the ONLY space between two rows — each row is a
+    // 28px control, so `py` is doubled into the gap between neighbours. Kept
+    // non-zero rather than removed: a wrapped run of labels overflows the 28px
+    // minimum, and at zero the first and last chip sit flush against the rows
+    // above and below. 2px is the least that still reads as a gap between two
+    // adjacent hover pills.
+    <div className="issue-property group/prop flex min-h-ctl-md items-center gap-2 py-0.5" title={label}>
       <dt className="sr-only">{label}</dt>
       <dd className="min-w-0 flex-1">{children}</dd>
     </div>
@@ -492,16 +500,16 @@ export function Disclosure({
 
   return (
     <section className="flex flex-col">
-      <div className="group/disc flex h-8 items-center gap-1">
+      <div className="group/disc flex h-ctl-lg items-center gap-1">
         <button
           type="button"
           onClick={() => setOpen((o) => !o)}
           aria-expanded={open}
           aria-controls={id}
-          className="text-dim hover:text-fg -ml-1 flex min-w-0 items-center gap-1 rounded px-1 py-0.5 text-sm font-medium outline-none focus-visible:ring-1 focus-visible:ring-accent/50"
+          className="text-dim hover:text-fg -ml-1 flex min-w-0 items-center gap-1 rounded-control px-1 py-0.5 text-sm font-medium outline-none focus-visible:ring-1 focus-visible:ring-accent/50"
         >
           <ChevronRight
-            className={cn("size-3.5 shrink-0 transition-transform", open && "rotate-90")}
+            className={cn("size-icon-sm shrink-0 transition-transform", open && "rotate-90")}
             aria-hidden
           />
           <span className="truncate">{title}</span>
@@ -535,7 +543,7 @@ export function Toast({
 }) {
   return (
     <div
-      className={cn("border-line bg-raised text-dim flex items-center gap-3 rounded-md border px-3 py-2 text-sm", className)}
+      className={cn("border-line bg-raised text-dim flex items-center gap-3 rounded-control border px-3 py-2 text-sm", className)}
       role="status"
       aria-live="polite"
     >
@@ -551,8 +559,8 @@ export function MenuContent({
 }: React.ComponentProps<typeof DropdownMenu.Content>) {
   return (
     <DropdownMenu.Content
-      sideOffset={4}
-      className={cn("ui-surface border-line-strong bg-raised shadow-overlay z-50 min-w-48 rounded-lg border p-1 text-sm", className)}
+      sideOffset={OverlayGap.menu}
+      className={cn("ui-surface border-line-strong bg-raised shadow-overlay z-50 min-w-48 rounded-surface border p-1 text-sm", className)}
       {...props}
     />
   );
@@ -566,7 +574,7 @@ export function MenuItem({
   return (
     <DropdownMenu.Item
       className={cn(
-        "flex h-7 cursor-default select-none items-center gap-2 rounded-md px-2 outline-none data-[highlighted]:bg-active data-[disabled]:opacity-50",
+        "flex h-ctl-md cursor-default select-none items-center gap-2 rounded-control px-2 outline-none data-[highlighted]:bg-active data-[disabled]:opacity-50",
         danger ? "text-danger" : "text-dim",
         className,
       )}
@@ -595,7 +603,7 @@ export function ContextMenuContent({
   return (
     <ContextMenu.Content
       className={cn(
-        "ui-surface border-line-strong bg-raised shadow-overlay z-50 min-w-48 rounded-lg border p-1 text-sm",
+        "ui-surface border-line-strong bg-raised shadow-overlay z-50 min-w-48 rounded-surface border p-1 text-sm",
         className,
       )}
       {...props}
@@ -611,7 +619,7 @@ export function ContextMenuItem({
   return (
     <ContextMenu.Item
       className={cn(
-        "flex h-7 cursor-default items-center gap-2 rounded-md px-2 outline-none select-none data-[disabled]:opacity-50 data-[highlighted]:bg-active",
+        "flex h-ctl-md cursor-default items-center gap-2 rounded-control px-2 outline-none select-none data-[disabled]:opacity-50 data-[highlighted]:bg-active",
         danger ? "text-danger" : "text-dim",
         className,
       )}
@@ -647,13 +655,13 @@ export function MenuSubTrigger({
   return (
     <DropdownMenu.SubTrigger
       className={cn(
-        "text-dim flex h-7 cursor-default select-none items-center gap-2 rounded-md px-2 outline-none data-[highlighted]:bg-active data-[state=open]:bg-active",
+        "text-dim flex h-ctl-md cursor-default select-none items-center gap-2 rounded-control px-2 outline-none data-[highlighted]:bg-active data-[state=open]:bg-active",
         className,
       )}
       {...props}
     >
       {children}
-      <ChevronRight className="text-mute ml-auto size-3 shrink-0" aria-hidden />
+      <ChevronRight className="text-mute ml-auto size-icon-xs shrink-0" aria-hidden />
     </DropdownMenu.SubTrigger>
   );
 }
@@ -665,9 +673,9 @@ export function MenuSubContent({
   return (
     <DropdownMenu.Portal>
       <DropdownMenu.SubContent
-        sideOffset={4}
+        sideOffset={OverlayGap.menu}
         className={cn(
-          "ui-surface border-line-strong bg-raised shadow-overlay z-50 max-h-72 min-w-52 overflow-y-auto rounded-lg border p-1 text-sm",
+          "ui-surface border-line-strong bg-raised shadow-overlay z-50 max-h-overlay-lg min-w-52 overflow-y-auto rounded-surface border p-1 text-sm",
           className,
         )}
         {...props}

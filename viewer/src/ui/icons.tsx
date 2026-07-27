@@ -16,11 +16,11 @@ export function PriorityIcon({ priority, className = "" }: { priority: Priority;
   if (priority === "urgent") {
     return (
       <span
-        className={`inline-flex size-4 shrink-0 items-center justify-center rounded-sm bg-urgent ${className}`}
+        className={`inline-flex size-icon-md shrink-0 items-center justify-center rounded-mark bg-urgent ${className}`}
         role="img"
         aria-label="Urgent priority"
       >
-        <svg viewBox="0 0 16 16" className="size-3 fill-white" aria-hidden="true">
+        <svg viewBox="0 0 16 16" className="size-icon-xs fill-white" aria-hidden="true">
           <rect x="7" y="3.5" width="2" height="6" rx="1" />
           <rect x="7" y="11" width="2" height="2" rx="1" />
         </svg>
@@ -33,7 +33,7 @@ export function PriorityIcon({ priority, className = "" }: { priority: Priority;
   return (
     <svg
       viewBox="0 0 16 16"
-      className={`size-4 shrink-0 ${className}`}
+      className={`size-icon-md shrink-0 ${className}`}
       role="img"
       aria-label={label}
     >
@@ -72,7 +72,7 @@ export function StatusIcon({
   return (
     <svg
       viewBox="0 0 14 14"
-      className={`size-3.5 shrink-0 ${className}`}
+      className={`size-icon-sm shrink-0 ${className}`}
       role="img"
       aria-label={label}
       style={{ color }}

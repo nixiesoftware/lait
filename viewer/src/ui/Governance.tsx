@@ -95,13 +95,13 @@ function Shell({
         <Dialog.Overlay className="ui-overlay fixed inset-0 z-50 bg-black/45 backdrop-blur-[2px]" />
         <Dialog.Content
           aria-describedby={undefined}
-          className="ui-surface border-line-strong bg-raised shadow-overlay fixed top-[10vh] left-1/2 z-50 flex max-h-[75vh] w-[min(560px,94vw)] -translate-x-1/2 flex-col overflow-hidden rounded-lg border"
+          className="ui-surface border-line-strong bg-raised shadow-overlay fixed top-[10vh] left-1/2 z-50 flex max-h-[75vh] w-[min(560px,94vw)] -translate-x-1/2 flex-col overflow-hidden rounded-surface border"
         >
           <header className="border-line flex shrink-0 items-center gap-2 border-b px-4 py-3">
             <Dialog.Title className="font-semibold">{title}</Dialog.Title>
             <Dialog.Close asChild>
               <IconButton label="Close" chord="Esc" className="ml-auto">
-                <X className="size-4" />
+                <X className="size-icon-md" />
               </IconButton>
             </Dialog.Close>
           </header>
@@ -117,8 +117,8 @@ function Shell({
 function ConflictNote({ heads, fix }: { heads: string[]; fix: string }) {
   if (heads.length === 0) return null;
   return (
-    <p className="text-warn border-warn/40 flex items-start gap-2 rounded border p-2 text-sm">
-      <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
+    <p className="text-warn border-warn/40 flex items-start gap-2 rounded-surface border p-2 text-sm">
+      <AlertTriangle className="mt-0.5 size-icon-sm shrink-0" />
       <span>
         {heads.length} concurrent revisions are unresolved — ordinary edits are blocked until an
         admin runs <code className="font-mono text-xs">{fix}</code>.
@@ -197,7 +197,7 @@ export function WorkflowDialog({
                     <li key={t.transition_id} className="text-sm">
                       <span className="flex items-center gap-1.5">
                         <span>{t.source_state_ids.map(nameOf).join(", ")}</span>
-                        <ArrowRight className="text-mute size-3 shrink-0" />
+                        <ArrowRight className="text-mute size-icon-xs shrink-0" />
                         <span>{nameOf(t.destination_state_id)}</span>
                       </span>
                       <span className="text-mute font-mono text-2xs">
@@ -243,12 +243,12 @@ export function RolesDialog({ spaceId, onClose }: { spaceId: string; onClose: ()
       {error && <p className="text-danger text-sm">{error}</p>}
       {!roles && !error && <p className="text-mute text-sm">Loading…</p>}
       {roles?.map((role) => (
-        <section key={role.role_id} className="border-line rounded border p-3">
+        <section key={role.role_id} className="border-line rounded-surface border p-3">
           <div className="flex items-center gap-2">
             <span className="font-medium">{role.revision?.body.name ?? role.role_id}</span>
             {role.built_in && (
               <span className="text-accent flex items-center gap-1 text-2xs" title="Immutable">
-                <ShieldCheck className="size-3" />
+                <ShieldCheck className="size-icon-xs" />
                 built-in
               </span>
             )}

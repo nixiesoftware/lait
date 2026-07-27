@@ -49,7 +49,7 @@ export function MyIssues({
   if (rows.length === 0) {
     return (
       <EmptyState
-        icon={<CircleDot className="size-5" />}
+        icon={<CircleDot className="size-icon-lg" />}
         title="No issues assigned to you"
         body="Issues assigned to you across every project will appear here."
       />
@@ -62,7 +62,7 @@ export function MyIssues({
         <li key={row.reff}>
           <button
             type="button"
-            className={`${interactiveRow({ density: "normal" })} flex w-full items-center gap-3 px-4 py-2 text-left`}
+            className={`${interactiveRow({ size: "lg" })} flex w-full items-center gap-3 px-4 py-2 text-left`}
             onClick={() => onOpen(row.key_alias ?? row.reff)}
           >
             <span className="text-mute w-20 shrink-0 truncate font-mono text-xs tabular-nums">

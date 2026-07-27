@@ -87,7 +87,7 @@ export function Activity({
   if (scopedEvents.length === 0) {
     return (
       <EmptyState
-        icon={<ActivityIcon className="size-5" />}
+        icon={<ActivityIcon className="size-icon-lg" />}
         title={projectName ? `No activity in ${projectName}` : "No activity yet"}
         body={projectName ? "Changes to this project's issues will appear here." : "Changes made in this session will appear here."}
       />
@@ -116,7 +116,7 @@ export function Activity({
             if (event.key === "Enter") onOpen(e.reff);
           }}
           tabIndex={0}
-          className={`${interactiveRow({ density: "normal" })} flex items-start gap-3 px-4 py-2.5`}
+          className={`${interactiveRow({ size: "lg" })} flex items-start gap-3 px-4 py-2.5`}
         >
           <span className="text-mute w-20 shrink-0 truncate font-mono text-xs tabular-nums">
             {e.reff}
@@ -132,12 +132,12 @@ export function Activity({
               (A§9): last-writer-wins already resolved it; you just get told. */}
           {e.collision && (
             <AlertTriangle
-              className="text-warn size-3.5 shrink-0"
+              className="text-warn size-icon-sm shrink-0"
               aria-label="Concurrent overwrite detected"
             />
           )}
           <span className="flex shrink-0 items-center gap-2">
-            {group.events.length > 1 && <span className="bg-raised text-mute rounded px-1.5 text-2xs">{group.events.length} changes</span>}
+            {group.events.length > 1 && <span className="bg-raised text-mute rounded-mark px-1.5 text-2xs">{group.events.length} changes</span>}
             <time className="text-mute text-xs">{when(e.ts)}</time>
           </span>
         </li>

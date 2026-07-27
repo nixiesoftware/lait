@@ -72,7 +72,7 @@ import { catalogColor } from "./ui/colors";
 import * as ask from "./ui/dialogs";
 import { DialogHost } from "./ui/dialogs";
 import { Combobox } from "./ui/Picker";
-import { Button, cn, IconButton, TooltipProvider } from "./ui/primitives";
+import { Button, IconButton, TooltipProvider } from "./ui/primitives";
 import { Sidebar } from "./ui/Sidebar";
 import {
   applyFilter,
@@ -1214,7 +1214,7 @@ export function App() {
               control: true,
               content: (
                 <Combobox
-                  variant="crumb"
+                  tone="quiet" size="sm" swatchSlot
                   label="Project"
                   swatchShape="square"
                   className="max-w-[min(32cqw,240px)] font-medium"
@@ -1377,7 +1377,7 @@ export function App() {
         collapsible
         collapsedSize={0}
         groupResizeBehavior="preserve-pixel-size"
-        className="bg-raised max-[960px]:hidden"
+        className="bg-sunken max-[960px]:hidden"
       >
         <Sidebar
           spaces={spaces}
@@ -1446,6 +1446,21 @@ export function App() {
                 />
               )}
 
+            </>
+              )
+            }
+          />
+          {/* The only band under the header. Filtering used to add a second one
+              beneath it for as long as the filter was engaged; it is a panel
+              now, so the chrome no longer changes height when you narrow. */}
+          {projectShell && !fullWidthDetail && issueMode && (
+            <Toolbar>
+              <StatusSlices states={states} filter={filter} onChange={setFilter} />
+              {/* The controls belong beside the slices they act on, not up in the
+                  trail: filtering, display and "new issue" are all about THIS
+                  list, while the bar above names where you are. One row, the
+                  slices at its head and the tools at its tail. */}
+              <span className="ml-auto flex items-center gap-1">
               {projectShell && issueMode && (
                 <FilterMenu
                   filter={filter}
@@ -1492,20 +1507,11 @@ export function App() {
               )}
 
               {projectShell && !readOnly && current && (view === "list" || view === "board" || view === "calendar") && (
-                <IconButton label="New issue" chord="C" onClick={() => run("issue.create")}>
-                  <Plus className="size-4" />
+                <IconButton label="New issue" chord="C" variant="outline" onClick={() => run("issue.create")}>
+                  <Plus className="size-icon-sm" />
                 </IconButton>
               )}
-            </>
-              )
-            }
-          />
-          {/* The only band under the header. Filtering used to add a second one
-              beneath it for as long as the filter was engaged; it is a panel
-              now, so the chrome no longer changes height when you narrow. */}
-          {projectShell && !fullWidthDetail && issueMode && (
-            <Toolbar>
-              <StatusSlices states={states} filter={filter} onChange={setFilter} />
+              </span>
             </Toolbar>
           )}
         </div>
@@ -1541,7 +1547,7 @@ export function App() {
         >
           {!current ? (
             <EmptyState
-              icon={<PanelLeft className="size-5" />}
+              icon={<PanelLeft className="size-icon-lg" />}
               title={
                 routeSpace
                   ? "This space is not on this device"
@@ -1778,7 +1784,7 @@ export function App() {
           <Dialog.Overlay className="ui-overlay fixed inset-0 z-40 hidden bg-black/45 backdrop-blur-[2px] max-[960px]:block" />
           <Dialog.Content
             aria-describedby={undefined}
-            className="ui-drawer bg-raised shadow-overlay fixed inset-y-0 left-0 z-40 hidden w-[min(320px,88vw)] pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)] outline-none max-[960px]:block"
+            className="ui-drawer bg-sunken shadow-overlay fixed inset-y-0 left-0 z-40 hidden w-[min(320px,88vw)] pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)] outline-none max-[960px]:block"
           >
             <Dialog.Title className="sr-only">Workspace navigation</Dialog.Title>
             <Sidebar
@@ -1902,13 +1908,13 @@ export function App() {
 
       {/* A half-typed sequence must be visible, or `g` reads as a dropped key. */}
       {pending.length > 0 && (
-        <div className="border-line-strong bg-raised text-dim shadow-overlay fixed bottom-4 left-4 rounded border px-2 py-1 font-mono text-sm">
+        <div className="border-line-strong bg-raised text-dim shadow-overlay fixed bottom-4 left-4 rounded-surface border px-2 py-1 font-mono text-sm">
           {pending.join(" ")} …
         </div>
       )}
       {mutationNotice && (
         <div
-          className="ui-surface border-line-strong bg-raised text-dim shadow-overlay fixed right-4 bottom-4 z-40 rounded border px-3 py-1.5 text-sm"
+          className="ui-surface border-line-strong bg-raised text-dim shadow-overlay fixed right-4 bottom-4 z-40 rounded-surface border px-3 py-1.5 text-sm"
           role="status"
           aria-live="polite"
         >
@@ -1917,7 +1923,7 @@ export function App() {
       )}
       {toast && (
         <div
-          className="border-line-strong bg-raised shadow-overlay fixed bottom-4 left-1/2 -translate-x-1/2 rounded border px-3 py-1.5 text-sm"
+          className="border-line-strong bg-raised shadow-overlay fixed bottom-4 left-1/2 -translate-x-1/2 rounded-surface border px-3 py-1.5 text-sm"
           role="status"
           aria-live="polite"
         >
@@ -2038,17 +2044,14 @@ function StatusSlices({
       {STATUS_SLICES.map((slice) => {
         const active = slice.id === selected;
         return (
-          <button
+          <Button
             key={slice.id}
+            variant={active ? "active" : "outline"}
             aria-pressed={active}
             onClick={() => onChange({ ...filter, status: idsFor(slice.categories) })}
-            className={cn(
-              "h-6 rounded-md px-2 text-sm transition-colors",
-              active ? "bg-active text-fg" : "text-dim hover:bg-hover hover:text-fg",
-            )}
           >
             {slice.label}
-          </button>
+          </Button>
         );
       })}
     </div>

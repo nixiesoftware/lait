@@ -11,7 +11,7 @@ import { Markdown } from "./Markdown";
 import { MarkdownEditor } from "./MarkdownEditor";
 import { Combobox } from "./Picker";
 import { RailRow, RailSection } from "./layout";
-import { Button, IconButton, PopoverContent } from "./primitives";
+import { Button, IconButton, Input, PopoverContent } from "./primitives";
 import { when } from "./time";
 import * as Popover from "@radix-ui/react-popover";
 
@@ -78,10 +78,10 @@ export function ProjectOverview({
                   <Popover.Trigger asChild>
                     <button
                       aria-label="Project colour"
-                      className="hover:ring-line-strong rounded p-0.5 hover:ring-1"
+                      className="hover:ring-line-strong rounded-mark p-0.5 hover:ring-1"
                     >
                       <span
-                        className="block size-4 rounded"
+                        className="block size-mark-xl rounded-mark"
                         style={{ background: catalogColor(project.color) }}
                       />
                     </button>
@@ -95,7 +95,7 @@ export function ProjectOverview({
                 </Popover.Root>
               ) : (
                 <span
-                  className="block size-4 rounded"
+                  className="block size-mark-xl rounded-mark"
                   style={{ background: catalogColor(project.color) }}
                 />
               )}
@@ -113,7 +113,7 @@ export function ProjectOverview({
                 aria-label="Project name"
               />
               {project.archived && (
-                <span className="border-line text-mute rounded border px-1.5 py-px text-2xs">
+                <span className="border-line text-mute rounded-mark border px-1.5 py-px text-2xs">
                   Archived
                 </span>
               )}
@@ -123,9 +123,9 @@ export function ProjectOverview({
                   onClick={() => void edit({ archived: !project.archived })}
                 >
                   {project.archived ? (
-                    <ArchiveRestore className="size-3.5" />
+                    <ArchiveRestore className="size-icon-sm" />
                   ) : (
-                    <Archive className="size-3.5" />
+                    <Archive className="size-icon-sm" />
                   )}
                 </IconButton>
               )}
@@ -158,7 +158,7 @@ export function ProjectOverview({
             <RailSection>
             <RailRow label="Lead">
               <Combobox
-                variant="property"
+                tone="quiet"
                 label="Lead"
                 disabled={readOnly}
                 value={
@@ -173,7 +173,7 @@ export function ProjectOverview({
                 face={
                   lead ? undefined : (
                     <>
-                      <UserPlus className="text-mute size-3.5 shrink-0" />
+                      <UserPlus className="text-mute size-icon-sm shrink-0" />
                       <span className="text-mute">Set lead</span>
                     </>
                   )
@@ -193,7 +193,7 @@ export function ProjectOverview({
             </RailRow>
             <RailRow label="Start date">
               <DatePicker
-                variant="property"
+                tone="quiet"
                 value={toInput(project.start_date)}
                 disabled={readOnly}
                 placeholder="Add start date"
@@ -203,7 +203,7 @@ export function ProjectOverview({
             </RailRow>
             <RailRow label="Target date">
               <DatePicker
-                variant="property"
+                tone="quiet"
                 value={toInput(project.target_date)}
                 disabled={readOnly}
                 placeholder="Add target date"
@@ -364,7 +364,7 @@ function Milestones({
           return (
             <li
               key={m.id}
-              className="border-line group flex items-center gap-3 rounded border px-3 py-2"
+              className="border-line group flex items-center gap-3 rounded-surface border px-3 py-2"
             >
               <div className="min-w-0 flex-1">
                 <div className="flex items-baseline gap-2 text-sm">
@@ -386,7 +386,7 @@ function Milestones({
                   className="opacity-0 group-hover:opacity-100"
                   onClick={() => void remove(m.id)}
                 >
-                  <X className="size-3.5" />
+                  <X className="size-icon-sm" />
                 </IconButton>
               )}
             </li>
@@ -395,24 +395,28 @@ function Milestones({
       </ol>
       {!readOnly && (
         <div className="mt-2 flex items-center gap-2">
-          <input
+          <Input
+            size="sm"
             value={draft}
             placeholder="New milestone…"
             onChange={(e) => setDraft(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === "Enter" && draft.trim()) void add();
             }}
-            className="border-line focus:border-line-strong placeholder:text-mute min-w-0 flex-1 rounded border bg-transparent px-2 py-1 text-sm outline-none"
+            className="min-w-0 flex-1"
             aria-label="New milestone name"
           />
           <DatePicker
-            variant="property"
+            tone="quiet"
             value={target}
             placeholder="Target"
             ariaLabel="Milestone target date"
             onChange={setTarget}
           />
-          <Button variant="outline" disabled={!draft.trim() || adding} onClick={() => void add()}>
+          {/* `md` so the row lands on one baseline: the field and the date
+              trigger beside it are both 28px, and the default `sm` button left a
+              24px control floating between them. */}
+          <Button variant="outline" size="md" disabled={!draft.trim() || adding} onClick={() => void add()}>
             Add
           </Button>
         </div>
@@ -482,13 +486,13 @@ function Updates({
       <h2 className="text-mute mb-3 text-2xs font-semibold tracking-wider uppercase">Updates</h2>
 
       {!readOnly && (
-        <div className="border-line mb-4 rounded border p-3">
+        <div className="border-line focus-within:border-line-strong mb-4 rounded-surface border bg-[var(--field-bg)] p-3 transition-colors">
           <textarea
             value={draft}
             rows={2}
             placeholder="Post a status update — what changed, what's next…"
             onChange={(e) => setDraft(e.target.value)}
-            className="placeholder:text-mute w-full resize-y bg-transparent text-sm outline-none"
+            className="placeholder:text-mute w-full resize-none bg-transparent text-sm outline-none"
             aria-label="New project update"
           />
           <div className="mt-2 flex items-center gap-2">

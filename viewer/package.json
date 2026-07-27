@@ -11,9 +11,13 @@
     "check": "tsc -b --noEmit",
     "preview": "vite preview",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "tokens": "node tool/generate-tokens.mjs",
+    "tokens:check": "node tool/generate-tokens.mjs --check"
   },
   "dependencies": {
+    "@fontsource-variable/inter": "^5.3.0",
+    "@fontsource-variable/roboto-mono": "^5.3.0",
     "@milkdown/kit": "^7.21.3",
     "@milkdown/react": "^7.21.3",
     "@radix-ui/react-alert-dialog": "^1.1.19",

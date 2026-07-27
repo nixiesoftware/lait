@@ -103,10 +103,10 @@ export function Members({
           <p className="text-dim mb-3 text-sm">People and agents with verified access to this encrypted space. Names are private labels on this device.</p>
           {members.length === 0 ? (
             <EmptyState title="No verified members" body="The local replica does not currently contain a readable membership graph." />
-          ) : <ul className="border-line divide-line divide-y rounded border">
+          ) : <ul className="border-line divide-line divide-y rounded-surface border">
             {members.map((m) => (
               <li key={m.key} className="flex items-center gap-3 p-3">
-                <Avatar deviceKey={m.key} alias={m.alias} me={m.me} className="size-6" />
+                <Avatar deviceKey={m.key} alias={m.alias} me={m.me} className="size-avatar-lg" />
                 <span className="min-w-0 flex-1">
                   <span className="flex items-center gap-2">
                     <span className="font-medium">
@@ -118,7 +118,7 @@ export function Members({
                         className="text-accent flex items-center gap-1 text-2xs"
                         title="From the signed ACL graph"
                       >
-                        <ShieldCheck className="size-3" />
+                        <ShieldCheck className="size-icon-xs" />
                         admin
                       </span>
                     )}
@@ -128,7 +128,7 @@ export function Members({
                         className="text-mute flex items-center gap-1 text-2xs"
                         title={`Sponsored agent — standing dies with ${sponsorName(m, members)}`}
                       >
-                        <Bot className="size-3" />
+                        <Bot className="size-icon-xs" />
                         sponsored · {sponsorName(m, members)}
                       </span>
                     )}
@@ -156,7 +156,7 @@ export function Members({
                         })
                       }
                     >
-                      <Pencil className="size-3.5" />
+                      <Pencil className="size-icon-sm" />
                     </IconButton>
                     {!m.me && (
                       <IconButton
@@ -192,7 +192,7 @@ export function Members({
                           })
                         }
                       >
-                        <X className="size-3.5" />
+                        <X className="size-icon-sm" />
                       </IconButton>
                     )}
                   </span>
@@ -255,7 +255,7 @@ function MemberLog({ entries, members }: { entries: MemberLogEntry[]; members: M
       <h2 className="text-mute mb-2 text-2xs font-semibold tracking-wider uppercase">
         Access log · {entries.length}
       </h2>
-      <ul className="border-line divide-line divide-y rounded border">
+      <ul className="border-line divide-line divide-y rounded-surface border">
         {/* Newest first — an audit log answers "what just changed access". */}
         {[...entries].reverse().map((e) => (
           <li key={e.op} className="flex items-start gap-2 p-2.5 text-sm">
@@ -275,7 +275,7 @@ function MemberLog({ entries, members }: { entries: MemberLogEntry[]; members: M
                 className="text-danger flex items-center gap-1 text-2xs"
                 title="Replay rejected this op as unauthorized or undecodable"
               >
-                <ShieldAlert className="size-3" />
+                <ShieldAlert className="size-icon-xs" />
                 rejected
               </span>
             )}
@@ -371,7 +371,7 @@ function Invite({
   return (
     <section>
       <h2 className="text-mute mb-2 text-2xs font-semibold tracking-wider uppercase">Invite</h2>
-      <div className="border-line flex flex-col gap-3 rounded border p-3">
+      <div className="border-line flex flex-col gap-3 rounded-surface border p-3">
         {!link ? (
           <>
             <div className="flex flex-wrap items-center gap-2">
@@ -404,7 +404,7 @@ function Invite({
             </div>
             <p className="text-mute text-xs">Invite links are access capabilities. Share them only with intended recipients and revoke exposed links promptly.</p>
             <Button variant="outline" size="md" onClick={() => void mint()} className="w-fit">
-              <UserPlus className="size-3.5" />
+              <UserPlus className="size-icon-sm" />
               Create invite link
             </Button>
           </>
@@ -415,14 +415,14 @@ function Invite({
                 <img
                   src={qr}
                   alt="Invite link QR code"
-                  className="size-[110px] shrink-0 rounded bg-white p-1"
+                  className="size-[110px] shrink-0 rounded-surface bg-white p-1"
                 />
               )}
               <div className="flex min-w-0 flex-1 flex-col gap-2">
                 <p className="text-dim text-sm">
                   They run this and they’re in — accepting the invite is the approval.
                 </p>
-                <code className="bg-bg border-line block truncate rounded border p-2 text-xs">
+                <code className="bg-bg border-line block truncate rounded-surface border p-2 text-xs">
                   lait join {link}
                 </code>
                 <div className="flex gap-2">
@@ -435,14 +435,14 @@ function Invite({
                       });
                     }}
                   >
-                    {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+                    {copied ? <Check className="size-icon-sm" /> : <Copy className="size-icon-sm" />}
                     {copied ? "Copied" : "Copy link"}
                   </Button>
                   <a
                     href={mailto(link)}
-                    className="border-line-strong hover:bg-hover flex items-center gap-1.5 rounded border px-2 py-1 text-sm"
+                    className="border-line-strong hover:bg-hover flex items-center gap-1.5 rounded-control border px-2 py-1 text-sm"
                   >
-                    <Link2 className="size-3.5" />
+                    <Link2 className="size-icon-sm" />
                     Email it
                   </a>
                   <Button
@@ -450,11 +450,11 @@ function Invite({
                     onClick={() => void revoke()}
                     title="The daemon refuses any future redemption of this link"
                   >
-                    <ShieldAlert className="size-3.5" />
+                    <ShieldAlert className="size-icon-sm" />
                     Revoke
                   </Button>
                   <Button onClick={() => setTicket(null)} className="ml-auto">
-                    <KeyRound className="size-3.5" />
+                    <KeyRound className="size-icon-sm" />
                     New link
                   </Button>
                 </div>
