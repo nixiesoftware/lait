@@ -335,16 +335,19 @@ fn projects_add_is_key_first_with_defaulted_name() {
 }
 
 #[test]
-fn spaces_and_flag_aliases_resolve() {
-    // `spaces` is the command; `workspaces` stays as a muscle-memory alias.
+fn orbital_navigation_names_and_compatibility_aliases_resolve() {
+    // `orbits` names the local path-keyed catalog. The old Space/workspace
+    // vocabulary remains accepted while scripts migrate.
     let cli = build_cli(&specs());
+    assert!(cli.clone().try_get_matches_from(["lait", "orbits"]).is_ok());
+    assert!(cli.clone().try_get_matches_from(["lait", "orbit"]).is_ok());
     assert!(cli.clone().try_get_matches_from(["lait", "spaces"]).is_ok());
     assert!(cli
         .clone()
         .try_get_matches_from(["lait", "workspaces"])
         .is_ok());
-    // Global selector: --space is primary, --workspace the hidden alias, -w short.
-    for flag in ["--space", "--workspace"] {
+    // Global selector: --orbit is canonical; the old long names and -w survive.
+    for flag in ["--orbit", "--space", "--workspace"] {
         assert!(
             cli.clone()
                 .try_get_matches_from(["lait", flag, "demo", "ls"])
@@ -359,9 +362,9 @@ fn spaces_and_flag_aliases_resolve() {
 }
 
 #[test]
-fn bare_invocation_parses_as_focus() {
-    // Bare `lait` (with global flags allowed) must parse with NO subcommand —
-    // app::run turns that into the focus view instead of help.
+fn bare_invocation_parses_as_navigation_context() {
+    // Bare `lait` (with global flags allowed) has no product command. app::run
+    // renders the selected identity/Orbit/Space/World context.
     let cli = build_cli(&specs());
     let m = cli
         .clone()
@@ -369,6 +372,70 @@ fn bare_invocation_parses_as_focus() {
         .expect("bare lait parses");
     assert!(m.subcommand().is_none());
     assert!(cli.try_get_matches_from(["lait", "--json"]).is_ok());
+}
+
+#[test]
+fn context_and_world_catalog_are_navigation_commands() {
+    let cli = build_cli(&specs());
+    assert!(cli
+        .clone()
+        .try_get_matches_from(["lait", "context"])
+        .is_ok());
+    assert!(cli.clone().try_get_matches_from(["lait", "worlds"]).is_ok());
+    assert!(cli.try_get_matches_from(["lait", "world"]).is_ok());
+}
+
+#[test]
+fn issues_namespace_is_canonical_and_flat_verbs_remain_compatible() {
+    let expected = Request::IssueView {
+        reff: "ENG-1".into(),
+    };
+    parses_to(&["lait", "issues", "show", "ENG-1"], expected.clone());
+    parses_to(&["lait", "show", "ENG-1"], expected);
+
+    // Product-owned groups may nest under the World namespace.
+    parses_to(
+        &["lait", "issues", "projects", "add", "OPS"],
+        Request::ProjectNew {
+            name: "Ops".into(),
+            key: "OPS".into(),
+            color: None,
+        },
+    );
+
+    let cli = build_cli(&specs());
+    let issues = cli
+        .get_subcommands()
+        .find(|command| command.get_name() == "issues")
+        .expect("visible Issues namespace");
+    assert!(!issues.is_hide_set());
+    let flat_show = cli
+        .get_subcommands()
+        .find(|command| command.get_name() == "show")
+        .expect("flat compatibility verb");
+    assert!(flat_show.is_hide_set());
+}
+
+#[test]
+fn root_help_presents_navigation_then_product_namespaces() {
+    let mut cli = build_cli(&specs());
+    let help = cli.render_long_help().to_string();
+    for visible in ["context", "orbits", "worlds", "serve", "issues"] {
+        assert!(
+            help.contains(visible),
+            "root help should expose {visible}:\n{help}"
+        );
+    }
+    assert!(
+        !help
+            .lines()
+            .any(|line| line.trim_start().starts_with("show ")),
+        "flat Issues compatibility verbs must stay out of root help:\n{help}"
+    );
+    assert!(
+        help.find("context").unwrap() < help.find("issues").unwrap(),
+        "navigation should precede product namespaces:\n{help}"
+    );
 }
 
 #[test]

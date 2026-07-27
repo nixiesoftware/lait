@@ -8,13 +8,13 @@ browser tab. If `cd` gets you into the project, you're already in.
 $ cd my-project
 $ lait init
 
-$ lait new "fix login race" --start  # file the issue, take it, branch it
+$ lait issues new "fix login race" --start  # file it, take it, branch it
 MP-1  fix login race  in_progress  · you
 switched to new branch 'mp-1-fix-login-race'
 
 # ...write the fix, commit...
 
-$ lait done                          # the branch tells lait which issue
+$ lait issues done                   # the branch tells lait which issue
 MP-1  fix login race  done
 ```
 
@@ -159,9 +159,17 @@ switched to new branch 'mp-3-flaky-reconnect'
 $ lait comment "root cause: reused nonce"      # ref inferred from the branch
 $ lait done
 
-$ lait                          # your focus, <50ms
+$ lait                          # identity → Orbit → Space → installed Worlds
+lait context
+identity   primary
+selection  cwd
+orbit      orb_…
+space      ws_…
+worlds     com.lait.issues
+
+$ lait issues                   # the issue-tracker World's focus view
 Inbox (2): bob commented on MP-2 · someone moved MP-2
-$ lait inbox
+$ lait issues inbox
 • MP-2  bob commented on  polish header  — on it, root cause is the header cache
 • MP-2  someone moved  polish header  — backlog → in_progress
 ```
@@ -186,19 +194,24 @@ $ lait inbox
 
 ### 5 · Many clients, one machine
 
-Spaces are discovered from the directory you stand in, git-style — and the
-registry makes them addressable from anywhere:
+Local Orbits are discovered from the directory you stand in, git-style. Each is
+one durable participation in a Space, and the navigation catalog makes it
+addressable from anywhere:
 
 ```console
-$ lait spaces
-acme        ws_01JTHHNM0  founded  up    [ACME, DSN]
+$ lait orbits
+acme  orb_a17c…  ws_01JTHHNM0  founded  up    [ACME, DSN]
   ~/code/acme/.lait
-kiln        ws_01JTGX2P1  joined   idle  [KLN]  (from mira)
+kiln  orb_9e42…  ws_01JTGX2P1  joined   idle  [KLN]  (from mira)
   ~/code/kiln/.lait
 
-$ lait -w kiln board            # target any space from any directory
+$ lait --orbit kiln issues board       # target a local Orbit from anywhere
 $ lait config set project.default DSN   # per-space default for `new`/`board`
 ```
+
+The former flat issue verbs and `-w`/`--space` selector remain compatibility
+aliases; the canonical interface keeps Lait navigation separate from the Worlds
+installed inside it.
 
 Project selection is one fixed chain: explicit `-p` → your branch's key →
 `project.default` → the only project → a teaching error. Filters (`ls -p`) are

@@ -1,11 +1,11 @@
-//! lait: a local-first, peer-to-peer issue tracker.
+//! lait: an orbital shell for local-first, peer-to-peer collaboration.
 //!
 //! One binary, four roles:
 //!   * `lait daemon` is the identity-scoped host: one local process endpoint,
 //!     an Orbit directory/router, identity-keyed transport hubs, and zero or
 //!     more in-process SpaceBridges.
-//!   * `lait <cmd>` is the cwd-scoped CLI client, driving that host over local
-//!     IPC with an explicit Orbit/World route.
+//!   * `lait <cmd>` is the cwd-scoped navigation client, selecting an Orbit and
+//!     driving the daemon or one installed World over an explicit route.
 //!   * `lait serve` binds that same façade to loopback HTTP + SSE so a browser
 //!     can be a client too ([`serve`], `docs/UI.md`). It owns no Station.
 //!   * `lait mcp` exposes the same Layer-B façade as MCP tools for an agent.
@@ -17,14 +17,15 @@
 //!   * **The substrate** (`mechanics`, `fabric`, `replica`, `comms`,
 //!     `runtime`): authority, convergence, the Body graph, transport, and the
 //!     orbital lifecycle, each behind its own crate boundary.
-//!   * **The product** ([`world`], [`orbital`]): the Issues World contract and
-//!     the composition root that docks it.
+//!   * **Bundled products** ([`world`]): the Issues World compatibility adapter
+//!     and the composition root that docks independently packaged Worlds.
 //!   * **Layer B — control protocol** ([`control`], [`dto`]): a stable,
 //!     versioned, hand-maintained projection over the local socket. Never a
 //!     dump of storage internals.
 
 pub mod app;
 pub mod cli;
+pub mod client_action;
 pub mod cmdspec;
 pub mod config;
 pub mod control;

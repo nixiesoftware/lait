@@ -16,6 +16,7 @@ use std::{
 use anyhow::{anyhow, Context, Result};
 
 use crate::{
+    client_action::ClientAction,
     control::{self, request, ControlRoute, ErrorKind, Event, EventKind, Request, Response},
     daemon::{ClientScope, LocalOrbitId, OrbitAddress},
     diagnose::{DiagnosisView, GateState},
@@ -561,28 +562,32 @@ fn daemon_exited_error(status: std::process::ExitStatus, log_path: &Path) -> any
     }
 }
 
-/// Ensure the daemon is up, then send one request as the primary identity — or,
-/// if `$LAIT_AS` names a local agent, as that agent (the shell-scoped selector,
-/// e.g. `LAIT_AS=scout lait new "…"`). Architecture B's "act as" on the CLI.
-pub async fn client(home: &Path, req: Request) -> Result<Response> {
-    // `LAIT_AS` is the CLI's own selector; `LAIT_AGENT` is what the MCP surface
-    // uses (and what an agent's launch env sets). Honour either here so a single
-    // exported var attributes both CLI and MCP calls to the same agent.
+/// Ensure the daemon is up, then send one already-routed action as the primary
+/// identity — or, if an acting identity is selected, as that local agent.
+pub async fn client_action(home: &Path, action: ClientAction) -> Result<Response> {
     let act_as = std::env::var("LAIT_AS")
         .ok()
         .or_else(|| std::env::var("LAIT_AGENT").ok())
         .filter(|s| !s.is_empty());
-    client_as(home, req, act_as.as_deref()).await
+    let scope = scope_for_home(home);
+    client_action_as_scoped(home, action, &scope, act_as.as_deref()).await
+}
+
+/// Ensure the daemon is up, then send one request as the primary identity — or,
+/// if `$LAIT_AS` names a local agent, as that agent (the shell-scoped selector,
+/// e.g. `LAIT_AS=scout lait new "…"`). Architecture B's "act as" on the CLI.
+pub async fn client(home: &Path, req: Request) -> Result<Response> {
+    client_action(home, ClientAction::from_legacy(req)).await
 }
 
 /// Ensure the daemon is up, then send one request acting as `act_as` (a local
 /// agent name, or `None` for the primary human identity).
 pub async fn client_as(home: &Path, req: Request, act_as: Option<&str>) -> Result<Response> {
     let scope = scope_for_home(home);
-    client_as_scoped(home, req, &scope, act_as).await
+    client_action_as_scoped(home, ClientAction::from_legacy(req), &scope, act_as).await
 }
 
-/// The single-Orbit scope implied by a cwd/`-w`/`--home` store resolution.
+/// The single-Orbit scope implied by cwd/`--orbit`/`--home` store resolution.
 pub fn scope_for_home(home: &Path) -> ClientScope {
     ClientScope::pinned(LocalOrbitId::for_store(home))
 }
@@ -592,15 +597,6 @@ pub fn orbit_address_for_home(home: &Path) -> Result<OrbitAddress> {
     let space = crate::orbital::discover_space_id(home)
         .ok_or_else(|| anyhow!("no local Orbit under {}", home.display()))?;
     Ok(OrbitAddress::for_store(home, space))
-}
-
-fn route_for(address: OrbitAddress, req: &Request) -> ControlRoute {
-    match req {
-        // `shutdown` is the explicit off-switch for the process-level host, not
-        // merely for whichever Station the cwd selected.
-        Request::Stop => ControlRoute::Daemon,
-        _ => control::station_route(address, req),
-    }
 }
 
 /// Send through a caller scope derived by a trusted client adapter.
@@ -614,15 +610,25 @@ pub async fn client_as_scoped(
     scope: &ClientScope,
     act_as: Option<&str>,
 ) -> Result<Response> {
+    client_action_as_scoped(home, ClientAction::from_legacy(req), scope, act_as).await
+}
+
+/// Send an action whose terminal owner was fixed by the command registry.
+pub async fn client_action_as_scoped(
+    home: &Path,
+    action: ClientAction,
+    scope: &ClientScope,
+    act_as: Option<&str>,
+) -> Result<Response> {
     let address = orbit_address_for_home(home)?;
     scope.authorize(&address)?;
-    let route = route_for(address, &req);
+    let route = action.route(address);
     ensure_daemon(home).await?;
     let daemon = crate::daemon::LaitDaemonClient::current()?;
     // The process endpoint answered the probe a moment ago, so a failure here
     // is the transport giving out mid-exchange: `3`, daemon unreachable.
     daemon
-        .request(route, &req, act_as)
+        .request(route, action.request(), act_as)
         .await
         .map_err(|e| CliError::unreachable(format!("{e:#}")).into())
 }
@@ -639,7 +645,8 @@ pub async fn request_running(home: &Path, req: &Request, act_as: Option<&str>) -
     let address = orbit_address_for_home(home)?;
     let scope = scope_for_home(home);
     scope.authorize(&address)?;
-    let route = route_for(address, req);
+    let action = ClientAction::from_legacy(req.clone());
+    let route = action.route(address);
     let daemon = crate::daemon::LaitDaemonClient::current()?;
     if !matches!(daemon.probe().await, control::Probe::Healthy) {
         return Err(anyhow!("Lait daemon is not running"));
@@ -649,7 +656,12 @@ pub async fn request_running(home: &Path, req: &Request, act_as: Option<&str>) -
 
 /// Run a request, print the response, and exit with the corresponding code.
 pub async fn run(home: &Path, req: Request, out: Out) -> Result<()> {
-    match client(home, req).await {
+    run_action(home, ClientAction::from_legacy(req), out).await
+}
+
+/// Run an already-routed action, print the response, and preserve CLI exits.
+pub async fn run_action(home: &Path, action: ClientAction, out: Out) -> Result<()> {
+    match client_action(home, action).await {
         Ok(resp) => {
             let code = print_response(&resp, out);
             if code != 0 {
@@ -1048,10 +1060,119 @@ fn print_diagnosis_or(resp: &Response, out: Out) {
     }
 }
 
+/// Print the current navigation context without activating an Orbit.
+pub async fn print_context(home: Option<PathBuf>, source: &str, out: Out) -> Result<()> {
+    let selected = home
+        .filter(|path| crate::orbital::space_store_present(path))
+        .and_then(|path| {
+            let space = crate::orbital::discover_space_id(&path)?;
+            Some((
+                LocalOrbitId::for_store(&path).to_string(),
+                space.to_string(),
+                path,
+            ))
+        });
+    let worlds: Vec<String> = crate::world::packages()
+        .world_ids()
+        .map(ToString::to_string)
+        .collect();
+    let acting_as = std::env::var("LAIT_AS")
+        .ok()
+        .or_else(|| std::env::var("LAIT_AGENT").ok())
+        .filter(|value| !value.is_empty());
+    let identity_home = crate::config::identity_dir()?;
+
+    if out.json {
+        let orbit = selected.as_ref().map(|(orbit, space, path)| {
+            serde_json::json!({
+                "id": orbit,
+                "space": space,
+                "path": path,
+            })
+        });
+        println!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({
+                "context": {
+                    "selection": source,
+                    "identity": {
+                        "home": identity_home,
+                        "acting_as": acting_as,
+                    },
+                    "orbit": orbit,
+                    "worlds": worlds,
+                    "known_orbits": spaces::list().len(),
+                }
+            }))
+            .unwrap_or_else(|_| "{}".into())
+        );
+        return Ok(());
+    }
+
+    println!("{}", paint(out.color, ansi::BOLD, "lait context"));
+    println!("identity   {}", acting_as.as_deref().unwrap_or("primary"));
+    println!("selection  {source}");
+    if let Some((orbit, space, path)) = selected {
+        println!("orbit      {orbit}");
+        println!("space      {space}");
+        println!("path       {}", path.display());
+    } else {
+        println!("orbit      (none selected)");
+        println!("space      (none selected)");
+    }
+    println!(
+        "worlds     {}",
+        if worlds.is_empty() {
+            "(none installed)".to_string()
+        } else {
+            worlds.join(", ")
+        }
+    );
+    if source == "none" {
+        let known = spaces::list().len();
+        if known == 0 {
+            println!();
+            println!("found a Space with `lait init`, or enter one with `lait join <link>`.");
+        } else {
+            println!();
+            println!(
+                "{known} local Orbit{} known — select one with `lait --orbit <selector>`.",
+                if known == 1 { "" } else { "s" }
+            );
+        }
+    }
+    Ok(())
+}
+
+/// List World packages installed in this application composition.
+pub fn print_worlds(out: Out) {
+    let worlds: Vec<String> = crate::world::packages()
+        .world_ids()
+        .map(ToString::to_string)
+        .collect();
+    if out.json {
+        let rows: Vec<_> = worlds
+            .iter()
+            .map(|world| serde_json::json!({ "id": world, "installed": true }))
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({ "worlds": rows }))
+                .unwrap_or_else(|_| "{}".into())
+        );
+    } else if worlds.is_empty() {
+        println!("(no World packages installed)");
+    } else {
+        for world in worlds {
+            println!("{world}");
+        }
+    }
+}
+
 /// Live status of one registry entry: `missing` (store gone from disk), `up`
 /// (a daemon answers on its control channel), or `idle` (store present, no
 /// daemon). The probe is a short-deadline `Status` round-trip — never a spawn.
-async fn space_status(e: &SpaceEntry) -> &'static str {
+async fn orbit_status(e: &SpaceEntry) -> &'static str {
     if spaces::presence(e) == StorePresence::Missing {
         return "missing";
     }
@@ -1069,13 +1190,12 @@ async fn space_status(e: &SpaceEntry) -> &'static str {
     }
 }
 
-/// `lait spaces`: every space on this machine (founded and joined),
-/// with live status. Honours `--json`.
-pub async fn print_spaces(out: Out) {
+/// `lait orbits`: every durable local participation known on this machine.
+pub async fn print_orbits(out: Out) {
     let entries = spaces::list();
     let mut statuses = Vec::with_capacity(entries.len());
     for e in &entries {
-        statuses.push(space_status(e).await);
+        statuses.push(orbit_status(e).await);
     }
     if out.json {
         let rows: Vec<serde_json::Value> = entries
@@ -1084,6 +1204,10 @@ pub async fn print_spaces(out: Out) {
             .map(|(e, s)| {
                 let mut v = serde_json::to_value(e).unwrap_or_default();
                 if let Some(o) = v.as_object_mut() {
+                    o.insert(
+                        "orbit".into(),
+                        serde_json::json!(LocalOrbitId::for_store(Path::new(&e.path))),
+                    );
                     o.insert("status".into(), serde_json::json!(s));
                 }
                 v
@@ -1091,17 +1215,25 @@ pub async fn print_spaces(out: Out) {
             .collect();
         println!(
             "{}",
-            serde_json::to_string(&serde_json::json!({ "spaces": rows }))
-                .unwrap_or_else(|_| "{}".into())
+            // `spaces` is retained as a compatibility key for scripts written
+            // against the former command name. Its rows were always path-keyed
+            // local participations; `orbits` names that truth.
+            serde_json::to_string(&serde_json::json!({
+                "orbits": rows.clone(),
+                "spaces": rows,
+            }))
+            .unwrap_or_else(|_| "{}".into())
         );
         return;
     }
     if entries.is_empty() {
-        println!("(no spaces yet — `lait init` to found one, or `lait join <link>`)");
+        println!("(no Orbits yet — `lait init` to found one, or `lait join <link>`)");
         return;
     }
     for (e, status) in entries.iter().zip(&statuses) {
-        let short: String = e.space.chars().take(12).collect();
+        let orbit = LocalOrbitId::for_store(Path::new(&e.path));
+        let orbit_short: String = orbit.as_str().chars().take(14).collect();
+        let space_short: String = e.space.chars().take(12).collect();
         let code = match *status {
             "up" => ansi::GREEN,
             "idle" => ansi::DIM,
@@ -1124,12 +1256,17 @@ pub async fn print_spaces(out: Out) {
             format!("  (from {})", e.host_nick)
         };
         println!(
-            "{name}  {short}  {}  {}{projects}{nick}",
+            "{name}  {orbit_short}  {space_short}  {}  {}{projects}{nick}",
             e.origin,
             paint(out.color, code, status),
         );
         println!("  {}", paint(out.color, ansi::DIM, &e.path));
     }
+}
+
+/// Historical name retained for callers outside the binary crate.
+pub async fn print_spaces(out: Out) {
+    print_orbits(out).await;
 }
 
 /// The universal "no space here" error: any store-needing command run in a
@@ -1140,7 +1277,7 @@ pub fn err_no_store_here(out: Out) {
     let known = spaces::list();
     if !known.is_empty() {
         eprintln!();
-        eprintln!("spaces on this machine:");
+        eprintln!("local Orbits on this machine:");
         for e in &known {
             let name = if e.name.is_empty() {
                 "(unnamed)"
@@ -1155,7 +1292,7 @@ pub fn err_no_store_here(out: Out) {
         }
         eprintln!();
         eprintln!(
-            "cd into one, target one from here with `-w <name>`, or `lait spaces` for details."
+            "cd into one, target one with `--orbit <name>`, or run `lait orbits` for details."
         );
     } else {
         eprintln!();

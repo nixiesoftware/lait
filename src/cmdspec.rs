@@ -4,10 +4,11 @@
 //! [`specs`] — instead of a `#[derive(Parser)]` enum. [`build_cli`] turns that
 //! data into a `clap::Command` at runtime, so completions (`clap_complete`) and
 //! the man page (`clap_mangen`) still generate from the live tree exactly as
-//! before; only the *front-end* changed, not the wire (`control::Request`).
+//! before; only the *front-end* changed, not the compatibility payload
+//! (`control::Request`).
 //!
 //! Why data-driven: a command is now one [`Spec`] entry mapping parsed args to a
-//! single Layer-B [`Request`] (or a `Special` handler), which is the same registry
+//! single [`ClientAction`] (or a `Special` handler), which is the same registry
 //! other surfaces (MCP) can derive from instead of re-declaring the command list.
 //! The trade vs. the derive macro: `ArgMatches` lookups are keyed by string, so a
 //! name typo is a runtime, not compile-time, error — concentrated inside each
@@ -18,15 +19,18 @@ use clap::{Arg, ArgAction, ArgMatches, Command};
 use clap_complete::Shell;
 
 use crate::{
+    client_action::ClientAction,
     control::{BoardPos, Filter, Request},
     install::{Client, Scope},
 };
 
 /// How a resolved leaf command is executed.
+#[derive(Clone, Copy)]
 pub enum Dispatch {
-    /// Build a `Request` from the parsed args, then round-trip the daemon and
-    /// render (`cli::run`). Covers the ~22 uniform commands.
-    Request(fn(&ArgMatches) -> Result<Request>),
+    /// Build the compatibility `Request`, capture its terminal orbital target
+    /// as a `ClientAction`, then round-trip and render. Product command packages
+    /// will eventually build opaque World calls directly at this same seam.
+    Action(fn(&ArgMatches) -> Result<Request>),
     /// A command with bespoke handling in `app::run` (spawns a daemon, mints a
     /// key, custom output). The arg reading lives in the matching handler.
     Special(Special),
@@ -35,6 +39,7 @@ pub enum Dispatch {
 /// The commands `app::run` handles by hand (they do more than one `Request`).
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Special {
+    IssuesFocus,
     Init,
     Start,
     Done,
@@ -58,6 +63,8 @@ pub enum Special {
     ConfigSet,
     ConfigUnset,
     ConfigList,
+    Context,
+    Worlds,
     Update,
     /// New-machine side of device enrollment: consume a `device invite` token
     /// and print a consent blob (no daemon, no store — just this identity).
@@ -69,6 +76,7 @@ pub enum Special {
 }
 
 /// One command (or nested group) in the tree.
+#[derive(Clone)]
 pub struct Spec {
     pub name: &'static str,
     pub aliases: &'static [&'static str],
@@ -83,6 +91,8 @@ pub struct Spec {
     /// A long-running networked service (`daemon`, `mcp`) that must keep Rust's
     /// default SIGPIPE-ignored so a dropped socket returns EPIPE, not a kill.
     pub service: bool,
+    /// Accepted for compatibility but omitted from root help/completions.
+    pub hidden: bool,
     /// Help-screen bucket (clap `display_order`): the first screen leads with
     /// the daily loop, registries and node plumbing sink to the bottom.
     pub order: usize,
@@ -104,8 +114,9 @@ impl Spec {
             subs: Vec::new(),
             sub_required: false,
             customize: None,
-            dispatch: Dispatch::Request(f),
+            dispatch: Dispatch::Action(f),
             service: false,
+            hidden: false,
             order: ORDER_DEFAULT,
         }
     }
@@ -122,6 +133,7 @@ impl Spec {
             customize: None,
             dispatch: Dispatch::Special(s),
             service: false,
+            hidden: false,
             order: ORDER_DEFAULT,
         }
     }
@@ -143,6 +155,7 @@ impl Spec {
 /// One argument, modelled declaratively. Every value is a `String`; numerics are
 /// parsed in the `to_request` closure (keeps this type free of clap value-parser
 /// generics). Exotic parsers (shell/client/scope value-enums) go via `customize`.
+#[derive(Clone)]
 pub struct ArgSpec {
     name: &'static str,
     short: Option<char>,
@@ -157,6 +170,7 @@ pub struct ArgSpec {
     conflicts: &'static [&'static str],
 }
 
+#[derive(Clone, Copy)]
 enum Act {
     Set,
     Append,
@@ -297,10 +311,9 @@ impl ArgSpec {
 pub fn build_cli(specs: &[Spec]) -> Command {
     let mut root = Command::new("lait")
         .version(env!("LAIT_VERSION_LONG"))
-        .about("A local-first, peer-to-peer issue tracker")
-        // No subcommand required: bare `lait` is the FOCUS view (inbox + your
-        // active issues) — the most valuable keystroke goes to the
-        // most-asked question, not to help. `lait help` / `-h` still work.
+        .about("Navigate local-first Spaces and the Worlds inside them")
+        // No subcommand required: bare `lait` reports the current orbital
+        // context. Product focus views live under their own command packages.
         .arg(
             Arg::new("home")
                 .long("home")
@@ -310,9 +323,10 @@ pub fn build_cli(specs: &[Spec]) -> Command {
                 .help("Select the node's home directory (overrides $LAIT_HOME)."),
         )
         .arg(
-            Arg::new("space")
+            Arg::new("orbit")
                 .short('w')
-                .long("space")
+                .long("orbit")
+                .alias("space")
                 .alias("workspace")
                 .global(true)
                 .action(ArgAction::Set)
@@ -320,8 +334,8 @@ pub fn build_cli(specs: &[Spec]) -> Command {
                 .value_name("SEL")
                 .help_heading(GLOBAL_HEADING)
                 .help(
-                    "Select a space by name, ws_ id (or prefix), or path — from any \
-                     directory (see `lait spaces`).",
+                    "Select a local Orbit by name, orb_/ws_ id (or prefix), or path \
+                     (see `lait orbits`).",
                 ),
         )
         .arg(
@@ -355,20 +369,24 @@ pub fn build_cli(specs: &[Spec]) -> Command {
     root
 }
 
-/// The heading the four global flags file under. Without it clap interleaves
+/// The heading the global flags file under. Without it clap interleaves
 /// them with each command's own flags in declaration order (`--home` between
 /// `-p` and `-a` on `lait new`), so the flags that apply *everywhere* read as
 /// command-specific noise. One heading separates the two kinds.
 const GLOBAL_HEADING: &str = "Global Options";
 
 /// Help buckets (see `Spec.order`). Within a bucket, declaration order holds.
-const ORDER_DAILY: usize = 10; // the loop: new/start/done/stop/inbox/show/board/ls…
-const ORDER_SHARE: usize = 20; // init/join/invite/spaces/members/doctor/status
+const ORDER_NAV: usize = 5; // context/orbits/worlds: orient before acting
+const ORDER_DAILY: usize = 10; // the Issues package and its daily loop
+const ORDER_SHARE: usize = 20; // init/join/invite/members/doctor/status
 const ORDER_DEFAULT: usize = 30; // registries, settings
 const ORDER_NODE: usize = 40; // daemon/remote/mcp/plumbing
 
 fn build_sub(s: &Spec) -> Command {
-    let mut c = Command::new(s.name).about(s.about).display_order(s.order);
+    let mut c = Command::new(s.name)
+        .about(s.about)
+        .display_order(s.order)
+        .hide(s.hidden);
     for a in s.aliases {
         c = c.alias(*a);
     }
@@ -394,7 +412,7 @@ fn build_sub(s: &Spec) -> Command {
 /// for bad input, or an error naming the command if it is a `Special` handler.
 pub fn parse_to_request(argv: &[&str]) -> Result<Request> {
     match parse_to_dispatch(argv)? {
-        ParsedCommand::Request(r) => Ok(r),
+        ParsedCommand::Action(action) => Ok(action.into_request()),
         ParsedCommand::Special { name, .. } => {
             Err(anyhow!("`{name}` is a special-dispatch command"))
         }
@@ -407,7 +425,7 @@ pub fn parse_to_request(argv: &[&str]) -> Result<Request> {
 /// it has a native equivalent (start/done/stop, config, spaces, …) or rejects
 /// with "CLI-only".
 pub enum ParsedCommand {
-    Request(Request),
+    Action(ClientAction),
     Special {
         which: Special,
         /// The leaf's name (for messages) — e.g. "start", "set".
@@ -423,7 +441,7 @@ pub fn parse_to_dispatch(argv: &[&str]) -> Result<ParsedCommand> {
     let m = cli.try_get_matches_from(argv).map_err(|e| anyhow!("{e}"))?;
     let (leaf, lm) = resolve(&specs, &m).ok_or_else(|| anyhow!("no subcommand"))?;
     match &leaf.dispatch {
-        Dispatch::Request(f) => Ok(ParsedCommand::Request(f(lm)?)),
+        Dispatch::Action(f) => Ok(ParsedCommand::Action(ClientAction::from_legacy(f(lm)?))),
         Dispatch::Special(s) => Ok(ParsedCommand::Special {
             which: *s,
             name: leaf.name,
@@ -432,43 +450,35 @@ pub fn parse_to_dispatch(argv: &[&str]) -> Result<ParsedCommand> {
     }
 }
 
-/// The palette's completion source: every invocable leaf as `(full name, about)`
-/// — top-level verbs plus one level of group subcommands ("members name").
+/// The palette's canonical completion source: every visible invocable command
+/// as `(full name, about)`, recursively including product-owned groups.
 pub fn command_index() -> Vec<(String, &'static str)> {
     let mut out = Vec::new();
-    for s in specs() {
-        if s.subs.is_empty() {
-            out.push((s.name.to_string(), s.about));
-        } else {
-            // The group's bare form is invocable too (e.g. `members` lists).
-            out.push((s.name.to_string(), s.about));
-            for c in &s.subs {
-                out.push((format!("{} {}", s.name, c.name), c.about));
-            }
+    fn visit(prefix: &str, specs: &[Spec], out: &mut Vec<(String, &'static str)>) {
+        for spec in specs.iter().filter(|spec| !spec.hidden) {
+            let name = if prefix.is_empty() {
+                spec.name.to_string()
+            } else {
+                format!("{prefix} {}", spec.name)
+            };
+            out.push((name.clone(), spec.about));
+            visit(&name, &spec.subs, out);
         }
     }
+    visit("", &specs(), &mut out);
     out
 }
 
-/// Resolve the invoked matches down to the leaf `Spec` + its `ArgMatches`,
-/// descending one level into groups (`projects`/`members`/…). A group invoked
-/// bare (`lait members`) resolves to the group spec itself (its bare dispatch).
+/// Resolve the invoked matches down to the leaf `Spec` + its `ArgMatches`.
+/// Product namespaces may contain their own command groups, so descent is
+/// recursive (`issues projects add`). A bare group resolves to the group spec.
 pub fn resolve<'a>(specs: &'a [Spec], m: &'a ArgMatches) -> Option<(&'a Spec, &'a ArgMatches)> {
     let (name, sub_m) = m.subcommand()?;
     let spec = specs
         .iter()
         .find(|s| s.name == name || s.aliases.contains(&name))?;
-    if !spec.subs.is_empty() {
-        if let Some((cn, cm)) = sub_m.subcommand() {
-            if let Some(child) = spec
-                .subs
-                .iter()
-                .find(|s| s.name == cn || s.aliases.contains(&cn))
-            {
-                return Some((child, cm));
-            }
-        }
-        return Some((spec, sub_m));
+    if sub_m.subcommand().is_some() {
+        return resolve(&spec.subs, sub_m);
     }
     Some((spec, sub_m))
 }
@@ -2276,31 +2286,47 @@ pub fn specs() -> Vec<Spec> {
             subs: vec![
                 Spec::special(
                     "ls",
-                    "List known spaces with status (default).",
+                    "List known local Orbits with status (default).",
                     vec![],
                     Special::Spaces,
                 ),
                 Spec::special(
                     "forget",
-                    "Deregister a space (registry only — never touches the store on disk).",
-                    vec![A::pos("sel", "A store path, ws_ id, or unique id prefix.")],
+                    "Deregister an Orbit (registry only — never touches its store).",
+                    vec![A::pos(
+                        "sel",
+                        "A store path, orb_/ws_ id, or unique id prefix.",
+                    )],
                     Special::SpacesForget,
                 ),
                 Spec::special(
                     "prune",
-                    "Drop registry entries whose store no longer exists on disk.",
+                    "Drop Orbit entries whose store no longer exists on disk.",
                     vec![],
                     Special::SpacesPrune,
                 ),
             ],
             ..Spec::special(
-                "spaces",
-                "Every space on this machine: name, id, origin, status, projects, path.",
+                "orbits",
+                "Every local Orbit: id, Space, origin, status, projects, and path.",
                 vec![],
                 Special::Spaces,
             )
-            .alias(&["workspaces"])
+            .alias(&["orbit", "spaces", "workspaces"])
         },
+        Spec::special(
+            "context",
+            "Show the identity, Orbit, Space, and installed Worlds selected here.",
+            vec![],
+            Special::Context,
+        ),
+        Spec::special(
+            "worlds",
+            "List the semantic World packages installed in this Lait application.",
+            vec![],
+            Special::Worlds,
+        )
+        .alias(&["world"]),
         Spec {
             subs: vec![
                 Spec::special(
@@ -2596,21 +2622,78 @@ pub fn specs() -> Vec<Spec> {
             Special::Man,
         ),
     ];
-    // Help buckets in one greppable place: the first help screen leads with the
-    // daily loop; registries/settings follow; node plumbing sinks to the bottom.
-    // Within a bucket, declaration order holds.
+    // Help buckets in one greppable place: navigation leads, product namespaces
+    // follow, then sharing/settings, with node plumbing at the bottom. Within a
+    // bucket, declaration order holds.
     for s in &mut v {
         s.order = match s.name {
             "new" | "start" | "done" | "stop" | "inbox" | "show" | "board" | "ls" | "edit"
             | "move" | "assign" | "label" | "comment" | "delete" | "restore" | "link"
-            | "unlink" | "parent" | "graph" | "history" | "activity" | "serve" => ORDER_DAILY,
-            "init" | "join" | "invite" | "spaces" | "members" | "doctor" | "status" | "who" => {
-                ORDER_SHARE
-            }
+            | "unlink" | "parent" | "graph" | "history" | "activity" => ORDER_DAILY,
+            "context" | "orbits" | "worlds" | "serve" => ORDER_NAV,
+            "init" | "join" | "invite" | "members" | "doctor" | "status" | "who" => ORDER_SHARE,
             "projects" | "labels" | "config" | "profiles" | "resume" => ORDER_DEFAULT,
             _ => ORDER_NODE,
         };
     }
+
+    // Product commands are visible under their World namespace. The historical
+    // flat forms remain accepted but disappear from root help/completions, so
+    // `lait` presents as the orbital shell instead of as one privileged World.
+    const ISSUES_COMMANDS: &[&str] = &[
+        "new",
+        "start",
+        "done",
+        "stop",
+        "inbox",
+        "ls",
+        "show",
+        "edit",
+        "move",
+        "assign",
+        "label",
+        "comment",
+        "delete",
+        "restore",
+        "link",
+        "unlink",
+        "parent",
+        "graph",
+        "history",
+        "board",
+        "projects",
+        "labels",
+        "cycles",
+        "teams",
+        "triage",
+        "attach",
+        "attachment",
+        "activity",
+    ];
+    let issue_subs: Vec<Spec> = v
+        .iter()
+        .filter(|spec| ISSUES_COMMANDS.contains(&spec.name))
+        .cloned()
+        .map(|mut spec| {
+            spec.hidden = false;
+            spec
+        })
+        .collect();
+    for spec in &mut v {
+        if ISSUES_COMMANDS.contains(&spec.name) {
+            spec.hidden = true;
+        }
+    }
+    v.push(Spec {
+        subs: issue_subs,
+        order: ORDER_DAILY,
+        ..Spec::special(
+            "issues",
+            "Work with the bundled issue-tracker World.",
+            vec![],
+            Special::IssuesFocus,
+        )
+    });
     v
 }
 

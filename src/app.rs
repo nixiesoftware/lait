@@ -2,10 +2,11 @@
 //! `main.rs`) so integration tests and doctests can drive the same command
 //! surface the binary exposes. `main.rs` is a thin shim over [`run`].
 //!
-//! Flat verbs act on **issues**, while plural
-//! nouns manage **registries** (`label <ref> +bug` vs `labels new`), and every
-//! `<ref>` is resolved daemon-side. Each verb maps to exactly one control
-//! `Request`, preserving one command = one commit = one activity row.
+//! `lait` is the orbital navigation shell. It selects an identity and local
+//! Orbit, exposes the Spaces and Worlds reachable through that context, and
+//! dispatches each command to one explicit terminal owner. Flat issue verbs
+//! remain compatibility aliases for the bundled Issues World while its command
+//! package moves behind `lait issues`.
 //!
 //! The surface is defined as **data** in [`crate::cmdspec`] — a `Vec<Spec>` turned
 //! into a `clap::Command` at runtime — not a `#[derive(Parser)]` enum. This module
@@ -33,10 +34,13 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
-/// Resolve a `-w <SEL>` space selector to a store path via the registry:
-/// a path (containing a separator or naming an existing dir), a `ws_` id or
-/// unique prefix, or a case-insensitive display-name match.
-fn resolve_space_selector(sel: &str) -> Result<std::path::PathBuf> {
+/// Resolve a `--orbit <SEL>` selector to a store path via the local catalog:
+/// a path, an `orb_` id, a `ws_` id, or a case-insensitive display-name match.
+///
+/// `--space`, `--workspace`, and `-w` remain parser aliases, but this resolver
+/// names the actual thing being selected: one durable local Orbit. Two entries
+/// may legitimately participate in the same Space.
+fn resolve_orbit_selector(sel: &str) -> Result<std::path::PathBuf> {
     use std::path::{Path, PathBuf};
     // Path form: explicit separators or an existing directory. Accept either
     // the `.lait` dir itself or its parent.
@@ -55,7 +59,16 @@ fn resolve_space_selector(sel: &str) -> Result<std::path::PathBuf> {
         return Ok(store);
     }
     let entries = spaces::list();
-    let matches: Vec<_> = if sel.starts_with("ws_") {
+    let matches: Vec<_> = if sel.starts_with("orb_") {
+        entries
+            .iter()
+            .filter(|e| {
+                crate::daemon::LocalOrbitId::for_store(Path::new(&e.path))
+                    .as_str()
+                    .starts_with(sel)
+            })
+            .collect()
+    } else if sel.starts_with("ws_") {
         entries
             .iter()
             .filter(|e| e.space == sel || e.space.starts_with(sel))
@@ -71,7 +84,7 @@ fn resolve_space_selector(sel: &str) -> Result<std::path::PathBuf> {
             let e = matches[0];
             if spaces::presence(e) == spaces::StorePresence::Missing {
                 return Err(anyhow!(
-                    "space '{}' is registered at {} but the store is gone — run `lait spaces prune`",
+                    "Orbit '{}' is registered at {} but the store is gone — run `lait orbits prune`",
                     sel,
                     e.path
                 ));
@@ -92,7 +105,7 @@ fn resolve_space_selector(sel: &str) -> Result<std::path::PathBuf> {
             // A selector that resolved to nothing: exit `2`, the same answer the
             // daemon already gives for a missing ref / user / label.
             Err(crate::cli::CliError::not_found(format!(
-                "no space matches '{sel}' — known: {} (see `lait spaces`)",
+                "no Orbit matches '{sel}' — known: {} (see `lait orbits`)",
                 if known.is_empty() {
                     "(none)".to_string()
                 } else {
@@ -106,10 +119,39 @@ fn resolve_space_selector(sel: &str) -> Result<std::path::PathBuf> {
                 .iter()
                 .map(|e| format!("{} ({})", e.space, e.path))
                 .collect();
-            eprintln!("'{sel}' is ambiguous:\n  {}", cands.join("\n  "));
+            eprintln!(
+                "Orbit selector '{sel}' is ambiguous:\n  {}",
+                cands.join("\n  ")
+            );
             std::process::exit(2);
         }
     }
+}
+
+/// Apply the invocation's navigation selector and report where it came from.
+fn apply_selection(matches: &ArgMatches) -> Result<&'static str> {
+    let source = if matches.get_one::<String>("home").is_some() {
+        "--home"
+    } else if matches.get_one::<String>("orbit").is_some() {
+        "--orbit"
+    } else if std::env::var_os("LAIT_HOME").is_some() {
+        "LAIT_HOME"
+    } else if std::env::var_os("LAIT_STORE").is_some() {
+        "LAIT_STORE"
+    } else if config::existing_home().is_some() {
+        "cwd"
+    } else {
+        "none"
+    };
+
+    if let Some(h) = matches.get_one::<String>("home") {
+        std::env::set_var("LAIT_HOME", h);
+    }
+    if let Some(sel) = matches.get_one::<String>("orbit") {
+        let store = resolve_orbit_selector(sel)?;
+        std::env::set_var("LAIT_STORE", &store);
+    }
+    Ok(source)
 }
 
 /// A minimal extension→MIME map for attachments — enough for the common
@@ -211,26 +253,11 @@ pub async fn run() -> std::process::ExitCode {
 async fn dispatch(specs: &[cmdspec::Spec], matches: &ArgMatches, out: Out) -> Result<()> {
     let resolved = cmdspec::resolve(specs, matches);
 
-    // Bare `lait` = the FOCUS view (inbox + your active issues): the
-    // most valuable keystroke answers "what's addressed to me / what am I on",
-    // not help. Global flags (--home/-w/--json) still apply.
+    // Bare `lait` reports the current orbital context. Product focus views are
+    // explicit (`lait issues` for the bundled tracker).
     let Some((leaf, m)) = resolved else {
-        if let Some(h) = matches.get_one::<String>("home") {
-            std::env::set_var("LAIT_HOME", h);
-        }
-        if let Some(sel) = matches.get_one::<String>("space") {
-            let store = resolve_space_selector(sel)?;
-            std::env::set_var("LAIT_STORE", &store);
-        }
-        let home = match config::resolve_existing_store(None) {
-            Ok(h) => h,
-            Err(e) if e.downcast_ref::<config::NoStoreHere>().is_some() => {
-                crate::cli::err_no_store_here(out);
-                std::process::exit(1);
-            }
-            Err(e) => return Err(e),
-        };
-        return crate::cli::run_focus(&home, out).await;
+        let source = apply_selection(matches)?;
+        return crate::cli::print_context(config::existing_home(), source, out).await;
     };
 
     // Stateless install surfaces (completions / man): generated from the live
@@ -251,20 +278,9 @@ async fn dispatch(specs: &[cmdspec::Spec], matches: &ArgMatches, out: Out) -> Re
         _ => {}
     }
 
-    // Home resolution honours an explicit --home over the session registry.
-    // Applied before ANY store-touching dispatch (including `config`, whose
-    // store layer resolves through the same env).
-    if let Some(h) = matches.get_one::<String>("home") {
-        std::env::set_var("LAIT_HOME", h);
-    }
-    // `-w <SEL>`: resolve the selector to a store path and pin it, so every
-    // command below derives the exact same Orbit route from any directory.
-    // `--home`/`$LAIT_HOME` still outrank it (and clap already rejects combining
-    // the two flags).
-    if let Some(sel) = matches.get_one::<String>("space") {
-        let store = resolve_space_selector(sel)?;
-        std::env::set_var("LAIT_STORE", &store);
-    }
+    // Resolve and pin the selected local Orbit before any store-touching
+    // dispatch. `--home` still outranks it, and clap rejects combining them.
+    let selection_source = apply_selection(matches)?;
 
     // Registry-level commands that operate across identities (no store/daemon).
     match &leaf.dispatch {
@@ -333,7 +349,7 @@ async fn dispatch(specs: &[cmdspec::Spec], matches: &ArgMatches, out: Out) -> Re
         }
         // The space registry + config: pure local state, no store/daemon.
         Dispatch::Special(Special::Spaces) => {
-            crate::cli::print_spaces(out).await;
+            crate::cli::print_orbits(out).await;
             return Ok(());
         }
         Dispatch::Special(Special::SpacesForget) => {
@@ -361,6 +377,13 @@ async fn dispatch(specs: &[cmdspec::Spec], matches: &ArgMatches, out: Out) -> Re
                 ),
                 out,
             );
+            return Ok(());
+        }
+        Dispatch::Special(Special::Context) => {
+            return crate::cli::print_context(config::existing_home(), selection_source, out).await;
+        }
+        Dispatch::Special(Special::Worlds) => {
+            crate::cli::print_worlds(out);
             return Ok(());
         }
         Dispatch::Special(
@@ -396,13 +419,14 @@ async fn dispatch(specs: &[cmdspec::Spec], matches: &ArgMatches, out: Out) -> Re
 
     match &leaf.dispatch {
         // The uniform path: build one Request and round-trip the daemon.
-        Dispatch::Request(f) => {
-            let req = f(m)?;
+        Dispatch::Action(f) => {
+            let action = crate::client_action::ClientAction::from_legacy(f(m)?);
+            let req = action.request();
             use std::io::IsTerminal;
             // Ask before destroying (delete / member remove / key rotate). Gated
             // on the Request, so the list lives in one place; everything else
             // passes straight through.
-            if !crate::cli::confirm_destructive(&home, &req, out).await {
+            if !crate::cli::confirm_destructive(&home, req, out).await {
                 std::process::exit(1);
             }
             // `new --start` chains the create into the work loop: file it, then
@@ -420,17 +444,18 @@ async fn dispatch(specs: &[cmdspec::Spec], matches: &ArgMatches, out: Out) -> Re
                 .copied()
                 .unwrap_or(false);
             if leaf.name == "new" && wants_start {
-                crate::cli::run_new_start(&home, req, out).await?;
+                crate::cli::run_new_start(&home, action.into_request(), out).await?;
             } else if leaf.name == "members" && !out.json && std::io::stdout().is_terminal() {
                 // Bare `lait members` in an interactive terminal opens the modal
                 // picker (browse/approve); `--json` and piped/redirected output
                 // keep the plain roster dump so scripts and agents are unaffected.
                 crate::members_ui::run(&home).await?
             } else {
-                crate::cli::run(&home, req, out).await?;
+                crate::cli::run_action(&home, action, out).await?;
             }
         }
         Dispatch::Special(s) => match s {
+            Special::IssuesFocus => crate::cli::run_focus(&home, out).await?,
             Special::Start => {
                 let reff = cmdspec::resolve_reff(m)?;
                 crate::cli::run_start(&home, reff, m.get_flag("no_branch"), out).await?
@@ -590,6 +615,8 @@ async fn dispatch(specs: &[cmdspec::Spec], matches: &ArgMatches, out: Out) -> Re
             | Special::ConfigSet
             | Special::ConfigUnset
             | Special::ConfigList
+            | Special::Context
+            | Special::Worlds
             | Special::Init
             | Special::Join
             | Special::DeviceAccept

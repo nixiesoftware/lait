@@ -61,6 +61,23 @@ daemon, a local Orbit plus its expected Space, or a World reached through that
 Orbit. The CLI's cwd selects its default Orbit; MCP is pinned to its launch
 Orbit; neither inherits catalog-wide visibility.
 
+The `lait` CLI is the navigation shell for this graph, not the command-line
+identity of the bundled Issues World. Bare `lait` reports the selected identity,
+Orbit, Space, and installed Worlds. `--orbit` selects one durable local
+participation (`-w`, `--space`, and `--workspace` are compatibility spellings);
+`lait orbits` lists those local participations, while `lait worlds` lists the
+semantic packages installed in the application composition. Product commands
+live below their World namespace, such as `lait issues ...`. The historical flat
+issue verbs remain accepted as hidden compatibility inputs during extraction.
+
+Command parsing produces a `ClientAction` whose terminal target is already
+`Daemon`, `Space`, or `World { world }`. Orbit resolution later completes that
+target into a wire `ControlRoute`; it does not reclassify product intent. The
+current action still carries the historical typed `Request` payload for
+CLI/MCP/viewer and v3 daemon compatibility. Product command packages will
+replace that payload with their opaque `WorldCall` without changing the shell's
+navigation or routing model.
+
 Trusted cwd and MCP adapters derive a pinned `ClientScope`; the web adapter
 applies catalog identity policy. Each constructs an explicit route and opens the
 identity-scoped LaitDaemon endpoint. The daemon resolves the Orbit, validates
@@ -155,7 +172,8 @@ runtime    Orbit/Station lifecycle, Contacts, Worlds, Sessions, observations
 world-bridge
            versioned opaque application calls and object-safe World handlers
 issues     IssuesWorld schemas, semantic model, product DTOs and identifiers
-lait       application shell, local control adapters, CLI/MCP/viewer composition
+lait       orbital navigation shell, local control adapters, CLI/MCP/viewer
+           composition, and temporary product-compatibility aliases
 ```
 
 Dependencies point inward through these boundaries. Product concepts such as
@@ -307,9 +325,13 @@ current CLI, MCP, viewer, and historical per-Orbit daemon, but it no longer
 crosses the generic WorldBridge boundary. Issues-specific status/inbox/doorbell
 projections and role-assignment planning still live in SpaceBridge/Mechanics.
 The Issues application codec, `IssueRouter`, product lifecycle module, and
-client adapters also still live in the root application. Product-owned
-projection/IAM hooks are the next prerequisite for moving that whole
-application—not just its already-acyclic semantic model—to another repository.
+client adapters also still live in the root application. The CLI now supplies
+the neutral navigation/`ClientAction` boundary and a visible `issues` namespace,
+but the Issues command specs behind that namespace remain in the root registry.
+Moving those specs and their codec/router into the Issues application package is
+the next product cut. Product-owned projection/IAM hooks then complete the
+prerequisites for moving that whole application—not just its already-acyclic
+semantic model—to another repository.
 
 ## 6. Communication model
 
