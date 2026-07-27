@@ -313,7 +313,7 @@ fn stop_kills_the_daemon_even_with_a_live_subscriber() {
 /// The decoy-store guard: a read-only command run in a directory with no `.lait/`,
 /// when the registry knows of joined spaces, must refuse to create an empty store
 /// and instead point the user at the real one — exit non-zero, no `.lait/` left
-/// behind. This is the direct fix for "joined, but `lait projects` shows nothing"
+/// behind. This is the direct fix for "joined, but `lait issues projects` shows nothing"
 /// caused by running from the wrong folder.
 #[test]
 fn read_command_in_empty_dir_refuses_to_create_a_decoy_store() {
@@ -337,7 +337,7 @@ fn read_command_in_empty_dir_refuses_to_create_a_decoy_store() {
     .unwrap();
 
     let out = Command::new(bin())
-        .arg("projects")
+        .args(["issues", "projects"])
         .current_dir(&cwd)
         .env("LAIT_CONFIG_ROOT", &cfg)
         // Deliberately NO LAIT_HOME: force the git-style discovery path where the
@@ -345,7 +345,7 @@ fn read_command_in_empty_dir_refuses_to_create_a_decoy_store() {
         .env_remove("LAIT_HOME")
         .env_remove("LAIT_STORE")
         .output()
-        .expect("spawn `lait projects`");
+        .expect("spawn `lait issues projects`");
 
     assert!(
         !out.status.success(),
@@ -385,13 +385,13 @@ fn read_command_with_empty_registry_still_refuses_and_suggests_creation_verbs() 
     let cwd = unique("guard0-cwd");
 
     let out = Command::new(bin())
-        .arg("projects")
+        .args(["issues", "projects"])
         .current_dir(&cwd)
         .env("LAIT_CONFIG_ROOT", &cfg)
         .env_remove("LAIT_HOME")
         .env_remove("LAIT_STORE")
         .output()
-        .expect("spawn `lait projects`");
+        .expect("spawn `lait issues projects`");
 
     assert!(
         !out.status.success(),

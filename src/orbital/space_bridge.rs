@@ -392,7 +392,7 @@ impl SpaceBridge {
         // The implementation self-check. Receipts pin whichever implementation
         // id is ACTIVE in the ledger — not this build's — so a build whose
         // descriptor has moved on would silently attest an implementation it
-        // is not. Say so at open; `lait world-upgrade` (admin) activates this
+        // is not. Say so at open; `lait issues world-upgrade` (admin) activates this
         // build's id.
         {
             use runtime::AuthorityView;
@@ -1796,7 +1796,8 @@ impl SpaceBridge {
             .unwrap_or_default();
         if !conflicts.is_empty() {
             return Response::err(format!(
-                "role `{role}` has {} concurrent revision heads — resolve them with                  `role resolve` before assigning",
+                "role `{role}` has {} concurrent revision heads — resolve them with \
+                 `lait issues role resolve` before assigning",
                 conflicts.len()
             ));
         }

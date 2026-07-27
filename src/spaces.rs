@@ -4,8 +4,8 @@
 //! mapping each **store path** to the space it holds. Written at every
 //! chokepoint a space becomes bound to a path — `lait init` (founding),
 //! `lait join` (bootstrapping), and every successful daemon open — so founders
-//! and joiners alike are observable via `lait spaces` and addressable via
-//! `-w`. It carries **no secrets and no trust** (the signed ACL still gates
+//! and joiners alike are observable via `lait orbits` and addressable via
+//! `--orbit`. It carries **no secrets and no trust** (the signed ACL still gates
 //! every op); it is pure navigation state: the `name` and `projects` fields are
 //! advisory snapshots refreshed on open, a corrupt/absent file degrades to "no
 //! known spaces", and nothing here is ever a source of truth.

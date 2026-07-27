@@ -3,7 +3,8 @@
 //! enum, and arg extraction is keyed by string inside each spec's closure — so a
 //! renamed arg is a runtime, not compile-time, error. These tests pin the tricky
 //! mappings (label +/- tokens, board-position flags, repeated/variadic args,
-//! aliases, defaults, and parse-level conflicts) that the derive used to enforce.
+//! nested namespaces, defaults, and parse-level conflicts) that the derive used
+//! to enforce.
 //!
 //! Comparison is by serde value so we assert the *whole* `Request`, tag and all,
 //! without depending on its wire representation.
@@ -27,7 +28,7 @@ fn label_tokens_split_into_add_and_remove() {
     // `+bug` adds, `-wip` removes, a bare token adds — and `-wip` must survive as a
     // value (allow_hyphen_values), not be parsed as an unknown flag.
     parses_to(
-        &["lait", "label", "ENG-1", "+bug", "-wip", "chore"],
+        &["lait", "issues", "label", "ENG-1", "+bug", "-wip", "chore"],
         Request::Label {
             reff: "ENG-1".into(),
             add: vec!["bug".into(), "chore".into()],
@@ -39,7 +40,7 @@ fn label_tokens_split_into_add_and_remove() {
 #[test]
 fn move_position_flags_map_to_boardpos() {
     parses_to(
-        &["lait", "move", "ENG-1", "--top"],
+        &["lait", "issues", "move", "ENG-1", "--top"],
         Request::IssueMove {
             reff: "ENG-1".into(),
             project: None,
@@ -47,7 +48,9 @@ fn move_position_flags_map_to_boardpos() {
         },
     );
     parses_to(
-        &["lait", "move", "ENG-1", "--before", "ENG-2", "-p", "ENG"],
+        &[
+            "lait", "issues", "move", "ENG-1", "--before", "ENG-2", "-p", "ENG",
+        ],
         Request::IssueMove {
             reff: "ENG-1".into(),
             project: Some("ENG".into()),
@@ -61,7 +64,9 @@ fn move_position_flags_map_to_boardpos() {
 #[test]
 fn assign_collects_variadic_who_and_toggles_add() {
     parses_to(
-        &["lait", "assign", "ENG-1", "alice", "bob", "--remove"],
+        &[
+            "lait", "issues", "assign", "ENG-1", "alice", "bob", "--remove",
+        ],
         Request::Assign {
             reff: "ENG-1".into(),
             who: vec!["alice".into(), "bob".into()],
@@ -69,7 +74,7 @@ fn assign_collects_variadic_who_and_toggles_add() {
         },
     );
     parses_to(
-        &["lait", "assign", "ENG-1", "alice"],
+        &["lait", "issues", "assign", "ENG-1", "alice"],
         Request::Assign {
             reff: "ENG-1".into(),
             who: vec!["alice".into()],
@@ -83,6 +88,7 @@ fn new_collects_repeated_short_flags() {
     parses_to(
         &[
             "lait",
+            "issues",
             "new",
             "Fix login",
             "-p",
@@ -118,7 +124,7 @@ fn new_collects_repeated_short_flags() {
 fn ls_filter_flags() {
     parses_to(
         &[
-            "lait", "ls", "-p", "ENG", "--mine", "--status", "wip", "--all",
+            "lait", "issues", "ls", "-p", "ENG", "--mine", "--status", "wip", "--all",
         ],
         Request::List {
             project: Some("ENG".into()),
@@ -134,9 +140,12 @@ fn ls_filter_flags() {
 
 #[test]
 fn activity_since_defaults_to_zero() {
-    parses_to(&["lait", "activity"], Request::Activity { since: 0 });
     parses_to(
-        &["lait", "activity", "--since", "42"],
+        &["lait", "issues", "activity"],
+        Request::Activity { since: 0 },
+    );
+    parses_to(
+        &["lait", "issues", "activity", "--since", "42"],
         Request::Activity { since: 42 },
     );
 }
@@ -145,7 +154,7 @@ fn activity_since_defaults_to_zero() {
 fn comment_with_inline_body() {
     // (The stdin fallback path is intentionally not exercised — it would block.)
     parses_to(
-        &["lait", "comment", "ENG-1", "looks good"],
+        &["lait", "issues", "comment", "ENG-1", "looks good"],
         Request::Comment {
             reply_to: None,
             reff: "ENG-1".into(),
@@ -175,8 +184,8 @@ fn aliases_resolve_to_the_canonical_command() {
 
 #[test]
 fn grouped_commands_bare_form_lists() {
-    parses_to(&["lait", "projects"], Request::ProjectList);
-    parses_to(&["lait", "labels"], Request::LabelList);
+    parses_to(&["lait", "issues", "projects"], Request::ProjectList);
+    parses_to(&["lait", "issues", "labels"], Request::LabelList);
     parses_to(&["lait", "members"], Request::Members);
 }
 
@@ -194,11 +203,12 @@ fn members_add_reads_admin_and_local_name() {
 
 #[test]
 fn board_positional_is_optional() {
-    // Bare `lait board` parses — the daemon's choose-project chain (sole
+    // Bare `lait issues board` parses — the daemon's choose-project chain (sole
     // project / `project.default` / branch hint) supplies the view project.
     // `project_hint` is environment-derived (git branch), so only `project` is
     // pinned here.
-    let got = parse_to_request(&["lait", "board"]).expect("bare `lait board` must parse");
+    let got = parse_to_request(&["lait", "issues", "board"])
+        .expect("bare `lait issues board` must parse");
     match got {
         Request::Board { project, .. } => assert_eq!(project, None),
         other => panic!("expected Request::Board, got {other:?}"),
@@ -206,7 +216,7 @@ fn board_positional_is_optional() {
     // With an explicit positional the hint is pinned None (an explicit project
     // always wins; no git subprocess runs).
     parses_to(
-        &["lait", "board", "ENG"],
+        &["lait", "issues", "board", "ENG"],
         Request::Board {
             project: Some("ENG".into()),
             project_hint: None,
@@ -219,7 +229,7 @@ fn explicit_project_pins_the_hint_to_none() {
     // Under an explicit `-p` the branch-derived project_hint must be None — the
     // daemon must never see a hint that could override an explicit choice.
     parses_to(
-        &["lait", "new", "t", "-p", "ENG"],
+        &["lait", "issues", "new", "t", "-p", "ENG"],
         Request::IssueNew {
             due: None,
             estimate: None,
@@ -251,7 +261,7 @@ fn config_set_is_special_dispatch_not_a_request() {
 #[test]
 fn cli_tree_builds_and_validates() {
     // clap panics on a malformed tree (dup ids, bad positionals). Asserts the
-    // whole registry — including the `-w` global and the `config`/`workspaces`
+    // whole registry — including the `--orbit` global and the `issues`/`config`
     // groups — assembles into a legal Command.
     build_cli(&specs()).debug_assert();
 }
@@ -285,22 +295,25 @@ fn work_state_verbs_are_special_dispatch() {
     // app/cli) — parse_to_request must refuse them by name, and the ref must
     // parse as an optional positional.
     for verb in ["start", "done", "stop"] {
-        let err = parse_to_request(&["lait", verb, "ENG-1"])
+        let err = parse_to_request(&["lait", "issues", verb, "ENG-1"])
             .expect_err("work-state verbs are special-dispatch");
         assert!(err.to_string().contains(verb), "{err}");
     }
     // --no-branch is a legal flag on start only.
     let cli = build_cli(&specs());
     assert!(cli
-        .try_get_matches_from(["lait", "start", "ENG-1", "--no-branch"])
+        .try_get_matches_from(["lait", "issues", "start", "ENG-1", "--no-branch"])
         .is_ok());
 }
 
 #[test]
 fn inbox_parses_with_and_without_clear() {
-    parses_to(&["lait", "inbox"], Request::Inbox { clear: false });
     parses_to(
-        &["lait", "inbox", "--clear"],
+        &["lait", "issues", "inbox"],
+        Request::Inbox { clear: false },
+    );
+    parses_to(
+        &["lait", "issues", "inbox", "--clear"],
         Request::Inbox { clear: true },
     );
 }
@@ -308,7 +321,7 @@ fn inbox_parses_with_and_without_clear() {
 #[test]
 fn projects_add_is_key_first_with_defaulted_name() {
     parses_to(
-        &["lait", "projects", "add", "OPS"],
+        &["lait", "issues", "projects", "add", "OPS"],
         Request::ProjectNew {
             name: "Ops".into(),
             key: "OPS".into(),
@@ -316,7 +329,7 @@ fn projects_add_is_key_first_with_defaulted_name() {
         },
     );
     parses_to(
-        &["lait", "projects", "add", "OPS", "Operations"],
+        &["lait", "issues", "projects", "add", "OPS", "Operations"],
         Request::ProjectNew {
             name: "Operations".into(),
             key: "OPS".into(),
@@ -325,7 +338,7 @@ fn projects_add_is_key_first_with_defaulted_name() {
     );
     // `new` survives as an alias of the SAME shape.
     parses_to(
-        &["lait", "projects", "new", "DSN", "Design"],
+        &["lait", "issues", "projects", "new", "DSN", "Design"],
         Request::ProjectNew {
             name: "Design".into(),
             key: "DSN".into(),
@@ -335,30 +348,29 @@ fn projects_add_is_key_first_with_defaulted_name() {
 }
 
 #[test]
-fn orbital_navigation_names_and_compatibility_aliases_resolve() {
-    // `orbits` names the local path-keyed catalog. The old Space/workspace
-    // vocabulary remains accepted while scripts migrate.
+fn orbital_navigation_uses_one_canonical_vocabulary() {
+    // `orbits` names the local path-keyed catalog. Removed migration spellings
+    // must remain errors so they cannot quietly become permanent API.
     let cli = build_cli(&specs());
     assert!(cli.clone().try_get_matches_from(["lait", "orbits"]).is_ok());
-    assert!(cli.clone().try_get_matches_from(["lait", "orbit"]).is_ok());
-    assert!(cli.clone().try_get_matches_from(["lait", "spaces"]).is_ok());
-    assert!(cli
-        .clone()
-        .try_get_matches_from(["lait", "workspaces"])
-        .is_ok());
-    // Global selector: --orbit is canonical; the old long names and -w survive.
-    for flag in ["--orbit", "--space", "--workspace"] {
+    for removed in ["orbit", "spaces", "workspaces"] {
         assert!(
-            cli.clone()
-                .try_get_matches_from(["lait", flag, "demo", "ls"])
-                .is_ok(),
-            "{flag} should parse"
+            cli.clone().try_get_matches_from(["lait", removed]).is_err(),
+            "{removed} must not parse"
         );
     }
     assert!(cli
         .clone()
-        .try_get_matches_from(["lait", "-w", "demo", "ls"])
+        .try_get_matches_from(["lait", "--orbit", "demo", "issues", "ls"])
         .is_ok());
+    for removed in ["--space", "--workspace", "-w"] {
+        assert!(
+            cli.clone()
+                .try_get_matches_from(["lait", removed, "demo", "issues", "ls"])
+                .is_err(),
+            "{removed} must not parse"
+        );
+    }
 }
 
 #[test]
@@ -382,16 +394,15 @@ fn context_and_world_catalog_are_navigation_commands() {
         .try_get_matches_from(["lait", "context"])
         .is_ok());
     assert!(cli.clone().try_get_matches_from(["lait", "worlds"]).is_ok());
-    assert!(cli.try_get_matches_from(["lait", "world"]).is_ok());
+    assert!(cli.try_get_matches_from(["lait", "world"]).is_err());
 }
 
 #[test]
-fn issues_namespace_is_canonical_and_flat_verbs_remain_compatible() {
+fn issues_namespace_is_the_only_product_entry() {
     let expected = Request::IssueView {
         reff: "ENG-1".into(),
     };
-    parses_to(&["lait", "issues", "show", "ENG-1"], expected.clone());
-    parses_to(&["lait", "show", "ENG-1"], expected);
+    parses_to(&["lait", "issues", "show", "ENG-1"], expected);
 
     // Product-owned groups may nest under the World namespace.
     parses_to(
@@ -404,16 +415,71 @@ fn issues_namespace_is_canonical_and_flat_verbs_remain_compatible() {
     );
 
     let cli = build_cli(&specs());
+    assert!(cli
+        .clone()
+        .try_get_matches_from(["lait", "show", "ENG-1"])
+        .is_err());
+    let root_names: Vec<_> = cli
+        .get_subcommands()
+        .map(|command| command.get_name())
+        .collect();
     let issues = cli
         .get_subcommands()
         .find(|command| command.get_name() == "issues")
         .expect("visible Issues namespace");
     assert!(!issues.is_hide_set());
-    let flat_show = cli
+    let issue_names: Vec<_> = issues
         .get_subcommands()
-        .find(|command| command.get_name() == "show")
-        .expect("flat compatibility verb");
-    assert!(flat_show.is_hide_set());
+        .map(|command| command.get_name())
+        .collect();
+    for product_command in [
+        "new",
+        "start",
+        "done",
+        "stop",
+        "inbox",
+        "ls",
+        "show",
+        "edit",
+        "move",
+        "assign",
+        "label",
+        "comment",
+        "react",
+        "world-upgrade",
+        "delete",
+        "restore",
+        "link",
+        "unlink",
+        "parent",
+        "graph",
+        "history",
+        "board",
+        "projects",
+        "labels",
+        "follow",
+        "unfollow",
+        "milestone",
+        "cycle",
+        "initiatives",
+        "teams",
+        "triage",
+        "attach",
+        "attachment",
+        "role",
+        "access",
+        "workflow",
+        "activity",
+    ] {
+        assert!(
+            issue_names.contains(&product_command),
+            "{product_command} must live under the Issues namespace"
+        );
+        assert!(
+            !root_names.contains(&product_command),
+            "{product_command} must not exist at the root"
+        );
+    }
 }
 
 #[test]
@@ -430,7 +496,7 @@ fn root_help_presents_navigation_then_product_namespaces() {
         !help
             .lines()
             .any(|line| line.trim_start().starts_with("show ")),
-        "flat Issues compatibility verbs must stay out of root help:\n{help}"
+        "flat Issues verbs must stay out of root help:\n{help}"
     );
     assert!(
         help.find("context").unwrap() < help.find("issues").unwrap(),
@@ -448,7 +514,7 @@ fn daemon_off_switch_is_shutdown() {
 fn comment_single_arg_is_the_body_with_explicit_ref_still_working() {
     // Two positionals: ref + body, exactly as typed.
     parses_to(
-        &["lait", "comment", "ENG-1", "found it"],
+        &["lait", "issues", "comment", "ENG-1", "found it"],
         Request::Comment {
             reply_to: None,
             reff: "ENG-1".into(),
@@ -458,7 +524,7 @@ fn comment_single_arg_is_the_body_with_explicit_ref_still_working() {
     // One positional: it's the BODY; the ref must come from the git branch.
     // Off a KEY-n branch that inference fails with a teaching error (this test
     // runs on arbitrary branches, so pin only the failure shape).
-    match parse_to_request(&["lait", "comment", "just a body, no ref"]) {
+    match parse_to_request(&["lait", "issues", "comment", "just a body, no ref"]) {
         Ok(Request::Comment { reff, body, .. }) => {
             // On a KEY-n branch the inference kicks in — body must be intact.
             assert_eq!(body, "just a body, no ref");

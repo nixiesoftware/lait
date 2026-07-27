@@ -279,7 +279,7 @@ pub fn form_space_with_fault(
 }
 
 /// The `lait init` heir with first-run UX parity: [`form_space`] with a seeded
-/// default project (named after the space, key derived) so `lait new` works on
+/// default project (named after the space, key derived) so `lait issues new` works on
 /// the very next command. The project is part of the ONE atomic
 /// `InitializeTracker` transaction. Returns the founded Space id and the
 /// default project's brief.

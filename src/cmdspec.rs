@@ -56,9 +56,9 @@ pub enum Special {
     Man,
     Profiles,
     Resume,
-    Spaces,
-    SpacesForget,
-    SpacesPrune,
+    Orbits,
+    OrbitsForget,
+    OrbitsPrune,
     ConfigGet,
     ConfigSet,
     ConfigUnset,
@@ -76,7 +76,6 @@ pub enum Special {
 }
 
 /// One command (or nested group) in the tree.
-#[derive(Clone)]
 pub struct Spec {
     pub name: &'static str,
     pub aliases: &'static [&'static str],
@@ -91,8 +90,6 @@ pub struct Spec {
     /// A long-running networked service (`daemon`, `mcp`) that must keep Rust's
     /// default SIGPIPE-ignored so a dropped socket returns EPIPE, not a kill.
     pub service: bool,
-    /// Accepted for compatibility but omitted from root help/completions.
-    pub hidden: bool,
     /// Help-screen bucket (clap `display_order`): the first screen leads with
     /// the daily loop, registries and node plumbing sink to the bottom.
     pub order: usize,
@@ -116,7 +113,6 @@ impl Spec {
             customize: None,
             dispatch: Dispatch::Action(f),
             service: false,
-            hidden: false,
             order: ORDER_DEFAULT,
         }
     }
@@ -133,7 +129,6 @@ impl Spec {
             customize: None,
             dispatch: Dispatch::Special(s),
             service: false,
-            hidden: false,
             order: ORDER_DEFAULT,
         }
     }
@@ -155,7 +150,6 @@ impl Spec {
 /// One argument, modelled declaratively. Every value is a `String`; numerics are
 /// parsed in the `to_request` closure (keeps this type free of clap value-parser
 /// generics). Exotic parsers (shell/client/scope value-enums) go via `customize`.
-#[derive(Clone)]
 pub struct ArgSpec {
     name: &'static str,
     short: Option<char>,
@@ -170,7 +164,6 @@ pub struct ArgSpec {
     conflicts: &'static [&'static str],
 }
 
-#[derive(Clone, Copy)]
 enum Act {
     Set,
     Append,
@@ -324,10 +317,7 @@ pub fn build_cli(specs: &[Spec]) -> Command {
         )
         .arg(
             Arg::new("orbit")
-                .short('w')
                 .long("orbit")
-                .alias("space")
-                .alias("workspace")
                 .global(true)
                 .action(ArgAction::Set)
                 .conflicts_with("home")
@@ -371,7 +361,7 @@ pub fn build_cli(specs: &[Spec]) -> Command {
 
 /// The heading the global flags file under. Without it clap interleaves
 /// them with each command's own flags in declaration order (`--home` between
-/// `-p` and `-a` on `lait new`), so the flags that apply *everywhere* read as
+/// `-p` and `-a` on `lait issues new`), so flags that apply *everywhere* read as
 /// command-specific noise. One heading separates the two kinds.
 const GLOBAL_HEADING: &str = "Global Options";
 
@@ -383,10 +373,7 @@ const ORDER_DEFAULT: usize = 30; // registries, settings
 const ORDER_NODE: usize = 40; // daemon/remote/mcp/plumbing
 
 fn build_sub(s: &Spec) -> Command {
-    let mut c = Command::new(s.name)
-        .about(s.about)
-        .display_order(s.order)
-        .hide(s.hidden);
+    let mut c = Command::new(s.name).about(s.about).display_order(s.order);
     for a in s.aliases {
         c = c.alias(*a);
     }
@@ -405,7 +392,7 @@ fn build_sub(s: &Spec) -> Command {
     c
 }
 
-/// Parse an argv (`["lait", "label", "ENG-1", "+bug"]`) and, when it resolves to
+/// Parse an argv (`["lait", "issues", "label", "ENG-1", "+bug"]`) and, when it resolves to
 /// a `Request`-dispatch command, build that `Request`. The parity seam: it maps
 /// argv → the exact Layer-B request the daemon receives, so `tests/cli_parse.rs`
 /// can pin the arg semantics without a running daemon. Returns a clap usage error
@@ -422,7 +409,7 @@ pub fn parse_to_request(argv: &[&str]) -> Result<Request> {
 /// A parsed command line, surfacing `Special` leaves instead of erroring on
 /// them — the seam interactive clients dispatch through. The caller decides per
 /// `Special` whether
-/// it has a native equivalent (start/done/stop, config, spaces, …) or rejects
+/// it has a native equivalent (start/done/stop, config, orbits, …) or rejects
 /// with "CLI-only".
 pub enum ParsedCommand {
     Action(ClientAction),
@@ -455,7 +442,7 @@ pub fn parse_to_dispatch(argv: &[&str]) -> Result<ParsedCommand> {
 pub fn command_index() -> Vec<(String, &'static str)> {
     let mut out = Vec::new();
     fn visit(prefix: &str, specs: &[Spec], out: &mut Vec<(String, &'static str)>) {
-        for spec in specs.iter().filter(|spec| !spec.hidden) {
+        for spec in specs {
             let name = if prefix.is_empty() {
                 spec.name.to_string()
             } else {
@@ -590,7 +577,7 @@ pub(crate) fn resolve_reff(m: &ArgMatches) -> Result<String> {
         None => infer_ref_from_git_branch().ok_or_else(|| {
             anyhow!(
                 "no issue given, and none could be inferred from the current git branch \
-                 (name it like `eng-142-short-desc`). Pass a ref explicitly, e.g. `lait show ENG-142`."
+                 (name it like `eng-142-short-desc`). Pass a ref explicitly, e.g. `lait issues show ENG-142`."
             )
         }),
     }
@@ -877,7 +864,7 @@ pub fn specs() -> Vec<Spec> {
                 // (body piped on stdin) is not silently read as the body:
                 //   - looks like an issue ref  ⇒ it's the REF, body from stdin;
                 //   - anything else            ⇒ it's the BODY, ref from the branch
-                //     (the branch-native loop `lait comment "found it"`).
+                //     (the branch-native loop `lait issues comment "found it"`).
                 // Two args are always ref + body, unambiguously.
                 let (reff, body) = match (opt_str(m, "reff"), opt_str(m, "body")) {
                     (Some(r), Some(b)) => (Some(r), Some(b)),
@@ -890,7 +877,7 @@ pub fn specs() -> Vec<Spec> {
                     None => infer_ref_from_git_branch().ok_or_else(|| {
                         anyhow!(
                             "no issue ref given, and none could be inferred from the git branch — \
-                             pass one: `lait comment ENG-142 \"...\"` (a lone `ENG-142` is read as \
+                             pass one: `lait issues comment ENG-142 \"...\"` (a lone `ENG-142` is read as \
                              the ref, with the body on stdin)"
                         )
                     })?,
@@ -906,7 +893,7 @@ pub fn specs() -> Vec<Spec> {
                 };
                 if body.trim().is_empty() {
                     anyhow::bail!(
-                        "no comment body — give it as an argument (`lait comment {reff} \"...\"`) \
+                        "no comment body — give it as an argument (`lait issues comment {reff} \"...\"`) \
                          or pipe it on stdin"
                     );
                 }
@@ -1024,7 +1011,7 @@ pub fn specs() -> Vec<Spec> {
                 let parent = opt_str(m, "parent");
                 if parent.is_none() && !flag(m, "none") {
                     anyhow::bail!(
-                        "give a parent ref, or --none to clear: `lait parent {reff} <epic>`"
+                        "give a parent ref, or --none to clear: `lait issues parent {reff} <epic>`"
                     );
                 }
                 Ok(Request::IssueParent { reff, parent })
@@ -1227,7 +1214,7 @@ pub fn specs() -> Vec<Spec> {
                 ),
                 Spec::req(
                     "new",
-                    "Create a milestone: `milestone new ENG \"Beta\" --target 2026-09-01`.",
+                    "Create a milestone: `lait issues milestone new ENG \"Beta\" --target 2026-09-01`.",
                     vec![
                         A::pos("project", "Project KEY or prj_ id."),
                         A::pos("name", "Milestone name."),
@@ -1315,7 +1302,7 @@ pub fn specs() -> Vec<Spec> {
                 ),
                 Spec::req(
                     "new",
-                    "Create a cycle: `cycle new ENG \"Sprint 12\" --start 2026-08-01 --end 2026-08-14`.",
+                    "Create a cycle: `lait issues cycle new ENG \"Sprint 12\" --start 2026-08-01 --end 2026-08-14`.",
                     vec![
                         A::pos("project", "Project KEY or prj_ id."),
                         A::pos("name", "Cycle name."),
@@ -1398,7 +1385,7 @@ pub fn specs() -> Vec<Spec> {
             subs: vec![
                 Spec::req(
                     "new",
-                    "Create an initiative: `initiative new \"Q3 platform\" --owner act_… --target 2026-09-30`.",
+                    "Create an initiative: `lait issues initiative new \"Q3 platform\" --owner act_… --target 2026-09-30`.",
                     vec![
                         A::pos("name", "Initiative name."),
                         A::val("description", "What this goal is."),
@@ -1493,7 +1480,7 @@ pub fn specs() -> Vec<Spec> {
             subs: vec![
                 Spec::req(
                     "new",
-                    "Create a team (admin-only): `team new \"Platform\" --key PLT`.",
+                    "Create a team (admin-only): `lait issues team new \"Platform\" --key PLT`.",
                     vec![
                         A::pos("name", "Team name."),
                         A::val("key", "Short KEY (immutable after creation)."),
@@ -2120,7 +2107,7 @@ pub fn specs() -> Vec<Spec> {
             ],
             ..Spec::req(
                 "role",
-                "Author product roles (Catalog definitions). `role` lists.",
+                "Author product roles (Catalog definitions). `lait issues role` lists.",
                 vec![],
                 |_| Ok(Request::RoleList),
             )
@@ -2147,7 +2134,10 @@ pub fn specs() -> Vec<Spec> {
                 Spec::req(
                     "revoke",
                     "Revoke one effective assignment by its grant id.",
-                    vec![A::pos("grant_id", "The 64-hex grant id (from `access ls`).")],
+                    vec![A::pos(
+                        "grant_id",
+                        "The 64-hex grant id (from `lait issues access ls`).",
+                    )],
                     |m| {
                         Ok(Request::AccessRevoke {
                             grant_id: req_str(m, "grant_id"),
@@ -2167,7 +2157,7 @@ pub fn specs() -> Vec<Spec> {
             ],
             ..Spec::req(
                 "access",
-                "Effective scoped capability assignments. `access` lists.",
+                "Effective scoped capability assignments. `lait issues access` lists.",
                 vec![],
                 |_| Ok(Request::AccessList { actor: None }),
             )
@@ -2288,7 +2278,7 @@ pub fn specs() -> Vec<Spec> {
                     "ls",
                     "List known local Orbits with status (default).",
                     vec![],
-                    Special::Spaces,
+                    Special::Orbits,
                 ),
                 Spec::special(
                     "forget",
@@ -2297,22 +2287,21 @@ pub fn specs() -> Vec<Spec> {
                         "sel",
                         "A store path, orb_/ws_ id, or unique id prefix.",
                     )],
-                    Special::SpacesForget,
+                    Special::OrbitsForget,
                 ),
                 Spec::special(
                     "prune",
                     "Drop Orbit entries whose store no longer exists on disk.",
                     vec![],
-                    Special::SpacesPrune,
+                    Special::OrbitsPrune,
                 ),
             ],
             ..Spec::special(
                 "orbits",
                 "Every local Orbit: id, Space, origin, status, projects, and path.",
                 vec![],
-                Special::Spaces,
+                Special::Orbits,
             )
-            .alias(&["orbit", "spaces", "workspaces"])
         },
         Spec::special(
             "context",
@@ -2325,8 +2314,7 @@ pub fn specs() -> Vec<Spec> {
             "List the semantic World packages installed in this Lait application.",
             vec![],
             Special::Worlds,
-        )
-        .alias(&["world"]),
+        ),
         Spec {
             subs: vec![
                 Spec::special(
@@ -2628,18 +2616,19 @@ pub fn specs() -> Vec<Spec> {
     for s in &mut v {
         s.order = match s.name {
             "new" | "start" | "done" | "stop" | "inbox" | "show" | "board" | "ls" | "edit"
-            | "move" | "assign" | "label" | "comment" | "delete" | "restore" | "link"
-            | "unlink" | "parent" | "graph" | "history" | "activity" => ORDER_DAILY,
+            | "move" | "assign" | "label" | "comment" | "react" | "delete" | "restore" | "link"
+            | "unlink" | "parent" | "graph" | "history" | "follow" | "unfollow" | "attach"
+            | "attachment" | "activity" => ORDER_DAILY,
             "context" | "orbits" | "worlds" | "serve" => ORDER_NAV,
             "init" | "join" | "invite" | "members" | "doctor" | "status" | "who" => ORDER_SHARE,
-            "projects" | "labels" | "config" | "profiles" | "resume" => ORDER_DEFAULT,
+            "projects" | "labels" | "milestone" | "cycle" | "initiatives" | "teams" | "triage"
+            | "role" | "access" | "workflow" | "config" | "profiles" | "resume" => ORDER_DEFAULT,
             _ => ORDER_NODE,
         };
     }
 
-    // Product commands are visible under their World namespace. The historical
-    // flat forms remain accepted but disappear from root help/completions, so
-    // `lait` presents as the orbital shell instead of as one privileged World.
+    // Product commands live only under their World namespace. Partitioning
+    // moves each Spec rather than cloning it back into a hidden root alias.
     const ISSUES_COMMANDS: &[&str] = &[
         "new",
         "start",
@@ -2653,6 +2642,8 @@ pub fn specs() -> Vec<Spec> {
         "assign",
         "label",
         "comment",
+        "react",
+        "world-upgrade",
         "delete",
         "restore",
         "link",
@@ -2663,27 +2654,23 @@ pub fn specs() -> Vec<Spec> {
         "board",
         "projects",
         "labels",
-        "cycles",
+        "follow",
+        "unfollow",
+        "milestone",
+        "cycle",
+        "initiatives",
         "teams",
         "triage",
         "attach",
         "attachment",
+        "role",
+        "access",
+        "workflow",
         "activity",
     ];
-    let issue_subs: Vec<Spec> = v
-        .iter()
-        .filter(|spec| ISSUES_COMMANDS.contains(&spec.name))
-        .cloned()
-        .map(|mut spec| {
-            spec.hidden = false;
-            spec
-        })
-        .collect();
-    for spec in &mut v {
-        if ISSUES_COMMANDS.contains(&spec.name) {
-            spec.hidden = true;
-        }
-    }
+    let (issue_subs, mut v): (Vec<Spec>, Vec<Spec>) = v
+        .into_iter()
+        .partition(|spec| ISSUES_COMMANDS.contains(&spec.name));
     v.push(Spec {
         subs: issue_subs,
         order: ORDER_DAILY,
@@ -2717,7 +2704,7 @@ mod tests {
 
     #[test]
     fn a_lone_comment_arg_is_a_ref_by_shape_not_the_body() {
-        // The footgun this fixes: `lait comment BEACON-7` (body piped on stdin)
+        // The footgun this fixes: `lait issues comment BEACON-7` (body on stdin)
         // must read BEACON-7 as the REF, not silently as the body.
         assert!(looks_like_issue_ref("BEACON-7"));
         assert!(looks_like_issue_ref("ENG-142"));

@@ -4,9 +4,8 @@
 //!
 //! `lait` is the orbital navigation shell. It selects an identity and local
 //! Orbit, exposes the Spaces and Worlds reachable through that context, and
-//! dispatches each command to one explicit terminal owner. Flat issue verbs
-//! remain compatibility aliases for the bundled Issues World while its command
-//! package moves behind `lait issues`.
+//! dispatches each command to one explicit terminal owner. Product verbs live
+//! below their World namespace, such as `lait issues`.
 //!
 //! The surface is defined as **data** in [`crate::cmdspec`] — a `Vec<Spec>` turned
 //! into a `clap::Command` at runtime — not a `#[derive(Parser)]` enum. This module
@@ -37,9 +36,8 @@ fn now_secs() -> u64 {
 /// Resolve a `--orbit <SEL>` selector to a store path via the local catalog:
 /// a path, an `orb_` id, a `ws_` id, or a case-insensitive display-name match.
 ///
-/// `--space`, `--workspace`, and `-w` remain parser aliases, but this resolver
-/// names the actual thing being selected: one durable local Orbit. Two entries
-/// may legitimately participate in the same Space.
+/// This resolver selects one durable local Orbit. Two entries may legitimately
+/// participate in the same Space.
 fn resolve_orbit_selector(sel: &str) -> Result<std::path::PathBuf> {
     use std::path::{Path, PathBuf};
     // Path form: explicit separators or an existing directory. Accept either
@@ -213,7 +211,7 @@ pub async fn run() -> std::process::ExitCode {
 
     // Effective color, computed once: honour --no-color, the $NO_COLOR
     // convention, --json (machine output is never styled), and whether stdout is
-    // an interactive terminal (so `lait ls | cat` / redirects stay clean).
+    // an interactive terminal (so `lait issues ls | cat` / redirects stay clean).
     use std::io::IsTerminal;
     let json = matches.get_flag("json");
     let out = Out {
@@ -348,11 +346,11 @@ async fn dispatch(specs: &[cmdspec::Spec], matches: &ArgMatches, out: Out) -> Re
             return crate::serve::run(port, m.get_flag("open"), out.json).await;
         }
         // The space registry + config: pure local state, no store/daemon.
-        Dispatch::Special(Special::Spaces) => {
+        Dispatch::Special(Special::Orbits) => {
             crate::cli::print_orbits(out).await;
             return Ok(());
         }
-        Dispatch::Special(Special::SpacesForget) => {
+        Dispatch::Special(Special::OrbitsForget) => {
             let sel = m.get_one::<String>("sel").cloned().unwrap_or_default();
             let removed = spaces::forget(&sel)?;
             if removed.is_empty() {
@@ -367,7 +365,7 @@ async fn dispatch(specs: &[cmdspec::Spec], matches: &ArgMatches, out: Out) -> Re
             }
             return Ok(());
         }
-        Dispatch::Special(Special::SpacesPrune) => {
+        Dispatch::Special(Special::OrbitsPrune) => {
             let removed = spaces::prune()?;
             crate::cli::emit_ok(
                 &format!(
@@ -436,7 +434,7 @@ async fn dispatch(specs: &[cmdspec::Spec], matches: &ArgMatches, out: Out) -> Re
             // `leaf.name` is only the *last* path segment, so `labels new` answers
             // to "new" as much as the top-level verb does — and `get_flag` on a
             // leaf that never declared the arg is a panic, not a `false`. That is
-            // exactly what `lait labels new <name>` did.
+            // exactly what `lait issues labels new <name>` did.
             let wants_start = m
                 .try_get_one::<bool>("start")
                 .ok()
@@ -608,9 +606,9 @@ async fn dispatch(specs: &[cmdspec::Spec], matches: &ArgMatches, out: Out) -> Re
             | Special::Man
             | Special::Profiles
             | Special::Resume
-            | Special::Spaces
-            | Special::SpacesForget
-            | Special::SpacesPrune
+            | Special::Orbits
+            | Special::OrbitsForget
+            | Special::OrbitsPrune
             | Special::ConfigGet
             | Special::ConfigSet
             | Special::ConfigUnset
@@ -666,9 +664,9 @@ async fn run_init(m: &ArgMatches, out: Out) -> Result<()> {
     let seed = load_or_create_identity(&config::identity_dir()?)?;
     let me = crate::crypto::device_from_seed(&seed);
     // Orbital formation: mechanics material + Runtime Orbit store + a seeded
-    // default project, so `lait new` works on the next command.
+    // default project, so `lait issues new` works on the next command.
     let (ws, project) = crate::orbital::found_space_cli(&home, &seed, &name)?;
-    // Register the founder — this is what makes `lait spaces` complete.
+    // Register the founder — this is what makes `lait orbits` complete.
     if let Err(e) = spaces::upsert(spaces::SpaceEntry {
         space: ws.to_string(),
         name: name.clone(),
@@ -693,7 +691,7 @@ async fn run_init(m: &ArgMatches, out: Out) -> Result<()> {
         println!("founded space '{name}' ({ws})");
         println!("id:      {}", me);
         println!(
-            "project: {} ({}) — `lait new \"...\"` files into it",
+            "project: {} ({}) — `lait issues new \"...\"` files into it",
             project.name, project.key
         );
         println!("home:    {}", home.display());
@@ -827,7 +825,7 @@ async fn run_join_orbital(m: &ArgMatches, link: &str, out: Out) -> Result<()> {
         crate::orbital::enter_space(&target, &seed, link)?;
     }
 
-    // Register the joiner store pre-daemon so `lait spaces` sees it.
+    // Register the joiner store pre-daemon so `lait orbits` sees it.
     if let Err(e) = spaces::upsert(spaces::SpaceEntry {
         space: space.clone(),
         name: verified.approach_nick_hint.clone(),
@@ -1014,7 +1012,7 @@ async fn run_config(dispatch: &Dispatch, m: &ArgMatches, out: Out) -> Result<()>
                 config::global_config_path()?
             } else {
                 let h = home.ok_or_else(|| {
-                    anyhow!("not inside a space — cd into one, use -w, or pass --global")
+                    anyhow!("not inside a space — cd into one, use --orbit, or pass --global")
                 })?;
                 config::store_config_path(&h)
             };
@@ -1149,7 +1147,7 @@ fn update_bin_path_in_archive() -> &'static str {
 }
 
 /// Restore the default `SIGPIPE` disposition on unix. Rust ignores `SIGPIPE` by
-/// default, which turns a closed downstream pipe (`lait board | head`,
+/// default, which turns a closed downstream pipe (`lait issues board | head`,
 /// `| grep -q`, `| less` then quit) into a panic on the next stdout write
 /// (`failed printing to stdout: Broken pipe`) instead of a clean exit. Resetting
 /// to `SIG_DFL` makes the process terminate normally when the reader goes away —

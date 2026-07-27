@@ -30,14 +30,14 @@ Common flows:
 
 ```text
 lait init
-lait new "Fix the import path"
-lait ls
-lait show <ref>
+lait issues new "Fix the import path"
+lait issues ls
+lait issues show <ref>
 lait edit <ref>
-lait start <ref>
-lait done <ref>
-lait comment <ref> "Reproduced on Windows"
-lait board
+lait issues start <ref>
+lait issues done <ref>
+lait issues comment <ref> "Reproduced on Windows"
+lait issues board
 ```
 
 `<ref>` resolution happens in the daemon. Full ids, unique prefixes, friendly

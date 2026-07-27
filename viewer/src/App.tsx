@@ -160,7 +160,8 @@ export function App() {
   const [bulkProgress, setBulkProgress] = useState<BulkProgress | null>(null);
   const bulkOperation = useRef<((reff: string) => Promise<unknown>) | null>(null);
   /** Which project's board is on screen. `null` = let the daemon's chain pick
-   *  (branch key → `project.default` → the only project), same as a bare `lait board`. */
+   *  (branch key → `project.default` → the only project), same as a bare
+   *  `lait issues board`. */
   const [project, setProject] = useState<string | null>(initialRoute.project);
   /** The picker a keybinding has asked for. Also an overlay: it owns the keymap. */
   const [field, setField] = useState<IssueField | null>(null);

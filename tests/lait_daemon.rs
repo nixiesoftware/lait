@@ -66,9 +66,9 @@ fn two_cwd_orbits_share_one_lait_daemon_process() {
     init(&config, &project_a, "A");
     init(&config, &project_b, "B");
 
-    let first = lait(&config, &project_a, &["new", "from a"]);
+    let first = lait(&config, &project_a, &["issues", "new", "from a"]);
     assert!(first.status.success(), "first request failed: {first:?}");
-    let second = lait(&config, &project_b, &["new", "from b"]);
+    let second = lait(&config, &project_b, &["issues", "new", "from b"]);
     assert!(second.status.success(), "second request failed: {second:?}");
 
     let daemon_pid = pid(&config.join("daemon").join("daemon.pid"));

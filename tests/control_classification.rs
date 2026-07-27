@@ -90,7 +90,7 @@ fn the_generated_routing_table_comes_from_the_production_classifier() {
 #[test]
 fn every_world_owned_request_is_served_by_the_issue_router() {
     // The defect this pins: `Activity` was classified World but the issue
-    // router neither claimed nor served it, so a public `lait activity` died
+    // router neither claimed nor served it, so a public `lait issues activity` died
     // with "request not routed to the issues world". Classification and the
     // router's claim set must agree in BOTH directions — a World-owned
     // request the router refuses is an unreachable public verb, and a

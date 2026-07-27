@@ -163,11 +163,11 @@ pub enum Confirmed {
 /// * `--yes` → [`Confirmed::Yes`] without asking (scripts, CI, agents).
 /// * `--json` or no TTY on **stdin or stdout** → [`Confirmed::CannotAsk`]. A
 ///   prompt written into a pipe is invisible, and reading a reply from a
-///   redirected stdin would eat data meant for the command (`lait comment`
+///   redirected stdin would eat data meant for the command (`lait issues comment`
 ///   reads stdin) or block forever with no visible question. Both checks matter:
 ///   stdout carries the question, stdin carries the answer.
 /// * otherwise → ask on **stderr** (stdout is the data channel; a prompt must
-///   never land in `lait ls | cat`), read one line, `y`/`yes` is yes and
+///   never land in `lait issues ls | cat`), read one line, `y`/`yes` is yes and
 ///   everything else — including a bare Enter or EOF — is no.
 pub fn confirm(question: &str, out: Out) -> Confirmed {
     if out.yes {
@@ -263,7 +263,7 @@ pub async fn confirm_destructive(home: &Path, req: &Request, out: Out) -> bool {
     let Some(question) = destructive_question(req) else {
         return true;
     };
-    // Name the thing, not just its handle: `lait delete` on a `eng-142-…` branch
+    // Name it, not just its handle: `lait issues delete` on an issue branch
     // takes its ref from the branch, so "delete ENG-142?" is unanswerable if you
     // don't remember which issue that is — which is exactly the case where a
     // stale checkout deletes the wrong one.
@@ -575,7 +575,7 @@ pub async fn client_action(home: &Path, action: ClientAction) -> Result<Response
 
 /// Ensure the daemon is up, then send one request as the primary identity — or,
 /// if `$LAIT_AS` names a local agent, as that agent (the shell-scoped selector,
-/// e.g. `LAIT_AS=scout lait new "…"`). Architecture B's "act as" on the CLI.
+/// e.g. `LAIT_AS=scout lait issues new "…"`). Architecture B's "act as" on the CLI.
 pub async fn client(home: &Path, req: Request) -> Result<Response> {
     client_action(home, ClientAction::from_legacy(req)).await
 }
@@ -917,7 +917,7 @@ fn checkout_issue_branch(v: &crate::dto::IssueView, out: Out) {
     }
 }
 
-/// `lait start`: claim + activate + branch. The daemon does the atomic
+/// `lait issues start`: claim + activate + branch. The daemon does the atomic
 /// state move; the branch is client-side sugar on top (skippable, best-effort).
 pub async fn run_start(home: &Path, reff: String, no_branch: bool, out: Out) -> Result<()> {
     let resp = client(home, Request::IssueStart { reff }).await?;
@@ -943,7 +943,7 @@ pub async fn run_start(home: &Path, reff: String, no_branch: bool, out: Out) -> 
     }
 }
 
-/// `lait done` / `lait stop`: the branchless work-state verbs.
+/// `lait issues done` / `lait issues stop`: branchless work-state verbs.
 pub async fn run_workstate(home: &Path, req: Request, out: Out) -> Result<()> {
     let resp = client(home, req).await?;
     match &resp {
@@ -965,7 +965,7 @@ pub async fn run_workstate(home: &Path, req: Request, out: Out) -> Result<()> {
     }
 }
 
-/// `lait new --start`: file the issue, then claim it (two honest commits).
+/// `lait issues new --start`: file the issue, then claim it (two commits).
 pub async fn run_new_start(home: &Path, new_req: Request, out: Out) -> Result<()> {
     let resp = client(home, new_req).await?;
     match &resp {
@@ -1025,7 +1025,7 @@ pub async fn run_focus(home: &Path, out: Out) -> Result<()> {
     }
     match &mine {
         Response::List { rows } if rows.is_empty() => {
-            println!("nothing assigned to you — grab something: `lait ls`, or file one: `lait new \"...\"`");
+            println!("nothing assigned to you — grab something: `lait issues ls`, or file one: `lait issues new \"...\"`");
         }
         Response::List { rows } => {
             for r in rows {
@@ -1264,11 +1264,6 @@ pub async fn print_orbits(out: Out) {
     }
 }
 
-/// Historical name retained for callers outside the binary crate.
-pub async fn print_spaces(out: Out) {
-    print_orbits(out).await;
-}
-
 /// The universal "no space here" error: any store-needing command run in a
 /// directory with no discoverable `.lait/` gets this instead of a silently
 /// minted decoy store. Points at the creation verbs and every known space.
@@ -1300,7 +1295,7 @@ pub fn err_no_store_here(out: Out) {
     }
 }
 
-/// Render the issue-graph neighborhood (`lait graph <ref>`).
+/// Render the issue-graph neighborhood (`lait issues graph <ref>`).
 fn print_graph(g: &crate::dto::GraphView, out: Out) {
     let row_line = |r: &crate::dto::Row| {
         let handle = r.key_alias.as_deref().unwrap_or(&r.reff);
@@ -1327,7 +1322,7 @@ fn print_graph(g: &crate::dto::GraphView, out: Out) {
         }
     }
     if g.parent.is_none() && g.children.is_empty() && g.links.is_empty() {
-        println!("  (no relations — `lait link <ref> blocks <ref>` or `lait parent <ref> <epic>`)");
+        println!("  (no relations — `lait issues link <ref> blocks <ref>` or `lait issues parent <ref> <epic>`)");
     }
 }
 
@@ -1395,7 +1390,7 @@ pub fn print_response(resp: &Response, out: Out) -> i32 {
         }
         Response::Inbox { entries, unread } => {
             if entries.is_empty() {
-                println!("inbox zero — nothing addressed to you. the backlog is `lait ls`.");
+                println!("inbox zero — nothing addressed to you. the backlog is `lait issues ls`.");
                 return 0;
             }
             // Newest-first + a ts watermark ⇒ exactly the first `unread` are unread.
@@ -1420,14 +1415,16 @@ pub fn print_response(resp: &Response, out: Out) -> i32 {
                 paint(
                     out.color,
                     ansi::DIM,
-                    &format!("({unread} unread — `lait inbox --clear` to mark read)")
+                    &format!("({unread} unread — `lait issues inbox --clear` to mark read)")
                 )
             );
             0
         }
         Response::Activity { events, .. } => {
             if events.is_empty() {
-                println!("(no activity yet — it fills as the space moves: `lait new \"...\"`)");
+                println!(
+                    "(no activity yet — it fills as the Space moves: `lait issues new \"...\"`)"
+                );
             }
             for e in events {
                 let changes = if e.changes.is_empty() {
@@ -1454,7 +1451,7 @@ pub fn print_response(resp: &Response, out: Out) -> i32 {
         }
         Response::Projects { projects } => {
             if projects.is_empty() {
-                println!("(no projects — create one: `lait projects add KEY`)");
+                println!("(no projects — create one: `lait issues projects add KEY`)");
                 // A just-joined peer sees this too, but should wait for sync, not
                 // create — point them at the verifier so an empty board is legible.
                 println!(
@@ -1473,7 +1470,7 @@ pub fn print_response(resp: &Response, out: Out) -> i32 {
         }
         Response::Updates { updates } => {
             if updates.is_empty() {
-                println!("(no updates yet — post one: `lait projects update KEY \"…\"`)");
+                println!("(no updates yet — post one: `lait issues projects update KEY \"…\"`)");
             }
             for u in updates {
                 let health = if u.health.is_empty() {
@@ -1488,7 +1485,7 @@ pub fn print_response(resp: &Response, out: Out) -> i32 {
         }
         Response::Milestones { milestones } => {
             if milestones.is_empty() {
-                println!("(no milestones — add one: `lait milestone new KEY \"…\"`)");
+                println!("(no milestones — add one: `lait issues milestone new KEY \"…\"`)");
             }
             for m in milestones {
                 let target = m
@@ -1501,7 +1498,7 @@ pub fn print_response(resp: &Response, out: Out) -> i32 {
         }
         Response::Cycles { cycles } => {
             if cycles.is_empty() {
-                println!("(no cycles — add one: `lait cycle new KEY \"…\"`)");
+                println!("(no cycles — add one: `lait issues cycle new KEY \"…\"`)");
             }
             for c in cycles {
                 let window = match (c.start, c.end) {
@@ -1516,7 +1513,7 @@ pub fn print_response(resp: &Response, out: Out) -> i32 {
         }
         Response::Initiatives { initiatives } => {
             if initiatives.is_empty() {
-                println!("(no initiatives — add one: `lait initiative new \"…\"`)");
+                println!("(no initiatives — add one: `lait issues initiative new \"…\"`)");
             }
             for i in initiatives {
                 let health = if i.health.is_empty() {
@@ -1538,7 +1535,7 @@ pub fn print_response(resp: &Response, out: Out) -> i32 {
         }
         Response::Teams { teams } => {
             if teams.is_empty() {
-                println!("(no teams — add one: `lait team new \"…\" --key T`)");
+                println!("(no teams — add one: `lait issues team new \"…\" --key T`)");
             }
             for t in teams {
                 let projects = if t.projects.is_empty() {
@@ -1558,7 +1555,7 @@ pub fn print_response(resp: &Response, out: Out) -> i32 {
         }
         Response::TriageItems { items } => {
             if items.is_empty() {
-                println!("(triage queue is empty — report with `lait triage submit \"…\"`)");
+                println!("(triage queue is empty — report with `lait issues triage submit \"…\"`)");
             }
             for t in items {
                 let state = if t.outcome.is_empty() {
@@ -1575,7 +1572,7 @@ pub fn print_response(resp: &Response, out: Out) -> i32 {
         Response::Attachment { name, mime, .. } => {
             // Reaching stdout with a payload would splat base64; the CLI's
             // `attachment get` writes the file itself and never prints this.
-            println!("attachment {name} ({mime}) — use `lait attachment get` to save it");
+            println!("attachment {name} ({mime}) — use `lait issues attachment get` to save it");
             0
         }
         Response::Labels { labels } => {
@@ -1870,7 +1867,7 @@ fn prio_badge(p: Priority, color: bool) -> String {
 fn print_rows(rows: &[Row], out: Out) {
     if rows.is_empty() {
         println!(
-            "(no issues here — file one: `lait new \"...\"`, or `lait ls --all` to include done)"
+            "(no issues here — file one: `lait issues new \"...\"`, or `lait issues ls --all` to include done)"
         );
         return;
     }
@@ -2407,7 +2404,7 @@ mod tests {
         // wrapped not-found is still a not-found. (This is the whole reason the
         // class is a type and not a prefix on the message.)
         let wrapped = Err::<(), _>(anyhow::Error::from(CliError::not_found("gone")))
-            .context("while resolving -w")
+            .context("while resolving --orbit")
             .unwrap_err();
         assert_eq!(exit_code_for_error(&wrapped), 2);
     }

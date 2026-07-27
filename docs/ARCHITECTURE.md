@@ -64,11 +64,10 @@ Orbit; neither inherits catalog-wide visibility.
 The `lait` CLI is the navigation shell for this graph, not the command-line
 identity of the bundled Issues World. Bare `lait` reports the selected identity,
 Orbit, Space, and installed Worlds. `--orbit` selects one durable local
-participation (`-w`, `--space`, and `--workspace` are compatibility spellings);
-`lait orbits` lists those local participations, while `lait worlds` lists the
-semantic packages installed in the application composition. Product commands
-live below their World namespace, such as `lait issues ...`. The historical flat
-issue verbs remain accepted as hidden compatibility inputs during extraction.
+participation; `lait orbits` lists those local participations, while
+`lait worlds` lists the semantic packages installed in the application
+composition. Product commands live only below their World namespace, such as
+`lait issues ...`.
 
 Command parsing produces a `ClientAction` whose terminal target is already
 `Daemon`, `Space`, or `World { world }`. Orbit resolution later completes that
@@ -172,8 +171,8 @@ runtime    Orbit/Station lifecycle, Contacts, Worlds, Sessions, observations
 world-bridge
            versioned opaque application calls and object-safe World handlers
 issues     IssuesWorld schemas, semantic model, product DTOs and identifiers
-lait       orbital navigation shell, local control adapters, CLI/MCP/viewer
-           composition, and temporary product-compatibility aliases
+lait       orbital navigation shell, local control adapters, and CLI/MCP/viewer
+           composition
 ```
 
 Dependencies point inward through these boundaries. Product concepts such as

@@ -230,8 +230,7 @@ requests. The production request classifier assigns every historical typed
 request exactly one terminal owner; there is no wildcard product fallback.
 
 The CLI calls its selector `--orbit` because it chooses the local durable
-participation used to reach a Space; `-w`, `--space`, and `--workspace` are
-compatibility spellings only. Its parser fixes the terminal target in a
+participation used to reach a Space. Its parser fixes the terminal target in a
 `ClientAction` before resolving the selected Orbit. The route is therefore an
 output of command parsing plus local navigation, not an inference repeated by
 the daemon from product payload shape.

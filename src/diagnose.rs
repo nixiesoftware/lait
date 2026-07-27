@@ -311,7 +311,7 @@ fn summarize(blocked: Option<&DiagnosisGate>, projects: usize, issues: usize) ->
             format!("you're in — {projects} project(s), {issues} issue(s) synced. get to work.")
         }
         Some("space") => "wrong directory: this store is a different space than the invite. \
-             cd to where you ran `lait join`, or run `lait spaces`."
+             cd to where you ran `lait join`, or run `lait orbits`."
             .to_string(),
         Some("membership") => {
             "waiting for an admin to approve your join — the board is still encrypted.".to_string()

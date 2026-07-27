@@ -125,7 +125,7 @@ Supported shells: `bash`, `zsh`, `fish`, `powershell`, `elvish`.
 ```sh
 cd your-project
 lait init                                  # found a space here (seeds a project)
-lait new "fix login race" -P high --start  # file it + claim it + branch
+lait issues new "fix login race" -P high --start  # file it + claim it + branch
 lait serve --open                          # the board, in your browser
 ```
 

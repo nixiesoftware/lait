@@ -185,7 +185,7 @@ fn the_space_bridge_serves_the_issue_surface_over_the_control_socket() {
     assert_eq!(view.comments[0].body, "a socket comment");
 
     // The space-wide activity feed serves through daemon dispatch (this pins
-    // the classification/routing defect where `lait activity` was refused with
+    // the classification/routing defect where `lait issues activity` was refused with
     // "request not routed to the issues world"): the created issue and the
     // comment appear as feed rows, and re-pulling from the returned cursor
     // yields nothing new.

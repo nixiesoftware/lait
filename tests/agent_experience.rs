@@ -76,7 +76,7 @@ fn a_sponsored_agent_acts_as_itself_in_one_store() {
         &["init", "--name", "PROJ", "--nick", "Huginn"],
     );
     assert!(!init.starts_with("ERR:"), "init failed: {init}");
-    lait(&home, &cfg, None, &["new", "human-filed issue"]);
+    lait(&home, &cfg, None, &["issues", "new", "human-filed issue"]);
 
     let human = json(&lait(&home, &cfg, None, &["--json", "whoami"]));
     let human_actor = human["actor"].as_str().unwrap().to_string();
@@ -140,7 +140,7 @@ fn a_sponsored_agent_acts_as_itself_in_one_store() {
         &home,
         &cfg,
         Some("scout"),
-        &["new", "agent-filed issue", "-p", "PROJ"],
+        &["issues", "new", "agent-filed issue", "-p", "PROJ"],
     );
     assert!(
         !filed.starts_with("ERR:") && filed.to_uppercase().contains("PROJ-"),

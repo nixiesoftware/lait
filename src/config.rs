@@ -113,7 +113,7 @@ fn ensure_store_gitignore(store: &Path) {
 
 /// Typed "no space store here" error, so callers (the app dispatcher) can
 /// tell "nothing to bind" apart from real I/O failures and print the guided
-/// error (`lait init` / `lait join` / `-w`) instead of a bare failure.
+/// error (`lait init` / `lait join` / `--orbit`) instead of a bare failure.
 #[derive(Debug)]
 pub struct NoStoreHere {
     /// The directory discovery started from.
@@ -138,7 +138,7 @@ impl std::error::Error for NoStoreHere {}
 ///   2. `$LAIT_HOME` — explicit, self-contained override (identity + store
 ///      in one dir): `--home`, tests, advanced setups.
 ///   3. `$LAIT_STORE` — pin set by the CLI for the daemon it spawns (and by
-///      `-w`), so both bind the exact store the CLI resolved, independent
+///      `--orbit`), so both bind the exact store the CLI resolved, independent
 ///      of cwd.
 ///   4. git-style discovery: walk up from the cwd for a `.lait/`.
 ///

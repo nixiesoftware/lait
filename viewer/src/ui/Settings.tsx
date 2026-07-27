@@ -772,7 +772,7 @@ function AccessPanel({
     <>
       <Section
         title="Roles"
-        hint="Named capability sets from the signed policy. Authoring a role is a CAS ceremony — create and edit them with lait role create/edit."
+        hint="Named capability sets from the signed policy. Authoring a role is a CAS ceremony — create and edit them with lait issues role create/edit."
       >
         {!roles && <p className="text-mute text-sm">Loading…</p>}
         <ul className="flex flex-col gap-2">

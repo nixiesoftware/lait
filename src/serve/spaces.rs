@@ -28,7 +28,7 @@ pub struct SpaceRow {
     pub path: String,
     pub origin: String,
     pub last_opened: u64,
-    /// `up` | `idle` | `missing`, exactly as `lait spaces` reports it.
+    /// `up` | `idle` | `missing`, exactly as `lait orbits` reports it.
     pub status: &'static str,
     pub identity: StationIdentity,
     pub projects: Vec<spaces::ProjectBrief>,

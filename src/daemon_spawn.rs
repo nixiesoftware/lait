@@ -6,7 +6,7 @@
 //! the three `Stdio` slots we named. Windows has no such default —
 //! `CreateProcess` takes a single `bInheritHandles` switch, and `TRUE` means
 //! *every* inheritable handle in this process, not just the ones in
-//! `STARTUPINFO`. A daemon spawned from a captured `lait new` therefore came up
+//! `STARTUPINFO`. A daemon spawned from a captured `lait issues new` therefore came up
 //! owning a write-end of that command's stdout, and the command's caller waited
 //! forever on an EOF that could not arrive (see `app::disinherit_stdio`, which
 //! covers our *own* stdio — this module covers everything else, including the

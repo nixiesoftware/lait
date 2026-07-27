@@ -19,7 +19,7 @@
 //!    hand these to anyhow's `Termination`, which broke all three.
 //!
 //! 4. **Never hold your stdout hostage.** A command that auto-spawns a daemon must
-//!    still hit EOF when it exits: whoever captured it (`$(lait new …)`, a test
+//!    still hit EOF when it exits: whoever captured it (`$(lait issues new …)`, a test
 //!    harness, an MCP client) reads until EOF, so a daemon left holding the write
 //!    end hangs the *caller*, not the daemon. Windows-only in practice — see
 //!    `disinherit_stdio` in `app.rs` — but the promise is platform-independent.
@@ -55,7 +55,7 @@ fn tmp_home(tag: &str) -> std::path::PathBuf {
 
 /// The per-test config root. `$LAIT_HOME` isolates the *store*, but the spaces
 /// registry lives under the config root — so without this every `init` here files
-/// itself in the developer's real `lait spaces` list and never leaves.
+/// itself in the developer's real `lait orbits` list and never leaves.
 fn config_root(home: &std::path::Path) -> std::path::PathBuf {
     home.join("cfg")
 }
@@ -89,12 +89,12 @@ fn delete_without_yes_refuses_and_keeps_the_issue() {
     let home = tmp_home("del");
     init(&home);
 
-    let out = lait(&home, &["new", "keep me"]);
+    let out = lait(&home, &["issues", "new", "keep me"]);
     assert!(out.status.success(), "new failed: {out:?}");
 
     // `cargo test` gives the child no terminal — the CI/agent shape exactly.
     let started = Instant::now();
-    let out = lait(&home, &["delete", "T-1"]);
+    let out = lait(&home, &["issues", "delete", "T-1"]);
     let stderr = String::from_utf8_lossy(&out.stderr);
 
     assert!(
@@ -114,16 +114,16 @@ fn delete_without_yes_refuses_and_keeps_the_issue() {
         "the prompt must name what it would destroy; got: {stderr}",
     );
 
-    let out = lait(&home, &["ls"]);
+    let out = lait(&home, &["issues", "ls"]);
     assert!(
         String::from_utf8_lossy(&out.stdout).contains("keep me"),
         "the issue must survive an unconfirmed delete",
     );
 
     // ...and `--yes` is the way through.
-    let out = lait(&home, &["--yes", "delete", "T-1"]);
+    let out = lait(&home, &["--yes", "issues", "delete", "T-1"]);
     assert!(out.status.success(), "--yes must confirm: {out:?}");
-    let out = lait(&home, &["ls"]);
+    let out = lait(&home, &["issues", "ls"]);
     assert!(
         !String::from_utf8_lossy(&out.stdout).contains("keep me"),
         "--yes must actually delete",
@@ -157,7 +157,7 @@ fn a_spawned_daemon_does_not_hold_our_stdout_open() {
         .env("LAIT_IDLE_SECS", "0")
         .arg("--home")
         .arg(&home)
-        .args(["new", "hold my stdout"])
+        .args(["issues", "new", "hold my stdout"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -273,7 +273,7 @@ fn a_client_side_error_keeps_the_cli_contract() {
     let home = tmp_home("err");
     init(&home);
 
-    // `-w` and `--home` are declared conflicting, so the home rides the env here
+    // `--orbit` and `--home` are declared conflicting, so the home rides the env here
     // (the same channel `--home` sets internally).
     let run = |args: &[&str]| {
         Command::new(bin())
@@ -285,7 +285,7 @@ fn a_client_side_error_keeps_the_cli_contract() {
             .expect("spawn lait")
     };
 
-    let out = run(&["-w", "nosuchspace", "ls"]);
+    let out = run(&["--orbit", "nosuchspace", "issues", "ls"]);
     let stderr = String::from_utf8_lossy(&out.stderr);
 
     // anyhow's Termination printed `Error:` (capitalised, Debug) while the daemon
@@ -307,7 +307,7 @@ fn a_client_side_error_keeps_the_cli_contract() {
 
     // `--json` is a contract: a consumer must get the DTO on stdout, not prose on
     // stderr and an empty stdout it can't distinguish from an empty result.
-    let out = run(&["--json", "-w", "nosuchspace", "ls"]);
+    let out = run(&["--json", "--orbit", "nosuchspace", "issues", "ls"]);
     let stdout = String::from_utf8_lossy(&out.stdout);
     let v: serde_json::Value = serde_json::from_str(stdout.trim())
         .unwrap_or_else(|e| panic!("stdout not JSON ({e}): {stdout:?}"));
@@ -425,7 +425,7 @@ fn a_newer_daemon_is_never_replaced_even_with_yes() {
 /// `leaf.name` is only the **last** path segment, so `labels new` answers to
 /// `"new"` exactly as the top-level verb does. `app::dispatch` special-cases
 /// `new --start`, and asking clap for an arg the matched leaf never declared is a
-/// **panic**, not a `false` — so `lait labels new <name>` aborted with "Mismatch
+/// **panic**, not a `false` — so `lait issues labels new <name>` aborted with "Mismatch
 /// between definition and access of `start`" before it reached the daemon.
 /// Shipped, and invisible until someone created a label from a surface that
 /// wasn't a hand-typed CLI.
@@ -439,17 +439,20 @@ fn colliding_leaf_names_do_not_read_each_others_args() {
     let home = tmp_home("leafname");
     init(&home);
 
-    let out = lait(&home, &["labels", "new", "bug", "--color", "red"]);
+    let out = lait(&home, &["issues", "labels", "new", "bug", "--color", "red"]);
     let stderr = String::from_utf8_lossy(&out.stderr);
 
     assert!(
         !stderr.contains("panicked"),
-        "`lait labels new` panicked:\n{stderr}",
+        "`lait issues labels new` panicked:\n{stderr}",
     );
-    assert!(out.status.success(), "`lait labels new` failed: {stderr}",);
+    assert!(
+        out.status.success(),
+        "`lait issues labels new` failed: {stderr}",
+    );
 
     // And it actually made the label, rather than merely not crashing.
-    let listed = lait(&home, &["--json", "labels", "ls"]);
+    let listed = lait(&home, &["--json", "issues", "labels", "ls"]);
     let stdout = String::from_utf8_lossy(&listed.stdout);
     assert!(
         stdout.contains("\"bug\""),
