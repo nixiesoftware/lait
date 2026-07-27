@@ -861,8 +861,8 @@ mod tests {
         let resolved = router.resolve(&id).unwrap();
         let call = WorldCall::new(
             crate::world::contract::world_id(),
-            crate::world::IssuesControlAdapter::OPERATION,
-            crate::world::IssuesControlAdapter::VERSION + 1,
+            issues_app::IssuesCallHandler::OPERATION,
+            issues_app::IssuesCallHandler::VERSION + 1,
             serde_json::to_vec(&Request::ProjectList).unwrap(),
         )
         .unwrap();

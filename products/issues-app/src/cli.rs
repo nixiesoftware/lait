@@ -1073,7 +1073,7 @@ fn project_option(help: &'static str) -> Arg {
     option("project", help).short('p').value_name("PROJECT")
 }
 
-fn leaf_matches<'a>(matches: &'a ArgMatches) -> (Vec<&'a str>, &'a ArgMatches) {
+fn leaf_matches(matches: &ArgMatches) -> (Vec<&str>, &ArgMatches) {
     let mut path = Vec::new();
     let mut current = matches;
     while let Some((name, next)) = current.subcommand() {

@@ -3,16 +3,20 @@
 //! [`issues`] remains the pure semantic World. This package owns the external
 //! application protocol and the client interfaces mounted by the `lait`
 //! navigation shell. It deliberately has no dependency on the root binary,
-//! daemon, control protocol, filesystem, or process lifecycle.
+//! daemon, or root control protocol.
 
 pub mod cli;
+pub mod lifecycle;
 pub mod mcp;
+pub mod projections;
 pub mod protocol;
+pub mod router;
 
 pub use protocol::{
-    decode_call, decode_reply, encode_call, encode_reply, BoardPos, Filter, IssuesRequest,
-    OPERATION, VERSION,
+    decode_call, decode_reply, encode_call, encode_reply, BoardPos, Filter, IssuesErrorKind,
+    IssuesRequest, IssuesResponse, OPERATION, VERSION,
 };
+pub use router::{IssueRouter, IssuesCallHandler, RouterFacts};
 
 /// The complete client-facing package mounted by the navigation shell.
 pub fn package() -> Result<world_interface::WorldClientPackage, world_interface::InterfaceError> {

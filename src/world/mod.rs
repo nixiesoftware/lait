@@ -6,18 +6,69 @@
 use std::sync::Arc;
 
 use crate::orbital::{
-    LegacyWorldCodec, WorldCall, WorldCallError, WorldPackage, WorldPackages, WorldReply,
+    LegacyWorldCodec, WorldCall, WorldCallError, WorldCallErrorCode, WorldPackage, WorldPackages,
+    WorldReply,
 };
 use world_interface::WorldClientRegistry;
 
 pub mod lifecycle;
-pub mod router;
 
 pub use issues::{
     contract, roles, views, workflow, IssueEffect, IssueIntent, IssueQuery, IssuesWorld,
     PRODUCT_WORLD,
 };
-pub use router::{IssueRouter, IssuesControlAdapter, RouterFacts};
+
+/// Temporary translation for historical typed SpaceBridge processes.
+///
+/// Product execution lives in `issues-app`; this adapter exists only at the
+/// root control-protocol boundary and can disappear with that legacy protocol.
+#[derive(Debug, Default)]
+struct IssuesLegacyCodec;
+
+impl IssuesLegacyCodec {
+    fn product_request(
+        request: &crate::control::Request,
+    ) -> Result<issues_app::IssuesRequest, WorldCallError> {
+        serde_json::from_value(serde_json::to_value(request).map_err(|error| {
+            WorldCallError::new(
+                WorldCallErrorCode::InvalidCall,
+                format!("encode legacy Issues request: {error}"),
+            )
+        })?)
+        .map_err(|error| {
+            WorldCallError::new(
+                WorldCallErrorCode::UnsupportedOperation,
+                format!("request is not owned by IssuesWorld: {error}"),
+            )
+        })
+    }
+}
+
+impl LegacyWorldCodec for IssuesLegacyCodec {
+    fn handles(&self, request: &crate::control::Request) -> bool {
+        Self::product_request(request).is_ok()
+    }
+
+    fn encode_call(&self, request: crate::control::Request) -> Result<WorldCall, WorldCallError> {
+        issues_app::encode_call(&Self::product_request(&request)?)
+    }
+
+    fn decode_call(&self, call: &WorldCall) -> Result<crate::control::Request, WorldCallError> {
+        let request = issues_app::decode_call(call)?;
+        serde_json::from_value(serde_json::to_value(request).map_err(|error| {
+            WorldCallError::new(
+                WorldCallErrorCode::InvalidCall,
+                format!("encode Issues compatibility request: {error}"),
+            )
+        })?)
+        .map_err(|error| {
+            WorldCallError::new(
+                WorldCallErrorCode::InvalidCall,
+                format!("decode Issues compatibility request: {error}"),
+            )
+        })
+    }
+}
 
 /// The issue tracker's complete compile-time World package.
 ///
@@ -26,14 +77,15 @@ pub use router::{IssueRouter, IssuesControlAdapter, RouterFacts};
 /// daemon and SpaceBridge receive packages by injection and do not construct or
 /// name IssuesWorld themselves.
 pub fn package() -> WorldPackage {
-    let control = Arc::new(IssuesControlAdapter);
+    let control = Arc::new(issues_app::IssuesCallHandler);
+    let legacy = Arc::new(IssuesLegacyCodec);
     WorldPackage::new(
         IssuesWorld::registration(),
         Arc::new(IssuesWorld::new()),
         implementation_id(),
     )
-    .with_control(control.clone())
-    .with_legacy_codec(control)
+    .with_control(control)
+    .with_legacy_codec(legacy)
 }
 
 /// Every product World bundled by the issue-tracker application.
@@ -53,22 +105,20 @@ pub fn client_packages() -> WorldClientRegistry {
 /// Host routing consumes the explicit result and never infers a World from the
 /// current directory or from daemon-global state.
 pub fn request_world(request: &crate::control::Request) -> Option<replica::ids::WorldId> {
-    IssueRouter::handles(request).then(contract::world_id)
+    IssuesLegacyCodec.handles(request).then(contract::world_id)
 }
 
 /// Encode the issue tracker's historical typed request as a generic World call.
 pub fn encode_call(request: crate::control::Request) -> Result<WorldCall, WorldCallError> {
-    IssuesControlAdapter.encode_call(request)
+    IssuesLegacyCodec.encode_call(request)
 }
 
 /// Decode a generic Issues reply for the historical CLI/MCP/viewer surfaces.
 pub fn decode_reply(reply: WorldReply) -> crate::control::Response {
-    IssuesControlAdapter.decode_reply(reply)
+    IssuesLegacyCodec.decode_reply(reply)
 }
 
 /// The reviewed IssuesWorld implementation id shipped by this build.
 pub fn implementation_id() -> [u8; 32] {
-    IssuesWorld::implementation_descriptor()
-        .id()
-        .expect("canonical IssuesWorld descriptor")
+    issues_app::lifecycle::implementation_id()
 }

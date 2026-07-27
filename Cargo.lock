@@ -2967,8 +2967,13 @@ dependencies = [
 name = "lait-issues-app"
 version = "0.6.0"
 dependencies = [
+ "anyhow",
  "clap",
  "lait-issues",
+ "mechanics",
+ "postcard",
+ "replica",
+ "runtime",
  "schemars",
  "serde",
  "serde_json",

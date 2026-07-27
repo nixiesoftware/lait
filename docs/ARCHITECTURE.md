@@ -301,8 +301,9 @@ and its host. `WorldCall { world, operation, version, payload }` and its bound
 `WorldReply` leave the payload opaque to LaitDaemon and SpaceBridge. The
 registered handler—not the client—decodes the call and classifies it as a query
 or command before host policy runs. It owns product reference resolution, local
-id/time minting, transient retry, and response rendering. This is a compile-time
-package seam, not a promise of dynamic library loading or process isolation.
+id/time minting, transient retry, and product response construction. This is a
+compile-time package seam, not a promise of dynamic library loading or process
+isolation.
 
 For an owned Station placement, ControlRouter invokes the in-process
 SpaceBridge directly. The per-Orbit socket is not part of that World call stack.
@@ -315,19 +316,23 @@ the `lait` application crate, local control protocol, daemon, filesystem, or
 process lifecycle. The root preserves `lait::world`, `lait::dto`, and
 `lait::ids` as compatibility re-exports. Moving that package to another
 repository changes the dependency locator, not Runtime or bridge ownership.
-The outer `world::lifecycle` adapter owns tracker formation, founder policy,
-the crash-resumable `InitializeTracker` record, and join materialization;
-`orbital` retains compatibility re-exports but contains no IssuesWorld
-construction or bootstrap implementation.
+The outer `world::lifecycle` adapter owns only generic Orbit/Station
+materialization and invokes package lifecycle hooks with a docked Session.
+`issues-app` supplies the reviewed implementation policy, founder grants,
+initial-project policy, and crash-resumable signed `InitializeTracker` record.
+`orbital` retains compatibility re-exports but contains no Issues bootstrap
+implementation.
 
 The sibling `products/issues-app` package owns the `issues.control` v1 codec,
-query/command classification, `lait issues` command tree, and all 38 Issues MCP
-descriptors. It depends on the semantic package and the generic bridge/client
-interfaces, never back on `lait`. Most client operations become `WorldCall`s at
-parse time. Inbox projection, access assignment, git work-state behavior,
-attachment filesystem I/O, and implementation activation are explicit named
-host-capability calls: their interface remains product-owned while the shell
-supplies authority that a semantic World must not hold.
+query/command classification, `IssueRouter` execution adapter, product response
+schema, formation policy, status/inbox/doorbell projections, `lait issues`
+command tree, and all 38 Issues MCP descriptors. It depends on the semantic
+package and generic substrate/bridge/client interfaces, never back on `lait`.
+Most client operations become `WorldCall`s at parse time. Inbox watermark I/O,
+access assignment, git work-state behavior, attachment filesystem I/O, and
+implementation activation are explicit named host-capability calls: their
+interface remains product-owned while the shell supplies authority that a
+semantic World must not hold.
 
 A Session binds a local identity to one World at an active Station. Queries and
 mutations are authorized independently. Query results are computed from one
@@ -346,11 +351,12 @@ architectural path unavailable to another conforming World.
 The issue-shaped `Request`/`Response` schema remains a compatibility surface for
 the viewer, explicit host-capability adapters, and historical per-Orbit daemon;
 it no longer defines the CLI/MCP grammar or crosses the generic WorldBridge
-boundary. `IssueRouter`, product lifecycle/formation, human response rendering,
-Issues-specific status/inbox/doorbell projections, and role-assignment planning
-still live in the root application or SpaceBridge/Mechanics. Those are the
-remaining ownership cuts before the whole Issues application—not only its
-already-acyclic semantic and client packages—can move to another repository.
+boundary. Human response rendering, the viewer, filesystem/git host-capability
+execution, the legacy issue-shaped control surface, and role-assignment
+planning still live in the root application or SpaceBridge/Mechanics. Those
+are the remaining ownership cuts before the whole Issues application—not only
+its already-acyclic semantic and application packages—can move to another
+repository.
 
 ## 6. Communication model
 

@@ -383,6 +383,100 @@ pub enum IssuesRequest {
     },
 }
 
+/// Issues-owned application responses.
+///
+/// The root control protocol may deserialize this JSON into its wider
+/// compatibility response enum, but execution never depends on that enum.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum IssuesResponse {
+    Ok {
+        message: Option<String>,
+    },
+    Ref {
+        reff: String,
+    },
+    Issue(Box<issues::dto::IssueView>),
+    List {
+        rows: Vec<issues::dto::Row>,
+    },
+    Board(Box<issues::dto::BoardView>),
+    Graph(Box<issues::dto::GraphView>),
+    Activity {
+        events: Vec<issues::dto::ActivityEvent>,
+        last: u64,
+    },
+    Projects {
+        projects: Vec<issues::dto::ProjectDto>,
+    },
+    Updates {
+        updates: Vec<issues::dto::ProjectUpdateDto>,
+    },
+    Labels {
+        labels: Vec<issues::dto::LabelDto>,
+    },
+    Milestones {
+        milestones: Vec<issues::dto::MilestoneDto>,
+    },
+    Cycles {
+        cycles: Vec<issues::dto::CycleDto>,
+    },
+    Initiatives {
+        initiatives: Vec<issues::dto::InitiativeDto>,
+    },
+    Teams {
+        teams: Vec<issues::dto::TeamDto>,
+    },
+    TriageItems {
+        items: Vec<issues::dto::TriageDto>,
+    },
+    Attachment {
+        name: String,
+        mime: String,
+        data_b64: String,
+    },
+    Text {
+        text: String,
+    },
+    Error {
+        message: String,
+        #[serde(default)]
+        error_kind: IssuesErrorKind,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IssuesErrorKind {
+    #[default]
+    Error,
+    NotFound,
+    Denied,
+}
+
+impl IssuesResponse {
+    pub fn err(message: impl Into<String>) -> Self {
+        Self::Error {
+            message: message.into(),
+            error_kind: IssuesErrorKind::Error,
+        }
+    }
+
+    pub fn not_found(message: impl Into<String>) -> Self {
+        Self::Error {
+            message: message.into(),
+            error_kind: IssuesErrorKind::NotFound,
+        }
+    }
+
+    pub fn denied(message: impl Into<String>) -> Self {
+        Self::Error {
+            message: message.into(),
+            error_kind: IssuesErrorKind::Denied,
+        }
+    }
+}
+
 impl IssuesRequest {
     pub fn access(&self) -> WorldCallAccess {
         use IssuesRequest::*;

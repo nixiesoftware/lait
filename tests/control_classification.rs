@@ -88,19 +88,22 @@ fn the_generated_routing_table_comes_from_the_production_classifier() {
 }
 
 #[test]
-fn every_world_owned_request_is_served_by_the_issue_router() {
+fn every_world_owned_compatibility_request_belongs_to_the_issues_protocol() {
     // The defect this pins: `Activity` was classified World but the issue
     // router neither claimed nor served it, so a public `lait issues activity` died
     // with "request not routed to the issues world". Classification and the
-    // router's claim set must agree in BOTH directions — a World-owned
-    // request the router refuses is an unreachable public verb, and a
-    // router-claimed request under another owner would never reach it.
+    // product protocol must agree in BOTH directions — a World-owned request
+    // the package cannot decode is an unreachable compatibility verb, and a
+    // product request under another owner would never reach its package.
     for req in representative_requests() {
-        let claimed = lait::world::router::IssueRouter::handles(&req);
+        let claimed = serde_json::to_value(&req)
+            .ok()
+            .and_then(|value| serde_json::from_value::<issues_app::IssuesRequest>(value).ok())
+            .is_some();
         let world = classify(&req) == RequestOwner::World;
         assert_eq!(
             world, claimed,
-            "classification/router disagreement on {req:?}: classified-World={world}, router-handles={claimed}"
+            "classification/protocol disagreement on {req:?}: classified-World={world}, protocol-owns={claimed}"
         );
     }
 }

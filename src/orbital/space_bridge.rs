@@ -39,8 +39,7 @@ use runtime::{
 
 use crate::config::{acquire_daemon_lock, load_or_create_identity, DaemonLock};
 use crate::control::{
-    control_name, CatalogScope, ControlRoute, DirtyProject, Doorbell, ProjectRef, Request,
-    RequestOwner, Response, StatusInfo,
+    control_name, CatalogScope, ControlRoute, Doorbell, Request, RequestOwner, Response, StatusInfo,
 };
 use crate::daemon::OrbitAddress;
 use crate::orbital::{
@@ -1257,50 +1256,20 @@ impl SpaceBridge {
     /// query failed). Status reports the truth; it never converts an
     /// unavailable projection into false zeros.
     fn counts(&self) -> Option<(usize, usize, String, String)> {
-        use crate::world::contract::{self, IssueQuery};
-        let world = contract::world_id();
+        let world = crate::world::contract::world_id();
         if !self.ensure_world_session(&world) {
             return None;
         }
         self.worlds
             .with_primary(&world, |session| {
-                let query = |q: IssueQuery| -> Option<serde_json::Value> {
-                    let bytes = session
-                        .query(runtime::WorldQuery {
-                            schema: contract::issue_schema(),
-                            schema_version: contract::ISSUE_SCHEMA_VERSION,
-                            payload: q.to_json(),
-                        })
-                        .ok()?
-                        .bytes;
-                    serde_json::from_slice(&bytes).ok()
-                };
-                let snapshot = query(IssueQuery::Snapshot)?;
-                let catalog = snapshot.get("catalog")?;
-                let projects = catalog.get("projects")?.as_object().map(|m| m.len())?;
-                // The catalog `name` register is the space's mutable display
-                // label (`SpaceRename` writes it); surface it so the rename is
-                // visible.
-                let name = catalog
-                    .get("name")
-                    .and_then(|n| n.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let description = catalog
-                    .get("description")
-                    .and_then(|n| n.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let issues = query(IssueQuery::List {
-                    project: None,
-                    label: None,
-                    status: None,
-                    mine: None,
-                    all: true,
-                    me: None,
+                issues_app::projections::status(session).map(|projection| {
+                    (
+                        projection.issues,
+                        projection.projects,
+                        projection.name,
+                        projection.description,
+                    )
                 })
-                .and_then(|v| v.as_array().map(|a| a.len()))?;
-                Some((issues, projects, name, description))
             })
             .flatten()
     }
@@ -1708,34 +1677,26 @@ impl SpaceBridge {
     /// second source of truth). The read watermark is a small local file;
     /// deleting it merely resets "unread".
     fn inbox_projection(&self) -> (Vec<crate::dto::InboxEntry>, u64) {
-        use crate::world::contract::IssueQuery;
         let me_actor = self.facts().actor;
         let me_device = crate::crypto::device_from_seed(&self.device_seed)
             .as_str()
             .to_string();
-        let Some(rows) = self.session_query_json(IssueQuery::Inbox {
-            actor: me_actor.as_str().to_string(),
-            exclude_device: Some(me_device),
-        }) else {
+        let world = crate::world::contract::world_id();
+        if !self.ensure_world_session(&world) {
             return (Vec::new(), 0);
-        };
-        let watermark = self.read_inbox_watermark();
-        let mut entries: Vec<crate::dto::InboxEntry> = Vec::new();
-        for e in rows.as_array().map(|a| a.as_slice()).unwrap_or_default() {
-            entries.push(crate::dto::InboxEntry {
-                ts: e["ts"].as_u64().unwrap_or(0),
-                kind: e["kind"].as_str().unwrap_or_default().to_string(),
-                reff: e["reff"].as_str().unwrap_or_default().to_string(),
-                doc_id: e["doc_id"].as_str().unwrap_or_default().to_string(),
-                title: e["title"].as_str().unwrap_or_default().to_string(),
-                detail: e["detail"].as_str().unwrap_or_default().to_string(),
-                actor: e["actor"].as_str().map(String::from),
-                actor_nick: None,
-            });
         }
-        entries.truncate(200);
-        let unread = entries.iter().filter(|e| e.ts > watermark).count() as u64;
-        (entries, unread)
+        let watermark = self.read_inbox_watermark();
+        self.worlds
+            .with_primary(&world, |session| {
+                let projection = issues_app::projections::inbox(
+                    session,
+                    me_actor.as_str(),
+                    &me_device,
+                    watermark,
+                );
+                (projection.entries, projection.unread)
+            })
+            .unwrap_or_default()
     }
 
     fn inbox_watermark_path(&self) -> PathBuf {
@@ -1764,15 +1725,7 @@ impl SpaceBridge {
         }
         self.worlds
             .with_primary(&world, |session| {
-                let bytes = session
-                    .query(runtime::WorldQuery {
-                        schema: crate::world::contract::issue_schema(),
-                        schema_version: crate::world::contract::ISSUE_SCHEMA_VERSION,
-                        payload: query.to_json(),
-                    })
-                    .ok()?
-                    .bytes;
-                serde_json::from_slice(&bytes).ok()
+                issues_app::projections::query_json(session, query)
             })
             .flatten()
     }
@@ -2117,52 +2070,15 @@ impl SpaceBridge {
         }
     }
 
-    /// One ring's worth of committed state: the doc index keyed by Body id, and
-    /// a digest per catalog plane.
-    ///
-    /// A Body id is a one-way hash of its doc id, so that correspondence only
-    /// runs *forwards*: there is nothing to invert, and the only honest way back
-    /// is to derive it from the docs the catalog names. Both halves come from
-    /// ONE `RingDigest` projection so they cannot describe two different roots,
-    /// and the whole thing is read fresh per ring rather than retained — a
-    /// derived map keyed by anything but the exact root it was read at can
-    /// answer for two roots at once (`tests/mixed_root_guard.rs`).
-    ///
-    /// `None` when there is no docked Session to read (an un-admitted joiner).
-    fn ring_state(&self) -> Option<RingState> {
-        let value = self.session_query_json(crate::world::contract::IssueQuery::RingDigest)?;
-        // Typed, and all-or-nothing. A plane this daemon cannot decode used to
-        // be skipped one entry at a time, which turns a schema mismatch into a
-        // resource that silently never refreshes — the exact failure the whole
-        // dirty-set exists to prevent. Failing the decode instead drops us to
-        // the coarse path, which is visible and correct.
-        let view: crate::world::contract::RingDigestView = match serde_json::from_value(value) {
-            Ok(view) => view,
-            Err(e) => {
-                tracing::warn!(error = %e, "ring digest did not decode; ringing coarsely");
-                return None;
-            }
-        };
-        let docs = view
-            .docs
-            .into_iter()
-            .map(|d| {
-                let project = ProjectRef {
-                    project_id: d.project_id,
-                    project_key: d.project_key,
-                };
-                (
-                    crate::world::contract::issue_body_id(&d.doc),
-                    (d.doc, project),
-                )
-            })
-            .collect();
-        let planes = view
-            .planes
-            .into_iter()
-            .map(|p| (p.plane, p.digest))
-            .collect();
-        Some(RingState { docs, planes })
+    /// Read one package-owned ring projection through the docked Session.
+    fn ring_state(&self) -> Option<issues_app::projections::RingState> {
+        let world = crate::world::contract::world_id();
+        if !self.ensure_world_session(&world) {
+            return None;
+        }
+        self.worlds
+            .with_primary(&world, issues_app::projections::ring_state)
+            .flatten()
     }
 
     /// Translate an Observation's Body scopes into a doorbell's dirty-set.
@@ -2188,58 +2104,22 @@ impl SpaceBridge {
     fn dirty_from_scopes(
         &self,
         scopes: &[replica::ids::BodyKey],
-    ) -> (Vec<DirtyProject>, Vec<CatalogScope>) {
-        let catalog_body = crate::world::contract::catalog_body_id(self.station.space_id());
-        let mut catalog_dirty = false;
-        let mut docs: Vec<&replica::ids::BodyId> = Vec::new();
-        for key in scopes {
-            if key.body == catalog_body {
-                catalog_dirty = true;
-            } else {
-                docs.push(&key.body);
-            }
-        }
-        if !catalog_dirty && docs.is_empty() {
+    ) -> (Vec<crate::dto::DirtyProject>, Vec<CatalogScope>) {
+        let world = crate::world::contract::world_id();
+        if !self.ensure_world_session(&world) {
             return Default::default();
         }
-
-        let Some(state) = self.ring_state() else {
-            // No projection to read at all. Name nothing rather than claim
-            // nothing moved — the caller's `reset` path is the honest signal,
-            // and an un-admitted joiner has no subscriber to mislead anyway.
-            return Default::default();
-        };
-        let (by_project, missed) = resolve_docs(Some(&state.docs), &docs);
-
-        let mut planes: Vec<CatalogScope> = Vec::new();
-        if catalog_dirty || missed {
-            let mut baseline = self.ring_planes.lock().expect("ring planes lock");
-            match baseline.as_ref() {
-                Some(previous) => {
-                    for (scope, digest) in &state.planes {
-                        if previous.get(scope) != Some(digest) {
-                            planes.push(scope.clone());
-                        }
-                    }
-                    // A plane that vanished changed too — emptied is not absent.
-                    for scope in previous.keys() {
-                        if !state.planes.contains_key(scope) {
-                            planes.push(scope.clone());
-                        }
-                    }
-                }
-                // Nothing to compare against: report every plane once rather
-                // than guess. The next ring diffs normally.
-                None => planes.extend(state.planes.keys().cloned()),
-            }
-            *baseline = Some(state.planes);
-            // A doc we could not name is a row-index question, and that is a
-            // plane — no need to fall back to the whole catalog for it.
-            if missed && !planes.contains(&CatalogScope::Docs) {
-                planes.push(CatalogScope::Docs);
-            }
-        }
-        (by_project, planes)
+        let mut baseline = self.ring_planes.lock().expect("ring planes lock");
+        self.worlds
+            .with_primary(&world, |session| {
+                issues_app::projections::observation(
+                    session,
+                    self.station.space_id(),
+                    scopes,
+                    &mut baseline,
+                )
+            })
+            .unwrap_or_default()
     }
 
     /// Start the single Observation pump if it is not already running.
@@ -2430,42 +2310,6 @@ impl SpaceBridge {
         self.stop_tx.send_replace(true);
         self.shutdown.notify_one();
     }
-}
-
-/// One ring's committed state, read at a single pinned root.
-struct RingState {
-    /// `Body id -> (doc id, the project that holds it)`.
-    docs: std::collections::HashMap<replica::ids::BodyId, (String, ProjectRef)>,
-    /// Digest per catalog plane.
-    planes: std::collections::BTreeMap<CatalogScope, String>,
-}
-
-/// Group observed issue Bodies by project, reporting whether any of them was
-/// absent from the index — the caller turns that miss into a coarser frame.
-fn resolve_docs(
-    index: Option<&std::collections::HashMap<replica::ids::BodyId, (String, ProjectRef)>>,
-    docs: &[&replica::ids::BodyId],
-) -> (Vec<DirtyProject>, bool) {
-    let mut by_project: std::collections::BTreeMap<ProjectRef, Vec<String>> = Default::default();
-    let mut missed = false;
-    for body in docs {
-        match index.and_then(|i| i.get(*body)) {
-            Some((doc, project)) => by_project
-                .entry(project.clone())
-                .or_default()
-                .push(doc.clone()),
-            None => missed = true,
-        }
-    }
-    let dirty = by_project
-        .into_iter()
-        .map(|(project, docs)| DirtyProject {
-            project_id: project.project_id,
-            project_key: project.project_key,
-            docs,
-        })
-        .collect();
-    (dirty, missed)
 }
 
 fn now_secs() -> u64 {

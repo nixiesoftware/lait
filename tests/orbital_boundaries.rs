@@ -48,7 +48,14 @@ fn issues_semantics_and_client_application_are_separate_packages() {
             "the semantic IssuesWorld package must not depend on {forbidden}"
         );
     }
-    for required in ["issues", "world-interface", "world-bridge"] {
+    for required in [
+        "issues",
+        "mechanics",
+        "replica",
+        "runtime",
+        "world-interface",
+        "world-bridge",
+    ] {
         assert!(
             manifest_at(&application, required),
             "the Issues application package must depend on {required}"
@@ -59,20 +66,51 @@ fn issues_semantics_and_client_application_are_separate_packages() {
         "the Issues application package must not depend back on the root shell"
     );
 
-    let application_source = read(&application.join("src").join("lib.rs"))
-        + &read(&application.join("src").join("cli.rs"))
-        + &read(&application.join("src").join("mcp.rs"))
-        + &read(&application.join("src").join("protocol.rs"));
+    let application_source: String = rust_sources_under(&application.join("src"))
+        .into_iter()
+        .map(|source| read(&source))
+        .collect();
     for forbidden in ["crate::control", "crate::daemon", "crate::cmdspec"] {
         assert!(
             !application_source.contains(forbidden),
             "root-shell dependency `{forbidden}` leaked into issues-app"
         );
     }
+
+    assert!(
+        !workspace_root().join("src/world/router.rs").exists(),
+        "Issues execution must not remain under the root shell"
+    );
+    let root_lifecycle = read(&workspace_root().join("src/world/lifecycle.rs"));
+    for product_detail in [
+        "initialize_tracker_intent",
+        "issues-bootstrap.bin",
+        "founder_capabilities",
+    ] {
+        assert!(
+            !root_lifecycle.contains(product_detail),
+            "Issues formation detail `{product_detail}` leaked into the orbital host"
+        );
+    }
+    let space_bridge = read(&workspace_root().join("src/orbital/space_bridge.rs"));
+    for product_projection in [
+        "IssueQuery::Inbox",
+        "IssueQuery::RingDigest",
+        "RingDigestView",
+    ] {
+        assert!(
+            !space_bridge.contains(product_projection),
+            "Issues projection detail `{product_projection}` leaked into SpaceBridge"
+        );
+    }
 }
 
 /// Every `.rs` file under a crate's `src/`.
 fn rust_sources(crate_dir: &str) -> Vec<PathBuf> {
+    rust_sources_under(&workspace_root().join("crates").join(crate_dir).join("src"))
+}
+
+fn rust_sources_under(root: &Path) -> Vec<PathBuf> {
     fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;
@@ -87,10 +125,7 @@ fn rust_sources(crate_dir: &str) -> Vec<PathBuf> {
         }
     }
     let mut out = Vec::new();
-    walk(
-        &workspace_root().join("crates").join(crate_dir).join("src"),
-        &mut out,
-    );
+    walk(root, &mut out);
     out
 }
 

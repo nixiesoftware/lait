@@ -1,13 +1,15 @@
-//! The control-surface router (C4.3 / C5 routing) drives the product's
-//! `control::Request` surface through the `IssuesWorld` adapter, producing the
-//! legacy `control::Response` shapes — the seam the daemon routes application
-//! requests through.
+//! The package-owned application router drives `IssuesRequest` through the
+//! `IssuesWorld` adapter and returns `IssuesResponse` projections.
 
 use std::sync::Arc;
 
-use lait::control::{BoardPos, Filter, Request, Response};
-use lait::ids::{ActorId, DeviceId, SystemUlidSource};
-use lait::world::{IssueRouter, IssuesWorld, RouterFacts};
+use issues::dto::Priority;
+use issues::ids::{ActorId, DeviceId, SystemUlidSource};
+use issues::IssuesWorld;
+use issues_app::{
+    BoardPos, Filter, IssueRouter, IssuesErrorKind, IssuesRequest as Request,
+    IssuesResponse as Response, RouterFacts,
+};
 use mechanics::crypto::AuthorizedBodyKey;
 use replica::frontier::AuthorityFrontier;
 use runtime::{ActivationOptions, LocalIdentity, Runtime, RuntimeBuilder, Session, Station};
@@ -71,7 +73,7 @@ fn facts() -> RouterFacts {
 fn dock(station: &Station) -> (Session, LocalIdentity) {
     let identity = Runtime::identity_from_seed(&WRITER_SEED);
     let session = station
-        .dock(&lait::world::contract::world_id(), &identity)
+        .dock(&issues::contract::world_id(), &identity)
         .unwrap();
     (session, identity)
 }
@@ -130,7 +132,7 @@ fn the_router_maps_the_control_surface_to_the_issues_world() {
         other => panic!("expected Issue, got {other:?}"),
     };
     assert_eq!(view.title, "Router works");
-    assert_eq!(view.priority, lait::dto::Priority::High);
+    assert_eq!(view.priority, Priority::High);
     assert_eq!(view.label_names, vec!["bug".to_string()]);
 
     // Edit, comment, start (work-state), and board all route.
@@ -216,7 +218,7 @@ fn the_router_maps_the_control_surface_to_the_issues_world() {
     assert!(matches!(
         resp,
         Response::Error {
-            error_kind: lait::control::ErrorKind::NotFound,
+            error_kind: IssuesErrorKind::NotFound,
             ..
         }
     ));
@@ -239,7 +241,7 @@ fn the_router_maps_the_control_surface_to_the_issues_world() {
 }
 
 #[test]
-fn the_router_declares_the_issue_family_it_handles() {
+fn the_router_accepts_its_product_protocol() {
     assert!(IssueRouter::handles(&Request::IssueNew {
         title: "x".into(),
         project: None,
@@ -254,12 +256,5 @@ fn the_router_declares_the_issue_family_it_handles() {
     assert!(IssueRouter::handles(&Request::Board {
         project: None,
         project_hint: None,
-    }));
-    // Membership/transport requests are NOT the router's.
-    assert!(!IssueRouter::handles(&Request::Status));
-    assert!(!IssueRouter::handles(&Request::MemberAdd {
-        who: "x".into(),
-        admin: false,
-        as_name: None,
     }));
 }
