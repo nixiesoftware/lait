@@ -205,7 +205,7 @@ pub struct CatalogState {
     pub boards: BTreeMap<String, Vec<(String, String)>>,
     /// project id -> grow-only workflow revision log (every revision ever
     /// committed; heads are revisions no successor names as a predecessor).
-    pub workflow_revisions: BTreeMap<String, Vec<crate::world::workflow::WorkflowRevision>>,
+    pub workflow_revisions: BTreeMap<String, Vec<crate::workflow::WorkflowRevision>>,
     /// role id -> the immutable BUILT-IN definition (seeded at formation).
     pub roles: BTreeMap<String, StoredRoleRevision>,
     /// role id -> grow-only custom-role revision log.
@@ -231,7 +231,7 @@ pub struct StoredRoleRevision {
     pub revision_id: String,
     #[serde(default)]
     pub predecessor_ids: Vec<String>,
-    pub body: crate::world::roles::RoleBody,
+    pub body: crate::roles::RoleBody,
 }
 
 fn reg_str(view: &CollaborativeView, path: &str) -> Option<String> {
@@ -286,8 +286,7 @@ impl CatalogState {
             let Some((project, _hex)) = key.rsplit_once('/') else {
                 continue;
             };
-            if let Ok(rev) = serde_json::from_str::<crate::world::workflow::WorkflowRevision>(&raw)
-            {
+            if let Ok(rev) = serde_json::from_str::<crate::workflow::WorkflowRevision>(&raw) {
                 state
                     .workflow_revisions
                     .entry(project.to_string())
@@ -1039,7 +1038,7 @@ fn heads_of<T, I: Fn(&T) -> &str, P: Fn(&T) -> &[String]>(
 impl CatalogState {
     /// The workflow revision heads for a project (empty = never seeded;
     /// more than one = concurrent edits pending explicit resolution).
-    pub fn workflow_heads(&self, project: &str) -> Vec<&crate::world::workflow::WorkflowRevision> {
+    pub fn workflow_heads(&self, project: &str) -> Vec<&crate::workflow::WorkflowRevision> {
         self.workflow_revisions
             .get(project)
             .map(|log| heads_of(log, |r| r.revision_id.as_str(), |r| &r.predecessor_ids))
@@ -1047,10 +1046,7 @@ impl CatalogState {
     }
 
     /// The single usable workflow head, or `None` (missing or conflicted).
-    pub fn workflow_head(
-        &self,
-        project: &str,
-    ) -> Option<&crate::world::workflow::WorkflowRevision> {
+    pub fn workflow_head(&self, project: &str) -> Option<&crate::workflow::WorkflowRevision> {
         let heads = self.workflow_heads(project);
         match heads.as_slice() {
             [one] => Some(one),

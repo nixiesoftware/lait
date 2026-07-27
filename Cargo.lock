@@ -2918,6 +2918,7 @@ dependencies = [
  "getrandom 0.3.4",
  "include_dir",
  "interprocess",
+ "lait-issues",
  "libc",
  "mechanics",
  "n0-future",
@@ -2942,6 +2943,21 @@ dependencies = [
  "tracing-subscriber",
  "windows-sys 0.61.2",
  "zip",
+]
+
+[[package]]
+name = "lait-issues"
+version = "0.6.0"
+dependencies = [
+ "blake3",
+ "data-encoding",
+ "mechanics",
+ "postcard",
+ "replica",
+ "runtime",
+ "schemars",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

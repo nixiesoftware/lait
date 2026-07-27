@@ -45,7 +45,8 @@ pub mod orbital;
 pub mod registry;
 pub mod serve;
 pub mod spaces;
-/// The product's orbital World adapter (the C4 contract packet + IssuesWorld).
+/// The application adapter and compatibility re-exports for the independently
+/// packaged IssuesWorld product.
 pub mod world;
 
 // The **kernel** (`mechanics`) holds lait's roots — identity, the trust

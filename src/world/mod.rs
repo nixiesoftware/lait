@@ -7,15 +7,12 @@ use std::sync::Arc;
 
 use crate::orbital::{WorldControlAdapter, WorldPackage, WorldPackages};
 
-pub mod contract;
-pub mod issues;
-pub mod roles;
 pub mod router;
-pub mod views;
-pub mod workflow;
 
-pub use contract::{IssueEffect, IssueIntent, IssueQuery, PRODUCT_WORLD};
-pub use issues::IssuesWorld;
+pub use issues::{
+    contract, roles, views, workflow, IssueEffect, IssueIntent, IssueQuery, IssuesWorld,
+    PRODUCT_WORLD,
+};
 pub use router::{IssueRouter, IssuesControlAdapter, RouterFacts};
 
 /// The issue tracker's complete compile-time World package.

@@ -6,6 +6,7 @@ members = [
     "crates/comms",
     "crates/replica",
     "crates/runtime",
+    "products/issues",
 ]
 # Pin resolver 2 explicitly: the release binary's non-linkage of the dev-only
 # `test-utils` feature (which would flip presets::N0 from prod to staging relays)
@@ -93,6 +94,10 @@ replica = { path = "crates/replica" }
 # (`Transport`, framed `Stream`s, gossip rooms) and never names the contractor
 # behind it. Swapping the adapter is a manifest change, not a daemon rewrite.
 comms = { path = "crates/comms" }
+# The canonical bundled product. Its semantic World, schemas, DTOs, and ids are
+# independently packaged; this root owns only the application shell and local
+# control adapters that compose it into LaitDaemon.
+issues = { package = "lait-issues", path = "products/issues" }
 # randomness for ULID minting (app-minted DocId/ProjectId/… ids).
 getrandom = "0.3"
 

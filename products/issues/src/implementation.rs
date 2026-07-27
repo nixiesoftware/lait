@@ -1,11 +1,11 @@
-//! The product's private compatibility World adapter (C4.2).
+//! The issue product's semantic Runtime World implementation.
 //!
 //! `IssuesWorld` implements the public `runtime::World` contract over the
 //! frozen mapping in `contract.rs`: current Issues behavior expressed as
 //! collaborative Body operations. It is deliberately **not** a reusable
-//! first-party World crate — it lives in the product, registers through the
-//! same `RuntimeBuilder` any consumer uses, and touches nothing below the
-//! World boundary. The World is pure: ids, timestamps, and resolved refs
+//! privileged Runtime path: it registers through the same `RuntimeBuilder` any
+//! consumer uses and touches nothing below the World boundary. The World is
+//! pure: ids, timestamps, and resolved refs
 //! arrive inside the intent; validation is re-checked here (the daemon
 //! pre-validates for friendly errors), and every accepted intent stages one
 //! atomic multi-Body transaction (issue + catalog together — the legacy split
@@ -380,7 +380,7 @@ fn transition_gate(
     project: &str,
     from: &str,
     to: &str,
-) -> Result<(Vec<u8>, crate::world::workflow::WorkflowTransitionEvidence), WorldError> {
+) -> Result<(Vec<u8>, crate::workflow::WorkflowTransitionEvidence), WorldError> {
     // The single usable head gates transitions; concurrent heads block them
     // (and further ordinary edits) until `workflow set --expect-head`
     // resolves. A project with NO revision at all is corrupt catalog state.
@@ -397,7 +397,7 @@ fn transition_gate(
         .encode_canonical()
         .map_err(|_| WorldError::ContractViolation)?;
     let digest = demand.digest().map_err(|_| WorldError::ContractViolation)?;
-    let evidence = crate::world::workflow::WorkflowTransitionEvidence {
+    let evidence = crate::workflow::WorkflowTransitionEvidence {
         transition_id: transition.transition_id.clone(),
         workflow_revision_id: revision.revision_id.clone(),
         source_state: from.to_string(),
@@ -409,10 +409,7 @@ fn transition_gate(
 
 /// Whether every capability id is registered for the declared scope kind
 /// (sorted, unique, non-empty).
-fn validate_role_caps(
-    caps: &[String],
-    scope: crate::world::roles::ScopeKind,
-) -> Result<(), WorldError> {
+fn validate_role_caps(caps: &[String], scope: crate::roles::ScopeKind) -> Result<(), WorldError> {
     if caps.is_empty() {
         return Err(WorldError::InvalidRequest);
     }
@@ -423,8 +420,8 @@ fn validate_role_caps(
         return Err(WorldError::InvalidRequest);
     }
     let registered = |c: &str| match scope {
-        crate::world::roles::ScopeKind::Space => contract::is_space_capability(c),
-        crate::world::roles::ScopeKind::Project => contract::is_project_capability(c),
+        crate::roles::ScopeKind::Space => contract::is_space_capability(c),
+        crate::roles::ScopeKind::Project => contract::is_project_capability(c),
     };
     if caps.iter().any(|c| !registered(c)) {
         return Err(WorldError::InvalidRequest);
@@ -438,7 +435,7 @@ fn expect_single_head<'a>(
     catalog: &'a CatalogState,
     role_id: &str,
     expected: &str,
-) -> Result<&'a crate::world::views::StoredRoleRevision, WorldError> {
+) -> Result<&'a crate::views::StoredRoleRevision, WorldError> {
     let heads = catalog.role_heads(role_id);
     match heads.as_slice() {
         [] => Err(WorldError::InvalidRequest),
@@ -459,8 +456,8 @@ fn decode_hex32(hex: &str) -> Result<[u8; 32], WorldError> {
 }
 
 /// Stage one role revision into the grow-only log.
-fn stage_role_revision(staging: &mut Staging, revision: &crate::world::roles::RoleRevision) {
-    let stored = crate::world::views::StoredRoleRevision {
+fn stage_role_revision(staging: &mut Staging, revision: &crate::roles::RoleRevision) {
+    let stored = crate::views::StoredRoleRevision {
         revision_id: data_encoding::HEXLOWER.encode(&revision.revision_id),
         predecessor_ids: revision
             .predecessor_ids
@@ -679,14 +676,13 @@ impl World for IssuesWorld {
                 if capability_registry_commitment != registry_hex {
                     return Err(WorldError::InvalidRequest);
                 }
-                let workflow_revision =
-                    crate::world::workflow::default_workflow_revision(&project_id);
+                let workflow_revision = crate::workflow::default_workflow_revision(&project_id);
                 if default_workflow_commitment != workflow_revision.revision_id {
                     return Err(WorldError::InvalidRequest);
                 }
                 let mut goldens: Vec<(String, String, String)> = Vec::new();
-                for id in crate::world::roles::BUILT_IN_ROLE_IDS {
-                    let rev = crate::world::roles::built_in(id).expect("built-in role");
+                for id in crate::roles::BUILT_IN_ROLE_IDS {
+                    let rev = crate::roles::built_in(id).expect("built-in role");
                     goldens.push((
                         id.to_string(),
                         data_encoding::HEXLOWER.encode(&rev.revision_id),
@@ -739,8 +735,8 @@ impl World for IssuesWorld {
                     }))
                     .expect("project json"),
                 ));
-                for id in crate::world::roles::BUILT_IN_ROLE_IDS {
-                    let rev = crate::world::roles::built_in(id).expect("built-in role");
+                for id in crate::roles::BUILT_IN_ROLE_IDS {
+                    let rev = crate::roles::built_in(id).expect("built-in role");
                     staging.catalog(map_set(
                         "roles",
                         id,
@@ -1455,7 +1451,7 @@ impl World for IssuesWorld {
                 // Every project carries a workflow revision from birth: the
                 // deterministic default (free movement, every edge an explicit
                 // replaceable gate).
-                let revision = crate::world::workflow::default_workflow_revision(&id);
+                let revision = crate::workflow::default_workflow_revision(&id);
                 staging.catalog(map_set(
                     "workflow_revisions",
                     format!("{id}/{}", revision.revision_id),
@@ -1574,7 +1570,7 @@ impl World for IssuesWorld {
                 if body.is_empty() {
                     return Err(WorldError::InvalidRequest);
                 }
-                let update = crate::world::views::ProjectUpdate {
+                let update = crate::views::ProjectUpdate {
                     id: id.clone(),
                     project_id: project_id.clone(),
                     author,
@@ -1690,7 +1686,7 @@ impl World for IssuesWorld {
                 // ids reject. The daemon mints the id; the World re-validates.
                 if !role_id.starts_with("role_")
                     || role_id.len() > 64
-                    || crate::world::roles::built_in(&role_id).is_some()
+                    || crate::roles::built_in(&role_id).is_some()
                 {
                     return Err(WorldError::InvalidRequest);
                 }
@@ -1700,16 +1696,16 @@ impl World for IssuesWorld {
                     return Err(WorldError::Conflict);
                 }
                 let scope_kind = match &scope_project {
-                    None => crate::world::roles::ScopeKind::Space,
+                    None => crate::roles::ScopeKind::Space,
                     Some(project) => {
                         if !catalog.projects.contains_key(project) {
                             return Err(WorldError::InvalidRequest);
                         }
-                        crate::world::roles::ScopeKind::Project
+                        crate::roles::ScopeKind::Project
                     }
                 };
                 validate_role_caps(&capabilities, scope_kind)?;
-                let body = crate::world::roles::RoleBody {
+                let body = crate::roles::RoleBody {
                     role_id: role_id.clone(),
                     scope_kind,
                     name,
@@ -1717,7 +1713,7 @@ impl World for IssuesWorld {
                     capabilities,
                     tombstone: false,
                 };
-                let revision = crate::world::roles::build_revision(body, vec![])
+                let revision = crate::roles::build_revision(body, vec![])
                     .map_err(|_| WorldError::InvalidRequest)?;
                 stage_role_revision(&mut staging, &revision);
                 staging.require(contract::demand_space_any("policy.configure"));
@@ -1749,7 +1745,7 @@ impl World for IssuesWorld {
                     body.capabilities = capabilities;
                 }
                 let predecessor = decode_hex32(&expected_revision)?;
-                let revision = crate::world::roles::build_revision(body, vec![predecessor])
+                let revision = crate::roles::build_revision(body, vec![predecessor])
                     .map_err(|_| WorldError::InvalidRequest)?;
                 stage_role_revision(&mut staging, &revision);
                 staging.require(contract::demand_space_any("policy.configure"));
@@ -1768,7 +1764,7 @@ impl World for IssuesWorld {
                 let mut body = head.body.clone();
                 body.tombstone = true;
                 let predecessor = decode_hex32(&expected_revision)?;
-                let revision = crate::world::roles::build_revision(body, vec![predecessor])
+                let revision = crate::roles::build_revision(body, vec![predecessor])
                     .map_err(|_| WorldError::InvalidRequest)?;
                 stage_role_revision(&mut staging, &revision);
                 staging.require(contract::demand_space_any("policy.configure"));
@@ -1796,7 +1792,7 @@ impl World for IssuesWorld {
                 if current.is_empty() || current != expected {
                     return Err(WorldError::Conflict);
                 }
-                let body: crate::world::roles::RoleBody =
+                let body: crate::roles::RoleBody =
                     serde_json::from_str(&body_json).map_err(|_| WorldError::InvalidRequest)?;
                 if body.role_id != role_id {
                     return Err(WorldError::InvalidRequest);
@@ -1806,7 +1802,7 @@ impl World for IssuesWorld {
                     .iter()
                     .map(|h| decode_hex32(h))
                     .collect::<Result<_, _>>()?;
-                let revision = crate::world::roles::build_revision(body, predecessors)
+                let revision = crate::roles::build_revision(body, predecessors)
                     .map_err(|_| WorldError::InvalidRequest)?;
                 stage_role_revision(&mut staging, &revision);
                 staging.require(contract::demand_space_any("policy.configure"));
@@ -1834,7 +1830,7 @@ impl World for IssuesWorld {
                 if current.is_empty() || current != expected {
                     return Err(WorldError::Conflict);
                 }
-                let body: crate::world::workflow::WorkflowBody =
+                let body: crate::workflow::WorkflowBody =
                     serde_json::from_str(&body_json).map_err(|_| WorldError::InvalidRequest)?;
                 if body.project_id != project_id {
                     return Err(WorldError::InvalidRequest);
@@ -1843,7 +1839,7 @@ impl World for IssuesWorld {
                     .iter()
                     .map(|h| decode_hex32(h))
                     .collect::<Result<_, _>>()?;
-                let revision = crate::world::workflow::build_revision(body, predecessors)
+                let revision = crate::workflow::build_revision(body, predecessors)
                     .map_err(|_| WorldError::InvalidRequest)?;
                 staging.catalog(map_set(
                     "workflow_revisions",
@@ -1972,7 +1968,7 @@ impl World for IssuesWorld {
                         if name.trim().is_empty() {
                             return Err(WorldError::InvalidRequest);
                         }
-                        crate::world::views::Milestone {
+                        crate::views::Milestone {
                             id: id.clone(),
                             project_id: project_id.clone(),
                             name: name.trim().to_string(),
@@ -2067,7 +2063,7 @@ impl World for IssuesWorld {
                         if name.trim().is_empty() {
                             return Err(WorldError::InvalidRequest);
                         }
-                        crate::world::views::Cycle {
+                        crate::views::Cycle {
                             id: id.clone(),
                             project_id: project_id.clone(),
                             name: name.trim().to_string(),
@@ -2167,7 +2163,7 @@ impl World for IssuesWorld {
                         if name.trim().is_empty() {
                             return Err(WorldError::InvalidRequest);
                         }
-                        crate::world::views::Initiative {
+                        crate::views::Initiative {
                             id: id.clone(),
                             name: name.trim().to_string(),
                             ..Default::default()
@@ -2252,7 +2248,7 @@ impl World for IssuesWorld {
                         if catalog.teams.values().any(|t| !t.tombstone && t.key == key) {
                             return Err(WorldError::Conflict);
                         }
-                        crate::world::views::Team {
+                        crate::views::Team {
                             id: id.clone(),
                             name: name.trim().to_string(),
                             key,
@@ -2320,7 +2316,7 @@ impl World for IssuesWorld {
                 {
                     return Err(WorldError::InvalidRequest);
                 }
-                let item = crate::world::views::TriageItem {
+                let item = crate::views::TriageItem {
                     id: id.clone(),
                     title: title.trim().to_string(),
                     body,

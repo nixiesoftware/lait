@@ -1,4 +1,4 @@
-//! IssuesWorld role definitions — canonical bodies, revision identity, and
+//! IssuesWorld role definitions: canonical bodies, revision identity, and
 //! the built-in roles (plan 04).
 //!
 //! A role definition is an atomic canonical revision, never field-merged:

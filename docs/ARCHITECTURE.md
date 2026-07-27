@@ -150,11 +150,13 @@ replica    Body transactions, protected material, Manifests, quotas,
            validation, and convergence
 comms      transport, streams, discovery, gossip, and presence mechanisms
 runtime    Orbit/Station lifecycle, Contacts, Worlds, Sessions, observations
-lait       IssuesWorld and product/control adapters
+issues     IssuesWorld schemas, semantic model, product DTOs and identifiers
+lait       application shell, local control adapters, CLI/MCP/viewer composition
 ```
 
 Dependencies point inward through these boundaries. Product concepts such as
-issues, projects, comments, roles, and workflows belong only to `lait`.
+issues, projects, comments, roles, and workflows belong to the independently
+packaged `products/issues` crate and the outer `lait` shell that presents them.
 Mechanics does not interpret product roles. Fabric does not know authority,
 transport, or product meaning. Comms moves bytes but cannot legitimize them.
 
@@ -260,6 +262,12 @@ control adapter owns product reference resolution, local id/time minting,
 transient retry, and response rendering. This is a compile-time package seam,
 not a promise of dynamic library loading or process isolation.
 
+IssuesWorld's semantic package lives at `products/issues` with no dependency on
+the `lait` application crate, local control protocol, daemon, filesystem, or
+process lifecycle. The root preserves `lait::world`, `lait::dto`, and
+`lait::ids` as compatibility re-exports. Moving that package to another
+repository changes the dependency locator, not Runtime or bridge ownership.
+
 A Session binds a local identity to one World at an active Station. Queries and
 mutations are authorized independently. Query results are computed from one
 Manifest root and authority frontier; a derived cache must be keyed by that
@@ -274,12 +282,13 @@ legitimate protected material opaquely.
 IssuesWorld (`com.lait.issues`) is the bundled reference World. It has no private
 architectural path unavailable to another conforming World.
 
-The package boundary is not yet the complete repository carve. The shared local
-`Request`/`Response` schema, Issues-specific status/inbox/doorbell projections,
-role-assignment planning, and tracker formation still live in the root
-application. They must move behind a versioned generic World-call envelope and
-product-owned lifecycle/projection hooks before the Issues package can become
-an acyclic standalone crate or repository.
+The semantic package boundary is not yet the complete application carve. The
+shared local `Request`/`Response` schema, Issues-specific
+status/inbox/doorbell projections, role-assignment planning, tracker formation,
+and CLI/MCP/viewer adapters still live in the root application. They must move
+behind a versioned generic World-call envelope and product-owned
+lifecycle/projection hooks before the whole issue-tracker application—not just
+its already-acyclic model package—can move to another repository.
 
 ## 6. Communication model
 
