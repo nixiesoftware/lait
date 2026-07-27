@@ -134,8 +134,43 @@ pub async fn run(port: u16, open: bool, json: bool) -> Result<()> {
         open_browser(&url);
     }
 
-    axum::serve(listener, router(app)).await.context("serve")?;
-    Ok(())
+    let serve_result = axum::serve(listener, router(app.clone()))
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+        .context("serve");
+    let shutdown_result = app
+        .control
+        .shutdown()
+        .await
+        .context("drain Station placements");
+    serve_result?;
+    shutdown_result
+}
+
+/// Stop accepting HTTP before the ControlRouter drains its owned placements.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    {
+        let terminate = async {
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("install SIGTERM handler")
+                .recv()
+                .await;
+        };
+        tokio::select! {
+            _ = ctrl_c => {}
+            _ = terminate => {}
+        }
+    }
+
+    #[cfg(not(unix))]
+    ctrl_c.await;
 }
 
 fn router(app: Arc<App>) -> Router {

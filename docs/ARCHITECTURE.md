@@ -19,15 +19,17 @@ LaitDaemon
        └─ OrbitOccupancy (keyed by local Orbit)
             ├─ vacant
             └─ StationPlacement
-                 └─ Station occupying the Orbit
-                      ├─ Mechanics
-                      ├─ Replica
-                      │    └─ Fabric
-                      ├─ Neighbor registry and Contact
-                      └─ exposed through a SpaceBridge
-                           └─ WorldBridgeRegistry
-                                └─ WorldBridge
-                                     └─ docked Sessions
+                 ├─ owned in-process
+                 └─ attached compatibility process
+                      └─ sole SpaceBridge for the Orbit
+                           └─ Station occupying the Orbit
+                                ├─ Mechanics
+                                ├─ Replica
+                                │    └─ Fabric
+                                ├─ Neighbor registry and Contact
+                                └─ WorldBridgeRegistry
+                                     └─ WorldBridge
+                                          └─ docked Sessions
 ```
 
 An Orbit is one durable local participation in a Space. It persists whether it
@@ -60,9 +62,34 @@ Bridges are logical boundaries, not mandatory processes. The target deployment
 is one per-user LaitDaemon routing to zero or more Station placements and their
 in-process SpaceBridges. A SpaceBridge or WorldBridge may move to a worker
 process for stronger fault or plugin isolation without changing its route or
-client contract. During the transition, `StationPlacement` selects the
-compatibility process host and `lait daemon` process-hosts one SpaceBridge
-behind its historical per-home socket.
+client contract. The current ControlRouter hosts a vacant Orbit in-process and
+attaches, without taking ownership, when a compatible `lait daemon` already
+holds that Orbit. Both placements retain the historical per-home socket so
+cwd-bound CLI and MCP clients can reach the same SpaceBridge during the
+transition.
+
+Placement and shutdown are ordered:
+
+```text
+request
+  -> OrbitDirectory resolves + authorizes
+  -> OrbitOccupancy single-flights by local Orbit
+  -> healthy existing control channel: attach
+     absent control channel: acquire daemon lock -> activate -> serve in-process
+
+host shutdown
+  -> stop accepting new HTTP/control-router work
+  -> close and join doorbell observers
+  -> signal each owned SpaceBridge
+  -> join control connections and Observation pumps
+  -> drop WorldBridgeRegistry/Sessions
+  -> Station::go_dormant
+  -> release the Orbit lock
+```
+
+Attached compatibility processes are not stopped by host shutdown. An owned
+placement is never task-aborted as a successful shutdown: the joinable runner
+must complete dormancy before the Orbit is considered vacant.
 
 ## 2. Crate boundaries
 

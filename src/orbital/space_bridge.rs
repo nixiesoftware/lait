@@ -35,7 +35,7 @@ use runtime::{
     LocalIdentity, Runtime, Session, Station,
 };
 
-use crate::config::{acquire_daemon_lock, load_or_create_identity};
+use crate::config::{acquire_daemon_lock, load_or_create_identity, DaemonLock};
 use crate::control::{
     control_name, CatalogScope, ControlRoute, DirtyProject, Doorbell, ProjectRef, Request,
     RequestOwner, Response, StatusInfo,
@@ -126,21 +126,107 @@ pub struct SpaceBridge {
     /// baseline it MUST be, because two subscribers each advancing the same
     /// baseline would leave the second one seeing no change at all.
     doorbells: tokio::sync::broadcast::Sender<Doorbell>,
-    /// Whether a live pump feeds [`Self::doorbells`].
+    /// The live task feeding [`Self::doorbells`], when one exists.
     ///
-    /// An async mutex, not a flag, and deliberately **held across startup**: a
-    /// boolean can say who owns the job but not whether the job is finished, and
-    /// the difference is a lost commit. A second subscriber that saw "someone is
-    /// starting" and ran ahead would send its own reset while the winner had not
-    /// yet opened the stream — and a commit in that window is in neither the
-    /// second subscriber's re-read nor the broadcast. Waiting on the lock makes
-    /// "ready" the only state a subscriber can observe.
-    pump: tokio::sync::Mutex<bool>,
+    /// The mutex is deliberately **held across startup**. A second subscriber
+    /// waits until the winner has opened the Observation stream, so "ready" is
+    /// the only state it can observe. Retaining the JoinHandle also lets
+    /// shutdown signal and join this owner before Station dormancy.
+    pump: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Control connections currently being served (idle-shutdown suppressor).
     active_conns: std::sync::atomic::AtomicU64,
     /// When the last control connection was accepted or completed — the idle
     /// clock's reference point.
     last_activity: Mutex<std::time::Instant>,
+}
+
+/// An owned in-process SpaceBridge lifecycle.
+///
+/// The runner holds the per-home daemon lock from before activation until after
+/// the Station has gone dormant. It is joinable by its host; dropping or
+/// aborting the task is not a successful shutdown path.
+pub(crate) struct SpaceBridgeRunner {
+    home: PathBuf,
+    bridge: Arc<SpaceBridge>,
+    _lock: DaemonLock,
+}
+
+/// A non-owning signal for an in-process SpaceBridge runner.
+///
+/// Weak by design: retaining a stop handle must not keep the bridge alive while
+/// the runner waits for every control/session owner to drain.
+#[derive(Clone)]
+pub(crate) struct SpaceBridgeStop {
+    bridge: std::sync::Weak<SpaceBridge>,
+}
+
+impl SpaceBridgeStop {
+    pub(crate) fn stop(&self) {
+        if let Some(bridge) = self.bridge.upgrade() {
+            bridge.begin_stop();
+        }
+    }
+}
+
+impl SpaceBridgeRunner {
+    /// Acquire the Orbit's process-wide lease and activate its Station.
+    pub(crate) async fn start(
+        home: PathBuf,
+        device_seed: [u8; 32],
+        factory: &dyn TransportFactory,
+    ) -> Result<Self> {
+        let lock = acquire_daemon_lock(&home)?;
+        let bridge = Arc::new(SpaceBridge::open(&home, device_seed, factory).await?);
+        Ok(Self {
+            home,
+            bridge,
+            _lock: lock,
+        })
+    }
+
+    pub(crate) fn stop_handle(&self) -> SpaceBridgeStop {
+        SpaceBridgeStop {
+            bridge: Arc::downgrade(&self.bridge),
+        }
+    }
+
+    /// Serve until stopped, drain every bridge owner, return the Station to its
+    /// Orbit, and only then release the per-home lease.
+    pub(crate) async fn run(self) -> Result<()> {
+        let serve_result = self.bridge.clone().serve().await;
+        self.bridge.begin_stop();
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while Arc::strong_count(&self.bridge) != 1 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .map_err(|_| {
+            anyhow!(
+                "SpaceBridge clients did not drain during shutdown ({} owners remain)",
+                Arc::strong_count(&self.bridge).saturating_sub(1)
+            )
+        })?;
+
+        let Self {
+            home,
+            bridge,
+            _lock,
+        } = self;
+        let bridge = Arc::try_unwrap(bridge)
+            .map_err(|_| anyhow!("SpaceBridge still shared after client drain"))?;
+        let dormancy_result = bridge.go_dormant();
+
+        serve_result?;
+        dormancy_result?;
+        #[cfg(unix)]
+        let _ = std::fs::remove_file(crate::config::socket_path(&home));
+        #[cfg(not(unix))]
+        let _ = home;
+        drop(_lock);
+        Ok(())
+    }
 }
 
 impl SpaceBridge {
@@ -312,7 +398,7 @@ impl SpaceBridge {
             stop_tx: tokio::sync::watch::channel(false).0,
             ring_planes: Mutex::new(None),
             doorbells: tokio::sync::broadcast::channel(256).0,
-            pump: tokio::sync::Mutex::new(false),
+            pump: tokio::sync::Mutex::new(None),
             active_conns: std::sync::atomic::AtomicU64::new(0),
             last_activity: Mutex::new(std::time::Instant::now()),
         })
@@ -1692,6 +1778,7 @@ impl SpaceBridge {
         );
         let idle_window = idle_window_from_env();
         let mut idle_tick = tokio::time::interval(Duration::from_millis(500));
+        let mut connections = tokio::task::JoinSet::new();
         loop {
             tokio::select! {
                 _ = self.shutdown.notified() => break,
@@ -1715,22 +1802,48 @@ impl SpaceBridge {
                         self.begin_stop();
                         break;
                     }
-                }
+                },
                 accept = listener.accept() => match accept {
                     Ok(stream) => {
                         let me = self.clone();
-                        tokio::spawn(async move { me.handle_conn(stream).await });
+                        connections.spawn(async move { me.handle_conn(stream).await });
                     }
                     Err(e) => {
                         tracing::warn!("control accept error: {e}");
                         break;
                     }
+                },
+                result = connections.join_next(), if !connections.is_empty() => {
+                    if let Some(Err(error)) = result {
+                        tracing::warn!(%error, "control connection task failed");
+                    }
                 }
             }
         }
-        // Wake every subscription/pump before the process adapter tries to take
-        // exclusive ownership and return the Station to Orbit.
+        // Wake and join every task retaining the bridge before the runner tries
+        // to consume it and return the Station to Orbit.
         self.begin_stop();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(result) = connections.join_next().await {
+                if let Err(error) = result {
+                    tracing::warn!(%error, "control connection task failed during shutdown");
+                }
+            }
+        })
+        .await
+        .map_err(|_| {
+            anyhow!(
+                "SpaceBridge control connections did not drain during shutdown ({} remain)",
+                connections.len()
+            )
+        })?;
+        let pump = self.pump.lock().await.take();
+        if let Some(pump) = pump {
+            tokio::time::timeout(Duration::from_secs(5), pump)
+                .await
+                .map_err(|_| anyhow!("SpaceBridge Observation pump did not drain during shutdown"))?
+                .map_err(|error| anyhow!("SpaceBridge Observation pump failed: {error}"))?;
+        }
         Ok(())
     }
 
@@ -1967,8 +2080,13 @@ impl SpaceBridge {
         // Held for the whole of startup: a caller that arrives mid-start blocks
         // here and returns only once the stream is open, never in between.
         let mut running = self.pump.lock().await;
-        if *running {
-            return;
+        if let Some(task) = running.as_ref() {
+            if !task.is_finished() {
+                return;
+            }
+        }
+        if let Some(finished) = running.take() {
+            let _ = finished.await;
         }
         // Seed the diff baseline BEFORE opening the stream. A commit landing in
         // between is then counted as already-known rather than as a change with
@@ -1993,7 +2111,7 @@ impl SpaceBridge {
         let _ = stream.try_next();
 
         let daemon = self.clone();
-        tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let worker_cancel = cancel.clone();
             let (tx, mut rx) = tokio::sync::mpsc::channel::<runtime::Observation>(64);
@@ -2013,6 +2131,9 @@ impl SpaceBridge {
             });
             let mut stop_rx = daemon.stop_tx.subscribe();
             loop {
+                if *stop_rx.borrow() {
+                    break;
+                }
                 tokio::select! {
                     changed = stop_rx.changed() => {
                         if changed.is_err() || *stop_rx.borrow() {
@@ -2031,11 +2152,8 @@ impl SpaceBridge {
             cancel.store(true, Ordering::SeqCst);
             drop(rx);
             let _ = worker.await;
-            // Say so on the way out, so the next subscribe revives the pump
-            // rather than attaching to a fan-out nothing feeds.
-            *daemon.pump.lock().await = false;
         });
-        *running = true;
+        *running = Some(task);
     }
 
     /// Translate one Observation into the frame every subscriber receives.
@@ -2098,6 +2216,9 @@ impl SpaceBridge {
 
         let mut stop_rx = self.stop_tx.subscribe();
         loop {
+            if *stop_rx.borrow() {
+                break;
+            }
             tokio::select! {
                 changed = stop_rx.changed() => {
                     if changed.is_err() || *stop_rx.borrow() {
@@ -2129,7 +2250,10 @@ impl SpaceBridge {
     fn begin_stop(&self) {
         self.stopping
             .store(true, std::sync::atomic::Ordering::SeqCst);
-        let _ = self.stop_tx.send(true);
+        // `send` discards the value when no receiver exists. A pump can be
+        // spawned but not yet have subscribed, so shutdown must replace the
+        // latched value for late receivers as well.
+        self.stop_tx.send_replace(true);
         self.shutdown.notify_one();
     }
 }
@@ -2386,27 +2510,8 @@ pub async fn run_space_bridge_with(
     device_seed: [u8; 32],
     factory: &dyn TransportFactory,
 ) -> Result<()> {
-    let _lock = acquire_daemon_lock(&home)?;
-    let bridge = Arc::new(SpaceBridge::open(&home, device_seed, factory).await?);
-    let serve_result = bridge.clone().serve().await;
-    bridge.begin_stop();
-
-    // Connection and observation tasks retain Arc<SpaceBridge>. Give the stop
-    // broadcast a bounded window to release them before consuming the bridge.
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while Arc::strong_count(&bridge) != 1 {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .map_err(|_| anyhow!("SpaceBridge clients did not drain during shutdown"))?;
-    let bridge = Arc::try_unwrap(bridge)
-        .map_err(|_| anyhow!("SpaceBridge still shared after client drain"))?;
-    let dormancy_result = bridge.go_dormant();
-
-    serve_result?;
-    dormancy_result?;
-    #[cfg(unix)]
-    let _ = std::fs::remove_file(crate::config::socket_path(&home));
-    Ok(())
+    SpaceBridgeRunner::start(home, device_seed, factory)
+        .await?
+        .run()
+        .await
 }

@@ -11,6 +11,7 @@
 //! agent-scoped directory can enumerate only itself.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 use serde::Serialize;
@@ -44,6 +45,8 @@ pub struct OrbitBinding {
 #[derive(Debug, Clone)]
 pub struct ResolvedOrbit {
     pub home: PathBuf,
+    /// Directory containing the identity seed this Station must use.
+    pub identity_dir: PathBuf,
     pub address: OrbitAddress,
     pub identity: StationIdentity,
 }
@@ -56,15 +59,46 @@ pub struct OrbitDirectory {
     identity: PathBuf,
     agents_base: PathBuf,
     self_contained: bool,
+    load_bindings: Arc<dyn Fn() -> Vec<SpaceEntry> + Send + Sync>,
 }
 
 impl OrbitDirectory {
     pub fn new(identity: PathBuf, agents_base: PathBuf, self_contained: bool) -> Self {
+        Self::with_loader(
+            identity,
+            agents_base,
+            self_contained,
+            Arc::new(spaces::list),
+        )
+    }
+
+    fn with_loader(
+        identity: PathBuf,
+        agents_base: PathBuf,
+        self_contained: bool,
+        load_bindings: Arc<dyn Fn() -> Vec<SpaceEntry> + Send + Sync>,
+    ) -> Self {
         Self {
             identity,
             agents_base,
             self_contained,
+            load_bindings,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_entries(
+        identity: PathBuf,
+        agents_base: PathBuf,
+        self_contained: bool,
+        entries: Vec<SpaceEntry>,
+    ) -> Self {
+        Self::with_loader(
+            identity,
+            agents_base,
+            self_contained,
+            Arc::new(move || entries.clone()),
+        )
     }
 
     /// Return the Orbits visible to this daemon identity, preserving registry
@@ -73,7 +107,7 @@ impl OrbitDirectory {
     /// Station is activated.
     pub fn bindings(&self) -> Vec<OrbitBinding> {
         visible_bindings(
-            spaces::list(),
+            (self.load_bindings)(),
             &self.identity,
             &self.agents_base,
             self.self_contained,
@@ -102,8 +136,14 @@ impl OrbitDirectory {
             .ok_or_else(|| anyhow!("registered local Orbit has an invalid Space id"))?;
         let address = OrbitAddress { orbit: id, space };
         client_scope.authorize(&address)?;
+        let home = PathBuf::from(&selected.entry.path);
+        let identity_dir = match &selected.identity {
+            StationIdentity::Own => self.identity.clone(),
+            StationIdentity::Agent { .. } => home.clone(),
+        };
         Ok(ResolvedOrbit {
-            home: PathBuf::from(&selected.entry.path),
+            home,
+            identity_dir,
             address,
             identity: selected.identity,
         })
