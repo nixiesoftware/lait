@@ -64,7 +64,9 @@ pub use lifecycle::{
     EnterOptions, Neighbor, Orbit, OrbitObservation, Reachability, Runtime, SpaceFormationOptions,
     Station,
 };
-pub use neighbor_presence::{PresenceAck, PresenceError, PresenceProbe, PRESENCE_ALPN};
+pub use neighbor_presence::{
+    PresenceAck, PresenceError, PresenceProbe, PRESENCE_ALPN, PRESENCE_PROTOCOL,
+};
 pub use neighbors::{NeighborRecord, NeighborRegistry, RegistryError, StoredRoute};
 pub use registry::{RuntimeBuilder, WorldRegistry};
 pub use session::{

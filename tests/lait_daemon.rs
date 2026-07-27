@@ -46,6 +46,17 @@ fn pid(path: &Path) -> u32 {
         .unwrap()
 }
 
+fn coordinates(output: std::process::Output) -> runtime::VerifiedCoordinates {
+    assert!(output.status.success(), "invite failed: {output:?}");
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("invite emits JSON");
+    let ticket = value["text"].as_str().expect("invite text DTO");
+    runtime::SignedCoordinates::parse_link(ticket)
+        .expect("parse invite")
+        .verify()
+        .expect("verify invite")
+}
+
 #[test]
 fn two_cwd_orbits_share_one_lait_daemon_process() {
     let root = temp_root();
@@ -65,6 +76,21 @@ fn two_cwd_orbits_share_one_lait_daemon_process() {
     let orbit_b_pid = pid(&project_b.join(".lait").join("daemon.pid"));
     assert_eq!(orbit_a_pid, daemon_pid);
     assert_eq!(orbit_b_pid, daemon_pid);
+
+    let invite_a = coordinates(lait(&config, &project_a, &["--json", "invite"]));
+    let invite_b = coordinates(lait(&config, &project_b, &["--json", "invite"]));
+    assert_eq!(
+        invite_a.approach_station, invite_b.approach_station,
+        "both Spaces use the same device identity"
+    );
+    assert!(
+        !invite_a.approach_routes.is_empty(),
+        "isolated mode must advertise its direct endpoint"
+    );
+    assert_eq!(
+        invite_a.approach_routes, invite_b.approach_routes,
+        "one device identity advertises one shared transport endpoint"
+    );
 
     let stopped = lait(&config, &project_a, &["shutdown"]);
     assert!(stopped.status.success(), "shutdown failed: {stopped:?}");

@@ -255,10 +255,11 @@ impl SpaceBridge {
 
         let network = crate::net::Network::from_env()?;
         let transport = factory
-            .build(
+            .build_scoped(
                 &device_seed,
                 &network,
                 &[runtime::contact::CONTACT_ALPN, runtime::PRESENCE_ALPN],
+                &space,
             )
             .await?;
         // Retain a transport clone for invite route advertisement (and the

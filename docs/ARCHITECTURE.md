@@ -17,6 +17,9 @@ LaitDaemon
   ├─ identity-scoped local control endpoint
   ├─ OrbitDirectory
   └─ ControlRouter
+       ├─ IdentityTransportHubs (keyed by DeviceId)
+       │    └─ concrete endpoint / protocol Router / gossip
+       │         └─ SpaceTransportView (keyed by SpaceId)
        └─ OrbitOccupancy (keyed by local Orbit)
             ├─ vacant
             └─ StationPlacement
@@ -28,6 +31,7 @@ LaitDaemon
                            ├─ Mechanics
                            ├─ Replica
                            │    └─ Fabric
+                           ├─ Comms -> SpaceTransportView
                            ├─ Neighbor registry and Contact
                            └─ WorldBridgeRegistry
                                 └─ WorldBridge
@@ -81,6 +85,24 @@ Catalog listing remains passive. The web adapter asks LaitDaemon for an
 `if_running` status; LaitDaemon may inspect an already-live per-Orbit
 compatibility adapter, but it never places a vacant Orbit for that probe.
 
+Transport ownership follows device identity, not Orbit count. One
+`IdentityTransportHub` owns the concrete endpoint, protocol Router, reachability
+book, and gossip instance for a `DeviceId`. Each active Space gets a scoped
+transport view with its own inbound queue and gossip topic. The hub reads a
+bounded Contact Hello or presence probe only far enough to select its declared
+Space, then replays the exact frame to Runtime; the SpaceBridge still performs
+canonical decoding, signature, negotiated-peer, protocol, and Space
+verification. Slow openers are bounded and dispatched concurrently.
+An attached historical compatibility process retains its legacy endpoint until
+that migration placement exits; the identity-hub invariant governs Stations
+owned by LaitDaemon.
+
+Two active Stations with the same `(DeviceId, SpaceId)` are rejected even if
+they occupy distinct local Orbits: the remote address is the device key and the
+opening protocol names only the Space, so no legitimate wire address can choose
+between them. Distinct Orbits remain durable and independently selectable, and
+the same Space can be active under distinct device identities.
+
 Placement and shutdown are ordered:
 
 ```text
@@ -105,8 +127,11 @@ explicit LaitDaemon shutdown
   -> signal each owned SpaceBridge
   -> join control connections and Observation pumps
   -> drop WorldBridgeRegistry/Sessions
+  -> Contact driver emits dormancy and unregisters its SpaceTransportView
   -> Station::go_dormant
   -> release the Orbit lock
+  -> after all owned placements join, gracefully stop each identity Router,
+     gossip instance, and concrete endpoint
 ```
 
 Attached compatibility processes are not stopped by host shutdown. An owned

@@ -102,6 +102,13 @@ The signed acknowledgment binds the exact Hello and a responder nonce. Both
 sides bind the authenticated transport peer to the signed Station identity
 before accepting transfer material.
 
+A local process may share one concrete transport endpoint across several
+Spaces. Its identity hub uses the bounded opening Hello's declared Space only
+to select a Space-scoped inbound queue and replays the exact bytes unchanged.
+The receiving Contact state machine still performs canonical decoding and all
+signature, peer, protocol, responder, and Space checks; local demultiplexing is
+not authority and changes no wire bytes. Presence probes follow the same rule.
+
 The Contact protocol field is currently version 2. The ALPN and individual
 domain strings have their own versioning and must not be inferred from that
 field. A clean format break updates the affected bytes and fixtures atomically.

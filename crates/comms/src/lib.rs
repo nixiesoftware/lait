@@ -17,10 +17,10 @@
 //! deterministic in-process one ([`mem::MemTransport`]) that lets the *real
 //! daemon* run with no network at all.
 //!
-//! **The daemon is the consumer, not the transport.** It holds an
-//! `Arc<dyn Transport>` and drives it, so swapping the in-memory transport for
-//! the shipped one changes *nothing* above this seam — which is what makes the
-//! thing under test the actual daemon rather than a stand-in.
+//! **The host is the consumer, not the transport.** Its identity hub owns the
+//! concrete endpoint and gives each Station an `Arc<dyn Transport>` scoped to
+//! one Space. Swapping the in-memory transport for the shipped one changes
+//! *nothing* above this seam.
 //!
 //! Identity note: [`PeerId`] is a [`DeviceId`] — a peer *is* its ed25519 key (the
 //! T0 identity agreement). The concrete transport converts at its own edge;
@@ -33,7 +33,7 @@ pub mod policy;
 use anyhow::Result;
 use async_trait::async_trait;
 
-use mechanics::ids::DeviceId;
+use mechanics::ids::{DeviceId, SpaceId};
 
 /// The transport lait ships with: QUIC over the relay mesh its [`policy`]
 /// selects, and the factory that builds it. Exported under their role rather
@@ -59,14 +59,12 @@ pub struct Topic(pub [u8; 32]);
 /// overflow guard applies.
 pub const MAX_FRAME: u32 = 64 * 1024 * 1024;
 
-/// How a daemon obtains its network.
+/// How a host obtains its network.
 ///
 /// A factory rather than a ready-made [`Transport`], because the transport's
-/// identity must *be* the daemon's identity, and the daemon only learns its seed
-/// after opening its identity file. Handing the seed to the builder is what makes
-/// the two agree by construction; the daemon's check afterwards is what makes a
-/// factory that disagrees fail loudly instead of running with signed gossip under
-/// one key and a dialable peer under another.
+/// identity must *be* the Station's device identity. Handing the seed to the
+/// builder makes the two agree by construction; the process-level hub checks
+/// the returned peer id and shares the resulting endpoint across Space views.
 #[async_trait]
 pub trait TransportFactory: Send + Sync {
     async fn build(
@@ -75,6 +73,24 @@ pub trait TransportFactory: Send + Sync {
         network: &policy::Network,
         alpns: &[Alpn],
     ) -> Result<std::sync::Arc<dyn Transport>>;
+
+    /// Build a transport view scoped to one Space.
+    ///
+    /// Simple factories may keep producing an independent transport. A
+    /// process-level identity hub overrides this to share one endpoint while
+    /// retaining one inbound queue per Space.
+    async fn build_scoped(
+        &self,
+        identity_seed: &[u8; 32],
+        network: &policy::Network,
+        alpns: &[Alpn],
+        _space: &SpaceId,
+    ) -> Result<std::sync::Arc<dyn Transport>> {
+        self.build(identity_seed, network, alpns).await
+    }
+
+    /// Drain process-owned transport resources after all scoped views stop.
+    async fn shutdown(&self) {}
 }
 
 /// What a gossip subscription yields. The daemon's `recv_loop` is written against
@@ -189,8 +205,10 @@ pub trait Transport: Send + Sync {
     /// Open a direct, framed connection to `peer` for protocol `alpn`.
     async fn connect(&self, peer: PeerId, alpn: Alpn) -> Result<Box<dyn Stream>>;
 
-    /// Accept the next inbound direct connection (any registered ALPN). The daemon
-    /// loops this and dispatches by `alpn` — its `Router` replacement.
+    /// Accept the next inbound direct connection (any registered ALPN). A
+    /// concrete endpoint yields every Space; a scoped view yields only the
+    /// connections demultiplexed to its Space. The Station then dispatches by
+    /// `alpn`.
     async fn accept(&self) -> Option<Incoming>;
 
     /// The direct addresses a minted ticket must carry so a peer can reach us
@@ -242,7 +260,9 @@ pub trait Transport: Send + Sync {
         bootstrap: &[PeerId],
     ) -> Result<(Box<dyn GossipSender>, Box<dyn GossipReceiver>)>;
 
-    /// Best-effort teardown: unblocks a parked [`accept`](Transport::accept)
-    /// (which returns `None` from then on) and closes the network.
+    /// Best-effort teardown of this view: unblocks a parked
+    /// [`accept`](Transport::accept), which returns `None` from then on. A
+    /// concrete transport also closes the network; a Space-scoped view only
+    /// unregisters itself so sibling Spaces retain the identity endpoint.
     async fn shutdown(&self);
 }

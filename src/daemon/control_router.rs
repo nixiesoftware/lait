@@ -3,10 +3,11 @@
 //! A [`ControlRouter`] is the sole host-plane entrance from a catalog-wide
 //! client to an Orbit. It resolves the Orbit through [`OrbitDirectory`], places
 //! or reuses exactly one Station host for that Orbit, and dispatches the existing
-//! control protocol. A vacant Orbit is hosted in-process; a compatible
-//! pre-existing per-home daemon is attached as an external placement. Per-home
-//! IPC remains an internal compatibility adapter behind the identity-scoped
-//! Lait daemon endpoint.
+//! control protocol. Its transport factory shares one concrete endpoint per
+//! device identity across the owned placements. A vacant Orbit is hosted
+//! in-process; a compatible pre-existing per-home daemon is attached as an
+//! external placement. Per-home IPC remains an internal compatibility adapter
+//! behind the identity-scoped Lait daemon endpoint.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -22,6 +23,7 @@ use crate::control::{self, ControlRoute, Doorbell, Request, RequestOwner, Respon
 use crate::orbital::space_bridge::{SpaceBridgeRunner, SpaceBridgeStop};
 use crate::transport::{DefaultFactory, TransportFactory};
 
+use super::transport_hub::TransportHubFactory;
 use super::{LocalOrbitId, OrbitAddress, OrbitDirectory, ResolvedOrbit};
 
 /// A Station placement's current hosting strategy.
@@ -419,7 +421,7 @@ impl ControlRouter {
             directory,
             occupancy: OrbitOccupancy::default(),
             doorbells,
-            factory,
+            factory: Arc::new(TransportHubFactory::new(factory)),
             lifecycle: RwLock::new(()),
             shutting_down: AtomicBool::new(false),
         }
@@ -548,6 +550,9 @@ impl ControlRouter {
                 Err(error) => failures.push(format!("shutdown task failed: {error}")),
             }
         }
+        // Stations unregister their Space-scoped views during dormancy. Only
+        // after every placement has joined may the identity endpoints close.
+        self.factory.shutdown().await;
         if failures.is_empty() {
             Ok(())
         } else {

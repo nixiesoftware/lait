@@ -142,6 +142,7 @@ fs2 = "0.4"
 
 # misc
 anyhow = "1"
+async-trait = "0.1"
 directories = "5"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -210,9 +211,6 @@ windows-sys = { version = "0.61", features = [
 # _path_does` exactly this way). Tests that *want* those vars set them explicitly
 # afterward (serialized by `ENV_LOCK`). Pulls only syn/quote, already in the tree.
 ctor = "0.2"
-# `tests/daemon_mem.rs` implements the transport factory to hand the daemon an
-# in-memory network. Production code composes the seam; only tests build one.
-async-trait = "0.1"
 # Raw crypto primitives are TEST-ONLY at this layer: `identity_interop.rs` and
 # `frost_interop.rs` forge keys and drive ceremony rounds against the kernel's
 # public surface, which is exactly the kind of adversarial construction that has

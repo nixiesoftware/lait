@@ -2,7 +2,8 @@
 //!
 //! One binary, four roles:
 //!   * `lait daemon` is the identity-scoped host: one local process endpoint,
-//!     an Orbit directory/router, and zero or more in-process SpaceBridges.
+//!     an Orbit directory/router, identity-keyed transport hubs, and zero or
+//!     more in-process SpaceBridges.
 //!   * `lait <cmd>` is the cwd-scoped CLI client, driving that host over local
 //!     IPC with an explicit Orbit/World route.
 //!   * `lait serve` binds that same façade to loopback HTTP + SSE so a browser

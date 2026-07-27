@@ -23,7 +23,8 @@ The normal product model is deliberately small:
 - `lait <verb>` is the scriptable and interactive CLI. `--json` returns the
   same versioned DTOs used by other clients.
 - `lait daemon` is the identity-scoped process host. It lazily places Stations
-  for addressed Orbits and remains independent of any viewer.
+  for addressed Orbits, shares one transport endpoint per device identity, and
+  remains independent of any viewer.
 - `lait serve` is a client adapter exposing the same daemon contract over a
   loopback-only HTTP/SSE surface.
 - `lait mcp` exposes the same command contract to agents.
