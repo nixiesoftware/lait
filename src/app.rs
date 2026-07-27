@@ -580,13 +580,32 @@ async fn dispatch_world_client(
 
     match invocation {
         world_interface::CliInvocation::World(call) => {
-            let legacy = issues_app::decode_call(&call)
-                .map_err(|error| anyhow!(error.to_string()))
-                .and_then(issues_request_to_legacy)?;
-            if !crate::cli::confirm_destructive(home, &legacy, out).await {
-                std::process::exit(1);
+            if let Ok(request) = issues_app::decode_call(&call) {
+                let legacy = issues_request_to_legacy(request)?;
+                if !crate::cli::confirm_destructive(home, &legacy, out).await {
+                    std::process::exit(1);
+                }
             }
-            crate::cli::run_action(home, crate::client_action::ClientAction::world(call), out).await
+            let package = crate::world::client_packages()
+                .package_for_world(call.world())
+                .cloned()
+                .ok_or_else(|| anyhow!("no client package for World '{}'", call.world()))?;
+            let scope = crate::cli::scope_for_home(home);
+            let reply = crate::cli::world_reply_as_scoped(home, call.clone(), &scope, None).await?;
+            let value = package
+                .decode_reply(&call, reply)
+                .map_err(|error| anyhow!(error.to_string()))?;
+            match serde_json::from_value::<Response>(value.clone()) {
+                Ok(response) => {
+                    let code = crate::cli::print_response(&response, out);
+                    if code != 0 {
+                        std::process::exit(code);
+                    }
+                }
+                Err(_) if out.json => println!("{}", serde_json::to_string(&value)?),
+                Err(_) => println!("{}", serde_json::to_string_pretty(&value)?),
+            }
+            Ok(())
         }
         world_interface::CliInvocation::Local { operation, input } => match operation.as_str() {
             LOCAL_FOCUS => crate::cli::run_focus(home, out).await,

@@ -80,13 +80,13 @@ commands emit their package-owned opaque `WorldCall` directly. The typed
 product variants remain only for viewer, host-capability, and v3 daemon
 compatibility adapters.
 
-`WorldClientRegistry` composes one root CLI mount and collision-safe MCP prefix
-per installed World. The Issues package therefore owns `lait issues ...` and
-the `issues_*` MCP tools. Adding a Files World means registering another package
-with (for example) a `files` mount and `files_*` tools; it does not add another
-branch to the root CLI or MCP router. Duplicate Worlds, duplicate mounts,
-package-local tool names, and collisions with shell names fail during
-composition.
+`WorldClientRegistry` composes one root CLI mount, collision-safe MCP prefix,
+and opaque reply decoder per installed World. The Issues package therefore owns
+`lait issues ...`, the `issues_*` MCP tools, and their response codec. Adding a
+Files World means registering another package with (for example) a `files`
+mount and `files_*` tools; it does not add another branch to the root CLI or MCP
+router. Duplicate Worlds, duplicate mounts, package-local tool names, and
+collisions with shell names fail during composition.
 
 Trusted cwd and MCP adapters derive a pinned `ClientScope`; the web adapter
 applies catalog identity policy. Each constructs an explicit route and opens the

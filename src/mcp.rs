@@ -23,8 +23,7 @@ use rmcp::{
 use serde::Deserialize;
 
 use crate::{
-    cli::{client_action_as_scoped, client_as_scoped, scope_for_home},
-    client_action::ClientAction,
+    cli::{client_as_scoped, scope_for_home, world_reply_as_scoped},
     control::{ErrorKind, Request, Response},
     daemon::ClientScope,
 };
@@ -294,13 +293,27 @@ impl LaitMcp {
     ) -> Result<CallToolResult, McpError> {
         let response = match invocation {
             world_interface::CliInvocation::World(call) => {
-                client_action_as_scoped(
+                let package = crate::world::client_packages()
+                    .package_for_world(call.world())
+                    .cloned()
+                    .ok_or_else(|| {
+                        McpError::internal_error(
+                            format!("no client package for World '{}'", call.world()),
+                            None,
+                        )
+                    })?;
+                let reply = world_reply_as_scoped(
                     &self.home,
-                    ClientAction::world(call),
+                    call.clone(),
                     &self.scope,
                     self.act_as.as_deref(),
                 )
                 .await
+                .map_err(|error| McpError::internal_error(format!("{error:#}"), None))?;
+                let value = package
+                    .decode_reply(&call, reply)
+                    .map_err(|error| McpError::internal_error(error.to_string(), None))?;
+                return Self::tool_value(value);
             }
             world_interface::CliInvocation::Local { operation, input } => {
                 let request = match operation.as_str() {
@@ -346,6 +359,15 @@ impl LaitMcp {
             }
         };
         Self::tool_result(response)
+    }
+
+    fn tool_value(value: serde_json::Value) -> Result<CallToolResult, McpError> {
+        if let Ok(response) = serde_json::from_value::<Response>(value.clone()) {
+            return Self::tool_result(Ok(response));
+        }
+        let json = serde_json::to_string(&value)
+            .map_err(|error| McpError::internal_error(error.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
     fn tool_result(response: anyhow::Result<Response>) -> Result<CallToolResult, McpError> {

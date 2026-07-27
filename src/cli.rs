@@ -640,6 +640,26 @@ pub async fn client_action_as_scoped(
     }
 }
 
+/// Send one package-owned call without decoding its opaque reply in the shell.
+pub async fn world_reply_as_scoped(
+    home: &Path,
+    call: crate::orbital::WorldCall,
+    scope: &ClientScope,
+    act_as: Option<&str>,
+) -> Result<crate::orbital::WorldReply> {
+    let address = orbit_address_for_home(home)?;
+    scope.authorize(&address)?;
+    let route = ControlRoute::World {
+        address,
+        world: call.world().as_str().to_string(),
+    };
+    ensure_daemon(home).await?;
+    crate::daemon::LaitDaemonClient::current()?
+        .call_world(route, call, act_as)
+        .await
+        .map_err(|error| CliError::unreachable(format!("{error:#}")).into())
+}
+
 /// Send through the current Lait daemon only if it is already running.
 ///
 /// This preserves best-effort surfaces such as live config reload and the

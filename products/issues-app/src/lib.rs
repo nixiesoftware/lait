@@ -21,5 +21,14 @@ pub fn package() -> Result<world_interface::WorldClientPackage, world_interface:
         world_interface::CliMount::new("issues", cli::command, cli::parse),
         mcp::tools(),
         "Work with issues, projects, planning, roles, and workflows in the selected Orbit.",
+        decode_client_reply,
     )
+}
+
+fn decode_client_reply(
+    call: &world_bridge::WorldCall,
+    reply: world_bridge::WorldReply,
+) -> Result<serde_json::Value, world_interface::InterfaceError> {
+    decode_reply(call, reply)
+        .map_err(|error| world_interface::InterfaceError::new(error.to_string()))
 }

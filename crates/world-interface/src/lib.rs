@@ -11,7 +11,7 @@ use std::fmt;
 use clap::{ArgMatches, Command};
 use replica::ids::WorldId;
 use serde_json::Value;
-use world_bridge::WorldCall;
+use world_bridge::{WorldCall, WorldReply};
 
 /// A client-surface declaration or dispatch failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,6 +82,7 @@ impl CliMount {
 
 pub type McpSchemaFactory = fn() -> Value;
 pub type McpCallFactory = fn(Value) -> Result<CliInvocation, InterfaceError>;
+pub type WorldReplyDecoder = fn(&WorldCall, WorldReply) -> Result<Value, InterfaceError>;
 
 /// One product-local MCP tool. The registry prefixes `name` with the CLI mount,
 /// so independently developed Worlds cannot both publish a global `list`.
@@ -132,6 +133,7 @@ pub struct WorldClientPackage {
     cli: CliMount,
     mcp_tools: Vec<McpTool>,
     mcp_instructions: &'static str,
+    decode_reply: WorldReplyDecoder,
 }
 
 impl WorldClientPackage {
@@ -140,6 +142,7 @@ impl WorldClientPackage {
         cli: CliMount,
         mcp_tools: Vec<McpTool>,
         mcp_instructions: &'static str,
+        decode_reply: WorldReplyDecoder,
     ) -> Result<Self, InterfaceError> {
         validate_name("CLI mount", cli.name())?;
         let mut local_tools = BTreeSet::new();
@@ -158,6 +161,7 @@ impl WorldClientPackage {
             cli,
             mcp_tools,
             mcp_instructions,
+            decode_reply,
         })
     }
 
@@ -175,6 +179,14 @@ impl WorldClientPackage {
 
     pub fn mcp_instructions(&self) -> &'static str {
         self.mcp_instructions
+    }
+
+    pub fn decode_reply(
+        &self,
+        call: &WorldCall,
+        reply: WorldReply,
+    ) -> Result<Value, InterfaceError> {
+        (self.decode_reply)(call, reply)
     }
 }
 
@@ -263,6 +275,10 @@ impl WorldClientRegistry {
         self.packages.get(world)
     }
 
+    pub fn package_for_world(&self, world: &WorldId) -> Option<&WorldClientPackage> {
+        self.packages.get(world.as_str())
+    }
+
     pub fn mcp_tools(&self) -> impl Iterator<Item = MountedMcpTool<'_>> {
         self.packages.values().flat_map(mounted_tools)
     }
@@ -342,6 +358,17 @@ mod tests {
         Ok(CliInvocation::World(notes_call(Value::Null)?))
     }
 
+    fn decode_json_reply(call: &WorldCall, reply: WorldReply) -> Result<Value, InterfaceError> {
+        reply
+            .validate_for(call)
+            .map_err(|error| InterfaceError::new(error.to_string()))?;
+        let payload = reply
+            .into_result()
+            .map_err(|error| InterfaceError::new(error.to_string()))?;
+        serde_json::from_slice(&payload)
+            .map_err(|error| InterfaceError::new(format!("decode reply: {error}")))
+    }
+
     fn package(world: &str, mount: &'static str) -> WorldClientPackage {
         let (cli, call) = if mount == "notes" {
             (
@@ -359,6 +386,7 @@ mod tests {
             cli,
             vec![McpTool::new("list", "List objects.", empty_schema, call)],
             "Work with files.",
+            decode_json_reply,
         )
         .unwrap()
     }
@@ -377,6 +405,20 @@ mod tests {
         assert_eq!(mounts, vec!["files", "notes"]);
         let tools: Vec<_> = registry.mcp_tools().map(|tool| tool.public_name).collect();
         assert_eq!(tools, vec!["files_list", "notes_list"]);
+
+        let call = files_call(Value::Null).unwrap();
+        let reply = WorldReply::ok(
+            &call,
+            serde_json::to_vec(&serde_json::json!(["a.txt"])).unwrap(),
+        );
+        assert_eq!(
+            registry
+                .package_for_world(call.world())
+                .unwrap()
+                .decode_reply(&call, reply)
+                .unwrap(),
+            serde_json::json!(["a.txt"])
+        );
     }
 
     #[test]
