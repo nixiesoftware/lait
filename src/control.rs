@@ -834,7 +834,7 @@ pub enum Request {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "scope", rename_all = "snake_case")]
 pub enum ControlRoute {
-    /// Address the process-level catalog/supervisor.
+    /// Address the process-level Orbit directory/control router.
     Daemon,
     /// Address Space mechanics, Station, observations, or Space lifecycle.
     Space {

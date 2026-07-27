@@ -349,7 +349,7 @@ fn mark_verified(home: &Path) {
 ///
 /// The memo is only sound because a CLI process resolves one store and exits: it
 /// cannot outlive the daemon it verified, so re-probing would be pure cost. A
-/// long-lived supervisor breaks that assumption — `lait serve` can watch a daemon
+/// long-lived ControlRouter breaks that assumption — `lait serve` can watch a daemon
 /// stop and then be asked for it again, and a stale entry there does not mean
 /// "already fine", it means **"never respawn this"**, which is exactly wrong. The
 /// symptom is a connect error that no retry can clear.
@@ -365,7 +365,7 @@ pub(crate) fn forget_verified(home: &Path) {
 ///
 /// Uses whatever identity this process would use — i.e. `$LAIT_HOME` if set,
 /// else the global `secret.key`. That is right for every caller that resolved
-/// its own store, which is every CLI invocation. A caller that supervises
+/// its own store, which is every CLI invocation. A router that addresses
 /// *several* homes at once cannot rely on its own env and must say which
 /// identity it means: see [`ensure_daemon_as`].
 pub async fn ensure_daemon(home: &Path) -> Result<()> {

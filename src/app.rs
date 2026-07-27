@@ -535,8 +535,8 @@ async fn dispatch(specs: &[cmdspec::Spec], matches: &ArgMatches, out: Out) -> Re
                 // The current compatibility runner hosts one SpaceBridge behind
                 // the per-home control socket. `open` runs the preflight legacy
                 // detector before anything binds. Process placement is not part
-                // of Space semantics; the general Lait daemon can supervise the
-                // same bridge in-process.
+                // of Space semantics; the general Lait daemon can place the same
+                // bridge in-process.
                 crate::orbital::run_space_bridge(home, &crate::transport::DefaultFactory).await?;
                 std::process::exit(0);
             }

@@ -7,7 +7,7 @@
 //!     control channel.
 //!   * `lait serve` binds that same façade to loopback HTTP + SSE so a browser
 //!     can be a client too ([`serve`], `docs/UI.md`). The only surface global
-//!     to the machine, it lazily supervises SpaceBridge attachments.
+//!     to the machine, it uses the host-plane ControlRouter across local Orbits.
 //!   * `lait mcp` exposes the same Layer-B façade as MCP tools for an agent.
 //!
 //! The crate is split lib + bin so integration tests, doctests, and the MCP/DTO

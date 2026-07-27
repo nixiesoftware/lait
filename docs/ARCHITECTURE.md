@@ -14,19 +14,20 @@ without a central server.
 
 ```text
 LaitDaemon
-  ├─ OrbitCatalog
-  └─ StationSupervisor
-       └─ local Orbit
+  ├─ OrbitDirectory
+  └─ ControlRouter
+       └─ OrbitOccupancy (keyed by local Orbit)
             ├─ vacant
-            └─ occupied by a Station
-                 ├─ Mechanics
-                 ├─ Replica
-                 │    └─ Fabric
-                 ├─ Neighbor registry and Contact
-                 └─ exposed through a SpaceBridge
-                      └─ WorldBridgeRegistry
-                           └─ WorldBridge
-                                └─ docked Sessions
+            └─ StationPlacement
+                 └─ Station occupying the Orbit
+                      ├─ Mechanics
+                      ├─ Replica
+                      │    └─ Fabric
+                      ├─ Neighbor registry and Contact
+                      └─ exposed through a SpaceBridge
+                           └─ WorldBridgeRegistry
+                                └─ WorldBridge
+                                     └─ docked Sessions
 ```
 
 An Orbit is one durable local participation in a Space. It persists whether it
@@ -49,16 +50,19 @@ In the current compatibility deployment, trusted client adapters derive a
 `ClientScope` and authorize an explicit route before opening the historical
 per-home channel; the receiving SpaceBridge independently verifies that its
 Orbit and Space match the route. The target LaitDaemon moves that same trusted
-scope check to the connection boundary, then asks the StationSupervisor to
-place or reuse the Station in the addressed Orbit and dispatches to one terminal
-owner: lifecycle, Mechanics, Station, observation, or a WorldBridge.
+scope check to the connection boundary, then asks the ControlRouter to resolve
+the Orbit, place or reuse its Station host, and dispatch to one terminal owner:
+lifecycle, Mechanics, Station, observation, or a WorldBridge. `OrbitDirectory`
+discovers durable bindings; `StationPlacement` records where an active Station
+is hosted; neither is a second lifecycle owner.
 
 Bridges are logical boundaries, not mandatory processes. The target deployment
-is one per-user LaitDaemon supervising zero or more Station placements and their
+is one per-user LaitDaemon routing to zero or more Station placements and their
 in-process SpaceBridges. A SpaceBridge or WorldBridge may move to a worker
 process for stronger fault or plugin isolation without changing its route or
-client contract. During the transition, the `lait daemon` compatibility runner
-process-hosts one SpaceBridge behind its historical per-home socket.
+client contract. During the transition, `StationPlacement` selects the
+compatibility process host and `lait daemon` process-hosts one SpaceBridge
+behind its historical per-home socket.
 
 ## 2. Crate boundaries
 

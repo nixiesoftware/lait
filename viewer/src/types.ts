@@ -400,9 +400,9 @@ export interface RecoveryStatus {
     | { state: "unreadable"; detail: RecoveryArtifactFailure };
 }
 
-// ---- the supervisor surface (serve-level, not control-plane) ----------------
+// ---- the Orbit directory projection (serve-level, not control-plane) --------
 
-/** Whose key a space's daemon signs with (`serve::spaces::SpaceIdentity`). */
+/** Whose key a placed Station signs with (`daemon::StationIdentity`). */
 export type SpaceIdentity = { kind: "own" } | { kind: "agent"; name: string };
 
 export interface ProjectBrief {

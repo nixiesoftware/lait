@@ -1,10 +1,12 @@
 //! The orbital lifecycle handles: [`Runtime`], [`Orbit`], and [`Station`].
 //!
-//! Orbit and Station are the same durable relationship in mutually exclusive
-//! states. [`Orbit::activate`] consumes the Orbit and returns a [`Station`];
-//! [`Station::go_dormant`] consumes the Station and returns the Orbit. Runtime is
-//! cloneable and owns configuration + registrations; it owns no active Space
-//! state. Orbit and Station are **not** cloneable.
+//! An Orbit is the durable relationship and persists while vacant or occupied.
+//! [`Orbit::activate`] consumes its vacant handle and returns a [`Station`];
+//! [`Station::go_dormant`] consumes the active handle and returns a vacant Orbit
+//! handle. The consuming API expresses exclusive operational ownership, not a
+//! conversion of a Station into an Orbit. Runtime is cloneable and owns
+//! configuration + registrations; it owns no active Space state. Orbit and
+//! Station are **not** cloneable.
 //!
 //! The durable footprint is real: an Orbit is backed by an on-disk store
 //! ([`crate::store`]) and holds the exclusive store lock (operational
@@ -363,10 +365,11 @@ impl Orbit {
         self.epoch
     }
 
-    /// Activate this Orbit into a [`Station`], consuming it. Activation first
-    /// durably increments and fsyncs the store epoch (failing closed on
-    /// overflow), then transfers the store lock into the live Station. Valid
-    /// offline; grants no new Space authority.
+    /// Occupy this Orbit with a [`Station`], consuming the vacant handle.
+    /// Activation first durably increments and fsyncs the store epoch (failing
+    /// closed on overflow), then transfers the store lock into the live Station.
+    /// The durable Orbit remains the same participation. Valid offline; grants
+    /// no new Space authority.
     pub fn activate(self, options: ActivationOptions) -> Result<Station, LifecycleError> {
         let drain_deadline = if options.drain_deadline.is_zero() {
             DEFAULT_DRAIN_DEADLINE

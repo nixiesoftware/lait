@@ -44,7 +44,7 @@ pub struct DaemonChild {
 /// child our own env block, so an env override there would have to be
 /// process-wide. `None` means "inherit whatever identity this process would use",
 /// which is right for every caller that resolved its own store — i.e. every CLI
-/// invocation. `lait serve` is the exception: it supervises several homes at once
+/// invocation. `lait serve` is the exception: it routes several homes at once
 /// and cannot speak for them through its own env.
 pub fn spawn(
     exe: &Path,

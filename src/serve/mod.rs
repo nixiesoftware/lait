@@ -9,11 +9,11 @@
 //!
 //! Two things follow, and they are the whole design:
 //!
-//! **This is currently the multi-Space supervision seam.** The compatibility
-//! control channel is still keyed by home, while the browser is a picker over
-//! all registered Spaces. [`spaces::Supervisor`] already supplies catalog-only
-//! listing, lazy attachment, and fan-in; the general Lait daemon promotes that
-//! seam from process-backed attachments to active SpaceBridges.
+//! **This is a client of the host plane.** The compatibility control channel is
+//! still keyed by home, while the browser is a picker over all registered
+//! Orbits. [`crate::daemon::OrbitDirectory`] supplies discovery and
+//! [`crate::daemon::ControlRouter`] supplies lazy Station placement, routing,
+//! and doorbell fan-in.
 //!
 //! **The socket was the authentication.** Binding the same façade to a TCP port
 //! removes the OS permission check that made auth unnecessary, and adds a caller
@@ -50,8 +50,8 @@ use tokio_stream::wrappers::{errors::BroadcastStreamRecvError, BroadcastStream};
 use tokio_stream::StreamExt;
 
 use crate::control::{ErrorKind, Request};
+use crate::daemon::{ControlRouter, OrbitDirectory, StationIdentity};
 use auth::{Guard, Refusal};
-use spaces::Supervisor;
 
 /// The default port. Fixed rather than ephemeral so the URL is predictable and
 /// the `Origin` allowlist has something stable to name; a collision is reported
@@ -74,7 +74,7 @@ fn cookie_name(port: u16) -> String {
 
 struct App {
     guard: Guard,
-    sup: Supervisor,
+    control: ControlRouter,
     cookie: String,
 }
 
@@ -93,8 +93,8 @@ struct App {
 /// The line is emitted **before** the server starts accepting, so a parent process
 /// can read one line and know it is safe to connect.
 pub async fn run(port: u16, open: bool, json: bool) -> Result<()> {
-    // Identity scoping, resolved once at startup — see `spaces::scope` for why
-    // `$LAIT_HOME` is the axis that matters.
+    // Identity scoping, resolved once at startup. OrbitDirectory uses
+    // `$LAIT_HOME` as the self-contained identity boundary.
     let identity = crate::config::identity_dir()?;
     let self_contained = std::env::var_os("LAIT_HOME").is_some();
     let agents_base = crate::registry::agents_base(&crate::config::config_root()?);
@@ -112,7 +112,7 @@ pub async fn run(port: u16, open: bool, json: bool) -> Result<()> {
     let token = mint_token();
     let app = Arc::new(App {
         guard: Guard::new(token.clone(), bound.port()),
-        sup: Supervisor::new(identity, agents_base, self_contained),
+        control: ControlRouter::new(OrbitDirectory::new(identity, agents_base, self_contained)),
         cookie: cookie_name(bound.port()),
     });
 
@@ -272,7 +272,10 @@ async fn static_asset(uri: axum::http::Uri) -> Response {
 }
 
 async fn list_spaces(State(app): State<Arc<App>>) -> Response {
-    Json(serde_json::json!({ "spaces": app.sup.list().await })).into_response()
+    Json(serde_json::json!({
+        "spaces": spaces::list(app.control.directory()).await
+    }))
+    .into_response()
 }
 
 #[derive(Deserialize)]
@@ -304,7 +307,7 @@ struct RpcQuery {
 ///    agent's name in the message. Reads through an agent's daemon are exactly the
 ///    observability they were scoped in for; a *write* would be signed by the agent
 ///    and land under its name. If you are a member of that space, write through
-///    your own node and sign as yourself — see [`spaces::scope`].
+///    your own node and sign as yourself.
 /// 3. **Destructive verbs keep the CLI's question.** `confirm_destructive` is a TTY
 ///    affordance: it refuses under `--json` because a pipe cannot be asked. A browser
 ///    can — it has a modal — so rather than bypass the gate or inherit the pipe's
@@ -332,7 +335,7 @@ async fn rpc(
             .into_response();
     }
 
-    let identity = match app.sup.resolve(&id) {
+    let identity = match app.control.resolve(&id) {
         Ok(resolved) => resolved.identity,
         Err(e) => {
             return (
@@ -343,7 +346,7 @@ async fn rpc(
         }
     };
 
-    if let spaces::SpaceIdentity::Agent { name } = &identity {
+    if let StationIdentity::Agent { name } = &identity {
         if !policy::is_read(&req) {
             return (
                 StatusCode::FORBIDDEN,
@@ -372,7 +375,7 @@ async fn rpc(
         }
     }
 
-    match app.sup.request(&id, &req).await {
+    match app.control.request(&id, &req).await {
         Ok(resp) => Json(resp).into_response(),
         Err(e) => (
             StatusCode::BAD_REQUEST,
@@ -392,7 +395,7 @@ async fn rpc(
 async fn events(
     State(app): State<Arc<App>>,
 ) -> Sse<impl tokio_stream::Stream<Item = Result<Event, std::convert::Infallible>>> {
-    let stream = BroadcastStream::new(app.sup.subscribe()).map(|r| {
+    let stream = BroadcastStream::new(app.control.subscribe()).map(|r| {
         Ok(match r {
             Ok(sd) => Event::default()
                 .event("doorbell")
@@ -432,7 +435,7 @@ mod tests {
     use axum::http::Request as HttpRequest;
     use tower::ServiceExt;
 
-    /// The real router, over a supervisor scoped to a directory with no spaces.
+    /// The real HTTP router, over an Orbit directory with no spaces.
     ///
     /// Every case below is refused (or served) by `gate` and the embedded-asset
     /// fallback, neither of which touches a daemon or the registry — so these run
@@ -441,7 +444,7 @@ mod tests {
         let nowhere = std::path::PathBuf::from("/nonexistent-for-tests");
         router(Arc::new(App {
             guard: Guard::new(token.into(), 7717),
-            sup: Supervisor::new(nowhere.clone(), nowhere, true),
+            control: ControlRouter::new(OrbitDirectory::new(nowhere.clone(), nowhere, true)),
             cookie: cookie_name(7717),
         }))
     }
