@@ -20,12 +20,11 @@ fn read(path: &Path) -> String {
 /// Whether a crate's manifest lists a dependency named `dep` (a crude but exact
 /// check: a line whose first token, before `=` or whitespace, equals `dep`).
 fn manifest_lists_dep(crate_dir: &str, dep: &str) -> bool {
-    let manifest = read(
-        &workspace_root()
-            .join("crates")
-            .join(crate_dir)
-            .join("Cargo.toml"),
-    );
+    manifest_at(&workspace_root().join("crates").join(crate_dir), dep)
+}
+
+fn manifest_at(package_dir: &Path, dep: &str) -> bool {
+    let manifest = read(&package_dir.join("Cargo.toml"));
     manifest.lines().any(|line| {
         let line = line.trim();
         let name = line
@@ -35,6 +34,41 @@ fn manifest_lists_dep(crate_dir: &str, dep: &str) -> bool {
             .trim_matches('"');
         name == dep
     })
+}
+
+#[test]
+fn issues_semantics_and_client_application_are_separate_packages() {
+    let products = workspace_root().join("products");
+    let semantic = products.join("issues");
+    let application = products.join("issues-app");
+
+    for forbidden in ["clap", "world-interface", "world-bridge"] {
+        assert!(
+            !manifest_at(&semantic, forbidden),
+            "the semantic IssuesWorld package must not depend on {forbidden}"
+        );
+    }
+    for required in ["issues", "world-interface", "world-bridge"] {
+        assert!(
+            manifest_at(&application, required),
+            "the Issues application package must depend on {required}"
+        );
+    }
+    assert!(
+        !manifest_at(&application, "lait"),
+        "the Issues application package must not depend back on the root shell"
+    );
+
+    let application_source = read(&application.join("src").join("lib.rs"))
+        + &read(&application.join("src").join("cli.rs"))
+        + &read(&application.join("src").join("mcp.rs"))
+        + &read(&application.join("src").join("protocol.rs"));
+    for forbidden in ["crate::control", "crate::daemon", "crate::cmdspec"] {
+        assert!(
+            !application_source.contains(forbidden),
+            "root-shell dependency `{forbidden}` leaked into issues-app"
+        );
+    }
 }
 
 /// Every `.rs` file under a crate's `src/`.

@@ -320,16 +320,44 @@ mod tests {
         Ok(CliInvocation::World(files_call(Value::Null)?))
     }
 
+    fn notes_call(_: Value) -> Result<WorldCall, InterfaceError> {
+        WorldCall::new(
+            WorldId::parse("com.example.notes").unwrap(),
+            "notes.list",
+            1,
+            vec![],
+        )
+        .map_err(|error| InterfaceError::new(error.to_string()))
+    }
+
+    fn notes_invocation(input: Value) -> Result<CliInvocation, InterfaceError> {
+        notes_call(input).map(CliInvocation::World)
+    }
+
+    fn notes_command() -> Command {
+        Command::new("notes").subcommand(Command::new("list"))
+    }
+
+    fn notes_parse(_: &ArgMatches) -> Result<CliInvocation, InterfaceError> {
+        Ok(CliInvocation::World(notes_call(Value::Null)?))
+    }
+
     fn package(world: &str, mount: &'static str) -> WorldClientPackage {
+        let (cli, call) = if mount == "notes" {
+            (
+                CliMount::new(mount, notes_command, notes_parse),
+                notes_invocation as McpCallFactory,
+            )
+        } else {
+            (
+                CliMount::new(mount, files_command, files_parse),
+                files_invocation as McpCallFactory,
+            )
+        };
         WorldClientPackage::new(
             WorldId::parse(world).unwrap(),
-            CliMount::new(mount, files_command, files_parse),
-            vec![McpTool::new(
-                "list",
-                "List files.",
-                empty_schema,
-                files_invocation,
-            )],
+            cli,
+            vec![McpTool::new("list", "List objects.", empty_schema, call)],
             "Work with files.",
         )
         .unwrap()

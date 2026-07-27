@@ -336,11 +336,11 @@ Or add it to `.mcp.json` by hand:
 }
 ```
 
-Tools exposed: the full issue surface — `issue_new`, `issue_edit`,
-`issue_move`, `assign`, `label`, `comment`, `issue_delete`, `issue_view`, `list`,
-`board`, `history`, `project_new`, `project_list`, `label_new`, `label_list`,
-`activity`, `member_add`, `member_remove`, `key_rotate`, `members` — plus
-transport (`status`, `my_id`, `invite_ticket`, `join_room`, `connect`, `who`).
+Tools exposed: the full namespaced issue surface — `issues_new`, `issues_edit`,
+`issues_move`, `issues_assign`, `issues_label`, `issues_comment`,
+`issues_delete`, `issues_view`, `issues_list`, `issues_board`, history,
+projects, labels, roles, access, workflows and activity — plus shell-owned
+membership, diagnostics, identity, peer discovery and sync.
 Each returns the **same versioned JSON DTO** the CLI `--json` emits; a build-gate
 parity test keeps the agent and human surfaces in lock-step.
 

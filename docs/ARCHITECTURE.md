@@ -42,7 +42,10 @@ lait serve
   └─ HTTP/SSE adapter -> LaitDaemon
 
 cwd CLI / pinned MCP
-  └─ explicit Orbit/World route -> LaitDaemon
+  └─ WorldClientRegistry
+       ├─ shell/Mechanics surfaces
+       └─ installed World client packages
+            └─ explicit Orbit/World route -> LaitDaemon
 ```
 
 An Orbit is one durable local participation in a Space. It persists whether it
@@ -72,10 +75,18 @@ composition. Product commands live only below their World namespace, such as
 Command parsing produces a `ClientAction` whose terminal target is already
 `Daemon`, `Space`, or `World { world }`. Orbit resolution later completes that
 target into a wire `ControlRoute`; it does not reclassify product intent. The
-current action still carries the historical typed `Request` payload for
-CLI/MCP/viewer and v3 daemon compatibility. Product command packages will
-replace that payload with their opaque `WorldCall` without changing the shell's
-navigation or routing model.
+shell commands still carry the historical typed `Request`; installed product
+commands emit their package-owned opaque `WorldCall` directly. The typed
+product variants remain only for viewer, host-capability, and v3 daemon
+compatibility adapters.
+
+`WorldClientRegistry` composes one root CLI mount and collision-safe MCP prefix
+per installed World. The Issues package therefore owns `lait issues ...` and
+the `issues_*` MCP tools. Adding a Files World means registering another package
+with (for example) a `files` mount and `files_*` tools; it does not add another
+branch to the root CLI or MCP router. Duplicate Worlds, duplicate mounts,
+package-local tool names, and collisions with shell names fail during
+composition.
 
 Trusted cwd and MCP adapters derive a pinned `ClientScope`; the web adapter
 applies catalog identity policy. Each constructs an explicit route and opens the
@@ -170,14 +181,19 @@ comms      transport, streams, discovery, gossip, and presence mechanisms
 runtime    Orbit/Station lifecycle, Contacts, Worlds, Sessions, observations
 world-bridge
            versioned opaque application calls and object-safe World handlers
+world-interface
+           composable CLI mounts, MCP descriptors, and namespace validation
 issues     IssuesWorld schemas, semantic model, product DTOs and identifiers
-lait       orbital navigation shell, local control adapters, and CLI/MCP/viewer
-           composition
+issues-app Issues application protocol plus CLI and MCP client interfaces
+lait       orbital navigation shell, host-capability adapters, viewer, and
+           application composition
 ```
 
 Dependencies point inward through these boundaries. Product concepts such as
 issues, projects, comments, roles, and workflows belong to the independently
-packaged `products/issues` crate and the outer `lait` shell that presents them.
+packaged `products/issues` and `products/issues-app` crates. The outer `lait`
+shell mounts those packages but does not declare their command grammar or MCP
+schemas.
 Mechanics does not interpret product roles. Fabric does not know authority,
 transport, or product meaning. Comms moves bytes but cannot legitimize them.
 
@@ -304,6 +320,15 @@ the crash-resumable `InitializeTracker` record, and join materialization;
 `orbital` retains compatibility re-exports but contains no IssuesWorld
 construction or bootstrap implementation.
 
+The sibling `products/issues-app` package owns the `issues.control` v1 codec,
+query/command classification, `lait issues` command tree, and all 38 Issues MCP
+descriptors. It depends on the semantic package and the generic bridge/client
+interfaces, never back on `lait`. Most client operations become `WorldCall`s at
+parse time. Inbox projection, access assignment, git work-state behavior,
+attachment filesystem I/O, and implementation activation are explicit named
+host-capability calls: their interface remains product-owned while the shell
+supplies authority that a semantic World must not hold.
+
 A Session binds a local identity to one World at an active Station. Queries and
 mutations are authorized independently. Query results are computed from one
 Manifest root and authority frontier; a derived cache must be keyed by that
@@ -318,19 +343,14 @@ legitimate protected material opaquely.
 IssuesWorld (`com.lait.issues`) is the bundled reference World. It has no private
 architectural path unavailable to another conforming World.
 
-The semantic package boundary is not yet the complete application carve. The
-issue-shaped `Request`/`Response` schema remains a compatibility surface for the
-current CLI, MCP, viewer, and historical per-Orbit daemon, but it no longer
-crosses the generic WorldBridge boundary. Issues-specific status/inbox/doorbell
-projections and role-assignment planning still live in SpaceBridge/Mechanics.
-The Issues application codec, `IssueRouter`, product lifecycle module, and
-client adapters also still live in the root application. The CLI now supplies
-the neutral navigation/`ClientAction` boundary and a visible `issues` namespace,
-but the Issues command specs behind that namespace remain in the root registry.
-Moving those specs and their codec/router into the Issues application package is
-the next product cut. Product-owned projection/IAM hooks then complete the
-prerequisites for moving that whole application—not just its already-acyclic
-semantic model—to another repository.
+The issue-shaped `Request`/`Response` schema remains a compatibility surface for
+the viewer, explicit host-capability adapters, and historical per-Orbit daemon;
+it no longer defines the CLI/MCP grammar or crosses the generic WorldBridge
+boundary. `IssueRouter`, product lifecycle/formation, human response rendering,
+Issues-specific status/inbox/doorbell projections, and role-assignment planning
+still live in the root application or SpaceBridge/Mechanics. Those are the
+remaining ownership cuts before the whole Issues application—not only its
+already-acyclic semantic and client packages—can move to another repository.
 
 ## 6. Communication model
 
