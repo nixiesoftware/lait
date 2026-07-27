@@ -2942,6 +2942,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "windows-sys 0.61.2",
+ "world-bridge",
  "zip",
 ]
 
@@ -6812,6 +6813,17 @@ dependencies = [
  "thiserror 2.0.18",
  "windows",
  "windows-core",
+]
+
+[[package]]
+name = "world-bridge"
+version = "0.6.0"
+dependencies = [
+ "data-encoding",
+ "replica",
+ "runtime",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

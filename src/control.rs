@@ -24,6 +24,7 @@ use crate::dto::{
     ActivityEvent, BoardView, Candidate, GraphView, InboxEntry, IssueView, LabelDto, MemberDto,
     MemberLogEntry, ProjectDto, Row, SeedDto,
 };
+use crate::orbital::{WorldCall, WorldReply};
 
 /// The control-plane protocol version this build **speaks** — CLI, web, and MCP
 /// ↔ daemon channel, exchanged in the [`Request::Hello`] handshake.
@@ -48,7 +49,13 @@ use crate::dto::{
 /// expected Space. A v2 per-home route selected the Orbit only out-of-band via
 /// its socket, which cannot address two local Orbits in the same Space through
 /// one future daemon endpoint.
-pub const CONTROL_PROTOCOL_VERSION: u32 = 3;
+///
+/// **v4:** product calls use a versioned opaque [`WorldCall`] envelope at the
+/// identity-scoped daemon. The daemon still accepts v3's typed issue requests
+/// and translates them at its compatibility edge.
+pub const CONTROL_PROTOCOL_VERSION: u32 = 4;
+/// First local-control version that carries [`WorldCall`].
+pub const WORLD_CALL_CONTROL_PROTOCOL: u32 = 4;
 
 /// The oldest control protocol a client still talks to. Raising this retires a
 /// version; the gap to [`CONTROL_PROTOCOL_VERSION`] is the mixed-version window.
@@ -912,6 +919,29 @@ impl ClientRequest {
             if_running: true,
             act_as: None,
             request,
+        }
+    }
+}
+
+/// Product-neutral request sent to the identity-scoped daemon.
+///
+/// Unlike [`ClientRequest`], this shape is never sent to a historical per-Orbit
+/// daemon. Its explicit `call` field also lets a v4 host distinguish it from the
+/// flattened v3 request schema before decoding any product payload.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorldClientRequest {
+    pub route: ControlRoute,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub act_as: Option<String>,
+    pub call: WorldCall,
+}
+
+impl WorldClientRequest {
+    pub fn new(route: ControlRoute, call: WorldCall, act_as: Option<String>) -> Self {
+        Self {
+            route,
+            act_as,
+            call,
         }
     }
 }
@@ -1856,6 +1886,36 @@ async fn probe_inner(home: &Path) -> Probe {
     }
 }
 
+/// Read and validate the peer's control protocol version.
+///
+/// Clients use the exact negotiated value to decide whether to send the v4
+/// generic World envelope or the still-supported v3 typed compatibility shape.
+pub async fn peer_protocol_version(home: &Path) -> Result<u32> {
+    let name = control_name(home)?;
+    let stream = Stream::connect(name)
+        .await
+        .context("connect to daemon for protocol handshake")?;
+    let line = exchange_raw(
+        stream,
+        &ClientRequest::plain(Request::Hello {
+            protocol_version: CONTROL_PROTOCOL_VERSION,
+        }),
+    )
+    .await?;
+    let value: serde_json::Value =
+        serde_json::from_str(&line).context("decode protocol handshake")?;
+    if value.get("kind").and_then(|kind| kind.as_str()) != Some("hello") {
+        return Err(anyhow!("daemon did not answer the protocol handshake"));
+    }
+    let version = value
+        .get("protocol_version")
+        .and_then(|version| version.as_u64())
+        .and_then(|version| u32::try_from(version).ok())
+        .ok_or_else(|| anyhow!("daemon hello omitted a valid protocol version"))?;
+    check_control_protocol(version)?;
+    Ok(version)
+}
+
 /// Send one request to the daemon and read one response (one-shot path), as the
 /// primary (human) identity.
 pub async fn request(home: &Path, req: &Request) -> Result<Response> {
@@ -1906,6 +1966,25 @@ pub async fn request_routed_if_running(
     .await
 }
 
+/// Send one product-neutral World call through the identity-scoped daemon.
+pub async fn call_world(
+    home: &Path,
+    route: ControlRoute,
+    call: WorldCall,
+    act_as: Option<&str>,
+) -> Result<WorldReply> {
+    let name = control_name(home)?;
+    let stream = Stream::connect(name)
+        .await
+        .context("connect to Lait daemon")?;
+    let line = exchange_raw(
+        stream,
+        &WorldClientRequest::new(route, call, act_as.map(str::to_string)),
+    )
+    .await?;
+    serde_json::from_str(line.trim()).context("decode World reply")
+}
+
 /// Write one request and read one response on an already-open stream.
 async fn exchange(stream: Stream, env: &ClientRequest) -> Result<Response> {
     let line = exchange_raw(stream, env).await?;
@@ -1917,7 +1996,7 @@ async fn exchange(stream: Stream, env: &ClientRequest) -> Result<Response> {
 /// Split from [`exchange`] for [`probe`]: typed decoding is exactly what a
 /// version-mismatched daemon breaks, so the handshake has to look at the bytes
 /// before serde gets an opinion about them.
-async fn exchange_raw(stream: Stream, env: &ClientRequest) -> Result<String> {
+async fn exchange_raw<T: Serialize>(stream: Stream, env: &T) -> Result<String> {
     let (read_half, mut write_half) = tokio::io::split(stream);
     let mut line = serde_json::to_string(env).context("encode request")?;
     line.push('\n');

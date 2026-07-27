@@ -19,9 +19,10 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 use crate::config::{acquire_daemon_lock, DaemonLock};
 use crate::control::{
-    self, ClientRequest, ControlRoute, Request, Response, CONTROL_PROTOCOL_VERSION,
+    self, ClientRequest, ControlRoute, Request, Response, WorldClientRequest,
+    CONTROL_PROTOCOL_VERSION, WORLD_CALL_CONTROL_PROTOCOL,
 };
-use crate::orbital::WorldPackages;
+use crate::orbital::{WorldCall, WorldCallErrorCode, WorldPackages, WorldReply};
 #[cfg(test)]
 use crate::transport::TransportFactory;
 
@@ -31,17 +32,22 @@ use super::{ControlRouter, OrbitDirectory, OrbitDoorbell};
 #[derive(Debug, Clone)]
 pub struct LaitDaemonClient {
     home: PathBuf,
+    protocol: Arc<tokio::sync::OnceCell<u32>>,
 }
 
 impl LaitDaemonClient {
     pub fn current() -> Result<Self> {
         Ok(Self {
             home: crate::config::lait_daemon_home()?,
+            protocol: Arc::new(tokio::sync::OnceCell::new()),
         })
     }
 
     pub fn at(home: PathBuf) -> Self {
-        Self { home }
+        Self {
+            home,
+            protocol: Arc::new(tokio::sync::OnceCell::new()),
+        }
     }
 
     pub fn home(&self) -> &Path {
@@ -49,7 +55,20 @@ impl LaitDaemonClient {
     }
 
     pub async fn probe(&self) -> control::Probe {
-        control::probe(&self.home).await
+        let probe = control::probe(&self.home).await;
+        if matches!(&probe, control::Probe::Healthy) {
+            if let Ok(version) = control::peer_protocol_version(&self.home).await {
+                let _ = self.protocol.set(version);
+            }
+        }
+        probe
+    }
+
+    async fn protocol_version(&self) -> Result<u32> {
+        self.protocol
+            .get_or_try_init(|| control::peer_protocol_version(&self.home))
+            .await
+            .copied()
     }
 
     pub async fn request(
@@ -58,7 +77,33 @@ impl LaitDaemonClient {
         request: &Request,
         act_as: Option<&str>,
     ) -> Result<Response> {
+        if matches!(&route, ControlRoute::World { .. })
+            && control::classify(request) == control::RequestOwner::World
+            && self.protocol_version().await? >= WORLD_CALL_CONTROL_PROTOCOL
+        {
+            let call = crate::world::encode_call(request.clone())?;
+            let reply = self.call_world(route, call, act_as).await?;
+            return Ok(crate::world::decode_reply(reply));
+        }
         control::request_as_routed(&self.home, request, Some(route), act_as).await
+    }
+
+    /// Send a product-neutral call without importing that product's request or
+    /// response schema into the daemon protocol.
+    pub async fn call_world(
+        &self,
+        route: ControlRoute,
+        call: WorldCall,
+        act_as: Option<&str>,
+    ) -> Result<WorldReply> {
+        let version = self.protocol_version().await?;
+        if version < WORLD_CALL_CONTROL_PROTOCOL {
+            return Err(anyhow!(
+                "Lait daemon speaks control protocol v{version}; generic World calls require \
+                 v{WORLD_CALL_CONTROL_PROTOCOL}"
+            ));
+        }
+        control::call_world(&self.home, route, call, act_as).await
     }
 
     /// Query an already-running Station without placing a vacant Orbit.
@@ -203,12 +248,51 @@ impl LaitDaemon {
         if reader.read_line(&mut line).await.is_err() {
             return;
         }
+        let value = match serde_json::from_str::<serde_json::Value>(line.trim()) {
+            Ok(value) => value,
+            Err(error) => {
+                let _ = write_line(
+                    &mut write_half,
+                    &Response::err(format!("bad request: {error}")),
+                )
+                .await;
+                return;
+            }
+        };
+
+        if value.get("call").is_some() {
+            let WorldClientRequest {
+                route,
+                act_as,
+                call,
+            } = match serde_json::from_value(value) {
+                Ok(request) => request,
+                Err(error) => {
+                    let _ = write_line(
+                        &mut write_half,
+                        &Response::err(format!("bad World call: {error}")),
+                    )
+                    .await;
+                    return;
+                }
+            };
+            let reply = self
+                .router
+                .call_world(route, &call, act_as.as_deref())
+                .await
+                .unwrap_or_else(|error| {
+                    WorldReply::error(&call, WorldCallErrorCode::InvalidCall, format!("{error:#}"))
+                });
+            let _ = write_line(&mut write_half, &reply).await;
+            return;
+        }
+
         let ClientRequest {
             route,
             if_running,
             act_as,
             request,
-        } = match serde_json::from_str::<ClientRequest>(line.trim()) {
+        } = match serde_json::from_value::<ClientRequest>(value) {
             Ok(request) => request,
             Err(error) => {
                 let _ = write_line(
@@ -291,11 +375,22 @@ impl LaitDaemon {
                 .await;
             }
             (route, request) => {
-                let response = self
-                    .router
-                    .request_routed(route, &request, act_as.as_deref())
-                    .await
-                    .unwrap_or_else(|error| Response::err(format!("{error:#}")));
+                let response = if control::classify(&request) == control::RequestOwner::World {
+                    match crate::world::encode_call(request) {
+                        Ok(call) => self
+                            .router
+                            .call_world(route, &call, act_as.as_deref())
+                            .await
+                            .map(crate::world::decode_reply)
+                            .unwrap_or_else(|error| Response::err(format!("{error:#}"))),
+                        Err(error) => Response::err(error.message),
+                    }
+                } else {
+                    self.router
+                        .request_routed(route, &request, act_as.as_deref())
+                        .await
+                        .unwrap_or_else(|error| Response::err(format!("{error:#}")))
+                };
                 let _ = write_line(&mut write_half, &response).await;
             }
         }
@@ -602,7 +697,7 @@ mod tests {
         }
 
         let mut catalog = client.subscribe_catalog().await.unwrap();
-        let route = control::station_route(resolved.address, &Request::Status);
+        let route = control::station_route(resolved.address.clone(), &Request::Status);
         assert!(matches!(
             client
                 .request_if_running(route.clone(), &Request::Status)
@@ -617,6 +712,14 @@ mod tests {
         assert!(matches!(
             client.request(route, &Request::Status, None).await.unwrap(),
             Response::Status(_)
+        ));
+        let world_route = control::station_route(resolved.address, &Request::ProjectList);
+        assert!(matches!(
+            client
+                .request(world_route, &Request::ProjectList, None)
+                .await
+                .unwrap(),
+            Response::Projects { .. }
         ));
         let ring = tokio::time::timeout(Duration::from_secs(2), catalog.next())
             .await

@@ -206,8 +206,8 @@ authorization.
 
 ## 10. Local control channel
 
-CLI, web, and MCP clients speak one typed local protocol. A `ClientRequest` may
-carry an explicit bridge route:
+CLI, web, and MCP clients enter one local protocol. A request carries an
+explicit bridge route:
 
 - `daemon` for the process-level catalog and daemon lifecycle;
 - `space { orbit, space }` for Mechanics, Station, observations, and lifecycle
@@ -223,10 +223,10 @@ against its `ClientScope`, the LaitDaemon resolves it through its own
 The allowed set is never accepted as a claim in the request.
 
 A missing route is accepted only by the historical per-home adapter: its socket
-identifies one Orbit and the uniquely claiming bundled World package is selected.
-An absent or ambiguous package claim rejects. The
-identity-scoped LaitDaemon endpoint requires an explicit route. A version
-handshake precedes requests. The production request classifier assigns every
+identifies one Orbit and the uniquely claiming bundled World package is
+selected. An absent or ambiguous package claim rejects. The identity-scoped
+LaitDaemon endpoint requires an explicit route. A version handshake precedes
+requests. The production request classifier assigns every historical typed
 request exactly one terminal owner; there is no wildcard product fallback.
 
 The optional `if_running: true` envelope field is reserved for passive,
@@ -236,10 +236,34 @@ an already-live compatibility adapter; it does not place a vacant Orbit. Other
 verbs and routes reject this mode. The field is omitted for ordinary dispatch,
 preserving the existing envelope shape.
 
-Product mutations and queries reach the World named by the route through that
-World's registered control adapter, WorldBridge, and docked Session. The
-issue-tracker application currently emits `com.lait.issues` routes; LaitDaemon
-does not infer or hardcode that identity.
+Protocol v4 sends product mutations and queries as:
+
+```text
+WorldClientRequest {
+  route: world { orbit, space, world },
+  act_as?,
+  call: WorldCall { world, operation, version, payload }
+}
+  -> WorldReply { world, operation, version, status, payload | error }
+```
+
+The route and call repeat the World identity and must agree. `payload` is
+bounded, unpadded URL-safe base64 on the JSON wire and opaque to the host. The
+registered product handler decodes it and derives query/command access; the
+client cannot grant itself read-only treatment with a wire flag. Replies repeat
+the exact `(world, operation, version)` tuple so a product codec cannot accept a
+reply for another contract.
+
+An owned Station receives the call directly through its in-process SpaceBridge.
+Only an attached historical SpaceBridge uses the package's legacy codec to
+translate the call to the v3 typed `Request`/`Response` socket. The v4 daemon
+continues accepting v3 typed product requests at its public endpoint and
+translates them before routing, so v3 remains inside the declared compatibility
+window. The issue-tracker application emits `com.lait.issues` /
+`issues.control` v1; LaitDaemon does not infer or hardcode either value.
+
+Product calls then reach the named World's registered handler, WorldBridge, and
+docked Session.
 Membership, devices, custody, and ceremonies reach Mechanics. Neighbor and
 Contact operations reach Station. Lifecycle operations reach Runtime/Orbit/
 Station. Clients never open Replica or Fabric directly.

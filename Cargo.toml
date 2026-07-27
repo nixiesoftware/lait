@@ -6,6 +6,7 @@ members = [
     "crates/comms",
     "crates/replica",
     "crates/runtime",
+    "crates/world-bridge",
     "products/issues",
 ]
 # Pin resolver 2 explicitly: the release binary's non-linkage of the dev-only
@@ -89,6 +90,7 @@ fabric = { path = "crates/fabric" }
 # is the S5c adoption edge: the root application depends on the new crates.
 runtime = { path = "crates/runtime" }
 replica = { path = "crates/replica" }
+world-bridge = { path = "crates/world-bridge" }
 # The network adapter — how independently held replicas exchange their material.
 # `iroh` is intentionally absent from THIS manifest: the app composes the seam
 # (`Transport`, framed `Stream`s, gossip rooms) and never names the contractor

@@ -3,11 +3,12 @@
 //! It composes [`OrbitalMechanics`] (authority/keys/membership over signed
 //! material), a [`Runtime`] hosting the build's registered Worlds, and a
 //! [`Station`] with the comms Contact plane. [`WorldBridgeRegistry`] owns one
-//! bridge per hosted World. The current process adapter serves the **same** newline-delimited
-//! `control::Request`/`Response` IPC the CLI/serve/MCP speak, so those clients
-//! are unchanged. Product requests route through the control adapter registered
-//! in their injected [`WorldPackage`](crate::orbital::WorldPackage); peer
-//! exchange is Contact/Convergence over `comms`;
+//! bridge per hosted World. The historical process adapter still serves the
+//! newline-delimited `control::Request`/`Response` IPC, while an owning
+//! LaitDaemon invokes [`WorldCall`] directly in-process. Product requests route
+//! through the call handler registered in their injected
+//! [`WorldPackage`](crate::orbital::WorldPackage); peer exchange is
+//! Contact/Convergence over `comms`;
 //! invitation is Coordinates v1; `Subscribe` streams the Station's
 //! `ObservationStream` as `Doorbell` frames.
 //!
@@ -44,7 +45,7 @@ use crate::control::{
 use crate::daemon::OrbitAddress;
 use crate::orbital::{
     orbital_store_root, unsupported_store_at, OrbitalMechanics, WorldBridge, WorldBridgeRegistry,
-    WorldControlContext, WorldPackages,
+    WorldCall, WorldCallAccess, WorldCallContext, WorldCallErrorCode, WorldPackages, WorldReply,
 };
 use crate::transport::{Transport, TransportFactory};
 
@@ -145,6 +146,25 @@ struct PrincipalFacts {
     device: String,
 }
 
+fn response_message(response: Response) -> String {
+    match response {
+        Response::Error { message, .. } => message,
+        other => format!("{other:?}"),
+    }
+}
+
+struct SpaceBridgeActivity<'a>(&'a SpaceBridge);
+
+impl Drop for SpaceBridgeActivity<'_> {
+    fn drop(&mut self) {
+        use std::sync::atomic::Ordering;
+        self.0.active_conns.fetch_sub(1, Ordering::SeqCst);
+        if let Ok(mut activity) = self.0.last_activity.lock() {
+            *activity = std::time::Instant::now();
+        }
+    }
+}
+
 /// An owned in-process SpaceBridge lifecycle.
 ///
 /// The runner holds the per-home daemon lock from before activation until after
@@ -194,6 +214,10 @@ impl SpaceBridgeRunner {
         SpaceBridgeStop {
             bridge: Arc::downgrade(&self.bridge),
         }
+    }
+
+    pub(crate) fn bridge_handle(&self) -> std::sync::Weak<SpaceBridge> {
+        Arc::downgrade(&self.bridge)
     }
 
     /// Serve until stopped, drain every bridge owner, return the Station to its
@@ -422,6 +446,12 @@ impl SpaceBridge {
             .is_ok()
     }
 
+    fn track_activity(&self) -> SpaceBridgeActivity<'_> {
+        use std::sync::atomic::Ordering;
+        self.active_conns.fetch_add(1, Ordering::SeqCst);
+        SpaceBridgeActivity(self)
+    }
+
     /// Resolve the World package addressed by this request.
     ///
     /// New daemon clients always provide an explicit World route. The
@@ -443,8 +473,8 @@ impl SpaceBridge {
             .filter(|world| {
                 self.worlds
                     .bridge(world)
-                    .and_then(WorldBridge::control)
-                    .is_some_and(|control| control.handles(request))
+                    .and_then(WorldBridge::legacy_codec)
+                    .is_some_and(|legacy| legacy.handles(request))
             })
             .cloned();
         let Some(world) = claimed.next() else {
@@ -470,12 +500,87 @@ impl SpaceBridge {
             Ok(world) => world,
             Err(response) => return response,
         };
+        let Some(codec) = self
+            .worlds
+            .bridge(&world)
+            .and_then(WorldBridge::legacy_codec)
+        else {
+            return Response::err(format!("World '{world}' has no historical control codec"));
+        };
+        let call = match codec.encode_call(req) {
+            Ok(call) => call,
+            Err(error) => return Response::err(error.message),
+        };
+        codec.decode_reply(self.route_world_call(&call, act_as))
+    }
+
+    /// Direct host-local entry for a versioned product call.
+    ///
+    /// Owned Station placements invoke this without traversing the per-Orbit
+    /// compatibility socket. The explicit Orbit/Space address is repeated and
+    /// validated here because the bridge remains the terminal boundary owner.
+    pub(crate) fn call_world(
+        &self,
+        address: &OrbitAddress,
+        call: &WorldCall,
+        act_as: Option<&str>,
+    ) -> WorldReply {
+        let _activity = self.track_activity();
+        if address != &self.address {
+            return WorldReply::error(
+                call,
+                WorldCallErrorCode::InvalidCall,
+                format!(
+                    "World call targets Orbit {} in Space {}, but this bridge occupies \
+                     Orbit {} in Space {}",
+                    address.orbit, address.space, self.address.orbit, self.address.space
+                ),
+            );
+        }
+        self.route_world_call(call, act_as)
+    }
+
+    /// Route a product call through its registered World package, or refuse
+    /// with a typed "not admitted yet" when this device holds no standing.
+    fn route_world_call(&self, call: &WorldCall, act_as: Option<&str>) -> WorldReply {
+        if let Err(error) = call.validate() {
+            return WorldReply::error(call, error.code, error.message);
+        }
+        let world = call.world();
+        let Some(bridge) = self.worlds.bridge(world) else {
+            return WorldReply::error(
+                call,
+                WorldCallErrorCode::UnsupportedOperation,
+                format!(
+                    "World '{world}' is not enabled in Space {}",
+                    self.address.space
+                ),
+            );
+        };
+        let Some(control) = bridge.control() else {
+            return WorldReply::error(
+                call,
+                WorldCallErrorCode::UnsupportedOperation,
+                format!("World '{world}' has no application call handler"),
+            );
+        };
+        let access = match control.access(call) {
+            Ok(access) => access,
+            Err(error) => return WorldReply::error(call, error.code, error.message),
+        };
+
         // Resolve which local identity signs this request: the daemon's primary
         // (human) when no selector, else a sponsored local agent provisioned
         // under this home. One store, N signing identities (Architecture B).
         let seed = match self.acting_seed(act_as) {
             Ok(s) => s,
-            Err(resp) => return resp,
+            Err(response) => {
+                return WorldReply::error(
+                    call,
+                    WorldCallErrorCode::Denied,
+                    response_message(response),
+                )
+            }
         };
         let device = crate::crypto::device_from_seed(&seed);
 
@@ -485,18 +590,22 @@ impl SpaceBridge {
         // view could act on issues it cannot see. A human acting for themselves
         // gets the loud `whoami`/`sync` signal and judges; an agent is stopped
         // by construction. Reads are always allowed (that is how it re-syncs).
-        if !crate::serve::policy::is_read(&req) {
+        if access == WorldCallAccess::Command {
             use runtime::AuthorityView;
             if let Some(actor) = self.mechanics.resolve(&device).map(|r| r.actor) {
                 if self.mechanics.is_agent(&actor) {
                     let divergence = self.mechanics.view_divergence();
                     if !divergence.is_empty() {
-                        return Response::denied(format!(
-                            "refusing to author against a partial view — {}. Run `sync` \
-                             until whole first; a delegated agent must not act on issues \
-                             it cannot see. Nothing was changed.",
-                            divergence.join("; ")
-                        ));
+                        return WorldReply::error(
+                            call,
+                            WorldCallErrorCode::Denied,
+                            format!(
+                                "refusing to author against a partial view — {}. Run `sync` \
+                                 until whole first; a delegated agent must not act on World \
+                                 state it cannot see. Nothing was changed.",
+                                divergence.join("; ")
+                            ),
+                        );
                     }
                 }
             }
@@ -505,29 +614,33 @@ impl SpaceBridge {
         // The primary (human) uses the World-keyed primary Session; a sponsored
         // agent docks lazily under the same World, sharing the one Replica.
         if act_as.is_none() {
-            if !self.ensure_world_session(&world) {
-                return Response::err(
-                    "not admitted to this space yet — run `lait connect` to reach an \
-                     admin and complete admission before using this World",
+            if !self.ensure_world_session(world) {
+                return WorldReply::error(
+                    call,
+                    WorldCallErrorCode::Unavailable,
+                    "not admitted to this space yet — run `lait connect` to reach an admin \
+                     and complete admission before using this World",
                 );
             }
             self.worlds
-                .with_primary(&world, |session| {
-                    self.route_with(&world, session, &self.identity, &seed, req)
+                .with_primary(world, |session| {
+                    self.call_with(control, call, session, &self.identity, &seed)
                 })
                 .expect("World Session present after ensure")
         } else {
             let identity = Runtime::identity_from_seed(&seed);
             match self
                 .worlds
-                .with_agent(&self.station, &world, &identity, |session| {
-                    self.route_with(&world, session, &identity, &seed, req)
+                .with_agent(&self.station, world, &identity, |session| {
+                    self.call_with(control, call, session, &identity, &seed)
                 }) {
                 Ok(response) => response,
-                Err(_) => Response::denied(
-                    "this agent identity holds no standing in the space yet — a \
-                     human member must sponsor it (`lait members agent <key>`) \
-                     before it can author. Nothing was changed.",
+                Err(_) => WorldReply::error(
+                    call,
+                    WorldCallErrorCode::Denied,
+                    "this agent identity holds no standing in the space yet — a human member \
+                     must sponsor it (`lait members agent <key>`) before it can author. \
+                     Nothing was changed.",
                 ),
             }
         }
@@ -536,29 +649,28 @@ impl SpaceBridge {
     /// Route one product request through a docked Session for a specific
     /// identity. Product-specific resolution, minting, retry, and rendering are
     /// owned by the package's control adapter.
-    fn route_with(
+    fn call_with(
         &self,
-        world: &WorldId,
+        control: &dyn crate::orbital::WorldCallHandler,
+        call: &WorldCall,
         session: &Session,
         identity: &LocalIdentity,
         seed: &[u8; 32],
-        req: Request,
-    ) -> Response {
+    ) -> WorldReply {
         let facts = self.facts_for(seed);
-        let Some(control) = self.worlds.bridge(world).and_then(WorldBridge::control) else {
-            return Response::err(format!(
-                "World '{world}' has no application control adapter"
-            ));
-        };
-        control.route(
-            req,
-            &WorldControlContext {
+        let reply = control.call(
+            call,
+            &WorldCallContext {
                 session,
                 identity,
                 actor: &facts.actor,
                 device: &facts.device,
             },
-        )
+        );
+        match reply.validate_for(call) {
+            Ok(()) => reply,
+            Err(error) => WorldReply::error(call, error.code, error.message),
+        }
     }
 
     /// Resolve the acting identity's seed. `None` → the daemon's primary (human)
@@ -699,8 +811,8 @@ impl SpaceBridge {
                 let accepts = self
                     .worlds
                     .bridge(&world_id)
-                    .and_then(WorldBridge::control)
-                    .is_some_and(|control| control.handles(request));
+                    .and_then(WorldBridge::legacy_codec)
+                    .is_some_and(|legacy| legacy.handles(request));
                 if !accepts {
                     return Err(Response::err(format!(
                         "World '{world}' does not own this product request"
@@ -1960,19 +2072,7 @@ impl SpaceBridge {
     }
 
     async fn handle_conn(self: Arc<Self>, stream: LocalStream) {
-        use std::sync::atomic::Ordering;
-        self.active_conns.fetch_add(1, Ordering::SeqCst);
-        // Decrement + stamp activity on every exit path (guard on drop).
-        struct ConnGuard<'a>(&'a SpaceBridge);
-        impl Drop for ConnGuard<'_> {
-            fn drop(&mut self) {
-                self.0.active_conns.fetch_sub(1, Ordering::SeqCst);
-                if let Ok(mut t) = self.0.last_activity.lock() {
-                    *t = std::time::Instant::now();
-                }
-            }
-        }
-        let _guard = ConnGuard(&self);
+        let _activity = self.track_activity();
 
         let (read_half, write_half) = tokio::io::split(stream);
         let mut reader = BufReader::new(read_half);

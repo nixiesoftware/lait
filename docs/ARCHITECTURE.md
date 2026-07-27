@@ -78,8 +78,10 @@ their in-process SpaceBridges. A SpaceBridge or WorldBridge may move to a worker
 process for stronger fault or plugin isolation without changing its route or
 client contract. The ControlRouter hosts a vacant Orbit in-process and attaches,
 without taking ownership, when a compatible historical per-home daemon already
-holds that Orbit. Both placement modes retain the per-home socket as an internal
-compatibility adapter, but CLI, MCP, and web requests enter through the one
+holds that Orbit. Both placement modes retain the per-home socket for Space
+control and Observation compatibility, but owned World calls dispatch directly
+to the in-process bridge. An attached placement alone translates and forwards a
+World call through that socket. CLI, MCP, and web requests enter through the one
 LaitDaemon endpoint.
 
 Catalog listing remains passive. The web adapter asks LaitDaemon for an
@@ -150,6 +152,8 @@ replica    Body transactions, protected material, Manifests, quotas,
            validation, and convergence
 comms      transport, streams, discovery, gossip, and presence mechanisms
 runtime    Orbit/Station lifecycle, Contacts, Worlds, Sessions, observations
+world-bridge
+           versioned opaque application calls and object-safe World handlers
 issues     IssuesWorld schemas, semantic model, product DTOs and identifiers
 lait       application shell, local control adapters, CLI/MCP/viewer composition
 ```
@@ -254,13 +258,24 @@ bridge objects; a Session can never be reused across Worlds.
 
 The application composition root supplies one compile-time `WorldPackages` set
 to LaitDaemon. Each `WorldPackage` keeps a Runtime registration, semantic World
-implementation, reviewed implementation identity, and optional local-control
-adapter together. The same immutable package set is carried through
+implementation, reviewed implementation identity, and optional
+`WorldCallHandler` together. The same immutable package set is carried through
 ControlRouter placement into every SpaceBridge; daemon routing validates the
-addressed World against that injected set and never names IssuesWorld. A
-control adapter owns product reference resolution, local id/time minting,
-transient retry, and response rendering. This is a compile-time package seam,
-not a promise of dynamic library loading or process isolation.
+addressed World against that injected set and never names IssuesWorld.
+
+The `world-bridge` crate is the application-call boundary shared by a product
+and its host. `WorldCall { world, operation, version, payload }` and its bound
+`WorldReply` leave the payload opaque to LaitDaemon and SpaceBridge. The
+registered handler—not the client—decodes the call and classifies it as a query
+or command before host policy runs. It owns product reference resolution, local
+id/time minting, transient retry, and response rendering. This is a compile-time
+package seam, not a promise of dynamic library loading or process isolation.
+
+For an owned Station placement, ControlRouter invokes the in-process
+SpaceBridge directly. The per-Orbit socket is not part of that World call stack.
+If LaitDaemon attaches to a historical standalone SpaceBridge, the package's
+temporary `LegacyWorldCodec` translates at that one compatibility edge and only
+then crosses the old typed socket. New products require no legacy codec.
 
 IssuesWorld's semantic package lives at `products/issues` with no dependency on
 the `lait` application crate, local control protocol, daemon, filesystem, or
@@ -287,12 +302,14 @@ IssuesWorld (`com.lait.issues`) is the bundled reference World. It has no privat
 architectural path unavailable to another conforming World.
 
 The semantic package boundary is not yet the complete application carve. The
-shared local `Request`/`Response` schema, Issues-specific
-status/inbox/doorbell projections, role-assignment planning, tracker formation,
-and CLI/MCP/viewer adapters still live in the root application. They must move
-behind a versioned generic World-call envelope and product-owned
-lifecycle/projection hooks before the whole issue-tracker application—not just
-its already-acyclic model package—can move to another repository.
+issue-shaped `Request`/`Response` schema remains a compatibility surface for the
+current CLI, MCP, viewer, and historical per-Orbit daemon, but it no longer
+crosses the generic WorldBridge boundary. Issues-specific status/inbox/doorbell
+projections and role-assignment planning still live in SpaceBridge/Mechanics.
+The Issues application codec, `IssueRouter`, product lifecycle module, and
+client adapters also still live in the root application. Product-owned
+projection/IAM hooks are the next prerequisite for moving that whole
+application—not just its already-acyclic semantic model—to another repository.
 
 ## 6. Communication model
 

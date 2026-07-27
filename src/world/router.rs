@@ -14,7 +14,10 @@ use serde::de::DeserializeOwned;
 use crate::control::{BoardPos, Request, Response};
 use crate::dto::{BoardView, GraphView, IssueView, LabelDto, ProjectDto, Row};
 use crate::ids::{DocId, LabelId, ProjectId, SystemUlidSource, UlidSource};
-use crate::orbital::{WorldControlAdapter, WorldControlContext};
+use crate::orbital::{
+    LegacyWorldCodec, WorldCall, WorldCallAccess, WorldCallContext, WorldCallError,
+    WorldCallErrorCode, WorldCallHandler, WorldReply,
+};
 
 use super::contract::{self, IssueIntent, IssueQuery, NewLabel, Pos, WorkAction};
 
@@ -43,12 +46,53 @@ pub struct RouterFacts {
 #[derive(Debug, Default)]
 pub struct IssuesControlAdapter;
 
-impl WorldControlAdapter for IssuesControlAdapter {
-    fn handles(&self, request: &Request) -> bool {
-        IssueRouter::handles(request)
+impl IssuesControlAdapter {
+    pub const OPERATION: &'static str = "issues.control";
+    pub const VERSION: u32 = 1;
+
+    fn decode_request(call: &WorldCall) -> Result<Request, WorldCallError> {
+        if call.world() != &contract::world_id() {
+            return Err(WorldCallError::new(
+                WorldCallErrorCode::InvalidCall,
+                format!(
+                    "Issues control call addresses World {}, not {}",
+                    call.world(),
+                    contract::world_id()
+                ),
+            ));
+        }
+        if call.operation() != Self::OPERATION {
+            return Err(WorldCallError::new(
+                WorldCallErrorCode::UnsupportedOperation,
+                format!("unsupported Issues operation '{}'", call.operation()),
+            ));
+        }
+        if call.version() != Self::VERSION {
+            return Err(WorldCallError::new(
+                WorldCallErrorCode::UnsupportedVersion,
+                format!(
+                    "unsupported Issues control version {}; expected {}",
+                    call.version(),
+                    Self::VERSION
+                ),
+            ));
+        }
+        let request: Request = serde_json::from_slice(call.payload()).map_err(|error| {
+            WorldCallError::new(
+                WorldCallErrorCode::InvalidCall,
+                format!("decode Issues request: {error}"),
+            )
+        })?;
+        if !IssueRouter::handles(&request) {
+            return Err(WorldCallError::new(
+                WorldCallErrorCode::UnsupportedOperation,
+                "request is not owned by IssuesWorld",
+            ));
+        }
+        Ok(request)
     }
 
-    fn route(&self, request: Request, context: &WorldControlContext<'_>) -> Response {
+    fn route_request(&self, request: Request, context: &WorldCallContext<'_>) -> Response {
         static CLOCK: std::sync::OnceLock<SystemUlidSource> = std::sync::OnceLock::new();
 
         let router = IssueRouter::new(
@@ -77,6 +121,56 @@ impl WorldControlAdapter for IssuesControlAdapter {
             }
         }
         response
+    }
+}
+
+impl WorldCallHandler for IssuesControlAdapter {
+    fn access(&self, call: &WorldCall) -> Result<WorldCallAccess, WorldCallError> {
+        let request = Self::decode_request(call)?;
+        Ok(if crate::serve::policy::is_read(&request) {
+            WorldCallAccess::Query
+        } else {
+            WorldCallAccess::Command
+        })
+    }
+
+    fn call(&self, call: &WorldCall, context: &WorldCallContext<'_>) -> WorldReply {
+        let request = match Self::decode_request(call) {
+            Ok(request) => request,
+            Err(error) => return WorldReply::error(call, error.code, error.message),
+        };
+        self.encode_reply(call, self.route_request(request, context))
+    }
+}
+
+impl LegacyWorldCodec for IssuesControlAdapter {
+    fn handles(&self, request: &Request) -> bool {
+        IssueRouter::handles(request)
+    }
+
+    fn encode_call(&self, request: Request) -> Result<WorldCall, WorldCallError> {
+        if !self.handles(&request) {
+            return Err(WorldCallError::new(
+                WorldCallErrorCode::UnsupportedOperation,
+                "request is not owned by IssuesWorld",
+            ));
+        }
+        let payload = serde_json::to_vec(&request).map_err(|error| {
+            WorldCallError::new(
+                WorldCallErrorCode::InvalidCall,
+                format!("encode Issues request: {error}"),
+            )
+        })?;
+        WorldCall::new(
+            contract::world_id(),
+            Self::OPERATION,
+            Self::VERSION,
+            payload,
+        )
+    }
+
+    fn decode_call(&self, call: &WorldCall) -> Result<Request, WorldCallError> {
+        Self::decode_request(call)
     }
 }
 

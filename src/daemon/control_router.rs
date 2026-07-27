@@ -2,12 +2,12 @@
 //!
 //! A [`ControlRouter`] is the sole host-plane entrance from a catalog-wide
 //! client to an Orbit. It resolves the Orbit through [`OrbitDirectory`], places
-//! or reuses exactly one Station host for that Orbit, and dispatches the existing
-//! control protocol. Its transport factory shares one concrete endpoint per
-//! device identity across the owned placements. A vacant Orbit is hosted
-//! in-process; a compatible pre-existing per-home daemon is attached as an
-//! external placement. Per-home IPC remains an internal compatibility adapter
-//! behind the identity-scoped Lait daemon endpoint.
+//! or reuses exactly one Station host for that Orbit, and dispatches Space
+//! control plus product-neutral World calls. Its transport factory shares one
+//! concrete endpoint per device identity across the owned placements. A vacant
+//! Orbit is hosted in-process; a compatible pre-existing per-home daemon is
+//! attached as an external placement. Per-home IPC remains an internal
+//! compatibility adapter behind the identity-scoped Lait daemon endpoint.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -21,7 +21,7 @@ use tokio::sync::{broadcast, Mutex, RwLock};
 
 use crate::control::{self, ControlRoute, Doorbell, Request, RequestOwner, Response};
 use crate::orbital::space_bridge::{SpaceBridgeRunner, SpaceBridgeStop};
-use crate::orbital::WorldPackages;
+use crate::orbital::{WorldCall, WorldCallErrorCode, WorldPackages, WorldReply};
 use crate::transport::{DefaultFactory, TransportFactory};
 
 use super::transport_hub::TransportHubFactory;
@@ -63,6 +63,7 @@ pub struct StationPlacement {
 
 enum PlacementMode {
     Owned {
+        bridge: std::sync::Weak<crate::orbital::space_bridge::SpaceBridge>,
         stop: SpaceBridgeStop,
         completion: StdMutex<Option<tokio::task::JoinHandle<Result<()>>>>,
     },
@@ -169,6 +170,7 @@ impl StationPlacement {
         let seed = crate::config::load_or_create_identity(&resolved.identity_dir)?;
         let runner =
             SpaceBridgeRunner::start(resolved.home.clone(), seed, factory, packages).await?;
+        let bridge = runner.bridge_handle();
         let stop = runner.stop_handle();
         let mut completion = tokio::spawn(runner.run());
 
@@ -184,6 +186,7 @@ impl StationPlacement {
         }
 
         Ok(PlacementMode::Owned {
+            bridge,
             stop,
             completion: StdMutex::new(Some(completion)),
         })
@@ -261,7 +264,10 @@ impl StationPlacement {
             let _ = pump.await;
         }
 
-        let PlacementMode::Owned { stop, completion } = &self.mode else {
+        let PlacementMode::Owned {
+            stop, completion, ..
+        } = &self.mode
+        else {
             return Ok(());
         };
         stop.stop();
@@ -459,25 +465,40 @@ impl ControlRouter {
             return Err(anyhow!("the control router is shutting down"));
         }
         let resolved = self.resolve(id)?;
-        self.place_resolved(resolved).await
+        self.place_resolved(resolved)
+            .await
+            .map(|(resolved, _)| resolved)
     }
 
-    async fn place_resolved(&self, resolved: ResolvedOrbit) -> Result<ResolvedOrbit> {
+    async fn place_resolved(
+        &self,
+        resolved: ResolvedOrbit,
+    ) -> Result<(ResolvedOrbit, Arc<StationPlacement>)> {
         let orbit = resolved.address.orbit.clone();
         let doorbells = self.doorbells.clone();
         let factory = self.factory.clone();
         let packages = self.packages.clone();
-        self.occupancy
+        let placement = self
+            .occupancy
             .get_or_try_place(orbit, StationPlacement::is_live, || {
                 StationPlacement::establish(&resolved, doorbells, factory, packages)
             })
             .await?;
-        Ok(resolved)
+        Ok((resolved, placement))
     }
 
     /// Place an explicitly addressed Orbit and reject a stale Space
     /// expectation before the request reaches its SpaceBridge.
     pub async fn place_address(&self, address: &OrbitAddress) -> Result<ResolvedOrbit> {
+        self.place_address_with_host(address)
+            .await
+            .map(|(resolved, _)| resolved)
+    }
+
+    async fn place_address_with_host(
+        &self,
+        address: &OrbitAddress,
+    ) -> Result<(ResolvedOrbit, Arc<StationPlacement>)> {
         // Address validation precedes placement: a stale or confused route must
         // not wake the Station it is subsequently refused from addressing.
         let _lifecycle = self.lifecycle.read().await;
@@ -509,6 +530,77 @@ impl ControlRouter {
         let address = routed_address(&self.packages, &route, request)?;
         let resolved = self.place_address(address).await?;
         control::request_as_routed(&resolved.home, request, Some(route), act_as).await
+    }
+
+    /// Dispatch one product-neutral call to its explicitly addressed World.
+    ///
+    /// Owned placements are invoked directly in-process. Only an attached
+    /// historical SpaceBridge crosses the per-Orbit compatibility socket, using
+    /// the product's temporary legacy codec at that edge.
+    pub async fn call_world(
+        &self,
+        route: ControlRoute,
+        call: &WorldCall,
+        act_as: Option<&str>,
+    ) -> Result<WorldReply> {
+        call.validate()?;
+        let ControlRoute::World { address, world } = &route else {
+            return Err(anyhow!("World call requires an explicit World route"));
+        };
+        let Some(route_world) = replica::ids::WorldId::parse(world) else {
+            return Err(anyhow!("invalid World id '{world}'"));
+        };
+        if &route_world != call.world() {
+            return Err(anyhow!(
+                "World route addresses {route_world}, but the call addresses {}",
+                call.world()
+            ));
+        }
+        if !self.packages.contains(call.world()) {
+            return Err(anyhow!(
+                "World '{}' is not bundled by this Lait daemon",
+                call.world()
+            ));
+        }
+        if let Err(error) = self.packages.call_access(call) {
+            return Ok(WorldReply::error(call, error.code, error.message));
+        }
+
+        let (resolved, placement) = self.place_address_with_host(address).await?;
+        match &placement.mode {
+            PlacementMode::Owned { bridge, .. } => {
+                let Some(bridge) = bridge.upgrade() else {
+                    return Ok(WorldReply::error(
+                        call,
+                        WorldCallErrorCode::Unavailable,
+                        "owned SpaceBridge is draining",
+                    ));
+                };
+                Ok(bridge.call_world(address, call, act_as))
+            }
+            PlacementMode::Attached => {
+                let Some(codec) = self.packages.legacy_codec(call.world()) else {
+                    return Ok(WorldReply::error(
+                        call,
+                        WorldCallErrorCode::Unavailable,
+                        format!(
+                            "World '{}' has no adapter for an attached compatibility process",
+                            call.world()
+                        ),
+                    ));
+                };
+                let request = match codec.decode_call(call) {
+                    Ok(request) => request,
+                    Err(error) => {
+                        return Ok(WorldReply::error(call, error.code, error.message));
+                    }
+                };
+                let response =
+                    control::request_as_routed(&resolved.home, &request, Some(route), act_as)
+                        .await?;
+                Ok(codec.encode_reply(call, response))
+            }
+        }
     }
 
     /// Dispatch through an existing per-Orbit adapter without placing a vacant
@@ -757,6 +849,47 @@ mod tests {
         assert_eq!(*placed, 7);
     }
 
+    #[tokio::test]
+    async fn invalid_world_call_is_rejected_before_it_places_a_station() {
+        let seed = [200; 32];
+        let (home, directory, id) = formed_directory("invalid-call", &seed);
+        let router = ControlRouter::with_factory(
+            directory,
+            Arc::new(MemFactory(MemNet::new())),
+            crate::world::packages(),
+        );
+        let resolved = router.resolve(&id).unwrap();
+        let call = WorldCall::new(
+            crate::world::contract::world_id(),
+            crate::world::IssuesControlAdapter::OPERATION,
+            crate::world::IssuesControlAdapter::VERSION + 1,
+            serde_json::to_vec(&Request::ProjectList).unwrap(),
+        )
+        .unwrap();
+        let reply = router
+            .call_world(
+                ControlRoute::World {
+                    address: resolved.address,
+                    world: call.world().as_str().to_string(),
+                },
+                &call,
+                None,
+            )
+            .await
+            .unwrap();
+        let error = reply.into_result().unwrap_err();
+        assert_eq!(
+            error.code,
+            crate::orbital::WorldCallErrorCode::UnsupportedVersion
+        );
+        assert!(router.occupancy.placements().await.is_empty());
+        drop(
+            crate::config::acquire_daemon_lock(&home)
+                .expect("invalid product calls must not wake a vacant Orbit"),
+        );
+        let _ = std::fs::remove_dir_all(home);
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn vacant_orbit_is_owned_in_process_and_shutdown_returns_it_to_vacancy() {
         let seed = [201; 32];
@@ -770,6 +903,23 @@ mod tests {
         assert!(matches!(
             router.request(&id, &Request::Status).await.unwrap(),
             Response::Status(_)
+        ));
+        let resolved = router.resolve(&id).unwrap();
+        let call = crate::world::encode_call(Request::ProjectList).unwrap();
+        let reply = router
+            .call_world(
+                ControlRoute::World {
+                    address: resolved.address,
+                    world: call.world().as_str().to_string(),
+                },
+                &call,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            crate::world::decode_reply(reply),
+            Response::Projects { .. }
         ));
         let placements = router.occupancy.placements().await;
         assert_eq!(placements.len(), 1);
@@ -815,6 +965,22 @@ mod tests {
         assert!(matches!(
             router.request(&id, &Request::Status).await.unwrap(),
             Response::Status(_)
+        ));
+        let call = crate::world::encode_call(Request::ProjectList).unwrap();
+        let reply = router
+            .call_world(
+                ControlRoute::World {
+                    address: resolved.address.clone(),
+                    world: call.world().as_str().to_string(),
+                },
+                &call,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            crate::world::decode_reply(reply),
+            Response::Projects { .. }
         ));
         let placements = router.occupancy.placements().await;
         assert_eq!(placements.len(), 1);
