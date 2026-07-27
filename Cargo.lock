@@ -2919,6 +2919,7 @@ dependencies = [
  "include_dir",
  "interprocess",
  "lait-issues",
+ "lait-issues-app",
  "libc",
  "mechanics",
  "n0-future",
@@ -2960,6 +2961,19 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "lait-issues-app"
+version = "0.6.0"
+dependencies = [
+ "clap",
+ "lait-issues",
+ "schemars",
+ "serde",
+ "serde_json",
+ "world-bridge",
+ "world-interface",
 ]
 
 [[package]]

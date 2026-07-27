@@ -9,6 +9,7 @@ members = [
     "crates/world-bridge",
     "crates/world-interface",
     "products/issues",
+    "products/issues-app",
 ]
 # Pin resolver 2 explicitly: the release binary's non-linkage of the dev-only
 # `test-utils` feature (which would flip presets::N0 from prod to staging relays)
@@ -102,6 +103,7 @@ comms = { path = "crates/comms" }
 # independently packaged; this root owns only the application shell and local
 # control adapters that compose it into LaitDaemon.
 issues = { package = "lait-issues", path = "products/issues" }
+issues-app = { package = "lait-issues-app", path = "products/issues-app" }
 # randomness for ULID minting (app-minted DocId/ProjectId/… ids).
 getrandom = "0.3"
 
