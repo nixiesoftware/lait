@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use crate::orbital::{WorldControlAdapter, WorldPackage, WorldPackages};
 
+pub mod lifecycle;
 pub mod router;
 
 pub use issues::{

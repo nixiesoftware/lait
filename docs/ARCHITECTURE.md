@@ -267,6 +267,10 @@ the `lait` application crate, local control protocol, daemon, filesystem, or
 process lifecycle. The root preserves `lait::world`, `lait::dto`, and
 `lait::ids` as compatibility re-exports. Moving that package to another
 repository changes the dependency locator, not Runtime or bridge ownership.
+The outer `world::lifecycle` adapter owns tracker formation, founder policy,
+the crash-resumable `InitializeTracker` record, and join materialization;
+`orbital` retains compatibility re-exports but contains no IssuesWorld
+construction or bootstrap implementation.
 
 A Session binds a local identity to one World at an active Station. Queries and
 mutations are authorized independently. Query results are computed from one
