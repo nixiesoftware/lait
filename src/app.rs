@@ -249,6 +249,19 @@ pub async fn run() -> std::process::ExitCode {
 
 /// Resolve the parsed args to a leaf spec and run it.
 async fn dispatch(specs: &[cmdspec::Spec], matches: &ArgMatches, out: Out) -> Result<()> {
+    if let Some(invocation) = cmdspec::parse_world_invocation(matches)? {
+        let selection_source = apply_selection(matches)?;
+        let home = match config::resolve_existing_store(None) {
+            Ok(home) => home,
+            Err(error) if error.downcast_ref::<config::NoStoreHere>().is_some() => {
+                crate::cli::err_no_store_here(out);
+                std::process::exit(1);
+            }
+            Err(error) => return Err(error),
+        };
+        return dispatch_world_client(&home, invocation, selection_source, out).await;
+    }
+
     let resolved = cmdspec::resolve(specs, matches);
 
     // Bare `lait` reports the current orbital context. Product focus views are
@@ -462,19 +475,6 @@ async fn dispatch(specs: &[cmdspec::Spec], matches: &ArgMatches, out: Out) -> Re
             }
         }
         Dispatch::Special(s) => match s {
-            Special::IssuesFocus => crate::cli::run_focus(&home, out).await?,
-            Special::Start => {
-                let reff = cmdspec::resolve_reff(m)?;
-                crate::cli::run_start(&home, reff, m.get_flag("no_branch"), out).await?
-            }
-            Special::Done => {
-                let reff = cmdspec::resolve_reff(m)?;
-                crate::cli::run_workstate(&home, Request::IssueDone { reff }, out).await?
-            }
-            Special::Stop => {
-                let reff = cmdspec::resolve_reff(m)?;
-                crate::cli::run_workstate(&home, Request::IssueStop { reff }, out).await?
-            }
             Special::Id => {
                 let seed = load_or_create_identity(&config::identity_dir()?)?;
                 crate::cli::emit_text(crate::crypto::device_from_seed(&seed).as_str(), out);
@@ -489,77 +489,6 @@ async fn dispatch(specs: &[cmdspec::Spec], matches: &ArgMatches, out: Out) -> Re
                     {
                         if let Some(actor_line) = m.lines().nth(1) {
                             println!("{actor_line}");
-                        }
-                    }
-                }
-            }
-            Special::Attach => {
-                let reff = m.get_one::<String>("reff").cloned().unwrap_or_default();
-                let path = m.get_one::<String>("file").cloned().unwrap_or_default();
-                let bytes =
-                    std::fs::read(&path).map_err(|e| anyhow!("could not read {path}: {e}"))?;
-                if bytes.is_empty() {
-                    return Err(anyhow!("{path} is empty — nothing to attach"));
-                }
-                if bytes.len() > crate::world::contract::MAX_ATTACHMENT_BYTES {
-                    return Err(anyhow!(
-                        "{path} is {} KiB — attachments are capped at {} KiB (they ride \
-                         the issue's replicated document). Link large files instead.",
-                        bytes.len() / 1024,
-                        crate::world::contract::MAX_ATTACHMENT_BYTES / 1024
-                    ));
-                }
-                let name = std::path::Path::new(&path)
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| path.clone());
-                let mime = mime_for(&name);
-                let req = Request::Attach {
-                    reff,
-                    name,
-                    mime: Some(mime),
-                    data_b64: data_encoding::BASE64.encode(&bytes),
-                    comment: m.get_one::<String>("comment").cloned(),
-                };
-                crate::cli::run(&home, req, out).await?
-            }
-            Special::AttachmentGet => {
-                let reff = m.get_one::<String>("reff").cloned().unwrap_or_default();
-                let id = m.get_one::<String>("id").cloned().unwrap_or_default();
-                if reff.is_empty() || id.is_empty() {
-                    return Err(anyhow!(
-                        "usage: lait attachment get <reff> <att_id> [--out <path>]"
-                    ));
-                }
-                let resp = crate::cli::client(&home, Request::AttachmentGet { reff, id }).await?;
-                match resp {
-                    Response::Attachment {
-                        name,
-                        mime: _,
-                        data_b64,
-                    } => {
-                        let bytes = data_encoding::BASE64
-                            .decode(data_b64.as_bytes())
-                            .map_err(|_| anyhow!("stored attachment did not decode"))?;
-                        let dest = m
-                            .get_one::<String>("out")
-                            .cloned()
-                            .unwrap_or_else(|| name.clone());
-                        std::fs::write(&dest, &bytes)
-                            .map_err(|e| anyhow!("could not write {dest}: {e}"))?;
-                        if out.json {
-                            crate::cli::emit_ok(
-                                &format!("saved {} bytes to {dest}", bytes.len()),
-                                out,
-                            );
-                        } else {
-                            println!("saved {} bytes to {dest}", bytes.len());
-                        }
-                    }
-                    other => {
-                        let code = crate::cli::print_response(&other, out);
-                        if code != 0 {
-                            std::process::exit(code);
                         }
                     }
                 }
@@ -636,6 +565,194 @@ async fn dispatch(specs: &[cmdspec::Spec], matches: &ArgMatches, out: Out) -> Re
     }
 
     Ok(())
+}
+
+async fn dispatch_world_client(
+    home: &std::path::Path,
+    invocation: world_interface::CliInvocation,
+    _selection_source: &'static str,
+    out: Out,
+) -> Result<()> {
+    use issues_app::cli::{
+        LOCAL_ACCESS, LOCAL_ATTACH, LOCAL_ATTACHMENT_GET, LOCAL_FOCUS, LOCAL_INBOX,
+        LOCAL_NEW_START, LOCAL_WORK_STATE, LOCAL_WORLD_UPGRADE,
+    };
+
+    match invocation {
+        world_interface::CliInvocation::World(call) => {
+            let legacy = issues_app::decode_call(&call)
+                .map_err(|error| anyhow!(error.to_string()))
+                .and_then(issues_request_to_legacy)?;
+            if !crate::cli::confirm_destructive(home, &legacy, out).await {
+                std::process::exit(1);
+            }
+            crate::cli::run_action(home, crate::client_action::ClientAction::world(call), out).await
+        }
+        world_interface::CliInvocation::Local { operation, input } => match operation.as_str() {
+            LOCAL_FOCUS => crate::cli::run_focus(home, out).await,
+            LOCAL_NEW_START => {
+                let request: issues_app::IssuesRequest =
+                    serde_json::from_value(input).context("decode Issues new/start invocation")?;
+                crate::cli::run_new_start(home, issues_request_to_legacy(request)?, out).await
+            }
+            LOCAL_WORK_STATE => {
+                let action = value_string(&input, "action")?;
+                let reff = value_string(&input, "reff")?;
+                match action.as_str() {
+                    "start" => {
+                        let no_branch = input
+                            .get("no_branch")
+                            .and_then(serde_json::Value::as_bool)
+                            .unwrap_or(false);
+                        crate::cli::run_start(home, reff, no_branch, out).await
+                    }
+                    "done" => {
+                        crate::cli::run_workstate(home, Request::IssueDone { reff }, out).await
+                    }
+                    "stop" => {
+                        crate::cli::run_workstate(home, Request::IssueStop { reff }, out).await
+                    }
+                    other => Err(anyhow!("unsupported Issues work-state action '{other}'")),
+                }
+            }
+            LOCAL_INBOX => {
+                crate::cli::run(
+                    home,
+                    Request::Inbox {
+                        clear: input
+                            .get("clear")
+                            .and_then(serde_json::Value::as_bool)
+                            .unwrap_or(false),
+                    },
+                    out,
+                )
+                .await
+            }
+            LOCAL_WORLD_UPGRADE => crate::cli::run(home, Request::WorldUpgrade, out).await,
+            LOCAL_ACCESS => {
+                let action = input
+                    .get("action")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("ls");
+                let request = match action {
+                    "access" | "ls" => Request::AccessList {
+                        actor: value_string_opt(&input, "actor"),
+                    },
+                    "grant" => Request::AccessGrant {
+                        actor: value_string(&input, "actor")?,
+                        role: value_string(&input, "role")?,
+                        project: value_string_opt(&input, "project"),
+                    },
+                    "revoke" => Request::AccessRevoke {
+                        grant_id: value_string(&input, "grant_id")?,
+                    },
+                    other => return Err(anyhow!("unsupported Issues access action '{other}'")),
+                };
+                crate::cli::run(home, request, out).await
+            }
+            LOCAL_ATTACH => run_issues_attach(home, &input, out).await,
+            LOCAL_ATTACHMENT_GET => run_issues_attachment_get(home, &input, out).await,
+            other => Err(anyhow!(
+                "Issues client package requested unsupported host capability '{other}'"
+            )),
+        },
+    }
+}
+
+fn issues_request_to_legacy(request: issues_app::IssuesRequest) -> Result<Request> {
+    serde_json::from_value(serde_json::to_value(request)?)
+        .context("translate Issues application request")
+}
+
+fn value_string(value: &serde_json::Value, field: &str) -> Result<String> {
+    value_string_opt(value, field)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow!("Issues client invocation is missing '{field}'"))
+}
+
+fn value_string_opt(value: &serde_json::Value, field: &str) -> Option<String> {
+    value
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+}
+
+async fn run_issues_attach(
+    home: &std::path::Path,
+    input: &serde_json::Value,
+    out: Out,
+) -> Result<()> {
+    let reff = value_string(input, "reff")?;
+    let path = value_string(input, "file")?;
+    let bytes = std::fs::read(&path).map_err(|error| anyhow!("could not read {path}: {error}"))?;
+    if bytes.is_empty() {
+        return Err(anyhow!("{path} is empty — nothing to attach"));
+    }
+    if bytes.len() > crate::world::contract::MAX_ATTACHMENT_BYTES {
+        return Err(anyhow!(
+            "{path} is {} KiB — attachments are capped at {} KiB",
+            bytes.len() / 1024,
+            crate::world::contract::MAX_ATTACHMENT_BYTES / 1024
+        ));
+    }
+    let name = std::path::Path::new(&path)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.clone());
+    crate::cli::run(
+        home,
+        Request::Attach {
+            reff,
+            mime: Some(mime_for(&name)),
+            name,
+            data_b64: data_encoding::BASE64.encode(&bytes),
+            comment: value_string_opt(input, "comment"),
+        },
+        out,
+    )
+    .await
+}
+
+async fn run_issues_attachment_get(
+    home: &std::path::Path,
+    input: &serde_json::Value,
+    out: Out,
+) -> Result<()> {
+    let response = crate::cli::client(
+        home,
+        Request::AttachmentGet {
+            reff: value_string(input, "reff")?,
+            id: value_string(input, "id")?,
+        },
+    )
+    .await?;
+    match response {
+        Response::Attachment {
+            name,
+            mime: _,
+            data_b64,
+        } => {
+            let bytes = data_encoding::BASE64
+                .decode(data_b64.as_bytes())
+                .map_err(|_| anyhow!("stored attachment did not decode"))?;
+            let destination = value_string_opt(input, "out").unwrap_or(name);
+            std::fs::write(&destination, &bytes)
+                .map_err(|error| anyhow!("could not write {destination}: {error}"))?;
+            crate::cli::emit_ok(
+                &format!("saved {} bytes to {destination}", bytes.len()),
+                out,
+            );
+            Ok(())
+        }
+        other => {
+            let code = crate::cli::print_response(&other, out);
+            if code == 0 {
+                Ok(())
+            } else {
+                Err(anyhow!("attachment request failed"))
+            }
+        }
+    }
 }
 
 /// `lait init`: found a space rooted at `cwd/.lait` (or `$LAIT_HOME`).

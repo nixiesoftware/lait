@@ -199,6 +199,15 @@ impl WorldClientRegistry {
 
     pub fn with_package(mut self, package: WorldClientPackage) -> Result<Self, InterfaceError> {
         let world = package.world().as_str().to_string();
+        let command_name = package.cli().command().get_name().to_string();
+        if command_name != package.cli().name() {
+            return Err(InterfaceError::new(format!(
+                "World '{}' CLI factory produced command '{}' for mount '{}'",
+                world,
+                command_name,
+                package.cli().name()
+            )));
+        }
         if self.packages.contains_key(&world) {
             return Err(InterfaceError::new(format!(
                 "duplicate client package for World '{world}'"

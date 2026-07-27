@@ -8,6 +8,7 @@ use std::sync::Arc;
 use crate::orbital::{
     LegacyWorldCodec, WorldCall, WorldCallError, WorldPackage, WorldPackages, WorldReply,
 };
+use world_interface::WorldClientRegistry;
 
 pub mod lifecycle;
 pub mod router;
@@ -38,6 +39,13 @@ pub fn package() -> WorldPackage {
 /// Every product World bundled by the issue-tracker application.
 pub fn packages() -> WorldPackages {
     WorldPackages::new().with_package(package())
+}
+
+/// Every client-facing World package mounted by the navigation shell.
+pub fn client_packages() -> WorldClientRegistry {
+    WorldClientRegistry::new()
+        .with_package(issues_app::package().expect("valid bundled Issues client package"))
+        .expect("non-conflicting bundled World client packages")
 }
 
 /// Select the product World for one request emitted by this application.
