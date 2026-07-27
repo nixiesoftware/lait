@@ -223,7 +223,8 @@ against its `ClientScope`, the LaitDaemon resolves it through its own
 The allowed set is never accepted as a claim in the request.
 
 A missing route is accepted only by the historical per-home adapter: its socket
-identifies one Orbit and issue-family commands imply IssuesWorld. The
+identifies one Orbit and the uniquely claiming bundled World package is selected.
+An absent or ambiguous package claim rejects. The
 identity-scoped LaitDaemon endpoint requires an explicit route. A version
 handshake precedes requests. The production request classifier assigns every
 request exactly one terminal owner; there is no wildcard product fallback.
@@ -235,8 +236,10 @@ an already-live compatibility adapter; it does not place a vacant Orbit. Other
 verbs and routes reject this mode. The field is omitted for ordinary dispatch,
 preserving the existing envelope shape.
 
-Product mutations and queries reach IssuesWorld through its WorldBridge and a
-docked Session.
+Product mutations and queries reach the World named by the route through that
+World's registered control adapter, WorldBridge, and docked Session. The
+issue-tracker application currently emits `com.lait.issues` routes; LaitDaemon
+does not infer or hardcode that identity.
 Membership, devices, custody, and ceremonies reach Mechanics. Neighbor and
 Contact operations reach Station. Lifecycle operations reach Runtime/Orbit/
 Station. Clients never open Replica or Fabric directly.

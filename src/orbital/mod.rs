@@ -1,17 +1,10 @@
-//! The product's adoption of the orbital lifecycle — **mechanics only**.
+//! The application's adoption of the orbital lifecycle.
 //!
-//! It fixes where the product keeps its orbital store, composes a [`Runtime`]
-//! from parts supplied by the caller, and (C5) supplies the mechanics
-//! composition — authority view/source, key source, and authority
-//! incorporation — over the Space's signed membership material
-//! ([`mechanics::OrbitalMechanics`]).
-//! It defines **no World**: per the program's settled decisions (O13/O23), no
-//! consumer-specific World becomes first-party inside LAIT, and the current
-//! Issues behavior adopts the public API as an *adapter over the existing
-//! product semantics* — not as a new product-owned World schema. The daemon
-//! integration supplies that adapter's registration when it routes the control
-//! surface onto Sessions; independent Worlds are exercised by the conformance
-//! and adoption tests.
+//! It fixes where the application keeps orbital stores, supplies the Mechanics
+//! composition over signed Space material, and defines the product-neutral
+//! [`WorldPackage`] / [`WorldBridge`] boundary used by SpaceBridge. Concrete
+//! packages are created by the application composition root and injected
+//! through LaitDaemon; this module does not construct or select IssuesWorld.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -122,25 +115,20 @@ pub mod space_bridge;
 pub mod world_bridge;
 
 pub use mechanics::{AuthorityRecord, OrbitalMechanics};
-pub use space_bridge::{run_space_bridge, run_space_bridge_with, SpaceBridge};
-pub use world_bridge::{WorldBridge, WorldBridgeRegistry, WorldBridgesBuilder};
+pub use space_bridge::{
+    run_space_bridge, run_space_bridge_with, run_space_bridge_with_packages, SpaceBridge,
+};
+pub use world_bridge::{
+    WorldBridge, WorldBridgeRegistry, WorldBridgesBuilder, WorldControlAdapter,
+    WorldControlContext, WorldPackage, WorldPackages,
+};
 
-use crate::world::IssuesWorld;
 use anyhow::Result;
 use runtime::{ActivationOptions, EnterOptions, SpaceFormationOptions};
 
-/// The compile-time World bridges bundled by the issue-tracker application.
-pub(super) fn issues_worlds() -> WorldBridgesBuilder {
-    WorldBridgesBuilder::new().register(
-        IssuesWorld::registration(),
-        Arc::new(IssuesWorld::new()),
-        issues_implementation_id(),
-    )
-}
-
 /// The issues Runtime registry used by formation and direct adoption helpers.
 fn issues_registry() -> Result<WorldRegistry> {
-    issues_worlds()
+    crate::world::packages()
         .build()
         .map(|(registry, _)| registry)
         .map_err(|e| anyhow::anyhow!("world registry: {e:?}"))
@@ -149,9 +137,7 @@ fn issues_registry() -> Result<WorldRegistry> {
 /// The reviewed IssuesWorld implementation id this build ships — the authority
 /// identity the founder activates and every product transaction pins.
 pub fn issues_implementation_id() -> [u8; 32] {
-    IssuesWorld::implementation_descriptor()
-        .id()
-        .expect("canonical IssuesWorld descriptor")
+    crate::world::implementation_id()
 }
 
 /// The founder product-authority bootstrap: activate the IssuesWorld

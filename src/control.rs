@@ -1086,7 +1086,10 @@ pub fn station_route(address: OrbitAddress, request: &Request) -> ControlRoute {
     match classify(request) {
         RequestOwner::World => ControlRoute::World {
             address,
-            world: crate::world::contract::world_id().as_str().to_string(),
+            world: crate::world::request_world(request)
+                .expect("every World-owned request is claimed by a bundled product adapter")
+                .as_str()
+                .to_string(),
         },
         _ => ControlRoute::Space { address },
     }

@@ -2,9 +2,10 @@
 //!
 //! [`runtime::WorldRegistry`] owns the immutable semantic implementations used
 //! by a Station. This module owns the application-side half of that boundary:
-//! one [`WorldBridge`] per registered World, including the reviewed
-//! implementation id bundled by this build and the Sessions docked for each
-//! local identity.
+//! a compile-time [`WorldPackage`] for each product, and one [`WorldBridge`] per
+//! package inside an active Space. A package carries the reviewed semantic
+//! implementation plus its optional local-control adapter; orbital code never
+//! needs to name the product behind either one.
 //!
 //! A [`WorldBridgeRegistry`] belongs to one Space bridge. It is not a process,
 //! does not own a listener, and has no autonomous background loop.
@@ -20,53 +21,150 @@ use runtime::{
     WorldRegistry,
 };
 
-struct PendingWorld {
+use crate::control::{Request, Response};
+
+/// Principal facts supplied to a World's local-control adapter.
+///
+/// This is deliberately smaller than a Runtime [`runtime::WorldContext`]. The
+/// adapter may resolve user-facing input and sign through the supplied Session,
+/// but it receives no Mechanics, Replica, transport, or storage handle.
+pub struct WorldControlContext<'a> {
+    pub session: &'a Session,
+    pub identity: &'a LocalIdentity,
+    pub actor: &'a str,
+    pub device: &'a str,
+}
+
+/// The application-side control adapter bundled with a World.
+///
+/// This is a compile-time package contract, not a dynamic loader ABI. Moving a
+/// bridge to a worker process later changes deployment isolation, not World
+/// identity or the route clients use.
+pub trait WorldControlAdapter: Send + Sync {
+    /// Whether this adapter owns the product request.
+    fn handles(&self, request: &Request) -> bool;
+
+    /// Resolve and execute one product request through the World's Session.
+    fn route(&self, request: Request, context: &WorldControlContext<'_>) -> Response;
+}
+
+/// One product package available to the application build.
+#[derive(Clone)]
+pub struct WorldPackage {
     registration: WorldRegistration,
     implementation: Arc<dyn World>,
     reviewed_implementation: [u8; 32],
+    control: Option<Arc<dyn WorldControlAdapter>>,
 }
 
-/// Compile-time composition of the Worlds bundled by one application build.
-#[derive(Default)]
-pub struct WorldBridgesBuilder {
-    pending: Vec<PendingWorld>,
-}
-
-impl WorldBridgesBuilder {
-    pub fn new() -> Self {
-        Self::default()
+impl std::fmt::Debug for WorldPackage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WorldPackage")
+            .field("world", &self.registration.id)
+            .field(
+                "reviewed_implementation",
+                &data_encoding::HEXLOWER.encode(&self.reviewed_implementation[..8]),
+            )
+            .field("has_control_adapter", &self.control.is_some())
+            .finish()
     }
+}
 
-    /// Add one reviewed World implementation.
-    ///
-    /// Duplicate ids and registration/implementation mismatches are rejected by
-    /// the existing [`RuntimeBuilder`] validation when [`Self::build`] freezes
-    /// the set.
-    pub fn register(
-        mut self,
+impl WorldPackage {
+    pub fn new(
         registration: WorldRegistration,
         implementation: Arc<dyn World>,
         reviewed_implementation: [u8; 32],
     ) -> Self {
-        self.pending.push(PendingWorld {
+        Self {
             registration,
             implementation,
             reviewed_implementation,
-        });
+            control: None,
+        }
+    }
+
+    pub fn with_control(mut self, control: Arc<dyn WorldControlAdapter>) -> Self {
+        self.control = Some(control);
         self
+    }
+
+    pub fn world_id(&self) -> &WorldId {
+        &self.registration.id
+    }
+}
+
+/// Compile-time composition of the Worlds bundled by one application build.
+///
+/// The package set is cloned down the LaitDaemon → Station placement →
+/// SpaceBridge call stack. Each Space freezes its own Runtime registry and
+/// bridge objects from the same reviewed set.
+#[derive(Clone, Default)]
+pub struct WorldPackages {
+    packages: Vec<WorldPackage>,
+}
+
+impl WorldPackages {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add one reviewed World package.
+    ///
+    /// Duplicate ids and registration/implementation mismatches are rejected by
+    /// the existing [`RuntimeBuilder`] validation when [`Self::build`] freezes
+    /// the set.
+    pub fn with_package(mut self, package: WorldPackage) -> Self {
+        self.packages.push(package);
+        self
+    }
+
+    /// Add a semantic-only World. Kept for independent Runtime adopters that
+    /// need no application control adapter.
+    pub fn register(
+        self,
+        registration: WorldRegistration,
+        implementation: Arc<dyn World>,
+        reviewed_implementation: [u8; 32],
+    ) -> Self {
+        self.with_package(WorldPackage::new(
+            registration,
+            implementation,
+            reviewed_implementation,
+        ))
+    }
+
+    pub fn world_ids(&self) -> impl Iterator<Item = &WorldId> {
+        self.packages.iter().map(WorldPackage::world_id)
+    }
+
+    pub fn contains(&self, world: &WorldId) -> bool {
+        self.packages
+            .iter()
+            .any(|package| package.world_id() == world)
+    }
+
+    pub fn accepts(&self, world: &WorldId, request: &Request) -> bool {
+        self.packages
+            .iter()
+            .find(|package| package.world_id() == world)
+            .and_then(|package| package.control.as_deref())
+            .is_some_and(|control| control.handles(request))
     }
 
     /// Freeze the semantic registry and create one application bridge per
     /// registered World.
-    pub fn build(self) -> Result<(WorldRegistry, WorldBridgeRegistry), RegistrationError> {
+    pub fn build(&self) -> Result<(WorldRegistry, WorldBridgeRegistry), RegistrationError> {
         let mut runtime = RuntimeBuilder::new();
-        let mut bridges = Vec::with_capacity(self.pending.len());
-        for pending in self.pending {
+        let mut bridges = Vec::with_capacity(self.packages.len());
+        for package in &self.packages {
             bridges.push((
-                pending.registration.id.clone(),
-                pending.reviewed_implementation,
+                package.registration.id.clone(),
+                package.reviewed_implementation,
+                package.control.clone(),
             ));
-            runtime = runtime.register(pending.registration, pending.implementation);
+            runtime =
+                runtime.register(package.registration.clone(), package.implementation.clone());
         }
         let registry = runtime.build()?;
         Ok((
@@ -74,12 +172,18 @@ impl WorldBridgesBuilder {
             WorldBridgeRegistry::new(
                 bridges
                     .into_iter()
-                    .map(|(world, reviewed)| (world.clone(), WorldBridge::new(world, reviewed)))
+                    .map(|(world, reviewed, control)| {
+                        (world.clone(), WorldBridge::new(world, reviewed, control))
+                    })
                     .collect(),
             ),
         ))
     }
 }
+
+/// Compatibility name for downstream code that built semantic-only World
+/// registries before packages also carried application control adapters.
+pub type WorldBridgesBuilder = WorldPackages;
 
 /// The sole product-side entrance to one World in one active Space.
 ///
@@ -88,6 +192,7 @@ impl WorldBridgesBuilder {
 pub struct WorldBridge {
     world: WorldId,
     reviewed_implementation: [u8; 32],
+    control: Option<Arc<dyn WorldControlAdapter>>,
     primary_session: Mutex<Option<Session>>,
     agent_sessions: Mutex<HashMap<DeviceId, Session>>,
 }
@@ -101,10 +206,15 @@ impl std::fmt::Debug for WorldBridge {
 }
 
 impl WorldBridge {
-    fn new(world: WorldId, reviewed_implementation: [u8; 32]) -> Self {
+    fn new(
+        world: WorldId,
+        reviewed_implementation: [u8; 32],
+        control: Option<Arc<dyn WorldControlAdapter>>,
+    ) -> Self {
         Self {
             world,
             reviewed_implementation,
+            control,
             primary_session: Mutex::new(None),
             agent_sessions: Mutex::new(HashMap::new()),
         }
@@ -116,6 +226,10 @@ impl WorldBridge {
 
     pub fn reviewed_implementation(&self) -> &[u8; 32] {
         &self.reviewed_implementation
+    }
+
+    pub fn control(&self) -> Option<&dyn WorldControlAdapter> {
+        self.control.as_deref()
     }
 
     /// Ensure the Space's primary identity has a Session for this World.
@@ -250,6 +364,20 @@ mod tests {
         schemas: Vec<BodySchema>,
     }
 
+    struct ProjectControl;
+
+    impl WorldControlAdapter for ProjectControl {
+        fn handles(&self, request: &Request) -> bool {
+            matches!(request, Request::ProjectList)
+        }
+
+        fn route(&self, _request: Request, _context: &WorldControlContext<'_>) -> Response {
+            Response::Projects {
+                projects: Vec::new(),
+            }
+        }
+    }
+
     impl World for NoopWorld {
         fn id(&self) -> WorldId {
             self.id.clone()
@@ -295,9 +423,9 @@ mod tests {
     fn one_space_has_one_bridge_per_registered_world() {
         let a = package("com.example.files", 1);
         let b = package("com.example.notes", 2);
-        let (registry, bridges) = WorldBridgesBuilder::new()
-            .register(a.0, a.1, a.2)
-            .register(b.0, b.1, b.2)
+        let (registry, bridges) = WorldPackages::new()
+            .with_package(WorldPackage::new(a.0, a.1, a.2))
+            .with_package(WorldPackage::new(b.0, b.1, b.2))
             .build()
             .unwrap();
 
@@ -326,9 +454,9 @@ mod tests {
     fn duplicate_worlds_still_fail_through_the_runtime_registry_contract() {
         let a = package("com.example.files", 1);
         let b = package("com.example.files", 2);
-        let err = WorldBridgesBuilder::new()
-            .register(a.0, a.1, a.2)
-            .register(b.0, b.1, b.2)
+        let err = WorldPackages::new()
+            .with_package(WorldPackage::new(a.0, a.1, a.2))
+            .with_package(WorldPackage::new(b.0, b.1, b.2))
             .build()
             .unwrap_err();
         assert_eq!(
@@ -337,5 +465,25 @@ mod tests {
                 WorldId::parse("com.example.files").expect("test World id")
             )
         );
+    }
+
+    #[test]
+    fn control_claims_are_owned_by_the_registered_package() {
+        let files = package("com.example.files", 1);
+        let notes = package("com.example.notes", 2);
+        let packages = WorldPackages::new()
+            .with_package(WorldPackage::new(files.0, files.1, files.2))
+            .with_package(
+                WorldPackage::new(notes.0, notes.1, notes.2).with_control(Arc::new(ProjectControl)),
+            );
+        let files = WorldId::parse("com.example.files").unwrap();
+        let notes = WorldId::parse("com.example.notes").unwrap();
+
+        assert!(!packages.accepts(&files, &Request::ProjectList));
+        assert!(packages.accepts(&notes, &Request::ProjectList));
+        assert!(!packages.accepts(&notes, &Request::Members));
+        let (_, bridges) = packages.build().unwrap();
+        assert!(bridges.bridge(&files).unwrap().control().is_none());
+        assert!(bridges.bridge(&notes).unwrap().control().is_some());
     }
 }

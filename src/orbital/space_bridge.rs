@@ -5,8 +5,9 @@
 //! [`Station`] with the comms Contact plane. [`WorldBridgeRegistry`] owns one
 //! bridge per hosted World. The current process adapter serves the **same** newline-delimited
 //! `control::Request`/`Response` IPC the CLI/serve/MCP speak, so those clients
-//! are unchanged. The current application requests route through
-//! [`IssueRouter`]; peer exchange is Contact/Convergence over `comms`;
+//! are unchanged. Product requests route through the control adapter registered
+//! in their injected [`WorldPackage`](crate::orbital::WorldPackage); peer
+//! exchange is Contact/Convergence over `comms`;
 //! invitation is Coordinates v1; `Subscribe` streams the Station's
 //! `ObservationStream` as `Doorbell` frames.
 //!
@@ -41,12 +42,11 @@ use crate::control::{
     RequestOwner, Response, StatusInfo,
 };
 use crate::daemon::OrbitAddress;
-use crate::ids::SystemUlidSource;
 use crate::orbital::{
-    orbital_store_root, unsupported_store_at, OrbitalMechanics, WorldBridgeRegistry,
+    orbital_store_root, unsupported_store_at, OrbitalMechanics, WorldBridge, WorldBridgeRegistry,
+    WorldControlContext, WorldPackages,
 };
 use crate::transport::{Transport, TransportFactory};
-use crate::world::{IssueRouter, RouterFacts};
 
 /// Discover the single Space id under a home's orbital store root.
 fn discover_space(home: &Path) -> Result<SpaceId> {
@@ -140,6 +140,11 @@ pub struct SpaceBridge {
     last_activity: Mutex<std::time::Instant>,
 }
 
+struct PrincipalFacts {
+    actor: String,
+    device: String,
+}
+
 /// An owned in-process SpaceBridge lifecycle.
 ///
 /// The runner holds the per-home daemon lock from before activation until after
@@ -174,9 +179,10 @@ impl SpaceBridgeRunner {
         home: PathBuf,
         device_seed: [u8; 32],
         factory: &dyn TransportFactory,
+        packages: WorldPackages,
     ) -> Result<Self> {
         let lock = acquire_daemon_lock(&home)?;
-        let bridge = Arc::new(SpaceBridge::open(&home, device_seed, factory).await?);
+        let bridge = Arc::new(SpaceBridge::open(&home, device_seed, factory, packages).await?);
         Ok(Self {
             home,
             bridge,
@@ -236,6 +242,7 @@ impl SpaceBridge {
         home: &Path,
         device_seed: [u8; 32],
         factory: &dyn TransportFactory,
+        packages: WorldPackages,
     ) -> Result<Self> {
         if let Some(err) = unsupported_store_at(home) {
             return Err(anyhow!("{err}"));
@@ -243,7 +250,7 @@ impl SpaceBridge {
         let space = discover_space(home)?;
         let mechanics = OrbitalMechanics::open(&orbital_store_root(home), &space, &device_seed)?;
 
-        let (registry, worlds) = crate::orbital::issues_worlds()
+        let (registry, worlds) = packages
             .build()
             .map_err(|e| anyhow!("world registry: {e:?}"))?;
         let rt = Runtime::open(
@@ -354,7 +361,9 @@ impl SpaceBridge {
         // Dock now if we already hold standing (founder / re-opened member);
         // otherwise defer until admission lands (an un-admitted joiner cannot
         // dock, but must still serve control to drive its own Contact).
-        let _ = worlds.ensure_primary(&station, &crate::world::contract::world_id(), &identity);
+        for world in worlds.world_ids().cloned().collect::<Vec<_>>() {
+            let _ = worlds.ensure_primary(&station, &world, &identity);
+        }
 
         // The implementation self-check. Receipts pin whichever implementation
         // id is ACTIVE in the ledger — not this build's — so a build whose
@@ -413,10 +422,54 @@ impl SpaceBridge {
             .is_ok()
     }
 
-    /// Route an issue-family request through the docked Session, or refuse with a
-    /// typed "not admitted yet" when this device holds no standing.
-    fn route_issue(&self, req: Request, act_as: Option<&str>) -> Response {
-        let world = crate::world::contract::world_id();
+    /// Resolve the World package addressed by this request.
+    ///
+    /// New daemon clients always provide an explicit World route. The
+    /// package-claim lookup remains only for the historical per-home control
+    /// adapter, which carried no route in its envelope.
+    fn control_world(
+        &self,
+        route: Option<&ControlRoute>,
+        request: &Request,
+    ) -> std::result::Result<WorldId, Response> {
+        if let Some(ControlRoute::World { world, .. }) = route {
+            return WorldId::parse(world)
+                .ok_or_else(|| Response::err(format!("invalid World id '{world}'")));
+        }
+
+        let mut claimed = self
+            .worlds
+            .world_ids()
+            .filter(|world| {
+                self.worlds
+                    .bridge(world)
+                    .and_then(WorldBridge::control)
+                    .is_some_and(|control| control.handles(request))
+            })
+            .cloned();
+        let Some(world) = claimed.next() else {
+            return Err(Response::err("no World package owns this request"));
+        };
+        if claimed.next().is_some() {
+            return Err(Response::err(
+                "more than one World package claims this request",
+            ));
+        }
+        Ok(world)
+    }
+
+    /// Route a product request through its registered World package, or refuse
+    /// with a typed "not admitted yet" when this device holds no standing.
+    fn route_world(
+        &self,
+        route: Option<&ControlRoute>,
+        req: Request,
+        act_as: Option<&str>,
+    ) -> Response {
+        let world = match self.control_world(route, &req) {
+            Ok(world) => world,
+            Err(response) => return response,
+        };
         // Resolve which local identity signs this request: the daemon's primary
         // (human) when no selector, else a sponsored local agent provisioned
         // under this home. One store, N signing identities (Architecture B).
@@ -455,12 +508,12 @@ impl SpaceBridge {
             if !self.ensure_world_session(&world) {
                 return Response::err(
                     "not admitted to this space yet — run `lait connect` to reach an \
-                     admin and complete admission before filing issues",
+                     admin and complete admission before using this World",
                 );
             }
             self.worlds
                 .with_primary(&world, |session| {
-                    self.route_with(session, &self.identity, &seed, req)
+                    self.route_with(&world, session, &self.identity, &seed, req)
                 })
                 .expect("World Session present after ensure")
         } else {
@@ -468,7 +521,7 @@ impl SpaceBridge {
             match self
                 .worlds
                 .with_agent(&self.station, &world, &identity, |session| {
-                    self.route_with(session, &identity, &seed, req)
+                    self.route_with(&world, session, &identity, &seed, req)
                 }) {
                 Ok(response) => response,
                 Err(_) => Response::denied(
@@ -480,29 +533,32 @@ impl SpaceBridge {
         }
     }
 
-    /// Route one issue request through a docked Session for a specific identity,
-    /// absorbing the transient "membership changed — retry" a background Contact
-    /// can cause between a submit's resolve and its commit.
+    /// Route one product request through a docked Session for a specific
+    /// identity. Product-specific resolution, minting, retry, and rendering are
+    /// owned by the package's control adapter.
     fn route_with(
         &self,
+        world: &WorldId,
         session: &Session,
         identity: &LocalIdentity,
         seed: &[u8; 32],
         req: Request,
     ) -> Response {
-        let router = IssueRouter::new(session, identity, CLOCK.get_or_init(|| SystemUlidSource));
         let facts = self.facts_for(seed);
-        let mut resp = router.route(req.clone(), &facts).0;
-        for _ in 0..3 {
-            match &resp {
-                Response::Error { message, .. } if message == "membership changed — retry" => {
-                    std::thread::sleep(std::time::Duration::from_millis(15));
-                    resp = router.route(req.clone(), &facts).0;
-                }
-                _ => break,
-            }
-        }
-        resp
+        let Some(control) = self.worlds.bridge(world).and_then(WorldBridge::control) else {
+            return Response::err(format!(
+                "World '{world}' has no application control adapter"
+            ));
+        };
+        control.route(
+            req,
+            &WorldControlContext {
+                session,
+                identity,
+                actor: &facts.actor,
+                device: &facts.device,
+            },
+        )
     }
 
     /// Resolve the acting identity's seed. `None` → the daemon's primary (human)
@@ -521,12 +577,12 @@ impl SpaceBridge {
         }
     }
 
-    fn facts(&self) -> RouterFacts {
+    fn facts(&self) -> PrincipalFacts {
         self.facts_for(&self.device_seed)
     }
 
-    /// Router facts (actor/device) for a specific identity seed.
-    fn facts_for(&self, seed: &[u8; 32]) -> RouterFacts {
+    /// Principal facts for a specific local identity seed.
+    fn facts_for(&self, seed: &[u8; 32]) -> PrincipalFacts {
         use runtime::AuthorityView;
         let device = crate::crypto::device_from_seed(seed);
         let actor = self
@@ -534,12 +590,9 @@ impl SpaceBridge {
             .resolve(&device)
             .map(|r| r.actor.as_str().to_string())
             .unwrap_or_default();
-        RouterFacts {
+        PrincipalFacts {
             device: device.as_str().to_string(),
             actor,
-            project_hint: std::env::var("LAIT_PROJECT_HINT").ok(),
-            default_project: None,
-            now: now_secs(),
         }
     }
 
@@ -554,7 +607,7 @@ impl SpaceBridge {
         act_as: Option<&str>,
     ) -> Response {
         let owner = crate::control::classify(&req);
-        if let Err(response) = self.validate_route(route, owner) {
+        if let Err(response) = self.validate_route(route, &req, owner) {
             return response;
         }
         match owner {
@@ -563,7 +616,7 @@ impl SpaceBridge {
             // I). Membership/station/lifecycle ops stay the daemon's — an agent
             // holds no membership authority, so routing them "as the agent"
             // would only ever be denied.
-            RequestOwner::World => self.route_issue(req, act_as),
+            RequestOwner::World => self.route_world(route, req, act_as),
             // Authority never passes through the Session, so a local membership,
             // role, device or key change publishes nothing on its own — the
             // remote half of this plane is published by the Contact driver.
@@ -589,6 +642,7 @@ impl SpaceBridge {
     fn validate_route(
         &self,
         route: Option<&ControlRoute>,
+        request: &Request,
         owner: RequestOwner,
     ) -> std::result::Result<(), Response> {
         let Some(route) = route else {
@@ -642,13 +696,14 @@ impl SpaceBridge {
                         "World '{world}' is not enabled in Space {actual_space}"
                     )));
                 }
-                // The public Request enum is still the issue tracker's adapter.
-                // A second application will add its own typed World call; until
-                // then, do not let an issue verb borrow another World's Session.
-                if world_id != crate::world::contract::world_id() {
+                let accepts = self
+                    .worlds
+                    .bridge(&world_id)
+                    .and_then(WorldBridge::control)
+                    .is_some_and(|control| control.handles(request));
+                if !accepts {
                     return Err(Response::err(format!(
-                        "request belongs to {}, not World '{world}'",
-                        crate::world::contract::world_id()
+                        "World '{world}' does not own this product request"
                     )));
                 }
                 Ok(())
@@ -659,8 +714,11 @@ impl SpaceBridge {
     /// Ring the authority plane, if there is a docked Session to ring through.
     /// Before admission there is no Session and nothing is subscribed anyway.
     fn publish_authority_advanced(&self) {
-        let world = crate::world::contract::world_id();
-        if !self.ensure_world_session(&world) {
+        let docked = self
+            .worlds
+            .world_ids()
+            .any(|world| self.ensure_world_session(world));
+        if !docked {
             return;
         }
         self.worlds.with_any_primary(|session| {
@@ -758,16 +816,27 @@ impl SpaceBridge {
             },
             Request::AgentProvision { name } => self.agent_provision(&name),
             Request::WorldUpgrade => {
-                let ours = crate::orbital::issues_implementation_id();
-                match self
-                    .mechanics
-                    .activate_implementation(crate::world::contract::PRODUCT_WORLD, ours)
-                {
+                let mut controlled = self.worlds.world_ids().filter_map(|world| {
+                    let bridge = self.worlds.bridge(world)?;
+                    bridge
+                        .control()
+                        .map(|_| (world.clone(), *bridge.reviewed_implementation()))
+                });
+                let Some((world, ours)) = controlled.next() else {
+                    return Response::err("this build has no controllable World to activate");
+                };
+                if controlled.next().is_some() {
+                    return Response::err(
+                        "more than one World is bundled — world-upgrade requires an explicit \
+                         World selector",
+                    );
+                }
+                match self.mechanics.activate_implementation(world.as_str(), ours) {
                     Ok(()) => Response::Ok {
                         message: Some(format!(
                             "implementation {} is active for {} (no-op if it already was)",
                             data_encoding::HEXLOWER.encode(&ours[..8]),
-                            crate::world::contract::PRODUCT_WORLD,
+                            world,
                         )),
                     },
                     Err(e) => Response::err(format!("{e}")),
@@ -1927,7 +1996,9 @@ impl SpaceBridge {
         // an invalidly routed Stop must not tear down this bridge, and a
         // subscription must not bypass the same Space-boundary check applied to
         // ordinary observation requests.
-        if let Err(response) = self.validate_route(route.as_ref(), crate::control::classify(&req)) {
+        if let Err(response) =
+            self.validate_route(route.as_ref(), &req, crate::control::classify(&req))
+        {
             let _ = write_line(write_half, &response).await;
             return;
         }
@@ -2296,8 +2367,6 @@ fn resolve_docs(
     (dirty, missed)
 }
 
-static CLOCK: std::sync::OnceLock<SystemUlidSource> = std::sync::OnceLock::new();
-
 fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::SystemTime::UNIX_EPOCH)
@@ -2512,7 +2581,20 @@ pub async fn run_space_bridge_with(
     device_seed: [u8; 32],
     factory: &dyn TransportFactory,
 ) -> Result<()> {
-    SpaceBridgeRunner::start(home, device_seed, factory)
+    run_space_bridge_with_packages(home, device_seed, factory, crate::world::packages()).await
+}
+
+/// Run a SpaceBridge with an explicitly supplied compile-time World package
+/// set. This is the product-neutral composition seam used by LaitDaemon; the
+/// convenience wrappers above preserve the issue tracker's existing entry
+/// points.
+pub async fn run_space_bridge_with_packages(
+    home: PathBuf,
+    device_seed: [u8; 32],
+    factory: &dyn TransportFactory,
+    packages: WorldPackages,
+) -> Result<()> {
+    SpaceBridgeRunner::start(home, device_seed, factory, packages)
         .await?
         .run()
         .await

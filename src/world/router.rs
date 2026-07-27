@@ -14,6 +14,7 @@ use serde::de::DeserializeOwned;
 use crate::control::{BoardPos, Request, Response};
 use crate::dto::{BoardView, GraphView, IssueView, LabelDto, ProjectDto, Row};
 use crate::ids::{DocId, LabelId, ProjectId, SystemUlidSource, UlidSource};
+use crate::orbital::{WorldControlAdapter, WorldControlContext};
 
 use super::contract::{self, IssueIntent, IssueQuery, NewLabel, Pos, WorkAction};
 
@@ -31,6 +32,52 @@ pub struct RouterFacts {
     pub default_project: Option<String>,
     /// Unix seconds now.
     pub now: u64,
+}
+
+/// IssuesWorld's application-control half.
+///
+/// The semantic [`super::IssuesWorld`] remains a pure Runtime World. This
+/// adapter owns user-facing request resolution, local id/time minting, retry
+/// policy, and response rendering, and is registered beside that World in its
+/// [`crate::orbital::WorldPackage`].
+#[derive(Debug, Default)]
+pub struct IssuesControlAdapter;
+
+impl WorldControlAdapter for IssuesControlAdapter {
+    fn handles(&self, request: &Request) -> bool {
+        IssueRouter::handles(request)
+    }
+
+    fn route(&self, request: Request, context: &WorldControlContext<'_>) -> Response {
+        static CLOCK: std::sync::OnceLock<SystemUlidSource> = std::sync::OnceLock::new();
+
+        let router = IssueRouter::new(
+            context.session,
+            context.identity,
+            CLOCK.get_or_init(|| SystemUlidSource),
+        );
+        let facts = RouterFacts {
+            device: context.device.to_string(),
+            actor: context.actor.to_string(),
+            project_hint: std::env::var("LAIT_PROJECT_HINT").ok(),
+            default_project: None,
+            now: std::time::SystemTime::now()
+                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                .map(|duration| duration.as_secs())
+                .unwrap_or(0),
+        };
+        let mut response = router.route(request.clone(), &facts).0;
+        for _ in 0..3 {
+            match &response {
+                Response::Error { message, .. } if message == "membership changed — retry" => {
+                    std::thread::sleep(std::time::Duration::from_millis(15));
+                    response = router.route(request.clone(), &facts).0;
+                }
+                _ => break,
+            }
+        }
+        response
+    }
 }
 
 /// The decoded catalog snapshot the router resolves against.

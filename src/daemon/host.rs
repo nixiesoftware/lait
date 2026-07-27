@@ -21,6 +21,7 @@ use crate::config::{acquire_daemon_lock, DaemonLock};
 use crate::control::{
     self, ClientRequest, ControlRoute, Request, Response, CONTROL_PROTOCOL_VERSION,
 };
+use crate::orbital::WorldPackages;
 #[cfg(test)]
 use crate::transport::TransportFactory;
 
@@ -435,17 +436,16 @@ impl LaitDaemonRunner {
 }
 
 /// Run the current identity's always-on Lait daemon.
-pub async fn run_lait_daemon() -> Result<()> {
+pub async fn run_lait_daemon(packages: WorldPackages) -> Result<()> {
     let identity = crate::config::identity_dir()?;
     let config_root = crate::config::config_root()?;
     let self_contained = std::env::var_os("LAIT_HOME").is_some();
     let agents_base = crate::registry::agents_base(&config_root);
     let home = crate::config::lait_daemon_home()?;
-    let router = Arc::new(ControlRouter::new(OrbitDirectory::new(
-        identity,
-        agents_base,
-        self_contained,
-    )));
+    let router = Arc::new(ControlRouter::new(
+        OrbitDirectory::new(identity, agents_base, self_contained),
+        packages,
+    ));
     let runner = LaitDaemonRunner::start(home, router)?;
     let stop = runner.stop_handle();
     let signal = tokio::spawn(async move {
@@ -500,7 +500,11 @@ pub(crate) fn runner_with_factory(
 ) -> Result<LaitDaemonRunner> {
     LaitDaemonRunner::start(
         home,
-        Arc::new(ControlRouter::with_factory(directory, factory)),
+        Arc::new(ControlRouter::with_factory(
+            directory,
+            factory,
+            crate::world::packages(),
+        )),
     )
 }
 

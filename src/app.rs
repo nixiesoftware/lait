@@ -318,7 +318,7 @@ async fn dispatch(specs: &[cmdspec::Spec], matches: &ArgMatches, out: Out) -> Re
                         .unwrap_or_else(|_| "lait=info,warn".into()),
                 )
                 .init();
-            return crate::daemon::run_lait_daemon().await;
+            return crate::daemon::run_lait_daemon(crate::world::packages()).await;
         }
         // `serve` is also global to the identity: it is now a client of the
         // Lait daemon rather than an owner of Station placements.

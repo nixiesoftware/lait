@@ -21,6 +21,7 @@ use tokio::sync::{broadcast, Mutex, RwLock};
 
 use crate::control::{self, ControlRoute, Doorbell, Request, RequestOwner, Response};
 use crate::orbital::space_bridge::{SpaceBridgeRunner, SpaceBridgeStop};
+use crate::orbital::WorldPackages;
 use crate::transport::{DefaultFactory, TransportFactory};
 
 use super::transport_hub::TransportHubFactory;
@@ -105,6 +106,7 @@ impl StationPlacement {
         resolved: &ResolvedOrbit,
         doorbells: broadcast::Sender<OrbitDoorbell>,
         factory: Arc<dyn TransportFactory>,
+        packages: WorldPackages,
     ) -> Result<Self> {
         let mode = match control::probe(&resolved.home).await {
             control::Probe::Healthy => PlacementMode::Attached,
@@ -117,7 +119,7 @@ impl StationPlacement {
                 .into())
             }
             control::Probe::Absent => {
-                match Self::start_owned(resolved, factory.as_ref()).await {
+                match Self::start_owned(resolved, factory.as_ref(), packages).await {
                     Ok(mode) => mode,
                     Err(start_error) => {
                         // A cwd-bound CLI can win the daemon lock after our
@@ -156,6 +158,7 @@ impl StationPlacement {
     async fn start_owned(
         resolved: &ResolvedOrbit,
         factory: &dyn TransportFactory,
+        packages: WorldPackages,
     ) -> Result<PlacementMode> {
         if !crate::orbital::space_store_present(&resolved.home) {
             return Err(anyhow!(
@@ -164,7 +167,8 @@ impl StationPlacement {
             ));
         }
         let seed = crate::config::load_or_create_identity(&resolved.identity_dir)?;
-        let runner = SpaceBridgeRunner::start(resolved.home.clone(), seed, factory).await?;
+        let runner =
+            SpaceBridgeRunner::start(resolved.home.clone(), seed, factory, packages).await?;
         let stop = runner.stop_handle();
         let mut completion = tokio::spawn(runner.run());
 
@@ -404,16 +408,21 @@ pub struct ControlRouter {
     occupancy: OrbitOccupancy<StationPlacement>,
     doorbells: broadcast::Sender<OrbitDoorbell>,
     factory: Arc<dyn TransportFactory>,
+    packages: WorldPackages,
     lifecycle: RwLock<()>,
     shutting_down: AtomicBool,
 }
 
 impl ControlRouter {
-    pub fn new(directory: OrbitDirectory) -> Self {
-        Self::with_factory(directory, Arc::new(DefaultFactory))
+    pub fn new(directory: OrbitDirectory, packages: WorldPackages) -> Self {
+        Self::with_factory(directory, Arc::new(DefaultFactory), packages)
     }
 
-    pub fn with_factory(directory: OrbitDirectory, factory: Arc<dyn TransportFactory>) -> Self {
+    pub fn with_factory(
+        directory: OrbitDirectory,
+        factory: Arc<dyn TransportFactory>,
+        packages: WorldPackages,
+    ) -> Self {
         // Doorbells are invalidations, not state. Lagging receivers rebaseline,
         // so a bounded fan-in is both sufficient and necessary.
         let (doorbells, _) = broadcast::channel(256);
@@ -422,6 +431,7 @@ impl ControlRouter {
             occupancy: OrbitOccupancy::default(),
             doorbells,
             factory: Arc::new(TransportHubFactory::new(factory)),
+            packages,
             lifecycle: RwLock::new(()),
             shutting_down: AtomicBool::new(false),
         }
@@ -456,9 +466,10 @@ impl ControlRouter {
         let orbit = resolved.address.orbit.clone();
         let doorbells = self.doorbells.clone();
         let factory = self.factory.clone();
+        let packages = self.packages.clone();
         self.occupancy
             .get_or_try_place(orbit, StationPlacement::is_live, || {
-                StationPlacement::establish(&resolved, doorbells, factory)
+                StationPlacement::establish(&resolved, doorbells, factory, packages)
             })
             .await?;
         Ok(resolved)
@@ -495,7 +506,7 @@ impl ControlRouter {
         request: &Request,
         act_as: Option<&str>,
     ) -> Result<control::Response> {
-        let address = routed_address(&route, request)?;
+        let address = routed_address(&self.packages, &route, request)?;
         let resolved = self.place_address(address).await?;
         control::request_as_routed(&resolved.home, request, Some(route), act_as).await
     }
@@ -508,7 +519,7 @@ impl ControlRouter {
         route: ControlRoute,
         request: &Request,
     ) -> Result<control::Response> {
-        let address = routed_address(&route, request)?;
+        let address = routed_address(&self.packages, &route, request)?;
         let _lifecycle = self.lifecycle.read().await;
         if self.shutting_down.load(Ordering::Acquire) {
             return Err(anyhow!("the control router is shutting down"));
@@ -564,7 +575,11 @@ impl ControlRouter {
     }
 }
 
-fn routed_address<'a>(route: &'a ControlRoute, request: &Request) -> Result<&'a OrbitAddress> {
+fn routed_address<'a>(
+    packages: &WorldPackages,
+    route: &'a ControlRoute,
+    request: &Request,
+) -> Result<&'a OrbitAddress> {
     match route {
         ControlRoute::Daemon => Err(anyhow!(
             "daemon-scoped request cannot be dispatched to a Station"
@@ -581,11 +596,16 @@ fn routed_address<'a>(route: &'a ControlRoute, request: &Request) -> Result<&'a 
                     "Space-owned request cannot be sent through a WorldBridge"
                 ));
             }
-            if world != crate::world::contract::world_id().as_str() {
+            let Some(world_id) = replica::ids::WorldId::parse(world) else {
+                return Err(anyhow!("invalid World id '{world}'"));
+            };
+            if !packages.contains(&world_id) {
                 return Err(anyhow!(
-                    "request belongs to {}, not World '{world}'",
-                    crate::world::contract::world_id()
+                    "World '{world}' is not bundled by this Lait daemon"
                 ));
+            }
+            if !packages.accepts(&world_id, request) {
+                return Err(anyhow!("World '{world}' does not own this product request"));
             }
             Ok(address)
         }
@@ -741,7 +761,11 @@ mod tests {
     async fn vacant_orbit_is_owned_in_process_and_shutdown_returns_it_to_vacancy() {
         let seed = [201; 32];
         let (home, directory, id) = formed_directory("owned", &seed);
-        let router = ControlRouter::with_factory(directory, Arc::new(MemFactory(MemNet::new())));
+        let router = ControlRouter::with_factory(
+            directory,
+            Arc::new(MemFactory(MemNet::new())),
+            crate::world::packages(),
+        );
 
         assert!(matches!(
             router.request(&id, &Request::Status).await.unwrap(),
@@ -768,9 +792,14 @@ mod tests {
         let seed = [202; 32];
         let (home, directory, id) = formed_directory("attached", &seed);
         let net = MemNet::new();
-        let runner = SpaceBridgeRunner::start(home.clone(), seed, &MemFactory(net.clone()))
-            .await
-            .unwrap();
+        let runner = SpaceBridgeRunner::start(
+            home.clone(),
+            seed,
+            &MemFactory(net.clone()),
+            crate::world::packages(),
+        )
+        .await
+        .unwrap();
         let stop = runner.stop_handle();
         let mut completion = tokio::spawn(runner.run());
         let resolved = directory.resolve(&id).unwrap();
@@ -778,7 +807,11 @@ mod tests {
             .await
             .unwrap();
 
-        let router = ControlRouter::with_factory(directory, Arc::new(MemFactory(net)));
+        let router = ControlRouter::with_factory(
+            directory,
+            Arc::new(MemFactory(net)),
+            crate::world::packages(),
+        );
         assert!(matches!(
             router.request(&id, &Request::Status).await.unwrap(),
             Response::Status(_)

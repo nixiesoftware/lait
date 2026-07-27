@@ -15,6 +15,7 @@ without a central server.
 ```text
 LaitDaemon
   ├─ identity-scoped local control endpoint
+  ├─ injected WorldPackages
   ├─ OrbitDirectory
   └─ ControlRouter
        ├─ IdentityTransportHubs (keyed by DeviceId)
@@ -249,6 +250,16 @@ active Space. It owns the reviewed implementation identity and the Sessions
 docked for local identities. A WorldBridgeRegistry maps `WorldId` to distinct
 bridge objects; a Session can never be reused across Worlds.
 
+The application composition root supplies one compile-time `WorldPackages` set
+to LaitDaemon. Each `WorldPackage` keeps a Runtime registration, semantic World
+implementation, reviewed implementation identity, and optional local-control
+adapter together. The same immutable package set is carried through
+ControlRouter placement into every SpaceBridge; daemon routing validates the
+addressed World against that injected set and never names IssuesWorld. A
+control adapter owns product reference resolution, local id/time minting,
+transient retry, and response rendering. This is a compile-time package seam,
+not a promise of dynamic library loading or process isolation.
+
 A Session binds a local identity to one World at an active Station. Queries and
 mutations are authorized independently. Query results are computed from one
 Manifest root and authority frontier; a derived cache must be keyed by that
@@ -262,6 +273,13 @@ legitimate protected material opaquely.
 
 IssuesWorld (`com.lait.issues`) is the bundled reference World. It has no private
 architectural path unavailable to another conforming World.
+
+The package boundary is not yet the complete repository carve. The shared local
+`Request`/`Response` schema, Issues-specific status/inbox/doorbell projections,
+role-assignment planning, and tracker formation still live in the root
+application. They must move behind a versioned generic World-call envelope and
+product-owned lifecycle/projection hooks before the Issues package can become
+an acyclic standalone crate or repository.
 
 ## 6. Communication model
 

@@ -104,3 +104,24 @@ fn every_world_owned_request_is_served_by_the_issue_router() {
         );
     }
 }
+
+#[test]
+fn every_world_owned_request_is_claimed_by_its_registered_package() {
+    let packages = lait::world::packages();
+    for request in representative_requests() {
+        let selected = lait::world::request_world(&request);
+        if classify(&request) == RequestOwner::World {
+            let world = selected
+                .unwrap_or_else(|| panic!("no bundled World package selected for {request:?}"));
+            assert!(
+                packages.accepts(&world, &request),
+                "selected World package {world} does not accept {request:?}"
+            );
+        } else {
+            assert!(
+                selected.is_none(),
+                "Space-owned request unexpectedly selected World {selected:?}: {request:?}"
+            );
+        }
+    }
+}
