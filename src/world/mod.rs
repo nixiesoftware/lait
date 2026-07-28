@@ -3,7 +3,7 @@
 //!
 //! See `docs/plans/04-product-world-contract.md` for the normative mapping.
 
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use crate::orbital::{WorldPackage, WorldPackages};
 use world_interface::WorldClientRegistry;
@@ -36,11 +36,15 @@ pub fn packages() -> WorldPackages {
     WorldPackages::new().with_package(package())
 }
 
-/// Every client-facing World package mounted by the navigation shell.
-pub fn client_packages() -> WorldClientRegistry {
+static CLIENT_PACKAGES: LazyLock<WorldClientRegistry> = LazyLock::new(|| {
     WorldClientRegistry::new()
         .with_package(issues_app::package().expect("valid bundled Issues client package"))
         .expect("non-conflicting bundled World client packages")
+});
+
+/// Every client-facing World package mounted by the navigation shell.
+pub fn client_packages() -> &'static WorldClientRegistry {
+    &CLIENT_PACKAGES
 }
 
 /// The reviewed IssuesWorld implementation id shipped by this build.

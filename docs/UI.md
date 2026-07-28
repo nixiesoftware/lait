@@ -33,7 +33,7 @@ lait init
 lait issues new "Fix the import path"
 lait issues ls
 lait issues show <ref>
-lait edit <ref>
+lait issues edit <ref>
 lait issues start <ref>
 lait issues done <ref>
 lait issues comment <ref> "Reproduced on Windows"

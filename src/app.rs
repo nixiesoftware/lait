@@ -152,31 +152,6 @@ fn apply_selection(matches: &ArgMatches) -> Result<&'static str> {
     Ok(source)
 }
 
-/// A minimal extension→MIME map for attachments — enough for the common
-/// cases; anything else is an honest octet-stream.
-fn mime_for(name: &str) -> String {
-    let ext = name
-        .rsplit('.')
-        .next()
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    match ext.as_str() {
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "gif" => "image/gif",
-        "webp" => "image/webp",
-        "svg" => "image/svg+xml",
-        "pdf" => "application/pdf",
-        "txt" | "log" => "text/plain",
-        "md" => "text/markdown",
-        "json" => "application/json",
-        "csv" => "text/csv",
-        "zip" => "application/zip",
-        _ => "application/octet-stream",
-    }
-    .to_string()
-}
-
 /// Parse arguments, run, and report any failure the way the CLI contract says.
 ///
 /// Returns the process exit code rather than a `Result`: handing an error back to
@@ -546,201 +521,49 @@ async fn dispatch(specs: &[cmdspec::Spec], matches: &ArgMatches, out: Out) -> Re
 
 async fn dispatch_world_client(
     home: &std::path::Path,
-    invocation: world_interface::CliInvocation,
+    invocation: world_interface::ClientInvocation,
     _selection_source: &'static str,
     out: Out,
 ) -> Result<()> {
-    use issues_app::host::{IssuesHostRequest, WorkStateAction};
-
-    match invocation {
-        world_interface::CliInvocation::World(call) => {
-            if let Ok(request) = issues_app::decode_call(&call) {
-                if !crate::cli::confirm_issues_destructive(home, &request, out).await {
-                    std::process::exit(1);
-                }
-            }
-            let package = crate::world::client_packages()
-                .package_for_world(call.world())
-                .cloned()
-                .ok_or_else(|| anyhow!("no client package for World '{}'", call.world()))?;
-            let scope = crate::cli::scope_for_home(home);
-            let reply = crate::cli::world_reply_as_scoped(home, call.clone(), &scope, None).await?;
-            let value = package
-                .decode_reply(&call, reply)
-                .map_err(|error| anyhow!(error.to_string()))?;
-            let options = world_interface::PresentationOptions {
+    let package = crate::world::client_packages()
+        .package_for_world(invocation.world_id())
+        .cloned()
+        .ok_or_else(|| anyhow!("no client package for World '{}'", invocation.world_id()))?;
+    let host = crate::cli::PackageClientHost::new(home, crate::cli::scope_for_home(home), None);
+    // Through the package, not off the invocation: a parse-time question can
+    // only echo the selector typed, and `lait issues delete` usually infers its
+    // ref from the branch. The package reads enough to name the thing first.
+    if let Some(question) = package
+        .confirmation(&host, &invocation)
+        .await
+        .map_err(|error| anyhow!(error.to_string()))?
+    {
+        if !crate::cli::confirm_client(&question, out) {
+            std::process::exit(1);
+        }
+    }
+    let output = package
+        .execute(
+            &host,
+            invocation,
+            world_interface::PresentationOptions {
                 json: out.json,
                 color: out.color,
-            };
-            if let Some(presentation) = package
-                .present_reply(value.clone(), options)
-                .map_err(|error| anyhow!(error.to_string()))?
-            {
-                let code = crate::cli::print_presentation(&presentation);
-                if code != 0 {
-                    std::process::exit(code);
-                }
-            } else if out.json {
-                println!("{}", serde_json::to_string(&value)?);
-            } else {
-                println!("{}", serde_json::to_string_pretty(&value)?);
-            }
-            Ok(())
+            },
+        )
+        .await
+        .map_err(|error| anyhow!(error.to_string()))?;
+    if let Some(presentation) = output.presentation {
+        let code = crate::cli::print_presentation(&presentation);
+        if code != 0 {
+            std::process::exit(code);
         }
-        world_interface::CliInvocation::Local { operation, input } => {
-            match issues_app::host::decode(&operation, input)
-                .map_err(|error| anyhow!(error.to_string()))?
-            {
-                IssuesHostRequest::Focus => crate::cli::run_focus(home, out).await,
-                IssuesHostRequest::NewStart(request) => {
-                    crate::cli::run_new_start(home, request, out).await
-                }
-                IssuesHostRequest::WorkState {
-                    action,
-                    reff,
-                    no_branch,
-                } => match action {
-                    WorkStateAction::Start => {
-                        crate::cli::run_start(home, reff, no_branch, out).await
-                    }
-                    WorkStateAction::Done => {
-                        crate::cli::run_workstate(
-                            home,
-                            issues_app::IssuesRequest::IssueDone { reff },
-                            out,
-                        )
-                        .await
-                    }
-                    WorkStateAction::Stop => {
-                        crate::cli::run_workstate(
-                            home,
-                            issues_app::IssuesRequest::IssueStop { reff },
-                            out,
-                        )
-                        .await
-                    }
-                },
-                IssuesHostRequest::Inbox { clear } => {
-                    let response = crate::cli::issues_inbox(home, clear).await?;
-                    let code = crate::cli::print_issues_response(&response, out);
-                    if code != 0 {
-                        std::process::exit(code);
-                    }
-                    Ok(())
-                }
-                IssuesHostRequest::WorldUpgrade => {
-                    crate::cli::run(
-                        home,
-                        Request::WorldActivate {
-                            world: issues::contract::PRODUCT_WORLD.into(),
-                        },
-                        out,
-                    )
-                    .await
-                }
-                IssuesHostRequest::Access(access) => {
-                    let scope = crate::cli::scope_for_home(home);
-                    let response =
-                        crate::cli::issues_access_as_scoped(home, access, &scope, None).await?;
-                    let code = crate::cli::print_response(&response, out);
-                    if code != 0 {
-                        std::process::exit(code);
-                    }
-                    Ok(())
-                }
-                IssuesHostRequest::Attach {
-                    reff,
-                    file,
-                    comment,
-                } => run_issues_attach(home, reff, file, comment, out).await,
-                IssuesHostRequest::AttachmentGet {
-                    reff,
-                    id,
-                    out: path,
-                } => run_issues_attachment_get(home, reff, id, path, out).await,
-            }
-        }
-    }
-}
-
-async fn run_issues_attach(
-    home: &std::path::Path,
-    reff: String,
-    path: String,
-    comment: Option<String>,
-    out: Out,
-) -> Result<()> {
-    let bytes = std::fs::read(&path).map_err(|error| anyhow!("could not read {path}: {error}"))?;
-    if bytes.is_empty() {
-        return Err(anyhow!("{path} is empty — nothing to attach"));
-    }
-    if bytes.len() > crate::world::contract::MAX_ATTACHMENT_BYTES {
-        return Err(anyhow!(
-            "{path} is {} KiB — attachments are capped at {} KiB",
-            bytes.len() / 1024,
-            crate::world::contract::MAX_ATTACHMENT_BYTES / 1024
-        ));
-    }
-    let name = std::path::Path::new(&path)
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path.clone());
-    let response = crate::cli::issues_client(
-        home,
-        issues_app::IssuesRequest::Attach {
-            reff,
-            mime: Some(mime_for(&name)),
-            name,
-            data_b64: data_encoding::BASE64.encode(&bytes),
-            comment,
-        },
-    )
-    .await?;
-    let code = crate::cli::print_issues_response(&response, out);
-    if code == 0 {
-        Ok(())
+    } else if out.json {
+        println!("{}", serde_json::to_string(&output.value)?);
     } else {
-        Err(anyhow!("attachment request failed"))
+        println!("{}", serde_json::to_string_pretty(&output.value)?);
     }
-}
-
-async fn run_issues_attachment_get(
-    home: &std::path::Path,
-    reff: String,
-    id: String,
-    out_path: Option<String>,
-    out: Out,
-) -> Result<()> {
-    let response =
-        crate::cli::issues_client(home, issues_app::IssuesRequest::AttachmentGet { reff, id })
-            .await?;
-    match response {
-        issues_app::IssuesResponse::Attachment {
-            name,
-            mime: _,
-            data_b64,
-        } => {
-            let bytes = data_encoding::BASE64
-                .decode(data_b64.as_bytes())
-                .map_err(|_| anyhow!("stored attachment did not decode"))?;
-            let destination = out_path.unwrap_or(name);
-            std::fs::write(&destination, &bytes)
-                .map_err(|error| anyhow!("could not write {destination}: {error}"))?;
-            crate::cli::emit_ok(
-                &format!("saved {} bytes to {destination}", bytes.len()),
-                out,
-            );
-            Ok(())
-        }
-        other => {
-            let code = crate::cli::print_issues_response(&other, out);
-            if code == 0 {
-                Ok(())
-            } else {
-                Err(anyhow!("attachment request failed"))
-            }
-        }
-    }
+    Ok(())
 }
 
 /// `lait init`: found a space rooted at `cwd/.lait` (or `$LAIT_HOME`).

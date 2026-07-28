@@ -23,7 +23,7 @@ use rmcp::{
 use serde::Deserialize;
 
 use crate::{
-    cli::{client_as_scoped, scope_for_home, world_reply_as_scoped},
+    cli::{client_as_scoped, scope_for_home},
     control::{ErrorKind, Request, Response},
     daemon::ClientScope,
 };
@@ -277,112 +277,31 @@ impl LaitMcp {
 
     async fn run_invocation(
         &self,
-        invocation: world_interface::CliInvocation,
+        invocation: world_interface::ClientInvocation,
     ) -> Result<CallToolResult, McpError> {
-        match invocation {
-            world_interface::CliInvocation::World(call) => {
-                let package = crate::world::client_packages()
-                    .package_for_world(call.world())
-                    .cloned()
-                    .ok_or_else(|| {
-                        McpError::internal_error(
-                            format!("no client package for World '{}'", call.world()),
-                            None,
-                        )
-                    })?;
-                let reply = world_reply_as_scoped(
-                    &self.home,
-                    call.clone(),
-                    &self.scope,
-                    self.act_as.as_deref(),
+        let package = crate::world::client_packages()
+            .package_for_world(invocation.world_id())
+            .cloned()
+            .ok_or_else(|| {
+                McpError::internal_error(
+                    format!("no client package for World '{}'", invocation.world_id()),
+                    None,
                 )
-                .await
-                .map_err(|error| McpError::internal_error(format!("{error:#}"), None))?;
-                let value = package
-                    .decode_reply(&call, reply)
-                    .map_err(|error| McpError::internal_error(error.to_string(), None))?;
-                Self::tool_world_value(&package, value)
-            }
-            world_interface::CliInvocation::Local { operation, input } => {
-                use issues_app::host::IssuesHostRequest;
-
-                let host = issues_app::host::decode(&operation, input)
-                    .map_err(|error| McpError::invalid_params(error.to_string(), None))?;
-                match host {
-                    IssuesHostRequest::Inbox { clear } => {
-                        let call = issues_app::encode_call(&issues_app::IssuesRequest::Inbox {
-                            watermark: issues_app::host::read_inbox_watermark(&self.home),
-                        })
-                        .map_err(|error| McpError::internal_error(error.to_string(), None))?;
-                        let package = crate::world::client_packages()
-                            .package_for_world(call.world())
-                            .cloned()
-                            .ok_or_else(|| {
-                                McpError::internal_error(
-                                    format!("no client package for World '{}'", call.world()),
-                                    None,
-                                )
-                            })?;
-                        let reply = world_reply_as_scoped(
-                            &self.home,
-                            call.clone(),
-                            &self.scope,
-                            self.act_as.as_deref(),
-                        )
-                        .await
-                        .map_err(|error| McpError::internal_error(format!("{error:#}"), None))?;
-                        let value = package
-                            .decode_reply(&call, reply)
-                            .map_err(|error| McpError::internal_error(error.to_string(), None))?;
-                        if clear
-                            && value.get("kind").and_then(serde_json::Value::as_str)
-                                == Some("inbox")
-                        {
-                            issues_app::host::write_inbox_watermark(
-                                &self.home,
-                                issues_app::host::now_seconds(),
-                            )
-                            .map_err(|error| {
-                                McpError::internal_error(
-                                    format!("advance Issues inbox watermark: {error}"),
-                                    None,
-                                )
-                            })?;
-                        }
-                        Self::tool_world_value(&package, value)
-                    }
-                    IssuesHostRequest::Access(access) => {
-                        let response = crate::cli::issues_access_as_scoped(
-                            &self.home,
-                            access,
-                            &self.scope,
-                            self.act_as.as_deref(),
-                        )
-                        .await
-                        .map_err(|error| McpError::internal_error(format!("{error:#}"), None))?;
-                        Self::tool_result(Ok(response))
-                    }
-                    other => Err(McpError::invalid_params(
-                        format!("unsupported MCP host capability {other:?}"),
-                        None,
-                    )),
-                }
-            }
-        }
-    }
-
-    fn tool_world_value(
-        package: &world_interface::WorldClientPackage,
-        value: serde_json::Value,
-    ) -> Result<CallToolResult, McpError> {
+            })?;
         let options = world_interface::PresentationOptions {
             json: true,
             color: false,
         };
-        if let Some(presentation) = package
-            .present_reply(value.clone(), options)
-            .map_err(|error| McpError::internal_error(error.to_string(), None))?
-        {
+        let host = crate::cli::PackageClientHost::new(
+            self.home.clone(),
+            self.scope.clone(),
+            self.act_as.clone(),
+        );
+        let output = package
+            .execute(&host, invocation, options)
+            .await
+            .map_err(|error| McpError::internal_error(error.to_string(), None))?;
+        if let Some(presentation) = output.presentation {
             if let Some(failure) = presentation.failure {
                 let message = presentation
                     .failure_message
@@ -396,11 +315,8 @@ impl LaitMcp {
                     }
                 });
             }
-            return Ok(CallToolResult::success(vec![Content::text(
-                presentation.stdout.trim_end().to_string(),
-            )]));
         }
-        let json = serde_json::to_string(&value)
+        let json = serde_json::to_string(&output.value)
             .map_err(|error| McpError::internal_error(error.to_string(), None))?;
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }

@@ -269,9 +269,13 @@ attachment. The issue-tracker application emits
 `com.lait.issues` / `issues.control` v1; LaitDaemon does not infer or hardcode
 either value.
 
-Product client packages decode `WorldReply.payload` and own presentation for
-their CLI and MCP surfaces. Root control treats both request and reply payloads
-as opaque and has no product response enum.
+Product client packages decode `WorldReply.payload`, own presentation for CLI
+and MCP, parse their explicit web route, and execute named local operations
+through generic host facilities. The browser sends Space control to
+`/api/spaces/{orbit}/rpc` and product input to
+`/api/spaces/{orbit}/worlds/{mount}/rpc`; there is no decode fallback between
+those namespaces. Root control treats World request and reply payloads as opaque
+and has no product response enum.
 
 Host capabilities may compose calls across the boundary. An Issues access
 grant first queries an `AccessPlan`, then submits its exact generic assignments

@@ -5,9 +5,14 @@
 //! vocabulary and validation; the navigation shell only supplies the facility.
 
 use std::path::Path;
+use std::process::{Command, Stdio};
 
-use serde_json::Value;
-use world_interface::InterfaceError;
+use serde_json::{json, Value};
+use world_interface::{
+    ClientAccess, ClientHost, ClientInvocation, ClientInvocationKind, ClientOutput, HostAssignment,
+    HostControlRequest, InterfaceError, LocalInvocation, Presentation, PresentationFailure,
+    PresentationOptions,
+};
 
 use crate::cli::{
     LOCAL_ACCESS, LOCAL_ATTACH, LOCAL_ATTACHMENT_GET, LOCAL_FOCUS, LOCAL_INBOX, LOCAL_NEW_START,
@@ -15,7 +20,7 @@ use crate::cli::{
 };
 use crate::IssuesRequest;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkStateAction {
     Start,
     Done,
@@ -61,6 +66,27 @@ pub enum IssuesHostRequest {
         id: String,
         out: Option<String>,
     },
+}
+
+impl IssuesHostRequest {
+    /// Classify the complete host operation, including caller-local effects.
+    ///
+    /// This must stay exhaustive: a new host capability cannot silently inherit
+    /// command access or be mistaken for a read-only World query.
+    pub fn access(&self) -> ClientAccess {
+        match self {
+            Self::Focus
+            | Self::Inbox { clear: false }
+            | Self::Access(AccessRequest::List { .. }) => ClientAccess::Query,
+            Self::NewStart(_)
+            | Self::WorkState { .. }
+            | Self::Inbox { clear: true }
+            | Self::WorldUpgrade
+            | Self::Access(AccessRequest::Grant { .. } | AccessRequest::Revoke { .. })
+            | Self::Attach { .. }
+            | Self::AttachmentGet { .. } => ClientAccess::Command,
+        }
+    }
 }
 
 pub struct AccessGrantPlan {
@@ -171,6 +197,642 @@ pub fn decode(operation: &str, input: Value) -> Result<IssuesHostRequest, Interf
             "unsupported Issues host capability '{other}'"
         ))),
     }
+}
+
+/// Construct one package-owned local invocation with whole-operation policy.
+pub fn invocation(operation: &str, input: Value) -> Result<ClientInvocation, InterfaceError> {
+    let request = decode(operation, input.clone())?;
+    Ok(ClientInvocation::local(
+        issues::contract::world_id(),
+        operation,
+        input,
+        request.access(),
+        None,
+    ))
+}
+
+/// Construct one Issues World invocation with package-owned client policy.
+pub fn world_invocation(request: IssuesRequest) -> Result<ClientInvocation, InterfaceError> {
+    let access = match request.access() {
+        world_bridge::WorldCallAccess::Query => ClientAccess::Query,
+        world_bridge::WorldCallAccess::Command => ClientAccess::Command,
+    };
+    let confirmation = request.destructive_question();
+    let call =
+        crate::encode_call(&request).map_err(|error| InterfaceError::new(error.to_string()))?;
+    Ok(ClientInvocation::world(call, access, confirmation))
+}
+
+/// Decode the Issues browser protocol behind its explicit World route.
+///
+/// Viewer-only host capabilities are adapted here; ordinary commands remain
+/// the exact strict [`IssuesRequest`] schema carried by CLI and MCP.
+pub fn parse_web(input: Value) -> Result<ClientInvocation, InterfaceError> {
+    let command = input
+        .get("cmd")
+        .and_then(Value::as_str)
+        .ok_or_else(|| InterfaceError::new("Issues request is missing string field 'cmd'"))?;
+    match command {
+        "inbox" => {
+            let clear = match input.get("clear") {
+                None => false,
+                Some(Value::Bool(clear)) => *clear,
+                Some(_) => {
+                    return Err(InterfaceError::new("inbox 'clear' must be a boolean"));
+                }
+            };
+            invocation(LOCAL_INBOX, json!({ "clear": clear }))
+        }
+        "access_list" => invocation(
+            LOCAL_ACCESS,
+            json!({
+                "action": "ls",
+                "actor": input.get("actor").and_then(Value::as_str),
+            }),
+        ),
+        "access_grant" => invocation(
+            LOCAL_ACCESS,
+            json!({
+                "action": "grant",
+                "actor": required(&input, "actor")?,
+                "role": required(&input, "role")?,
+                "project": optional(&input, "project"),
+            }),
+        ),
+        "access_revoke" => invocation(
+            LOCAL_ACCESS,
+            json!({
+                "action": "revoke",
+                "grant_id": required(&input, "grant_id")?,
+            }),
+        ),
+        _ => {
+            let request: IssuesRequest = serde_json::from_value(input)
+                .map_err(|error| InterfaceError::new(format!("bad Issues request: {error}")))?;
+            world_invocation(request)
+        }
+    }
+}
+
+/// Execute one Issues-owned local operation through generic host facilities.
+pub fn execute<'a>(
+    host: &'a dyn ClientHost,
+    local: LocalInvocation,
+    options: PresentationOptions,
+) -> world_interface::ClientFuture<'a, ClientOutput> {
+    Box::pin(async move {
+        let request = decode(&local.operation, local.input)?;
+        match request {
+            IssuesHostRequest::Focus => run_focus(host, options).await,
+            IssuesHostRequest::NewStart(request) => run_new_start(host, request, options).await,
+            IssuesHostRequest::WorkState {
+                action,
+                reff,
+                no_branch,
+            } => run_work_state(host, action, reff, no_branch, options).await,
+            IssuesHostRequest::Inbox { clear } => run_inbox(host, clear, options).await,
+            IssuesHostRequest::WorldUpgrade => {
+                let value = host
+                    .call_control(HostControlRequest::WorldActivate {
+                        world: issues::contract::world_id(),
+                    })
+                    .await?;
+                Ok(control_output(value, options))
+            }
+            IssuesHostRequest::Access(access) => run_access(host, access, options).await,
+            IssuesHostRequest::Attach {
+                reff,
+                file,
+                comment,
+            } => run_attach(host, reff, file, comment, options).await,
+            IssuesHostRequest::AttachmentGet { reff, id, out } => {
+                run_attachment_get(host, reff, id, out, options).await
+            }
+        }
+    })
+}
+
+/// Name what a destructive Issues command would destroy.
+///
+/// `destructive_question` is built at parse time and can only echo the selector
+/// the user typed — and for `lait issues delete` that selector is usually a ref
+/// inferred from the git branch, which makes "delete T-1?" a question nobody can
+/// answer. Reading the title first is the difference between a prompt and a
+/// coin flip, so it happens before anyone is asked.
+///
+/// Best-effort by construction: a failed read returns the declared question
+/// rather than blocking the confirmation on a lookup that only adds detail.
+pub fn confirmation<'a>(
+    host: &'a dyn ClientHost,
+    invocation: &'a ClientInvocation,
+) -> world_interface::ClientFuture<'a, Option<String>> {
+    Box::pin(async move {
+        let Some(question) = invocation.confirmation_question() else {
+            return Ok(None);
+        };
+        let ClientInvocationKind::World(call) = invocation.kind() else {
+            return Ok(Some(question.to_string()));
+        };
+        let Ok(IssuesRequest::IssueDelete { reff }) = crate::decode_call(call) else {
+            return Ok(Some(question.to_string()));
+        };
+        let titled = match call_issues(host, IssuesRequest::IssueView { reff }).await {
+            Ok(crate::IssuesResponse::Issue(view)) => format!("{question}  {}", view.title),
+            _ => question.to_string(),
+        };
+        Ok(Some(titled))
+    })
+}
+
+async fn call_issues(
+    host: &dyn ClientHost,
+    request: IssuesRequest,
+) -> Result<crate::IssuesResponse, InterfaceError> {
+    let call =
+        crate::encode_call(&request).map_err(|error| InterfaceError::new(error.to_string()))?;
+    let reply = host.call_world(call.clone()).await?;
+    let value = crate::decode_reply(&call, reply)
+        .map_err(|error| InterfaceError::new(error.to_string()))?;
+    serde_json::from_value(value)
+        .map_err(|error| InterfaceError::new(format!("decode Issues response: {error}")))
+}
+
+fn issues_output(response: &crate::IssuesResponse, options: PresentationOptions) -> ClientOutput {
+    ClientOutput::new(
+        serde_json::to_value(response).unwrap_or(Value::Null),
+        Some(crate::presentation::render(response, options)),
+    )
+}
+
+async fn run_inbox(
+    host: &dyn ClientHost,
+    clear: bool,
+    options: PresentationOptions,
+) -> Result<ClientOutput, InterfaceError> {
+    let response = call_issues(
+        host,
+        IssuesRequest::Inbox {
+            watermark: read_inbox_watermark(host.local_root()),
+        },
+    )
+    .await?;
+    if clear && matches!(&response, crate::IssuesResponse::Inbox { .. }) {
+        write_inbox_watermark(host.local_root(), now_seconds()).map_err(|error| {
+            InterfaceError::new(format!("advance Issues inbox watermark: {error}"))
+        })?;
+    }
+    Ok(issues_output(&response, options))
+}
+
+async fn run_focus(
+    host: &dyn ClientHost,
+    options: PresentationOptions,
+) -> Result<ClientOutput, InterfaceError> {
+    let inbox = call_issues(
+        host,
+        IssuesRequest::Inbox {
+            watermark: read_inbox_watermark(host.local_root()),
+        },
+    )
+    .await?;
+    if matches!(&inbox, crate::IssuesResponse::Error { .. }) {
+        return Ok(issues_output(&inbox, options));
+    }
+    let mine = call_issues(
+        host,
+        IssuesRequest::List {
+            project: None,
+            filter: crate::Filter {
+                mine: true,
+                status: None,
+                label: None,
+                all: false,
+            },
+        },
+    )
+    .await?;
+    if matches!(&mine, crate::IssuesResponse::Error { .. }) {
+        return Ok(issues_output(&mine, options));
+    }
+
+    let value = json!({ "kind": "focus", "inbox": inbox, "mine": mine });
+    let stdout = if options.json {
+        format!(
+            "{}\n{}\n",
+            serde_json::to_string(&inbox).unwrap_or_else(|_| "{}".into()),
+            serde_json::to_string(&mine).unwrap_or_else(|_| "{}".into())
+        )
+    } else {
+        let mut text = String::new();
+        if let crate::IssuesResponse::Inbox {
+            entries, unread, ..
+        } = &inbox
+        {
+            if *unread > 0 {
+                let heads: Vec<_> = entries
+                    .iter()
+                    .take(3)
+                    .map(|entry| format!("{} {}", inbox_line_verb(entry), entry.reff))
+                    .collect();
+                text.push_str(&format!("Inbox ({unread}): {}\n", heads.join(" · ")));
+            }
+        }
+        match &mine {
+            crate::IssuesResponse::List { rows } if rows.is_empty() => text.push_str(
+                "nothing assigned to you — grab something: `lait issues ls`, or file one: \
+                 `lait issues new \"...\"`\n",
+            ),
+            crate::IssuesResponse::List { rows } => {
+                for row in rows {
+                    text.push_str(&format!(
+                        "  {}  {:<10}  {}\n",
+                        row.reff, row.status, row.title
+                    ));
+                }
+            }
+            _ => {}
+        }
+        text
+    };
+    Ok(ClientOutput::new(
+        value,
+        Some(Presentation {
+            stdout,
+            stderr: String::new(),
+            exit_code: 0,
+            failure: None,
+            failure_message: None,
+        }),
+    ))
+}
+
+async fn run_new_start(
+    host: &dyn ClientHost,
+    request: IssuesRequest,
+    options: PresentationOptions,
+) -> Result<ClientOutput, InterfaceError> {
+    let response = call_issues(host, request).await?;
+    match response {
+        crate::IssuesResponse::Ref { reff } => {
+            let prefix = reff.clone();
+            let mut output =
+                run_work_state(host, WorkStateAction::Start, reff, false, options).await?;
+            if !options.json {
+                if let Some(presentation) = output.presentation.as_mut() {
+                    presentation.stdout.insert_str(0, &format!("{prefix}\n"));
+                }
+            }
+            Ok(output)
+        }
+        other => Ok(issues_output(&other, options)),
+    }
+}
+
+async fn run_work_state(
+    host: &dyn ClientHost,
+    action: WorkStateAction,
+    reff: String,
+    no_branch: bool,
+    options: PresentationOptions,
+) -> Result<ClientOutput, InterfaceError> {
+    let request = match action {
+        WorkStateAction::Start => IssuesRequest::IssueStart { reff },
+        WorkStateAction::Done => IssuesRequest::IssueDone { reff },
+        WorkStateAction::Stop => IssuesRequest::IssueStop { reff },
+    };
+    let starting = matches!(action, WorkStateAction::Start);
+    let response = call_issues(host, request).await?;
+    let crate::IssuesResponse::Issue(issue) = &response else {
+        return Ok(issues_output(&response, options));
+    };
+    if options.json {
+        return Ok(issues_output(&response, options));
+    }
+
+    let mut stdout = format!("{}\n", workstate_line(issue));
+    let mut stderr = String::new();
+    if starting {
+        stdout = format!("{}  · you\n", workstate_line(issue));
+        if !no_branch {
+            match checkout_issue_branch(issue) {
+                Some(Ok(message)) => stdout.push_str(&format!("{message}\n")),
+                Some(Err(message)) => stderr.push_str(&format!("({message})\n")),
+                None => {}
+            }
+        }
+    }
+    Ok(ClientOutput::new(
+        serde_json::to_value(&response).unwrap_or(Value::Null),
+        Some(Presentation {
+            stdout,
+            stderr,
+            exit_code: 0,
+            failure: None,
+            failure_message: None,
+        }),
+    ))
+}
+
+async fn run_access(
+    host: &dyn ClientHost,
+    access: AccessRequest,
+    options: PresentationOptions,
+) -> Result<ClientOutput, InterfaceError> {
+    let control = match access {
+        AccessRequest::List { actor } => HostControlRequest::AssignmentList { actor },
+        AccessRequest::Revoke { grant_id } => HostControlRequest::AssignmentRevoke { grant_id },
+        AccessRequest::Grant {
+            actor,
+            role,
+            project,
+        } => {
+            let response = call_issues(host, IssuesRequest::AccessPlan { role, project }).await?;
+            let crate::IssuesResponse::AccessPlan { assignments } = response else {
+                return Ok(issues_output(&response, options));
+            };
+            HostControlRequest::AssignmentGrant {
+                actor,
+                assignments: assignments
+                    .into_iter()
+                    .map(|assignment| HostAssignment {
+                        world: assignment.world,
+                        capability: assignment.capability,
+                        resource: assignment.resource,
+                    })
+                    .collect(),
+            }
+        }
+    };
+    let value = host.call_control(control).await?;
+    Ok(control_output(value, options))
+}
+
+async fn run_attach(
+    host: &dyn ClientHost,
+    reff: String,
+    path: String,
+    comment: Option<String>,
+    options: PresentationOptions,
+) -> Result<ClientOutput, InterfaceError> {
+    let bytes = std::fs::read(&path)
+        .map_err(|error| InterfaceError::new(format!("could not read {path}: {error}")))?;
+    if bytes.is_empty() {
+        return Err(InterfaceError::new(format!(
+            "{path} is empty — nothing to attach"
+        )));
+    }
+    if bytes.len() > issues::contract::MAX_ATTACHMENT_BYTES {
+        return Err(InterfaceError::new(format!(
+            "{path} is {} KiB — attachments are capped at {} KiB",
+            bytes.len() / 1024,
+            issues::contract::MAX_ATTACHMENT_BYTES / 1024
+        )));
+    }
+    let name = Path::new(&path)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.clone());
+    let response = call_issues(
+        host,
+        IssuesRequest::Attach {
+            reff,
+            mime: Some(mime_for(&name)),
+            name,
+            data_b64: data_encoding::BASE64.encode(&bytes),
+            comment,
+        },
+    )
+    .await?;
+    Ok(issues_output(&response, options))
+}
+
+async fn run_attachment_get(
+    host: &dyn ClientHost,
+    reff: String,
+    id: String,
+    out: Option<String>,
+    options: PresentationOptions,
+) -> Result<ClientOutput, InterfaceError> {
+    let response = call_issues(host, IssuesRequest::AttachmentGet { reff, id }).await?;
+    let crate::IssuesResponse::Attachment { name, data_b64, .. } = response else {
+        return Ok(issues_output(&response, options));
+    };
+    let bytes = data_encoding::BASE64
+        .decode(data_b64.as_bytes())
+        .map_err(|_| InterfaceError::new("stored attachment did not decode"))?;
+    let destination = out.unwrap_or(name);
+    std::fs::write(&destination, &bytes)
+        .map_err(|error| InterfaceError::new(format!("could not write {destination}: {error}")))?;
+    let message = format!("saved {} bytes to {destination}", bytes.len());
+    let value = json!({ "kind": "ok", "message": message });
+    let stdout = if options.json {
+        format!(
+            "{}\n",
+            serde_json::to_string(&value).unwrap_or_else(|_| "{}".into())
+        )
+    } else {
+        format!("{message}\n")
+    };
+    Ok(ClientOutput::new(
+        value,
+        Some(Presentation {
+            stdout,
+            stderr: String::new(),
+            exit_code: 0,
+            failure: None,
+            failure_message: None,
+        }),
+    ))
+}
+
+fn control_output(value: Value, options: PresentationOptions) -> ClientOutput {
+    let kind = value.get("kind").and_then(Value::as_str);
+    let error_message = (kind == Some("error"))
+        .then(|| {
+            value
+                .get("message")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .flatten();
+    let (exit_code, failure) = match value.get("error_kind").and_then(Value::as_str) {
+        Some("not_found") => (2, Some(PresentationFailure::InvalidRequest)),
+        Some("denied") => (1, Some(PresentationFailure::InvalidRequest)),
+        Some("error") => (1, Some(PresentationFailure::Internal)),
+        _ => (0, None),
+    };
+    let (stdout, stderr) = if options.json {
+        (
+            format!(
+                "{}\n",
+                serde_json::to_string(&value).unwrap_or_else(|_| "{}".into())
+            ),
+            String::new(),
+        )
+    } else if let Some(message) = &error_message {
+        (String::new(), format!("error: {message}\n"))
+    } else if kind == Some("assignments") {
+        let mut text = String::new();
+        let rows = value
+            .get("rows")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        if rows.is_empty() {
+            text.push_str("(no effective assignments)\n");
+        }
+        for row in rows {
+            let grant = row
+                .get("grant_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let scope = row
+                .get("resource")
+                .and_then(Value::as_array)
+                .map(|segments| {
+                    segments
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join("/")
+                })
+                .filter(|scope| !scope.is_empty())
+                .unwrap_or_else(|| "space".into());
+            text.push_str(&format!(
+                "{}  {:<24} {:<28} {}\n",
+                &grant[..12.min(grant.len())],
+                row.get("capability")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+                scope,
+                row.get("actor").and_then(Value::as_str).unwrap_or_default()
+            ));
+        }
+        (text, String::new())
+    } else {
+        (
+            format!(
+                "{}\n",
+                value.get("message").and_then(Value::as_str).unwrap_or("ok")
+            ),
+            String::new(),
+        )
+    };
+    ClientOutput::new(
+        value,
+        Some(Presentation {
+            stdout,
+            stderr,
+            exit_code,
+            failure,
+            failure_message: error_message,
+        }),
+    )
+}
+
+fn workstate_line(issue: &issues::dto::IssueView) -> String {
+    let handle = issue.key_alias.as_deref().unwrap_or(&issue.reff);
+    format!("{handle}  {}  {}", issue.title, issue.status)
+}
+
+fn checkout_issue_branch(issue: &issues::dto::IssueView) -> Option<Result<String, String>> {
+    let in_repo = Command::new("git")
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false);
+    if !in_repo {
+        return None;
+    }
+    let name = branch_name_for(issue);
+    let created = Command::new("git")
+        .args(["switch", "-c", &name])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false);
+    let switched = created
+        || Command::new("git")
+            .args(["switch", &name])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+    Some(if switched {
+        Ok(format!(
+            "{} branch '{name}'",
+            if created {
+                "switched to new"
+            } else {
+                "switched to"
+            }
+        ))
+    } else {
+        Err(format!(
+            "could not create/switch branch '{name}' — continue manually"
+        ))
+    })
+}
+
+fn branch_name_for(issue: &issues::dto::IssueView) -> String {
+    let handle = issue
+        .key_alias
+        .clone()
+        .unwrap_or_else(|| issue.reff.clone())
+        .to_ascii_lowercase();
+    let mut slug = String::new();
+    for character in issue.title.to_ascii_lowercase().chars() {
+        if slug.len() >= 40 {
+            break;
+        }
+        if character.is_ascii_alphanumeric() {
+            slug.push(character);
+        } else if !slug.ends_with('-') && !slug.is_empty() {
+            slug.push('-');
+        }
+    }
+    let slug = slug.trim_matches('-');
+    if slug.is_empty() {
+        handle
+    } else {
+        format!("{handle}-{slug}")
+    }
+}
+
+fn inbox_line_verb(entry: &issues::dto::InboxEntry) -> String {
+    let who = entry.actor_nick.clone().unwrap_or_else(|| "someone".into());
+    match entry.kind.as_str() {
+        "assigned" => format!("{who} assigned you"),
+        "comment" => format!("{who} commented on"),
+        _ => format!("{who} moved"),
+    }
+}
+
+fn mime_for(name: &str) -> String {
+    let extension = name
+        .rsplit('.')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    match extension.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "pdf" => "application/pdf",
+        "txt" | "log" => "text/plain",
+        "md" => "text/markdown",
+        "json" => "application/json",
+        "csv" => "text/csv",
+        "zip" => "application/zip",
+        _ => "application/octet-stream",
+    }
+    .to_string()
 }
 
 /// Expand one pinned Issues role into the exact authority assignments that the
@@ -317,5 +979,21 @@ mod tests {
     fn rejects_incomplete_access_grants_before_the_host_sees_them() {
         let error = decode(LOCAL_ACCESS, json!({"action": "grant", "actor": "alice"})).unwrap_err();
         assert!(error.to_string().contains("missing 'role'"));
+    }
+
+    #[test]
+    fn web_inbox_clear_is_a_complete_command_not_a_world_query() {
+        let read = parse_web(json!({"cmd": "inbox"})).unwrap();
+        assert_eq!(read.access(), ClientAccess::Query);
+
+        let clear = parse_web(json!({"cmd": "inbox", "clear": true})).unwrap();
+        assert_eq!(clear.access(), ClientAccess::Command);
+    }
+
+    #[test]
+    fn malformed_world_input_keeps_its_product_error() {
+        let error = parse_web(json!({"cmd": "issue_new"})).unwrap_err();
+        assert!(error.to_string().contains("bad Issues request"));
+        assert!(error.to_string().contains("title"));
     }
 }

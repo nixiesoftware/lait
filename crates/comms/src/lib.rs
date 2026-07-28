@@ -134,6 +134,20 @@ pub trait Stream: Send {
     /// finished at a frame boundary); an end mid-frame or a lost connection is
     /// an `Err` — truncation is loud, never a quiet end.
     async fn recv(&mut self) -> Result<Option<Vec<u8>>>;
+    /// Receive one frame with a caller-owned protocol limit.
+    ///
+    /// Real framed transports override this so an oversized length prefix is
+    /// rejected before allocating the body. The default preserves compatibility
+    /// for transports that already materialize whole frames.
+    async fn recv_bounded(&mut self, max: usize) -> Result<Option<Vec<u8>>> {
+        let frame = self.recv().await?;
+        if frame.as_ref().is_some_and(|frame| frame.len() > max) {
+            return Err(anyhow::anyhow!(
+                "frame exceeds protocol limit of {max} bytes"
+            ));
+        }
+        Ok(frame)
+    }
     /// Signal we are done sending (the peer sees end-of-stream after draining).
     /// This only **queues** the end marker — it does NOT confirm delivery;
     /// accepters must follow with [`wait_closed`](Stream::wait_closed) before

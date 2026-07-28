@@ -234,41 +234,10 @@ pub(crate) fn destructive_question(req: &Request) -> Option<String> {
     }
 }
 
-/// Best-effort title lookup for a ref, to name what a prompt is about to destroy.
-/// A failure just returns `None` — the prompt falls back to the bare ref rather
-/// than blocking on a lookup that isn't essential.
-async fn peek_title(home: &Path, reff: &str) -> Option<String> {
-    match issues_client(
-        home,
-        issues_app::IssuesRequest::IssueView {
-            reff: reff.to_string(),
-        },
-    )
-    .await
-    {
-        Ok(issues_app::IssuesResponse::Issue(v)) => Some(v.title),
-        _ => None,
-    }
-}
-
-/// Gate a product-owned Issues command behind the same CLI confirmation
-/// affordance used by Space control.
-pub async fn confirm_issues_destructive(
-    home: &Path,
-    request: &issues_app::IssuesRequest,
-    out: Out,
-) -> bool {
-    let Some(question) = request.destructive_question() else {
-        return true;
-    };
-    let question = match request {
-        issues_app::IssuesRequest::IssueDelete { reff } => match peek_title(home, reff).await {
-            Some(title) => format!("{question}  {title}"),
-            None => question,
-        },
-        _ => question,
-    };
-    ask_confirmation(&question, out)
+/// Gate one package-declared destructive operation behind the shell's common
+/// confirmation affordance.
+pub fn confirm_client(question: &str, out: Out) -> bool {
+    ask_confirmation(question, out)
 }
 
 /// Gate a destructive request behind a confirmation. `true` = go ahead.
@@ -631,81 +600,68 @@ pub async fn client_action_as_scoped(
 ) -> Result<Response> {
     let address = orbit_address_for_home(home)?;
     scope.authorize(&address)?;
-    let route = action.route(address);
     ensure_daemon(home).await?;
     let daemon = crate::daemon::LaitDaemonClient::current()?;
     // The process endpoint answered the probe a moment ago, so a failure here
     // is the transport giving out mid-exchange: `3`, daemon unreachable.
     match action.payload() {
-        ClientPayload::Control(request) => daemon
-            .request(route, request, act_as)
-            .await
-            .map_err(|e| CliError::unreachable(format!("{e:#}")).into()),
-        ClientPayload::World(call) => {
-            let _ = (route, call, act_as);
-            Err(anyhow!(
-                "World actions must be dispatched through their client package"
-            ))
+        ClientPayload::Control(request) => {
+            let route = action.route(address);
+            daemon
+                .request(route, request, act_as)
+                .await
+                .map_err(|e| CliError::unreachable(format!("{e:#}")).into())
+        }
+        ClientPayload::World(_) => Err(anyhow!(
+            "World actions must be dispatched through their client package"
+        )),
+    }
+}
+
+/// Generic facilities supplied by the Lait navigation shell to one client
+/// package invocation.
+pub struct PackageClientHost {
+    home: PathBuf,
+    scope: ClientScope,
+    act_as: Option<String>,
+}
+
+impl PackageClientHost {
+    pub fn new(home: impl Into<PathBuf>, scope: ClientScope, act_as: Option<String>) -> Self {
+        Self {
+            home: home.into(),
+            scope,
+            act_as,
         }
     }
 }
 
-/// Send one Issues request through its package-owned World protocol.
-pub async fn issues_client(
-    home: &Path,
-    request: issues_app::IssuesRequest,
-) -> Result<issues_app::IssuesResponse> {
-    let call = issues_app::encode_call(&request)?;
-    let scope = scope_for_home(home);
-    let reply = world_reply_as_scoped(home, call.clone(), &scope, None).await?;
-    let value = issues_app::decode_reply(&call, reply)?;
-    serde_json::from_value(value).context("decode Issues response")
-}
-
-/// Project the Issues inbox using its caller-local watermark, then optionally
-/// advance that watermark only after the World answered successfully.
-pub async fn issues_inbox(home: &Path, clear: bool) -> Result<issues_app::IssuesResponse> {
-    let response = issues_client(
-        home,
-        issues_app::IssuesRequest::Inbox {
-            watermark: issues_app::host::read_inbox_watermark(home),
-        },
-    )
-    .await?;
-    if clear && matches!(&response, issues_app::IssuesResponse::Inbox { .. }) {
-        issues_app::host::write_inbox_watermark(home, issues_app::host::now_seconds())
-            .context("advance Issues inbox watermark")?;
+impl world_interface::ClientHost for PackageClientHost {
+    fn local_root(&self) -> &Path {
+        &self.home
     }
-    Ok(response)
-}
 
-/// Execute the Issues access host capability by resolving product role
-/// semantics through its World, then committing only generic assignments
-/// through Space authority.
-pub async fn issues_access_as_scoped(
-    home: &Path,
-    access: issues_app::host::AccessRequest,
-    scope: &ClientScope,
-    act_as: Option<&str>,
-) -> Result<Response> {
-    use issues_app::host::AccessRequest;
+    fn call_world<'a>(
+        &'a self,
+        call: crate::orbital::WorldCall,
+    ) -> world_interface::ClientFuture<'a, crate::orbital::WorldReply> {
+        Box::pin(async move {
+            world_reply_as_scoped(&self.home, call, &self.scope, self.act_as.as_deref())
+                .await
+                .map_err(|error| world_interface::InterfaceError::new(format!("{error:#}")))
+        })
+    }
 
-    let request = match access {
-        AccessRequest::List { actor } => Request::AssignmentList { actor },
-        AccessRequest::Revoke { grant_id } => Request::AssignmentRevoke { grant_id },
-        AccessRequest::Grant {
-            actor,
-            role,
-            project,
-        } => {
-            let call =
-                issues_app::encode_call(&issues_app::IssuesRequest::AccessPlan { role, project })?;
-            let reply = world_reply_as_scoped(home, call.clone(), scope, act_as).await?;
-            let value = issues_app::decode_reply(&call, reply)?;
-            let response: issues_app::IssuesResponse =
-                serde_json::from_value(value).context("decode Issues access plan")?;
-            match response {
-                issues_app::IssuesResponse::AccessPlan { assignments } => {
+    fn call_control<'a>(
+        &'a self,
+        request: world_interface::HostControlRequest,
+    ) -> world_interface::ClientFuture<'a, serde_json::Value> {
+        Box::pin(async move {
+            let request = match request {
+                world_interface::HostControlRequest::AssignmentList { actor } => {
+                    Request::AssignmentList { actor }
+                }
+                world_interface::HostControlRequest::AssignmentGrant { actor, assignments } => {
                     Request::AssignmentGrant {
                         actor,
                         assignments: assignments
@@ -718,28 +674,26 @@ pub async fn issues_access_as_scoped(
                             .collect(),
                     }
                 }
-                issues_app::IssuesResponse::Error {
-                    message,
-                    error_kind,
-                } => {
-                    return Ok(Response::Error {
-                        message,
-                        error_kind: match error_kind {
-                            issues_app::IssuesErrorKind::Error => ErrorKind::Error,
-                            issues_app::IssuesErrorKind::NotFound => ErrorKind::NotFound,
-                            issues_app::IssuesErrorKind::Denied => ErrorKind::Denied,
-                        },
-                    });
+                world_interface::HostControlRequest::AssignmentRevoke { grant_id } => {
+                    Request::AssignmentRevoke { grant_id }
                 }
-                other => {
-                    return Err(anyhow!(
-                        "Issues access-plan call returned an unexpected response: {other:?}"
-                    ));
+                world_interface::HostControlRequest::WorldActivate { world } => {
+                    Request::WorldActivate {
+                        world: world.as_str().to_string(),
+                    }
                 }
-            }
-        }
-    };
-    client_as_scoped(home, request, scope, act_as).await
+            };
+            let response =
+                client_as_scoped(&self.home, request, &self.scope, self.act_as.as_deref())
+                    .await
+                    .map_err(|error| world_interface::InterfaceError::new(format!("{error:#}")))?;
+            serde_json::to_value(response).map_err(|error| {
+                world_interface::InterfaceError::new(format!(
+                    "encode host control response: {error}"
+                ))
+            })
+        })
+    }
 }
 
 /// Emit a complete product-owned presentation without inspecting its response.
@@ -747,17 +701,6 @@ pub fn print_presentation(presentation: &world_interface::Presentation) -> i32 {
     print!("{}", presentation.stdout);
     eprint!("{}", presentation.stderr);
     presentation.exit_code
-}
-
-pub fn print_issues_response(response: &issues_app::IssuesResponse, out: Out) -> i32 {
-    let presentation = issues_app::presentation::render(
-        response,
-        world_interface::PresentationOptions {
-            json: out.json,
-            color: out.color,
-        },
-    );
-    print_presentation(&presentation)
 }
 
 /// Send one package-owned call without decoding its opaque reply in the shell.
@@ -973,235 +916,6 @@ pub async fn run_join(home: &Path, ticket: String, out: Out) -> Result<()> {
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
     Ok(())
-}
-
-/// One-line issue summary for the work-state verbs: `MP-3  fix login  in_progress`.
-/// Prefers the friendly `KEY-n` handle; the collision-free short id is `--json`'s.
-fn workstate_line(v: &crate::dto::IssueView) -> String {
-    let handle = v.key_alias.as_deref().unwrap_or(&v.reff);
-    format!("{handle}  {}  {}", v.title, v.status)
-}
-
-/// A git branch name for an issue: lowercased `KEY-n` + a hyphenated title slug
-/// (≤40 chars of slug). Predictable by design — `done`/`show` infer the issue
-/// back out of it, and so do agents.
-fn branch_name_for(v: &crate::dto::IssueView) -> String {
-    let handle = v
-        .key_alias
-        .clone()
-        .unwrap_or_else(|| v.reff.clone())
-        .to_ascii_lowercase();
-    let mut slug = String::new();
-    for c in v.title.to_ascii_lowercase().chars() {
-        if slug.len() >= 40 {
-            break;
-        }
-        if c.is_ascii_alphanumeric() {
-            slug.push(c);
-        } else if !slug.ends_with('-') && !slug.is_empty() {
-            slug.push('-');
-        }
-    }
-    let slug = slug.trim_matches('-');
-    if slug.is_empty() {
-        handle
-    } else {
-        format!("{handle}-{slug}")
-    }
-}
-
-/// Create + checkout the issue's branch, best-effort: outside a git work-tree
-/// this silently does nothing; inside one, an existing branch is switched to and
-/// any failure is a warning — a branch hiccup must never fail the `start`.
-fn checkout_issue_branch(v: &crate::dto::IssueView, out: Out) {
-    let in_repo = std::process::Command::new("git")
-        .args(["rev-parse", "--is-inside-work-tree"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-    if !in_repo {
-        return;
-    }
-    let name = branch_name_for(v);
-    // `switch -c` for a fresh branch; if it already exists, plain `switch`.
-    let created = std::process::Command::new("git")
-        .args(["switch", "-c", &name])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-    let ok = created
-        || std::process::Command::new("git")
-            .args(["switch", &name])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-    if !out.json {
-        if ok {
-            println!(
-                "{}",
-                paint(
-                    out.color,
-                    ansi::DIM,
-                    &format!(
-                        "{} branch '{name}'",
-                        if created {
-                            "switched to new"
-                        } else {
-                            "switched to"
-                        }
-                    )
-                )
-            );
-        } else {
-            eprintln!("(could not create/switch branch '{name}' — continue manually)");
-        }
-    }
-}
-
-/// `lait issues start`: claim + activate + branch. The daemon does the atomic
-/// state move; the branch is client-side sugar on top (skippable, best-effort).
-pub async fn run_start(home: &Path, reff: String, no_branch: bool, out: Out) -> Result<()> {
-    let resp = issues_client(home, issues_app::IssuesRequest::IssueStart { reff }).await?;
-    match &resp {
-        issues_app::IssuesResponse::Issue(v) => {
-            if out.json {
-                print_issues_response(&resp, out);
-            } else {
-                println!("{}  · you", workstate_line(v));
-            }
-            if !no_branch {
-                checkout_issue_branch(v, out);
-            }
-            Ok(())
-        }
-        other => {
-            let code = print_issues_response(other, out);
-            if code != 0 {
-                std::process::exit(code);
-            }
-            Ok(())
-        }
-    }
-}
-
-/// `lait issues done` / `lait issues stop`: branchless work-state verbs.
-pub async fn run_workstate(
-    home: &Path,
-    request: issues_app::IssuesRequest,
-    out: Out,
-) -> Result<()> {
-    let resp = issues_client(home, request).await?;
-    match &resp {
-        issues_app::IssuesResponse::Issue(v) => {
-            if out.json {
-                print_issues_response(&resp, out);
-            } else {
-                println!("{}", workstate_line(v));
-            }
-            Ok(())
-        }
-        other => {
-            let code = print_issues_response(other, out);
-            if code != 0 {
-                std::process::exit(code);
-            }
-            Ok(())
-        }
-    }
-}
-
-/// `lait issues new --start`: file the issue, then claim it (two commits).
-pub async fn run_new_start(
-    home: &Path,
-    request: issues_app::IssuesRequest,
-    out: Out,
-) -> Result<()> {
-    let resp = issues_client(home, request).await?;
-    match &resp {
-        issues_app::IssuesResponse::Ref { reff } => {
-            if !out.json {
-                println!("{reff}");
-            }
-            run_start(home, reff.clone(), false, out).await
-        }
-        other => {
-            let code = print_issues_response(other, out);
-            if code != 0 {
-                std::process::exit(code);
-            }
-            Ok(())
-        }
-    }
-}
-
-/// Bare `lait` — the FOCUS view: unread inbox summary + your open issues.
-/// Must answer "what's addressed to me / what am I on" faster than a browser
-/// tab could open, and its empty states name the next command.
-pub async fn run_focus(home: &Path, out: Out) -> Result<()> {
-    let inbox = issues_inbox(home, false).await?;
-    let mine = issues_client(
-        home,
-        issues_app::IssuesRequest::List {
-            project: None,
-            filter: issues_app::Filter {
-                mine: true,
-                status: None,
-                label: None,
-                all: false,
-            },
-        },
-    )
-    .await?;
-    if out.json {
-        // Machine focus = the two DTOs on two lines (each independently stable).
-        print_issues_response(&inbox, out);
-        print_issues_response(&mine, out);
-        return Ok(());
-    }
-    if let issues_app::IssuesResponse::Inbox { entries, unread } = &inbox {
-        if *unread > 0 {
-            let heads: Vec<String> = entries
-                .iter()
-                .take(3)
-                .map(|e| format!("{} {}", inbox_line_verb(e), e.reff))
-                .collect();
-            println!(
-                "{} {}",
-                paint(out.color, ansi::CYAN, &format!("Inbox ({unread}):")),
-                heads.join(" · ")
-            );
-        }
-    }
-    match &mine {
-        issues_app::IssuesResponse::List { rows } if rows.is_empty() => {
-            println!("nothing assigned to you — grab something: `lait issues ls`, or file one: `lait issues new \"...\"`");
-        }
-        issues_app::IssuesResponse::List { rows } => {
-            for r in rows {
-                println!("  {}  {:<10}  {}", r.reff, r.status, r.title);
-            }
-        }
-        other => {
-            print_issues_response(other, out);
-        }
-    }
-    Ok(())
-}
-
-/// The inbox verb phrase for the host-composed focus summary.
-fn inbox_line_verb(e: &crate::dto::InboxEntry) -> String {
-    let who = e.actor_nick.clone().unwrap_or_else(|| "someone".into());
-    match e.kind.as_str() {
-        "assigned" => format!("{who} assigned you"),
-        "comment" => format!("{who} commented on"),
-        _ => format!("{who} moved"),
-    }
 }
 
 /// Render a `Diagnosis` response, or fall back gracefully if the daemon returned
@@ -2178,37 +1892,6 @@ mod tests {
             assert!(
                 destructive_question(&req).is_some(),
                 "{req:?} destroys something and must be confirmed",
-            );
-        }
-        // Product destructive policy is declared by the package.
-        assert!(issues_app::IssuesRequest::IssueDelete {
-            reff: "ENG-1".into()
-        }
-        .destructive_question()
-        .is_some());
-        for request in [
-            issues_app::IssuesRequest::List {
-                project: None,
-                filter: Default::default(),
-            },
-            issues_app::IssuesRequest::IssueView {
-                reff: "ENG-1".into(),
-            },
-            issues_app::IssuesRequest::IssueNew {
-                title: "t".into(),
-                project: None,
-                project_hint: None,
-                body: None,
-                due: None,
-                estimate: None,
-                assignees: vec![],
-                priority: None,
-                labels: vec![],
-            },
-        ] {
-            assert!(
-                request.destructive_question().is_none(),
-                "{request:?} is not destructive and must not prompt",
             );
         }
     }

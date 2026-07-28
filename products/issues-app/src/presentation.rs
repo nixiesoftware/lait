@@ -331,7 +331,7 @@ fn failure(response: &IssuesResponse) -> (i32, Option<PresentationFailure>) {
             ..
         } => (1, Some(PresentationFailure::InvalidRequest)),
         IssuesResponse::Error {
-            error_kind: IssuesErrorKind::Error,
+            error_kind: IssuesErrorKind::Error | IssuesErrorKind::Retry,
             ..
         } => (1, Some(PresentationFailure::Internal)),
         _ => (0, None),

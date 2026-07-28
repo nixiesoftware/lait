@@ -58,8 +58,6 @@ use crate::orbital::{WorldCall, WorldReply};
 /// **v6:** product host projections, including Issues inbox, leave root
 /// `Request`/`Response`. Their local facilities now wrap opaque World calls.
 pub const CONTROL_PROTOCOL_VERSION: u32 = 6;
-/// First local-control version that carries [`WorldCall`].
-pub const WORLD_CALL_CONTROL_PROTOCOL: u32 = 4;
 
 /// The oldest control protocol a client still talks to. Raising this retires a
 /// version; the gap to [`CONTROL_PROTOCOL_VERSION`] is the mixed-version window.
@@ -571,7 +569,7 @@ pub fn classify(req: &Request) -> RequestOwner {
 /// Process-level requests such as stopping the Lait daemon are chosen by the
 /// client surface itself; this helper covers requests whose owner lives behind
 /// a Station.
-pub fn station_route(address: OrbitAddress, _request: &Request) -> ControlRoute {
+pub fn station_route(address: OrbitAddress) -> ControlRoute {
     ControlRoute::Space { address }
 }
 

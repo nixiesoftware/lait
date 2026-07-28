@@ -29,7 +29,13 @@ pub fn package() -> Result<world_interface::WorldClientPackage, world_interface:
         "Work with issues, projects, planning, roles, and workflows in the selected Orbit.",
         decode_client_reply,
     )
-    .map(|package| package.with_presenter(presentation::present))
+    .map(|package| {
+        package
+            .with_presenter(presentation::present)
+            .with_local_handler(host::execute)
+            .with_web_parser(host::parse_web)
+            .with_confirmation(host::confirmation)
+    })
 }
 
 fn decode_client_reply(

@@ -355,12 +355,18 @@ async fn dispatch_incoming(
     if *hub_stopping.borrow() {
         return;
     }
+    let Some(opening_limit) = opening_limit(&incoming.alpn) else {
+        return;
+    };
     let first = tokio::select! {
         changed = hub_stopping.changed() => {
             let _ = changed;
             return;
         }
-        received = tokio::time::timeout(OPENING_FRAME_DEADLINE, incoming.stream.recv()) => {
+        received = tokio::time::timeout(
+            OPENING_FRAME_DEADLINE,
+            incoming.stream.recv_bounded(opening_limit),
+        ) => {
             match received {
                 Ok(Ok(Some(frame))) => frame,
                 _ => return,
@@ -395,6 +401,16 @@ async fn dispatch_incoming(
         changed = hub_stopping.changed() => {
             let _ = changed;
         }
+    }
+}
+
+fn opening_limit(alpn: &[u8]) -> Option<usize> {
+    if alpn == runtime::contact::CONTACT_ALPN {
+        Some(runtime::contact::MAX_FRAME)
+    } else if alpn == runtime::PRESENCE_ALPN {
+        Some(runtime::neighbor_presence::MAX_MESSAGE)
+    } else {
+        None
     }
 }
 

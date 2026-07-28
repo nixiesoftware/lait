@@ -81,7 +81,12 @@ product variants remain only for viewer, host-capability, and v3 daemon
 compatibility adapters.
 
 `WorldClientRegistry` composes one root CLI mount, collision-safe MCP prefix,
-and opaque reply decoder per installed World. The Issues package therefore owns
+explicit web adapter, opaque reply decoder, and local-operation executor per
+installed World. A parsed `ClientInvocation` carries package-owned access and
+confirmation metadata for the complete operation, including caller-local
+effects. The shell enforces that metadata and supplies an object-safe
+`ClientHost` for World calls and generic Space-authority facilities; it never
+matches a product host enum. The Issues package therefore owns
 `lait issues ...`, the `issues_*` MCP tools, and their response codec. Adding a
 Files World means registering another package with (for example) a `files`
 mount and `files_*` tools; it does not add another branch to the root CLI or MCP
@@ -89,7 +94,9 @@ router. Duplicate Worlds, duplicate mounts, package-local tool names, and
 collisions with shell names fail during composition.
 
 Trusted cwd and MCP adapters derive a pinned `ClientScope`; the web adapter
-applies catalog identity policy. Each constructs an explicit route and opens the
+applies catalog identity policy. Web Space control and product calls use
+disjoint endpoints; a product request names its World/package route before its
+payload is decoded. Each adapter constructs an explicit route and opens the
 identity-scoped LaitDaemon endpoint. The daemon resolves the Orbit, validates
 its repeated Space expectation before activation, places or reuses its Station
 host, and dispatches to one terminal owner: lifecycle, Mechanics, Station,
@@ -123,6 +130,10 @@ bounded Contact Hello or presence probe only far enough to select its declared
 Space, then replays the exact frame to Runtime; the SpaceBridge still performs
 canonical decoding, signature, negotiated-peer, protocol, and Space
 verification. Slow openers are bounded and dispatched concurrently.
+The concrete endpoint is daemon-scoped by design: unregistering the last Space
+route leaves the identity endpoint warm until explicit LaitDaemon shutdown.
+Dropping it on every last-Station transition would race concurrent placement
+and turn Station churn into identity/transport churn.
 An attached historical compatibility process retains its legacy endpoint until
 that migration placement exits; the identity-hub invariant governs Stations
 owned by LaitDaemon.
@@ -334,8 +345,9 @@ substrate/bridge/client interfaces, never back on `lait`.
 Most client operations become `WorldCall`s at parse time. Inbox watermark I/O,
 access assignment, git work-state behavior, attachment filesystem I/O, and
 implementation activation are explicit named host-capability calls: their
-interface remains product-owned while the shell supplies authority that a
-semantic World must not hold.
+interface and asynchronous orchestration remain product-owned while the shell
+supplies generic World-call and Space-authority facilities that a semantic
+World must not hold.
 
 Role assignment is split at that boundary: Issues resolves `(role, project)`
 into a package-owned `AccessPlan`; root control can only commit generic
@@ -365,12 +377,15 @@ architectural path unavailable to another conforming World.
 
 Root control contains no issue command or response variants. The viewer, CLI,
 and MCP construct the Issues-owned application protocol and carry it in an
-opaque `WorldCall`; attached SpaceBridges receive that same envelope. Local
-host capabilities are decoded from product-owned vocabulary and may compose a
-World call with a working-tree, filesystem, or Space-authority facility. For
-example, inbox reads pass the caller-local watermark into an Issues query and
-advance it only after a successful reply. Protocol v6 makes this boundary
-explicit on the wire.
+opaque `WorldCall`; attached SpaceBridges receive that same envelope. The web
+viewer addresses `/worlds/issues/rpc`, so malformed product input cannot fall
+through into root control decoding. Local host capabilities are decoded and
+executed by the product package and may compose a World call with a
+working-tree, filesystem, caller-local state, or generic Space-authority
+facility. For example, inbox reads pass the caller-local watermark into an
+Issues query and advance it only after a successful reply; the complete
+operation is therefore a command when `clear` is true. Protocol v6 makes the
+daemon boundary explicit on the wire.
 
 ## 6. Communication model
 

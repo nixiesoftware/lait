@@ -512,7 +512,7 @@ impl ControlRouter {
     /// Dispatch a request after ensuring its Orbit has one live placement.
     pub async fn request(&self, id: &str, request: &Request) -> Result<control::Response> {
         let resolved = self.resolve(id)?;
-        let route = control::station_route(resolved.address, request);
+        let route = control::station_route(resolved.address);
         self.request_routed(route, request, None).await
     }
 
@@ -527,7 +527,7 @@ impl ControlRouter {
         request: &Request,
         act_as: Option<&str>,
     ) -> Result<control::Response> {
-        let address = routed_address(&self.packages, &route, request)?;
+        let address = routed_address(&route)?;
         let resolved = self.place_address(address).await?;
         control::request_as_routed(&resolved.home, request, Some(route), act_as).await
     }
@@ -592,7 +592,7 @@ impl ControlRouter {
         route: ControlRoute,
         request: &Request,
     ) -> Result<control::Response> {
-        let address = routed_address(&self.packages, &route, request)?;
+        let address = routed_address(&route)?;
         let _lifecycle = self.lifecycle.read().await;
         if self.shutting_down.load(Ordering::Acquire) {
             return Err(anyhow!("the control router is shutting down"));
@@ -648,23 +648,16 @@ impl ControlRouter {
     }
 }
 
-fn routed_address<'a>(
-    packages: &WorldPackages,
-    route: &'a ControlRoute,
-    _request: &Request,
-) -> Result<&'a OrbitAddress> {
+fn routed_address(route: &ControlRoute) -> Result<&OrbitAddress> {
     match route {
         ControlRoute::Daemon => Err(anyhow!(
             "daemon-scoped request cannot be dispatched to a Station"
         )),
         ControlRoute::Space { address } => Ok(address),
-        ControlRoute::World { address, world } => {
-            let _ = (packages, address, world);
-            Err(anyhow!(
-                "typed product requests were retired in control protocol v5; \
-                 send a versioned World call"
-            ))
-        }
+        ControlRoute::World { .. } => Err(anyhow!(
+            "typed product requests were retired in control protocol v5; \
+             send a versioned World call"
+        )),
     }
 }
 

@@ -220,6 +220,7 @@ fn router(app: Arc<App>) -> Router {
         .route("/", get(index))
         .route("/api/spaces", get(list_spaces))
         .route("/api/spaces/{id}/rpc", post(rpc))
+        .route("/api/spaces/{id}/worlds/{world}/rpc", post(world_rpc))
         .route("/api/events", get(events))
         // Everything else is the client: a real asset, or the SPA entry so the
         // app can resolve its own routes. Registered last so it can never shadow
@@ -363,8 +364,9 @@ struct RpcQuery {
     confirm: bool,
 }
 
-/// The browser adapter: `POST /api/spaces/{id}/rpc` with either an
-/// [`issues_app::IssuesRequest`] or a Space-owned [`Request`].
+/// Browser adapters use disjoint routes: generic Space control enters
+/// `POST /api/spaces/{id}/rpc`, while a package-owned protocol enters
+/// `POST /api/spaces/{id}/worlds/{world}/rpc`.
 ///
 /// One endpoint avoids a second REST projection. Product requests are decoded
 /// by the product package and sent as opaque World calls; Space requests remain
@@ -393,6 +395,107 @@ struct RpcQuery {
 /// Gate 3 protects against an *accident*, not an attacker: anything that can POST
 /// `delete` can also POST `?confirm=1`. That is the same guarantee the CLI's prompt
 /// gives, and it is worth being honest that it is the whole of it.
+async fn world_rpc(
+    State(app): State<Arc<App>>,
+    Path((id, world)): Path<(String, String)>,
+    Query(q): Query<RpcQuery>,
+    Json(input): Json<serde_json::Value>,
+) -> Response {
+    let resolved = match app.directory.resolve(&id) {
+        Ok(resolved) => resolved,
+        Err(error) => {
+            return (
+                StatusCode::NOT_FOUND,
+                err_json(&error.to_string(), ErrorKind::NotFound),
+            )
+                .into_response();
+        }
+    };
+    let registry = crate::world::client_packages();
+    let package = registry.package_for_mount(&world).or_else(|| {
+        replica::ids::WorldId::parse(&world).and_then(|world| registry.package_for_world(&world))
+    });
+    let Some(package) = package.cloned() else {
+        return (
+            StatusCode::NOT_FOUND,
+            err_json(
+                &format!("no client package is mounted for World '{world}'"),
+                ErrorKind::NotFound,
+            ),
+        )
+            .into_response();
+    };
+    let invocation = match package.parse_web(input) {
+        Ok(invocation) => invocation,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                err_json(&error.to_string(), ErrorKind::Error),
+            )
+                .into_response();
+        }
+    };
+    if let StationIdentity::Agent { name } = &resolved.identity {
+        if invocation.access() != world_interface::ClientAccess::Query {
+            return (
+                StatusCode::FORBIDDEN,
+                err_json(
+                    &format!(
+                        "{name}'s space is read-only here — a write would be signed as {name}. \
+                         Open the same space through your own node to write as yourself."
+                    ),
+                    ErrorKind::Error,
+                ),
+            )
+                .into_response();
+        }
+    }
+    let scope = crate::daemon::ClientScope::pinned(resolved.address.orbit.clone());
+    let host = crate::cli::PackageClientHost::new(&resolved.home, scope, None);
+    if !q.confirm {
+        // The same package-resolved question the CLI prompts with, so the modal
+        // and the terminal cannot describe the same danger differently.
+        match package.confirmation(&host, &invocation).await {
+            Ok(Some(question)) => {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(serde_json::json!({
+                        "kind": "confirm_required",
+                        "question": question,
+                    })),
+                )
+                    .into_response();
+            }
+            Ok(None) => {}
+            Err(error) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    err_json(&error.to_string(), ErrorKind::Error),
+                )
+                    .into_response();
+            }
+        }
+    }
+    match package
+        .execute(
+            &host,
+            invocation,
+            world_interface::PresentationOptions {
+                json: true,
+                color: false,
+            },
+        )
+        .await
+    {
+        Ok(output) => Json(output.value).into_response(),
+        Err(error) => (
+            StatusCode::BAD_REQUEST,
+            err_json(&error.to_string(), ErrorKind::Error),
+        )
+            .into_response(),
+    }
+}
+
 async fn rpc(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,
@@ -409,188 +512,6 @@ async fn rpc(
                 .into_response()
         }
     };
-
-    let inbox_clear = match input.get("cmd").and_then(serde_json::Value::as_str) {
-        Some("inbox") => match input.get("clear") {
-            None => Some(false),
-            Some(serde_json::Value::Bool(clear)) => Some(*clear),
-            Some(_) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    err_json("inbox `clear` must be a boolean", ErrorKind::Error),
-                )
-                    .into_response()
-            }
-        },
-        _ => None,
-    };
-
-    let access = match input.get("cmd").and_then(serde_json::Value::as_str) {
-        Some("access_list") => Some(issues_app::host::AccessRequest::List {
-            actor: input
-                .get("actor")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_string),
-        }),
-        Some("access_grant") => {
-            let required = |field: &str| {
-                input
-                    .get(field)
-                    .and_then(serde_json::Value::as_str)
-                    .filter(|value| !value.is_empty())
-                    .map(str::to_string)
-            };
-            let (Some(actor), Some(role)) = (required("actor"), required("role")) else {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    err_json("access_grant requires `actor` and `role`", ErrorKind::Error),
-                )
-                    .into_response();
-            };
-            Some(issues_app::host::AccessRequest::Grant {
-                actor,
-                role,
-                project: required("project"),
-            })
-        }
-        Some("access_revoke") => {
-            let Some(grant_id) = input
-                .get("grant_id")
-                .and_then(serde_json::Value::as_str)
-                .filter(|value| !value.is_empty())
-            else {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    err_json("access_revoke requires `grant_id`", ErrorKind::Error),
-                )
-                    .into_response();
-            };
-            Some(issues_app::host::AccessRequest::Revoke {
-                grant_id: grant_id.to_string(),
-            })
-        }
-        _ => None,
-    };
-    if let Some(access) = access {
-        let read_only = matches!(access, issues_app::host::AccessRequest::List { .. });
-        if let StationIdentity::Agent { name } = &resolved.identity {
-            if !read_only {
-                return (
-                    StatusCode::FORBIDDEN,
-                    err_json(
-                        &format!(
-                            "{name}'s space is read-only here — a write would be signed as {name}. \
-                             Open the same space through your own node to write as yourself."
-                        ),
-                        ErrorKind::Error,
-                    ),
-                )
-                    .into_response();
-            }
-        }
-        let scope = crate::daemon::ClientScope::pinned(resolved.address.orbit.clone());
-        return match crate::cli::issues_access_as_scoped(&resolved.home, access, &scope, None).await
-        {
-            Ok(response) => Json(response).into_response(),
-            Err(error) => (
-                StatusCode::BAD_REQUEST,
-                err_json(&error.to_string(), ErrorKind::Error),
-            )
-                .into_response(),
-        };
-    }
-
-    let issues_request = match inbox_clear {
-        Some(_) => Ok(issues_app::IssuesRequest::Inbox {
-            watermark: issues_app::host::read_inbox_watermark(&resolved.home),
-        }),
-        None => serde_json::from_value::<issues_app::IssuesRequest>(input.clone()),
-    };
-
-    if let Ok(request) = issues_request {
-        if let StationIdentity::Agent { name } = &resolved.identity {
-            if request.access() != crate::orbital::WorldCallAccess::Query {
-                return (
-                    StatusCode::FORBIDDEN,
-                    err_json(
-                        &format!(
-                            "{name}'s space is read-only here — a write would be signed as {name}. \
-                             Open the same space through your own node to write as yourself."
-                        ),
-                        ErrorKind::Error,
-                    ),
-                )
-                    .into_response();
-            }
-        }
-        if !q.confirm {
-            if let Some(question) = request.destructive_question() {
-                return (
-                    StatusCode::CONFLICT,
-                    Json(serde_json::json!({
-                        "kind": "confirm_required",
-                        "question": question,
-                    })),
-                )
-                    .into_response();
-            }
-        }
-        let call = match issues_app::encode_call(&request) {
-            Ok(call) => call,
-            Err(error) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    err_json(&error.to_string(), ErrorKind::Error),
-                )
-                    .into_response();
-            }
-        };
-        let route = crate::control::ControlRoute::World {
-            address: resolved.address.clone(),
-            world: call.world().as_str().to_string(),
-        };
-        if let Err(error) = crate::cli::ensure_lait_daemon().await {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                err_json(&error.to_string(), ErrorKind::Error),
-            )
-                .into_response();
-        }
-        return match app.daemon.call_world(route, call.clone(), None).await {
-            Ok(reply) => match issues_app::decode_reply(&call, reply) {
-                Ok(value) => {
-                    if inbox_clear == Some(true)
-                        && value.get("kind").and_then(serde_json::Value::as_str) == Some("inbox")
-                    {
-                        if let Err(error) = issues_app::host::write_inbox_watermark(
-                            &resolved.home,
-                            issues_app::host::now_seconds(),
-                        ) {
-                            return (
-                                StatusCode::INTERNAL_SERVER_ERROR,
-                                err_json(
-                                    &format!("advance Issues inbox watermark: {error}"),
-                                    ErrorKind::Error,
-                                ),
-                            )
-                                .into_response();
-                        }
-                    }
-                    Json(value).into_response()
-                }
-                Err(error) => (
-                    StatusCode::BAD_REQUEST,
-                    err_json(&error.to_string(), ErrorKind::Error),
-                )
-                    .into_response(),
-            },
-            Err(error) => (
-                StatusCode::BAD_REQUEST,
-                err_json(&error.to_string(), ErrorKind::Error),
-            )
-                .into_response(),
-        };
-    }
 
     let req = match serde_json::from_value::<Request>(input) {
         Ok(request) => request,
@@ -642,7 +563,7 @@ async fn rpc(
         }
     }
 
-    let route = crate::control::station_route(resolved.address, &req);
+    let route = crate::control::station_route(resolved.address);
     if let Err(error) = crate::cli::ensure_lait_daemon().await {
         return (
             StatusCode::SERVICE_UNAVAILABLE,

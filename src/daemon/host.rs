@@ -20,7 +20,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use crate::config::{acquire_daemon_lock, DaemonLock};
 use crate::control::{
     self, ClientRequest, ControlRoute, Request, Response, WorldClientRequest,
-    CONTROL_PROTOCOL_VERSION, WORLD_CALL_CONTROL_PROTOCOL,
+    CONTROL_PROTOCOL_VERSION,
 };
 use crate::orbital::{WorldCall, WorldCallErrorCode, WorldPackages, WorldReply};
 #[cfg(test)]
@@ -32,22 +32,17 @@ use super::{ControlRouter, OrbitDirectory, OrbitDoorbell};
 #[derive(Debug, Clone)]
 pub struct LaitDaemonClient {
     home: PathBuf,
-    protocol: Arc<tokio::sync::OnceCell<u32>>,
 }
 
 impl LaitDaemonClient {
     pub fn current() -> Result<Self> {
         Ok(Self {
             home: crate::config::lait_daemon_home()?,
-            protocol: Arc::new(tokio::sync::OnceCell::new()),
         })
     }
 
     pub fn at(home: PathBuf) -> Self {
-        Self {
-            home,
-            protocol: Arc::new(tokio::sync::OnceCell::new()),
-        }
+        Self { home }
     }
 
     pub fn home(&self) -> &Path {
@@ -55,20 +50,7 @@ impl LaitDaemonClient {
     }
 
     pub async fn probe(&self) -> control::Probe {
-        let probe = control::probe(&self.home).await;
-        if matches!(&probe, control::Probe::Healthy) {
-            if let Ok(version) = control::peer_protocol_version(&self.home).await {
-                let _ = self.protocol.set(version);
-            }
-        }
-        probe
-    }
-
-    async fn protocol_version(&self) -> Result<u32> {
-        self.protocol
-            .get_or_try_init(|| control::peer_protocol_version(&self.home))
-            .await
-            .copied()
+        control::probe(&self.home).await
     }
 
     pub async fn request(
@@ -88,13 +70,6 @@ impl LaitDaemonClient {
         call: WorldCall,
         act_as: Option<&str>,
     ) -> Result<WorldReply> {
-        let version = self.protocol_version().await?;
-        if version < WORLD_CALL_CONTROL_PROTOCOL {
-            return Err(anyhow!(
-                "Lait daemon speaks control protocol v{version}; generic World calls require \
-                 v{WORLD_CALL_CONTROL_PROTOCOL}"
-            ));
-        }
         control::call_world(&self.home, route, call, act_as).await
     }
 
@@ -678,7 +653,7 @@ mod tests {
         }
 
         let mut catalog = client.subscribe_catalog().await.unwrap();
-        let route = control::station_route(resolved.address.clone(), &Request::Status);
+        let route = control::station_route(resolved.address.clone());
         assert!(matches!(
             client
                 .request_if_running(route.clone(), &Request::Status)

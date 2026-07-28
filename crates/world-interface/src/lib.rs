@@ -7,6 +7,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::future::Future;
+use std::path::Path;
+use std::pin::Pin;
 
 use clap::{ArgMatches, Command};
 use replica::ids::WorldId;
@@ -35,20 +38,107 @@ impl fmt::Display for InterfaceError {
 
 impl std::error::Error for InterfaceError {}
 
-/// A parsed product CLI invocation.
+/// The complete externally visible effect of one client invocation.
 ///
-/// `Local` is for product-owned client orchestration such as reading an
-/// attachment before constructing its bounded World call or creating a branch
-/// after a successful work-state call. The shell routes it back to the package;
-/// it does not interpret the operation name.
+/// This classifies the whole package-owned operation, including caller-local
+/// effects such as advancing a watermark or writing an attachment. It is not a
+/// substitute for the daemon's independent [`world_bridge::WorldCallAccess`]
+/// classification of an opaque World call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClientAccess {
+    Query,
+    Command,
+}
+
+/// One package-owned local operation.
 #[derive(Debug, Clone)]
-pub enum CliInvocation {
+pub struct LocalInvocation {
+    pub operation: String,
+    pub input: Value,
+}
+
+/// The target selected by a parsed product invocation.
+#[derive(Debug, Clone)]
+pub enum ClientInvocationKind {
     World(WorldCall),
-    Local { operation: String, input: Value },
+    Local(LocalInvocation),
+}
+
+/// A parsed product invocation with package-owned policy metadata.
+///
+/// `Local` operations may compose World calls with working-tree, filesystem,
+/// caller-local state, or generic Space-authority facilities. The shell
+/// enforces the declared whole-operation access and confirmation policy, then
+/// routes execution back through the package without interpreting its name.
+#[derive(Debug, Clone)]
+pub struct ClientInvocation {
+    world: WorldId,
+    access: ClientAccess,
+    confirmation_question: Option<String>,
+    kind: ClientInvocationKind,
+}
+
+impl ClientInvocation {
+    pub fn world(
+        call: WorldCall,
+        access: ClientAccess,
+        confirmation_question: Option<String>,
+    ) -> Self {
+        Self {
+            world: call.world().clone(),
+            access,
+            confirmation_question,
+            kind: ClientInvocationKind::World(call),
+        }
+    }
+
+    pub fn local(
+        world: WorldId,
+        operation: impl Into<String>,
+        input: Value,
+        access: ClientAccess,
+        confirmation_question: Option<String>,
+    ) -> Self {
+        Self {
+            world,
+            access,
+            confirmation_question,
+            kind: ClientInvocationKind::Local(LocalInvocation {
+                operation: operation.into(),
+                input,
+            }),
+        }
+    }
+
+    pub fn world_id(&self) -> &WorldId {
+        &self.world
+    }
+
+    pub fn access(&self) -> ClientAccess {
+        self.access
+    }
+
+    /// The question declared at parse time, before any host is available.
+    ///
+    /// This is the floor, not the final prompt. A package that can say *what*
+    /// it would destroy should resolve it through
+    /// [`WorldClientPackage::confirmation`], which is what every client surface
+    /// actually asks.
+    pub fn confirmation_question(&self) -> Option<&str> {
+        self.confirmation_question.as_deref()
+    }
+
+    pub fn kind(&self) -> &ClientInvocationKind {
+        &self.kind
+    }
+
+    pub fn into_kind(self) -> ClientInvocationKind {
+        self.kind
+    }
 }
 
 pub type CliCommandFactory = fn() -> Command;
-pub type CliParser = fn(&ArgMatches) -> Result<CliInvocation, InterfaceError>;
+pub type CliParser = fn(&ArgMatches) -> Result<ClientInvocation, InterfaceError>;
 
 /// One root-level CLI namespace mounted by a World application.
 #[derive(Clone)]
@@ -75,16 +165,17 @@ impl CliMount {
         (self.command)()
     }
 
-    pub fn parse(&self, matches: &ArgMatches) -> Result<CliInvocation, InterfaceError> {
+    pub fn parse(&self, matches: &ArgMatches) -> Result<ClientInvocation, InterfaceError> {
         (self.parse)(matches)
     }
 }
 
 pub type McpSchemaFactory = fn() -> Value;
-pub type McpCallFactory = fn(Value) -> Result<CliInvocation, InterfaceError>;
+pub type McpCallFactory = fn(Value) -> Result<ClientInvocation, InterfaceError>;
 pub type WorldReplyDecoder = fn(&WorldCall, WorldReply) -> Result<Value, InterfaceError>;
 pub type WorldReplyPresenter =
     fn(Value, PresentationOptions) -> Result<Presentation, InterfaceError>;
+pub type WebParser = fn(Value) -> Result<ClientInvocation, InterfaceError>;
 
 /// Output policy supplied by the navigation shell to a product presenter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,6 +203,84 @@ pub struct Presentation {
     pub failure: Option<PresentationFailure>,
     pub failure_message: Option<String>,
 }
+
+/// A package execution result shared by CLI, MCP, and web adapters.
+///
+/// `value` is the lossless machine result. `presentation` is optional
+/// product-owned terminal/error policy; native clients render it while web
+/// clients return `value` directly.
+#[derive(Debug, Clone)]
+pub struct ClientOutput {
+    pub value: Value,
+    pub presentation: Option<Presentation>,
+}
+
+impl ClientOutput {
+    pub fn new(value: Value, presentation: Option<Presentation>) -> Self {
+        Self {
+            value,
+            presentation,
+        }
+    }
+}
+
+/// One generic Space/host facility available to an application package.
+///
+/// These are deliberately product-neutral. A package may plan assignments or
+/// implementation activation, but the Lait host remains the authority that
+/// resolves the selected Orbit and commits the control operation.
+#[derive(Debug, Clone)]
+pub enum HostControlRequest {
+    AssignmentList {
+        actor: Option<String>,
+    },
+    AssignmentGrant {
+        actor: String,
+        assignments: Vec<HostAssignment>,
+    },
+    AssignmentRevoke {
+        grant_id: String,
+    },
+    WorldActivate {
+        world: WorldId,
+    },
+}
+
+/// One exact generic Mechanics assignment planned by a product package.
+#[derive(Debug, Clone)]
+pub struct HostAssignment {
+    pub world: String,
+    pub capability: String,
+    pub resource: Vec<String>,
+}
+
+/// Boxed future used to keep the host interface dyn-compatible.
+pub type ClientFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, InterfaceError>> + Send + 'a>>;
+
+/// Facilities supplied by a trusted native client host to a World package.
+///
+/// The package owns orchestration and product semantics. The implementation
+/// owns Orbit selection, daemon transport, acting identity, and generic Space
+/// authority. `local_root` is caller-local state, never replicated World state.
+pub trait ClientHost: Send + Sync {
+    fn local_root(&self) -> &Path;
+    fn call_world<'a>(&'a self, call: WorldCall) -> ClientFuture<'a, WorldReply>;
+    fn call_control<'a>(&'a self, request: HostControlRequest) -> ClientFuture<'a, Value>;
+}
+
+pub type LocalInvocationHandler = for<'a> fn(
+    &'a dyn ClientHost,
+    LocalInvocation,
+    PresentationOptions,
+) -> ClientFuture<'a, ClientOutput>;
+
+/// Resolve the confirmation prompt for one invocation, with a host available.
+///
+/// A parse-time question can only name the *selector* the user typed, which for
+/// a ref inferred from the working tree is unanswerable. This hook lets the
+/// package read enough to name the thing itself before anyone is asked.
+pub type ConfirmationResolver =
+    for<'a> fn(&'a dyn ClientHost, &'a ClientInvocation) -> ClientFuture<'a, Option<String>>;
 
 /// One product-local MCP tool. The registry prefixes `name` with the CLI mount,
 /// so independently developed Worlds cannot both publish a global `list`.
@@ -150,7 +319,7 @@ impl McpTool {
         (self.schema)()
     }
 
-    pub fn call(&self, input: Value) -> Result<CliInvocation, InterfaceError> {
+    pub fn call(&self, input: Value) -> Result<ClientInvocation, InterfaceError> {
         (self.call)(input)
     }
 }
@@ -164,6 +333,9 @@ pub struct WorldClientPackage {
     mcp_instructions: &'static str,
     decode_reply: WorldReplyDecoder,
     present_reply: Option<WorldReplyPresenter>,
+    local_handler: Option<LocalInvocationHandler>,
+    web_parser: Option<WebParser>,
+    confirmation: Option<ConfirmationResolver>,
 }
 
 impl WorldClientPackage {
@@ -193,11 +365,29 @@ impl WorldClientPackage {
             mcp_instructions,
             decode_reply,
             present_reply: None,
+            local_handler: None,
+            web_parser: None,
+            confirmation: None,
         })
     }
 
     pub fn with_presenter(mut self, presenter: WorldReplyPresenter) -> Self {
         self.present_reply = Some(presenter);
+        self
+    }
+
+    pub fn with_local_handler(mut self, handler: LocalInvocationHandler) -> Self {
+        self.local_handler = Some(handler);
+        self
+    }
+
+    pub fn with_web_parser(mut self, parser: WebParser) -> Self {
+        self.web_parser = Some(parser);
+        self
+    }
+
+    pub fn with_confirmation(mut self, confirmation: ConfirmationResolver) -> Self {
+        self.confirmation = Some(confirmation);
         self
     }
 
@@ -233,6 +423,82 @@ impl WorldClientPackage {
         self.present_reply
             .map(|presenter| presenter(value, options))
             .transpose()
+    }
+
+    pub fn parse_web(&self, input: Value) -> Result<ClientInvocation, InterfaceError> {
+        let parser = self.web_parser.ok_or_else(|| {
+            InterfaceError::new(format!(
+                "World '{}' does not expose a web client interface",
+                self.world
+            ))
+        })?;
+        let invocation = parser(input)?;
+        self.validate_invocation(&invocation)?;
+        Ok(invocation)
+    }
+
+    /// The prompt a client must show before running `invocation`, or `None`
+    /// when the package considers it unremarkable.
+    ///
+    /// Every surface asks through here so the CLI prompt and the browser's
+    /// modal cannot disagree about what is dangerous, or describe it
+    /// differently. A package without a resolver gets its declared question
+    /// verbatim; a resolver that fails falls back to it rather than blocking a
+    /// confirmation on a lookup that was only ever there to add detail.
+    pub fn confirmation<'a>(
+        &'a self,
+        host: &'a dyn ClientHost,
+        invocation: &'a ClientInvocation,
+    ) -> ClientFuture<'a, Option<String>> {
+        Box::pin(async move {
+            self.validate_invocation(invocation)?;
+            let declared = invocation.confirmation_question().map(str::to_string);
+            let Some(resolver) = self.confirmation else {
+                return Ok(declared);
+            };
+            Ok(resolver(host, invocation).await.unwrap_or(declared))
+        })
+    }
+
+    /// Execute one invocation through its owning package.
+    pub fn execute<'a>(
+        &'a self,
+        host: &'a dyn ClientHost,
+        invocation: ClientInvocation,
+        options: PresentationOptions,
+    ) -> ClientFuture<'a, ClientOutput> {
+        Box::pin(async move {
+            self.validate_invocation(&invocation)?;
+            match invocation.into_kind() {
+                ClientInvocationKind::World(call) => {
+                    let reply = host.call_world(call.clone()).await?;
+                    let value = self.decode_reply(&call, reply)?;
+                    let presentation = self.present_reply(value.clone(), options)?;
+                    Ok(ClientOutput::new(value, presentation))
+                }
+                ClientInvocationKind::Local(local) => {
+                    let handler = self.local_handler.ok_or_else(|| {
+                        InterfaceError::new(format!(
+                            "World '{}' does not expose local client operations",
+                            self.world
+                        ))
+                    })?;
+                    handler(host, local, options).await
+                }
+            }
+        })
+    }
+
+    fn validate_invocation(&self, invocation: &ClientInvocation) -> Result<(), InterfaceError> {
+        if invocation.world_id() == &self.world {
+            Ok(())
+        } else {
+            Err(InterfaceError::new(format!(
+                "World '{}' client package cannot execute an invocation for '{}'",
+                self.world,
+                invocation.world_id()
+            )))
+        }
     }
 }
 
@@ -370,16 +636,20 @@ mod tests {
         .map_err(|error| InterfaceError::new(error.to_string()))
     }
 
-    fn files_invocation(input: Value) -> Result<CliInvocation, InterfaceError> {
-        files_call(input).map(CliInvocation::World)
+    fn files_invocation(input: Value) -> Result<ClientInvocation, InterfaceError> {
+        files_call(input).map(|call| ClientInvocation::world(call, ClientAccess::Query, None))
     }
 
     fn files_command() -> Command {
         Command::new("files").subcommand(Command::new("list"))
     }
 
-    fn files_parse(_: &ArgMatches) -> Result<CliInvocation, InterfaceError> {
-        Ok(CliInvocation::World(files_call(Value::Null)?))
+    fn files_parse(_: &ArgMatches) -> Result<ClientInvocation, InterfaceError> {
+        Ok(ClientInvocation::world(
+            files_call(Value::Null)?,
+            ClientAccess::Query,
+            None,
+        ))
     }
 
     fn notes_call(_: Value) -> Result<WorldCall, InterfaceError> {
@@ -392,16 +662,20 @@ mod tests {
         .map_err(|error| InterfaceError::new(error.to_string()))
     }
 
-    fn notes_invocation(input: Value) -> Result<CliInvocation, InterfaceError> {
-        notes_call(input).map(CliInvocation::World)
+    fn notes_invocation(input: Value) -> Result<ClientInvocation, InterfaceError> {
+        notes_call(input).map(|call| ClientInvocation::world(call, ClientAccess::Query, None))
     }
 
     fn notes_command() -> Command {
         Command::new("notes").subcommand(Command::new("list"))
     }
 
-    fn notes_parse(_: &ArgMatches) -> Result<CliInvocation, InterfaceError> {
-        Ok(CliInvocation::World(notes_call(Value::Null)?))
+    fn notes_parse(_: &ArgMatches) -> Result<ClientInvocation, InterfaceError> {
+        Ok(ClientInvocation::world(
+            notes_call(Value::Null)?,
+            ClientAccess::Query,
+            None,
+        ))
     }
 
     fn decode_json_reply(call: &WorldCall, reply: WorldReply) -> Result<Value, InterfaceError> {

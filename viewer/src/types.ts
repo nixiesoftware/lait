@@ -628,6 +628,30 @@ export type Request =
   | { cmd: "log"; since: number }
   | { cmd: "who" };
 
+export type SpaceRequest = Extract<
+  Request,
+  {
+    cmd:
+      | "member_add"
+      | "member_remove"
+      | "key_rotate"
+      | "members"
+      | "member_log"
+      | "member_alias"
+      | "status"
+      | "diagnose"
+      | "id"
+      | "invite"
+      | "invite_revoke"
+      | "join"
+      | "seed_list"
+      | "log"
+      | "who";
+  }
+>;
+
+export type WorldRequest = Exclude<Request, SpaceRequest>;
+
 /**
  * `control.rs` `Response`, internally tagged by `kind`.
  *

@@ -2,9 +2,9 @@
 
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use serde_json::{json, to_value};
-use world_interface::{CliInvocation, InterfaceError};
+use world_interface::{ClientInvocation as CliInvocation, InterfaceError};
 
-use crate::{encode_call, BoardPos, Filter, IssuesRequest};
+use crate::{BoardPos, Filter, IssuesRequest};
 
 pub const LOCAL_FOCUS: &str = "issues.focus";
 pub const LOCAL_NEW_START: &str = "issues.new_start";
@@ -392,16 +392,11 @@ pub fn parse(matches: &ArgMatches) -> Result<CliInvocation, InterfaceError> {
 }
 
 fn world(request: IssuesRequest) -> Result<CliInvocation, InterfaceError> {
-    encode_call(&request)
-        .map(CliInvocation::World)
-        .map_err(interface_error)
+    crate::host::world_invocation(request)
 }
 
 fn local(operation: &str, input: serde_json::Value) -> Result<CliInvocation, InterfaceError> {
-    Ok(CliInvocation::Local {
-        operation: operation.to_string(),
-        input,
-    })
+    crate::host::invocation(operation, input)
 }
 
 fn parse_comment(m: &ArgMatches) -> Result<IssuesRequest, InterfaceError> {
@@ -1107,7 +1102,7 @@ fn opt(m: &ArgMatches, id: &str) -> Option<String> {
 }
 
 fn req(m: &ArgMatches, id: &str) -> String {
-    opt(m, id).unwrap_or_default()
+    opt(m, id).unwrap_or_else(|| panic!("required Issues CLI argument '{id}' is missing"))
 }
 
 fn many(m: &ArgMatches, id: &str) -> Vec<String> {
@@ -1155,10 +1150,7 @@ fn title_case(key: &str) -> String {
 }
 
 fn project_hint(m: &ArgMatches) -> Option<String> {
-    opt(m, "project")
-        .is_none()
-        .then(infer_project_key)?
-        .or(None)
+    opt(m, "project").is_none().then(infer_project_key)?
 }
 
 fn resolve_reff(m: &ArgMatches) -> Result<String, InterfaceError> {
@@ -1246,6 +1238,7 @@ fn interface_error(error: impl std::fmt::Display) -> InterfaceError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use world_interface::ClientAccess;
 
     fn invocation(argv: &[&str]) -> CliInvocation {
         let matches = command().try_get_matches_from(argv).unwrap();
@@ -1253,9 +1246,13 @@ mod tests {
     }
 
     fn request(argv: &[&str]) -> IssuesRequest {
-        match invocation(argv) {
-            CliInvocation::World(call) => crate::decode_call(&call).unwrap(),
-            CliInvocation::Local { operation, .. } => panic!("local invocation {operation}"),
+        match invocation(argv).into_kind() {
+            world_interface::ClientInvocationKind::World(call) => {
+                crate::decode_call(&call).unwrap()
+            }
+            world_interface::ClientInvocationKind::Local(local) => {
+                panic!("local invocation {}", local.operation)
+            }
         }
     }
 
@@ -1281,13 +1278,19 @@ mod tests {
 
     #[test]
     fn host_capabilities_are_explicit_local_operations() {
+        let inbox = invocation(&["issues", "inbox", "--clear"]);
+        assert_eq!(inbox.access(), ClientAccess::Command);
         assert!(matches!(
-            invocation(&["issues", "inbox", "--clear"]),
-            CliInvocation::Local { operation, .. } if operation == LOCAL_INBOX
+            inbox.into_kind(),
+            world_interface::ClientInvocationKind::Local(local)
+                if local.operation == LOCAL_INBOX
         ));
+        let access = invocation(&["issues", "access", "ls"]);
+        assert_eq!(access.access(), ClientAccess::Query);
         assert!(matches!(
-            invocation(&["issues", "access", "ls"]),
-            CliInvocation::Local { operation, .. } if operation == LOCAL_ACCESS
+            access.into_kind(),
+            world_interface::ClientInvocationKind::Local(local)
+                if local.operation == LOCAL_ACCESS
         ));
     }
 

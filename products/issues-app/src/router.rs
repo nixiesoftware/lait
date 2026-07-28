@@ -73,17 +73,19 @@ impl IssuesCallHandler {
                 .map(|duration| duration.as_secs())
                 .unwrap_or(0),
         };
-        let mut response = router.route(request.clone(), &facts).0;
-        for _ in 0..3 {
-            match &response {
-                Response::Error { message, .. } if message == "membership changed — retry" => {
-                    std::thread::sleep(std::time::Duration::from_millis(15));
-                    response = router.route(request.clone(), &facts).0;
+        for _ in 0..=3 {
+            let response = router.route(request.clone(), &facts).0;
+            if !matches!(
+                &response,
+                Response::Error {
+                    error_kind: crate::IssuesErrorKind::Retry,
+                    ..
                 }
-                _ => break,
+            ) {
+                return response;
             }
         }
-        response
+        Response::retry("membership changed repeatedly — retry the request")
     }
 }
 
@@ -430,7 +432,7 @@ impl<'a> IssueRouter<'a> {
                 Response::err("unsupported request")
             }
             WorldError::LimitExceeded => Response::err("request exceeds a limit"),
-            WorldError::AuthorityChanged => Response::err("membership changed — retry"),
+            WorldError::AuthorityChanged => Response::retry("membership changed — retry"),
             WorldError::StationDormant => Response::err("the space is shutting down"),
             WorldError::Persistence | WorldError::WorldPanicked => Response::err("internal error"),
             WorldError::ResetRequired => Response::err("state reset — re-query"),

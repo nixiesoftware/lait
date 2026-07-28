@@ -480,6 +480,7 @@ pub enum IssuesErrorKind {
     Error,
     NotFound,
     Denied,
+    Retry,
 }
 
 impl IssuesResponse {
@@ -501,6 +502,13 @@ impl IssuesResponse {
         Self::Error {
             message: message.into(),
             error_kind: IssuesErrorKind::Denied,
+        }
+    }
+
+    pub fn retry(message: impl Into<String>) -> Self {
+        Self::Error {
+            message: message.into(),
+            error_kind: IssuesErrorKind::Retry,
         }
     }
 }
@@ -530,7 +538,46 @@ impl IssuesRequest {
             | RoleShow { .. }
             | WorkflowShow { .. }
             | WorkflowValidate { .. } => WorldCallAccess::Query,
-            _ => WorldCallAccess::Command,
+            IssueNew { .. }
+            | IssueEdit { .. }
+            | IssueMove { .. }
+            | Assign { .. }
+            | Label { .. }
+            | Comment { .. }
+            | React { .. }
+            | IssueDelete { .. }
+            | IssueRestore { .. }
+            | IssueLink { .. }
+            | IssueUnlink { .. }
+            | IssueParent { .. }
+            | IssueStart { .. }
+            | IssueDone { .. }
+            | IssueStop { .. }
+            | ProjectNew { .. }
+            | ProjectEdit { .. }
+            | ProjectDelete { .. }
+            | Follow { .. }
+            | MilestoneSet { .. }
+            | IssueMilestone { .. }
+            | CycleSet { .. }
+            | IssueCycle { .. }
+            | InitiativeSet { .. }
+            | TeamSet { .. }
+            | TriageSubmit { .. }
+            | TriageDecide { .. }
+            | Attach { .. }
+            | Detach { .. }
+            | ProjectUpdatePost { .. }
+            | LabelNew { .. }
+            | LabelEdit { .. }
+            | LabelDelete { .. }
+            | SpaceRename { .. }
+            | SpaceDescribe { .. }
+            | RoleCreate { .. }
+            | RoleEdit { .. }
+            | RoleDelete { .. }
+            | RoleResolve { .. }
+            | WorkflowSet { .. } => WorldCallAccess::Command,
         }
     }
 

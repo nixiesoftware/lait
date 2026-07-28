@@ -12,7 +12,7 @@
  * origin guard.
  */
 
-import type { Request, Response, SpacesReply } from "./types";
+import type { Response, SpaceRequest, SpacesReply, WorldRequest } from "./types";
 
 /** A refusal from the engine, carrying its own words. */
 export class LaitError extends Error {
@@ -59,11 +59,12 @@ export async function spaces(signal?: AbortSignal): Promise<SpacesReply> {
 }
 
 /**
- * Send one control-plane `Request` to one space's daemon.
+ * Send one Issues World request through its explicit package route.
  *
- * The request/response types are the engine's own (`src/control.rs`), not a REST
- * translation of them — which is why this cannot drift from the CLI the way the
- * old viewer's hand-written routes did.
+ * The request/response types are the Issues package's application protocol,
+ * not a REST translation. Generic membership, lifecycle, and authority calls
+ * use `spaceRpc` instead, so malformed product input can never fall through
+ * into an unrelated root command namespace.
  *
  * `confirm` is not a security boundary and is not pretending to be one: anything
  * that can send `issue_delete` can send `confirm`. It exists so a destructive verb
@@ -71,11 +72,32 @@ export async function spaces(signal?: AbortSignal): Promise<SpacesReply> {
  */
 export async function rpc<R extends Response = Response>(
   space: string,
-  request: Request,
+  request: WorldRequest,
   opts: { confirm?: boolean; signal?: AbortSignal } = {},
 ): Promise<R> {
+  return send(
+    `/api/spaces/${encodeURIComponent(space)}/worlds/issues/rpc`,
+    request,
+    opts,
+  );
+}
+
+/** Send one generic Space-control request to the selected Orbit. */
+export async function spaceRpc<R extends Response = Response>(
+  space: string,
+  request: SpaceRequest,
+  opts: { confirm?: boolean; signal?: AbortSignal } = {},
+): Promise<R> {
+  return send(`/api/spaces/${encodeURIComponent(space)}/rpc`, request, opts);
+}
+
+async function send<R extends Response = Response>(
+  endpoint: string,
+  request: WorldRequest | SpaceRequest,
+  opts: { confirm?: boolean; signal?: AbortSignal },
+): Promise<R> {
   const qs = opts.confirm ? "?confirm=true" : "";
-  const r = await fetch(`/api/spaces/${encodeURIComponent(space)}/rpc${qs}`, {
+  const r = await fetch(`${endpoint}${qs}`, {
     method: "POST",
     credentials: "same-origin",
     headers: { "content-type": "application/json" },

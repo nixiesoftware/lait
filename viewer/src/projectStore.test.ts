@@ -187,8 +187,10 @@ describe("ProjectViewerStore", () => {
     let members = [
       { actor: "act_1", key: "act_1", nick: "a", alias: "", role: "admin", admin: true, me: true, devices: [] },
     ];
-    const rpc = vi.fn(async () => ({ kind: "members", members }) as Response);
-    const store = new ProjectViewerStore(rpc);
+    // Membership is generic Space control, so it rides the space transport —
+    // injected, like the World one, rather than reaching for the module import.
+    const spaceRpc = vi.fn(async () => ({ kind: "members", members }) as Response);
+    const store = new ProjectViewerStore(undefined, spaceRpc);
     await store.ensureMembers("local");
     const key = projectKeys.members("local");
     const unsubscribe = store.resources.subscribe(key, () => undefined);

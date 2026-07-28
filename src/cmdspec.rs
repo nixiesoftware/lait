@@ -444,13 +444,14 @@ pub fn parse_to_dispatch(argv: &[&str]) -> Result<ParsedCommand> {
     let cli = build_cli(&specs);
     let m = cli.try_get_matches_from(argv).map_err(|e| anyhow!("{e}"))?;
     if let Some(invocation) = parse_world_invocation(&m)? {
-        return Ok(match invocation {
-            world_interface::CliInvocation::World(call) => {
+        return Ok(match invocation.into_kind() {
+            world_interface::ClientInvocationKind::World(call) => {
                 ParsedCommand::Action(ClientAction::world(call))
             }
-            world_interface::CliInvocation::Local { operation, input } => {
-                ParsedCommand::ProductLocal { operation, input }
-            }
+            world_interface::ClientInvocationKind::Local(local) => ParsedCommand::ProductLocal {
+                operation: local.operation,
+                input: local.input,
+            },
         });
     }
     let (leaf, lm) = resolve(&specs, &m).ok_or_else(|| anyhow!("no subcommand"))?;
@@ -468,7 +469,7 @@ pub fn parse_to_dispatch(argv: &[&str]) -> Result<ParsedCommand> {
 /// shell registry.
 pub fn parse_world_invocation(
     matches: &ArgMatches,
-) -> Result<Option<world_interface::CliInvocation>> {
+) -> Result<Option<world_interface::ClientInvocation>> {
     let Some((mount, package_matches)) = matches.subcommand() else {
         return Ok(None);
     };

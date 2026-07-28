@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useMemo, type ReactNode } from "react";
-import { rpc as defaultRpc } from "./api";
+import { rpc as defaultRpc, spaceRpc as defaultSpaceRpc } from "./api";
 import { applyOverlay, Overlay, type Field } from "./core/overlay";
 import { useWorldResource } from "./core/worldViewReact";
 import { type ResourceSnapshot, WorldViewStore } from "./core/worldViewStore";
@@ -16,14 +16,17 @@ import type {
   MilestoneDto,
   Priority,
   ProjectDto,
-  Request,
   Response,
   Row,
   SpaceDoorbell,
+  SpaceRequest,
   StatusInfo,
+  WorldRequest,
 } from "./types";
 
-type Rpc = (space: string, request: Request) => Promise<Response>;
+type Rpc = (space: string, request: WorldRequest) => Promise<Response>;
+/** Generic Space control, injected like `Rpc` so both transports stay substitutable. */
+type SpaceRpc = (space: string, request: SpaceRequest) => Promise<Response>;
 
 const part = (value: string | null | undefined) => encodeURIComponent(value ?? "_");
 const prefix = (space: string) => `space:${part(space)}/`;
@@ -197,6 +200,7 @@ export class ProjectViewerStore {
 
   constructor(
     private readonly rpc: Rpc = defaultRpc,
+    private readonly spaceRpc: SpaceRpc = defaultSpaceRpc,
     resources = new WorldViewStore(),
   ) {
     this.resources = resources;
@@ -389,7 +393,7 @@ export class ProjectViewerStore {
 
   ensureMembers(space: string, force = false): Promise<MemberDto[]> {
     return this.load(projectKeys.members(space), async () => {
-      const result = await this.rpc(space, { cmd: "members" });
+      const result = await this.spaceRpc(space, { cmd: "members" });
       if (result.kind !== "members") throw new Error("Expected members response");
       return result.members;
       // Membership is not catalog structure at all — it converges as signed
@@ -407,7 +411,7 @@ export class ProjectViewerStore {
 
   ensureStatus(space: string, force = false): Promise<StatusInfo> {
     return this.load(projectKeys.status(space), async () => {
-      const result = await this.rpc(space, { cmd: "status" });
+      const result = await this.spaceRpc(space, { cmd: "status" });
       if (result.kind !== "status") throw new Error("Expected status response");
       return result;
       // Status names the space and counts its projects, members and issues —
@@ -543,7 +547,7 @@ export class ProjectViewerStore {
     reff: string,
     field: Field,
     value: string,
-    request: Request,
+    request: WorldRequest,
   ): Promise<boolean> {
     const row = this.resources.read<Row>(projectKeys.row(space, reff)).data;
     if (!row) return false;

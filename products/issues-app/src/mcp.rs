@@ -3,10 +3,10 @@
 use schemars::JsonSchema;
 use serde::{de::DeserializeOwned, Deserialize};
 use serde_json::{json, Value};
-use world_interface::{CliInvocation, InterfaceError, McpTool};
+use world_interface::{ClientInvocation as CliInvocation, InterfaceError, McpTool};
 
 use crate::cli::{LOCAL_ACCESS, LOCAL_INBOX};
-use crate::{encode_call, BoardPos, Filter, IssuesRequest};
+use crate::{BoardPos, Filter, IssuesRequest};
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 struct EmptyArgs {}
@@ -334,16 +334,11 @@ fn args<T: DeserializeOwned>(input: Value) -> Result<T, InterfaceError> {
 }
 
 fn world(request: IssuesRequest) -> Result<CliInvocation, InterfaceError> {
-    encode_call(&request)
-        .map(CliInvocation::World)
-        .map_err(|error| InterfaceError::new(error.to_string()))
+    crate::host::world_invocation(request)
 }
 
 fn local(operation: &str, input: Value) -> Result<CliInvocation, InterfaceError> {
-    Ok(CliInvocation::Local {
-        operation: operation.to_string(),
-        input,
-    })
+    crate::host::invocation(operation, input)
 }
 
 fn issue_new(input: Value) -> Result<CliInvocation, InterfaceError> {
@@ -669,6 +664,9 @@ mod tests {
             .unwrap()
             .call(json!({ "reff": "ENG-1" }))
             .unwrap();
-        assert!(matches!(invocation, CliInvocation::World(_)));
+        assert!(matches!(
+            invocation.into_kind(),
+            world_interface::ClientInvocationKind::World(_)
+        ));
     }
 }
