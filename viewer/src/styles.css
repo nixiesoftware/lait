@@ -252,14 +252,14 @@
      floating bar in the app has been computing `box-shadow: none`. It looked
      deliberate because the surfaces also carry a border. */
   --shadow-overlay: 0 8px 30px light-dark(rgb(0 0 0 / 0.12), rgb(0 0 0 / 0.5));
-  /* The middle tier, and deliberately unused. A shadow is a claim to be off the
-     page, so only things that float carry one: `overlay` for a surface anchored
-     to the control that opened it, `float` for the one that is not anchored to
-     anything. A board card, a segmented selector and an inline toast are all *on*
-     the page — they had this and it read as elevation they had not earned. Kept
-     as the scale's middle step for a surface that lifts without floating; there
-     is currently no such surface. */
-  --shadow-raised: 0 2px 4px light-dark(rgb(0 0 0 / 0.10), rgb(0 0 0 / 0.55));
+  /* The middle tier: a surface that lifts without floating. A shadow is a claim
+     to be off the page, so most on-page things carry none — a board card, a
+     segmented selector and an inline toast had this and it read as elevation
+     they had not earned. What HAS earned it is the comment card and the comment
+     composer: white surfaces sitting on the grey canvas (see the neutral ramp),
+     where a whisper of shadow is what separates "a card on the page" from "a
+     rectangle drawn on it" — Linear's treatment, tuned to be felt, not seen. */
+  --shadow-raised: 0 1px 4px light-dark(rgb(0 0 0 / 0.05), rgb(0 0 0 / 0.35));
   /* For the one surface that is genuinely *hovering* over the work rather than
      opening from a control: the bulk bar. `overlay` is tuned for a popover
      anchored to the thing it belongs to, so it stops short of reading as a

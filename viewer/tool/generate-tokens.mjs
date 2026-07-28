@@ -39,9 +39,15 @@ const HUE = {
 };
 
 // ── The neutral ramp ─────────────────────────────────────────────────────
-// Read off the palette these replace, so nothing shifts. Chroma rises toward
-// the middle: a near-black and a near-white cannot carry tint, the steps
-// between them can, and a little of it is what stops a grey looking dead.
+// Read off the palette these replace — except the light surface rungs, which
+// were deliberately re-rung: light mode used to put pure white on `bg` and a
+// grey on `raised`, so a card rendered *darker* than the canvas it sat on,
+// the opposite of dark mode and of every elevation model (Linear's included).
+// Now both themes climb the same way — sunken < bg < raised — so "raised"
+// means lighter-than-the-page everywhere: a grey canvas, white cards on it.
+// Chroma rises toward the middle: a near-black and a near-white cannot carry
+// tint, the steps between them can, and a little of it is what stops a grey
+// looking dead.
 const NEUTRAL = {
   dark: {
     sunken: [0.1354, 0.005], bg: [0.1505, 0.004], raised: [0.1881, 0.006],
@@ -50,7 +56,7 @@ const NEUTRAL = {
     fg: [0.9349, 0.004],
   },
   light: {
-    sunken: [0.9677, 0.003], bg: [1, 0], raised: [0.9851, 0.001],
+    sunken: [0.9677, 0.003], bg: [0.9851, 0.001], raised: [1, 0],
     hover: [0.9617, 0.003], active: [0.947, 0.004], line: [0.9261, 0.005],
     lineStrong: [0.8658, 0.010], mute: [0.5558, 0.017], dim: [0.4783, 0.016],
     fg: [0.2059, 0.006],
