@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use async_trait::async_trait;
+use issues_app::IssuesResponse as IssueResponse;
 use lait::control::{request, ControlRoute, Request, Response};
 use lait::daemon::OrbitAddress;
 use lait::net::Network;
@@ -56,7 +57,7 @@ fn issue_req(
     rt: &tokio::runtime::Runtime,
     home: &Path,
     request: issues_app::IssuesRequest,
-) -> Response {
+) -> IssueResponse {
     rt.block_on(async {
         let space = lait::orbital::discover_space_id(home).expect("test Space");
         let call = issues_app::encode_call(&request)?;
@@ -70,16 +71,20 @@ fn issue_req(
             None,
         )
         .await?;
-        Ok::<Response, anyhow::Error>(serde_json::from_value(issues_app::decode_reply(
+        Ok::<IssueResponse, anyhow::Error>(serde_json::from_value(issues_app::decode_reply(
             &call, reply,
         )?)?)
     })
-    .unwrap_or_else(|error| Response::err(format!("{error:#}")))
+    .unwrap_or_else(|error| IssueResponse::err(format!("{error:#}")))
 }
 
-fn ok(rt: &tokio::runtime::Runtime, home: &Path, request: issues_app::IssuesRequest) -> Response {
+fn ok(
+    rt: &tokio::runtime::Runtime,
+    home: &Path,
+    request: issues_app::IssuesRequest,
+) -> IssueResponse {
     let response = issue_req(rt, home, request.clone());
-    if let Response::Error { message, .. } = &response {
+    if let IssueResponse::Error { message, .. } = &response {
         panic!("request {request:?} failed: {message}");
     }
     response
@@ -136,7 +141,7 @@ fn new_issue(rt: &tokio::runtime::Runtime, home: &Path, project: &str, title: &s
         },
     );
     match resp {
-        Response::Ref { reff } => reff,
+        IssueResponse::Ref { reff } => reff,
         other => panic!("IssueNew answered {other:?}"),
     }
 }
@@ -181,7 +186,7 @@ fn milestones_cycles_initiatives_teams_triage_delete_and_attachments() {
             milestone: Some("Beta".into()),
         },
     );
-    let Response::Milestones { milestones } = ok(
+    let IssueResponse::Milestones { milestones } = ok(
         &client,
         &home,
         issues_app::IssuesRequest::MilestoneList {
@@ -201,7 +206,7 @@ fn milestones_cycles_initiatives_teams_triage_delete_and_attachments() {
             reff: issue.clone(),
         },
     );
-    let Response::Milestones { milestones } = ok(
+    let IssueResponse::Milestones { milestones } = ok(
         &client,
         &home,
         issues_app::IssuesRequest::MilestoneList {
@@ -233,7 +238,7 @@ fn milestones_cycles_initiatives_teams_triage_delete_and_attachments() {
             cycle: Some("Sprint 1".into()),
         },
     );
-    let Response::Cycles { cycles } = ok(
+    let IssueResponse::Cycles { cycles } = ok(
         &client,
         &home,
         issues_app::IssuesRequest::CycleList {
@@ -277,7 +282,7 @@ fn milestones_cycles_initiatives_teams_triage_delete_and_attachments() {
             remove: false,
         },
     );
-    let Response::Initiatives { initiatives } =
+    let IssueResponse::Initiatives { initiatives } =
         ok(&client, &home, issues_app::IssuesRequest::InitiativeList)
     else {
         panic!("expected Initiatives");
@@ -331,7 +336,8 @@ fn milestones_cycles_initiatives_teams_triage_delete_and_attachments() {
             archived: None,
         },
     );
-    let Response::Teams { teams } = ok(&client, &home, issues_app::IssuesRequest::TeamList) else {
+    let IssueResponse::Teams { teams } = ok(&client, &home, issues_app::IssuesRequest::TeamList)
+    else {
         panic!("expected Teams");
     };
     assert_eq!(teams.len(), 1);
@@ -340,7 +346,7 @@ fn milestones_cycles_initiatives_teams_triage_delete_and_attachments() {
     assert_eq!(teams[0].projects, vec!["ENG".to_string()]);
 
     // ---- triage (SCOPE-7): submit, accept, decline, duplicate. ----
-    let Response::Ref { reff: t_accept } = ok(
+    let IssueResponse::Ref { reff: t_accept } = ok(
         &client,
         &home,
         issues_app::IssuesRequest::TriageSubmit {
@@ -351,7 +357,7 @@ fn milestones_cycles_initiatives_teams_triage_delete_and_attachments() {
     ) else {
         panic!("expected Ref");
     };
-    let Response::Ref { reff: t_decline } = ok(
+    let IssueResponse::Ref { reff: t_decline } = ok(
         &client,
         &home,
         issues_app::IssuesRequest::TriageSubmit {
@@ -362,7 +368,7 @@ fn milestones_cycles_initiatives_teams_triage_delete_and_attachments() {
     ) else {
         panic!("expected Ref");
     };
-    let Response::Ref { reff: t_dupe } = ok(
+    let IssueResponse::Ref { reff: t_dupe } = ok(
         &client,
         &home,
         issues_app::IssuesRequest::TriageSubmit {
@@ -419,10 +425,11 @@ fn milestones_cycles_initiatives_teams_triage_delete_and_attachments() {
         },
     );
     assert!(
-        matches!(&resp, Response::Error { message, .. } if message.contains("already decided")),
+        matches!(&resp, IssueResponse::Error { message, .. } if message.contains("already decided")),
         "double decide must refuse: {resp:?}"
     );
-    let Response::TriageItems { items } = ok(&client, &home, issues_app::IssuesRequest::TriageList)
+    let IssueResponse::TriageItems { items } =
+        ok(&client, &home, issues_app::IssuesRequest::TriageList)
     else {
         panic!("expected TriageItems");
     };
@@ -432,7 +439,7 @@ fn milestones_cycles_initiatives_teams_triage_delete_and_attachments() {
     assert_eq!(accepted.outcome, "accepted");
     assert!(!accepted.reff.is_empty(), "accepted names its issue");
     // The accepted issue is a real, listed issue carrying the intake body.
-    let Response::Issue(view) = ok(
+    let IssueResponse::Issue(view) = ok(
         &client,
         &home,
         issues_app::IssuesRequest::IssueView {
@@ -457,7 +464,7 @@ fn milestones_cycles_initiatives_teams_triage_delete_and_attachments() {
             comment: None,
         },
     );
-    let Response::Issue(view) = ok(
+    let IssueResponse::Issue(view) = ok(
         &client,
         &home,
         issues_app::IssuesRequest::IssueView {
@@ -470,7 +477,7 @@ fn milestones_cycles_initiatives_teams_triage_delete_and_attachments() {
     assert_eq!(view.attachments[0].name, "notes.txt");
     assert_eq!(view.attachments[0].size, payload.len() as u64);
     let att_id = view.attachments[0].id.clone();
-    let Response::Attachment {
+    let IssueResponse::Attachment {
         name,
         mime,
         data_b64,
@@ -505,7 +512,7 @@ fn milestones_cycles_initiatives_teams_triage_delete_and_attachments() {
         },
     );
     assert!(
-        matches!(&resp, Response::Error { message, .. } if message.contains("KiB")),
+        matches!(&resp, IssueResponse::Error { message, .. } if message.contains("KiB")),
         "oversize must refuse: {resp:?}"
     );
     ok(
@@ -516,7 +523,7 @@ fn milestones_cycles_initiatives_teams_triage_delete_and_attachments() {
             id: att_id,
         },
     );
-    let Response::Issue(view) = ok(
+    let IssueResponse::Issue(view) = ok(
         &client,
         &home,
         issues_app::IssuesRequest::IssueView {
@@ -546,7 +553,7 @@ fn milestones_cycles_initiatives_teams_triage_delete_and_attachments() {
         },
     );
     assert!(
-        matches!(&resp, Response::Error { message, .. } if message.contains("still has issues")),
+        matches!(&resp, IssueResponse::Error { message, .. } if message.contains("still has issues")),
         "non-empty delete must refuse: {resp:?}"
     );
     // Even a TOMBSTONED issue keeps the project undeletable.
@@ -565,7 +572,7 @@ fn milestones_cycles_initiatives_teams_triage_delete_and_attachments() {
         },
     );
     assert!(
-        matches!(&resp, Response::Error { message, .. } if message.contains("still has issues")),
+        matches!(&resp, IssueResponse::Error { message, .. } if message.contains("still has issues")),
         "tombstoned issues still block: {resp:?}"
     );
     // Move it out; the emptied project deletes, and its initiative membership
@@ -608,7 +615,7 @@ fn milestones_cycles_initiatives_teams_triage_delete_and_attachments() {
             project: "dmd".into(),
         },
     );
-    let Response::Projects { projects } =
+    let IssueResponse::Projects { projects } =
         ok(&client, &home, issues_app::IssuesRequest::ProjectList)
     else {
         panic!("expected Projects");
@@ -617,7 +624,7 @@ fn milestones_cycles_initiatives_teams_triage_delete_and_attachments() {
         !projects.iter().any(|p| p.key == "DMD"),
         "the emptied project is gone"
     );
-    let Response::Initiatives { initiatives } =
+    let IssueResponse::Initiatives { initiatives } =
         ok(&client, &home, issues_app::IssuesRequest::InitiativeList)
     else {
         panic!("expected Initiatives");
@@ -628,7 +635,7 @@ fn milestones_cycles_initiatives_teams_triage_delete_and_attachments() {
         "the initiative dropped the deleted project"
     );
     // The moved issue survived under its new project.
-    let Response::List { rows } = ok(
+    let IssueResponse::List { rows } = ok(
         &client,
         &home,
         issues_app::IssuesRequest::List {
@@ -715,7 +722,7 @@ fn a_follower_hears_about_an_issue_they_are_not_assigned() {
                         on: true,
                     },
                 ),
-                Response::Ref { .. }
+                IssueResponse::Ref { .. }
             )
             .then_some(())
         })
@@ -736,8 +743,12 @@ fn a_follower_hears_about_an_issue_they_are_not_assigned() {
     // (converging ambient over the beacon plane; no manual Connect).
     assert!(
         poll_until(Duration::from_secs(15), || {
-            match req(&client, &member_home, Request::Inbox { clear: false }) {
-                Response::Inbox { entries, .. }
+            match issue_req(
+                &client,
+                &member_home,
+                issues_app::IssuesRequest::Inbox { watermark: 0 },
+            ) {
+                IssueResponse::Inbox { entries, .. }
                     if entries
                         .iter()
                         .any(|e| e.kind == "comment" && e.detail == "news for the followers") =>

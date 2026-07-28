@@ -16,7 +16,7 @@
 //! `tests/control_classification.rs`): product intents/queries route to the
 //! World Session; membership, admission, device, key and the FROST
 //! recovery/elevation/custody ceremonies are served by [`OrbitalMechanics`]
-//! over the mechanics primitives; seeds, diagnose, inbox and log are node-local
+//! over the mechanics primitives; seeds, diagnose, and log are node-local
 //! lifecycle concerns. There is no catch-all refusal.
 
 use std::path::{Path, PathBuf};
@@ -626,10 +626,6 @@ impl SpaceBridge {
         }
     }
 
-    fn facts(&self) -> PrincipalFacts {
-        self.facts_for(&self.device_seed)
-    }
-
     /// Principal facts for a specific local identity seed.
     fn facts_for(&self, seed: &[u8; 32]) -> PrincipalFacts {
         use runtime::AuthorityView;
@@ -660,15 +656,6 @@ impl SpaceBridge {
             return response;
         }
         match owner {
-            // The acting-identity selector matters where the answer is
-            // identity-relative: issue authoring (who signs) and whoami (who am
-            // I). Membership/station/lifecycle ops stay the daemon's — an agent
-            // holds no membership authority, so routing them "as the agent"
-            // would only ever be denied.
-            RequestOwner::World => Response::err(
-                "typed product requests were retired in control protocol v5; \
-                 send a versioned World call",
-            ),
             // Authority never passes through the Session, so a local membership,
             // role, device or key change publishes nothing on its own — the
             // remote half of this plane is published by the Contact driver.
@@ -694,7 +681,7 @@ impl SpaceBridge {
     fn validate_route(
         &self,
         route: Option<&ControlRoute>,
-        owner: RequestOwner,
+        _owner: RequestOwner,
     ) -> std::result::Result<(), Response> {
         let Some(route) = route else {
             return Ok(());
@@ -722,9 +709,6 @@ impl SpaceBridge {
                 if &address.space != actual_space {
                     return Err(wrong_space(&address.space));
                 }
-                if owner == RequestOwner::World {
-                    return Err(Response::err("World-owned request requires a world route"));
-                }
                 Ok(())
             }
             ControlRoute::World { address, world } => {
@@ -733,11 +717,6 @@ impl SpaceBridge {
                 }
                 if &address.space != actual_space {
                     return Err(wrong_space(&address.space));
-                }
-                if owner != RequestOwner::World {
-                    return Err(Response::err(
-                        "Space-owned request cannot be sent through a WorldBridge",
-                    ));
                 }
                 let Some(world_id) = WorldId::parse(world) else {
                     return Err(Response::err(format!("invalid World id '{world}'")));
@@ -748,7 +727,7 @@ impl SpaceBridge {
                     )));
                 }
                 Err(Response::err(
-                    "typed product requests were retired in control protocol v5; \
+                    "control requests cannot be sent through a WorldBridge; \
                      send a versioned World call",
                 ))
             }
@@ -859,28 +838,23 @@ impl SpaceBridge {
                 Err(e) => Response::err(format!("{e}")),
             },
             Request::AgentProvision { name } => self.agent_provision(&name),
-            Request::WorldUpgrade => {
-                let mut controlled = self.worlds.world_ids().filter_map(|world| {
-                    let bridge = self.worlds.bridge(world)?;
-                    bridge
-                        .control()
-                        .map(|_| (world.clone(), *bridge.reviewed_implementation()))
-                });
-                let Some((world, ours)) = controlled.next() else {
-                    return Response::err("this build has no controllable World to activate");
+            Request::WorldActivate { world } => {
+                let Some(world_id) = WorldId::parse(&world) else {
+                    return Response::err("invalid World id");
                 };
-                if controlled.next().is_some() {
-                    return Response::err(
-                        "more than one World is bundled — world-upgrade requires an explicit \
-                         World selector",
-                    );
-                }
-                match self.mechanics.activate_implementation(world.as_str(), ours) {
+                let Some(bridge) = self.worlds.bridge(&world_id) else {
+                    return Response::not_found(format!("World '{world}' is not hosted"));
+                };
+                let ours = *bridge.reviewed_implementation();
+                match self
+                    .mechanics
+                    .activate_implementation(world_id.as_str(), ours)
+                {
                     Ok(()) => Response::Ok {
                         message: Some(format!(
                             "implementation {} is active for {} (no-op if it already was)",
                             data_encoding::HEXLOWER.encode(&ours[..8]),
-                            world,
+                            world_id,
                         )),
                     },
                     Err(e) => Response::err(format!("{e}")),
@@ -923,7 +897,7 @@ impl SpaceBridge {
                 passphrase,
                 force,
             } => self.space_custody_import(path, passphrase, force),
-            Request::AccessList { actor } => {
+            Request::AssignmentList { actor } => {
                 let subject = match actor.as_deref() {
                     None => None,
                     Some(who) => match self.mechanics.resolve_actor_ref(who) {
@@ -935,12 +909,37 @@ impl SpaceBridge {
                     rows: self.mechanics.assignment_rows(subject.as_ref()),
                 }
             }
-            Request::AccessGrant {
-                actor,
-                role,
-                project,
-            } => self.access_grant(&actor, &role, project.as_deref()),
-            Request::AccessRevoke { grant_id } => {
+            Request::AssignmentGrant { actor, assignments } => {
+                let Some(subject) = self.mechanics.resolve_actor_ref(&actor) else {
+                    return Response::not_found(format!("no actor matches '{actor}'"));
+                };
+                let assignments = assignments
+                    .into_iter()
+                    .map(|assignment| {
+                        (
+                            mechanics::demand::PolicyCapability::new(
+                                &assignment.world,
+                                &assignment.capability,
+                            ),
+                            mechanics::demand::PolicyResource {
+                                world: assignment.world,
+                                segments: assignment.resource,
+                            },
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                match self.mechanics.grant_assignments(&subject, &assignments) {
+                    Ok(granted) => Response::Ok {
+                        message: Some(format!(
+                            "installed {} assignment(s) for {}",
+                            granted.len(),
+                            subject.short()
+                        )),
+                    },
+                    Err(error) => Response::err(format!("{error}")),
+                }
+            }
+            Request::AssignmentRevoke { grant_id } => {
                 let raw = match data_encoding::HEXLOWER_PERMISSIVE
                     .decode(grant_id.trim().as_bytes())
                     .ok()
@@ -1140,17 +1139,10 @@ impl SpaceBridge {
             .count()
     }
 
-    /// Status, subscription, and locally derived projection surfaces.
+    /// Generic status and subscription projection surfaces.
     fn dispatch_observation(&self, req: Request) -> Response {
         match req {
             Request::Status => self.status(),
-            Request::Inbox { clear } => {
-                let (entries, unread) = self.inbox_projection();
-                if clear {
-                    self.write_inbox_watermark(now_secs());
-                }
-                Response::Inbox { entries, unread }
-            }
             // Subscribe is handled by the streaming connection path before
             // dispatch; a one-shot Subscribe cannot be answered on this plane.
             Request::Subscribe { .. } => Response::err("subscribe is a streaming request"),
@@ -1601,90 +1593,6 @@ impl SpaceBridge {
                     }),
                 }
             }
-            Err(e) => Response::err(format!("{e}")),
-        }
-    }
-
-    /// The addressed-to-you inbox — ONE World query over the derived read
-    /// model (plan 04: activity/inbox rebuild from query and are never a
-    /// second source of truth). The read watermark is a small local file;
-    /// deleting it merely resets "unread".
-    fn inbox_projection(&self) -> (Vec<crate::dto::InboxEntry>, u64) {
-        let me_actor = self.facts().actor;
-        let me_device = crate::crypto::device_from_seed(&self.device_seed)
-            .as_str()
-            .to_string();
-        let world = crate::world::contract::world_id();
-        if !self.ensure_world_session(&world) {
-            return (Vec::new(), 0);
-        }
-        let watermark = self.read_inbox_watermark();
-        self.worlds
-            .with_primary(&world, |session| {
-                let projection = issues_app::projections::inbox(
-                    session,
-                    me_actor.as_str(),
-                    &me_device,
-                    watermark,
-                );
-                (projection.entries, projection.unread)
-            })
-            .unwrap_or_default()
-    }
-
-    fn inbox_watermark_path(&self) -> PathBuf {
-        self.home.join("inbox-read.json")
-    }
-
-    fn read_inbox_watermark(&self) -> u64 {
-        std::fs::read_to_string(self.inbox_watermark_path())
-            .ok()
-            .and_then(|s| s.trim().parse().ok())
-            .unwrap_or(0)
-    }
-
-    fn write_inbox_watermark(&self, ts: u64) {
-        let _ = std::fs::write(self.inbox_watermark_path(), ts.to_string());
-    }
-
-    /// Expand a role's pinned definition (read from the Manifest-pinned
-    /// Catalog through the Session) and install the exact assignments as one
-    /// Mechanics authority batch. IssuesWorld plans the expansion; Runtime
-    /// validates; Mechanics commits authority-first.
-    fn access_grant(&self, actor: &str, role: &str, project: Option<&str>) -> Response {
-        let Some(subject) = self.mechanics.resolve_actor_ref(actor) else {
-            return Response::not_found(format!("no actor matches '{actor}'"));
-        };
-        let world = crate::world::contract::world_id();
-        if !self.ensure_world_session(&world) {
-            return Response::err("the Issues World is unavailable");
-        }
-        let plan = self
-            .worlds
-            .with_primary(&world, |session| {
-                issues_app::host::plan_access_grant(session, role, project)
-            })
-            .expect("Issues Session present after ensure");
-        let plan = match plan {
-            Ok(plan) => plan,
-            Err(issues_app::host::AccessPlanError::NotFound(message)) => {
-                return Response::not_found(message);
-            }
-            Err(issues_app::host::AccessPlanError::Invalid(message)) => {
-                return Response::err(message);
-            }
-        };
-        match self
-            .mechanics
-            .grant_assignments(&subject, &plan.assignments)
-        {
-            Ok(granted) => Response::Ok {
-                message: Some(format!(
-                    "granted {} capability assignment(s) from role `{role}` to {}",
-                    granted.len(),
-                    subject.short()
-                )),
-            },
             Err(e) => Response::err(format!("{e}")),
         }
     }

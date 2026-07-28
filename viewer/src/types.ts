@@ -518,7 +518,8 @@ export interface Filter {
 }
 
 /**
- * `control.rs` `Request`, internally tagged by `cmd`.
+ * The installed Issues application protocol plus the browser-safe root control
+ * requests, internally tagged by `cmd`.
  *
  * Field names are the Rust ones, verbatim — several are *not* what the CLI flag
  * suggests, and guessing them is how the old viewer broke. The ones that bite:

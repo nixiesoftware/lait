@@ -446,7 +446,9 @@ impl<'a> IssueRouter<'a> {
     pub fn handles(req: &Request) -> bool {
         matches!(
             req,
-            Request::IssueNew { .. }
+            Request::Inbox { .. }
+                | Request::AccessPlan { .. }
+                | Request::IssueNew { .. }
                 | Request::IssueEdit { .. }
                 | Request::IssueMove { .. }
                 | Request::Assign { .. }
@@ -520,6 +522,32 @@ impl<'a> IssueRouter<'a> {
     fn route_inner(&self, req: Request, facts: &RouterFacts) -> Result<(Response, bool), Response> {
         let snapshot = self.snapshot();
         match req {
+            Request::Inbox { watermark } => {
+                let projection =
+                    crate::projections::inbox(self.session, &facts.actor, &facts.device, watermark);
+                Ok((
+                    Response::Inbox {
+                        entries: projection.entries,
+                        unread: projection.unread,
+                    },
+                    false,
+                ))
+            }
+            Request::AccessPlan { role, project } => {
+                let plan = crate::host::plan_access_grant(self.session, &role, project.as_deref())
+                    .map_err(|error| match error {
+                        crate::host::AccessPlanError::NotFound(message) => {
+                            Response::not_found(message)
+                        }
+                        crate::host::AccessPlanError::Invalid(message) => Response::err(message),
+                    })?;
+                Ok((
+                    Response::AccessPlan {
+                        assignments: plan.assignments,
+                    },
+                    false,
+                ))
+            }
             Request::IssueNew {
                 title,
                 project,

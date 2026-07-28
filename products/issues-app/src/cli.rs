@@ -36,6 +36,19 @@ pub fn command() -> Command {
             leaf("inbox", "Things addressed to you.")
                 .arg(flag("clear", "Mark everything read after listing.")),
         )
+        .subcommand(
+            leaf(
+                "rename",
+                "Rename this Issues space without changing its stable identity.",
+            )
+            .arg(pos("name", "New space name.")),
+        )
+        .subcommand(
+            leaf("describe", "Set this Issues space's overview description.").arg(pos(
+                "description",
+                "Overview text; pass an empty string to clear it.",
+            )),
+        )
         .subcommand(list_command())
         .subcommand(leaf("board", "Render a project's board.").arg(pos_opt(
             "project",
@@ -153,6 +166,12 @@ pub fn parse(matches: &ArgMatches) -> Result<CliInvocation, InterfaceError> {
         ["inbox"] => {
             return local(LOCAL_INBOX, json!({ "clear": yes(m, "clear") }));
         }
+        ["rename"] => IssuesRequest::SpaceRename {
+            name: req(m, "name"),
+        },
+        ["describe"] => IssuesRequest::SpaceDescribe {
+            description: req(m, "description"),
+        },
         ["ls"] => IssuesRequest::List {
             project: opt(m, "project"),
             filter: Filter {

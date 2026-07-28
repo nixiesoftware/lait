@@ -29,6 +29,15 @@ pub struct Filter {
     pub all: bool,
 }
 
+/// One generic Space-authority assignment produced by an Issues role.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AccessAssignment {
+    pub world: String,
+    pub capability: String,
+    #[serde(default)]
+    pub resource: Vec<String>,
+}
+
 /// Issues-owned application requests.
 ///
 /// The tagged JSON representation is also the Issues web-client contract. All
@@ -36,6 +45,19 @@ pub struct Filter {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum IssuesRequest {
+    /// Project the acting identity's inbox using the caller-local read
+    /// watermark. Advancing that watermark remains a client-host facility.
+    Inbox {
+        #[serde(default)]
+        watermark: u64,
+    },
+    /// Resolve a pinned Issues role into generic Mechanics assignments. The
+    /// client host commits the returned plan through root Space authority.
+    AccessPlan {
+        role: String,
+        #[serde(default)]
+        project: Option<String>,
+    },
     IssueNew {
         title: String,
         #[serde(default)]
@@ -384,8 +406,8 @@ pub enum IssuesRequest {
 
 /// Issues-owned application responses.
 ///
-/// The root control protocol may deserialize this JSON into its wider
-/// compatibility response enum, but execution never depends on that enum.
+/// Client packages decode and present this schema directly; the root control
+/// protocol neither mirrors nor interprets these product variants.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum IssuesResponse {
@@ -404,6 +426,13 @@ pub enum IssuesResponse {
     Activity {
         events: Vec<issues::dto::ActivityEvent>,
         last: u64,
+    },
+    Inbox {
+        entries: Vec<issues::dto::InboxEntry>,
+        unread: u64,
+    },
+    AccessPlan {
+        assignments: Vec<AccessAssignment>,
     },
     Projects {
         projects: Vec<issues::dto::ProjectDto>,
@@ -480,7 +509,9 @@ impl IssuesRequest {
     pub fn access(&self) -> WorldCallAccess {
         use IssuesRequest::*;
         match self {
-            IssueGraph { .. }
+            Inbox { .. }
+            | AccessPlan { .. }
+            | IssueGraph { .. }
             | IssueView { .. }
             | List { .. }
             | Board { .. }

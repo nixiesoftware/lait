@@ -4,8 +4,8 @@
 //! [`specs`] — instead of a `#[derive(Parser)]` enum. [`build_cli`] turns that
 //! data into a `clap::Command` at runtime, so completions (`clap_complete`) and
 //! the man page (`clap_mangen`) still generate from the live tree exactly as
-//! before; only the *front-end* changed, not the compatibility payload
-//! (`control::Request`).
+//! before. Space/daemon commands build `control::Request`; installed World
+//! packages mount and parse their own command namespaces.
 //!
 //! Why data-driven: a command is now one [`Spec`] entry mapping parsed args to a
 //! single [`ClientAction`] (or a `Special` handler), which is the same registry
@@ -27,9 +27,8 @@ use crate::{
 /// How a resolved leaf command is executed.
 #[derive(Clone, Copy)]
 pub enum Dispatch {
-    /// Build the compatibility `Request`, capture its terminal orbital target
-    /// as a `ClientAction`, then round-trip and render. Product command packages
-    /// will eventually build opaque World calls directly at this same seam.
+    /// Build a Space/daemon `Request`, capture its terminal orbital target as a
+    /// `ClientAction`, then round-trip and render.
     Action(fn(&ArgMatches) -> Result<Request>),
     /// A command with bespoke handling in `app::run` (spawns a daemon, mints a
     /// key, custom output). The arg reading lives in the matching handler.
@@ -394,34 +393,21 @@ fn build_sub(s: &Spec) -> Command {
     c
 }
 
-/// Parse an argv (`["lait", "issues", "label", "ENG-1", "+bug"]`) and, when it resolves to
-/// a `Request`-dispatch command, build that `Request`. The parity seam: it maps
-/// argv → the exact Layer-B request the daemon receives, so `tests/cli_parse.rs`
-/// can pin the arg semantics without a running daemon. Returns a clap usage error
-/// for bad input, or an error naming the command if it is a `Special` handler.
+/// Parse an argv and, when it resolves to a Space/daemon control command, build
+/// that `Request`. Product commands deliberately remain opaque World calls and
+/// are tested through [`parse_to_dispatch`]. Returns a clap usage error for bad
+/// input, or an error naming commands handled outside root control.
 pub fn parse_to_request(argv: &[&str]) -> Result<Request> {
     match parse_to_dispatch(argv)? {
         ParsedCommand::Action(action) => match action.payload() {
             crate::client_action::ClientPayload::Control(request) => Ok(request.clone()),
-            crate::client_action::ClientPayload::World(call) => {
-                let request =
-                    issues_app::decode_call(call).map_err(|error| anyhow!(error.to_string()))?;
-                serde_json::from_value(serde_json::to_value(request)?)
-                    .map_err(|error| anyhow!("translate Issues request: {error}"))
-            }
+            crate::client_action::ClientPayload::World(call) => Err(anyhow!(
+                "World operation `{}` is owned by its client package, not root control",
+                call.operation()
+            )),
         },
         ParsedCommand::Special { name, .. } => {
             Err(anyhow!("`{name}` is a special-dispatch command"))
-        }
-        ParsedCommand::ProductLocal { operation, input }
-            if operation == issues_app::cli::LOCAL_INBOX =>
-        {
-            Ok(Request::Inbox {
-                clear: input
-                    .get("clear")
-                    .and_then(serde_json::Value::as_bool)
-                    .unwrap_or(false),
-            })
         }
         ParsedCommand::ProductLocal { operation, input } => {
             let name = input
@@ -1065,26 +1051,6 @@ pub fn specs() -> Vec<Spec> {
         Spec::req("status", "Show node and space status.", vec![], |_| {
             Ok(Request::Status)
         }),
-        Spec::req(
-            "rename",
-            "Rename this space (a mutable display label — the seed id is unchanged). Admin only.",
-            vec![A::pos("name", "New space name.")],
-            |m| {
-                Ok(Request::SpaceRename {
-                    name: req_str(m, "name"),
-                })
-            },
-        ),
-        Spec::req(
-            "describe",
-            "Set this space's overview description (empty string clears it). Admin only.",
-            vec![A::pos("description", "The space overview text (or \"\" to clear).")],
-            |m| {
-                Ok(Request::SpaceDescribe {
-                    description: req_str(m, "description"),
-                })
-            },
-        ),
         Spec {
             subs: vec![Spec::req(
                 "revoke",

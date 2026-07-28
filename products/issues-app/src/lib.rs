@@ -9,13 +9,14 @@ pub mod cli;
 pub mod host;
 pub mod lifecycle;
 pub mod mcp;
+pub mod presentation;
 pub mod projections;
 pub mod protocol;
 pub mod router;
 
 pub use protocol::{
-    decode_call, decode_reply, encode_call, encode_reply, BoardPos, Filter, IssuesErrorKind,
-    IssuesRequest, IssuesResponse, OPERATION, VERSION,
+    decode_call, decode_reply, encode_call, encode_reply, AccessAssignment, BoardPos, Filter,
+    IssuesErrorKind, IssuesRequest, IssuesResponse, OPERATION, VERSION,
 };
 pub use router::{IssueRouter, IssuesCallHandler, RouterFacts};
 
@@ -28,6 +29,7 @@ pub fn package() -> Result<world_interface::WorldClientPackage, world_interface:
         "Work with issues, projects, planning, roles, and workflows in the selected Orbit.",
         decode_client_reply,
     )
+    .map(|package| package.with_presenter(presentation::present))
 }
 
 fn decode_client_reply(

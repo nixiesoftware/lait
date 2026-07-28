@@ -20,7 +20,6 @@ use crate::{
     control::{self, request, ControlRoute, ErrorKind, Event, EventKind, Request, Response},
     daemon::{ClientScope, LocalOrbitId, OrbitAddress},
     diagnose::{DiagnosisView, GateState},
-    dto::{BoardView, IssueView, Priority, Row},
     spaces::{self, SpaceEntry, StorePresence},
 };
 
@@ -247,7 +246,7 @@ async fn peek_title(home: &Path, reff: &str) -> Option<String> {
     )
     .await
     {
-        Ok(Response::Issue(v)) => Some(v.title),
+        Ok(issues_app::IssuesResponse::Issue(v)) => Some(v.title),
         _ => None,
     }
 }
@@ -643,30 +642,122 @@ pub async fn client_action_as_scoped(
             .await
             .map_err(|e| CliError::unreachable(format!("{e:#}")).into()),
         ClientPayload::World(call) => {
-            let reply = daemon
-                .call_world(route, call.clone(), act_as)
-                .await
-                .map_err(|e| CliError::unreachable(format!("{e:#}")))?;
-            let packages = crate::world::client_packages();
-            let package = packages
-                .package_for_world(call.world())
-                .ok_or_else(|| anyhow!("no client package for World '{}'", call.world()))?;
-            let value = package
-                .decode_reply(call, reply)
-                .map_err(|error| anyhow!(error.to_string()))?;
-            serde_json::from_value(value).context("decode product response")
+            let _ = (route, call, act_as);
+            Err(anyhow!(
+                "World actions must be dispatched through their client package"
+            ))
         }
     }
 }
 
-/// Send one Issues request through its package-owned World protocol and adapt
-/// the response to the shell's existing presentation DTO.
-pub async fn issues_client(home: &Path, request: issues_app::IssuesRequest) -> Result<Response> {
+/// Send one Issues request through its package-owned World protocol.
+pub async fn issues_client(
+    home: &Path,
+    request: issues_app::IssuesRequest,
+) -> Result<issues_app::IssuesResponse> {
     let call = issues_app::encode_call(&request)?;
     let scope = scope_for_home(home);
     let reply = world_reply_as_scoped(home, call.clone(), &scope, None).await?;
     let value = issues_app::decode_reply(&call, reply)?;
     serde_json::from_value(value).context("decode Issues response")
+}
+
+/// Project the Issues inbox using its caller-local watermark, then optionally
+/// advance that watermark only after the World answered successfully.
+pub async fn issues_inbox(home: &Path, clear: bool) -> Result<issues_app::IssuesResponse> {
+    let response = issues_client(
+        home,
+        issues_app::IssuesRequest::Inbox {
+            watermark: issues_app::host::read_inbox_watermark(home),
+        },
+    )
+    .await?;
+    if clear && matches!(&response, issues_app::IssuesResponse::Inbox { .. }) {
+        issues_app::host::write_inbox_watermark(home, issues_app::host::now_seconds())
+            .context("advance Issues inbox watermark")?;
+    }
+    Ok(response)
+}
+
+/// Execute the Issues access host capability by resolving product role
+/// semantics through its World, then committing only generic assignments
+/// through Space authority.
+pub async fn issues_access_as_scoped(
+    home: &Path,
+    access: issues_app::host::AccessRequest,
+    scope: &ClientScope,
+    act_as: Option<&str>,
+) -> Result<Response> {
+    use issues_app::host::AccessRequest;
+
+    let request = match access {
+        AccessRequest::List { actor } => Request::AssignmentList { actor },
+        AccessRequest::Revoke { grant_id } => Request::AssignmentRevoke { grant_id },
+        AccessRequest::Grant {
+            actor,
+            role,
+            project,
+        } => {
+            let call =
+                issues_app::encode_call(&issues_app::IssuesRequest::AccessPlan { role, project })?;
+            let reply = world_reply_as_scoped(home, call.clone(), scope, act_as).await?;
+            let value = issues_app::decode_reply(&call, reply)?;
+            let response: issues_app::IssuesResponse =
+                serde_json::from_value(value).context("decode Issues access plan")?;
+            match response {
+                issues_app::IssuesResponse::AccessPlan { assignments } => {
+                    Request::AssignmentGrant {
+                        actor,
+                        assignments: assignments
+                            .into_iter()
+                            .map(|assignment| crate::control::AssignmentSpec {
+                                world: assignment.world,
+                                capability: assignment.capability,
+                                resource: assignment.resource,
+                            })
+                            .collect(),
+                    }
+                }
+                issues_app::IssuesResponse::Error {
+                    message,
+                    error_kind,
+                } => {
+                    return Ok(Response::Error {
+                        message,
+                        error_kind: match error_kind {
+                            issues_app::IssuesErrorKind::Error => ErrorKind::Error,
+                            issues_app::IssuesErrorKind::NotFound => ErrorKind::NotFound,
+                            issues_app::IssuesErrorKind::Denied => ErrorKind::Denied,
+                        },
+                    });
+                }
+                other => {
+                    return Err(anyhow!(
+                        "Issues access-plan call returned an unexpected response: {other:?}"
+                    ));
+                }
+            }
+        }
+    };
+    client_as_scoped(home, request, scope, act_as).await
+}
+
+/// Emit a complete product-owned presentation without inspecting its response.
+pub fn print_presentation(presentation: &world_interface::Presentation) -> i32 {
+    print!("{}", presentation.stdout);
+    eprint!("{}", presentation.stderr);
+    presentation.exit_code
+}
+
+pub fn print_issues_response(response: &issues_app::IssuesResponse, out: Out) -> i32 {
+    let presentation = issues_app::presentation::render(
+        response,
+        world_interface::PresentationOptions {
+            json: out.json,
+            color: out.color,
+        },
+    );
+    print_presentation(&presentation)
 }
 
 /// Send one package-owned call without decoding its opaque reply in the shell.
@@ -978,9 +1069,9 @@ fn checkout_issue_branch(v: &crate::dto::IssueView, out: Out) {
 pub async fn run_start(home: &Path, reff: String, no_branch: bool, out: Out) -> Result<()> {
     let resp = issues_client(home, issues_app::IssuesRequest::IssueStart { reff }).await?;
     match &resp {
-        Response::Issue(v) => {
+        issues_app::IssuesResponse::Issue(v) => {
             if out.json {
-                print_response(&resp, out);
+                print_issues_response(&resp, out);
             } else {
                 println!("{}  · you", workstate_line(v));
             }
@@ -990,7 +1081,7 @@ pub async fn run_start(home: &Path, reff: String, no_branch: bool, out: Out) -> 
             Ok(())
         }
         other => {
-            let code = print_response(other, out);
+            let code = print_issues_response(other, out);
             if code != 0 {
                 std::process::exit(code);
             }
@@ -1007,16 +1098,16 @@ pub async fn run_workstate(
 ) -> Result<()> {
     let resp = issues_client(home, request).await?;
     match &resp {
-        Response::Issue(v) => {
+        issues_app::IssuesResponse::Issue(v) => {
             if out.json {
-                print_response(&resp, out);
+                print_issues_response(&resp, out);
             } else {
                 println!("{}", workstate_line(v));
             }
             Ok(())
         }
         other => {
-            let code = print_response(other, out);
+            let code = print_issues_response(other, out);
             if code != 0 {
                 std::process::exit(code);
             }
@@ -1033,14 +1124,14 @@ pub async fn run_new_start(
 ) -> Result<()> {
     let resp = issues_client(home, request).await?;
     match &resp {
-        Response::Ref { reff } => {
+        issues_app::IssuesResponse::Ref { reff } => {
             if !out.json {
                 println!("{reff}");
             }
             run_start(home, reff.clone(), false, out).await
         }
         other => {
-            let code = print_response(other, out);
+            let code = print_issues_response(other, out);
             if code != 0 {
                 std::process::exit(code);
             }
@@ -1053,7 +1144,7 @@ pub async fn run_new_start(
 /// Must answer "what's addressed to me / what am I on" faster than a browser
 /// tab could open, and its empty states name the next command.
 pub async fn run_focus(home: &Path, out: Out) -> Result<()> {
-    let inbox = client(home, Request::Inbox { clear: false }).await?;
+    let inbox = issues_inbox(home, false).await?;
     let mine = issues_client(
         home,
         issues_app::IssuesRequest::List {
@@ -1069,11 +1160,11 @@ pub async fn run_focus(home: &Path, out: Out) -> Result<()> {
     .await?;
     if out.json {
         // Machine focus = the two DTOs on two lines (each independently stable).
-        print_response(&inbox, out);
-        print_response(&mine, out);
+        print_issues_response(&inbox, out);
+        print_issues_response(&mine, out);
         return Ok(());
     }
-    if let Response::Inbox { entries, unread } = &inbox {
+    if let issues_app::IssuesResponse::Inbox { entries, unread } = &inbox {
         if *unread > 0 {
             let heads: Vec<String> = entries
                 .iter()
@@ -1088,22 +1179,22 @@ pub async fn run_focus(home: &Path, out: Out) -> Result<()> {
         }
     }
     match &mine {
-        Response::List { rows } if rows.is_empty() => {
+        issues_app::IssuesResponse::List { rows } if rows.is_empty() => {
             println!("nothing assigned to you — grab something: `lait issues ls`, or file one: `lait issues new \"...\"`");
         }
-        Response::List { rows } => {
+        issues_app::IssuesResponse::List { rows } => {
             for r in rows {
                 println!("  {}  {:<10}  {}", r.reff, r.status, r.title);
             }
         }
         other => {
-            print_response(other, out);
+            print_issues_response(other, out);
         }
     }
     Ok(())
 }
 
-/// The inbox verb phrase for a summary line ("assigned you", "commented on"…).
+/// The inbox verb phrase for the host-composed focus summary.
 fn inbox_line_verb(e: &crate::dto::InboxEntry) -> String {
     let who = e.actor_nick.clone().unwrap_or_else(|| "someone".into());
     match e.kind.as_str() {
@@ -1359,63 +1450,12 @@ pub fn err_no_store_here(out: Out) {
     }
 }
 
-/// Render the issue-graph neighborhood (`lait issues graph <ref>`).
-fn print_graph(g: &crate::dto::GraphView, out: Out) {
-    let row_line = |r: &crate::dto::Row| {
-        let handle = r.key_alias.as_deref().unwrap_or(&r.reff);
-        format!("{handle}  {}  ({})", r.title, r.status)
-    };
-    println!("{}", paint(out.color, ansi::BOLD, &g.reff));
-    if let Some(p) = &g.parent {
-        println!("  parent    {}", row_line(p));
-    }
-    for c in &g.children {
-        println!("  child     {}", row_line(c));
-    }
-    for l in &g.links {
-        let arrow = if l.direction == "out" { "→" } else { "←" };
-        println!("  {} {arrow}  {}", l.kind, row_line(&l.row));
-    }
-    if !g.blocked_by.is_empty() {
-        println!(
-            "{}",
-            paint(out.color, ansi::YELLOW, "  blocked by (open, transitive):")
-        );
-        for b in &g.blocked_by {
-            println!("    ⚠ {}", row_line(b));
-        }
-    }
-    if g.parent.is_none() && g.children.is_empty() && g.links.is_empty() {
-        println!("  (no relations — `lait issues link <ref> blocks <ref>` or `lait issues parent <ref> <epic>`)");
-    }
-}
-
-/// Print a response; return the process exit code it implies.
-/// Render unix seconds as the UTC `YYYY-MM-DD` day (the inverse of the
-/// router's `parse_due`; same civil-date arithmetic).
-fn fmt_day(ts: u64) -> String {
-    let days = (ts / 86_400) as i64;
-    // Howard Hinnant's civil-from-days.
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-    format!("{y:04}-{m:02}-{d:02}")
-}
-
 pub fn print_response(resp: &Response, out: Out) -> i32 {
     if out.json {
         let json = serde_json::to_string(resp).unwrap_or_else(|_| "{}".into());
         println!("{json}");
         return match resp {
             Response::Error { error_kind, .. } => exit_code_for_kind(*error_kind),
-            Response::Candidates { .. } => 2,
             _ => 0,
         };
     }
@@ -1434,218 +1474,6 @@ pub fn print_response(resp: &Response, out: Out) -> i32 {
         }
         Response::Ref { reff } => {
             println!("{reff}");
-            0
-        }
-        Response::Issue(v) => {
-            print_issue(v, out);
-            0
-        }
-        Response::List { rows } => {
-            print_rows(rows, out);
-            0
-        }
-        Response::Board(b) => {
-            print_board(b, out);
-            0
-        }
-        Response::Graph(g) => {
-            print_graph(g, out);
-            0
-        }
-        Response::Inbox { entries, unread } => {
-            if entries.is_empty() {
-                println!("inbox zero — nothing addressed to you. the backlog is `lait issues ls`.");
-                return 0;
-            }
-            // Newest-first + a ts watermark ⇒ exactly the first `unread` are unread.
-            for (i, e) in entries.iter().enumerate() {
-                let mark = if (i as u64) < *unread { "•" } else { " " };
-                let detail = if e.detail.is_empty() {
-                    String::new()
-                } else {
-                    format!("  — {}", e.detail)
-                };
-                println!(
-                    "{} {}  {}  {}{}",
-                    paint(out.color, ansi::CYAN, mark),
-                    e.reff,
-                    inbox_line_verb(e),
-                    e.title,
-                    detail
-                );
-            }
-            println!(
-                "{}",
-                paint(
-                    out.color,
-                    ansi::DIM,
-                    &format!("({unread} unread — `lait issues inbox --clear` to mark read)")
-                )
-            );
-            0
-        }
-        Response::Activity { events, .. } => {
-            if events.is_empty() {
-                println!(
-                    "(no activity yet — it fills as the Space moves: `lait issues new \"...\"`)"
-                );
-            }
-            for e in events {
-                let changes = if e.changes.is_empty() {
-                    String::new()
-                } else {
-                    let cs: Vec<String> = e
-                        .changes
-                        .iter()
-                        .map(|c| {
-                            format!(
-                                "{} {}→{}",
-                                c.field,
-                                c.from.as_deref().unwrap_or("∅"),
-                                c.to.as_deref().unwrap_or("∅")
-                            )
-                        })
-                        .collect();
-                    format!("  {}", cs.join(", "))
-                };
-                let warn = if e.collision { " ⚠" } else { "" };
-                println!("{} {} {}{}{}", e.reff, e.actor_nick, e.kind, changes, warn);
-            }
-            0
-        }
-        Response::Projects { projects } => {
-            if projects.is_empty() {
-                println!("(no projects — create one: `lait issues projects add KEY`)");
-                // A just-joined peer sees this too, but should wait for sync, not
-                // create — point them at the verifier so an empty board is legible.
-                println!(
-                    "{}",
-                    paint(
-                        out.color,
-                        ansi::DIM,
-                        "  just joined? run `lait doctor` to check sync status"
-                    )
-                );
-            }
-            for p in projects {
-                println!("{:<6} {}  ({})", p.key, p.name, p.id);
-            }
-            0
-        }
-        Response::Updates { updates } => {
-            if updates.is_empty() {
-                println!("(no updates yet — post one: `lait issues projects update KEY \"…\"`)");
-            }
-            for u in updates {
-                let health = if u.health.is_empty() {
-                    String::new()
-                } else {
-                    format!(" [{}]", u.health.replace('_', " "))
-                };
-                println!("{}{health}  {}", u.ts, u.body);
-                let _ = &u.author;
-            }
-            0
-        }
-        Response::Milestones { milestones } => {
-            if milestones.is_empty() {
-                println!("(no milestones — add one: `lait issues milestone new KEY \"…\"`)");
-            }
-            for m in milestones {
-                let target = m
-                    .target_date
-                    .map(|t| format!("  → {}", fmt_day(t)))
-                    .unwrap_or_default();
-                println!("{:<24} {}/{}{target}  ({})", m.name, m.done, m.total, m.id);
-            }
-            0
-        }
-        Response::Cycles { cycles } => {
-            if cycles.is_empty() {
-                println!("(no cycles — add one: `lait issues cycle new KEY \"…\"`)");
-            }
-            for c in cycles {
-                let window = match (c.start, c.end) {
-                    (0, 0) => String::new(),
-                    (s, 0) => format!("  {} →", fmt_day(s)),
-                    (0, e) => format!("  → {}", fmt_day(e)),
-                    (s, e) => format!("  {} → {}", fmt_day(s), fmt_day(e)),
-                };
-                println!("{:<24} {}/{}{window}  ({})", c.name, c.done, c.total, c.id);
-            }
-            0
-        }
-        Response::Initiatives { initiatives } => {
-            if initiatives.is_empty() {
-                println!("(no initiatives — add one: `lait issues initiative new \"…\"`)");
-            }
-            for i in initiatives {
-                let health = if i.health.is_empty() {
-                    String::new()
-                } else {
-                    format!(" [{}]", i.health.replace('_', " "))
-                };
-                let projects = if i.projects.is_empty() {
-                    "(no projects)".to_string()
-                } else {
-                    i.projects.join(", ")
-                };
-                println!(
-                    "{:<24} {}/{}{health}  {}  ({})",
-                    i.name, i.done, i.total, projects, i.id
-                );
-            }
-            0
-        }
-        Response::Teams { teams } => {
-            if teams.is_empty() {
-                println!("(no teams — add one: `lait issues team new \"…\" --key T`)");
-            }
-            for t in teams {
-                let projects = if t.projects.is_empty() {
-                    String::new()
-                } else {
-                    format!("  → {}", t.projects.join(", "))
-                };
-                println!(
-                    "{:<8} {:<20} {} member(s){projects}  ({})",
-                    t.key,
-                    t.name,
-                    t.members.len(),
-                    t.id
-                );
-            }
-            0
-        }
-        Response::TriageItems { items } => {
-            if items.is_empty() {
-                println!("(triage queue is empty — report with `lait issues triage submit \"…\"`)");
-            }
-            for t in items {
-                let state = if t.outcome.is_empty() {
-                    "pending".to_string()
-                } else if t.reff.is_empty() {
-                    t.outcome.clone()
-                } else {
-                    format!("{} → {}", t.outcome, t.reff)
-                };
-                println!("{}  {:<10} {}", t.id, state, t.title);
-            }
-            0
-        }
-        Response::Attachment { name, mime, .. } => {
-            // Reaching stdout with a payload would splat base64; the CLI's
-            // `attachment get` writes the file itself and never prints this.
-            println!("attachment {name} ({mime}) — use `lait issues attachment get` to save it");
-            0
-        }
-        Response::Labels { labels } => {
-            if labels.is_empty() {
-                println!("(no labels)");
-            }
-            for l in labels {
-                println!("{:<16} {}  ({})", l.name, l.color, l.id);
-            }
             0
         }
         Response::Assignments { rows } => {
@@ -1725,24 +1553,6 @@ pub fn print_response(resp: &Response, out: Out) -> i32 {
                 println!("{}  {:<12}  {}", short, nick, s.state);
             }
             0
-        }
-        Response::Candidates {
-            candidates,
-            near_miss_for,
-        } => {
-            match near_miss_for {
-                Some(input) => eprintln!("no issue matches '{input}' — did you mean:"),
-                None => eprintln!("ambiguous ref — {} candidates:", candidates.len()),
-            }
-            for c in candidates {
-                let alias = c
-                    .key_alias
-                    .as_deref()
-                    .map(|a| format!(" [{a}]"))
-                    .unwrap_or_default();
-                eprintln!("  {}{}  {}", c.reff, alias, c.title);
-            }
-            2
         }
         Response::Status(s) => {
             println!("id:        {}", s.id);
@@ -1913,120 +1723,6 @@ fn exit_code_for_kind(kind: ErrorKind) -> i32 {
     match kind {
         ErrorKind::NotFound => 2,
         ErrorKind::Error | ErrorKind::Denied => 1,
-    }
-}
-
-fn prio_badge(p: Priority, color: bool) -> String {
-    let badge = format!("·{}·", p.badge());
-    let code = match p {
-        Priority::Urgent => ansi::RED,
-        Priority::High => ansi::YELLOW,
-        Priority::Medium => ansi::CYAN,
-        Priority::Low => ansi::DIM,
-        Priority::None => ansi::DIM,
-    };
-    paint(color, code, &badge)
-}
-
-fn print_rows(rows: &[Row], out: Out) {
-    if rows.is_empty() {
-        println!(
-            "(no issues here — file one: `lait issues new \"...\"`, or `lait issues ls --all` to include done)"
-        );
-        return;
-    }
-    for r in rows {
-        let alias = r.key_alias.as_deref().unwrap_or(&r.reff);
-        let asg = if r.assignee_summary.is_empty() {
-            String::new()
-        } else {
-            format!("  {}", r.assignee_summary)
-        };
-        let dim = if r.provisional {
-            paint(out.color, ansi::DIM, " (provisional)")
-        } else {
-            String::new()
-        };
-        println!(
-            "{} {} {:<12} {}{}{}",
-            paint(out.color, ansi::BOLD, &format!("{alias:<10}")),
-            prio_badge(r.priority, out.color),
-            r.status,
-            r.title,
-            asg,
-            dim
-        );
-    }
-}
-
-fn print_board(b: &BoardView, out: Out) {
-    println!(
-        "{} · {}",
-        paint(out.color, ansi::BOLD, &b.project.key),
-        b.project.name
-    );
-    for col in &b.columns {
-        let header = format!("┌ {} ({}) ", col.state.name, col.rows.len());
-        println!("\n{}", paint(out.color, ansi::CYAN, &header));
-        for r in &col.rows {
-            let alias = r.key_alias.as_deref().unwrap_or(&r.reff);
-            let asg = if r.assignee_summary.is_empty() {
-                String::new()
-            } else {
-                format!("  {}", r.assignee_summary)
-            };
-            println!(
-                "│ {:<10} {} {}{}",
-                alias,
-                prio_badge(r.priority, out.color),
-                r.title,
-                asg
-            );
-        }
-    }
-}
-
-fn print_issue(v: &IssueView, out: Out) {
-    let alias = v.key_alias.as_deref().unwrap_or(&v.reff);
-    println!(
-        "{}  {}",
-        paint(out.color, ansi::BOLD, alias),
-        paint(out.color, ansi::BOLD, &v.title)
-    );
-    println!("{}", paint(out.color, ansi::DIM, &"─".repeat(60)));
-    println!("id:       {}", v.reff);
-    println!("project:  {}", v.project_key.as_deref().unwrap_or("?"));
-    println!("status:   {}", v.status);
-    println!("priority: {}", v.priority.as_str());
-    if !v.assignees.is_empty() {
-        let names: Vec<String> = v.assignees.iter().map(|u| u.short()).collect();
-        println!("assignees: {}", names.join(", "));
-    }
-    if !v.label_names.is_empty() {
-        println!("labels:   {}", v.label_names.join(", "));
-    }
-    if v.provisional {
-        println!("(provisional — issue body not yet synced)");
-    }
-    if !v.description.is_empty() {
-        println!("\n{}", v.description);
-    }
-    if !v.comments.is_empty() {
-        println!("\n## Comments ({})", v.comments.len());
-        for c in &v.comments {
-            let who = c.author_nick.clone().unwrap_or_else(|| c.author.short());
-            println!("{} · {}  {}", who, c.ts, c.body);
-        }
-    }
-    // Corruption is reported, never rendered as content: a malformed record gets
-    // a diagnostic line under its own heading, so it can't be mistaken for
-    // something a person actually wrote.
-    if !v.corrupt_records.is_empty() {
-        println!("\n## Corrupt records ({})", v.corrupt_records.len());
-        for r in &v.corrupt_records {
-            println!("{} · {}", r.locus, r.reason);
-        }
-        println!("(these are stored records that do not conform to the schema; run with --json for the raw values)");
     }
 }
 
@@ -2447,7 +2143,6 @@ pub async fn watch(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dto::Priority;
     use crate::ids::SpaceId;
 
     #[test]
@@ -2582,14 +2277,6 @@ mod tests {
                 ..
             }
         ));
-    }
-
-    #[test]
-    fn prio_badge_colorless_is_plain() {
-        assert_eq!(prio_badge(Priority::Urgent, false), "·U·");
-        // Colored urgent badge carries an ANSI escape but the same visible text.
-        let c = prio_badge(Priority::Urgent, true);
-        assert!(c.contains("·U·") && c.contains('\u{1b}'));
     }
 
     #[test]

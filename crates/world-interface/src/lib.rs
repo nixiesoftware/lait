@@ -83,6 +83,35 @@ impl CliMount {
 pub type McpSchemaFactory = fn() -> Value;
 pub type McpCallFactory = fn(Value) -> Result<CliInvocation, InterfaceError>;
 pub type WorldReplyDecoder = fn(&WorldCall, WorldReply) -> Result<Value, InterfaceError>;
+pub type WorldReplyPresenter =
+    fn(Value, PresentationOptions) -> Result<Presentation, InterfaceError>;
+
+/// Output policy supplied by the navigation shell to a product presenter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PresentationOptions {
+    pub json: bool,
+    pub color: bool,
+}
+
+/// How a product-classified failure should surface to an agent client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PresentationFailure {
+    InvalidRequest,
+    Internal,
+}
+
+/// A complete product-owned rendering result.
+///
+/// The shell writes these strings to their named streams and uses the exit code;
+/// it never needs to decode or match the product response itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Presentation {
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: i32,
+    pub failure: Option<PresentationFailure>,
+    pub failure_message: Option<String>,
+}
 
 /// One product-local MCP tool. The registry prefixes `name` with the CLI mount,
 /// so independently developed Worlds cannot both publish a global `list`.
@@ -134,6 +163,7 @@ pub struct WorldClientPackage {
     mcp_tools: Vec<McpTool>,
     mcp_instructions: &'static str,
     decode_reply: WorldReplyDecoder,
+    present_reply: Option<WorldReplyPresenter>,
 }
 
 impl WorldClientPackage {
@@ -162,7 +192,13 @@ impl WorldClientPackage {
             mcp_tools,
             mcp_instructions,
             decode_reply,
+            present_reply: None,
         })
+    }
+
+    pub fn with_presenter(mut self, presenter: WorldReplyPresenter) -> Self {
+        self.present_reply = Some(presenter);
+        self
     }
 
     pub fn world(&self) -> &WorldId {
@@ -187,6 +223,16 @@ impl WorldClientPackage {
         reply: WorldReply,
     ) -> Result<Value, InterfaceError> {
         (self.decode_reply)(call, reply)
+    }
+
+    pub fn present_reply(
+        &self,
+        value: Value,
+        options: PresentationOptions,
+    ) -> Result<Option<Presentation>, InterfaceError> {
+        self.present_reply
+            .map(|presenter| presenter(value, options))
+            .transpose()
     }
 }
 

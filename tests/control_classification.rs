@@ -11,20 +11,6 @@ use lait::control::{classify, representative_requests, routing_rows, Request, Re
 fn every_request_variant_has_a_terminal_owner() {
     // Exhaustiveness is compile-enforced by `classify`'s match. Assert the
     // intended mapping for representatives of every owner.
-    assert_eq!(
-        classify(&Request::IssueNew {
-            title: "t".into(),
-            project: None,
-            project_hint: None,
-            assignees: vec![],
-            priority: None,
-            labels: vec![],
-            body: None,
-            due: None,
-            estimate: None,
-        }),
-        RequestOwner::World
-    );
     assert_eq!(classify(&Request::Members), RequestOwner::Mechanics);
     assert_eq!(classify(&Request::DeviceList), RequestOwner::Mechanics);
     assert_eq!(
@@ -39,10 +25,6 @@ fn every_request_variant_has_a_terminal_owner() {
         RequestOwner::Station
     );
     assert_eq!(classify(&Request::Status), RequestOwner::Observation);
-    assert_eq!(
-        classify(&Request::Inbox { clear: false }),
-        RequestOwner::Observation
-    );
     assert_eq!(classify(&Request::Stop), RequestOwner::Lifecycle);
 }
 
@@ -88,22 +70,12 @@ fn the_generated_routing_table_comes_from_the_production_classifier() {
 }
 
 #[test]
-fn every_world_owned_compatibility_request_belongs_to_the_issues_protocol() {
-    // The defect this pins: `Activity` was classified World but the issue
-    // router neither claimed nor served it, so a public `lait issues activity` died
-    // with "request not routed to the issues world". Classification and the
-    // product protocol must agree in BOTH directions — a World-owned request
-    // the package cannot decode is an unreachable compatibility verb, and a
-    // product request under another owner would never reach its package.
+fn root_control_declares_no_issues_protocol_commands() {
     for req in representative_requests() {
-        let claimed = serde_json::to_value(&req)
-            .ok()
-            .and_then(|value| serde_json::from_value::<issues_app::IssuesRequest>(value).ok())
-            .is_some();
-        let world = classify(&req) == RequestOwner::World;
-        assert_eq!(
-            world, claimed,
-            "classification/protocol disagreement on {req:?}: classified-World={world}, protocol-owns={claimed}"
+        let value = serde_json::to_value(&req).unwrap();
+        assert!(
+            serde_json::from_value::<issues_app::IssuesRequest>(value).is_err(),
+            "root control leaked an Issues command: {req:?}"
         );
     }
 }

@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use async_trait::async_trait;
+use issues_app::IssuesResponse as IssueResponse;
 use lait::control::{request, ControlRoute, Request, Response};
 use lait::daemon::OrbitAddress;
 use lait::net::Network;
@@ -61,7 +62,7 @@ fn issue_req(
     rt: &tokio::runtime::Runtime,
     home: &Path,
     request: issues_app::IssuesRequest,
-) -> Response {
+) -> IssueResponse {
     rt.block_on(async {
         let space = lait::orbital::discover_space_id(home).expect("test Space");
         let call = issues_app::encode_call(&request)?;
@@ -75,11 +76,11 @@ fn issue_req(
             None,
         )
         .await?;
-        Ok::<Response, anyhow::Error>(serde_json::from_value(issues_app::decode_reply(
+        Ok::<IssueResponse, anyhow::Error>(serde_json::from_value(issues_app::decode_reply(
             &call, reply,
         )?)?)
     })
-    .unwrap_or_else(|error| Response::err(format!("{error:#}")))
+    .unwrap_or_else(|error| IssueResponse::err(format!("{error:#}")))
 }
 
 fn poll_until<T>(timeout: Duration, mut check: impl FnMut() -> Option<T>) -> Option<T> {
@@ -144,7 +145,7 @@ fn two_space_bridges_join_admit_and_converge_over_the_socket() {
         },
     );
     assert!(
-        matches!(&resp, Response::Ref { reff } if reff == "CORE"),
+        matches!(&resp, IssueResponse::Ref { reff } if reff == "CORE"),
         "{resp:?}"
     );
     let resp = issue_req(
@@ -164,7 +165,7 @@ fn two_space_bridges_join_admit_and_converge_over_the_socket() {
         },
     );
     assert!(
-        matches!(&resp, Response::Ref { reff } if reff == "CORE-1"),
+        matches!(&resp, IssueResponse::Ref { reff } if reff == "CORE-1"),
         "{resp:?}"
     );
 
@@ -251,7 +252,7 @@ fn two_space_bridges_join_admit_and_converge_over_the_socket() {
             reff: "CORE-1".into(),
         },
     );
-    let Response::Issue(view) = resp else {
+    let IssueResponse::Issue(view) = resp else {
         panic!("expected Issue, got {resp:?}");
     };
     assert_eq!(view.title, "Secret plan");
@@ -285,7 +286,7 @@ fn two_space_bridges_join_admit_and_converge_over_the_socket() {
                 reff: "CORE-1".into(),
             },
         ) {
-            Response::Issue(v)
+            IssueResponse::Issue(v)
                 if v.comments
                     .iter()
                     .any(|c| c.body == "joined over the socket") =>
@@ -310,10 +311,14 @@ fn two_space_bridges_join_admit_and_converge_over_the_socket() {
             reff: "CORE-1".into(),
         },
     );
-    assert!(!matches!(resp, Response::Error { .. }), "{resp:?}");
+    assert!(!matches!(resp, IssueResponse::Error { .. }), "{resp:?}");
     let inboxed = poll_until(Duration::from_secs(10), || {
-        match req(&client, &founder_home, Request::Inbox { clear: false }) {
-            Response::Inbox { entries, .. }
+        match issue_req(
+            &client,
+            &founder_home,
+            issues_app::IssuesRequest::Inbox { watermark: 0 },
+        ) {
+            IssueResponse::Inbox { entries, .. }
                 if entries
                     .iter()
                     .any(|e| e.kind == "comment" && e.detail == "joined over the socket") =>

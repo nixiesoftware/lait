@@ -42,6 +42,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use async_trait::async_trait;
+use issues_app::IssuesResponse as IssueResponse;
 use lait::control::{request, ControlRoute, Request, Response};
 use lait::daemon::OrbitAddress;
 use lait::net::Network;
@@ -106,7 +107,7 @@ fn issue_req(
     rt: &tokio::runtime::Runtime,
     home: &Path,
     request: issues_app::IssuesRequest,
-) -> Response {
+) -> IssueResponse {
     rt.block_on(async {
         let space = lait::orbital::discover_space_id(home).expect("test Space");
         let call = issues_app::encode_call(&request)?;
@@ -120,20 +121,20 @@ fn issue_req(
             None,
         )
         .await?;
-        Ok::<Response, anyhow::Error>(serde_json::from_value(issues_app::decode_reply(
+        Ok::<IssueResponse, anyhow::Error>(serde_json::from_value(issues_app::decode_reply(
             &call, reply,
         )?)?)
     })
-    .unwrap_or_else(|error| Response::err(format!("{error:#}")))
+    .unwrap_or_else(|error| IssueResponse::err(format!("{error:#}")))
 }
 
 fn issue_ok(
     rt: &tokio::runtime::Runtime,
     home: &Path,
     request: issues_app::IssuesRequest,
-) -> Response {
+) -> IssueResponse {
     let response = issue_req(rt, home, request.clone());
-    if let Response::Error { message, .. } = &response {
+    if let IssueResponse::Error { message, .. } = &response {
         panic!("request {request:?} failed: {message}");
     }
     response
@@ -505,7 +506,9 @@ fn issues_reference_performance_gate() {
                 },
             );
             match issue_req(&rt, &home, issues_app::IssuesRequest::ProjectList) {
-                Response::Projects { projects } if projects.len() >= projects_expected => Some(()),
+                IssueResponse::Projects { projects } if projects.len() >= projects_expected => {
+                    Some(())
+                }
                 _ => None,
             }
         });
@@ -564,8 +567,8 @@ fn issues_reference_performance_gate() {
                     },
                 );
                 let reff = match &resp {
-                    Response::Ref { reff } => reff.clone(),
-                    Response::Issue(v) => v.reff.clone(),
+                    IssueResponse::Ref { reff } => reff.clone(),
+                    IssueResponse::Issue(v) => v.reff.clone(),
                     other => panic!("IssueNew answered {other:?}"),
                 };
                 for e in 0..events_per_issue.saturating_sub(2) {
@@ -613,7 +616,7 @@ fn issues_reference_performance_gate() {
                 },
             },
         ) {
-            Response::List { rows } => rows.len(),
+            IssueResponse::List { rows } => rows.len(),
             _ => 0,
         }
     };
@@ -672,7 +675,7 @@ fn issues_reference_performance_gate() {
             },
         },
     ) {
-        Response::List { rows } => rows.iter().map(|r| r.reff.clone()).collect(),
+        IssueResponse::List { rows } => rows.iter().map(|r| r.reff.clone()).collect(),
         other => panic!("expected List, got {other:?}"),
     };
     for (n, f) in fleet.iter().filter(|f| f.writer).enumerate() {
@@ -705,7 +708,7 @@ fn issues_reference_performance_gate() {
             },
         );
         assert!(
-            matches!(denied, Response::Error { .. }),
+            matches!(denied, IssueResponse::Error { .. }),
             "the viewer tier must be refused mutation, got {denied:?}"
         );
     }
@@ -715,7 +718,7 @@ fn issues_reference_performance_gate() {
     let refs = founder_refs;
     let home = founder_home.clone();
     let focus = |rt: &tokio::runtime::Runtime| {
-        ok(rt, &home, Request::Inbox { clear: false });
+        issue_ok(rt, &home, issues_app::IssuesRequest::Inbox { watermark: 0 });
         issue_ok(
             rt,
             &home,

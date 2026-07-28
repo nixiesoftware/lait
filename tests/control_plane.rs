@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use async_trait::async_trait;
+use issues_app::IssuesResponse as IssueResponse;
 use lait::control::{
     request, request_routed, subscribe, CatalogScope, ControlRoute, Request, Response,
 };
@@ -61,7 +62,7 @@ fn req(rt: &tokio::runtime::Runtime, home: &Path, r: Request) -> Response {
         .unwrap_or_else(|e| Response::err(format!("{e:#}")))
 }
 
-async fn issues_request(home: &Path, request: issues_app::IssuesRequest) -> Result<Response> {
+async fn issues_request(home: &Path, request: issues_app::IssuesRequest) -> Result<IssueResponse> {
     let space = lait::orbital::discover_space_id(home).expect("test Space");
     let call = issues_app::encode_call(&request)?;
     let reply = lait::control::call_world(
@@ -83,9 +84,9 @@ fn issue_req(
     rt: &tokio::runtime::Runtime,
     home: &Path,
     request: issues_app::IssuesRequest,
-) -> Response {
+) -> IssueResponse {
     rt.block_on(issues_request(home, request))
-        .unwrap_or_else(|error| Response::err(format!("{error:#}")))
+        .unwrap_or_else(|error| IssueResponse::err(format!("{error:#}")))
 }
 
 /// The docs a frame names under a project KEY, in frame order.
@@ -273,7 +274,7 @@ fn seed_project_and_issue(rt: &tokio::runtime::Runtime, home: &Path) -> String {
         },
     );
     assert!(
-        matches!(resp, Response::Ref { .. }),
+        matches!(resp, IssueResponse::Ref { .. }),
         "projects new should echo a Ref, got {resp:?}"
     );
     let resp = issue_req(
@@ -292,7 +293,7 @@ fn seed_project_and_issue(rt: &tokio::runtime::Runtime, home: &Path) -> String {
         },
     );
     match resp {
-        Response::Ref { reff } => reff,
+        IssueResponse::Ref { reff } => reff,
         other => panic!("issue new should echo a Ref, got {other:?}"),
     }
 }
@@ -345,7 +346,7 @@ fn stale_since_after_restart_yields_reset() {
         .await
         .expect("issue edit");
         assert!(
-            matches!(resp, Response::Ref { .. }),
+            matches!(resp, IssueResponse::Ref { .. }),
             "valid edit should echo a Ref, got {resp:?}"
         );
 
@@ -403,7 +404,7 @@ fn doorbell_names_the_dirty_project_and_doc() {
     ) {
         // The only row there is — `reff` may be the `ENG-1` alias rather than the
         // canonical handle the row carries, so match on the seeding, not the text.
-        Response::List { rows } => match rows.as_slice() {
+        IssueResponse::List { rows } => match rows.as_slice() {
             [row] => row.doc_id.as_str().to_string(),
             other => panic!("expected exactly the seeded issue, got {other:?}"),
         },
@@ -469,7 +470,7 @@ fn doorbell_names_the_dirty_project_and_doc() {
         .await
         .expect("issue new")
         {
-            Response::Ref { reff } => reff,
+            IssueResponse::Ref { reff } => reff,
             other => panic!("issue new should echo a Ref, got {other:?}"),
         };
 
@@ -632,7 +633,7 @@ fn validate_then_commit_rings_no_doorbell() {
         .await
         .expect("issue edit request round-trips");
         assert!(
-            matches!(resp, Response::Error { .. }),
+            matches!(resp, IssueResponse::Error { .. }),
             "an invalid status must be rejected, got {resp:?}"
         );
 

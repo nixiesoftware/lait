@@ -310,7 +310,8 @@ SpaceBridge directly. The per-Orbit socket is not part of that World call stack.
 If LaitDaemon attaches to a standalone SpaceBridge, the same opaque
 `WorldClientRequest` crosses the socket and the receiving bridge invokes its
 registered handler. Protocol v5 deliberately retired v4 bridges and typed
-product requests, so every placement now has the same product-neutral boundary.
+product requests; protocol v6 removed the last product projection from root
+control, so every placement now has the same product-neutral boundary.
 
 IssuesWorld's semantic package lives at `products/issues` with no dependency on
 the `lait` application crate, local control protocol, daemon, filesystem, or
@@ -336,6 +337,18 @@ implementation activation are explicit named host-capability calls: their
 interface remains product-owned while the shell supplies authority that a
 semantic World must not hold.
 
+Role assignment is split at that boundary: Issues resolves `(role, project)`
+into a package-owned `AccessPlan`; root control can only commit generic
+`(World, capability, resource)` Mechanics assignments. Reviewed implementation
+activation likewise carries an explicit World id. Neither root verb names an
+Issues role, project, or singleton bundled product.
+
+The client package also owns reply decoding and presentation. CLI and MCP pass
+the decoded product value to its presenter; the shell only writes the returned
+stdout/stderr and applies typed failure semantics. Product response variants,
+tables, boards, issue detail, inbox wording, ANSI styling, and JSON shape do not
+appear in root control or its renderer.
+
 A Session binds a local identity to one World at an active Station. Queries and
 mutations are authorized independently. Query results are computed from one
 Manifest root and authority frontier; a derived cache must be keyed by that
@@ -350,15 +363,14 @@ legitimate protected material opaquely.
 IssuesWorld (`com.lait.issues`) is the bundled reference World. It has no private
 architectural path unavailable to another conforming World.
 
-The issue-shaped root `Request` variants now survive only as inert schema debt:
-protocol v5 rejects them at every transport entrance. The viewer, CLI, and MCP
-all construct the Issues-owned application protocol and carry it in an opaque
-`WorldCall`; attached SpaceBridges receive that same envelope. The Issues
-package also owns its host-capability vocabulary, destructive policy, and
-role-assignment planning. Root `Response` presentation DTOs and their renderers
-are the remaining ownership cut before the whole Issues application—not only
-its already-acyclic semantic and application packages—can move to another
-repository.
+Root control contains no issue command or response variants. The viewer, CLI,
+and MCP construct the Issues-owned application protocol and carry it in an
+opaque `WorldCall`; attached SpaceBridges receive that same envelope. Local
+host capabilities are decoded from product-owned vocabulary and may compose a
+World call with a working-tree, filesystem, or Space-authority facility. For
+example, inbox reads pass the caller-local watermark into an Issues query and
+advance it only after a successful reply. Protocol v6 makes this boundary
+explicit on the wire.
 
 ## 6. Communication model
 

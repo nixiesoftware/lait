@@ -367,17 +367,11 @@ impl LaitDaemon {
                 .await;
             }
             (route, request) => {
-                let response = if control::classify(&request) == control::RequestOwner::World {
-                    Response::err(
-                        "typed product requests were retired in control protocol v5; \
-                         send a versioned World call",
-                    )
-                } else {
-                    self.router
-                        .request_routed(route, &request, act_as.as_deref())
-                        .await
-                        .unwrap_or_else(|error| Response::err(format!("{error:#}")))
-                };
+                let response = self
+                    .router
+                    .request_routed(route, &request, act_as.as_deref())
+                    .await
+                    .unwrap_or_else(|error| Response::err(format!("{error:#}")));
                 let _ = write_line(&mut write_half, &response).await;
             }
         }
@@ -711,8 +705,8 @@ mod tests {
             .unwrap();
         let value = issues_app::decode_reply(&call, reply).unwrap();
         assert!(matches!(
-            serde_json::from_value::<Response>(value).unwrap(),
-            Response::Projects { .. }
+            serde_json::from_value::<issues_app::IssuesResponse>(value).unwrap(),
+            issues_app::IssuesResponse::Projects { .. }
         ));
         let ring = tokio::time::timeout(Duration::from_secs(2), catalog.next())
             .await

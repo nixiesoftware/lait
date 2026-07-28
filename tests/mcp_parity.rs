@@ -6,7 +6,7 @@
 //! the build gate if a replica `Request` is added without a corresponding MCP
 //! tool, or if a `Response` DTO stops round-tripping (a silent contract break).
 
-use lait::control::Response;
+use issues_app::IssuesResponse as Response;
 use lait::dto::{
     ActivityEvent, BoardColumn, BoardView, IssueView, Priority, ProjectDto, Row, WorkflowState,
     SCHEMA_VERSION,

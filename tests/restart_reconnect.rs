@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use async_trait::async_trait;
+use issues_app::IssuesResponse as IssueResponse;
 use lait::control::{request, ControlRoute, Request, Response};
 use lait::daemon::OrbitAddress;
 use lait::net::Network;
@@ -63,7 +64,7 @@ fn issue_req(
     rt: &tokio::runtime::Runtime,
     home: &Path,
     request: issues_app::IssuesRequest,
-) -> Response {
+) -> IssueResponse {
     rt.block_on(async {
         let space = lait::orbital::discover_space_id(home).expect("test Space");
         let call = issues_app::encode_call(&request)?;
@@ -77,11 +78,11 @@ fn issue_req(
             None,
         )
         .await?;
-        Ok::<Response, anyhow::Error>(serde_json::from_value(issues_app::decode_reply(
+        Ok::<IssueResponse, anyhow::Error>(serde_json::from_value(issues_app::decode_reply(
             &call, reply,
         )?)?)
     })
-    .unwrap_or_else(|error| Response::err(format!("{error:#}")))
+    .unwrap_or_else(|error| IssueResponse::err(format!("{error:#}")))
 }
 
 fn poll_until<T>(timeout: Duration, mut check: impl FnMut() -> Option<T>) -> Option<T> {
@@ -128,12 +129,12 @@ fn list_titles(rt: &tokio::runtime::Runtime, home: &Path) -> Vec<String> {
             filter: issues_app::protocol::Filter::default(),
         },
     ) {
-        Response::List { rows } => rows.into_iter().map(|r| r.title).collect(),
+        IssueResponse::List { rows } => rows.into_iter().map(|r| r.title).collect(),
         _ => Vec::new(),
     }
 }
 
-fn new_issue(rt: &tokio::runtime::Runtime, home: &Path, title: &str) -> Response {
+fn new_issue(rt: &tokio::runtime::Runtime, home: &Path, title: &str) -> IssueResponse {
     issue_req(
         rt,
         home,
@@ -174,14 +175,14 @@ fn restarted_joiner_daemon_reconverges_from_its_persisted_store() {
                     color: None,
                 }
             ),
-            Response::Ref { .. }
+            IssueResponse::Ref { .. }
         ),
         "founder: projects new"
     );
     assert!(
         matches!(
             new_issue(&rt, &founder_home, "before restart"),
-            Response::Ref { .. }
+            IssueResponse::Ref { .. }
         ),
         "founder: first issue"
     );
@@ -261,7 +262,7 @@ fn restarted_joiner_daemon_reconverges_from_its_persisted_store() {
     assert!(
         matches!(
             new_issue(&rt, &founder_home, "after restart"),
-            Response::Ref { .. }
+            IssueResponse::Ref { .. }
         ),
         "founder: post-restart issue"
     );

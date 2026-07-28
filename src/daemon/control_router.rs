@@ -19,7 +19,7 @@ use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, Mutex, RwLock};
 
-use crate::control::{self, ControlRoute, Doorbell, Request, RequestOwner, Response};
+use crate::control::{self, ControlRoute, Doorbell, Request, Response};
 use crate::orbital::space_bridge::{SpaceBridgeRunner, SpaceBridgeStop};
 use crate::orbital::{WorldCall, WorldCallErrorCode, WorldPackages, WorldReply};
 use crate::transport::{DefaultFactory, TransportFactory};
@@ -651,18 +651,13 @@ impl ControlRouter {
 fn routed_address<'a>(
     packages: &WorldPackages,
     route: &'a ControlRoute,
-    request: &Request,
+    _request: &Request,
 ) -> Result<&'a OrbitAddress> {
     match route {
         ControlRoute::Daemon => Err(anyhow!(
             "daemon-scoped request cannot be dispatched to a Station"
         )),
-        ControlRoute::Space { address } => {
-            if control::classify(request) == RequestOwner::World {
-                return Err(anyhow!("World-owned request requires a World route"));
-            }
-            Ok(address)
-        }
+        ControlRoute::Space { address } => Ok(address),
         ControlRoute::World { address, world } => {
             let _ = (packages, address, world);
             Err(anyhow!(
@@ -888,8 +883,8 @@ mod tests {
             .unwrap();
         let value = issues_app::decode_reply(&call, reply).unwrap();
         assert!(matches!(
-            serde_json::from_value::<Response>(value).unwrap(),
-            Response::Projects { .. }
+            serde_json::from_value::<issues_app::IssuesResponse>(value).unwrap(),
+            issues_app::IssuesResponse::Projects { .. }
         ));
         let placements = router.occupancy.placements().await;
         assert_eq!(placements.len(), 1);
@@ -950,8 +945,8 @@ mod tests {
             .unwrap();
         let value = issues_app::decode_reply(&call, reply).unwrap();
         assert!(matches!(
-            serde_json::from_value::<Response>(value).unwrap(),
-            Response::Projects { .. }
+            serde_json::from_value::<issues_app::IssuesResponse>(value).unwrap(),
+            issues_app::IssuesResponse::Projects { .. }
         ));
         let placements = router.occupancy.placements().await;
         assert_eq!(placements.len(), 1);

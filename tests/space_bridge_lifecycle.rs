@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use async_trait::async_trait;
+use issues_app::IssuesResponse as IssueResponse;
 use lait::control::{request, ControlRoute, Request, Response};
 use lait::daemon::OrbitAddress;
 use lait::net::Network;
@@ -58,7 +59,7 @@ fn issue_req(
     rt: &tokio::runtime::Runtime,
     home: &Path,
     request: issues_app::IssuesRequest,
-) -> Response {
+) -> IssueResponse {
     rt.block_on(async {
         let space = lait::orbital::discover_space_id(home).expect("test Space");
         let call = issues_app::encode_call(&request)?;
@@ -72,11 +73,11 @@ fn issue_req(
             None,
         )
         .await?;
-        Ok::<Response, anyhow::Error>(serde_json::from_value(issues_app::decode_reply(
+        Ok::<IssueResponse, anyhow::Error>(serde_json::from_value(issues_app::decode_reply(
             &call, reply,
         )?)?)
     })
-    .unwrap_or_else(|error| Response::err(format!("{error:#}")))
+    .unwrap_or_else(|error| IssueResponse::err(format!("{error:#}")))
 }
 
 fn poll_until<T>(timeout: Duration, mut check: impl FnMut() -> Option<T>) -> Option<T> {
@@ -145,7 +146,7 @@ fn the_space_bridge_serves_the_issue_surface_over_the_control_socket() {
         },
     );
     assert!(
-        matches!(&resp, Response::Ref { reff } if reff == "ENG"),
+        matches!(&resp, IssueResponse::Ref { reff } if reff == "ENG"),
         "{resp:?}"
     );
 
@@ -168,7 +169,7 @@ fn the_space_bridge_serves_the_issue_surface_over_the_control_socket() {
         },
     );
     assert!(
-        matches!(&resp, Response::Ref { reff } if reff == "ENG-1"),
+        matches!(&resp, IssueResponse::Ref { reff } if reff == "ENG-1"),
         "{resp:?}"
     );
 
@@ -180,7 +181,7 @@ fn the_space_bridge_serves_the_issue_surface_over_the_control_socket() {
             reff: "ENG-1".into(),
         },
     );
-    let Response::Issue(view) = resp else {
+    let IssueResponse::Issue(view) = resp else {
         panic!("expected Issue, got {resp:?}");
     };
     assert_eq!(view.title, "Served over the socket");
@@ -204,7 +205,7 @@ fn the_space_bridge_serves_the_issue_surface_over_the_control_socket() {
             reff: "ENG-1".into(),
         },
     );
-    let Response::Issue(view) = resp else {
+    let IssueResponse::Issue(view) = resp else {
         panic!("expected Issue");
     };
     assert_eq!(view.comments.len(), 1);
@@ -220,7 +221,7 @@ fn the_space_bridge_serves_the_issue_surface_over_the_control_socket() {
         &home,
         issues_app::IssuesRequest::Activity { since: 0 },
     );
-    let Response::Activity { events, last } = resp else {
+    let IssueResponse::Activity { events, last } = resp else {
         panic!("expected Activity, got {resp:?}");
     };
     assert!(last >= 2, "created + comment rows expected, last={last}");
@@ -233,7 +234,7 @@ fn the_space_bridge_serves_the_issue_surface_over_the_control_socket() {
         &home,
         issues_app::IssuesRequest::Activity { since: last },
     );
-    let Response::Activity { events, last: l2 } = resp else {
+    let IssueResponse::Activity { events, last: l2 } = resp else {
         panic!("expected Activity, got {resp:?}");
     };
     assert!(events.is_empty(), "cursor resume must yield no repeats");
@@ -248,7 +249,7 @@ fn the_space_bridge_serves_the_issue_surface_over_the_control_socket() {
             filter: issues_app::protocol::Filter::default(),
         },
     );
-    let Response::List { rows } = resp else {
+    let IssueResponse::List { rows } = resp else {
         panic!("expected List");
     };
     assert!(rows.iter().any(|r| r.title == "Served over the socket"));
@@ -262,7 +263,7 @@ fn the_space_bridge_serves_the_issue_surface_over_the_control_socket() {
             project_hint: None,
         },
     );
-    assert!(matches!(resp, Response::Board(_)), "{resp:?}");
+    assert!(matches!(resp, IssueResponse::Board(_)), "{resp:?}");
 
     // Members reports the founder as an admin over the signed ACL roster.
     let resp = req(&client_rt, &home, Request::Members);

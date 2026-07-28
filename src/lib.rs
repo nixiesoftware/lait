@@ -17,8 +17,8 @@
 //!   * **The substrate** (`mechanics`, `fabric`, `replica`, `comms`,
 //!     `runtime`): authority, convergence, the Body graph, transport, and the
 //!     orbital lifecycle, each behind its own crate boundary.
-//!   * **Bundled products** ([`world`]): the Issues World compatibility adapter
-//!     and the composition root that docks independently packaged Worlds.
+//!   * **Bundled products** ([`world`]): the composition root that docks
+//!     independently packaged Worlds and mounts their client interfaces.
 //!   * **Layer B — control protocol** ([`control`], [`dto`]): a stable,
 //!     versioned, hand-maintained projection over the local socket. Never a
 //!     dump of storage internals.
@@ -46,8 +46,7 @@ pub mod orbital;
 pub mod registry;
 pub mod serve;
 pub mod spaces;
-/// The application adapter and compatibility re-exports for the independently
-/// packaged IssuesWorld product.
+/// The composition adapter for independently packaged Worlds.
 pub mod world;
 
 // The **kernel** (`mechanics`) holds lait's roots — identity, the trust

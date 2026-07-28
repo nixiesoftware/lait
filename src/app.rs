@@ -550,7 +550,7 @@ async fn dispatch_world_client(
     _selection_source: &'static str,
     out: Out,
 ) -> Result<()> {
-    use issues_app::host::{AccessRequest, IssuesHostRequest, WorkStateAction};
+    use issues_app::host::{IssuesHostRequest, WorkStateAction};
 
     match invocation {
         world_interface::CliInvocation::World(call) => {
@@ -568,15 +568,22 @@ async fn dispatch_world_client(
             let value = package
                 .decode_reply(&call, reply)
                 .map_err(|error| anyhow!(error.to_string()))?;
-            match serde_json::from_value::<Response>(value.clone()) {
-                Ok(response) => {
-                    let code = crate::cli::print_response(&response, out);
-                    if code != 0 {
-                        std::process::exit(code);
-                    }
+            let options = world_interface::PresentationOptions {
+                json: out.json,
+                color: out.color,
+            };
+            if let Some(presentation) = package
+                .present_reply(value.clone(), options)
+                .map_err(|error| anyhow!(error.to_string()))?
+            {
+                let code = crate::cli::print_presentation(&presentation);
+                if code != 0 {
+                    std::process::exit(code);
                 }
-                Err(_) if out.json => println!("{}", serde_json::to_string(&value)?),
-                Err(_) => println!("{}", serde_json::to_string_pretty(&value)?),
+            } else if out.json {
+                println!("{}", serde_json::to_string(&value)?);
+            } else {
+                println!("{}", serde_json::to_string_pretty(&value)?);
             }
             Ok(())
         }
@@ -614,26 +621,32 @@ async fn dispatch_world_client(
                     }
                 },
                 IssuesHostRequest::Inbox { clear } => {
-                    crate::cli::run(home, Request::Inbox { clear }, out).await
+                    let response = crate::cli::issues_inbox(home, clear).await?;
+                    let code = crate::cli::print_issues_response(&response, out);
+                    if code != 0 {
+                        std::process::exit(code);
+                    }
+                    Ok(())
                 }
                 IssuesHostRequest::WorldUpgrade => {
-                    crate::cli::run(home, Request::WorldUpgrade, out).await
+                    crate::cli::run(
+                        home,
+                        Request::WorldActivate {
+                            world: issues::contract::PRODUCT_WORLD.into(),
+                        },
+                        out,
+                    )
+                    .await
                 }
                 IssuesHostRequest::Access(access) => {
-                    let request = match access {
-                        AccessRequest::List { actor } => Request::AccessList { actor },
-                        AccessRequest::Grant {
-                            actor,
-                            role,
-                            project,
-                        } => Request::AccessGrant {
-                            actor,
-                            role,
-                            project,
-                        },
-                        AccessRequest::Revoke { grant_id } => Request::AccessRevoke { grant_id },
-                    };
-                    crate::cli::run(home, request, out).await
+                    let scope = crate::cli::scope_for_home(home);
+                    let response =
+                        crate::cli::issues_access_as_scoped(home, access, &scope, None).await?;
+                    let code = crate::cli::print_response(&response, out);
+                    if code != 0 {
+                        std::process::exit(code);
+                    }
+                    Ok(())
                 }
                 IssuesHostRequest::Attach {
                     reff,
@@ -683,7 +696,7 @@ async fn run_issues_attach(
         },
     )
     .await?;
-    let code = crate::cli::print_response(&response, out);
+    let code = crate::cli::print_issues_response(&response, out);
     if code == 0 {
         Ok(())
     } else {
@@ -702,7 +715,7 @@ async fn run_issues_attachment_get(
         crate::cli::issues_client(home, issues_app::IssuesRequest::AttachmentGet { reff, id })
             .await?;
     match response {
-        Response::Attachment {
+        issues_app::IssuesResponse::Attachment {
             name,
             mime: _,
             data_b64,
@@ -720,7 +733,7 @@ async fn run_issues_attachment_get(
             Ok(())
         }
         other => {
-            let code = crate::cli::print_response(&other, out);
+            let code = crate::cli::print_issues_response(&other, out);
             if code == 0 {
                 Ok(())
             } else {

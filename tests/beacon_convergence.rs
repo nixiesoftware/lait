@@ -25,6 +25,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use async_trait::async_trait;
+use issues_app::IssuesResponse as IssueResponse;
 use lait::control::{request, subscribe, ControlRoute, Request, Response};
 use lait::daemon::OrbitAddress;
 use lait::net::Network;
@@ -67,7 +68,7 @@ fn req(rt: &tokio::runtime::Runtime, home: &Path, r: Request) -> Response {
         .unwrap_or_else(|e| Response::err(format!("{e:#}")))
 }
 
-async fn issues_request(home: &Path, request: issues_app::IssuesRequest) -> Result<Response> {
+async fn issues_request(home: &Path, request: issues_app::IssuesRequest) -> Result<IssueResponse> {
     let space = lait::orbital::discover_space_id(home).expect("test Space");
     let call = issues_app::encode_call(&request)?;
     let reply = lait::control::call_world(
@@ -89,9 +90,9 @@ fn issue_req(
     rt: &tokio::runtime::Runtime,
     home: &Path,
     request: issues_app::IssuesRequest,
-) -> Response {
+) -> IssueResponse {
     rt.block_on(issues_request(home, request))
-        .unwrap_or_else(|error| Response::err(format!("{error:#}")))
+        .unwrap_or_else(|error| IssueResponse::err(format!("{error:#}")))
 }
 
 fn poll_until<T>(timeout: Duration, mut check: impl FnMut() -> Option<T>) -> Option<T> {
@@ -193,7 +194,7 @@ fn a_fresh_write_converges_with_no_rejoin_and_presence_surfaces_agree() {
         },
     );
     assert!(
-        matches!(&resp, Response::Ref { reff } if reff == "BCN"),
+        matches!(&resp, IssueResponse::Ref { reff } if reff == "BCN"),
         "{resp:?}"
     );
     let resp = issue_req(
@@ -212,7 +213,7 @@ fn a_fresh_write_converges_with_no_rejoin_and_presence_surfaces_agree() {
         },
     );
     assert!(
-        matches!(&resp, Response::Ref { reff } if reff == "BCN-1"),
+        matches!(&resp, IssueResponse::Ref { reff } if reff == "BCN-1"),
         "{resp:?}"
     );
 
@@ -225,7 +226,7 @@ fn a_fresh_write_converges_with_no_rejoin_and_presence_surfaces_agree() {
                 reff: "BCN-1".into(),
             },
         ) {
-            Response::Issue(v) if v.title == "Ambient news" => Some(()),
+            IssueResponse::Issue(v) if v.title == "Ambient news" => Some(()),
             _ => None,
         }
     });
@@ -257,7 +258,9 @@ fn a_fresh_write_converges_with_no_rejoin_and_presence_surfaces_agree() {
                 reff: "BCN-1".into(),
             },
         ) {
-            Response::Issue(v) if v.comments.iter().any(|c| c.body == "heard you ambiently") => {
+            IssueResponse::Issue(v)
+                if v.comments.iter().any(|c| c.body == "heard you ambiently") =>
+            {
                 Some(())
             }
             _ => None,
@@ -372,7 +375,7 @@ fn a_peers_change_rings_a_doorbell_that_names_what_moved() {
                 filter: Default::default(),
             },
         ) {
-            Response::List { rows } => rows.first().map(|r| r.doc_id.as_str().to_string()),
+            IssueResponse::List { rows } => rows.first().map(|r| r.doc_id.as_str().to_string()),
             _ => None,
         }
     })
@@ -603,7 +606,7 @@ fn surviving_members_converge_after_the_approach_station_dies() {
         },
     );
     assert!(
-        matches!(&resp, Response::Ref { reff } if reff == "ORP"),
+        matches!(&resp, IssueResponse::Ref { reff } if reff == "ORP"),
         "{resp:?}"
     );
     let resp = issue_req(
@@ -622,7 +625,7 @@ fn surviving_members_converge_after_the_approach_station_dies() {
         },
     );
     assert!(
-        matches!(&resp, Response::Ref { reff } if reff == "ORP-1"),
+        matches!(&resp, IssueResponse::Ref { reff } if reff == "ORP-1"),
         "{resp:?}"
     );
 
@@ -634,7 +637,7 @@ fn surviving_members_converge_after_the_approach_station_dies() {
                 reff: "ORP-1".into(),
             },
         ) {
-            Response::Issue(v) if v.title == "The hub is gone" => Some(()),
+            IssueResponse::Issue(v) if v.title == "The hub is gone" => Some(()),
             _ => None,
         }
     });

@@ -262,11 +262,22 @@ reply for another contract.
 
 An owned Station receives the call directly through its in-process SpaceBridge.
 An attached SpaceBridge receives the identical opaque envelope through its
-per-Orbit socket. Protocol v5 retired the typed product-request path and the
-root-owned product codec; v4 processes are outside the compatibility window and
-must restart before attachment. The issue-tracker application emits
+per-Orbit socket. Protocol v5 retired the typed product-request path;
+protocol v6 removed product host projections from root `Request`/`Response`.
+Older processes are outside the compatibility window and must restart before
+attachment. The issue-tracker application emits
 `com.lait.issues` / `issues.control` v1; LaitDaemon does not infer or hardcode
 either value.
+
+Product client packages decode `WorldReply.payload` and own presentation for
+their CLI and MCP surfaces. Root control treats both request and reply payloads
+as opaque and has no product response enum.
+
+Host capabilities may compose calls across the boundary. An Issues access
+grant first queries an `AccessPlan`, then submits its exact generic assignments
+to Space authority; inbox supplies a local watermark to an Issues query and
+advances it only after success. Root control never receives role, project, or
+product-response vocabulary.
 
 Product calls then reach the named World's registered handler, WorldBridge, and
 docked Session.

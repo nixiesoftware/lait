@@ -4,6 +4,8 @@
 //! local files, read watermarks, or Space authority). The product owns their
 //! vocabulary and validation; the navigation shell only supplies the facility.
 
+use std::path::Path;
+
 use serde_json::Value;
 use world_interface::InterfaceError;
 
@@ -62,10 +64,28 @@ pub enum IssuesHostRequest {
 }
 
 pub struct AccessGrantPlan {
-    pub assignments: Vec<(
-        mechanics::demand::PolicyCapability,
-        mechanics::demand::PolicyResource,
-    )>,
+    pub assignments: Vec<crate::AccessAssignment>,
+}
+
+/// Read the caller-local inbox watermark. Missing or malformed state simply
+/// means the inbox is unread; it is never replicated truth.
+pub fn read_inbox_watermark(home: &Path) -> u64 {
+    std::fs::read_to_string(home.join("inbox-read.json"))
+        .ok()
+        .and_then(|value| value.trim().parse().ok())
+        .unwrap_or(0)
+}
+
+/// Advance the caller-local inbox watermark after a successful projection.
+pub fn write_inbox_watermark(home: &Path, timestamp: u64) -> std::io::Result<()> {
+    std::fs::write(home.join("inbox-read.json"), timestamp.to_string())
+}
+
+pub fn now_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -238,20 +258,16 @@ pub fn plan_access_grant(
             ));
         }
     };
-    let assignments: Vec<(
-        mechanics::demand::PolicyCapability,
-        mechanics::demand::PolicyResource,
-    )> = body["capabilities"]
+    let assignments: Vec<crate::AccessAssignment> = body["capabilities"]
         .as_array()
         .map(|capabilities| {
             capabilities
                 .iter()
                 .filter_map(Value::as_str)
-                .map(|capability| {
-                    (
-                        mechanics::demand::PolicyCapability::new(world, capability),
-                        resource.clone(),
-                    )
+                .map(|capability| crate::AccessAssignment {
+                    world: world.to_string(),
+                    capability: capability.to_string(),
+                    resource: resource.segments.clone(),
                 })
                 .collect()
         })
