@@ -97,13 +97,29 @@ export function IssueList({
   const total = deletedMode
     ? deleted.length
     : groups.reduce((n, g) => n + visible(g).length, 0);
+  // The key column's measure: the longest key in the view, in characters. The
+  // key renders in the mono font, where every glyph is exactly 1ch, so this is
+  // the column width — Linear's rule. Sizing to the view's own maximum is what
+  // a hardcoded 64px could never do: `COMP-9` and `COMP-25` share one edge, and
+  // an `ACCESS-100` view simply gets a wider column instead of truncating.
+  const keyCh = useMemo(
+    () =>
+      Math.max(
+        0,
+        ...groups.flatMap((g) => g.rows).concat(deleted).map((r) => (r.key_alias ?? r.reff).length),
+      ),
+    [groups, deleted],
+  );
 
   return (
     // No total across the top. Every group header already carries its own count,
     // so the summary row spent a full band of the viewport restating their sum —
     // and it sat between the tab strip and the first group, which is exactly
     // where the eye starts.
-    <div className="flex min-h-0 flex-1 flex-col">
+    <div
+      className="flex min-h-0 flex-1 flex-col"
+      style={{ "--key-col": `${keyCh}ch` } as React.CSSProperties}
+    >
       <div className="min-h-0 flex-1 overflow-y-auto">
         {!deletedMode && groups.map((group) => (
           <Group
@@ -402,13 +418,14 @@ function IssueRow({
         )}
       </span>
       <PriorityIcon priority={row.priority} />
-      {/* Content-width, not a fixed 64px column. The refs in one project share a
-          key, so they still form the straight edge that made the column worth
-          having — and the 8px of slack that column left on a `COMP-25` pushed
-          the status glyph away from the id it belongs to. The fixed width was
-          also quietly short: `ACCESS-100` measures ~80px and was being
-          truncated. Tabular numerals keep the digits aligned. */}
-      <span className="text-mute shrink-0 font-mono text-xs tabular-nums">
+      {/* One column for every key in the view, sized by the list to its longest
+          key (`--key-col`, in ch — exact in this mono font). Content-width was
+          tried and misaligns: rows share a key *prefix* but not a digit count,
+          so `COMP-9` sat one character narrower than `COMP-25` and everything
+          after it drifted. A column sized to the view's own maximum keeps the
+          status glyphs and titles on one edge without a hardcoded width to go
+          stale or truncate. */}
+      <span className="text-mute shrink-0 font-mono text-xs tabular-nums min-w-[var(--key-col)]">
         {row.key_alias ?? row.reff}
       </span>
       {state && <StatusIcon category={state.category} color={catalogColor(state.color)} />}
