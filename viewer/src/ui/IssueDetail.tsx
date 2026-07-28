@@ -473,7 +473,14 @@ export function IssueDetail({
           Status row above already does, and it would be the one piece of this pane
           that came from somewhere else.
         */}
-        <div className="issue-detail-properties flex flex-col text-sm">
+        {/* `text-dim`, not `text-fg`: the rail is reference you read *against*
+            the document, and at equal weight the two competed — a status and a
+            title cannot both be the loudest thing on the page. One step down
+            puts the captions (`mute`), the values (`dim`) and the body (`fg`)
+            on three rungs of one ladder, which is the relationship Linear's
+            rail keeps. Icons and label chips carry their own colour and are
+            untouched; only inherited text moves. */}
+        <div className="issue-detail-properties text-dim flex flex-col text-sm">
           <RailSection title="Properties">
           <RailRow label="Status">
             <Combobox

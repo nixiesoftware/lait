@@ -154,6 +154,10 @@ export function App() {
   const [display, setDisplay] = useState<DisplayState>(() => loadDisplay(initialDisplayScope));
   const [displayOpen, setDisplayOpen] = useState(false);
   const [mobileNav, setMobileNav] = useState(false);
+  /** Is the workspace rail collapsed? Only the shell's own header may answer
+   *  that — a collapsed rail leaves ⌘B as the sole way back, which is a
+   *  keystroke you have to already know. */
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [personalNavRevision, setPersonalNavRevision] = useState(0);
   /** Bulk-selection checks, by canonical ref. Distinct from `selection`: the
    *  focus is one row, the checks are a set, and `x` is the bridge. */
@@ -1424,6 +1428,7 @@ export function App() {
         collapsible
         collapsedSize={0}
         groupResizeBehavior="preserve-pixel-size"
+        onResize={(size) => setSidebarCollapsed(size.inPixels === 0)}
         className="bg-sunken max-[960px]:hidden"
       >
         <Sidebar
@@ -1475,9 +1480,26 @@ export function App() {
             it hides the sidebar, so it draws its own shell entirely. */}
         <div className={view === "settings" ? "hidden" : "shrink-0"}>
           <SurfaceHeader
-            // No leading control. The bar's first ink is the thing you are
-            // looking at — the toggle was a piece of window furniture sitting
-            // where the trail should start, and ⌘B still collapses the sidebar.
+            // No standing leading control — the bar's first ink is the thing
+            // you are looking at, and a permanent toggle was window furniture
+            // sitting where the trail should start. It returns for exactly the
+            // one state that needs it: with the rail collapsed there is nothing
+            // on screen that brings it back, and ⌘B only helps someone who
+            // already knows. It leaves again the moment the rail is open.
+            leading={
+              sidebarCollapsed ? (
+                <IconButton
+                  label="Show sidebar"
+                  chord="⌘B"
+                  // Its own space, so it reads as chrome acting on the window
+                  // rather than the first crumb of the trail.
+                  className="mr-2"
+                  onClick={api.toggleSidebar}
+                >
+                  <PanelLeft className="size-icon-sm" />
+                </IconButton>
+              ) : undefined
+            }
             trail={<Breadcrumbs items={trail} />}
             actions={
               // An open issue owns this end of the bar. Its buttons arrive from

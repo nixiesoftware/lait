@@ -771,7 +771,7 @@
 
    The terms are already `sr-only` at every width (the rail dropped its label
    column), so nothing needs hiding here that isn't hidden already. */
-@container (max-width: 699px) {
+@container (max-width: 919px) {
   .issue-detail-properties {
     flex-flow: row wrap;
     gap: 2px 8px;
@@ -805,26 +805,55 @@
   margin-top: 0;
 }
 
-@container (min-width: 700px) {
+/* The rail costs a fixed 264px plus its gutter and the page inset — 400px of
+   chrome before the document gets a single character. Engaging it at 700px
+   left the text 331px, a ~48-character column with a 264px rail beside it:
+   the reference material was taking 44% of the room and the thing you came to
+   read was wrapping mid-phrase with code blocks running past their edge.
+
+   So the threshold is what the DOCUMENT needs, not what the rail fits in. 920px
+   is 400px of chrome plus a 520px column — ~75 characters at this face, the
+   top of the comfortable range. Below it the strip above wins: properties on
+   one wrapping row and the body at full width beats two columns that are both
+   too narrow. */
+@container (min-width: 920px) {
   /* Boxed and centred, the way Linear sets an issue. The measure cap below
      governs the text column; capping the GRID at exactly that column plus the
      gutter and the rail means the two never drift apart as the window grows,
      and the whole set stays centred in the pane rather than pinned left with a
      widening void beside it. */
   .issue-detail-body {
-    /* Composed, not a round number. The cap is exactly measure + gutter + rail,
-       so any one of the three can be retuned and the total follows instead of
-       needing to be recomputed by hand. `+ 2rem` restores the element's own
-       `p-4`, which sits inside the border box — without it the columns would
-       sum to 32px less than the composition claims. */
+    /* Composed, not a round number. The cap is exactly measure + gutter + rail
+       + the element's own inset, so any one of them can be retuned and the
+       total follows instead of needing to be recomputed by hand.
+
+       An issue read at full width is a document, and a document needs margins:
+       the pane's `p-4` is right for a strip 400px wide and far too tight once
+       the thing spans a monitor — the title started 16px under the header bar
+       with the text running to the edge. The inset and the leading are set
+       here rather than as utility classes on the element because the width
+       composition above has to know them; two places would drift.
+
+       Bottom is deliberately the largest. A body ends where its last line
+       ends, and a scroll that stops dead on the composer reads as truncation —
+       Linear leaves a screen's worth of quiet under the final block. */
     --issue-rail: 264px;
-    --issue-gutter: 40px;
+    --issue-gutter: 56px;
     --issue-measure: 1296px;
+    --issue-inset: 40px;
     display: grid;
     grid-template-columns: minmax(0, 1fr) var(--issue-rail);
     align-content: start;
     column-gap: var(--issue-gutter);
-    max-width: calc(var(--issue-measure) + var(--issue-gutter) + var(--issue-rail) + 2rem);
+    /* The body's own rhythm, one step up from the narrow strip's 16px: at this
+       measure the title, the description and the timeline are separate
+       movements rather than a stack of rows. */
+    row-gap: 24px;
+    padding: 40px var(--issue-inset) 96px;
+    max-width: calc(
+      var(--issue-measure) + var(--issue-gutter) + var(--issue-rail) +
+        (2 * var(--issue-inset))
+    );
     margin-inline: auto;
     width: 100%;
   }
@@ -856,10 +885,10 @@
     grid-row: 1 / span 40;
     align-self: start;
     position: sticky;
-    /* Matches the body's own `p-4`. At `top: 0` the rail sat 16px below the
+    /* Matches the body's own top inset. At `top: 0` the rail sat below the
        scroll container at rest and then snapped up to meet it on the first
        scroll — a visible jolt that read as the eyebrow sliding out from under
        itself. Sticking where it already sits means it never moves at all. */
-    top: 1rem;
+    top: 40px;
   }
 }
