@@ -17,7 +17,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { ActivityEvent } from "../types";
-import { describeChanges, describeEvent, isAttributable } from "./activity";
+import { describeChanges, describeEvent, describeEventRich, isAttributable } from "./activity";
 
 const ALICE = "a".repeat(64);
 const BOB = "b".repeat(64);
@@ -130,5 +130,88 @@ describe("changes", () => {
     // `x → —` is a real transition (a field cleared); only `— → —` is a no-op.
     const e = ev({ changes: [{ field: "title", from: "old", to: null }] });
     expect(describeChanges(e)).toBe("title: old → —");
+  });
+});
+
+describe("rich phrasing", () => {
+  const ctx = {
+    resolveName: resolve,
+    stateName: (id: string) => ({ backlog: "Backlog", in_progress: "In Progress" })[id] ?? null,
+    issueLabel: (doc: string) => (doc === "doc9" ? "ENG-9 The other issue" : null),
+  };
+
+  it("keeps describeEvent's attribution, including the synced no-name rule", () => {
+    expect(describeEventRich(ev({ kind: "synced" }), ctx).actor).toBeNull();
+    expect(describeEventRich(ev({ actor: BOB }), ctx).actor).toBe("bob");
+  });
+
+  it("narrates a status change with display names", () => {
+    const e = ev({ changes: [{ field: "status", from: "backlog", to: "in_progress" }] });
+    expect(describeEventRich(e, ctx).phrase).toBe("moved from Backlog to In Progress");
+  });
+
+  it("falls back to the raw state id when the workflow doesn't know it", () => {
+    const e = ev({ changes: [{ field: "status", from: "backlog", to: "vanished" }] });
+    expect(describeEventRich(e, ctx).phrase).toBe("moved from Backlog to vanished");
+  });
+
+  it("says raised or lowered by the priority order, not the word order", () => {
+    const up = ev({ changes: [{ field: "priority", from: "high", to: "urgent" }] });
+    const down = ev({ changes: [{ field: "priority", from: "urgent", to: "high" }] });
+    expect(describeEventRich(up, ctx).phrase).toBe("raised priority from High to Urgent");
+    expect(describeEventRich(down, ctx).phrase).toBe("lowered priority from Urgent to High");
+  });
+
+  it("treats a description edit as real even though it travels as — → —", () => {
+    // The daemon doesn't ship the two texts, so the change arrives value-less;
+    // dropping it (like created's empty containers) would hide a real edit.
+    const e = ev({ changes: [{ field: "description", from: null, to: null }] });
+    expect(describeEventRich(e, ctx).phrase).toBe("updated the description");
+  });
+
+  it("says only 'created the issue' — no recitation of every initial field", () => {
+    const e = ev({
+      kind: "created",
+      changes: [{ field: "status", from: null, to: "backlog" }],
+    });
+    expect(describeEventRich(e, ctx).phrase).toBe("created the issue");
+  });
+
+  it("names the other issue in a link event when the graph can", () => {
+    const e = ev({ kind: "linked", text: "blocks doc9" });
+    expect(describeEventRich(e, ctx).phrase).toBe(
+      "marked this issue as blocking ENG-9 The other issue",
+    );
+  });
+
+  it("falls back to a short doc id for a link target outside the neighborhood", () => {
+    const e = ev({ kind: "linked", text: "relates doc_gone_from_graph" });
+    expect(describeEventRich(e, ctx).phrase).toBe("added related issue doc_gone…");
+  });
+
+  it("resolves an assignee key to a member name", () => {
+    const e = ev({
+      kind: "assigned",
+      changes: [{ field: "assignees", from: null, to: BOB }],
+    });
+    expect(describeEventRich(e, ctx).phrase).toBe("assigned bob");
+  });
+
+  it("phrases the WorkState self-assignment rider alongside the move", () => {
+    const e = ev({
+      kind: "started",
+      changes: [
+        { field: "status", from: "backlog", to: "in_progress" },
+        { field: "assignees", from: null, to: "@me" },
+      ],
+    });
+    expect(describeEventRich(e, ctx).phrase).toBe(
+      "moved from Backlog to In Progress, assigned themselves",
+    );
+  });
+
+  it("keeps the plain phrase for kinds with nothing more to say", () => {
+    expect(describeEventRich(ev({ kind: "labeled" }), ctx).phrase).toBe("changed labels");
+    expect(describeEventRich(ev({ kind: "frobnicated" }), ctx).phrase).toBe("frobnicated");
   });
 });
