@@ -1,6 +1,5 @@
-import { useRef, useState } from "react";
-import { Archive, ArchiveRestore, MoreHorizontal, Plus, UserPlus } from "lucide-react";
-import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
+import { useId, useRef, useState } from "react";
+import { Archive, ArchiveRestore, ChevronRight } from "lucide-react";
 
 import { rpc } from "../api";
 import {
@@ -13,13 +12,11 @@ import type { MemberDto, MilestoneDto, ProjectDto } from "../types";
 import { Avatar, memberName } from "./Avatar";
 import { catalogColor } from "./colors";
 import { ColorPicker } from "./ColorPicker";
-import { DatePicker } from "./DatePicker";
 import { Markdown } from "./Markdown";
 import { MarkdownEditor } from "./MarkdownEditor";
 import { Combobox } from "./Picker";
 import { MilestoneIcon } from "./icons";
-import { MenuContent, MenuItem, RailCard, RailRow } from "./layout";
-import { Button, IconButton, Input, PopoverContent } from "./primitives";
+import { Button, cn, IconButton, PopoverContent } from "./primitives";
 import { when } from "./time";
 import * as Popover from "@radix-ui/react-popover";
 
@@ -29,12 +26,6 @@ const HEALTH: Record<string, { label: string; tone: string }> = {
   at_risk: { label: "At risk", tone: "text-warn" },
   off_track: { label: "Off track", tone: "text-danger" },
 };
-
-/** unix seconds -> YYYY-MM-DD (UTC), the wire format the engine + DatePicker share. */
-function toInput(secs: number | null | undefined): string | null {
-  if (secs == null) return null;
-  return new Date(secs * 1000).toISOString().slice(0, 10);
-}
 
 /**
  * A project's overview — the document a project became.
@@ -49,20 +40,14 @@ export function ProjectOverview({
   spaceId,
   project,
   members,
-  counts,
   readOnly,
   onError,
-  onOpenMilestone,
 }: {
   spaceId: string;
   project: ProjectDto;
   members: MemberDto[];
-  counts: { backlog: number; active: number; done: number; total: number };
   readOnly: boolean;
   onError: (message: string) => void;
-  /** Scope the project's issue surfaces to one milestone (`""` = unscoped
-   *  issues). A milestone is a filter, so this navigates rather than selects. */
-  onOpenMilestone: (milestone: string) => void;
 }) {
   const edit = async (patch: Record<string, string | boolean | null>) => {
     try {
@@ -72,29 +57,16 @@ export function ProjectOverview({
     }
   };
 
-  const lead = members.find((m) => m.key === project.lead);
-  const { backlog, active, done, total } = counts;
-
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="@container min-h-0 flex-1 overflow-y-auto p-6">
-        {/* Wider than it was, and all of the extra width goes to the rail.
-            264px is a property column — enough for a value and nothing else. The
-            rail now packs a glyph, a name, a percentage, a count and a date onto
-            one scannable line, and that needs ~340. The prose keeps its 35rem
-            measure, so the document did not get harder to read to pay for it.
-
-            The split is a **container** query, not `md:`. The viewport is not
-            what this layout is short of — the sidebar is — so a viewport
-            breakpoint happily put two columns in 588px and left the document
-            216px wide, which is four words a line. 54rem is the width at which a
-            fixed 340px rail still leaves the prose something worth reading;
-            under it the rail stacks beneath the document at full width. */}
-        <div className="mx-auto flex max-w-5xl flex-col gap-8 @[54rem]:grid @[54rem]:grid-cols-[minmax(0,1fr)_340px]">
-          {/* Title + description. The measure is capped at the same 35rem the
-              issue body uses — a project overview is the same kind of document,
-              and two prose columns at different widths in one app read as two
-              apps. */}
+      <div className="min-h-0 flex-1 overflow-y-auto p-6">
+        {/* One column. The rail used to be the second, and it is the shell's now
+            — it has to survive a hop to Issues, which this page does not. What
+            is left is the document, at the measure a document wants. */}
+        <div className="mx-auto max-w-3xl">
+          {/* The measure is capped at the same 35rem the issue body uses — a
+              project overview is the same kind of document, and two prose
+              columns at different widths in one app read as two apps. */}
           <div className="min-w-0 max-w-[35rem]">
             <div className="mb-4 flex items-center gap-2">
               {!readOnly ? (
@@ -157,7 +129,15 @@ export function ProjectOverview({
             <Description
               value={project.description ?? ""}
               readOnly={readOnly}
+              placeholder="Describe this project — goals, scope, links."
+              empty="No description"
               onSave={(description) => void edit({ description })}
+            />
+            <MilestoneDocument
+              spaceId={spaceId}
+              projectId={project.id}
+              readOnly={readOnly}
+              onError={onError}
             />
             <Updates
               spaceId={spaceId}
@@ -168,118 +148,6 @@ export function ProjectOverview({
             />
           </div>
 
-          {/* A console, not an aside.
-
-              The issue rail recedes because the body is the point: captions over
-              a hairline column, nothing to click. This one does the opposite —
-              cards with their own verbs, rows that navigate, folds that persist.
-              A project is a thing you steer; an issue is a thing you read, and
-              lending them one grammar made the steering surface as quiet as the
-              reading one.
-
-              What survives from that rail is the rule worth keeping: an unset
-              property still reads as the verb that sets it. */}
-          <div className="flex flex-col gap-2 text-sm">
-            <RailCard title="Properties" id="properties">
-            <RailRow label="Lead">
-              <Combobox
-                tone="quiet"
-                label="Lead"
-                disabled={readOnly}
-                value={
-                  lead
-                    ? {
-                        id: lead.key,
-                        label: memberName(lead.key, lead),
-                        icon: <Avatar deviceKey={lead.key} alias={lead.alias} me={lead.me} size="sm" />,
-                      }
-                    : null
-                }
-                face={
-                  lead ? undefined : (
-                    <>
-                      <UserPlus className="text-mute size-icon-sm shrink-0" />
-                      <span className="text-mute">Set lead</span>
-                    </>
-                  )
-                }
-                options={[
-                  { id: "none", label: "No lead" },
-                  ...members.map((m) => ({
-                    id: m.key,
-                    label: memberName(m.key, m),
-                    icon: <Avatar deviceKey={m.key} alias={m.alias} me={m.me} size="sm" />,
-                    hint: m.key.slice(0, 6),
-                    keywords: [m.key, m.alias],
-                  })),
-                ]}
-                onPick={(id) => void edit({ lead: id === "none" ? "none" : id })}
-              />
-            </RailRow>
-            <RailRow label="Start date">
-              <DatePicker
-                tone="quiet"
-                value={toInput(project.start_date)}
-                disabled={readOnly}
-                placeholder="Add start date"
-                ariaLabel="Start date"
-                onChange={(next) => void edit({ start: next ?? "none" })}
-              />
-            </RailRow>
-            <RailRow label="Target date">
-              <DatePicker
-                tone="quiet"
-                value={toInput(project.target_date)}
-                disabled={readOnly}
-                placeholder="Add target date"
-                ariaLabel="Target date"
-                onChange={(next) => void edit({ target: next ?? "none" })}
-              />
-            </RailRow>
-            </RailCard>
-
-            <Milestones
-              spaceId={spaceId}
-              projectId={project.id}
-              readOnly={readOnly}
-              onError={onError}
-              onOpen={onOpenMilestone}
-            />
-
-            {/* Read rather than set, so it is the one card with no verb in its
-                header. The legend leads because the counts are the answer and
-                the bar is the shape of it — Linear's project rail makes the same
-                call, and a bare bar over a sentence made you read the sentence
-                to learn what the colours meant. */}
-            <RailCard title="Progress" id="progress">
-              <div className="flex flex-col gap-2 pt-1">
-                <div className="flex items-baseline gap-4 text-xs">
-                  <span className="flex items-baseline gap-1.5">
-                    <span className="bg-mute inline-block size-mark-sm rounded-mark" aria-hidden />
-                    <span className="text-mute">Scope</span>
-                    <span className="text-ink tabular-nums">{total}</span>
-                  </span>
-                  <span className="flex items-baseline gap-1.5">
-                    <span className="bg-ok inline-block size-mark-sm rounded-mark" aria-hidden />
-                    <span className="text-mute">Completed</span>
-                    <span className="text-ink tabular-nums">{done}</span>
-                  </span>
-                </div>
-                <span className="bg-line flex h-1.5 w-full gap-0.5 overflow-hidden rounded-full">
-                  {total === 0 ? null : (
-                    <>
-                      {backlog > 0 && <span className="bg-mute" style={{ flex: backlog }} />}
-                      {active > 0 && <span className="bg-accent" style={{ flex: active }} />}
-                      {done > 0 && <span className="bg-ok" style={{ flex: done }} />}
-                    </>
-                  )}
-                </span>
-                <span className="text-mute text-2xs">
-                  {total === 0 ? "No issues yet" : `${active} active · ${backlog} backlog`}
-                </span>
-              </div>
-            </RailCard>
-          </div>
         </div>
       </div>
     </div>
@@ -287,23 +155,45 @@ export function ProjectOverview({
 }
 
 /** The overview paragraph — the same live document the issue body is, so the two
- *  surfaces are written the same way as well as read the same way. */
+ *  surfaces are written the same way as well as read the same way.
+ *
+ *  Shared with the milestone bodies below: they are the same kind of prose in the
+ *  same document, so they get the same editor and the same commit-on-blur rule
+ *  rather than a second copy of this dirty-tracking dance. */
 function Description({
   value,
   readOnly,
+  placeholder,
+  empty,
+  className = "min-h-16 py-2",
   onSave,
 }: {
   value: string;
   readOnly: boolean;
+  placeholder: string;
+  /** Read-only text when there is no body. Omit to render nothing — a milestone
+   *  with no prose should take no room, where a project with none has a page to
+   *  explain. */
+  empty?: string;
+  /** The editor's resting size. A project's body reserves a paragraph because
+   *  the page is about writing it; a milestone's reserves nothing and takes the
+   *  height of its own empty line, because an undescribed stage is normal and
+   *  four in a row should not open a field of blank space above the Updates.
+   *
+   *  No `min-h-*` rung here on purpose: the ladder in `designSystem.test.ts` is
+   *  for CONTROL heights, and a prose body is a measure, not a control. Padding
+   *  plus the editor's own line is the honest way to say "one line". */
+  className?: string;
   onSave: (v: string) => void;
 }) {
   const [, setDraft] = useState(value);
   const dirty = useRef(false);
 
   if (readOnly) {
+    if (!value && !empty) return null;
     return (
-      <div className="min-h-16 py-2">
-        {value ? <Markdown text={value} /> : <span className="text-mute">No description</span>}
+      <div className={className}>
+        {value ? <Markdown text={value} /> : <span className="text-mute">{empty}</span>}
       </div>
     );
   }
@@ -311,8 +201,8 @@ function Description({
   return (
     <MarkdownEditor
       value={value}
-      placeholder="Describe this project — goals, scope, links."
-      className="min-h-16 py-2"
+      placeholder={placeholder}
+      className={className}
       onChange={(markdown) => {
         dirty.current = true;
         setDraft(markdown);
@@ -329,290 +219,135 @@ function Description({
   );
 }
 
+
 /**
- * The project's milestones (SCOPE-1): named targets with derived progress.
- * Records live in the catalog's `project_milestones` map; the counts are
- * derived by the engine from issues' milestone pointers, never stored.
+ * The milestones as *document* — the second face of the same records the rail
+ * indexes, and the duplication is the point.
  *
- * Read through the world store rather than a local `useState`, because "derived
- * from issues" means the bars go stale on a write this component never sees:
- * dragging a card to Done changes a percentage here. The store already declares
- * that dependency (`ensureMilestones`), so the doorbell refetches; a private
- * copy simply would not hear about it, which is what this used to be.
+ * The rail answers "where are we": one scannable line per stage, and a click
+ * that narrows the issues. This answers "what is this stage": the prose that
+ * explains what the milestone means, in the column where a project's other
+ * prose already lives. Linear carries both for the same reason, and the two are
+ * one resource under one key, so they can never disagree.
+ *
+ * It draws nothing until a project has milestones — the rail's empty state is
+ * the one that teaches, and two empty states for one absence is one too many.
  */
-function Milestones({
+function MilestoneDocument({
   spaceId,
   projectId,
   readOnly,
   onError,
-  onOpen,
 }: {
   spaceId: string;
   projectId: string;
   readOnly: boolean;
   onError: (message: string) => void;
-  onOpen: (milestone: string) => void;
 }) {
   const store = useProjectViewerStore();
-  const resource = useProjectMilestones(spaceId, projectId);
-  const milestones = resource.data ?? null;
-  const [draft, setDraft] = useState("");
-  const [target, setTarget] = useState<string | null>(null);
-  const [adding, setAdding] = useState(false);
-  const [composing, setComposing] = useState(false);
+  const milestones = useProjectMilestones(spaceId, projectId).data ?? [];
 
-  // A local write rings the doorbell too, but the round trip is longer than the
-  // one we just made — force the resource so the row lands with the click.
-  const reload = () => store.ensureMilestones(spaceId, projectId, true);
-
-  const add = async () => {
-    const name = draft.trim();
-    if (!name) return;
-    setAdding(true);
+  const edit = async (id: string, patch: { name?: string; description?: string }) => {
     try {
-      await rpc(spaceId, {
-        cmd: "milestone_set",
-        project: projectId,
-        name,
-        target,
-      });
-      setDraft("");
-      setTarget(null);
-      setComposing(false);
-      await reload();
-    } catch (e) {
-      onError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setAdding(false);
-    }
-  };
-
-  const remove = async (id: string) => {
-    try {
-      await rpc(spaceId, { cmd: "milestone_set", project: projectId, milestone: id, remove: true });
-      await reload();
+      await rpc(spaceId, { cmd: "milestone_set", project: projectId, milestone: id, ...patch });
+      await store.ensureMilestones(spaceId, projectId, true);
     } catch (e) {
       onError(e instanceof Error ? e.message : String(e));
     }
   };
 
-  /**
-   * Move one step, expressed as "put me on the far side of my neighbour".
-   *
-   * The engine's placement vocabulary is relative (`before`/`after` a sibling),
-   * not positional, which is what makes a move one record write instead of a
-   * renumbering. So "up" is `before` the milestone above me — the list this
-   * component is already rendering supplies the neighbour.
-   */
-  const move = async (index: number, delta: -1 | 1) => {
-    const list = milestones ?? [];
-    const neighbour = list[index + delta];
-    if (!neighbour) return;
-    try {
-      await rpc(spaceId, {
-        cmd: "milestone_set",
-        project: projectId,
-        milestone: list[index]!.id,
-        pos: delta < 0 ? { at: "before", reff: neighbour.id } : { at: "after", reff: neighbour.id },
-      });
-      await reload();
-    } catch (e) {
-      onError(e instanceof Error ? e.message : String(e));
-    }
-  };
-
-  const empty = milestones !== null && milestones.length === 0;
-
+  if (milestones.length === 0) return null;
   return (
-    <RailCard
-      title="Milestones"
-      id="milestones"
-      action={
-        !readOnly && (
-          <IconButton
-            label="Add milestone"
-            onClick={() => setComposing((open) => !open)}
-          >
-            <Plus className="size-icon-sm" />
-          </IconButton>
-        )
-      }
-    >
-      {resource.error != null && <p className="text-danger py-1 text-xs">Couldn't load milestones.</p>}
-      {milestones === null && resource.error == null && (
-        <p className="text-mute py-1 text-xs">Loading…</p>
-      )}
-      {/* The empty state teaches rather than reports. "No milestones yet" told
-          you a fact you could already see; this says what the feature is for,
-          which is the only thing you need at the moment you have none. */}
-      {empty && !composing && (
-        <p className="text-mute py-1 text-xs leading-relaxed">
-          {readOnly
-            ? "No milestones."
-            : "Break the project into stages, each with its own target date and progress."}
-        </p>
-      )}
-
+    <section className="mt-8">
+      <h2 className="text-mute mb-3 text-2xs font-semibold tracking-wider uppercase">Milestones</h2>
       <ol className="flex flex-col">
-        {milestones?.map((m, index) => (
-          <MilestoneRow
+        {milestones.map((m) => (
+          <MilestoneSection
             key={m.id}
             milestone={m}
             readOnly={readOnly}
-            onOpen={() => onOpen(m.id)}
-            onRemove={() => void remove(m.id)}
-            onMoveUp={index > 0 ? () => void move(index, -1) : undefined}
-            onMoveDown={index < milestones.length - 1 ? () => void move(index, 1) : undefined}
+            onRename={(name) => void edit(m.id, { name })}
+            onDescribe={(description) => void edit(m.id, { description })}
           />
         ))}
-        {/* The bucket, and the reason it is here rather than only in the filter
-            menu: "what has nobody scoped yet" is the question this list is for,
-            and it is the one row a per-milestone index cannot otherwise offer.
-            Hidden until there is a milestone, because with none it would just be
-            a link to every issue in the project. */}
-        {!empty && milestones !== null && (
-          <li>
-            <button
-              type="button"
-              onClick={() => onOpen("")}
-              className="text-mute hover:bg-hover hover:text-fg flex h-ctl-lg w-full items-center gap-2 rounded-control px-1 text-left text-xs outline-none focus-visible:ring-1 focus-visible:ring-accent/50"
-            >
-              <MilestoneIcon progress="none" />
-              <span className="min-w-0 flex-1 truncate">No milestone</span>
-            </button>
-          </li>
-        )}
       </ol>
-
-      {!readOnly && composing && (
-        <div className="border-line mt-1 flex flex-col gap-1.5 border-t pt-2">
-          <Input
-            autoFocus
-            size="sm"
-            value={draft}
-            placeholder="Milestone name…"
-            onChange={(e) => setDraft(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && draft.trim()) void add();
-              if (e.key === "Escape") setComposing(false);
-            }}
-            aria-label="New milestone name"
-          />
-          <div className="flex items-center gap-1">
-            <DatePicker
-              tone="quiet"
-              value={target}
-              placeholder="Target"
-              ariaLabel="Milestone target date"
-              onChange={setTarget}
-            />
-            <Button
-              variant="primary"
-              size="sm"
-              className="ml-auto"
-              disabled={!draft.trim() || adding}
-              onClick={() => void add()}
-            >
-              Add
-            </Button>
-          </div>
-        </div>
-      )}
-    </RailCard>
+    </section>
   );
 }
 
 /**
- * One row of the milestone index.
+ * One milestone as a section of the project document.
  *
- * Reads as `◆ Beta · 50% of 4 · Sep 1`, which is the order you ask the questions
- * in: what stage, how far along, how many, by when. The glyph leads because it is
- * the only part you can read without reading — a column of diamonds tells you the
- * shape of the project before any of the words do.
+ * The heading carries the glyph, the name, and the progress — the same three
+ * facts the rail row carries, because they are the same milestone, but spelled
+ * for a document: `2 issues · 50%` rather than `50% of 2`, since prose has room
+ * for the noun and a rail does not.
  *
- * `50% of 4` rather than `2/4 · 50%`: the old row printed the same fact twice in
- * two alphabets, and in a rail this narrow the percentage is what you scan and
- * the count is the footnote.
+ * Collapsible and open by default. Nine stages with bodies is a long page, and
+ * the fold is what makes the list navigable once it is; hiding them by default
+ * would hide the writing this section exists to show.
  */
-function MilestoneRow({
+function MilestoneSection({
   milestone: m,
   readOnly,
-  onOpen,
-  onRemove,
-  onMoveUp,
-  onMoveDown,
+  onRename,
+  onDescribe,
 }: {
   milestone: MilestoneDto;
   readOnly: boolean;
-  onOpen: () => void;
-  onRemove: () => void;
-  /** Absent at the ends of the list — the verb is offered only where it works.
-   *  Explicitly `| undefined` because `exactOptionalPropertyTypes` is on: an
-   *  optional prop and a prop that may be passed as `undefined` are different
-   *  types here, and the caller computes these. */
-  onMoveUp?: (() => void) | undefined;
-  onMoveDown?: (() => void) | undefined;
+  onRename: (name: string) => void;
+  onDescribe: (description: string) => void;
 }) {
+  const [open, setOpen] = useState(true);
+  const bodyId = useId();
   const pct = milestonePercent(m);
+
   return (
-    // The hover surface is the whole row, menu included. It used to live on the
-    // name button, so the highlight stopped short of the `…` and the control you
-    // were reaching for sat outside the thing that had lit up to say it was
-    // reachable — the row looked like it ended where it did not.
-    <li className="group/ms hover:bg-hover flex h-ctl-lg items-center rounded-control">
-      <button
-        type="button"
-        onClick={onOpen}
-        aria-label={`Show issues in ${m.name}`}
-        className="text-dim group-hover/ms:text-fg flex h-full min-w-0 flex-1 items-center gap-2 rounded-control px-1 text-left text-xs outline-none focus-visible:ring-1 focus-visible:ring-accent/50"
-      >
+    <li className="border-line/70 border-b py-3 last:border-b-0">
+      <div className="group/sec flex items-center gap-2">
+        <button
+          type="button"
+          onClick={() => setOpen((was) => !was)}
+          aria-expanded={open}
+          aria-controls={bodyId}
+          aria-label={open ? `Collapse ${m.name}` : `Expand ${m.name}`}
+          className="text-mute hover:text-fg -ml-5 flex size-icon-md shrink-0 items-center justify-center rounded-control opacity-0 outline-none group-hover/sec:opacity-100 focus-visible:opacity-100 focus-visible:ring-1 focus-visible:ring-accent/50"
+        >
+          <ChevronRight className={cn("size-icon-sm transition-transform", open && "rotate-90")} />
+        </button>
         <MilestoneIcon progress={milestoneProgress(m)} />
-        <span className="min-w-0 flex-1 truncate">{m.name}</span>
-        <span className="text-mute shrink-0 tabular-nums">
-          {pct}% of {m.total}
+        <input
+          defaultValue={m.name}
+          readOnly={readOnly}
+          onBlur={(e) => {
+            const next = e.target.value.trim();
+            if (next && next !== m.name) onRename(next);
+            else e.target.value = m.name;
+          }}
+          // Keyed on the name so an edit from the rail, the CLI or a peer lands
+          // here: an uncontrolled input keeps its own value forever otherwise,
+          // and this heading would quietly disagree with the row above it.
+          key={m.name}
+          className="min-w-0 flex-1 bg-transparent text-base font-semibold tracking-tight outline-none"
+          aria-label={`Milestone name — ${m.name}`}
+        />
+        <span className="text-mute shrink-0 text-xs tabular-nums">
+          {m.total === 1 ? "1 issue" : `${m.total} issues`} · {pct}%
         </span>
-        {m.target_date != null && (
-          <span className="text-mute shrink-0 tabular-nums">{shortDate(m.target_date)}</span>
-        )}
-      </button>
-      {!readOnly && (
-        // A menu, not a bare `×`. Removal is the least reversible thing you can
-        // do to a milestone, and it had been sitting where a menu belongs — one
-        // hover away from a row you were only trying to click through.
-        //
-        // Always drawn, never hover-revealed. This rail is a console: a verb that
-        // only exists once you have found it is a verb you have to already know
-        // about, and the cost of showing it is one muted glyph per row.
-        <DropdownMenu.Root>
-          <DropdownMenu.Trigger asChild>
-            <IconButton
-              label={`Milestone actions for ${m.name}`}
-              className="text-mute hover:text-fg mr-0.5 shrink-0"
-            >
-              <MoreHorizontal className="size-icon-sm" />
-            </IconButton>
-          </DropdownMenu.Trigger>
-          <MenuContent align="end">
-            {onMoveUp && <MenuItem onSelect={onMoveUp}>Move up</MenuItem>}
-            {onMoveDown && <MenuItem onSelect={onMoveDown}>Move down</MenuItem>}
-            <MenuItem danger onSelect={onRemove}>
-              Remove milestone
-            </MenuItem>
-          </MenuContent>
-        </DropdownMenu.Root>
+      </div>
+      {open && (
+        <div id={bodyId} className="pl-6">
+          <Description
+            value={m.description ?? ""}
+            readOnly={readOnly}
+            placeholder="What is this stage — goal, scope, what lands."
+            className="py-1"
+            onSave={onDescribe}
+          />
+        </div>
       )}
     </li>
   );
-}
-
-/** `Sep 1` — the rail has no room for a full date and no need for the year on a
- *  target that is almost always months away, not years. */
-function shortDate(secs: number): string {
-  return new Date(secs * 1000).toLocaleDateString(undefined, {
-    month: "short",
-    day: "numeric",
-    timeZone: "UTC",
-  });
 }
 
 /**

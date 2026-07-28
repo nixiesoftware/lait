@@ -2,7 +2,14 @@ import { useEffect, useRef, useState } from "react";
 import * as Popover from "@radix-ui/react-popover";
 import { ArrowLeft, Check, ChevronRight, ListFilter, Milestone, Tag, UserRound } from "lucide-react";
 
-import { EMPTY_FILTER, isActive, type FilterState } from "../core/filter";
+import {
+  EMPTY_FILTER,
+  isActive,
+  selectedSlice,
+  sliceStatusIds,
+  STATUS_SLICES,
+  type FilterState,
+} from "../core/filter";
 import {
   PRIORITY_ORDER,
   type LabelDto,
@@ -94,6 +101,7 @@ export function FilterMenu({
   useEffect(() => setQuery(""), [facet]);
 
   const active = isActive(filter);
+  const slice = selectedSlice(filter, states);
   const label = labels.find((l) => l.name === filter.label);
   // `""` is the No-milestone bucket, so this reads the empty string as a real
   // selection with a name rather than as "nothing selected".
@@ -163,6 +171,29 @@ export function FilterMenu({
             </p>
 
             <div className="flex flex-col p-1">
+              {/* The coarse cut, first, because it is the one you make before
+                  any of the others — and the only reason the facets below need
+                  a Status row at all is the cut this cannot express. These write
+                  the same `filter.status` that row does. */}
+              {STATUS_SLICES.map((preset) => (
+                <Value
+                  key={preset.id}
+                  icon={
+                    <StatusIcon
+                      category={preset.categories?.[0] ?? "done"}
+                      color={
+                        preset.categories === null
+                          ? "var(--color-mute)"
+                          : "var(--color-dim)"
+                      }
+                    />
+                  }
+                  label={preset.label}
+                  selected={slice === preset.id}
+                  onClick={() => onChange({ ...filter, status: sliceStatusIds(preset, states) })}
+                />
+              ))}
+              <div className="border-line my-1 border-t" />
               <Row
                 icon={<UserRound className="size-icon-sm" />}
                 label="Mine"

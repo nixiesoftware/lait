@@ -72,10 +72,8 @@ describe("ProjectOverview", () => {
                   spaceId="local"
                   project={project}
                   members={[]}
-                  counts={{ backlog: 2, active: 0, done: 0, total: 2 }}
                   readOnly
                   onError={vi.fn()}
-                  onOpenMilestone={vi.fn()}
                 />
               </TooltipProvider>
             </StrictMode>
@@ -85,8 +83,12 @@ describe("ProjectOverview", () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
 
-    expect(host.textContent).toContain("Beta");
-    expect(host.textContent).toContain("0% of 2");
+    // The name is an editable heading now, so it lives in a value rather than
+    // in text: the rail's read-only row moved out to the project shell.
+    const heading = () =>
+      host?.querySelector<HTMLInputElement>('input[aria-label^="Milestone name"]')?.value;
+    expect(heading()).toBe("Beta");
+    expect(host.textContent).toContain("2 issues · 0%");
 
     milestones = [{ id: "mls_1", name: "Beta", total: 2, done: 1 }];
     await act(async () => {
@@ -99,7 +101,7 @@ describe("ProjectOverview", () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
 
-    expect(host.textContent).toContain("50% of 2");
+    expect(host.textContent).toContain("2 issues · 50%");
   });
 
   /** The milestone resource is keyed on the `prj_` id, so the request the page
@@ -130,10 +132,8 @@ describe("ProjectOverview", () => {
                 spaceId="local"
                 project={project}
                 members={[]}
-                counts={{ backlog: 0, active: 0, done: 0, total: 0 }}
                 readOnly
                 onError={vi.fn()}
-                onOpenMilestone={vi.fn()}
               />
             </TooltipProvider>
           </ProjectViewerStoreProvider>

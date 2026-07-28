@@ -157,6 +157,13 @@
   --spacing-mark-lg: 12px;
   --spacing-mark-xl: 16px;
 
+  /* The project console's width. PINNED, like the icons above and for the same
+     reason: the rail's rows pack a glyph, a name, a percentage, a count and a
+     date onto one line, and that budget is set by the words, not by the density
+     the rest of the layout is running at. Loosening the rhythm should give the
+     rows more air, not make the panel wider. */
+  --spacing-rail: 340px;
+
   /* The density factor. Distinct from `--spacing` on purpose: the unit is the
      rhythm's *quantum* and this is the system's *scale*. Splitting them is what
      lets a comfortable layout loosen rows without also inflating the glyphs and
@@ -710,12 +717,24 @@
   white-space: pre-wrap;
 }
 
-/* An empty document has nothing to click, so it needs a line to aim at. The
-   placeholder rides on the first paragraph rather than the root: ProseMirror
-   always keeps one, and attaching to the root leaves the text sitting above
-   the caret instead of behind it. */
-.milkdown .ProseMirror.is-empty > p:first-child::before,
-.milkdown .ProseMirror > p.is-empty:first-child::before {
+/* An empty document has nothing to click, so it needs a line to aim at.
+   This used to key off `.is-empty` and read `attr()` from the first paragraph,
+   and it had never once rendered: nothing sets that class — Milkdown's
+   placeholder plugin is not installed — and the attribute is on the ROOT, which
+   is where `editorViewOptionsCtx.attributes` puts everything. `attr()` only
+   reads the element it sits on, so a pseudo-element on the paragraph was asking
+   the paragraph for a value it never had.
+
+   Both halves are fixed here. The empty test is structural rather than a class
+   we do not control: one paragraph holding nothing but the trailing break
+   ProseMirror always keeps. And the pseudo-element moves to the root, where the
+   attribute is. The float with zero height is the same trick as before — it
+   takes no vertical room, so the caret still lands on the first line rather
+   than under the hint. */
+.milkdown
+  .ProseMirror[data-placeholder]:has(
+    > p:first-child:last-child > br.ProseMirror-trailingBreak:only-child
+  )::before {
   content: attr(data-placeholder);
   color: var(--color-mute);
   float: left;

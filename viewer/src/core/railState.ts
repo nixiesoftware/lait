@@ -27,3 +27,33 @@ export function saveRailCollapsed(card: string, collapsed: boolean): void {
     // A remembered fold is a convenience; the rail renders the same without it.
   }
 }
+
+const RAIL_OPEN = "lait.project-rail";
+
+/**
+ * Whether the project rail is showing at all.
+ *
+ * Separate from the per-card folds above, and global for the same reason: it is
+ * a statement about how you work, not about one project. The board is why it
+ * exists — a fixed 340px console is worth its width on a document and expensive
+ * on horizontally scrolling columns, so the width has to be reclaimable.
+ *
+ * Open by default: the rail is the point of the project shell, and a console
+ * nobody knows to turn on is a console nobody has.
+ */
+export function loadRailOpen(): boolean {
+  try {
+    return localStorage.getItem(RAIL_OPEN) !== "0";
+  } catch {
+    return true;
+  }
+}
+
+export function saveRailOpen(open: boolean): void {
+  try {
+    if (open) localStorage.removeItem(RAIL_OPEN);
+    else localStorage.setItem(RAIL_OPEN, "0");
+  } catch {
+    // A remembered panel is a convenience; the shell renders the same without it.
+  }
+}

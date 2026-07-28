@@ -3,6 +3,7 @@ import { Group, Panel, Separator, useDefaultLayout, usePanelRef } from "react-re
 import * as Dialog from "@radix-ui/react-dialog";
 import {
   PanelLeft,
+  PanelRight,
   Plus,
 } from "lucide-react";
 
@@ -17,9 +18,7 @@ import {
   type Ctx,
   isIssueMode,
   isProjectView,
-  navViewFor,
   type IssueMode,
-  PROJECT_VIEW_LABEL,
   type IssueField,
   type View,
 } from "./core/registry";
@@ -35,6 +34,7 @@ import {
 import { useKeys } from "./core/useKeys";
 import { neighbourState, workTarget } from "./core/workflow";
 import { loadFavoriteProjects, toggleFavoriteProject } from "./core/personalNav";
+import { loadRailOpen, saveRailOpen } from "./core/railState";
 import { loadSavedViews, type SavedView } from "./core/savedViews";
 import { Activity } from "./ui/Activity";
 import { classifyFailure, EmptyState, InlineError, recoveryForError, TrustPopover } from "./ui/AppState";
@@ -49,6 +49,8 @@ import { Inbox } from "./ui/Inbox";
 import { IssueSearch, rememberIssue } from "./ui/IssueSearch";
 import { Projects } from "./ui/Projects";
 import { ProjectOverview } from "./ui/ProjectOverview";
+import { ProjectRail } from "./ui/ProjectRail";
+import { ProjectTabs } from "./ui/ProjectTabs";
 import {
   Breadcrumbs,
   DESTINATION_ICON,
@@ -98,7 +100,6 @@ import {
   type SpaceRow,
   type StatusInfo,
   type WorkflowState,
-  type StatusCategory,
 } from "./types";
 import "./commands";
 
@@ -150,6 +151,8 @@ export function App() {
   const [composingProject, setComposingProject] = useState(false);
   const [filter, setFilter] = useState<FilterState>(initialRoute.filter ?? EMPTY_FILTER);
   const [filterOpen, setFilterOpen] = useState(false);
+  // The console's own visibility, remembered across sessions. See core/railState.
+  const [railOpen, setRailOpen] = useState(loadRailOpen);
   const [focusToken, setFocusToken] = useState(0);
   /** Group / order / show-deleted. Loaded once; every change is persisted. */
   const initialDisplayScope = `${initialRoute.spaceId ?? "none"}/${initialRoute.project ?? "all"}/${initialRoute.view}`;
@@ -1270,26 +1273,23 @@ export function App() {
     : null;
 
   /**
-   * The face of the project you are on, as a crumb.
+   * The face of the project is the STRIP's to name, not the trail's — and this
+   * has now gone both ways, so the reason matters more than the answer.
    *
-   * It used to be a tab strip under the header, which the trail then had to stay
-   * silent about to avoid saying "Issues" twice — so the address bar named a
-   * project and the screen named a view, and neither said both. The sidebar's
-   * project tree now carries the five faces, so the strip was a second switcher
-   * for a choice already made one pane to the left, and the trail is free to
-   * finish the sentence it starts.
+   * The trail took the view when the strip was removed, on the grounds that the
+   * sidebar's project tree already switched faces and a strip was a second
+   * switcher for a settled choice. That was true of a project you *visit*. It is
+   * not true of a project you are *inside*: the rail persists across the faces
+   * now, a milestone click narrows the issue list without leaving the shell, and
+   * the sidebar has no way to say "this project, Issues, scoped to M1". The
+   * strip does, so the strip has it back and the trail stops at the project.
    *
-   * Overview is the project's home rather than one of its faces, so it adds no
-   * crumb: `Viewer` already means it.
+   * An open issue is still a crumb — it is a different document, not a face.
    */
   /** The layout showing, when one is — `null` on Overview, Activity and the
    *  workspace destinations. Narrowed once so every gate below reads the same. */
   const issueMode = isIssueMode(view) ? view : null;
-  // Board and Calendar are layouts of Issues, so the trail names Issues for all
-  // three: the crumb is the destination, the switcher is the drawing.
-  const viewCrumb =
-    projectShell && isProjectView(view) && view !== "overview" ? navViewFor(view) : null;
-  const belowProject = Boolean(viewCrumb || openRow);
+  const belowProject = Boolean(openRow);
 
   const trail: BreadcrumbItem[] = projectShell
     ? [
@@ -1366,25 +1366,6 @@ export function App() {
         },
       ];
 
-  if (viewCrumb) {
-    trail.push({
-      key: `view-${viewCrumb}`,
-      // No glyph: the leading slot belongs to things with a mark of their own —
-      // a project has a colour, a destination has an icon, a view is a word.
-      content: <span className="truncate">{PROJECT_VIEW_LABEL[viewCrumb]}</span>,
-      // Ancestors may drop on a narrow bar, and between the project and the
-      // issue this is the hop you can most afford to lose.
-      optional: true,
-      ...(openRow
-        ? {
-            onNavigate: () => {
-              api.select(null);
-              setDetail(false);
-            },
-          }
-        : {}),
-    });
-  }
 
   if (openRow) {
     trail.push({
@@ -1481,7 +1462,6 @@ export function App() {
           savedViews={sidebarSavedViews}
           onPickSpace={api.pickSpace}
           onSearch={() => run("search.issues")}
-          issueLayout={issueLayout}
           onOpenProjectView={(key, next) => api.goto(next, key)}
           onGo={api.goto}
           onMyIssues={openMyIssues}
@@ -1568,9 +1548,19 @@ export function App() {
           {/* The only band under the header. Filtering used to add a second one
               beneath it for as long as the filter was engaged; it is a panel
               now, so the chrome no longer changes height when you narrow. */}
-          {projectShell && !fullWidthDetail && issueMode && (
+          {projectShell && !fullWidthDetail && (
             <Toolbar>
-              <StatusSlices states={states} filter={filter} onChange={setFilter} />
+              {/* The strip alone, then the tools at the tail. The status slices
+                  used to sit here and no longer do: they are a filter, and six
+                  identical pills on one bar answered two different questions —
+                  which FACE of the project, and which ROWS that face draws. */}
+              <ProjectTabs
+                view={isProjectView(view) ? view : "list"}
+                // Re-entering Issues keeps the layout you were last drawing them
+                // in rather than snapping back to the list — the tree used to
+                // carry this rule and the strip inherits it.
+                onPick={(next) => api.goto(next === "list" ? issueLayout : next)}
+              />
               {/* The controls belong beside the slices they act on, not up in the
                   trail: filtering, display and "new issue" are all about THIS
                   list, while the bar above names where you are. One row, the
@@ -1627,6 +1617,23 @@ export function App() {
                   <Plus className="size-icon-sm" />
                 </IconButton>
               )}
+              {/* Last in the band, because it acts on the band's neighbour
+                  rather than on the rows: everything to its left changes what
+                  the list shows, this changes whether the console is beside it. */}
+              {projectShell && (
+                <IconButton
+                  label={railOpen ? "Hide project panel" : "Show project panel"}
+                  variant={railOpen ? "active" : "outline"}
+                  onClick={() =>
+                    setRailOpen((was) => {
+                      saveRailOpen(!was);
+                      return !was;
+                    })
+                  }
+                >
+                  <PanelRight className="size-icon-sm" />
+                </IconButton>
+              )}
               </span>
             </Toolbar>
           )}
@@ -1652,14 +1659,18 @@ export function App() {
         )}
 
 
-        {/* No `tabpanel` role any more: with the strip gone there is no tablist
-            for it to belong to, and a panel labelled by a tab that does not
-            exist is a dangling `aria-labelledby`, not an affordance. The trail
-            names this surface now. */}
+        {/* The project shell: whatever face you are on, beside the console.
+
+            The rail is here rather than inside any one view because it has to
+            survive the hop between them — clicking a milestone narrows the issue
+            list, and a panel that vanished on the way would take the only way to
+            clear the filter with it. Non-project surfaces render the content
+            column alone and the row collapses to it. */}
+        <div className={`flex min-h-0 flex-1${fullWidthDetail ? " hidden" : ""}`}>
         <div
           // Hidden rather than unmounted behind a full-width issue: coming back
           // should land you where you were in the list, not at the top of it.
-          className={`group/list flex min-h-0 flex-1 flex-col${fullWidthDetail ? " hidden" : ""}`}
+          className="group/list flex min-w-0 min-h-0 flex-1 flex-col"
         >
           {!current ? (
             <EmptyState
@@ -1733,10 +1744,8 @@ export function App() {
               spaceId={current}
               project={activeProject}
               members={members}
-              counts={projectCounts}
               readOnly={readOnly}
               onError={setError}
-              onOpenMilestone={(id) => api.gotoMilestone(activeProject.key, id)}
             />
           ) : view === "activity" && board ? (
             <Activity
@@ -1848,6 +1857,21 @@ export function App() {
             />
           )}
         </div>
+        {projectShell && railOpen && activeProject && current && (
+          <aside className="border-line w-rail shrink-0 overflow-y-auto border-l p-3">
+            <ProjectRail
+              spaceId={current}
+              project={activeProject}
+              members={members}
+              counts={projectCounts}
+              readOnly={readOnly}
+              activeMilestone={filter.milestone}
+              onError={setError}
+              onOpenMilestone={(id: string | null) => api.gotoMilestone(activeProject.key, id)}
+            />
+          </aside>
+        )}
+        </div>
       </Panel>
 
       {/* The third panel and its handle are held open as declarations only: the
@@ -1920,7 +1944,6 @@ export function App() {
                 run("search.issues");
                 setMobileNav(false);
               }}
-              issueLayout={issueLayout}
               onOpenProjectView={(key, next) => {
                 api.goto(next, key);
                 setMobileNav(false);
@@ -2109,73 +2132,6 @@ contribute({
     },
   ],
 });
-
-
-/**
- * The three slices of a workflow anyone actually asks for.
- *
- * Status filtering already existed, but only inside the filter bar — so the
- * commonest question a tracker is asked ("what is live right now?") cost opening
- * a panel and ticking states one at a time, and the answer left no mark you
- * could see at a glance. These are not a new filter: each button writes the same
- * `filter.status` the bar writes, so the two can never disagree, and a selection
- * made in the bar simply lights up whichever slice it happens to equal.
- *
- * It sits in the band the issue count used to occupy, so the chrome above the
- * first row is no taller than it was.
- */
-const STATUS_SLICES = [
-  { id: "active", label: "Active", categories: ["active"] as StatusCategory[] },
-  { id: "backlog", label: "Backlog", categories: ["backlog"] as StatusCategory[] },
-  { id: "all", label: "All issues", categories: null },
-] as const;
-
-function StatusSlices({
-  states,
-  filter,
-  onChange,
-}: {
-  states: WorkflowState[];
-  filter: FilterState;
-  onChange: (next: FilterState) => void;
-}) {
-  const idsFor = (categories: readonly StatusCategory[] | null) =>
-    categories === null
-      ? []
-      : states.filter((state) => categories.includes(state.category)).map((state) => state.id);
-  const sameSet = (a: readonly string[], b: readonly string[]) =>
-    a.length === b.length && a.every((id) => b.includes(id));
-  // A workflow with no `active` states would make that slice's id set empty and
-  // indistinguishable from "All issues", so an empty slice never claims the
-  // selection — "All" is the only one allowed to mean nothing selected.
-  const selected =
-    STATUS_SLICES.find((slice) => {
-      const ids = idsFor(slice.categories);
-      return slice.categories === null ? filter.status.length === 0 : ids.length > 0 && sameSet(filter.status, ids);
-    })?.id ?? null;
-
-  return (
-    <div className="flex shrink-0 items-center gap-1" role="group" aria-label="Status">
-      {STATUS_SLICES.map((slice) => {
-        const active = slice.id === selected;
-        return (
-          <Button
-            key={slice.id}
-            // The toolbar's controls share one rung: these sit beside 28px icon
-            // circles, and a 24px pill next to them reads as a different class
-            // of control rather than the same bar.
-            size="md"
-            variant={active ? "active" : "outline"}
-            aria-pressed={active}
-            onClick={() => onChange({ ...filter, status: idsFor(slice.categories) })}
-          >
-            {slice.label}
-          </Button>
-        );
-      })}
-    </div>
-  );
-}
 
 
 function workspaceTitle(view: View): string {
