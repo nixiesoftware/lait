@@ -1,15 +1,46 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { CheckSquare, ChevronRight, Copy, ExternalLink, Plus, Trash2, UserRound } from "lucide-react";
+import {
+  CalendarPlus,
+  Check,
+  CheckSquare,
+  ChevronRight,
+  Copy,
+  ExternalLink,
+  Plus,
+  SignalHigh,
+  Tag,
+  Trash2,
+  UserRound,
+} from "lucide-react";
 
 import type { RowGroup } from "../core/display";
 import { indexBy } from "../core/performance";
 import type { LabelDto, MemberDto, Row, WorkflowState } from "../types";
-import { Avatar, AvatarStack, memberName, stackFor } from "./Avatar";
+import { PRIORITY_ORDER } from "../types";
+import { Avatar, memberName } from "./Avatar";
 import { ApplicationState } from "./AppState";
 import { catalogColor } from "./colors";
+import {
+  AssigneeChip,
+  DueChip,
+  fromRowControl,
+  LabelsChip,
+  PriorityChip,
+  StatusChip,
+  type IssueMutators,
+} from "./fields";
 import { PriorityIcon, StatusIcon } from "./icons";
-import { ContextMenu, ContextMenuContent, ContextMenuItem, GroupHeader } from "./layout";
-import { Button, Checkbox, IconButton, interactiveRow, LabelChips, LabelDots } from "./primitives";
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+  ContextMenuSub,
+  ContextMenuSubContent,
+  ContextMenuSubTrigger,
+  GroupHeader,
+} from "./layout";
+import { Button, Checkbox, IconButton, interactiveRow } from "./primitives";
 import { dueLabel, dueTone } from "./time";
 
 /**
@@ -41,6 +72,7 @@ export function IssueList({
   onToggleCheck,
   onOpen,
   onCreate,
+  mutators,
   readOnly,
   filtered,
 }: {
@@ -65,6 +97,8 @@ export function IssueList({
   onToggleCheck: (reff: string) => void;
   onOpen: (reff: string) => void;
   onCreate: (status: string) => void;
+  /** In-place field writes — every chip and context submenu resolves here. */
+  mutators: IssueMutators;
   readOnly: boolean;
   filtered: boolean;
 }) {
@@ -137,6 +171,7 @@ export function IssueList({
             group={group}
             rows={visible(group)}
             anyDue={anyDue}
+            states={states}
             stateById={stateById}
             members={members}
             labels={labels}
@@ -147,6 +182,7 @@ export function IssueList({
             onToggleCheck={checkRow}
             onOpen={onOpen}
             onCreate={onCreate}
+            mutators={mutators}
             readOnly={readOnly}
           />
         ))}
@@ -165,8 +201,9 @@ export function IssueList({
                   row={row}
                   anyDue={anyDue}
                   state={stateById.get(row.status)}
+                  states={states}
                   members={members}
-            labels={labels}
+                  labels={labels}
                   selected={row.reff === selection}
                   checked={checked.has(row.reff)}
                   anyChecked={checked.size > 0}
@@ -174,6 +211,7 @@ export function IssueList({
                   onSelect={onSelect}
                   onToggleCheck={checkRow}
                   onOpen={onOpen}
+                  mutators={mutators}
                   readOnly={readOnly}
                 />
               ))}
@@ -215,6 +253,7 @@ function Group({
   group,
   rows,
   anyDue,
+  states,
   stateById,
   members,
   labels,
@@ -225,12 +264,14 @@ function Group({
   onToggleCheck,
   onOpen,
   onCreate,
+  mutators,
   readOnly,
 }: {
   group: RowGroup;
   rows: Row[];
   /** Whether this view reserves the due-date column — see the list's note. */
   anyDue: boolean;
+  states: WorkflowState[];
   stateById: ReadonlyMap<string, WorkflowState>;
   members: MemberDto[];
   labels: LabelDto[];
@@ -241,6 +282,7 @@ function Group({
   onToggleCheck: (reff: string, range: boolean) => void;
   onOpen: (reff: string) => void;
   onCreate: (status: string) => void;
+  mutators: IssueMutators;
   readOnly: boolean;
 }) {
   const [collapsed, setCollapsed] = useState(false);
@@ -300,6 +342,7 @@ function Group({
             row={row}
             anyDue={anyDue}
             state={stateById.get(row.status)}
+            states={states}
             members={members}
             labels={labels}
             selected={row.reff === selection}
@@ -309,6 +352,7 @@ function Group({
             onSelect={onSelect}
             onToggleCheck={onToggleCheck}
             onOpen={onOpen}
+            mutators={mutators}
             readOnly={readOnly}
           />
         ))}
@@ -321,6 +365,7 @@ function IssueRow({
   row,
   anyDue,
   state,
+  states,
   members,
   labels,
   selected,
@@ -330,12 +375,14 @@ function IssueRow({
   onSelect,
   onToggleCheck,
   onOpen,
+  mutators,
   readOnly,
 }: {
   row: Row;
   /** Whether this view reserves the due-date column. */
   anyDue: boolean;
   state: WorkflowState | undefined;
+  states: WorkflowState[];
   members: MemberDto[];
   labels: LabelDto[];
   selected: boolean;
@@ -346,9 +393,13 @@ function IssueRow({
   onSelect: (reff: string) => void;
   onToggleCheck: (reff: string, range: boolean) => void;
   onOpen: (reff: string) => void;
+  mutators: IssueMutators;
   readOnly: boolean;
 }) {
   const el = useRef<HTMLLIElement>(null);
+  // The same lock the detail rail applies: a read-only space cannot write, and
+  // a provisional or deleted row is not yet (or no longer) a thing to edit.
+  const locked = readOnly || row.provisional || row.tombstone;
 
   // Selection moves by keyboard, so it must drag the viewport with it — a
   // selected row below the fold is indistinguishable from a dropped keypress.
@@ -400,6 +451,11 @@ function IssueRow({
         row.tombstone && "opacity-60",
       ])}
       onClick={(event) => {
+        // A click that began on a chip or the checkbox is that control's, not
+        // the row's. Guarded here rather than stopped there — an intercepted
+        // click makes Radix cancel another popover's outside-dismissal, so
+        // nothing in a row is allowed to swallow one (see `fromRowControl`).
+        if (fromRowControl(event)) return;
         event.currentTarget.focus({ preventScroll: true });
         onSelect(row.reff);
         onOpen(row.reff);
@@ -418,13 +474,12 @@ function IssueRow({
       {/* This 16px column is shared with the group chevron above it. Keeping the
           selection affordance in that column lets priority/status/title retain
           exactly the same geometry when the checkbox appears. */}
-      <span className="flex size-icon-md shrink-0 items-center justify-center">
+      <span data-row-control="" className="flex size-icon-md shrink-0 items-center justify-center">
         {!readOnly && (
           <Checkbox
             checked={checked}
             onCheckedChange={() => onToggleCheck(row.reff, false)}
             onClick={(event) => {
-              event.stopPropagation();
               if ((event.nativeEvent as MouseEvent).shiftKey) {
                 event.preventDefault();
                 onToggleCheck(row.reff, true);
@@ -438,7 +493,11 @@ function IssueRow({
           />
         )}
       </span>
-      <PriorityIcon priority={row.priority} />
+      <PriorityChip
+        priority={row.priority}
+        disabled={locked}
+        onPick={(p) => mutators.setPriority(row.reff, p)}
+      />
       {/* One column for every key in the view, sized by the list to its longest
           key (`--key-col`, in ch — exact in this mono font). Content-width was
           tried and misaligns: rows share a key *prefix* but not a digit count,
@@ -449,7 +508,13 @@ function IssueRow({
       <span className="text-mute shrink-0 font-mono text-xs tabular-nums min-w-[var(--key-col)]">
         {row.key_alias ?? row.reff}
       </span>
-      {state && <StatusIcon category={state.category} color={catalogColor(state.color)} />}
+      <StatusChip
+        status={row.status}
+        state={state}
+        states={states}
+        disabled={locked}
+        onPick={(id) => mutators.setStatus(row.reff, id)}
+      />
       <span
         className={clsxish(["min-w-0 flex-1 truncate font-medium", row.tombstone && "text-mute line-through"])}
       >
@@ -465,17 +530,23 @@ function IssueRow({
           beside a title at all, so the set collapses to Linear's dots-pill —
           the same labels as colour plus a count, instead of pills crushing the
           title or vanishing entirely. */}
-      <LabelChips
+      <LabelsChip
         names={row.label_names ?? []}
-        colorOf={(name) => labels.find((l) => l.name === name)?.color ?? "gray"}
+        labels={labels}
+        disabled={locked}
+        onToggle={(name, add) => mutators.toggleLabel(row.reff, name, add)}
+        onSwap={(from, to) => mutators.swapLabel(row.reff, from, to)}
         max={2}
         showOverflow={false}
-        size="sm"
         className="hidden shrink-0 flex-nowrap @min-[40rem]:flex"
       />
-      <LabelDots
+      <LabelsChip
         names={row.label_names ?? []}
-        colorOf={(name) => labels.find((l) => l.name === name)?.color ?? "gray"}
+        labels={labels}
+        disabled={locked}
+        onToggle={(name, add) => mutators.toggleLabel(row.reff, name, add)}
+        onSwap={(from, to) => mutators.swapLabel(row.reff, from, to)}
+        dots
         className="@min-[40rem]:hidden"
       />
       {/* Unconfirmed: shown as truth because that is what makes a write feel
@@ -496,19 +567,13 @@ function IssueRow({
           content-width, right edges flush: a wider stack grows leftward into
           the labels' slack, exactly as Linear's does — a fixed 56px column put
           36px of dead air between the labels and every single face. */}
-      <span className="flex shrink-0 items-center justify-end">
-        {row.assignees.length > 0 ? (
-          <AvatarStack members={stackFor(row.assignees, members)} />
-        ) : (
-          <span
-            className="border-line-strong text-mute flex size-avatar-md items-center justify-center rounded-full border border-dashed"
-            title="Unassigned"
-            aria-label="Unassigned"
-          >
-            <UserRound className="size-icon-xs opacity-60" />
-          </span>
-        )}
-      </span>
+      <AssigneeChip
+        assignees={row.assignees}
+        members={members}
+        disabled={locked}
+        onToggle={(key, add) => mutators.toggleAssignee(row.reff, key, add)}
+        className="justify-end"
+      />
       {/* Last, against the row's trailing edge. A date is the one field you
           scan down a column rather than read across a row, so it wants a
           straight right edge of its own — putting it before the faces gave it a
@@ -516,21 +581,34 @@ function IssueRow({
           column exists per view (`anyDue`): every row reserves it when any row
           needs it, and no row pays 44px of empty edge when none does. */}
       {anyDue && (
-        <span
-          className={clsxish([
-            // A fixed, right-aligned column: `Aug 14` and `Sep 3` are different
-            // widths, and a date you read down a list has to start and end in
-            // the same place on every row or the column stops being one.
-            "w-11 shrink-0 text-right text-2xs tabular-nums",
-            row.due_date != null &&
-              { overdue: "text-danger", soon: "text-warn", later: "text-mute" }[
-                dueTone(row.due_date)
-              ],
-          ])}
-          title={row.due_date != null ? "Due date" : undefined}
-        >
-          {row.due_date != null && dueLabel(row.due_date)}
-        </span>
+        <DueChip
+          due={row.due_date}
+          disabled={locked}
+          onChange={(next) => mutators.setDue(row.reff, next)}
+          face={
+            <span
+              className={clsxish([
+                // A fixed, right-aligned column: `Aug 14` and `Sep 3` are different
+                // widths, and a date you read down a list has to start and end in
+                // the same place on every row or the column stops being one.
+                "flex w-11 shrink-0 items-center justify-end text-right text-2xs tabular-nums",
+                row.due_date != null &&
+                  { overdue: "text-danger", soon: "text-warn", later: "text-mute" }[
+                    dueTone(row.due_date)
+                  ],
+              ])}
+              title={row.due_date != null ? "Due date" : undefined}
+            >
+              {row.due_date != null ? (
+                dueLabel(row.due_date)
+              ) : !locked ? (
+                // The reserved-but-empty cell is a target, said quietly: the
+                // glyph surfaces with the row's other hover affordances.
+                <CalendarPlus className="text-mute size-icon-xs opacity-0 transition-opacity group-hover/row:opacity-60" />
+              ) : null}
+            </span>
+          }
+        />
       )}
 
     </li>
@@ -552,6 +630,107 @@ function IssueRow({
             <Copy className="size-icon-sm" />
             Copy link
           </ContextMenuItem>
+          {/* The properties, as fly-outs — Linear's context menu, and the
+              keyboard-free route to the same writes the chips make. Each row
+              marks the current value; picking it again is a no-op, not a
+              toggle, matching the chips' pickers. */}
+          {!locked && (
+            <>
+              <ContextMenuSeparator />
+              <ContextMenuSub>
+                <ContextMenuSubTrigger>
+                  <SignalHigh className="size-icon-sm" />
+                  Status
+                </ContextMenuSubTrigger>
+                <ContextMenuSubContent>
+                  {states.map((s) => (
+                    <ContextMenuItem
+                      key={s.id}
+                      onSelect={() => {
+                        if (s.id !== row.status) mutators.setStatus(row.reff, s.id);
+                      }}
+                    >
+                      <StatusIcon category={s.category} color={catalogColor(s.color)} />
+                      <span className="flex-1">{s.name}</span>
+                      {s.id === row.status && <Check className="size-icon-xs" />}
+                    </ContextMenuItem>
+                  ))}
+                </ContextMenuSubContent>
+              </ContextMenuSub>
+              <ContextMenuSub>
+                <ContextMenuSubTrigger>
+                  <UserRound className="size-icon-sm" />
+                  Assignee
+                </ContextMenuSubTrigger>
+                <ContextMenuSubContent>
+                  {members.length === 0 && (
+                    <ContextMenuItem disabled>No members yet</ContextMenuItem>
+                  )}
+                  {members.map((m) => (
+                    <ContextMenuItem
+                      key={m.key}
+                      onSelect={() =>
+                        mutators.toggleAssignee(row.reff, m.key, !row.assignees.includes(m.key))
+                      }
+                    >
+                      <Avatar deviceKey={m.key} alias={m.alias} me={m.me} size="sm" />
+                      <span className="flex-1 truncate">{memberName(m.key, m)}</span>
+                      {row.assignees.includes(m.key) && <Check className="size-icon-xs" />}
+                    </ContextMenuItem>
+                  ))}
+                </ContextMenuSubContent>
+              </ContextMenuSub>
+              <ContextMenuSub>
+                <ContextMenuSubTrigger>
+                  <PriorityIcon priority={row.priority} />
+                  Priority
+                </ContextMenuSubTrigger>
+                <ContextMenuSubContent>
+                  {[...PRIORITY_ORDER].reverse().map((p) => (
+                    <ContextMenuItem
+                      key={p}
+                      className="capitalize"
+                      onSelect={() => {
+                        if (p !== row.priority) mutators.setPriority(row.reff, p);
+                      }}
+                    >
+                      <PriorityIcon priority={p} />
+                      <span className="flex-1">{p === "none" ? "No priority" : p}</span>
+                      {p === row.priority && <Check className="size-icon-xs" />}
+                    </ContextMenuItem>
+                  ))}
+                </ContextMenuSubContent>
+              </ContextMenuSub>
+              <ContextMenuSub>
+                <ContextMenuSubTrigger>
+                  <Tag className="size-icon-sm" />
+                  Labels
+                </ContextMenuSubTrigger>
+                <ContextMenuSubContent>
+                  {labels.length === 0 && (
+                    <ContextMenuItem disabled>No labels yet</ContextMenuItem>
+                  )}
+                  {labels.map((l) => {
+                    const on = (row.label_names ?? []).includes(l.name);
+                    return (
+                      <ContextMenuItem
+                        key={l.id}
+                        onSelect={() => mutators.toggleLabel(row.reff, l.name, !on)}
+                      >
+                        <span
+                          className="size-mark-sm shrink-0 rounded-full"
+                          style={{ background: catalogColor(l.color) }}
+                        />
+                        <span className="flex-1 truncate capitalize">{l.name}</span>
+                        {on && <Check className="size-icon-xs" />}
+                      </ContextMenuItem>
+                    );
+                  })}
+                </ContextMenuSubContent>
+              </ContextMenuSub>
+              <ContextMenuSeparator />
+            </>
+          )}
           {!readOnly && (
             <ContextMenuItem onSelect={() => onToggleCheck(row.reff, false)}>
               <CheckSquare className="size-icon-sm" />

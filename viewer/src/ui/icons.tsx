@@ -11,16 +11,35 @@ import type { Priority, StatusCategory } from "../types";
  */
 
 /** Priority as ascending bars, dimmed when unset. Linear's grammar, and it reads
- *  at a glance in a way a word never does at this density. */
-export function PriorityIcon({ priority, className = "" }: { priority: Priority; className?: string }) {
+ *  at a glance in a way a word never does at this density.
+ *
+ *  `size="sm"` is the pill-row measure: a card's property pills draw their
+ *  glyphs at 12px, and the urgent badge at its full 16px sat among them like a
+ *  thumb — so it steps down with everything else, and goes fully round: at
+ *  12px the mark radius reads as a squashed square, and a circle is the shape
+ *  the other small glyphs already are. */
+export function PriorityIcon({
+  priority,
+  size = "md",
+  className = "",
+}: {
+  priority: Priority;
+  size?: "md" | "sm";
+  className?: string;
+}) {
+  const box = size === "sm" ? "size-icon-xs" : "size-icon-md";
   if (priority === "urgent") {
     return (
       <span
-        className={`inline-flex size-icon-md shrink-0 items-center justify-center rounded-mark bg-urgent ${className}`}
+        className={`inline-flex ${box} shrink-0 items-center justify-center ${size === "sm" ? "rounded-full" : "rounded-mark"} bg-urgent ${className}`}
         role="img"
         aria-label="Urgent priority"
       >
-        <svg viewBox="0 0 16 16" className="size-icon-xs fill-white" aria-hidden="true">
+        <svg
+          viewBox="0 0 16 16"
+          className={`${size === "sm" ? "size-[8px]" : "size-icon-xs"} fill-white`}
+          aria-hidden="true"
+        >
           <rect x="7" y="3.5" width="2" height="6" rx="1" />
           <rect x="7" y="11" width="2" height="2" rx="1" />
         </svg>
@@ -33,7 +52,7 @@ export function PriorityIcon({ priority, className = "" }: { priority: Priority;
   return (
     <svg
       viewBox="0 0 16 16"
-      className={`size-icon-md shrink-0 ${className}`}
+      className={`${box} shrink-0 ${className}`}
       role="img"
       aria-label={label}
     >
@@ -109,6 +128,51 @@ export function StatusIcon({
             strokeLinejoin="round"
           />
         </>
+      )}
+    </svg>
+  );
+}
+
+/**
+ * Sub-issue progress as a filling ring — Linear's mark, and the same grammar as
+ * the status icon above: a circle whose fill *is* the number. A checklist glyph
+ * next to "2/7" said the same thing twice in different alphabets; the ring lets
+ * the fraction be read as shape before it is read as digits. Strokes in
+ * `currentColor`, so the chip it sits in decides the voice — dim while under
+ * way, `ok` when the ring closes.
+ */
+export function ProgressRing({
+  done,
+  total,
+  className = "",
+}: {
+  done: number;
+  total: number;
+  className?: string;
+}) {
+  const r = 5.5;
+  const circumference = 2 * Math.PI * r;
+  const arc = circumference * (total > 0 ? Math.min(1, done / total) : 0);
+  return (
+    <svg
+      viewBox="0 0 14 14"
+      // Rotated so the fill grows from 12 o'clock, the way every dial is read.
+      className={`size-icon-xs shrink-0 -rotate-90 ${className}`}
+      role="img"
+      aria-label={`${done} of ${total} sub-issues done`}
+    >
+      <circle cx="7" cy="7" r={r} fill="none" stroke="currentColor" strokeWidth="1.5" opacity="0.3" />
+      {arc > 0 && (
+        <circle
+          cx="7"
+          cy="7"
+          r={r}
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.5"
+          strokeLinecap="round"
+          strokeDasharray={`${arc} ${circumference}`}
+        />
       )}
     </svg>
   );

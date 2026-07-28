@@ -453,8 +453,10 @@ export const crumbGlyph = "flex size-icon-md shrink-0 items-center justify-cente
 export const controlTrigger = cva(
   // No radius in the base: a corner is part of a tone's identity, not a default
   // it inherits. Keeping it here meant a tone that wanted a different shape
-  // emitted both classes and left the winner to CSS source order.
-  "inline-flex items-center gap-1.5 text-sm outline-none transition-colors disabled:pointer-events-none disabled:opacity-45 data-[state=open]:bg-active",
+  // emitted both classes and left the winner to CSS source order. The open-state
+  // fill moved out for the same reason: `bare`'s whole identity is "no box", and
+  // a base that painted one behind every open trigger overruled it.
+  "inline-flex items-center gap-1.5 text-sm outline-none transition-colors disabled:pointer-events-none disabled:opacity-45",
   {
     variants: {
       /** How tall. Declared before `tone` only for readability; `cn` resolves
@@ -473,21 +475,22 @@ export const controlTrigger = cva(
          *  and the breadcrumb switcher. Fully rounded: a hover fill is the only
          *  shape it has, so a pill reads as deliberate where a rounded box reads
          *  as something that appeared under the pointer. */
-        quiet: "hover:bg-hover -mx-1 min-w-0 rounded-full px-1.5 text-left",
+        quiet:
+          "hover:bg-hover data-[state=open]:bg-active -mx-1 min-w-0 rounded-full px-1.5 text-left",
         /** A standing control with a border. Stays a box — a border makes the
          *  shape explicit rather than only appearing on hover, and a pilled
          *  border starts reading as a tag rather than a control. */
         outline:
-          "border-line bg-bg hover:border-line-strong hover:bg-hover rounded-control border px-2",
+          "border-line bg-bg hover:border-line-strong hover:bg-hover data-[state=open]:bg-active rounded-control border px-2",
         /** Inside a floating bar. It lifts on hover: the bar is the one surface
          *  that is over the work rather than part of it, so its controls answer
          *  the pointer with elevation instead of only a fill. */
-        pill: "bg-active/60 text-dim hover:bg-hover hover:text-fg rounded-full px-2.5",
-        /** No box at all — the child already is one. Wrapping a label chip in a
-         *  second shape would put a rectangle around a pill, so hover dims
-         *  rather than fills and nothing shifts when it opens. Pair with
-         *  `size="none"`: the chip carries its own height. */
-        bare: "min-w-0 rounded-full transition-opacity hover:opacity-75 data-[state=open]:opacity-75",
+        pill: "bg-active/60 text-dim hover:bg-hover hover:text-fg data-[state=open]:bg-active rounded-full px-2.5",
+        /** No box at all — the child already is one, and no state may paint one
+         *  either: a glyph on a row answers the pointer and the open menu by
+         *  getting *lighter*, never by growing a fill or dimming away. Pair
+         *  with `size="none"`: the chip carries its own height. */
+        bare: "min-w-0 rounded-full transition-[filter] hover:brightness-125 data-[state=open]:brightness-125",
       },
     },
     defaultVariants: { tone: "outline", size: "md" },

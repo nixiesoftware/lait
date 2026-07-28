@@ -586,11 +586,11 @@ export function IssueDetail({
                 keywords: [m.key, m.alias],
               }))}
               onToggle={(key) => {
-                const add = !issue.assignees.includes(key);
-                // `who` takes `me`/`@me` or a **full 64-hex key** — `index::resolve_device`
-                // does not consult the member directory, so a petname would 404. The
-                // key is what we hold and the key is what we send.
-                void send(() => rpc(spaceId, { cmd: "assign", reff, who: [key], add }));
+                // `who` takes a **full 64-hex key** — the store method documents
+                // why. The key is what we hold and the key is what we send.
+                void runCommand(
+                  projectStore.toggleAssignee(spaceId, reff, key, !issue.assignees.includes(key)),
+                );
               }}
             />
           </RailRow>
@@ -620,7 +620,7 @@ export function IssueDetail({
                 ...[1, 2, 3, 5, 8, 13].map((n) => ({ id: String(n), label: `${n} pt` })),
               ]}
               onPick={(id) =>
-                void send(() => rpc(spaceId, { cmd: "issue_edit", reff, estimate: id }))
+                void runCommand(projectStore.setEstimate(spaceId, reff, id))
               }
             />
           </RailRow>
@@ -630,7 +630,7 @@ export function IssueDetail({
               value={issue.due_date ?? null}
               readOnly={locked}
               onChange={(due) =>
-                void send(() => rpc(spaceId, { cmd: "issue_edit", reff, due }))
+                void runCommand(projectStore.setDue(spaceId, reff, due === "none" ? null : due))
               }
             />
           </RailRow>
@@ -671,16 +671,9 @@ export function IssueDetail({
                   ]}
                   onPick={(next) => {
                     if (next === name) return;
-                    // One swap, two requests, in this order: the engine's label
-                    // op is add-or-remove on a name set, so a rename is a
-                    // detach and an attach. Removing first keeps the set from
-                    // briefly holding both.
-                    void send(async () => {
-                      await rpc(spaceId, { cmd: "label", reff, remove: [name] });
-                      if (next !== "__remove__") {
-                        await rpc(spaceId, { cmd: "label", reff, add: [next] });
-                      }
-                    });
+                    void runCommand(
+                      projectStore.swapLabel(spaceId, reff, name, next === "__remove__" ? null : next),
+                    );
                   }}
                 />
               ))}
@@ -713,13 +706,8 @@ export function IssueDetail({
                   keywords: [l.id],
                 }))}
                 onToggle={(name) => {
-                  const on = issue.label_names.includes(name);
-                  void send(() =>
-                    rpc(spaceId, {
-                      cmd: "label",
-                      reff,
-                      ...(on ? { remove: [name] } : { add: [name] }),
-                    }),
+                  void runCommand(
+                    projectStore.toggleLabel(spaceId, reff, name, !issue.label_names.includes(name)),
                   );
                 }}
                 // A brand-new label gets a colour before it exists: the picker hands

@@ -47,8 +47,14 @@ export interface Option {
   label: string;
   icon?: React.ReactNode;
   swatch?: string;
+  /** A muted mono identifier *before* the label — an issue key ahead of its
+   *  title, the way every row that names an issue leads with one. */
+  kicker?: string;
   /** Secondary text, muted and right-aligned — a key prefix under a petname. */
   hint?: string;
+  /** A glyph on the row's trailing edge — a priority mark, a state. The `hint`
+   *  is words about the option; this is data the row carries. */
+  trailing?: React.ReactNode;
   /** Matched by search but not shown. A member's full key, a label's id. */
   keywords?: string[];
 }
@@ -78,6 +84,17 @@ type Props = {
    */
   onCreate?: (text: string) => void;
   /**
+   * A section label over the options — Linear's menus name what the rows *are*
+   * ("Navigation") when the rows are objects rather than values. Omitted, the
+   * list stays a bare run, which is right for four statuses.
+   */
+  heading?: string;
+  /**
+   * The wider shell. A row carrying a kicker, a title and a trailing glyph is
+   * a sentence, and the value-picker's 240px cut every one of them short.
+   */
+  wide?: boolean;
+  /**
    * The shape a colour swatch takes. Round is the default — a label, a status,
    * a member colour. Projects are square everywhere else they are identified
    * (sidebar, project cards, the header crumb), so their pickers say square too:
@@ -94,6 +111,21 @@ type Props = {
   swatchSlot?: boolean;
 };
 
+/** The options, under a section label when one is asked for. cmdk's group
+ *  hides itself when the query filters every row out, so the heading never
+ *  stands over an empty list. */
+function MaybeGroup({ heading, children }: { heading?: string | undefined; children: React.ReactNode }) {
+  if (!heading) return <>{children}</>;
+  return (
+    <Command.Group
+      heading={heading}
+      className="[&_[cmdk-group-heading]]:text-mute [&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:pt-1.5 [&_[cmdk-group-heading]]:pb-1 [&_[cmdk-group-heading]]:text-xs"
+    >
+      {children}
+    </Command.Group>
+  );
+}
+
 export function Combobox(props: Props) {
   const {
     label,
@@ -109,6 +141,8 @@ export function Combobox(props: Props) {
     size,
     swatchSlot,
     onCreate,
+    heading,
+    wide,
     swatchShape,
   } = props;
   const swatch = cn("size-mark-sm shrink-0", swatchShape === "square" ? "rounded-mark" : "rounded-full");
@@ -171,7 +205,7 @@ export function Combobox(props: Props) {
       <Popover.Trigger aria-label={label} className={cn(controlTrigger({ tone, size }), className)}>
         {content}
       </Popover.Trigger>
-      <PopoverContent align="start" className="w-60 overflow-hidden p-0">
+      <PopoverContent align="start" className={cn("overflow-hidden p-0", wide ? "w-80" : "w-60")}>
           <Command filter={cmdkFilter} loop>
             <Command.Input
               autoFocus
@@ -189,6 +223,7 @@ export function Combobox(props: Props) {
                   {emptyText ?? "No matches"}
                 </Command.Empty>
               )}
+              <MaybeGroup heading={heading}>
               {options.map((o) => (
                 <Command.Item
                   key={o.id}
@@ -209,19 +244,33 @@ export function Combobox(props: Props) {
                       setOpen(false);
                     }
                   }}
-                  className="data-[selected=true]:bg-active flex cursor-default items-center gap-2 rounded-control px-2 py-1 text-sm outline-none"
+                  // The highlight is colour alone: rows rest at `dim`, the
+                  // pointed-at one lifts to `bright`, and the surface is never
+                  // painted — no fill, no pill. The lift needs the resting rows
+                  // dim to have anywhere to go, which is why the two halves are
+                  // one decision.
+                  className="text-dim data-[selected=true]:text-bright flex cursor-default items-center gap-2 rounded-control px-2 py-1 text-sm outline-none transition-colors"
                 >
                   {o.icon}
                   {o.swatch && <span className={swatch} style={{ background: o.swatch }} />}
-                  <span className="min-w-0 flex-1 truncate">{o.label}</span>
-                  {o.hint && <span className="text-mute shrink-0 font-mono text-2xs">{o.hint}</span>}
-                  {/* Reserve the check's width always, or every row shifts sideways
-                      the moment one becomes selected. */}
-                  <span className="size-icon-xs shrink-0">
-                    {isSelected(o.id) && <Check className="size-icon-xs" />}
+                  {o.kicker && (
+                    <span className="text-mute shrink-0 font-mono text-xs tabular-nums">
+                      {o.kicker}
+                    </span>
+                  )}
+                  {/* The check rides directly after the name — Linear's row: the
+                      mark belongs to the label it affirms, and the far edge stays
+                      the hint's. Nothing needs a reserved slot; the hint is
+                      right-aligned, so a check popping in moves nothing else. */}
+                  <span className="flex min-w-0 flex-1 items-center gap-2">
+                    <span className="min-w-0 truncate">{o.label}</span>
+                    {isSelected(o.id) && <Check className="size-icon-xs shrink-0" />}
                   </span>
+                  {o.hint && <span className="text-mute shrink-0 font-mono text-2xs">{o.hint}</span>}
+                  {o.trailing && <span className="text-mute shrink-0">{o.trailing}</span>}
                 </Command.Item>
               ))}
+              </MaybeGroup>
               {onCreate &&
                 query.trim() &&
                 !options.some((o) => o.label.toLowerCase() === query.trim().toLowerCase()) && (
@@ -235,7 +284,7 @@ export function Combobox(props: Props) {
                       setQuery("");
                       if (props.multi !== true) setOpen(false);
                     }}
-                    className="data-[selected=true]:bg-active flex cursor-default items-center gap-2 rounded-control px-2 py-1 text-sm outline-none"
+                    className="text-dim data-[selected=true]:text-bright flex cursor-default items-center gap-2 rounded-control px-2 py-1 text-sm outline-none transition-colors"
                   >
                     <Plus className="size-icon-xs shrink-0" />
                     <span className="min-w-0 flex-1 truncate">

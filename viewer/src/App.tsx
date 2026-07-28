@@ -43,6 +43,7 @@ import { Calendar } from "./ui/Calendar";
 import { Timeline } from "./ui/Timeline";
 import { DisplayOptions } from "./ui/DisplayOptions";
 import { FilterMenu } from "./ui/FilterMenu";
+import type { IssueMutators } from "./ui/fields";
 import { Inbox } from "./ui/Inbox";
 import { IssueSearch, rememberIssue } from "./ui/IssueSearch";
 import { Projects } from "./ui/Projects";
@@ -609,6 +610,52 @@ export function App() {
       setError(e instanceof LaitError ? e.message : String(e));
     }
   }, []);
+
+  /** `predict`'s notice-and-rollback framing, for a store field method. */
+  const commitField = useCallback(
+    async (field: string, run: () => Promise<boolean>) => {
+      setMutationNotice(`Saving ${field} on this device…`);
+      try {
+        await run();
+        setMutationNotice(`${field} saved on this device`);
+      } catch (e) {
+        setMutationNotice(`${field} was refused · local value restored`);
+        if (!(e instanceof ConfirmRequired)) {
+          setError(e instanceof LaitError ? e.message : String(e));
+        }
+      }
+    },
+    [],
+  );
+
+  /**
+   * The in-place field writes — one object, handed to the list, the board and
+   * the calendar, so a chip on any of them commits through the same store
+   * methods (and the same optimistic overlay) as the detail rail.
+   */
+  const issueMutators = useMemo<IssueMutators>(() => ({
+    setStatus: (reff, status) =>
+      void commitField("status", () =>
+        projectStore.setStatus(currentRef.current ?? "", reff, status)),
+    setPriority: (reff, priority) =>
+      void commitField("priority", () =>
+        projectStore.setPriority(currentRef.current ?? "", reff, priority)),
+    toggleAssignee: (reff, key, add) =>
+      void commitField("assignee", () =>
+        projectStore.toggleAssignee(currentRef.current ?? "", reff, key, add)),
+    toggleLabel: (reff, name, add) =>
+      void commitField("label", () =>
+        projectStore.toggleLabel(currentRef.current ?? "", reff, name, add)),
+    swapLabel: (reff, from, to) =>
+      void commitField("label", () =>
+        projectStore.swapLabel(currentRef.current ?? "", reff, from, to)),
+    setDue: (reff, due) =>
+      void commitField("due date", () =>
+        projectStore.setDue(currentRef.current ?? "", reff, due)),
+    setEstimate: (reff, estimate) =>
+      void commitField("estimate", () =>
+        projectStore.setEstimate(currentRef.current ?? "", reff, estimate)),
+  }), [commitField, projectStore]);
 
   /**
    * One request per checked issue with a small concurrency ceiling. Independent
@@ -1412,7 +1459,15 @@ export function App() {
         <span className="absolute inset-y-0 -left-[3px] w-[7px]" />
       </Separator>
 
-      <Panel id="main" role="main" className="flex min-w-0 flex-col">
+      <Panel
+        id="main"
+        role="main"
+        // On the board, the whole pane — breadcrumb bar and tab strip included —
+        // stands on the raised canvas the columns are sunk into. A seam at the
+        // toolbar's edge would split one surface into chrome-over-content; the
+        // headers belong to the body they act on.
+        className={`flex min-w-0 flex-col${view === "board" && !fullWidthDetail ? " bg-raised" : ""}`}
+      >
         {/* One header for every view, mounted once and never swapped. Opening an
             issue extends the trail and hands the actions slot to the issue; it
             does not build a second bar with its own inset, its own controls and
@@ -1656,28 +1711,23 @@ export function App() {
                 if (!id) return;
                 if (display.group === "priority") {
                   if (row.priority === groupKey) return;
-                  void predict(row.doc_id, "priority", groupKey, () =>
-                    rpc(id, { cmd: "issue_edit", reff: row.reff, priority: groupKey }),
-                  );
+                  void commitField("priority", () =>
+                    projectStore.setPriority(id, row.reff, groupKey));
                 } else if (display.group === "assignee") {
-                  // Reassign = make the target the issue's sole assignee (or clear
-                  // it for the unassigned lane). `assign` is add/remove per key, so
-                  // this is a small batch; the doorbell repaints when it lands.
+                  // Reassign = make the target the issue's sole assignee (or
+                  // clear it for the unassigned lane).
                   const target = groupKey === "unassigned" ? null : groupKey;
-                  void guard(async () => {
-                    for (const k of row.assignees) {
-                      if (k !== target)
-                        await rpc(id, { cmd: "assign", reff: row.reff, who: [k], add: false });
-                    }
-                    if (target && !row.assignees.includes(target))
-                      await rpc(id, { cmd: "assign", reff: row.reff, who: [target], add: true });
-                  });
+                  void commitField("assignee", () =>
+                    projectStore.setAssignees(id, row.reff, target ? [target] : []));
                 }
               }}
-              onEdit={(reff, nextField) => {
-                api.select(reff);
-                setDetail(true);
-                setField(nextField);
+              mutators={issueMutators}
+              // The graph resource the detail pane reads, on demand: a card's
+              // sub-issue menu asks only when it opens.
+              onLoadChildren={(reff) => {
+                const id = currentRef.current;
+                if (!id) return Promise.resolve([]);
+                return projectStore.ensureGraph(id, reff).then((graph) => graph.children);
               }}
               readOnly={readOnly}
             />
@@ -1688,6 +1738,8 @@ export function App() {
                 api.select(reff);
                 setDetail(true);
               }}
+              mutators={issueMutators}
+              readOnly={readOnly}
             />
           ) : view === "timeline" ? (
             <Timeline
@@ -1721,6 +1773,7 @@ export function App() {
                 setDetail(true);
               }}
               onCreate={(status) => setComposing({ status })}
+              mutators={issueMutators}
               readOnly={readOnly}
               filtered={isActive(filter)}
             />

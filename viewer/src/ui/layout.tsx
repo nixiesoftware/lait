@@ -630,6 +630,55 @@ export function ContextMenuItem({
 
 export { ContextMenu };
 
+/** The context-menu spelling of `MenuSub*` — same surface, summoned by the
+ *  right button. Radix ships the two menus as separate primitives, so each
+ *  needs its own wrapper to keep them indistinguishable on screen. */
+export const ContextMenuSub = ContextMenu.Sub;
+
+export function ContextMenuSubTrigger({
+  className,
+  children,
+  ...props
+}: React.ComponentProps<typeof ContextMenu.SubTrigger>) {
+  return (
+    <ContextMenu.SubTrigger
+      className={cn(
+        "text-dim flex h-ctl-md cursor-default select-none items-center gap-2 rounded-control px-2 outline-none data-[highlighted]:bg-active data-[state=open]:bg-active",
+        className,
+      )}
+      {...props}
+    >
+      {children}
+      <ChevronRight className="text-mute ml-auto size-icon-xs shrink-0" aria-hidden />
+    </ContextMenu.SubTrigger>
+  );
+}
+
+export function ContextMenuSubContent({
+  className,
+  ...props
+}: React.ComponentProps<typeof ContextMenu.SubContent>) {
+  return (
+    <ContextMenu.Portal>
+      <ContextMenu.SubContent
+        sideOffset={OverlayGap.menu}
+        className={cn(
+          "ui-surface border-line-strong bg-raised shadow-overlay z-50 max-h-overlay-lg min-w-52 overflow-y-auto rounded-surface border p-1 text-sm",
+          className,
+        )}
+        {...props}
+      />
+    </ContextMenu.Portal>
+  );
+}
+
+export function ContextMenuSeparator({
+  className,
+  ...props
+}: React.ComponentProps<typeof ContextMenu.Separator>) {
+  return <ContextMenu.Separator className={cn("bg-line my-1 h-px", className)} {...props} />;
+}
+
 export function MenuSeparator({
   className,
   ...props

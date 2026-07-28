@@ -5,8 +5,19 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { RowGroup } from "../core/display";
 import type { Row, WorkflowState } from "../types";
+import type { IssueMutators } from "./fields";
 import { IssueList } from "./IssueList";
 import { TooltipProvider } from "./primitives";
+
+const noopMutators: IssueMutators = {
+  setStatus: () => undefined,
+  setPriority: () => undefined,
+  toggleAssignee: () => undefined,
+  toggleLabel: () => undefined,
+  swapLabel: () => undefined,
+  setDue: () => undefined,
+  setEstimate: () => undefined,
+};
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean })
   .IS_REACT_ACT_ENVIRONMENT = true;
@@ -67,6 +78,7 @@ describe("IssueList semantics", () => {
           }}
           onOpen={() => undefined}
           onCreate={() => undefined}
+          mutators={noopMutators}
           readOnly={false}
           filtered={false}
         />
@@ -109,6 +121,7 @@ describe("IssueList semantics", () => {
           onToggleCheck={() => undefined}
           onOpen={() => undefined}
           onCreate={() => undefined}
+          mutators={noopMutators}
           readOnly={false}
           filtered={false}
         />
@@ -149,6 +162,7 @@ describe("IssueList semantics", () => {
           onToggleCheck={() => undefined}
           onOpen={() => undefined}
           onCreate={() => undefined}
+          mutators={noopMutators}
           readOnly={false}
           filtered={false}
         />
@@ -190,6 +204,7 @@ describe("IssueList semantics", () => {
           onToggleCheck={() => undefined}
           onOpen={onOpen}
           onCreate={() => undefined}
+          mutators={noopMutators}
           readOnly={false}
           filtered={false}
         />
