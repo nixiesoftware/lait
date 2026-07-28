@@ -558,6 +558,9 @@ pub enum IssueIntent {
         project_id: String,
         id: String,
         name: Option<String>,
+        /// `None` leaves the body untouched; `Some("")` clears it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
         /// Outer `None` leaves the date; inner `None` clears it.
         #[serde(
             default,

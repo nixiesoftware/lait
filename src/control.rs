@@ -339,6 +339,9 @@ pub enum Request {
         milestone: Option<String>,
         #[serde(default)]
         name: Option<String>,
+        /// The milestone's prose body. Absent leaves it untouched; `""` clears.
+        #[serde(default)]
+        description: Option<String>,
         /// `YYYY-MM-DD`, or "none" to clear. Absent leaves it untouched.
         #[serde(default)]
         target: Option<String>,
@@ -1135,6 +1138,7 @@ pub fn representative_requests() -> Vec<Request> {
             project: s(),
             milestone: None,
             name: None,
+            description: None,
             target: None,
             pos: None,
             remove: false,

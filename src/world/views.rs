@@ -83,6 +83,16 @@ pub struct Milestone {
     pub id: String,
     pub project_id: String,
     pub name: String,
+    /// The milestone's prose — what this stage is, in the project document.
+    ///
+    /// A catalog register on the record, like a project's description and for
+    /// the same reason: it is an overview paragraph, not a wiki. The cost is
+    /// stated plainly — the whole string is last-writer-wins, so two people
+    /// editing one milestone's body at once keep one of the two versions. A
+    /// per-milestone collaborative doc would fix that and would be a new doc
+    /// type for prose nobody co-edits live.
+    #[serde(default)]
+    pub description: String,
     #[serde(default)]
     pub target_date: Option<u64>,
     /// Fractional index (`world::rank`), the project's manual milestone order.

@@ -183,6 +183,8 @@ export interface AttachmentMetaDto {
 export interface MilestoneDto {
   id: string;
   name: string;
+  /** Prose body (absent/empty = none). */
+  description?: string;
   target_date?: number | null;
   total: number;
   done: number;
@@ -588,7 +590,7 @@ export type Request =
   | { cmd: "follow"; reff: string; on?: boolean }
   /** Reply is `milestones` — the project's milestones with progress (SCOPE-1). */
   | { cmd: "milestone_list"; project: string }
-  | { cmd: "milestone_set"; project: string; milestone?: string | null; name?: string | null; target?: string | null; pos?: BoardPos | null; remove?: boolean }
+  | { cmd: "milestone_set"; project: string; milestone?: string | null; name?: string | null; description?: string | null; target?: string | null; pos?: BoardPos | null; remove?: boolean }
   /** Point an issue at a milestone in its project (`null`/"none" clears). */
   | { cmd: "issue_milestone"; reff: string; milestone?: string | null }
   /** Attach a file (standard base64; raw ≤ 256 KiB) — CREATE-5. */

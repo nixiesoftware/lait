@@ -2006,6 +2006,7 @@ impl World for IssuesWorld {
                 project_id,
                 id,
                 name,
+                description,
                 target_date,
                 pos,
                 tombstone,
@@ -2062,6 +2063,7 @@ impl World for IssuesWorld {
                             id: id.clone(),
                             project_id: project_id.clone(),
                             name: name.trim().to_string(),
+                            description: String::new(),
                             target_date: None,
                             // Appended, so a new milestone lands where you can
                             // see it rather than sorted into the middle by a date
@@ -2083,6 +2085,9 @@ impl World for IssuesWorld {
                         }
                         record.name = name.trim().to_string();
                     }
+                }
+                if let Some(description) = &description {
+                    record.description = description.clone();
                 }
                 if let Some(target) = target_date {
                     record.target_date = target;
@@ -3008,6 +3013,7 @@ impl World for IssuesWorld {
                         crate::dto::MilestoneDto {
                             id: m.id.clone(),
                             name: m.name.clone(),
+                            description: m.description.clone(),
                             target_date: m.target_date,
                             total,
                             done,
@@ -3405,6 +3411,7 @@ mod milestone_order_tests {
             id: id.into(),
             project_id: "prj_1".into(),
             name: name.into(),
+            description: String::new(),
             target_date: target,
             rank: rank.into(),
             tombstone: false,

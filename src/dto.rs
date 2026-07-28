@@ -333,6 +333,9 @@ pub struct ProjectDto {
 pub struct MilestoneDto {
     pub id: String,
     pub name: String,
+    /// The milestone's prose body (additive; empty when unset).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_date: Option<u64>,
     /// Live (non-tombstoned) issues targeting this milestone.

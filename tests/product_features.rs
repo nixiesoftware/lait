@@ -143,6 +143,7 @@ fn milestones_cycles_initiatives_teams_triage_delete_and_attachments() {
             project: "eng".into(),
             milestone: None,
             name: Some("Beta".into()),
+            description: None,
             target: Some("2026-09-01".into()),
             pos: None,
             remove: false,
@@ -168,6 +169,75 @@ fn milestones_cycles_initiatives_teams_triage_delete_and_attachments() {
     assert_eq!(milestones.len(), 1);
     assert_eq!(milestones[0].name, "Beta");
     assert_eq!((milestones[0].done, milestones[0].total), (0, 1));
+    assert_eq!(milestones[0].description, "", "a new milestone has no body");
+
+    // The body is an independent field: writing it leaves the name and date
+    // alone, and an absent `description` on a later edit leaves the body alone.
+    ok(
+        &client,
+        &home,
+        Request::MilestoneSet {
+            project: "eng".into(),
+            milestone: Some("Beta".into()),
+            name: None,
+            description: Some("Ship the public preview.\n\n- API frozen".into()),
+            target: None,
+            pos: None,
+            remove: false,
+        },
+    );
+    ok(
+        &client,
+        &home,
+        Request::MilestoneSet {
+            project: "eng".into(),
+            milestone: Some("Beta".into()),
+            name: None,
+            description: None,
+            target: Some("2026-10-01".into()),
+            pos: None,
+            remove: false,
+        },
+    );
+    let Response::Milestones { milestones } = ok(
+        &client,
+        &home,
+        Request::MilestoneList {
+            project: "eng".into(),
+        },
+    ) else {
+        panic!("expected Milestones");
+    };
+    assert!(milestones[0]
+        .description
+        .starts_with("Ship the public preview."));
+    assert_eq!(milestones[0].name, "Beta");
+
+    // `""` clears it — distinct from absent, which is "leave it".
+    ok(
+        &client,
+        &home,
+        Request::MilestoneSet {
+            project: "eng".into(),
+            milestone: Some("Beta".into()),
+            name: None,
+            description: Some(String::new()),
+            target: None,
+            pos: None,
+            remove: false,
+        },
+    );
+    let Response::Milestones { milestones } = ok(
+        &client,
+        &home,
+        Request::MilestoneList {
+            project: "eng".into(),
+        },
+    ) else {
+        panic!("expected Milestones");
+    };
+    assert_eq!(milestones[0].description, "");
+
     // Completing the issue moves the derived progress.
     ok(
         &client,
@@ -212,6 +282,7 @@ fn milestones_cycles_initiatives_teams_triage_delete_and_attachments() {
                 project: "eng".into(),
                 milestone: None,
                 name: Some(name.into()),
+                description: None,
                 target: None,
                 pos: None,
                 remove: false,
@@ -230,6 +301,7 @@ fn milestones_cycles_initiatives_teams_triage_delete_and_attachments() {
             project: "eng".into(),
             milestone: Some("Delta".into()),
             name: None,
+            description: None,
             target: None,
             pos: Some(lait::control::BoardPos::Top),
             remove: false,
@@ -243,6 +315,7 @@ fn milestones_cycles_initiatives_teams_triage_delete_and_attachments() {
             project: "eng".into(),
             milestone: Some("Delta".into()),
             name: None,
+            description: None,
             target: None,
             pos: Some(lait::control::BoardPos::After {
                 reff: "Beta".into(),
@@ -261,6 +334,7 @@ fn milestones_cycles_initiatives_teams_triage_delete_and_attachments() {
             project: "eng".into(),
             milestone: Some("Delta".into()),
             name: None,
+            description: None,
             target: None,
             pos: Some(lait::control::BoardPos::Before {
                 reff: "nope".into(),
