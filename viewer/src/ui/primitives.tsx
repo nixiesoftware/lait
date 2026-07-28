@@ -326,6 +326,67 @@ export function LabelChips({
   );
 }
 
+/**
+ * Linear's narrow-width form of a label set: one pill, every label reduced to
+ * its dot, the dots overlapped, the count after. Shown instead of `LabelChips`
+ * when the container is too narrow for pills — the labels stay present as
+ * *colour*, which is the half that scans. The names ride a real tooltip (the
+ * app's, not the browser's): a pill whose whole point is compression owes the
+ * hover the uncompressed answer.
+ */
+export function LabelDots({
+  names,
+  colorOf,
+  className,
+}: {
+  names: readonly string[];
+  colorOf: (name: string) => string;
+  className?: string;
+}) {
+  if (names.length === 0) return null;
+  return (
+    <Tooltip.Root>
+      <Tooltip.Trigger asChild>
+        <span
+          aria-label={`Labels: ${names.join(", ")}`}
+          className={cn(
+            "border-line text-dim inline-flex h-ctl-sm shrink-0 items-center gap-1.5 rounded-full border px-2.5 text-xs font-medium",
+            className,
+          )}
+        >
+          <span className="flex -space-x-1">
+            {names.map((name) => (
+              <span
+                key={name}
+                className="size-mark-sm rounded-full ring-1 ring-[var(--color-bg)]"
+                style={{ background: catalogColor(colorOf(name)) }}
+              />
+            ))}
+          </span>
+          <span className="tabular-nums">{names.length}</span>
+        </span>
+      </Tooltip.Trigger>
+      <Tooltip.Portal>
+        <Tooltip.Content
+          sideOffset={OverlayGap.tip}
+          style={{ transformOrigin: "var(--radix-tooltip-content-transform-origin)" }}
+          className="ui-surface border-line-strong bg-raised shadow-overlay z-50 flex flex-col gap-1 rounded-control border px-2 py-1.5 text-xs"
+        >
+          {names.map((name) => (
+            <span key={name} className="flex items-center gap-1.5">
+              <span
+                className="size-mark-xs shrink-0 rounded-full"
+                style={{ background: catalogColor(colorOf(name)) }}
+              />
+              <span className="capitalize">{name}</span>
+            </span>
+          ))}
+        </Tooltip.Content>
+      </Tooltip.Portal>
+    </Tooltip.Root>
+  );
+}
+
 export function ChipButton({
   className,
   ...props

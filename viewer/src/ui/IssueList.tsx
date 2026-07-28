@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { CheckSquare, ChevronRight, Copy, ExternalLink, Plus, Trash2 } from "lucide-react";
+import { CheckSquare, ChevronRight, Copy, ExternalLink, Plus, Trash2, UserRound } from "lucide-react";
 
 import type { RowGroup } from "../core/display";
 import { indexBy } from "../core/performance";
@@ -9,7 +9,7 @@ import { ApplicationState } from "./AppState";
 import { catalogColor } from "./colors";
 import { PriorityIcon, StatusIcon } from "./icons";
 import { ContextMenu, ContextMenuContent, ContextMenuItem, GroupHeader } from "./layout";
-import { Button, Checkbox, IconButton, interactiveRow, LabelChips } from "./primitives";
+import { Button, Checkbox, IconButton, interactiveRow, LabelChips, LabelDots } from "./primitives";
 import { dueLabel, dueTone } from "./time";
 
 /**
@@ -110,6 +110,14 @@ export function IssueList({
       ),
     [groups, deleted],
   );
+  // The due-date column exists per view, like the key column: if any visible
+  // row has a date, every row reserves the slot so the avatar column has a
+  // straight wall to align against — and if none does, no row pays 44px of
+  // empty edge for a column with nothing in it.
+  const anyDue = useMemo(
+    () => groups.flatMap((g) => g.rows).concat(deleted).some((r) => r.due_date != null),
+    [groups, deleted],
+  );
 
   return (
     // No total across the top. Every group header already carries its own count,
@@ -120,12 +128,15 @@ export function IssueList({
       className="flex min-h-0 flex-1 flex-col"
       style={{ "--key-col": `${keyCh}ch` } as React.CSSProperties}
     >
-      <div className="min-h-0 flex-1 overflow-y-auto">
+      {/* `@container`: the row's trailing cluster adapts to the width of this
+          pane (which halves when the detail opens), not the viewport. */}
+      <div className="@container min-h-0 flex-1 overflow-y-auto">
         {!deletedMode && groups.map((group) => (
           <Group
             key={group.key}
             group={group}
             rows={visible(group)}
+            anyDue={anyDue}
             stateById={stateById}
             members={members}
             labels={labels}
@@ -152,6 +163,7 @@ export function IssueList({
                 <IssueRow
                   key={row.reff}
                   row={row}
+                  anyDue={anyDue}
                   state={stateById.get(row.status)}
                   members={members}
             labels={labels}
@@ -202,6 +214,7 @@ function GroupIcon({ group, members }: { group: RowGroup; members: MemberDto[] }
 function Group({
   group,
   rows,
+  anyDue,
   stateById,
   members,
   labels,
@@ -216,6 +229,8 @@ function Group({
 }: {
   group: RowGroup;
   rows: Row[];
+  /** Whether this view reserves the due-date column — see the list's note. */
+  anyDue: boolean;
   stateById: ReadonlyMap<string, WorkflowState>;
   members: MemberDto[];
   labels: LabelDto[];
@@ -265,11 +280,13 @@ function Group({
         count={rows.length}
         actions={
           !readOnly && group.state ? (
+            // Always visible, like Linear's: creating an issue in a bucket is
+            // the header's one action, and an affordance you must hover to
+            // discover is one most people never do. The ghost variant keeps it
+            // quiet enough not to compete with the title.
             <IconButton
               label={`New issue in ${group.state.name}`}
               onClick={() => onCreate(group.state!.id)}
-              // Revealed on hover/focus: present when wanted, silent otherwise.
-              className="opacity-0 transition group-hover/list:opacity-100 focus-visible:opacity-100"
             >
               <Plus className="size-icon-sm" />
             </IconButton>
@@ -281,6 +298,7 @@ function Group({
           <IssueRow
             key={row.reff}
             row={row}
+            anyDue={anyDue}
             state={stateById.get(row.status)}
             members={members}
             labels={labels}
@@ -301,6 +319,7 @@ function Group({
 
 function IssueRow({
   row,
+  anyDue,
   state,
   members,
   labels,
@@ -314,6 +333,8 @@ function IssueRow({
   readOnly,
 }: {
   row: Row;
+  /** Whether this view reserves the due-date column. */
+  anyDue: boolean;
   state: WorkflowState | undefined;
   members: MemberDto[];
   labels: LabelDto[];
@@ -439,14 +460,23 @@ function IssueRow({
       )}
       {/* Two is what a dense line affords, and the rest are simply not shown:
           a trailing `+2` is a tally of things you cannot see, competing for the
-          same edge as the date. The full set is one click away in the detail. */}
+          same edge as the date. The full set is one click away in the detail.
+          Below 40rem of *pane* (the detail opening halves it), pills don't fit
+          beside a title at all, so the set collapses to Linear's dots-pill —
+          the same labels as colour plus a count, instead of pills crushing the
+          title or vanishing entirely. */}
       <LabelChips
         names={row.label_names ?? []}
         colorOf={(name) => labels.find((l) => l.name === name)?.color ?? "gray"}
         max={2}
         showOverflow={false}
         size="sm"
-        className="shrink-0 flex-nowrap"
+        className="hidden shrink-0 flex-nowrap @min-[40rem]:flex"
+      />
+      <LabelDots
+        names={row.label_names ?? []}
+        colorOf={(name) => labels.find((l) => l.name === name)?.color ?? "gray"}
+        className="@min-[40rem]:hidden"
       />
       {/* Unconfirmed: shown as truth because that is what makes a write feel
           instant, but never *claimed* as truth. */}
@@ -458,26 +488,48 @@ function IssueRow({
         />
       )}
       {/* Faces, not `assignee_summary` — that string is the terminal's projection
-          ("you +1"), and this row has a fixed 32px rhythm to keep. */}
-      <AvatarStack members={stackFor(row.assignees, members)} className="w-14 justify-end" />
+          ("you +1"), and this row has a fixed 32px rhythm to keep. Every row
+          renders the slot — an AvatarStack with nobody in it renders nothing,
+          and a column that only exists when occupied is not a column. Linear's
+          answer, taken whole: the empty slot draws the dashed ghost, so
+          "unassigned" is a visible state rather than an absence. The slot is
+          content-width, right edges flush: a wider stack grows leftward into
+          the labels' slack, exactly as Linear's does — a fixed 56px column put
+          36px of dead air between the labels and every single face. */}
+      <span className="flex shrink-0 items-center justify-end">
+        {row.assignees.length > 0 ? (
+          <AvatarStack members={stackFor(row.assignees, members)} />
+        ) : (
+          <span
+            className="border-line-strong text-mute flex size-avatar-md items-center justify-center rounded-full border border-dashed"
+            title="Unassigned"
+            aria-label="Unassigned"
+          >
+            <UserRound className="size-icon-xs opacity-60" />
+          </span>
+        )}
+      </span>
       {/* Last, against the row's trailing edge. A date is the one field you
           scan down a column rather than read across a row, so it wants a
           straight right edge of its own — putting it before the faces gave it a
-          ragged one that moved with however many people were assigned. */}
-      {row.due_date != null && (
+          ragged one that moved with however many people were assigned. The
+          column exists per view (`anyDue`): every row reserves it when any row
+          needs it, and no row pays 44px of empty edge when none does. */}
+      {anyDue && (
         <span
           className={clsxish([
             // A fixed, right-aligned column: `Aug 14` and `Sep 3` are different
             // widths, and a date you read down a list has to start and end in
             // the same place on every row or the column stops being one.
             "w-11 shrink-0 text-right text-2xs tabular-nums",
-            { overdue: "text-danger", soon: "text-warn", later: "text-mute" }[
-              dueTone(row.due_date)
-            ],
+            row.due_date != null &&
+              { overdue: "text-danger", soon: "text-warn", later: "text-mute" }[
+                dueTone(row.due_date)
+              ],
           ])}
-          title="Due date"
+          title={row.due_date != null ? "Due date" : undefined}
         >
-          {dueLabel(row.due_date)}
+          {row.due_date != null && dueLabel(row.due_date)}
         </span>
       )}
 
