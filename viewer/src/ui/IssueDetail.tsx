@@ -64,10 +64,10 @@ import {
   type ProjectDto,
   type WorkflowState,
 } from "../types";
-import { Avatar, AvatarStack, memberName as nameOf } from "./Avatar";
+import { Avatar, AvatarStack, memberName as nameOf, stackFor } from "./Avatar";
 import { LoadingState } from "./AppState";
 import { catalogColor } from "./colors";
-import { PriorityIcon, StatusIcon } from "./icons";
+import { PriorityIcon, ProgressRing, StatusIcon } from "./icons";
 import { Markdown } from "./Markdown";
 import { MarkdownEditor } from "./MarkdownEditor";
 import { DatePicker } from "./DatePicker";
@@ -852,6 +852,7 @@ export function IssueDetail({
             reff={issue.reff}
             projectId={issue.project_id}
             states={states}
+            members={members}
             readOnly={locked}
             send={send}
             onNavigate={onNavigate}
@@ -1288,6 +1289,7 @@ function Relations({
   reff,
   projectId,
   states,
+  members,
   readOnly,
   send,
   onNavigate,
@@ -1302,6 +1304,8 @@ function Relations({
   /** The issue's project — where a quick-created sub-issue is filed. */
   projectId: string;
   states: WorkflowState[];
+  /** The ACL, for resolving a related issue's assignees to faces. */
+  members: MemberDto[];
   readOnly: boolean;
   send: (fn: () => Promise<unknown>) => Promise<void>;
   onNavigate: (reff: string) => void;
@@ -1394,6 +1398,17 @@ function Relations({
     (c) => states.find((s) => s.id === c.status)?.category === "done",
   ).length;
 
+  /** A related issue's state as the ring every other surface draws it. Falls
+   *  back to the tree glyph while the workflow is still arriving. */
+  const statusGlyph = (row: Row) => {
+    const state = states.find((s) => s.id === row.status);
+    return state ? (
+      <StatusIcon category={state.category} color={catalogColor(state.color)} />
+    ) : (
+      <CornerDownRight className="size-icon-xs" />
+    );
+  };
+
   const empty =
     graph.children.length === 0 &&
     graph.blocked_by.length === 0 &&
@@ -1462,8 +1477,16 @@ function Relations({
       {(graph.children.length > 0 || subDraft !== null) && (
         <Disclosure
           title="Sub-issues"
-          // `done/total`, Linear's sub-issue progress at a glance.
-          count={`${doneChildren}/${graph.children.length}`}
+          // The ring and its tally, the same mark a board card carries — one
+          // glyph for one idea, wherever you meet it. It replaces a full-width
+          // bar that was the only progress meter in the app and read as a
+          // loading state parked under the caption.
+          count={
+            <span className="flex items-center gap-1.5">
+              <ProgressRing done={doneChildren} total={graph.children.length} />
+              {doneChildren}/{graph.children.length}
+            </span>
+          }
           {...(readOnly
             ? {}
             : {
@@ -1474,26 +1497,19 @@ function Relations({
                 ),
               })}
         >
-          {graph.children.length > 0 && (
-            <div
-              className="bg-line h-1.5 overflow-hidden rounded-full"
-              role="progressbar"
-              aria-label="Sub-issue completion"
-              aria-valuemin={0}
-              aria-valuemax={graph.children.length}
-              aria-valuenow={doneChildren}
-            >
-              <span
-                className="bg-ok block h-full rounded-full transition-[width]"
-                style={{ width: `${(doneChildren / graph.children.length) * 100}%` }}
-              />
-            </div>
-          )}
           {graph.children.map((r) => (
             <RelRow
               key={r.reff}
               row={r}
-              icon={<CornerDownRight className="size-icon-xs" />}
+              // The child's own status leads the row, exactly as it does on a
+              // board card and a list line — a sub-issue you cannot tell the
+              // state of is a link, not a piece of the work.
+              icon={statusGlyph(r)}
+              trailing={
+                r.assignees.length > 0 ? (
+                  <AvatarStack members={stackFor(r.assignees, members)} />
+                ) : undefined
+              }
               onNavigate={onNavigate}
               {...(removable
                 ? {
@@ -1610,6 +1626,7 @@ function RelRow({
   icon,
   kind,
   tone,
+  trailing,
   onNavigate,
   onRemove,
 }: {
@@ -1618,11 +1635,18 @@ function RelRow({
   /** What this edge *is* — omitted for sub-issues, where the group says it. */
   kind?: string;
   tone?: "warn";
+  /** The row's own metadata, parked on the trailing edge — faces for a
+   *  sub-issue. Same slot the pickers' option rows use, same reason: what the
+   *  row *is* reads on the left, what it carries reads on the right. */
+  trailing?: React.ReactNode;
   onNavigate: (reff: string) => void;
   onRemove?: () => void;
 }) {
   return (
-    <div className="group/rel -mx-1 flex items-center gap-2 rounded-control px-1 py-0.5 text-sm">
+    // The row answers the pointer as a whole. It is one target — the button
+    // inside fills it — so lighting the row rather than the label is what makes
+    // a run of them read as a list you can walk.
+    <div className="group/rel hover:bg-hover -mx-1 flex items-center gap-2 rounded-control px-1 py-0.5 text-sm transition-colors">
       <Button
         onClick={() => onNavigate(row.reff)}
         className="min-w-0 flex-1 shrink justify-start px-1 text-left"
@@ -1643,6 +1667,7 @@ function RelRow({
         </span>
         <span className="min-w-0 flex-1 truncate font-medium">{row.title}</span>
       </Button>
+      {trailing && <span className="shrink-0">{trailing}</span>}
       {onRemove && (
         <IconButton
           label="Remove relation"
@@ -1660,7 +1685,7 @@ function RelRow({
 
 type Entry =
   | { at: number; order: number; kind: "comment"; comment: CommentDto }
-  | { at: number; order: number; kind: "event"; event: ActivityEvent };
+  | { at: number; order: number; kind: "event"; event: ActivityEvent; repeat?: number };
 
 /**
  * Comments and activity, in one chronological stream.
@@ -1754,8 +1779,47 @@ function Timeline({
     // Oldest first — a timeline you read downward, like the conversation it is.
     // `order` breaks ties: whole-second stamps mean a burst of edits all land on
     // the same `ts`, and without it they shuffle on every render.
-    return out.sort((a, b) => a.at - b.at || a.order - b.order);
-  }, [events, comments]);
+    out.sort((a, b) => a.at - b.at || a.order - b.order);
+
+    // Then fold runs that would print the same line twice. Editing five labels
+    // is five commits and five honest oplog entries, but it is one act, and the
+    // feed rendered it as eight consecutive "changed labels" — a wall that
+    // buries the events worth reading between them.
+    //
+    // The test is the RENDERED PHRASE, not the event kind: two rows merge only
+    // if they would have been character-for-character identical (same actor,
+    // same sentence). That is what keeps this honest — "moved the due date to
+    // Aug 14" and "…to Aug 21" say different things and stay two lines, while
+    // eight identical sentences become one with a tally. The newest stamp wins,
+    // so the time still reads as when the run finished, and a collision anywhere
+    // in the run keeps its flag.
+    const folded: Entry[] = [];
+    for (const entry of out) {
+      const prev = folded[folded.length - 1];
+      if (
+        entry.kind === "event" &&
+        prev?.kind === "event" &&
+        describeEventRich(prev.event, phraseCtx).phrase ===
+          describeEventRich(entry.event, phraseCtx).phrase &&
+        prev.event.actor === entry.event.actor
+      ) {
+        folded[folded.length - 1] = {
+          ...entry,
+          repeat: (prev.repeat ?? 1) + 1,
+          event: {
+            ...entry.event,
+            ...(prev.event.collision ? { collision: true } : {}),
+          },
+        };
+        continue;
+      }
+      folded.push(entry);
+    }
+    return folded;
+    // `phraseCtx` is rebuilt every render but only reads `states`/`graph`, which
+    // the deps below already track.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [events, comments, states, graph]);
 
   const repliesByParent = useMemo(() => {
     const indexed = new Map<string, CommentDto[]>();
@@ -1768,7 +1832,15 @@ function Timeline({
   const visibleEntries = boundedTail(entries, visibleCount);
 
   return (
-    <section id="issue-activity" className="flex flex-col gap-3 scroll-mt-3">
+    // The one rule in the document, and it earns it: everything above is the
+    // issue, everything below is what happened to it. Linear draws exactly this
+    // line and no other — the sections above are divided by their captions and
+    // by air, which is why adding a second rule anywhere would immediately make
+    // this one stop meaning "the history starts here".
+    <section
+      id="issue-activity"
+      className="border-line/70 flex flex-col gap-3 scroll-mt-3 border-t pt-6"
+    >
       {/* A true title, not the uppercase micro-label the rail sections use: this
           is the page's second heading (Linear draws it the same way), and the
           conversation below it deserves more than furniture-weight type. */}
@@ -1817,6 +1889,7 @@ function Timeline({
             states={states}
             memberOf={memberOf}
             ctx={phraseCtx}
+            {...(entry.repeat ? { repeat: entry.repeat } : {})}
           />
         ),
       )}
@@ -2059,11 +2132,14 @@ function Event({
   states,
   memberOf,
   ctx,
+  repeat,
 }: {
   event: ActivityEvent;
   states: WorkflowState[];
   memberOf: (key: string) => MemberDto | undefined;
   ctx: EventPhraseContext;
+  /** How many identical lines this row stands for — see the fold in `Timeline`. */
+  repeat?: number;
 }) {
   const { actor, phrase } = describeEventRich(e, ctx);
 
@@ -2079,6 +2155,14 @@ function Event({
             "someone" would claim we know there was a someone and lost the name. */}
         {actor && <span className="text-dim font-medium">{actor} </span>}
         {phrase}
+        {/* The tally, never a re-wording: the sentence is what happened and the
+            count is how many times, so a folded run reads as its own line plus
+            a number rather than a phrase you have to parse differently. */}
+        {repeat && repeat > 1 && (
+          <span className="text-dim ml-1 tabular-nums" title={`${repeat} identical changes`}>
+            ×{repeat}
+          </span>
+        )}
         <span aria-hidden="true"> · </span>
         <time dateTime={tsToDate(e.ts).toISOString()}>{when(e.ts)}</time>
         {/* A concurrent overwrite is worth flagging but never worth blocking on

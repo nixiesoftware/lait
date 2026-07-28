@@ -845,10 +845,12 @@
     grid-template-columns: minmax(0, 1fr) var(--issue-rail);
     align-content: start;
     column-gap: var(--issue-gutter);
-    /* The body's own rhythm, one step up from the narrow strip's 16px: at this
-       measure the title, the description and the timeline are separate
-       movements rather than a stack of rows. */
-    row-gap: 24px;
+    /* NO row gap, and the rhythm rides on margins below instead. The rail has
+       to span many rows for `sticky` to have anywhere to travel (see its rule),
+       and a spanned row that holds nothing still pays the gap on both sides —
+       37 unused rows were manufacturing 888px of emptiness under every issue.
+       Margins are paid by elements that exist, so the phantom rows cost zero. */
+    row-gap: 0;
     padding: 40px var(--issue-inset) 96px;
     max-width: calc(
       var(--issue-measure) + var(--issue-gutter) + var(--issue-rail) +
@@ -872,6 +874,15 @@
     grid-column: 1;
     width: 100%;
     max-width: var(--issue-measure);
+    /* The document's rhythm — one step up from the narrow strip's 16px, so the
+       title, the description and the timeline read as separate movements
+       rather than a stack of rows. On the element rather than as a gap: see
+       `row-gap: 0` above. */
+    margin-top: 24px;
+  }
+
+  .issue-detail-body > *:not(.issue-detail-properties):first-child {
+    margin-top: 0;
   }
 
   /* No divider and no scroll of its own. The rail is reference material you
