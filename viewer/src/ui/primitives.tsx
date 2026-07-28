@@ -250,23 +250,22 @@ export function LabelChip({
         // label sits among — a label *is* a value, and setting it a step down
         // was what made the old 16px chip read as a footnote.
         //
-        // Both sizes are 20px because the chip has to sit *inside* its row,
-        // not fill it. At 24px in the rail's 28px rows it left 2px of air where
-        // every bare entry beside it (`Backlog`, `5 pt`, `Aug 14`) has six, and
-        // a wrapped pair ran at a 28px pitch against the rail's 30px — the
-        // block visibly stopped tracking the column it was in.
+        // Both sizes are 24px — Linear's measure, and the roominess is the
+        // point: at 20px with an 8px inset the pill read as a cramped ticket
+        // stub next to every other control on the page. The rail's rows wrap a
+        // hair looser for it, which is the trade Linear makes too.
         //
-        // What the sizes do differ in is voice. In the rail a label is a
-        // property you are reading, so it takes the foreground at the same
-        // 12px as the values around it; in a list row it is metadata you scan
-        // past next to a date and a project, so it drops to `text-dim` and 11px
-        // and sits at their weight rather than above it.
-        size === "md" ? "text-fg h-ctl-xs gap-1.5 px-2 text-sm" : "text-dim h-ctl-xs gap-1 px-2 text-xs",
+        // What the sizes differ in is voice. In the rail a label is a property
+        // you are reading, so it takes the foreground at the same 12px as the
+        // values around it; in a list row it is metadata you scan past next to
+        // a date and a project, so it drops to `text-dim` and 11px and sits at
+        // their weight rather than above it.
+        size === "md" ? "text-fg h-ctl-sm gap-2 px-2.5 text-sm" : "text-dim h-ctl-sm gap-1.5 px-2.5 text-xs",
         className,
       )}
     >
       <span
-        className="size-mark-xs shrink-0 rounded-full"
+        className="size-mark-sm shrink-0 rounded-full"
         style={{ background: catalogColor(color) }}
       />
       {/* `capitalize` is a text transform, not a rewrite: the DOM still holds
