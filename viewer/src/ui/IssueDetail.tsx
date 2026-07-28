@@ -925,11 +925,11 @@ export function IssueDetail({
                 }
               }}
               rows={3}
-              className="placeholder:text-mute block w-full resize-none bg-transparent p-2 outline-none"
+              className="placeholder:text-mute block w-full resize-none bg-transparent px-4 py-3 outline-none"
               aria-label="New comment"
               aria-describedby={commentError ? "comment-error" : undefined}
             />
-            <div className="flex items-center gap-2 px-2 pb-2">
+            <div className="flex items-center gap-2 px-2.5 pb-2.5">
               {commentError && (
                 <span
                   id="comment-error"
@@ -1916,7 +1916,7 @@ function CommentBlock({
   const canAct = !readOnly && !!c.id;
 
   return (
-    <div className="group/comment p-3">
+    <div className="group/comment px-4 py-3">
       <div className="flex items-center gap-2">
         <Avatar
           deviceKey={c.author}
@@ -2022,7 +2022,7 @@ function ReplyComposer({
   };
   const me = meKey ? memberOf(meKey) : undefined;
   return (
-    <div className="border-line flex items-center gap-2 border-t p-2 pl-3">
+    <div className="border-line flex items-center gap-2 border-t py-2.5 pr-2.5 pl-4">
       {meKey && <Avatar deviceKey={meKey} alias={me?.alias ?? ""} me size="sm" />}
       <textarea
         value={draft}
