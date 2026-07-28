@@ -223,4 +223,58 @@ describe("ProjectViewerStore", () => {
     });
     expect(store.resources.read(projectKeys.issue("local", "iss_other")).state).toBe("ready");
   });
+
+  it("predicts an assignee toggle and stacks a second on the first", async () => {
+    const rpc = vi.fn(async (_space: string, request: { cmd: string }) => {
+      if (request.cmd === "board") return board as Response;
+      return { kind: "ok", message: null } as Response;
+    });
+    const store = new ProjectViewerStore(rpc);
+    await store.ensureBoard("local", "ONE");
+    const first = store.toggleAssignee("local", row.reff, "a".repeat(64), true);
+    // Before the doorbell retires the first guess, a second toggle must build
+    // on the predicted set — not the server's stale empty one.
+    const second = store.toggleAssignee("local", row.reff, "b".repeat(64), true);
+    expect(store.selectRow("local", row.reff)?.assignees).toEqual([
+      "a".repeat(64),
+      "b".repeat(64),
+    ]);
+    expect(store.selectBoard("local", "ONE")?.columns[0]?.rows[0]?.assignees).toHaveLength(2);
+    await Promise.all([first, second]);
+    expect(rpc).toHaveBeenCalledWith("local", {
+      cmd: "assign", reff: row.reff, who: ["a".repeat(64)], add: true,
+    });
+  });
+
+  it("predicts a due date, and its clearing, in the row's units", async () => {
+    const rpc = vi.fn(async (_space: string, request: { cmd: string }) => {
+      if (request.cmd === "board") return board as Response;
+      return { kind: "ok", message: null } as Response;
+    });
+    const store = new ProjectViewerStore(rpc);
+    await store.ensureBoard("local", "ONE");
+    await store.setDue("local", row.reff, "2026-07-30");
+    expect(store.selectRow("local", row.reff)?.due_date).toBe(
+      Date.UTC(2026, 6, 30) / 1000,
+    );
+    expect(rpc).toHaveBeenCalledWith("local", {
+      cmd: "issue_edit", reff: row.reff, due: "2026-07-30",
+    });
+    await store.setDue("local", row.reff, null);
+    expect(store.selectRow("local", row.reff)?.due_date).toBeNull();
+    expect(rpc).toHaveBeenCalledWith("local", {
+      cmd: "issue_edit", reff: row.reff, due: "none",
+    });
+  });
+
+  it("rolls a refused label toggle back immediately", async () => {
+    const rpc = vi.fn(async (_space: string, request: { cmd: string }) => {
+      if (request.cmd === "board") return board as Response;
+      throw new Error("refused");
+    });
+    const store = new ProjectViewerStore(rpc);
+    await store.ensureBoard("local", "ONE");
+    await expect(store.toggleLabel("local", row.reff, "infra", true)).rejects.toThrow("refused");
+    expect(store.selectRow("local", row.reff)?.label_names ?? []).toEqual([]);
+  });
 });

@@ -1,6 +1,12 @@
 import { createContext, useCallback, useContext, useMemo, type ReactNode } from "react";
 import { rpc as defaultRpc } from "./api";
-import { applyOverlay, Overlay, type Field } from "./core/overlay";
+import {
+  applyOverlay,
+  Overlay,
+  overlayRow,
+  type Field,
+  type PredictionValue,
+} from "./core/overlay";
 import { useWorldResource } from "./core/worldViewReact";
 import { type ResourceSnapshot, WorldViewStore } from "./core/worldViewStore";
 import type {
@@ -14,7 +20,6 @@ import type {
   LabelDto,
   MemberDto,
   MilestoneDto,
-  Priority,
   ProjectDto,
   Request,
   Response,
@@ -207,7 +212,7 @@ export class ProjectViewerStore {
     const source = this.resources.read<BoardView>(key);
     const overlay = source.data
       ? source.data.columns.flatMap((column) => column.rows)
-        .map((row) => `${row.doc_id}:${this.overlay.get(row.doc_id, "title") ?? ""}:${this.overlay.get(row.doc_id, "status") ?? ""}:${this.overlay.get(row.doc_id, "priority") ?? ""}`)
+        .map((row) => `${row.doc_id}:${this.overlay.signature(row.doc_id)}`)
         .join("|")
       : "";
     const cached = this.boardSelectors.get(key);
@@ -222,15 +227,10 @@ export class ProjectViewerStore {
     const source = this.resources.read<Row>(key);
     const row = source.data;
     if (!row) return null;
-    const overlay = `${this.overlay.get(row.doc_id, "title") ?? ""}:${this.overlay.get(row.doc_id, "status") ?? ""}:${this.overlay.get(row.doc_id, "priority") ?? ""}`;
+    const overlay = this.overlay.signature(row.doc_id);
     const cached = this.rowSelectors.get(key);
     if (cached?.source === source && cached.overlay === overlay) return cached.value;
-    const value = !this.overlay.has(row.doc_id) ? row : {
-        ...row,
-        title: this.overlay.get(row.doc_id, "title") ?? row.title,
-        status: this.overlay.get(row.doc_id, "status") ?? row.status,
-        priority: (this.overlay.get(row.doc_id, "priority") as Priority | undefined) ?? row.priority,
-      };
+    const value = overlayRow(row, this.overlay);
     this.rowSelectors.set(key, { source, overlay, value });
     return value;
   }
@@ -251,20 +251,21 @@ export class ProjectViewerStore {
       return cached.value;
     }
     const base = body.data ?? (row ? issueFromRow(space, row) : null);
+    // Every predictable field reads through the overlaid row, so an optimistic
+    // write shows in the detail rail exactly as it does on the row — the body
+    // keeps what only it carries (description, comments, label ids, …).
     const issue: IssueView | null = base && row
       ? {
           ...base,
           title: row.title,
           status: row.status,
           priority: row.priority,
-          assignees: body.data?.assignees ?? row.assignees,
-          label_names: body.data?.label_names ?? row.label_names ?? [],
-          ...(body.data?.due_date !== undefined
-            ? { due_date: body.data.due_date }
-            : row.due_date !== undefined ? { due_date: row.due_date } : {}),
-          ...(body.data?.estimate !== undefined
-            ? { estimate: body.data.estimate }
-            : row.estimate !== undefined ? { estimate: row.estimate } : {}),
+          assignees: row.assignees,
+          label_names: row.label_names ?? [],
+          // Explicit null, not omission: a predicted *clear* has to beat the
+          // body's stale value, and a spread that skips the key cannot.
+          due_date: row.due_date ?? null,
+          estimate: row.estimate ?? null,
         }
       : base;
     const value = {
@@ -427,6 +428,14 @@ export class ProjectViewerStore {
     void this.ensureIssue(space, reff).catch(() => undefined);
   }
 
+  // ---- field writes ---------------------------------------------------------
+  //
+  // Every surface that edits an issue field — a list row's chip, a board card,
+  // the detail rail, a swimlane drop — calls one of these. The prediction and
+  // the wire format live together here, so a second caller cannot invent a
+  // second spelling of "reassign" (the app shell and the detail rail once held
+  // two, and they disagreed).
+
   async editTitle(space: string, reff: string, title: string): Promise<boolean> {
     return this.predict(space, reff, "title", title, { cmd: "issue_edit", reff, title });
   }
@@ -439,11 +448,87 @@ export class ProjectViewerStore {
     return this.predict(space, reff, "priority", priority, { cmd: "issue_edit", reff, priority });
   }
 
+  /** `due` is the engine's `YYYY-MM-DD` (UTC), or null to clear. */
+  async setDue(space: string, reff: string, due: string | null): Promise<boolean> {
+    const predicted = due === null ? null : Math.floor(Date.parse(`${due}T00:00:00Z`) / 1000);
+    return this.predict(space, reff, "due", predicted, {
+      cmd: "issue_edit",
+      reff,
+      due: due ?? "none",
+    });
+  }
+
+  /** `estimate` is a numeric string or `"none"` — the wire's own shape. */
+  async setEstimate(space: string, reff: string, estimate: string): Promise<boolean> {
+    const predicted = estimate === "none" ? null : Number(estimate);
+    return this.predict(space, reff, "estimate", predicted, {
+      cmd: "issue_edit",
+      reff,
+      estimate,
+    });
+  }
+
+  /** Add or remove one assignee. `key` must be a full 64-hex device key —
+   *  `index::resolve_device` does not consult the member directory. */
+  async toggleAssignee(space: string, reff: string, key: string, add: boolean): Promise<boolean> {
+    return this.predictFromRow(
+      space,
+      reff,
+      "assignees",
+      (row) =>
+        add
+          ? [...row.assignees.filter((k) => k !== key), key]
+          : row.assignees.filter((k) => k !== key),
+      () => this.rpc(space, { cmd: "assign", reff, who: [key], add }),
+    );
+  }
+
+  /**
+   * Make `keys` the exact assignee set. `assign` is add/remove per key, so this
+   * is a small batch — removals first, then the additions.
+   */
+  async setAssignees(space: string, reff: string, keys: readonly string[]): Promise<boolean> {
+    return this.predictFromRow(space, reff, "assignees", () => [...keys], async () => {
+      const row = this.resources.read<Row>(projectKeys.row(space, reff)).data;
+      const current = row?.assignees ?? [];
+      for (const k of current) {
+        if (!keys.includes(k)) await this.rpc(space, { cmd: "assign", reff, who: [k], add: false });
+      }
+      for (const k of keys) {
+        if (!current.includes(k)) await this.rpc(space, { cmd: "assign", reff, who: [k], add: true });
+      }
+    });
+  }
+
+  /** Attach or detach one label, by name — `Request::Label` resolves names. */
+  async toggleLabel(space: string, reff: string, name: string, add: boolean): Promise<boolean> {
+    return this.predictFromRow(space, reff, "labels", (row) => {
+      const names = row.label_names ?? [];
+      return add ? [...names.filter((n) => n !== name), name] : names.filter((n) => n !== name);
+    }, () => this.rpc(space, { cmd: "label", reff, ...(add ? { add: [name] } : { remove: [name] }) }));
+  }
+
+  /**
+   * Swap one label for another (or for nothing). One swap, two requests, in
+   * this order: the engine's label op is add-or-remove on a name set, so a
+   * rename is a detach and an attach — removing first keeps the set from
+   * briefly holding both.
+   */
+  async swapLabel(space: string, reff: string, from: string, to: string | null): Promise<boolean> {
+    return this.predictFromRow(space, reff, "labels", (row) => {
+      const names = (row.label_names ?? []).filter((n) => n !== from);
+      return to !== null && !names.includes(to) ? [...names, to] : names;
+    }, async () => {
+      await this.rpc(space, { cmd: "label", reff, remove: [from] });
+      if (to !== null) await this.rpc(space, { cmd: "label", reff, add: [to] });
+    });
+  }
+
   async predictValue(
     space: string,
     doc: string,
     field: Field,
-    value: string,
+    value: PredictionValue,
     send: () => Promise<unknown>,
   ): Promise<boolean> {
     this.overlay.set(doc, field, value);
@@ -542,15 +627,33 @@ export class ProjectViewerStore {
     space: string,
     reff: string,
     field: Field,
-    value: string,
+    value: PredictionValue,
     request: Request,
+  ): Promise<boolean> {
+    return this.predictFromRow(space, reff, field, () => value, () => this.rpc(space, request));
+  }
+
+  /**
+   * Predict a value computed from the current row, then send. The row read and
+   * the overlay write happen together so an array field (assignees, labels)
+   * derives its replacement from the same row it patches — and a reff with no
+   * row yet has nothing to predict against, so the write is simply not sent.
+   */
+  private async predictFromRow(
+    space: string,
+    reff: string,
+    field: Field,
+    value: (row: Row) => PredictionValue,
+    send: () => Promise<unknown>,
   ): Promise<boolean> {
     const row = this.resources.read<Row>(projectKeys.row(space, reff)).data;
     if (!row) return false;
-    this.overlay.set(row.doc_id, field, value);
+    // Compute from the *overlaid* row: a second toggle while the first is still
+    // unconfirmed must stack on the prediction, not on the server's stale set.
+    this.overlay.set(row.doc_id, field, value(overlayRow(row, this.overlay)));
     this.notifyRows(space, [row.doc_id]);
     try {
-      await this.rpc(space, request);
+      await send();
       return true;
     } catch (error) {
       this.overlay.clearDoc(row.doc_id);

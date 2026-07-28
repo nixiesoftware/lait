@@ -27,10 +27,25 @@ import type { BoardView, Priority, Row } from "../types";
  */
 
 /** Fields a client is allowed to predict — the ones a row renders. */
-export type Field = "title" | "status" | "priority";
+export type Field =
+  | "title"
+  | "status"
+  | "priority"
+  | "assignees"
+  | "labels"
+  | "due"
+  | "estimate";
+
+/**
+ * What a prediction holds — the *row's* shape for that field, not the wire's.
+ * `assignees`/`labels` are the full replacement array; `due`/`estimate` are the
+ * row's number-or-null, where a predicted `null` means "cleared", which is why
+ * presence is asked with `hasField` rather than read through `??`.
+ */
+export type PredictionValue = string | readonly string[] | number | null;
 
 interface Prediction {
-  value: string;
+  value: PredictionValue;
   /** ms epoch — the TTL axis. */
   at: number;
 }
@@ -41,19 +56,36 @@ export const PREDICTION_TTL_MS = 10_000;
 export class Overlay {
   private byDoc = new Map<string, Map<Field, Prediction>>();
 
-  set(doc: string, field: Field, value: string, now: number = Date.now()): void {
+  set(doc: string, field: Field, value: PredictionValue, now: number = Date.now()): void {
     const fields = this.byDoc.get(doc) ?? new Map<Field, Prediction>();
     fields.set(field, { value, at: now });
     this.byDoc.set(doc, fields);
   }
 
-  get(doc: string, field: Field): string | undefined {
+  get(doc: string, field: Field): PredictionValue | undefined {
     return this.byDoc.get(doc)?.get(field)?.value;
   }
 
   /** Whether this doc carries any prediction — drives the "unconfirmed" mark. */
   has(doc: string): boolean {
     return (this.byDoc.get(doc)?.size ?? 0) > 0;
+  }
+
+  /** Whether this field is predicted. `get` cannot answer it: a predicted `null`
+   *  (a cleared due date) and "no prediction" both read back falsy. */
+  hasField(doc: string, field: Field): boolean {
+    return this.byDoc.get(doc)?.has(field) ?? false;
+  }
+
+  /**
+   * One doc's predictions as a comparable string — the selectors' memo key.
+   * Selector caches used to hand-build this from three hardcoded fields, which
+   * is exactly how a newly predictable field would silently stop invalidating.
+   */
+  signature(doc: string): string {
+    const fields = this.byDoc.get(doc);
+    if (!fields?.size) return "";
+    return [...fields].map(([field, p]) => `${field}=${JSON.stringify(p.value)}`).join(",");
   }
 
   /** Every doc currently predicted. */
@@ -93,6 +125,23 @@ export class Overlay {
   }
 }
 
+/** One row through the overlay: every predicted field wins over the server's. */
+export function overlayRow(row: Row, overlay: Overlay): Row {
+  if (!overlay.has(row.doc_id)) return row;
+  const pick = <T,>(field: Field, current: T): T =>
+    overlay.hasField(row.doc_id, field) ? (overlay.get(row.doc_id, field) as T) : current;
+  return {
+    ...row,
+    title: pick("title", row.title),
+    status: pick("status", row.status),
+    priority: pick<Priority>("priority", row.priority),
+    assignees: pick<string[]>("assignees", row.assignees),
+    label_names: pick<string[]>("labels", row.label_names ?? []),
+    due_date: pick("due", row.due_date ?? null),
+    estimate: pick("estimate", row.estimate ?? null),
+  };
+}
+
 /**
  * Render a board through the overlay: predictions win over server data.
  *
@@ -113,15 +162,7 @@ export function applyOverlay(
   const marked = new Set(overlay.docs().filter((d) => overlay.has(d)));
   if (marked.size === 0) return { board, optimistic: marked };
 
-  const predict = (r: Row): Row => {
-    if (!overlay.has(r.doc_id)) return r;
-    return {
-      ...r,
-      title: overlay.get(r.doc_id, "title") ?? r.title,
-      status: overlay.get(r.doc_id, "status") ?? r.status,
-      priority: (overlay.get(r.doc_id, "priority") as Priority | undefined) ?? r.priority,
-    };
-  };
+  const predict = (r: Row): Row => overlayRow(r, overlay);
 
   // Bucket in two passes so a mover cannot jump the queue: each column keeps its
   // own rows in their existing order (that order is `Catalog.boards[P]`'s answer,
