@@ -16,7 +16,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use async_trait::async_trait;
-use lait::control::{request, Request, Response};
+use lait::control::{request, ControlRoute, Request, Response};
+use lait::daemon::OrbitAddress;
 use lait::net::Network;
 use lait::orbital::run_space_bridge_with;
 use lait::transport::mem::MemNet;
@@ -54,6 +55,31 @@ fn temp_home(tag: &str) -> PathBuf {
 fn req(rt: &tokio::runtime::Runtime, home: &Path, r: Request) -> Response {
     rt.block_on(async { request(home, &r).await })
         .unwrap_or_else(|e| Response::err(format!("{e:#}")))
+}
+
+fn issue_req(
+    rt: &tokio::runtime::Runtime,
+    home: &Path,
+    request: issues_app::IssuesRequest,
+) -> Response {
+    rt.block_on(async {
+        let space = lait::orbital::discover_space_id(home).expect("test Space");
+        let call = issues_app::encode_call(&request)?;
+        let reply = lait::control::call_world(
+            home,
+            ControlRoute::World {
+                address: OrbitAddress::for_store(home, space),
+                world: call.world().as_str().to_string(),
+            },
+            call.clone(),
+            None,
+        )
+        .await?;
+        Ok::<Response, anyhow::Error>(serde_json::from_value(issues_app::decode_reply(
+            &call, reply,
+        )?)?)
+    })
+    .unwrap_or_else(|error| Response::err(format!("{error:#}")))
 }
 
 fn poll_until<T>(timeout: Duration, mut check: impl FnMut() -> Option<T>) -> Option<T> {
@@ -108,10 +134,10 @@ fn two_space_bridges_join_admit_and_converge_over_the_socket() {
     wait_online(&client, &founder_home);
 
     // A project + an issue with a sealed body, filed by the founder over the wire.
-    let resp = req(
+    let resp = issue_req(
         &client,
         &founder_home,
-        Request::ProjectNew {
+        issues_app::IssuesRequest::ProjectNew {
             name: "Core".into(),
             key: "core".into(),
             color: None,
@@ -121,10 +147,10 @@ fn two_space_bridges_join_admit_and_converge_over_the_socket() {
         matches!(&resp, Response::Ref { reff } if reff == "CORE"),
         "{resp:?}"
     );
-    let resp = req(
+    let resp = issue_req(
         &client,
         &founder_home,
-        Request::IssueNew {
+        issues_app::IssuesRequest::IssueNew {
             due: None,
             estimate: None,
             title: "Secret plan".into(),
@@ -218,10 +244,10 @@ fn two_space_bridges_join_admit_and_converge_over_the_socket() {
     assert_eq!(members.len(), 2, "founder + admitted joiner: {members:?}");
 
     // The admitted joiner reads the founder's previously-opaque sealed issue.
-    let resp = req(
+    let resp = issue_req(
         &client,
         &joiner_home,
-        Request::IssueView {
+        issues_app::IssuesRequest::IssueView {
             reff: "CORE-1".into(),
         },
     );
@@ -235,10 +261,10 @@ fn two_space_bridges_join_admit_and_converge_over_the_socket() {
     );
 
     // The joiner writes back; the founder converges it.
-    req(
+    issue_req(
         &client,
         &joiner_home,
-        Request::Comment {
+        issues_app::IssuesRequest::Comment {
             reply_to: None,
             reff: "CORE-1".into(),
             body: "joined over the socket".into(),
@@ -252,10 +278,10 @@ fn two_space_bridges_join_admit_and_converge_over_the_socket() {
                 ticket: joiner_device.clone(),
             },
         );
-        match req(
+        match issue_req(
             &client,
             &founder_home,
-            Request::IssueView {
+            issues_app::IssuesRequest::IssueView {
                 reff: "CORE-1".into(),
             },
         ) {
@@ -277,10 +303,10 @@ fn two_space_bridges_join_admit_and_converge_over_the_socket() {
     // Inbox reconstruction (plan 04): the founder assigns itself by starting
     // the issue, so the JOINER's converged comment is addressed to it — the
     // inbox is a pure projection over the synced state, rebuilt from query.
-    let resp = req(
+    let resp = issue_req(
         &client,
         &founder_home,
-        Request::IssueStart {
+        issues_app::IssuesRequest::IssueStart {
             reff: "CORE-1".into(),
         },
     );

@@ -363,14 +363,12 @@ struct RpcQuery {
     confirm: bool,
 }
 
-/// The control plane, verbatim: `POST /api/spaces/{id}/rpc` with a [`Request`],
-/// back a [`crate::control::Response`].
+/// The browser adapter: `POST /api/spaces/{id}/rpc` with either an
+/// [`issues_app::IssuesRequest`] or a Space-owned [`Request`].
 ///
-/// One endpoint rather than a REST surface, because the REST surface would be a
-/// second, hand-maintained projection of a façade that is *already* the stable,
-/// versioned, hand-maintained projection. Two separate projections drift; the viewer
-/// branch is the proof — it still calls `projects new --key`, a shape that stopped
-/// existing. This cannot drift: it is the same enum the CLI and MCP send.
+/// One endpoint avoids a second REST projection. Product requests are decoded
+/// by the product package and sent as opaque World calls; Space requests remain
+/// on the host control protocol.
 ///
 /// Selecting a space is what attaches its daemon, so this is also the first point
 /// at which anything is started.
@@ -399,19 +397,8 @@ async fn rpc(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,
     Query(q): Query<RpcQuery>,
-    Json(req): Json<Request>,
+    Json(input): Json<serde_json::Value>,
 ) -> Response {
-    if matches!(req, Request::Subscribe { .. }) {
-        return (
-            StatusCode::BAD_REQUEST,
-            err_json(
-                "subscribe is a stream, not a request — use GET /api/events",
-                ErrorKind::Error,
-            ),
-        )
-            .into_response();
-    }
-
     let resolved = match app.directory.resolve(&id) {
         Ok(resolved) => resolved,
         Err(e) => {
@@ -422,6 +409,93 @@ async fn rpc(
                 .into_response()
         }
     };
+
+    if let Ok(request) = serde_json::from_value::<issues_app::IssuesRequest>(input.clone()) {
+        if let StationIdentity::Agent { name } = &resolved.identity {
+            if request.access() != crate::orbital::WorldCallAccess::Query {
+                return (
+                    StatusCode::FORBIDDEN,
+                    err_json(
+                        &format!(
+                            "{name}'s space is read-only here — a write would be signed as {name}. \
+                             Open the same space through your own node to write as yourself."
+                        ),
+                        ErrorKind::Error,
+                    ),
+                )
+                    .into_response();
+            }
+        }
+        if !q.confirm {
+            if let Some(question) = request.destructive_question() {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(serde_json::json!({
+                        "kind": "confirm_required",
+                        "question": question,
+                    })),
+                )
+                    .into_response();
+            }
+        }
+        let call = match issues_app::encode_call(&request) {
+            Ok(call) => call,
+            Err(error) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    err_json(&error.to_string(), ErrorKind::Error),
+                )
+                    .into_response();
+            }
+        };
+        let route = crate::control::ControlRoute::World {
+            address: resolved.address.clone(),
+            world: call.world().as_str().to_string(),
+        };
+        if let Err(error) = crate::cli::ensure_lait_daemon().await {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                err_json(&error.to_string(), ErrorKind::Error),
+            )
+                .into_response();
+        }
+        return match app.daemon.call_world(route, call.clone(), None).await {
+            Ok(reply) => match issues_app::decode_reply(&call, reply) {
+                Ok(value) => Json(value).into_response(),
+                Err(error) => (
+                    StatusCode::BAD_REQUEST,
+                    err_json(&error.to_string(), ErrorKind::Error),
+                )
+                    .into_response(),
+            },
+            Err(error) => (
+                StatusCode::BAD_REQUEST,
+                err_json(&error.to_string(), ErrorKind::Error),
+            )
+                .into_response(),
+        };
+    }
+
+    let req = match serde_json::from_value::<Request>(input) {
+        Ok(request) => request,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                err_json(&format!("bad request: {error}"), ErrorKind::Error),
+            )
+                .into_response();
+        }
+    };
+    if matches!(req, Request::Subscribe { .. }) {
+        return (
+            StatusCode::BAD_REQUEST,
+            err_json(
+                "subscribe is a stream, not a request — use GET /api/events",
+                ErrorKind::Error,
+            ),
+        )
+            .into_response();
+    }
 
     if let StationIdentity::Agent { name } = &resolved.identity {
         if !policy::is_read(&req) {

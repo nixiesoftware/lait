@@ -77,14 +77,6 @@ impl LaitDaemonClient {
         request: &Request,
         act_as: Option<&str>,
     ) -> Result<Response> {
-        if matches!(&route, ControlRoute::World { .. })
-            && control::classify(request) == control::RequestOwner::World
-            && self.protocol_version().await? >= WORLD_CALL_CONTROL_PROTOCOL
-        {
-            let call = crate::world::encode_call(request.clone())?;
-            let reply = self.call_world(route, call, act_as).await?;
-            return Ok(crate::world::decode_reply(reply));
-        }
         control::request_as_routed(&self.home, request, Some(route), act_as).await
     }
 
@@ -376,15 +368,10 @@ impl LaitDaemon {
             }
             (route, request) => {
                 let response = if control::classify(&request) == control::RequestOwner::World {
-                    match crate::world::encode_call(request) {
-                        Ok(call) => self
-                            .router
-                            .call_world(route, &call, act_as.as_deref())
-                            .await
-                            .map(crate::world::decode_reply)
-                            .unwrap_or_else(|error| Response::err(format!("{error:#}"))),
-                        Err(error) => Response::err(error.message),
-                    }
+                    Response::err(
+                        "typed product requests were retired in control protocol v5; \
+                         send a versioned World call",
+                    )
                 } else {
                     self.router
                         .request_routed(route, &request, act_as.as_deref())
@@ -713,12 +700,18 @@ mod tests {
             client.request(route, &Request::Status, None).await.unwrap(),
             Response::Status(_)
         ));
-        let world_route = control::station_route(resolved.address, &Request::ProjectList);
+        let call = issues_app::encode_call(&issues_app::IssuesRequest::ProjectList).unwrap();
+        let world_route = ControlRoute::World {
+            address: resolved.address,
+            world: call.world().as_str().to_string(),
+        };
+        let reply = client
+            .call_world(world_route, call.clone(), None)
+            .await
+            .unwrap();
+        let value = issues_app::decode_reply(&call, reply).unwrap();
         assert!(matches!(
-            client
-                .request(world_route, &Request::ProjectList, None)
-                .await
-                .unwrap(),
+            serde_json::from_value::<Response>(value).unwrap(),
             Response::Projects { .. }
         ));
         let ring = tokio::time::timeout(Duration::from_secs(2), catalog.next())

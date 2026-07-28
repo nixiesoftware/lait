@@ -1,9 +1,7 @@
 //! Product-neutral CLI dispatch intent.
 //!
-//! Parsing a command should determine its orbital destination. The application
-//! runner may still carry the historical typed [`Request`] while bundled
-//! product adapters are being extracted, but it must not rediscover whether
-//! that request belongs to the daemon, a Space, or a World after parsing.
+//! Parsing a command determines its orbital destination. Space/daemon commands
+//! carry [`Request`]; product packages emit opaque World calls.
 
 use crate::{
     control::{ControlRoute, Request},
@@ -35,25 +33,17 @@ pub struct ClientAction {
 
 #[derive(Debug, Clone)]
 pub enum ClientPayload {
-    /// Space/daemon compatibility surface, pending its own typed split.
+    /// Space/daemon control surface.
     Control(Request),
     /// A product-owned application call.
     World(WorldCall),
 }
 
 impl ClientAction {
-    /// Adapt the historical typed request surface at the command-registry edge.
-    ///
-    /// This is deliberately the only compatibility classifier used by the CLI.
-    /// New product command registries should construct an explicit World action
-    /// instead of adding another post-parse request classifier.
+    /// Construct an action for the Space/daemon control surface.
     pub fn from_legacy(request: Request) -> Self {
         let target = if matches!(&request, Request::Stop) {
             ClientTarget::Daemon
-        } else if let Some(world) = crate::world::request_world(&request) {
-            ClientTarget::World {
-                world: world.as_str().to_string(),
-            }
         } else {
             ClientTarget::Space
         };
@@ -115,15 +105,7 @@ mod tests {
     use std::path::Path;
 
     #[test]
-    fn compatibility_requests_become_explicit_orbital_actions() {
-        let issue = ClientAction::from_legacy(Request::IssueView {
-            reff: "ENG-1".into(),
-        });
-        assert!(matches!(
-            issue.target(),
-            ClientTarget::World { world } if world == "com.lait.issues"
-        ));
-
+    fn control_requests_become_explicit_orbital_actions() {
         let station = ClientAction::from_legacy(Request::Who);
         assert_eq!(station.target(), &ClientTarget::Space);
 
@@ -135,9 +117,14 @@ mod tests {
     fn an_action_materializes_the_route_it_selected_at_parse_time() {
         let address =
             OrbitAddress::for_store(Path::new("/tmp/lait-action"), SpaceId::from_digest([7; 16]));
-        let action = ClientAction::from_legacy(Request::IssueView {
-            reff: "ENG-1".into(),
-        });
+        let call = WorldCall::new(
+            crate::world::contract::world_id(),
+            "issues.control",
+            1,
+            br#"{"cmd":"issue_view","reff":"ENG-1"}"#.to_vec(),
+        )
+        .unwrap();
+        let action = ClientAction::world(call);
         assert!(matches!(
             action.route(address),
             ControlRoute::World { world, .. } if world == "com.lait.issues"

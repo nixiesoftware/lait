@@ -6,6 +6,7 @@
 //! daemon, or root control protocol.
 
 pub mod cli;
+pub mod host;
 pub mod lifecycle;
 pub mod mcp;
 pub mod projections;

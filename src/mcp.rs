@@ -186,18 +186,6 @@ pub struct ConnectArgs {
     pub ticket: String,
 }
 
-fn mcp_string(value: &serde_json::Value, field: &str) -> Result<String, McpError> {
-    mcp_string_opt(value, field)
-        .ok_or_else(|| McpError::invalid_params(format!("Issues tool is missing '{field}'"), None))
-}
-
-fn mcp_string_opt(value: &serde_json::Value, field: &str) -> Option<String> {
-    value
-        .get(field)
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_string)
-}
-
 #[derive(Clone)]
 pub struct LaitMcp {
     home: PathBuf,
@@ -316,41 +304,28 @@ impl LaitMcp {
                 return Self::tool_value(value);
             }
             world_interface::CliInvocation::Local { operation, input } => {
-                let request = match operation.as_str() {
-                    issues_app::cli::LOCAL_INBOX => Request::Inbox {
-                        clear: input
-                            .get("clear")
-                            .and_then(serde_json::Value::as_bool)
-                            .unwrap_or(false),
+                use issues_app::host::{AccessRequest, IssuesHostRequest};
+
+                let host = issues_app::host::decode(&operation, input)
+                    .map_err(|error| McpError::invalid_params(error.to_string(), None))?;
+                let request = match host {
+                    IssuesHostRequest::Inbox { clear } => Request::Inbox { clear },
+                    IssuesHostRequest::Access(access) => match access {
+                        AccessRequest::List { actor } => Request::AccessList { actor },
+                        AccessRequest::Grant {
+                            actor,
+                            role,
+                            project,
+                        } => Request::AccessGrant {
+                            actor,
+                            role,
+                            project,
+                        },
+                        AccessRequest::Revoke { grant_id } => Request::AccessRevoke { grant_id },
                     },
-                    issues_app::cli::LOCAL_ACCESS => {
-                        let action = input
-                            .get("action")
-                            .and_then(serde_json::Value::as_str)
-                            .unwrap_or("ls");
-                        match action {
-                            "ls" => Request::AccessList {
-                                actor: mcp_string_opt(&input, "actor"),
-                            },
-                            "grant" => Request::AccessGrant {
-                                actor: mcp_string(&input, "actor")?,
-                                role: mcp_string(&input, "role")?,
-                                project: mcp_string_opt(&input, "project"),
-                            },
-                            "revoke" => Request::AccessRevoke {
-                                grant_id: mcp_string(&input, "grant_id")?,
-                            },
-                            other => {
-                                return Err(McpError::invalid_params(
-                                    format!("unsupported Issues access action '{other}'"),
-                                    None,
-                                ));
-                            }
-                        }
-                    }
                     other => {
                         return Err(McpError::invalid_params(
-                            format!("unsupported World host capability '{other}'"),
+                            format!("unsupported MCP host capability {other:?}"),
                             None,
                         ));
                     }

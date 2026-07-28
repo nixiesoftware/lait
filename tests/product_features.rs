@@ -11,7 +11,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use async_trait::async_trait;
-use lait::control::{request, Filter, Request, Response};
+use lait::control::{request, ControlRoute, Request, Response};
+use lait::daemon::OrbitAddress;
 use lait::net::Network;
 use lait::orbital::run_space_bridge_with;
 use lait::transport::mem::MemNet;
@@ -51,12 +52,37 @@ fn req(rt: &tokio::runtime::Runtime, home: &Path, r: Request) -> Response {
         .unwrap_or_else(|e| Response::err(format!("{e:#}")))
 }
 
-fn ok(rt: &tokio::runtime::Runtime, home: &Path, r: Request) -> Response {
-    let resp = req(rt, home, r.clone());
-    if let Response::Error { message, .. } = &resp {
-        panic!("request {r:?} failed: {message}");
+fn issue_req(
+    rt: &tokio::runtime::Runtime,
+    home: &Path,
+    request: issues_app::IssuesRequest,
+) -> Response {
+    rt.block_on(async {
+        let space = lait::orbital::discover_space_id(home).expect("test Space");
+        let call = issues_app::encode_call(&request)?;
+        let reply = lait::control::call_world(
+            home,
+            ControlRoute::World {
+                address: OrbitAddress::for_store(home, space),
+                world: call.world().as_str().to_string(),
+            },
+            call.clone(),
+            None,
+        )
+        .await?;
+        Ok::<Response, anyhow::Error>(serde_json::from_value(issues_app::decode_reply(
+            &call, reply,
+        )?)?)
+    })
+    .unwrap_or_else(|error| Response::err(format!("{error:#}")))
+}
+
+fn ok(rt: &tokio::runtime::Runtime, home: &Path, request: issues_app::IssuesRequest) -> Response {
+    let response = issue_req(rt, home, request.clone());
+    if let Response::Error { message, .. } = &response {
+        panic!("request {request:?} failed: {message}");
     }
-    resp
+    response
 }
 
 fn poll_until<T>(timeout: Duration, mut check: impl FnMut() -> Option<T>) -> Option<T> {
@@ -97,7 +123,7 @@ fn new_issue(rt: &tokio::runtime::Runtime, home: &Path, project: &str, title: &s
     let resp = ok(
         rt,
         home,
-        Request::IssueNew {
+        issues_app::IssuesRequest::IssueNew {
             due: None,
             estimate: None,
             title: title.into(),
@@ -127,7 +153,7 @@ fn milestones_cycles_initiatives_teams_triage_delete_and_attachments() {
     ok(
         &client,
         &home,
-        Request::ProjectNew {
+        issues_app::IssuesRequest::ProjectNew {
             name: "Engine".into(),
             key: "eng".into(),
             color: None,
@@ -139,7 +165,7 @@ fn milestones_cycles_initiatives_teams_triage_delete_and_attachments() {
     ok(
         &client,
         &home,
-        Request::MilestoneSet {
+        issues_app::IssuesRequest::MilestoneSet {
             project: "eng".into(),
             milestone: None,
             name: Some("Beta".into()),
@@ -150,7 +176,7 @@ fn milestones_cycles_initiatives_teams_triage_delete_and_attachments() {
     ok(
         &client,
         &home,
-        Request::IssueMilestone {
+        issues_app::IssuesRequest::IssueMilestone {
             reff: issue.clone(),
             milestone: Some("Beta".into()),
         },
@@ -158,7 +184,7 @@ fn milestones_cycles_initiatives_teams_triage_delete_and_attachments() {
     let Response::Milestones { milestones } = ok(
         &client,
         &home,
-        Request::MilestoneList {
+        issues_app::IssuesRequest::MilestoneList {
             project: "eng".into(),
         },
     ) else {
@@ -171,14 +197,14 @@ fn milestones_cycles_initiatives_teams_triage_delete_and_attachments() {
     ok(
         &client,
         &home,
-        Request::IssueDone {
+        issues_app::IssuesRequest::IssueDone {
             reff: issue.clone(),
         },
     );
     let Response::Milestones { milestones } = ok(
         &client,
         &home,
-        Request::MilestoneList {
+        issues_app::IssuesRequest::MilestoneList {
             project: "eng".into(),
         },
     ) else {
@@ -190,7 +216,7 @@ fn milestones_cycles_initiatives_teams_triage_delete_and_attachments() {
     ok(
         &client,
         &home,
-        Request::CycleSet {
+        issues_app::IssuesRequest::CycleSet {
             project: "eng".into(),
             cycle: None,
             name: Some("Sprint 1".into()),
@@ -202,7 +228,7 @@ fn milestones_cycles_initiatives_teams_triage_delete_and_attachments() {
     ok(
         &client,
         &home,
-        Request::IssueCycle {
+        issues_app::IssuesRequest::IssueCycle {
             reff: issue.clone(),
             cycle: Some("Sprint 1".into()),
         },
@@ -210,7 +236,7 @@ fn milestones_cycles_initiatives_teams_triage_delete_and_attachments() {
     let Response::Cycles { cycles } = ok(
         &client,
         &home,
-        Request::CycleList {
+        issues_app::IssuesRequest::CycleList {
             project: "eng".into(),
         },
     ) else {
@@ -224,7 +250,7 @@ fn milestones_cycles_initiatives_teams_triage_delete_and_attachments() {
     ok(
         &client,
         &home,
-        Request::InitiativeSet {
+        issues_app::IssuesRequest::InitiativeSet {
             initiative: None,
             name: Some("Q3 platform".into()),
             description: Some("everything ships".into()),
@@ -239,7 +265,7 @@ fn milestones_cycles_initiatives_teams_triage_delete_and_attachments() {
     ok(
         &client,
         &home,
-        Request::InitiativeSet {
+        issues_app::IssuesRequest::InitiativeSet {
             initiative: Some("Q3 platform".into()),
             name: None,
             description: None,
@@ -251,7 +277,9 @@ fn milestones_cycles_initiatives_teams_triage_delete_and_attachments() {
             remove: false,
         },
     );
-    let Response::Initiatives { initiatives } = ok(&client, &home, Request::InitiativeList) else {
+    let Response::Initiatives { initiatives } =
+        ok(&client, &home, issues_app::IssuesRequest::InitiativeList)
+    else {
         panic!("expected Initiatives");
     };
     assert_eq!(initiatives.len(), 1);
@@ -262,7 +290,7 @@ fn milestones_cycles_initiatives_teams_triage_delete_and_attachments() {
     ok(
         &client,
         &home,
-        Request::TeamSet {
+        issues_app::IssuesRequest::TeamSet {
             team: None,
             name: Some("Platform".into()),
             key: Some("plt".into()),
@@ -277,7 +305,7 @@ fn milestones_cycles_initiatives_teams_triage_delete_and_attachments() {
     ok(
         &client,
         &home,
-        Request::TeamSet {
+        issues_app::IssuesRequest::TeamSet {
             team: Some("PLT".into()),
             name: None,
             key: None,
@@ -291,7 +319,7 @@ fn milestones_cycles_initiatives_teams_triage_delete_and_attachments() {
     ok(
         &client,
         &home,
-        Request::ProjectEdit {
+        issues_app::IssuesRequest::ProjectEdit {
             project: "eng".into(),
             name: None,
             color: None,
@@ -303,7 +331,7 @@ fn milestones_cycles_initiatives_teams_triage_delete_and_attachments() {
             archived: None,
         },
     );
-    let Response::Teams { teams } = ok(&client, &home, Request::TeamList) else {
+    let Response::Teams { teams } = ok(&client, &home, issues_app::IssuesRequest::TeamList) else {
         panic!("expected Teams");
     };
     assert_eq!(teams.len(), 1);
@@ -315,7 +343,7 @@ fn milestones_cycles_initiatives_teams_triage_delete_and_attachments() {
     let Response::Ref { reff: t_accept } = ok(
         &client,
         &home,
-        Request::TriageSubmit {
+        issues_app::IssuesRequest::TriageSubmit {
             title: "login breaks on refresh".into(),
             body: Some("steps: refresh twice".into()),
             source: None,
@@ -326,7 +354,7 @@ fn milestones_cycles_initiatives_teams_triage_delete_and_attachments() {
     let Response::Ref { reff: t_decline } = ok(
         &client,
         &home,
-        Request::TriageSubmit {
+        issues_app::IssuesRequest::TriageSubmit {
             title: "make it web scale".into(),
             body: None,
             source: Some("suggestion-box".into()),
@@ -337,7 +365,7 @@ fn milestones_cycles_initiatives_teams_triage_delete_and_attachments() {
     let Response::Ref { reff: t_dupe } = ok(
         &client,
         &home,
-        Request::TriageSubmit {
+        issues_app::IssuesRequest::TriageSubmit {
             title: "milestone thing again".into(),
             body: None,
             source: None,
@@ -348,7 +376,7 @@ fn milestones_cycles_initiatives_teams_triage_delete_and_attachments() {
     ok(
         &client,
         &home,
-        Request::TriageDecide {
+        issues_app::IssuesRequest::TriageDecide {
             id: t_accept.clone(),
             outcome: "accepted".into(),
             project: Some("eng".into()),
@@ -359,7 +387,7 @@ fn milestones_cycles_initiatives_teams_triage_delete_and_attachments() {
     ok(
         &client,
         &home,
-        Request::TriageDecide {
+        issues_app::IssuesRequest::TriageDecide {
             id: t_decline.clone(),
             outcome: "declined".into(),
             project: None,
@@ -370,7 +398,7 @@ fn milestones_cycles_initiatives_teams_triage_delete_and_attachments() {
     ok(
         &client,
         &home,
-        Request::TriageDecide {
+        issues_app::IssuesRequest::TriageDecide {
             id: t_dupe.clone(),
             outcome: "duplicate".into(),
             project: None,
@@ -379,10 +407,10 @@ fn milestones_cycles_initiatives_teams_triage_delete_and_attachments() {
         },
     );
     // Deciding twice is refused.
-    let resp = req(
+    let resp = issue_req(
         &client,
         &home,
-        Request::TriageDecide {
+        issues_app::IssuesRequest::TriageDecide {
             id: t_decline.clone(),
             outcome: "accepted".into(),
             project: Some("eng".into()),
@@ -394,7 +422,8 @@ fn milestones_cycles_initiatives_teams_triage_delete_and_attachments() {
         matches!(&resp, Response::Error { message, .. } if message.contains("already decided")),
         "double decide must refuse: {resp:?}"
     );
-    let Response::TriageItems { items } = ok(&client, &home, Request::TriageList) else {
+    let Response::TriageItems { items } = ok(&client, &home, issues_app::IssuesRequest::TriageList)
+    else {
         panic!("expected TriageItems");
     };
     assert_eq!(items.len(), 3);
@@ -406,7 +435,7 @@ fn milestones_cycles_initiatives_teams_triage_delete_and_attachments() {
     let Response::Issue(view) = ok(
         &client,
         &home,
-        Request::IssueView {
+        issues_app::IssuesRequest::IssueView {
             reff: accepted.reff.clone(),
         },
     ) else {
@@ -420,7 +449,7 @@ fn milestones_cycles_initiatives_teams_triage_delete_and_attachments() {
     ok(
         &client,
         &home,
-        Request::Attach {
+        issues_app::IssuesRequest::Attach {
             reff: issue.clone(),
             name: "notes.txt".into(),
             mime: Some("text/plain".into()),
@@ -431,7 +460,7 @@ fn milestones_cycles_initiatives_teams_triage_delete_and_attachments() {
     let Response::Issue(view) = ok(
         &client,
         &home,
-        Request::IssueView {
+        issues_app::IssuesRequest::IssueView {
             reff: issue.clone(),
         },
     ) else {
@@ -448,7 +477,7 @@ fn milestones_cycles_initiatives_teams_triage_delete_and_attachments() {
     } = ok(
         &client,
         &home,
-        Request::AttachmentGet {
+        issues_app::IssuesRequest::AttachmentGet {
             reff: issue.clone(),
             id: att_id.clone(),
         },
@@ -464,10 +493,10 @@ fn milestones_cycles_initiatives_teams_triage_delete_and_attachments() {
     );
     // Over the cap refuses loudly.
     let big = vec![0u8; lait::world::contract::MAX_ATTACHMENT_BYTES + 1];
-    let resp = req(
+    let resp = issue_req(
         &client,
         &home,
-        Request::Attach {
+        issues_app::IssuesRequest::Attach {
             reff: issue.clone(),
             name: "big.bin".into(),
             mime: None,
@@ -482,7 +511,7 @@ fn milestones_cycles_initiatives_teams_triage_delete_and_attachments() {
     ok(
         &client,
         &home,
-        Request::Detach {
+        issues_app::IssuesRequest::Detach {
             reff: issue.clone(),
             id: att_id,
         },
@@ -490,7 +519,7 @@ fn milestones_cycles_initiatives_teams_triage_delete_and_attachments() {
     let Response::Issue(view) = ok(
         &client,
         &home,
-        Request::IssueView {
+        issues_app::IssuesRequest::IssueView {
             reff: issue.clone(),
         },
     ) else {
@@ -502,17 +531,17 @@ fn milestones_cycles_initiatives_teams_triage_delete_and_attachments() {
     ok(
         &client,
         &home,
-        Request::ProjectNew {
+        issues_app::IssuesRequest::ProjectNew {
             name: "Doomed".into(),
             key: "dmd".into(),
             color: None,
         },
     );
     let doomed_issue = new_issue(&client, &home, "dmd", "the last issue");
-    let resp = req(
+    let resp = issue_req(
         &client,
         &home,
-        Request::ProjectDelete {
+        issues_app::IssuesRequest::ProjectDelete {
             project: "dmd".into(),
         },
     );
@@ -524,14 +553,14 @@ fn milestones_cycles_initiatives_teams_triage_delete_and_attachments() {
     ok(
         &client,
         &home,
-        Request::IssueDelete {
+        issues_app::IssuesRequest::IssueDelete {
             reff: doomed_issue.clone(),
         },
     );
-    let resp = req(
+    let resp = issue_req(
         &client,
         &home,
-        Request::ProjectDelete {
+        issues_app::IssuesRequest::ProjectDelete {
             project: "dmd".into(),
         },
     );
@@ -544,14 +573,14 @@ fn milestones_cycles_initiatives_teams_triage_delete_and_attachments() {
     ok(
         &client,
         &home,
-        Request::IssueRestore {
+        issues_app::IssuesRequest::IssueRestore {
             reff: doomed_issue.clone(),
         },
     );
     ok(
         &client,
         &home,
-        Request::InitiativeSet {
+        issues_app::IssuesRequest::InitiativeSet {
             initiative: Some("Q3 platform".into()),
             name: None,
             description: None,
@@ -566,7 +595,7 @@ fn milestones_cycles_initiatives_teams_triage_delete_and_attachments() {
     ok(
         &client,
         &home,
-        Request::IssueMove {
+        issues_app::IssuesRequest::IssueMove {
             reff: doomed_issue.clone(),
             project: Some("eng".into()),
             pos: None,
@@ -575,18 +604,22 @@ fn milestones_cycles_initiatives_teams_triage_delete_and_attachments() {
     ok(
         &client,
         &home,
-        Request::ProjectDelete {
+        issues_app::IssuesRequest::ProjectDelete {
             project: "dmd".into(),
         },
     );
-    let Response::Projects { projects } = ok(&client, &home, Request::ProjectList) else {
+    let Response::Projects { projects } =
+        ok(&client, &home, issues_app::IssuesRequest::ProjectList)
+    else {
         panic!("expected Projects");
     };
     assert!(
         !projects.iter().any(|p| p.key == "DMD"),
         "the emptied project is gone"
     );
-    let Response::Initiatives { initiatives } = ok(&client, &home, Request::InitiativeList) else {
+    let Response::Initiatives { initiatives } =
+        ok(&client, &home, issues_app::IssuesRequest::InitiativeList)
+    else {
         panic!("expected Initiatives");
     };
     assert_eq!(
@@ -598,9 +631,9 @@ fn milestones_cycles_initiatives_teams_triage_delete_and_attachments() {
     let Response::List { rows } = ok(
         &client,
         &home,
-        Request::List {
+        issues_app::IssuesRequest::List {
             project: Some("eng".into()),
-            filter: Filter {
+            filter: issues_app::Filter {
                 all: true,
                 ..Default::default()
             },
@@ -628,7 +661,7 @@ fn a_follower_hears_about_an_issue_they_are_not_assigned() {
     ok(
         &client,
         &founder_home,
-        Request::ProjectNew {
+        issues_app::IssuesRequest::ProjectNew {
             name: "Core".into(),
             key: "core".into(),
             color: None,
@@ -636,7 +669,7 @@ fn a_follower_hears_about_an_issue_they_are_not_assigned() {
     );
     let issue = new_issue(&client, &founder_home, "core", "watched work");
 
-    let Response::Ref { reff: invite } = ok(
+    let Response::Ref { reff: invite } = req(
         &client,
         &founder_home,
         Request::Invite {
@@ -674,10 +707,10 @@ fn a_follower_hears_about_an_issue_they_are_not_assigned() {
     assert!(
         poll_until(Duration::from_secs(10), || {
             matches!(
-                req(
+                issue_req(
                     &client,
                     &member_home,
-                    Request::Follow {
+                    issues_app::IssuesRequest::Follow {
                         reff: issue.clone(),
                         on: true,
                     },
@@ -693,7 +726,7 @@ fn a_follower_hears_about_an_issue_they_are_not_assigned() {
     ok(
         &client,
         &founder_home,
-        Request::Comment {
+        issues_app::IssuesRequest::Comment {
             reply_to: None,
             reff: issue.clone(),
             body: "news for the followers".into(),

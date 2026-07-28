@@ -534,9 +534,9 @@ impl ControlRouter {
 
     /// Dispatch one product-neutral call to its explicitly addressed World.
     ///
-    /// Owned placements are invoked directly in-process. Only an attached
-    /// historical SpaceBridge crosses the per-Orbit compatibility socket, using
-    /// the product's temporary legacy codec at that edge.
+    /// Owned placements are invoked directly in-process. An attached
+    /// SpaceBridge receives the same opaque envelope over its per-Orbit socket;
+    /// the router never decodes or translates product payloads.
     pub async fn call_world(
         &self,
         route: ControlRoute,
@@ -579,26 +579,7 @@ impl ControlRouter {
                 Ok(bridge.call_world(address, call, act_as))
             }
             PlacementMode::Attached => {
-                let Some(codec) = self.packages.legacy_codec(call.world()) else {
-                    return Ok(WorldReply::error(
-                        call,
-                        WorldCallErrorCode::Unavailable,
-                        format!(
-                            "World '{}' has no adapter for an attached compatibility process",
-                            call.world()
-                        ),
-                    ));
-                };
-                let request = match codec.decode_call(call) {
-                    Ok(request) => request,
-                    Err(error) => {
-                        return Ok(WorldReply::error(call, error.code, error.message));
-                    }
-                };
-                let response =
-                    control::request_as_routed(&resolved.home, &request, Some(route), act_as)
-                        .await?;
-                Ok(codec.encode_reply(call, response))
+                control::call_world(&resolved.home, route, call.clone(), act_as).await
             }
         }
     }
@@ -683,23 +664,11 @@ fn routed_address<'a>(
             Ok(address)
         }
         ControlRoute::World { address, world } => {
-            if control::classify(request) != RequestOwner::World {
-                return Err(anyhow!(
-                    "Space-owned request cannot be sent through a WorldBridge"
-                ));
-            }
-            let Some(world_id) = replica::ids::WorldId::parse(world) else {
-                return Err(anyhow!("invalid World id '{world}'"));
-            };
-            if !packages.contains(&world_id) {
-                return Err(anyhow!(
-                    "World '{world}' is not bundled by this Lait daemon"
-                ));
-            }
-            if !packages.accepts(&world_id, request) {
-                return Err(anyhow!("World '{world}' does not own this product request"));
-            }
-            Ok(address)
+            let _ = (packages, address, world);
+            Err(anyhow!(
+                "typed product requests were retired in control protocol v5; \
+                 send a versioned World call"
+            ))
         }
     }
 }
@@ -863,7 +832,7 @@ mod tests {
             crate::world::contract::world_id(),
             issues_app::IssuesCallHandler::OPERATION,
             issues_app::IssuesCallHandler::VERSION + 1,
-            serde_json::to_vec(&Request::ProjectList).unwrap(),
+            serde_json::to_vec(&issues_app::IssuesRequest::ProjectList).unwrap(),
         )
         .unwrap();
         let reply = router
@@ -905,7 +874,7 @@ mod tests {
             Response::Status(_)
         ));
         let resolved = router.resolve(&id).unwrap();
-        let call = crate::world::encode_call(Request::ProjectList).unwrap();
+        let call = issues_app::encode_call(&issues_app::IssuesRequest::ProjectList).unwrap();
         let reply = router
             .call_world(
                 ControlRoute::World {
@@ -917,8 +886,9 @@ mod tests {
             )
             .await
             .unwrap();
+        let value = issues_app::decode_reply(&call, reply).unwrap();
         assert!(matches!(
-            crate::world::decode_reply(reply),
+            serde_json::from_value::<Response>(value).unwrap(),
             Response::Projects { .. }
         ));
         let placements = router.occupancy.placements().await;
@@ -966,7 +936,7 @@ mod tests {
             router.request(&id, &Request::Status).await.unwrap(),
             Response::Status(_)
         ));
-        let call = crate::world::encode_call(Request::ProjectList).unwrap();
+        let call = issues_app::encode_call(&issues_app::IssuesRequest::ProjectList).unwrap();
         let reply = router
             .call_world(
                 ControlRoute::World {
@@ -978,8 +948,9 @@ mod tests {
             )
             .await
             .unwrap();
+        let value = issues_app::decode_reply(&call, reply).unwrap();
         assert!(matches!(
-            crate::world::decode_reply(reply),
+            serde_json::from_value::<Response>(value).unwrap(),
             Response::Projects { .. }
         ));
         let placements = router.occupancy.placements().await;

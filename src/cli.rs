@@ -227,9 +227,6 @@ fn paint(on: bool, code: &str, s: &str) -> String {
 /// dangerous.
 pub(crate) fn destructive_question(req: &Request) -> Option<String> {
     match req {
-        // The ref is inferred from the git branch when omitted, so this is the
-        // one verb that can destroy something you never named.
-        Request::IssueDelete { reff } => Some(format!("delete {reff}?")),
         Request::MemberRemove { who } => Some(format!(
             "remove {who} from this space and rotate the space key?"
         )),
@@ -242,9 +239,9 @@ pub(crate) fn destructive_question(req: &Request) -> Option<String> {
 /// A failure just returns `None` — the prompt falls back to the bare ref rather
 /// than blocking on a lookup that isn't essential.
 async fn peek_title(home: &Path, reff: &str) -> Option<String> {
-    match client(
+    match issues_client(
         home,
-        Request::IssueView {
+        issues_app::IssuesRequest::IssueView {
             reff: reff.to_string(),
         },
     )
@@ -255,26 +252,39 @@ async fn peek_title(home: &Path, reff: &str) -> Option<String> {
     }
 }
 
-/// Gate a destructive request behind a confirmation. `true` = go ahead.
-///
-/// Non-destructive requests pass straight through, so this can sit on the uniform
-/// dispatch path without every verb paying for it.
-pub async fn confirm_destructive(home: &Path, req: &Request, out: Out) -> bool {
-    let Some(question) = destructive_question(req) else {
+/// Gate a product-owned Issues command behind the same CLI confirmation
+/// affordance used by Space control.
+pub async fn confirm_issues_destructive(
+    home: &Path,
+    request: &issues_app::IssuesRequest,
+    out: Out,
+) -> bool {
+    let Some(question) = request.destructive_question() else {
         return true;
     };
-    // Name it, not just its handle: `lait issues delete` on an issue branch
-    // takes its ref from the branch, so "delete ENG-142?" is unanswerable if you
-    // don't remember which issue that is — which is exactly the case where a
-    // stale checkout deletes the wrong one.
-    let question = match req {
-        Request::IssueDelete { reff } => match peek_title(home, reff).await {
-            Some(t) => format!("delete {reff} “{t}”? this tombstones it for every peer"),
+    let question = match request {
+        issues_app::IssuesRequest::IssueDelete { reff } => match peek_title(home, reff).await {
+            Some(title) => format!("{question}  {title}"),
             None => question,
         },
         _ => question,
     };
-    match confirm(&question, out) {
+    ask_confirmation(&question, out)
+}
+
+/// Gate a destructive request behind a confirmation. `true` = go ahead.
+///
+/// Non-destructive requests pass straight through, so this can sit on the uniform
+/// dispatch path without every verb paying for it.
+pub async fn confirm_destructive(req: &Request, out: Out) -> bool {
+    let Some(question) = destructive_question(req) else {
+        return true;
+    };
+    ask_confirmation(&question, out)
+}
+
+fn ask_confirmation(question: &str, out: Out) -> bool {
+    match confirm(question, out) {
         Confirmed::Yes => true,
         Confirmed::No => {
             eprintln!("aborted.");
@@ -632,12 +642,31 @@ pub async fn client_action_as_scoped(
             .request(route, request, act_as)
             .await
             .map_err(|e| CliError::unreachable(format!("{e:#}")).into()),
-        ClientPayload::World(call) => daemon
-            .call_world(route, call.clone(), act_as)
-            .await
-            .map(crate::world::decode_reply)
-            .map_err(|e| CliError::unreachable(format!("{e:#}")).into()),
+        ClientPayload::World(call) => {
+            let reply = daemon
+                .call_world(route, call.clone(), act_as)
+                .await
+                .map_err(|e| CliError::unreachable(format!("{e:#}")))?;
+            let packages = crate::world::client_packages();
+            let package = packages
+                .package_for_world(call.world())
+                .ok_or_else(|| anyhow!("no client package for World '{}'", call.world()))?;
+            let value = package
+                .decode_reply(call, reply)
+                .map_err(|error| anyhow!(error.to_string()))?;
+            serde_json::from_value(value).context("decode product response")
+        }
     }
+}
+
+/// Send one Issues request through its package-owned World protocol and adapt
+/// the response to the shell's existing presentation DTO.
+pub async fn issues_client(home: &Path, request: issues_app::IssuesRequest) -> Result<Response> {
+    let call = issues_app::encode_call(&request)?;
+    let scope = scope_for_home(home);
+    let reply = world_reply_as_scoped(home, call.clone(), &scope, None).await?;
+    let value = issues_app::decode_reply(&call, reply)?;
+    serde_json::from_value(value).context("decode Issues response")
 }
 
 /// Send one package-owned call without decoding its opaque reply in the shell.
@@ -947,7 +976,7 @@ fn checkout_issue_branch(v: &crate::dto::IssueView, out: Out) {
 /// `lait issues start`: claim + activate + branch. The daemon does the atomic
 /// state move; the branch is client-side sugar on top (skippable, best-effort).
 pub async fn run_start(home: &Path, reff: String, no_branch: bool, out: Out) -> Result<()> {
-    let resp = client(home, Request::IssueStart { reff }).await?;
+    let resp = issues_client(home, issues_app::IssuesRequest::IssueStart { reff }).await?;
     match &resp {
         Response::Issue(v) => {
             if out.json {
@@ -971,8 +1000,12 @@ pub async fn run_start(home: &Path, reff: String, no_branch: bool, out: Out) -> 
 }
 
 /// `lait issues done` / `lait issues stop`: branchless work-state verbs.
-pub async fn run_workstate(home: &Path, req: Request, out: Out) -> Result<()> {
-    let resp = client(home, req).await?;
+pub async fn run_workstate(
+    home: &Path,
+    request: issues_app::IssuesRequest,
+    out: Out,
+) -> Result<()> {
+    let resp = issues_client(home, request).await?;
     match &resp {
         Response::Issue(v) => {
             if out.json {
@@ -993,8 +1026,12 @@ pub async fn run_workstate(home: &Path, req: Request, out: Out) -> Result<()> {
 }
 
 /// `lait issues new --start`: file the issue, then claim it (two commits).
-pub async fn run_new_start(home: &Path, new_req: Request, out: Out) -> Result<()> {
-    let resp = client(home, new_req).await?;
+pub async fn run_new_start(
+    home: &Path,
+    request: issues_app::IssuesRequest,
+    out: Out,
+) -> Result<()> {
+    let resp = issues_client(home, request).await?;
     match &resp {
         Response::Ref { reff } => {
             if !out.json {
@@ -1017,11 +1054,11 @@ pub async fn run_new_start(home: &Path, new_req: Request, out: Out) -> Result<()
 /// tab could open, and its empty states name the next command.
 pub async fn run_focus(home: &Path, out: Out) -> Result<()> {
     let inbox = client(home, Request::Inbox { clear: false }).await?;
-    let mine = request(
+    let mine = issues_client(
         home,
-        &Request::List {
+        issues_app::IssuesRequest::List {
             project: None,
-            filter: crate::control::Filter {
+            filter: issues_app::Filter {
                 mine: true,
                 status: None,
                 label: None,
@@ -2438,13 +2475,8 @@ mod tests {
 
     #[test]
     fn destructive_verbs_ask_and_the_rest_do_not() {
-        // The three that destroy something ask. This list IS the policy, so a new
-        // destructive verb that forgets to register here fails this test rather
-        // than silently shipping without a prompt.
+        // Space-level destructive operations remain host policy.
         for req in [
-            Request::IssueDelete {
-                reff: "ENG-1".into(),
-            },
             Request::MemberRemove { who: "ada".into() },
             Request::KeyRotate,
         ] {
@@ -2453,17 +2485,21 @@ mod tests {
                 "{req:?} destroys something and must be confirmed",
             );
         }
-        // Reads and ordinary writes must never prompt — prompting on these would
-        // break every script that files or lists issues.
-        for req in [
-            Request::List {
+        // Product destructive policy is declared by the package.
+        assert!(issues_app::IssuesRequest::IssueDelete {
+            reff: "ENG-1".into()
+        }
+        .destructive_question()
+        .is_some());
+        for request in [
+            issues_app::IssuesRequest::List {
                 project: None,
                 filter: Default::default(),
             },
-            Request::IssueView {
+            issues_app::IssuesRequest::IssueView {
                 reff: "ENG-1".into(),
             },
-            Request::IssueNew {
+            issues_app::IssuesRequest::IssueNew {
                 title: "t".into(),
                 project: None,
                 project_hint: None,
@@ -2476,8 +2512,8 @@ mod tests {
             },
         ] {
             assert!(
-                destructive_question(&req).is_none(),
-                "{req:?} is not destructive and must not prompt",
+                request.destructive_question().is_none(),
+                "{request:?} is not destructive and must not prompt",
             );
         }
     }

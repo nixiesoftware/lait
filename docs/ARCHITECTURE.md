@@ -107,9 +107,9 @@ client contract. The ControlRouter hosts a vacant Orbit in-process and attaches,
 without taking ownership, when a compatible historical per-home daemon already
 holds that Orbit. Both placement modes retain the per-home socket for Space
 control and Observation compatibility, but owned World calls dispatch directly
-to the in-process bridge. An attached placement alone translates and forwards a
-World call through that socket. CLI, MCP, and web requests enter through the one
-LaitDaemon endpoint.
+to the in-process bridge. An attached placement forwards the same opaque World
+call through that socket without translating its payload. CLI, MCP, and web
+requests enter through the one LaitDaemon endpoint.
 
 Catalog listing remains passive. The web adapter asks LaitDaemon for an
 `if_running` status; LaitDaemon may inspect an already-live per-Orbit
@@ -307,9 +307,10 @@ isolation.
 
 For an owned Station placement, ControlRouter invokes the in-process
 SpaceBridge directly. The per-Orbit socket is not part of that World call stack.
-If LaitDaemon attaches to a historical standalone SpaceBridge, the package's
-temporary `LegacyWorldCodec` translates at that one compatibility edge and only
-then crosses the old typed socket. New products require no legacy codec.
+If LaitDaemon attaches to a standalone SpaceBridge, the same opaque
+`WorldClientRequest` crosses the socket and the receiving bridge invokes its
+registered handler. Protocol v5 deliberately retired v4 bridges and typed
+product requests, so every placement now has the same product-neutral boundary.
 
 IssuesWorld's semantic package lives at `products/issues` with no dependency on
 the `lait` application crate, local control protocol, daemon, filesystem, or
@@ -325,9 +326,10 @@ implementation.
 
 The sibling `products/issues-app` package owns the `issues.control` v1 codec,
 query/command classification, `IssueRouter` execution adapter, product response
-schema, formation policy, status/inbox/doorbell projections, `lait issues`
-command tree, and all 38 Issues MCP descriptors. It depends on the semantic
-package and generic substrate/bridge/client interfaces, never back on `lait`.
+schema, host-capability vocabulary, role-to-authority planning, formation
+policy, status/inbox/doorbell projections, `lait issues` command tree, and all
+38 Issues MCP descriptors. It depends on the semantic package and generic
+substrate/bridge/client interfaces, never back on `lait`.
 Most client operations become `WorldCall`s at parse time. Inbox watermark I/O,
 access assignment, git work-state behavior, attachment filesystem I/O, and
 implementation activation are explicit named host-capability calls: their
@@ -348,13 +350,13 @@ legitimate protected material opaquely.
 IssuesWorld (`com.lait.issues`) is the bundled reference World. It has no private
 architectural path unavailable to another conforming World.
 
-The issue-shaped `Request`/`Response` schema remains a compatibility surface for
-the viewer, explicit host-capability adapters, and historical per-Orbit daemon;
-it no longer defines the CLI/MCP grammar or crosses the generic WorldBridge
-boundary. Human response rendering, the viewer, filesystem/git host-capability
-execution, the legacy issue-shaped control surface, and role-assignment
-planning still live in the root application or SpaceBridge/Mechanics. Those
-are the remaining ownership cuts before the whole Issues application—not only
+The issue-shaped root `Request` variants now survive only as inert schema debt:
+protocol v5 rejects them at every transport entrance. The viewer, CLI, and MCP
+all construct the Issues-owned application protocol and carry it in an opaque
+`WorldCall`; attached SpaceBridges receive that same envelope. The Issues
+package also owns its host-capability vocabulary, destructive policy, and
+role-assignment planning. Root `Response` presentation DTOs and their renderers
+are the remaining ownership cut before the whole Issues application—not only
 its already-acyclic semantic and application packages—can move to another
 repository.
 

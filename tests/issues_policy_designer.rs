@@ -12,7 +12,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use async_trait::async_trait;
-use lait::control::{request, Request, Response};
+use lait::control::{request, ControlRoute, Request, Response};
+use lait::daemon::OrbitAddress;
 use lait::net::Network;
 use lait::orbital::run_space_bridge;
 use lait::transport::mem::MemNet;
@@ -49,6 +50,31 @@ fn temp_home() -> PathBuf {
 fn req(rt: &tokio::runtime::Runtime, home: &Path, r: Request) -> Response {
     rt.block_on(async { request(home, &r).await })
         .unwrap_or_else(|e| Response::err(format!("{e:#}")))
+}
+
+fn issue_req(
+    rt: &tokio::runtime::Runtime,
+    home: &Path,
+    request: issues_app::IssuesRequest,
+) -> Response {
+    rt.block_on(async {
+        let space = lait::orbital::discover_space_id(home).expect("test Space");
+        let call = issues_app::encode_call(&request)?;
+        let reply = lait::control::call_world(
+            home,
+            ControlRoute::World {
+                address: OrbitAddress::for_store(home, space),
+                world: call.world().as_str().to_string(),
+            },
+            call.clone(),
+            None,
+        )
+        .await?;
+        Ok::<Response, anyhow::Error>(serde_json::from_value(issues_app::decode_reply(
+            &call, reply,
+        )?)?)
+    })
+    .unwrap_or_else(|error| Response::err(format!("{error:#}")))
 }
 
 fn text_of(resp: Response) -> serde_json::Value {
@@ -115,7 +141,7 @@ fn role_access_and_workflow_authoring_round_trip_over_the_daemon() {
     assert!(online, "daemon online");
 
     // ---- built-ins are listed, immutable, and shown with revisions --------
-    let roles = text_of(req(&rt, &home, Request::RoleList));
+    let roles = text_of(issue_req(&rt, &home, issues_app::IssuesRequest::RoleList));
     let ids: Vec<&str> = roles
         .as_array()
         .unwrap()
@@ -125,18 +151,18 @@ fn role_access_and_workflow_authoring_round_trip_over_the_daemon() {
     for built_in in ["lait.administrator", "lait.contributor", "lait.viewer"] {
         assert!(ids.contains(&built_in), "{built_in} listed");
     }
-    let viewer = text_of(req(
+    let viewer = text_of(issue_req(
         &rt,
         &home,
-        Request::RoleShow {
+        issues_app::IssuesRequest::RoleShow {
             role: "lait.viewer".into(),
         },
     ));
     assert_eq!(viewer["built_in"], true);
-    let resp = req(
+    let resp = issue_req(
         &rt,
         &home,
-        Request::RoleEdit {
+        issues_app::IssuesRequest::RoleEdit {
             role: "lait.viewer".into(),
             expect_revision: viewer["revision"]["revision_id"]
                 .as_str()
@@ -153,14 +179,14 @@ fn role_access_and_workflow_authoring_round_trip_over_the_daemon() {
     );
 
     // ---- custom role lifecycle: create → edit (exact head) → assign -------
-    let project_key = match req(&rt, &home, Request::ProjectList) {
+    let project_key = match issue_req(&rt, &home, issues_app::IssuesRequest::ProjectList) {
         Response::Projects { projects } => projects.first().unwrap().key.clone(),
         other => panic!("{other:?}"),
     };
-    let created = req(
+    let created = issue_req(
         &rt,
         &home,
-        Request::RoleCreate {
+        issues_app::IssuesRequest::RoleCreate {
             name: "Reviewer".into(),
             description: Some("Can pass reviews".into()),
             project: Some(project_key.clone()),
@@ -174,10 +200,10 @@ fn role_access_and_workflow_authoring_round_trip_over_the_daemon() {
         .trim()
         .to_string();
     assert!(role_id.starts_with("role_"), "{role_id}");
-    let shown = text_of(req(
+    let shown = text_of(issue_req(
         &rt,
         &home,
-        Request::RoleShow {
+        issues_app::IssuesRequest::RoleShow {
             role: role_id.clone(),
         },
     ));
@@ -187,10 +213,10 @@ fn role_access_and_workflow_authoring_round_trip_over_the_daemon() {
         .to_string();
 
     // A stale expected revision refuses; the exact head succeeds.
-    let stale = req(
+    let stale = issue_req(
         &rt,
         &home,
-        Request::RoleEdit {
+        issues_app::IssuesRequest::RoleEdit {
             role: role_id.clone(),
             expect_revision: "ab".repeat(32),
             name: Some("Renamed".into()),
@@ -199,10 +225,10 @@ fn role_access_and_workflow_authoring_round_trip_over_the_daemon() {
         },
     );
     assert!(matches!(stale, Response::Error { .. }), "{stale:?}");
-    let edited = req(
+    let edited = issue_req(
         &rt,
         &home,
-        Request::RoleEdit {
+        issues_app::IssuesRequest::RoleEdit {
             role: role_id.clone(),
             expect_revision: head.clone(),
             name: Some("Reviewer+".into()),
@@ -211,10 +237,10 @@ fn role_access_and_workflow_authoring_round_trip_over_the_daemon() {
         },
     );
     assert!(matches!(edited, Response::Ok { .. }), "{edited:?}");
-    let after = text_of(req(
+    let after = text_of(issue_req(
         &rt,
         &home,
-        Request::RoleShow {
+        issues_app::IssuesRequest::RoleShow {
             role: role_id.clone(),
         },
     ));
@@ -226,10 +252,10 @@ fn role_access_and_workflow_authoring_round_trip_over_the_daemon() {
     assert_eq!(after["revision"]["body"]["name"], "Reviewer+");
 
     // An unregistered capability refuses at creation.
-    let bogus = req(
+    let bogus = issue_req(
         &rt,
         &home,
-        Request::RoleCreate {
+        issues_app::IssuesRequest::RoleCreate {
             name: "Bogus".into(),
             description: None,
             project: None,
@@ -239,10 +265,10 @@ fn role_access_and_workflow_authoring_round_trip_over_the_daemon() {
     assert!(matches!(bogus, Response::Error { .. }), "{bogus:?}");
 
     // ---- workflow: replace the default with a gated edge ------------------
-    let wf = text_of(req(
+    let wf = text_of(issue_req(
         &rt,
         &home,
-        Request::WorkflowShow {
+        issues_app::IssuesRequest::WorkflowShow {
             project: project_key.clone(),
         },
     ));
@@ -269,26 +295,26 @@ fn role_access_and_workflow_authoring_round_trip_over_the_daemon() {
     let mut broken = body.clone();
     broken["transitions"].as_array_mut().unwrap()[0]["destination_state_id"] =
         serde_json::json!("nowhere");
-    let invalid = req(
+    let invalid = issue_req(
         &rt,
         &home,
-        Request::WorkflowValidate {
+        issues_app::IssuesRequest::WorkflowValidate {
             body_json: broken.to_string(),
         },
     );
     assert!(matches!(invalid, Response::Error { .. }), "{invalid:?}");
-    let valid = req(
+    let valid = issue_req(
         &rt,
         &home,
-        Request::WorkflowValidate {
+        issues_app::IssuesRequest::WorkflowValidate {
             body_json: body.to_string(),
         },
     );
     assert!(matches!(valid, Response::Ok { .. }), "{valid:?}");
-    let set = req(
+    let set = issue_req(
         &rt,
         &home,
-        Request::WorkflowSet {
+        issues_app::IssuesRequest::WorkflowSet {
             project: project_id.clone(),
             expect_heads: vec![wf_head],
             body_json: body.to_string(),
@@ -298,10 +324,10 @@ fn role_access_and_workflow_authoring_round_trip_over_the_daemon() {
 
     // ---- gate enforcement: the removed edge is refused; the stripped edge
     // denies even the admin until the matching role is assigned -------------
-    let filed = req(
+    let filed = issue_req(
         &rt,
         &home,
-        Request::IssueNew {
+        issues_app::IssuesRequest::IssueNew {
             due: None,
             estimate: None,
             title: "Gated".into(),
@@ -318,10 +344,10 @@ fn role_access_and_workflow_authoring_round_trip_over_the_daemon() {
         other => panic!("{other:?}"),
     };
     // backlog → done: the edge does not exist in the replaced workflow.
-    let no_edge = req(
+    let no_edge = issue_req(
         &rt,
         &home,
-        Request::IssueEdit {
+        issues_app::IssuesRequest::IssueEdit {
             due: None,
             estimate: None,
             reff: reff.clone(),
@@ -334,10 +360,10 @@ fn role_access_and_workflow_authoring_round_trip_over_the_daemon() {
     assert!(matches!(no_edge, Response::Error { .. }), "{no_edge:?}");
     // backlog → in_progress: exists, but its template grants no admin
     // override — even the founder is denied until the role is assigned.
-    let denied = req(
+    let denied = issue_req(
         &rt,
         &home,
-        Request::IssueEdit {
+        issues_app::IssuesRequest::IssueEdit {
             due: None,
             estimate: None,
             reff: reff.clone(),
@@ -383,10 +409,10 @@ fn role_access_and_workflow_authoring_round_trip_over_the_daemon() {
         .find(|r| r.capability == "workflow.transition.ship")
         .expect("the exact expansion landed");
     assert_eq!(grant.resource, vec![project_id.clone()]);
-    let allowed = req(
+    let allowed = issue_req(
         &rt,
         &home,
-        Request::IssueEdit {
+        issues_app::IssuesRequest::IssueEdit {
             due: None,
             estimate: None,
             reff: reff.clone(),
@@ -426,10 +452,10 @@ fn role_access_and_workflow_authoring_round_trip_over_the_daemon() {
             .any(|r| r.capability == "workflow.transition.ship"),
         "revocation removed the assignment"
     );
-    let denied_again = req(
+    let denied_again = issue_req(
         &rt,
         &home,
-        Request::IssueEdit {
+        issues_app::IssuesRequest::IssueEdit {
             due: None,
             estimate: None,
             reff: reff.clone(),
@@ -442,10 +468,10 @@ fn role_access_and_workflow_authoring_round_trip_over_the_daemon() {
     // in_progress → backlog keeps the default (admin-overridable) template, so
     // this still succeeds; the STRIPPED edge denies again after revocation.
     assert!(matches!(denied_again, Response::Ref { .. }));
-    let stripped = req(
+    let stripped = issue_req(
         &rt,
         &home,
-        Request::IssueEdit {
+        issues_app::IssuesRequest::IssueEdit {
             due: None,
             estimate: None,
             reff,
@@ -458,10 +484,10 @@ fn role_access_and_workflow_authoring_round_trip_over_the_daemon() {
     assert!(matches!(stripped, Response::Error { .. }), "{stripped:?}");
 
     // ---- tombstone: a deleted role no longer assigns ----------------------
-    let deleted = req(
+    let deleted = issue_req(
         &rt,
         &home,
-        Request::RoleDelete {
+        issues_app::IssuesRequest::RoleDelete {
             role: role_id.clone(),
             expect_revision: head2,
         },

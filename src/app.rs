@@ -439,33 +439,10 @@ async fn dispatch(specs: &[cmdspec::Spec], matches: &ArgMatches, out: Out) -> Re
             // Ask before destroying (delete / member remove / key rotate). Gated
             // on the Request, so the list lives in one place; everything else
             // passes straight through.
-            if !crate::cli::confirm_destructive(&home, req, out).await {
+            if !crate::cli::confirm_destructive(req, out).await {
                 std::process::exit(1);
             }
-            // `new --start` chains the create into the work loop: file it, then
-            // claim it (two honest commits produce two activity rows).
-            //
-            // Ask for `start` in a way that can answer "there is no such arg".
-            // `leaf.name` is only the *last* path segment, so `labels new` answers
-            // to "new" as much as the top-level verb does — and `get_flag` on a
-            // leaf that never declared the arg is a panic, not a `false`. That is
-            // exactly what `lait issues labels new <name>` did.
-            let wants_start = m
-                .try_get_one::<bool>("start")
-                .ok()
-                .flatten()
-                .copied()
-                .unwrap_or(false);
-            if leaf.name == "new" && wants_start {
-                crate::cli::run_new_start(
-                    &home,
-                    action
-                        .into_request()
-                        .expect("new remains on the compatibility registry"),
-                    out,
-                )
-                .await?;
-            } else if leaf.name == "members" && !out.json && std::io::stdout().is_terminal() {
+            if leaf.name == "members" && !out.json && std::io::stdout().is_terminal() {
                 // Bare `lait members` in an interactive terminal opens the modal
                 // picker (browse/approve); `--json` and piped/redirected output
                 // keep the plain roster dump so scripts and agents are unaffected.
@@ -573,16 +550,12 @@ async fn dispatch_world_client(
     _selection_source: &'static str,
     out: Out,
 ) -> Result<()> {
-    use issues_app::cli::{
-        LOCAL_ACCESS, LOCAL_ATTACH, LOCAL_ATTACHMENT_GET, LOCAL_FOCUS, LOCAL_INBOX,
-        LOCAL_NEW_START, LOCAL_WORK_STATE, LOCAL_WORLD_UPGRADE,
-    };
+    use issues_app::host::{AccessRequest, IssuesHostRequest, WorkStateAction};
 
     match invocation {
         world_interface::CliInvocation::World(call) => {
             if let Ok(request) = issues_app::decode_call(&call) {
-                let legacy = issues_request_to_legacy(request)?;
-                if !crate::cli::confirm_destructive(home, &legacy, out).await {
+                if !crate::cli::confirm_issues_destructive(home, &request, out).await {
                     std::process::exit(1);
                 }
             }
@@ -607,102 +580,83 @@ async fn dispatch_world_client(
             }
             Ok(())
         }
-        world_interface::CliInvocation::Local { operation, input } => match operation.as_str() {
-            LOCAL_FOCUS => crate::cli::run_focus(home, out).await,
-            LOCAL_NEW_START => {
-                let request: issues_app::IssuesRequest =
-                    serde_json::from_value(input).context("decode Issues new/start invocation")?;
-                crate::cli::run_new_start(home, issues_request_to_legacy(request)?, out).await
-            }
-            LOCAL_WORK_STATE => {
-                let action = value_string(&input, "action")?;
-                let reff = value_string(&input, "reff")?;
-                match action.as_str() {
-                    "start" => {
-                        let no_branch = input
-                            .get("no_branch")
-                            .and_then(serde_json::Value::as_bool)
-                            .unwrap_or(false);
+        world_interface::CliInvocation::Local { operation, input } => {
+            match issues_app::host::decode(&operation, input)
+                .map_err(|error| anyhow!(error.to_string()))?
+            {
+                IssuesHostRequest::Focus => crate::cli::run_focus(home, out).await,
+                IssuesHostRequest::NewStart(request) => {
+                    crate::cli::run_new_start(home, request, out).await
+                }
+                IssuesHostRequest::WorkState {
+                    action,
+                    reff,
+                    no_branch,
+                } => match action {
+                    WorkStateAction::Start => {
                         crate::cli::run_start(home, reff, no_branch, out).await
                     }
-                    "done" => {
-                        crate::cli::run_workstate(home, Request::IssueDone { reff }, out).await
+                    WorkStateAction::Done => {
+                        crate::cli::run_workstate(
+                            home,
+                            issues_app::IssuesRequest::IssueDone { reff },
+                            out,
+                        )
+                        .await
                     }
-                    "stop" => {
-                        crate::cli::run_workstate(home, Request::IssueStop { reff }, out).await
+                    WorkStateAction::Stop => {
+                        crate::cli::run_workstate(
+                            home,
+                            issues_app::IssuesRequest::IssueStop { reff },
+                            out,
+                        )
+                        .await
                     }
-                    other => Err(anyhow!("unsupported Issues work-state action '{other}'")),
+                },
+                IssuesHostRequest::Inbox { clear } => {
+                    crate::cli::run(home, Request::Inbox { clear }, out).await
                 }
+                IssuesHostRequest::WorldUpgrade => {
+                    crate::cli::run(home, Request::WorldUpgrade, out).await
+                }
+                IssuesHostRequest::Access(access) => {
+                    let request = match access {
+                        AccessRequest::List { actor } => Request::AccessList { actor },
+                        AccessRequest::Grant {
+                            actor,
+                            role,
+                            project,
+                        } => Request::AccessGrant {
+                            actor,
+                            role,
+                            project,
+                        },
+                        AccessRequest::Revoke { grant_id } => Request::AccessRevoke { grant_id },
+                    };
+                    crate::cli::run(home, request, out).await
+                }
+                IssuesHostRequest::Attach {
+                    reff,
+                    file,
+                    comment,
+                } => run_issues_attach(home, reff, file, comment, out).await,
+                IssuesHostRequest::AttachmentGet {
+                    reff,
+                    id,
+                    out: path,
+                } => run_issues_attachment_get(home, reff, id, path, out).await,
             }
-            LOCAL_INBOX => {
-                crate::cli::run(
-                    home,
-                    Request::Inbox {
-                        clear: input
-                            .get("clear")
-                            .and_then(serde_json::Value::as_bool)
-                            .unwrap_or(false),
-                    },
-                    out,
-                )
-                .await
-            }
-            LOCAL_WORLD_UPGRADE => crate::cli::run(home, Request::WorldUpgrade, out).await,
-            LOCAL_ACCESS => {
-                let action = input
-                    .get("action")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("ls");
-                let request = match action {
-                    "access" | "ls" => Request::AccessList {
-                        actor: value_string_opt(&input, "actor"),
-                    },
-                    "grant" => Request::AccessGrant {
-                        actor: value_string(&input, "actor")?,
-                        role: value_string(&input, "role")?,
-                        project: value_string_opt(&input, "project"),
-                    },
-                    "revoke" => Request::AccessRevoke {
-                        grant_id: value_string(&input, "grant_id")?,
-                    },
-                    other => return Err(anyhow!("unsupported Issues access action '{other}'")),
-                };
-                crate::cli::run(home, request, out).await
-            }
-            LOCAL_ATTACH => run_issues_attach(home, &input, out).await,
-            LOCAL_ATTACHMENT_GET => run_issues_attachment_get(home, &input, out).await,
-            other => Err(anyhow!(
-                "Issues client package requested unsupported host capability '{other}'"
-            )),
-        },
+        }
     }
-}
-
-fn issues_request_to_legacy(request: issues_app::IssuesRequest) -> Result<Request> {
-    serde_json::from_value(serde_json::to_value(request)?)
-        .context("translate Issues application request")
-}
-
-fn value_string(value: &serde_json::Value, field: &str) -> Result<String> {
-    value_string_opt(value, field)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| anyhow!("Issues client invocation is missing '{field}'"))
-}
-
-fn value_string_opt(value: &serde_json::Value, field: &str) -> Option<String> {
-    value
-        .get(field)
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_string)
 }
 
 async fn run_issues_attach(
     home: &std::path::Path,
-    input: &serde_json::Value,
+    reff: String,
+    path: String,
+    comment: Option<String>,
     out: Out,
 ) -> Result<()> {
-    let reff = value_string(input, "reff")?;
-    let path = value_string(input, "file")?;
     let bytes = std::fs::read(&path).map_err(|error| anyhow!("could not read {path}: {error}"))?;
     if bytes.is_empty() {
         return Err(anyhow!("{path} is empty — nothing to attach"));
@@ -718,33 +672,35 @@ async fn run_issues_attach(
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.clone());
-    crate::cli::run(
+    let response = crate::cli::issues_client(
         home,
-        Request::Attach {
+        issues_app::IssuesRequest::Attach {
             reff,
             mime: Some(mime_for(&name)),
             name,
             data_b64: data_encoding::BASE64.encode(&bytes),
-            comment: value_string_opt(input, "comment"),
+            comment,
         },
-        out,
     )
-    .await
+    .await?;
+    let code = crate::cli::print_response(&response, out);
+    if code == 0 {
+        Ok(())
+    } else {
+        Err(anyhow!("attachment request failed"))
+    }
 }
 
 async fn run_issues_attachment_get(
     home: &std::path::Path,
-    input: &serde_json::Value,
+    reff: String,
+    id: String,
+    out_path: Option<String>,
     out: Out,
 ) -> Result<()> {
-    let response = crate::cli::client(
-        home,
-        Request::AttachmentGet {
-            reff: value_string(input, "reff")?,
-            id: value_string(input, "id")?,
-        },
-    )
-    .await?;
+    let response =
+        crate::cli::issues_client(home, issues_app::IssuesRequest::AttachmentGet { reff, id })
+            .await?;
     match response {
         Response::Attachment {
             name,
@@ -754,7 +710,7 @@ async fn run_issues_attachment_get(
             let bytes = data_encoding::BASE64
                 .decode(data_b64.as_bytes())
                 .map_err(|_| anyhow!("stored attachment did not decode"))?;
-            let destination = value_string_opt(input, "out").unwrap_or(name);
+            let destination = out_path.unwrap_or(name);
             std::fs::write(&destination, &bytes)
                 .map_err(|error| anyhow!("could not write {destination}: {error}"))?;
             crate::cli::emit_ok(

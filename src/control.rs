@@ -51,19 +51,21 @@ use crate::orbital::{WorldCall, WorldReply};
 /// one future daemon endpoint.
 ///
 /// **v4:** product calls use a versioned opaque [`WorldCall`] envelope at the
-/// identity-scoped daemon. The daemon still accepts v3's typed issue requests
-/// and translates them at its compatibility edge.
-pub const CONTROL_PROTOCOL_VERSION: u32 = 4;
+/// identity-scoped daemon.
+///
+/// **v5:** attached SpaceBridge processes accept that same opaque envelope
+/// directly. Typed product requests and the root-owned compatibility codec are
+/// retired, so v4 processes cannot remain attached across this boundary.
+pub const CONTROL_PROTOCOL_VERSION: u32 = 5;
 /// First local-control version that carries [`WorldCall`].
 pub const WORLD_CALL_CONTROL_PROTOCOL: u32 = 4;
 
 /// The oldest control protocol a client still talks to. Raising this retires a
 /// version; the gap to [`CONTROL_PROTOCOL_VERSION`] is the mixed-version window.
 ///
-/// At 3 the window is a single version, so a v2 daemon still holding the
-/// lock reads as *behind us* and is therefore replaceable — it is killed and
-/// respawned on the first client contact rather than being talked to.
-pub const MIN_SUPPORTED_CONTROL_PROTOCOL: u32 = 3;
+/// Protocol v5 is a deliberate compatibility cutoff: every process on the
+/// local control plane must understand opaque World calls end to end.
+pub const MIN_SUPPORTED_CONTROL_PROTOCOL: u32 = 5;
 
 /// Whether this build can talk to a daemon advertising control protocol `peer`.
 ///
@@ -925,9 +927,9 @@ impl ClientRequest {
 
 /// Product-neutral request sent to the identity-scoped daemon.
 ///
-/// Unlike [`ClientRequest`], this shape is never sent to a historical per-Orbit
-/// daemon. Its explicit `call` field also lets a v4 host distinguish it from the
-/// flattened v3 request schema before decoding any product payload.
+/// The identity daemon forwards this same envelope unchanged to an attached
+/// SpaceBridge. Its explicit `call` field keeps every routing layer independent
+/// of the product payload and protocol.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorldClientRequest {
     pub route: ControlRoute,
@@ -1114,13 +1116,9 @@ pub fn classify(req: &Request) -> RequestOwner {
 /// a Station.
 pub fn station_route(address: OrbitAddress, request: &Request) -> ControlRoute {
     match classify(request) {
-        RequestOwner::World => ControlRoute::World {
-            address,
-            world: crate::world::request_world(request)
-                .expect("every World-owned request is claimed by a bundled product adapter")
-                .as_str()
-                .to_string(),
-        },
+        RequestOwner::World => {
+            unreachable!("product packages construct explicit World routes from WorldCall")
+        }
         _ => ControlRoute::Space { address },
     }
 }
@@ -1888,8 +1886,8 @@ async fn probe_inner(home: &Path) -> Probe {
 
 /// Read and validate the peer's control protocol version.
 ///
-/// Clients use the exact negotiated value to decide whether to send the v4
-/// generic World envelope or the still-supported v3 typed compatibility shape.
+/// Clients use the exact negotiated value to ensure the peer speaks the current
+/// generic World envelope.
 pub async fn peer_protocol_version(home: &Path) -> Result<u32> {
     let name = control_name(home)?;
     let stream = Stream::connect(name)

@@ -12,7 +12,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use async_trait::async_trait;
-use lait::control::{request, Filter, Request, Response};
+use lait::control::{request, ControlRoute, Request, Response};
+use lait::daemon::OrbitAddress;
 use lait::net::Network;
 use lait::orbital::run_space_bridge_with;
 use lait::transport::mem::MemNet;
@@ -52,6 +53,31 @@ fn req(rt: &tokio::runtime::Runtime, home: &Path, r: Request) -> Response {
         .unwrap_or_else(|e| Response::err(format!("{e:#}")))
 }
 
+fn issue_req(
+    rt: &tokio::runtime::Runtime,
+    home: &Path,
+    request: issues_app::IssuesRequest,
+) -> Response {
+    rt.block_on(async {
+        let space = lait::orbital::discover_space_id(home).expect("test Space");
+        let call = issues_app::encode_call(&request)?;
+        let reply = lait::control::call_world(
+            home,
+            ControlRoute::World {
+                address: OrbitAddress::for_store(home, space),
+                world: call.world().as_str().to_string(),
+            },
+            call.clone(),
+            None,
+        )
+        .await?;
+        Ok::<Response, anyhow::Error>(serde_json::from_value(issues_app::decode_reply(
+            &call, reply,
+        )?)?)
+    })
+    .unwrap_or_else(|error| Response::err(format!("{error:#}")))
+}
+
 fn poll_until<T>(timeout: Duration, mut check: impl FnMut() -> Option<T>) -> Option<T> {
     let start = Instant::now();
     loop {
@@ -84,12 +110,12 @@ fn wait_online(rt: &tokio::runtime::Runtime, home: &Path) {
 }
 
 fn list_titles(rt: &tokio::runtime::Runtime, home: &Path) -> Vec<String> {
-    match req(
+    match issue_req(
         rt,
         home,
-        Request::List {
+        issues_app::IssuesRequest::List {
             project: None,
-            filter: Filter {
+            filter: issues_app::Filter {
                 all: true,
                 ..Default::default()
             },
@@ -112,10 +138,10 @@ fn concurrent_issue_creation_converges_across_daemons() {
     let joiner_device = lait::crypto::device_from_seed(&JOINER_SEED).to_string();
 
     // Founder authors one issue BEFORE the joiner exists.
-    let resp = req(
+    let resp = issue_req(
         &rt,
         &founder_home,
-        Request::IssueNew {
+        issues_app::IssuesRequest::IssueNew {
             due: None,
             estimate: None,
             title: "founder issue".into(),
@@ -226,10 +252,10 @@ fn concurrent_issue_creation_converges_across_daemons() {
 
     // Both sides now create issues CONCURRENTLY (catalog writes on each).
     for i in 0..3 {
-        let resp = req(
+        let resp = issue_req(
             &rt,
             &founder_home,
-            Request::IssueNew {
+            issues_app::IssuesRequest::IssueNew {
                 due: None,
                 estimate: None,
                 title: format!("founder concurrent {i}"),
@@ -242,10 +268,10 @@ fn concurrent_issue_creation_converges_across_daemons() {
             },
         );
         assert!(matches!(resp, Response::Ref { .. }), "{resp:?}");
-        let resp = req(
+        let resp = issue_req(
             &rt,
             &joiner_home,
-            Request::IssueNew {
+            issues_app::IssuesRequest::IssueNew {
                 due: None,
                 estimate: None,
                 title: format!("joiner concurrent {i}"),

@@ -31,9 +31,8 @@ pub struct Filter {
 
 /// Issues-owned application requests.
 ///
-/// The tagged JSON representation intentionally matches the temporary v3/v4
-/// root-control variants. That keeps the historical bridge adapter mechanical
-/// while new CLI and MCP clients send this type directly as a [`WorldCall`].
+/// The tagged JSON representation is also the Issues web-client contract. All
+/// native product clients carry this type inside a [`WorldCall`].
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum IssuesRequest {
@@ -501,6 +500,14 @@ impl IssuesRequest {
             | WorkflowShow { .. }
             | WorkflowValidate { .. } => WorldCallAccess::Query,
             _ => WorldCallAccess::Command,
+        }
+    }
+
+    /// The confirmation question for a destructive Issues command.
+    pub fn destructive_question(&self) -> Option<String> {
+        match self {
+            Self::IssueDelete { reff } => Some(format!("delete {reff}?")),
+            _ => None,
         }
     }
 }

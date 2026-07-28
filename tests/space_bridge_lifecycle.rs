@@ -14,7 +14,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use async_trait::async_trait;
-use lait::control::{request, Filter, Request, Response};
+use lait::control::{request, ControlRoute, Request, Response};
+use lait::daemon::OrbitAddress;
 use lait::net::Network;
 use lait::orbital::run_space_bridge;
 use lait::transport::mem::MemNet;
@@ -51,6 +52,31 @@ fn temp_home() -> PathBuf {
 fn req(rt: &tokio::runtime::Runtime, home: &Path, r: Request) -> Response {
     rt.block_on(async { request(home, &r).await })
         .unwrap_or_else(|e| Response::err(format!("{e:#}")))
+}
+
+fn issue_req(
+    rt: &tokio::runtime::Runtime,
+    home: &Path,
+    request: issues_app::IssuesRequest,
+) -> Response {
+    rt.block_on(async {
+        let space = lait::orbital::discover_space_id(home).expect("test Space");
+        let call = issues_app::encode_call(&request)?;
+        let reply = lait::control::call_world(
+            home,
+            ControlRoute::World {
+                address: OrbitAddress::for_store(home, space),
+                world: call.world().as_str().to_string(),
+            },
+            call.clone(),
+            None,
+        )
+        .await?;
+        Ok::<Response, anyhow::Error>(serde_json::from_value(issues_app::decode_reply(
+            &call, reply,
+        )?)?)
+    })
+    .unwrap_or_else(|error| Response::err(format!("{error:#}")))
 }
 
 fn poll_until<T>(timeout: Duration, mut check: impl FnMut() -> Option<T>) -> Option<T> {
@@ -109,10 +135,10 @@ fn the_space_bridge_serves_the_issue_surface_over_the_control_socket() {
     assert_eq!(info.membership, "member");
 
     // Create a project.
-    let resp = req(
+    let resp = issue_req(
         &client_rt,
         &home,
-        Request::ProjectNew {
+        issues_app::IssuesRequest::ProjectNew {
             name: "Engineering".into(),
             key: "eng".into(),
             color: None,
@@ -124,10 +150,10 @@ fn the_space_bridge_serves_the_issue_surface_over_the_control_socket() {
     );
 
     // File an issue; it routes through the World and returns the canonical reff.
-    let resp = req(
+    let resp = issue_req(
         &client_rt,
         &home,
-        Request::IssueNew {
+        issues_app::IssuesRequest::IssueNew {
             title: "Served over the socket".into(),
             // Formation seeded the default project, so the space has two —
             // pick the explicit one.
@@ -147,10 +173,10 @@ fn the_space_bridge_serves_the_issue_surface_over_the_control_socket() {
     );
 
     // View it back.
-    let resp = req(
+    let resp = issue_req(
         &client_rt,
         &home,
-        Request::IssueView {
+        issues_app::IssuesRequest::IssueView {
             reff: "ENG-1".into(),
         },
     );
@@ -162,19 +188,19 @@ fn the_space_bridge_serves_the_issue_surface_over_the_control_socket() {
     assert_eq!(view.priority, lait::dto::Priority::High);
 
     // Comment routes too.
-    req(
+    issue_req(
         &client_rt,
         &home,
-        Request::Comment {
+        issues_app::IssuesRequest::Comment {
             reff: "ENG-1".into(),
             body: "a socket comment".into(),
             reply_to: None,
         },
     );
-    let resp = req(
+    let resp = issue_req(
         &client_rt,
         &home,
-        Request::IssueView {
+        issues_app::IssuesRequest::IssueView {
             reff: "ENG-1".into(),
         },
     );
@@ -189,7 +215,11 @@ fn the_space_bridge_serves_the_issue_surface_over_the_control_socket() {
     // "request not routed to the issues world"): the created issue and the
     // comment appear as feed rows, and re-pulling from the returned cursor
     // yields nothing new.
-    let resp = req(&client_rt, &home, Request::Activity { since: 0 });
+    let resp = issue_req(
+        &client_rt,
+        &home,
+        issues_app::IssuesRequest::Activity { since: 0 },
+    );
     let Response::Activity { events, last } = resp else {
         panic!("expected Activity, got {resp:?}");
     };
@@ -198,7 +228,11 @@ fn the_space_bridge_serves_the_issue_surface_over_the_control_socket() {
     assert!(events
         .iter()
         .any(|e| e.kind == "commented" && e.text == "a socket comment"));
-    let resp = req(&client_rt, &home, Request::Activity { since: last });
+    let resp = issue_req(
+        &client_rt,
+        &home,
+        issues_app::IssuesRequest::Activity { since: last },
+    );
     let Response::Activity { events, last: l2 } = resp else {
         panic!("expected Activity, got {resp:?}");
     };
@@ -206,12 +240,12 @@ fn the_space_bridge_serves_the_issue_surface_over_the_control_socket() {
     assert_eq!(l2, last);
 
     // List reflects it.
-    let resp = req(
+    let resp = issue_req(
         &client_rt,
         &home,
-        Request::List {
+        issues_app::IssuesRequest::List {
             project: None,
-            filter: Filter::default(),
+            filter: issues_app::protocol::Filter::default(),
         },
     );
     let Response::List { rows } = resp else {
@@ -220,10 +254,10 @@ fn the_space_bridge_serves_the_issue_surface_over_the_control_socket() {
     assert!(rows.iter().any(|r| r.title == "Served over the socket"));
 
     // Board renders columns.
-    let resp = req(
+    let resp = issue_req(
         &client_rt,
         &home,
-        Request::Board {
+        issues_app::IssuesRequest::Board {
             project: Some("eng".into()),
             project_hint: None,
         },

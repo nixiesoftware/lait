@@ -4,8 +4,8 @@
 //! by a Station. This module owns the application-side half of that boundary:
 //! a compile-time [`WorldPackage`] for each product, and one [`WorldBridge`] per
 //! package inside an active Space. A package carries the reviewed semantic
-//! implementation plus its optional product-neutral call handler; orbital code never
-//! needs to name the product behind either one.
+//! implementation plus its optional product-neutral call handler; orbital code
+//! never needs to name the product behind either one.
 //!
 //! A [`WorldBridgeRegistry`] belongs to one Space bridge. It is not a process,
 //! does not own a listener, and has no autonomous background loop.
@@ -21,53 +21,10 @@ use runtime::{
     WorldRegistry,
 };
 
-use crate::control::{Request, Response};
-
 pub use ::world_bridge::{
     WorldCall, WorldCallAccess, WorldCallContext, WorldCallError, WorldCallErrorCode,
     WorldCallHandler, WorldReply,
 };
-
-/// Temporary translation between the generic World-call boundary and the
-/// historical issue-shaped per-Orbit control protocol.
-///
-/// New products need only [`WorldCallHandler`]. A package supplies this codec
-/// only while older standalone SpaceBridge processes for that product remain
-/// attachable by LaitDaemon.
-pub trait LegacyWorldCodec: Send + Sync {
-    /// Whether this codec owns one historical root request.
-    fn handles(&self, request: &Request) -> bool;
-
-    /// Translate an old typed request into the product's versioned opaque call.
-    fn encode_call(&self, request: Request) -> Result<WorldCall, WorldCallError>;
-
-    /// Translate a generic call for dispatch to an attached historical daemon.
-    fn decode_call(&self, call: &WorldCall) -> Result<Request, WorldCallError>;
-
-    /// Wrap a historical response for the generic caller.
-    fn encode_reply(&self, call: &WorldCall, response: Response) -> WorldReply {
-        match serde_json::to_vec(&response) {
-            Ok(payload) => WorldReply::ok(call, payload),
-            Err(error) => WorldReply::error(
-                call,
-                WorldCallErrorCode::Internal,
-                format!("encode legacy World response: {error}"),
-            ),
-        }
-    }
-
-    /// Decode a generic reply for an old typed caller.
-    fn decode_reply(&self, reply: WorldReply) -> Response {
-        match reply.into_result() {
-            Ok(payload) => serde_json::from_slice(&payload)
-                .unwrap_or_else(|error| Response::err(format!("decode World response: {error}"))),
-            Err(error) if error.code == WorldCallErrorCode::Denied => {
-                Response::denied(error.message)
-            }
-            Err(error) => Response::err(error.message),
-        }
-    }
-}
 
 /// One product package available to the application build.
 #[derive(Clone)]
@@ -76,7 +33,6 @@ pub struct WorldPackage {
     implementation: Arc<dyn World>,
     reviewed_implementation: [u8; 32],
     control: Option<Arc<dyn WorldCallHandler>>,
-    legacy: Option<Arc<dyn LegacyWorldCodec>>,
 }
 
 impl std::fmt::Debug for WorldPackage {
@@ -88,7 +44,6 @@ impl std::fmt::Debug for WorldPackage {
                 &data_encoding::HEXLOWER.encode(&self.reviewed_implementation[..8]),
             )
             .field("has_call_handler", &self.control.is_some())
-            .field("has_legacy_codec", &self.legacy.is_some())
             .finish()
     }
 }
@@ -104,17 +59,11 @@ impl WorldPackage {
             implementation,
             reviewed_implementation,
             control: None,
-            legacy: None,
         }
     }
 
     pub fn with_control(mut self, control: Arc<dyn WorldCallHandler>) -> Self {
         self.control = Some(control);
-        self
-    }
-
-    pub fn with_legacy_codec(mut self, legacy: Arc<dyn LegacyWorldCodec>) -> Self {
-        self.legacy = Some(legacy);
         self
     }
 
@@ -173,14 +122,6 @@ impl WorldPackages {
             .any(|package| package.world_id() == world)
     }
 
-    pub fn accepts(&self, world: &WorldId, request: &Request) -> bool {
-        self.packages
-            .iter()
-            .find(|package| package.world_id() == world)
-            .and_then(|package| package.legacy.as_deref())
-            .is_some_and(|legacy| legacy.handles(request))
-    }
-
     pub fn accepts_call(&self, call: &WorldCall) -> bool {
         self.call_access(call).is_ok()
     }
@@ -200,13 +141,6 @@ impl WorldPackages {
         control.access(call)
     }
 
-    pub fn legacy_codec(&self, world: &WorldId) -> Option<&dyn LegacyWorldCodec> {
-        self.packages
-            .iter()
-            .find(|package| package.world_id() == world)
-            .and_then(|package| package.legacy.as_deref())
-    }
-
     /// Freeze the semantic registry and create one application bridge per
     /// registered World.
     pub fn build(&self) -> Result<(WorldRegistry, WorldBridgeRegistry), RegistrationError> {
@@ -217,7 +151,6 @@ impl WorldPackages {
                 package.registration.id.clone(),
                 package.reviewed_implementation,
                 package.control.clone(),
-                package.legacy.clone(),
             ));
             runtime =
                 runtime.register(package.registration.clone(), package.implementation.clone());
@@ -228,11 +161,8 @@ impl WorldPackages {
             WorldBridgeRegistry::new(
                 bridges
                     .into_iter()
-                    .map(|(world, reviewed, control, legacy)| {
-                        (
-                            world.clone(),
-                            WorldBridge::new(world, reviewed, control, legacy),
-                        )
+                    .map(|(world, reviewed, control)| {
+                        (world.clone(), WorldBridge::new(world, reviewed, control))
                     })
                     .collect(),
             ),
@@ -252,7 +182,6 @@ pub struct WorldBridge {
     world: WorldId,
     reviewed_implementation: [u8; 32],
     control: Option<Arc<dyn WorldCallHandler>>,
-    legacy: Option<Arc<dyn LegacyWorldCodec>>,
     primary_session: Mutex<Option<Session>>,
     agent_sessions: Mutex<HashMap<DeviceId, Session>>,
 }
@@ -270,13 +199,11 @@ impl WorldBridge {
         world: WorldId,
         reviewed_implementation: [u8; 32],
         control: Option<Arc<dyn WorldCallHandler>>,
-        legacy: Option<Arc<dyn LegacyWorldCodec>>,
     ) -> Self {
         Self {
             world,
             reviewed_implementation,
             control,
-            legacy,
             primary_session: Mutex::new(None),
             agent_sessions: Mutex::new(HashMap::new()),
         }
@@ -292,10 +219,6 @@ impl WorldBridge {
 
     pub fn control(&self) -> Option<&dyn WorldCallHandler> {
         self.control.as_deref()
-    }
-
-    pub fn legacy_codec(&self) -> Option<&dyn LegacyWorldCodec> {
-        self.legacy.as_deref()
     }
 
     /// Ensure the Space's primary identity has a Session for this World.
@@ -434,52 +357,18 @@ mod tests {
 
     impl WorldCallHandler for ProjectControl {
         fn access(&self, call: &WorldCall) -> Result<WorldCallAccess, WorldCallError> {
-            self.decode_call(call).map(|_| WorldCallAccess::Query)
+            if call.operation() == "projects.control" && call.version() == 1 {
+                Ok(WorldCallAccess::Query)
+            } else {
+                Err(WorldCallError::new(
+                    WorldCallErrorCode::UnsupportedOperation,
+                    "unsupported project call",
+                ))
+            }
         }
 
         fn call(&self, call: &WorldCall, _context: &WorldCallContext<'_>) -> WorldReply {
-            self.encode_reply(
-                call,
-                Response::Projects {
-                    projects: Vec::new(),
-                },
-            )
-        }
-    }
-
-    impl LegacyWorldCodec for ProjectControl {
-        fn handles(&self, request: &Request) -> bool {
-            matches!(request, Request::ProjectList)
-        }
-
-        fn encode_call(&self, request: Request) -> Result<WorldCall, WorldCallError> {
-            if !self.handles(&request) {
-                return Err(WorldCallError::new(
-                    WorldCallErrorCode::UnsupportedOperation,
-                    "not a project request",
-                ));
-            }
-            WorldCall::new(
-                WorldId::parse("com.example.notes").unwrap(),
-                "projects.control",
-                1,
-                serde_json::to_vec(&request).unwrap(),
-            )
-        }
-
-        fn decode_call(&self, call: &WorldCall) -> Result<Request, WorldCallError> {
-            if call.operation() != "projects.control" || call.version() != 1 {
-                return Err(WorldCallError::new(
-                    WorldCallErrorCode::UnsupportedOperation,
-                    "unsupported project call",
-                ));
-            }
-            serde_json::from_slice(call.payload()).map_err(|error| {
-                WorldCallError::new(
-                    WorldCallErrorCode::InvalidCall,
-                    format!("decode project request: {error}"),
-                )
-            })
+            WorldReply::ok(call, b"{}".to_vec())
         }
     }
 
@@ -573,26 +462,20 @@ mod tests {
     }
 
     #[test]
-    fn control_claims_are_owned_by_the_registered_package() {
+    fn call_handlers_are_owned_by_the_registered_package() {
         let files = package("com.example.files", 1);
         let notes = package("com.example.notes", 2);
         let control = Arc::new(ProjectControl);
         let packages = WorldPackages::new()
             .with_package(WorldPackage::new(files.0, files.1, files.2))
-            .with_package(
-                WorldPackage::new(notes.0, notes.1, notes.2)
-                    .with_control(control.clone())
-                    .with_legacy_codec(control),
-            );
+            .with_package(WorldPackage::new(notes.0, notes.1, notes.2).with_control(control));
         let files = WorldId::parse("com.example.files").unwrap();
         let notes = WorldId::parse("com.example.notes").unwrap();
 
-        assert!(!packages.accepts(&files, &Request::ProjectList));
-        assert!(packages.accepts(&notes, &Request::ProjectList));
-        assert!(!packages.accepts(&notes, &Request::Members));
+        let call = WorldCall::new(notes.clone(), "projects.control", 1, Vec::new()).unwrap();
+        assert!(packages.accepts_call(&call));
         let (_, bridges) = packages.build().unwrap();
         assert!(bridges.bridge(&files).unwrap().control().is_none());
         assert!(bridges.bridge(&notes).unwrap().control().is_some());
-        assert!(bridges.bridge(&notes).unwrap().legacy_codec().is_some());
     }
 }

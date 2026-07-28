@@ -42,7 +42,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use async_trait::async_trait;
-use lait::control::{request, Filter, Request, Response};
+use lait::control::{request, ControlRoute, Request, Response};
+use lait::daemon::OrbitAddress;
 use lait::net::Network;
 use lait::orbital::run_space_bridge_with;
 use lait::transport::mem::MemNet;
@@ -99,6 +100,43 @@ fn ok(rt: &tokio::runtime::Runtime, home: &Path, r: Request) -> Response {
         panic!("request {r:?} failed: {message}");
     }
     resp
+}
+
+fn issue_req(
+    rt: &tokio::runtime::Runtime,
+    home: &Path,
+    request: issues_app::IssuesRequest,
+) -> Response {
+    rt.block_on(async {
+        let space = lait::orbital::discover_space_id(home).expect("test Space");
+        let call = issues_app::encode_call(&request)?;
+        let reply = lait::control::call_world(
+            home,
+            ControlRoute::World {
+                address: OrbitAddress::for_store(home, space),
+                world: call.world().as_str().to_string(),
+            },
+            call.clone(),
+            None,
+        )
+        .await?;
+        Ok::<Response, anyhow::Error>(serde_json::from_value(issues_app::decode_reply(
+            &call, reply,
+        )?)?)
+    })
+    .unwrap_or_else(|error| Response::err(format!("{error:#}")))
+}
+
+fn issue_ok(
+    rt: &tokio::runtime::Runtime,
+    home: &Path,
+    request: issues_app::IssuesRequest,
+) -> Response {
+    let response = issue_req(rt, home, request.clone());
+    if let Response::Error { message, .. } = &response {
+        panic!("request {request:?} failed: {message}");
+    }
+    response
 }
 
 fn poll_until<T>(timeout: Duration, mut check: impl FnMut() -> Option<T>) -> Option<T> {
@@ -389,10 +427,10 @@ fn issues_reference_performance_gate() {
             (b'A' + (p / 26) as u8) as char,
             (b'A' + (p % 26) as u8) as char
         );
-        ok(
+        issue_ok(
             &rt,
             &founder_home,
-            Request::ProjectNew {
+            issues_app::IssuesRequest::ProjectNew {
                 name: format!("Project {p:02}"),
                 key: key.clone(),
                 color: None,
@@ -466,7 +504,7 @@ fn issues_reference_performance_gate() {
                     ticket: founder_device.clone(),
                 },
             );
-            match req(&rt, &home, Request::ProjectList) {
+            match issue_req(&rt, &home, issues_app::IssuesRequest::ProjectList) {
                 Response::Projects { projects } if projects.len() >= projects_expected => Some(()),
                 _ => None,
             }
@@ -510,10 +548,10 @@ fn issues_reference_performance_gate() {
                 let labels: Vec<String> = (0..labels_per_issue)
                     .map(|k| label_pool[(i + k) % label_pool.len()].clone())
                     .collect();
-                let resp = ok(
+                let resp = issue_ok(
                     &rt,
                     &home,
-                    Request::IssueNew {
+                    issues_app::IssuesRequest::IssueNew {
                         due: None,
                         estimate: None,
                         title: format!("reference issue {i:05}"),
@@ -531,10 +569,10 @@ fn issues_reference_performance_gate() {
                     other => panic!("IssueNew answered {other:?}"),
                 };
                 for e in 0..events_per_issue.saturating_sub(2) {
-                    ok(
+                    issue_ok(
                         &rt,
                         &home,
-                        Request::Comment {
+                        issues_app::IssuesRequest::Comment {
                             reply_to: None,
                             reff: reff.clone(),
                             body: format!("event {e} on {reff}"),
@@ -544,8 +582,16 @@ fn issues_reference_performance_gate() {
                 if events_per_issue >= 2 {
                     // The workflow gate pair: every issue passes the
                     // start/stop transition demands on its author's replica.
-                    ok(&rt, &home, Request::IssueStart { reff: reff.clone() });
-                    ok(&rt, &home, Request::IssueStop { reff: reff.clone() });
+                    issue_ok(
+                        &rt,
+                        &home,
+                        issues_app::IssuesRequest::IssueStart { reff: reff.clone() },
+                    );
+                    issue_ok(
+                        &rt,
+                        &home,
+                        issues_app::IssuesRequest::IssueStop { reff: reff.clone() },
+                    );
                 }
             }
         }));
@@ -556,12 +602,12 @@ fn issues_reference_performance_gate() {
 
     // ---- convergence: pump Contact until the founder holds the whole corpus --
     let list_all_count = |rt: &tokio::runtime::Runtime, home: &Path| -> usize {
-        match req(
+        match issue_req(
             rt,
             home,
-            Request::List {
+            issues_app::IssuesRequest::List {
                 project: None,
-                filter: Filter {
+                filter: issues_app::Filter {
                     all: true,
                     ..Default::default()
                 },
@@ -615,12 +661,12 @@ fn issues_reference_performance_gate() {
     // Every contributor comments once on a founder-visible issue (cross-node
     // authoring on a synced Body), and the viewer proves the read tier: its
     // reads serve, its mutation is refused at the demand layer.
-    let founder_refs: Vec<String> = match req(
+    let founder_refs: Vec<String> = match issue_req(
         &rt,
         &founder_home,
-        Request::List {
+        issues_app::IssuesRequest::List {
             project: None,
-            filter: Filter {
+            filter: issues_app::Filter {
                 all: true,
                 ..Default::default()
             },
@@ -630,10 +676,10 @@ fn issues_reference_performance_gate() {
         other => panic!("expected List, got {other:?}"),
     };
     for (n, f) in fleet.iter().filter(|f| f.writer).enumerate() {
-        ok(
+        issue_ok(
             &rt,
             &f.home,
-            Request::Comment {
+            issues_app::IssuesRequest::Comment {
                 reply_to: None,
                 reff: founder_refs[n % founder_refs.len()].clone(),
                 body: format!("cross-actor comment from contributor {n}"),
@@ -643,10 +689,10 @@ fn issues_reference_performance_gate() {
     if let Some(viewer) = fleet.iter().find(|f| !f.writer) {
         let rows = list_all_count(&rt, &viewer.home);
         assert!(rows > 0, "the viewer tier reads the converged corpus");
-        let denied = req(
+        let denied = issue_req(
             &rt,
             &viewer.home,
-            Request::IssueNew {
+            issues_app::IssuesRequest::IssueNew {
                 due: None,
                 estimate: None,
                 title: "viewer must not author".into(),
@@ -670,12 +716,12 @@ fn issues_reference_performance_gate() {
     let home = founder_home.clone();
     let focus = |rt: &tokio::runtime::Runtime| {
         ok(rt, &home, Request::Inbox { clear: false });
-        ok(
+        issue_ok(
             rt,
             &home,
-            Request::List {
+            issues_app::IssuesRequest::List {
                 project: None,
-                filter: Filter {
+                filter: issues_app::Filter {
                     mine: true,
                     ..Default::default()
                 },
@@ -695,10 +741,10 @@ fn issues_reference_performance_gate() {
         (
             "issue_open",
             Box::new(|rt, i| {
-                ok(
+                issue_ok(
                     rt,
                     &home,
-                    Request::IssueView {
+                    issues_app::IssuesRequest::IssueView {
                         reff: refs[i % refs.len()].clone(),
                     },
                 );
@@ -707,16 +753,16 @@ fn issues_reference_performance_gate() {
         (
             "project_list",
             Box::new(|rt, _| {
-                ok(rt, &home, Request::ProjectList);
+                issue_ok(rt, &home, issues_app::IssuesRequest::ProjectList);
             }),
         ),
         (
             "board",
             Box::new(|rt, i| {
-                ok(
+                issue_ok(
                     rt,
                     &home,
-                    Request::Board {
+                    issues_app::IssuesRequest::Board {
                         project: Some(project_keys[i % project_keys.len()].clone()),
                         project_hint: None,
                     },
@@ -726,10 +772,10 @@ fn issues_reference_performance_gate() {
         (
             "graph",
             Box::new(|rt, i| {
-                ok(
+                issue_ok(
                     rt,
                     &home,
-                    Request::IssueGraph {
+                    issues_app::IssuesRequest::IssueGraph {
                         reff: refs[i % refs.len()].clone(),
                     },
                 );
@@ -738,10 +784,10 @@ fn issues_reference_performance_gate() {
         (
             "history",
             Box::new(|rt, i| {
-                ok(
+                issue_ok(
                     rt,
                     &home,
-                    Request::History {
+                    issues_app::IssuesRequest::History {
                         reff: refs[i % refs.len()].clone(),
                     },
                 );
@@ -750,10 +796,10 @@ fn issues_reference_performance_gate() {
         (
             "edit",
             Box::new(|rt, i| {
-                ok(
+                issue_ok(
                     rt,
                     &home,
-                    Request::IssueEdit {
+                    issues_app::IssuesRequest::IssueEdit {
                         due: None,
                         estimate: None,
                         reff: refs[i % refs.len()].clone(),
@@ -770,19 +816,19 @@ fn issues_reference_performance_gate() {
             Box::new(|rt, i| {
                 let reff = refs[i % refs.len()].clone();
                 if i % 2 == 0 {
-                    ok(rt, &home, Request::IssueStart { reff });
+                    issue_ok(rt, &home, issues_app::IssuesRequest::IssueStart { reff });
                 } else {
-                    ok(rt, &home, Request::IssueStop { reff });
+                    issue_ok(rt, &home, issues_app::IssuesRequest::IssueStop { reff });
                 }
             }),
         ),
         (
             "create",
             Box::new(|rt, i| {
-                ok(
+                issue_ok(
                     rt,
                     &home,
-                    Request::IssueNew {
+                    issues_app::IssuesRequest::IssueNew {
                         due: None,
                         estimate: None,
                         title: format!("warm create {i}"),
@@ -802,12 +848,12 @@ fn issues_reference_performance_gate() {
                 // Listing under two DIFFERENT projects back to back evaluates
                 // the per-project policy context twice in one family sample.
                 for p in [i, i + 1] {
-                    ok(
+                    issue_ok(
                         rt,
                         &home,
-                        Request::List {
+                        issues_app::IssuesRequest::List {
                             project: Some(project_keys[p % project_keys.len()].clone()),
-                            filter: Filter::default(),
+                            filter: issues_app::Filter::default(),
                         },
                     );
                 }
@@ -850,10 +896,10 @@ fn issues_reference_performance_gate() {
     let t = Instant::now();
     for i in 0..incremental_ops {
         let author = &writer_homes[i % writer_homes.len()];
-        ok(
+        issue_ok(
             &rt,
             author,
-            Request::Comment {
+            issues_app::IssuesRequest::Comment {
                 reply_to: None,
                 reff: refs[i % refs.len()].clone(),
                 body: format!("incremental op {i}"),

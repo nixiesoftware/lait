@@ -61,6 +61,33 @@ fn req(rt: &tokio::runtime::Runtime, home: &Path, r: Request) -> Response {
         .unwrap_or_else(|e| Response::err(format!("{e:#}")))
 }
 
+async fn issues_request(home: &Path, request: issues_app::IssuesRequest) -> Result<Response> {
+    let space = lait::orbital::discover_space_id(home).expect("test Space");
+    let call = issues_app::encode_call(&request)?;
+    let reply = lait::control::call_world(
+        home,
+        ControlRoute::World {
+            address: OrbitAddress::for_store(home, space),
+            world: call.world().as_str().to_string(),
+        },
+        call.clone(),
+        None,
+    )
+    .await?;
+    Ok(serde_json::from_value(issues_app::decode_reply(
+        &call, reply,
+    )?)?)
+}
+
+fn issue_req(
+    rt: &tokio::runtime::Runtime,
+    home: &Path,
+    request: issues_app::IssuesRequest,
+) -> Response {
+    rt.block_on(issues_request(home, request))
+        .unwrap_or_else(|error| Response::err(format!("{error:#}")))
+}
+
 /// The docs a frame names under a project KEY, in frame order.
 fn named_docs(frame: &lait::control::Doorbell, key: &str) -> Vec<String> {
     frame
@@ -159,33 +186,43 @@ fn explicit_routes_cannot_cross_space_or_world_boundaries() {
         Response::Error { message, .. } if message.contains("this bridge occupies")
     ));
 
+    let files_call = lait::orbital::WorldCall::new(
+        replica::ids::WorldId::parse("com.example.files").unwrap(),
+        "files.list",
+        1,
+        Vec::new(),
+    )
+    .unwrap();
     let missing_world = rt
-        .block_on(request_routed(
+        .block_on(lait::control::call_world(
             &home,
-            &Request::ProjectList,
             ControlRoute::World {
                 address: address.clone(),
                 world: "com.example.files".into(),
             },
+            files_call,
+            None,
         ))
         .unwrap();
     assert!(matches!(
-        missing_world,
-        Response::Error { message, .. } if message.contains("is not enabled")
+        missing_world.into_result(),
+        Err(error) if error.message.contains("is not enabled")
     ));
 
+    let issues_call = issues_app::encode_call(&issues_app::IssuesRequest::ProjectList).unwrap();
     let wrong_level = rt
-        .block_on(request_routed(
+        .block_on(lait::control::call_world(
             &home,
-            &Request::ProjectList,
             ControlRoute::Space {
                 address: address.clone(),
             },
+            issues_call,
+            None,
         ))
         .unwrap();
     assert!(matches!(
-        wrong_level,
-        Response::Error { message, .. } if message.contains("requires a world route")
+        wrong_level.into_result(),
+        Err(error) if error.message.contains("requires an explicit World route")
     ));
 
     let rejected_stop = rt
@@ -226,10 +263,10 @@ fn explicit_routes_cannot_cross_space_or_world_boundaries() {
 /// Seed a project + one issue and return the issue's canonical ref (e.g.
 /// `ENG-1`). Exercises the World submit path that feeds the doorbell.
 fn seed_project_and_issue(rt: &tokio::runtime::Runtime, home: &Path) -> String {
-    let resp = req(
+    let resp = issue_req(
         rt,
         home,
-        Request::ProjectNew {
+        issues_app::IssuesRequest::ProjectNew {
             name: "Eng".into(),
             key: "ENG".into(),
             color: None,
@@ -239,10 +276,10 @@ fn seed_project_and_issue(rt: &tokio::runtime::Runtime, home: &Path) -> String {
         matches!(resp, Response::Ref { .. }),
         "projects new should echo a Ref, got {resp:?}"
     );
-    let resp = req(
+    let resp = issue_req(
         rt,
         home,
-        Request::IssueNew {
+        issues_app::IssuesRequest::IssueNew {
             due: None,
             estimate: None,
             title: "t1".into(),
@@ -293,9 +330,9 @@ fn stale_since_after_restart_yields_reset() {
         );
 
         // A live edit rings a real doorbell: non-reset, advancing activity.
-        let resp = request(
+        let resp = issues_request(
             &home,
-            &Request::IssueEdit {
+            issues_app::IssuesRequest::IssueEdit {
                 due: None,
                 estimate: None,
                 reff: reff.clone(),
@@ -356,10 +393,10 @@ fn doorbell_names_the_dirty_project_and_doc() {
     wait_online(&rt, &home);
 
     let reff = seed_project_and_issue(&rt, &home);
-    let doc = match req(
+    let doc = match issue_req(
         &rt,
         &home,
-        Request::List {
+        issues_app::IssuesRequest::List {
             project: None,
             filter: Default::default(),
         },
@@ -383,9 +420,9 @@ fn doorbell_names_the_dirty_project_and_doc() {
         assert!(first.reset, "first Subscribe frame must be a Reset");
 
         // A field edit: one issue Body, no catalog plane.
-        request(
+        issues_request(
             &home,
-            &Request::IssueEdit {
+            issues_app::IssuesRequest::IssueEdit {
                 due: None,
                 estimate: None,
                 reff: reff.clone(),
@@ -415,9 +452,9 @@ fn doorbell_names_the_dirty_project_and_doc() {
         );
 
         // A create: a new issue Body *and* the catalog (aliases, seqs, board).
-        let created = match request(
+        let created = match issues_request(
             &home,
-            &Request::IssueNew {
+            issues_app::IssuesRequest::IssueNew {
                 due: None,
                 estimate: None,
                 title: "t2".into(),
@@ -517,9 +554,9 @@ fn every_subscriber_sees_the_same_frame_for_one_commit() {
             assert!(first.reset, "{who}'s first frame must be a Reset");
         }
 
-        request(
+        issues_request(
             &home,
-            &Request::IssueEdit {
+            issues_app::IssuesRequest::IssueEdit {
                 due: None,
                 estimate: None,
                 reff: reff.clone(),
@@ -580,9 +617,9 @@ fn validate_then_commit_rings_no_doorbell() {
         assert!(first.reset, "first Subscribe frame must be a Reset");
 
         // An invalid status is rejected pre-commit.
-        let resp = request(
+        let resp = issues_request(
             &home,
-            &Request::IssueEdit {
+            issues_app::IssuesRequest::IssueEdit {
                 due: None,
                 estimate: None,
                 reff: reff.clone(),

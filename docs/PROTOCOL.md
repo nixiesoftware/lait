@@ -242,7 +242,7 @@ an already-live compatibility adapter; it does not place a vacant Orbit. Other
 verbs and routes reject this mode. The field is omitted for ordinary dispatch,
 preserving the existing envelope shape.
 
-Protocol v4 sends product mutations and queries as:
+Protocol v5 sends product mutations and queries as:
 
 ```text
 WorldClientRequest {
@@ -261,12 +261,12 @@ the exact `(world, operation, version)` tuple so a product codec cannot accept a
 reply for another contract.
 
 An owned Station receives the call directly through its in-process SpaceBridge.
-Only an attached historical SpaceBridge uses the package's legacy codec to
-translate the call to the v3 typed `Request`/`Response` socket. The v4 daemon
-continues accepting v3 typed product requests at its public endpoint and
-translates them before routing, so v3 remains inside the declared compatibility
-window. The issue-tracker application emits `com.lait.issues` /
-`issues.control` v1; LaitDaemon does not infer or hardcode either value.
+An attached SpaceBridge receives the identical opaque envelope through its
+per-Orbit socket. Protocol v5 retired the typed product-request path and the
+root-owned product codec; v4 processes are outside the compatibility window and
+must restart before attachment. The issue-tracker application emits
+`com.lait.issues` / `issues.control` v1; LaitDaemon does not infer or hardcode
+either value.
 
 Product calls then reach the named World's registered handler, WorldBridge, and
 docked Session.

@@ -3,10 +3,10 @@
 //! It composes [`OrbitalMechanics`] (authority/keys/membership over signed
 //! material), a [`Runtime`] hosting the build's registered Worlds, and a
 //! [`Station`] with the comms Contact plane. [`WorldBridgeRegistry`] owns one
-//! bridge per hosted World. The historical process adapter still serves the
-//! newline-delimited `control::Request`/`Response` IPC, while an owning
-//! LaitDaemon invokes [`WorldCall`] directly in-process. Product requests route
-//! through the call handler registered in their injected
+//! bridge per hosted World. The process adapter serves Space-owned
+//! `control::Request`/`Response` IPC and product-neutral [`WorldCall`] envelopes,
+//! while an owning LaitDaemon can invoke a World bridge directly in-process.
+//! Product requests route through the call handler registered in their injected
 //! [`WorldPackage`](crate::orbital::WorldPackage); peer exchange is
 //! Contact/Convergence over `comms`;
 //! invitation is Coordinates v1; `Subscribe` streams the Station's
@@ -43,8 +43,8 @@ use crate::control::{
 };
 use crate::daemon::OrbitAddress;
 use crate::orbital::{
-    orbital_store_root, unsupported_store_at, OrbitalMechanics, WorldBridge, WorldBridgeRegistry,
-    WorldCall, WorldCallAccess, WorldCallContext, WorldCallErrorCode, WorldPackages, WorldReply,
+    orbital_store_root, unsupported_store_at, OrbitalMechanics, WorldBridgeRegistry, WorldCall,
+    WorldCallAccess, WorldCallContext, WorldCallErrorCode, WorldPackages, WorldReply,
 };
 use crate::transport::{Transport, TransportFactory};
 
@@ -451,68 +451,6 @@ impl SpaceBridge {
         SpaceBridgeActivity(self)
     }
 
-    /// Resolve the World package addressed by this request.
-    ///
-    /// New daemon clients always provide an explicit World route. The
-    /// package-claim lookup remains only for the historical per-home control
-    /// adapter, which carried no route in its envelope.
-    fn control_world(
-        &self,
-        route: Option<&ControlRoute>,
-        request: &Request,
-    ) -> std::result::Result<WorldId, Response> {
-        if let Some(ControlRoute::World { world, .. }) = route {
-            return WorldId::parse(world)
-                .ok_or_else(|| Response::err(format!("invalid World id '{world}'")));
-        }
-
-        let mut claimed = self
-            .worlds
-            .world_ids()
-            .filter(|world| {
-                self.worlds
-                    .bridge(world)
-                    .and_then(WorldBridge::legacy_codec)
-                    .is_some_and(|legacy| legacy.handles(request))
-            })
-            .cloned();
-        let Some(world) = claimed.next() else {
-            return Err(Response::err("no World package owns this request"));
-        };
-        if claimed.next().is_some() {
-            return Err(Response::err(
-                "more than one World package claims this request",
-            ));
-        }
-        Ok(world)
-    }
-
-    /// Route a product request through its registered World package, or refuse
-    /// with a typed "not admitted yet" when this device holds no standing.
-    fn route_world(
-        &self,
-        route: Option<&ControlRoute>,
-        req: Request,
-        act_as: Option<&str>,
-    ) -> Response {
-        let world = match self.control_world(route, &req) {
-            Ok(world) => world,
-            Err(response) => return response,
-        };
-        let Some(codec) = self
-            .worlds
-            .bridge(&world)
-            .and_then(WorldBridge::legacy_codec)
-        else {
-            return Response::err(format!("World '{world}' has no historical control codec"));
-        };
-        let call = match codec.encode_call(req) {
-            Ok(call) => call,
-            Err(error) => return Response::err(error.message),
-        };
-        codec.decode_reply(self.route_world_call(&call, act_as))
-    }
-
     /// Direct host-local entry for a versioned product call.
     ///
     /// Owned Station placements invoke this without traversing the per-Orbit
@@ -718,7 +656,7 @@ impl SpaceBridge {
         act_as: Option<&str>,
     ) -> Response {
         let owner = crate::control::classify(&req);
-        if let Err(response) = self.validate_route(route, &req, owner) {
+        if let Err(response) = self.validate_route(route, owner) {
             return response;
         }
         match owner {
@@ -727,7 +665,10 @@ impl SpaceBridge {
             // I). Membership/station/lifecycle ops stay the daemon's — an agent
             // holds no membership authority, so routing them "as the agent"
             // would only ever be denied.
-            RequestOwner::World => self.route_world(route, req, act_as),
+            RequestOwner::World => Response::err(
+                "typed product requests were retired in control protocol v5; \
+                 send a versioned World call",
+            ),
             // Authority never passes through the Session, so a local membership,
             // role, device or key change publishes nothing on its own — the
             // remote half of this plane is published by the Contact driver.
@@ -748,12 +689,11 @@ impl SpaceBridge {
     }
 
     /// Validate the explicit broker path before any terminal owner sees the
-    /// request. A missing route is the legacy per-home protocol and remains
-    /// accepted while clients migrate to the general Lait daemon.
+    /// request. A missing route remains valid for Space-owned requests accepted
+    /// directly by a SpaceBridge.
     fn validate_route(
         &self,
         route: Option<&ControlRoute>,
-        request: &Request,
         owner: RequestOwner,
     ) -> std::result::Result<(), Response> {
         let Some(route) = route else {
@@ -807,17 +747,10 @@ impl SpaceBridge {
                         "World '{world}' is not enabled in Space {actual_space}"
                     )));
                 }
-                let accepts = self
-                    .worlds
-                    .bridge(&world_id)
-                    .and_then(WorldBridge::legacy_codec)
-                    .is_some_and(|legacy| legacy.handles(request));
-                if !accepts {
-                    return Err(Response::err(format!(
-                        "World '{world}' does not own this product request"
-                    )));
-                }
-                Ok(())
+                Err(Response::err(
+                    "typed product requests were retired in control protocol v5; \
+                     send a versioned World call",
+                ))
             }
         }
     }
@@ -1714,22 +1647,6 @@ impl SpaceBridge {
         let _ = std::fs::write(self.inbox_watermark_path(), ts.to_string());
     }
 
-    /// Query the docked Session for a JSON projection (role/workflow views).
-    fn session_query_json(
-        &self,
-        query: crate::world::contract::IssueQuery,
-    ) -> Option<serde_json::Value> {
-        let world = crate::world::contract::world_id();
-        if !self.ensure_world_session(&world) {
-            return None;
-        }
-        self.worlds
-            .with_primary(&world, |session| {
-                issues_app::projections::query_json(session, query)
-            })
-            .flatten()
-    }
-
     /// Expand a role's pinned definition (read from the Manifest-pinned
     /// Catalog through the Session) and install the exact assignments as one
     /// Mechanics authority batch. IssuesWorld plans the expansion; Runtime
@@ -1738,83 +1655,29 @@ impl SpaceBridge {
         let Some(subject) = self.mechanics.resolve_actor_ref(actor) else {
             return Response::not_found(format!("no actor matches '{actor}'"));
         };
-        let Some(view) = self.session_query_json(crate::world::contract::IssueQuery::RoleShow {
-            role: role.to_string(),
-        }) else {
-            return Response::not_found(format!("no role `{role}` in this space"));
-        };
-        let conflicts = view["conflict_heads"]
-            .as_array()
-            .cloned()
-            .unwrap_or_default();
-        if !conflicts.is_empty() {
-            return Response::err(format!(
-                "role `{role}` has {} concurrent revision heads — resolve them with \
-                 `lait issues role resolve` before assigning",
-                conflicts.len()
-            ));
+        let world = crate::world::contract::world_id();
+        if !self.ensure_world_session(&world) {
+            return Response::err("the Issues World is unavailable");
         }
-        let Some(revision) = view.get("revision").filter(|r| !r.is_null()) else {
-            return Response::not_found(format!("role `{role}` has no usable revision"));
-        };
-        let body = &revision["body"];
-        if body["tombstone"].as_bool() == Some(true) {
-            return Response::err(format!("role `{role}` is tombstoned"));
-        }
-        let scope_kind = body["scope_kind"].as_str().unwrap_or("space");
-        let world = crate::world::contract::PRODUCT_WORLD;
-        let resource = match (scope_kind, project) {
-            ("space", None) => mechanics::demand::PolicyResource::space(world),
-            ("space", Some(_)) => {
-                return Response::err("that is a Space role — it takes no --project")
-            }
-            ("project", Some(sel)) => {
-                let Some(snapshot) =
-                    self.session_query_json(crate::world::contract::IssueQuery::Snapshot)
-                else {
-                    return Response::err("the catalog is unavailable");
-                };
-                let projects = snapshot["catalog"]["projects"].as_object().cloned();
-                let resolved = projects.and_then(|m| {
-                    let upper = sel.to_ascii_uppercase();
-                    if m.contains_key(sel) {
-                        return Some(sel.to_string());
-                    }
-                    m.iter()
-                        .find(|(_, meta)| meta["key"].as_str() == Some(upper.as_str()))
-                        .map(|(id, _)| id.clone())
-                });
-                match resolved {
-                    Some(id) => mechanics::demand::PolicyResource::project(world, &id),
-                    None => return Response::not_found(format!("no project matches '{sel}'")),
-                }
-            }
-            ("project", None) => {
-                return Response::err("that is a Project role — pass -p <project>")
-            }
-            _ => return Response::err("unrecognized role scope"),
-        };
-        let assignments: Vec<(
-            mechanics::demand::PolicyCapability,
-            mechanics::demand::PolicyResource,
-        )> = body["capabilities"]
-            .as_array()
-            .map(|caps| {
-                caps.iter()
-                    .filter_map(|c| c.as_str())
-                    .map(|c| {
-                        (
-                            mechanics::demand::PolicyCapability::new(world, c),
-                            resource.clone(),
-                        )
-                    })
-                    .collect()
+        let plan = self
+            .worlds
+            .with_primary(&world, |session| {
+                issues_app::host::plan_access_grant(session, role, project)
             })
-            .unwrap_or_default();
-        if assignments.is_empty() {
-            return Response::err(format!("role `{role}` expands to no capabilities"));
-        }
-        match self.mechanics.grant_assignments(&subject, &assignments) {
+            .expect("Issues Session present after ensure");
+        let plan = match plan {
+            Ok(plan) => plan,
+            Err(issues_app::host::AccessPlanError::NotFound(message)) => {
+                return Response::not_found(message);
+            }
+            Err(issues_app::host::AccessPlanError::Invalid(message)) => {
+                return Response::err(message);
+            }
+        };
+        match self
+            .mechanics
+            .grant_assignments(&subject, &plan.assignments)
+        {
             Ok(granted) => Response::Ok {
                 message: Some(format!(
                     "granted {} capability assignment(s) from role `{role}` to {}",
@@ -2034,12 +1897,61 @@ impl SpaceBridge {
         if reader.read_line(&mut line).await.is_err() {
             return;
         }
+        let value = match serde_json::from_str::<serde_json::Value>(line.trim()) {
+            Ok(value) => value,
+            Err(error) => {
+                let _ =
+                    write_line(write_half, &Response::err(format!("bad request: {error}"))).await;
+                return;
+            }
+        };
+        if value.get("call").is_some() {
+            let crate::control::WorldClientRequest {
+                route,
+                act_as,
+                call,
+            } = match serde_json::from_value(value) {
+                Ok(request) => request,
+                Err(error) => {
+                    let _ = write_line(
+                        write_half,
+                        &Response::err(format!("bad World call: {error}")),
+                    )
+                    .await;
+                    return;
+                }
+            };
+            let reply = match route {
+                ControlRoute::World { address, world } => {
+                    let route_world = WorldId::parse(&world);
+                    if route_world.as_ref() != Some(call.world()) {
+                        WorldReply::error(
+                            &call,
+                            WorldCallErrorCode::InvalidCall,
+                            format!(
+                                "World route addresses '{world}', but the call addresses '{}'",
+                                call.world()
+                            ),
+                        )
+                    } else {
+                        self.call_world(&address, &call, act_as.as_deref())
+                    }
+                }
+                _ => WorldReply::error(
+                    &call,
+                    WorldCallErrorCode::InvalidCall,
+                    "World call requires an explicit World route",
+                ),
+            };
+            let _ = write_line(write_half, &reply).await;
+            return;
+        }
         let crate::control::ClientRequest {
             route,
             if_running: _,
             act_as,
             request: req,
-        } = match serde_json::from_str::<crate::control::ClientRequest>(line.trim()) {
+        } = match serde_json::from_value::<crate::control::ClientRequest>(value) {
             Ok(env) => env,
             Err(e) => {
                 let _ = write_line(write_half, &Response::err(format!("bad request: {e}"))).await;
@@ -2050,9 +1962,7 @@ impl SpaceBridge {
         // an invalidly routed Stop must not tear down this bridge, and a
         // subscription must not bypass the same Space-boundary check applied to
         // ordinary observation requests.
-        if let Err(response) =
-            self.validate_route(route.as_ref(), &req, crate::control::classify(&req))
-        {
+        if let Err(response) = self.validate_route(route.as_ref(), crate::control::classify(&req)) {
             let _ = write_line(write_half, &response).await;
             return;
         }

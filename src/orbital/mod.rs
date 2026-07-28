@@ -111,9 +111,9 @@ pub use space_bridge::{
     run_space_bridge, run_space_bridge_with, run_space_bridge_with_packages, SpaceBridge,
 };
 pub use world_bridge::{
-    LegacyWorldCodec, WorldBridge, WorldBridgeRegistry, WorldBridgesBuilder, WorldCall,
-    WorldCallAccess, WorldCallContext, WorldCallError, WorldCallErrorCode, WorldCallHandler,
-    WorldPackage, WorldPackages, WorldReply,
+    WorldBridge, WorldBridgeRegistry, WorldBridgesBuilder, WorldCall, WorldCallAccess,
+    WorldCallContext, WorldCallError, WorldCallErrorCode, WorldCallHandler, WorldPackage,
+    WorldPackages, WorldReply,
 };
 
 // Compatibility exports for callers that reached the issue tracker's outer
