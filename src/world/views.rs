@@ -85,6 +85,14 @@ pub struct Milestone {
     pub name: String,
     #[serde(default)]
     pub target_date: Option<u64>,
+    /// Fractional index (`world::rank`), the project's manual milestone order.
+    ///
+    /// Additive: records written before ordering existed decode with `""`, and
+    /// the first milestone write in a project backfills every one of them from
+    /// the order they were already being read in — so a project is never half
+    /// ordered by hand and half by date.
+    #[serde(default)]
+    pub rank: String,
     #[serde(default)]
     pub tombstone: bool,
 }
@@ -778,6 +786,7 @@ pub fn project_row(
                     .collect()
             })
             .unwrap_or_default(),
+        milestone: issue.and_then(|i| i.milestone.clone()),
         // Sub-issue progress is a board-projection concern (it needs the issues
         // map to classify each child's status); the base row leaves it absent.
         child_done: None,

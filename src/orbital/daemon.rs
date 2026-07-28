@@ -951,6 +951,7 @@ impl OrbitalDaemon {
             project: None,
             label: None,
             status: None,
+            milestone: None,
             mine: None,
             all: true,
             me: None,

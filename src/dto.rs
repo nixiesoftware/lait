@@ -487,6 +487,17 @@ pub struct Row {
     /// dots without a second fetch; older consumers ignore the field.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub label_names: Vec<String>,
+    /// The `mls_` milestone this issue targets, if any (SCOPE-1).
+    ///
+    /// On the row for the same reason `label_names` is: a client that wants to
+    /// group or filter by milestone can do it against rows it already holds,
+    /// rather than opening every issue to learn what the catalog already knows.
+    /// The *id*, not the name — a rename must not move a filter, and the name is
+    /// one `milestone_list` away on a surface that needs to print it.
+    ///
+    /// Additive/absent-when-none, so pre-milestone consumers decode unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub milestone: Option<String>,
     /// Sub-issue progress: done and total live (non-tombstoned) children. `None`
     /// when the issue has no children, so a card only draws a progress mini-bar
     /// for issues that actually parent others. Additive/absent-when-none, and set

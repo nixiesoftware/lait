@@ -112,6 +112,11 @@ pub struct Filter {
     pub status: Option<String>,
     #[serde(default)]
     pub label: Option<String>,
+    /// Milestone name or `mls_` id, resolved within the listed project.
+    /// Meaningless without a project — a milestone belongs to exactly one, so a
+    /// filter with no project to resolve against is refused rather than guessed.
+    #[serde(default)]
+    pub milestone: Option<String>,
     /// Include done and tombstoned rows.
     #[serde(default)]
     pub all: bool,
@@ -337,6 +342,11 @@ pub enum Request {
         /// `YYYY-MM-DD`, or "none" to clear. Absent leaves it untouched.
         #[serde(default)]
         target: Option<String>,
+        /// Where to place it in the project's manual order — `Before`/`After`
+        /// name another milestone of the same project. Absent leaves an existing
+        /// milestone where it is and appends a new one.
+        #[serde(default)]
+        pos: Option<BoardPos>,
         /// Tombstone the milestone (issues keep their register; it reads as
         /// cleared once the milestone is gone).
         #[serde(default)]
@@ -1126,6 +1136,7 @@ pub fn representative_requests() -> Vec<Request> {
             milestone: None,
             name: None,
             target: None,
+            pos: None,
             remove: false,
         },
         Request::IssueMilestone {

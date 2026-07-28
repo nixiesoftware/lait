@@ -169,3 +169,34 @@ describe("the status filter selects columns", () => {
     expect(out.columns[0]!.rows[0]!.reff).toBe("iss_1");
   });
 });
+
+describe("milestone filter", () => {
+  const scoped = row({ reff: "iss_a", milestone: "mls_1" });
+  const other = row({ reff: "iss_b", milestone: "mls_2" });
+  const loose = row({ reff: "iss_c" });
+  const all = board([scoped, other, loose]);
+
+  it("keeps only the rows targeting that milestone", () => {
+    const view = applyFilter(all, { ...EMPTY_FILTER, milestone: "mls_1" }, null);
+    expect(view.columns[0]?.rows.map((r) => r.reff)).toEqual(["iss_a"]);
+  });
+
+  it("treats the empty string as the No-milestone bucket, not as no filter", () => {
+    // The distinction the route grammar also has to preserve: `""` is a real
+    // selection — the issues nobody has scoped yet — and `null` is every issue.
+    // Conflating them makes the bucket unreachable and silently widens the view.
+    const bucket = applyFilter(all, { ...EMPTY_FILTER, milestone: "" }, null);
+    expect(bucket.columns[0]?.rows.map((r) => r.reff)).toEqual(["iss_c"]);
+
+    const unfiltered = applyFilter(all, { ...EMPTY_FILTER, milestone: null }, null);
+    expect(countRows(unfiltered)).toBe(3);
+    expect(isActive({ ...EMPTY_FILTER, milestone: "" })).toBe(true);
+    expect(isActive({ ...EMPTY_FILTER, milestone: null })).toBe(false);
+  });
+
+  it("is answered client-side — the daemon is not asked", () => {
+    // `Row.milestone` is an id the daemon already put on the row, so matching it
+    // re-derives nothing. Same argument as `status`, unlike `mine`/`label`.
+    expect(needsServer({ ...EMPTY_FILTER, milestone: "mls_1" })).toBe(false);
+  });
+});

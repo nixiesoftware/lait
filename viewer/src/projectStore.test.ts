@@ -119,6 +119,80 @@ describe("ProjectViewerStore", () => {
     unsubscribe();
   });
 
+  it("refreshes milestone progress when an issue moves, not just the records", async () => {
+    // The half of the milestone derivation that has nothing to do with the
+    // catalog: `total`/`done` are counted from ISSUE bodies, so dragging a card
+    // to Done changes a percentage on a project overview nobody touched. The
+    // ring here names a dirty doc and no milestone plane at all — the shape a
+    // private `useState` copy in the overview could never hear.
+    let milestones = [{ id: "ms_1", project_id: "prj_1", name: "v1", tombstone: false, total: 2, done: 0 }];
+    const rpc = vi.fn(async (_space: string, request: { cmd: string }) => {
+      if (request.cmd === "board") return board as Response;
+      if (request.cmd === "milestone_list") return { kind: "milestones", milestones } as Response;
+      return { kind: "ok", message: null } as Response;
+    });
+    const store = new ProjectViewerStore(rpc);
+    await store.ensureMilestones("local", "prj_1");
+    const key = projectKeys.milestones("local", "prj_1");
+    const unsubscribe = store.resources.subscribe(key, () => undefined);
+
+    milestones = [{ id: "ms_1", project_id: "prj_1", name: "v1", tombstone: false, total: 2, done: 1 }];
+    await store.handleDoorbell({
+      space: "local", epoch: 1, seq: 1, reset: false,
+      dirty_by_project: [{ project_id: "prj_1", project_key: "ONE", docs: ["doc_1"] }],
+      dirty_catalog: [],
+      authority_advanced: false, activity_advanced: false, presence_advanced: false,
+    });
+
+    expect(store.resources.read<typeof milestones>(key).data?.[0]?.done).toBe(1);
+
+    // ...and another project's issues leave this project's bars alone.
+    milestones = [{ id: "ms_1", project_id: "prj_1", name: "v1", tombstone: false, total: 2, done: 2 }];
+    await store.handleDoorbell({
+      space: "local", epoch: 1, seq: 2, reset: false,
+      dirty_by_project: [{ project_id: "prj_2", project_key: "TWO", docs: ["doc_9"] }],
+      dirty_catalog: [],
+      authority_advanced: false, activity_advanced: false, presence_advanced: false,
+    });
+    expect(store.resources.read<typeof milestones>(key).data?.[0]?.done).toBe(1);
+    unsubscribe();
+  });
+
+  it("rings the update feed on its own plane and nothing else's", async () => {
+    // An update is authored once and never edited, so unlike the milestone bars
+    // the feed depends on its own plane alone: no issue moving can change what a
+    // past post said, and a milestone edit must not refetch it.
+    let updates = [{ id: "upd_1", author: "act_1", ts: 1, body: "first" }];
+    const rpc = vi.fn(async (_space: string, request: { cmd: string }) => {
+      if (request.cmd === "project_updates") return { kind: "updates", updates } as Response;
+      return { kind: "ok", message: null } as Response;
+    });
+    const store = new ProjectViewerStore(rpc);
+    await store.ensureUpdates("local", "prj_1");
+    const key = projectKeys.updates("local", "prj_1");
+    const unsubscribe = store.resources.subscribe(key, () => undefined);
+
+    // A teammate's post reaches us without a reload of our own.
+    updates = [...updates, { id: "upd_2", author: "act_2", ts: 2, body: "second" }];
+    await store.handleDoorbell({
+      space: "local", epoch: 1, seq: 1, reset: false,
+      dirty_by_project: [],
+      dirty_catalog: [{ scope: "updates", project_id: "prj_1", project_key: "ONE" }],
+      authority_advanced: false, activity_advanced: false, presence_advanced: false,
+    });
+    expect(store.resources.read(key).data).toHaveLength(2);
+
+    const before = rpc.mock.calls.filter((c) => c[1].cmd === "project_updates").length;
+    await store.handleDoorbell({
+      space: "local", epoch: 1, seq: 2, reset: false,
+      dirty_by_project: [{ project_id: "prj_1", project_key: "ONE", docs: ["doc_1"] }],
+      dirty_catalog: [{ scope: "milestones", project_id: "prj_1", project_key: "ONE" }],
+      authority_advanced: false, activity_advanced: false, presence_advanced: false,
+    });
+    expect(rpc.mock.calls.filter((c) => c[1].cmd === "project_updates").length).toBe(before);
+    unsubscribe();
+  });
+
   it("leaves resources alone that the dirty plane does not reach", async () => {
     // The other half of precision, and the half a coarse ring cannot give you:
     // a milestone edit must not drag the label registry along behind it.

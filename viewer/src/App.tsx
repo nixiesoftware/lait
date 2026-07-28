@@ -24,6 +24,7 @@ import {
   type View,
 } from "./core/registry";
 import {
+  carriesFilter,
   formatRoute,
   loadLastRoute,
   parseRoute,
@@ -86,6 +87,7 @@ import { PREDICTION_TTL_MS, type Field } from "./core/overlay";
 import {
   projectKeys,
   useProjectBoard,
+  useProjectMilestones,
   useProjectRegistry,
   useProjectViewerStore,
 } from "./projectStore";
@@ -763,6 +765,35 @@ export function App() {
         setDetail(false);
         if (scoped !== filter) setFilter(scoped);
       },
+      /**
+       * A milestone is a filter, not a destination.
+       *
+       * So this stays on whatever issue surface you were reading if that surface
+       * can be narrowed — clicking a milestone while working the board should
+       * narrow the board, not throw you into a list. Only Overview and Activity,
+       * which draw no rows, hand you to Issues.
+       */
+      gotoMilestone: (toProject, milestone) => {
+        const next = { ...filter, milestone };
+        const nextView = carriesFilter(view) ? view : "list";
+        const nextProject = toProject ?? project;
+        window.history.pushState(
+          null,
+          "",
+          formatRoute({
+            spaceId: routeSpace,
+            project: nextProject,
+            view: nextView,
+            issue: null,
+            filter: next,
+          }),
+        );
+        setProject(nextProject);
+        setView(nextView);
+        setSelection(null);
+        setDetail(false);
+        setFilter(next);
+      },
       openFilter: () => {
         setFilterOpen(true);
         setFocusToken((t) => t + 1);
@@ -1007,10 +1038,14 @@ export function App() {
         view?: View;
         project?: string | null;
         issue?: string | null;
+        milestone?: string | null;
       };
       setTimeout(() => {
         if (typeof detail.view === "string") api.goto(detail.view);
         if ("project" in detail) api.goto(isProjectView(view) ? view : "overview", detail.project ?? null);
+        // After `project`, so `{ project, milestone }` in one detail scopes the
+        // project it just named rather than the one you were on.
+        if ("milestone" in detail) api.gotoMilestone(detail.project ?? null, detail.milestone ?? null);
         if ("issue" in detail) api.select(detail.issue ?? null);
       }, 0);
     };
@@ -1192,6 +1227,9 @@ export function App() {
   const activeProject =
     board?.project ?? projects.find((candidate) => candidate.key === project) ?? null;
   const projectShell = isProjectView(view) && Boolean(project || activeProject);
+  // The open project's milestones, for the filter menu's Milestone facet. The
+  // same resource the overview and the issue rail read — one fetch for all three.
+  const milestones = useProjectMilestones(current ?? "", activeProject?.id).data ?? [];
   const projectCounts = useMemo(() => {
     const counts = { backlog: 0, active: 0, done: 0, total: 0 };
     for (const column of board?.columns ?? []) {
@@ -1544,6 +1582,7 @@ export function App() {
                   labels={labels}
                   states={states}
                   members={members}
+                  milestones={milestones}
                   open={filterOpen}
                   onOpenChange={setFilterOpen}
                   focusToken={focusToken}
@@ -1697,6 +1736,7 @@ export function App() {
               counts={projectCounts}
               readOnly={readOnly}
               onError={setError}
+              onOpenMilestone={(id) => api.gotoMilestone(activeProject.key, id)}
             />
           ) : view === "activity" && board ? (
             <Activity
@@ -2121,6 +2161,10 @@ function StatusSlices({
         return (
           <Button
             key={slice.id}
+            // The toolbar's controls share one rung: these sit beside 28px icon
+            // circles, and a 24px pill next to them reads as a different class
+            // of control rather than the same bar.
+            size="md"
             variant={active ? "active" : "outline"}
             aria-pressed={active}
             onClick={() => onChange({ ...filter, status: idsFor(slice.categories) })}

@@ -144,6 +144,7 @@ fn milestones_cycles_initiatives_teams_triage_delete_and_attachments() {
             milestone: None,
             name: Some("Beta".into()),
             target: Some("2026-09-01".into()),
+            pos: None,
             remove: false,
         },
     );
@@ -185,6 +186,93 @@ fn milestones_cycles_initiatives_teams_triage_delete_and_attachments() {
         panic!("expected Milestones");
     };
     assert_eq!((milestones[0].done, milestones[0].total), (1, 1));
+
+    // ---- milestone order (SCOPE-1): manual, and independent of the date. ----
+    //
+    // The bug this replaces: milestones sorted by target date with undated ones
+    // last, so an undated "M0" read *below* a dated "M8" — a stage list in the
+    // wrong order is worse than no order at all.
+    let names = |client: &tokio::runtime::Runtime, home: &Path| -> Vec<String> {
+        let Response::Milestones { milestones } = ok(
+            client,
+            home,
+            Request::MilestoneList {
+                project: "eng".into(),
+            },
+        ) else {
+            panic!("expected Milestones");
+        };
+        milestones.into_iter().map(|m| m.name).collect()
+    };
+    for name in ["Gamma", "Delta"] {
+        ok(
+            &client,
+            &home,
+            Request::MilestoneSet {
+                project: "eng".into(),
+                milestone: None,
+                name: Some(name.into()),
+                target: None,
+                pos: None,
+                remove: false,
+            },
+        );
+    }
+    // Appended, not sorted in: "Beta" carries a target date and the other two do
+    // not, so a date sort would have put them either side of it.
+    assert_eq!(names(&client, &home), ["Beta", "Gamma", "Delta"]);
+
+    // Moved by hand, and the date stays irrelevant.
+    ok(
+        &client,
+        &home,
+        Request::MilestoneSet {
+            project: "eng".into(),
+            milestone: Some("Delta".into()),
+            name: None,
+            target: None,
+            pos: Some(lait::control::BoardPos::Top),
+            remove: false,
+        },
+    );
+    assert_eq!(names(&client, &home), ["Delta", "Beta", "Gamma"]);
+    ok(
+        &client,
+        &home,
+        Request::MilestoneSet {
+            project: "eng".into(),
+            milestone: Some("Delta".into()),
+            name: None,
+            target: None,
+            pos: Some(lait::control::BoardPos::After {
+                reff: "Beta".into(),
+            }),
+            remove: false,
+        },
+    );
+    assert_eq!(names(&client, &home), ["Beta", "Delta", "Gamma"]);
+
+    // A placement relative to a milestone that is not in this project is a
+    // mistake, not a default: it is refused rather than silently appended.
+    let refused = req(
+        &client,
+        &home,
+        Request::MilestoneSet {
+            project: "eng".into(),
+            milestone: Some("Delta".into()),
+            name: None,
+            target: None,
+            pos: Some(lait::control::BoardPos::Before {
+                reff: "nope".into(),
+            }),
+            remove: false,
+        },
+    );
+    assert!(
+        matches!(refused, Response::Error { .. }),
+        "unknown sibling must be refused, got {refused:?}"
+    );
+    assert_eq!(names(&client, &home), ["Beta", "Delta", "Gamma"]);
 
     // ---- cycles (BOARD-11): box, schedule, counts. ----
     ok(

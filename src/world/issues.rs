@@ -28,10 +28,65 @@ use super::contract::{
     self, board_path, catalog_key, issue_key, EventChange, IssueEffect, IssueEvent, IssueIntent,
     IssueQuery, Pos, StoredComment, WorkAction, DEFAULT_STATUS, LINK_KINDS, VIEW_SCHEMA_VERSION,
 };
+use super::rank;
 use super::views::{
     board_view, canonical_for, derive_aliases, issue_view, label_dto, project_dto, project_row,
-    CatalogState, DerivedAliases, IssueState,
+    CatalogState, DerivedAliases, IssueState, Milestone,
 };
+
+/// The order milestones read in, and the only place that decides it.
+///
+/// Rank first, so a project that has been ordered by hand stays that way. An
+/// unranked record — one written before ordering existed, in a project nobody has
+/// touched since — falls back to the target date it used to sort by, so the list
+/// looks the same as it did until someone deliberately moves something.
+///
+/// The id breaks every remaining tie. Two replicas can independently place a
+/// milestone at the same rank; agreeing on *an* order matters more than agreeing
+/// on whose move won, and the id is the one key both sides always have.
+fn milestone_order(a: &Milestone, b: &Milestone) -> std::cmp::Ordering {
+    if !a.rank.is_empty() || !b.rank.is_empty() {
+        // An unranked record sorts last rather than first: `""` is below every
+        // rank, and a legacy milestone jumping to the head of a hand-ordered list
+        // is the one outcome the backfill exists to prevent.
+        let key = |m: &Milestone| (m.rank.is_empty(), m.rank.clone());
+        return key(a).cmp(&key(b)).then_with(|| a.id.cmp(&b.id));
+    }
+    let date = |d: Option<u64>| d.unwrap_or(u64::MAX);
+    date(a.target_date)
+        .cmp(&date(b.target_date))
+        .then_with(|| a.name.cmp(&b.name))
+        .then_with(|| a.id.cmp(&b.id))
+}
+
+/// The rank that puts `id` where `pos` says, within `ordered` (which is sorted
+/// and excludes tombstones). `None` when `pos` names a milestone that is not in
+/// this project — a placement relative to nothing is a mistake, not a default.
+fn place(ordered: &[Milestone], id: &str, pos: &Pos) -> Option<String> {
+    // The milestone being moved is not its own neighbour. Leaving it in would
+    // make "after the one directly above me" resolve to a gap I already occupy.
+    let others: Vec<&Milestone> = ordered.iter().filter(|m| m.id != id).collect();
+    let rank_at = |i: usize| others.get(i).map(|m| m.rank.as_str());
+    let (lo, hi) = match pos {
+        Pos::Top => ("", rank_at(0)),
+        Pos::Bottom => (others.last().map(|m| m.rank.as_str()).unwrap_or(""), None),
+        Pos::Before { doc } | Pos::After { doc } => {
+            let at = others.iter().position(|m| m.id == *doc)?;
+            match pos {
+                Pos::Before { .. } => (
+                    if at == 0 {
+                        ""
+                    } else {
+                        others[at - 1].rank.as_str()
+                    },
+                    Some(others[at].rank.as_str()),
+                ),
+                _ => (others[at].rank.as_str(), rank_at(at + 1)),
+            }
+        }
+    };
+    Some(rank::between(lo, hi))
+}
 
 /// The registered product World.
 pub struct IssuesWorld {
@@ -1952,6 +2007,7 @@ impl World for IssuesWorld {
                 id,
                 name,
                 target_date,
+                pos,
                 tombstone,
                 device: _,
                 ts: _,
@@ -1960,11 +2016,41 @@ impl World for IssuesWorld {
                 if !catalog.projects.contains_key(&project_id) || id.is_empty() {
                     return Err(WorldError::InvalidRequest);
                 }
-                let current = catalog
+
+                // The project's live milestones in the order a reader sees them,
+                // and the backfill that makes that order durable.
+                //
+                // Records written before ranks existed have none, and a list that
+                // was half hand-ordered and half date-ordered would have no
+                // answer to "where does this one go". So the first milestone
+                // write in a project stamps a rank on every one of its
+                // milestones, taken from the legacy order they are already being
+                // read in — nothing moves, the order just stops being derived.
+                let mut ordered: Vec<crate::world::views::Milestone> = catalog
                     .milestones
                     .get(&project_id)
-                    .and_then(|m| m.get(&id))
-                    .cloned();
+                    .into_iter()
+                    .flat_map(|m| m.values())
+                    .filter(|m| !m.tombstone)
+                    .cloned()
+                    .collect();
+                ordered.sort_by(|a, b| milestone_order(a, b));
+                let backfilling = ordered.iter().any(|m| m.rank.is_empty());
+                if backfilling {
+                    let mut previous = String::new();
+                    for milestone in ordered.iter_mut() {
+                        previous = rank::between(&previous, None);
+                        milestone.rank = previous.clone();
+                    }
+                }
+
+                let current = ordered.iter().find(|m| m.id == id).cloned().or_else(|| {
+                    catalog
+                        .milestones
+                        .get(&project_id)
+                        .and_then(|m| m.get(&id))
+                        .cloned()
+                });
                 let mut record = match current.clone() {
                     Some(m) => m,
                     None => {
@@ -1977,10 +2063,19 @@ impl World for IssuesWorld {
                             project_id: project_id.clone(),
                             name: name.trim().to_string(),
                             target_date: None,
+                            // Appended, so a new milestone lands where you can
+                            // see it rather than sorted into the middle by a date
+                            // you have not set yet.
+                            rank: rank::after_all(
+                                &ordered.iter().map(|m| m.rank.clone()).collect::<Vec<_>>(),
+                            ),
                             tombstone: false,
                         }
                     }
                 };
+                if let Some(pos) = &pos {
+                    record.rank = place(&ordered, &id, pos).ok_or(WorldError::InvalidRequest)?;
+                }
                 if current.is_some() {
                     if let Some(name) = &name {
                         if name.trim().is_empty() {
@@ -1995,8 +2090,22 @@ impl World for IssuesWorld {
                 if let Some(tombstone) = tombstone {
                     record.tombstone = tombstone;
                 }
-                if current.as_ref() == Some(&record) {
+                if current.as_ref() == Some(&record) && !backfilling {
                     return Ok(staging.into_effect(None));
+                }
+                if backfilling {
+                    // Every sibling whose rank we just derived, so the order this
+                    // write assumes is the order the next reader gets.
+                    for milestone in &ordered {
+                        if milestone.id == id {
+                            continue;
+                        }
+                        staging.catalog(map_set(
+                            "project_milestones",
+                            format!("{project_id}/{}", milestone.id),
+                            serde_json::to_vec(milestone).expect("milestone json"),
+                        ));
+                    }
                 }
                 staging.catalog(map_set(
                     "project_milestones",
@@ -2557,6 +2666,7 @@ impl World for IssuesWorld {
                 project,
                 label,
                 status,
+                milestone,
                 mine,
                 all,
                 me,
@@ -2591,6 +2701,11 @@ impl World for IssuesWorld {
                     }
                     if let Some(label) = &label {
                         if !issue.labels.contains(label) {
+                            continue;
+                        }
+                    }
+                    if let Some(milestone) = &milestone {
+                        if issue.milestone.as_deref() != Some(milestone.as_str()) {
                             continue;
                         }
                     }
@@ -2874,12 +2989,20 @@ impl World for IssuesWorld {
                     }
                     (done, total)
                 };
-                let mut rows: Vec<crate::dto::MilestoneDto> = catalog
+                // Sorted as records, then projected: the DTO carries no rank —
+                // a client renders the order it is given and has no business
+                // re-deriving it — so the ordering has to happen while the field
+                // still exists.
+                let mut records: Vec<&Milestone> = catalog
                     .milestones
                     .get(&project)
                     .into_iter()
                     .flat_map(|m| m.values())
                     .filter(|m| !m.tombstone)
+                    .collect();
+                records.sort_by(|a, b| milestone_order(a, b));
+                let rows: Vec<crate::dto::MilestoneDto> = records
+                    .into_iter()
                     .map(|m| {
                         let (done, total) = counts(&m.id);
                         crate::dto::MilestoneDto {
@@ -2891,12 +3014,6 @@ impl World for IssuesWorld {
                         }
                     })
                     .collect();
-                rows.sort_by(|a, b| {
-                    let key = |d: Option<u64>| d.unwrap_or(u64::MAX);
-                    key(a.target_date)
-                        .cmp(&key(b.target_date))
-                        .then_with(|| a.name.cmp(&b.name))
-                });
                 Ok(projection(serde_json::to_vec(&rows).expect("milestones")))
             }
             IssueQuery::Cycles { project } => {
@@ -3277,4 +3394,75 @@ fn ring_digest(catalog: &CatalogState) -> contract::RingDigestView {
         }
     }
     contract::RingDigestView { planes, docs }
+}
+
+#[cfg(test)]
+mod milestone_order_tests {
+    use super::*;
+
+    fn milestone(id: &str, name: &str, rank: &str, target: Option<u64>) -> Milestone {
+        Milestone {
+            id: id.into(),
+            project_id: "prj_1".into(),
+            name: name.into(),
+            target_date: target,
+            rank: rank.into(),
+            tombstone: false,
+        }
+    }
+
+    fn order(mut list: Vec<Milestone>) -> Vec<String> {
+        list.sort_by(|a, b| milestone_order(a, b));
+        list.into_iter().map(|m| m.name).collect()
+    }
+
+    #[test]
+    fn ranked_milestones_ignore_the_target_date() {
+        // The whole point: an undated first stage must not sink below a dated
+        // later one. `M0` has no target and still leads.
+        let list = vec![
+            milestone("mls_b", "M1", "2", Some(1_000)),
+            milestone("mls_a", "M0", "1", None),
+            milestone("mls_c", "M2", "3", Some(500)),
+        ];
+        assert_eq!(order(list), ["M0", "M1", "M2"]);
+    }
+
+    #[test]
+    fn unranked_milestones_keep_the_old_date_order() {
+        // A project nobody has reordered since ranks existed reads exactly as it
+        // did before: by target date, undated last, name breaking ties.
+        let list = vec![
+            milestone("mls_c", "Later", "", Some(2_000)),
+            milestone("mls_a", "Someday", "", None),
+            milestone("mls_b", "Soon", "", Some(1_000)),
+        ];
+        assert_eq!(order(list), ["Soon", "Later", "Someday"]);
+    }
+
+    #[test]
+    fn an_unranked_stray_sorts_last_rather_than_first() {
+        // `""` is below every rank, so the naive comparison would put a legacy
+        // record at the head of a list somebody has deliberately ordered. The
+        // backfill normally prevents the mix; if one slips through — a concurrent
+        // write from an older peer — it lands at the end, where it is visible and
+        // harmless, not on top of the first stage.
+        let list = vec![
+            milestone("mls_x", "Stray", "", Some(1)),
+            milestone("mls_b", "M1", "2", None),
+            milestone("mls_a", "M0", "1", None),
+        ];
+        assert_eq!(order(list), ["M0", "M1", "Stray"]);
+    }
+
+    #[test]
+    fn equal_ranks_break_on_id_so_replicas_agree() {
+        // Two peers can place a milestone at the same rank concurrently. Agreeing
+        // on *an* order matters more than agreeing on whose move won.
+        let list = vec![
+            milestone("mls_b", "Second", "5", None),
+            milestone("mls_a", "First", "5", None),
+        ];
+        assert_eq!(order(list), ["First", "Second"]);
+    }
 }

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { DEFAULT_ROUTE, formatRoute, loadLastRoute, parseRoute, resolveLocalSpace, sameRoute, saveLastRoute } from "./route";
+import { EMPTY_FILTER } from "./filter";
 import type { SpaceRow } from "../types";
 
 describe("viewer routes", () => {
@@ -37,7 +38,7 @@ describe("viewer routes", () => {
       project: "WEB",
       view: "list",
       issue: null,
-      filter: { text: "login bug", mine: true, label: "customer", status: ["todo", "doing"], priority: [], assignees: [] },
+      filter: { text: "login bug", mine: true, label: "customer", status: ["todo", "doing"], priority: [], assignees: [], milestone: "mls_1" },
     });
     expect(parseRoute(new URL(href, "http://lait.local")).filter).toEqual({
       text: "login bug",
@@ -46,7 +47,28 @@ describe("viewer routes", () => {
       status: ["todo", "doing"],
       priority: [],
       assignees: [],
+      milestone: "mls_1",
     });
+  });
+
+  it("keeps the No-milestone bucket distinct from no milestone filter", () => {
+    // `?milestone=` present-but-empty means "issues nobody has scoped yet" — a
+    // selection you can only reach this way. Folding it back to `null` on the
+    // round trip would silently widen the view to every issue in the project.
+    const bucket = formatRoute({
+      spaceId: "ws_1",
+      project: "WEB",
+      view: "board",
+      issue: null,
+      filter: { ...EMPTY_FILTER, milestone: "" },
+    });
+    expect(bucket).toContain("milestone=");
+    expect(parseRoute(new URL(bucket, "http://lait.local")).filter?.milestone).toBe("");
+
+    // ...and absent stays absent, rather than becoming the bucket.
+    expect(
+      parseRoute({ pathname: "/spaces/ws_1/projects/WEB/board", search: "" }).filter,
+    ).toBeUndefined();
   });
 
   it("does not carry an issue selection onto surfaces that cannot display it", () => {
@@ -75,6 +97,7 @@ describe("viewer routes", () => {
           status: [],
           priority: [],
           assignees: [],
+          milestone: null,
         },
       }),
     ).toBe("/spaces/ws_1/settings");

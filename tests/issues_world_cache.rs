@@ -110,6 +110,7 @@ fn list_titles(world: &lait::world::IssuesWorld, ctx: &WorldContext<'_>) -> Vec<
                     project: None,
                     label: None,
                     status: None,
+                    milestone: None,
                     mine: None,
                     all: true,
                     me: None,

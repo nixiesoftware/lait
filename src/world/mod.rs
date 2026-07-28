@@ -5,6 +5,7 @@
 
 pub mod contract;
 pub mod issues;
+pub mod rank;
 pub mod roles;
 pub mod router;
 pub mod views;

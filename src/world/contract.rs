@@ -565,6 +565,10 @@ pub enum IssueIntent {
             skip_serializing_if = "Option::is_none"
         )]
         target_date: Option<Option<u64>>,
+        /// Where to place it in the project's manual order. `None` leaves an
+        /// existing milestone where it is and appends a new one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pos: Option<Pos>,
         tombstone: Option<bool>,
         device: String,
         ts: u64,
@@ -838,6 +842,9 @@ pub enum IssueQuery {
         project: Option<String>,
         label: Option<String>,
         status: Option<String>,
+        /// Already-resolved `mls_` id — the router resolves the name against
+        /// the listed project, because only it holds the catalog.
+        milestone: Option<String>,
         mine: Option<String>,
         all: bool,
         me: Option<String>,

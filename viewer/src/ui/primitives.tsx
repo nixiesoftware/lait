@@ -101,8 +101,12 @@ const button = cva(
       variant: {
         /** The default. Invisible until hovered — for chrome. */
         ghost: "text-mute hover:bg-hover hover:text-fg",
-        /** A visible affordance without shouting. */
-        outline: "border-line bg-bg hover:border-line-strong hover:bg-hover text-fg border",
+        /** A visible affordance without shouting. Its edge is a half-pixel ring
+         *  and a whisper of lift (`shadow-control`), not a border — measured off
+         *  Linear's toolbar, where a 1px border proved to be the thing making
+         *  ours read as outlines drawn on the bar rather than buttons resting on
+         *  it. Hover moves the fill; the edge is the shape and does not flicker. */
+        outline: "bg-bg hover:bg-hover text-fg shadow-control",
         /** Exactly one per screen, at most. A neutral inverse commit keeps blue
          *  available for focus and state instead of making every save look like
          *  a Jira call-to-action. */
@@ -115,12 +119,15 @@ const button = cva(
          *  White-on-danger clears AA (see the palette note). Replaces the old
          *  `primary` + `bg-danger` override that every call site had to remember. */
         destructive: "bg-danger text-accent-fg hover:bg-danger/85",
-        /** Selected state in a segmented group. Bordered, because the thing
-         *  it alternates with is `outline`: a state change should move the
-         *  fill, not the silhouette. Without the border a selected tab was a
-         *  pixel narrower than its neighbours and the row shifted as you
-         *  moved between them. */
-        active: "border-line-strong bg-active text-fg border",
+        /** Selected state in a segmented group: the same ring as `outline`, a
+         *  deeper fill, and no lift — a pressed control is set INTO the bar, and
+         *  a shadow claiming it had risen off is the one thing that would make
+         *  the pair read as two kinds of button. A state change moves the fill,
+         *  never the silhouette, and now that neither wears a border there is no
+         *  silhouette left to move: a ring costs no layout, so the row cannot
+         *  shift as the selection travels along it (it used to, by the width of
+         *  one border, back when only this one was drawn). */
+        active: "bg-active text-fg shadow-edge",
         /** A named action inside dense chrome. Unlike `primary`, this sits beside
          * icon buttons without turning the toolbar into a callout banner. */
         toolbar:
@@ -136,19 +143,28 @@ const button = cva(
         pill: "bg-active/60 text-dim hover:bg-hover hover:text-fg rounded-full",
       },
       size: {
-        /** Icon-only chrome: a 24px circle, the toolbar unit. Fully rounded for
+        /** Icon-only chrome: a 28px circle, the toolbar unit. Fully rounded for
          *  the same reason the property rail is — the only shape these carry is a
          *  hover fill, so a circle reads as deliberate where a rounded square
-         *  reads as a box that appeared under the pointer. */
-        icon: "size-ctl-sm rounded-full",
+         *  reads as a box that appeared under the pointer.
+         *
+         *  28, not 24: a 14px glyph in a 24px circle leaves a 5px ring, which
+         *  reads as an icon that outgrew its button and sits under the comfortable
+         *  minimum for a pointer target. */
+        icon: "size-ctl-md rounded-full",
         /** Pills, not boxes. A button carries no border of its own in the
          *  common variants, so its shape is whatever the fill describes — and a
          *  row of buttons has to agree: a ghost "Cancel" beside a primary "Save"
          *  cannot be a pill next to a box. Shape therefore rides on size, which
          *  every variant passes through, rather than on the ones that happen to
-         *  be quiet. */
+         *  be quiet.
+         *
+         *  The inset scales with the height instead of being a flat 8px at every
+         *  rung: a taller pill with the same side padding reads as a label that
+         *  has been squeezed, and at 8px the text was closer to the capsule's
+         *  edge than to its neighbour in the row. */
         sm: "h-ctl-sm rounded-full px-2 text-sm",
-        md: "h-ctl-md rounded-full px-2 text-sm",
+        md: "h-ctl-md rounded-full px-2.5 text-sm",
         /** No capsule at all — this is a text action inside prose. */
         inline: "h-auto p-0 text-xs",
       },

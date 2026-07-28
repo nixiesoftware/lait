@@ -1002,6 +1002,7 @@ pub async fn run_focus(home: &Path, out: Out) -> Result<()> {
                 mine: true,
                 status: None,
                 label: None,
+                milestone: None,
                 all: false,
             },
         },

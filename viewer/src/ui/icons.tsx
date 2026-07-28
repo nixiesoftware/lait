@@ -1,3 +1,4 @@
+import type { MilestoneProgress } from "../core/milestone";
 import type { Priority, StatusCategory } from "../types";
 
 /**
@@ -173,6 +174,83 @@ export function ProgressRing({
           strokeLinecap="round"
           strokeDasharray={`${arc} ${circumference}`}
         />
+      )}
+    </svg>
+  );
+}
+
+/**
+ * A milestone's state as a diamond — Linear's mark, in the same grammar as the
+ * status circle above: outline while untouched, half-filled once work lands,
+ * solid when it closes. The shape says "milestone" where the circle says
+ * "status", so the two never read as the same field even at 14px.
+ *
+ * Colour follows the project's own progress bar rather than Linear's palette —
+ * `mute` / `accent` / `ok` are what a lait progress bar already means, and a
+ * milestone that turned amber next to a bar that turned blue would be two
+ * vocabularies for one idea.
+ *
+ * The fill is derived from counts (`core/milestone.ts`), so this draws whatever
+ * the issues currently say. There is no state to get out of sync.
+ */
+export function MilestoneIcon({
+  progress,
+  className = "",
+}: {
+  /**
+   * `"none"` is the No-milestone bucket — the *absence* of a milestone, not a
+   * milestone that has not started. It draws dashed, borrowing the rule the
+   * status circle above already established: a broken outline says "this is not
+   * a thing yet" before the colour says anything.
+   */
+  progress: MilestoneProgress | "none";
+  className?: string;
+}) {
+  const label = {
+    none: "No milestone",
+    "not-started": "Not started",
+    "in-progress": "In progress",
+    complete: "Complete",
+  }[progress];
+  const tone = {
+    none: "var(--color-mute)",
+    "not-started": "var(--color-mute)",
+    "in-progress": "var(--color-accent)",
+    complete: "var(--color-ok)",
+  }[progress];
+  return (
+    <svg
+      viewBox="0 0 14 14"
+      className={`size-icon-sm shrink-0 ${className}`}
+      role="img"
+      aria-label={label}
+      style={{ color: tone }}
+    >
+      {/* A rotated square rather than a `<rect transform>`: the path keeps the
+          points on exact half-pixels, which is what stops the rim shimmering at
+          this size. */}
+      <path
+        d="M7 1.4 L12.6 7 L7 12.6 L1.4 7 Z"
+        fill={progress === "complete" ? "currentColor" : "none"}
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinejoin="round"
+        // Dots, not dashes: a zero-length segment under a round cap renders as a
+        // disc of the stroke width. Two per side — the side is 5.6·√2 ≈ 7.92, so
+        // a 3.96 period puts a dot exactly on every corner, which is what keeps
+        // the points and stops the ring reading as a circle.
+        //
+        // Two, not three: the dot is 1.5 wide and the glyph is 14px, so a third
+        // per side leaves ~1px of gap and the discs anti-alias into a continuous
+        // fuzzy ring — the one shape this must not be, because the *circle* is
+        // the status icon.
+        strokeDasharray={progress === "none" ? "0.01 3.96" : undefined}
+        strokeLinecap={progress === "none" ? "round" : undefined}
+      />
+      {progress === "in-progress" && (
+        // The left half, so the fill grows the way a bar does — from the start
+        // edge inward — rather than from an arbitrary side.
+        <path d="M7 2.6 L7 11.4 L2.6 7 Z" fill="currentColor" />
       )}
     </svg>
   );

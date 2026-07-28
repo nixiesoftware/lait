@@ -73,6 +73,7 @@ fn response_dtos_round_trip() {
         due_date: None,
         estimate: None,
         label_names: Vec::new(),
+        milestone: None,
         child_done: None,
         child_total: None,
         reff: "iss_3f9ab2c".into(),

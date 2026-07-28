@@ -58,6 +58,19 @@ export interface FilterState {
    *  Client-side: the row carries its assignee keys, so this is a set membership
    *  test, not the ACL question `mine` answers. */
   assignees: readonly string[];
+  /**
+   * A `mls_` milestone id, or `""` for the No-milestone bucket. `null` = all.
+   *
+   * Client-side, by the same argument this file makes for `status`: `Row.milestone`
+   * is an id the daemon put there, so comparing it re-derives nothing. Unlike
+   * `label` there is no resolution step — the id is already on the row, which is
+   * exactly why it was put there.
+   *
+   * `""` is a real selection, not an absence: "issues nobody has scoped yet" is a
+   * thing you go looking for, and it is the one bucket a per-milestone filter
+   * cannot otherwise reach. `null` and `""` must never be conflated.
+   */
+  milestone: string | null;
 }
 
 export const EMPTY_FILTER: FilterState = {
@@ -67,6 +80,7 @@ export const EMPTY_FILTER: FilterState = {
   status: [],
   priority: [],
   assignees: [],
+  milestone: null,
 };
 
 /** Whether anything is narrowing the view. */
@@ -76,7 +90,8 @@ export const isActive = (f: FilterState): boolean =>
   f.label !== null ||
   f.status.length > 0 ||
   f.priority.length > 0 ||
-  f.assignees.length > 0;
+  f.assignees.length > 0 ||
+  f.milestone !== null;
 
 /** Whether the daemon has to be asked — i.e. the parts we refuse to guess at. */
 export const needsServer = (f: FilterState): boolean => f.mine || f.label !== null;
@@ -132,7 +147,8 @@ export function applyFilter(
             matchesText(r, f.text) &&
             (allowed === null || allowed.has(r.doc_id)) &&
             (f.priority.length === 0 || f.priority.includes(r.priority)) &&
-            (f.assignees.length === 0 || r.assignees.some((a) => f.assignees.includes(a))),
+            (f.assignees.length === 0 || r.assignees.some((a) => f.assignees.includes(a))) &&
+            (f.milestone === null || (r.milestone ?? "") === f.milestone),
         ),
       })),
   };

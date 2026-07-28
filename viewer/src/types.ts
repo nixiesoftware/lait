@@ -92,6 +92,9 @@ export interface Row {
   estimate?: number | null;
   /** Resolved label names (absent/empty = none). */
   label_names?: string[];
+  /** The `mls_` milestone this issue targets (absent = none). The id, not the
+   *  name — a rename must not move a filter. */
+  milestone?: string | null;
   /** Sub-issue progress: done / total live children. Absent = no children.
    *  Populated by the board projection only. */
   child_done?: number | null;
@@ -513,6 +516,9 @@ export interface Filter {
   mine?: boolean;
   status?: string | null;
   label?: string | null;
+  /** Milestone name or `mls_` id, resolved within `project` — which the daemon
+   *  requires, because a milestone belongs to exactly one project. */
+  milestone?: string | null;
   /** Include done + tombstoned rows (UI.md §2.2). */
   all?: boolean;
 }
@@ -582,7 +588,7 @@ export type Request =
   | { cmd: "follow"; reff: string; on?: boolean }
   /** Reply is `milestones` — the project's milestones with progress (SCOPE-1). */
   | { cmd: "milestone_list"; project: string }
-  | { cmd: "milestone_set"; project: string; milestone?: string | null; name?: string | null; target?: string | null; remove?: boolean }
+  | { cmd: "milestone_set"; project: string; milestone?: string | null; name?: string | null; target?: string | null; pos?: BoardPos | null; remove?: boolean }
   /** Point an issue at a milestone in its project (`null`/"none" clears). */
   | { cmd: "issue_milestone"; reff: string; milestone?: string | null }
   /** Attach a file (standard base64; raw ≤ 256 KiB) — CREATE-5. */

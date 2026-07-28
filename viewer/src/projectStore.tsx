@@ -21,6 +21,7 @@ import type {
   MemberDto,
   MilestoneDto,
   ProjectDto,
+  ProjectUpdateDto,
   Request,
   Response,
   Row,
@@ -39,6 +40,7 @@ export const projectKeys = {
   graph: (space: string, reff: string) => `${prefix(space)}graph:${part(reff)}`,
   history: (space: string, reff: string) => `${prefix(space)}history:${part(reff)}`,
   milestones: (space: string, project: string) => `${prefix(space)}milestones:${part(project)}`,
+  updates: (space: string, project: string) => `${prefix(space)}updates:${part(project)}`,
   labels: (space: string) => `${prefix(space)}labels`,
   members: (space: string) => `${prefix(space)}members`,
   projects: (space: string) => `${prefix(space)}projects`,
@@ -378,6 +380,20 @@ export class ProjectViewerStore {
       catalog: [{ plane: "milestones", projectId: project }, "workflow"],
       issues: { projectId: project },
     }, force);
+  }
+
+  ensureUpdates(space: string, project: string, force = false): Promise<ProjectUpdateDto[]> {
+    return this.load(projectKeys.updates(space, project), async () => {
+      const result = await this.rpc(space, { cmd: "project_updates", project });
+      if (result.kind !== "updates") throw new Error("Expected updates response");
+      return result.updates;
+      // One dependency, where the milestones above need three: an update is
+      // authored once and never edited, so no issue moving and no workflow
+      // change can alter what a past post said. Only the feed's own plane can.
+      //
+      // `project` is the `prj_` id the ring matches on, so posting in ENG does
+      // not refetch DSN's feed.
+    }, { catalog: [{ plane: "updates", projectId: project }] }, force);
   }
 
   ensureLabels(space: string, force = false): Promise<LabelDto[]> {
@@ -735,6 +751,46 @@ export function useProjectRegistry<T>(
   return useWorldResource(key, loader);
 }
 
+/**
+ * A project's milestones, live.
+ *
+ * Keyed on the `prj_` **id**, never the display KEY: the doorbell rings a plane
+ * by stable id, so a resource registered under a key would quietly stop
+ * refreshing the first time someone renamed the project. Callers holding a
+ * `ProjectDto` want `project.id`.
+ *
+ * `null` — the project is not known yet — parks on a shared empty key instead of
+ * asking the daemon about a project that isn't there.
+ */
+export function useProjectMilestones(
+  space: string,
+  projectId: string | null | undefined,
+): ResourceSnapshot<MilestoneDto[]> {
+  const store = useProjectViewerStore();
+  return useWorldResource<MilestoneDto[]>(
+    projectKeys.milestones(space, projectId ?? "_unknown"),
+    useCallback(
+      () => (projectId ? store.ensureMilestones(space, projectId) : Promise.resolve([])),
+      [projectId, space, store],
+    ),
+  );
+}
+
+/** A project's status-update feed, live. Same id-not-key rule as above. */
+export function useProjectUpdates(
+  space: string,
+  projectId: string | null | undefined,
+): ResourceSnapshot<ProjectUpdateDto[]> {
+  const store = useProjectViewerStore();
+  return useWorldResource<ProjectUpdateDto[]>(
+    projectKeys.updates(space, projectId ?? "_unknown"),
+    useCallback(
+      () => (projectId ? store.ensureUpdates(space, projectId) : Promise.resolve([])),
+      [projectId, space, store],
+    ),
+  );
+}
+
 export function useIssueDetail(space: string, reff: string): IssueDetailSnapshot {
   const store = useProjectViewerStore();
   const row = useWorldResource<Row>(projectKeys.row(space, reff));
@@ -751,13 +807,10 @@ export function useIssueDetail(space: string, reff: string): IssueDetailSnapshot
     useCallback(() => store.ensureHistory(space, reff), [reff, space, store]),
   );
   const projectId = body.data?.project_id ?? row.data?.project_id;
-  useWorldResource<MilestoneDto[]>(
-    projectId ? projectKeys.milestones(space, projectId) : projectKeys.milestones(space, "_unknown"),
-    useCallback(
-      () => projectId ? store.ensureMilestones(space, projectId) : Promise.resolve([]),
-      [projectId, space, store],
-    ),
-  );
+  // The detail rail's milestone picker and the project overview's milestone list
+  // are the same resource under the same key — one fetch, one invalidation, and
+  // the two surfaces can never disagree about a milestone's progress.
+  useProjectMilestones(space, projectId);
   return useMemo(
     () => store.selectIssueDetail(space, reff),
     // The resource objects are immutable change tokens.

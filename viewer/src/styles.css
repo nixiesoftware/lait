@@ -269,6 +269,25 @@
   --shadow-float:
     0 2px 6px light-dark(rgb(0 0 0 / 0.06), rgb(0 0 0 / 0.4)),
     0 20px 56px -12px light-dark(rgb(0 0 0 / 0.22), rgb(0 0 0 / 0.75));
+
+  /* A CONTROL's edge, measured off Linear's own toolbar rather than guessed.
+     The finding that matters: its buttons carry no border at all. The hairline
+     is a 0.5px shadow RING, and that is not a rounding of 1px — a border is a
+     full device pixel of solid ink that reads as drawn, while a half-pixel ring
+     reads as the edge of something sitting there. At a 28px control the
+     difference is the whole character of the thing.
+
+     `edge` is the ring alone — for a control that is already filled, where a
+     lift would claim it had risen off the bar when it is pressed INTO it. */
+  --shadow-edge: 0 0 0 0.5px light-dark(rgb(0 0 0 / 0.09), rgb(255 255 255 / 0.1));
+  /* The ring plus the lift, two layers: a tight contact shadow and a wider
+     ambient one. Same pairing as `float` and for the same reason — one layer
+     reads as pasted — but an order of magnitude softer, because a toolbar
+     button is resting on the bar, not hovering over the work. */
+  --shadow-control:
+    0 0 0 0.5px light-dark(rgb(0 0 0 / 0.09), rgb(255 255 255 / 0.1)),
+    0 3px 6px -2px light-dark(rgb(0 0 0 / 0.02), rgb(0 0 0 / 0.28)),
+    0 1px 1px light-dark(rgb(0 0 0 / 0.04), rgb(0 0 0 / 0.32));
 }
 
 /* Dark by default; the OS decides unless the user overrode it. `color-scheme` is
