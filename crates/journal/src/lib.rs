@@ -243,23 +243,6 @@ impl index::NodeSource for ObjectNodes<'_> {
     }
 }
 
-/// The same, plus the objects a commit is about to write. An index update
-/// produces nodes that reference siblings from the same commit, and those are
-/// not on disk yet when the next node needs them.
-struct PendingNodes<'a> {
-    root: &'a Path,
-    pending: &'a std::collections::BTreeMap<[u8; 32], Vec<u8>>,
-}
-
-impl index::NodeSource for PendingNodes<'_> {
-    fn node(&self, hash: &[u8; 32]) -> Option<Vec<u8>> {
-        if let Some(bytes) = self.pending.get(hash) {
-            return Some(bytes.clone());
-        }
-        ObjectNodes { root: self.root }.node(hash)
-    }
-}
-
 fn io_err(what: &str, e: std::io::Error) -> JournalError {
     JournalError::Durability(format!("{what}: {e}"))
 }
@@ -362,6 +345,12 @@ impl JournaledStore {
     /// The current manifest, if any commit has completed.
     pub fn manifest(&self) -> Option<&StoreManifest> {
         self.manifest.as_ref()
+    }
+
+    /// A reader for index nodes held in this store, so a caller maintaining its
+    /// own index (see `caller_index_roots`) can descend it.
+    pub fn nodes(&self) -> impl index::NodeSource + '_ {
+        ObjectNodes { root: &self.root }
     }
 
     /// Every currently required object, in key order.
@@ -589,13 +578,12 @@ impl JournaledStore {
                     bad = Some(format!("required entry {} has no length", hex(&entry.key)));
                     return;
                 };
-                match std::fs::metadata(self.root.join(OBJECTS_DIR).join(hex(&entry.key))) {
-                    Ok(meta) if meta.len() == len => {}
-                    Ok(meta) => {
+                match std::fs::read(self.root.join(OBJECTS_DIR).join(hex(&entry.key))) {
+                    Ok(bytes) if bytes.len() as u64 == len && object_hash(&bytes) == entry.key => {}
+                    Ok(_) => {
                         bad = Some(format!(
-                            "object {} is {} bytes, the manifest says {len}",
-                            hex(&entry.key),
-                            meta.len()
+                            "object {} fails its content address",
+                            hex(&entry.key)
                         ));
                     }
                     Err(_) => bad = Some(format!("object {} is absent", hex(&entry.key))),
@@ -766,18 +754,10 @@ impl JournaledStore {
             })
             .collect();
 
-        // The index update happens against the objects already on disk plus the
-        // ones this commit is about to write, so a node can reference a sibling
-        // written in the same commit.
-        let pending: std::collections::BTreeMap<[u8; 32], Vec<u8>> = added_refs
-            .iter()
-            .zip(added)
-            .map(|(r, bytes)| (r.hash, bytes.clone()))
-            .collect();
-        let source = PendingNodes {
-            root: &self.root,
-            pending: &pending,
-        };
+        // Only nodes already on disk are read: `index::apply` decides whether a
+        // subtree merges before it descends, so it never needs a node written
+        // by this same commit.
+        let source = ObjectNodes { root: &self.root };
 
         let mut changes: Vec<index::IndexChange> = added_refs
             .iter()

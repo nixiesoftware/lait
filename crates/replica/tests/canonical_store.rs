@@ -268,27 +268,27 @@ fn the_store_addresses_canonical_objects_not_an_engine_snapshot() {
     .unwrap();
     drop(r);
 
-    // Inspect the raw store: the current manifest must name at least the
+    // Inspect the raw store: the required set must name at least the
     // transaction record, one protected Body object, the receipt, and the
-    // manifest root/page — and every stored byte object must decode as one of
-    // those canonical forms (no whole-engine snapshot object).
+    // manifest root — and every required object must decode as one of those
+    // canonical forms or as an index node (no whole-engine snapshot object).
     let store = fabric::JournaledStore::open(&dir).unwrap();
-    let manifest = store.manifest().unwrap().clone();
+    let required = store.required_objects().unwrap();
     assert!(
-        manifest.objects.len() >= 4,
+        required.len() >= 4,
         "transaction + protected body + receipt + manifest objects, got {}",
-        manifest.objects.len()
+        required.len()
     );
     let mut classified = 0;
-    for obj in &manifest.objects {
+    for obj in &required {
         let bytes = store.read_object(obj).unwrap();
         let is_tx = replica::BodyTransaction::decode_canonical(&bytes).is_ok();
         let is_receipt = replica::RequestReceipt::decode_canonical(&bytes).is_ok();
         let is_root = replica::ManifestRoot::decode_canonical(&bytes).is_ok();
-        let is_page = replica::ManifestPage::decode_canonical(&bytes).is_ok();
+        let is_node = fabric::journal::index::IndexNode::decode_canonical(&bytes).is_ok();
         let is_protected = mechanics::crypto::body_epoch_id(&bytes) == Some(EPOCH);
         assert!(
-            is_tx || is_receipt || is_root || is_page || is_protected,
+            is_tx || is_receipt || is_root || is_node || is_protected,
             "an object is none of the canonical forms"
         );
         classified += 1;
@@ -301,7 +301,7 @@ fn the_store_addresses_canonical_objects_not_an_engine_snapshot() {
             );
         }
     }
-    assert_eq!(classified, manifest.objects.len());
+    assert_eq!(classified, required.len());
     let _ = std::fs::remove_dir_all(&dir);
 }
 

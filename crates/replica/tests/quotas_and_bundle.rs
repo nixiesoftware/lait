@@ -261,7 +261,7 @@ fn stage(r: &Replica) -> StagedContactMaterial {
     StagedContactMaterial {
         authority_records,
         manifest_root_bytes: root,
-        manifest_pages: pages,
+        manifest_nodes: pages,
         bodies,
     }
 }
@@ -327,7 +327,7 @@ fn adversarial_stagings_are_rejected_whole() {
 
     // An omitted manifest page.
     let mut omitted = staged.clone();
-    omitted.manifest_pages.clear();
+    omitted.manifest_nodes.clear();
     assert!(matches!(
         b.validate_contact(&omitted, &WriterAuthorized, &mut incorporator),
         Err(ReplicaCommitError::Illegitimate(_))

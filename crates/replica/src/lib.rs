@@ -46,7 +46,7 @@ pub use fabric::{CollaborativeView, ListElement, ProjectionError};
 pub use frontier::{AuthorityFrontier, ReplicaFrontier};
 pub use ids::{BodyId, BodyKey, EncodingId, SchemaId, WorldId};
 pub use manifest::{
-    AuthorizedRoot, ManifestBook, ManifestEntry, ManifestError, ManifestPage, ManifestRoot,
+    AuthorizedRoot, ManifestBook, ManifestEntry, ManifestError, ManifestHead, ManifestRoot,
     RootObservation,
 };
 pub use marker::{MarkerError, StoreMarker};

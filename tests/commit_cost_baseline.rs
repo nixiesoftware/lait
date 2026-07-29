@@ -366,19 +366,31 @@ fn commit_cost_baseline() {
         None => println!("peak RSS: unavailable on this platform"),
     }
 
-    // The baseline's job is to record, not to gate — F1 is what makes these
-    // numbers flat. What it *does* assert is the shape the docket claims,
-    // because a baseline that cannot see the problem cannot prove the fix.
+    // This began as a recording harness whose assertions pinned the *problem*:
+    // the manifest grew with the Body count and a one-Body edit rewrote it.
+    // F1 made those assertions fail, which is what F1 was for, so they now
+    // state the property instead — and a regression re-inflates them.
     let first = rows.first().expect("at least one scale");
     let last = rows.last().expect("at least one scale");
     assert!(
-        last.manifest_bytes > first.manifest_bytes,
-        "the manifest is supposed to grow with the Body count today — if it \
-         does not, this harness is measuring the wrong thing"
-    );
-    assert!(
         last.object_bytes_before > first.object_bytes_before,
         "a larger store must hold more object bytes"
+    );
+    assert!(
+        last.manifest_bytes < 4 * first.manifest_bytes,
+        "the commit point must not grow with the Body count: {} bytes at {} Bodies against {} at {}",
+        last.manifest_bytes,
+        last.bodies,
+        first.manifest_bytes,
+        first.bodies
+    );
+    assert!(
+        last.object_bytes_per_edit < 4.0 * first.object_bytes_per_edit,
+        "bytes written per one-Body edit must be bounded by what changed, not by the store: {:.0} at {} Bodies against {:.0} at {}",
+        last.object_bytes_per_edit,
+        last.bodies,
+        first.object_bytes_per_edit,
+        first.bodies
     );
 
     if let Ok(path) = std::env::var("LAIT_COMMIT_BASELINE_REPORT") {

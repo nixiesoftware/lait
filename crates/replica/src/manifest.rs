@@ -1,29 +1,27 @@
-//! Manifest v1 — the signed, paged commitment to a Replica's Body set
-//! (`lait/manifest/1`).
+//! The signed commitment to a Replica's Body and content catalogs.
 //!
-//! A manifest root binds a Space, a Replica frontier, and an ordered list of
-//! page hashes under an admitted Station's signature; pages carry the
-//! BodyKey-sorted entries (descriptor hash + transaction commitment per Body).
-//! The ordered page hashes commit order, omission, and page count; across
-//! page-index order, entries are **globally strictly increasing** by BodyKey —
-//! every page's first key must exceed the previous page's last key, and no
-//! BodyKey appears twice. Page-boundary overlap or regression rejects the root.
+//! A manifest root binds a Space, a Replica frontier, and two authenticated
+//! index roots under an admitted Station's signature. The Body index maps a
+//! canonical Body key to that Body's advertised head set; the content index
+//! maps a content id to its descriptor. Both are the canonical radix index the
+//! journal defines, so the same logical catalog has exactly one root on every
+//! replica that holds it.
 //!
-//! **Binding without circularity.** A page cannot embed its root's hash (the
-//! root commits to page hashes, so the reference would be circular). A page is
-//! instead bound *relationally*: its canonical hash must equal the root's
-//! ordered page hash at its index. Substituted, omitted, or reordered pages
-//! therefore fail against the signed root.
+//! **Why not pages.** The shape this replaces chunked BodyKey-sorted entries
+//! into ordinal pages and signed the ordered page hashes. Editing an existing
+//! Body was cheap — its entry stayed in its page — but *adding* one was not:
+//! a new entry in an early page pushes the last entry into the next page, and
+//! every page after it changes. At the 100,000-Body ceiling that is a complete
+//! rewrite of the catalog to add one issue. An index has no ordinals, so an
+//! insertion rewrites one leaf and its ancestors and nothing else.
 //!
 //! **Concurrency and equivocation.** Incomparable concurrent roots coexist —
 //! Convergence unions their valid transactions before emitting a new local
 //! root. *Equivocation* is two **different** roots by the same signer at the
 //! same semantic transaction coordinate (Replica frontier); [`ManifestBook`]
-//! rejects and reports it. Full dominance ordering ("a strictly dominated root
-//! is stale") requires the Manifest transaction references the S5 store
-//! integration adds; until then the book safely treats unordered roots as
-//! concurrent (union) and dedupes exact replays.
+//! rejects and reports it.
 
+use fabric::journal::index::{self, ChildRef, IndexEntry, IndexKey, NodeSink, NodeSource};
 use mechanics::ids::SpaceId;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -32,49 +30,47 @@ use crate::frontier::{AuthorityFrontier, ReplicaFrontier};
 use crate::ids::BodyKey;
 
 /// Root signature domain.
-pub const MANIFEST_DOMAIN: &[u8] = b"lait/manifest/1";
-/// Page hash domain.
-pub const PAGE_DOMAIN: &[u8] = b"lait/manifest/1/page";
-/// Pages-root domain (over the ordered page hashes).
-pub const PAGES_ROOT_DOMAIN: &[u8] = b"lait/manifest/1/pages-root";
+pub const MANIFEST_DOMAIN: &[u8] = b"lait/manifest/2";
+/// Domain separating a Body's index key from every other digest.
+pub const BODY_INDEX_KEY_DOMAIN: &[u8] = b"lait/manifest/2/body-key";
 /// Ed25519 algorithm tag.
 pub const SIG_ALG_ED25519: u8 = 1;
-/// Maximum entries per page.
-pub const MAX_ENTRIES_PER_PAGE: usize = 4096;
-/// Maximum pages per manifest.
-pub const MAX_PAGES: usize = 4096;
-/// Maximum encoded page size (1 MiB).
-pub const MAX_PAGE_BYTES: usize = 1024 * 1024;
+/// The encoded generation of the manifest format.
+pub const MANIFEST_FORMAT_VERSION: u8 = 2;
+/// Maximum advertised heads for one Body. A Body is advertised as the exact set
+/// of author-signed heads whose union is its state; concurrent writers grow it,
+/// convergence shrinks it, and this is where an unbounded one is refused.
+pub const MAX_HEADS_PER_BODY: usize = 1024;
 /// The fixed rendered-SpaceId length.
 pub const SPACE_ID_LEN: usize = 29;
 
-/// One Body's manifest entry: its key, the hash of its public descriptor, and
-/// the commitment to its signed BodyTransaction.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ManifestEntry {
-    pub key: BodyKey,
+/// One advertised head: the hash of its public descriptor and the commitment to
+/// its signed BodyTransaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct ManifestHead {
     pub descriptor_hash: [u8; 32],
     pub transaction_commitment: [u8; 32],
 }
 
-/// One manifest page: BodyKey-sorted entries for a slice of the Body set.
+/// One Body's manifest entry: its key and its advertised head set.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ManifestPage {
-    pub version: u8,
-    pub space: [u8; SPACE_ID_LEN],
-    pub page_index: u32,
-    pub entries: Vec<ManifestEntry>,
+pub struct ManifestEntry {
+    pub key: BodyKey,
+    /// Sorted and unique. A Body's heads are a set, so a canonical order is
+    /// what lets two replicas holding the same Body publish the same bytes.
+    pub heads: Vec<ManifestHead>,
 }
 
 /// The signed manifest root.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManifestRoot {
-    pub version: u8,
+    pub format_version: u8,
     pub space: [u8; SPACE_ID_LEN],
     pub replica_frontier: ReplicaFrontier,
-    pub page_count: u32,
-    pub ordered_page_hashes: Vec<[u8; 32]>,
-    pub pages_root: [u8; 32],
+    pub body_index_root: Option<ChildRef>,
+    pub body_count: u64,
+    pub content_index_root: Option<ChildRef>,
+    pub content_count: u64,
     pub signer: [u8; 32],
     pub authority_frontier: AuthorityFrontier,
     pub signature_algorithm: u8,
@@ -89,17 +85,16 @@ pub enum ManifestError {
     UnsupportedSignatureAlgorithm(u8),
     NonCanonical,
     BadSpaceId,
-    /// Page/entry counts or sizes exceed the frozen bounds.
+    /// Counts or head sets exceed the frozen bounds.
     Bounds,
-    /// `pages_root`/`page_count` disagree with the ordered page hashes.
-    PagesRootMismatch,
-    /// A page's hash does not match the signed root's slot for its index.
-    PageNotInRoot,
-    /// Entries are unsorted or duplicated within a page, or a page boundary
-    /// overlaps/regresses the previous page's keys.
+    /// A declared count disagrees with the index it names.
+    CountMismatch,
+    /// The index is missing a node, malformed, non-canonical, or misordered.
+    IndexInvalid,
+    /// An entry's key does not hash to the index key it sits under.
+    KeyMismatch,
+    /// Heads unsorted or duplicated within one Body.
     OrderViolation,
-    /// A page's Space disagrees with the root's.
-    SpaceMismatch,
     BadSignature,
     /// Two different roots by the same signer at the same frontier coordinate.
     Equivocation,
@@ -124,86 +119,64 @@ fn length_framed(domain: &[u8], body: &[u8]) -> Vec<u8> {
     out
 }
 
-impl ManifestPage {
-    pub fn new(space: &SpaceId, page_index: u32, entries: Vec<ManifestEntry>) -> Option<Self> {
-        Some(Self {
-            version: 1,
-            space: <[u8; SPACE_ID_LEN]>::try_from(space.as_str().as_bytes()).ok()?,
-            page_index,
-            entries,
-        })
-    }
+/// The index key a Body sits under: a domain-separated hash of its canonical
+/// logical key. Hashing is what keeps the tree's shape independent of how
+/// Worlds and Bodies happen to be named.
+pub fn body_index_key(key: &BodyKey) -> IndexKey {
+    let mut h = blake3::Hasher::new();
+    h.update(BODY_INDEX_KEY_DOMAIN);
+    h.update(key.world.as_bytes());
+    h.update(&[0x00]);
+    h.update(&key.body.as_bytes());
+    *h.finalize().as_bytes()
+}
 
-    /// Canonical page bytes.
+impl ManifestEntry {
     pub fn encode(&self) -> Vec<u8> {
-        postcard::to_stdvec(self).expect("postcard manifest page")
+        postcard::to_stdvec(self).expect("postcard manifest entry")
     }
 
     pub fn decode_canonical(bytes: &[u8]) -> Result<Self, ManifestError> {
-        if bytes.len() > MAX_PAGE_BYTES {
-            return Err(ManifestError::Bounds);
-        }
-        let page: Self = postcard::from_bytes(bytes).map_err(|_| ManifestError::NonCanonical)?;
-        if page.encode() != bytes {
+        let entry: Self = postcard::from_bytes(bytes).map_err(|_| ManifestError::NonCanonical)?;
+        if entry.encode() != bytes {
             return Err(ManifestError::NonCanonical);
         }
-        Ok(page)
+        entry.validate()?;
+        Ok(entry)
     }
 
-    /// The domain-separated hash the root commits to for this page.
-    pub fn hash(&self) -> [u8; 32] {
-        let mut h = blake3::Hasher::new();
-        h.update(PAGE_DOMAIN);
-        h.update(&self.encode());
-        *h.finalize().as_bytes()
-    }
-
-    /// Structural validation: version, bounds, strict internal BodyKey order.
     pub fn validate(&self) -> Result<(), ManifestError> {
-        if self.version != 1 {
-            return Err(ManifestError::UnsupportedVersion(self.version));
-        }
-        std::str::from_utf8(&self.space)
-            .ok()
-            .and_then(SpaceId::parse)
-            .ok_or(ManifestError::BadSpaceId)?;
-        if self.entries.len() > MAX_ENTRIES_PER_PAGE || self.encode().len() > MAX_PAGE_BYTES {
+        if self.heads.is_empty() || self.heads.len() > MAX_HEADS_PER_BODY {
             return Err(ManifestError::Bounds);
         }
-        for w in self.entries.windows(2) {
-            // Strict order over (key, transaction commitment): a multi-writer
-            // Body is advertised as several heads under one key, so the
-            // commitment is the tiebreaker; an exact duplicate is still a
-            // violation.
-            if (&w[0].key, &w[0].transaction_commitment)
-                >= (&w[1].key, &w[1].transaction_commitment)
-            {
+        for w in self.heads.windows(2) {
+            if w[0] >= w[1] {
                 return Err(ManifestError::OrderViolation);
             }
         }
         Ok(())
     }
-}
 
-/// The commitment over the ordered page hashes.
-pub fn pages_root(ordered_page_hashes: &[[u8; 32]]) -> [u8; 32] {
-    let mut h = blake3::Hasher::new();
-    h.update(PAGES_ROOT_DOMAIN);
-    for ph in ordered_page_hashes {
-        h.update(ph);
+    /// Build a canonical entry from an unordered head set.
+    pub fn new(key: BodyKey, mut heads: Vec<ManifestHead>) -> Result<Self, ManifestError> {
+        heads.sort();
+        heads.dedup();
+        let entry = Self { key, heads };
+        entry.validate()?;
+        Ok(entry)
     }
-    *h.finalize().as_bytes()
 }
 
 impl ManifestRoot {
     fn preimage(&self) -> Vec<u8> {
         let body = postcard::to_stdvec(&(
-            self.version,
+            self.format_version,
             self.space,
             self.replica_frontier,
-            self.page_count,
-            &self.ordered_page_hashes,
-            self.pages_root,
+            self.body_index_root,
+            self.body_count,
+            self.content_index_root,
+            self.content_count,
             self.signer,
             &self.authority_frontier,
         ))
@@ -211,41 +184,26 @@ impl ManifestRoot {
         length_framed(MANIFEST_DOMAIN, &body)
     }
 
-    /// Build and sign a root over already-validated pages. Any admitted Station
-    /// may sign; mechanics validates its standing at the authority frontier
-    /// (separately, like every signed object).
-    pub fn sign(
-        space: &SpaceId,
-        replica_frontier: ReplicaFrontier,
-        pages: &[ManifestPage],
-        authority_frontier: AuthorityFrontier,
-        signer_seed: &[u8; 32],
-    ) -> Option<Self> {
-        Self::sign_with(
-            space,
-            replica_frontier,
-            pages,
-            authority_frontier,
-            &crate::transaction::SeedSigner(signer_seed),
-        )
-    }
-
-    /// Build and sign a root through an opaque signing capability.
+    /// Build and sign a root over already-built index roots. Any admitted
+    /// Station may sign; mechanics validates its standing at the authority
+    /// frontier separately, like every signed object.
+    #[allow(clippy::too_many_arguments)]
     pub fn sign_with(
         space: &SpaceId,
         replica_frontier: ReplicaFrontier,
-        pages: &[ManifestPage],
+        body_index_root: Option<ChildRef>,
+        content_index_root: Option<ChildRef>,
         authority_frontier: AuthorityFrontier,
         signer: &dyn crate::transaction::TransactionSigner,
     ) -> Option<Self> {
-        let hashes: Vec<[u8; 32]> = pages.iter().map(|p| p.hash()).collect();
         let mut root = Self {
-            version: 1,
+            format_version: MANIFEST_FORMAT_VERSION,
             space: <[u8; SPACE_ID_LEN]>::try_from(space.as_str().as_bytes()).ok()?,
             replica_frontier,
-            page_count: hashes.len() as u32,
-            pages_root: pages_root(&hashes),
-            ordered_page_hashes: hashes,
+            body_index_root,
+            body_count: body_index_root.map_or(0, |c| c.count),
+            content_index_root,
+            content_count: content_index_root.map_or(0, |c| c.count),
             signer: signer.signer_key(),
             authority_frontier,
             signature_algorithm: SIG_ALG_ED25519,
@@ -267,12 +225,13 @@ impl ManifestRoot {
         Ok(root)
     }
 
-    /// Verify the root itself: version, algorithm, Space shape, bounds,
-    /// pages-root binding, and the Station signature. (Signer standing at the
-    /// authority frontier is mechanics' separate check.)
+    /// Verify the root itself: version, algorithm, Space shape, declared counts
+    /// against the roots they name, and the Station signature. Signer standing
+    /// at the authority frontier is mechanics' separate check, and the index's
+    /// contents are [`Self::verify_index`].
     pub fn verify(&self) -> Result<(), ManifestError> {
-        if self.version != 1 {
-            return Err(ManifestError::UnsupportedVersion(self.version));
+        if self.format_version != MANIFEST_FORMAT_VERSION {
+            return Err(ManifestError::UnsupportedVersion(self.format_version));
         }
         if self.signature_algorithm != SIG_ALG_ED25519 {
             return Err(ManifestError::UnsupportedSignatureAlgorithm(
@@ -283,13 +242,10 @@ impl ManifestRoot {
             .ok()
             .and_then(SpaceId::parse)
             .ok_or(ManifestError::BadSpaceId)?;
-        if self.ordered_page_hashes.len() > MAX_PAGES {
-            return Err(ManifestError::Bounds);
-        }
-        if self.page_count as usize != self.ordered_page_hashes.len()
-            || self.pages_root != pages_root(&self.ordered_page_hashes)
+        if self.body_index_root.map_or(0, |c| c.count) != self.body_count
+            || self.content_index_root.map_or(0, |c| c.count) != self.content_count
         {
-            return Err(ManifestError::PagesRootMismatch);
+            return Err(ManifestError::CountMismatch);
         }
         if !mechanics::crypto::verify_detached(&self.signer, &self.preimage(), &self.signature) {
             return Err(ManifestError::BadSignature);
@@ -297,34 +253,35 @@ impl ManifestRoot {
         Ok(())
     }
 
-    /// Verify a complete page set against this (already-verified) root:
-    /// per-page structure and hash membership at the right index, Space
-    /// agreement, and **global** strict BodyKey order across page boundaries.
-    pub fn verify_pages(&self, pages: &[ManifestPage]) -> Result<(), ManifestError> {
-        if pages.len() != self.ordered_page_hashes.len() {
-            return Err(ManifestError::PageNotInRoot);
+    /// Verify the Body index against this (already-verified) root: canonical
+    /// index structure, then every entry's own validity and its placement under
+    /// the key it hashes to.
+    ///
+    /// The placement check is what stops a substituted entry. Index validation
+    /// proves an entry sits under some key; only re-deriving the key from the
+    /// entry's own `BodyKey` proves it sits under *its* key.
+    pub fn verify_index(&self, nodes: &dyn NodeSource) -> Result<u64, ManifestError> {
+        let counted = index::validate(nodes, self.body_index_root)
+            .map_err(|_| ManifestError::IndexInvalid)?;
+        if counted != self.body_count {
+            return Err(ManifestError::CountMismatch);
         }
-        let mut last_pair: Option<(&BodyKey, &[u8; 32])> = None;
-        for (i, page) in pages.iter().enumerate() {
-            page.validate()?;
-            if page.space != self.space {
-                return Err(ManifestError::SpaceMismatch);
+        let mut failure: Option<ManifestError> = None;
+        index::stream(nodes, self.body_index_root, &mut |entry| {
+            if failure.is_some() {
+                return;
             }
-            if page.page_index as usize != i || page.hash() != self.ordered_page_hashes[i] {
-                return Err(ManifestError::PageNotInRoot);
+            match ManifestEntry::decode_canonical(&entry.value) {
+                Ok(decoded) if body_index_key(&decoded.key) == entry.key => {}
+                Ok(_) => failure = Some(ManifestError::KeyMismatch),
+                Err(e) => failure = Some(e),
             }
-            if let (Some(prev), Some(first)) = (last_pair, page.entries.first()) {
-                // Every page's first (key, commitment) must exceed the
-                // previous page's last.
-                if (&first.key, &first.transaction_commitment) <= prev {
-                    return Err(ManifestError::OrderViolation);
-                }
-            }
-            if let Some(last) = page.entries.last() {
-                last_pair = Some((&last.key, &last.transaction_commitment));
-            }
+        })
+        .map_err(|_| ManifestError::IndexInvalid)?;
+        match failure {
+            Some(e) => Err(e),
+            None => Ok(counted),
         }
-        Ok(())
     }
 
     /// The equivocation coordinate: one signer may publish at most one root per
@@ -358,6 +315,26 @@ impl ManifestRoot {
     }
 }
 
+/// Build a Body index from a complete catalog. Used when publishing from a
+/// catalog held whole in memory; incremental publication updates the prior root
+/// through the index's own `apply` instead.
+pub fn build_body_index(
+    entries: Vec<ManifestEntry>,
+    sink: &mut NodeSink,
+) -> Result<Option<ChildRef>, ManifestError> {
+    let indexed: Vec<IndexEntry> = entries
+        .into_iter()
+        .map(|entry| {
+            entry.validate()?;
+            Ok(IndexEntry {
+                key: body_index_key(&entry.key),
+                value: entry.encode(),
+            })
+        })
+        .collect::<Result<_, ManifestError>>()?;
+    index::build_index(indexed, sink).map_err(|_| ManifestError::IndexInvalid)
+}
+
 /// A manifest root whose structure, signature, **and signer authority** have
 /// been verified. Constructible only through
 /// [`ManifestRoot::verify_authorized`].
@@ -379,22 +356,53 @@ pub enum RootObservation {
     Accepted,
     /// An exact replay of an already-known root.
     AlreadyKnown,
+    /// Accepted, and an older coordinate was evicted to stay within the bound.
+    /// Reported rather than silent, because eviction is the one thing that can
+    /// make a later equivocation undetectable.
+    AcceptedWithEviction { evicted: usize },
 }
 
-/// The per-Space record of observed manifest roots, keyed by signer +
-/// frontier coordinate. Detects equivocation (two different roots by the same
-/// signer at the same coordinate) and dedupes replays. It never deletes roots —
-/// incomparable concurrent roots coexist by design.
-#[derive(Debug, Default)]
+/// The per-Space record of observed manifest roots, keyed by signer + frontier
+/// coordinate. Detects equivocation (two different roots by the same signer at
+/// the same coordinate) and dedupes replays.
+///
+/// **Bounded, and the bound has a cost worth naming.** This map used to retain
+/// every observed root forever by design, which is unbounded growth driven by
+/// remote input. It is now capped per signer. But a coordinate this book has
+/// forgotten is a coordinate at which a signer can equivocate undetected, so
+/// eviction is reported rather than silent, retention is per-signer (one noisy
+/// peer cannot evict another's history), and the newest coordinates — where a
+/// live equivocation would actually be exploitable — are the ones kept.
+#[derive(Debug)]
 pub struct ManifestBook {
     /// Keyed by `(signer, frontier root, frontier count)` — raw bytes, so no
     /// ordering semantics are implied for frontiers (they are equality tokens).
     seen: BTreeMap<([u8; 32], [u8; 32], u64), [u8; 32]>,
+    per_signer_limit: usize,
+}
+
+/// Default retained coordinates per signer.
+pub const DEFAULT_ROOTS_PER_SIGNER: usize = 4096;
+
+impl Default for ManifestBook {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ManifestBook {
     pub fn new() -> Self {
-        Self::default()
+        Self::with_limit(DEFAULT_ROOTS_PER_SIGNER)
+    }
+
+    /// Build with an explicit per-signer retention limit. An operator may lower
+    /// it; zero is treated as one, because a book that retains nothing cannot
+    /// detect an equivocation at all.
+    pub fn with_limit(per_signer_limit: usize) -> Self {
+        Self {
+            seen: BTreeMap::new(),
+            per_signer_limit: per_signer_limit.max(1),
+        }
     }
 
     /// Observe an authority-verified root — the type makes verification
@@ -410,12 +418,38 @@ impl ManifestBook {
             Some(_) => Err(ManifestError::Equivocation),
             None => {
                 self.seen.insert(coordinate, hash);
-                Ok(RootObservation::Accepted)
+                let evicted = self.trim(&signer);
+                if evicted > 0 {
+                    Ok(RootObservation::AcceptedWithEviction { evicted })
+                } else {
+                    Ok(RootObservation::Accepted)
+                }
             }
         }
     }
 
-    /// The number of distinct roots observed.
+    /// Drop this signer's oldest coordinates past the limit. Ordering is by
+    /// frontier transaction count, so "oldest" means least advanced rather than
+    /// least recently seen — a peer cannot protect a coordinate it wants
+    /// forgotten by re-announcing it.
+    fn trim(&mut self, signer: &[u8; 32]) -> usize {
+        let mut coordinates: Vec<([u8; 32], [u8; 32], u64)> = self
+            .seen
+            .range((*signer, [0u8; 32], 0)..=(*signer, [0xFFu8; 32], u64::MAX))
+            .map(|(k, _)| *k)
+            .collect();
+        if coordinates.len() <= self.per_signer_limit {
+            return 0;
+        }
+        coordinates.sort_by_key(|(_, _, count)| *count);
+        let excess = coordinates.len() - self.per_signer_limit;
+        for coordinate in coordinates.into_iter().take(excess) {
+            self.seen.remove(&coordinate);
+        }
+        excess
+    }
+
+    /// The number of distinct roots retained.
     pub fn len(&self) -> usize {
         self.seen.len()
     }

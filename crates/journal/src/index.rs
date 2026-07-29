@@ -101,7 +101,7 @@ pub trait NodeSource {
 /// The nibble of `key` at `depth`.
 fn nibble(key: &IndexKey, depth: usize) -> usize {
     let byte = key[depth / 2];
-    if depth % 2 == 0 {
+    if depth.is_multiple_of(2) {
         (byte >> 4) as usize
     } else {
         (byte & 0x0F) as usize
@@ -210,7 +210,7 @@ pub fn build_index(
             return Err(IndexError::Bounds);
         }
     }
-    entries.sort_by(|a, b| a.key.cmp(&b.key));
+    entries.sort_by_key(|e| e.key);
     if entries.windows(2).any(|w| w[0].key == w[1].key) {
         return Err(IndexError::Order);
     }
@@ -269,7 +269,7 @@ pub fn apply(
             return Err(IndexError::Bounds);
         }
     }
-    changes.sort_by(|a, b| a.key.cmp(&b.key));
+    changes.sort_by_key(|c| c.key);
     changes.dedup_by(|a, b| a.key == b.key);
     if changes.is_empty() {
         return Ok(root);
@@ -321,6 +321,29 @@ fn descend(
             Ok(build(&merged, depth, sink))
         }
         Some((child, IndexNode::Branch(children))) => {
+            // Decide the merge *before* descending, because merging after
+            // would mean reading nodes this call had just written, which are
+            // not yet anywhere a reader can see them.
+            //
+            // The test is the *lower* bound on the post-change count, not the
+            // upper one. Removals shrink a subtree, so a branch that was too
+            // big to merge before the update can be small enough after it —
+            // and leaving it a branch would produce a legal tree that is not
+            // the canonical encoding of its set, which is exactly what
+            // validation refuses. Once the bound says a merge is possible the
+            // whole subtree is rebuilt from its own entries; `build` then
+            // produces a leaf or re-splits, whichever the set calls for.
+            let deletes = changes.iter().filter(|c| c.value.is_none()).count() as u64;
+            if child.count.saturating_sub(deletes) <= MAX_LEAF_ENTRIES as u64 {
+                let mut entries = Vec::with_capacity(child.count as usize);
+                for slot in children.iter().flatten() {
+                    collect(source, slot, depth + 1, &mut entries)?;
+                }
+                entries.sort_by_key(|e| e.key);
+                let merged = merge_into(entries, changes);
+                return Ok(build(&merged, depth, sink));
+            }
+
             let mut next = *children;
             let mut total = child.count;
             let mut start = 0usize;
@@ -340,20 +363,6 @@ fn descend(
 
             if total == 0 {
                 return Ok(None);
-            }
-            // The merge rule, stated as a property of the set: if everything
-            // below this branch would fit one leaf, the canonical encoding of
-            // that set *is* one leaf. Reading the subtree to find out is
-            // bounded, because the counts already say it is small.
-            if total <= MAX_LEAF_ENTRIES as u64 {
-                let mut entries = Vec::with_capacity(total as usize);
-                for slot in next.iter().flatten() {
-                    collect(source, slot, depth + 1, &mut entries)?;
-                }
-                entries.sort_by(|a, b| a.key.cmp(&b.key));
-                if fits_leaf(&entries, depth) {
-                    return Ok(build(&entries, depth, sink));
-                }
             }
             let node = IndexNode::Branch(Box::new(next));
             Ok(Some(sink.emit(&node, total)))
@@ -587,7 +596,7 @@ pub fn validate(source: &dyn NodeSource, root: Option<ChildRef>) -> Result<u64, 
                     for slot in children.iter().flatten() {
                         collect(source, slot, depth + 1, &mut entries)?;
                     }
-                    entries.sort_by(|a, b| a.key.cmp(&b.key));
+                    entries.sort_by_key(|e| e.key);
                     if fits_leaf(&entries, depth) {
                         return Err(IndexError::NotCanonicalShape);
                     }

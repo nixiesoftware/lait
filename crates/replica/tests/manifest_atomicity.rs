@@ -196,7 +196,7 @@ fn stage(r: &Replica) -> StagedContactMaterial {
     StagedContactMaterial {
         authority_records,
         manifest_root_bytes: root,
-        manifest_pages: pages,
+        manifest_nodes: pages,
         bodies,
     }
 }

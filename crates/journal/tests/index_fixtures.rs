@@ -431,7 +431,7 @@ fn a_thousand_random_operations_agree_with_a_plain_map() {
             .wrapping_mul(6364136223846793005)
             .wrapping_add(1442695040888963407);
         let n = (state >> 33) % 400;
-        let change = if state % 3 == 0 {
+        let change = if state.is_multiple_of(3) {
             model.remove(&n);
             remove(n)
         } else {
@@ -469,5 +469,29 @@ fn a_thousand_random_operations_agree_with_a_plain_map() {
     assert_eq!(
         root, rebuilt,
         "a thousand edits drifted from the canonical encoding of the set"
+    );
+}
+
+#[test]
+fn shrinking_a_branch_below_the_leaf_threshold_merges_it() {
+    // The canonical shape is a property of the *set*, so a branch that was too
+    // big to be a leaf before a removal must become one after it. Deciding the
+    // merge from the pre-change count misses this entirely, and produces a
+    // legal tree that validation then refuses — which is how it was found.
+    let (mut nodes, root) = built(400);
+    let mut sink = NodeSink::default();
+    let shrunk = apply(&nodes, root, (200..400).map(remove).collect(), &mut sink).expect("remove");
+    nodes.absorb(sink);
+
+    assert_eq!(validate(&nodes, shrunk), Ok(200));
+    let mut sink = NodeSink::default();
+    let rebuilt = build_index(
+        (0..200).map(|n| entry(n, &n.to_be_bytes())).collect(),
+        &mut sink,
+    )
+    .expect("rebuild");
+    assert_eq!(
+        shrunk, rebuilt,
+        "a shrunk index must equal the canonical encoding of what it now holds"
     );
 }

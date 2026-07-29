@@ -46,7 +46,7 @@ use crate::body::{BodyOp, ContentCommitment};
 use crate::convergence::ConvergenceOutcome;
 use crate::frontier::{AuthorityFrontier, ReplicaFrontier};
 use crate::ids::{BodyKey, EncodingId, SchemaId, WorldId};
-use crate::manifest::{ManifestEntry, ManifestPage, ManifestRoot, MAX_ENTRIES_PER_PAGE};
+use crate::manifest::{body_index_key, ManifestEntry, ManifestHead, ManifestRoot};
 use crate::protected::{BodyKeySource, ProtectedBodyPayload, ProtectedError, MAX_BODY_BYTES};
 use crate::receipt::RequestReceipt;
 use crate::transaction::{
@@ -398,18 +398,55 @@ impl BodyRecord {
     }
 }
 
-/// The store's opaque caller metadata: the complete Replica index, persisted
-/// with every commit at the journal's manifest linearization point.
+/// The store's opaque caller metadata, persisted with every commit at the
+/// journal's manifest linearization point.
+///
+/// Every large map here is a *root*, not a vector. The shape this replaced
+/// carried the complete Body catalog inline, so changing one Body re-encoded
+/// and fsynced all of them — 28.8 MB at 100,000 Bodies, which is the whole
+/// reason this docket exists. What is left is fixed-size.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct StoreMeta {
-    version: u8,
+    format_version: u8,
     space: Option<SpaceId>,
     frontier: ReplicaFrontier,
     quota: QuotaConfig,
-    bodies: Vec<(BodyKey, BodyRecord)>,
-    receipts: Vec<(Vec<u8>, ObjectRef)>,
+    /// `BodyKey` → the Body's record. Nodes live in the object store and are
+    /// kept alive through the journal's `caller_index_roots`.
+    body_index_root: Option<IndexRef>,
+    /// The published catalog root the signed manifest commits to.
+    manifest_body_root: Option<IndexRef>,
+    /// Idempotency scope → the receipt object that answers a replay.
+    receipt_index_root: Option<IndexRef>,
     manifest_root: Option<ObjectRef>,
-    manifest_pages: Vec<ObjectRef>,
+}
+
+/// The store meta's encoded generation.
+const STORE_META_FORMAT_VERSION: u8 = 2;
+
+type IndexRef = fabric::journal::index::ChildRef;
+
+/// One Body's indexed entry. The key travels with the record because an index
+/// key is a hash and cannot be inverted, and reopening needs the Body back.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct IndexedBody {
+    key: BodyKey,
+    record: BodyRecord,
+}
+
+/// One receipt's indexed entry, same reasoning.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct IndexedReceipt {
+    scope: Vec<u8>,
+    object: ObjectRef,
+}
+
+/// The index key a receipt scope sits under.
+fn receipt_index_key(scope: &[u8]) -> [u8; 32] {
+    let mut h = blake3::Hasher::new();
+    h.update(b"lait/replica/receipt-scope/1");
+    h.update(scope);
+    *h.finalize().as_bytes()
 }
 
 /// The Orbit's durable local materialization, over a Fabric engine.
@@ -424,6 +461,22 @@ pub struct Replica {
     quota: QuotaConfig,
     bodies: BTreeMap<BodyKey, BodyRecord>,
     receipts: BTreeMap<Vec<u8>, (RequestReceipt, Option<ObjectRef>)>,
+    /// Roots of the durable catalogs, carried so a commit can apply a delta
+    /// rather than rebuild.
+    body_index_root: Option<IndexRef>,
+    /// The published catalog: head sets only, no local object references.
+    manifest_body_root: Option<IndexRef>,
+    receipt_index_root: Option<IndexRef>,
+    manifest_root_object: Option<ObjectRef>,
+    /// How many live references each stored object has.
+    ///
+    /// A commit must tell the journal which objects stopped being required, and
+    /// "the ones this Body used to name" is the wrong answer: one signed
+    /// transaction record covers every Body in its batch, so dropping it when
+    /// one of them moves on would strand the others. Counting is the cheap
+    /// correct answer, and it stays O(changed) because only touched Bodies
+    /// adjust it.
+    object_refs: BTreeMap<[u8; 32], u64>,
     /// Opaque retained material kept in memory for non-durable replicas (a
     /// durable store keeps it as objects; this map indexes the raw envelope
     /// bytes + transaction bytes for byte-identical forwarding either way).
@@ -538,6 +591,11 @@ impl Replica {
             supported: SupportedSchemas::default(),
             quota: QuotaConfig::default(),
             bodies: BTreeMap::new(),
+            body_index_root: None,
+            manifest_body_root: None,
+            receipt_index_root: None,
+            manifest_root_object: None,
+            object_refs: BTreeMap::new(),
             receipts: BTreeMap::new(),
             raw_material: BTreeMap::new(),
         }
@@ -623,22 +681,67 @@ impl Replica {
             Err(e) => return Err(ReplicaCommitError::Durability(e.to_string())),
         };
         let mut replica = Self::new(Box::new(CrdtFabric::new())).with_keys(keys.clone());
-        let Some(manifest) = store.manifest() else {
+        let Some(meta_bytes) = store
+            .caller_meta()
+            .map_err(|e| ReplicaCommitError::Integrity(e.to_string()))?
+        else {
             replica.durable = Some(store);
             return Ok(replica);
         };
-        let meta: StoreMeta = postcard::from_bytes(&manifest.meta)
+        let meta: StoreMeta = postcard::from_bytes(&meta_bytes)
             .map_err(|e| ReplicaCommitError::Integrity(format!("store meta: {e}")))?;
-        if meta.version != 1 {
+        if meta.format_version != STORE_META_FORMAT_VERSION {
             return Err(ReplicaCommitError::Integrity(format!(
-                "unsupported store meta version {}",
-                meta.version
+                "unsupported store meta version {} — an older store is refused, \
+                 never upgraded",
+                meta.format_version
             )));
         }
         replica.frontier = meta.frontier;
         replica.space = meta.space.clone();
         replica.quota = meta.quota.clamped();
-        for (key, mut record) in meta.bodies {
+        replica.body_index_root = meta.body_index_root;
+        replica.manifest_body_root = meta.manifest_body_root;
+        replica.receipt_index_root = meta.receipt_index_root;
+        replica.manifest_root_object = meta.manifest_root;
+
+        // Stream the catalogs rather than decoding one giant vector. The engine
+        // still materialises every Body — Fabric holds a document per Body — so
+        // opening remains proportional to the store. What changed is that the
+        // commit point no longer is.
+        let mut indexed_bodies: Vec<IndexedBody> = Vec::new();
+        let mut decode_failure: Option<String> = None;
+        fabric::journal::index::stream(&store.nodes(), meta.body_index_root, &mut |entry| {
+            if decode_failure.is_some() {
+                return;
+            }
+            match postcard::from_bytes::<IndexedBody>(&entry.value) {
+                Ok(body) => indexed_bodies.push(body),
+                Err(e) => decode_failure = Some(format!("body entry: {e}")),
+            }
+        })
+        .map_err(|e| ReplicaCommitError::Integrity(format!("body index: {e}")))?;
+        if let Some(reason) = decode_failure {
+            return Err(ReplicaCommitError::Integrity(reason));
+        }
+
+        let mut indexed_receipts: Vec<IndexedReceipt> = Vec::new();
+        let mut decode_failure: Option<String> = None;
+        fabric::journal::index::stream(&store.nodes(), meta.receipt_index_root, &mut |entry| {
+            if decode_failure.is_some() {
+                return;
+            }
+            match postcard::from_bytes::<IndexedReceipt>(&entry.value) {
+                Ok(receipt) => indexed_receipts.push(receipt),
+                Err(e) => decode_failure = Some(format!("receipt entry: {e}")),
+            }
+        })
+        .map_err(|e| ReplicaCommitError::Integrity(format!("receipt index: {e}")))?;
+        if let Some(reason) = decode_failure {
+            return Err(ReplicaCommitError::Integrity(reason));
+        }
+
+        for IndexedBody { key, mut record } in indexed_bodies {
             if record.heads.is_empty() {
                 return Err(ReplicaCommitError::Integrity(
                     "body record without heads".into(),
@@ -708,18 +811,256 @@ impl Replica {
                     .collect();
                 replica.raw_material.insert(key.clone(), entries);
             }
+            for hash in Self::record_object_refs(&record) {
+                *replica.object_refs.entry(hash).or_insert(0) += 1;
+            }
             replica.bodies.insert(key, record);
         }
-        for (scope, receipt_ref) in meta.receipts {
+        for IndexedReceipt { scope, object } in indexed_receipts {
             let bytes = store
-                .read_object(&receipt_ref)
+                .read_object(&object)
                 .map_err(|e| ReplicaCommitError::Integrity(e.to_string()))?;
             let receipt = RequestReceipt::decode_canonical(&bytes)
                 .map_err(|e| ReplicaCommitError::Integrity(format!("receipt: {e}")))?;
-            replica.receipts.insert(scope, (receipt, Some(receipt_ref)));
+            *replica.object_refs.entry(object.hash).or_insert(0) += 1;
+            replica.receipts.insert(scope, (receipt, Some(object)));
+        }
+        if let Some(root) = meta.manifest_root {
+            *replica.object_refs.entry(root.hash).or_insert(0) += 1;
         }
         replica.durable = Some(store);
         Ok(replica)
+    }
+
+    /// Every object one Body record names, for reference counting.
+    fn record_object_refs(record: &BodyRecord) -> Vec<[u8; 32]> {
+        let mut out = Vec::with_capacity(record.heads.len() * 2);
+        for head in &record.heads {
+            if let Some(r) = head.protected {
+                out.push(r.hash);
+            }
+            if let Some(r) = head.transaction {
+                out.push(r.hash);
+            }
+        }
+        out
+    }
+
+    fn retain_object(&mut self, hash: [u8; 32]) {
+        *self.object_refs.entry(hash).or_insert(0) += 1;
+    }
+
+    /// Drop one reference, reporting whether that was the last.
+    fn release_object(&mut self, hash: [u8; 32]) -> bool {
+        match self.object_refs.get_mut(&hash) {
+            Some(count) if *count > 1 => {
+                *count -= 1;
+                false
+            }
+            Some(_) => {
+                self.object_refs.remove(&hash);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// What the signed manifest advertises for one Body, as distinct from the
+    /// local record, which also names objects no peer should learn about.
+    fn manifest_entry(key: &BodyKey, record: &BodyRecord) -> Option<ManifestEntry> {
+        ManifestEntry::new(
+            key.clone(),
+            record
+                .heads
+                .iter()
+                .map(|h| ManifestHead {
+                    descriptor_hash: h.descriptor_hash,
+                    transaction_commitment: h.tx_commitment,
+                })
+                .collect(),
+        )
+        .ok()
+    }
+
+    /// The single durable write.
+    ///
+    /// Everything proportional to the store size is gone from here: the
+    /// catalogs update by delta, the journal is told what changed rather than
+    /// what to keep, and the signed manifest commits to index roots. What this
+    /// writes is the changed Bodies, their objects, the nodes on the paths they
+    /// touch, and one root.
+    fn persist(
+        &mut self,
+        ctx: Option<&CommitContext<'_>>,
+        changed: &BTreeMap<BodyKey, Option<BodyRecord>>,
+        new_receipt: Option<&RequestReceipt>,
+        mut new_objects: Vec<Vec<u8>>,
+        next_frontier: ReplicaFrontier,
+    ) -> Result<(), ReplicaCommitError> {
+        use fabric::journal::index::{self, IndexChange, NodeSink};
+
+        let mut sink = NodeSink::default();
+        let mut removed: Vec<[u8; 32]> = Vec::new();
+        let mut manifest_changes: Vec<IndexChange> = Vec::with_capacity(changed.len());
+
+        // 1. Body catalog: one index change per touched Body, plus a refcount
+        //    pass that decides which objects genuinely stopped being needed.
+        //    One signed transaction record covers every Body in its batch, so
+        //    "the objects this Body used to name" is the wrong removal set.
+        let mut body_changes: Vec<IndexChange> = Vec::with_capacity(changed.len());
+        for (key, record) in changed {
+            let prior = self
+                .bodies
+                .get(key)
+                .map(Self::record_object_refs)
+                .unwrap_or_default();
+            let now = record
+                .as_ref()
+                .map(Self::record_object_refs)
+                .unwrap_or_default();
+            for hash in &now {
+                self.retain_object(*hash);
+            }
+            for hash in prior {
+                if self.release_object(hash) && !now.contains(&hash) {
+                    removed.push(hash);
+                }
+            }
+            let value = match record {
+                None => None,
+                Some(record) => {
+                    let entry = IndexedBody {
+                        key: key.clone(),
+                        record: record.clone(),
+                    };
+                    Some(
+                        postcard::to_stdvec(&entry)
+                            .map_err(|e| ReplicaCommitError::Fabric(e.to_string()))?,
+                    )
+                }
+            };
+            body_changes.push(IndexChange {
+                key: body_index_key(key),
+                value,
+            });
+            manifest_changes.push(IndexChange {
+                key: body_index_key(key),
+                value: record
+                    .as_ref()
+                    .and_then(|r| Self::manifest_entry(key, r))
+                    .map(|e| e.encode()),
+            });
+        }
+
+        let (body_index_root, manifest_body_root) = {
+            let nodes = self.durable.as_ref().expect("durable path").nodes();
+            let body_index_root =
+                index::apply(&nodes, self.body_index_root, body_changes, &mut sink)
+                    .map_err(|e| ReplicaCommitError::Integrity(format!("body index: {e}")))?;
+            let manifest_body_root =
+                index::apply(&nodes, self.manifest_body_root, manifest_changes, &mut sink)
+                    .map_err(|e| ReplicaCommitError::Integrity(format!("manifest index: {e}")))?;
+            (body_index_root, manifest_body_root)
+        };
+
+        // 2. Receipt catalog.
+        let mut receipt_index_root = self.receipt_index_root;
+        if let Some(receipt) = new_receipt {
+            let bytes = receipt.encode();
+            let reference = object_ref(&bytes);
+            new_objects.push(bytes);
+            self.retain_object(reference.hash);
+            let entry = IndexedReceipt {
+                scope: receipt.scope_key(),
+                object: reference,
+            };
+            let value = postcard::to_stdvec(&entry)
+                .map_err(|e| ReplicaCommitError::Fabric(e.to_string()))?;
+            let nodes = self.durable.as_ref().expect("durable path").nodes();
+            receipt_index_root = index::apply(
+                &nodes,
+                receipt_index_root,
+                vec![IndexChange {
+                    key: receipt_index_key(&receipt.scope_key()),
+                    value: Some(value),
+                }],
+                &mut sink,
+            )
+            .map_err(|e| ReplicaCommitError::Integrity(format!("receipt index: {e}")))?;
+        }
+
+        // 3. The signed root over the catalogs. A commit with no attribution
+        //    context is a receipt-only replay and republishes nothing.
+        let manifest_root_object = match ctx {
+            None => self.manifest_root_object,
+            Some(ctx) => {
+                let root = ManifestRoot::sign_with(
+                    ctx.space,
+                    next_frontier,
+                    manifest_body_root,
+                    None,
+                    ctx.authority_frontier.clone(),
+                    ctx.signer,
+                )
+                .ok_or_else(|| ReplicaCommitError::Illegitimate("sign manifest root".into()))?;
+                let bytes = root.encode();
+                let reference = object_ref(&bytes);
+                new_objects.push(bytes);
+                self.retain_object(reference.hash);
+                if let Some(prior) = self.manifest_root_object {
+                    if prior.hash != reference.hash && self.release_object(prior.hash) {
+                        removed.push(prior.hash);
+                    }
+                }
+                Some(reference)
+            }
+        };
+
+        let meta = StoreMeta {
+            format_version: STORE_META_FORMAT_VERSION,
+            space: self.space.clone(),
+            frontier: next_frontier,
+            quota: self.quota,
+            body_index_root,
+            manifest_body_root,
+            receipt_index_root,
+            manifest_root: manifest_root_object,
+        };
+        let meta_bytes =
+            postcard::to_stdvec(&meta).map_err(|e| ReplicaCommitError::Fabric(e.to_string()))?;
+
+        let mut added = new_objects;
+        added.extend(sink.written);
+        let mut seen = std::collections::BTreeSet::new();
+        added.retain(|b| seen.insert(object_ref(b).hash));
+        // An object written by this commit is not also collectable by it.
+        removed.retain(|h| !seen.contains(h));
+        removed.sort();
+        removed.dedup();
+
+        let roots: Vec<IndexRef> = body_index_root
+            .into_iter()
+            .chain(manifest_body_root)
+            .chain(receipt_index_root)
+            .collect();
+
+        let store = self.durable.as_mut().expect("durable path");
+        match store.commit(&added, &removed, &roots, meta_bytes) {
+            Ok(_) => {}
+            Err(fabric::journal::JournalError::OutcomeUnknown) => {
+                self.poisoned = true;
+                return Err(ReplicaCommitError::OutcomeUnknown);
+            }
+            Err(e) => {
+                self.poisoned = true;
+                return Err(ReplicaCommitError::Durability(e.to_string()));
+            }
+        }
+        self.body_index_root = body_index_root;
+        self.manifest_body_root = manifest_body_root;
+        self.receipt_index_root = receipt_index_root;
+        self.manifest_root_object = manifest_root_object;
+        Ok(())
     }
 
     /// Test seam: attach a fault injector to the underlying journaled store
@@ -741,17 +1082,8 @@ impl Replica {
     /// [`crate::transaction::NO_PARENT_ROOT`] before any durable commit — the
     /// parent a local submit authors against.
     pub fn manifest_root(&self) -> [u8; 32] {
-        self.durable
-            .as_ref()
-            .and_then(|store| store.manifest())
-            .and_then(|m| {
-                // The Replica meta records the manifest-root object ref; a
-                // fresh or non-durable store has none.
-                postcard::from_bytes::<StoreMeta>(&m.meta)
-                    .ok()
-                    .and_then(|meta| meta.manifest_root)
-                    .map(|r| r.hash)
-            })
+        self.manifest_root_object
+            .map(|r| r.hash)
             .unwrap_or(crate::transaction::NO_PARENT_ROOT)
     }
 
@@ -1700,124 +2032,21 @@ impl Replica {
             }
         }
 
-        // The post-commit body index: current records overlaid with the new.
-        let mut bodies: BTreeMap<BodyKey, BodyRecord> = self.bodies.clone();
-        for (key, record) in &new_records {
-            bodies.insert(key.clone(), record.clone());
-        }
-
-        // Manifest pages over the full Body set.
-        let space = ctx.space;
-        // One entry per constituent head: a multi-writer Body is advertised
-        // as the exact set of author-signed heads whose union is its state.
-        let entries: Vec<ManifestEntry> = bodies
-            .iter()
-            .flat_map(|(key, r)| {
-                r.heads.iter().map(move |h| ManifestEntry {
-                    key: key.clone(),
-                    descriptor_hash: h.descriptor_hash,
-                    transaction_commitment: h.tx_commitment,
-                })
-            })
-            .collect();
-        let mut entries = entries;
-        entries.sort_by(|a, b| {
-            (&a.key, &a.transaction_commitment).cmp(&(&b.key, &b.transaction_commitment))
-        });
-        let entries = entries;
-        let mut pages: Vec<ManifestPage> = Vec::new();
-        for (i, chunk) in entries.chunks(MAX_ENTRIES_PER_PAGE).enumerate() {
-            pages.push(
-                ManifestPage::new(space, i as u32, chunk.to_vec())
-                    .ok_or_else(|| ReplicaCommitError::Illegitimate("space id shape".into()))?,
-            );
-        }
-        let root = ManifestRoot::sign_with(
-            space,
-            next_frontier,
-            &pages,
-            ctx.authority_frontier.clone(),
-            ctx.signer,
-        )
-        .ok_or_else(|| ReplicaCommitError::Illegitimate("sign manifest root".into()))?;
-        let root_bytes = root.encode();
-        let page_bytes: Vec<Vec<u8>> = pages.iter().map(|p| p.encode()).collect();
-
-        // Receipts: existing durable refs are kept.
-        let mut receipt_meta: Vec<(Vec<u8>, ObjectRef)> = Vec::new();
-        let mut keep: Vec<ObjectRef> = Vec::new();
-        for (scope, (_, existing_ref)) in &self.receipts {
-            if let Some(r) = existing_ref {
-                receipt_meta.push((scope.clone(), *r));
-                keep.push(*r);
-            }
-        }
-
-        // New objects, deduped by content address.
+        // Only the touched Bodies reach the durable write. The shape this
+        // replaced overlaid every record into one map and re-encoded it.
         let mut new_objects: Vec<Vec<u8>> = Vec::new();
-        let mut seen: std::collections::BTreeSet<[u8; 32]> = std::collections::BTreeSet::new();
-        let push_obj = |bytes: &Vec<u8>,
-                        out: &mut Vec<Vec<u8>>,
-                        seen: &mut std::collections::BTreeSet<[u8; 32]>| {
-            let r = object_ref(bytes);
-            if seen.insert(r.hash) {
-                out.push(bytes.clone());
-            }
-        };
         for tx_bytes in tx_bytes_by_unit.values() {
-            push_obj(tx_bytes, &mut new_objects, &mut seen);
+            new_objects.push(tx_bytes.clone());
         }
         for (_, _, envelope, _) in staged_material {
-            push_obj(envelope, &mut new_objects, &mut seen);
+            new_objects.push(envelope.clone());
         }
-        push_obj(&root_bytes, &mut new_objects, &mut seen);
-        for p in &page_bytes {
-            push_obj(p, &mut new_objects, &mut seen);
-        }
+        let staged: BTreeMap<BodyKey, Option<BodyRecord>> = new_records
+            .iter()
+            .map(|(k, v)| (k.clone(), Some(v.clone())))
+            .collect();
+        self.persist(Some(ctx), &staged, None, new_objects, next_frontier)?;
 
-        // Keep: every carried object the post-commit index references.
-        for record in bodies.values() {
-            for head in &record.heads {
-                if let Some(r) = head.protected {
-                    if !seen.contains(&r.hash) {
-                        keep.push(r);
-                    }
-                }
-                if let Some(r) = head.transaction {
-                    if !seen.contains(&r.hash) {
-                        keep.push(r);
-                    }
-                }
-            }
-        }
-        keep.sort_by_key(|r| r.hash);
-        keep.dedup_by_key(|r| r.hash);
-
-        let meta = StoreMeta {
-            version: 1,
-            space: Some(space.clone()),
-            frontier: next_frontier,
-            quota: self.quota,
-            bodies: bodies.into_iter().collect(),
-            receipts: receipt_meta,
-            manifest_root: Some(object_ref(&root_bytes)),
-            manifest_pages: page_bytes.iter().map(|p| object_ref(p)).collect(),
-        };
-        let meta_bytes =
-            postcard::to_stdvec(&meta).map_err(|e| ReplicaCommitError::Fabric(e.to_string()))?;
-
-        let store = self.durable.as_mut().expect("durable path");
-        match store.commit(&new_objects, &keep, meta_bytes) {
-            Ok(_) => {}
-            Err(fabric::journal::JournalError::OutcomeUnknown) => {
-                self.poisoned = true;
-                return Err(ReplicaCommitError::OutcomeUnknown);
-            }
-            Err(e) => {
-                self.poisoned = true;
-                return Err(ReplicaCommitError::Durability(e.to_string()));
-            }
-        }
         // The caller's in-memory index must adopt THESE records — the ones
         // carrying the object refs just persisted — or the replica cannot
         // re-serve incorporated material until a reopen reloads the meta
@@ -1890,7 +2119,7 @@ impl Replica {
         // transactions, and no Body payloads. The authority phase above is the
         // whole exchange.
         if staged.manifest_root_bytes.is_empty() {
-            if !staged.manifest_pages.is_empty()
+            if !staged.manifest_nodes.is_empty()
                 || !staged.bodies.is_empty()
                 || !transactions.is_empty()
             {
@@ -1903,29 +2132,50 @@ impl Replica {
                 units: Vec::new(),
             });
         }
-        // 3. + 4. Authority-verified manifest root and its complete pages.
+        // 3. + 4. Authority-verified manifest root and its complete index.
         let root = ManifestRoot::decode_canonical(&staged.manifest_root_bytes)
             .map_err(|e| illegit(format!("manifest root: {e}")))?;
         let root_space = root.space;
         let authorized = root
             .verify_authorized(authority)
             .map_err(|e| illegit(format!("manifest root: {e}")))?;
-        let mut pages = Vec::with_capacity(staged.manifest_pages.len());
-        for bytes in &staged.manifest_pages {
-            pages.push(
-                ManifestPage::decode_canonical(bytes)
-                    .map_err(|e| illegit(format!("manifest page: {e}")))?,
-            );
+
+        // The index nodes arrive as a bag of bytes; address them and let the
+        // root say which ones belong. A node the sender threw in that no root
+        // reaches is simply never read.
+        let offered: BTreeMap<[u8; 32], Vec<u8>> = staged
+            .manifest_nodes
+            .iter()
+            .map(|bytes| (fabric::journal::object_content_hash(bytes), bytes.clone()))
+            .collect();
+        struct OfferedNodes<'a>(&'a BTreeMap<[u8; 32], Vec<u8>>);
+        impl fabric::journal::index::NodeSource for OfferedNodes<'_> {
+            fn node(&self, hash: &[u8; 32]) -> Option<Vec<u8>> {
+                self.0.get(hash).cloned()
+            }
         }
+        let nodes = OfferedNodes(&offered);
         authorized
             .root()
-            .verify_pages(&pages)
-            .map_err(|e| illegit(format!("manifest pages: {e}")))?;
-        // A multi-writer Body is advertised as several heads under one key:
-        // the entry index is a multimap grouped by key.
-        let mut entries: BTreeMap<BodyKey, Vec<&ManifestEntry>> = BTreeMap::new();
-        for e in pages.iter().flat_map(|p| p.entries.iter()) {
-            entries.entry(e.key.clone()).or_default().push(e);
+            .verify_index(&nodes)
+            .map_err(|e| illegit(format!("manifest index: {e}")))?;
+
+        let mut entries: BTreeMap<BodyKey, ManifestEntry> = BTreeMap::new();
+        let mut entry_failure: Option<String> = None;
+        fabric::journal::index::stream(&nodes, authorized.root().body_index_root, &mut |entry| {
+            if entry_failure.is_some() {
+                return;
+            }
+            match ManifestEntry::decode_canonical(&entry.value) {
+                Ok(decoded) => {
+                    entries.insert(decoded.key.clone(), decoded);
+                }
+                Err(e) => entry_failure = Some(format!("manifest entry: {e}")),
+            }
+        })
+        .map_err(|e| illegit(format!("manifest index: {e}")))?;
+        if let Some(reason) = entry_failure {
+            return Err(illegit(reason));
         }
         // 5. Every provided transaction verifies with historical standing,
         //    bound to the root's Space.
@@ -1954,12 +2204,12 @@ impl Replica {
                     "payload does not match the signed commitment".into(),
                 ));
             }
-            let Some(key_entries) = entries.get(key) else {
+            let Some(key_entry) = entries.get(key) else {
                 return Err(illegit("payload outside the advertised manifest".into()));
             };
-            let bound = key_entries.iter().any(|entry| {
-                entry.descriptor_hash == descriptor_hash(descriptor)
-                    && entry.transaction_commitment == tx_commitment(tx_bytes)
+            let bound = key_entry.heads.iter().any(|head| {
+                head.descriptor_hash == descriptor_hash(descriptor)
+                    && head.transaction_commitment == tx_commitment(tx_bytes)
             });
             if !bound {
                 return Err(illegit(
@@ -1985,8 +2235,8 @@ impl Replica {
                 received.insert((key, tx_commitment(tx_bytes)));
             }
         }
-        for (key, key_entries) in &entries {
-            for entry in key_entries {
+        for (key, key_entry) in &entries {
+            for entry in &key_entry.heads {
                 if received.contains(&(key, entry.transaction_commitment)) {
                     continue;
                 }
@@ -2025,46 +2275,38 @@ impl Replica {
         self.incorporate_units(ctx, &bundle.units, authority)
     }
 
-    /// Build and sign the current Manifest (root + pages) over the full Body
-    /// set — the advertisement a Contact serves. Deterministic for a given
-    /// state and signer.
+    /// Build and sign the current Manifest over the full Body set, returning
+    /// the root plus every index node a peer needs to verify it — the
+    /// advertisement a Contact serves. Deterministic for a given state and
+    /// signer.
+    ///
+    /// Shipping the whole index is what F4 replaces: two peers will compare
+    /// roots, descend only where subtree hashes differ, and exchange divergent
+    /// leaves. Until then this costs what pages cost, and is correct.
     pub fn export_manifest(
         &self,
         ctx: &CommitContext<'_>,
     ) -> Result<(Vec<u8>, Vec<Vec<u8>>), ReplicaCommitError> {
-        // One entry per constituent head (see `persist_bundle`).
+        use fabric::journal::index::NodeSink;
+
         let entries: Vec<ManifestEntry> = self
             .bodies
             .iter()
-            .flat_map(|(key, r)| {
-                r.heads.iter().map(move |h| ManifestEntry {
-                    key: key.clone(),
-                    descriptor_hash: h.descriptor_hash,
-                    transaction_commitment: h.tx_commitment,
-                })
-            })
+            .filter_map(|(key, record)| Self::manifest_entry(key, record))
             .collect();
-        let mut entries = entries;
-        entries.sort_by(|a, b| {
-            (&a.key, &a.transaction_commitment).cmp(&(&b.key, &b.transaction_commitment))
-        });
-        let entries = entries;
-        let mut pages: Vec<ManifestPage> = Vec::new();
-        for (i, chunk) in entries.chunks(MAX_ENTRIES_PER_PAGE).enumerate() {
-            pages.push(
-                ManifestPage::new(ctx.space, i as u32, chunk.to_vec())
-                    .ok_or_else(|| ReplicaCommitError::Illegitimate("space id shape".into()))?,
-            );
-        }
+        let mut sink = NodeSink::default();
+        let body_root = crate::manifest::build_body_index(entries, &mut sink)
+            .map_err(|e| ReplicaCommitError::Illegitimate(format!("manifest index: {e}")))?;
         let root = ManifestRoot::sign_with(
             ctx.space,
             self.frontier,
-            &pages,
+            body_root,
+            None,
             ctx.authority_frontier.clone(),
             ctx.signer,
         )
         .ok_or_else(|| ReplicaCommitError::Illegitimate("sign manifest root".into()))?;
-        Ok((root.encode(), pages.iter().map(|p| p.encode()).collect()))
+        Ok((root.encode(), sink.written))
     }
 
     /// The complete per-head holdings summary: every `(key, transaction
@@ -2266,73 +2508,15 @@ impl Replica {
         Ok(receipt)
     }
 
-    /// Persist ONLY a new idempotency receipt: the body index, manifest, and
-    /// frontier are unchanged; every existing object is carried forward.
+    /// Persist ONLY a new idempotency receipt. No Body changed and no manifest
+    /// is republished, so this writes the receipt, one index path, and the
+    /// commit point — and nothing else.
     fn persist_receipt_only(&mut self, receipt: &RequestReceipt) -> Result<(), ReplicaCommitError> {
-        let store = self.durable.as_ref().expect("durable path");
-        let prior: Option<StoreMeta> = store
-            .manifest()
-            .map(|m| postcard::from_bytes(&m.meta))
-            .transpose()
-            .map_err(|e| ReplicaCommitError::Integrity(format!("store meta: {e}")))?;
-        let receipt_bytes = receipt.encode();
-        let receipt_ref = object_ref(&receipt_bytes);
-        let mut keep: Vec<ObjectRef> = Vec::new();
-        let mut receipt_meta: Vec<(Vec<u8>, ObjectRef)> = Vec::new();
-        for (scope, (_, existing_ref)) in &self.receipts {
-            if let Some(r) = existing_ref {
-                receipt_meta.push((scope.clone(), *r));
-                keep.push(*r);
-            }
-        }
-        receipt_meta.push((receipt.scope_key(), receipt_ref));
-        let (bodies, manifest_root, manifest_pages) = match prior {
-            Some(meta) => (meta.bodies, meta.manifest_root, meta.manifest_pages),
-            None => (self.bodies.clone().into_iter().collect(), None, Vec::new()),
-        };
-        for (_, record) in &bodies {
-            for head in &record.heads {
-                if let Some(r) = head.protected {
-                    keep.push(r);
-                }
-                if let Some(r) = head.transaction {
-                    keep.push(r);
-                }
-            }
-        }
-        if let Some(r) = manifest_root {
-            keep.push(r);
-        }
-        keep.extend(manifest_pages.iter().copied());
-        keep.sort_by_key(|r| r.hash);
-        keep.dedup_by_key(|r| r.hash);
-        let meta = StoreMeta {
-            version: 1,
-            space: self.space.clone(),
-            frontier: self.frontier,
-            quota: self.quota,
-            bodies,
-            receipts: receipt_meta,
-            manifest_root,
-            manifest_pages,
-        };
-        let meta_bytes =
-            postcard::to_stdvec(&meta).map_err(|e| ReplicaCommitError::Fabric(e.to_string()))?;
-        let store = self.durable.as_mut().expect("durable path");
-        match store.commit(std::slice::from_ref(&receipt_bytes), &keep, meta_bytes) {
-            Ok(_) => {}
-            Err(fabric::journal::JournalError::OutcomeUnknown) => {
-                self.poisoned = true;
-                return Err(ReplicaCommitError::OutcomeUnknown);
-            }
-            Err(e) => {
-                self.poisoned = true;
-                return Err(ReplicaCommitError::Durability(e.to_string()));
-            }
-        }
+        let frontier = self.frontier;
+        self.persist(None, &BTreeMap::new(), Some(receipt), Vec::new(), frontier)?;
         self.receipts.insert(
             receipt.scope_key(),
-            (receipt.clone(), Some(object_ref(&receipt_bytes))),
+            (receipt.clone(), Some(object_ref(&receipt.encode()))),
         );
         Ok(())
     }
@@ -2372,137 +2556,15 @@ impl Replica {
             }
         }
 
-        // The post-commit body index: current records overlaid with the new.
-        let mut bodies: BTreeMap<BodyKey, BodyRecord> = self.bodies.clone();
-        for (key, record) in new_records.iter() {
-            match record {
-                None => {
-                    bodies.remove(key);
-                }
-                Some(r) => {
-                    bodies.insert(key.clone(), r.clone());
-                }
-            }
-        }
-
-        // Manifest pages over the full Body set.
-        let space = ctx.space;
-        // One entry per constituent head (see `persist_bundle`).
-        let entries: Vec<ManifestEntry> = bodies
-            .iter()
-            .flat_map(|(key, r)| {
-                r.heads.iter().map(move |h| ManifestEntry {
-                    key: key.clone(),
-                    descriptor_hash: h.descriptor_hash,
-                    transaction_commitment: h.tx_commitment,
-                })
-            })
-            .collect();
-        let mut entries = entries;
-        entries.sort_by(|a, b| {
-            (&a.key, &a.transaction_commitment).cmp(&(&b.key, &b.transaction_commitment))
-        });
-        let entries = entries;
-        let mut pages: Vec<ManifestPage> = Vec::new();
-        for (i, chunk) in entries.chunks(MAX_ENTRIES_PER_PAGE).enumerate() {
-            pages.push(
-                ManifestPage::new(space, i as u32, chunk.to_vec())
-                    .ok_or_else(|| ReplicaCommitError::Illegitimate("space id shape".into()))?,
-            );
-        }
-        let root = ManifestRoot::sign_with(
-            space,
-            next_frontier,
-            &pages,
-            ctx.authority_frontier.clone(),
-            ctx.signer,
-        )
-        .ok_or_else(|| ReplicaCommitError::Illegitimate("sign manifest root".into()))?;
-        let root_bytes = root.encode();
-        let page_bytes: Vec<Vec<u8>> = pages.iter().map(|p| p.encode()).collect();
-
-        // Receipts: existing durable refs are kept; the new one is written.
-        let mut receipt_meta: Vec<(Vec<u8>, ObjectRef)> = Vec::new();
-        let mut keep: Vec<ObjectRef> = Vec::new();
-        for (scope, (_, existing_ref)) in &self.receipts {
-            if let Some(r) = existing_ref {
-                receipt_meta.push((scope.clone(), *r));
-                keep.push(*r);
-            }
-        }
-        let receipt_bytes = receipt.map(|r| r.encode());
-        if let (Some(receipt), Some(bytes)) = (receipt, &receipt_bytes) {
-            receipt_meta.push((receipt.scope_key(), object_ref(bytes)));
-        }
-
-        // New objects, deduped by content address.
-        let mut new_objects: Vec<Vec<u8>> = Vec::new();
-        let mut seen: std::collections::BTreeSet<[u8; 32]> = std::collections::BTreeSet::new();
-        let push_obj = |bytes: &Vec<u8>,
-                        seen: &mut std::collections::BTreeSet<[u8; 32]>,
-                        out: &mut Vec<Vec<u8>>| {
-            let r = object_ref(bytes);
-            if seen.insert(r.hash) {
-                out.push(bytes.clone());
-            }
-        };
-        push_obj(&tx_bytes, &mut seen, &mut new_objects);
+        let mut new_objects: Vec<Vec<u8>> = vec![tx_bytes.clone()];
         for (_, envelope, _) in sealed {
-            push_obj(envelope, &mut seen, &mut new_objects);
+            new_objects.push(envelope.clone());
         }
-        if let Some(bytes) = &receipt_bytes {
-            push_obj(bytes, &mut seen, &mut new_objects);
-        }
-        push_obj(&root_bytes, &mut seen, &mut new_objects);
-        for p in &page_bytes {
-            push_obj(p, &mut seen, &mut new_objects);
-        }
+        self.persist(Some(ctx), new_records, receipt, new_objects, next_frontier)?;
 
-        // Keep: every carried object the post-commit index references.
-        for record in bodies.values() {
-            for head in &record.heads {
-                if let Some(r) = head.protected {
-                    if !seen.contains(&r.hash) {
-                        keep.push(r);
-                    }
-                }
-                if let Some(r) = head.transaction {
-                    if !seen.contains(&r.hash) {
-                        keep.push(r);
-                    }
-                }
-            }
-        }
-        keep.sort_by_key(|r| r.hash);
-        keep.dedup_by_key(|r| r.hash);
-
-        let meta = StoreMeta {
-            version: 1,
-            space: Some(space.clone()),
-            frontier: next_frontier,
-            quota: self.quota,
-            bodies: bodies.clone().into_iter().collect(),
-            receipts: receipt_meta.clone(),
-            manifest_root: Some(object_ref(&root_bytes)),
-            manifest_pages: page_bytes.iter().map(|p| object_ref(p)).collect(),
-        };
-        let meta_bytes =
-            postcard::to_stdvec(&meta).map_err(|e| ReplicaCommitError::Fabric(e.to_string()))?;
-
-        let store = self.durable.as_mut().expect("durable path");
-        match store.commit(&new_objects, &keep, meta_bytes) {
-            Ok(_) => {}
-            Err(fabric::journal::JournalError::OutcomeUnknown) => {
-                self.poisoned = true;
-                return Err(ReplicaCommitError::OutcomeUnknown);
-            }
-            Err(e) => {
-                self.poisoned = true;
-                return Err(ReplicaCommitError::Durability(e.to_string()));
-            }
-        }
         // Durable receipt refs become authoritative in memory.
-        if let (Some(receipt), Some(bytes)) = (receipt, &receipt_bytes) {
+        if let Some(receipt) = receipt {
+            let bytes = &receipt.encode();
             self.receipts.insert(
                 receipt.scope_key(),
                 (receipt.clone(), Some(object_ref(bytes))),

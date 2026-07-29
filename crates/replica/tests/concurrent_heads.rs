@@ -219,7 +219,7 @@ fn stage_excluding(
     StagedContactMaterial {
         authority_records,
         manifest_root_bytes: root,
-        manifest_pages: pages,
+        manifest_nodes: pages,
         bodies,
     }
 }
@@ -245,7 +245,7 @@ fn stage(r: &Replica, seed: &'static [u8; 32]) -> StagedContactMaterial {
     StagedContactMaterial {
         authority_records,
         manifest_root_bytes: root,
-        manifest_pages: pages,
+        manifest_nodes: pages,
         bodies,
     }
 }

@@ -79,7 +79,7 @@ pub struct StagedContactMaterial {
     /// The signed manifest root, byte-canonical.
     pub manifest_root_bytes: Vec<u8>,
     /// The manifest pages, ordered by page index, byte-canonical.
-    pub manifest_pages: Vec<Vec<u8>>,
+    pub manifest_nodes: Vec<Vec<u8>>,
     /// Received protected Body payloads: `(transaction id, key, envelope)`.
     /// The transaction id is the full signed-envelope digest.
     pub bodies: Vec<([u8; 32], crate::ids::BodyKey, Vec<u8>)>,

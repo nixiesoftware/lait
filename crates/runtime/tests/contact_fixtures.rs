@@ -7,7 +7,7 @@ use mechanics::ids::{SpaceId, StationId};
 use replica::body::ContentCommitment;
 use replica::ids::{BodyId, BodyKey, WorldId};
 use runtime::contact::{
-    abort, authority_record_hash, authority_set_hash, body_chunk_hash, manifest_page_hash,
+    abort, authority_record_hash, authority_set_hash, body_chunk_hash, manifest_node_hash,
     manifest_root_ref, AccepterEvent, AccepterValidator, ContactFrame, ContactHello,
     ContactHelloAck, ContactId, ContactWireError, InitiatorReceiver, InitiatorState, Progress,
 };
@@ -172,17 +172,15 @@ fn frame_tags_are_the_canonical_wire_values() {
             5,
             ContactFrame::ManifestRequest {
                 root: [0u8; 32],
-                first_page: 0,
-                page_count: 1,
+                node_count: 1,
             },
         ),
         (
             6,
-            ContactFrame::ManifestPage {
+            ContactFrame::ManifestNode {
                 root: [0u8; 32],
-                page_index: 0,
-                page_hash: [0u8; 32],
-                page_bytes: vec![1],
+                node_hash: [0u8; 32],
+                node_bytes: vec![1],
             },
         ),
         (
@@ -272,7 +270,7 @@ fn happy_frames() -> Vec<Vec<u8>> {
     let set_hash = authority_set_hash(&record_hashes);
     let root_bytes = b"canonical-manifest-root".to_vec();
     let root = manifest_root_ref(&root_bytes);
-    let page_bytes = b"canonical-page-0".to_vec();
+    let node_bytes = b"canonical-node".to_vec();
     let payload = b"protected-body-payload".to_vec();
     let (c0, c1) = payload.split_at(10);
     let commitment = ContentCommitment::over_protected_payload(&payload).as_bytes();
@@ -301,11 +299,10 @@ fn happy_frames() -> Vec<Vec<u8>> {
         ContactFrame::ManifestOffer {
             root_bytes: root_bytes.clone(),
         },
-        ContactFrame::ManifestPage {
+        ContactFrame::ManifestNode {
             root,
-            page_index: 0,
-            page_hash: manifest_page_hash(&page_bytes),
-            page_bytes,
+            node_hash: manifest_node_hash(&node_bytes),
+            node_bytes,
         },
         ContactFrame::BodyChunk {
             transaction: [2u8; 32],
@@ -382,7 +379,10 @@ fn a_complete_transfer_stages_acks_and_yields_the_material() {
     );
     assert_eq!(material.authority_frontier, vec![0xAA]);
     assert_eq!(material.manifest_root_bytes, b"canonical-manifest-root");
-    assert_eq!(material.manifest_pages[&0], b"canonical-page-0");
+    assert_eq!(
+        material.manifest_nodes.values().next().unwrap(),
+        b"canonical-node"
+    );
     assert_eq!(
         material.bodies[&([2u8; 32], body_key())],
         b"protected-body-payload"
@@ -671,8 +671,7 @@ fn manifest_requests_must_reference_the_offer_in_range() {
         acc.on_frame(
             &ContactFrame::ManifestRequest {
                 root,
-                first_page: 0,
-                page_count: 1,
+                node_count: 1,
             }
             .encode(&contact()),
         ),
@@ -682,11 +681,10 @@ fn manifest_requests_must_reference_the_offer_in_range() {
     acc.record_sent(&ContactFrame::ManifestOffer { root_bytes }.encode(&contact()));
     for i in 0..2u32 {
         acc.record_sent(
-            &ContactFrame::ManifestPage {
+            &ContactFrame::ManifestNode {
                 root,
-                page_index: i,
-                page_hash: manifest_page_hash(b"p"),
-                page_bytes: b"p".to_vec(),
+                node_hash: manifest_node_hash(&[b'p', i as u8]),
+                node_bytes: vec![b'p', i as u8],
             }
             .encode(&contact()),
         );
@@ -696,8 +694,7 @@ fn manifest_requests_must_reference_the_offer_in_range() {
         acc.on_frame(
             &ContactFrame::ManifestRequest {
                 root,
-                first_page: 0,
-                page_count: 2,
+                node_count: 2,
             }
             .encode(&contact()),
         )
@@ -709,8 +706,7 @@ fn manifest_requests_must_reference_the_offer_in_range() {
         acc.on_frame(
             &ContactFrame::ManifestRequest {
                 root,
-                first_page: 1,
-                page_count: 2,
+                node_count: 3,
             }
             .encode(&contact()),
         ),
@@ -720,8 +716,7 @@ fn manifest_requests_must_reference_the_offer_in_range() {
         acc.on_frame(
             &ContactFrame::ManifestRequest {
                 root: [0xEE; 32],
-                first_page: 0,
-                page_count: 1,
+                node_count: 1,
             }
             .encode(&contact()),
         ),

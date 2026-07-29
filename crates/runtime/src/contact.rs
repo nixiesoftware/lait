@@ -60,6 +60,10 @@ pub const MAX_FRAMES: u32 = 4096;
 pub const MAX_CONTACT_BYTES: u64 = 80 * 1024 * 1024;
 /// Maximum chunk payload (authority records and body chunks).
 pub const MAX_CHUNK: usize = 256 * 1024;
+/// Maximum manifest index nodes one Contact may offer. At the index's 256-entry
+/// leaves this covers well past the Body-count ceiling, and it is what stops a
+/// peer from streaming nodes until the receiver runs out of memory.
+pub const MAX_MANIFEST_NODES: usize = 8192;
 
 /// Domain for the running transcript hash (over every raw frame, in order).
 const TRANSCRIPT_DOMAIN: &[u8] = b"lait/contact/1/transcript";
@@ -89,6 +93,7 @@ pub mod abort {
     pub const EMPTY_CHUNK: u16 = 11;
     pub const SET_MISMATCH: u16 = 12;
     pub const BAD_REQUEST: u16 = 13;
+    pub const TOO_LARGE: u16 = 14;
 }
 
 fn domain_hash(domain: &[u8], bytes: &[u8]) -> [u8; 32] {
@@ -113,13 +118,15 @@ pub fn authority_set_hash(record_hashes: &[[u8; 32]]) -> [u8; 32] {
     *h.finalize().as_bytes()
 }
 
-/// The reference hash `ManifestRequest`/`ManifestPage` use for an offered root.
+/// The reference hash `ManifestRequest`/`ManifestNode` use for an offered root.
 pub fn manifest_root_ref(root_bytes: &[u8]) -> [u8; 32] {
     domain_hash(ROOT_REF_DOMAIN, root_bytes)
 }
 
-/// The hash a `page_hash` field must carry for its page bytes.
-pub fn manifest_page_hash(bytes: &[u8]) -> [u8; 32] {
+/// The hash a `node_hash` field must carry for its node bytes. It is the
+/// store's object address, because a manifest index node *is* an object and
+/// naming it any other way would let the two disagree.
+pub fn manifest_node_hash(bytes: &[u8]) -> [u8; 32] {
     domain_hash(PAGE_DOMAIN, bytes)
 }
 
@@ -452,14 +459,17 @@ pub enum ContactFrame {
     },
     ManifestRequest {
         root: [u8; 32],
-        first_page: u32,
-        page_count: u16,
+        node_count: u32,
     },
-    ManifestPage {
+    /// One node of the manifest's Body index.
+    ///
+    /// Nodes are named by hash rather than by ordinal, which is the whole
+    /// point of the index replacing pages: an ordinal shifts when a Body is
+    /// inserted, so every later page changed, and a hash does not.
+    ManifestNode {
         root: [u8; 32],
-        page_index: u32,
-        page_hash: [u8; 32],
-        page_bytes: Vec<u8>,
+        node_hash: [u8; 32],
+        node_bytes: Vec<u8>,
     },
     BodyRequest {
         transaction: [u8; 32],
@@ -517,7 +527,7 @@ impl ContactFrame {
             ContactFrame::AuthorityEnd { .. } => 3,
             ContactFrame::ManifestOffer { .. } => 4,
             ContactFrame::ManifestRequest { .. } => 5,
-            ContactFrame::ManifestPage { .. } => 6,
+            ContactFrame::ManifestNode { .. } => 6,
             ContactFrame::BodyRequest { .. } => 7,
             ContactFrame::BodyChunk { .. } => 8,
             ContactFrame::BodyEnd { .. } => 9,
@@ -645,8 +655,8 @@ pub struct ReceivedMaterial {
     pub authority_frontier: Vec<u8>,
     pub authority_records: Vec<Vec<u8>>,
     pub manifest_root_bytes: Vec<u8>,
-    /// page index → canonical page bytes.
-    pub manifest_pages: BTreeMap<u32, Vec<u8>>,
+    /// node hash → canonical node bytes of the manifest's Body index.
+    pub manifest_nodes: BTreeMap<[u8; 32], Vec<u8>>,
     /// (transaction, BodyKey) → assembled protected payload.
     pub bodies: BTreeMap<([u8; 32], BodyKey), Vec<u8>>,
 }
@@ -665,7 +675,7 @@ pub struct InitiatorReceiver {
     authority_frontier: Vec<u8>,
     manifest_root_ref: Option<[u8; 32]>,
     manifest_root_bytes: Vec<u8>,
-    manifest_pages: BTreeMap<u32, ([u8; 32], Vec<u8>)>,
+    manifest_nodes: BTreeMap<[u8; 32], Vec<u8>>,
     bodies: BTreeMap<([u8; 32], BodyKey), BodyStaging>,
     ended_bodies: u32,
 }
@@ -684,7 +694,7 @@ impl InitiatorReceiver {
             authority_frontier: Vec::new(),
             manifest_root_ref: None,
             manifest_root_bytes: Vec::new(),
-            manifest_pages: BTreeMap::new(),
+            manifest_nodes: BTreeMap::new(),
             bodies: BTreeMap::new(),
             ended_bodies: 0,
         }
@@ -699,7 +709,7 @@ impl InitiatorReceiver {
         self.authority = None;
         self.manifest_root_ref = None;
         self.manifest_root_bytes.clear();
-        self.manifest_pages.clear();
+        self.manifest_nodes.clear();
         self.bodies.clear();
         self.state = InitiatorState::Aborted;
         code
@@ -827,11 +837,10 @@ impl InitiatorReceiver {
                 self.manifest_root_bytes = root_bytes;
                 Ok(Progress::Continue)
             }
-            ContactFrame::ManifestPage {
+            ContactFrame::ManifestNode {
                 root,
-                page_index,
-                page_hash,
-                page_bytes,
+                node_hash,
+                node_bytes,
             } => {
                 if self.state != InitiatorState::ManifestReceiving {
                     return Err(self.abort(abort::WRONG_STATE));
@@ -842,19 +851,16 @@ impl InitiatorReceiver {
                 if root != offered {
                     return Err(self.abort(abort::HASH_MISMATCH));
                 }
-                if manifest_page_hash(&page_bytes) != page_hash {
+                if manifest_node_hash(&node_bytes) != node_hash {
                     return Err(self.abort(abort::HASH_MISMATCH));
                 }
-                match self.manifest_pages.get(&page_index) {
-                    // An exact duplicate page is idempotent.
-                    Some((h, _)) if *h == page_hash => Ok(Progress::Continue),
-                    Some(_) => Err(self.abort(abort::CHUNK_CONFLICT)),
-                    None => {
-                        self.manifest_pages
-                            .insert(page_index, (page_hash, page_bytes));
-                        Ok(Progress::Continue)
-                    }
+                if self.manifest_nodes.len() >= MAX_MANIFEST_NODES {
+                    return Err(self.abort(abort::TOO_LARGE));
                 }
+                // Content-addressed, so a duplicate is idempotent by
+                // construction and a conflict is not expressible.
+                self.manifest_nodes.insert(node_hash, node_bytes);
+                Ok(Progress::Continue)
             }
             ContactFrame::BodyChunk {
                 transaction,
@@ -1019,10 +1025,7 @@ impl InitiatorReceiver {
             authority_frontier: std::mem::take(&mut self.authority_frontier),
             authority_records: authority.records,
             manifest_root_bytes: std::mem::take(&mut self.manifest_root_bytes),
-            manifest_pages: std::mem::take(&mut self.manifest_pages)
-                .into_iter()
-                .map(|(i, (_, b))| (i, b))
-                .collect(),
+            manifest_nodes: std::mem::take(&mut self.manifest_nodes),
             bodies: std::mem::take(&mut self.bodies)
                 .into_iter()
                 .filter_map(|(k, mut s)| s.chunks.remove(&0).map(|(_, b)| (k, b)))
@@ -1041,11 +1044,12 @@ impl InitiatorReceiver {
 pub struct OutboundTransfer {
     pub authority_frontier: Vec<u8>,
     /// Canonical authority-section records (mechanics material and signed
-    /// `BodyTransactionV1` records), byte-exact.
+    /// `BodyTransaction` records), byte-exact.
     pub authority_records: Vec<Vec<u8>>,
     pub manifest_root_bytes: Vec<u8>,
-    /// Ordered canonical page bytes.
-    pub manifest_pages: Vec<Vec<u8>>,
+    /// Canonical node bytes of the manifest's Body index, in any order — they
+    /// are content-addressed, so order carries no meaning.
+    pub manifest_nodes: Vec<Vec<u8>>,
     /// `(transaction id, key, protected payload bytes)`.
     pub bodies: Vec<([u8; 32], BodyKey, Vec<u8>)>,
 }
@@ -1085,12 +1089,11 @@ pub fn build_transfer_frames(contact: &ContactId, t: &OutboundTransfer) -> Vec<V
     frames.push(ContactFrame::ManifestOffer {
         root_bytes: t.manifest_root_bytes.clone(),
     });
-    for (i, page) in t.manifest_pages.iter().enumerate() {
-        frames.push(ContactFrame::ManifestPage {
+    for node in &t.manifest_nodes {
+        frames.push(ContactFrame::ManifestNode {
             root,
-            page_index: i as u32,
-            page_hash: manifest_page_hash(page),
-            page_bytes: page.clone(),
+            node_hash: manifest_node_hash(node),
+            node_bytes: node.clone(),
         });
     }
     let mut body_count = 0u32;
@@ -1147,7 +1150,7 @@ pub fn build_transfer_frames(contact: &ContactId, t: &OutboundTransfer) -> Vec<V
 pub struct AccepterValidator {
     contact: ContactId,
     offered_root: Option<[u8; 32]>,
-    offered_pages: u32,
+    offered_nodes: u32,
     sent_transcript: blake3::Hasher,
     end_sent: bool,
     acked: bool,
@@ -1157,8 +1160,7 @@ pub struct AccepterValidator {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AccepterEvent {
     ManifestRequest {
-        first_page: u32,
-        page_count: u16,
+        node_count: u32,
     },
     BodyRequest {
         transaction: [u8; 32],
@@ -1179,7 +1181,7 @@ impl AccepterValidator {
         Self {
             contact,
             offered_root: None,
-            offered_pages: 0,
+            offered_nodes: 0,
             sent_transcript,
             end_sent: false,
             acked: false,
@@ -1194,8 +1196,8 @@ impl AccepterValidator {
                 ContactFrame::ManifestOffer { root_bytes } => {
                     self.offered_root = Some(manifest_root_ref(root_bytes));
                 }
-                ContactFrame::ManifestPage { page_index, .. } => {
-                    self.offered_pages = self.offered_pages.max(page_index + 1);
+                ContactFrame::ManifestNode { .. } => {
+                    self.offered_nodes += 1;
                 }
                 ContactFrame::TransferEnd { .. } => {
                     self.end_sent = true;
@@ -1225,26 +1227,16 @@ impl AccepterValidator {
         }
         match frame {
             ContactFrame::Abort { code } => Ok(AccepterEvent::PeerAborted(code)),
-            ContactFrame::ManifestRequest {
-                root,
-                first_page,
-                page_count,
-            } => {
+            ContactFrame::ManifestRequest { root, node_count } => {
                 let Some(offered) = self.offered_root else {
                     return Err(abort::BAD_REQUEST);
                 };
-                // Must reference the offered root and a nonempty, contiguous,
-                // in-range page interval.
-                if root != offered
-                    || page_count == 0
-                    || u64::from(first_page) + u64::from(page_count) > u64::from(self.offered_pages)
-                {
+                // Must reference the offered root and ask for no more nodes
+                // than were offered.
+                if root != offered || node_count == 0 || node_count > self.offered_nodes {
                     return Err(abort::BAD_REQUEST);
                 }
-                Ok(AccepterEvent::ManifestRequest {
-                    first_page,
-                    page_count,
-                })
+                Ok(AccepterEvent::ManifestRequest { node_count })
             }
             ContactFrame::BodyRequest {
                 transaction,

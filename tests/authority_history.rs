@@ -409,7 +409,7 @@ fn authority_survives_a_body_crash_and_the_retry_incorporates_exactly_once() {
     let staged = StagedContactMaterial {
         authority_records,
         manifest_root_bytes: root_bytes,
-        manifest_pages: pages,
+        manifest_nodes: pages,
         bodies,
     };
 

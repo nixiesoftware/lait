@@ -525,7 +525,7 @@ async fn contact_neighbor(
     let staged = StagedContactMaterial {
         authority_records: received.authority_records,
         manifest_root_bytes: received.manifest_root_bytes,
-        manifest_pages: received.manifest_pages.into_values().collect(),
+        manifest_nodes: received.manifest_nodes.into_values().collect(),
         bodies: received
             .bodies
             .into_iter()
@@ -861,7 +861,7 @@ async fn serve_contact(
         authority_frontier: frontier.as_bytes().to_vec(),
         authority_records,
         manifest_root_bytes: manifest.0,
-        manifest_pages: manifest.1,
+        manifest_nodes: manifest.1,
         bodies,
     };
     let contact = hello.contact;
