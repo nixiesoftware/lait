@@ -404,6 +404,44 @@ fn duplicate_keys_are_refused_rather_than_silently_resolved() {
 }
 
 #[test]
+fn repeating_a_key_in_one_batch_takes_the_last_change() {
+    // What applying the batch in order would have done. `Vec::dedup_by` keeps
+    // the *first* of a run, so the naive spelling silently discards every
+    // change after the first — including a removal that follows a write.
+    let mut nodes = Nodes::default();
+    let mut sink = NodeSink::default();
+    let root = apply(
+        &nodes,
+        None,
+        vec![
+            set(1, b"first"),
+            set(1, b"second"),
+            set(1, b"last"),
+            set(2, b"kept"),
+        ],
+        &mut sink,
+    )
+    .expect("apply");
+    nodes.absorb(sink);
+    assert_eq!(
+        lookup(&nodes, root, &key(1)).expect("lookup"),
+        Some(b"last".to_vec())
+    );
+
+    // And a removal after a write in the same batch removes.
+    let mut sink = NodeSink::default();
+    let root = apply(
+        &nodes,
+        root,
+        vec![set(2, b"rewritten"), remove(2)],
+        &mut sink,
+    )
+    .expect("apply");
+    nodes.absorb(sink);
+    assert_eq!(lookup(&nodes, root, &key(2)).expect("lookup"), None);
+}
+
+#[test]
 fn a_large_value_still_indexes_and_reads_back() {
     // Body records are the largest values this index carries; the leaf byte
     // bound must split rather than refuse.

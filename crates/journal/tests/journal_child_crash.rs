@@ -15,7 +15,7 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-use journal::JournaledStore;
+use journal::{CallerIndex, JournaledStore};
 
 const ENV_DIR: &str = "LAIT_JOURNAL_CRASH_DIR";
 const ENV_POINT: &str = "LAIT_JOURNAL_CRASH_POINT";
@@ -43,7 +43,12 @@ fn crash_child() {
             }
             false
         }));
-    let _ = store.commit(&[b"new-object".to_vec()], &[], &[], b"new-meta".to_vec());
+    let _ = store.commit(
+        &[b"new-object".to_vec()],
+        &[],
+        CallerIndex::NONE,
+        b"new-meta".to_vec(),
+    );
     // Post-authoritative points may let commit() return; exit cleanly then —
     // the parent classifies by on-disk state, not exit code.
     std::process::exit(0);
@@ -66,7 +71,12 @@ fn a_killed_process_recovers_to_exactly_one_complete_state() {
         let old_seq = {
             let mut store = JournaledStore::open(&dir).unwrap();
             store
-                .commit(&[b"old-object".to_vec()], &[], &[], b"old-meta".to_vec())
+                .commit(
+                    &[b"old-object".to_vec()],
+                    &[],
+                    CallerIndex::NONE,
+                    b"old-meta".to_vec(),
+                )
                 .unwrap()
         };
 
@@ -111,7 +121,12 @@ fn a_killed_process_recovers_to_exactly_one_complete_state() {
         // The next commit proceeds with a strictly-forward sequence.
         let mut store = store;
         let next = store
-            .commit(&[b"after".to_vec()], &[], &[], b"after-meta".to_vec())
+            .commit(
+                &[b"after".to_vec()],
+                &[],
+                CallerIndex::NONE,
+                b"after-meta".to_vec(),
+            )
             .unwrap();
         assert!(next > manifest.sequence, "sequences never reuse");
         let _ = std::fs::remove_dir_all(&dir);
@@ -130,7 +145,7 @@ fn many_consecutive_commits_stay_monotone_and_complete() {
             .commit(
                 &[format!("object-{i}").into_bytes()],
                 &[],
-                &[],
+                CallerIndex::NONE,
                 format!("meta-{i}").into_bytes(),
             )
             .unwrap();

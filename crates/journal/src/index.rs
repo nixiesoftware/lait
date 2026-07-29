@@ -251,6 +251,11 @@ pub struct IndexChange {
 
 /// Apply a batch of changes, rewriting only the paths they touch.
 ///
+/// Repeating a key in one batch takes the **last** change for it, which is what
+/// applying a batch in order would have done. `Vec::dedup_by` keeps the first
+/// of a run, so the retained entry is overwritten rather than the later one
+/// dropped — the naive spelling silently discards every change after the first.
+///
 /// Returns the new root and, through `sink`, exactly the nodes that had to be
 /// written. Nodes the update superseded are not deleted here — they become
 /// unreachable, and the store's sweep collects them.
@@ -270,7 +275,13 @@ pub fn apply(
         }
     }
     changes.sort_by_key(|c| c.key);
-    changes.dedup_by(|a, b| a.key == b.key);
+    changes.dedup_by(|later, retained| {
+        if later.key != retained.key {
+            return false;
+        }
+        std::mem::swap(later, retained);
+        true
+    });
     if changes.is_empty() {
         return Ok(root);
     }

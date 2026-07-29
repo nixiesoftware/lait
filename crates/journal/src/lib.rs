@@ -109,14 +109,35 @@ pub struct ObjectRef {
 /// older store is refused at open, never upgraded.
 pub const STORE_FORMAT_VERSION: u8 = 2;
 
+/// A caller's own authenticated index, as one commit sees it.
+///
+/// The two halves travel together because separating them corrupts silently:
+/// roots without nodes name material the commit never wrote, and nodes without
+/// roots are unreachable the moment they land.
+#[derive(Debug, Clone, Copy)]
+pub struct CallerIndex<'a> {
+    /// The roots to record in the manifest. Replaces the previous set whole.
+    pub roots: &'a [index::ChildRef],
+    /// The nodes this commit produced. Written, never made required.
+    pub nodes: &'a [Vec<u8>],
+}
+
+impl CallerIndex<'_> {
+    /// For a caller that keeps no index of its own.
+    pub const NONE: Self = Self {
+        roots: &[],
+        nodes: &[],
+    };
+}
+
 /// The store's indexed commit point: a root into the required-object index plus
 /// a reference to opaque caller metadata. Both are small and neither grows with
 /// the store, which is the entire difference from the shape this replaced.
 ///
-/// The caller keeps its own large maps as index roots inside `caller_meta`,
-/// registering their nodes as ordinary required objects — that is how a
-/// semantics-free journal keeps a Replica's Body catalog alive without being
-/// able to read it.
+/// The caller keeps its own large maps as index roots, and the store keeps
+/// their nodes alive by reachability from those roots — that is how a
+/// semantics-free journal preserves a Replica's Body catalog without being able
+/// to read it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoreManifest {
     pub format_version: u8,
@@ -180,7 +201,16 @@ pub struct JournaledStore {
     root: PathBuf,
     manifest: Option<StoreManifest>,
     injector: Option<FaultInjector>,
+    commits_since_sweep: u32,
 }
+
+/// How many commits may pass before the store collects what they orphaned.
+///
+/// A sweep walks the object directory once, so doing it per commit would put an
+/// O(live) cost on an O(changed) operation. Amortising it over this many
+/// commits keeps the average near zero while bounding how far a long-running
+/// session can drift from live state.
+const COMMITS_PER_SWEEP: u32 = 256;
 
 // The injector closure is not `Debug`; show the root + current manifest.
 impl std::fmt::Debug for JournaledStore {
@@ -326,6 +356,7 @@ impl JournaledStore {
             root,
             manifest: None,
             injector: None,
+            commits_since_sweep: 0,
         };
         store.recover()?;
         Ok(store)
@@ -556,12 +587,18 @@ impl JournaledStore {
         // whose counter is missing or behind its manifest sequence could reuse
         // a sequence — fail closed.
         //
-        // Verification traverses the index rather than reading every object.
-        // The structure is proven whole — canonical encoding, counts, prefix
-        // placement, shape — and each entry is checked for presence and length.
-        // Hashing every object at open cost seconds at 100,000 objects and
-        // bought nothing `read_object` does not already guarantee at the point
-        // of use, which is where a corrupt object actually matters.
+        // Verification proves the index structure whole — canonical encoding,
+        // counts, prefix placement, shape — and then reads and re-hashes every
+        // required object. That second half is deliberate and it is not cheap:
+        // it is what makes "this store opened" mean "every object it promises
+        // is present and is the bytes it claims", rather than deferring the
+        // answer to whichever read happens to touch a corrupt object first.
+        //
+        // It is affordable only because the required set tracks live state.
+        // Index nodes are kept by reachability rather than by requirement, so
+        // the set does not grow with the number of commits ever performed;
+        // `required_set_tracks_live_state` in `journal_faults` is what keeps
+        // that true.
         if let Some((manifest, _)) = self.read_manifest_file()? {
             let source = ObjectNodes { root: &self.root };
             index::validate(&source, manifest.required_object_index_root)
@@ -611,6 +648,22 @@ impl JournaledStore {
         let _ = std::fs::remove_file(self.root.join(format!("{COUNTER_FILE}.tmp")));
         let _ = std::fs::remove_file(self.root.join(format!("{MANIFEST_FILE}.tmp")));
         Ok(())
+    }
+
+    /// Collect every object no root reaches, without stopping the world.
+    ///
+    /// Recovery calls this at open, but a Station that stays up for weeks never
+    /// reopens, so a session-long process would otherwise accumulate every
+    /// superseded object it ever wrote. Collection is safe at any quiet moment
+    /// because it is reachability-driven: an object is removed only when no
+    /// index root reaches it and the required index does not name it, and a
+    /// commit publishes its new root before anything it superseded stops being
+    /// reachable.
+    ///
+    /// It costs one directory walk plus one lookup per candidate, so a caller
+    /// runs it on an idle beat rather than inside a commit.
+    pub fn collect_unreachable(&self) -> Result<(), JournalError> {
+        self.sweep()
     }
 
     /// Collect every object no root reaches. Streaming by construction: the
@@ -710,7 +763,16 @@ impl JournaledStore {
             })
             .map_err(|e| JournalError::Integrity(format!("required index: {e}")))?;
         }
-        self.commit(added, &removed, &[], meta)
+        // A caller that keeps its own index cannot use this door: the whole-set
+        // diff above would drop every caller root it did not name, and this
+        // signature has nowhere to name them.
+        debug_assert!(
+            self.manifest
+                .as_ref()
+                .is_none_or(|m| m.caller_index_roots.is_empty()),
+            "commit_required_set would clear the caller index roots it cannot see"
+        );
+        self.commit(added, &removed, CallerIndex::NONE, meta)
     }
 
     /// Execute one journaled commit.
@@ -719,6 +781,15 @@ impl JournaledStore {
     /// names object hashes whose requirement is dropped — the bytes survive
     /// until a sweep collects them, so a concurrent read cannot tear. `meta` is
     /// the caller's opaque metadata, stored as its own object.
+    ///
+    /// `caller_index` carries the caller's own authenticated index: its roots,
+    /// and the nodes this commit produced. Those nodes are written but **not
+    /// required** — like the store's own index nodes, they are kept alive by
+    /// reachability from a root. That distinction is the whole lifecycle. A
+    /// required entry is a promise that never expires, so an index node
+    /// admitted as required would survive every rewrite that superseded it, and
+    /// the store would grow with the number of commits it had ever performed
+    /// rather than with what it holds.
     ///
     /// The commit writes only what changed: the added objects, the meta object,
     /// and the index nodes on the paths those changes touch. Nothing
@@ -740,9 +811,10 @@ impl JournaledStore {
         &mut self,
         added: &[Vec<u8>],
         removed: &[[u8; 32]],
-        caller_index_roots: &[index::ChildRef],
+        caller_index: CallerIndex<'_>,
         meta: Vec<u8>,
     ) -> Result<u64, JournalError> {
+        let caller_index_roots = caller_index.roots;
         // 1. Reserve the transaction counter (gaps allowed, reuse forbidden).
         self.point("counter")?;
         let sequence = self.reserve_sequence()?;
@@ -767,7 +839,15 @@ impl JournaledStore {
                 value: Some(encode_len(r.len)),
             })
             .collect();
+        // A hash in both lists is the caller contradicting itself. The write
+        // wins, because the bytes are about to be on disk and releasing them in
+        // the same breath would make this commit's own objects collectable.
+        let written_now: std::collections::BTreeSet<[u8; 32]> =
+            added_refs.iter().map(|r| r.hash).collect();
         for hash in removed {
+            if written_now.contains(hash) {
+                continue;
+            }
             changes.push(index::IndexChange {
                 key: *hash,
                 value: None,
@@ -789,10 +869,12 @@ impl JournaledStore {
 
         // Everything this commit must durably write: the caller's objects, the
         // metadata object, and the index nodes the update produced.
-        let mut write_set: Vec<Vec<u8>> = Vec::with_capacity(added.len() + sink.written.len() + 1);
+        let mut write_set: Vec<Vec<u8>> =
+            Vec::with_capacity(added.len() + sink.written.len() + caller_index.nodes.len() + 1);
         write_set.extend_from_slice(added);
         write_set.push(meta);
         write_set.extend(sink.written);
+        write_set.extend_from_slice(caller_index.nodes);
         let mut seen = std::collections::BTreeSet::new();
         write_set.retain(|bytes| seen.insert(object_hash(bytes)));
 
@@ -876,6 +958,21 @@ impl JournaledStore {
             if wrote && !self.crash_requested("journal-remove") {
                 let _ = self.remove_journal();
             }
+        }
+
+        // 7. The periodic backstop. A commit orphans the index spine it
+        //    rewrote, and a Station that stays up for weeks never reopens — so
+        //    without this the object directory grows with the number of commits
+        //    the session performed. Best-effort by construction: the commit is
+        //    already authoritative, and the next open sweeps anyway.
+        //
+        //    Amortised rather than per-commit because a sweep walks the object
+        //    directory once. A caller with an idle beat should pre-empt this by
+        //    calling [`Self::collect_unreachable`] when nothing is waiting.
+        self.commits_since_sweep += 1;
+        if self.commits_since_sweep >= COMMITS_PER_SWEEP {
+            self.commits_since_sweep = 0;
+            let _ = self.sweep();
         }
         Ok(sequence)
     }

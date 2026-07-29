@@ -1104,10 +1104,16 @@ impl Replica {
         let meta_bytes =
             postcard::to_stdvec(&meta).map_err(|e| ReplicaCommitError::Fabric(e.to_string()))?;
 
+        // Index nodes are handed over separately, not folded into `added`. An
+        // entry in the required set is a promise that never expires, so a node
+        // admitted there would outlive every rewrite that superseded it and the
+        // store would grow with the number of commits rather than with what it
+        // holds. As caller-index nodes they live by reachability instead.
         let mut added = new_objects;
-        added.extend(sink.written);
         let mut seen = std::collections::BTreeSet::new();
         added.retain(|b| seen.insert(object_ref(b).hash));
+        let mut index_nodes = sink.written;
+        index_nodes.retain(|b| seen.insert(object_ref(b).hash));
         // An object written by this commit is not also collectable by it.
         removed.retain(|h| !seen.contains(h));
         removed.sort();
@@ -1121,7 +1127,11 @@ impl Replica {
             .collect();
 
         let store = self.durable.as_mut().expect("durable path");
-        match store.commit(&added, &removed, &roots, meta_bytes) {
+        let caller_index = fabric::journal::CallerIndex {
+            roots: &roots,
+            nodes: &index_nodes,
+        };
+        match store.commit(&added, &removed, caller_index, meta_bytes) {
             Ok(_) => {}
             Err(fabric::journal::JournalError::OutcomeUnknown) => {
                 self.poisoned = true;
@@ -1383,8 +1393,8 @@ impl Replica {
         };
         let meta_bytes =
             postcard::to_stdvec(&meta).map_err(|e| ReplicaCommitError::Fabric(e.to_string()))?;
-        let mut added = vec![root_bytes];
-        added.extend(sink.written);
+        let added = vec![root_bytes];
+        let index_nodes = sink.written;
         let roots: Vec<IndexRef> = self
             .body_index_root
             .into_iter()
@@ -1394,7 +1404,11 @@ impl Replica {
             .collect();
 
         let store = self.durable.as_mut().expect("durable path");
-        match store.commit(&added, &removed, &roots, meta_bytes) {
+        let caller_index = fabric::journal::CallerIndex {
+            roots: &roots,
+            nodes: &index_nodes,
+        };
+        match store.commit(&added, &removed, caller_index, meta_bytes) {
             Ok(_) => {}
             Err(fabric::journal::JournalError::OutcomeUnknown) => {
                 self.poisoned = true;
@@ -2716,6 +2730,28 @@ impl Replica {
     /// encoding is canonical.
     pub fn published_root(&self) -> Option<fabric::journal::index::ChildRef> {
         self.manifest_body_root
+    }
+
+    /// How many objects the store has promised to keep.
+    ///
+    /// A maintenance and test observation, not a product surface. It exists
+    /// because the required set is the one thing whose growth has no natural
+    /// ceiling: an entry is a promise that never expires, so anything admitted
+    /// there by mistake is permanent.
+    pub fn required_object_count(&self) -> Option<usize> {
+        Some(self.durable.as_ref()?.required_objects().ok()?.len())
+    }
+
+    /// Collect objects no root reaches. A maintenance beat, safe at any quiet
+    /// moment — the store sweeps periodically on its own, and this lets a
+    /// caller that knows it is idle pre-empt that.
+    pub fn collect_unreachable_objects(&self) -> Result<(), ReplicaCommitError> {
+        let Some(store) = self.durable.as_ref() else {
+            return Ok(());
+        };
+        store
+            .collect_unreachable()
+            .map_err(|e| ReplicaCommitError::Durability(e.to_string()))
     }
 
     /// Serve the requested published-catalog nodes to a descending peer.

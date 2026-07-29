@@ -36,4 +36,6 @@ pub use fabric::{
     BodyExport, CausalToken, CollaborativeView, CrdtFabric, Fabric, FabricCommitReceipt,
     FabricError, FabricKey, FabricOp, FabricTransactionRequest, ListElement, ProjectionError,
 };
-pub use journal::{FaultInjector, JournaledStore, ObjectRef, StoreManifest, FAULT_POINTS};
+pub use journal::{
+    CallerIndex, FaultInjector, JournaledStore, ObjectRef, StoreManifest, FAULT_POINTS,
+};

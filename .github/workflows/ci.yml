@@ -257,7 +257,7 @@ jobs:
           # refusal, and the commit-cost baseline. Each is a claim the docket
           # makes about the substrate; each fails loudly if it stops being true.
           - job: core-fabric-foundations
-            filter: "binary(causal_evidence) + binary(history_growth) + binary(algebra_reservation) + binary(clean_break) + binary(commit_cost_baseline) + binary(causal_contract) + binary(batch_atomicity)"
+            filter: "binary(causal_evidence) + binary(history_growth) + binary(algebra_reservation) + binary(clean_break) + binary(commit_cost_baseline) + binary(causal_contract) + binary(batch_atomicity) + binary(store_growth)"
           # Plan 14 S0: the frozen delivery-plane shapes, and the documentation
           # gate that keeps the observed-vs-chosen split honest when the
           # transport pin moves. The real-socket measurements are #[ignore]d and
