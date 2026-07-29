@@ -227,6 +227,7 @@ fn an_unsorted_entry_from_the_wire_is_refused() {
     let bad = ManifestEntry {
         key: body(1),
         heads: vec![b, a],
+        content_refs: Vec::new(),
     };
     assert_eq!(
         ManifestEntry::decode_canonical(&postcard::to_stdvec(&bad).unwrap()),

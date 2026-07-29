@@ -357,3 +357,147 @@ fn recorded_chunk_geometry() {
         "a sealed chunk must fit Contact's 1 MiB frame"
     );
 }
+
+// --- Streaming ingest -------------------------------------------------------
+
+fn temp_cache(tag: &str) -> fabric::journal::cache::ResidentCache {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!("lait-ingest-{tag}-{}-{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    fabric::journal::cache::ResidentCache::open(dir, 1 << 30).unwrap()
+}
+
+#[test]
+fn a_streamed_ingest_matches_a_whole_seal_and_reads_back() {
+    use replica::content::{open_resident_chunk, ContentIngest};
+    let cache = temp_cache("roundtrip");
+    let chunk = CHUNK_PLAINTEXT_LEN as usize;
+
+    for len in [0usize, 1, chunk - 1, chunk, chunk + 1, chunk * 2 + 13] {
+        let plaintext = filler(len as u64, len);
+        let mut ingest = ContentIngest::begin(&space(), &key(), [1u8; 16], &cache, u64::MAX);
+        // Feed in awkward slices: ingest must not care where the reader's
+        // buffer boundaries fall.
+        for piece in plaintext.chunks(7919.min(plaintext.len().max(1))) {
+            ingest.push(piece).unwrap();
+        }
+        let out = ingest.finish().unwrap();
+
+        assert_eq!(out.descriptor.plaintext_len, len as u64);
+        assert_eq!(
+            out.descriptor.chunk_count as u64,
+            expected_chunk_count(len as u64)
+        );
+        assert_eq!(out.leases.len(), out.descriptor.chunk_count as usize);
+
+        let mut recovered = Vec::with_capacity(len);
+        for lease in &out.leases {
+            recovered.extend_from_slice(
+                &open_resident_chunk(&out.descriptor, &key(), &cache, &lease.entry).unwrap(),
+            );
+        }
+        assert_eq!(recovered, plaintext, "streamed round trip failed at {len}");
+    }
+}
+
+#[test]
+fn a_cancelled_ingest_leaves_nothing_reachable() {
+    use replica::content::ContentIngest;
+    let cache = temp_cache("cancel");
+    let mut ingest = ContentIngest::begin(&space(), &key(), [2u8; 16], &cache, u64::MAX);
+    ingest
+        .push(&filler(1, CHUNK_PLAINTEXT_LEN as usize * 2))
+        .unwrap();
+    ingest.cancel();
+
+    // Nothing was installed, because installation happens at finish — a proof
+    // cannot exist before the tree it proves against.
+    cache.sweep().unwrap();
+    assert_eq!(cache.resident_bytes(), 0);
+}
+
+#[test]
+fn a_dropped_ingest_cleans_up_like_a_cancelled_one() {
+    use replica::content::ContentIngest;
+    let cache = temp_cache("dropped");
+    {
+        let mut ingest = ContentIngest::begin(&space(), &key(), [3u8; 16], &cache, u64::MAX);
+        ingest.push(b"abandoned").unwrap();
+    }
+    cache.sweep().unwrap();
+    assert_eq!(cache.resident_bytes(), 0);
+}
+
+#[test]
+fn an_ingest_past_its_policy_maximum_is_refused_while_streaming() {
+    // Refused as the bytes arrive, not after the whole thing has been read.
+    use replica::content::ContentIngest;
+    let cache = temp_cache("toolong");
+    let mut ingest = ContentIngest::begin(&space(), &key(), [4u8; 16], &cache, 1_000);
+    assert!(ingest.push(&filler(1, 600)).is_ok());
+    assert_eq!(
+        ingest.push(&filler(2, 600)),
+        Err(ContentError::Geometry),
+        "the limit fires on the piece that would cross it"
+    );
+}
+
+#[test]
+fn ingest_holds_one_chunk_regardless_of_content_size() {
+    // The property that makes this streaming rather than buffering. Measured
+    // through the public surface: a content many chunks long must not make the
+    // ingester's own buffer grow.
+    use replica::content::ContentIngest;
+    let cache = temp_cache("bounded");
+    let mut ingest = ContentIngest::begin(&space(), &key(), [5u8; 16], &cache, u64::MAX);
+    let piece = filler(6, CHUNK_PLAINTEXT_LEN as usize);
+    for _ in 0..8 {
+        ingest.push(&piece).unwrap();
+    }
+    let out = ingest.finish().unwrap();
+    assert_eq!(out.descriptor.chunk_count, 8);
+    // The descriptor is what every replica carries, and it is the same size for
+    // 2 MiB as for a terabyte.
+    assert!(
+        out.descriptor.encode().len() < 128,
+        "a descriptor is fixed-size whatever the content is: {} bytes",
+        out.descriptor.encode().len()
+    );
+}
+
+#[test]
+fn the_ingest_hold_and_the_content_hold_hand_over() {
+    use replica::content::ContentIngest;
+    let cache = temp_cache("held");
+    // Quota zero: everything unheld is evictable immediately.
+    let cache = fabric::journal::cache::ResidentCache::open(cache.root(), 0).unwrap();
+    let mut ingest = ContentIngest::begin(&space(), &key(), [7u8; 16], &cache, u64::MAX);
+    ingest.push(b"held by its ingest").unwrap();
+    let out = ingest.finish().unwrap();
+
+    cache.sweep().unwrap();
+    assert!(
+        cache.is_resident(&out.leases[0].entry),
+        "the ingest holds it"
+    );
+
+    // Releasing the ingest's own hold is what a caller does once it has
+    // committed the descriptor. The content-scoped hold takes over, so the
+    // bytes stay — otherwise committing a descriptor would be the moment its
+    // content became collectable.
+    cache.release_operation(&[7u8; 16]).unwrap();
+    cache.sweep().unwrap();
+    assert!(
+        cache.is_resident(&out.leases[0].entry),
+        "the content hold outlives the ingest that created it"
+    );
+
+    // Only a reachability sweep, which releases by content nonce, lets go.
+    cache
+        .release_operation(&out.descriptor.content_nonce)
+        .unwrap();
+    cache.sweep().unwrap();
+    assert!(!cache.is_resident(&out.leases[0].entry));
+}

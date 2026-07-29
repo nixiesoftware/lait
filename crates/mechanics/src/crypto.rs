@@ -312,34 +312,39 @@ const CONTENT_CHUNK_DOMAIN: &[u8] = b"lait/content-chunk/1";
 
 /// The binding a content chunk is sealed under: everything about the chunk's
 /// place in its content that must not be substitutable. A chunk lifted into a
-/// different position, a different content, or a re-declared geometry fails to
-/// open — the associated data is not decoration.
+/// different position or a different content fails to open — the associated
+/// data is not decoration.
 ///
 /// `content_nonce` rather than the final `ContentId` is bound, and that is
 /// forced: the id contains the Merkle root over these very ciphertexts, so
 /// binding it would be circular.
+///
+/// The content's total length and chunk count are deliberately **not** here,
+/// though an earlier draft had them. They buy nothing the Merkle root does not
+/// already give — the root commits the whole leaf set, each leaf commits its
+/// index and ciphertext length, and the `ContentId` is the hash of the
+/// descriptor carrying that root, so a re-shaped content is a different content
+/// and a truncated one does not verify. What they cost is real: knowing the
+/// total before sealing the first chunk makes streaming ingest impossible, and
+/// ingest that must know the size up front is ingest that buffers the file.
 #[derive(Debug, Clone, Copy)]
 pub struct ContentChunkBinding<'a> {
     pub space: &'a str,
     pub content_nonce: &'a [u8; 16],
     pub chunk_index: u32,
-    pub chunk_count: u32,
-    pub plaintext_len: u64,
 }
 
 impl ContentChunkBinding<'_> {
     /// The canonical associated data. Length-framed so no two distinct
     /// bindings share a preimage.
     fn associated_data(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(CONTENT_CHUNK_DOMAIN.len() + self.space.len() + 48);
+        let mut out = Vec::with_capacity(CONTENT_CHUNK_DOMAIN.len() + self.space.len() + 24);
         out.extend_from_slice(&(CONTENT_CHUNK_DOMAIN.len() as u16).to_be_bytes());
         out.extend_from_slice(CONTENT_CHUNK_DOMAIN);
         out.extend_from_slice(&(self.space.len() as u16).to_be_bytes());
         out.extend_from_slice(self.space.as_bytes());
         out.extend_from_slice(self.content_nonce);
         out.extend_from_slice(&self.chunk_index.to_be_bytes());
-        out.extend_from_slice(&self.chunk_count.to_be_bytes());
-        out.extend_from_slice(&self.plaintext_len.to_be_bytes());
         out
     }
 }

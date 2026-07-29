@@ -33,6 +33,12 @@ use crate::ids::BodyKey;
 pub const MANIFEST_DOMAIN: &[u8] = b"lait/manifest/2";
 /// Domain separating a Body's index key from every other digest.
 pub const BODY_INDEX_KEY_DOMAIN: &[u8] = b"lait/manifest/2/body-key";
+/// Domain separating a content descriptor's index key.
+pub const CONTENT_INDEX_KEY_DOMAIN: &[u8] = b"lait/manifest/2/content-key";
+/// Maximum content references one Body may declare. Bounded because the whole
+/// point of the declaration is that it can be validated without decoding the
+/// product bytes it describes.
+pub const MAX_CONTENT_REFS_PER_BODY: usize = 1024;
 /// Ed25519 algorithm tag.
 pub const SIG_ALG_ED25519: u8 = 1;
 /// The encoded generation of the manifest format.
@@ -52,13 +58,34 @@ pub struct ManifestHead {
     pub transaction_commitment: [u8; 32],
 }
 
-/// One Body's manifest entry: its key and its advertised head set.
+/// One Body's manifest entry: its key, its advertised head set, and the content
+/// it declares.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManifestEntry {
     pub key: BodyKey,
     /// Sorted and unique. A Body's heads are a set, so a canonical order is
     /// what lets two replicas holding the same Body publish the same bytes.
     pub heads: Vec<ManifestHead>,
+    /// The content ids this Body references, sorted and unique.
+    ///
+    /// A `ContentRef` committed inside a Body is product-encoded, and the World
+    /// boundary forbids the substrate from decoding product bytes to find it.
+    /// Without this the content catalog could only ever grow: tombstone every
+    /// Body that referenced an upload and its descriptor — size, geometry,
+    /// epoch, Merkle root — remains signed state on every peer forever. A
+    /// substrate that cannot forget an accidental upload is not acceptable, and
+    /// a reachability rule nobody can compute is not a rule.
+    ///
+    /// So the World *declares* it and Replica validates the declaration:
+    /// bounds, sortedness, uniqueness, and that every named descriptor is
+    /// committed. That is a statement about opaque bytes, not a decoding of
+    /// them, so the boundary holds.
+    ///
+    /// No reference count is stored anywhere. Counts do not converge across
+    /// independently committing replicas; a pure function of the converged Body
+    /// set does.
+    #[serde(default)]
+    pub content_refs: Vec<[u8; 32]>,
 }
 
 /// The signed manifest root.
@@ -122,6 +149,13 @@ fn length_framed(domain: &[u8], body: &[u8]) -> Vec<u8> {
 /// The index key a Body sits under: a domain-separated hash of its canonical
 /// logical key. Hashing is what keeps the tree's shape independent of how
 /// Worlds and Bodies happen to be named.
+pub fn content_index_key(content_id: &[u8; 32]) -> IndexKey {
+    let mut h = blake3::Hasher::new();
+    h.update(CONTENT_INDEX_KEY_DOMAIN);
+    h.update(content_id);
+    *h.finalize().as_bytes()
+}
+
 pub fn body_index_key(key: &BodyKey) -> IndexKey {
     let mut h = blake3::Hasher::new();
     h.update(BODY_INDEX_KEY_DOMAIN);
@@ -149,7 +183,15 @@ impl ManifestEntry {
         if self.heads.is_empty() || self.heads.len() > MAX_HEADS_PER_BODY {
             return Err(ManifestError::Bounds);
         }
+        if self.content_refs.len() > MAX_CONTENT_REFS_PER_BODY {
+            return Err(ManifestError::Bounds);
+        }
         for w in self.heads.windows(2) {
+            if w[0] >= w[1] {
+                return Err(ManifestError::OrderViolation);
+            }
+        }
+        for w in self.content_refs.windows(2) {
             if w[0] >= w[1] {
                 return Err(ManifestError::OrderViolation);
             }
@@ -157,11 +199,26 @@ impl ManifestEntry {
         Ok(())
     }
 
-    /// Build a canonical entry from an unordered head set.
-    pub fn new(key: BodyKey, mut heads: Vec<ManifestHead>) -> Result<Self, ManifestError> {
+    /// Build a canonical entry from an unordered head set and declaration.
+    pub fn new(key: BodyKey, heads: Vec<ManifestHead>) -> Result<Self, ManifestError> {
+        Self::declaring(key, heads, Vec::new())
+    }
+
+    /// Build a canonical entry that also declares content references.
+    pub fn declaring(
+        key: BodyKey,
+        mut heads: Vec<ManifestHead>,
+        mut content_refs: Vec<[u8; 32]>,
+    ) -> Result<Self, ManifestError> {
         heads.sort();
         heads.dedup();
-        let entry = Self { key, heads };
+        content_refs.sort();
+        content_refs.dedup();
+        let entry = Self {
+            key,
+            heads,
+            content_refs,
+        };
         entry.validate()?;
         Ok(entry)
     }

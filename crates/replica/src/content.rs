@@ -95,6 +95,9 @@ pub enum ContentError {
     /// The chunk verified but did not open: wrong epoch, wrong key, or a
     /// binding that disagrees. Deliberately one answer.
     Unopenable,
+    /// The chunk is simply not here. Expected — content is descriptor-complete,
+    /// not byte-complete — and the caller's response is to fetch it.
+    NotResident,
 }
 
 impl std::fmt::Display for ContentError {
@@ -298,8 +301,6 @@ impl ContentDescriptor {
             space: &self.space,
             content_nonce: &self.content_nonce,
             chunk_index,
-            chunk_count: self.chunk_count,
-            plaintext_len: self.plaintext_len,
         }
     }
 
@@ -395,8 +396,6 @@ pub fn seal_content(
             space: space.as_str(),
             content_nonce: &content_nonce,
             chunk_index: index,
-            chunk_count,
-            plaintext_len,
         };
         let sealed = mechanics::crypto::content_chunk_seal(key, &binding, slice);
         leaves.push(ChunkLeaf::of(index, &sealed));
@@ -423,4 +422,211 @@ pub fn seal_content(
         ciphertexts,
         proofs,
     })
+}
+
+/// Streaming ingest: turn a byte source into sealed, verified, resident chunks
+/// without ever holding the whole content.
+///
+/// The reason this can exist at all is that a chunk's binding names its
+/// position, not its content's total size. Bind the total and the first chunk
+/// cannot be sealed until the last byte has been seen, which means buffering
+/// the file — exactly what the content plane exists to avoid.
+///
+/// Nothing durable survives a cancelled or dropped ingest: chunks go to the
+/// cache under this operation's leases, and the descriptor — the only thing
+/// that makes them reachable — is returned to the caller to commit, or not.
+pub struct ContentIngest<'a> {
+    space: SpaceId,
+    key: AuthorizedBodyKey,
+    content_nonce: [u8; 16],
+    operation: [u8; 16],
+    cache: &'a fabric::journal::cache::ResidentCache,
+    buffer: Vec<u8>,
+    leaves: Vec<ChunkLeaf>,
+    ciphertexts: Vec<(u32, Vec<u8>)>,
+    plaintext_len: u64,
+    max_len: u64,
+    finished: bool,
+}
+
+/// What an ingest produced: the descriptor to commit, and the leases holding
+/// its chunks resident until the caller decides.
+///
+/// Two holds exist on these chunks and they hand over. `leases` is the ingest's
+/// own, and lasts only while the caller is deciding whether to commit the
+/// descriptor at all — release it (`release_operation`) once committed. The
+/// content-scoped hold, keyed by the descriptor's nonce, is what keeps the
+/// bytes after that, and only a reachability sweep releases it.
+pub struct IngestedContent {
+    pub descriptor: ContentDescriptor,
+    pub content_ref: ContentRef,
+    pub leases: Vec<fabric::journal::cache::Lease>,
+}
+
+impl<'a> ContentIngest<'a> {
+    /// Begin an ingest. `max_len` is operator policy and may only lower the
+    /// protocol maximum.
+    pub fn begin(
+        space: &SpaceId,
+        key: &AuthorizedBodyKey,
+        operation: [u8; 16],
+        cache: &'a fabric::journal::cache::ResidentCache,
+        max_len: u64,
+    ) -> Self {
+        let mut content_nonce = [0u8; 16];
+        getrandom::fill(&mut content_nonce).expect("getrandom");
+        Self {
+            space: space.clone(),
+            key: key.clone(),
+            content_nonce,
+            operation,
+            cache,
+            buffer: Vec::with_capacity(CHUNK_PLAINTEXT_LEN as usize),
+            leaves: Vec::new(),
+            ciphertexts: Vec::new(),
+            plaintext_len: 0,
+            max_len: max_len.min(MAX_CONTENT_LEN),
+            finished: false,
+        }
+    }
+
+    /// Feed the next bytes. Whole chunks are sealed as they complete, so peak
+    /// memory is one chunk regardless of the content's size.
+    pub fn push(&mut self, mut bytes: &[u8]) -> Result<(), ContentError> {
+        if self.plaintext_len + bytes.len() as u64 > self.max_len {
+            return Err(ContentError::Geometry);
+        }
+        self.plaintext_len += bytes.len() as u64;
+        while !bytes.is_empty() {
+            let room = CHUNK_PLAINTEXT_LEN as usize - self.buffer.len();
+            let take = room.min(bytes.len());
+            self.buffer.extend_from_slice(&bytes[..take]);
+            bytes = &bytes[take..];
+            if self.buffer.len() == CHUNK_PLAINTEXT_LEN as usize {
+                self.seal_buffered()?;
+            }
+        }
+        Ok(())
+    }
+
+    fn seal_buffered(&mut self) -> Result<(), ContentError> {
+        let index = self.leaves.len() as u32;
+        if index >= MAX_CHUNK_COUNT {
+            return Err(ContentError::Geometry);
+        }
+        let binding = ContentChunkBinding {
+            space: self.space.as_str(),
+            content_nonce: &self.content_nonce,
+            chunk_index: index,
+        };
+        let sealed = mechanics::crypto::content_chunk_seal(&self.key, &binding, &self.buffer);
+        self.buffer.clear();
+        self.leaves.push(ChunkLeaf::of(index, &sealed));
+        self.ciphertexts.push((index, sealed));
+        Ok(())
+    }
+
+    /// Close the ingest: seal the tail, build the tree, install every chunk with
+    /// its proof, and return the descriptor.
+    ///
+    /// Chunks install only here, once the root exists — a proof cannot be
+    /// written before the tree it proves against, and the cache refuses to
+    /// advertise an entry without one.
+    pub fn finish(mut self) -> Result<IngestedContent, ContentError> {
+        // Zero-length content is one canonical empty chunk, so a tail is sealed
+        // whenever the buffer holds something or nothing has been sealed yet.
+        if !self.buffer.is_empty() || self.leaves.is_empty() {
+            self.seal_buffered()?;
+        }
+        let descriptor = ContentDescriptor {
+            format_version: CONTENT_FORMAT_VERSION,
+            space: self.space.as_str().to_string(),
+            content_nonce: self.content_nonce,
+            plaintext_len: self.plaintext_len,
+            chunk_plaintext_len: CHUNK_PLAINTEXT_LEN,
+            chunk_count: self.leaves.len() as u32,
+            ciphertext_merkle_root: merkle_root(&self.leaves),
+            epoch: *self.key.epoch_id(),
+        };
+        descriptor.validate()?;
+
+        let mut leases = Vec::with_capacity(self.ciphertexts.len());
+        for (index, ciphertext) in &self.ciphertexts {
+            let proof = chunk_proof(&self.leaves, *index).ok_or(ContentError::ProofMismatch)?;
+            let sidecar = postcard::to_stdvec(&proof).map_err(|_| ContentError::NonCanonical)?;
+            let entry = fabric::journal::object_content_hash(ciphertext);
+            self.cache
+                .install(&entry, ciphertext, &sidecar)
+                .map_err(|_| ContentError::ChunkMismatch)?;
+            // Two holds, for two different lifetimes. The ingest's own lease
+            // lasts while the caller decides whether to commit the descriptor
+            // at all. The content-scoped one lasts until the content becomes
+            // unreferenced, and is keyed by the nonce so it is recoverable from
+            // the descriptor alone — a sweep that has only a descriptor can
+            // still let its bytes go.
+            //
+            // They cannot be one hold. Keying residency by transfer would let
+            // the first of two concurrent fetches collect the other's bytes;
+            // keying a transfer by content would make a cancelled fetch drop
+            // content someone else committed.
+            let lease = fabric::journal::cache::Lease {
+                operation: self.operation,
+                entry,
+            };
+            self.cache
+                .lease(&lease)
+                .map_err(|_| ContentError::ChunkMismatch)?;
+            self.cache
+                .lease(&fabric::journal::cache::Lease {
+                    operation: self.content_nonce,
+                    entry,
+                })
+                .map_err(|_| ContentError::ChunkMismatch)?;
+            leases.push(lease);
+        }
+        self.finished = true;
+        Ok(IngestedContent {
+            content_ref: descriptor.content_ref(),
+            descriptor,
+            leases,
+        })
+    }
+
+    /// Abandon the ingest. Explicit, but dropping does the same — an ingest
+    /// that never finished has installed nothing.
+    pub fn cancel(mut self) {
+        self.finished = true;
+        let _ = self.cache.discard_staged(&self.operation);
+        let _ = self.cache.release_operation(&self.operation);
+    }
+}
+
+impl Drop for ContentIngest<'_> {
+    fn drop(&mut self) {
+        if !self.finished {
+            let _ = self.cache.discard_staged(&self.operation);
+            let _ = self.cache.release_operation(&self.operation);
+        }
+    }
+}
+
+/// The cache address one of a content's chunks is filed under.
+pub fn chunk_entry(ciphertext: &[u8]) -> [u8; 32] {
+    fabric::journal::object_content_hash(ciphertext)
+}
+
+/// Read one chunk of committed content out of the cache, verified and opened.
+pub fn open_resident_chunk(
+    descriptor: &ContentDescriptor,
+    key: &AuthorizedBodyKey,
+    cache: &fabric::journal::cache::ResidentCache,
+    entry: &[u8; 32],
+) -> Result<Vec<u8>, ContentError> {
+    let (ciphertext, sidecar) = cache.read(entry).map_err(|e| match e {
+        fabric::journal::cache::CacheError::NotResident => ContentError::NotResident,
+        _ => ContentError::ChunkMismatch,
+    })?;
+    let proof: ChunkProof =
+        postcard::from_bytes(&sidecar).map_err(|_| ContentError::NonCanonical)?;
+    descriptor.open_chunk(key, &proof, &ciphertext)
 }

@@ -7,6 +7,33 @@ Windows 11 (26200), NVMe. Regenerate with:
 LAIT_COMMIT_BASELINE_FULL=1 cargo test --release --test commit_cost_baseline -- --nocapture
 ```
 
+## After F1 — indexed
+
+One single-Body edit against a store already holding N Bodies, at `293e182`:
+
+| Bodies | p50 | p95 | p99 | objects/edit | object bytes/edit | manifest |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1,000 | 96.8 ms | 108 ms | 118 ms | 19.9 | 55 KB | 174 B |
+| 10,000 | 136 ms | 159 ms | 164 ms | 35.5 | 56 KB | 174 B |
+| 50,000 | 162 ms | 217 ms | 226 ms | 42.8 | 196 KB | 177 B |
+| 100,000 | 206 ms | 227 ms | 369 ms | 56.4 | 74 KB | 177 B |
+
+Peak RSS 174 MiB.
+
+**28x faster at the ceiling, and the commit point stopped growing.** 5.81 s
+becomes 206 ms; a 28.8 MB manifest rewrite becomes 177 bytes. Latency still
+rises about twofold across a hundredfold change in store size — the index is
+O(depth), not O(1), and a larger store means deeper paths and more page cache
+pressure — but the linear term is gone.
+
+Objects written per edit rose from 5-6 to 20-56, because index nodes are
+objects and there are now four indexes (Body catalog, published catalog,
+content catalog, receipts). Total bytes written fell anyway, which is the trade
+that matters: many small immutable nodes instead of one enormous rewritten
+vector.
+
+## Before F1 — the paged manifest and inline catalog
+
 One single-Body edit against a store already holding N Bodies:
 
 | Bodies | p50 | p95 | p99 | objects/edit | object bytes/edit | manifest |

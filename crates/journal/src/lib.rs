@@ -48,6 +48,7 @@
 //! Every write/fsync/rename boundary carries a named fault-injection point so
 //! the crash matrix is testable; see [`JournaledStore::with_fault_injector`].
 
+pub mod cache;
 pub mod index;
 
 use std::fs::{File, OpenOptions};
@@ -243,11 +244,11 @@ impl index::NodeSource for ObjectNodes<'_> {
     }
 }
 
-fn io_err(what: &str, e: std::io::Error) -> JournalError {
+pub(crate) fn io_err(what: &str, e: std::io::Error) -> JournalError {
     JournalError::Durability(format!("{what}: {e}"))
 }
 
-fn write_sync(path: &Path, bytes: &[u8]) -> Result<(), JournalError> {
+pub(crate) fn write_sync(path: &Path, bytes: &[u8]) -> Result<(), JournalError> {
     let mut f = OpenOptions::new()
         .create(true)
         .write(true)
@@ -260,7 +261,7 @@ fn write_sync(path: &Path, bytes: &[u8]) -> Result<(), JournalError> {
 }
 
 /// Atomic replace with a brief retry for Windows sharing violations.
-fn atomic_replace(tmp: &Path, dst: &Path) -> Result<(), JournalError> {
+pub(crate) fn atomic_replace(tmp: &Path, dst: &Path) -> Result<(), JournalError> {
     let mut last = None;
     for attempt in 0..5 {
         match std::fs::rename(tmp, dst) {
@@ -284,7 +285,7 @@ fn atomic_replace(tmp: &Path, dst: &Path) -> Result<(), JournalError> {
 /// handle that opens and then fails to flush is a real error and fails the
 /// phase.
 #[cfg(unix)]
-fn sync_dir(dir: &Path) -> Result<(), JournalError> {
+pub(crate) fn sync_dir(dir: &Path) -> Result<(), JournalError> {
     File::open(dir)
         .and_then(|d| d.sync_all())
         .map_err(|e| io_err("fsync dir", e))
