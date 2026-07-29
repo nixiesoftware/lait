@@ -20,7 +20,7 @@ describe("Sidebar navigation", () => {
     host = null;
   });
 
-  it("keeps workspace destinations global and reaches a project's faces from the tree", () => {
+  it("keeps workspace destinations global and offers projects without their faces", () => {
     const onGo = vi.fn();
     const onMyIssues = vi.fn();
     const onOpenProjectView = vi.fn();
@@ -40,7 +40,6 @@ describe("Sidebar navigation", () => {
           unread={3}
           favoriteProjects={[]}
           savedViews={[]}
-          issueLayout="list"
           onPickSpace={vi.fn()}
           onSearch={onSearch}
           onOpenProjectView={onOpenProjectView}
@@ -63,29 +62,25 @@ describe("Sidebar navigation", () => {
     expect(onSearch).toHaveBeenCalledOnce();
     expect(host.textContent).toContain("3");
 
-    // The project you are in opens itself, so its faces are reachable without
-    // first landing on it and reading a tab strip.
-    click("Activity");
-    expect(onOpenProjectView).toHaveBeenCalledWith("WEB", "activity");
-    click("Overview");
-    expect(onOpenProjectView).toHaveBeenCalledWith("WEB", "overview");
+    // The tree offers PROJECTS, never their faces. It used to hang Overview,
+    // Issues and Activity off each project, from before the project shell had a
+    // tab strip you could see — now it has one, always, so the tree was drawing
+    // the same three choices a pane away with two rows claiming to be current.
+    // The nav answers "which project"; the strip answers "which face".
+    const labels = [...host.querySelectorAll("button")].map((b) => b.textContent);
+    for (const face of ["Overview", "Activity", "Board", "Calendar"]) {
+      expect(labels, `the tree must not offer ${face} — the project strip does`)
+        .not.toContain(face);
+    }
 
-    // Board and Calendar are layouts of Issues, not siblings of it — the tree
-    // offers the destination once and the display popover picks the drawing.
-    expect([...host.querySelectorAll("button")].map((b) => b.textContent))
-      .not.toContain("Calendar");
-    click("Issues");
-    expect(onOpenProjectView).toHaveBeenCalledWith("WEB", "list");
-
-    // The name still goes to the project itself — the chevron is what reveals —
-    // and it names the face it lands on, because there is one navigation verb
-    // and the destination is its argument, not its identity.
+    // The name opens the project, naming the face it lands on: there is one
+    // navigation verb and the destination is its argument, not its identity.
     const name = [...host.querySelectorAll("button")].find((b) => b.title?.startsWith("Web ·"));
     act(() => name?.click());
     expect(onOpenProjectView).toHaveBeenLastCalledWith("WEB", "list");
 
-    // Exactly one row is "where you are": the face, not the face *and* its
-    // project, which drew a two-row block and claimed two current pages.
+    // Exactly one row is "where you are" — the project, now that it has no
+    // children to hand the highlight down to.
     expect(host.querySelectorAll('[aria-current="page"]')).toHaveLength(1);
   });
 
@@ -106,7 +101,6 @@ describe("Sidebar navigation", () => {
           unread={0}
           favoriteProjects={[]}
           savedViews={[]}
-          issueLayout="list"
           onPickSpace={vi.fn()}
           onSearch={vi.fn()}
           onOpenProjectView={vi.fn()}

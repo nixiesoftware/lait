@@ -253,6 +253,10 @@ pub struct ListArgs {
     pub status: Option<String>,
     #[serde(default)]
     pub label: Option<String>,
+    /// Milestone name or `mls_` id. Requires `project` — a milestone belongs to
+    /// exactly one, so there is nothing to resolve the name against without it.
+    #[serde(default)]
+    pub milestone: Option<String>,
     /// Include done + tombstoned issues.
     #[serde(default)]
     pub all: bool,
@@ -729,6 +733,7 @@ impl LaitMcp {
                 mine: a.mine,
                 status: a.status,
                 label: a.label,
+                milestone: a.milestone,
                 all: a.all,
             },
         })

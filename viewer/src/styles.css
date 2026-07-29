@@ -157,6 +157,13 @@
   --spacing-mark-lg: 12px;
   --spacing-mark-xl: 16px;
 
+  /* The project console's width. PINNED, like the icons above and for the same
+     reason: the rail's rows pack a glyph, a name, a percentage, a count and a
+     date onto one line, and that budget is set by the words, not by the density
+     the rest of the layout is running at. Loosening the rhythm should give the
+     rows more air, not make the panel wider. */
+  --spacing-rail: 340px;
+
   /* The density factor. Distinct from `--spacing` on purpose: the unit is the
      rhythm's *quantum* and this is the system's *scale*. Splitting them is what
      lets a comfortable layout loosen rows without also inflating the glyphs and
@@ -252,14 +259,14 @@
      floating bar in the app has been computing `box-shadow: none`. It looked
      deliberate because the surfaces also carry a border. */
   --shadow-overlay: 0 8px 30px light-dark(rgb(0 0 0 / 0.12), rgb(0 0 0 / 0.5));
-  /* The middle tier, and deliberately unused. A shadow is a claim to be off the
-     page, so only things that float carry one: `overlay` for a surface anchored
-     to the control that opened it, `float` for the one that is not anchored to
-     anything. A board card, a segmented selector and an inline toast are all *on*
-     the page — they had this and it read as elevation they had not earned. Kept
-     as the scale's middle step for a surface that lifts without floating; there
-     is currently no such surface. */
-  --shadow-raised: 0 2px 4px light-dark(rgb(0 0 0 / 0.10), rgb(0 0 0 / 0.55));
+  /* The middle tier: a surface that lifts without floating. A shadow is a claim
+     to be off the page, so most on-page things carry none — a board card, a
+     segmented selector and an inline toast had this and it read as elevation
+     they had not earned. What HAS earned it is the comment card and the comment
+     composer: white surfaces sitting on the grey canvas (see the neutral ramp),
+     where a whisper of shadow is what separates "a card on the page" from "a
+     rectangle drawn on it" — Linear's treatment, tuned to be felt, not seen. */
+  --shadow-raised: 0 1px 4px light-dark(rgb(0 0 0 / 0.05), rgb(0 0 0 / 0.35));
   /* For the one surface that is genuinely *hovering* over the work rather than
      opening from a control: the bulk bar. `overlay` is tuned for a popover
      anchored to the thing it belongs to, so it stops short of reading as a
@@ -269,6 +276,25 @@
   --shadow-float:
     0 2px 6px light-dark(rgb(0 0 0 / 0.06), rgb(0 0 0 / 0.4)),
     0 20px 56px -12px light-dark(rgb(0 0 0 / 0.22), rgb(0 0 0 / 0.75));
+
+  /* A CONTROL's edge, measured off Linear's own toolbar rather than guessed.
+     The finding that matters: its buttons carry no border at all. The hairline
+     is a 0.5px shadow RING, and that is not a rounding of 1px — a border is a
+     full device pixel of solid ink that reads as drawn, while a half-pixel ring
+     reads as the edge of something sitting there. At a 28px control the
+     difference is the whole character of the thing.
+
+     `edge` is the ring alone — for a control that is already filled, where a
+     lift would claim it had risen off the bar when it is pressed INTO it. */
+  --shadow-edge: 0 0 0 0.5px light-dark(rgb(0 0 0 / 0.09), rgb(255 255 255 / 0.1));
+  /* The ring plus the lift, two layers: a tight contact shadow and a wider
+     ambient one. Same pairing as `float` and for the same reason — one layer
+     reads as pasted — but an order of magnitude softer, because a toolbar
+     button is resting on the bar, not hovering over the work. */
+  --shadow-control:
+    0 0 0 0.5px light-dark(rgb(0 0 0 / 0.09), rgb(255 255 255 / 0.1)),
+    0 3px 6px -2px light-dark(rgb(0 0 0 / 0.02), rgb(0 0 0 / 0.28)),
+    0 1px 1px light-dark(rgb(0 0 0 / 0.04), rgb(0 0 0 / 0.32));
 }
 
 /* Dark by default; the OS decides unless the user overrode it. `color-scheme` is
@@ -691,12 +717,24 @@
   white-space: pre-wrap;
 }
 
-/* An empty document has nothing to click, so it needs a line to aim at. The
-   placeholder rides on the first paragraph rather than the root: ProseMirror
-   always keeps one, and attaching to the root leaves the text sitting above
-   the caret instead of behind it. */
-.milkdown .ProseMirror.is-empty > p:first-child::before,
-.milkdown .ProseMirror > p.is-empty:first-child::before {
+/* An empty document has nothing to click, so it needs a line to aim at.
+   This used to key off `.is-empty` and read `attr()` from the first paragraph,
+   and it had never once rendered: nothing sets that class — Milkdown's
+   placeholder plugin is not installed — and the attribute is on the ROOT, which
+   is where `editorViewOptionsCtx.attributes` puts everything. `attr()` only
+   reads the element it sits on, so a pseudo-element on the paragraph was asking
+   the paragraph for a value it never had.
+
+   Both halves are fixed here. The empty test is structural rather than a class
+   we do not control: one paragraph holding nothing but the trailing break
+   ProseMirror always keeps. And the pseudo-element moves to the root, where the
+   attribute is. The float with zero height is the same trick as before — it
+   takes no vertical room, so the caret still lands on the first line rather
+   than under the hint. */
+.milkdown
+  .ProseMirror[data-placeholder]:has(
+    > p:first-child:last-child > br.ProseMirror-trailingBreak:only-child
+  )::before {
   content: attr(data-placeholder);
   color: var(--color-mute);
   float: left;
@@ -771,7 +809,7 @@
 
    The terms are already `sr-only` at every width (the rail dropped its label
    column), so nothing needs hiding here that isn't hidden already. */
-@container (max-width: 699px) {
+@container (max-width: 919px) {
   .issue-detail-properties {
     flex-flow: row wrap;
     gap: 2px 8px;
@@ -805,26 +843,57 @@
   margin-top: 0;
 }
 
-@container (min-width: 700px) {
+/* The rail costs a fixed 264px plus its gutter and the page inset — 400px of
+   chrome before the document gets a single character. Engaging it at 700px
+   left the text 331px, a ~48-character column with a 264px rail beside it:
+   the reference material was taking 44% of the room and the thing you came to
+   read was wrapping mid-phrase with code blocks running past their edge.
+
+   So the threshold is what the DOCUMENT needs, not what the rail fits in. 920px
+   is 400px of chrome plus a 520px column — ~75 characters at this face, the
+   top of the comfortable range. Below it the strip above wins: properties on
+   one wrapping row and the body at full width beats two columns that are both
+   too narrow. */
+@container (min-width: 920px) {
   /* Boxed and centred, the way Linear sets an issue. The measure cap below
      governs the text column; capping the GRID at exactly that column plus the
      gutter and the rail means the two never drift apart as the window grows,
      and the whole set stays centred in the pane rather than pinned left with a
      widening void beside it. */
   .issue-detail-body {
-    /* Composed, not a round number. The cap is exactly measure + gutter + rail,
-       so any one of the three can be retuned and the total follows instead of
-       needing to be recomputed by hand. `+ 2rem` restores the element's own
-       `p-4`, which sits inside the border box — without it the columns would
-       sum to 32px less than the composition claims. */
+    /* Composed, not a round number. The cap is exactly measure + gutter + rail
+       + the element's own inset, so any one of them can be retuned and the
+       total follows instead of needing to be recomputed by hand.
+
+       An issue read at full width is a document, and a document needs margins:
+       the pane's `p-4` is right for a strip 400px wide and far too tight once
+       the thing spans a monitor — the title started 16px under the header bar
+       with the text running to the edge. The inset and the leading are set
+       here rather than as utility classes on the element because the width
+       composition above has to know them; two places would drift.
+
+       Bottom is deliberately the largest. A body ends where its last line
+       ends, and a scroll that stops dead on the composer reads as truncation —
+       Linear leaves a screen's worth of quiet under the final block. */
     --issue-rail: 264px;
-    --issue-gutter: 40px;
+    --issue-gutter: 56px;
     --issue-measure: 1296px;
+    --issue-inset: 40px;
     display: grid;
     grid-template-columns: minmax(0, 1fr) var(--issue-rail);
     align-content: start;
     column-gap: var(--issue-gutter);
-    max-width: calc(var(--issue-measure) + var(--issue-gutter) + var(--issue-rail) + 2rem);
+    /* NO row gap, and the rhythm rides on margins below instead. The rail has
+       to span many rows for `sticky` to have anywhere to travel (see its rule),
+       and a spanned row that holds nothing still pays the gap on both sides —
+       37 unused rows were manufacturing 888px of emptiness under every issue.
+       Margins are paid by elements that exist, so the phantom rows cost zero. */
+    row-gap: 0;
+    padding: 40px var(--issue-inset) 96px;
+    max-width: calc(
+      var(--issue-measure) + var(--issue-gutter) + var(--issue-rail) +
+        (2 * var(--issue-inset))
+    );
     margin-inline: auto;
     width: 100%;
   }
@@ -843,6 +912,15 @@
     grid-column: 1;
     width: 100%;
     max-width: var(--issue-measure);
+    /* The document's rhythm — one step up from the narrow strip's 16px, so the
+       title, the description and the timeline read as separate movements
+       rather than a stack of rows. On the element rather than as a gap: see
+       `row-gap: 0` above. */
+    margin-top: 24px;
+  }
+
+  .issue-detail-body > *:not(.issue-detail-properties):first-child {
+    margin-top: 0;
   }
 
   /* No divider and no scroll of its own. The rail is reference material you
@@ -856,10 +934,10 @@
     grid-row: 1 / span 40;
     align-self: start;
     position: sticky;
-    /* Matches the body's own `p-4`. At `top: 0` the rail sat 16px below the
+    /* Matches the body's own top inset. At `top: 0` the rail sat below the
        scroll container at rest and then snapped up to meet it on the first
        scroll — a visible jolt that read as the eyebrow sliding out from under
        itself. Sticking where it already sits means it never moves at all. */
-    top: 1rem;
+    top: 40px;
   }
 }

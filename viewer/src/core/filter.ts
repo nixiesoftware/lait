@@ -1,4 +1,4 @@
-import type { BoardView, Row } from "../types";
+import type { BoardView, Row, StatusCategory, WorkflowState } from "../types";
 
 /**
  * Filtering — two kinds, deliberately not one.
@@ -58,6 +58,19 @@ export interface FilterState {
    *  Client-side: the row carries its assignee keys, so this is a set membership
    *  test, not the ACL question `mine` answers. */
   assignees: readonly string[];
+  /**
+   * A `mls_` milestone id, or `""` for the No-milestone bucket. `null` = all.
+   *
+   * Client-side, by the same argument this file makes for `status`: `Row.milestone`
+   * is an id the daemon put there, so comparing it re-derives nothing. Unlike
+   * `label` there is no resolution step — the id is already on the row, which is
+   * exactly why it was put there.
+   *
+   * `""` is a real selection, not an absence: "issues nobody has scoped yet" is a
+   * thing you go looking for, and it is the one bucket a per-milestone filter
+   * cannot otherwise reach. `null` and `""` must never be conflated.
+   */
+  milestone: string | null;
 }
 
 export const EMPTY_FILTER: FilterState = {
@@ -67,6 +80,7 @@ export const EMPTY_FILTER: FilterState = {
   status: [],
   priority: [],
   assignees: [],
+  milestone: null,
 };
 
 /** Whether anything is narrowing the view. */
@@ -76,7 +90,8 @@ export const isActive = (f: FilterState): boolean =>
   f.label !== null ||
   f.status.length > 0 ||
   f.priority.length > 0 ||
-  f.assignees.length > 0;
+  f.assignees.length > 0 ||
+  f.milestone !== null;
 
 /** Whether the daemon has to be asked — i.e. the parts we refuse to guess at. */
 export const needsServer = (f: FilterState): boolean => f.mine || f.label !== null;
@@ -132,7 +147,8 @@ export function applyFilter(
             matchesText(r, f.text) &&
             (allowed === null || allowed.has(r.doc_id)) &&
             (f.priority.length === 0 || f.priority.includes(r.priority)) &&
-            (f.assignees.length === 0 || r.assignees.some((a) => f.assignees.includes(a))),
+            (f.assignees.length === 0 || r.assignees.some((a) => f.assignees.includes(a))) &&
+            (f.milestone === null || (r.milestone ?? "") === f.milestone),
         ),
       })),
   };
@@ -141,3 +157,56 @@ export function applyFilter(
 /** Total visible rows, tombstones excluded. */
 export const countRows = (board: BoardView): number =>
   board.columns.reduce((n, c) => n + c.rows.filter((r) => !r.tombstone).length, 0);
+
+/**
+ * The three cuts of a workflow anyone actually asks for.
+ *
+ * Presets over `status`, not a second axis: each writes the same `filter.status`
+ * the Status facet writes, so the two can never disagree and a hand-picked set
+ * simply lights up whichever preset it happens to equal.
+ *
+ * They used to be a run of pills in the toolbar beside the project tabs, which
+ * put six identical pills on one bar answering two different questions — which
+ * FACE of the project, and which ROWS that face draws. They are a filter, so
+ * they live in the filter now.
+ */
+export const STATUS_SLICES = [
+  { id: "active", label: "Active", categories: ["active"] as StatusCategory[] },
+  { id: "backlog", label: "Backlog", categories: ["backlog"] as StatusCategory[] },
+  { id: "all", label: "All issues", categories: null },
+] as const;
+
+export type StatusSlice = (typeof STATUS_SLICES)[number];
+
+/** The status ids a slice selects — empty for "all", which selects nothing. */
+export function sliceStatusIds(
+  slice: StatusSlice,
+  states: readonly WorkflowState[],
+): string[] {
+  return slice.categories === null
+    ? []
+    : states.filter((state) => slice.categories!.includes(state.category)).map((s) => s.id);
+}
+
+/**
+ * Which slice the current selection equals, if any.
+ *
+ * A workflow with no `active` states would make that slice's id set empty and
+ * indistinguishable from "All issues", so an empty slice never claims the
+ * selection — "All" is the only one allowed to mean nothing selected.
+ */
+export function selectedSlice(
+  f: FilterState,
+  states: readonly WorkflowState[],
+): StatusSlice["id"] | null {
+  const sameSet = (a: readonly string[], b: readonly string[]) =>
+    a.length === b.length && a.every((id) => b.includes(id));
+  return (
+    STATUS_SLICES.find((slice) => {
+      const ids = sliceStatusIds(slice, states);
+      return slice.categories === null
+        ? f.status.length === 0
+        : ids.length > 0 && sameSet(f.status, ids);
+    })?.id ?? null
+  );
+}

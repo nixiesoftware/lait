@@ -20,10 +20,6 @@ import {
 
 import {
   isProjectView,
-  navViewFor,
-  PROJECT_NAV_VIEWS,
-  PROJECT_VIEW_LABEL,
-  type IssueMode,
   type ProjectView,
   type View,
 } from "../core/registry";
@@ -37,7 +33,6 @@ import {
   MenuSub,
   MenuSubContent,
   MenuSubTrigger,
-  PROJECT_VIEW_ICON,
 } from "./layout";
 import { Badge, cn, IconButton, navigationItem } from "./primitives";
 
@@ -52,7 +47,6 @@ export function Sidebar({
   currentName,
   favoriteProjects,
   savedViews,
-  issueLayout,
   onPickSpace,
   onSearch,
   onOpenProjectView,
@@ -74,8 +68,6 @@ export function Sidebar({
   currentName?: string | undefined;
   favoriteProjects: readonly string[];
   savedViews: readonly SavedView[];
-  /** The layout Issues were last drawn in, so re-entering them keeps it. */
-  issueLayout: IssueMode;
   onPickSpace: (id: string) => void;
   onSearch: () => void;
   onOpenProjectView: (key: string, view: ProjectView) => void;
@@ -105,18 +97,6 @@ export function Sidebar({
     });
   };
 
-  // Which projects show their faces. Deliberately not persisted: an expanded
-  // tree is about the project you are working in right now, and restoring six
-  // of them from last week would be the enumeration the collapse is there to
-  // avoid. The project you are in opens itself.
-  const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
-  const toggleExpanded = (key: string) =>
-    setExpanded((open) => {
-      const next = new Set(open);
-      if (!next.delete(key)) next.add(key);
-      return next;
-    });
-  const isExpanded = (key: string) => expanded.has(key) || (key === currentProject && isProjectView(view));
   const activeView = isProjectView(view) ? view : null;
 
   const projectNode = (project: ProjectDto) => (
@@ -124,13 +104,11 @@ export function Sidebar({
       key={project.id}
       project={project}
       active={project.key === currentProject}
-      activeView={activeView}
-      issueMode={issueLayout}
       favorited={favoriteProjects.includes(project.key)}
-      expanded={isExpanded(project.key)}
-      onToggleExpand={toggleExpanded}
+      // Re-entering a project keeps the face you were last on, so the tree
+      // answers "which project" and the strip answers "which face" without
+      // either resetting the other's answer.
       onPick={(key) => onOpenProjectView(key, activeView ?? "overview")}
-      onOpenView={onOpenProjectView}
       onToggleFavorite={onToggleFavorite}
     />
   );
@@ -316,70 +294,40 @@ function SpaceSwitcher({
   );
 }
 
-/** One project in the nav — color dot, name, key, and a hover star to (un)pin.
- *  Shared by Favorites and the collapsible all-projects list so the two render
- *  identically and a pin just moves the row up. */
 /**
- * One project in the nav, and — when opened — its five faces beneath it.
+ * One project in the nav — colour dot, name, and a hover star to (un)pin.
  *
- * A flat list of names could only answer "which project"; the view you actually
- * wanted was another click away, on a tab strip you could not see yet. Hanging
- * the views off the project makes the second question answerable from the same
- * place as the first, and the indent rule on the left says which project is
- * answering it.
+ * Flat, and this used to be a tree. The tree existed because a flat list could
+ * only answer "which project" while the face you wanted was another click away
+ * on a strip you could not see yet. The project shell has that strip now, and
+ * it is always on screen — so the tree was offering the same three faces the
+ * strip offers, one pane apart, with two highlights claiming to be the current
+ * page. The nav answers "which project"; the strip answers "which face".
+ *
+ * Shared by Favorites and the all-projects list so the two render identically
+ * and a pin just moves the row up.
  */
 function ProjectRow({
   project,
   active,
-  activeView,
-  issueMode,
   favorited,
-  expanded,
-  onToggleExpand,
   onPick,
-  onOpenView,
   onToggleFavorite,
 }: {
   project: ProjectDto;
   active: boolean;
-  activeView: ProjectView | null;
-  issueMode: IssueMode;
   favorited: boolean;
-  expanded: boolean;
-  onToggleExpand: (key: string) => void;
   onPick: (key: string) => void;
-  onOpenView: (key: string, view: ProjectView) => void;
   onToggleFavorite: (key: string) => void;
 }) {
-  // "You are on one of this project's faces" — the child that owns the highlight.
-  const onFace = active && expanded && activeView !== null;
   return (
     <div className="mb-0.5">
       <div className="group/project relative flex items-center">
-        {/* Its own hit target: the chevron reveals, the name navigates. One
-            button doing both would make "see what is in here" and "go there"
-            the same gesture. */}
-        <button
-          onClick={() => onToggleExpand(project.key)}
-          aria-expanded={expanded}
-          aria-label={expanded ? `Collapse ${project.name}` : `Expand ${project.name}`}
-          className="text-mute hover:text-fg flex size-ctl-xs shrink-0 items-center justify-center rounded-full outline-none"
-        >
-          <ChevronRight
-            className={cn("size-icon-xs transition-transform", expanded && "rotate-90")}
-            aria-hidden
-          />
-        </button>
-        {/* Exactly one row in the tree is where you are. When a face of this
-            project is open that face is the answer, so the project itself steps
-            back — it used to keep its own highlight *and* its own
-            `aria-current`, which drew a two-row block and told a screen reader
-            there were two current pages. */}
         <button
           onClick={() => onPick(project.key)}
           title={`${project.name} · ${project.key}`}
-          aria-current={active && !onFace ? "page" : undefined}
-          className={cn(navigationItem({ selected: active && !onFace }), "px-1.5")}
+          aria-current={active ? "page" : undefined}
+          className={cn(navigationItem({ selected: active }), "px-1.5")}
         >
           <span
             className={cn("size-mark-xs shrink-0 rounded-mark opacity-75", active && "opacity-100")}
@@ -398,34 +346,6 @@ function ProjectRow({
           {favorited ? <StarOff className="size-icon-xs" /> : <Star className="size-icon-xs" />}
         </IconButton>
       </div>
-      {expanded && (
-        /**
-         * A project's faces are pages, drawn like every other page in this nav:
-         * an icon, a label, and a full-width row that lights up when you are on
-         * it. No connecting rule — the indent is the nesting, and a tree of
-         * elbows here would be scaffolding around five items that already read
-         * as a group.
-         *
-         * The rule is what the *next* level down gets, if one ever exists: the
-         * reference draws Cycles' Current/Upcoming with a plain vertical line
-         * and no icons, precisely because they are subordinate to a page that
-         * already has one.
-         */
-        <div className="ml-[18px] flex flex-col gap-px">
-          {PROJECT_NAV_VIEWS.map((v) => (
-            <NavItem
-              key={v}
-              icon={PROJECT_VIEW_ICON[v]}
-              label={PROJECT_VIEW_LABEL[v]}
-              // A board *is* Issues, so the row stays lit while you are on one.
-              active={active && activeView !== null && navViewFor(activeView) === v}
-              // …and re-entering Issues keeps the layout you were last drawing
-              // them in, rather than snapping you back to the list.
-              onClick={() => onOpenView(project.key, v === "list" ? issueMode : v)}
-            />
-          ))}
-        </div>
-      )}
     </div>
   );
 }

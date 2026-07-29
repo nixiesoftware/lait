@@ -1,9 +1,22 @@
 import { useEffect, useRef, useState } from "react";
 import * as Popover from "@radix-ui/react-popover";
-import { ArrowLeft, Check, ChevronRight, ListFilter, Tag, UserRound } from "lucide-react";
+import { ArrowLeft, Check, ChevronRight, ListFilter, Milestone, Tag, UserRound } from "lucide-react";
 
-import { EMPTY_FILTER, isActive, type FilterState } from "../core/filter";
-import { PRIORITY_ORDER, type LabelDto, type MemberDto, type WorkflowState } from "../types";
+import {
+  EMPTY_FILTER,
+  isActive,
+  selectedSlice,
+  sliceStatusIds,
+  STATUS_SLICES,
+  type FilterState,
+} from "../core/filter";
+import {
+  PRIORITY_ORDER,
+  type LabelDto,
+  type MemberDto,
+  type MilestoneDto,
+  type WorkflowState,
+} from "../types";
 import { Avatar, memberName } from "./Avatar";
 import { catalogColor } from "./colors";
 import { PriorityIcon, StatusIcon } from "./icons";
@@ -13,7 +26,7 @@ import { cn, IconButton, PopoverContent } from "./primitives";
 const toggle = (list: readonly string[], id: string): string[] =>
   list.includes(id) ? list.filter((x) => x !== id) : [...list, id];
 
-type Facet = "status" | "priority" | "assignees" | "label";
+type Facet = "status" | "priority" | "assignees" | "label" | "milestone";
 
 /**
  * The filter menu.
@@ -45,6 +58,7 @@ export function FilterMenu({
   labels,
   states,
   members,
+  milestones,
   open,
   onOpenChange,
   focusToken,
@@ -56,6 +70,9 @@ export function FilterMenu({
   labels: LabelDto[];
   states: WorkflowState[];
   members: MemberDto[];
+  /** The open project's milestones. Empty outside a project — a milestone
+   *  belongs to exactly one, so there is nothing to offer across projects. */
+  milestones: MilestoneDto[];
   open: boolean;
   onOpenChange: (open: boolean) => void;
   /** Bumped by the `/` command; opens and focuses without owning the binding. */
@@ -84,13 +101,23 @@ export function FilterMenu({
   useEffect(() => setQuery(""), [facet]);
 
   const active = isActive(filter);
+  const slice = selectedSlice(filter, states);
   const label = labels.find((l) => l.name === filter.label);
+  // `""` is the No-milestone bucket, so this reads the empty string as a real
+  // selection with a name rather than as "nothing selected".
+  const milestoneName =
+    filter.milestone === null
+      ? undefined
+      : filter.milestone === ""
+        ? "No milestone"
+        : (milestones.find((m) => m.id === filter.milestone)?.name ?? filter.milestone);
 
   const counts: Record<Facet, number> = {
     status: filter.status.length,
     priority: filter.priority.length,
     assignees: filter.assignees.length,
     label: filter.label ? 1 : 0,
+    milestone: filter.milestone === null ? 0 : 1,
   };
 
   const matches = (text: string) => text.toLowerCase().includes(query.trim().toLowerCase());
@@ -144,6 +171,29 @@ export function FilterMenu({
             </p>
 
             <div className="flex flex-col p-1">
+              {/* The coarse cut, first, because it is the one you make before
+                  any of the others — and the only reason the facets below need
+                  a Status row at all is the cut this cannot express. These write
+                  the same `filter.status` that row does. */}
+              {STATUS_SLICES.map((preset) => (
+                <Value
+                  key={preset.id}
+                  icon={
+                    <StatusIcon
+                      category={preset.categories?.[0] ?? "done"}
+                      color={
+                        preset.categories === null
+                          ? "var(--color-mute)"
+                          : "var(--color-dim)"
+                      }
+                    />
+                  }
+                  label={preset.label}
+                  selected={slice === preset.id}
+                  onClick={() => onChange({ ...filter, status: sliceStatusIds(preset, states) })}
+                />
+              ))}
+              <div className="border-line my-1 border-t" />
               <Row
                 icon={<UserRound className="size-icon-sm" />}
                 label="Mine"
@@ -194,6 +244,15 @@ export function FilterMenu({
                   value={filter.label ?? undefined}
                   swatch={label ? catalogColor(label.color) : undefined}
                   onOpen={() => setFacet("label")}
+                />
+              )}
+              {milestones.length > 0 && (
+                <Facet
+                  name="Milestone"
+                  icon={<Milestone className="size-icon-sm" />}
+                  count={counts.milestone}
+                  value={milestoneName}
+                  onOpen={() => setFacet("milestone")}
                 />
               )}
             </div>
@@ -296,6 +355,40 @@ export function FilterMenu({
                       }
                     />
                   ))}
+              {/* Single-valued like `label`, but for a different reason: an issue
+                  targets one milestone, so an intersection of two would always be
+                  empty. The No-milestone bucket leads, because "what has nobody
+                  scoped yet" is the question this list is usually opened to ask. */}
+              {facet === "milestone" && (
+                <>
+                  {matches("No milestone") && (
+                    <Value
+                      icon={<Milestone className="text-mute size-icon-sm" />}
+                      label="No milestone"
+                      selected={filter.milestone === ""}
+                      onClick={() =>
+                        onChange({ ...filter, milestone: filter.milestone === "" ? null : "" })
+                      }
+                    />
+                  )}
+                  {milestones
+                    .filter((m) => matches(m.name))
+                    .map((m) => (
+                      <Value
+                        key={m.id}
+                        icon={<Milestone className="text-mute size-icon-sm" />}
+                        label={m.name}
+                        selected={filter.milestone === m.id}
+                        onClick={() =>
+                          onChange({
+                            ...filter,
+                            milestone: filter.milestone === m.id ? null : m.id,
+                          })
+                        }
+                      />
+                    ))}
+                </>
+              )}
             </div>
           </div>
         )}
@@ -309,10 +402,14 @@ const FACET_NAME: Record<Facet, string> = {
   priority: "Priority",
   assignees: "Assignee",
   label: "Label",
+  milestone: "Milestone",
 };
 
 function clearFacet(filter: FilterState, facet: Facet): FilterState {
   if (facet === "label") return { ...filter, label: null };
+  // `null`, never `""` — clearing must widen to every issue, not narrow to the
+  // No-milestone bucket.
+  if (facet === "milestone") return { ...filter, milestone: null };
   return { ...filter, [facet]: [] };
 }
 

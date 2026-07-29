@@ -5,7 +5,18 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_DISPLAY } from "../core/display";
 import type { BoardView } from "../types";
 import { Board } from "./Board";
+import type { IssueMutators } from "./fields";
 import { TooltipProvider } from "./primitives";
+
+const noopMutators: IssueMutators = {
+  setStatus: () => undefined,
+  setPriority: () => undefined,
+  toggleAssignee: () => undefined,
+  toggleLabel: () => undefined,
+  swapLabel: () => undefined,
+  setDue: () => undefined,
+  setEstimate: () => undefined,
+};
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean })
   .IS_REACT_ACT_ENVIRONMENT = true;
@@ -52,7 +63,8 @@ describe("Board filtered-empty state", () => {
             onCreate={() => undefined}
             onDrop={() => undefined}
             onReassign={() => undefined}
-            onEdit={() => undefined}
+            mutators={noopMutators}
+            onLoadChildren={() => Promise.resolve([])}
             readOnly={false}
             filtered={false}
             onClearFilter={() => undefined}

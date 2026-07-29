@@ -126,6 +126,7 @@ fn ls_filter_flags() {
                 mine: true,
                 status: Some("wip".into()),
                 label: None,
+                milestone: None,
                 all: true,
             },
         },

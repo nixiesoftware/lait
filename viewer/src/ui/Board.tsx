@@ -1,20 +1,34 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { GroupHeader, MenuContent, MenuItem } from "./layout";
-import { CalendarClock, ChevronRight, ExternalLink, Flag, FilterX, Gauge, Info, ListChecks, MoreHorizontal, Plus, Tags, UserPlus } from "lucide-react";
+import { CalendarClock, FilterX, Gauge, Info, MoreHorizontal, Plus } from "lucide-react";
 
 import { loadBoardScroll, saveBoardScroll } from "../core/boardState";
 import { groupRows, type DisplayState, type RowGroup } from "../core/display";
-import type { IssueField } from "../core/registry";
 import type { BoardColumn, BoardPos, BoardView, LabelDto, MemberDto, Row } from "../types";
 import { AvatarStack, memberName, stackFor } from "./Avatar";
 import { EmptyState } from "./AppState";
 import { catalogColor } from "./colors";
-import { PriorityIcon, StatusIcon } from "./icons";
-import { Button, IconButton, LabelChips } from "./primitives";
+import {
+  AssigneeChip,
+  DueChip,
+  EstimateChip,
+  fromRowControl,
+  LabelsChip,
+  PriorityChip,
+  StatusChip,
+  SubIssuesChip,
+  type IssueMutators,
+} from "./fields";
+import { PriorityIcon, ProgressRing, StatusIcon } from "./icons";
+import { Button, cn, IconButton } from "./primitives";
 import { dueLabel, dueTone } from "./time";
 
 const DUE_TONE = { overdue: "text-danger", soon: "text-warn", later: "text-mute" } as const;
+
+/** A card's property mini-chip — `ChipButton`'s measure, worn as a face: the
+ *  same 24px pill as a label chip, so one row reads as one family. */
+const cardChip = "border-line text-dim flex h-ctl-sm items-center gap-1 rounded-full border px-2 text-xs";
 
 /**
  * The board — the same fetch as the list, laid out sideways.
@@ -45,7 +59,8 @@ export function Board({
   onCreate,
   onDrop,
   onReassign,
-  onEdit,
+  mutators,
+  onLoadChildren,
   readOnly,
   filtered,
   onClearFilter,
@@ -68,7 +83,10 @@ export function Board({
   /** A card was dragged into a non-status swimlane: reassign it to `groupKey`
    *  (a priority string, an assignee key, or `"unassigned"`). */
   onReassign: (row: Row, groupKey: string) => void;
-  onEdit: (reff: string, field: Extract<IssueField, "priority" | "assignee" | "label">) => void;
+  /** In-place field writes — every chip on a card resolves here. */
+  mutators: IssueMutators;
+  /** The sub-issue rows behind a card's tally, fetched when its menu opens. */
+  onLoadChildren: (reff: string) => Promise<Row[]>;
   readOnly: boolean;
   /** A filter is narrowing this board (`mine`, status, label, …). */
   filtered: boolean;
@@ -107,8 +125,8 @@ export function Board({
         optimistic={optimistic}
         onSelect={onSelect}
         onReassign={onReassign}
-        onStatusMove={onDrop}
-        onEdit={onEdit}
+        mutators={mutators}
+        onLoadChildren={onLoadChildren}
         readOnly={readOnly}
       />
     );
@@ -136,25 +154,19 @@ export function Board({
     reset();
   };
 
-  const move = (row: Row, col: BoardColumn) => {
-    if (row.status === col.state.id) return;
-    onDrop(
-      row.reff,
-      col.state.id,
-      boardMovePosition(col),
-    );
-    setAnnouncement(`Moved ${row.key_alias ?? row.reff} to ${col.state.name}`);
-  };
-
   const reset = () => {
     setDrag(null);
     setOver(null);
   };
 
   return (
+    // The canvas takes `raised` — the elevation ladder's lightest rung — so the
+    // sunken columns read as wells cut into it, Linear's figure-and-ground.
+    // Spacing on the 4px rhythm: a 16px margin around the board, columns 12px
+    // apart — the seam between wells stays narrower than the shore around them.
     <div
       ref={scrollRef}
-      className="flex min-h-0 flex-1 gap-3 overflow-x-auto p-3"
+      className="bg-raised flex min-h-0 flex-1 gap-3 overflow-x-auto p-4"
       aria-label="Issue board"
       tabIndex={0}
       onScroll={(event) => saveBoardScroll(board.project.id, event.currentTarget.scrollLeft)}
@@ -181,8 +193,8 @@ export function Board({
             })
           }
           onDrop={() => finish(col)}
-          onMove={move}
-          onEdit={onEdit}
+          mutators={mutators}
+          onLoadChildren={onLoadChildren}
           columns={board.columns}
           readOnly={readOnly}
         />
@@ -198,7 +210,7 @@ export function Board({
  * two views agree. The drop verb is different from the status board's: there is no
  * `boards[P]` position for these axes, so a card dropped into a column reassigns
  * that field (`onReassign`) rather than moving its status and its order. The card's
- * own "Move to" menu still changes status — the two verbs stay distinct.
+ * own status chip still changes status — the two verbs stay distinct.
  */
 function GroupedBoard({
   board,
@@ -209,8 +221,8 @@ function GroupedBoard({
   optimistic,
   onSelect,
   onReassign,
-  onStatusMove,
-  onEdit,
+  mutators,
+  onLoadChildren,
   readOnly,
 }: {
   board: BoardView;
@@ -221,8 +233,8 @@ function GroupedBoard({
   optimistic: ReadonlySet<string>;
   onSelect: (reff: string) => void;
   onReassign: (row: Row, groupKey: string) => void;
-  onStatusMove: (reff: string, status: string, pos: BoardPos | null) => void;
-  onEdit: (reff: string, field: Extract<IssueField, "priority" | "assignee" | "label">) => void;
+  mutators: IssueMutators;
+  onLoadChildren: (reff: string) => Promise<Row[]>;
   readOnly: boolean;
 }) {
   const [drag, setDrag] = useState<{ reff: string; from: string } | null>(null);
@@ -232,7 +244,6 @@ function GroupedBoard({
   const axis = display.group === "priority" ? "priority" : "assignee";
   const groups = groupRows(board, display);
   const columns = board.columns;
-  const moveStatus = (row: Row, col: BoardColumn) => onStatusMove(row.reff, col.state.id, boardMovePosition(col));
   const rowByReff = new Map(board.columns.flatMap((c) => c.rows).map((r) => [r.reff, r]));
 
   const drop = (group: RowGroup) => {
@@ -247,7 +258,7 @@ function GroupedBoard({
   };
 
   return (
-    <div className="flex min-h-0 flex-1 gap-3 overflow-x-auto p-3" aria-label="Issue board" tabIndex={0}>
+    <div className="bg-raised flex min-h-0 flex-1 gap-3 overflow-x-auto p-4" aria-label="Issue board" tabIndex={0}>
       <p className="sr-only" aria-live="polite">{announcement}</p>
       {groups.map((group) => (
         <GroupedColumn
@@ -270,8 +281,8 @@ function GroupedBoard({
           }}
           onOver={() => setOverCol(group.key)}
           onDrop={() => drop(group)}
-          onMove={moveStatus}
-          onEdit={onEdit}
+          mutators={mutators}
+          onLoadChildren={onLoadChildren}
         />
       ))}
     </div>
@@ -294,8 +305,8 @@ function GroupedColumn({
   onDragEnd,
   onOver,
   onDrop,
-  onMove,
-  onEdit,
+  mutators,
+  onLoadChildren,
 }: {
   group: RowGroup;
   axis: "assignee" | "priority";
@@ -312,14 +323,17 @@ function GroupedColumn({
   onDragEnd: () => void;
   onOver: () => void;
   onDrop: () => void;
-  onMove: (row: Row, col: BoardColumn) => void;
-  onEdit: (reff: string, field: Extract<IssueField, "priority" | "assignee" | "label">) => void;
+  mutators: IssueMutators;
+  onLoadChildren: (reff: string) => Promise<Row[]>;
 }) {
   const rows = group.rows.filter((r) => !r.tombstone);
   const unassigned = axis === "assignee" && group.key === "unassigned";
   return (
-    <section className={`flex shrink-0 flex-col ${rows.length ? "w-72" : "w-60"}`}>
+    // The same fixed-width sunken box as the status columns — a lane is a
+    // column whatever axis it buckets by.
+    <section className="bg-sunken flex w-80 shrink-0 flex-col rounded-surface pt-1">
       <GroupHeader
+        className="px-3"
         icon={
           axis === "priority" ? (
             <PriorityIcon priority={rows[0]?.priority ?? "none"} />
@@ -344,7 +358,7 @@ function GroupedColumn({
         aria-label={`${group.label} issues`}
         data-board-collection
         className={[
-          "flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto rounded-surface p-1 transition-colors",
+          "flex min-h-0 flex-1 flex-col gap-2.5 overflow-y-auto rounded-surface p-3 pt-1 transition-colors",
           active && over ? "bg-hover" : "",
         ].join(" ")}
         onDragOver={(e) => {
@@ -375,8 +389,9 @@ function GroupedColumn({
             onDragEnd={onDragEnd}
             onOver={() => onOver()}
             columns={columns}
-            onMove={onMove}
-            onEdit={onEdit}
+            mutators={mutators}
+            onLoadChildren={onLoadChildren}
+            readOnly={readOnly}
           />
         ))}
         {rows.length === 0 && (
@@ -424,8 +439,8 @@ function Column({
   onDragEnd,
   onOver,
   onDrop,
-  onMove,
-  onEdit,
+  mutators,
+  onLoadChildren,
   columns,
   readOnly,
 }: {
@@ -442,93 +457,81 @@ function Column({
   onDragEnd: () => void;
   onOver: (pos: BoardPos) => void;
   onDrop: () => void;
-  onMove: (row: Row, col: BoardColumn) => void;
-  onEdit: (reff: string, field: Extract<IssueField, "priority" | "assignee" | "label">) => void;
+  mutators: IssueMutators;
+  onLoadChildren: (reff: string) => Promise<Row[]>;
   columns: BoardColumn[];
   readOnly: boolean;
 }) {
   const rows = col.rows.filter((r) => !r.tombstone);
   const active = drag !== null && !readOnly;
-  const [collapsed, setCollapsed] = useState(false);
 
   return (
-    <section className={`group/col flex shrink-0 flex-col transition-[width] ${collapsed ? "w-10" : rows.length ? "w-72" : "w-60"}`}>
+    // One fixed measure per column, and the column is a *box*: header and rows
+    // share one sunken panel, a shade darker than the canvas behind it, so the
+    // board reads as Linear's does — dark wells holding raised cards. Nothing
+    // collapses any more: a board's whole point is every bucket visible at
+    // once, and the 40px rail the chevron bought was a place issues went to
+    // hide. Content-sized widths went with it — `Backlog` and an empty
+    // `Canceled` are the same shelf, which is what lets the eye track a card
+    // across columns without the geometry shifting under it.
+    <section className="bg-sunken flex w-80 shrink-0 flex-col rounded-surface pt-1">
+      {/* 12px inset for the header and the list both, so the state glyph and
+          every card share one left edge — the alignment is what makes the box
+          read as one object rather than a header floating over a list. */}
       <GroupHeader
-        leading={
-          <IconButton
-            label={`${collapsed ? "Expand" : "Collapse"} ${col.state.name}`}
-            onClick={() => setCollapsed((value) => !value)}
-            aria-expanded={!collapsed}
-          >
-            <ChevronRight className={`size-icon-xs transition-transform ${collapsed ? "" : "rotate-90"}`} />
-          </IconButton>
-        }
-        // Collapsed, the column is a 40px rail: the chevron is the only thing
-        // that still fits, so everything the header names goes with the width.
-        {...(collapsed
-          ? { title: null }
-          : {
-              icon: <StatusIcon category={col.state.category} color={catalogColor(col.state.color)} />,
-              title: col.state.name,
-              count: rows.length,
-              meta: col.state.category === "done" ? (
-                <Info
-                  className="text-mute size-icon-sm"
-                  role="img"
-                  aria-label="Completed issues follow completion order. Move an issue here; its completion time determines its position."
-                />
-              ) : undefined,
-              actions: (
-                <>
+        className="px-3"
+        icon={<StatusIcon category={col.state.category} color={catalogColor(col.state.color)} />}
+        title={col.state.name}
+        count={rows.length}
+        meta={col.state.category === "done" ? (
+          <Info
+            className="text-mute size-icon-sm"
+            role="img"
+            aria-label="Completed issues follow completion order. Move an issue here; its completion time determines its position."
+          />
+        ) : undefined}
+        actions={
+          <>
+            {!readOnly && (
+              <IconButton
+                label={`New issue in ${col.state.name}`}
+                onClick={() => onCreate(col.state.id)}
+              >
+                <Plus className="size-icon-sm" />
+              </IconButton>
+            )}
+            <DropdownMenu.Root>
+              <DropdownMenu.Trigger asChild>
+                <IconButton label={`${col.state.name} column actions`}>
+                  <MoreHorizontal className="size-icon-sm" />
+                </IconButton>
+              </DropdownMenu.Trigger>
+              <DropdownMenu.Portal>
+                <MenuContent align="end">
                   {!readOnly && (
-                    <IconButton
-                      label={`New issue in ${col.state.name}`}
-                      onClick={() => onCreate(col.state.id)}
-                    >
+                    <MenuItem onSelect={() => onCreate(col.state.id)}>
                       <Plus className="size-icon-sm" />
-                    </IconButton>
+                      New issue
+                    </MenuItem>
                   )}
-                  <DropdownMenu.Root>
-                    <DropdownMenu.Trigger asChild>
-                      <IconButton label={`${col.state.name} column actions`}>
-                        <MoreHorizontal className="size-icon-sm" />
-                      </IconButton>
-                    </DropdownMenu.Trigger>
-                    <DropdownMenu.Portal>
-                      <MenuContent align="end">
-                        {!readOnly && (
-                          <MenuItem onSelect={() => onCreate(col.state.id)}>
-                            <Plus className="size-icon-sm" />
-                            New issue
-                          </MenuItem>
-                        )}
-                        <MenuItem
-                          disabled={!rows[0]}
-                          onSelect={() => rows[0] && onSelect(rows[0].reff)}
-                        >
-                          Open first issue
-                          <span className="text-mute ml-auto tabular-nums">{rows.length}</span>
-                        </MenuItem>
-                      </MenuContent>
-                    </DropdownMenu.Portal>
-                  </DropdownMenu.Root>
-                </>
-              ),
-            })}
+                  <MenuItem
+                    disabled={!rows[0]}
+                    onSelect={() => rows[0] && onSelect(rows[0].reff)}
+                  >
+                    Open first issue
+                    <span className="text-mute ml-auto tabular-nums">{rows.length}</span>
+                  </MenuItem>
+                </MenuContent>
+              </DropdownMenu.Portal>
+            </DropdownMenu.Root>
+          </>
+        }
       />
-      {collapsed ? (
-        <Button
-          className="min-h-0 flex-1 items-start py-2 text-xs [writing-mode:vertical-rl]"
-          onClick={() => setCollapsed(false)}
-        >
-          {col.state.name} · {rows.length}
-        </Button>
-      ) : (
       <ul
         aria-label={`${col.state.name} issues`}
         data-board-collection
         className={[
-          "flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto rounded-surface p-1 transition-colors",
+          "flex min-h-0 flex-1 flex-col gap-2.5 overflow-y-auto rounded-surface p-3 pt-1 transition-colors",
           // The whole column lights up as a target, because the drop is a *status*
           // change first and a position second — the column is the thing you are
           // choosing.
@@ -564,8 +567,9 @@ function Column({
             onDragEnd={onDragEnd}
             onOver={onOver}
             columns={columns}
-            onMove={onMove}
-            onEdit={onEdit}
+            mutators={mutators}
+            onLoadChildren={onLoadChildren}
+            readOnly={readOnly}
           />
         ))}
         {rows.length === 0 && (
@@ -593,7 +597,6 @@ function Column({
           </li>
         )}
       </ul>
-      )}
     </section>
   );
 }
@@ -626,8 +629,9 @@ function Card({
   onDragEnd,
   onOver,
   columns,
-  onMove,
-  onEdit,
+  mutators,
+  onLoadChildren,
+  readOnly,
 }: {
   row: Row;
   members: MemberDto[];
@@ -641,11 +645,14 @@ function Card({
   onDragStart: (reff: string) => void;
   onDragEnd: () => void;
   onOver: (pos: BoardPos) => void;
+  /** The workflow, for the title-row status chip's options. */
   columns: BoardColumn[];
-  onMove: (row: Row, col: BoardColumn) => void;
-  onEdit: (reff: string, field: Extract<IssueField, "priority" | "assignee" | "label">) => void;
+  mutators: IssueMutators;
+  onLoadChildren: (reff: string) => Promise<Row[]>;
+  readOnly: boolean;
 }) {
   const el = useRef<HTMLLIElement>(null);
+  const locked = readOnly || row.provisional || row.tombstone;
   // Selection moves by keyboard, so it has to drag the viewport with it.
   useEffect(() => {
     if (selected) {
@@ -664,6 +671,10 @@ function Card({
         data-issue-ref={row.reff}
         draggable={draggable}
         onClick={(event) => {
+          // A chip's or the menu's click is not a card click — guarded, never
+          // stopped, so Radix's outside-dismissal sees every click (see
+          // `fromRowControl`).
+          if (fromRowControl(event)) return;
           event.currentTarget.focus({ preventScroll: true });
           onSelect(row.reff);
         }}
@@ -692,7 +703,7 @@ function Card({
         aria-current={selected ? "true" : undefined}
         tabIndex={selected ? 0 : -1}
         className={[
-          "bg-raised group/card cursor-default rounded-surface border p-2 transition-[border-color,opacity] duration-150",
+          "bg-raised group/card cursor-default rounded-surface border p-3 transition-[border-color,opacity] duration-150",
           selected
             ? "border-accent ring-accent ring-1"
             : "border-line hover:border-line-strong",
@@ -703,99 +714,13 @@ function Card({
           dragging ? "opacity-40" : "",
         ].join(" ")}
       >
-        <div className="mb-1.5 flex items-start gap-1">
-          <p className={`min-w-0 flex-1 line-clamp-2 font-medium ${row.tombstone ? "text-mute line-through" : ""}`}>
-            {row.title}
-          </p>
-          {!row.tombstone && (
-            <DropdownMenu.Root>
-              <DropdownMenu.Trigger asChild>
-                <IconButton
-                  label={`Move ${row.key_alias ?? row.reff}`}
-                  onClick={(event) => event.stopPropagation()}
-                  className="-mr-1 -mt-1 opacity-0 group-hover/card:opacity-100 focus-visible:opacity-100 data-[state=open]:opacity-100"
-                >
-                  <MoreHorizontal className="size-icon-sm" />
-                </IconButton>
-              </DropdownMenu.Trigger>
-              <DropdownMenu.Portal>
-                <MenuContent align="end">
-                  <DropdownMenu.Label className="text-mute px-2 py-1 text-2xs font-semibold uppercase">
-                    Move to
-                  </DropdownMenu.Label>
-                  {columns.map((column) => (
-                    <MenuItem
-                      key={column.state.id}
-                      disabled={column.state.id === row.status}
-                      onSelect={() => onMove(row, column)}
-                    >
-                      <StatusIcon
-                        category={column.state.category}
-                        color={catalogColor(column.state.color)}
-                      />
-                      <span className="flex-1">{column.state.name}</span>
-                      <span className="text-mute tabular-nums">{column.rows.length}</span>
-                      {column.state.category === "done" && <span className="sr-only">Completion time determines order</span>}
-                    </MenuItem>
-                  ))}
-                  <DropdownMenu.Separator className="bg-line my-1 h-px" />
-                  <MenuItem onSelect={() => onSelect(row.reff)}>
-                    <ExternalLink className="size-icon-sm" /> Open issue
-                  </MenuItem>
-                  <MenuItem onSelect={() => onEdit(row.reff, "priority")}>
-                    <Flag className="size-icon-sm" /> Set priority
-                  </MenuItem>
-                  <MenuItem onSelect={() => onEdit(row.reff, "assignee")}>
-                    <UserPlus className="size-icon-sm" /> Assign
-                  </MenuItem>
-                  <MenuItem onSelect={() => onEdit(row.reff, "label")}>
-                    <Tags className="size-icon-sm" /> Add label
-                  </MenuItem>
-                </MenuContent>
-              </DropdownMenu.Portal>
-            </DropdownMenu.Root>
-          )}
-        </div>
-        {((row.label_names?.length ?? 0) > 0 ||
-          row.due_date != null ||
-          row.estimate != null ||
-          (row.child_total ?? 0) > 0) && (
-          <div className="mb-1.5 flex flex-wrap items-center gap-1">
-            {/* Three fits a card's width; the rest fold into `+N`. */}
-            <LabelChips
-              names={row.label_names ?? []}
-              colorOf={(name) => labels.find((l) => l.name === name)?.color ?? "gray"}
-              max={3}
-              size="sm"
-            />
-            {row.due_date != null && (
-              <span className={`flex items-center gap-1 text-2xs ${DUE_TONE[dueTone(row.due_date)]}`}>
-                <CalendarClock className="size-icon-xs" />
-                {dueLabel(row.due_date)}
-              </span>
-            )}
-            {row.estimate != null && (
-              <span className="text-mute flex items-center gap-1 text-2xs">
-                <Gauge className="size-icon-xs" />
-                {row.estimate}
-              </span>
-            )}
-            {(row.child_total ?? 0) > 0 && (
-              <span
-                className={`flex items-center gap-1 text-2xs ${
-                  row.child_done === row.child_total ? "text-ok" : "text-mute"
-                }`}
-                title={`${row.child_done} of ${row.child_total} sub-issues done`}
-              >
-                <ListChecks className="size-icon-xs" />
-                {row.child_done}/{row.child_total}
-              </span>
-            )}
-          </div>
-        )}
-        <div className="flex items-center gap-2">
-          <PriorityIcon priority={row.priority} />
-          <span className="text-mute font-mono text-2xs tabular-nums">
+        {/* Linear's card, three rows top to bottom: who and which (key leading,
+            faces trailing), what (status + title), then one pill row where
+            every property is its own trigger. */}
+        <div className="mb-1 flex items-center gap-2">
+          {/* The same measure the list rows set the key in — one identity, one
+              size, whichever surface it names. */}
+          <span className="text-mute font-mono text-xs tabular-nums">
             {row.key_alias ?? row.reff}
           </span>
           <span className="ml-auto flex items-center gap-2">
@@ -808,8 +733,101 @@ function Card({
             )}
             {/* Faces, not `assignee_summary`. The summary is the *terminal's*
                 projection — "you +1" is a sentence, and a card wants a glance. */}
-            <AvatarStack members={stackFor(row.assignees, members)} />
+            <AssigneeChip
+              assignees={row.assignees}
+              members={members}
+              disabled={locked}
+              onToggle={(key, add) => mutators.toggleAssignee(row.reff, key, add)}
+            />
           </span>
+        </div>
+        {/* Status leads the title. The glyph is the picker, so the state a card
+            is in and the way to change it are one mark. */}
+        <div className="mb-1.5 flex items-start gap-1.5">
+          <StatusChip
+            status={row.status}
+            state={columns.find((c) => c.state.id === row.status)?.state}
+            states={columns.map((c) => c.state)}
+            disabled={locked}
+            onPick={(id) => mutators.setStatus(row.reff, id)}
+            className="mt-0.5"
+          />
+          <p className={`min-w-0 flex-1 line-clamp-2 font-medium ${row.tombstone ? "text-mute line-through" : ""}`}>
+            {row.title}
+          </p>
+        </div>
+        {/* One pill row, one family — the bordered mini-chip (the `ChipButton`
+            measure: 24px, pilled, quiet), each pill its own trigger. Priority
+            leads as an icon pill, Linear's spelling; the due date keeps its
+            urgency colour — that is data — and everything else stays dim. */}
+        <div className="flex flex-wrap items-center gap-1.5">
+          <PriorityChip
+            priority={row.priority}
+            disabled={locked}
+            onPick={(p) => mutators.setPriority(row.reff, p)}
+            face={
+              <span className={cn(cardChip, "px-1.5")}>
+                <PriorityIcon priority={row.priority} size="sm" />
+              </span>
+            }
+          />
+          {row.due_date != null && (
+            <DueChip
+              due={row.due_date}
+              disabled={locked}
+              onChange={(next) => mutators.setDue(row.reff, next)}
+              face={
+                <span
+                  className={cn(
+                    cardChip,
+                    dueTone(row.due_date) !== "later" && DUE_TONE[dueTone(row.due_date)],
+                  )}
+                >
+                  <CalendarClock className="size-icon-xs" />
+                  {dueLabel(row.due_date)}
+                </span>
+              }
+            />
+          )}
+          {row.estimate != null && (
+            <EstimateChip
+              estimate={row.estimate}
+              disabled={locked}
+              onPick={(id) => mutators.setEstimate(row.reff, id)}
+              face={
+                <span className={cardChip}>
+                  <Gauge className="size-icon-xs" />
+                  {row.estimate}
+                </span>
+              }
+            />
+          )}
+          {(row.child_total ?? 0) > 0 && (
+            <SubIssuesChip
+              states={columns.map((c) => c.state)}
+              loadChildren={() => onLoadChildren(row.reff)}
+              onOpen={onSelect}
+              face={
+                <span
+                  className={cn(cardChip, row.child_done === row.child_total && "text-ok")}
+                  title={`${row.child_done} of ${row.child_total} sub-issues done`}
+                >
+                  <ProgressRing done={row.child_done ?? 0} total={row.child_total ?? 0} />
+                  {row.child_done}/{row.child_total}
+                </span>
+              }
+            />
+          )}
+          {/* Three fits a card's width; the rest fold into `+N`. */}
+          <LabelsChip
+            names={row.label_names ?? []}
+            labels={labels}
+            disabled={locked}
+            onToggle={(name, add) => mutators.toggleLabel(row.reff, name, add)}
+            onSwap={(from, to) => mutators.swapLabel(row.reff, from, to)}
+            max={3}
+            className="flex-wrap"
+          />
         </div>
       </li>
       {gap === "after" && <DropLine />}

@@ -82,6 +82,7 @@ export function DatePicker({
   ariaLabel = "Due date",
   placeholder = "None",
   className,
+  face,
 }: {
   value: string | null;
   onChange: (next: string | null) => void;
@@ -93,6 +94,10 @@ export function DatePicker({
   className?: string;
   tone?: ControlTone;
   size?: ControlSize;
+  /** Trigger content. Defaults to the calendar glyph + label — a chip that
+   *  already draws the date its own way (a list row's bare column, a card's
+   *  `CalendarClock` run) passes its face and keeps its geometry. */
+  face?: React.ReactNode;
 }) {
   const [open, setOpen] = useState(false);
   const [view, setView] = useState<Date>(() =>
@@ -111,7 +116,7 @@ export function DatePicker({
   if (disabled) {
     return (
       <span className={cn(controlTrigger({ tone, size }), "text-dim", !value && "text-mute", className)}>
-        {value ? labelFor(value) : placeholder}
+        {face ?? (value ? labelFor(value) : placeholder)}
       </span>
     );
   }
@@ -141,8 +146,12 @@ export function DatePicker({
         aria-label={ariaLabel}
         className={cn(controlTrigger({ tone, size }), !value && "text-mute", className)}
       >
-        <Calendar className="text-mute size-icon-sm shrink-0" />
-        <span>{value ? labelFor(value) : placeholder}</span>
+        {face ?? (
+          <>
+            <Calendar className="text-mute size-icon-sm shrink-0" />
+            <span>{value ? labelFor(value) : placeholder}</span>
+          </>
+        )}
       </Popover.Trigger>
       <PopoverContent align="start" className="w-64 p-2">
         <div className="mb-1 flex flex-col gap-0.5">

@@ -1,6 +1,7 @@
 import { createContext, useContext, useId, useMemo, useState } from "react";
 
 import type { ProjectView } from "../core/registry";
+import { loadRailCollapsed, saveRailCollapsed } from "../core/railState";
 import { createPortal } from "react-dom";
 
 import { cn, crumbGlyph, OverlayGap } from "./primitives";
@@ -448,6 +449,70 @@ export function RailSection({
   );
 }
 
+/**
+ * A card in the project rail — and deliberately *not* the grammar `RailSection`
+ * above uses.
+ *
+ * An issue's rail is metadata about a document you are reading, so it recedes:
+ * captions over a hairline column, no borders, nothing to click. A project's
+ * rail is the console for something you are running, so it does the opposite.
+ * Each card is a bordered surface with a header that carries its own verb, its
+ * rows go somewhere, and the whole thing folds when you are done with it.
+ *
+ * The two surfaces used to share one aside on the theory that a project and an
+ * issue are the same kind of object. They are not: one is a thing you read, the
+ * other is a thing you steer.
+ *
+ * `id` keys the fold preference and must stay stable — it is not the title,
+ * which is a display string.
+ */
+export function RailCard({
+  title,
+  id,
+  action,
+  children,
+}: {
+  title: string;
+  id: string;
+  /** A trailing control in the header, typically the `+` that adds to the card. */
+  action?: React.ReactNode;
+  children: React.ReactNode;
+}) {
+  const [collapsed, setCollapsed] = useState(() => loadRailCollapsed(id));
+  const bodyId = useId();
+
+  const toggle = () => {
+    setCollapsed((was) => {
+      saveRailCollapsed(id, !was);
+      return !was;
+    });
+  };
+
+  return (
+    <section className="border-line bg-raised rounded-surface border">
+      <div className="flex h-ctl-lg items-center gap-1 px-2">
+        <button
+          type="button"
+          onClick={toggle}
+          aria-expanded={!collapsed}
+          aria-controls={bodyId}
+          className="text-dim hover:text-fg flex min-w-0 items-center gap-1 rounded-control px-1 text-sm font-medium outline-none focus-visible:ring-1 focus-visible:ring-accent/50"
+        >
+          <span className="truncate">{title}</span>
+          <ChevronRight
+            className={cn("size-icon-sm shrink-0 transition-transform", !collapsed && "rotate-90")}
+            aria-hidden
+          />
+        </button>
+        {/* Always visible, unlike the document's `Disclosure`. A console's verbs
+            do not hide until you find them with the pointer. */}
+        {action && <span className="ml-auto flex items-center">{action}</span>}
+      </div>
+      {!collapsed && <div id={bodyId} className="px-2 pb-2">{children}</div>}
+    </section>
+  );
+}
+
 export function RailRow({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     // `title` restores the term to the pointer. It is the same string as the
@@ -629,6 +694,55 @@ export function ContextMenuItem({
 }
 
 export { ContextMenu };
+
+/** The context-menu spelling of `MenuSub*` — same surface, summoned by the
+ *  right button. Radix ships the two menus as separate primitives, so each
+ *  needs its own wrapper to keep them indistinguishable on screen. */
+export const ContextMenuSub = ContextMenu.Sub;
+
+export function ContextMenuSubTrigger({
+  className,
+  children,
+  ...props
+}: React.ComponentProps<typeof ContextMenu.SubTrigger>) {
+  return (
+    <ContextMenu.SubTrigger
+      className={cn(
+        "text-dim flex h-ctl-md cursor-default select-none items-center gap-2 rounded-control px-2 outline-none data-[highlighted]:bg-active data-[state=open]:bg-active",
+        className,
+      )}
+      {...props}
+    >
+      {children}
+      <ChevronRight className="text-mute ml-auto size-icon-xs shrink-0" aria-hidden />
+    </ContextMenu.SubTrigger>
+  );
+}
+
+export function ContextMenuSubContent({
+  className,
+  ...props
+}: React.ComponentProps<typeof ContextMenu.SubContent>) {
+  return (
+    <ContextMenu.Portal>
+      <ContextMenu.SubContent
+        sideOffset={OverlayGap.menu}
+        className={cn(
+          "ui-surface border-line-strong bg-raised shadow-overlay z-50 max-h-overlay-lg min-w-52 overflow-y-auto rounded-surface border p-1 text-sm",
+          className,
+        )}
+        {...props}
+      />
+    </ContextMenu.Portal>
+  );
+}
+
+export function ContextMenuSeparator({
+  className,
+  ...props
+}: React.ComponentProps<typeof ContextMenu.Separator>) {
+  return <ContextMenu.Separator className={cn("bg-line my-1 h-px", className)} {...props} />;
+}
 
 export function MenuSeparator({
   className,

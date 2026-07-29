@@ -76,6 +76,9 @@ export function parseRoute(location: Pick<Location, "pathname" | "search">): Vie
     status: query.getAll("status").filter(Boolean),
     priority: query.getAll("priority").filter(Boolean),
     assignees: query.getAll("assignee").filter(Boolean),
+    // `?milestone=` present-but-empty is the No-milestone bucket, so the test is
+    // `has`, not truthiness. `clean()` would fold "" back to null and lose it.
+    milestone: query.has("milestone") ? (query.get("milestone") ?? "") : null,
   };
   // `focus=1` used to pick full width over the split pane. There is no split any
   // more — an open issue is always full width — so the parameter is accepted and
@@ -105,6 +108,7 @@ export function formatRoute(route: ViewerRoute): string {
     for (const status of route.filter.status) query.append("status", status);
     for (const priority of route.filter.priority) query.append("priority", priority);
     for (const assignee of route.filter.assignees) query.append("assignee", assignee);
+    if (route.filter.milestone !== null) query.set("milestone", route.filter.milestone);
   }
 
   const path =
@@ -172,7 +176,8 @@ function isProjectDestination(view: View): boolean {
   return view === "overview" || view === "list" || view === "board" || view === "calendar" || view === "activity";
 }
 
-function carriesFilter(view: View): boolean {
+/** Whether this view draws rows a filter can narrow. */
+export function carriesFilter(view: View): boolean {
   return view === "list" || view === "board" || view === "calendar";
 }
 

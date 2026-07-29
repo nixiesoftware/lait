@@ -66,17 +66,16 @@ describe("LabelChip", () => {
     expect(chip.textContent).toContain("a-very-long-label-name");
   });
 
-  it("stays shorter than the row it sits in, at both sizes", () => {
-    // `ctl-xs` (20px) inside a `ctl-md` (28px) rail row. At 24px it left 2px of
-    // air where every bare entry beside it has six, and a wrapped pair ran at a
-    // pitch the rail did not share — so height is the one thing the sizes agree
-    // on. Now a rung apart on the control ladder rather than two loose numbers.
+  it("shares one 24px measure at both sizes — Linear's pill, not a ticket stub", () => {
+    // `ctl-sm` (24px) at both sizes: the roominess is the design, and height
+    // is the one thing the sizes agree on — a rung on the control ladder
+    // rather than two loose numbers.
     const md = draw(<LabelChip name="x" color="blue" />).firstElementChild!;
-    expect(md.className).toContain("h-ctl-xs");
+    expect(md.className).toContain("h-ctl-sm");
     act(() => root!.unmount());
     host!.remove();
     const sm = draw(<LabelChip name="x" color="blue" size="sm" />).firstElementChild!;
-    expect(sm.className).toContain("h-ctl-xs");
+    expect(sm.className).toContain("h-ctl-sm");
     expect(sm.className).toContain("rounded-full");
     // What differs is type size, not box size.
     expect(md.className).toContain("text-sm");

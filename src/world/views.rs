@@ -83,8 +83,26 @@ pub struct Milestone {
     pub id: String,
     pub project_id: String,
     pub name: String,
+    /// The milestone's prose — what this stage is, in the project document.
+    ///
+    /// A catalog register on the record, like a project's description and for
+    /// the same reason: it is an overview paragraph, not a wiki. The cost is
+    /// stated plainly — the whole string is last-writer-wins, so two people
+    /// editing one milestone's body at once keep one of the two versions. A
+    /// per-milestone collaborative doc would fix that and would be a new doc
+    /// type for prose nobody co-edits live.
+    #[serde(default)]
+    pub description: String,
     #[serde(default)]
     pub target_date: Option<u64>,
+    /// Fractional index (`world::rank`), the project's manual milestone order.
+    ///
+    /// Additive: records written before ordering existed decode with `""`, and
+    /// the first milestone write in a project backfills every one of them from
+    /// the order they were already being read in — so a project is never half
+    /// ordered by hand and half by date.
+    #[serde(default)]
+    pub rank: String,
     #[serde(default)]
     pub tombstone: bool,
 }
@@ -778,6 +796,7 @@ pub fn project_row(
                     .collect()
             })
             .unwrap_or_default(),
+        milestone: issue.and_then(|i| i.milestone.clone()),
         // Sub-issue progress is a board-projection concern (it needs the issues
         // map to classify each child's status); the base row leaves it absent.
         child_done: None,

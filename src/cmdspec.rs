@@ -717,6 +717,10 @@ pub fn specs() -> Vec<Spec> {
                 A::flag("mine", "Only issues assigned to you."),
                 A::val("status", "Filter by status."),
                 A::val("label", "Filter by label."),
+                A::val(
+                    "milestone",
+                    "Filter by milestone (name or `mls_` id). Needs `--project`.",
+                ),
                 A::flag("all", "Include done/archived."),
             ],
             |m| {
@@ -726,6 +730,7 @@ pub fn specs() -> Vec<Spec> {
                         mine: flag(m, "mine"),
                         status: opt_str(m, "status"),
                         label: opt_str(m, "label"),
+                        milestone: opt_str(m, "milestone"),
                         all: flag(m, "all"),
                     },
                 })
@@ -1221,6 +1226,7 @@ pub fn specs() -> Vec<Spec> {
                     vec![
                         A::pos("project", "Project KEY or prj_ id."),
                         A::pos("name", "Milestone name."),
+                        A::val("description", "What this stage is (markdown)."),
                         A::val("target", "Target date YYYY-MM-DD (or `none`)."),
                     ],
                     |m| {
@@ -1228,26 +1234,44 @@ pub fn specs() -> Vec<Spec> {
                             project: req_str(m, "project"),
                             milestone: None,
                             name: Some(req_str(m, "name")),
+                            description: opt_str(m, "description"),
                             target: opt_str(m, "target"),
+                            pos: None,
                             remove: false,
                         })
                     },
                 ),
                 Spec::req(
                     "edit",
-                    "Rename or retarget a milestone.",
+                    "Rename, retarget, or reorder a milestone.",
                     vec![
                         A::pos("project", "Project KEY or prj_ id."),
                         A::pos("milestone", "Milestone name or mls_ id."),
                         A::val("name", "New name."),
+                        A::val("description", "Replace the body (empty string clears)."),
                         A::val("target", "Target date YYYY-MM-DD (or `none`)."),
+                        A::flag("top", "Move to the top of the project's milestones."),
+                        A::flag("bottom", "Move to the bottom."),
+                        A::val("before", "Place before this milestone."),
+                        A::val("after", "Place after this milestone."),
                     ],
                     |m| {
+                        let pos = if flag(m, "top") {
+                            Some(BoardPos::Top)
+                        } else if flag(m, "bottom") {
+                            Some(BoardPos::Bottom)
+                        } else if let Some(r) = opt_str(m, "before") {
+                            Some(BoardPos::Before { reff: r })
+                        } else {
+                            opt_str(m, "after").map(|r| BoardPos::After { reff: r })
+                        };
                         Ok(Request::MilestoneSet {
                             project: req_str(m, "project"),
                             milestone: opt_str(m, "milestone"),
                             name: opt_str(m, "name"),
+                            description: opt_str(m, "description"),
                             target: opt_str(m, "target"),
+                            pos,
                             remove: false,
                         })
                     },
@@ -1264,7 +1288,9 @@ pub fn specs() -> Vec<Spec> {
                             project: req_str(m, "project"),
                             milestone: opt_str(m, "milestone"),
                             name: None,
+                            description: None,
                             target: None,
+                            pos: None,
                             remove: true,
                         })
                     },
