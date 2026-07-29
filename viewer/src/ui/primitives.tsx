@@ -101,8 +101,12 @@ const button = cva(
       variant: {
         /** The default. Invisible until hovered — for chrome. */
         ghost: "text-mute hover:bg-hover hover:text-fg",
-        /** A visible affordance without shouting. */
-        outline: "border-line bg-bg hover:border-line-strong hover:bg-hover text-fg border",
+        /** A visible affordance without shouting. Its edge is a half-pixel ring
+         *  and a whisper of lift (`shadow-control`), not a border — measured off
+         *  Linear's toolbar, where a 1px border proved to be the thing making
+         *  ours read as outlines drawn on the bar rather than buttons resting on
+         *  it. Hover moves the fill; the edge is the shape and does not flicker. */
+        outline: "bg-bg hover:bg-hover text-fg shadow-control",
         /** Exactly one per screen, at most. A neutral inverse commit keeps blue
          *  available for focus and state instead of making every save look like
          *  a Jira call-to-action. */
@@ -115,12 +119,15 @@ const button = cva(
          *  White-on-danger clears AA (see the palette note). Replaces the old
          *  `primary` + `bg-danger` override that every call site had to remember. */
         destructive: "bg-danger text-accent-fg hover:bg-danger/85",
-        /** Selected state in a segmented group. Bordered, because the thing
-         *  it alternates with is `outline`: a state change should move the
-         *  fill, not the silhouette. Without the border a selected tab was a
-         *  pixel narrower than its neighbours and the row shifted as you
-         *  moved between them. */
-        active: "border-line-strong bg-active text-fg border",
+        /** Selected state in a segmented group: the same ring as `outline`, a
+         *  deeper fill, and no lift — a pressed control is set INTO the bar, and
+         *  a shadow claiming it had risen off is the one thing that would make
+         *  the pair read as two kinds of button. A state change moves the fill,
+         *  never the silhouette, and now that neither wears a border there is no
+         *  silhouette left to move: a ring costs no layout, so the row cannot
+         *  shift as the selection travels along it (it used to, by the width of
+         *  one border, back when only this one was drawn). */
+        active: "bg-active text-fg shadow-edge",
         /** A named action inside dense chrome. Unlike `primary`, this sits beside
          * icon buttons without turning the toolbar into a callout banner. */
         toolbar:
@@ -136,19 +143,28 @@ const button = cva(
         pill: "bg-active/60 text-dim hover:bg-hover hover:text-fg rounded-full",
       },
       size: {
-        /** Icon-only chrome: a 24px circle, the toolbar unit. Fully rounded for
+        /** Icon-only chrome: a 28px circle, the toolbar unit. Fully rounded for
          *  the same reason the property rail is — the only shape these carry is a
          *  hover fill, so a circle reads as deliberate where a rounded square
-         *  reads as a box that appeared under the pointer. */
-        icon: "size-ctl-sm rounded-full",
+         *  reads as a box that appeared under the pointer.
+         *
+         *  28, not 24: a 14px glyph in a 24px circle leaves a 5px ring, which
+         *  reads as an icon that outgrew its button and sits under the comfortable
+         *  minimum for a pointer target. */
+        icon: "size-ctl-md rounded-full",
         /** Pills, not boxes. A button carries no border of its own in the
          *  common variants, so its shape is whatever the fill describes — and a
          *  row of buttons has to agree: a ghost "Cancel" beside a primary "Save"
          *  cannot be a pill next to a box. Shape therefore rides on size, which
          *  every variant passes through, rather than on the ones that happen to
-         *  be quiet. */
+         *  be quiet.
+         *
+         *  The inset scales with the height instead of being a flat 8px at every
+         *  rung: a taller pill with the same side padding reads as a label that
+         *  has been squeezed, and at 8px the text was closer to the capsule's
+         *  edge than to its neighbour in the row. */
         sm: "h-ctl-sm rounded-full px-2 text-sm",
-        md: "h-ctl-md rounded-full px-2 text-sm",
+        md: "h-ctl-md rounded-full px-2.5 text-sm",
         /** No capsule at all — this is a text action inside prose. */
         inline: "h-auto p-0 text-xs",
       },
@@ -250,23 +266,22 @@ export function LabelChip({
         // label sits among — a label *is* a value, and setting it a step down
         // was what made the old 16px chip read as a footnote.
         //
-        // Both sizes are 20px because the chip has to sit *inside* its row,
-        // not fill it. At 24px in the rail's 28px rows it left 2px of air where
-        // every bare entry beside it (`Backlog`, `5 pt`, `Aug 14`) has six, and
-        // a wrapped pair ran at a 28px pitch against the rail's 30px — the
-        // block visibly stopped tracking the column it was in.
+        // Both sizes are 24px — Linear's measure, and the roominess is the
+        // point: at 20px with an 8px inset the pill read as a cramped ticket
+        // stub next to every other control on the page. The rail's rows wrap a
+        // hair looser for it, which is the trade Linear makes too.
         //
-        // What the sizes do differ in is voice. In the rail a label is a
-        // property you are reading, so it takes the foreground at the same
-        // 12px as the values around it; in a list row it is metadata you scan
-        // past next to a date and a project, so it drops to `text-dim` and 11px
-        // and sits at their weight rather than above it.
-        size === "md" ? "text-fg h-ctl-xs gap-1.5 px-2 text-sm" : "text-dim h-ctl-xs gap-1 px-2 text-xs",
+        // What the sizes differ in is voice. In the rail a label is a property
+        // you are reading, so it takes the foreground at the same 12px as the
+        // values around it; in a list row it is metadata you scan past next to
+        // a date and a project, so it drops to `text-dim` and 11px and sits at
+        // their weight rather than above it.
+        size === "md" ? "text-fg h-ctl-sm gap-2 px-2.5 text-sm" : "text-dim h-ctl-sm gap-1.5 px-2.5 text-xs",
         className,
       )}
     >
       <span
-        className="size-mark-xs shrink-0 rounded-full"
+        className="size-mark-sm shrink-0 rounded-full"
         style={{ background: catalogColor(color) }}
       />
       {/* `capitalize` is a text transform, not a rewrite: the DOM still holds
@@ -324,6 +339,67 @@ export function LabelChips({
         </span>
       )}
     </span>
+  );
+}
+
+/**
+ * Linear's narrow-width form of a label set: one pill, every label reduced to
+ * its dot, the dots overlapped, the count after. Shown instead of `LabelChips`
+ * when the container is too narrow for pills — the labels stay present as
+ * *colour*, which is the half that scans. The names ride a real tooltip (the
+ * app's, not the browser's): a pill whose whole point is compression owes the
+ * hover the uncompressed answer.
+ */
+export function LabelDots({
+  names,
+  colorOf,
+  className,
+}: {
+  names: readonly string[];
+  colorOf: (name: string) => string;
+  className?: string;
+}) {
+  if (names.length === 0) return null;
+  return (
+    <Tooltip.Root>
+      <Tooltip.Trigger asChild>
+        <span
+          aria-label={`Labels: ${names.join(", ")}`}
+          className={cn(
+            "border-line text-dim inline-flex h-ctl-sm shrink-0 items-center gap-1.5 rounded-full border px-2.5 text-xs font-medium",
+            className,
+          )}
+        >
+          <span className="flex -space-x-1">
+            {names.map((name) => (
+              <span
+                key={name}
+                className="size-mark-sm rounded-full ring-1 ring-[var(--color-bg)]"
+                style={{ background: catalogColor(colorOf(name)) }}
+              />
+            ))}
+          </span>
+          <span className="tabular-nums">{names.length}</span>
+        </span>
+      </Tooltip.Trigger>
+      <Tooltip.Portal>
+        <Tooltip.Content
+          sideOffset={OverlayGap.tip}
+          style={{ transformOrigin: "var(--radix-tooltip-content-transform-origin)" }}
+          className="ui-surface border-line-strong bg-raised shadow-overlay z-50 flex flex-col gap-1 rounded-control border px-2 py-1.5 text-xs"
+        >
+          {names.map((name) => (
+            <span key={name} className="flex items-center gap-1.5">
+              <span
+                className="size-mark-xs shrink-0 rounded-full"
+                style={{ background: catalogColor(colorOf(name)) }}
+              />
+              <span className="capitalize">{name}</span>
+            </span>
+          ))}
+        </Tooltip.Content>
+      </Tooltip.Portal>
+    </Tooltip.Root>
   );
 }
 
@@ -393,8 +469,10 @@ export const crumbGlyph = "flex size-icon-md shrink-0 items-center justify-cente
 export const controlTrigger = cva(
   // No radius in the base: a corner is part of a tone's identity, not a default
   // it inherits. Keeping it here meant a tone that wanted a different shape
-  // emitted both classes and left the winner to CSS source order.
-  "inline-flex items-center gap-1.5 text-sm outline-none transition-colors disabled:pointer-events-none disabled:opacity-45 data-[state=open]:bg-active",
+  // emitted both classes and left the winner to CSS source order. The open-state
+  // fill moved out for the same reason: `bare`'s whole identity is "no box", and
+  // a base that painted one behind every open trigger overruled it.
+  "inline-flex items-center gap-1.5 text-sm outline-none transition-colors disabled:pointer-events-none disabled:opacity-45",
   {
     variants: {
       /** How tall. Declared before `tone` only for readability; `cn` resolves
@@ -413,21 +491,22 @@ export const controlTrigger = cva(
          *  and the breadcrumb switcher. Fully rounded: a hover fill is the only
          *  shape it has, so a pill reads as deliberate where a rounded box reads
          *  as something that appeared under the pointer. */
-        quiet: "hover:bg-hover -mx-1 min-w-0 rounded-full px-1.5 text-left",
+        quiet:
+          "hover:bg-hover data-[state=open]:bg-active -mx-1 min-w-0 rounded-full px-1.5 text-left",
         /** A standing control with a border. Stays a box — a border makes the
          *  shape explicit rather than only appearing on hover, and a pilled
          *  border starts reading as a tag rather than a control. */
         outline:
-          "border-line bg-bg hover:border-line-strong hover:bg-hover rounded-control border px-2",
+          "border-line bg-bg hover:border-line-strong hover:bg-hover data-[state=open]:bg-active rounded-control border px-2",
         /** Inside a floating bar. It lifts on hover: the bar is the one surface
          *  that is over the work rather than part of it, so its controls answer
          *  the pointer with elevation instead of only a fill. */
-        pill: "bg-active/60 text-dim hover:bg-hover hover:text-fg rounded-full px-2.5",
-        /** No box at all — the child already is one. Wrapping a label chip in a
-         *  second shape would put a rectangle around a pill, so hover dims
-         *  rather than fills and nothing shifts when it opens. Pair with
-         *  `size="none"`: the chip carries its own height. */
-        bare: "min-w-0 rounded-full transition-opacity hover:opacity-75 data-[state=open]:opacity-75",
+        pill: "bg-active/60 text-dim hover:bg-hover hover:text-fg data-[state=open]:bg-active rounded-full px-2.5",
+        /** No box at all — the child already is one, and no state may paint one
+         *  either: a glyph on a row answers the pointer and the open menu by
+         *  getting *lighter*, never by growing a fill or dimming away. Pair
+         *  with `size="none"`: the chip carries its own height. */
+        bare: "min-w-0 rounded-full transition-[filter] hover:brightness-125 data-[state=open]:brightness-125",
       },
     },
     defaultVariants: { tone: "outline", size: "md" },

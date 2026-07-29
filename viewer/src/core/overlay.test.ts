@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { applyOverlay, Overlay, PREDICTION_TTL_MS } from "./overlay";
+import { applyOverlay, Overlay, overlayRow, PREDICTION_TTL_MS } from "./overlay";
 import type { BoardView, Row } from "../types";
 
 const row = (over: Partial<Row> & { reff: string }): Row => ({
@@ -136,5 +136,55 @@ describe("applyOverlay", () => {
     o.set("doc_iss_1", "priority", "urgent");
     const { board: out } = applyOverlay(b, o);
     expect(out.columns[0]!.rows[0]!.priority).toBe("urgent");
+  });
+});
+
+describe("overlayRow — the widened fields", () => {
+  it("predicts array fields as whole replacements", () => {
+    const o = new Overlay();
+    const r = row({ reff: "iss_1", assignees: ["aaa"], label_names: ["infra"] });
+    o.set(r.doc_id, "assignees", ["aaa", "bbb"]);
+    o.set(r.doc_id, "labels", ["infra", "perf"]);
+    const out = overlayRow(r, o);
+    expect(out.assignees).toEqual(["aaa", "bbb"]);
+    expect(out.label_names).toEqual(["infra", "perf"]);
+  });
+
+  it("distinguishes a predicted clear from no prediction", () => {
+    // A cleared due date is a predicted `null` — reading it back through `??`
+    // would resurrect the server's stale date, which is why presence is asked
+    // with `hasField`.
+    const o = new Overlay();
+    const r = row({ reff: "iss_1", due_date: 1_800_000_000, estimate: 5 });
+    o.set(r.doc_id, "due", null);
+    const out = overlayRow(r, o);
+    expect(out.due_date).toBeNull();
+    expect(out.estimate).toBe(5);
+  });
+
+  it("predicts due and estimate as the row's numbers", () => {
+    const o = new Overlay();
+    const r = row({ reff: "iss_1" });
+    o.set(r.doc_id, "due", 1_800_000_000);
+    o.set(r.doc_id, "estimate", 8);
+    const out = overlayRow(r, o);
+    expect(out.due_date).toBe(1_800_000_000);
+    expect(out.estimate).toBe(8);
+  });
+
+  it("returns the same object when nothing is predicted", () => {
+    const r = row({ reff: "iss_1" });
+    expect(overlayRow(r, new Overlay())).toBe(r);
+  });
+
+  it("keys the selector signature on every predicted field", () => {
+    // The selectors memo on this string; a field it omitted would stop
+    // invalidating the cached board the moment it became predictable.
+    const o = new Overlay();
+    o.set("doc_1", "assignees", ["aaa"]);
+    const before = o.signature("doc_1");
+    o.set("doc_1", "due", null);
+    expect(o.signature("doc_1")).not.toBe(before);
+    expect(o.signature("doc_2")).toBe("");
   });
 });

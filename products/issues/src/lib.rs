@@ -9,6 +9,7 @@ pub mod contract;
 pub mod dto;
 pub mod ids;
 mod implementation;
+mod rank;
 pub mod roles;
 pub mod views;
 pub mod workflow;

@@ -8,6 +8,7 @@ import {
   Ban,
   Bell,
   BellOff,
+  CalendarDays,
   ChevronLeft,
   ChevronRight,
   CircleDot,
@@ -23,10 +24,13 @@ import {
   MoreHorizontal,
   MoveRight,
   Paperclip,
+  Pencil,
   Plus,
+  RefreshCw,
   SmilePlus,
   Tag,
   Trash2,
+  UserMinus,
   UserPlus,
   X,
 } from "lucide-react";
@@ -34,7 +38,12 @@ import {
 import { rpc } from "../api";
 import { useIssueDetail, useProjectViewerStore } from "../projectStore";
 import { clearDraft, loadDraft, saveDraft } from "../core/drafts";
-import { describeChanges, describeEvent, type NameResolver } from "../core/activity";
+import {
+  describeEventRich,
+  EDIT_KINDS,
+  type EventPhraseContext,
+  type NameResolver,
+} from "../core/activity";
 import type { Field as PredictField } from "../core/overlay";
 import type { IssueField } from "../core/registry";
 import { inverseWorkAction, workTarget } from "../core/workflow";
@@ -43,6 +52,7 @@ import {
   type AttachmentMetaDto,
   type GraphView,
   type LinkDto,
+  type Priority,
   type Row,
   PRIORITY_ORDER,
   tsToDate,
@@ -54,16 +64,16 @@ import {
   type ProjectDto,
   type WorkflowState,
 } from "../types";
-import { Avatar, AvatarStack, memberName as nameOf } from "./Avatar";
+import { Avatar, AvatarStack, memberName as nameOf, stackFor } from "./Avatar";
 import { LoadingState } from "./AppState";
 import { catalogColor } from "./colors";
-import { PriorityIcon, StatusIcon } from "./icons";
+import { PriorityIcon, ProgressRing, StatusIcon } from "./icons";
 import { Markdown } from "./Markdown";
 import { MarkdownEditor } from "./MarkdownEditor";
 import { DatePicker } from "./DatePicker";
 import { NewLabelDialog } from "./NewLabel";
 import { Combobox, type Option } from "./Picker";
-import { Button, ChipButton, cn, IconButton, InlineAction, Input, LabelChip, PopoverContent } from "./primitives";
+import { Button, ChipButton, cn, IconButton, Input, LabelChip, PopoverContent } from "./primitives";
 import {
   Disclosure,
   HeaderActions,
@@ -71,7 +81,6 @@ import {
   MenuItem,
   RailRow,
   RailSection,
-  SectionHeader,
   Toast,
 } from "./layout";
 import * as ask from "./dialogs";
@@ -464,7 +473,14 @@ export function IssueDetail({
           Status row above already does, and it would be the one piece of this pane
           that came from somewhere else.
         */}
-        <div className="issue-detail-properties flex flex-col text-sm">
+        {/* `text-dim`, not `text-fg`: the rail is reference you read *against*
+            the document, and at equal weight the two competed — a status and a
+            title cannot both be the loudest thing on the page. One step down
+            puts the captions (`mute`), the values (`dim`) and the body (`fg`)
+            on three rungs of one ladder, which is the relationship Linear's
+            rail keeps. Icons and label chips carry their own colour and are
+            untouched; only inherited text moves. */}
+        <div className="issue-detail-properties text-dim flex flex-col text-sm">
           <RailSection title="Properties">
           <RailRow label="Status">
             <Combobox
@@ -577,11 +593,11 @@ export function IssueDetail({
                 keywords: [m.key, m.alias],
               }))}
               onToggle={(key) => {
-                const add = !issue.assignees.includes(key);
-                // `who` takes `me`/`@me` or a **full 64-hex key** — `index::resolve_device`
-                // does not consult the member directory, so a petname would 404. The
-                // key is what we hold and the key is what we send.
-                void send(() => rpc(spaceId, { cmd: "assign", reff, who: [key], add }));
+                // `who` takes a **full 64-hex key** — the store method documents
+                // why. The key is what we hold and the key is what we send.
+                void runCommand(
+                  projectStore.toggleAssignee(spaceId, reff, key, !issue.assignees.includes(key)),
+                );
               }}
             />
           </RailRow>
@@ -611,7 +627,7 @@ export function IssueDetail({
                 ...[1, 2, 3, 5, 8, 13].map((n) => ({ id: String(n), label: `${n} pt` })),
               ]}
               onPick={(id) =>
-                void send(() => rpc(spaceId, { cmd: "issue_edit", reff, estimate: id }))
+                void runCommand(projectStore.setEstimate(spaceId, reff, id))
               }
             />
           </RailRow>
@@ -621,7 +637,7 @@ export function IssueDetail({
               value={issue.due_date ?? null}
               readOnly={locked}
               onChange={(due) =>
-                void send(() => rpc(spaceId, { cmd: "issue_edit", reff, due }))
+                void runCommand(projectStore.setDue(spaceId, reff, due === "none" ? null : due))
               }
             />
           </RailRow>
@@ -662,16 +678,9 @@ export function IssueDetail({
                   ]}
                   onPick={(next) => {
                     if (next === name) return;
-                    // One swap, two requests, in this order: the engine's label
-                    // op is add-or-remove on a name set, so a rename is a
-                    // detach and an attach. Removing first keeps the set from
-                    // briefly holding both.
-                    void send(async () => {
-                      await rpc(spaceId, { cmd: "label", reff, remove: [name] });
-                      if (next !== "__remove__") {
-                        await rpc(spaceId, { cmd: "label", reff, add: [next] });
-                      }
-                    });
+                    void runCommand(
+                      projectStore.swapLabel(spaceId, reff, name, next === "__remove__" ? null : next),
+                    );
                   }}
                 />
               ))}
@@ -704,13 +713,8 @@ export function IssueDetail({
                   keywords: [l.id],
                 }))}
                 onToggle={(name) => {
-                  const on = issue.label_names.includes(name);
-                  void send(() =>
-                    rpc(spaceId, {
-                      cmd: "label",
-                      reff,
-                      ...(on ? { remove: [name] } : { add: [name] }),
-                    }),
+                  void runCommand(
+                    projectStore.toggleLabel(spaceId, reff, name, !issue.label_names.includes(name)),
                   );
                 }}
                 // A brand-new label gets a colour before it exists: the picker hands
@@ -848,6 +852,7 @@ export function IssueDetail({
             reff={issue.reff}
             projectId={issue.project_id}
             states={states}
+            members={members}
             readOnly={locked}
             send={send}
             onNavigate={onNavigate}
@@ -863,6 +868,8 @@ export function IssueDetail({
           events={events}
           comments={issue.comments}
           memberOf={memberOf}
+          states={states}
+          graph={graph}
           readOnly={locked}
           meKey={members.find((m) => m.me)?.key ?? null}
           onReact={(comment, emoji, on) =>
@@ -898,7 +905,7 @@ export function IssueDetail({
              send control inside the field at the bottom right and lets the
              keyboard shortcut live on its tooltip — the affordance is the
              button, and the hint is there when you go looking for it. */
-          <div className="border-line focus-within:border-line-strong rounded-surface border bg-[var(--field-bg)]">
+          <div className="border-line focus-within:border-line-strong bg-raised shadow-raised rounded-surface border">
             <textarea
               ref={commentRef}
               value={comment}
@@ -914,11 +921,11 @@ export function IssueDetail({
                 }
               }}
               rows={3}
-              className="placeholder:text-mute block w-full resize-none bg-transparent p-2 outline-none"
+              className="placeholder:text-mute block w-full resize-none bg-transparent px-4 py-3 outline-none"
               aria-label="New comment"
               aria-describedby={commentError ? "comment-error" : undefined}
             />
-            <div className="flex items-center gap-2 px-2 pb-2">
+            <div className="flex items-center gap-2 px-2.5 pb-2.5">
               {commentError && (
                 <span
                   id="comment-error"
@@ -930,9 +937,14 @@ export function IssueDetail({
               )}
               <span className="ml-auto" />
               <IconButton
+                label="Attach a file"
+                onClick={() => document.getElementById("issue-attach")?.click()}
+              >
+                <Paperclip className="size-icon-sm" />
+              </IconButton>
+              <IconButton
                 label={commentError ? "Retry comment" : "Comment"}
                 chord="Ctrl/⌘ ↵"
-                variant="primary"
                 disabled={!comment.trim()}
                 loading={commentPending}
                 onClick={() => void submitComment()}
@@ -1277,6 +1289,7 @@ function Relations({
   reff,
   projectId,
   states,
+  members,
   readOnly,
   send,
   onNavigate,
@@ -1291,6 +1304,8 @@ function Relations({
   /** The issue's project — where a quick-created sub-issue is filed. */
   projectId: string;
   states: WorkflowState[];
+  /** The ACL, for resolving a related issue's assignees to faces. */
+  members: MemberDto[];
   readOnly: boolean;
   send: (fn: () => Promise<unknown>) => Promise<void>;
   onNavigate: (reff: string) => void;
@@ -1383,6 +1398,17 @@ function Relations({
     (c) => states.find((s) => s.id === c.status)?.category === "done",
   ).length;
 
+  /** A related issue's state as the ring every other surface draws it. Falls
+   *  back to the tree glyph while the workflow is still arriving. */
+  const statusGlyph = (row: Row) => {
+    const state = states.find((s) => s.id === row.status);
+    return state ? (
+      <StatusIcon category={state.category} color={catalogColor(state.color)} />
+    ) : (
+      <CornerDownRight className="size-icon-xs" />
+    );
+  };
+
   const empty =
     graph.children.length === 0 &&
     graph.blocked_by.length === 0 &&
@@ -1451,8 +1477,16 @@ function Relations({
       {(graph.children.length > 0 || subDraft !== null) && (
         <Disclosure
           title="Sub-issues"
-          // `done/total`, Linear's sub-issue progress at a glance.
-          count={`${doneChildren}/${graph.children.length}`}
+          // The ring and its tally, the same mark a board card carries — one
+          // glyph for one idea, wherever you meet it. It replaces a full-width
+          // bar that was the only progress meter in the app and read as a
+          // loading state parked under the caption.
+          count={
+            <span className="flex items-center gap-1.5">
+              <ProgressRing done={doneChildren} total={graph.children.length} />
+              {doneChildren}/{graph.children.length}
+            </span>
+          }
           {...(readOnly
             ? {}
             : {
@@ -1463,26 +1497,19 @@ function Relations({
                 ),
               })}
         >
-          {graph.children.length > 0 && (
-            <div
-              className="bg-line h-1.5 overflow-hidden rounded-full"
-              role="progressbar"
-              aria-label="Sub-issue completion"
-              aria-valuemin={0}
-              aria-valuemax={graph.children.length}
-              aria-valuenow={doneChildren}
-            >
-              <span
-                className="bg-ok block h-full rounded-full transition-[width]"
-                style={{ width: `${(doneChildren / graph.children.length) * 100}%` }}
-              />
-            </div>
-          )}
           {graph.children.map((r) => (
             <RelRow
               key={r.reff}
               row={r}
-              icon={<CornerDownRight className="size-icon-xs" />}
+              // The child's own status leads the row, exactly as it does on a
+              // board card and a list line — a sub-issue you cannot tell the
+              // state of is a link, not a piece of the work.
+              icon={statusGlyph(r)}
+              trailing={
+                r.assignees.length > 0 ? (
+                  <AvatarStack members={stackFor(r.assignees, members)} />
+                ) : undefined
+              }
               onNavigate={onNavigate}
               {...(removable
                 ? {
@@ -1599,6 +1626,7 @@ function RelRow({
   icon,
   kind,
   tone,
+  trailing,
   onNavigate,
   onRemove,
 }: {
@@ -1607,11 +1635,18 @@ function RelRow({
   /** What this edge *is* — omitted for sub-issues, where the group says it. */
   kind?: string;
   tone?: "warn";
+  /** The row's own metadata, parked on the trailing edge — faces for a
+   *  sub-issue. Same slot the pickers' option rows use, same reason: what the
+   *  row *is* reads on the left, what it carries reads on the right. */
+  trailing?: React.ReactNode;
   onNavigate: (reff: string) => void;
   onRemove?: () => void;
 }) {
   return (
-    <div className="group/rel -mx-1 flex items-center gap-2 rounded-control px-1 py-0.5 text-sm">
+    // The row answers the pointer as a whole. It is one target — the button
+    // inside fills it — so lighting the row rather than the label is what makes
+    // a run of them read as a list you can walk.
+    <div className="group/rel hover:bg-hover -mx-1 flex items-center gap-2 rounded-control px-1 py-0.5 text-sm transition-colors">
       <Button
         onClick={() => onNavigate(row.reff)}
         className="min-w-0 flex-1 shrink justify-start px-1 text-left"
@@ -1632,6 +1667,7 @@ function RelRow({
         </span>
         <span className="min-w-0 flex-1 truncate font-medium">{row.title}</span>
       </Button>
+      {trailing && <span className="shrink-0">{trailing}</span>}
       {onRemove && (
         <IconButton
           label="Remove relation"
@@ -1649,7 +1685,7 @@ function RelRow({
 
 type Entry =
   | { at: number; order: number; kind: "comment"; comment: CommentDto }
-  | { at: number; order: number; kind: "event"; event: ActivityEvent };
+  | { at: number; order: number; kind: "event"; event: ActivityEvent; repeat?: number };
 
 /**
  * Comments and activity, in one chronological stream.
@@ -1678,6 +1714,8 @@ function Timeline({
   events,
   comments,
   memberOf,
+  states,
+  graph,
   readOnly,
   meKey,
   onReact,
@@ -1688,6 +1726,10 @@ function Timeline({
   events: ActivityEvent[];
   comments: CommentDto[];
   memberOf: (key: string) => MemberDto | undefined;
+  /** The workflow, so a status change can say "Backlog", not "backlog". */
+  states: WorkflowState[];
+  /** The issue's graph neighborhood — how a link event names the other issue. */
+  graph: GraphView | null;
   readOnly: boolean;
   /** My member key — how "did I already react" is answered. */
   meKey: string | null;
@@ -1700,6 +1742,29 @@ function Timeline({
   // The naming policy lives here, where the member list is: a key becomes an alias,
   // "you", or a short prefix. `describeEvent` only decides *whether* there is a name.
   const resolveName: NameResolver = (key) => nameOf(key, memberOf(key));
+  // Link/parent events carry the other issue's doc id; the graph is the one piece
+  // of state already at hand that can turn it into "NIX-90 Title…". An issue that
+  // has since left the neighborhood falls back to a short id — rare, and honest.
+  const issueLabel = useMemo(() => {
+    const map = new Map<string, string>();
+    const add = (r: Row | null | undefined) => {
+      if (!r) return;
+      const title = r.title.length > 40 ? `${r.title.slice(0, 40)}…` : r.title;
+      map.set(r.doc_id, `${r.key_alias ?? r.reff} ${title}`);
+    };
+    if (graph) {
+      add(graph.parent);
+      graph.children.forEach(add);
+      graph.blocked_by.forEach(add);
+      graph.links.forEach((l) => add(l.row));
+    }
+    return (doc: string) => map.get(doc) ?? null;
+  }, [graph]);
+  const phraseCtx: EventPhraseContext = {
+    resolveName,
+    stateName: (id) => states.find((s) => s.id === id)?.name ?? null,
+    issueLabel,
+  };
   const entries = useMemo<Entry[]>(() => {
     const out: Entry[] = [
       // Roots only: a reply renders nested under its parent, not as its own
@@ -1714,8 +1779,47 @@ function Timeline({
     // Oldest first — a timeline you read downward, like the conversation it is.
     // `order` breaks ties: whole-second stamps mean a burst of edits all land on
     // the same `ts`, and without it they shuffle on every render.
-    return out.sort((a, b) => a.at - b.at || a.order - b.order);
-  }, [events, comments]);
+    out.sort((a, b) => a.at - b.at || a.order - b.order);
+
+    // Then fold runs that would print the same line twice. Editing five labels
+    // is five commits and five honest oplog entries, but it is one act, and the
+    // feed rendered it as eight consecutive "changed labels" — a wall that
+    // buries the events worth reading between them.
+    //
+    // The test is the RENDERED PHRASE, not the event kind: two rows merge only
+    // if they would have been character-for-character identical (same actor,
+    // same sentence). That is what keeps this honest — "moved the due date to
+    // Aug 14" and "…to Aug 21" say different things and stay two lines, while
+    // eight identical sentences become one with a tally. The newest stamp wins,
+    // so the time still reads as when the run finished, and a collision anywhere
+    // in the run keeps its flag.
+    const folded: Entry[] = [];
+    for (const entry of out) {
+      const prev = folded[folded.length - 1];
+      if (
+        entry.kind === "event" &&
+        prev?.kind === "event" &&
+        describeEventRich(prev.event, phraseCtx).phrase ===
+          describeEventRich(entry.event, phraseCtx).phrase &&
+        prev.event.actor === entry.event.actor
+      ) {
+        folded[folded.length - 1] = {
+          ...entry,
+          repeat: (prev.repeat ?? 1) + 1,
+          event: {
+            ...entry.event,
+            ...(prev.event.collision ? { collision: true } : {}),
+          },
+        };
+        continue;
+      }
+      folded.push(entry);
+    }
+    return folded;
+    // `phraseCtx` is rebuilt every render but only reads `states`/`graph`, which
+    // the deps below already track.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [events, comments, states, graph]);
 
   const repliesByParent = useMemo(() => {
     const indexed = new Map<string, CommentDto[]>();
@@ -1728,19 +1832,30 @@ function Timeline({
   const visibleEntries = boundedTail(entries, visibleCount);
 
   return (
-    <section id="issue-activity" className="flex flex-col gap-3 scroll-mt-3">
-      <SectionHeader
-        title="Activity"
-        meta={comments.length > 0 ? `${comments.length} comments` : undefined}
-        action={
-          <span
-            title="This issue's full history, read from its change log on disk — it survives restarts and shows who made each change. (The space-wide Activity view is a lighter, per-session feed.)"
-            className="cursor-help"
-          >
-            <Info className="size-icon-xs" />
-          </span>
-        }
-      />
+    // The one rule in the document, and it earns it: everything above is the
+    // issue, everything below is what happened to it. Linear draws exactly this
+    // line and no other — the sections above are divided by their captions and
+    // by air, which is why adding a second rule anywhere would immediately make
+    // this one stop meaning "the history starts here".
+    <section
+      id="issue-activity"
+      className="border-line/70 flex flex-col gap-3 scroll-mt-3 border-t pt-6"
+    >
+      {/* A true title, not the uppercase micro-label the rail sections use: this
+          is the page's second heading (Linear draws it the same way), and the
+          conversation below it deserves more than furniture-weight type. */}
+      <div className="flex min-h-ctl-sm items-center gap-2">
+        <h3 className="text-fg text-base font-semibold">Activity</h3>
+        {comments.length > 0 && (
+          <span className="text-mute text-xs">{comments.length} comments</span>
+        )}
+        <span
+          title="This issue's full history, read from its change log on disk — it survives restarts and shows who made each change. (The space-wide Activity view is a lighter, per-session feed.)"
+          className="text-mute ml-auto cursor-help"
+        >
+          <Info className="size-icon-xs" />
+        </span>
+      </div>
 
       {entries.length === 0 && <p className="text-mute text-sm">Nothing yet.</p>}
       {entries.length > visibleCount && (
@@ -1768,7 +1883,14 @@ function Timeline({
             onCreateFromComment={onCreateFromComment}
           />
         ) : (
-          <Event key={`e${entry.order}`} event={entry.event} resolveName={resolveName} />
+          <Event
+            key={`e${entry.order}`}
+            event={entry.event}
+            states={states}
+            memberOf={memberOf}
+            ctx={phraseCtx}
+            {...(entry.repeat ? { repeat: entry.repeat } : {})}
+          />
         ),
       )}
     </section>
@@ -1779,6 +1901,13 @@ function Timeline({
  *  (the engine accepts any single emoji; the CLI can send exotic ones). */
 const REACTION_EMOJIS = ["👍", "❤️", "🎉", "😄", "🚀", "👀"] as const;
 
+/**
+ * One comment thread, as a card: the root comment, its replies flush beneath it,
+ * and a standing reply composer as the card's footer. Linear's shape, for
+ * Linear's reason — the card is what separates the conversation from the event
+ * furniture around it, and a composer that is already there makes replying one
+ * keystroke instead of a hover hunt.
+ */
 function Comment({
   comment: c,
   replies,
@@ -1800,184 +1929,327 @@ function Comment({
   onCopyLink: (commentId: string) => void;
   onCreateFromComment: (body: string) => void;
 }) {
-  const member = memberOf(c.author);
-  const [picking, setPicking] = useState(false);
-  const [replying, setReplying] = useState<string | null>(null);
-  // Pre-identity comments (no id) cannot anchor reactions or replies — the
-  // affordances simply don't exist for them, rather than existing and failing.
-  const canAct = !readOnly && !!c.id;
-
+  const block = (comment: CommentDto) => (
+    <CommentBlock
+      comment={comment}
+      memberOf={memberOf}
+      readOnly={readOnly}
+      meKey={meKey}
+      onReact={onReact}
+      onCopyLink={onCopyLink}
+      onCreateFromComment={onCreateFromComment}
+    />
+  );
   return (
-    <article className="flex gap-2">
-      <Avatar
-        deviceKey={c.author}
-        // The in-doc `author_nick` is what the author *claimed*; the local alias is
-        // what you decided they are. Prefer yours — it is the half that was verified.
-        alias={member?.alias || c.author_nick || ""}
-        me={member?.me ?? false}
-        className="mt-0.5"
-      />
-      <div className="min-w-0 flex-1">
-        <div className="group/comment">
-          <div className="flex items-baseline gap-2">
-            <span className="font-medium">
-              {member ? nameOf(c.author, member) : (c.author_nick ?? short(c.author))}
-            </span>
-            {/* Unix SECONDS — `tsToDate` is the only place that's converted. */}
-            <time className="text-mute text-xs" dateTime={tsToDate(c.ts).toISOString()}>
-              {when(c.ts)}
-            </time>
-          </div>
-          <Markdown text={c.body} density="tight" className="mt-0.5" />
-
-          {(canAct || (c.reactions?.length ?? 0) > 0) && (
-            <div className="mt-1 flex flex-wrap items-center gap-1">
-              {(c.reactions ?? []).map((r) => {
-                const mine = meKey !== null && r.actors.includes(meKey);
-                return (
-                  <ChipButton
-                    key={r.emoji}
-                    disabled={!canAct}
-                    onClick={() => c.id && onReact(c.id, r.emoji, !mine)}
-                    title={r.actors.map((a) => nameOf(a, memberOf(a))).join(", ")}
-                    aria-pressed={mine}
-                  >
-                    {r.emoji}
-                    <span className="tabular-nums">{r.actors.length}</span>
-                  </ChipButton>
-                );
-              })}
-              {canAct && (
-                <>
-                  {/* A floating palette, like every other pick-from-a-set surface —
-                      it used to swap itself inline for six buttons and shove the
-                      footer sideways. */}
-                  <Popover.Root open={picking} onOpenChange={setPicking}>
-                    <Popover.Trigger asChild>
-                      <IconButton
-                        aria-label="Add reaction"
-                        label="Add reaction"
-                        className="opacity-0 transition-opacity group-hover/comment:opacity-100 focus-visible:opacity-100 data-[state=open]:opacity-100"
-                      >
-                        <SmilePlus className="size-icon-sm" />
-                      </IconButton>
-                    </Popover.Trigger>
-                    <PopoverContent align="start" className="flex gap-0.5 p-1">
-                      {REACTION_EMOJIS.map((emoji) => (
-                        <Button
-                          key={emoji}
-                          onClick={() => {
-                            setPicking(false);
-                            if (c.id) onReact(c.id, emoji, true);
-                          }}
-                          aria-label={`React ${emoji}`}
-                          size="icon"
-                          className="text-base"
-                        >
-                          {emoji}
-                        </Button>
-                      ))}
-                    </PopoverContent>
-                  </Popover.Root>
-                  {/* Replies to a reply re-anchor to the root: one level. */}
-                  {!c.parent && (
-                    <InlineAction
-                      onClick={() => setReplying("")}
-                      className="opacity-0 transition-opacity group-hover/comment:opacity-100 focus-visible:opacity-100"
-                    >
-                      Reply
-                    </InlineAction>
-                  )}
-                  {c.id && (
-                    <>
-                      <InlineAction
-                        onClick={() => onCopyLink(c.id!)}
-                        className="opacity-0 transition-opacity group-hover/comment:opacity-100 focus-visible:opacity-100"
-                      >
-                        Copy link
-                      </InlineAction>
-                      <InlineAction
-                        onClick={() => onCreateFromComment(c.body)}
-                        title="Create a new issue from this comment"
-                        className="opacity-0 transition-opacity group-hover/comment:opacity-100 focus-visible:opacity-100"
-                      >
-                        New issue
-                      </InlineAction>
-                    </>
-                  )}
-                </>
-              )}
-            </div>
-          )}
+    <article className="border-line bg-raised shadow-raised rounded-surface border">
+      {block(c)}
+      {replies.map((r, i) => (
+        <div key={r.id ?? `r${i}`} className="border-line border-t">
+          {block(r)}
         </div>
-
-        {(replies.length > 0 || replying !== null) && (
-          <div className="border-line mt-2 flex flex-col gap-2 border-l pl-3">
-            {replies.map((r, i) => (
-              <Comment
-                key={r.id ?? `r${i}`}
-                comment={r}
-                replies={[]}
-                memberOf={memberOf}
-                readOnly={readOnly}
-                meKey={meKey}
-                onReact={onReact}
-                onReply={onReply}
-                onCopyLink={onCopyLink}
-                onCreateFromComment={onCreateFromComment}
-              />
-            ))}
-            {replying !== null && (
-              <textarea
-                autoFocus
-                value={replying}
-                placeholder="Reply…  (⌘/Ctrl + Enter)"
-                onChange={(e) => setReplying(e.target.value)}
-                onKeyDown={(e) => {
-                  e.stopPropagation();
-                  if (e.key === "Escape") setReplying(null);
-                  if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && replying.trim() && c.id) {
-                    e.preventDefault();
-                    onReply(c.id, replying.trim());
-                    setReplying(null);
-                  }
-                }}
-                rows={2}
-                aria-label="Reply"
-                className="border-line focus-within:border-line-strong placeholder:text-mute resize-y rounded-control border bg-transparent p-2 text-sm outline-none"
-              />
-            )}
-          </div>
-        )}
-      </div>
+      ))}
+      {/* Pre-identity comments (no id) cannot anchor replies — the composer
+          simply doesn't exist for them, rather than existing and failing.
+          Replies to a reply re-anchor to the root: one level. */}
+      {!readOnly && !!c.id && (
+        <ReplyComposer meKey={meKey} memberOf={memberOf} onSubmit={(body) => onReply(c.id!, body)} />
+      )}
     </article>
   );
 }
 
-function Event({ event: e, resolveName }: { event: ActivityEvent; resolveName: NameResolver }) {
-  const { actor, phrase } = describeEvent(e, resolveName);
-  const changes = describeChanges(e);
+/** A single comment inside the card: header (face, name, time, actions), body,
+ *  reaction chips. Shared by the root comment and each reply. */
+function CommentBlock({
+  comment: c,
+  memberOf,
+  readOnly,
+  meKey,
+  onReact,
+  onCopyLink,
+  onCreateFromComment,
+}: {
+  comment: CommentDto;
+  memberOf: (key: string) => MemberDto | undefined;
+  readOnly: boolean;
+  meKey: string | null;
+  onReact: (comment: string, emoji: string, on: boolean) => void;
+  onCopyLink: (commentId: string) => void;
+  onCreateFromComment: (body: string) => void;
+}) {
+  const member = memberOf(c.author);
+  const [picking, setPicking] = useState(false);
+  // Pre-identity comments (no id) cannot anchor reactions or links — the
+  // affordances simply don't exist for them, rather than existing and failing.
+  const canAct = !readOnly && !!c.id;
 
   return (
-    <div className="text-mute flex items-baseline gap-2 text-xs">
-      <CircleDot className="size-icon-xs shrink-0 translate-y-0.5" />
+    <div className="group/comment px-4 py-3">
+      <div className="flex items-center gap-2">
+        <Avatar
+          deviceKey={c.author}
+          // The in-doc `author_nick` is what the author *claimed*; the local alias is
+          // what you decided they are. Prefer yours — it is the half that was verified.
+          alias={member?.alias || c.author_nick || ""}
+          me={member?.me ?? false}
+        />
+        <span className="min-w-0 truncate font-medium">
+          {member ? nameOf(c.author, member) : (c.author_nick ?? short(c.author))}
+        </span>
+        {/* Unix SECONDS — `tsToDate` is the only place that's converted. */}
+        <time className="text-mute shrink-0 text-xs" dateTime={tsToDate(c.ts).toISOString()}>
+          {when(c.ts)}
+        </time>
+        {canAct && (
+          /* Anchored in the header, so revealing them never reflows the thread. */
+          <span className="ml-auto flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover/comment:opacity-100 focus-within:opacity-100 has-[[data-state=open]]:opacity-100">
+            <Popover.Root open={picking} onOpenChange={setPicking}>
+              <Popover.Trigger asChild>
+                <IconButton aria-label="Add reaction" label="Add reaction">
+                  <SmilePlus className="size-icon-sm" />
+                </IconButton>
+              </Popover.Trigger>
+              <PopoverContent align="end" className="flex gap-0.5 p-1">
+                {REACTION_EMOJIS.map((emoji) => (
+                  <Button
+                    key={emoji}
+                    onClick={() => {
+                      setPicking(false);
+                      if (c.id) onReact(c.id, emoji, true);
+                    }}
+                    aria-label={`React ${emoji}`}
+                    size="icon"
+                    className="text-base"
+                  >
+                    {emoji}
+                  </Button>
+                ))}
+              </PopoverContent>
+            </Popover.Root>
+            <DropdownMenu.Root>
+              <DropdownMenu.Trigger asChild>
+                <IconButton label="Comment actions">
+                  <MoreHorizontal className="size-icon-sm" />
+                </IconButton>
+              </DropdownMenu.Trigger>
+              <DropdownMenu.Portal>
+                <MenuContent align="end" className="min-w-44">
+                  <MenuItem onSelect={() => onCopyLink(c.id!)}>
+                    <Link2 className="size-icon-sm" /> Copy link
+                  </MenuItem>
+                  <MenuItem onSelect={() => onCreateFromComment(c.body)}>
+                    <CopyPlus className="size-icon-sm" /> New issue from comment
+                  </MenuItem>
+                </MenuContent>
+              </DropdownMenu.Portal>
+            </DropdownMenu.Root>
+          </span>
+        )}
+      </div>
+      <Markdown text={c.body} density="tight" className="mt-1.5" />
+      {(c.reactions?.length ?? 0) > 0 && (
+        <div className="mt-1.5 flex flex-wrap items-center gap-1">
+          {(c.reactions ?? []).map((r) => {
+            const mine = meKey !== null && r.actors.includes(meKey);
+            return (
+              <ChipButton
+                key={r.emoji}
+                disabled={!canAct}
+                onClick={() => c.id && onReact(c.id, r.emoji, !mine)}
+                title={r.actors.map((a) => nameOf(a, memberOf(a))).join(", ")}
+                aria-pressed={mine}
+              >
+                {r.emoji}
+                <span className="tabular-nums">{r.actors.length}</span>
+              </ChipButton>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** The card's standing footer: your face, a field, a send button. Always there,
+ *  like Linear's "Leave a reply…" — not summoned from a hover menu. */
+function ReplyComposer({
+  meKey,
+  memberOf,
+  onSubmit,
+}: {
+  meKey: string | null;
+  memberOf: (key: string) => MemberDto | undefined;
+  onSubmit: (body: string) => void;
+}) {
+  const [draft, setDraft] = useState("");
+  const submit = () => {
+    const body = draft.trim();
+    if (!body) return;
+    onSubmit(body);
+    setDraft("");
+  };
+  const me = meKey ? memberOf(meKey) : undefined;
+  return (
+    <div className="border-line flex items-center gap-2 border-t py-2.5 pr-2.5 pl-4">
+      {meKey && <Avatar deviceKey={meKey} alias={me?.alias ?? ""} me size="sm" />}
+      <textarea
+        value={draft}
+        placeholder="Leave a reply…"
+        rows={Math.min(6, draft.split("\n").length)}
+        onChange={(e) => setDraft(e.target.value)}
+        onKeyDown={(e) => {
+          e.stopPropagation();
+          if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && draft.trim()) {
+            e.preventDefault();
+            submit();
+          }
+        }}
+        aria-label="Reply"
+        className="placeholder:text-mute min-w-0 flex-1 resize-none bg-transparent py-0.5 text-sm outline-none"
+      />
+      <IconButton
+        label="Attach a file"
+        onClick={() => document.getElementById("issue-attach")?.click()}
+        className="self-end"
+      >
+        <Paperclip className="size-icon-sm" />
+      </IconButton>
+      <IconButton
+        label="Reply"
+        chord="Ctrl/⌘ ↵"
+        disabled={!draft.trim()}
+        onClick={submit}
+        className="self-end"
+      >
+        <ArrowUp className="size-icon-sm" />
+      </IconButton>
+    </div>
+  );
+}
+
+function Event({
+  event: e,
+  states,
+  memberOf,
+  ctx,
+  repeat,
+}: {
+  event: ActivityEvent;
+  states: WorkflowState[];
+  memberOf: (key: string) => MemberDto | undefined;
+  ctx: EventPhraseContext;
+  /** How many identical lines this row stands for — see the fold in `Timeline`. */
+  repeat?: number;
+}) {
+  const { actor, phrase } = describeEventRich(e, ctx);
+
+  return (
+    <div className="text-mute flex items-start gap-2 text-xs">
+      {/* A fixed column as wide as a comment avatar, so the timeline's icons and
+          the cards' faces share one left edge. */}
+      <span className="flex h-4 w-avatar-md shrink-0 items-center justify-center">
+        <EventGlyph event={e} states={states} memberOf={memberOf} />
+      </span>
       <span className="min-w-0 flex-1">
         {/* No actor means we genuinely don't know — see core/activity.ts. Printing
             "someone" would claim we know there was a someone and lost the name. */}
         {actor && <span className="text-dim font-medium">{actor} </span>}
         {phrase}
-        {changes && <span className="text-mute"> · {changes}</span>}
+        {/* The tally, never a re-wording: the sentence is what happened and the
+            count is how many times, so a folded run reads as its own line plus
+            a number rather than a phrase you have to parse differently. */}
+        {repeat && repeat > 1 && (
+          <span className="text-dim ml-1 tabular-nums" title={`${repeat} identical changes`}>
+            ×{repeat}
+          </span>
+        )}
+        <span aria-hidden="true"> · </span>
+        <time dateTime={tsToDate(e.ts).toISOString()}>{when(e.ts)}</time>
+        {/* A concurrent overwrite is worth flagging but never worth blocking on
+            (A§9): last-writer-wins already resolved it; you just get told. */}
+        {e.collision && (
+          <AlertTriangle
+            className="text-warn size-icon-xs ml-1 inline-block align-text-top"
+            aria-label="Concurrent overwrite"
+          />
+        )}
       </span>
-      {/* A concurrent overwrite is worth flagging but never worth blocking on
-          (A§9): last-writer-wins already resolved it; you just get told. */}
-      {e.collision && (
-        <AlertTriangle className="text-warn size-icon-xs shrink-0" aria-label="Concurrent overwrite" />
-      )}
-      <time className="shrink-0" dateTime={tsToDate(e.ts).toISOString()}>
-        {when(e.ts)}
-      </time>
     </div>
   );
+}
+
+/**
+ * The icon column earns its width: each event kind draws its own glyph — the
+ * target state's circle for a move, the priority bars for a priority change, the
+ * actor's face for "created the issue" — so the timeline can be scanned by shape
+ * before it is read.
+ */
+function EventGlyph({
+  event: e,
+  states,
+  memberOf,
+}: {
+  event: ActivityEvent;
+  states: WorkflowState[];
+  memberOf: (key: string) => MemberDto | undefined;
+}) {
+  if (e.kind === "created" && e.actor) {
+    const member = memberOf(e.actor);
+    return (
+      <Avatar deviceKey={e.actor} alias={member?.alias ?? ""} me={member?.me ?? false} size="sm" />
+    );
+  }
+  if (EDIT_KINDS.has(e.kind)) {
+    const changed = (field: string) =>
+      e.changes.find((c) => c.field === field && (c.from ?? "—") !== (c.to ?? "—"));
+    const status = changed("status");
+    if (status?.to) {
+      const s = states.find((st) => st.id === status.to);
+      if (s) return <StatusIcon category={s.category} color={catalogColor(s.color)} />;
+    }
+    const priority = changed("priority");
+    if (priority) return <PriorityIcon priority={(priority.to ?? "none") as Priority} />;
+    if (changed("duedate")) return <CalendarDays className="size-icon-sm" />;
+    if (changed("estimate")) return <Gauge className="size-icon-sm" />;
+    if (e.changes.some((c) => c.field === "assignees")) {
+      return e.changes.some((c) => c.field === "assignees" && c.to) ? (
+        <UserPlus className="size-icon-sm" />
+      ) : (
+        <UserMinus className="size-icon-sm" />
+      );
+    }
+    return <Pencil className="size-icon-sm" />;
+  }
+  switch (e.kind) {
+    case "assigned":
+      return <UserPlus className="size-icon-sm" />;
+    case "unassigned":
+      return <UserMinus className="size-icon-sm" />;
+    case "labeled":
+      return <Tag className="size-icon-sm" />;
+    case "linked":
+    case "unlinked":
+      if (e.text.startsWith("blocks ")) return <Ban className="text-danger size-icon-sm" />;
+      if (e.text.startsWith("duplicates ")) return <CopyPlus className="size-icon-sm" />;
+      return <Link2 className="size-icon-sm" />;
+    case "parented":
+      return <CornerDownRight className="size-icon-sm" />;
+    case "milestoned":
+      return <Milestone className="size-icon-sm" />;
+    case "cycled":
+      return <RefreshCw className="size-icon-sm" />;
+    case "attached":
+    case "detached":
+      return <Paperclip className="size-icon-sm" />;
+    case "deleted":
+      return <Trash2 className="size-icon-sm" />;
+    case "restored":
+      return <ArchiveRestore className="size-icon-sm" />;
+    case "moved":
+      return <MoveRight className="size-icon-sm" />;
+    default:
+      return <CircleDot className="size-icon-xs" />;
+  }
 }
 
 /**

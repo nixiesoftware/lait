@@ -143,6 +143,15 @@ export interface AppApi {
   openFilter(): void;
   /** Reset every filter facet to the neutral state (show all). */
   clearFilter(): void;
+  /**
+   * Scope the issue surfaces to one milestone of `project`.
+   *
+   * `""` is the No-milestone bucket and `null` clears the scope — the same
+   * three-way the route grammar carries, because a milestone is a *filter* here
+   * and not a destination: it composes with the board, the list and the
+   * calendar rather than owning a route of its own.
+   */
+  gotoMilestone(project: string | null, milestone: string | null): void;
   toast(message: string): void;
   refresh(): void;
   select(reff: string | null): void;

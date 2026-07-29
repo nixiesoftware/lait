@@ -178,6 +178,7 @@ pub fn parse(matches: &ArgMatches) -> Result<CliInvocation, InterfaceError> {
                 mine: yes(m, "mine"),
                 status: opt(m, "status"),
                 label: opt(m, "label"),
+                milestone: opt(m, "milestone"),
                 all: yes(m, "all"),
             },
         },
@@ -439,21 +440,27 @@ fn parse_milestone(verb: &str, m: &ArgMatches) -> Result<IssuesRequest, Interfac
             project: req(m, "project"),
             milestone: None,
             name: Some(req(m, "name")),
+            description: opt(m, "description"),
             target: opt(m, "target"),
+            pos: None,
             remove: false,
         },
         "edit" => IssuesRequest::MilestoneSet {
             project: req(m, "project"),
             milestone: opt(m, "milestone"),
             name: opt(m, "name"),
+            description: opt(m, "description"),
             target: opt(m, "target"),
+            pos: milestone_pos(m),
             remove: false,
         },
         "rm" => IssuesRequest::MilestoneSet {
             project: req(m, "project"),
             milestone: opt(m, "milestone"),
             name: None,
+            description: None,
             target: None,
+            pos: None,
             remove: true,
         },
         "set" => IssuesRequest::IssueMilestone {
@@ -462,6 +469,20 @@ fn parse_milestone(verb: &str, m: &ArgMatches) -> Result<IssuesRequest, Interfac
         },
         _ => return Err(InterfaceError::new("unknown milestone command")),
     })
+}
+
+/// `--top`/`--bottom`/`--before`/`--after` read as one placement, in that
+/// precedence. Absent leaves an existing milestone where it is.
+fn milestone_pos(m: &ArgMatches) -> Option<BoardPos> {
+    if yes(m, "top") {
+        Some(BoardPos::Top)
+    } else if yes(m, "bottom") {
+        Some(BoardPos::Bottom)
+    } else if let Some(reff) = opt(m, "before") {
+        Some(BoardPos::Before { reff })
+    } else {
+        opt(m, "after").map(|reff| BoardPos::After { reff })
+    }
 }
 
 fn parse_cycle(verb: &str, m: &ArgMatches) -> Result<IssuesRequest, InterfaceError> {
@@ -706,6 +727,10 @@ fn list_command() -> Command {
         .arg(flag("mine", "Only issues assigned to you."))
         .arg(option("status", "Filter by status."))
         .arg(option("label", "Filter by label."))
+        .arg(option(
+            "milestone",
+            "Filter by milestone (name or `mls_` id). Needs `--project`.",
+        ))
         .arg(flag("all", "Include done and archived."))
 }
 
@@ -820,14 +845,23 @@ fn milestone_command() -> Command {
             leaf("new", "Create a milestone.")
                 .arg(pos("project", "Project ref."))
                 .arg(pos("name", "Milestone name."))
+                .arg(option("description", "What this stage is (markdown)."))
                 .arg(option("target", "Target date.")),
         )
         .subcommand(
-            leaf("edit", "Edit a milestone.")
+            leaf("edit", "Rename, retarget, or reorder a milestone.")
                 .arg(pos("project", "Project ref."))
                 .arg(pos("milestone", "Milestone ref."))
                 .arg(option("name", "New name."))
-                .arg(option("target", "Target date.")),
+                .arg(option(
+                    "description",
+                    "Replace the body (empty string clears).",
+                ))
+                .arg(option("target", "Target date."))
+                .arg(flag("top", "Move to the top of the project's milestones."))
+                .arg(flag("bottom", "Move to the bottom."))
+                .arg(option("before", "Place before this milestone."))
+                .arg(option("after", "Place after this milestone.")),
         )
         .subcommand(
             leaf("rm", "Remove a milestone.")

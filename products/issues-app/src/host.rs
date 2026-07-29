@@ -406,6 +406,7 @@ async fn run_focus(
                 mine: true,
                 status: None,
                 label: None,
+                milestone: None,
                 all: false,
             },
         },

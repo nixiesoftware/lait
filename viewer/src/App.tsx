@@ -3,6 +3,7 @@ import { Group, Panel, Separator, useDefaultLayout, usePanelRef } from "react-re
 import * as Dialog from "@radix-ui/react-dialog";
 import {
   PanelLeft,
+  PanelRight,
   Plus,
 } from "lucide-react";
 
@@ -17,13 +18,12 @@ import {
   type Ctx,
   isIssueMode,
   isProjectView,
-  navViewFor,
   type IssueMode,
-  PROJECT_VIEW_LABEL,
   type IssueField,
   type View,
 } from "./core/registry";
 import {
+  carriesFilter,
   formatRoute,
   loadLastRoute,
   parseRoute,
@@ -34,6 +34,7 @@ import {
 import { useKeys } from "./core/useKeys";
 import { neighbourState, workTarget } from "./core/workflow";
 import { loadFavoriteProjects, toggleFavoriteProject } from "./core/personalNav";
+import { loadRailOpen, saveRailOpen } from "./core/railState";
 import { loadSavedViews, type SavedView } from "./core/savedViews";
 import { Activity } from "./ui/Activity";
 import { classifyFailure, EmptyState, InlineError, recoveryForError, TrustPopover } from "./ui/AppState";
@@ -43,10 +44,13 @@ import { Calendar } from "./ui/Calendar";
 import { Timeline } from "./ui/Timeline";
 import { DisplayOptions } from "./ui/DisplayOptions";
 import { FilterMenu } from "./ui/FilterMenu";
+import type { IssueMutators } from "./ui/fields";
 import { Inbox } from "./ui/Inbox";
 import { IssueSearch, rememberIssue } from "./ui/IssueSearch";
 import { Projects } from "./ui/Projects";
 import { ProjectOverview } from "./ui/ProjectOverview";
+import { ProjectRail } from "./ui/ProjectRail";
+import { ProjectTabs } from "./ui/ProjectTabs";
 import {
   Breadcrumbs,
   DESTINATION_ICON,
@@ -85,6 +89,7 @@ import { PREDICTION_TTL_MS, type Field } from "./core/overlay";
 import {
   projectKeys,
   useProjectBoard,
+  useProjectMilestones,
   useProjectRegistry,
   useProjectViewerStore,
 } from "./projectStore";
@@ -95,7 +100,6 @@ import {
   type SpaceRow,
   type StatusInfo,
   type WorkflowState,
-  type StatusCategory,
 } from "./types";
 import "./commands";
 
@@ -147,12 +151,18 @@ export function App() {
   const [composingProject, setComposingProject] = useState(false);
   const [filter, setFilter] = useState<FilterState>(initialRoute.filter ?? EMPTY_FILTER);
   const [filterOpen, setFilterOpen] = useState(false);
+  // The console's own visibility, remembered across sessions. See core/railState.
+  const [railOpen, setRailOpen] = useState(loadRailOpen);
   const [focusToken, setFocusToken] = useState(0);
   /** Group / order / show-deleted. Loaded once; every change is persisted. */
   const initialDisplayScope = `${initialRoute.spaceId ?? "none"}/${initialRoute.project ?? "all"}/${initialRoute.view}`;
   const [display, setDisplay] = useState<DisplayState>(() => loadDisplay(initialDisplayScope));
   const [displayOpen, setDisplayOpen] = useState(false);
   const [mobileNav, setMobileNav] = useState(false);
+  /** Is the workspace rail collapsed? Only the shell's own header may answer
+   *  that — a collapsed rail leaves ⌘B as the sole way back, which is a
+   *  keystroke you have to already know. */
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [personalNavRevision, setPersonalNavRevision] = useState(0);
   /** Bulk-selection checks, by canonical ref. Distinct from `selection`: the
    *  focus is one row, the checks are a set, and `x` is the bridge. */
@@ -611,6 +621,52 @@ export function App() {
     }
   }, []);
 
+  /** `predict`'s notice-and-rollback framing, for a store field method. */
+  const commitField = useCallback(
+    async (field: string, run: () => Promise<boolean>) => {
+      setMutationNotice(`Saving ${field} on this device…`);
+      try {
+        await run();
+        setMutationNotice(`${field} saved on this device`);
+      } catch (e) {
+        setMutationNotice(`${field} was refused · local value restored`);
+        if (!(e instanceof ConfirmRequired)) {
+          setError(e instanceof LaitError ? e.message : String(e));
+        }
+      }
+    },
+    [],
+  );
+
+  /**
+   * The in-place field writes — one object, handed to the list, the board and
+   * the calendar, so a chip on any of them commits through the same store
+   * methods (and the same optimistic overlay) as the detail rail.
+   */
+  const issueMutators = useMemo<IssueMutators>(() => ({
+    setStatus: (reff, status) =>
+      void commitField("status", () =>
+        projectStore.setStatus(currentRef.current ?? "", reff, status)),
+    setPriority: (reff, priority) =>
+      void commitField("priority", () =>
+        projectStore.setPriority(currentRef.current ?? "", reff, priority)),
+    toggleAssignee: (reff, key, add) =>
+      void commitField("assignee", () =>
+        projectStore.toggleAssignee(currentRef.current ?? "", reff, key, add)),
+    toggleLabel: (reff, name, add) =>
+      void commitField("label", () =>
+        projectStore.toggleLabel(currentRef.current ?? "", reff, name, add)),
+    swapLabel: (reff, from, to) =>
+      void commitField("label", () =>
+        projectStore.swapLabel(currentRef.current ?? "", reff, from, to)),
+    setDue: (reff, due) =>
+      void commitField("due date", () =>
+        projectStore.setDue(currentRef.current ?? "", reff, due)),
+    setEstimate: (reff, estimate) =>
+      void commitField("estimate", () =>
+        projectStore.setEstimate(currentRef.current ?? "", reff, estimate)),
+  }), [commitField, projectStore]);
+
   /**
    * One request per checked issue with a small concurrency ceiling. Independent
    * refusals do not stop the run, and the itemized result targets retry precisely.
@@ -712,6 +768,35 @@ export function App() {
         setSelection(null);
         setDetail(false);
         if (scoped !== filter) setFilter(scoped);
+      },
+      /**
+       * A milestone is a filter, not a destination.
+       *
+       * So this stays on whatever issue surface you were reading if that surface
+       * can be narrowed — clicking a milestone while working the board should
+       * narrow the board, not throw you into a list. Only Overview and Activity,
+       * which draw no rows, hand you to Issues.
+       */
+      gotoMilestone: (toProject, milestone) => {
+        const next = { ...filter, milestone };
+        const nextView = carriesFilter(view) ? view : "list";
+        const nextProject = toProject ?? project;
+        window.history.pushState(
+          null,
+          "",
+          formatRoute({
+            spaceId: routeSpace,
+            project: nextProject,
+            view: nextView,
+            issue: null,
+            filter: next,
+          }),
+        );
+        setProject(nextProject);
+        setView(nextView);
+        setSelection(null);
+        setDetail(false);
+        setFilter(next);
       },
       openFilter: () => {
         setFilterOpen(true);
@@ -957,10 +1042,14 @@ export function App() {
         view?: View;
         project?: string | null;
         issue?: string | null;
+        milestone?: string | null;
       };
       setTimeout(() => {
         if (typeof detail.view === "string") api.goto(detail.view);
         if ("project" in detail) api.goto(isProjectView(view) ? view : "overview", detail.project ?? null);
+        // After `project`, so `{ project, milestone }` in one detail scopes the
+        // project it just named rather than the one you were on.
+        if ("milestone" in detail) api.gotoMilestone(detail.project ?? null, detail.milestone ?? null);
         if ("issue" in detail) api.select(detail.issue ?? null);
       }, 0);
     };
@@ -1142,6 +1231,9 @@ export function App() {
   const activeProject =
     board?.project ?? projects.find((candidate) => candidate.key === project) ?? null;
   const projectShell = isProjectView(view) && Boolean(project || activeProject);
+  // The open project's milestones, for the filter menu's Milestone facet. The
+  // same resource the overview and the issue rail read — one fetch for all three.
+  const milestones = useProjectMilestones(current ?? "", activeProject?.id).data ?? [];
   const projectCounts = useMemo(() => {
     const counts = { backlog: 0, active: 0, done: 0, total: 0 };
     for (const column of board?.columns ?? []) {
@@ -1182,26 +1274,23 @@ export function App() {
     : null;
 
   /**
-   * The face of the project you are on, as a crumb.
+   * The face of the project is the STRIP's to name, not the trail's — and this
+   * has now gone both ways, so the reason matters more than the answer.
    *
-   * It used to be a tab strip under the header, which the trail then had to stay
-   * silent about to avoid saying "Issues" twice — so the address bar named a
-   * project and the screen named a view, and neither said both. The sidebar's
-   * project tree now carries the five faces, so the strip was a second switcher
-   * for a choice already made one pane to the left, and the trail is free to
-   * finish the sentence it starts.
+   * The trail took the view when the strip was removed, on the grounds that the
+   * sidebar's project tree already switched faces and a strip was a second
+   * switcher for a settled choice. That was true of a project you *visit*. It is
+   * not true of a project you are *inside*: the rail persists across the faces
+   * now, a milestone click narrows the issue list without leaving the shell, and
+   * the sidebar has no way to say "this project, Issues, scoped to M1". The
+   * strip does, so the strip has it back and the trail stops at the project.
    *
-   * Overview is the project's home rather than one of its faces, so it adds no
-   * crumb: `Viewer` already means it.
+   * An open issue is still a crumb — it is a different document, not a face.
    */
   /** The layout showing, when one is — `null` on Overview, Activity and the
    *  workspace destinations. Narrowed once so every gate below reads the same. */
   const issueMode = isIssueMode(view) ? view : null;
-  // Board and Calendar are layouts of Issues, so the trail names Issues for all
-  // three: the crumb is the destination, the switcher is the drawing.
-  const viewCrumb =
-    projectShell && isProjectView(view) && view !== "overview" ? navViewFor(view) : null;
-  const belowProject = Boolean(viewCrumb || openRow);
+  const belowProject = Boolean(openRow);
 
   const trail: BreadcrumbItem[] = projectShell
     ? [
@@ -1278,25 +1367,6 @@ export function App() {
         },
       ];
 
-  if (viewCrumb) {
-    trail.push({
-      key: `view-${viewCrumb}`,
-      // No glyph: the leading slot belongs to things with a mark of their own —
-      // a project has a colour, a destination has an icon, a view is a word.
-      content: <span className="truncate">{PROJECT_VIEW_LABEL[viewCrumb]}</span>,
-      // Ancestors may drop on a narrow bar, and between the project and the
-      // issue this is the hop you can most afford to lose.
-      optional: true,
-      ...(openRow
-        ? {
-            onNavigate: () => {
-              api.select(null);
-              setDetail(false);
-            },
-          }
-        : {}),
-    });
-  }
 
   if (openRow) {
     trail.push({
@@ -1378,6 +1448,7 @@ export function App() {
         collapsible
         collapsedSize={0}
         groupResizeBehavior="preserve-pixel-size"
+        onResize={(size) => setSidebarCollapsed(size.inPixels === 0)}
         className="bg-sunken max-[960px]:hidden"
       >
         <Sidebar
@@ -1392,7 +1463,6 @@ export function App() {
           savedViews={sidebarSavedViews}
           onPickSpace={api.pickSpace}
           onSearch={() => run("search.issues")}
-          issueLayout={issueLayout}
           onOpenProjectView={(key, next) => api.goto(next, key)}
           onGo={api.goto}
           onMyIssues={openMyIssues}
@@ -1413,7 +1483,15 @@ export function App() {
         <span className="absolute inset-y-0 -left-[3px] w-[7px]" />
       </Separator>
 
-      <Panel id="main" role="main" className="flex min-w-0 flex-col">
+      <Panel
+        id="main"
+        role="main"
+        // On the board, the whole pane — breadcrumb bar and tab strip included —
+        // stands on the raised canvas the columns are sunk into. A seam at the
+        // toolbar's edge would split one surface into chrome-over-content; the
+        // headers belong to the body they act on.
+        className={`flex min-w-0 flex-col${view === "board" && !fullWidthDetail ? " bg-raised" : ""}`}
+      >
         {/* One header for every view, mounted once and never swapped. Opening an
             issue extends the trail and hands the actions slot to the issue; it
             does not build a second bar with its own inset, its own controls and
@@ -1421,9 +1499,26 @@ export function App() {
             it hides the sidebar, so it draws its own shell entirely. */}
         <div className={view === "settings" ? "hidden" : "shrink-0"}>
           <SurfaceHeader
-            // No leading control. The bar's first ink is the thing you are
-            // looking at — the toggle was a piece of window furniture sitting
-            // where the trail should start, and ⌘B still collapses the sidebar.
+            // No standing leading control — the bar's first ink is the thing
+            // you are looking at, and a permanent toggle was window furniture
+            // sitting where the trail should start. It returns for exactly the
+            // one state that needs it: with the rail collapsed there is nothing
+            // on screen that brings it back, and ⌘B only helps someone who
+            // already knows. It leaves again the moment the rail is open.
+            leading={
+              sidebarCollapsed ? (
+                <IconButton
+                  label="Show sidebar"
+                  chord="⌘B"
+                  // Its own space, so it reads as chrome acting on the window
+                  // rather than the first crumb of the trail.
+                  className="mr-2"
+                  onClick={api.toggleSidebar}
+                >
+                  <PanelLeft className="size-icon-sm" />
+                </IconButton>
+              ) : undefined
+            }
             trail={<Breadcrumbs items={trail} />}
             actions={
               // An open issue owns this end of the bar. Its buttons arrive from
@@ -1454,9 +1549,19 @@ export function App() {
           {/* The only band under the header. Filtering used to add a second one
               beneath it for as long as the filter was engaged; it is a panel
               now, so the chrome no longer changes height when you narrow. */}
-          {projectShell && !fullWidthDetail && issueMode && (
+          {projectShell && !fullWidthDetail && (
             <Toolbar>
-              <StatusSlices states={states} filter={filter} onChange={setFilter} />
+              {/* The strip alone, then the tools at the tail. The status slices
+                  used to sit here and no longer do: they are a filter, and six
+                  identical pills on one bar answered two different questions —
+                  which FACE of the project, and which ROWS that face draws. */}
+              <ProjectTabs
+                view={isProjectView(view) ? view : "list"}
+                // Re-entering Issues keeps the layout you were last drawing them
+                // in rather than snapping back to the list — the tree used to
+                // carry this rule and the strip inherits it.
+                onPick={(next) => api.goto(next === "list" ? issueLayout : next)}
+              />
               {/* The controls belong beside the slices they act on, not up in the
                   trail: filtering, display and "new issue" are all about THIS
                   list, while the bar above names where you are. One row, the
@@ -1468,6 +1573,7 @@ export function App() {
                   labels={labels}
                   states={states}
                   members={members}
+                  milestones={milestones}
                   open={filterOpen}
                   onOpenChange={setFilterOpen}
                   focusToken={focusToken}
@@ -1512,6 +1618,23 @@ export function App() {
                   <Plus className="size-icon-sm" />
                 </IconButton>
               )}
+              {/* Last in the band, because it acts on the band's neighbour
+                  rather than on the rows: everything to its left changes what
+                  the list shows, this changes whether the console is beside it. */}
+              {projectShell && (
+                <IconButton
+                  label={railOpen ? "Hide project panel" : "Show project panel"}
+                  variant={railOpen ? "active" : "outline"}
+                  onClick={() =>
+                    setRailOpen((was) => {
+                      saveRailOpen(!was);
+                      return !was;
+                    })
+                  }
+                >
+                  <PanelRight className="size-icon-sm" />
+                </IconButton>
+              )}
               </span>
             </Toolbar>
           )}
@@ -1537,14 +1660,18 @@ export function App() {
         )}
 
 
-        {/* No `tabpanel` role any more: with the strip gone there is no tablist
-            for it to belong to, and a panel labelled by a tab that does not
-            exist is a dangling `aria-labelledby`, not an affordance. The trail
-            names this surface now. */}
+        {/* The project shell: whatever face you are on, beside the console.
+
+            The rail is here rather than inside any one view because it has to
+            survive the hop between them — clicking a milestone narrows the issue
+            list, and a panel that vanished on the way would take the only way to
+            clear the filter with it. Non-project surfaces render the content
+            column alone and the row collapses to it. */}
+        <div className={`flex min-h-0 flex-1${fullWidthDetail ? " hidden" : ""}`}>
         <div
           // Hidden rather than unmounted behind a full-width issue: coming back
           // should land you where you were in the list, not at the top of it.
-          className={`group/list flex min-h-0 flex-1 flex-col${fullWidthDetail ? " hidden" : ""}`}
+          className="group/list flex min-w-0 min-h-0 flex-1 flex-col"
         >
           {!current ? (
             <EmptyState
@@ -1618,7 +1745,6 @@ export function App() {
               spaceId={current}
               project={activeProject}
               members={members}
-              counts={projectCounts}
               readOnly={readOnly}
               onError={setError}
             />
@@ -1657,28 +1783,23 @@ export function App() {
                 if (!id) return;
                 if (display.group === "priority") {
                   if (row.priority === groupKey) return;
-                  void predict(row.doc_id, "priority", groupKey, () =>
-                    rpc(id, { cmd: "issue_edit", reff: row.reff, priority: groupKey }),
-                  );
+                  void commitField("priority", () =>
+                    projectStore.setPriority(id, row.reff, groupKey));
                 } else if (display.group === "assignee") {
-                  // Reassign = make the target the issue's sole assignee (or clear
-                  // it for the unassigned lane). `assign` is add/remove per key, so
-                  // this is a small batch; the doorbell repaints when it lands.
+                  // Reassign = make the target the issue's sole assignee (or
+                  // clear it for the unassigned lane).
                   const target = groupKey === "unassigned" ? null : groupKey;
-                  void guard(async () => {
-                    for (const k of row.assignees) {
-                      if (k !== target)
-                        await rpc(id, { cmd: "assign", reff: row.reff, who: [k], add: false });
-                    }
-                    if (target && !row.assignees.includes(target))
-                      await rpc(id, { cmd: "assign", reff: row.reff, who: [target], add: true });
-                  });
+                  void commitField("assignee", () =>
+                    projectStore.setAssignees(id, row.reff, target ? [target] : []));
                 }
               }}
-              onEdit={(reff, nextField) => {
-                api.select(reff);
-                setDetail(true);
-                setField(nextField);
+              mutators={issueMutators}
+              // The graph resource the detail pane reads, on demand: a card's
+              // sub-issue menu asks only when it opens.
+              onLoadChildren={(reff) => {
+                const id = currentRef.current;
+                if (!id) return Promise.resolve([]);
+                return projectStore.ensureGraph(id, reff).then((graph) => graph.children);
               }}
               readOnly={readOnly}
             />
@@ -1689,6 +1810,8 @@ export function App() {
                 api.select(reff);
                 setDetail(true);
               }}
+              mutators={issueMutators}
+              readOnly={readOnly}
             />
           ) : view === "timeline" ? (
             <Timeline
@@ -1722,6 +1845,7 @@ export function App() {
                 setDetail(true);
               }}
               onCreate={(status) => setComposing({ status })}
+              mutators={issueMutators}
               readOnly={readOnly}
               filtered={isActive(filter)}
             />
@@ -1733,6 +1857,21 @@ export function App() {
               action={<Button onClick={api.refresh}>Retry loading</Button>}
             />
           )}
+        </div>
+        {projectShell && railOpen && activeProject && current && (
+          <aside className="border-line w-rail shrink-0 overflow-y-auto border-l p-3">
+            <ProjectRail
+              spaceId={current}
+              project={activeProject}
+              members={members}
+              counts={projectCounts}
+              readOnly={readOnly}
+              activeMilestone={filter.milestone}
+              onError={setError}
+              onOpenMilestone={(id: string | null) => api.gotoMilestone(activeProject.key, id)}
+            />
+          </aside>
+        )}
         </div>
       </Panel>
 
@@ -1806,7 +1945,6 @@ export function App() {
                 run("search.issues");
                 setMobileNav(false);
               }}
-              issueLayout={issueLayout}
               onOpenProjectView={(key, next) => {
                 api.goto(next, key);
                 setMobileNav(false);
@@ -1995,69 +2133,6 @@ contribute({
     },
   ],
 });
-
-
-/**
- * The three slices of a workflow anyone actually asks for.
- *
- * Status filtering already existed, but only inside the filter bar — so the
- * commonest question a tracker is asked ("what is live right now?") cost opening
- * a panel and ticking states one at a time, and the answer left no mark you
- * could see at a glance. These are not a new filter: each button writes the same
- * `filter.status` the bar writes, so the two can never disagree, and a selection
- * made in the bar simply lights up whichever slice it happens to equal.
- *
- * It sits in the band the issue count used to occupy, so the chrome above the
- * first row is no taller than it was.
- */
-const STATUS_SLICES = [
-  { id: "active", label: "Active", categories: ["active"] as StatusCategory[] },
-  { id: "backlog", label: "Backlog", categories: ["backlog"] as StatusCategory[] },
-  { id: "all", label: "All issues", categories: null },
-] as const;
-
-function StatusSlices({
-  states,
-  filter,
-  onChange,
-}: {
-  states: WorkflowState[];
-  filter: FilterState;
-  onChange: (next: FilterState) => void;
-}) {
-  const idsFor = (categories: readonly StatusCategory[] | null) =>
-    categories === null
-      ? []
-      : states.filter((state) => categories.includes(state.category)).map((state) => state.id);
-  const sameSet = (a: readonly string[], b: readonly string[]) =>
-    a.length === b.length && a.every((id) => b.includes(id));
-  // A workflow with no `active` states would make that slice's id set empty and
-  // indistinguishable from "All issues", so an empty slice never claims the
-  // selection — "All" is the only one allowed to mean nothing selected.
-  const selected =
-    STATUS_SLICES.find((slice) => {
-      const ids = idsFor(slice.categories);
-      return slice.categories === null ? filter.status.length === 0 : ids.length > 0 && sameSet(filter.status, ids);
-    })?.id ?? null;
-
-  return (
-    <div className="flex shrink-0 items-center gap-1" role="group" aria-label="Status">
-      {STATUS_SLICES.map((slice) => {
-        const active = slice.id === selected;
-        return (
-          <Button
-            key={slice.id}
-            variant={active ? "active" : "outline"}
-            aria-pressed={active}
-            onClick={() => onChange({ ...filter, status: idsFor(slice.categories) })}
-          >
-            {slice.label}
-          </Button>
-        );
-      })}
-    </div>
-  );
-}
 
 
 function workspaceTitle(view: View): string {

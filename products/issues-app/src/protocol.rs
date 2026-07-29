@@ -25,6 +25,11 @@ pub struct Filter {
     pub status: Option<String>,
     #[serde(default)]
     pub label: Option<String>,
+    /// Milestone name or `mls_` id, resolved within the listed project.
+    /// Meaningless without a project — a milestone belongs to exactly one, so a
+    /// filter with no project to resolve against is refused rather than guessed.
+    #[serde(default)]
+    pub milestone: Option<String>,
     #[serde(default)]
     pub all: bool,
 }
@@ -219,8 +224,16 @@ pub enum IssuesRequest {
         milestone: Option<String>,
         #[serde(default)]
         name: Option<String>,
+        /// The milestone's prose body. Absent leaves it untouched; `""` clears.
+        #[serde(default)]
+        description: Option<String>,
         #[serde(default)]
         target: Option<String>,
+        /// Where to place it in the project's manual order — `Before`/`After`
+        /// name another milestone of the same project. Absent leaves an existing
+        /// milestone where it is and appends a new one.
+        #[serde(default)]
+        pos: Option<BoardPos>,
         #[serde(default)]
         remove: bool,
     },

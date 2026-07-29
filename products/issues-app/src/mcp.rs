@@ -125,6 +125,10 @@ struct ListArgs {
     status: Option<String>,
     #[serde(default)]
     label: Option<String>,
+    /// Milestone name or `mls_` id. Requires `project` — a milestone belongs to
+    /// exactly one, so there is nothing to resolve the name against without it.
+    #[serde(default)]
+    milestone: Option<String>,
     #[serde(default)]
     all: bool,
 }
@@ -489,6 +493,7 @@ fn list(input: Value) -> Result<CliInvocation, InterfaceError> {
             mine: a.mine,
             status: a.status,
             label: a.label,
+            milestone: a.milestone,
             all: a.all,
         },
     })

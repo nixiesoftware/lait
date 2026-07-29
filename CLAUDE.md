@@ -19,6 +19,10 @@ window.dispatchEvent(new CustomEvent("lait:nav", { detail: { view: "settings" } 
 `detail` fields:
 - `{ view }` — `overview | list | board | calendar | timeline | projects | inbox | my-issues | activity | settings`
 - `{ project }` / `{ issue }` — select a project (KEY) or issue (ref)
+- `{ milestone }` — scope the issue surfaces to a `mls_` id; `""` is the
+  No-milestone bucket and `null` clears the scope. Applied *after* `project`, so
+  `{ project: "ENG", milestone: "mls_x" }` in one detail scopes ENG. Stays on the
+  current view if it draws rows (list/board/calendar), else lands on Issues.
 - `{ tab }` — Settings sub-page: `general | members | labels | workflow | access`
 - `{ project: "<PROJECT_KEY>", view: "overview" }` — enter that project's overview page
 

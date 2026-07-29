@@ -2,9 +2,9 @@ import { Toolbar } from "./layout";
 import { useMemo, useState } from "react";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 
-import type { BoardView, Row } from "../types";
+import type { BoardView, Row, WorkflowState } from "../types";
 import { tsToDate } from "../types";
-import { PriorityIcon } from "./icons";
+import { fromRowControl, PriorityChip, StatusChip, type IssueMutators } from "./fields";
 import { Button, IconButton } from "./primitives";
 
 /**
@@ -20,10 +20,19 @@ import { Button, IconButton } from "./primitives";
 export function Calendar({
   board,
   onSelect,
+  mutators,
+  readOnly,
 }: {
   board: BoardView;
   onSelect: (reff: string) => void;
+  /** In-place field writes — the entry's priority/status chips resolve here. */
+  mutators: IssueMutators;
+  readOnly: boolean;
 }) {
+  const states: WorkflowState[] = useMemo(
+    () => board.columns.map((c) => c.state),
+    [board],
+  );
   const rows = useMemo(
     () => board.columns.flatMap((c) => c.rows).filter((r) => !r.tombstone),
     [board],
@@ -126,16 +135,43 @@ export function Calendar({
               </span>
               <div className="flex min-h-0 flex-col gap-0.5 overflow-y-auto">
                 {dayRows.map((r) => (
-                  <button
+                  // A div wearing button semantics, not a `<button>`: the
+                  // priority and status chips inside are buttons of their own,
+                  // and buttons do not nest.
+                  <div
                     key={r.reff}
+                    role="button"
+                    tabIndex={0}
                     data-issue-ref={r.reff}
-                    onClick={() => onSelect(r.reff)}
+                    onClick={(event) => {
+                      // A chip's click is the chip's — guarded, never stopped
+                      // (see `fromRowControl`).
+                      if (fromRowControl(event)) return;
+                      onSelect(r.reff);
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.target === event.currentTarget && event.key === "Enter") {
+                        event.preventDefault();
+                        onSelect(r.reff);
+                      }
+                    }}
                     title={r.title}
                     className="bg-raised border-line hover:border-line-strong flex items-center gap-1 rounded-control border px-1 py-0.5 text-left text-2xs"
                   >
-                    <PriorityIcon priority={r.priority} />
+                    <PriorityChip
+                      priority={r.priority}
+                      disabled={readOnly || r.provisional}
+                      onPick={(p) => mutators.setPriority(r.reff, p)}
+                    />
+                    <StatusChip
+                      status={r.status}
+                      state={states.find((s) => s.id === r.status)}
+                      states={states}
+                      disabled={readOnly || r.provisional}
+                      onPick={(id) => mutators.setStatus(r.reff, id)}
+                    />
                     <span className="min-w-0 flex-1 truncate font-medium">{r.title}</span>
-                  </button>
+                  </div>
                 ))}
               </div>
             </div>

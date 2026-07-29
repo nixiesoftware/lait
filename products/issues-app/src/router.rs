@@ -820,11 +820,31 @@ impl<'a> IssueRouter<'a> {
                     ),
                     None => None,
                 };
+                // A milestone belongs to exactly one project, so there is no
+                // catalog to resolve the name against without one — and silently
+                // listing everything would be the worst answer to a filter the
+                // caller asked for. Both misses are loud.
+                let milestone = match &filter.milestone {
+                    Some(m) => {
+                        let project = project.as_deref().ok_or_else(|| {
+                            Response::not_found(
+                                "a milestone filter needs a project to resolve it in".to_string(),
+                            )
+                        })?;
+                        Some(
+                            snapshot.resolve_milestone(project, m).ok_or_else(|| {
+                                Response::not_found(format!("no milestone {m:?}"))
+                            })?,
+                        )
+                    }
+                    None => None,
+                };
                 let rows: Vec<Row> = self
                     .query(&IssueQuery::List {
                         project,
                         label: filter.label.and_then(|l| snapshot.resolve_label(&l)),
                         status: filter.status,
+                        milestone,
                         mine: filter.mine.then(|| facts.actor.clone()),
                         all: filter.all,
                         me: Some(facts.actor.clone()),
@@ -1023,7 +1043,9 @@ impl<'a> IssueRouter<'a> {
                 project,
                 milestone,
                 name,
+                description,
                 target,
+                pos,
                 remove,
             } => {
                 let project_id = snapshot.resolve_project(&project).ok_or_else(|| {
@@ -1042,11 +1064,33 @@ impl<'a> IssueRouter<'a> {
                     Some("none") | Some("") => Some(None),
                     Some(text) => Some(Some(parse_due(text).ok_or_else(bad_due)?)),
                 };
+                // `Before`/`After` name a sibling milestone, resolved in the same
+                // project — the World takes ids, and a name is this layer's job.
+                let resolve_sibling = |reff: &str| {
+                    snapshot
+                        .resolve_milestone(&project_id, reff)
+                        .ok_or_else(|| {
+                            Response::not_found(format!("no milestone matches {reff:?}"))
+                        })
+                };
+                let pos = match &pos {
+                    None => None,
+                    Some(BoardPos::Top) => Some(Pos::Top),
+                    Some(BoardPos::Bottom) => Some(Pos::Bottom),
+                    Some(BoardPos::Before { reff }) => Some(Pos::Before {
+                        doc: resolve_sibling(reff)?,
+                    }),
+                    Some(BoardPos::After { reff }) => Some(Pos::After {
+                        doc: resolve_sibling(reff)?,
+                    }),
+                };
                 self.submit(&IssueIntent::MilestoneSet {
                     project_id,
                     id: id.clone(),
                     name,
+                    description,
                     target_date,
+                    pos,
                     tombstone: remove.then_some(true),
                     device: facts.device.clone(),
                     ts: facts.now,
