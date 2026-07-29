@@ -4,9 +4,10 @@
 //! streaming [`Request::Subscribe`] mode that writes [`Doorbell`] frames until
 //! the client disconnects.
 //!
-//! This is an **imperative façade over a declarative CRDT**: a stable, versioned,
-//! hand-maintained projection of durable state, never an automatic dump. `Ref`s
-//! and `who-ref`s arrive as plain strings and are resolved **daemon-side**.
+//! This is the stable, versioned host façade for daemon, Space, Mechanics,
+//! Station, Observation, and lifecycle operations. Product commands and
+//! responses travel separately in opaque [`WorldCall`] / [`WorldReply`]
+//! envelopes owned by installed client packages.
 
 use std::path::Path;
 
@@ -18,11 +19,10 @@ use interprocess::local_socket::{
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
+use crate::daemon::OrbitAddress;
 use crate::diagnose::DiagnosisView;
-use crate::dto::{
-    ActivityEvent, BoardView, Candidate, GraphView, InboxEntry, IssueView, LabelDto, MemberDto,
-    MemberLogEntry, ProjectDto, Row, SeedDto,
-};
+use crate::dto::{MemberDto, MemberLogEntry, SeedDto};
+use crate::orbital::{WorldCall, WorldReply};
 
 /// The control-plane protocol version this build **speaks** — CLI, web, and MCP
 /// ↔ daemon channel, exchanged in the [`Request::Hello`] handshake.
@@ -42,15 +42,29 @@ use crate::dto::{
 /// `Diagnose.expected_space`, `StatusInfo.space`, `IssueView.space_id`. A v1
 /// daemon cannot answer them, so v1 is retired rather than tolerated: a client
 /// that decoded a v1 answer would read absent fields as absent state.
-pub const CONTROL_PROTOCOL_VERSION: u32 = 2;
+///
+/// **v3:** explicit Space/World routes name the local Orbit as well as the
+/// expected Space. A v2 per-home route selected the Orbit only out-of-band via
+/// its socket, which cannot address two local Orbits in the same Space through
+/// one future daemon endpoint.
+///
+/// **v4:** product calls use a versioned opaque [`WorldCall`] envelope at the
+/// identity-scoped daemon.
+///
+/// **v5:** attached SpaceBridge processes accept that same opaque envelope
+/// directly. Typed product requests and the root-owned compatibility codec are
+/// retired, so v4 processes cannot remain attached across this boundary.
+///
+/// **v6:** product host projections, including Issues inbox, leave root
+/// `Request`/`Response`. Their local facilities now wrap opaque World calls.
+pub const CONTROL_PROTOCOL_VERSION: u32 = 6;
 
 /// The oldest control protocol a client still talks to. Raising this retires a
 /// version; the gap to [`CONTROL_PROTOCOL_VERSION`] is the mixed-version window.
 ///
-/// At 2 the window is a single version, so a v0.5.x daemon still holding the
-/// lock reads as *behind us* and is therefore replaceable — it is killed and
-/// respawned on the first client contact rather than being talked to.
-pub const MIN_SUPPORTED_CONTROL_PROTOCOL: u32 = 2;
+/// Protocol v6 is a deliberate compatibility cutoff: root control contains
+/// only daemon, Space, Mechanics, Station, Observation, and lifecycle calls.
+pub const MIN_SUPPORTED_CONTROL_PROTOCOL: u32 = 6;
 
 /// Whether this build can talk to a daemon advertising control protocol `peer`.
 ///
@@ -93,456 +107,19 @@ pub fn control_name(home: &Path) -> Result<Name<'static>> {
     }
 }
 
-/// A board position for `IssueMove` (`--top`, `--bottom`, `--before`, or `--after`).
+/// One product-neutral Mechanics assignment supplied by a World client package.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(tag = "at", rename_all = "snake_case")]
-pub enum BoardPos {
-    Top,
-    Bottom,
-    Before { reff: String },
-    After { reff: String },
-}
-
-/// List and board filter.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct Filter {
+pub struct AssignmentSpec {
+    pub world: String,
+    pub capability: String,
     #[serde(default)]
-    pub mine: bool,
-    #[serde(default)]
-    pub status: Option<String>,
-    #[serde(default)]
-    pub label: Option<String>,
-    /// Milestone name or `mls_` id, resolved within the listed project.
-    /// Meaningless without a project — a milestone belongs to exactly one, so a
-    /// filter with no project to resolve against is refused rather than guessed.
-    #[serde(default)]
-    pub milestone: Option<String>,
-    /// Include done and tombstoned rows.
-    #[serde(default)]
-    pub all: bool,
+    pub resource: Vec<String>,
 }
 
 /// A request from a client to the daemon.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum Request {
-    // ---- replica (Layer-B façade over the issue model) ----
-    IssueNew {
-        title: String,
-        #[serde(default)]
-        project: Option<String>,
-        /// Environment hint (the CLI's git-branch project key) — distinct from
-        /// `project` because "user said X" must error loudly on a miss while
-        /// "environment suggests X" must fall through silently (S: the
-        /// choose-project chain). MCP always sends `None`.
-        #[serde(default)]
-        project_hint: Option<String>,
-        #[serde(default)]
-        assignees: Vec<String>,
-        #[serde(default)]
-        priority: Option<String>,
-        #[serde(default)]
-        labels: Vec<String>,
-        #[serde(default)]
-        body: Option<String>,
-        /// Due date: unix seconds or `YYYY-MM-DD` (UTC midnight).
-        #[serde(default)]
-        due: Option<String>,
-        /// Estimate points.
-        #[serde(default)]
-        estimate: Option<u32>,
-    },
-    IssueEdit {
-        reff: String,
-        #[serde(default)]
-        title: Option<String>,
-        #[serde(default)]
-        status: Option<String>,
-        #[serde(default)]
-        priority: Option<String>,
-        /// Full-buffer description replacement; the client holds
-        /// no `LoroText` cursor; the daemon applies it as a text update).
-        #[serde(default)]
-        description: Option<String>,
-        /// Due date: unix seconds, `YYYY-MM-DD` (UTC midnight), or `none` to
-        /// clear. Absent = untouched.
-        #[serde(default)]
-        due: Option<String>,
-        /// Estimate points, or `none` to clear. Absent = untouched.
-        #[serde(default)]
-        estimate: Option<String>,
-    },
-    IssueMove {
-        reff: String,
-        #[serde(default)]
-        project: Option<String>,
-        #[serde(default)]
-        pos: Option<BoardPos>,
-    },
-    Assign {
-        reff: String,
-        who: Vec<String>,
-        #[serde(default = "default_true")]
-        add: bool,
-    },
-    Label {
-        reff: String,
-        #[serde(default)]
-        add: Vec<String>,
-        #[serde(default)]
-        remove: Vec<String>,
-    },
-    Comment {
-        reff: String,
-        body: String,
-        /// The comment id being replied to (from `IssueView.comments[].id`),
-        /// when this comment is a reply. One level of nesting.
-        #[serde(default)]
-        reply_to: Option<String>,
-    },
-    /// Toggle an emoji reaction on a comment. Writes no history event — a
-    /// reaction is a social signal, not a change of record.
-    React {
-        reff: String,
-        /// The target comment's id (`IssueView.comments[].id`).
-        comment: String,
-        emoji: String,
-        /// `true` (default) adds the reaction; `false` removes it.
-        #[serde(default = "default_true")]
-        on: bool,
-    },
-    IssueDelete {
-        reff: String,
-    },
-    /// Restore a deleted issue — a signed content-authority op that clears the
-    /// tombstone. Restore wins over a concurrent delete.
-    IssueRestore {
-        reff: String,
-    },
-    /// Link two issues (`blocks` | `relates` | `duplicates`) — an add-wins edge
-    /// in the catalog structure document.
-    IssueLink {
-        reff: String,
-        kind: String,
-        target: String,
-    },
-    IssueUnlink {
-        reff: String,
-        kind: String,
-        target: String,
-    },
-    /// Set (or clear, with `parent: None`) an issue's parent in the sub-issue
-    /// hierarchy — a tree-move CRDT, so concurrent conflicting parents can
-    /// never converge to a cycle.
-    IssueParent {
-        reff: String,
-        #[serde(default)]
-        parent: Option<String>,
-    },
-    /// The issue's graph neighborhood: parent, children, links, open blockers.
-    IssueGraph {
-        reff: String,
-    },
-    /// Work-state verbs: each is one commit and one activity row,
-    /// bundling the fields a single human intent moves. Targets are picked by
-    /// workflow *category* (first Active / Done / Backlog state), so they track
-    /// whatever the space's column set is. They return `Response::Issue`
-    /// (a fresh snapshot) — the one deviation from writes-echo-Ref, because the
-    /// CLI needs the title to derive the git branch name.
-    IssueStart {
-        reff: String,
-    },
-    IssueDone {
-        reff: String,
-    },
-    IssueStop {
-        reff: String,
-    },
-    IssueView {
-        reff: String,
-    },
-    List {
-        #[serde(default)]
-        project: Option<String>,
-        #[serde(default)]
-        filter: Filter,
-    },
-    Board {
-        /// Optional since the choose-project chain can supply the view project
-        /// (sole project / `project.default` / branch hint).
-        #[serde(default)]
-        project: Option<String>,
-        #[serde(default)]
-        project_hint: Option<String>,
-    },
-    History {
-        reff: String,
-    },
-    ProjectNew {
-        name: String,
-        key: String,
-        #[serde(default)]
-        color: Option<String>,
-    },
-    ProjectList,
-    ProjectEdit {
-        /// KEY or `prj_` id.
-        project: String,
-        #[serde(default)]
-        name: Option<String>,
-        #[serde(default)]
-        color: Option<String>,
-        #[serde(default)]
-        description: Option<String>,
-        /// Lead actor key, or "" / "none" to clear.
-        #[serde(default)]
-        lead: Option<String>,
-        /// `YYYY-MM-DD`, or "none" to clear. Absent leaves it untouched.
-        #[serde(default)]
-        start: Option<String>,
-        #[serde(default)]
-        target: Option<String>,
-        /// Soft-hide toggle: `Some(true)` archives, `Some(false)` restores,
-        /// `None` leaves it untouched (CUSTOM-9).
-        #[serde(default)]
-        archived: Option<bool>,
-        /// Owning team (key/name/`tm_` id), or "" / "none" to clear (GOV-7).
-        #[serde(default)]
-        team: Option<String>,
-    },
-    /// Hard-delete an EMPTY project (CUSTOM-10): refused while any issue —
-    /// live or tombstoned — still references it.
-    ProjectDelete {
-        /// KEY or `prj_` id.
-        project: String,
-    },
-    /// Subscribe to (or unsubscribe from) an issue's activity without holding
-    /// its assignment (INBOX-9). Reply: `Ref`.
-    Follow {
-        reff: String,
-        /// `true` (default) follows; `false` unfollows.
-        #[serde(default = "default_true")]
-        on: bool,
-    },
-    /// A project's milestones with derived progress (SCOPE-1). Reply:
-    /// `Milestones`.
-    MilestoneList {
-        /// KEY or `prj_` id.
-        project: String,
-    },
-    /// Create, edit, or tombstone a project milestone (SCOPE-1).
-    MilestoneSet {
-        /// KEY or `prj_` id.
-        project: String,
-        /// Existing milestone (name or `mls_` id); absent creates one.
-        #[serde(default)]
-        milestone: Option<String>,
-        #[serde(default)]
-        name: Option<String>,
-        /// The milestone's prose body. Absent leaves it untouched; `""` clears.
-        #[serde(default)]
-        description: Option<String>,
-        /// `YYYY-MM-DD`, or "none" to clear. Absent leaves it untouched.
-        #[serde(default)]
-        target: Option<String>,
-        /// Where to place it in the project's manual order — `Before`/`After`
-        /// name another milestone of the same project. Absent leaves an existing
-        /// milestone where it is and appends a new one.
-        #[serde(default)]
-        pos: Option<BoardPos>,
-        /// Tombstone the milestone (issues keep their register; it reads as
-        /// cleared once the milestone is gone).
-        #[serde(default)]
-        remove: bool,
-    },
-    /// Point an issue at a milestone in its project, or clear it with
-    /// `milestone: None`/"none".
-    IssueMilestone {
-        reff: String,
-        #[serde(default)]
-        milestone: Option<String>,
-    },
-    /// A project's cycles with derived counts (BOARD-11). Reply: `Cycles`.
-    CycleList {
-        /// KEY or `prj_` id.
-        project: String,
-    },
-    /// Create, edit, or tombstone a cycle (BOARD-11).
-    CycleSet {
-        /// KEY or `prj_` id.
-        project: String,
-        /// Existing cycle (name or `cyc_` id); absent creates one.
-        #[serde(default)]
-        cycle: Option<String>,
-        #[serde(default)]
-        name: Option<String>,
-        /// `YYYY-MM-DD`, or "none" to clear. Absent leaves it untouched.
-        #[serde(default)]
-        start: Option<String>,
-        #[serde(default)]
-        end: Option<String>,
-        #[serde(default)]
-        remove: bool,
-    },
-    /// Schedule an issue into a cycle, or clear it.
-    IssueCycle {
-        reff: String,
-        #[serde(default)]
-        cycle: Option<String>,
-    },
-    /// Every live initiative with its roll-up (SCOPE-8). Reply: `Initiatives`.
-    InitiativeList,
-    /// Create, edit, or tombstone an initiative (SCOPE-8).
-    InitiativeSet {
-        /// Existing initiative (name or `ini_` id); absent creates one.
-        #[serde(default)]
-        initiative: Option<String>,
-        #[serde(default)]
-        name: Option<String>,
-        #[serde(default)]
-        description: Option<String>,
-        /// Owner actor key, or "" / "none" to clear.
-        #[serde(default)]
-        owner: Option<String>,
-        /// `on_track` | `at_risk` | `off_track` | "" (none).
-        #[serde(default)]
-        health: Option<String>,
-        /// `YYYY-MM-DD`, or "none" to clear.
-        #[serde(default)]
-        target: Option<String>,
-        /// Project refs to add to / remove from the membership.
-        #[serde(default)]
-        add_projects: Vec<String>,
-        #[serde(default)]
-        remove_projects: Vec<String>,
-        #[serde(default)]
-        remove: bool,
-    },
-    /// Every live team with its owned projects (GOV-7). Reply: `Teams`.
-    TeamList,
-    /// Create, edit, or tombstone a team (GOV-7; admin-only).
-    TeamSet {
-        /// Existing team (KEY, name, or `tm_` id); absent creates one.
-        #[serde(default)]
-        team: Option<String>,
-        #[serde(default)]
-        name: Option<String>,
-        /// Short handle, set at creation, immutable after.
-        #[serde(default)]
-        key: Option<String>,
-        #[serde(default)]
-        icon: Option<String>,
-        /// Lead actor key, or "" / "none" to clear.
-        #[serde(default)]
-        lead: Option<String>,
-        /// Actor keys to add to / remove from the membership.
-        #[serde(default)]
-        add_members: Vec<String>,
-        #[serde(default)]
-        remove_members: Vec<String>,
-        #[serde(default)]
-        remove: bool,
-    },
-    /// The triage intake queue, pending first (SCOPE-7). Reply: `TriageItems`.
-    TriageList,
-    /// Report work into the intake queue — outside every project workflow
-    /// until reviewed (SCOPE-7).
-    TriageSubmit {
-        title: String,
-        #[serde(default)]
-        body: Option<String>,
-        /// Where this came from (an integration name, "cli", …).
-        #[serde(default)]
-        source: Option<String>,
-    },
-    /// Decide a pending triage item: `accepted` (into `project`), `declined`,
-    /// or `duplicate` (of `target`). Exactly once per item.
-    TriageDecide {
-        /// The `trg_` intake id.
-        id: String,
-        outcome: String,
-        #[serde(default)]
-        project: Option<String>,
-        /// The duplicated issue's ref (duplicate outcome).
-        #[serde(default)]
-        target: Option<String>,
-        #[serde(default)]
-        note: Option<String>,
-    },
-    /// Attach a bounded file to an issue (CREATE-5). `data_b64` is the
-    /// standard-base64 payload (raw size ≤ 256 KiB). Reply: `Ref`.
-    Attach {
-        reff: String,
-        name: String,
-        #[serde(default)]
-        mime: Option<String>,
-        data_b64: String,
-        /// A comment id to associate the file with.
-        #[serde(default)]
-        comment: Option<String>,
-    },
-    /// Remove an attachment record.
-    Detach {
-        reff: String,
-        /// The `att_` attachment id.
-        id: String,
-    },
-    /// One attachment's payload (CREATE-5). Reply: `Attachment`.
-    AttachmentGet {
-        reff: String,
-        /// The `att_` attachment id.
-        id: String,
-    },
-    /// A project's status-update feed, newest first (SCOPE-1). Reply: `Updates`.
-    ProjectUpdates {
-        /// KEY or `prj_` id.
-        project: String,
-    },
-    /// Append an immutable status update to a project's feed (SCOPE-1).
-    ProjectUpdatePost {
-        /// KEY or `prj_` id.
-        project: String,
-        body: String,
-        /// `on_track` | `at_risk` | `off_track` | "" (none).
-        #[serde(default)]
-        health: Option<String>,
-    },
-    LabelNew {
-        name: String,
-        #[serde(default)]
-        color: Option<String>,
-    },
-    LabelList,
-    LabelEdit {
-        /// Name or `lbl_` id.
-        label: String,
-        #[serde(default)]
-        name: Option<String>,
-        #[serde(default)]
-        color: Option<String>,
-    },
-    LabelDelete {
-        /// Name or `lbl_` id.
-        label: String,
-    },
-    SpaceRename {
-        name: String,
-    },
-    /// Set (or clear, empty) the space's overview description (SCOPE-2).
-    SpaceDescribe {
-        description: String,
-    },
-    Activity {
-        #[serde(default)]
-        since: u64,
-    },
-    /// The durable, addressed-to-you inbox (`inbox.json`): remote
-    /// assignments/comments/status moves on your work, derived at import time.
-    /// `clear` stamps the read watermark after listing.
-    Inbox {
-        #[serde(default)]
-        clear: bool,
-    },
     // ---- membership and authorization ----
     MemberAdd {
         who: String,
@@ -670,78 +247,28 @@ pub enum Request {
         name: String,
     },
 
-    // ---- role / access / workflow authoring (plan 04) ----
-    /// Every role definition: built-ins plus custom heads.
-    RoleList,
-    RoleShow {
-        role: String,
-    },
-    /// Create a custom role (Space-scoped, or Project-scoped with `project`).
-    RoleCreate {
-        name: String,
-        #[serde(default)]
-        description: Option<String>,
-        #[serde(default)]
-        project: Option<String>,
-        capabilities: Vec<String>,
-    },
-    /// Edit a custom role at an exact expected revision head.
-    RoleEdit {
-        role: String,
-        expect_revision: String,
-        #[serde(default)]
-        name: Option<String>,
-        #[serde(default)]
-        description: Option<String>,
-        #[serde(default)]
-        capabilities: Option<Vec<String>>,
-    },
-    /// Tombstone a custom role at an exact expected revision head.
-    RoleDelete {
-        role: String,
-        expect_revision: String,
-    },
-    /// Resolve concurrent role heads with a complete replacement body.
-    RoleResolve {
-        role: String,
-        expect_heads: Vec<String>,
-        body_json: String,
-    },
+    // ---- generic Space authority capabilities ----
     /// Effective scoped assignments (Mechanics history, not Catalog state).
-    AccessList {
+    AssignmentList {
         #[serde(default)]
         actor: Option<String>,
     },
-    /// Expand a role's pinned definition and install the exact assignments —
-    /// authority-first, all-or-nothing.
-    AccessGrant {
+    /// Install exact package-planned assignments, authority-first and
+    /// all-or-nothing. Mechanics validates every World/resource/capability.
+    AssignmentGrant {
         actor: String,
-        role: String,
-        #[serde(default)]
-        project: Option<String>,
+        assignments: Vec<AssignmentSpec>,
     },
     /// Revoke one effective assignment by its grant id (64-hex).
-    AccessRevoke {
+    AssignmentRevoke {
         grant_id: String,
     },
-    /// Activate this build's reviewed IssuesWorld implementation for the
-    /// Space (admin-authored ACL action; idempotent when already active).
+    /// Activate this build's reviewed implementation for one hosted World
+    /// (admin-authored ACL action; idempotent when already active).
     /// The activation is what receipts pin — a build whose descriptor differs
     /// from the active one should run this before writing.
-    WorldUpgrade,
-    /// A project's workflow revision head(s).
-    WorkflowShow {
-        project: String,
-    },
-    /// Validate a canonical workflow body without committing anything.
-    WorkflowValidate {
-        body_json: String,
-    },
-    /// Replace a project's workflow at exactly the current heads.
-    WorkflowSet {
-        project: String,
-        expect_heads: Vec<String>,
-        body_json: String,
+    WorldActivate {
+        world: String,
     },
     /// Streaming dirty notifications for live clients. Turns the one-shot handler into a
     /// stream of [`Doorbell`] frames until the client disconnects.
@@ -832,17 +359,48 @@ pub enum Request {
     },
 }
 
-/// The wire envelope a client sends: a [`Request`] plus an optional **acting
-/// identity** selector. This is how the multi-tenant daemon (Architecture B)
-/// stays "one surface" — the *same* `Request` set, with a modifier saying *which
-/// local member signs it*. `act_as` names a local identity (an agent profile
-/// name, an actor id, or a device id) the daemon holds a seed for; `None` (the
-/// default) is the daemon's primary — the human. It is flattened and
-/// `skip`-when-`None`, so a request with no selector serializes to *exactly* the
-/// bare `{"cmd":…}` an older client sends — the wire stays backward-compatible in
-/// both directions.
+/// An explicit path through the local bridge hierarchy.
+///
+/// `None` on [`ClientRequest::route`] is the legacy per-home path: the socket
+/// already identifies one Space. The general Lait daemon uses an explicit
+/// route so one endpoint can reject cross-Space or cross-World confusion before
+/// dispatch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "scope", rename_all = "snake_case")]
+pub enum ControlRoute {
+    /// Address the process-level Orbit directory/control router.
+    Daemon,
+    /// Address Space mechanics, Station, observations, or Space lifecycle.
+    Space {
+        #[serde(flatten)]
+        address: OrbitAddress,
+    },
+    /// Address one World hosted by one Space.
+    World {
+        #[serde(flatten)]
+        address: OrbitAddress,
+        world: String,
+    },
+}
+
+/// The wire envelope a client sends: a [`Request`], an optional bridge
+/// [`ControlRoute`], passive-dispatch intent, and an optional **acting
+/// identity** selector.
+///
+/// `act_as` names a local identity (an agent profile name, actor id, or device
+/// id) the daemon holds a seed for. `None` is the primary human identity. Both
+/// Optional modifiers are skipped when absent, so a legacy request serializes
+/// to exactly the bare `{"cmd":…}` shape.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClientRequest {
+    /// The bridge path this request is allowed to traverse.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route: Option<ControlRoute>,
+    /// Ask the identity-scoped host to dispatch only when the addressed
+    /// Station already has a live compatibility adapter. This is a passive
+    /// catalog probe, not an authorization claim.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub if_running: bool,
     /// The local identity to sign+attribute this request as. `None` = the
     /// daemon's primary (human) identity, exactly as before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -855,24 +413,73 @@ impl ClientRequest {
     /// A plain request as the primary identity (the pre-B behavior).
     pub fn plain(request: Request) -> Self {
         Self {
+            route: None,
+            if_running: false,
             act_as: None,
             request,
         }
     }
     /// A request acting as a named local identity.
     pub fn acting_as(request: Request, act_as: Option<String>) -> Self {
-        Self { act_as, request }
+        Self {
+            route: None,
+            if_running: false,
+            act_as,
+            request,
+        }
+    }
+
+    /// A request with an explicit bridge path.
+    pub fn routed(request: Request, route: ControlRoute, act_as: Option<String>) -> Self {
+        Self {
+            route: Some(route),
+            if_running: false,
+            act_as,
+            request,
+        }
+    }
+
+    /// A routed request that must not activate a vacant Orbit.
+    pub fn routed_if_running(request: Request, route: ControlRoute) -> Self {
+        Self {
+            route: Some(route),
+            if_running: true,
+            act_as: None,
+            request,
+        }
     }
 }
 
-fn default_true() -> bool {
-    true
+/// Product-neutral request sent to the identity-scoped daemon.
+///
+/// The identity daemon forwards this same envelope unchanged to an attached
+/// SpaceBridge. Its explicit `call` field keeps every routing layer independent
+/// of the product payload and protocol.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorldClientRequest {
+    pub route: ControlRoute,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub act_as: Option<String>,
+    pub call: WorldCall,
+}
+
+impl WorldClientRequest {
+    pub fn new(route: ControlRoute, call: WorldCall, act_as: Option<String>) -> Self {
+        Self {
+            route,
+            act_as,
+            call,
+        }
+    }
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 /// The terminal owner of a control request — the single orbital plane that
 /// serves it (plan 01, "External architecture"):
 ///
-/// - **Session** — product intent/query through `IssueRouter` -> Session;
 /// - **Mechanics** — membership/admission/ceremony/custody/device work through
 ///   the active Orbit/Station's mechanics;
 /// - **Station** — connect/neighbor/Contact operations;
@@ -881,7 +488,6 @@ fn default_true() -> bool {
 ///   node-local configuration adapters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RequestOwner {
-    Session,
     Mechanics,
     Station,
     Observation,
@@ -892,7 +498,6 @@ impl RequestOwner {
     /// The stable lowercase label (the generated routing table's column).
     pub fn label(&self) -> &'static str {
         match self {
-            RequestOwner::Session => "session",
             RequestOwner::Mechanics => "mechanics",
             RequestOwner::Station => "station",
             RequestOwner::Observation => "observation",
@@ -909,67 +514,6 @@ impl RequestOwner {
 pub fn classify(req: &Request) -> RequestOwner {
     use RequestOwner::*;
     match req {
-        // ---- Session: product intents, queries, projections ----
-        Request::IssueNew { .. }
-        | Request::IssueEdit { .. }
-        | Request::IssueMove { .. }
-        | Request::Assign { .. }
-        | Request::Label { .. }
-        | Request::Comment { .. }
-        | Request::React { .. }
-        | Request::IssueDelete { .. }
-        | Request::IssueRestore { .. }
-        | Request::IssueLink { .. }
-        | Request::IssueUnlink { .. }
-        | Request::IssueParent { .. }
-        | Request::IssueGraph { .. }
-        | Request::IssueStart { .. }
-        | Request::IssueDone { .. }
-        | Request::IssueStop { .. }
-        | Request::IssueView { .. }
-        | Request::List { .. }
-        | Request::Board { .. }
-        | Request::History { .. }
-        | Request::ProjectNew { .. }
-        | Request::ProjectList
-        | Request::ProjectEdit { .. }
-        | Request::ProjectUpdates { .. }
-        | Request::ProjectUpdatePost { .. }
-        | Request::ProjectDelete { .. }
-        | Request::Follow { .. }
-        | Request::MilestoneList { .. }
-        | Request::MilestoneSet { .. }
-        | Request::IssueMilestone { .. }
-        | Request::CycleList { .. }
-        | Request::CycleSet { .. }
-        | Request::IssueCycle { .. }
-        | Request::InitiativeList
-        | Request::InitiativeSet { .. }
-        | Request::TeamList
-        | Request::TeamSet { .. }
-        | Request::TriageList
-        | Request::TriageSubmit { .. }
-        | Request::TriageDecide { .. }
-        | Request::Attach { .. }
-        | Request::Detach { .. }
-        | Request::AttachmentGet { .. }
-        | Request::LabelNew { .. }
-        | Request::LabelList
-        | Request::LabelEdit { .. }
-        | Request::LabelDelete { .. }
-        | Request::SpaceRename { .. }
-        | Request::SpaceDescribe { .. }
-        | Request::Activity { .. }
-        | Request::RoleList
-        | Request::RoleShow { .. }
-        | Request::RoleCreate { .. }
-        | Request::RoleEdit { .. }
-        | Request::RoleDelete { .. }
-        | Request::RoleResolve { .. }
-        | Request::WorkflowShow { .. }
-        | Request::WorkflowValidate { .. }
-        | Request::WorkflowSet { .. } => Session,
-
         // ---- Mechanics: membership, admission, ceremonies, custody, devices ----
         Request::MemberAdd { .. }
         | Request::MemberRemove { .. }
@@ -994,20 +538,18 @@ pub fn classify(req: &Request) -> RequestOwner {
         | Request::Recover
         | Request::Invite { .. }
         | Request::Join { .. }
-        | Request::AccessList { .. }
-        | Request::AccessGrant { .. }
-        | Request::AccessRevoke { .. }
-        | Request::WorldUpgrade
+        | Request::AssignmentList { .. }
+        | Request::AssignmentGrant { .. }
+        | Request::AssignmentRevoke { .. }
+        | Request::WorldActivate { .. }
         | Request::Id
         | Request::Whoami => Mechanics,
 
         // ---- Station: connect/neighbor/Contact ----
         Request::Connect { .. } | Request::Who | Request::Sync => Station,
 
-        // ---- Observation: status, subscription, and locally derived
-        // projection surfaces (the inbox rebuilds from query after reset and
-        // is never a second source of truth) ----
-        Request::Status | Request::Subscribe { .. } | Request::Inbox { .. } => Observation,
+        // ---- Observation: generic status and subscription surfaces ----
+        Request::Status | Request::Subscribe { .. } => Observation,
 
         // ---- Lifecycle/deployment: daemon process + node-local config ----
         Request::Diagnose { .. }
@@ -1022,6 +564,15 @@ pub fn classify(req: &Request) -> RequestOwner {
     }
 }
 
+/// Select the terminal Space/World route for an already-authorized Orbit.
+///
+/// Process-level requests such as stopping the Lait daemon are chosen by the
+/// client surface itself; this helper covers requests whose owner lives behind
+/// a Station.
+pub fn station_route(address: OrbitAddress) -> ControlRoute {
+    ControlRoute::Space { address }
+}
+
 /// One representative instance per `Request` variant — the enumeration the
 /// generated routing table and classification tests iterate. Kept beside
 /// [`classify`] so both evolve together; the classifier's exhaustive match is
@@ -1029,236 +580,13 @@ pub fn classify(req: &Request) -> RequestOwner {
 pub fn representative_requests() -> Vec<Request> {
     let s = String::new;
     vec![
-        Request::IssueNew {
-            title: s(),
-            project: None,
-            project_hint: None,
-            assignees: vec![],
-            priority: None,
-            labels: vec![],
-            body: None,
-            due: None,
-            estimate: None,
-        },
-        Request::IssueEdit {
-            reff: s(),
-            title: None,
-            status: None,
-            priority: None,
-            description: None,
-            due: None,
-            estimate: None,
-        },
-        Request::IssueMove {
-            reff: s(),
-            project: None,
-            pos: None,
-        },
-        Request::Assign {
-            reff: s(),
-            who: vec![],
-            add: true,
-        },
-        Request::Label {
-            reff: s(),
-            add: vec![],
-            remove: vec![],
-        },
-        Request::Comment {
-            reff: s(),
-            body: s(),
-            reply_to: None,
-        },
-        Request::React {
-            reff: s(),
-            comment: s(),
-            emoji: s(),
-            on: true,
-        },
-        Request::IssueDelete { reff: s() },
-        Request::IssueRestore { reff: s() },
-        Request::IssueLink {
-            reff: s(),
-            kind: s(),
-            target: s(),
-        },
-        Request::IssueUnlink {
-            reff: s(),
-            kind: s(),
-            target: s(),
-        },
-        Request::IssueParent {
-            reff: s(),
-            parent: None,
-        },
-        Request::IssueGraph { reff: s() },
-        Request::IssueStart { reff: s() },
-        Request::IssueDone { reff: s() },
-        Request::IssueStop { reff: s() },
-        Request::IssueView { reff: s() },
-        Request::List {
-            project: None,
-            filter: Filter::default(),
-        },
-        Request::Board {
-            project: None,
-            project_hint: None,
-        },
-        Request::History { reff: s() },
-        Request::ProjectNew {
-            name: s(),
-            key: s(),
-            color: None,
-        },
-        Request::ProjectList,
-        Request::ProjectEdit {
-            project: s(),
-            name: None,
-            color: None,
-            description: None,
-            lead: None,
-            start: None,
-            target: None,
-            archived: None,
-            team: None,
-        },
-        Request::ProjectUpdates { project: s() },
-        Request::ProjectUpdatePost {
-            project: s(),
-            body: s(),
-            health: None,
-        },
-        Request::ProjectDelete { project: s() },
-        Request::Follow {
-            reff: s(),
-            on: true,
-        },
-        Request::MilestoneList { project: s() },
-        Request::MilestoneSet {
-            project: s(),
-            milestone: None,
-            name: None,
-            description: None,
-            target: None,
-            pos: None,
-            remove: false,
-        },
-        Request::IssueMilestone {
-            reff: s(),
-            milestone: None,
-        },
-        Request::CycleList { project: s() },
-        Request::CycleSet {
-            project: s(),
-            cycle: None,
-            name: None,
-            start: None,
-            end: None,
-            remove: false,
-        },
-        Request::IssueCycle {
-            reff: s(),
-            cycle: None,
-        },
-        Request::InitiativeList,
-        Request::InitiativeSet {
-            initiative: None,
-            name: None,
-            description: None,
-            owner: None,
-            health: None,
-            target: None,
-            add_projects: vec![],
-            remove_projects: vec![],
-            remove: false,
-        },
-        Request::TeamList,
-        Request::TeamSet {
-            team: None,
-            name: None,
-            key: None,
-            icon: None,
-            lead: None,
-            add_members: vec![],
-            remove_members: vec![],
-            remove: false,
-        },
-        Request::TriageList,
-        Request::TriageSubmit {
-            title: s(),
-            body: None,
-            source: None,
-        },
-        Request::TriageDecide {
-            id: s(),
-            outcome: s(),
-            project: None,
-            target: None,
-            note: None,
-        },
-        Request::Attach {
-            reff: s(),
-            name: s(),
-            mime: None,
-            data_b64: s(),
-            comment: None,
-        },
-        Request::Detach { reff: s(), id: s() },
-        Request::AttachmentGet { reff: s(), id: s() },
-        Request::LabelNew {
-            name: s(),
-            color: None,
-        },
-        Request::LabelList,
-        Request::LabelEdit {
-            label: s(),
-            name: None,
-            color: None,
-        },
-        Request::LabelDelete { label: s() },
-        Request::SpaceRename { name: s() },
-        Request::SpaceDescribe { description: s() },
-        Request::Activity { since: 0 },
-        Request::RoleList,
-        Request::RoleShow { role: s() },
-        Request::RoleCreate {
-            name: s(),
-            description: None,
-            project: None,
-            capabilities: vec![],
-        },
-        Request::RoleEdit {
-            role: s(),
-            expect_revision: s(),
-            name: None,
-            description: None,
-            capabilities: None,
-        },
-        Request::RoleDelete {
-            role: s(),
-            expect_revision: s(),
-        },
-        Request::RoleResolve {
-            role: s(),
-            expect_heads: vec![],
-            body_json: s(),
-        },
-        Request::AccessList { actor: None },
-        Request::AccessGrant {
+        Request::AssignmentList { actor: None },
+        Request::AssignmentGrant {
             actor: s(),
-            role: s(),
-            project: None,
+            assignments: vec![],
         },
-        Request::AccessRevoke { grant_id: s() },
-        Request::WorldUpgrade,
-        Request::WorkflowShow { project: s() },
-        Request::WorkflowValidate { body_json: s() },
-        Request::WorkflowSet {
-            project: s(),
-            expect_heads: vec![],
-            body_json: s(),
-        },
-        Request::Inbox { clear: false },
+        Request::AssignmentRevoke { grant_id: s() },
+        Request::WorldActivate { world: s() },
         Request::MemberAdd {
             who: s(),
             admin: false,
@@ -1353,9 +681,8 @@ pub fn routing_rows() -> Vec<(String, &'static str)> {
         .collect()
 }
 
-/// A response from the daemon. A snapshot at a version — there is
-/// **no CAS token**. Internally tagged by `kind` (not `status`, which
-/// would collide with `IssueView.status` when the `Issue` variant is flattened).
+/// A response from the daemon or Space host. Internally tagged by `kind`;
+/// product response schemas are not members of this enum.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Response {
@@ -1376,37 +703,10 @@ pub enum Response {
     Ref {
         reff: String,
     },
-    Issue(Box<IssueView>),
-    List {
-        rows: Vec<Row>,
-    },
-    Board(Box<BoardView>),
-    /// The issue-graph neighborhood (reply to [`Request::IssueGraph`]).
-    Graph(Box<GraphView>),
-    Activity {
-        events: Vec<ActivityEvent>,
-        last: u64,
-    },
-    /// The inbox snapshot: entries newest-first; `unread` counts entries past
-    /// the read watermark.
-    Inbox {
-        entries: Vec<InboxEntry>,
-        unread: u64,
-    },
-    Projects {
-        projects: Vec<ProjectDto>,
-    },
-    /// A project's status-update feed (reply to [`Request::ProjectUpdates`]).
-    Updates {
-        updates: Vec<crate::dto::ProjectUpdateDto>,
-    },
-    Labels {
-        labels: Vec<LabelDto>,
-    },
     Members {
         members: Vec<MemberDto>,
     },
-    /// Effective scoped assignments (reply to [`Request::AccessList`]).
+    /// Effective scoped assignments (reply to [`Request::AssignmentList`]).
     Assignments {
         rows: Vec<crate::dto::AssignmentDto>,
     },
@@ -1417,45 +717,6 @@ pub enum Response {
     /// Pinned seeds ("remotes") and their reachability.
     Seeds {
         seeds: Vec<SeedDto>,
-    },
-    /// Reply to [`Request::MilestoneList`].
-    Milestones {
-        milestones: Vec<crate::dto::MilestoneDto>,
-    },
-    /// Reply to [`Request::CycleList`].
-    Cycles {
-        cycles: Vec<crate::dto::CycleDto>,
-    },
-    /// Reply to [`Request::InitiativeList`].
-    Initiatives {
-        initiatives: Vec<crate::dto::InitiativeDto>,
-    },
-    /// Reply to [`Request::TeamList`].
-    Teams {
-        teams: Vec<crate::dto::TeamDto>,
-    },
-    /// Reply to [`Request::TriageList`].
-    TriageItems {
-        items: Vec<crate::dto::TriageDto>,
-    },
-    /// Reply to [`Request::AttachmentGet`] — the full record incl. payload.
-    Attachment {
-        name: String,
-        mime: String,
-        data_b64: String,
-    },
-    /// A ref resolved to many candidates, represented as a first-class outcome,
-    /// or, when `near_miss_for` is set, matched **nothing** and these are the
-    /// closest handles to what was typed.
-    Candidates {
-        candidates: Vec<Candidate>,
-        /// The input that matched nothing, when these are near misses rather than
-        /// an ambiguous prefix. Additive and `#[serde(default)]` on purpose: a
-        /// client that predates it decodes the variant unchanged and just calls
-        /// them candidates, so this stays safe in both directions within the
-        /// epoch (cf. `sync::PROTOCOL_VERSION` on the sync plane).
-        #[serde(default)]
-        near_miss_for: Option<String>,
     },
 
     // ---- transport / presence ----
@@ -1500,11 +761,8 @@ pub enum Response {
 
 /// Classifies a [`Response::Error`] so the process exit code is
 /// derived from a **typed kind**, never by string-matching the human message.
-/// `NotFound` (a ref / registry entry didn't resolve) maps to exit `2` alongside
-/// the ambiguous [`Response::Candidates`] outcome; everything else is a plain
-/// error → exit `1`. Kept minimal on purpose: "many candidates" already has its
-/// own response variant, so the only extra rung the message layer needs is
-/// "resolved to nothing."
+/// `NotFound` (a ref / registry entry didn't resolve) maps to exit `2`;
+/// everything else is a plain error → exit `1`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorKind {
@@ -1785,6 +1043,36 @@ async fn probe_inner(home: &Path) -> Probe {
     }
 }
 
+/// Read and validate the peer's control protocol version.
+///
+/// Clients use the exact negotiated value to ensure the peer speaks the current
+/// generic World envelope.
+pub async fn peer_protocol_version(home: &Path) -> Result<u32> {
+    let name = control_name(home)?;
+    let stream = Stream::connect(name)
+        .await
+        .context("connect to daemon for protocol handshake")?;
+    let line = exchange_raw(
+        stream,
+        &ClientRequest::plain(Request::Hello {
+            protocol_version: CONTROL_PROTOCOL_VERSION,
+        }),
+    )
+    .await?;
+    let value: serde_json::Value =
+        serde_json::from_str(&line).context("decode protocol handshake")?;
+    if value.get("kind").and_then(|kind| kind.as_str()) != Some("hello") {
+        return Err(anyhow!("daemon did not answer the protocol handshake"));
+    }
+    let version = value
+        .get("protocol_version")
+        .and_then(|version| version.as_u64())
+        .and_then(|version| u32::try_from(version).ok())
+        .ok_or_else(|| anyhow!("daemon hello omitted a valid protocol version"))?;
+    check_control_protocol(version)?;
+    Ok(version)
+}
+
 /// Send one request to the daemon and read one response (one-shot path), as the
 /// primary (human) identity.
 pub async fn request(home: &Path, req: &Request) -> Result<Response> {
@@ -1794,10 +1082,64 @@ pub async fn request(home: &Path, req: &Request) -> Result<Response> {
 /// Send one request acting as a named local identity (`act_as`) — the
 /// multi-tenant path. `None` is identical to [`request`].
 pub async fn request_as(home: &Path, req: &Request, act_as: Option<&str>) -> Result<Response> {
+    request_as_routed(home, req, None, act_as).await
+}
+
+/// Send a request through an explicit bridge path.
+pub async fn request_routed(home: &Path, req: &Request, route: ControlRoute) -> Result<Response> {
+    request_as_routed(home, req, Some(route), None).await
+}
+
+/// Send a request with both an explicit bridge path and acting identity.
+pub async fn request_as_routed(
+    home: &Path,
+    req: &Request,
+    route: Option<ControlRoute>,
+    act_as: Option<&str>,
+) -> Result<Response> {
     let name = control_name(home)?;
     let stream = Stream::connect(name).await.context("connect to daemon")?;
-    let env = ClientRequest::acting_as(req.clone(), act_as.map(str::to_string));
+    let env = ClientRequest {
+        route,
+        if_running: false,
+        act_as: act_as.map(str::to_string),
+        request: req.clone(),
+    };
     exchange(stream, &env).await
+}
+
+/// Send a routed request that must not activate a vacant Orbit.
+pub async fn request_routed_if_running(
+    home: &Path,
+    req: &Request,
+    route: ControlRoute,
+) -> Result<Response> {
+    let name = control_name(home)?;
+    let stream = Stream::connect(name).await.context("connect to daemon")?;
+    exchange(
+        stream,
+        &ClientRequest::routed_if_running(req.clone(), route),
+    )
+    .await
+}
+
+/// Send one product-neutral World call through the identity-scoped daemon.
+pub async fn call_world(
+    home: &Path,
+    route: ControlRoute,
+    call: WorldCall,
+    act_as: Option<&str>,
+) -> Result<WorldReply> {
+    let name = control_name(home)?;
+    let stream = Stream::connect(name)
+        .await
+        .context("connect to Lait daemon")?;
+    let line = exchange_raw(
+        stream,
+        &WorldClientRequest::new(route, call, act_as.map(str::to_string)),
+    )
+    .await?;
+    serde_json::from_str(line.trim()).context("decode World reply")
 }
 
 /// Write one request and read one response on an already-open stream.
@@ -1811,7 +1153,7 @@ async fn exchange(stream: Stream, env: &ClientRequest) -> Result<Response> {
 /// Split from [`exchange`] for [`probe`]: typed decoding is exactly what a
 /// version-mismatched daemon breaks, so the handshake has to look at the bytes
 /// before serde gets an opinion about them.
-async fn exchange_raw(stream: Stream, env: &ClientRequest) -> Result<String> {
+async fn exchange_raw<T: Serialize>(stream: Stream, env: &T) -> Result<String> {
     let (read_half, mut write_half) = tokio::io::split(stream);
     let mut line = serde_json::to_string(env).context("encode request")?;
     line.push('\n');
@@ -1856,10 +1198,24 @@ impl Subscription {
 
 /// Open a streaming [`Request::Subscribe`] connection.
 pub async fn subscribe(home: &Path, since: u64) -> Result<Subscription> {
+    subscribe_routed(home, since, None).await
+}
+
+/// Open a subscription through an explicit Space route.
+pub async fn subscribe_routed(
+    home: &Path,
+    since: u64,
+    route: Option<ControlRoute>,
+) -> Result<Subscription> {
     let name = control_name(home)?;
     let mut stream = Stream::connect(name).await.context("connect to daemon")?;
-    let mut line =
-        serde_json::to_string(&Request::Subscribe { since }).context("encode subscribe")?;
+    let envelope = ClientRequest {
+        route,
+        if_running: false,
+        act_as: None,
+        request: Request::Subscribe { since },
+    };
+    let mut line = serde_json::to_string(&envelope).context("encode subscribe")?;
     line.push('\n');
     stream
         .write_all(line.as_bytes())
@@ -1877,10 +1233,9 @@ mod tests {
 
     #[test]
     fn client_request_envelope_is_wire_backward_compatible() {
-        // No selector → serializes to EXACTLY the bare request an older client
-        // sends (the flatten + skip_serializing_if contract), so a pre-B daemon
-        // still decodes it and a bare request still decodes as `act_as: None`.
-        let bare = Request::Inbox { clear: true };
+        // No route or selector serializes to EXACTLY the bare request an older
+        // client sends (the flatten + skip_serializing_if contract).
+        let bare = Request::MemberRemove { who: "abc".into() };
         let env = ClientRequest::plain(bare.clone());
         let env_json = serde_json::to_value(&env).unwrap();
         let bare_json = serde_json::to_value(&bare).unwrap();
@@ -1890,41 +1245,55 @@ mod tests {
         );
         // A bare request decodes as an envelope with no selector.
         let decoded: ClientRequest = serde_json::from_value(bare_json.clone()).unwrap();
+        assert!(decoded.route.is_none());
+        assert!(!decoded.if_running);
         assert!(decoded.act_as.is_none());
         assert_eq!(serde_json::to_value(&decoded.request).unwrap(), bare_json);
     }
 
     #[test]
-    fn client_request_flatten_round_trips_with_selector_and_scalars() {
-        // The flatten gotcha: a selector alongside a Request carrying scalar
-        // fields (bool + Option<u64>) must survive a JSON round trip. Pin it.
+    fn client_request_flatten_round_trips_with_route_selector_and_scalars() {
+        // The flatten gotcha: a route and selector alongside a Request carrying
+        // scalar fields must survive a JSON round trip.
         for req in [
             Request::Invite {
                 role: Some("contributor".into()),
                 reusable: true,
                 ttl_hours: Some(48),
             },
-            Request::Inbox { clear: false },
+            Request::Status,
             Request::Whoami,
-            Request::IssueNew {
-                title: "t".into(),
-                project: None,
-                project_hint: None,
-                assignees: vec![],
-                priority: None,
-                labels: vec![],
-                body: None,
-                due: None,
-                estimate: Some(3),
-            },
         ] {
-            let env = ClientRequest::acting_as(req.clone(), Some("agent-x".into()));
+            let route = ControlRoute::Space {
+                address: OrbitAddress::for_store(
+                    Path::new("/tmp/test-orbit"),
+                    crate::ids::SpaceId::from_digest([4; 16]),
+                ),
+            };
+            let env = ClientRequest::routed(req.clone(), route.clone(), Some("agent-x".into()));
             let json = serde_json::to_string(&env).unwrap();
+            assert!(
+                json.contains("\"scope\":\"space\""),
+                "route present: {json}"
+            );
+            assert!(
+                json.contains("\"orbit\":\"orb_"),
+                "local Orbit address present: {json}"
+            );
             assert!(
                 json.contains("\"act_as\":\"agent-x\""),
                 "selector present: {json}"
             );
+            assert!(
+                !json.contains("if_running"),
+                "ordinary dispatch omits passive intent: {json}"
+            );
+            assert!(
+                !json.contains("allowed_orbits") && !json.contains("default_orbit"),
+                "trusted ClientScope must not become a wire claim: {json}"
+            );
             let back: ClientRequest = serde_json::from_str(&json).unwrap();
+            assert_eq!(back.route, Some(route));
             assert_eq!(back.act_as.as_deref(), Some("agent-x"));
             assert_eq!(
                 serde_json::to_value(&back.request).unwrap(),
@@ -1932,6 +1301,23 @@ mod tests {
                 "the flattened request must survive: {json}"
             );
         }
+    }
+
+    #[test]
+    fn passive_dispatch_intent_is_explicit_and_round_trips() {
+        let route = ControlRoute::Space {
+            address: OrbitAddress::for_store(
+                Path::new("/tmp/passive-orbit"),
+                crate::ids::SpaceId::from_digest([5; 16]),
+            ),
+        };
+        let env = ClientRequest::routed_if_running(Request::Status, route.clone());
+        let json = serde_json::to_string(&env).unwrap();
+        assert!(json.contains("\"if_running\":true"), "{json}");
+        let back: ClientRequest = serde_json::from_str(&json).unwrap();
+        assert!(back.if_running);
+        assert_eq!(back.route, Some(route));
+        assert!(matches!(back.request, Request::Status));
     }
 
     #[test]

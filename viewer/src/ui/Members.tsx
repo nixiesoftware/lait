@@ -12,7 +12,7 @@ import {
   X,
 } from "lucide-react";
 
-import { ConfirmRequired, rpc } from "../api";
+import { ConfirmRequired, spaceRpc as rpc } from "../api";
 import type { MemberDto, MemberLogEntry } from "../types";
 import { Avatar, memberName } from "./Avatar";
 import * as ask from "./dialogs";

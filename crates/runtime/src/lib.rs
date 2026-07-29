@@ -15,9 +15,12 @@
 //! stream, file, key, ciphertext, mutex, or product request types — those live
 //! below the boundary in [`fabric`], [`comms`], and [`mechanics`].
 //!
-//! Orbit and Station are the same durable relationship in mutually exclusive
-//! states: [`Orbit::activate`] consumes the Orbit and returns a [`Station`];
-//! [`Station::go_dormant`] consumes the Station and returns the Orbit.
+//! An Orbit is the durable relationship and persists while vacant or occupied.
+//! The Rust handles encode its exclusive operational lease:
+//! [`Orbit::activate`] consumes the vacant Orbit handle and returns a
+//! [`Station`]; [`Station::go_dormant`] consumes the active Station handle and
+//! returns a vacant Orbit handle. Those ownership transfers are not an
+//! ontological conversion between Orbit and Station.
 //!
 //! S0 establishes the sealed lifecycle contract surface and a **real, tested**
 //! immutable World registry (duplicate registration is rejected). The lifecycle
@@ -61,7 +64,9 @@ pub use lifecycle::{
     EnterOptions, Neighbor, Orbit, OrbitObservation, Reachability, Runtime, SpaceFormationOptions,
     Station,
 };
-pub use neighbor_presence::{PresenceAck, PresenceError, PresenceProbe, PRESENCE_ALPN};
+pub use neighbor_presence::{
+    PresenceAck, PresenceError, PresenceProbe, PRESENCE_ALPN, PRESENCE_PROTOCOL,
+};
 pub use neighbors::{NeighborRecord, NeighborRegistry, RegistryError, StoredRoute};
 pub use registry::{RuntimeBuilder, WorldRegistry};
 pub use session::{

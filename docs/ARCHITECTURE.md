@@ -13,26 +13,171 @@ boundary. Each device keeps its own durable participation and can activate it
 without a central server.
 
 ```text
-Space
-  └─ local participation
-       ├─ dormant: Orbit
-       └─ active: Station
-            ├─ Mechanics
-            ├─ Replica
-            │    └─ Fabric
-            ├─ Neighbor registry and Contact
-            ├─ hosted Worlds
-            └─ docked Sessions
+LaitDaemon
+  ├─ identity-scoped local control endpoint
+  ├─ injected WorldPackages
+  ├─ OrbitDirectory
+  └─ ControlRouter
+       ├─ IdentityTransportHubs (keyed by DeviceId)
+       │    └─ concrete endpoint / protocol Router / gossip
+       │         └─ SpaceTransportView (keyed by SpaceId)
+       └─ OrbitOccupancy (keyed by local Orbit)
+            ├─ vacant
+            └─ StationPlacement
+                 ├─ hosting
+                 │    ├─ owned in-process
+                 │    └─ attached compatibility process
+                 └─ sole SpaceBridge for the Orbit
+                      └─ Station occupying the Orbit
+                           ├─ Mechanics
+                           ├─ Replica
+                           │    └─ Fabric
+                           ├─ Comms -> SpaceTransportView
+                           ├─ Neighbor registry and Contact
+                           └─ WorldBridgeRegistry
+                                └─ WorldBridge
+                                     └─ docked Sessions
+
+lait serve
+  └─ HTTP/SSE adapter -> LaitDaemon
+
+cwd CLI / pinned MCP
+  └─ WorldClientRegistry
+       ├─ shell/Mechanics surfaces
+       └─ installed World client packages
+            └─ explicit Orbit/World route -> LaitDaemon
 ```
 
-An Orbit is durable, inactive participation in one Space. `Orbit::activate`
-consumes it and produces the Station, the exclusive live owner. Dormancy drains
-the Station and returns the participation to an Orbit. There is never a second
-live daemon, Replica, or product store beside a Station.
+An Orbit is one durable local participation in a Space. It persists whether it
+is vacant or occupied. Activation acquires that Orbit's exclusive operational
+lease and places a Station into it; removing the Station drains its tasks and
+releases the lease without turning the Station into an Orbit. The current
+Runtime API transfers that lease through `Orbit::activate` and
+`Station::go_dormant`; those consuming handles express ownership transfer, not
+an ontological state conversion. A SpaceBridge is the sole product-side
+entrance to the Station occupying one Orbit. There is never a second live
+Station, Replica, or product store for the same local Orbit.
 
 CLI, web, and MCP clients use one local control protocol. They do not open the
-store or CRDT engine. The daemon classifies each request to one terminal owner:
-lifecycle, Mechanics, Station, or the Issues World router.
+store or CRDT engine. An explicit control route addresses the process-level
+daemon, a local Orbit plus its expected Space, or a World reached through that
+Orbit. The CLI's cwd selects its default Orbit; MCP is pinned to its launch
+Orbit; neither inherits catalog-wide visibility.
+
+The `lait` CLI is the navigation shell for this graph, not the command-line
+identity of the bundled Issues World. Bare `lait` reports the selected identity,
+Orbit, Space, and installed Worlds. `--orbit` selects one durable local
+participation; `lait orbits` lists those local participations, while
+`lait worlds` lists the semantic packages installed in the application
+composition. Product commands live only below their World namespace, such as
+`lait issues ...`.
+
+Command parsing produces a `ClientAction` whose terminal target is already
+`Daemon`, `Space`, or `World { world }`. Orbit resolution later completes that
+target into a wire `ControlRoute`; it does not reclassify product intent. The
+shell commands still carry the historical typed `Request`; installed product
+commands emit their package-owned opaque `WorldCall` directly. The typed
+product variants remain only for viewer, host-capability, and v3 daemon
+compatibility adapters.
+
+`WorldClientRegistry` composes one root CLI mount, collision-safe MCP prefix,
+explicit web adapter, opaque reply decoder, and local-operation executor per
+installed World. A parsed `ClientInvocation` carries package-owned access and
+confirmation metadata for the complete operation, including caller-local
+effects. The shell enforces that metadata and supplies an object-safe
+`ClientHost` for World calls and generic Space-authority facilities; it never
+matches a product host enum. The Issues package therefore owns
+`lait issues ...`, the `issues_*` MCP tools, and their response codec. Adding a
+Files World means registering another package with (for example) a `files`
+mount and `files_*` tools; it does not add another branch to the root CLI or MCP
+router. Duplicate Worlds, duplicate mounts, package-local tool names, and
+collisions with shell names fail during composition.
+
+Trusted cwd and MCP adapters derive a pinned `ClientScope`; the web adapter
+applies catalog identity policy. Web Space control and product calls use
+disjoint endpoints; a product request names its World/package route before its
+payload is decoded. Each adapter constructs an explicit route and opens the
+identity-scoped LaitDaemon endpoint. The daemon resolves the Orbit, validates
+its repeated Space expectation before activation, places or reuses its Station
+host, and dispatches to one terminal owner: lifecycle, Mechanics, Station,
+observation, or a WorldBridge. The receiving SpaceBridge independently
+validates its Orbit, Space, World, and terminal owner. `OrbitDirectory`
+discovers durable bindings; `StationPlacement` records where an active Station
+is hosted; neither is a second lifecycle owner. The allowed Orbit set never
+rides on the wire as a client-controlled claim.
+
+Bridges are logical boundaries, not mandatory processes. The current deployment
+is one identity-scoped LaitDaemon routing to zero or more Station placements and
+their in-process SpaceBridges. A SpaceBridge or WorldBridge may move to a worker
+process for stronger fault or plugin isolation without changing its route or
+client contract. The ControlRouter hosts a vacant Orbit in-process and attaches,
+without taking ownership, when a compatible historical per-home daemon already
+holds that Orbit. Both placement modes retain the per-home socket for Space
+control and Observation compatibility, but owned World calls dispatch directly
+to the in-process bridge. An attached placement forwards the same opaque World
+call through that socket without translating its payload. CLI, MCP, and web
+requests enter through the one LaitDaemon endpoint.
+
+Catalog listing remains passive. The web adapter asks LaitDaemon for an
+`if_running` status; LaitDaemon may inspect an already-live per-Orbit
+compatibility adapter, but it never places a vacant Orbit for that probe.
+
+Transport ownership follows device identity, not Orbit count. One
+`IdentityTransportHub` owns the concrete endpoint, protocol Router, reachability
+book, and gossip instance for a `DeviceId`. Each active Space gets a scoped
+transport view with its own inbound queue and gossip topic. The hub reads a
+bounded Contact Hello or presence probe only far enough to select its declared
+Space, then replays the exact frame to Runtime; the SpaceBridge still performs
+canonical decoding, signature, negotiated-peer, protocol, and Space
+verification. Slow openers are bounded and dispatched concurrently.
+The concrete endpoint is daemon-scoped by design: unregistering the last Space
+route leaves the identity endpoint warm until explicit LaitDaemon shutdown.
+Dropping it on every last-Station transition would race concurrent placement
+and turn Station churn into identity/transport churn.
+An attached historical compatibility process retains its legacy endpoint until
+that migration placement exits; the identity-hub invariant governs Stations
+owned by LaitDaemon.
+
+Two active Stations with the same `(DeviceId, SpaceId)` are rejected even if
+they occupy distinct local Orbits: the remote address is the device key and the
+opening protocol names only the Space, so no legitimate wire address can choose
+between them. Distinct Orbits remain durable and independently selectable, and
+the same Space can be active under distinct device identities.
+
+Placement and shutdown are ordered:
+
+```text
+request
+  -> trusted adapter authorizes ClientScope
+  -> identity-scoped LaitDaemon endpoint
+  -> OrbitDirectory resolves
+  -> validate Orbit + expected Space before activation
+  -> OrbitOccupancy single-flights by local Orbit
+  -> healthy existing control channel: attach
+     absent control channel: acquire daemon lock -> activate -> serve in-process
+
+viewer shutdown
+  -> stop HTTP and join its daemon event observer
+  -> LaitDaemon and Stations remain active
+
+explicit LaitDaemon shutdown
+  -> stop accepting process-control work
+  -> close and join daemon client connections
+  -> gate ControlRouter against new placements
+  -> close and join doorbell observers
+  -> signal each owned SpaceBridge
+  -> join control connections and Observation pumps
+  -> drop WorldBridgeRegistry/Sessions
+  -> Contact driver emits dormancy and unregisters its SpaceTransportView
+  -> Station::go_dormant
+  -> release the Orbit lock
+  -> after all owned placements join, gracefully stop each identity Router,
+     gossip instance, and concrete endpoint
+```
+
+Attached compatibility processes are not stopped by host shutdown. An owned
+placement is never task-aborted as a successful shutdown: the joinable runner
+must complete dormancy before the Orbit is considered vacant.
 
 ## 2. Crate boundaries
 
@@ -45,11 +190,21 @@ replica    Body transactions, protected material, Manifests, quotas,
            validation, and convergence
 comms      transport, streams, discovery, gossip, and presence mechanisms
 runtime    Orbit/Station lifecycle, Contacts, Worlds, Sessions, observations
-lait       IssuesWorld and product/control adapters
+world-bridge
+           versioned opaque application calls and object-safe World handlers
+world-interface
+           composable CLI mounts, MCP descriptors, and namespace validation
+issues     IssuesWorld schemas, semantic model, product DTOs and identifiers
+issues-app Issues application protocol plus CLI and MCP client interfaces
+lait       orbital navigation shell, host-capability adapters, viewer, and
+           application composition
 ```
 
 Dependencies point inward through these boundaries. Product concepts such as
-issues, projects, comments, roles, and workflows belong only to `lait`.
+issues, projects, comments, roles, and workflows belong to the independently
+packaged `products/issues` and `products/issues-app` crates. The outer `lait`
+shell mounts those packages but does not declare their command grammar or MCP
+schemas.
 Mechanics does not interpret product roles. Fabric does not know authority,
 transport, or product meaning. Comms moves bytes but cannot legitimize them.
 
@@ -140,6 +295,72 @@ facts. It cannot access storage, Loro, transport, custody secrets, or authority
 mutation. It returns declared Body operations and a non-empty authorization
 demand. Runtime validates World/schema containment before committing anything.
 
+A WorldBridge is the application-side entrance to one registered World in one
+active Space. It owns the reviewed implementation identity and the Sessions
+docked for local identities. A WorldBridgeRegistry maps `WorldId` to distinct
+bridge objects; a Session can never be reused across Worlds.
+
+The application composition root supplies one compile-time `WorldPackages` set
+to LaitDaemon. Each `WorldPackage` keeps a Runtime registration, semantic World
+implementation, reviewed implementation identity, and optional
+`WorldCallHandler` together. The same immutable package set is carried through
+ControlRouter placement into every SpaceBridge; daemon routing validates the
+addressed World against that injected set and never names IssuesWorld.
+
+The `world-bridge` crate is the application-call boundary shared by a product
+and its host. `WorldCall { world, operation, version, payload }` and its bound
+`WorldReply` leave the payload opaque to LaitDaemon and SpaceBridge. The
+registered handler—not the client—decodes the call and classifies it as a query
+or command before host policy runs. It owns product reference resolution, local
+id/time minting, transient retry, and product response construction. This is a
+compile-time package seam, not a promise of dynamic library loading or process
+isolation.
+
+For an owned Station placement, ControlRouter invokes the in-process
+SpaceBridge directly. The per-Orbit socket is not part of that World call stack.
+If LaitDaemon attaches to a standalone SpaceBridge, the same opaque
+`WorldClientRequest` crosses the socket and the receiving bridge invokes its
+registered handler. Protocol v5 deliberately retired v4 bridges and typed
+product requests; protocol v6 removed the last product projection from root
+control, so every placement now has the same product-neutral boundary.
+
+IssuesWorld's semantic package lives at `products/issues` with no dependency on
+the `lait` application crate, local control protocol, daemon, filesystem, or
+process lifecycle. The root preserves `lait::world`, `lait::dto`, and
+`lait::ids` as compatibility re-exports. Moving that package to another
+repository changes the dependency locator, not Runtime or bridge ownership.
+The outer `world::lifecycle` adapter owns only generic Orbit/Station
+materialization and invokes package lifecycle hooks with a docked Session.
+`issues-app` supplies the reviewed implementation policy, founder grants,
+initial-project policy, and crash-resumable signed `InitializeTracker` record.
+`orbital` retains compatibility re-exports but contains no Issues bootstrap
+implementation.
+
+The sibling `products/issues-app` package owns the `issues.control` v1 codec,
+query/command classification, `IssueRouter` execution adapter, product response
+schema, host-capability vocabulary, role-to-authority planning, formation
+policy, status/inbox/doorbell projections, `lait issues` command tree, and all
+38 Issues MCP descriptors. It depends on the semantic package and generic
+substrate/bridge/client interfaces, never back on `lait`.
+Most client operations become `WorldCall`s at parse time. Inbox watermark I/O,
+access assignment, git work-state behavior, attachment filesystem I/O, and
+implementation activation are explicit named host-capability calls: their
+interface and asynchronous orchestration remain product-owned while the shell
+supplies generic World-call and Space-authority facilities that a semantic
+World must not hold.
+
+Role assignment is split at that boundary: Issues resolves `(role, project)`
+into a package-owned `AccessPlan`; root control can only commit generic
+`(World, capability, resource)` Mechanics assignments. Reviewed implementation
+activation likewise carries an explicit World id. Neither root verb names an
+Issues role, project, or singleton bundled product.
+
+The client package also owns reply decoding and presentation. CLI and MCP pass
+the decoded product value to its presenter; the shell only writes the returned
+stdout/stderr and applies typed failure semantics. Product response variants,
+tables, boards, issue detail, inbox wording, ANSI styling, and JSON shape do not
+appear in root control or its renderer.
+
 A Session binds a local identity to one World at an active Station. Queries and
 mutations are authorized independently. Query results are computed from one
 Manifest root and authority frontier; a derived cache must be keyed by that
@@ -153,6 +374,18 @@ legitimate protected material opaquely.
 
 IssuesWorld (`com.lait.issues`) is the bundled reference World. It has no private
 architectural path unavailable to another conforming World.
+
+Root control contains no issue command or response variants. The viewer, CLI,
+and MCP construct the Issues-owned application protocol and carry it in an
+opaque `WorldCall`; attached SpaceBridges receive that same envelope. The web
+viewer addresses `/worlds/issues/rpc`, so malformed product input cannot fall
+through into root control decoding. Local host capabilities are decoded and
+executed by the product package and may compose a World call with a
+working-tree, filesystem, caller-local state, or generic Space-authority
+facility. For example, inbox reads pass the caller-local watermark into an
+Issues query and advance it only after a successful reply; the complete
+operation is therefore a command when `clear` is true. Protocol v6 makes the
+daemon boundary explicit on the wire.
 
 ## 6. Communication model
 

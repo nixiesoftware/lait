@@ -188,20 +188,22 @@ jobs:
           [[ "$id_out" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::bad id: $id_out"; exit 1; }
           # spaces are founded explicitly (no lazy mint); founding seeds a project
           bin init --name Smoke
-          bin projects add ENG Engineering
-          bin new "fix login race" -p ENG -P high >/dev/null
-          bin new "add dark mode"  -p ENG -P low  >/dev/null
+          # Product verbs live under their World's namespace (`lait issues ...`);
+          # the root shell navigates identities, Orbits, Spaces and Worlds.
+          bin issues projects add ENG Engineering
+          bin issues new "fix login race" -p ENG -P high >/dev/null
+          bin issues new "add dark mode"  -p ENG -P low  >/dev/null
           # board shows both issues in Backlog
-          board="$(bin board ENG)"; has "$board" "fix login race"; has "$board" "add dark mode"
+          board="$(bin issues board ENG)"; has "$board" "fix login race"; has "$board" "add dark mode"
           # the work loop: start assigns + activates; done completes (S§5.7)
-          start_out="$(bin start ENG-1 --no-branch)"; has "$start_out" "in_progress"
-          board="$(bin board ENG)"; has "$board" "In Progress"; has "$board" "fix login race"
-          bin done ENG-2 >/dev/null
-          ls_out="$(bin ls)"; has "$ls_out" "fix login race"
+          start_out="$(bin issues start ENG-1 --no-branch)"; has "$start_out" "in_progress"
+          board="$(bin issues board ENG)"; has "$board" "In Progress"; has "$board" "fix login race"
+          bin issues done ENG-2 >/dev/null
+          ls_out="$(bin issues ls)"; has "$ls_out" "fix login race"
           # activity feed records the transitions
-          act="$(bin activity)"; has "$act" "created"; has "$act" "started"
+          act="$(bin issues activity)"; has "$act" "created"; has "$act" "started"
           # the machine registry lists the founded space
-          spaces_out="$(bin spaces)"; has "$spaces_out" "Smoke"
+          orbits_out="$(bin orbits)"; has "$orbits_out" "Smoke"
           bin shutdown || true
           echo "P0 smoke flow OK on ${{ matrix.os }}"
 
@@ -261,7 +263,7 @@ jobs:
           - job: orbital-independent-world
             filter: "binary(independent_world) + binary(orbital_adoption)"
           - job: orbital-product-parity
-            filter: "binary(orbital_product_parity) + binary(issues_policy_designer) + binary(orbital_daemon_lifecycle) + binary(control_classification) + binary(mcp_parity) + binary(viewer_parity)"
+            filter: "binary(orbital_product_parity) + binary(issues_policy_designer) + binary(space_bridge_lifecycle) + binary(lait_daemon) + binary(control_classification) + binary(mcp_parity) + binary(viewer_parity)"
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - name: Install Rust (stable)

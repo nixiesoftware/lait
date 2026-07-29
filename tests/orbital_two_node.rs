@@ -16,9 +16,11 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use async_trait::async_trait;
-use lait::control::{request, Request, Response};
+use issues_app::IssuesResponse as IssueResponse;
+use lait::control::{request, ControlRoute, Request, Response};
+use lait::daemon::OrbitAddress;
 use lait::net::Network;
-use lait::orbital::run_orbital_daemon_with;
+use lait::orbital::run_space_bridge_with;
 use lait::transport::mem::MemNet;
 use lait::transport::{Alpn, Transport, TransportFactory};
 
@@ -56,6 +58,31 @@ fn req(rt: &tokio::runtime::Runtime, home: &Path, r: Request) -> Response {
         .unwrap_or_else(|e| Response::err(format!("{e:#}")))
 }
 
+fn issue_req(
+    rt: &tokio::runtime::Runtime,
+    home: &Path,
+    request: issues_app::IssuesRequest,
+) -> IssueResponse {
+    rt.block_on(async {
+        let space = lait::orbital::discover_space_id(home).expect("test Space");
+        let call = issues_app::encode_call(&request)?;
+        let reply = lait::control::call_world(
+            home,
+            ControlRoute::World {
+                address: OrbitAddress::for_store(home, space),
+                world: call.world().as_str().to_string(),
+            },
+            call.clone(),
+            None,
+        )
+        .await?;
+        Ok::<IssueResponse, anyhow::Error>(serde_json::from_value(issues_app::decode_reply(
+            &call, reply,
+        )?)?)
+    })
+    .unwrap_or_else(|error| IssueResponse::err(format!("{error:#}")))
+}
+
 fn poll_until<T>(timeout: Duration, mut check: impl FnMut() -> Option<T>) -> Option<T> {
     let start = Instant::now();
     loop {
@@ -69,14 +96,14 @@ fn poll_until<T>(timeout: Duration, mut check: impl FnMut() -> Option<T>) -> Opt
     }
 }
 
-/// Spawn an orbital daemon for `home` on its own OS thread + runtime, with an
+/// Spawn a process-backed SpaceBridge for `home` on its own OS thread + runtime, with an
 /// explicit device seed (the injectable multi-node contract — no shared global
 /// identity between the two daemons).
 fn spawn_daemon(home: PathBuf, seed: [u8; 32], net: MemNet) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async move {
-            if let Err(e) = run_orbital_daemon_with(home, seed, &MemFactory(net)).await {
+            if let Err(e) = run_space_bridge_with(home, seed, &MemFactory(net)).await {
                 eprintln!("DAEMON ERR: {e:#}");
             }
         });
@@ -95,7 +122,7 @@ fn wait_online(rt: &tokio::runtime::Runtime, home: &Path) {
 }
 
 #[test]
-fn two_orbital_daemons_join_admit_and_converge_over_the_socket() {
+fn two_space_bridges_join_admit_and_converge_over_the_socket() {
     let net = MemNet::new();
 
     // -- Founder: form the Space, seed a project + a sealed issue, then serve. --
@@ -108,23 +135,23 @@ fn two_orbital_daemons_join_admit_and_converge_over_the_socket() {
     wait_online(&client, &founder_home);
 
     // A project + an issue with a sealed body, filed by the founder over the wire.
-    let resp = req(
+    let resp = issue_req(
         &client,
         &founder_home,
-        Request::ProjectNew {
+        issues_app::IssuesRequest::ProjectNew {
             name: "Core".into(),
             key: "core".into(),
             color: None,
         },
     );
     assert!(
-        matches!(&resp, Response::Ref { reff } if reff == "CORE"),
+        matches!(&resp, IssueResponse::Ref { reff } if reff == "CORE"),
         "{resp:?}"
     );
-    let resp = req(
+    let resp = issue_req(
         &client,
         &founder_home,
-        Request::IssueNew {
+        issues_app::IssuesRequest::IssueNew {
             due: None,
             estimate: None,
             title: "Secret plan".into(),
@@ -138,7 +165,7 @@ fn two_orbital_daemons_join_admit_and_converge_over_the_socket() {
         },
     );
     assert!(
-        matches!(&resp, Response::Ref { reff } if reff == "CORE-1"),
+        matches!(&resp, IssueResponse::Ref { reff } if reff == "CORE-1"),
         "{resp:?}"
     );
 
@@ -218,14 +245,14 @@ fn two_orbital_daemons_join_admit_and_converge_over_the_socket() {
     assert_eq!(members.len(), 2, "founder + admitted joiner: {members:?}");
 
     // The admitted joiner reads the founder's previously-opaque sealed issue.
-    let resp = req(
+    let resp = issue_req(
         &client,
         &joiner_home,
-        Request::IssueView {
+        issues_app::IssuesRequest::IssueView {
             reff: "CORE-1".into(),
         },
     );
-    let Response::Issue(view) = resp else {
+    let IssueResponse::Issue(view) = resp else {
         panic!("expected Issue, got {resp:?}");
     };
     assert_eq!(view.title, "Secret plan");
@@ -235,10 +262,10 @@ fn two_orbital_daemons_join_admit_and_converge_over_the_socket() {
     );
 
     // The joiner writes back; the founder converges it.
-    req(
+    issue_req(
         &client,
         &joiner_home,
-        Request::Comment {
+        issues_app::IssuesRequest::Comment {
             reply_to: None,
             reff: "CORE-1".into(),
             body: "joined over the socket".into(),
@@ -252,14 +279,14 @@ fn two_orbital_daemons_join_admit_and_converge_over_the_socket() {
                 ticket: joiner_device.clone(),
             },
         );
-        match req(
+        match issue_req(
             &client,
             &founder_home,
-            Request::IssueView {
+            issues_app::IssuesRequest::IssueView {
                 reff: "CORE-1".into(),
             },
         ) {
-            Response::Issue(v)
+            IssueResponse::Issue(v)
                 if v.comments
                     .iter()
                     .any(|c| c.body == "joined over the socket") =>
@@ -277,17 +304,21 @@ fn two_orbital_daemons_join_admit_and_converge_over_the_socket() {
     // Inbox reconstruction (plan 04): the founder assigns itself by starting
     // the issue, so the JOINER's converged comment is addressed to it — the
     // inbox is a pure projection over the synced state, rebuilt from query.
-    let resp = req(
+    let resp = issue_req(
         &client,
         &founder_home,
-        Request::IssueStart {
+        issues_app::IssuesRequest::IssueStart {
             reff: "CORE-1".into(),
         },
     );
-    assert!(!matches!(resp, Response::Error { .. }), "{resp:?}");
+    assert!(!matches!(resp, IssueResponse::Error { .. }), "{resp:?}");
     let inboxed = poll_until(Duration::from_secs(10), || {
-        match req(&client, &founder_home, Request::Inbox { clear: false }) {
-            Response::Inbox { entries, .. }
+        match issue_req(
+            &client,
+            &founder_home,
+            issues_app::IssuesRequest::Inbox { watermark: 0 },
+        ) {
+            IssueResponse::Inbox { entries, .. }
                 if entries
                     .iter()
                     .any(|e| e.kind == "comment" && e.detail == "joined over the socket") =>

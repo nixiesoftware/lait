@@ -39,8 +39,8 @@ use ratatui::{
     Terminal, TerminalOptions, Viewport,
 };
 
-use crate::cli::ensure_daemon;
-use crate::control::{request, Request, Response};
+use crate::cli::{client, ensure_daemon};
+use crate::control::{Request, Response};
 use crate::dto::MemberDto;
 use crate::list_picker::{row_line, window, Cell};
 
@@ -89,7 +89,7 @@ impl App {
 
     /// Re-read the roster from the daemon.
     async fn reload(&mut self) -> Result<()> {
-        self.members = match request(&self.home, &Request::Members).await? {
+        self.members = match client(&self.home, Request::Members).await? {
             Response::Members { members } => members,
             Response::Error { message, .. } => return Err(anyhow!(message)),
             other => return Err(anyhow!("unexpected response to members: {other:?}")),
@@ -174,7 +174,7 @@ impl App {
     /// Send a mutating request, set a success/failure status, and re-read the
     /// roster on success. Shared by rename/remove.
     async fn mutate(&mut self, req: Request, ok_msg: &str) {
-        match request(&self.home, &req).await {
+        match client(&self.home, req).await {
             Ok(Response::Error { message, .. }) => self.status = Some(format!("failed: {message}")),
             Ok(_) => {
                 self.status = Some(ok_msg.to_string());
@@ -195,7 +195,7 @@ impl App {
             reusable: false,
             ttl_hours: None,
         };
-        match request(&self.home, &req).await {
+        match client(&self.home, req).await {
             Ok(Response::Ref { reff }) => {
                 let token = reff.trim().to_string();
                 let link = format!("lait://join/{token}");

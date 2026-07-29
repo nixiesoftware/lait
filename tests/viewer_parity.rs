@@ -1,11 +1,9 @@
-//! Viewer / control-plane parity guard.
+//! Viewer / installed-interface parity guard.
 //!
-//! `lait serve` binds `control::Request` to a port **verbatim**, so the wire cannot
-//! drift from the CLI. The web client is a different matter: `viewer/src/types.ts`
-//! is a hand-written TypeScript mirror of that enum, and until this file existed
-//! nothing checked it. The drift the old `feat/lait-viewer` branch suffered wasn't
-//! eliminated by deleting its REST router — it *moved*, from a pile of hand-written
-//! routes into one hand-written type file.
+//! `lait serve` accepts both the Issues-owned application protocol and root
+//! Space/daemon control. `viewer/src/types.ts` is a hand-written TypeScript
+//! union of those installed interfaces, so this test checks it against both
+//! canonical Rust schemas.
 //!
 //! What makes that a correctness problem rather than a tidiness one: nothing in
 //! `src/` uses `deny_unknown_fields`, and it should not: add-only fields are what
@@ -35,35 +33,53 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-/// Field names the schema declares for each `cmd`, keyed by tag value.
+/// Field names the installed Rust interfaces declare for each `cmd`, keyed by
+/// tag value. Inbox is a product-owned host capability: the viewer sends
+/// `clear`, while the shell supplies the local watermark to the World request.
 fn rust_request_fields() -> BTreeMap<String, BTreeSet<String>> {
-    let schema = schemars::schema_for!(lait::control::Request);
-    let v = serde_json::to_value(&schema).expect("schema to json");
-    let variants = v
-        .get("oneOf")
-        .and_then(|x| x.as_array())
-        .expect("Request is an internally-tagged enum, so its schema is a oneOf");
-
     let mut out = BTreeMap::new();
-    for variant in variants {
-        let Some(props) = variant.get("properties").and_then(|p| p.as_object()) else {
-            continue;
-        };
-        // The tag carries the variant name as a const.
-        let Some(cmd) = props
-            .get("cmd")
-            .and_then(|c| c.get("const"))
-            .and_then(|c| c.as_str())
-        else {
-            continue;
-        };
-        let fields = props
-            .keys()
-            .filter(|k| k.as_str() != "cmd")
-            .cloned()
-            .collect();
-        out.insert(cmd.to_string(), fields);
+    for schema in [
+        serde_json::to_value(schemars::schema_for!(lait::control::Request))
+            .expect("root control schema to json"),
+        serde_json::to_value(schemars::schema_for!(issues_app::IssuesRequest))
+            .expect("Issues schema to json"),
+    ] {
+        let variants = schema
+            .get("oneOf")
+            .and_then(|value| value.as_array())
+            .expect("internally-tagged request enum schema is a oneOf");
+        for variant in variants {
+            let Some(props) = variant
+                .get("properties")
+                .and_then(|value| value.as_object())
+            else {
+                continue;
+            };
+            let Some(cmd) = props
+                .get("cmd")
+                .and_then(|value| value.get("const"))
+                .and_then(|value| value.as_str())
+            else {
+                continue;
+            };
+            let fields = props
+                .keys()
+                .filter(|key| key.as_str() != "cmd")
+                .cloned()
+                .collect();
+            assert!(
+                out.insert(cmd.to_string(), fields).is_none(),
+                "root control and Issues both declare `{cmd}`"
+            );
+        }
     }
+    out.insert("inbox".into(), BTreeSet::from(["clear".into()]));
+    out.insert("access_list".into(), BTreeSet::from(["actor".into()]));
+    out.insert(
+        "access_grant".into(),
+        BTreeSet::from(["actor".into(), "role".into(), "project".into()]),
+    );
+    out.insert("access_revoke".into(), BTreeSet::from(["grant_id".into()]));
     out
 }
 
@@ -151,14 +167,14 @@ fn the_ts_client_invents_no_fields() {
     for (cmd, ts_fields) in &ts {
         let Some(rust_fields) = rust.get(cmd) else {
             panic!(
-                "types.ts declares `cmd: \"{cmd}\"`, which control::Request has no \
-                 variant for — the daemon will refuse it"
+                "types.ts declares `cmd: \"{cmd}\"`, which no installed Rust \
+                 interface accepts"
             );
         };
         for field in ts_fields {
             assert!(
                 rust_fields.contains(field),
-                "types.ts declares `{field}` on `{cmd}`, but control::Request does not.\n\
+                "types.ts declares `{field}` on `{cmd}`, but its installed Rust interface does not.\n\
                  serde ignores unknown fields deliberately for forward compatibility, so this \
                  would be dropped in flight and the command would run without it.\n\
                  Rust has: {rust_fields:?}",

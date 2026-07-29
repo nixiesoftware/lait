@@ -6,7 +6,7 @@
 //! the three `Stdio` slots we named. Windows has no such default —
 //! `CreateProcess` takes a single `bInheritHandles` switch, and `TRUE` means
 //! *every* inheritable handle in this process, not just the ones in
-//! `STARTUPINFO`. A daemon spawned from a captured `lait new` therefore came up
+//! `STARTUPINFO`. A daemon spawned from a captured `lait issues new` therefore came up
 //! owning a write-end of that command's stdout, and the command's caller waited
 //! forever on an EOF that could not arrive (see `app::disinherit_stdio`, which
 //! covers our *own* stdio — this module covers everything else, including the
@@ -30,29 +30,23 @@ pub struct DaemonChild {
     child: std::process::Child,
 }
 
-/// Spawn `<exe> daemon` bound to `home`, with `log` (when present) as its stderr
-/// and `NUL`/`/dev/null` for the rest.
+/// Spawn the identity-scoped `<exe> daemon`, with `log` (when present) as its
+/// stderr and `NUL`/`/dev/null` for the rest.
 ///
 /// `log` is the daemon's own diagnosis when a spawn fails ("another lait daemon
-/// is already running for this home…"), which is the whole error message on that
-/// path — so it is a real file, not a null sink.
-/// Spawn the daemon for `home`.
+/// is already running…"), which is the whole error message on that path — so it
+/// is a real file, not a null sink.
 ///
 /// `identity` pins which `secret.key` it runs on, passed as `--home` rather than
-/// an env var: identity does not follow the store (`config::identity_dir` reads
-/// `$LAIT_HOME` and never `$LAIT_STORE`), and the Windows path below hands the
-/// child our own env block, so an env override there would have to be
-/// process-wide. `None` means "inherit whatever identity this process would use",
-/// which is right for every caller that resolved its own store — i.e. every CLI
-/// invocation. `lait serve` is the exception: it supervises several homes at once
-/// and cannot speak for them through its own env.
+/// an env var. `None` selects the ordinary per-user identity; `Some` is the
+/// self-contained `$LAIT_HOME` case. Orbit selection is deliberately absent:
+/// the general daemon's [`crate::daemon::ControlRouter`] places many Orbits.
 pub fn spawn(
     exe: &Path,
-    home: &Path,
     log: Option<std::fs::File>,
     identity: Option<&Path>,
 ) -> io::Result<DaemonChild> {
-    imp::spawn(exe, home, log, identity)
+    imp::spawn(exe, log, identity)
 }
 
 impl DaemonChild {
@@ -73,7 +67,6 @@ mod imp {
 
     pub fn spawn(
         exe: &Path,
-        home: &Path,
         log: Option<std::fs::File>,
         identity: Option<&Path>,
     ) -> io::Result<DaemonChild> {
@@ -81,18 +74,13 @@ mod imp {
             Some(f) => Stdio::from(f),
             None => Stdio::null(),
         };
-        // Pin the resolved store for the spawned daemon so it binds the exact
-        // same store regardless of its cwd (DUR-5). `LAIT_HOME`, when set
-        // (self-contained / --home / resume), is inherited from our env and
-        // takes precedence, so this is a no-op in that mode.
         let mut cmd = Command::new(exe);
         cmd.arg("daemon")
-            .env("LAIT_STORE", home)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(stderr);
         // `--home` is a global flag the child turns into its own `LAIT_HOME`,
-        // which `identity_dir` reads and `LAIT_STORE` cannot override.
+        // selecting a self-contained daemon identity.
         if let Some(identity) = identity {
             cmd.arg("--home").arg(identity);
         }
@@ -158,20 +146,9 @@ mod imp {
 
     pub fn spawn(
         exe: &Path,
-        home: &Path,
         log: Option<std::fs::File>,
         identity: Option<&Path>,
     ) -> io::Result<DaemonChild> {
-        // Pin the resolved store for the spawned daemon so it binds the exact
-        // same store regardless of its cwd (DUR-5). Set on *our* env rather than
-        // a child-only override, so the daemon can inherit our block wholesale
-        // (`lpEnvironment` = NULL) and we never hand-build one: Windows requires
-        // the block sorted case-insensitively, and letting the OS keep that
-        // invariant is worth more than avoiding one process-wide set_var — which
-        // is how `-w` already pins the store anyway (see `app::dispatch`).
-        // `LAIT_HOME`, when set, is read first, so this is a no-op in that mode.
-        std::env::set_var("LAIT_STORE", home);
-
         // Held to the end of the call: these must outlive `CreateProcessW`, which
         // duplicates them into the child. Our copies close on drop.
         let stdin = nul(false)?;

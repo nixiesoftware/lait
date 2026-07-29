@@ -1,0 +1,17 @@
+[package]
+name = "world-interface"
+version = "0.6.0"
+edition = "2021"
+rust-version = "1.91"
+description = "Composable CLI and MCP interfaces for LAIT World applications"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+clap = "4"
+replica = { path = "../replica" }
+world-bridge = { path = "../world-bridge" }
+serde_json = "1"
+
+[dev-dependencies]
+schemars = "1"

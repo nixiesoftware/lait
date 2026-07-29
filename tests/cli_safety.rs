@@ -19,7 +19,7 @@
 //!    hand these to anyhow's `Termination`, which broke all three.
 //!
 //! 4. **Never hold your stdout hostage.** A command that auto-spawns a daemon must
-//!    still hit EOF when it exits: whoever captured it (`$(lait new …)`, a test
+//!    still hit EOF when it exits: whoever captured it (`$(lait issues new …)`, a test
 //!    harness, an MCP client) reads until EOF, so a daemon left holding the write
 //!    end hangs the *caller*, not the daemon. Windows-only in practice — see
 //!    `disinherit_stdio` in `app.rs` — but the promise is platform-independent.
@@ -30,13 +30,8 @@ use std::time::{Duration, Instant};
 
 /// Clean-env entrypoint for this binary (step 0 of the Agent Experience
 /// initiative). A developer's shell may export `$LAIT_HOME` pointing at their
-/// *live* node; inherited into a test that spawns a daemon for a temp home (via
-/// `daemon_spawn::spawn`, which pins `LAIT_STORE` but is overridden by an
-/// ambient `LAIT_HOME`), it collided the spawned daemon with the live node's
-/// single-instance lock and failed `a_dead_daemon_is_reported_dead_and_a_live_
-/// one_is_not`. Scrubbed once at binary load, before any test runs, so this
-/// suite is immune by construction. Tests that want these vars set them
-/// explicitly afterward (per-command in the `lait()` helper).
+/// live identity-scoped daemon. Scrubbed once at binary load, before any test
+/// runs, so spawned test hosts cannot collide with it.
 #[ctor::ctor]
 fn scrub_ambient_lait_env() {
     for key in ["LAIT_HOME", "LAIT_STORE", "LAIT_CONFIG_ROOT"] {
@@ -60,7 +55,7 @@ fn tmp_home(tag: &str) -> std::path::PathBuf {
 
 /// The per-test config root. `$LAIT_HOME` isolates the *store*, but the spaces
 /// registry lives under the config root — so without this every `init` here files
-/// itself in the developer's real `lait spaces` list and never leaves.
+/// itself in the developer's real `lait orbits` list and never leaves.
 fn config_root(home: &std::path::Path) -> std::path::PathBuf {
     home.join("cfg")
 }
@@ -94,12 +89,12 @@ fn delete_without_yes_refuses_and_keeps_the_issue() {
     let home = tmp_home("del");
     init(&home);
 
-    let out = lait(&home, &["new", "keep me"]);
+    let out = lait(&home, &["issues", "new", "keep me"]);
     assert!(out.status.success(), "new failed: {out:?}");
 
     // `cargo test` gives the child no terminal — the CI/agent shape exactly.
     let started = Instant::now();
-    let out = lait(&home, &["delete", "T-1"]);
+    let out = lait(&home, &["issues", "delete", "T-1"]);
     let stderr = String::from_utf8_lossy(&out.stderr);
 
     assert!(
@@ -119,16 +114,16 @@ fn delete_without_yes_refuses_and_keeps_the_issue() {
         "the prompt must name what it would destroy; got: {stderr}",
     );
 
-    let out = lait(&home, &["ls"]);
+    let out = lait(&home, &["issues", "ls"]);
     assert!(
         String::from_utf8_lossy(&out.stdout).contains("keep me"),
         "the issue must survive an unconfirmed delete",
     );
 
     // ...and `--yes` is the way through.
-    let out = lait(&home, &["--yes", "delete", "T-1"]);
+    let out = lait(&home, &["--yes", "issues", "delete", "T-1"]);
     assert!(out.status.success(), "--yes must confirm: {out:?}");
-    let out = lait(&home, &["ls"]);
+    let out = lait(&home, &["issues", "ls"]);
     assert!(
         !String::from_utf8_lossy(&out.stdout).contains("keep me"),
         "--yes must actually delete",
@@ -162,7 +157,7 @@ fn a_spawned_daemon_does_not_hold_our_stdout_open() {
         .env("LAIT_IDLE_SECS", "0")
         .arg("--home")
         .arg(&home)
-        .args(["new", "hold my stdout"])
+        .args(["issues", "new", "hold my stdout"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -205,51 +200,22 @@ fn a_spawned_daemon_does_not_hold_our_stdout_open() {
 #[test]
 fn a_dead_daemon_is_reported_dead_and_a_live_one_is_not() {
     let exe = std::path::PathBuf::from(bin());
-
-    // Dead: no store to open, so the daemon exits ~immediately and non-zero.
-    let empty = tmp_home("dead");
-    let log_path = empty.join("daemon.log");
-    let log = std::fs::File::create(&log_path).expect("create log");
-    let mut child = lait::daemon_spawn::spawn(&exe, &empty, Some(log), None).expect("spawn daemon");
-    let deadline = Instant::now() + Duration::from_secs(15);
-    let status = loop {
-        match child.try_wait().expect("try_wait") {
-            Some(s) => break s,
-            None if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(100)),
-            None => panic!(
-                "a daemon that could not open a store was never reported as exited — \
-                 the spawn wait would blame a 20s timeout instead of saying why",
-            ),
-        }
-    };
-    assert!(
-        !status.success(),
-        "a daemon that cannot open its store must exit non-zero, got {status}",
-    );
-    // The log is the daemon's stderr: `daemon_exited_error` quotes it back as the
-    // "it said:" diagnosis, so a mis-wired stderr costs the entire explanation and
-    // leaves only an exit code.
-    let said = std::fs::read_to_string(&log_path).unwrap_or_default();
-    assert!(
-        said.contains("no orbital store") && said.contains("lait init"),
-        "the daemon's stderr must reach its log — that text is the whole \
-         diagnosis when a spawn dies; got: {said:?}",
-    );
-    std::fs::remove_dir_all(&empty).ok();
-
-    // Live: a real store, so it comes up — and must not be declared dead.
-    //
-    // It reaps itself on a short idle window rather than being told to stop: a
-    // `shutdown` races the daemon's control-channel bind, and losing that race
-    // strands a live `lait.exe`. On Windows that is not a stray process but a
-    // broken build — the linker cannot replace a running binary, so the next
-    // `cargo run` fails with "Access is denied" in some later step that has
-    // nothing to do with this test. Self-reaping means no assertion below can
-    // leak one.
-    std::env::set_var("LAIT_IDLE_SECS", "2");
     let home = tmp_home("live");
-    init(&home);
-    let mut child = lait::daemon_spawn::spawn(&exe, &home, None, None).expect("spawn daemon");
+    let daemon_home = home.join("daemon");
+    let mut child = lait::daemon_spawn::spawn(&exe, None, Some(&home)).expect("spawn live daemon");
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    runtime.block_on(async {
+        let client = lait::daemon::LaitDaemonClient::at(daemon_home.clone());
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        while !matches!(client.probe().await, lait::control::Probe::Healthy) {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "Lait daemon did not become ready"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    });
+
     let alive = child.try_wait().expect("try_wait");
     assert!(
         alive.is_none(),
@@ -257,14 +223,44 @@ fn a_dead_daemon_is_reported_dead_and_a_live_one_is_not() {
          spawn wait would abandon a daemon that was coming up fine",
     );
 
-    // ...and when that same daemon idles out, the sensor must notice: proof the
-    // `None` above was a live reading rather than a stuck one.
+    // Dead: a second host for the same identity loses the process lock and exits
+    // immediately. Its stderr must remain wired to the diagnostic log.
+    let log_path = home.join("duplicate.log");
+    let log = std::fs::File::create(&log_path).expect("create duplicate log");
+    let mut duplicate =
+        lait::daemon_spawn::spawn(&exe, Some(log), Some(&home)).expect("spawn duplicate");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let status = loop {
+        match duplicate.try_wait().expect("try_wait duplicate") {
+            Some(status) => break status,
+            None if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(100)),
+            None => panic!("duplicate Lait daemon was never reported as exited"),
+        }
+    };
+    assert!(!status.success(), "duplicate host must fail: {status}");
+    let said = std::fs::read_to_string(&log_path).unwrap_or_default();
+    assert!(
+        said.contains("another lait daemon"),
+        "duplicate diagnosis must reach its log; got: {said:?}"
+    );
+
+    runtime.block_on(async {
+        let client = lait::daemon::LaitDaemonClient::at(daemon_home);
+        client
+            .request(
+                lait::control::ControlRoute::Daemon,
+                &lait::control::Request::Stop,
+                None,
+            )
+            .await
+            .expect("stop Lait daemon");
+    });
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         match child.try_wait().expect("try_wait") {
             Some(_) => break,
             None if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(200)),
-            None => panic!("a daemon that idled out was never reported as exited"),
+            None => panic!("a stopped daemon was never reported as exited"),
         }
     }
     std::fs::remove_dir_all(&home).ok();
@@ -277,7 +273,7 @@ fn a_client_side_error_keeps_the_cli_contract() {
     let home = tmp_home("err");
     init(&home);
 
-    // `-w` and `--home` are declared conflicting, so the home rides the env here
+    // `--orbit` and `--home` are declared conflicting, so the home rides the env here
     // (the same channel `--home` sets internally).
     let run = |args: &[&str]| {
         Command::new(bin())
@@ -289,7 +285,7 @@ fn a_client_side_error_keeps_the_cli_contract() {
             .expect("spawn lait")
     };
 
-    let out = run(&["-w", "nosuchspace", "ls"]);
+    let out = run(&["--orbit", "nosuchspace", "issues", "ls"]);
     let stderr = String::from_utf8_lossy(&out.stderr);
 
     // anyhow's Termination printed `Error:` (capitalised, Debug) while the daemon
@@ -311,7 +307,7 @@ fn a_client_side_error_keeps_the_cli_contract() {
 
     // `--json` is a contract: a consumer must get the DTO on stdout, not prose on
     // stderr and an empty stdout it can't distinguish from an empty result.
-    let out = run(&["--json", "-w", "nosuchspace", "ls"]);
+    let out = run(&["--json", "--orbit", "nosuchspace", "issues", "ls"]);
     let stdout = String::from_utf8_lossy(&out.stdout);
     let v: serde_json::Value = serde_json::from_str(stdout.trim())
         .unwrap_or_else(|e| panic!("stdout not JSON ({e}): {stdout:?}"));
@@ -429,7 +425,7 @@ fn a_newer_daemon_is_never_replaced_even_with_yes() {
 /// `leaf.name` is only the **last** path segment, so `labels new` answers to
 /// `"new"` exactly as the top-level verb does. `app::dispatch` special-cases
 /// `new --start`, and asking clap for an arg the matched leaf never declared is a
-/// **panic**, not a `false` — so `lait labels new <name>` aborted with "Mismatch
+/// **panic**, not a `false` — so `lait issues labels new <name>` aborted with "Mismatch
 /// between definition and access of `start`" before it reached the daemon.
 /// Shipped, and invisible until someone created a label from a surface that
 /// wasn't a hand-typed CLI.
@@ -443,17 +439,20 @@ fn colliding_leaf_names_do_not_read_each_others_args() {
     let home = tmp_home("leafname");
     init(&home);
 
-    let out = lait(&home, &["labels", "new", "bug", "--color", "red"]);
+    let out = lait(&home, &["issues", "labels", "new", "bug", "--color", "red"]);
     let stderr = String::from_utf8_lossy(&out.stderr);
 
     assert!(
         !stderr.contains("panicked"),
-        "`lait labels new` panicked:\n{stderr}",
+        "`lait issues labels new` panicked:\n{stderr}",
     );
-    assert!(out.status.success(), "`lait labels new` failed: {stderr}",);
+    assert!(
+        out.status.success(),
+        "`lait issues labels new` failed: {stderr}",
+    );
 
     // And it actually made the label, rather than merely not crashing.
-    let listed = lait(&home, &["--json", "labels", "ls"]);
+    let listed = lait(&home, &["--json", "issues", "labels", "ls"]);
     let stdout = String::from_utf8_lossy(&listed.stdout);
     assert!(
         stdout.contains("\"bug\""),

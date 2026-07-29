@@ -2,10 +2,10 @@
 //! `main.rs`) so integration tests and doctests can drive the same command
 //! surface the binary exposes. `main.rs` is a thin shim over [`run`].
 //!
-//! Flat verbs act on **issues**, while plural
-//! nouns manage **registries** (`label <ref> +bug` vs `labels new`), and every
-//! `<ref>` is resolved daemon-side. Each verb maps to exactly one control
-//! `Request`, preserving one command = one commit = one activity row.
+//! `lait` is the orbital navigation shell. It selects an identity and local
+//! Orbit, exposes the Spaces and Worlds reachable through that context, and
+//! dispatches each command to one explicit terminal owner. Product verbs live
+//! below their World namespace, such as `lait issues`.
 //!
 //! The surface is defined as **data** in [`crate::cmdspec`] — a `Vec<Spec>` turned
 //! into a `clap::Command` at runtime — not a `#[derive(Parser)]` enum. This module
@@ -33,10 +33,12 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
-/// Resolve a `-w <SEL>` space selector to a store path via the registry:
-/// a path (containing a separator or naming an existing dir), a `ws_` id or
-/// unique prefix, or a case-insensitive display-name match.
-fn resolve_space_selector(sel: &str) -> Result<std::path::PathBuf> {
+/// Resolve a `--orbit <SEL>` selector to a store path via the local catalog:
+/// a path, an `orb_` id, a `ws_` id, or a case-insensitive display-name match.
+///
+/// This resolver selects one durable local Orbit. Two entries may legitimately
+/// participate in the same Space.
+fn resolve_orbit_selector(sel: &str) -> Result<std::path::PathBuf> {
     use std::path::{Path, PathBuf};
     // Path form: explicit separators or an existing directory. Accept either
     // the `.lait` dir itself or its parent.
@@ -55,7 +57,16 @@ fn resolve_space_selector(sel: &str) -> Result<std::path::PathBuf> {
         return Ok(store);
     }
     let entries = spaces::list();
-    let matches: Vec<_> = if sel.starts_with("ws_") {
+    let matches: Vec<_> = if sel.starts_with("orb_") {
+        entries
+            .iter()
+            .filter(|e| {
+                crate::daemon::LocalOrbitId::for_store(Path::new(&e.path))
+                    .as_str()
+                    .starts_with(sel)
+            })
+            .collect()
+    } else if sel.starts_with("ws_") {
         entries
             .iter()
             .filter(|e| e.space == sel || e.space.starts_with(sel))
@@ -71,7 +82,7 @@ fn resolve_space_selector(sel: &str) -> Result<std::path::PathBuf> {
             let e = matches[0];
             if spaces::presence(e) == spaces::StorePresence::Missing {
                 return Err(anyhow!(
-                    "space '{}' is registered at {} but the store is gone — run `lait spaces prune`",
+                    "Orbit '{}' is registered at {} but the store is gone — run `lait orbits prune`",
                     sel,
                     e.path
                 ));
@@ -92,7 +103,7 @@ fn resolve_space_selector(sel: &str) -> Result<std::path::PathBuf> {
             // A selector that resolved to nothing: exit `2`, the same answer the
             // daemon already gives for a missing ref / user / label.
             Err(crate::cli::CliError::not_found(format!(
-                "no space matches '{sel}' — known: {} (see `lait spaces`)",
+                "no Orbit matches '{sel}' — known: {} (see `lait orbits`)",
                 if known.is_empty() {
                     "(none)".to_string()
                 } else {
@@ -106,35 +117,39 @@ fn resolve_space_selector(sel: &str) -> Result<std::path::PathBuf> {
                 .iter()
                 .map(|e| format!("{} ({})", e.space, e.path))
                 .collect();
-            eprintln!("'{sel}' is ambiguous:\n  {}", cands.join("\n  "));
+            eprintln!(
+                "Orbit selector '{sel}' is ambiguous:\n  {}",
+                cands.join("\n  ")
+            );
             std::process::exit(2);
         }
     }
 }
 
-/// A minimal extension→MIME map for attachments — enough for the common
-/// cases; anything else is an honest octet-stream.
-fn mime_for(name: &str) -> String {
-    let ext = name
-        .rsplit('.')
-        .next()
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    match ext.as_str() {
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "gif" => "image/gif",
-        "webp" => "image/webp",
-        "svg" => "image/svg+xml",
-        "pdf" => "application/pdf",
-        "txt" | "log" => "text/plain",
-        "md" => "text/markdown",
-        "json" => "application/json",
-        "csv" => "text/csv",
-        "zip" => "application/zip",
-        _ => "application/octet-stream",
+/// Apply the invocation's navigation selector and report where it came from.
+fn apply_selection(matches: &ArgMatches) -> Result<&'static str> {
+    let source = if matches.get_one::<String>("home").is_some() {
+        "--home"
+    } else if matches.get_one::<String>("orbit").is_some() {
+        "--orbit"
+    } else if std::env::var_os("LAIT_HOME").is_some() {
+        "LAIT_HOME"
+    } else if std::env::var_os("LAIT_STORE").is_some() {
+        "LAIT_STORE"
+    } else if config::existing_home().is_some() {
+        "cwd"
+    } else {
+        "none"
+    };
+
+    if let Some(h) = matches.get_one::<String>("home") {
+        std::env::set_var("LAIT_HOME", h);
     }
-    .to_string()
+    if let Some(sel) = matches.get_one::<String>("orbit") {
+        let store = resolve_orbit_selector(sel)?;
+        std::env::set_var("LAIT_STORE", &store);
+    }
+    Ok(source)
 }
 
 /// Parse arguments, run, and report any failure the way the CLI contract says.
@@ -171,7 +186,7 @@ pub async fn run() -> std::process::ExitCode {
 
     // Effective color, computed once: honour --no-color, the $NO_COLOR
     // convention, --json (machine output is never styled), and whether stdout is
-    // an interactive terminal (so `lait ls | cat` / redirects stay clean).
+    // an interactive terminal (so `lait issues ls | cat` / redirects stay clean).
     use std::io::IsTerminal;
     let json = matches.get_flag("json");
     let out = Out {
@@ -209,28 +224,26 @@ pub async fn run() -> std::process::ExitCode {
 
 /// Resolve the parsed args to a leaf spec and run it.
 async fn dispatch(specs: &[cmdspec::Spec], matches: &ArgMatches, out: Out) -> Result<()> {
-    let resolved = cmdspec::resolve(specs, matches);
-
-    // Bare `lait` = the FOCUS view (inbox + your active issues): the
-    // most valuable keystroke answers "what's addressed to me / what am I on",
-    // not help. Global flags (--home/-w/--json) still apply.
-    let Some((leaf, m)) = resolved else {
-        if let Some(h) = matches.get_one::<String>("home") {
-            std::env::set_var("LAIT_HOME", h);
-        }
-        if let Some(sel) = matches.get_one::<String>("space") {
-            let store = resolve_space_selector(sel)?;
-            std::env::set_var("LAIT_STORE", &store);
-        }
+    if let Some(invocation) = cmdspec::parse_world_invocation(matches)? {
+        let selection_source = apply_selection(matches)?;
         let home = match config::resolve_existing_store(None) {
-            Ok(h) => h,
-            Err(e) if e.downcast_ref::<config::NoStoreHere>().is_some() => {
+            Ok(home) => home,
+            Err(error) if error.downcast_ref::<config::NoStoreHere>().is_some() => {
                 crate::cli::err_no_store_here(out);
                 std::process::exit(1);
             }
-            Err(e) => return Err(e),
+            Err(error) => return Err(error),
         };
-        return crate::cli::run_focus(&home, out).await;
+        return dispatch_world_client(&home, invocation, selection_source, out).await;
+    }
+
+    let resolved = cmdspec::resolve(specs, matches);
+
+    // Bare `lait` reports the current orbital context. Product focus views are
+    // explicit (`lait issues` for the bundled tracker).
+    let Some((leaf, m)) = resolved else {
+        let source = apply_selection(matches)?;
+        return crate::cli::print_context(config::existing_home(), source, out).await;
     };
 
     // Stateless install surfaces (completions / man): generated from the live
@@ -251,21 +264,9 @@ async fn dispatch(specs: &[cmdspec::Spec], matches: &ArgMatches, out: Out) -> Re
         _ => {}
     }
 
-    // Home resolution honours an explicit --home over the session registry.
-    // Applied before ANY store-touching dispatch (including `config`, whose
-    // store layer resolves through the same env).
-    if let Some(h) = matches.get_one::<String>("home") {
-        std::env::set_var("LAIT_HOME", h);
-    }
-    // `-w <SEL>`: resolve the selector to a store path and pin it, so every
-    // command below binds that exact store from any directory. The pin rides
-    // the same env the daemon spawn uses (`LAIT_STORE`), so the plumbing is
-    // shared with cwd binding. `--home`/`$LAIT_HOME` still outrank it (and
-    // clap already rejects combining the two flags).
-    if let Some(sel) = matches.get_one::<String>("space") {
-        let store = resolve_space_selector(sel)?;
-        std::env::set_var("LAIT_STORE", &store);
-    }
+    // Resolve and pin the selected local Orbit before any store-touching
+    // dispatch. `--home` still outranks it, and clap rejects combining them.
+    let selection_source = apply_selection(matches)?;
 
     // Registry-level commands that operate across identities (no store/daemon).
     match &leaf.dispatch {
@@ -289,9 +290,8 @@ async fn dispatch(specs: &[cmdspec::Spec], matches: &ArgMatches, out: Out) -> Re
         Dispatch::Special(Special::Resume) => {
             let name = m.get_one::<String>("name").cloned().unwrap_or_default();
             let home = config::bind_session(&name)?;
-            // A named identity is a self-contained home: pin it as LAIT_HOME so the
-            // daemon we spawn uses it for both identity and store, not the global
-            // identity + repo-discovered store (DUR-5).
+            // A named identity is a self-contained home: pin it as LAIT_HOME so
+            // the identity-scoped daemon directory sees only that binding.
             std::env::set_var("LAIT_HOME", &home);
             load_or_create_identity(&home)?;
             // Under --json only the Status DTO is emitted — no human line ahead.
@@ -311,10 +311,19 @@ async fn dispatch(specs: &[cmdspec::Spec], matches: &ArgMatches, out: Out) -> Re
             }
             return crate::cli::run(&home, Request::Status, out).await;
         }
-        // `serve` is global to the machine, not bound to one store: it reads the
-        // space registry and attaches each space's daemon lazily, so it must
-        // not resolve (or demand) a store in the cwd — running it from anywhere
-        // is the point.
+        // The process-level daemon is identity-scoped, not store-scoped. It
+        // owns the Orbit directory and lazily places every addressed Station.
+        Dispatch::Special(Special::Daemon) => {
+            tracing_subscriber::fmt()
+                .with_env_filter(
+                    tracing_subscriber::EnvFilter::try_from_default_env()
+                        .unwrap_or_else(|_| "lait=info,warn".into()),
+                )
+                .init();
+            return crate::daemon::run_lait_daemon(crate::world::packages()).await;
+        }
+        // `serve` is also global to the identity: it is now a client of the
+        // Lait daemon rather than an owner of Station placements.
         Dispatch::Special(Special::Serve) => {
             let port = m
                 .get_one::<String>("port")
@@ -325,11 +334,11 @@ async fn dispatch(specs: &[cmdspec::Spec], matches: &ArgMatches, out: Out) -> Re
             return crate::serve::run(port, m.get_flag("open"), out.json).await;
         }
         // The space registry + config: pure local state, no store/daemon.
-        Dispatch::Special(Special::Spaces) => {
-            crate::cli::print_spaces(out).await;
+        Dispatch::Special(Special::Orbits) => {
+            crate::cli::print_orbits(out).await;
             return Ok(());
         }
-        Dispatch::Special(Special::SpacesForget) => {
+        Dispatch::Special(Special::OrbitsForget) => {
             let sel = m.get_one::<String>("sel").cloned().unwrap_or_default();
             let removed = spaces::forget(&sel)?;
             if removed.is_empty() {
@@ -344,7 +353,7 @@ async fn dispatch(specs: &[cmdspec::Spec], matches: &ArgMatches, out: Out) -> Re
             }
             return Ok(());
         }
-        Dispatch::Special(Special::SpacesPrune) => {
+        Dispatch::Special(Special::OrbitsPrune) => {
             let removed = spaces::prune()?;
             crate::cli::emit_ok(
                 &format!(
@@ -354,6 +363,13 @@ async fn dispatch(specs: &[cmdspec::Spec], matches: &ArgMatches, out: Out) -> Re
                 ),
                 out,
             );
+            return Ok(());
+        }
+        Dispatch::Special(Special::Context) => {
+            return crate::cli::print_context(config::existing_home(), selection_source, out).await;
+        }
+        Dispatch::Special(Special::Worlds) => {
+            crate::cli::print_worlds(out);
             return Ok(());
         }
         Dispatch::Special(
@@ -389,53 +405,28 @@ async fn dispatch(specs: &[cmdspec::Spec], matches: &ArgMatches, out: Out) -> Re
 
     match &leaf.dispatch {
         // The uniform path: build one Request and round-trip the daemon.
-        Dispatch::Request(f) => {
-            let req = f(m)?;
+        Dispatch::Action(f) => {
+            let action = crate::client_action::ClientAction::from_legacy(f(m)?);
+            let req = action
+                .request()
+                .expect("legacy command registry emitted a WorldCall unexpectedly");
             use std::io::IsTerminal;
             // Ask before destroying (delete / member remove / key rotate). Gated
             // on the Request, so the list lives in one place; everything else
             // passes straight through.
-            if !crate::cli::confirm_destructive(&home, &req, out).await {
+            if !crate::cli::confirm_destructive(req, out).await {
                 std::process::exit(1);
             }
-            // `new --start` chains the create into the work loop: file it, then
-            // claim it (two honest commits produce two activity rows).
-            //
-            // Ask for `start` in a way that can answer "there is no such arg".
-            // `leaf.name` is only the *last* path segment, so `labels new` answers
-            // to "new" as much as the top-level verb does — and `get_flag` on a
-            // leaf that never declared the arg is a panic, not a `false`. That is
-            // exactly what `lait labels new <name>` did.
-            let wants_start = m
-                .try_get_one::<bool>("start")
-                .ok()
-                .flatten()
-                .copied()
-                .unwrap_or(false);
-            if leaf.name == "new" && wants_start {
-                crate::cli::run_new_start(&home, req, out).await?;
-            } else if leaf.name == "members" && !out.json && std::io::stdout().is_terminal() {
+            if leaf.name == "members" && !out.json && std::io::stdout().is_terminal() {
                 // Bare `lait members` in an interactive terminal opens the modal
                 // picker (browse/approve); `--json` and piped/redirected output
                 // keep the plain roster dump so scripts and agents are unaffected.
                 crate::members_ui::run(&home).await?
             } else {
-                crate::cli::run(&home, req, out).await?;
+                crate::cli::run_action(&home, action, out).await?;
             }
         }
         Dispatch::Special(s) => match s {
-            Special::Start => {
-                let reff = cmdspec::resolve_reff(m)?;
-                crate::cli::run_start(&home, reff, m.get_flag("no_branch"), out).await?
-            }
-            Special::Done => {
-                let reff = cmdspec::resolve_reff(m)?;
-                crate::cli::run_workstate(&home, Request::IssueDone { reff }, out).await?
-            }
-            Special::Stop => {
-                let reff = cmdspec::resolve_reff(m)?;
-                crate::cli::run_workstate(&home, Request::IssueStop { reff }, out).await?
-            }
             Special::Id => {
                 let seed = load_or_create_identity(&config::identity_dir()?)?;
                 crate::cli::emit_text(crate::crypto::device_from_seed(&seed).as_str(), out);
@@ -446,99 +437,13 @@ async fn dispatch(specs: &[cmdspec::Spec], matches: &ArgMatches, out: Out) -> Re
                 // above stays the stable first line either way.
                 if !out.json {
                     if let Ok(Response::Ok { message: Some(m) }) =
-                        crate::control::request(&home, &Request::Id).await
+                        crate::cli::request_running(&home, &Request::Id, None).await
                     {
                         if let Some(actor_line) = m.lines().nth(1) {
                             println!("{actor_line}");
                         }
                     }
                 }
-            }
-            Special::Attach => {
-                let reff = m.get_one::<String>("reff").cloned().unwrap_or_default();
-                let path = m.get_one::<String>("file").cloned().unwrap_or_default();
-                let bytes =
-                    std::fs::read(&path).map_err(|e| anyhow!("could not read {path}: {e}"))?;
-                if bytes.is_empty() {
-                    return Err(anyhow!("{path} is empty — nothing to attach"));
-                }
-                if bytes.len() > crate::world::contract::MAX_ATTACHMENT_BYTES {
-                    return Err(anyhow!(
-                        "{path} is {} KiB — attachments are capped at {} KiB (they ride \
-                         the issue's replicated document). Link large files instead.",
-                        bytes.len() / 1024,
-                        crate::world::contract::MAX_ATTACHMENT_BYTES / 1024
-                    ));
-                }
-                let name = std::path::Path::new(&path)
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| path.clone());
-                let mime = mime_for(&name);
-                let req = Request::Attach {
-                    reff,
-                    name,
-                    mime: Some(mime),
-                    data_b64: data_encoding::BASE64.encode(&bytes),
-                    comment: m.get_one::<String>("comment").cloned(),
-                };
-                crate::cli::run(&home, req, out).await?
-            }
-            Special::AttachmentGet => {
-                let reff = m.get_one::<String>("reff").cloned().unwrap_or_default();
-                let id = m.get_one::<String>("id").cloned().unwrap_or_default();
-                if reff.is_empty() || id.is_empty() {
-                    return Err(anyhow!(
-                        "usage: lait attachment get <reff> <att_id> [--out <path>]"
-                    ));
-                }
-                let resp = crate::cli::client(&home, Request::AttachmentGet { reff, id }).await?;
-                match resp {
-                    Response::Attachment {
-                        name,
-                        mime: _,
-                        data_b64,
-                    } => {
-                        let bytes = data_encoding::BASE64
-                            .decode(data_b64.as_bytes())
-                            .map_err(|_| anyhow!("stored attachment did not decode"))?;
-                        let dest = m
-                            .get_one::<String>("out")
-                            .cloned()
-                            .unwrap_or_else(|| name.clone());
-                        std::fs::write(&dest, &bytes)
-                            .map_err(|e| anyhow!("could not write {dest}: {e}"))?;
-                        if out.json {
-                            crate::cli::emit_ok(
-                                &format!("saved {} bytes to {dest}", bytes.len()),
-                                out,
-                            );
-                        } else {
-                            println!("saved {} bytes to {dest}", bytes.len());
-                        }
-                    }
-                    other => {
-                        let code = crate::cli::print_response(&other, out);
-                        if code != 0 {
-                            std::process::exit(code);
-                        }
-                    }
-                }
-            }
-            Special::Daemon => {
-                tracing_subscriber::fmt()
-                    .with_env_filter(
-                        tracing_subscriber::EnvFilter::try_from_default_env()
-                            .unwrap_or_else(|_| "lait=info,warn".into()),
-                    )
-                    .init();
-                // The orbital daemon is the only daemon. `open` runs the preflight
-                // legacy detector: a pre-orbital (v0.x) store is refused with
-                // recreation guidance before anything binds, and an uninitialized
-                // home is told to run `lait init` — never a silent fallback to a
-                // legacy node.
-                crate::orbital::run_orbital_daemon(home, &crate::transport::DefaultFactory).await?;
-                std::process::exit(0);
             }
             Special::Mcp => {
                 mcp::run_mcp(&home).await?;
@@ -591,16 +496,19 @@ async fn dispatch(specs: &[cmdspec::Spec], matches: &ArgMatches, out: Out) -> Re
             | Special::Man
             | Special::Profiles
             | Special::Resume
-            | Special::Spaces
-            | Special::SpacesForget
-            | Special::SpacesPrune
+            | Special::Orbits
+            | Special::OrbitsForget
+            | Special::OrbitsPrune
             | Special::ConfigGet
             | Special::ConfigSet
             | Special::ConfigUnset
             | Special::ConfigList
+            | Special::Context
+            | Special::Worlds
             | Special::Init
             | Special::Join
             | Special::DeviceAccept
+            | Special::Daemon
             | Special::Serve
             | Special::Update => {
                 unreachable!("handled before home resolution")
@@ -608,6 +516,53 @@ async fn dispatch(specs: &[cmdspec::Spec], matches: &ArgMatches, out: Out) -> Re
         },
     }
 
+    Ok(())
+}
+
+async fn dispatch_world_client(
+    home: &std::path::Path,
+    invocation: world_interface::ClientInvocation,
+    _selection_source: &'static str,
+    out: Out,
+) -> Result<()> {
+    let package = crate::world::client_packages()
+        .package_for_world(invocation.world_id())
+        .cloned()
+        .ok_or_else(|| anyhow!("no client package for World '{}'", invocation.world_id()))?;
+    let host = crate::cli::PackageClientHost::new(home, crate::cli::scope_for_home(home), None);
+    // Through the package, not off the invocation: a parse-time question can
+    // only echo the selector typed, and `lait issues delete` usually infers its
+    // ref from the branch. The package reads enough to name the thing first.
+    if let Some(question) = package
+        .confirmation(&host, &invocation)
+        .await
+        .map_err(|error| anyhow!(error.to_string()))?
+    {
+        if !crate::cli::confirm_client(&question, out) {
+            std::process::exit(1);
+        }
+    }
+    let output = package
+        .execute(
+            &host,
+            invocation,
+            world_interface::PresentationOptions {
+                json: out.json,
+                color: out.color,
+            },
+        )
+        .await
+        .map_err(|error| anyhow!(error.to_string()))?;
+    if let Some(presentation) = output.presentation {
+        let code = crate::cli::print_presentation(&presentation);
+        if code != 0 {
+            std::process::exit(code);
+        }
+    } else if out.json {
+        println!("{}", serde_json::to_string(&output.value)?);
+    } else {
+        println!("{}", serde_json::to_string_pretty(&output.value)?);
+    }
     Ok(())
 }
 
@@ -646,9 +601,9 @@ async fn run_init(m: &ArgMatches, out: Out) -> Result<()> {
     let seed = load_or_create_identity(&config::identity_dir()?)?;
     let me = crate::crypto::device_from_seed(&seed);
     // Orbital formation: mechanics material + Runtime Orbit store + a seeded
-    // default project, so `lait new` works on the next command.
+    // default project, so `lait issues new` works on the next command.
     let (ws, project) = crate::orbital::found_space_cli(&home, &seed, &name)?;
-    // Register the founder — this is what makes `lait spaces` complete.
+    // Register the founder — this is what makes `lait orbits` complete.
     if let Err(e) = spaces::upsert(spaces::SpaceEntry {
         space: ws.to_string(),
         name: name.clone(),
@@ -673,7 +628,7 @@ async fn run_init(m: &ArgMatches, out: Out) -> Result<()> {
         println!("founded space '{name}' ({ws})");
         println!("id:      {}", me);
         println!(
-            "project: {} ({}) — `lait new \"...\"` files into it",
+            "project: {} ({}) — `lait issues new \"...\"` files into it",
             project.name, project.key
         );
         println!("home:    {}", home.display());
@@ -733,8 +688,9 @@ fn dir_display_name(home: &std::path::Path) -> String {
 }
 
 /// `lait join <coordinates>`: the orbital join path. Bootstrap the joiner's
-/// orbital store from the invite link (`orbital::enter_space`), spawn the
-/// orbital daemon, then drive Contact to the invite's approach Station until
+/// orbital store from the invite link (`orbital::enter_space`), ask the Lait
+/// daemon to place its SpaceBridge, then drive Contact to the invite's approach
+/// Station until
 /// admission lands. The joiner's Contact registers it as a pending Neighbor on
 /// the inviter, whose driver reciprocally dials back to redeem the admission —
 /// so repeated joiner-side Connects converge to membership without a manual
@@ -806,7 +762,7 @@ async fn run_join_orbital(m: &ArgMatches, link: &str, out: Out) -> Result<()> {
         crate::orbital::enter_space(&target, &seed, link)?;
     }
 
-    // Register the joiner store pre-daemon so `lait spaces` sees it.
+    // Register the joiner store pre-daemon so `lait orbits` sees it.
     if let Err(e) = spaces::upsert(spaces::SpaceEntry {
         space: space.clone(),
         name: verified.approach_nick_hint.clone(),
@@ -819,7 +775,8 @@ async fn run_join_orbital(m: &ArgMatches, link: &str, out: Out) -> Result<()> {
         eprintln!("(space registry update failed: {e:#})");
     }
 
-    // Spawn the daemon (the orbital Station is the only daemon).
+    // Start the identity-scoped host; the first routed request below lazily
+    // places the joiner's Station in-process.
     crate::cli::ensure_daemon(&target).await?;
 
     // Drive Contact to the approach Station until admitted (or a deadline). The
@@ -837,9 +794,9 @@ async fn run_join_orbital(m: &ArgMatches, link: &str, out: Out) -> Result<()> {
     let mut last_err: Option<String> = None;
     let mut last_beat = started;
     while tokio::time::Instant::now() < deadline {
-        match crate::control::request(
+        match crate::cli::client(
             &target,
-            &Request::Connect {
+            Request::Connect {
                 ticket: approach.clone(),
             },
         )
@@ -854,8 +811,7 @@ async fn run_join_orbital(m: &ArgMatches, link: &str, out: Out) -> Result<()> {
             Ok(Response::Error { message, .. }) => last_err = Some(message),
             _ => {}
         }
-        if let Ok(Response::Status(info)) = crate::control::request(&target, &Request::Status).await
-        {
+        if let Ok(Response::Status(info)) = crate::cli::client(&target, Request::Status).await {
             if info.membership == "member" {
                 admitted = true;
                 break;
@@ -993,7 +949,7 @@ async fn run_config(dispatch: &Dispatch, m: &ArgMatches, out: Out) -> Result<()>
                 config::global_config_path()?
             } else {
                 let h = home.ok_or_else(|| {
-                    anyhow!("not inside a space — cd into one, use -w, or pass --global")
+                    anyhow!("not inside a space — cd into one, use --orbit, or pass --global")
                 })?;
                 config::store_config_path(&h)
             };
@@ -1011,16 +967,16 @@ async fn run_config(dispatch: &Dispatch, m: &ArgMatches, out: Out) -> Result<()>
                 cfg.save(&path)?;
                 format!("unset {key}")
             };
-            // Daemon-read keys: never a silent wait-for-restart. Bare
-            // `control::request` (NOT `cli::client`) so we never auto-spawn a
-            // daemon just to tell it about a config change.
+            // Daemon-read keys: never a silent wait-for-restart, but never
+            // auto-spawn the host merely to deliver an advisory reload.
             let mut applied = String::new();
             if spec.daemon_read {
                 if let Some(h) = config::existing_home() {
-                    applied = match crate::control::request(&h, &Request::ConfigReload).await {
-                        Ok(_) => " (applied to the running daemon)".to_string(),
-                        Err(_) => " (applies when the daemon next starts)".to_string(),
-                    };
+                    applied =
+                        match crate::cli::request_running(&h, &Request::ConfigReload, None).await {
+                            Ok(_) => " (applied to the running daemon)".to_string(),
+                            Err(_) => " (applies when the daemon next starts)".to_string(),
+                        };
                 }
             }
             crate::cli::emit_ok(&format!("{message}{applied}"), out);
@@ -1038,31 +994,26 @@ async fn run_config(dispatch: &Dispatch, m: &ArgMatches, out: Out) -> Result<()>
 /// and self-replaces the running executable (all pure-Rust: `ureq` + rustls,
 /// gzip/zip extraction, atomic self-replace).
 async fn run_update() -> Result<()> {
-    if let Some(home) = config::existing_home() {
-        // Only claim to have stopped something if something was there, and only
-        // after watching it go. The old check was `request(Stop).is_ok()`, which
-        // is true for any *decodable* reply — including an error, and including
-        // the "shutting down" a pre-`signal_shutdown` daemon sends and then
-        // ignores. That printed a stop that never happened and left a daemon on
-        // stale code: the exact skew `heal_foreign_daemon` now has to clean up.
-        if !matches!(
-            crate::control::probe(&home).await,
-            crate::control::Probe::Absent
-        ) {
-            match crate::cli::stop_daemon_verified(&home).await {
-                Ok(()) => {
-                    println!("stopped the running daemon");
-                    // let the OS release the file handle before the binary is swapped
-                    tokio::time::sleep(std::time::Duration::from_millis(600)).await;
-                }
-                // Worth saying out loud rather than swallowing: a daemon left
-                // running is on stale code the moment the swap lands, and on
-                // Windows it may still hold the executable open.
-                Err(e) => eprintln!(
-                    "warning: could not stop the running daemon: {e:#}\n\
-                     continuing; run `lait shutdown` after the update."
-                ),
+    let daemon_home = config::lait_daemon_home()?;
+    // Only claim to have stopped something if the process endpoint was there,
+    // and only after watching it go.
+    if !matches!(
+        crate::control::probe(&daemon_home).await,
+        crate::control::Probe::Absent
+    ) {
+        match crate::cli::stop_daemon_verified(&daemon_home).await {
+            Ok(()) => {
+                println!("stopped the running daemon");
+                // let the OS release the file handle before the binary is swapped
+                tokio::time::sleep(std::time::Duration::from_millis(600)).await;
             }
+            // Worth saying out loud rather than swallowing: a daemon left
+            // running is on stale code the moment the swap lands, and on
+            // Windows it may still hold the executable open.
+            Err(e) => eprintln!(
+                "warning: could not stop the running daemon: {e:#}\n\
+                 continuing; run `lait shutdown` after the update."
+            ),
         }
     }
 
@@ -1133,7 +1084,7 @@ fn update_bin_path_in_archive() -> &'static str {
 }
 
 /// Restore the default `SIGPIPE` disposition on unix. Rust ignores `SIGPIPE` by
-/// default, which turns a closed downstream pipe (`lait board | head`,
+/// default, which turns a closed downstream pipe (`lait issues board | head`,
 /// `| grep -q`, `| less` then quit) into a panic on the next stdout write
 /// (`failed printing to stdout: Broken pipe`) instead of a clean exit. Resetting
 /// to `SIG_DFL` makes the process terminate normally when the reader goes away —

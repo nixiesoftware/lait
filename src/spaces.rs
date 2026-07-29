@@ -4,8 +4,8 @@
 //! mapping each **store path** to the space it holds. Written at every
 //! chokepoint a space becomes bound to a path — `lait init` (founding),
 //! `lait join` (bootstrapping), and every successful daemon open — so founders
-//! and joiners alike are observable via `lait spaces` and addressable via
-//! `-w`. It carries **no secrets and no trust** (the signed ACL still gates
+//! and joiners alike are observable via `lait orbits` and addressable via
+//! `--orbit`. It carries **no secrets and no trust** (the signed ACL still gates
 //! every op); it is pure navigation state: the `name` and `projects` fields are
 //! advisory snapshots refreshed on open, a corrupt/absent file degrades to "no
 //! known spaces", and nothing here is ever a source of truth.
@@ -192,25 +192,6 @@ pub fn prune() -> Result<Vec<SpaceEntry>> {
         save(&kept)?;
     }
     Ok(removed)
-}
-
-/// Derive a short project KEY from a display name: initials of up to four
-/// words, or the first four letters of a single word, uppercased.
-pub fn derive_project_key(name: &str) -> String {
-    let words: Vec<&str> = name
-        .split(|c: char| !c.is_ascii_alphabetic())
-        .filter(|w| !w.is_empty())
-        .collect();
-    let key: String = match words.len() {
-        0 => "PRJ".to_string(),
-        1 => words[0].chars().take(4).collect(),
-        _ => words
-            .iter()
-            .take(4)
-            .filter_map(|w| w.chars().next())
-            .collect(),
-    };
-    key.to_ascii_uppercase()
 }
 
 #[cfg(test)]

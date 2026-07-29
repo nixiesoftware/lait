@@ -6,6 +6,10 @@ members = [
     "crates/comms",
     "crates/replica",
     "crates/runtime",
+    "crates/world-bridge",
+    "crates/world-interface",
+    "products/issues",
+    "products/issues-app",
 ]
 # Pin resolver 2 explicitly: the release binary's non-linkage of the dev-only
 # `test-utils` feature (which would flip presets::N0 from prod to staging relays)
@@ -88,11 +92,18 @@ fabric = { path = "crates/fabric" }
 # is the S5c adoption edge: the root application depends on the new crates.
 runtime = { path = "crates/runtime" }
 replica = { path = "crates/replica" }
+world-bridge = { path = "crates/world-bridge" }
+world-interface = { path = "crates/world-interface" }
 # The network adapter — how independently held replicas exchange their material.
 # `iroh` is intentionally absent from THIS manifest: the app composes the seam
 # (`Transport`, framed `Stream`s, gossip rooms) and never names the contractor
 # behind it. Swapping the adapter is a manifest change, not a daemon rewrite.
 comms = { path = "crates/comms" }
+# The canonical bundled product. Its semantic World, schemas, DTOs, and ids are
+# independently packaged; this root owns only the application shell and local
+# control adapters that compose it into LaitDaemon.
+issues = { package = "lait-issues", path = "products/issues" }
+issues-app = { package = "lait-issues-app", path = "products/issues-app" }
 # randomness for ULID minting (app-minted DocId/ProjectId/… ids).
 getrandom = "0.3"
 
@@ -142,6 +153,7 @@ fs2 = "0.4"
 
 # misc
 anyhow = "1"
+async-trait = "0.1"
 directories = "5"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -210,9 +222,6 @@ windows-sys = { version = "0.61", features = [
 # _path_does` exactly this way). Tests that *want* those vars set them explicitly
 # afterward (serialized by `ENV_LOCK`). Pulls only syn/quote, already in the tree.
 ctor = "0.2"
-# `tests/daemon_mem.rs` implements the transport factory to hand the daemon an
-# in-memory network. Production code composes the seam; only tests build one.
-async-trait = "0.1"
 # Raw crypto primitives are TEST-ONLY at this layer: `identity_interop.rs` and
 # `frost_interop.rs` forge keys and drive ceremony rounds against the kernel's
 # public surface, which is exactly the kind of adversarial construction that has

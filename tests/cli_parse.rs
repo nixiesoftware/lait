@@ -3,23 +3,56 @@
 //! enum, and arg extraction is keyed by string inside each spec's closure — so a
 //! renamed arg is a runtime, not compile-time, error. These tests pin the tricky
 //! mappings (label +/- tokens, board-position flags, repeated/variadic args,
-//! aliases, defaults, and parse-level conflicts) that the derive used to enforce.
+//! nested namespaces, defaults, and parse-level conflicts) that the derive used
+//! to enforce.
 //!
 //! Comparison is by serde value so we assert the *whole* `Request`, tag and all,
 //! without depending on its wire representation.
 
-use lait::cmdspec::{build_cli, parse_to_request, specs};
-use lait::control::{BoardPos, Filter, Request};
+use issues_app::{BoardPos, Filter, IssuesRequest};
+use lait::client_action::ClientPayload;
+use lait::cmdspec::{build_cli, parse_to_dispatch, parse_to_request, specs, ParsedCommand};
+use lait::control::Request;
 use serde_json::to_value;
 
 /// Assert an argv parses to exactly `expected`.
-fn parses_to(argv: &[&str], expected: Request) {
-    let got = parse_to_request(argv).unwrap_or_else(|e| panic!("parse {argv:?}: {e}"));
-    assert_eq!(
-        to_value(&got).unwrap(),
-        to_value(&expected).unwrap(),
-        "argv {argv:?} produced the wrong Request",
-    );
+fn parses_to(argv: &[&str], expected: impl ParsedExpected) {
+    expected.assert_parse(argv);
+}
+
+trait ParsedExpected {
+    fn assert_parse(self, argv: &[&str]);
+}
+
+impl ParsedExpected for Request {
+    fn assert_parse(self, argv: &[&str]) {
+        let got = parse_to_request(argv).unwrap_or_else(|e| panic!("parse {argv:?}: {e}"));
+        assert_eq!(to_value(got).unwrap(), to_value(self).unwrap());
+    }
+}
+
+impl ParsedExpected for IssuesRequest {
+    fn assert_parse(self, argv: &[&str]) {
+        let got = parse_issues(argv).unwrap_or_else(|e| panic!("parse {argv:?}: {e}"));
+        assert_eq!(to_value(got).unwrap(), to_value(self).unwrap());
+    }
+}
+
+fn parse_issues(argv: &[&str]) -> anyhow::Result<IssuesRequest> {
+    match parse_to_dispatch(argv)? {
+        ParsedCommand::Action(action) => match action.payload() {
+            ClientPayload::World(call) => issues_app::decode_call(call).map_err(anyhow::Error::msg),
+            ClientPayload::Control(request) => {
+                anyhow::bail!("expected Issues World call, got {request:?}")
+            }
+        },
+        ParsedCommand::ProductLocal { operation, .. } => {
+            anyhow::bail!("expected Issues World call, got local operation {operation}")
+        }
+        ParsedCommand::Special { name, .. } => {
+            anyhow::bail!("expected Issues World call, got special command {name}")
+        }
+    }
 }
 
 #[test]
@@ -27,8 +60,8 @@ fn label_tokens_split_into_add_and_remove() {
     // `+bug` adds, `-wip` removes, a bare token adds — and `-wip` must survive as a
     // value (allow_hyphen_values), not be parsed as an unknown flag.
     parses_to(
-        &["lait", "label", "ENG-1", "+bug", "-wip", "chore"],
-        Request::Label {
+        &["lait", "issues", "label", "ENG-1", "+bug", "-wip", "chore"],
+        IssuesRequest::Label {
             reff: "ENG-1".into(),
             add: vec!["bug".into(), "chore".into()],
             remove: vec!["wip".into()],
@@ -39,16 +72,18 @@ fn label_tokens_split_into_add_and_remove() {
 #[test]
 fn move_position_flags_map_to_boardpos() {
     parses_to(
-        &["lait", "move", "ENG-1", "--top"],
-        Request::IssueMove {
+        &["lait", "issues", "move", "ENG-1", "--top"],
+        IssuesRequest::IssueMove {
             reff: "ENG-1".into(),
             project: None,
             pos: Some(BoardPos::Top),
         },
     );
     parses_to(
-        &["lait", "move", "ENG-1", "--before", "ENG-2", "-p", "ENG"],
-        Request::IssueMove {
+        &[
+            "lait", "issues", "move", "ENG-1", "--before", "ENG-2", "-p", "ENG",
+        ],
+        IssuesRequest::IssueMove {
             reff: "ENG-1".into(),
             project: Some("ENG".into()),
             pos: Some(BoardPos::Before {
@@ -61,16 +96,18 @@ fn move_position_flags_map_to_boardpos() {
 #[test]
 fn assign_collects_variadic_who_and_toggles_add() {
     parses_to(
-        &["lait", "assign", "ENG-1", "alice", "bob", "--remove"],
-        Request::Assign {
+        &[
+            "lait", "issues", "assign", "ENG-1", "alice", "bob", "--remove",
+        ],
+        IssuesRequest::Assign {
             reff: "ENG-1".into(),
             who: vec!["alice".into(), "bob".into()],
             add: false,
         },
     );
     parses_to(
-        &["lait", "assign", "ENG-1", "alice"],
-        Request::Assign {
+        &["lait", "issues", "assign", "ENG-1", "alice"],
+        IssuesRequest::Assign {
             reff: "ENG-1".into(),
             who: vec!["alice".into()],
             add: true,
@@ -83,6 +120,7 @@ fn new_collects_repeated_short_flags() {
     parses_to(
         &[
             "lait",
+            "issues",
             "new",
             "Fix login",
             "-p",
@@ -100,7 +138,7 @@ fn new_collects_repeated_short_flags() {
             "-b",
             "details",
         ],
-        Request::IssueNew {
+        IssuesRequest::IssueNew {
             due: None,
             estimate: None,
             title: "Fix login".into(),
@@ -118,9 +156,9 @@ fn new_collects_repeated_short_flags() {
 fn ls_filter_flags() {
     parses_to(
         &[
-            "lait", "ls", "-p", "ENG", "--mine", "--status", "wip", "--all",
+            "lait", "issues", "ls", "-p", "ENG", "--mine", "--status", "wip", "--all",
         ],
-        Request::List {
+        IssuesRequest::List {
             project: Some("ENG".into()),
             filter: Filter {
                 mine: true,
@@ -135,10 +173,13 @@ fn ls_filter_flags() {
 
 #[test]
 fn activity_since_defaults_to_zero() {
-    parses_to(&["lait", "activity"], Request::Activity { since: 0 });
     parses_to(
-        &["lait", "activity", "--since", "42"],
-        Request::Activity { since: 42 },
+        &["lait", "issues", "activity"],
+        IssuesRequest::Activity { since: 0 },
+    );
+    parses_to(
+        &["lait", "issues", "activity", "--since", "42"],
+        IssuesRequest::Activity { since: 42 },
     );
 }
 
@@ -146,8 +187,8 @@ fn activity_since_defaults_to_zero() {
 fn comment_with_inline_body() {
     // (The stdin fallback path is intentionally not exercised — it would block.)
     parses_to(
-        &["lait", "comment", "ENG-1", "looks good"],
-        Request::Comment {
+        &["lait", "issues", "comment", "ENG-1", "looks good"],
+        IssuesRequest::Comment {
             reply_to: None,
             reff: "ENG-1".into(),
             body: "looks good".into(),
@@ -176,9 +217,28 @@ fn aliases_resolve_to_the_canonical_command() {
 
 #[test]
 fn grouped_commands_bare_form_lists() {
-    parses_to(&["lait", "projects"], Request::ProjectList);
-    parses_to(&["lait", "labels"], Request::LabelList);
+    parses_to(&["lait", "issues", "projects"], IssuesRequest::ProjectList);
+    parses_to(&["lait", "issues", "labels"], IssuesRequest::LabelList);
     parses_to(&["lait", "members"], Request::Members);
+}
+
+#[test]
+fn space_metadata_commands_belong_to_the_issues_namespace() {
+    parses_to(
+        &["lait", "issues", "rename", "Moon Base"],
+        IssuesRequest::SpaceRename {
+            name: "Moon Base".into(),
+        },
+    );
+    parses_to(
+        &["lait", "issues", "describe", "Orbital work"],
+        IssuesRequest::SpaceDescribe {
+            description: "Orbital work".into(),
+        },
+    );
+
+    assert!(parse_to_request(&["lait", "rename", "Moon Base"]).is_err());
+    assert!(parse_to_request(&["lait", "describe", "Orbital work"]).is_err());
 }
 
 #[test]
@@ -195,20 +255,21 @@ fn members_add_reads_admin_and_local_name() {
 
 #[test]
 fn board_positional_is_optional() {
-    // Bare `lait board` parses — the daemon's choose-project chain (sole
+    // Bare `lait issues board` parses — the daemon's choose-project chain (sole
     // project / `project.default` / branch hint) supplies the view project.
     // `project_hint` is environment-derived (git branch), so only `project` is
     // pinned here.
-    let got = parse_to_request(&["lait", "board"]).expect("bare `lait board` must parse");
+    let got =
+        parse_issues(&["lait", "issues", "board"]).expect("bare `lait issues board` must parse");
     match got {
-        Request::Board { project, .. } => assert_eq!(project, None),
+        IssuesRequest::Board { project, .. } => assert_eq!(project, None),
         other => panic!("expected Request::Board, got {other:?}"),
     }
     // With an explicit positional the hint is pinned None (an explicit project
     // always wins; no git subprocess runs).
     parses_to(
-        &["lait", "board", "ENG"],
-        Request::Board {
+        &["lait", "issues", "board", "ENG"],
+        IssuesRequest::Board {
             project: Some("ENG".into()),
             project_hint: None,
         },
@@ -220,8 +281,8 @@ fn explicit_project_pins_the_hint_to_none() {
     // Under an explicit `-p` the branch-derived project_hint must be None — the
     // daemon must never see a hint that could override an explicit choice.
     parses_to(
-        &["lait", "new", "t", "-p", "ENG"],
-        Request::IssueNew {
+        &["lait", "issues", "new", "t", "-p", "ENG"],
+        IssuesRequest::IssueNew {
             due: None,
             estimate: None,
             title: "t".into(),
@@ -252,7 +313,7 @@ fn config_set_is_special_dispatch_not_a_request() {
 #[test]
 fn cli_tree_builds_and_validates() {
     // clap panics on a malformed tree (dup ids, bad positionals). Asserts the
-    // whole registry — including the `-w` global and the `config`/`workspaces`
+    // whole registry — including the `--orbit` global and the `issues`/`config`
     // groups — assembles into a legal Command.
     build_cli(&specs()).debug_assert();
 }
@@ -286,39 +347,46 @@ fn work_state_verbs_are_special_dispatch() {
     // app/cli) — parse_to_request must refuse them by name, and the ref must
     // parse as an optional positional.
     for verb in ["start", "done", "stop"] {
-        let err = parse_to_request(&["lait", verb, "ENG-1"])
+        let err = parse_to_request(&["lait", "issues", verb, "ENG-1"])
             .expect_err("work-state verbs are special-dispatch");
         assert!(err.to_string().contains(verb), "{err}");
     }
     // --no-branch is a legal flag on start only.
     let cli = build_cli(&specs());
     assert!(cli
-        .try_get_matches_from(["lait", "start", "ENG-1", "--no-branch"])
+        .try_get_matches_from(["lait", "issues", "start", "ENG-1", "--no-branch"])
         .is_ok());
 }
 
 #[test]
 fn inbox_parses_with_and_without_clear() {
-    parses_to(&["lait", "inbox"], Request::Inbox { clear: false });
-    parses_to(
-        &["lait", "inbox", "--clear"],
-        Request::Inbox { clear: true },
-    );
+    for (argv, clear) in [
+        (&["lait", "issues", "inbox"][..], false),
+        (&["lait", "issues", "inbox", "--clear"][..], true),
+    ] {
+        match parse_to_dispatch(argv).expect("parse Issues inbox") {
+            ParsedCommand::ProductLocal { operation, input } => {
+                assert_eq!(operation, issues_app::cli::LOCAL_INBOX);
+                assert_eq!(input["clear"], clear);
+            }
+            _ => panic!("Issues inbox must remain a package-owned host call"),
+        }
+    }
 }
 
 #[test]
 fn projects_add_is_key_first_with_defaulted_name() {
     parses_to(
-        &["lait", "projects", "add", "OPS"],
-        Request::ProjectNew {
+        &["lait", "issues", "projects", "add", "OPS"],
+        IssuesRequest::ProjectNew {
             name: "Ops".into(),
             key: "OPS".into(),
             color: None,
         },
     );
     parses_to(
-        &["lait", "projects", "add", "OPS", "Operations"],
-        Request::ProjectNew {
+        &["lait", "issues", "projects", "add", "OPS", "Operations"],
+        IssuesRequest::ProjectNew {
             name: "Operations".into(),
             key: "OPS".into(),
             color: None,
@@ -326,8 +394,8 @@ fn projects_add_is_key_first_with_defaulted_name() {
     );
     // `new` survives as an alias of the SAME shape.
     parses_to(
-        &["lait", "projects", "new", "DSN", "Design"],
-        Request::ProjectNew {
+        &["lait", "issues", "projects", "new", "DSN", "Design"],
+        IssuesRequest::ProjectNew {
             name: "Design".into(),
             key: "DSN".into(),
             color: None,
@@ -336,33 +404,35 @@ fn projects_add_is_key_first_with_defaulted_name() {
 }
 
 #[test]
-fn spaces_and_flag_aliases_resolve() {
-    // `spaces` is the command; `workspaces` stays as a muscle-memory alias.
+fn orbital_navigation_uses_one_canonical_vocabulary() {
+    // `orbits` names the local path-keyed catalog. Removed migration spellings
+    // must remain errors so they cannot quietly become permanent API.
     let cli = build_cli(&specs());
-    assert!(cli.clone().try_get_matches_from(["lait", "spaces"]).is_ok());
-    assert!(cli
-        .clone()
-        .try_get_matches_from(["lait", "workspaces"])
-        .is_ok());
-    // Global selector: --space is primary, --workspace the hidden alias, -w short.
-    for flag in ["--space", "--workspace"] {
+    assert!(cli.clone().try_get_matches_from(["lait", "orbits"]).is_ok());
+    for removed in ["orbit", "spaces", "workspaces"] {
         assert!(
-            cli.clone()
-                .try_get_matches_from(["lait", flag, "demo", "ls"])
-                .is_ok(),
-            "{flag} should parse"
+            cli.clone().try_get_matches_from(["lait", removed]).is_err(),
+            "{removed} must not parse"
         );
     }
     assert!(cli
         .clone()
-        .try_get_matches_from(["lait", "-w", "demo", "ls"])
+        .try_get_matches_from(["lait", "--orbit", "demo", "issues", "ls"])
         .is_ok());
+    for removed in ["--space", "--workspace", "-w"] {
+        assert!(
+            cli.clone()
+                .try_get_matches_from(["lait", removed, "demo", "issues", "ls"])
+                .is_err(),
+            "{removed} must not parse"
+        );
+    }
 }
 
 #[test]
-fn bare_invocation_parses_as_focus() {
-    // Bare `lait` (with global flags allowed) must parse with NO subcommand —
-    // app::run turns that into the focus view instead of help.
+fn bare_invocation_parses_as_navigation_context() {
+    // Bare `lait` (with global flags allowed) has no product command. app::run
+    // renders the selected identity/Orbit/Space/World context.
     let cli = build_cli(&specs());
     let m = cli
         .clone()
@@ -370,6 +440,124 @@ fn bare_invocation_parses_as_focus() {
         .expect("bare lait parses");
     assert!(m.subcommand().is_none());
     assert!(cli.try_get_matches_from(["lait", "--json"]).is_ok());
+}
+
+#[test]
+fn context_and_world_catalog_are_navigation_commands() {
+    let cli = build_cli(&specs());
+    assert!(cli
+        .clone()
+        .try_get_matches_from(["lait", "context"])
+        .is_ok());
+    assert!(cli.clone().try_get_matches_from(["lait", "worlds"]).is_ok());
+    assert!(cli.try_get_matches_from(["lait", "world"]).is_err());
+}
+
+#[test]
+fn issues_namespace_is_the_only_product_entry() {
+    let expected = IssuesRequest::IssueView {
+        reff: "ENG-1".into(),
+    };
+    parses_to(&["lait", "issues", "show", "ENG-1"], expected);
+
+    // Product-owned groups may nest under the World namespace.
+    parses_to(
+        &["lait", "issues", "projects", "add", "OPS"],
+        IssuesRequest::ProjectNew {
+            name: "Ops".into(),
+            key: "OPS".into(),
+            color: None,
+        },
+    );
+
+    let cli = build_cli(&specs());
+    assert!(cli
+        .clone()
+        .try_get_matches_from(["lait", "show", "ENG-1"])
+        .is_err());
+    let root_names: Vec<_> = cli
+        .get_subcommands()
+        .map(|command| command.get_name())
+        .collect();
+    let issues = cli
+        .get_subcommands()
+        .find(|command| command.get_name() == "issues")
+        .expect("visible Issues namespace");
+    assert!(!issues.is_hide_set());
+    let issue_names: Vec<_> = issues
+        .get_subcommands()
+        .map(|command| command.get_name())
+        .collect();
+    for product_command in [
+        "new",
+        "start",
+        "done",
+        "stop",
+        "inbox",
+        "ls",
+        "show",
+        "edit",
+        "move",
+        "assign",
+        "label",
+        "comment",
+        "react",
+        "world-upgrade",
+        "delete",
+        "restore",
+        "link",
+        "unlink",
+        "parent",
+        "graph",
+        "history",
+        "board",
+        "projects",
+        "labels",
+        "follow",
+        "unfollow",
+        "milestone",
+        "cycle",
+        "initiatives",
+        "teams",
+        "triage",
+        "attach",
+        "attachment",
+        "role",
+        "access",
+        "workflow",
+        "activity",
+    ] {
+        assert!(
+            issue_names.contains(&product_command),
+            "{product_command} must live under the Issues namespace"
+        );
+        assert!(
+            !root_names.contains(&product_command),
+            "{product_command} must not exist at the root"
+        );
+    }
+}
+
+#[test]
+fn root_help_presents_navigation_then_product_namespaces() {
+    let mut cli = build_cli(&specs());
+    let help = cli.render_long_help().to_string();
+    for visible in ["context", "orbits", "worlds", "serve", "issues"] {
+        assert!(
+            help.contains(visible),
+            "root help should expose {visible}:\n{help}"
+        );
+    }
+    assert!(
+        !help
+            .lines()
+            .any(|line| line.trim_start().starts_with("show ")),
+        "flat Issues verbs must stay out of root help:\n{help}"
+    );
+    assert!(
+        help.find("context").unwrap() < help.find("issues").unwrap(),
+        "navigation should precede product namespaces:\n{help}"
+    );
 }
 
 #[test]
@@ -382,8 +570,8 @@ fn daemon_off_switch_is_shutdown() {
 fn comment_single_arg_is_the_body_with_explicit_ref_still_working() {
     // Two positionals: ref + body, exactly as typed.
     parses_to(
-        &["lait", "comment", "ENG-1", "found it"],
-        Request::Comment {
+        &["lait", "issues", "comment", "ENG-1", "found it"],
+        IssuesRequest::Comment {
             reply_to: None,
             reff: "ENG-1".into(),
             body: "found it".into(),
@@ -392,8 +580,8 @@ fn comment_single_arg_is_the_body_with_explicit_ref_still_working() {
     // One positional: it's the BODY; the ref must come from the git branch.
     // Off a KEY-n branch that inference fails with a teaching error (this test
     // runs on arbitrary branches, so pin only the failure shape).
-    match parse_to_request(&["lait", "comment", "just a body, no ref"]) {
-        Ok(Request::Comment { reff, body, .. }) => {
+    match parse_issues(&["lait", "issues", "comment", "just a body, no ref"]) {
+        Ok(IssuesRequest::Comment { reff, body, .. }) => {
             // On a KEY-n branch the inference kicks in — body must be intact.
             assert_eq!(body, "just a body, no ref");
             assert!(reff.contains('-'), "inferred ref is a KEY-n: {reff}");

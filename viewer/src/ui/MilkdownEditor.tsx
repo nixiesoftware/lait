@@ -25,7 +25,7 @@ import { cn } from "./primitives";
  * remark's defaults are pretty-printer defaults — `*` bullets, `_` emphasis,
  * and tables padded so the pipes line up. Each one is a whole-document rewrite
  * the first time anyone edits a body that came from the CLI or an agent, and
- * `lait show` prints the result, so they are pinned to what people actually
+ * `lait issues show` prints the result, so they are pinned to what people actually
  * type. Exported so the round-trip tests exercise the real configuration
  * rather than remark's.
  */
@@ -58,7 +58,7 @@ export const SERIALIZE = {
  * document is parsed and serialized by *remark* — the same pipeline the rest of
  * the Markdown world runs on — rather than by a serializer written against a
  * ProseMirror schema. That distinction is the whole reason for the choice.
- * lait stores descriptions as plain CRDT text and `lait show` prints them
+ * lait stores descriptions as plain CRDT text and `lait issues show` prints them
  * verbatim, so an editor that normalises on save would rewrite an agent's issue
  * body the moment a human touched one word, and every such rewrite is a
  * document-wide CRDT op and a noisy diff. remark round-trips what it was given.

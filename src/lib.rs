@@ -1,13 +1,13 @@
-//! lait: a local-first, peer-to-peer issue tracker.
+//! lait: an orbital shell for local-first, peer-to-peer collaboration.
 //!
 //! One binary, four roles:
-//!   * `lait daemon` runs the orbital Station: mechanics authority, the Body
-//!     replica, comms transport, and the docked Issues World.
-//!   * `lait <cmd>` is the CLI client, driving the daemon over a local IPC
-//!     control channel.
+//!   * `lait daemon` is the identity-scoped host: one local process endpoint,
+//!     an Orbit directory/router, identity-keyed transport hubs, and zero or
+//!     more in-process SpaceBridges.
+//!   * `lait <cmd>` is the cwd-scoped navigation client, selecting an Orbit and
+//!     driving the daemon or one installed World over an explicit route.
 //!   * `lait serve` binds that same façade to loopback HTTP + SSE so a browser
-//!     can be a client too ([`serve`], `docs/UI.md`). The only surface global
-//!     to the machine: it supervises one daemon per space.
+//!     can be a client too ([`serve`], `docs/UI.md`). It owns no Station.
 //!   * `lait mcp` exposes the same Layer-B façade as MCP tools for an agent.
 //!
 //! The crate is split lib + bin so integration tests, doctests, and the MCP/DTO
@@ -17,17 +17,19 @@
 //!   * **The substrate** (`mechanics`, `fabric`, `replica`, `comms`,
 //!     `runtime`): authority, convergence, the Body graph, transport, and the
 //!     orbital lifecycle, each behind its own crate boundary.
-//!   * **The product** ([`world`], [`orbital`]): the Issues World contract and
-//!     the composition root that docks it.
+//!   * **Bundled products** ([`world`]): the composition root that docks
+//!     independently packaged Worlds and mounts their client interfaces.
 //!   * **Layer B — control protocol** ([`control`], [`dto`]): a stable,
 //!     versioned, hand-maintained projection over the local socket. Never a
 //!     dump of storage internals.
 
 pub mod app;
 pub mod cli;
+pub mod client_action;
 pub mod cmdspec;
 pub mod config;
 pub mod control;
+pub mod daemon;
 pub mod daemon_spawn;
 pub mod diagnose;
 /// Layer-B data-transfer objects (the product's external JSON shapes).
@@ -44,7 +46,7 @@ pub mod orbital;
 pub mod registry;
 pub mod serve;
 pub mod spaces;
-/// The product's orbital World adapter (the C4 contract packet + IssuesWorld).
+/// The composition adapter for independently packaged Worlds.
 pub mod world;
 
 // The **kernel** (`mechanics`) holds lait's roots — identity, the trust

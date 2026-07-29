@@ -270,6 +270,10 @@ impl Stream for IrohStream {
     /// than the legacy `read_msg`, which mapped every read error to a quiet
     /// end: exactly the silent-partial-sync failure mode).
     async fn recv(&mut self) -> Result<Option<Vec<u8>>> {
+        self.recv_bounded(MAX_FRAME as usize).await
+    }
+
+    async fn recv_bounded(&mut self, max: usize) -> Result<Option<Vec<u8>>> {
         let (_, recv) = self.bi().await?;
         let mut len_buf = [0u8; 4];
         match recv.read_exact(&mut len_buf).await {
@@ -280,6 +284,11 @@ impl Stream for IrohStream {
         }
         let len = u32::from_be_bytes(len_buf);
         check_frame_len(len)?;
+        if len as usize > max {
+            return Err(anyhow!(
+                "frame length {len} exceeds protocol limit of {max} bytes"
+            ));
+        }
         let mut buf = vec![0u8; len as usize];
         recv.read_exact(&mut buf).await.context("read frame body")?;
         Ok(Some(buf))

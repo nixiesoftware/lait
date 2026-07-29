@@ -1,6 +1,6 @@
 //! W4 — the Beacon initiative's acceptance harness (docket 06).
 //!
-//! Real orbital daemons over their control sockets on an in-memory transport,
+//! Real process-backed SpaceBridges over their control sockets on an in-memory transport,
 //! proving the plane the initiative exists for:
 //!
 //! 1. **Steady-state convergence without re-join** (exit criterion 1 /
@@ -25,9 +25,11 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use async_trait::async_trait;
-use lait::control::{request, subscribe, Request, Response};
+use issues_app::IssuesResponse as IssueResponse;
+use lait::control::{request, subscribe, ControlRoute, Request, Response};
+use lait::daemon::OrbitAddress;
 use lait::net::Network;
-use lait::orbital::run_orbital_daemon_with;
+use lait::orbital::run_space_bridge_with;
 use lait::transport::mem::MemNet;
 use lait::transport::{Alpn, Transport, TransportFactory};
 
@@ -66,6 +68,33 @@ fn req(rt: &tokio::runtime::Runtime, home: &Path, r: Request) -> Response {
         .unwrap_or_else(|e| Response::err(format!("{e:#}")))
 }
 
+async fn issues_request(home: &Path, request: issues_app::IssuesRequest) -> Result<IssueResponse> {
+    let space = lait::orbital::discover_space_id(home).expect("test Space");
+    let call = issues_app::encode_call(&request)?;
+    let reply = lait::control::call_world(
+        home,
+        ControlRoute::World {
+            address: OrbitAddress::for_store(home, space),
+            world: call.world().as_str().to_string(),
+        },
+        call.clone(),
+        None,
+    )
+    .await?;
+    Ok(serde_json::from_value(issues_app::decode_reply(
+        &call, reply,
+    )?)?)
+}
+
+fn issue_req(
+    rt: &tokio::runtime::Runtime,
+    home: &Path,
+    request: issues_app::IssuesRequest,
+) -> IssueResponse {
+    rt.block_on(issues_request(home, request))
+        .unwrap_or_else(|error| IssueResponse::err(format!("{error:#}")))
+}
+
 fn poll_until<T>(timeout: Duration, mut check: impl FnMut() -> Option<T>) -> Option<T> {
     let start = Instant::now();
     loop {
@@ -83,7 +112,7 @@ fn spawn_daemon(home: PathBuf, seed: [u8; 32], net: MemNet) -> std::thread::Join
     std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async move {
-            if let Err(e) = run_orbital_daemon_with(home, seed, &MemFactory(net)).await {
+            if let Err(e) = run_space_bridge_with(home, seed, &MemFactory(net)).await {
                 eprintln!("DAEMON ERR: {e:#}");
             }
         });
@@ -155,23 +184,23 @@ fn a_fresh_write_converges_with_no_rejoin_and_presence_surfaces_agree() {
     // The founder files a project + issue. NO Connect is issued from here on;
     // the write must reach the member through the plane alone (edge beacon →
     // pending mark → scheduler Contact).
-    let resp = req(
+    let resp = issue_req(
         &client,
         &founder_home,
-        Request::ProjectNew {
+        issues_app::IssuesRequest::ProjectNew {
             name: "Beacon".into(),
             key: "bcn".into(),
             color: None,
         },
     );
     assert!(
-        matches!(&resp, Response::Ref { reff } if reff == "BCN"),
+        matches!(&resp, IssueResponse::Ref { reff } if reff == "BCN"),
         "{resp:?}"
     );
-    let resp = req(
+    let resp = issue_req(
         &client,
         &founder_home,
-        Request::IssueNew {
+        issues_app::IssuesRequest::IssueNew {
             due: None,
             estimate: None,
             title: "Ambient news".into(),
@@ -184,20 +213,20 @@ fn a_fresh_write_converges_with_no_rejoin_and_presence_surfaces_agree() {
         },
     );
     assert!(
-        matches!(&resp, Response::Ref { reff } if reff == "BCN-1"),
+        matches!(&resp, IssueResponse::Ref { reff } if reff == "BCN-1"),
         "{resp:?}"
     );
 
     let started = Instant::now();
     let converged = poll_until(Duration::from_secs(10), || {
-        match req(
+        match issue_req(
             &client,
             &member_home,
-            Request::IssueView {
+            issues_app::IssuesRequest::IssueView {
                 reff: "BCN-1".into(),
             },
         ) {
-            Response::Issue(v) if v.title == "Ambient news" => Some(()),
+            IssueResponse::Issue(v) if v.title == "Ambient news" => Some(()),
             _ => None,
         }
     });
@@ -212,24 +241,26 @@ fn a_fresh_write_converges_with_no_rejoin_and_presence_surfaces_agree() {
     );
 
     // And the reverse direction, still hands off.
-    req(
+    issue_req(
         &client,
         &member_home,
-        Request::Comment {
+        issues_app::IssuesRequest::Comment {
             reply_to: None,
             reff: "BCN-1".into(),
             body: "heard you ambiently".into(),
         },
     );
     let back = poll_until(Duration::from_secs(10), || {
-        match req(
+        match issue_req(
             &client,
             &founder_home,
-            Request::IssueView {
+            issues_app::IssuesRequest::IssueView {
                 reff: "BCN-1".into(),
             },
         ) {
-            Response::Issue(v) if v.comments.iter().any(|c| c.body == "heard you ambiently") => {
+            IssueResponse::Issue(v)
+                if v.comments.iter().any(|c| c.body == "heard you ambiently") =>
+            {
                 Some(())
             }
             _ => None,
@@ -309,19 +340,19 @@ fn a_peers_change_rings_a_doorbell_that_names_what_moved() {
     let founder_device = lait::crypto::device_from_seed(&FOUNDER_SEED).to_string();
     drive_admission(&client, &member_home, &founder_device);
 
-    req(
+    issue_req(
         &client,
         &founder_home,
-        Request::ProjectNew {
+        issues_app::IssuesRequest::ProjectNew {
             name: "Beacon".into(),
             key: "bcn".into(),
             color: None,
         },
     );
-    req(
+    issue_req(
         &client,
         &founder_home,
-        Request::IssueNew {
+        issues_app::IssuesRequest::IssueNew {
             due: None,
             estimate: None,
             title: "before".into(),
@@ -336,15 +367,15 @@ fn a_peers_change_rings_a_doorbell_that_names_what_moved() {
     // Wait for the issue itself to land, so the frame under test is the *edit*
     // rather than the arrival of a doc the member had never seen.
     let doc = poll_until(Duration::from_secs(15), || {
-        match req(
+        match issue_req(
             &client,
             &member_home,
-            Request::List {
+            issues_app::IssuesRequest::List {
                 project: None,
                 filter: Default::default(),
             },
         ) {
-            Response::List { rows } => rows.first().map(|r| r.doc_id.as_str().to_string()),
+            IssueResponse::List { rows } => rows.first().map(|r| r.doc_id.as_str().to_string()),
             _ => None,
         }
     })
@@ -363,9 +394,9 @@ fn a_peers_change_rings_a_doorbell_that_names_what_moved() {
 
         // The founder edits. Nothing is issued at the member from here on: the
         // change arrives through the plane, and the doorbell is the only news.
-        request(
+        issues_request(
             &founder_home,
-            &Request::IssueEdit {
+            issues_app::IssuesRequest::IssueEdit {
                 due: None,
                 estimate: None,
                 reff: "BCN-1".into(),
@@ -565,23 +596,23 @@ fn surviving_members_converge_after_the_approach_station_dies() {
     let _ = req(&client, &founder_home, Request::Stop);
     let _ = founder_handle.join();
 
-    let resp = req(
+    let resp = issue_req(
         &client,
         &b_home,
-        Request::ProjectNew {
+        issues_app::IssuesRequest::ProjectNew {
             name: "Orphaned".into(),
             key: "orp".into(),
             color: None,
         },
     );
     assert!(
-        matches!(&resp, Response::Ref { reff } if reff == "ORP"),
+        matches!(&resp, IssueResponse::Ref { reff } if reff == "ORP"),
         "{resp:?}"
     );
-    let resp = req(
+    let resp = issue_req(
         &client,
         &b_home,
-        Request::IssueNew {
+        issues_app::IssuesRequest::IssueNew {
             due: None,
             estimate: None,
             title: "The hub is gone".into(),
@@ -594,19 +625,19 @@ fn surviving_members_converge_after_the_approach_station_dies() {
         },
     );
     assert!(
-        matches!(&resp, Response::Ref { reff } if reff == "ORP-1"),
+        matches!(&resp, IssueResponse::Ref { reff } if reff == "ORP-1"),
         "{resp:?}"
     );
 
     let survived = poll_until(Duration::from_secs(15), || {
-        match req(
+        match issue_req(
             &client,
             &a_home,
-            Request::IssueView {
+            issues_app::IssuesRequest::IssueView {
                 reff: "ORP-1".into(),
             },
         ) {
-            Response::Issue(v) if v.title == "The hub is gone" => Some(()),
+            IssueResponse::Issue(v) if v.title == "The hub is gone" => Some(()),
             _ => None,
         }
     });

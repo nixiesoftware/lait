@@ -1,4 +1,4 @@
-//! Seed-registry end-to-end over the **orbital daemon** (in-process, in-memory
+//! Seed-registry end-to-end over a process-backed **SpaceBridge** (in-process, in-memory
 //! transport). A node pins an always-on bootstrap seed — by device id or by an
 //! orbital Coordinates link — into its node-local `seeds.json`, and that pin
 //! (1) surfaces in a structured `Seeds` DTO with live reachability, and
@@ -19,7 +19,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use lait::control::{request, Request, Response};
 use lait::net::Network;
-use lait::orbital::run_orbital_daemon_with;
+use lait::orbital::run_space_bridge_with;
 use lait::transport::mem::MemNet;
 use lait::transport::{Alpn, Transport, TransportFactory};
 
@@ -74,7 +74,7 @@ fn spawn_daemon(home: PathBuf, seed: [u8; 32], net: MemNet) -> std::thread::Join
     std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async move {
-            if let Err(e) = run_orbital_daemon_with(home, seed, &MemFactory(net)).await {
+            if let Err(e) = run_space_bridge_with(home, seed, &MemFactory(net)).await {
                 eprintln!("DAEMON ERR: {e:#}");
             }
         });
@@ -87,7 +87,7 @@ fn wait_online(rt: &tokio::runtime::Runtime, home: &Path) {
     });
     assert!(
         online.is_some(),
-        "orbital daemon at {} never came online",
+        "SpaceBridge at {} never came online",
         home.display()
     );
 }

@@ -797,8 +797,8 @@ pub fn initialize_tracker_intent(
     device: &str,
 ) -> IssueIntent {
     let mut built_in_roles = Vec::new();
-    for id in crate::world::roles::BUILT_IN_ROLE_IDS {
-        let rev = crate::world::roles::built_in(id).expect("built-in role");
+    for id in crate::roles::BUILT_IN_ROLE_IDS {
+        let rev = crate::roles::built_in(id).expect("built-in role");
         built_in_roles.push((
             id.to_string(),
             data_encoding::HEXLOWER.encode(&rev.revision_id),
@@ -815,7 +815,7 @@ pub fn initialize_tracker_intent(
         built_in_roles,
         capability_registry_commitment: data_encoding::HEXLOWER
             .encode(&capability_registry_commitment()),
-        default_workflow_commitment: crate::world::workflow::default_workflow_revision(project_id)
+        default_workflow_commitment: crate::workflow::default_workflow_revision(project_id)
             .revision_id,
     }
 }

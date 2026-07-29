@@ -65,8 +65,8 @@ function findLait() {
 /** Start the engine and resolve once it tells us where it is. */
 function startEngine(bin, port) {
   return new Promise((ok, fail) => {
-    const selector = process.env.LAIT_SPACE
-      ? ["-w", process.env.LAIT_SPACE]
+    const selector = process.env.LAIT_ORBIT
+      ? ["--orbit", process.env.LAIT_ORBIT]
       : [];
     const child = spawn(bin, [...selector, "serve", "--port", port, "--json"], {
       cwd: REPO,

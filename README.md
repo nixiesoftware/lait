@@ -8,13 +8,13 @@ browser tab. If `cd` gets you into the project, you're already in.
 $ cd my-project
 $ lait init
 
-$ lait new "fix login race" --start  # file the issue, take it, branch it
+$ lait issues new "fix login race" --start  # file it, take it, branch it
 MP-1  fix login race  in_progress  · you
 switched to new branch 'mp-1-fix-login-race'
 
 # ...write the fix, commit...
 
-$ lait done                          # the branch tells lait which issue
+$ lait issues done                   # the branch tells lait which issue
 MP-1  fix login race  done
 ```
 
@@ -24,8 +24,8 @@ MP-1  fix login race  done
   no accounts, no admin console, no seat licenses
 - **Agent-native** // AI agents are first-class members: they claim, comment,
   and close issues through MCP with the same audit trail as a human
-- **Branch-native** // `lait start` cuts the branch; `done`, `comment`, and
-  `show` read the issue off the branch you're on
+- **Branch-native** // `lait issues start` cuts the branch; `done`, `comment`,
+  and `show` read the issue off the branch you're on
 - **Private by default** // everything is end-to-end encrypted between members;
   there is no server to trust because there is no server
 - **Works everywhere** // one self-contained binary for macOS, Linux, and
@@ -111,14 +111,14 @@ after your directory, so there's nothing to configure before the first issue:
 $ cd my-project
 $ lait init
 founded space 'my-project' (ws_01JTHLH8QT…)
-project: my-project (MP) — `lait new "..."` files into it
+project: my-project (MP) — `lait issues new "..."` files into it
 
-$ lait new "flaky websocket reconnect" -P high    # -P = priority
+$ lait issues new "flaky websocket reconnect" -P high    # -P = priority
 MP-1
 ```
 
 From there, three views: bare `lait` is your **focus** (unread inbox + what
-you're working on, in under 50 ms), `lait board` prints the columns, and
+you're working on, in under 50 ms), `lait issues board` prints the columns, and
 `lait serve` opens your spaces in a browser — every space on this machine, live.
 Nothing needs the network; teammates come later (scenario 2) or never.
 
@@ -153,15 +153,23 @@ Branch names carry the issue (`mp-1-fix-login-race`), so the loop needs no refs
 and no context switch — and your teammate's activity finds you, you don't poll it:
 
 ```console
-$ lait start MP-3               # assign me + in_progress + branch, one commit
+$ lait issues start MP-3        # assign me + in_progress + branch, one commit
 MP-3  flaky reconnect  in_progress  · you
 switched to new branch 'mp-3-flaky-reconnect'
-$ lait comment "root cause: reused nonce"      # ref inferred from the branch
-$ lait done
+$ lait issues comment "root cause: reused nonce"  # ref inferred from the branch
+$ lait issues done
 
-$ lait                          # your focus, <50ms
+$ lait                          # identity → Orbit → Space → installed Worlds
+lait context
+identity   primary
+selection  cwd
+orbit      orb_…
+space      ws_…
+worlds     com.lait.issues
+
+$ lait issues                   # the issue-tracker World's focus view
 Inbox (2): bob commented on MP-2 · someone moved MP-2
-$ lait inbox
+$ lait issues inbox
 • MP-2  bob commented on  polish header  — on it, root cause is the header cache
 • MP-2  someone moved  polish header  — backlog → in_progress
 ```
@@ -177,28 +185,33 @@ verbs, same audit trail:
 
 ```console
 $ lait install-mcp --client claude
-$ lait new "backfill created_at on legacy rows" -b "batched, dry-run first"
-$ lait assign MP-4 agent        # any member — agents included — by name or key
+$ lait issues new "backfill created_at on legacy rows" -b "batched, dry-run first"
+$ lait issues assign MP-4 agent # any member — agents included — by name or key
 # the agent: issue_start → comment progress → issue_done, over `lait mcp`
-$ lait inbox
+$ lait issues inbox
 • MP-4  agent commented on  backfill created_at…  — dry run: 48,112 rows. PR up.
 ```
 
 ### 5 · Many clients, one machine
 
-Spaces are discovered from the directory you stand in, git-style — and the
-registry makes them addressable from anywhere:
+Local Orbits are discovered from the directory you stand in, git-style. Each is
+one durable participation in a Space, and the navigation catalog makes it
+addressable from anywhere:
 
 ```console
-$ lait spaces
-acme        ws_01JTHHNM0  founded  up    [ACME, DSN]
+$ lait orbits
+acme  orb_a17c…  ws_01JTHHNM0  founded  up    [ACME, DSN]
   ~/code/acme/.lait
-kiln        ws_01JTGX2P1  joined   idle  [KLN]  (from mira)
+kiln  orb_9e42…  ws_01JTGX2P1  joined   idle  [KLN]  (from mira)
   ~/code/kiln/.lait
 
-$ lait -w kiln board            # target any space from any directory
+$ lait --orbit kiln issues board       # target a local Orbit from anywhere
 $ lait config set project.default DSN   # per-space default for `new`/`board`
 ```
+
+The interface keeps Lait navigation separate from the Worlds installed inside
+it: product commands use their namespace, and local participation is selected
+with `--orbit`.
 
 Project selection is one fixed chain: explicit `-p` → your branch's key →
 `project.default` → the only project → a teaching error. Filters (`ls -p`) are
@@ -223,7 +236,7 @@ Every command emits a stable, versioned DTO under `--json` — the same shapes t
 MCP tools return:
 
 ```bash
-id=$(lait new "fix login" -p ENG --json | jq -r .reff)
+id=$(lait issues new "fix login" -p ENG --json | jq -r .reff)
 ```
 
 `lait watch` follows the presence/join event stream and can run a hook per event
@@ -252,47 +265,47 @@ On a git branch named `eng-142-fix-login`, the ref is **optional** for `show` / 
 
 ```bash
 git switch -c eng-142-fix-login
-lait show            # → ENG-142, no ref needed
-lait edit --status in_progress
+lait issues show            # → ENG-142, no ref needed
+lait issues edit --status in_progress
 ```
 
 | Command | Description |
 |---|---|
-| `new <title> [-p PROJ] [-a USER…] [-P PRIO] [-l LABEL…] [-b BODY] [--start]` | Create an issue (`-p` optional: branch key → `project.default` → sole project; unknown labels created on first use) |
-| `start [ref] [--no-branch]` | Claim + activate + branch: assign yourself, first active status, checkout `key-n-slug` |
-| `done [ref]` · `stop [ref]` | Finish (first done status) · put down gracefully (backlog, unassigned). Refs infer from the branch |
-| `inbox [--clear]` | Durable addressed-to-you: assignments, comments on your work, @mentions |
-| `ls [-p PROJ] [--mine] [--status S] [--label L] [--all]` | List rows from the catalog cache (`-p` is a pure filter) |
-| `board [PROJ]` | Render a project's board (positional optional, same chain as `new`) |
-| `show <ref>` | Full issue (lazily loads the issue doc) |
-| `edit <ref> [--title T] [--status S] [--priority P]` | Patch LWW fields (one activity row) |
-| `move <ref> [-p PROJ] [--top\|--bottom\|--before R\|--after R]` | Set project and/or board order |
-| `assign <ref> <who…> [--remove]` | Add/remove assignees |
-| `label <ref> [+LABEL…] [-LABEL…]` | Add/remove labels |
-| `comment [ref] [BODY]` | Append a comment. One arg on a KEY-n branch = the body (ref inferred); no BODY → stdin |
-| `delete <ref>` | Tombstone an issue (stays in history) |
-| `history <ref>` | The issue's derived activity feed |
+| `issues new <title> [-p PROJ] [-a USER…] [-P PRIO] [-l LABEL…] [-b BODY] [--start]` | Create an issue (`-p` optional: branch key → `project.default` → sole project; unknown labels created on first use) |
+| `issues start [ref] [--no-branch]` | Claim + activate + branch: assign yourself, first active status, checkout `key-n-slug` |
+| `issues done [ref]` · `issues stop [ref]` | Finish (first done status) · put down gracefully (backlog, unassigned). Refs infer from the branch |
+| `issues inbox [--clear]` | Durable addressed-to-you: assignments, comments on your work, @mentions |
+| `issues ls [-p PROJ] [--mine] [--status S] [--label L] [--all]` | List rows from the catalog cache (`-p` is a pure filter) |
+| `issues board [PROJ]` | Render a project's board (positional optional, same chain as `new`) |
+| `issues show <ref>` | Full issue (lazily loads the issue doc) |
+| `issues edit <ref> [--title T] [--status S] [--priority P]` | Patch LWW fields (one activity row) |
+| `issues move <ref> [-p PROJ] [--top\|--bottom\|--before R\|--after R]` | Set project and/or board order |
+| `issues assign <ref> <who…> [--remove]` | Add/remove assignees |
+| `issues label <ref> [+LABEL…] [-LABEL…]` | Add/remove labels |
+| `issues comment [ref] [BODY]` | Append a comment. One arg on a KEY-n branch = the body (ref inferred); no BODY → stdin |
+| `issues delete <ref>` | Tombstone an issue (stays in history) |
+| `issues history <ref>` | The issue's derived activity feed |
 
 Registries + node:
 
 | Command | Description |
 |---|---|
 | `init [--name N] [--nick N]` | Found a space here (mints the genesis, seeds a first project) |
-| `spaces [ls \| forget <sel> \| prune]` | Every space on this machine: name, origin, status, path |
+| `orbits [ls \| forget <sel> \| prune]` | Every local Orbit: Space, origin, status, path |
 | `config [get \| set \| unset \| ls]` | Layered local settings (`user.nick`, `project.default`); store wins over global |
-| `projects [add KEY [NAME] \| ls]` | Manage the project registry (name defaults to the key) |
-| `labels [new <name> --color C \| ls]` | Manage the label registry |
+| `issues projects [add KEY [NAME] \| ls]` | Manage the project registry (name defaults to the key) |
+| `issues labels [new <name> --color C \| ls]` | Manage the label registry |
 | `members [add \| remove \| name \| rotate-key \| ls]` | Manage E2EE membership (signed ACL); `add` seals the key, `remove` rotates it, `name` sets a local label for a key |
-| `activity [--since N]` | Space-wide recent transitions |
+| `issues activity [--since N]` | Space-wide recent transitions |
 | `serve [--port N] [--open]` | Open your spaces in a browser (loopback-only) |
 | `status` · `id` · `shutdown` | Node/space status · endpoint id · stop the daemon |
 | `invite [--role R] [--reusable] [--ttl-hours N]` · `join <link> [--dir D]` | Invite a teammate; `join` creates the joiner's store (cwd or `--dir`) and accepting the invite admits them automatically with the invited role's exact capabilities |
 | `who` · `watch` | Peers online · follow the event stream |
 | `profiles` / `resume <name>` | List profiles / switch to a named profile (each a separate identity + store) |
 
-Global flags: `--home DIR`, `-w SEL` (target a space by name/id/path from any
-directory), `--json`, `--no-color`. Exit codes: `0` ok · `1` usage/error · `2` ref
-not found / ambiguous · `3` daemon unreachable.
+Global flags: `--home DIR`, `--orbit SEL` (target a local Orbit by
+name/id/path), `--json`, `--no-color`. Exit codes: `0` ok · `1` usage/error ·
+`2` ref not found / ambiguous · `3` daemon unreachable.
 
 ## Use from an AI agent (MCP)
 
@@ -323,11 +336,11 @@ Or add it to `.mcp.json` by hand:
 }
 ```
 
-Tools exposed: the full issue surface — `issue_new`, `issue_edit`,
-`issue_move`, `assign`, `label`, `comment`, `issue_delete`, `issue_view`, `list`,
-`board`, `history`, `project_new`, `project_list`, `label_new`, `label_list`,
-`activity`, `member_add`, `member_remove`, `key_rotate`, `members` — plus
-transport (`status`, `my_id`, `invite_ticket`, `join_room`, `connect`, `who`).
+Tools exposed: the full namespaced issue surface — `issues_new`, `issues_edit`,
+`issues_move`, `issues_assign`, `issues_label`, `issues_comment`,
+`issues_delete`, `issues_view`, `issues_list`, `issues_board`, history,
+projects, labels, roles, access, workflows and activity — plus shell-owned
+membership, diagnostics, identity, peer discovery and sync.
 Each returns the **same versioned JSON DTO** the CLI `--json` emits; a build-gate
 parity test keeps the agent and human surfaces in lock-step.
 

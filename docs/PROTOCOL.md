@@ -102,6 +102,13 @@ The signed acknowledgment binds the exact Hello and a responder nonce. Both
 sides bind the authenticated transport peer to the signed Station identity
 before accepting transfer material.
 
+A local process may share one concrete transport endpoint across several
+Spaces. Its identity hub uses the bounded opening Hello's declared Space only
+to select a Space-scoped inbound queue and replays the exact bytes unchanged.
+The receiving Contact state machine still performs canonical decoding and all
+signature, peer, protocol, responder, and Space checks; local demultiplexing is
+not authority and changes no wire bytes. Presence probes follow the same rule.
+
 The Contact protocol field is currently version 2. The ALPN and individual
 domain strings have their own versioning and must not be inferred from that
 field. A clean format break updates the affected bytes and fixtures atomically.
@@ -199,11 +206,85 @@ authorization.
 
 ## 10. Local control channel
 
-CLI, web, and MCP clients speak one typed local protocol to the per-Space daemon.
-A version handshake precedes requests. The production request classifier assigns
-every request exactly one terminal owner; there is no wildcard product fallback.
+CLI, web, and MCP clients enter one local protocol. A request carries an
+explicit bridge route:
 
-Product mutations and queries reach IssuesWorld through a docked Session.
+- `daemon` for the process-level catalog and daemon lifecycle;
+- `space { orbit, space }` for Mechanics, Station, observations, and lifecycle
+  through one local Orbit;
+- `world { orbit, space, world }` for product mutations and queries.
+
+`orbit` is a full, stable local identifier derived from the store binding;
+`space` is repeated as an expectation. Distinct local Orbits in the same Space
+therefore remain independently addressable, and a stale or confused binding
+fails before activation. A trusted client adapter validates the complete route
+against its `ClientScope`, the LaitDaemon resolves it through its own
+`OrbitDirectory`, and the receiving bridge independently validates its address.
+The allowed set is never accepted as a claim in the request.
+
+A missing route is accepted only by the historical per-home adapter: its socket
+identifies one Orbit and the uniquely claiming bundled World package is
+selected. An absent or ambiguous package claim rejects. The identity-scoped
+LaitDaemon endpoint requires an explicit route. A version handshake precedes
+requests. The production request classifier assigns every historical typed
+request exactly one terminal owner; there is no wildcard product fallback.
+
+The CLI calls its selector `--orbit` because it chooses the local durable
+participation used to reach a Space. Its parser fixes the terminal target in a
+`ClientAction` before resolving the selected Orbit. The route is therefore an
+output of command parsing plus local navigation, not an inference repeated by
+the daemon from product payload shape.
+
+The optional `if_running: true` envelope field is reserved for passive,
+explicitly Space-routed status, identity display, and configuration reload.
+LaitDaemon resolves and validates the complete Orbit address, then queries only
+an already-live compatibility adapter; it does not place a vacant Orbit. Other
+verbs and routes reject this mode. The field is omitted for ordinary dispatch,
+preserving the existing envelope shape.
+
+Protocol v5 sends product mutations and queries as:
+
+```text
+WorldClientRequest {
+  route: world { orbit, space, world },
+  act_as?,
+  call: WorldCall { world, operation, version, payload }
+}
+  -> WorldReply { world, operation, version, status, payload | error }
+```
+
+The route and call repeat the World identity and must agree. `payload` is
+bounded, unpadded URL-safe base64 on the JSON wire and opaque to the host. The
+registered product handler decodes it and derives query/command access; the
+client cannot grant itself read-only treatment with a wire flag. Replies repeat
+the exact `(world, operation, version)` tuple so a product codec cannot accept a
+reply for another contract.
+
+An owned Station receives the call directly through its in-process SpaceBridge.
+An attached SpaceBridge receives the identical opaque envelope through its
+per-Orbit socket. Protocol v5 retired the typed product-request path;
+protocol v6 removed product host projections from root `Request`/`Response`.
+Older processes are outside the compatibility window and must restart before
+attachment. The issue-tracker application emits
+`com.lait.issues` / `issues.control` v1; LaitDaemon does not infer or hardcode
+either value.
+
+Product client packages decode `WorldReply.payload`, own presentation for CLI
+and MCP, parse their explicit web route, and execute named local operations
+through generic host facilities. The browser sends Space control to
+`/api/spaces/{orbit}/rpc` and product input to
+`/api/spaces/{orbit}/worlds/{mount}/rpc`; there is no decode fallback between
+those namespaces. Root control treats World request and reply payloads as opaque
+and has no product response enum.
+
+Host capabilities may compose calls across the boundary. An Issues access
+grant first queries an `AccessPlan`, then submits its exact generic assignments
+to Space authority; inbox supplies a local watermark to an Issues query and
+advances it only after success. Root control never receives role, project, or
+product-response vocabulary.
+
+Product calls then reach the named World's registered handler, WorldBridge, and
+docked Session.
 Membership, devices, custody, and ceremonies reach Mechanics. Neighbor and
 Contact operations reach Station. Lifecycle operations reach Runtime/Orbit/
 Station. Clients never open Replica or Fabric directly.

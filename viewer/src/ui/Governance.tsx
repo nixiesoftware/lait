@@ -113,7 +113,7 @@ function Shell({
 }
 
 /** Multiple heads = concurrent edits nobody has resolved; edits are blocked
- *  until `workflow set --expect-head` (or the role equivalent) picks one. */
+ *  until `lait issues workflow set --expect-head` (or the role equivalent) picks one. */
 function ConflictNote({ heads, fix }: { heads: string[]; fix: string }) {
   if (heads.length === 0) return null;
   return (
@@ -164,7 +164,10 @@ export function WorkflowDialog({
       {!wf && !error && <p className="text-mute text-sm">Loading…</p>}
       {wf && (
         <>
-          <ConflictNote heads={wf.conflict_heads} fix="lait workflow set --expect-head …" />
+          <ConflictNote
+            heads={wf.conflict_heads}
+            fix="lait issues workflow set --expect-head …"
+          />
           {wf.revision && (
             <>
               <section>
@@ -209,7 +212,8 @@ export function WorkflowDialog({
               </section>
               <p className="text-mute text-xs">
                 Revision <code className="font-mono">{wf.revision.revision_id.slice(0, 12)}…</code>{" "}
-                — editable via <code className="font-mono">lait workflow set</code>.
+                — editable via{" "}
+                <code className="font-mono">lait issues workflow set</code>.
               </p>
             </>
           )}
@@ -259,7 +263,7 @@ export function RolesDialog({ spaceId, onClose }: { spaceId: string; onClose: ()
           {role.revision?.body.description && (
             <p className="text-dim mt-1 text-sm">{role.revision.body.description}</p>
           )}
-          <ConflictNote heads={role.conflict_heads} fix="lait role resolve …" />
+          <ConflictNote heads={role.conflict_heads} fix="lait issues role resolve …" />
           <ul className="mt-2 flex flex-wrap gap-1">
             {(role.revision?.body.capabilities ?? []).map((c) => (
               <li
@@ -274,7 +278,8 @@ export function RolesDialog({ spaceId, onClose }: { spaceId: string; onClose: ()
       ))}
       {roles && (
         <p className="text-mute text-xs">
-          Custom roles are managed via <code className="font-mono">lait role create/edit</code>.
+          Custom roles are managed via{" "}
+          <code className="font-mono">lait issues role create/edit</code>.
         </p>
       )}
     </Shell>

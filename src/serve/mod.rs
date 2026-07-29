@@ -9,10 +9,10 @@
 //!
 //! Two things follow, and they are the whole design:
 //!
-//! **This is a supervisor, not a client.** The control channel is keyed by home,
-//! so there is one daemon per space. A CLI invocation resolves exactly one store
-//! and talks to exactly one daemon; the browser is a picker over *all* of them,
-//! so it holds N. See [`spaces::Supervisor`].
+//! **This is a client of the host plane.** The browser is a picker over all
+//! registered Orbits. [`crate::daemon::OrbitDirectory`] supplies passive
+//! discovery; the identity-scoped Lait daemon owns lazy Station placement,
+//! routing, and doorbell fan-in.
 //!
 //! **The socket was the authentication.** Binding the same façade to a TCP port
 //! removes the OS permission check that made auth unnecessary, and adds a caller
@@ -49,8 +49,8 @@ use tokio_stream::wrappers::{errors::BroadcastStreamRecvError, BroadcastStream};
 use tokio_stream::StreamExt;
 
 use crate::control::{ErrorKind, Request};
+use crate::daemon::{LaitDaemonClient, OrbitDirectory, OrbitDoorbell, StationIdentity};
 use auth::{Guard, Refusal};
-use spaces::Supervisor;
 
 /// The default port. Fixed rather than ephemeral so the URL is predictable and
 /// the `Origin` allowlist has something stable to name; a collision is reported
@@ -73,8 +73,16 @@ fn cookie_name(port: u16) -> String {
 
 struct App {
     guard: Guard,
-    sup: Supervisor,
+    directory: OrbitDirectory,
+    daemon: LaitDaemonClient,
+    doorbells: tokio::sync::broadcast::Sender<ViewerEvent>,
     cookie: String,
+}
+
+#[derive(Clone)]
+enum ViewerEvent {
+    Doorbell(OrbitDoorbell),
+    Lagged,
 }
 
 /// Run the local server until interrupted.
@@ -92,8 +100,8 @@ struct App {
 /// The line is emitted **before** the server starts accepting, so a parent process
 /// can read one line and know it is safe to connect.
 pub async fn run(port: u16, open: bool, json: bool) -> Result<()> {
-    // Identity scoping, resolved once at startup — see `spaces::scope` for why
-    // `$LAIT_HOME` is the axis that matters.
+    // Identity scoping, resolved once at startup. OrbitDirectory uses
+    // `$LAIT_HOME` as the self-contained identity boundary.
     let identity = crate::config::identity_dir()?;
     let self_contained = std::env::var_os("LAIT_HOME").is_some();
     let agents_base = crate::registry::agents_base(&crate::config::config_root()?);
@@ -109,11 +117,19 @@ pub async fn run(port: u16, open: bool, json: bool) -> Result<()> {
     let bound = listener.local_addr().context("read bound address")?;
 
     let token = mint_token();
+    crate::cli::ensure_lait_daemon()
+        .await
+        .context("start Lait daemon")?;
+    let daemon = LaitDaemonClient::current()?;
+    let (doorbells, _) = tokio::sync::broadcast::channel(256);
     let app = Arc::new(App {
         guard: Guard::new(token.clone(), bound.port()),
-        sup: Supervisor::new(identity, agents_base, self_contained),
+        directory: OrbitDirectory::new(identity, agents_base, self_contained),
+        daemon: daemon.clone(),
+        doorbells: doorbells.clone(),
         cookie: cookie_name(bound.port()),
     });
+    let event_pump = tokio::spawn(pump_daemon_events(daemon, doorbells));
 
     let url = format!("http://127.0.0.1:{}/?token={}", bound.port(), token);
     if json {
@@ -133,8 +149,70 @@ pub async fn run(port: u16, open: bool, json: bool) -> Result<()> {
         open_browser(&url);
     }
 
-    axum::serve(listener, router(app)).await.context("serve")?;
-    Ok(())
+    let serve_result = axum::serve(listener, router(app))
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+        .context("serve");
+    event_pump.abort();
+    let _ = event_pump.await;
+    serve_result
+}
+
+async fn pump_daemon_events(
+    daemon: LaitDaemonClient,
+    doorbells: tokio::sync::broadcast::Sender<ViewerEvent>,
+) {
+    loop {
+        match daemon.subscribe_catalog().await {
+            Ok(mut subscription) => loop {
+                match subscription.next().await {
+                    Ok(Some(doorbell)) => {
+                        let _ = doorbells.send(ViewerEvent::Doorbell(doorbell));
+                    }
+                    Ok(None) => {
+                        let _ = doorbells.send(ViewerEvent::Lagged);
+                        break;
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "Lait daemon event stream ended");
+                        let _ = doorbells.send(ViewerEvent::Lagged);
+                        break;
+                    }
+                }
+            },
+            Err(error) => {
+                tracing::debug!(%error, "Lait daemon event endpoint is unavailable");
+                let _ = doorbells.send(ViewerEvent::Lagged);
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+}
+
+/// Stop the viewer adapter without stopping the independently owned Lait daemon.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    {
+        let terminate = async {
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("install SIGTERM handler")
+                .recv()
+                .await;
+        };
+        tokio::select! {
+            _ = ctrl_c => {}
+            _ = terminate => {}
+        }
+    }
+
+    #[cfg(not(unix))]
+    ctrl_c.await;
 }
 
 fn router(app: Arc<App>) -> Router {
@@ -142,6 +220,7 @@ fn router(app: Arc<App>) -> Router {
         .route("/", get(index))
         .route("/api/spaces", get(list_spaces))
         .route("/api/spaces/{id}/rpc", post(rpc))
+        .route("/api/spaces/{id}/worlds/{world}/rpc", post(world_rpc))
         .route("/api/events", get(events))
         // Everything else is the client: a real asset, or the SPA entry so the
         // app can resolve its own routes. Registered last so it can never shadow
@@ -271,7 +350,10 @@ async fn static_asset(uri: axum::http::Uri) -> Response {
 }
 
 async fn list_spaces(State(app): State<Arc<App>>) -> Response {
-    Json(serde_json::json!({ "spaces": app.sup.list().await })).into_response()
+    Json(serde_json::json!({
+        "spaces": spaces::list(&app.directory, &app.daemon).await
+    }))
+    .into_response()
 }
 
 #[derive(Deserialize)]
@@ -282,14 +364,13 @@ struct RpcQuery {
     confirm: bool,
 }
 
-/// The control plane, verbatim: `POST /api/spaces/{id}/rpc` with a [`Request`],
-/// back a [`crate::control::Response`].
+/// Browser adapters use disjoint routes: generic Space control enters
+/// `POST /api/spaces/{id}/rpc`, while a package-owned protocol enters
+/// `POST /api/spaces/{id}/worlds/{world}/rpc`.
 ///
-/// One endpoint rather than a REST surface, because the REST surface would be a
-/// second, hand-maintained projection of a façade that is *already* the stable,
-/// versioned, hand-maintained projection. Two separate projections drift; the viewer
-/// branch is the proof — it still calls `projects new --key`, a shape that stopped
-/// existing. This cannot drift: it is the same enum the CLI and MCP send.
+/// One endpoint avoids a second REST projection. Product requests are decoded
+/// by the product package and sent as opaque World calls; Space requests remain
+/// on the host control protocol.
 ///
 /// Selecting a space is what attaches its daemon, so this is also the first point
 /// at which anything is started.
@@ -303,7 +384,7 @@ struct RpcQuery {
 ///    agent's name in the message. Reads through an agent's daemon are exactly the
 ///    observability they were scoped in for; a *write* would be signed by the agent
 ///    and land under its name. If you are a member of that space, write through
-///    your own node and sign as yourself — see [`spaces::scope`].
+///    your own node and sign as yourself.
 /// 3. **Destructive verbs keep the CLI's question.** `confirm_destructive` is a TTY
 ///    affordance: it refuses under `--json` because a pipe cannot be asked. A browser
 ///    can — it has a modal — so rather than bypass the gate or inherit the pipe's
@@ -314,12 +395,134 @@ struct RpcQuery {
 /// Gate 3 protects against an *accident*, not an attacker: anything that can POST
 /// `delete` can also POST `?confirm=1`. That is the same guarantee the CLI's prompt
 /// gives, and it is worth being honest that it is the whole of it.
+async fn world_rpc(
+    State(app): State<Arc<App>>,
+    Path((id, world)): Path<(String, String)>,
+    Query(q): Query<RpcQuery>,
+    Json(input): Json<serde_json::Value>,
+) -> Response {
+    let resolved = match app.directory.resolve(&id) {
+        Ok(resolved) => resolved,
+        Err(error) => {
+            return (
+                StatusCode::NOT_FOUND,
+                err_json(&error.to_string(), ErrorKind::NotFound),
+            )
+                .into_response();
+        }
+    };
+    let registry = crate::world::client_packages();
+    let package = registry.package_for_mount(&world).or_else(|| {
+        replica::ids::WorldId::parse(&world).and_then(|world| registry.package_for_world(&world))
+    });
+    let Some(package) = package.cloned() else {
+        return (
+            StatusCode::NOT_FOUND,
+            err_json(
+                &format!("no client package is mounted for World '{world}'"),
+                ErrorKind::NotFound,
+            ),
+        )
+            .into_response();
+    };
+    let invocation = match package.parse_web(input) {
+        Ok(invocation) => invocation,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                err_json(&error.to_string(), ErrorKind::Error),
+            )
+                .into_response();
+        }
+    };
+    if let StationIdentity::Agent { name } = &resolved.identity {
+        if invocation.access() != world_interface::ClientAccess::Query {
+            return (
+                StatusCode::FORBIDDEN,
+                err_json(
+                    &format!(
+                        "{name}'s space is read-only here — a write would be signed as {name}. \
+                         Open the same space through your own node to write as yourself."
+                    ),
+                    ErrorKind::Error,
+                ),
+            )
+                .into_response();
+        }
+    }
+    let scope = crate::daemon::ClientScope::pinned(resolved.address.orbit.clone());
+    let host = crate::cli::PackageClientHost::new(&resolved.home, scope, None);
+    if !q.confirm {
+        // The same package-resolved question the CLI prompts with, so the modal
+        // and the terminal cannot describe the same danger differently.
+        match package.confirmation(&host, &invocation).await {
+            Ok(Some(question)) => {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(serde_json::json!({
+                        "kind": "confirm_required",
+                        "question": question,
+                    })),
+                )
+                    .into_response();
+            }
+            Ok(None) => {}
+            Err(error) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    err_json(&error.to_string(), ErrorKind::Error),
+                )
+                    .into_response();
+            }
+        }
+    }
+    match package
+        .execute(
+            &host,
+            invocation,
+            world_interface::PresentationOptions {
+                json: true,
+                color: false,
+            },
+        )
+        .await
+    {
+        Ok(output) => Json(output.value).into_response(),
+        Err(error) => (
+            StatusCode::BAD_REQUEST,
+            err_json(&error.to_string(), ErrorKind::Error),
+        )
+            .into_response(),
+    }
+}
+
 async fn rpc(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,
     Query(q): Query<RpcQuery>,
-    Json(req): Json<Request>,
+    Json(input): Json<serde_json::Value>,
 ) -> Response {
+    let resolved = match app.directory.resolve(&id) {
+        Ok(resolved) => resolved,
+        Err(e) => {
+            return (
+                StatusCode::NOT_FOUND,
+                err_json(&e.to_string(), ErrorKind::NotFound),
+            )
+                .into_response()
+        }
+    };
+
+    let req = match serde_json::from_value::<Request>(input) {
+        Ok(request) => request,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                err_json(&format!("bad request: {error}"), ErrorKind::Error),
+            )
+                .into_response();
+        }
+    };
     if matches!(req, Request::Subscribe { .. }) {
         return (
             StatusCode::BAD_REQUEST,
@@ -331,18 +534,7 @@ async fn rpc(
             .into_response();
     }
 
-    let identity = match app.sup.resolve(&id) {
-        Ok((_, identity)) => identity,
-        Err(e) => {
-            return (
-                StatusCode::NOT_FOUND,
-                err_json(&e.to_string(), ErrorKind::NotFound),
-            )
-                .into_response()
-        }
-    };
-
-    if let spaces::SpaceIdentity::Agent { name } = &identity {
+    if let StationIdentity::Agent { name } = &resolved.identity {
         if !policy::is_read(&req) {
             return (
                 StatusCode::FORBIDDEN,
@@ -371,7 +563,15 @@ async fn rpc(
         }
     }
 
-    match app.sup.request(&id, &req).await {
+    let route = crate::control::station_route(resolved.address);
+    if let Err(error) = crate::cli::ensure_lait_daemon().await {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            err_json(&error.to_string(), ErrorKind::Error),
+        )
+            .into_response();
+    }
+    match app.daemon.request(route, &req, None).await {
         Ok(resp) => Json(resp).into_response(),
         Err(e) => (
             StatusCode::BAD_REQUEST,
@@ -391,12 +591,13 @@ async fn rpc(
 async fn events(
     State(app): State<Arc<App>>,
 ) -> Sse<impl tokio_stream::Stream<Item = Result<Event, std::convert::Infallible>>> {
-    let stream = BroadcastStream::new(app.sup.subscribe()).map(|r| {
+    let stream = BroadcastStream::new(app.doorbells.subscribe()).map(|r| {
         Ok(match r {
-            Ok(sd) => Event::default()
+            Ok(ViewerEvent::Doorbell(sd)) => Event::default()
                 .event("doorbell")
                 .json_data(sd)
                 .unwrap_or_else(|_| Event::default().event("lagged").data("encode")),
+            Ok(ViewerEvent::Lagged) => Event::default().event("lagged").data("daemon"),
             Err(BroadcastStreamRecvError::Lagged(n)) => {
                 Event::default().event("lagged").data(n.to_string())
             }
@@ -431,7 +632,7 @@ mod tests {
     use axum::http::Request as HttpRequest;
     use tower::ServiceExt;
 
-    /// The real router, over a supervisor scoped to a directory with no spaces.
+    /// The real HTTP router, over an Orbit directory with no spaces.
     ///
     /// Every case below is refused (or served) by `gate` and the embedded-asset
     /// fallback, neither of which touches a daemon or the registry — so these run
@@ -440,7 +641,9 @@ mod tests {
         let nowhere = std::path::PathBuf::from("/nonexistent-for-tests");
         router(Arc::new(App {
             guard: Guard::new(token.into(), 7717),
-            sup: Supervisor::new(nowhere.clone(), nowhere, true),
+            directory: OrbitDirectory::new(nowhere.clone(), nowhere.clone(), true),
+            daemon: LaitDaemonClient::at(nowhere),
+            doorbells: tokio::sync::broadcast::channel(1).0,
             cookie: cookie_name(7717),
         }))
     }

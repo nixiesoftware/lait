@@ -1,4 +1,4 @@
-//! IssuesWorld workflow definitions — deterministic assembly lines (plan 04).
+//! IssuesWorld workflow definitions: deterministic assembly lines (plan 04).
 //!
 //! A workflow revision is `WorkflowRevision { revision_id, predecessor_ids,
 //! body }` with `body = { project_id, name, states, transitions, tombstone }`

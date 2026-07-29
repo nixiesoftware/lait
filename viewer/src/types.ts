@@ -405,9 +405,9 @@ export interface RecoveryStatus {
     | { state: "unreadable"; detail: RecoveryArtifactFailure };
 }
 
-// ---- the supervisor surface (serve-level, not control-plane) ----------------
+// ---- the Orbit directory projection (serve-level, not control-plane) --------
 
-/** Whose key a space's daemon signs with (`serve::spaces::SpaceIdentity`). */
+/** Whose key a placed Station signs with (`daemon::StationIdentity`). */
 export type SpaceIdentity = { kind: "own" } | { kind: "agent"; name: string };
 
 export interface ProjectBrief {
@@ -526,7 +526,8 @@ export interface Filter {
 }
 
 /**
- * `control.rs` `Request`, internally tagged by `cmd`.
+ * The installed Issues application protocol plus the browser-safe root control
+ * requests, internally tagged by `cmd`.
  *
  * Field names are the Rust ones, verbatim — several are *not* what the CLI flag
  * suggests, and guessing them is how the old viewer broke. The ones that bite:
@@ -634,6 +635,30 @@ export type Request =
   | { cmd: "seed_list" }
   | { cmd: "log"; since: number }
   | { cmd: "who" };
+
+export type SpaceRequest = Extract<
+  Request,
+  {
+    cmd:
+      | "member_add"
+      | "member_remove"
+      | "key_rotate"
+      | "members"
+      | "member_log"
+      | "member_alias"
+      | "status"
+      | "diagnose"
+      | "id"
+      | "invite"
+      | "invite_revoke"
+      | "join"
+      | "seed_list"
+      | "log"
+      | "who";
+  }
+>;
+
+export type WorldRequest = Exclude<Request, SpaceRequest>;
 
 /**
  * `control.rs` `Response`, internally tagged by `kind`.

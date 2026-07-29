@@ -1,9 +1,9 @@
 //! End-to-end tests for control-plane dirty notifications and `Reset`
-//! recovery, driven through the **orbital daemon** over its real IPC control
+//! recovery, driven through a process-backed **SpaceBridge** over its real IPC control
 //! socket with an in-memory transport (no network sockets). See
 //! `docs/PROTOCOL.md`.
 //!
-//! Formation is `orbital::form_space` (the `lait init` heir); the orbital daemon
+//! Formation is `orbital::form_space` (the `lait init` heir); the SpaceBridge
 //! then serves `control::Request`/`Response` — including the `Subscribe`
 //! doorbell stream sourced from the Station's `ObservationStream` — exactly as
 //! the CLI/serve/MCP clients speak it. Two behaviors are proven: a wildly stale
@@ -18,9 +18,14 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use async_trait::async_trait;
-use lait::control::{request, subscribe, CatalogScope, Request, Response};
+use issues_app::IssuesResponse as IssueResponse;
+use lait::control::{
+    request, request_routed, subscribe, CatalogScope, ControlRoute, Request, Response,
+};
+use lait::daemon::OrbitAddress;
+use lait::ids::SpaceId;
 use lait::net::Network;
-use lait::orbital::run_orbital_daemon_with;
+use lait::orbital::run_space_bridge_with;
 use lait::transport::mem::MemNet;
 use lait::transport::{Alpn, Transport, TransportFactory};
 
@@ -57,6 +62,33 @@ fn req(rt: &tokio::runtime::Runtime, home: &Path, r: Request) -> Response {
         .unwrap_or_else(|e| Response::err(format!("{e:#}")))
 }
 
+async fn issues_request(home: &Path, request: issues_app::IssuesRequest) -> Result<IssueResponse> {
+    let space = lait::orbital::discover_space_id(home).expect("test Space");
+    let call = issues_app::encode_call(&request)?;
+    let reply = lait::control::call_world(
+        home,
+        ControlRoute::World {
+            address: OrbitAddress::for_store(home, space),
+            world: call.world().as_str().to_string(),
+        },
+        call.clone(),
+        None,
+    )
+    .await?;
+    Ok(serde_json::from_value(issues_app::decode_reply(
+        &call, reply,
+    )?)?)
+}
+
+fn issue_req(
+    rt: &tokio::runtime::Runtime,
+    home: &Path,
+    request: issues_app::IssuesRequest,
+) -> IssueResponse {
+    rt.block_on(issues_request(home, request))
+        .unwrap_or_else(|error| IssueResponse::err(format!("{error:#}")))
+}
+
 /// The docs a frame names under a project KEY, in frame order.
 fn named_docs(frame: &lait::control::Doorbell, key: &str) -> Vec<String> {
     frame
@@ -84,7 +116,7 @@ fn spawn_daemon(home: PathBuf, seed: [u8; 32], net: MemNet) -> std::thread::Join
     std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async move {
-            if let Err(e) = run_orbital_daemon_with(home, seed, &MemFactory(net)).await {
+            if let Err(e) = run_space_bridge_with(home, seed, &MemFactory(net)).await {
                 eprintln!("DAEMON ERR: {e:#}");
             }
         });
@@ -97,31 +129,158 @@ fn wait_online(rt: &tokio::runtime::Runtime, home: &Path) {
     });
     assert!(
         online.is_some(),
-        "orbital daemon at {} never came online",
+        "SpaceBridge at {} never came online",
         home.display()
     );
+}
+
+#[test]
+fn explicit_routes_cannot_cross_space_or_world_boundaries() {
+    let net = MemNet::new();
+    let home = temp_home("routes");
+    lait::orbital::form_space(&home, &FOUNDER_SEED, "Route Space").unwrap();
+    let space = lait::orbital::discover_space_id(&home).unwrap();
+    let address = OrbitAddress::for_store(&home, space.clone());
+    let handle = spawn_daemon(home.clone(), FOUNDER_SEED, net);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    wait_online(&rt, &home);
+
+    let response = rt
+        .block_on(request_routed(
+            &home,
+            &Request::Status,
+            ControlRoute::Space {
+                address: address.clone(),
+            },
+        ))
+        .unwrap();
+    assert!(matches!(response, Response::Status(_)));
+
+    let wrong_space = rt
+        .block_on(request_routed(
+            &home,
+            &Request::Status,
+            ControlRoute::Space {
+                address: OrbitAddress {
+                    orbit: address.orbit.clone(),
+                    space: SpaceId::from_digest([0xEE; 16]),
+                },
+            },
+        ))
+        .unwrap();
+    assert!(matches!(
+        wrong_space,
+        Response::Error { message, .. } if message.contains("this bridge owns")
+    ));
+
+    let wrong_orbit = rt
+        .block_on(request_routed(
+            &home,
+            &Request::Status,
+            ControlRoute::Space {
+                address: OrbitAddress::for_store(&home.with_extension("sibling"), space.clone()),
+            },
+        ))
+        .unwrap();
+    assert!(matches!(
+        wrong_orbit,
+        Response::Error { message, .. } if message.contains("this bridge occupies")
+    ));
+
+    let files_call = lait::orbital::WorldCall::new(
+        replica::ids::WorldId::parse("com.example.files").unwrap(),
+        "files.list",
+        1,
+        Vec::new(),
+    )
+    .unwrap();
+    let missing_world = rt
+        .block_on(lait::control::call_world(
+            &home,
+            ControlRoute::World {
+                address: address.clone(),
+                world: "com.example.files".into(),
+            },
+            files_call,
+            None,
+        ))
+        .unwrap();
+    assert!(matches!(
+        missing_world.into_result(),
+        Err(error) if error.message.contains("is not enabled")
+    ));
+
+    let issues_call = issues_app::encode_call(&issues_app::IssuesRequest::ProjectList).unwrap();
+    let wrong_level = rt
+        .block_on(lait::control::call_world(
+            &home,
+            ControlRoute::Space {
+                address: address.clone(),
+            },
+            issues_call,
+            None,
+        ))
+        .unwrap();
+    assert!(matches!(
+        wrong_level.into_result(),
+        Err(error) if error.message.contains("requires an explicit World route")
+    ));
+
+    let rejected_stop = rt
+        .block_on(request_routed(
+            &home,
+            &Request::Stop,
+            ControlRoute::Space {
+                address: OrbitAddress {
+                    orbit: address.orbit.clone(),
+                    space: SpaceId::from_digest([0xEF; 16]),
+                },
+            },
+        ))
+        .unwrap();
+    assert!(matches!(
+        rejected_stop,
+        Response::Error { message, .. } if message.contains("this bridge owns")
+    ));
+    let still_online = rt
+        .block_on(request_routed(
+            &home,
+            &Request::Status,
+            ControlRoute::Space { address },
+        ))
+        .unwrap();
+    assert!(
+        matches!(still_online, Response::Status(_)),
+        "a rejected Stop must leave the addressed SpaceBridge online"
+    );
+
+    rt.block_on(async {
+        let _ = request(&home, &Request::Stop).await;
+    });
+    let _ = handle.join();
+    let _ = std::fs::remove_dir_all(&home);
 }
 
 /// Seed a project + one issue and return the issue's canonical ref (e.g.
 /// `ENG-1`). Exercises the World submit path that feeds the doorbell.
 fn seed_project_and_issue(rt: &tokio::runtime::Runtime, home: &Path) -> String {
-    let resp = req(
+    let resp = issue_req(
         rt,
         home,
-        Request::ProjectNew {
+        issues_app::IssuesRequest::ProjectNew {
             name: "Eng".into(),
             key: "ENG".into(),
             color: None,
         },
     );
     assert!(
-        matches!(resp, Response::Ref { .. }),
+        matches!(resp, IssueResponse::Ref { .. }),
         "projects new should echo a Ref, got {resp:?}"
     );
-    let resp = req(
+    let resp = issue_req(
         rt,
         home,
-        Request::IssueNew {
+        issues_app::IssuesRequest::IssueNew {
             due: None,
             estimate: None,
             title: "t1".into(),
@@ -134,7 +293,7 @@ fn seed_project_and_issue(rt: &tokio::runtime::Runtime, home: &Path) -> String {
         },
     );
     match resp {
-        Response::Ref { reff } => reff,
+        IssueResponse::Ref { reff } => reff,
         other => panic!("issue new should echo a Ref, got {other:?}"),
     }
 }
@@ -172,9 +331,9 @@ fn stale_since_after_restart_yields_reset() {
         );
 
         // A live edit rings a real doorbell: non-reset, advancing activity.
-        let resp = request(
+        let resp = issues_request(
             &home,
-            &Request::IssueEdit {
+            issues_app::IssuesRequest::IssueEdit {
                 due: None,
                 estimate: None,
                 reff: reff.clone(),
@@ -187,7 +346,7 @@ fn stale_since_after_restart_yields_reset() {
         .await
         .expect("issue edit");
         assert!(
-            matches!(resp, Response::Ref { .. }),
+            matches!(resp, IssueResponse::Ref { .. }),
             "valid edit should echo a Ref, got {resp:?}"
         );
 
@@ -235,17 +394,17 @@ fn doorbell_names_the_dirty_project_and_doc() {
     wait_online(&rt, &home);
 
     let reff = seed_project_and_issue(&rt, &home);
-    let doc = match req(
+    let doc = match issue_req(
         &rt,
         &home,
-        Request::List {
+        issues_app::IssuesRequest::List {
             project: None,
             filter: Default::default(),
         },
     ) {
         // The only row there is — `reff` may be the `ENG-1` alias rather than the
         // canonical handle the row carries, so match on the seeding, not the text.
-        Response::List { rows } => match rows.as_slice() {
+        IssueResponse::List { rows } => match rows.as_slice() {
             [row] => row.doc_id.as_str().to_string(),
             other => panic!("expected exactly the seeded issue, got {other:?}"),
         },
@@ -262,9 +421,9 @@ fn doorbell_names_the_dirty_project_and_doc() {
         assert!(first.reset, "first Subscribe frame must be a Reset");
 
         // A field edit: one issue Body, no catalog plane.
-        request(
+        issues_request(
             &home,
-            &Request::IssueEdit {
+            issues_app::IssuesRequest::IssueEdit {
                 due: None,
                 estimate: None,
                 reff: reff.clone(),
@@ -294,9 +453,9 @@ fn doorbell_names_the_dirty_project_and_doc() {
         );
 
         // A create: a new issue Body *and* the catalog (aliases, seqs, board).
-        let created = match request(
+        let created = match issues_request(
             &home,
-            &Request::IssueNew {
+            issues_app::IssuesRequest::IssueNew {
                 due: None,
                 estimate: None,
                 title: "t2".into(),
@@ -311,7 +470,7 @@ fn doorbell_names_the_dirty_project_and_doc() {
         .await
         .expect("issue new")
         {
-            Response::Ref { reff } => reff,
+            IssueResponse::Ref { reff } => reff,
             other => panic!("issue new should echo a Ref, got {other:?}"),
         };
 
@@ -396,9 +555,9 @@ fn every_subscriber_sees_the_same_frame_for_one_commit() {
             assert!(first.reset, "{who}'s first frame must be a Reset");
         }
 
-        request(
+        issues_request(
             &home,
-            &Request::IssueEdit {
+            issues_app::IssuesRequest::IssueEdit {
                 due: None,
                 estimate: None,
                 reff: reff.clone(),
@@ -459,9 +618,9 @@ fn validate_then_commit_rings_no_doorbell() {
         assert!(first.reset, "first Subscribe frame must be a Reset");
 
         // An invalid status is rejected pre-commit.
-        let resp = request(
+        let resp = issues_request(
             &home,
-            &Request::IssueEdit {
+            issues_app::IssuesRequest::IssueEdit {
                 due: None,
                 estimate: None,
                 reff: reff.clone(),
@@ -474,7 +633,7 @@ fn validate_then_commit_rings_no_doorbell() {
         .await
         .expect("issue edit request round-trips");
         assert!(
-            matches!(resp, Response::Error { .. }),
+            matches!(resp, IssueResponse::Error { .. }),
             "an invalid status must be rejected, got {resp:?}"
         );
 

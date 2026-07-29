@@ -1,21 +1,26 @@
-//! The product control-surface router (C4.3 / C5 step 5 routing).
+//! The Issues application router (C4.3 / C5 step 5 routing).
 //!
-//! `IssueRouter` maps the product's issue-family [`control::Request`] onto the
-//! [`IssuesWorld`] adapter through a docked [`runtime::Session`]: it resolves
+//! `IssueRouter` maps the product's [`IssuesRequest`] onto the semantic
+//! [`issues::IssuesWorld`] through a docked [`runtime::Session`]: it resolves
 //! refs/projects/labels and chooses the project from the World's `Snapshot`
 //! query, mints ids and stamps timestamps (the World is pure), submits the
-//! mapped intent, and renders the mapped [`control::Response`] from the World's
-//! projection. This is the seam the daemon routes every application request
-//! through; membership/transport requests stay on the mechanics/Contact planes.
+//! mapped intent, and returns the product-owned [`IssuesResponse`] projection.
+//! The host supplies only the docked Session and principal facts.
 
+use issues::contract::{self, IssueIntent, IssueQuery, NewLabel, Pos, WorkAction};
+use issues::dto::{BoardView, GraphView, IssueView, LabelDto, ProjectDto, Row};
+use issues::ids::{DocId, LabelId, ProjectId, SystemUlidSource, UlidSource};
 use runtime::{RequestId, Session, WorldError, WorldIntent, WorldQuery};
 use serde::de::DeserializeOwned;
+use world_bridge::{
+    WorldCall, WorldCallAccess, WorldCallContext, WorldCallError, WorldCallErrorCode,
+    WorldCallHandler, WorldReply,
+};
 
-use crate::control::{BoardPos, Request, Response};
-use crate::dto::{BoardView, GraphView, IssueView, LabelDto, ProjectDto, Row};
-use crate::ids::{DocId, LabelId, ProjectId, SystemUlidSource, UlidSource};
-
-use super::contract::{self, IssueIntent, IssueQuery, NewLabel, Pos, WorkAction};
+use crate::{
+    decode_call, encode_reply, BoardPos, IssuesRequest as Request, IssuesResponse as Response,
+    OPERATION, VERSION,
+};
 
 /// The daemon facts the router needs per request: who is acting and the
 /// project-choice inputs. (Membership/standing itself is enforced by the
@@ -31,6 +36,80 @@ pub struct RouterFacts {
     pub default_project: Option<String>,
     /// Unix seconds now.
     pub now: u64,
+}
+
+/// IssuesWorld's application execution half.
+///
+/// The semantic [`issues::IssuesWorld`] remains a pure Runtime World. This
+/// adapter owns user-facing request resolution, local id/time minting, retry
+/// policy, and response construction. A host registers this handler beside the
+/// semantic World without learning the product protocol.
+#[derive(Debug, Default)]
+pub struct IssuesCallHandler;
+
+impl IssuesCallHandler {
+    pub const OPERATION: &'static str = OPERATION;
+    pub const VERSION: u32 = VERSION;
+
+    fn decode_request(call: &WorldCall) -> Result<Request, WorldCallError> {
+        decode_call(call)
+    }
+
+    fn route_request(&self, request: Request, context: &WorldCallContext<'_>) -> Response {
+        static CLOCK: std::sync::OnceLock<SystemUlidSource> = std::sync::OnceLock::new();
+
+        let router = IssueRouter::new(
+            context.session,
+            context.identity,
+            CLOCK.get_or_init(|| SystemUlidSource),
+        );
+        let facts = RouterFacts {
+            device: context.device.to_string(),
+            actor: context.actor.to_string(),
+            project_hint: std::env::var("LAIT_PROJECT_HINT").ok(),
+            default_project: None,
+            now: std::time::SystemTime::now()
+                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                .map(|duration| duration.as_secs())
+                .unwrap_or(0),
+        };
+        for _ in 0..=3 {
+            let response = router.route(request.clone(), &facts).0;
+            if !matches!(
+                &response,
+                Response::Error {
+                    error_kind: crate::IssuesErrorKind::Retry,
+                    ..
+                }
+            ) {
+                return response;
+            }
+        }
+        Response::retry("membership changed repeatedly — retry the request")
+    }
+}
+
+impl WorldCallHandler for IssuesCallHandler {
+    fn access(&self, call: &WorldCall) -> Result<WorldCallAccess, WorldCallError> {
+        let request = Self::decode_request(call)?;
+        Ok(request.access())
+    }
+
+    fn call(&self, call: &WorldCall, context: &WorldCallContext<'_>) -> WorldReply {
+        let request = match Self::decode_request(call) {
+            Ok(request) => request,
+            Err(error) => return WorldReply::error(call, error.code, error.message),
+        };
+        let response = self.route_request(request, context);
+        match serde_json::to_value(response) {
+            Ok(response) => encode_reply(call, &response),
+            Err(error) => WorldReply::error(
+                call,
+                WorldCallErrorCode::Internal,
+                format!("encode Issues response: {error}"),
+            ),
+        }
+    }
 }
 
 /// The decoded catalog snapshot the router resolves against.
@@ -227,7 +306,7 @@ impl<'a> IssueRouter<'a> {
         }
     }
 
-    fn submit(&self, intent: &IssueIntent) -> Result<super::contract::IssueEffect, WorldError> {
+    fn submit(&self, intent: &IssueIntent) -> Result<contract::IssueEffect, WorldError> {
         let action = self.identity.sign_action(
             self.session,
             RequestId::mint(),
@@ -239,12 +318,10 @@ impl<'a> IssueRouter<'a> {
         )?;
         let committed = self.session.submit(action)?;
         Ok(
-            super::contract::IssueEffect::from_json(&committed.effect).unwrap_or(
-                super::contract::IssueEffect {
-                    doc: None,
-                    unchanged: false,
-                },
-            ),
+            contract::IssueEffect::from_json(&committed.effect).unwrap_or(contract::IssueEffect {
+                doc: None,
+                unchanged: false,
+            }),
         )
     }
 
@@ -355,7 +432,7 @@ impl<'a> IssueRouter<'a> {
                 Response::err("unsupported request")
             }
             WorldError::LimitExceeded => Response::err("request exceeds a limit"),
-            WorldError::AuthorityChanged => Response::err("membership changed — retry"),
+            WorldError::AuthorityChanged => Response::retry("membership changed — retry"),
             WorldError::StationDormant => Response::err("the space is shutting down"),
             WorldError::Persistence | WorldError::WorldPanicked => Response::err("internal error"),
             WorldError::ResetRequired => Response::err("state reset — re-query"),
@@ -371,7 +448,9 @@ impl<'a> IssueRouter<'a> {
     pub fn handles(req: &Request) -> bool {
         matches!(
             req,
-            Request::IssueNew { .. }
+            Request::Inbox { .. }
+                | Request::AccessPlan { .. }
+                | Request::IssueNew { .. }
                 | Request::IssueEdit { .. }
                 | Request::IssueMove { .. }
                 | Request::Assign { .. }
@@ -445,6 +524,32 @@ impl<'a> IssueRouter<'a> {
     fn route_inner(&self, req: Request, facts: &RouterFacts) -> Result<(Response, bool), Response> {
         let snapshot = self.snapshot();
         match req {
+            Request::Inbox { watermark } => {
+                let projection =
+                    crate::projections::inbox(self.session, &facts.actor, &facts.device, watermark);
+                Ok((
+                    Response::Inbox {
+                        entries: projection.entries,
+                        unread: projection.unread,
+                    },
+                    false,
+                ))
+            }
+            Request::AccessPlan { role, project } => {
+                let plan = crate::host::plan_access_grant(self.session, &role, project.as_deref())
+                    .map_err(|error| match error {
+                        crate::host::AccessPlanError::NotFound(message) => {
+                            Response::not_found(message)
+                        }
+                        crate::host::AccessPlanError::Invalid(message) => Response::err(message),
+                    })?;
+                Ok((
+                    Response::AccessPlan {
+                        assignments: plan.assignments,
+                    },
+                    false,
+                ))
+            }
             Request::IssueNew {
                 title,
                 project,
@@ -612,7 +717,7 @@ impl<'a> IssueRouter<'a> {
                     body,
                     // The adapter mints the id (lowercase — it doubles as a
                     // Body path segment); the World re-validates it.
-                    id: Some(crate::ids::mint_comment_id(self.clock)),
+                    id: Some(issues::ids::mint_comment_id(self.clock)),
                     parent: reply_to,
                     actor: facts.actor.clone(),
                     device: facts.device.clone(),
@@ -774,7 +879,7 @@ impl<'a> IssueRouter<'a> {
                 let doc = self.resolve(&snapshot, &reff)?;
                 #[derive(serde::Deserialize)]
                 struct Hist {
-                    events: Vec<crate::dto::ActivityEvent>,
+                    events: Vec<issues::dto::ActivityEvent>,
                     last: u64,
                 }
                 let hist: Hist = self
@@ -791,7 +896,7 @@ impl<'a> IssueRouter<'a> {
             Request::Activity { since } => {
                 #[derive(serde::Deserialize)]
                 struct Feed {
-                    events: Vec<crate::dto::ActivityEvent>,
+                    events: Vec<issues::dto::ActivityEvent>,
                     last: u64,
                 }
                 let feed: Feed = self
@@ -929,7 +1034,7 @@ impl<'a> IssueRouter<'a> {
                 let id = snapshot.resolve_project(&project).ok_or_else(|| {
                     Response::not_found(format!("no project matches {project:?}"))
                 })?;
-                let milestones: Vec<crate::dto::MilestoneDto> = self
+                let milestones: Vec<issues::dto::MilestoneDto> = self
                     .query(&IssueQuery::Milestones { project: id })
                     .map_err(Self::effect_err)?;
                 Ok((Response::Milestones { milestones }, false))
@@ -952,7 +1057,7 @@ impl<'a> IssueRouter<'a> {
                         .ok_or_else(|| {
                             Response::not_found(format!("no milestone matches {sel:?}"))
                         })?,
-                    None => crate::ids::mint_milestone_id(self.clock),
+                    None => issues::ids::mint_milestone_id(self.clock),
                 };
                 let target_date = match target.as_deref() {
                     None => None,
@@ -1027,7 +1132,7 @@ impl<'a> IssueRouter<'a> {
                 let id = snapshot.resolve_project(&project).ok_or_else(|| {
                     Response::not_found(format!("no project matches {project:?}"))
                 })?;
-                let cycles: Vec<crate::dto::CycleDto> = self
+                let cycles: Vec<issues::dto::CycleDto> = self
                     .query(&IssueQuery::Cycles { project: id })
                     .map_err(Self::effect_err)?;
                 Ok((Response::Cycles { cycles }, false))
@@ -1047,7 +1152,7 @@ impl<'a> IssueRouter<'a> {
                     Some(sel) => snapshot
                         .resolve_cycle(&project_id, sel)
                         .ok_or_else(|| Response::not_found(format!("no cycle matches {sel:?}")))?,
-                    None => crate::ids::mint_cycle_id(self.clock),
+                    None => issues::ids::mint_cycle_id(self.clock),
                 };
                 let parse_edge = |v: Option<String>| -> Result<Option<Option<u64>>, Response> {
                     match v.as_deref() {
@@ -1098,7 +1203,7 @@ impl<'a> IssueRouter<'a> {
                 Ok((self.ref_response(&doc), true))
             }
             Request::InitiativeList => {
-                let initiatives: Vec<crate::dto::InitiativeDto> = self
+                let initiatives: Vec<issues::dto::InitiativeDto> = self
                     .query(&IssueQuery::Initiatives)
                     .map_err(Self::effect_err)?;
                 Ok((Response::Initiatives { initiatives }, false))
@@ -1123,7 +1228,7 @@ impl<'a> IssueRouter<'a> {
                 let id = current
                     .as_ref()
                     .map(|(id, _)| id.clone())
-                    .unwrap_or_else(|| crate::ids::mint_initiative_id(self.clock));
+                    .unwrap_or_else(|| issues::ids::mint_initiative_id(self.clock));
                 // Merge membership against the current record; the intent
                 // carries the complete replacement list.
                 let projects = if add_projects.is_empty() && remove_projects.is_empty() {
@@ -1180,7 +1285,7 @@ impl<'a> IssueRouter<'a> {
                 Ok((Response::Ref { reff: id }, true))
             }
             Request::TeamList => {
-                let teams: Vec<crate::dto::TeamDto> =
+                let teams: Vec<issues::dto::TeamDto> =
                     self.query(&IssueQuery::Teams).map_err(Self::effect_err)?;
                 Ok((Response::Teams { teams }, false))
             }
@@ -1204,7 +1309,7 @@ impl<'a> IssueRouter<'a> {
                 let id = current
                     .as_ref()
                     .map(|(id, _)| id.clone())
-                    .unwrap_or_else(|| crate::ids::mint_team_id(self.clock));
+                    .unwrap_or_else(|| issues::ids::mint_team_id(self.clock));
                 let members = if add_members.is_empty() && remove_members.is_empty() {
                     None
                 } else {
@@ -1250,7 +1355,7 @@ impl<'a> IssueRouter<'a> {
                 Ok((Response::Ref { reff: id }, true))
             }
             Request::TriageList => {
-                let items: Vec<crate::dto::TriageDto> =
+                let items: Vec<issues::dto::TriageDto> =
                     self.query(&IssueQuery::Triage).map_err(Self::effect_err)?;
                 Ok((Response::TriageItems { items }, false))
             }
@@ -1259,7 +1364,7 @@ impl<'a> IssueRouter<'a> {
                 body,
                 source,
             } => {
-                let id = crate::ids::mint_triage_id(self.clock);
+                let id = issues::ids::mint_triage_id(self.clock);
                 self.submit(&IssueIntent::TriageSubmit {
                     id: id.clone(),
                     title,
@@ -1340,7 +1445,7 @@ impl<'a> IssueRouter<'a> {
                 let doc = self.resolve(&snapshot, &reff)?;
                 self.submit(&IssueIntent::Attach {
                     doc: doc.clone(),
-                    id: crate::ids::mint_attachment_id(self.clock),
+                    id: issues::ids::mint_attachment_id(self.clock),
                     name,
                     mime: mime.unwrap_or_else(|| "application/octet-stream".into()),
                     data_b64,
@@ -1352,8 +1457,8 @@ impl<'a> IssueRouter<'a> {
                 .map_err(|e| match e {
                     WorldError::LimitExceeded => Response::err(format!(
                         "attachment refused: at most {} files per issue, {} KiB each",
-                        super::contract::MAX_ATTACHMENTS_PER_ISSUE,
-                        super::contract::MAX_ATTACHMENT_BYTES / 1024,
+                        contract::MAX_ATTACHMENTS_PER_ISSUE,
+                        contract::MAX_ATTACHMENT_BYTES / 1024,
                     )),
                     other => Self::effect_err(other),
                 })?;
@@ -1388,7 +1493,7 @@ impl<'a> IssueRouter<'a> {
                 let id = snapshot.resolve_project(&project).ok_or_else(|| {
                     Response::not_found(format!("no project matches {project:?}"))
                 })?;
-                let updates: Vec<crate::dto::ProjectUpdateDto> = self
+                let updates: Vec<issues::dto::ProjectUpdateDto> = self
                     .query(&IssueQuery::ProjectUpdates { project: id })
                     .map_err(Self::effect_err)?;
                 Ok((Response::Updates { updates }, false))
@@ -1403,7 +1508,7 @@ impl<'a> IssueRouter<'a> {
                 })?;
                 self.submit(&IssueIntent::ProjectUpdatePost {
                     project_id: id,
-                    id: crate::ids::mint_update_id(self.clock),
+                    id: issues::ids::mint_update_id(self.clock),
                     author: facts.actor.clone(),
                     body,
                     health: health.unwrap_or_default(),
@@ -1513,7 +1618,7 @@ impl<'a> IssueRouter<'a> {
                 };
                 let role_id = format!(
                     "role_{}",
-                    crate::ids::ProjectId::mint(self.clock)
+                    issues::ids::ProjectId::mint(self.clock)
                         .as_str()
                         .trim_start_matches("prj_")
                 );
@@ -1615,7 +1720,7 @@ impl<'a> IssueRouter<'a> {
             }
             Request::WorkflowValidate { body_json } => {
                 // Pure local validation — nothing is committed.
-                match serde_json::from_str::<crate::world::workflow::WorkflowBody>(&body_json) {
+                match serde_json::from_str::<issues::workflow::WorkflowBody>(&body_json) {
                     Ok(body) => match body.validate() {
                         Ok(()) => Ok((
                             Response::Ok {
@@ -1650,12 +1755,10 @@ impl<'a> IssueRouter<'a> {
                     },
                     true,
                 ))
-            }
-            // Ownership is fixed by the production classifier; the agreement
-            // gate (control_classification) proves every Session-owned request
-            // has an arm above, so a foreign request here is a caller bug,
-            // never a servable state.
-            other => unreachable!("misrouted issues-world request: {other:?}"),
+            } // Ownership is fixed by the production classifier; the agreement
+              // gate (control_classification) proves every Session-owned request
+              // has an arm above, so a foreign request here is a caller bug,
+              // never a servable state.
         }
     }
 

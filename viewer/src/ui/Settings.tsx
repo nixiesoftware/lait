@@ -13,7 +13,7 @@ import {
   X,
 } from "lucide-react";
 
-import { rpc } from "../api";
+import { rpc, spaceRpc } from "../api";
 import type { AssignmentDto, LabelDto, MemberDto, ProjectDto } from "../types";
 import { memberName } from "./Avatar";
 import { catalogColor } from "./colors";
@@ -689,7 +689,7 @@ function AccessPanel({
     try {
       const [r, m, a] = await Promise.all([
         rpc(spaceId, { cmd: "role_list" }),
-        rpc(spaceId, { cmd: "members" }),
+        spaceRpc(spaceId, { cmd: "members" }),
         rpc(spaceId, { cmd: "access_list" }),
       ]);
       if (r.kind === "text") setRoles(JSON.parse(r.text) as RoleWire[]);
@@ -772,7 +772,7 @@ function AccessPanel({
     <>
       <Section
         title="Roles"
-        hint="Named capability sets from the signed policy. Authoring a role is a CAS ceremony — create and edit them with lait role create/edit."
+        hint="Named capability sets from the signed policy. Authoring a role is a CAS ceremony — create and edit them with lait issues role create/edit."
       >
         {!roles && <p className="text-mute text-sm">Loading…</p>}
         <ul className="flex flex-col gap-2">

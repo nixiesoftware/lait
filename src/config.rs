@@ -113,7 +113,7 @@ fn ensure_store_gitignore(store: &Path) {
 
 /// Typed "no space store here" error, so callers (the app dispatcher) can
 /// tell "nothing to bind" apart from real I/O failures and print the guided
-/// error (`lait init` / `lait join` / `-w`) instead of a bare failure.
+/// error (`lait init` / `lait join` / `--orbit`) instead of a bare failure.
 #[derive(Debug)]
 pub struct NoStoreHere {
     /// The directory discovery started from.
@@ -138,7 +138,7 @@ impl std::error::Error for NoStoreHere {}
 ///   2. `$LAIT_HOME` — explicit, self-contained override (identity + store
 ///      in one dir): `--home`, tests, advanced setups.
 ///   3. `$LAIT_STORE` — pin set by the CLI for the daemon it spawns (and by
-///      `-w`), so both bind the exact store the CLI resolved, independent
+///      `--orbit`), so both bind the exact store the CLI resolved, independent
 ///      of cwd.
 ///   4. git-style discovery: walk up from the cwd for a `.lait/`.
 ///
@@ -206,6 +206,20 @@ pub fn identity_dir() -> Result<PathBuf> {
         return Ok(dir);
     }
     config_root()
+}
+
+/// Private runtime home of the identity-scoped Lait daemon.
+///
+/// Kept below the identity directory, but distinct from every Orbit home: the
+/// host process owns the catalog-wide control socket and process lock while
+/// each active [`crate::orbital::SpaceBridge`] independently holds its Orbit
+/// lease. A self-contained `$LAIT_HOME` therefore still gets one daemon without
+/// colliding with the Station occupying that same directory.
+pub fn lait_daemon_home() -> Result<PathBuf> {
+    let dir = identity_dir()?.join("daemon");
+    fs::create_dir_all(&dir)
+        .with_context(|| format!("create Lait daemon home {}", dir.display()))?;
+    Ok(dir)
 }
 
 /// The store this invocation WOULD bind if it already exists — WITHOUT creating
@@ -294,9 +308,11 @@ pub struct DaemonLock {
     _file: fs::File,
 }
 
-/// Acquire the exclusive single-instance lock for a home, guaranteeing at most
-/// one daemon per home. Returns an error if another daemon already holds it,
-/// which is how we avoid the startup race that used to spawn duplicate daemons.
+/// Acquire the exclusive operational lock for a home.
+///
+/// A Lait daemon uses this for its process home; a SpaceBridge runner uses it
+/// for an Orbit home. In both cases there is at most one live owner for that
+/// exact resource.
 pub fn acquire_daemon_lock(home: &Path) -> Result<DaemonLock> {
     use fs2::FileExt;
     let path = lock_path(home);

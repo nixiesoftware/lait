@@ -1,12 +1,11 @@
-//! C5 step 5 — the orbital daemon serves the product control surface over the
-//! real IPC control socket, through the orbital Runtime.
+//! The process-backed SpaceBridge serves the product control surface over the
+//! real IPC control socket through the orbital Runtime.
 //!
 //! Formation happens via `OrbitalMechanics::form` (the `lait init` heir); the
-//! orbital daemon then serves `control::Request`/`Response` exactly as the CLI/
+//! SpaceBridge then serves `control::Request`/`Response` exactly as the CLI/
 //! serve/MCP clients speak it. This drives the issue family end to end
 //! (project/new/view/list/board/comment) plus status and invite over the wire,
-//! with an in-memory transport (no network sockets) — proving the daemon path
-//! works without touching the legacy node.
+//! with an in-memory transport (no network sockets).
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -15,9 +14,11 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use async_trait::async_trait;
-use lait::control::{request, Filter, Request, Response};
+use issues_app::IssuesResponse as IssueResponse;
+use lait::control::{request, ControlRoute, Request, Response};
+use lait::daemon::OrbitAddress;
 use lait::net::Network;
-use lait::orbital::run_orbital_daemon;
+use lait::orbital::run_space_bridge;
 use lait::transport::mem::MemNet;
 use lait::transport::{Alpn, Transport, TransportFactory};
 
@@ -54,6 +55,31 @@ fn req(rt: &tokio::runtime::Runtime, home: &Path, r: Request) -> Response {
         .unwrap_or_else(|e| Response::err(format!("{e:#}")))
 }
 
+fn issue_req(
+    rt: &tokio::runtime::Runtime,
+    home: &Path,
+    request: issues_app::IssuesRequest,
+) -> IssueResponse {
+    rt.block_on(async {
+        let space = lait::orbital::discover_space_id(home).expect("test Space");
+        let call = issues_app::encode_call(&request)?;
+        let reply = lait::control::call_world(
+            home,
+            ControlRoute::World {
+                address: OrbitAddress::for_store(home, space),
+                world: call.world().as_str().to_string(),
+            },
+            call.clone(),
+            None,
+        )
+        .await?;
+        Ok::<IssueResponse, anyhow::Error>(serde_json::from_value(issues_app::decode_reply(
+            &call, reply,
+        )?)?)
+    })
+    .unwrap_or_else(|error| IssueResponse::err(format!("{error:#}")))
+}
+
 fn poll_until<T>(timeout: Duration, mut check: impl FnMut() -> Option<T>) -> Option<T> {
     let start = Instant::now();
     loop {
@@ -68,7 +94,7 @@ fn poll_until<T>(timeout: Duration, mut check: impl FnMut() -> Option<T>) -> Opt
 }
 
 #[test]
-fn the_orbital_daemon_serves_the_issue_surface_over_the_control_socket() {
+fn the_space_bridge_serves_the_issue_surface_over_the_control_socket() {
     // The daemon runs on a dedicated OS thread with its own runtime (it holds a
     // blocking control accept loop); the test drives it with a separate client
     // runtime, exactly as the real CLI/daemon split works.
@@ -79,7 +105,7 @@ fn the_orbital_daemon_serves_the_issue_surface_over_the_control_socket() {
     // daemon reads, so the daemon and formation share one device seed.
     std::fs::create_dir_all(&home).unwrap();
     write_identity(&home, &FOUNDER_SEED);
-    lait::orbital::form_space(&home, &FOUNDER_SEED, "Orbital Daemon Space").unwrap();
+    lait::orbital::form_space(&home, &FOUNDER_SEED, "Space Bridge Space").unwrap();
 
     // Run the daemon on its own thread.
     let daemon_home = home.clone();
@@ -87,7 +113,7 @@ fn the_orbital_daemon_serves_the_issue_surface_over_the_control_socket() {
     let handle = std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async move {
-            if let Err(e) = run_orbital_daemon(daemon_home, &MemFactory(daemon_net)).await {
+            if let Err(e) = run_space_bridge(daemon_home, &MemFactory(daemon_net)).await {
                 eprintln!("DAEMON ERR: {e:#}");
             }
         });
@@ -99,7 +125,7 @@ fn the_orbital_daemon_serves_the_issue_surface_over_the_control_socket() {
     let online = poll_until(Duration::from_secs(20), || {
         matches!(req(&client_rt, &home, Request::Status), Response::Status(_)).then_some(())
     });
-    assert!(online.is_some(), "the orbital daemon never answered Status");
+    assert!(online.is_some(), "the SpaceBridge never answered Status");
 
     // Status reports the founder as a member of the formed Space.
     let status = req(&client_rt, &home, Request::Status);
@@ -110,25 +136,25 @@ fn the_orbital_daemon_serves_the_issue_surface_over_the_control_socket() {
     assert_eq!(info.membership, "member");
 
     // Create a project.
-    let resp = req(
+    let resp = issue_req(
         &client_rt,
         &home,
-        Request::ProjectNew {
+        issues_app::IssuesRequest::ProjectNew {
             name: "Engineering".into(),
             key: "eng".into(),
             color: None,
         },
     );
     assert!(
-        matches!(&resp, Response::Ref { reff } if reff == "ENG"),
+        matches!(&resp, IssueResponse::Ref { reff } if reff == "ENG"),
         "{resp:?}"
     );
 
     // File an issue; it routes through the World and returns the canonical reff.
-    let resp = req(
+    let resp = issue_req(
         &client_rt,
         &home,
-        Request::IssueNew {
+        issues_app::IssuesRequest::IssueNew {
             title: "Served over the socket".into(),
             // Formation seeded the default project, so the space has two —
             // pick the explicit one.
@@ -137,61 +163,65 @@ fn the_orbital_daemon_serves_the_issue_surface_over_the_control_socket() {
             assignees: vec![],
             priority: Some("high".into()),
             labels: vec![],
-            body: Some("through the orbital daemon".into()),
+            body: Some("through the space bridge".into()),
             due: None,
             estimate: None,
         },
     );
     assert!(
-        matches!(&resp, Response::Ref { reff } if reff == "ENG-1"),
+        matches!(&resp, IssueResponse::Ref { reff } if reff == "ENG-1"),
         "{resp:?}"
     );
 
     // View it back.
-    let resp = req(
+    let resp = issue_req(
         &client_rt,
         &home,
-        Request::IssueView {
+        issues_app::IssuesRequest::IssueView {
             reff: "ENG-1".into(),
         },
     );
-    let Response::Issue(view) = resp else {
+    let IssueResponse::Issue(view) = resp else {
         panic!("expected Issue, got {resp:?}");
     };
     assert_eq!(view.title, "Served over the socket");
-    assert_eq!(view.description, "through the orbital daemon");
+    assert_eq!(view.description, "through the space bridge");
     assert_eq!(view.priority, lait::dto::Priority::High);
 
     // Comment routes too.
-    req(
+    issue_req(
         &client_rt,
         &home,
-        Request::Comment {
+        issues_app::IssuesRequest::Comment {
             reff: "ENG-1".into(),
             body: "a socket comment".into(),
             reply_to: None,
         },
     );
-    let resp = req(
+    let resp = issue_req(
         &client_rt,
         &home,
-        Request::IssueView {
+        issues_app::IssuesRequest::IssueView {
             reff: "ENG-1".into(),
         },
     );
-    let Response::Issue(view) = resp else {
+    let IssueResponse::Issue(view) = resp else {
         panic!("expected Issue");
     };
     assert_eq!(view.comments.len(), 1);
     assert_eq!(view.comments[0].body, "a socket comment");
 
     // The space-wide activity feed serves through daemon dispatch (this pins
-    // the classification/routing defect where `lait activity` was refused with
+    // the classification/routing defect where `lait issues activity` was refused with
     // "request not routed to the issues world"): the created issue and the
     // comment appear as feed rows, and re-pulling from the returned cursor
     // yields nothing new.
-    let resp = req(&client_rt, &home, Request::Activity { since: 0 });
-    let Response::Activity { events, last } = resp else {
+    let resp = issue_req(
+        &client_rt,
+        &home,
+        issues_app::IssuesRequest::Activity { since: 0 },
+    );
+    let IssueResponse::Activity { events, last } = resp else {
         panic!("expected Activity, got {resp:?}");
     };
     assert!(last >= 2, "created + comment rows expected, last={last}");
@@ -199,37 +229,41 @@ fn the_orbital_daemon_serves_the_issue_surface_over_the_control_socket() {
     assert!(events
         .iter()
         .any(|e| e.kind == "commented" && e.text == "a socket comment"));
-    let resp = req(&client_rt, &home, Request::Activity { since: last });
-    let Response::Activity { events, last: l2 } = resp else {
+    let resp = issue_req(
+        &client_rt,
+        &home,
+        issues_app::IssuesRequest::Activity { since: last },
+    );
+    let IssueResponse::Activity { events, last: l2 } = resp else {
         panic!("expected Activity, got {resp:?}");
     };
     assert!(events.is_empty(), "cursor resume must yield no repeats");
     assert_eq!(l2, last);
 
     // List reflects it.
-    let resp = req(
+    let resp = issue_req(
         &client_rt,
         &home,
-        Request::List {
+        issues_app::IssuesRequest::List {
             project: None,
-            filter: Filter::default(),
+            filter: issues_app::protocol::Filter::default(),
         },
     );
-    let Response::List { rows } = resp else {
+    let IssueResponse::List { rows } = resp else {
         panic!("expected List");
     };
     assert!(rows.iter().any(|r| r.title == "Served over the socket"));
 
     // Board renders columns.
-    let resp = req(
+    let resp = issue_req(
         &client_rt,
         &home,
-        Request::Board {
+        issues_app::IssuesRequest::Board {
             project: Some("eng".into()),
             project_hint: None,
         },
     );
-    assert!(matches!(resp, Response::Board(_)), "{resp:?}");
+    assert!(matches!(resp, IssueResponse::Board(_)), "{resp:?}");
 
     // Members reports the founder as an admin over the signed ACL roster.
     let resp = req(&client_rt, &home, Request::Members);
@@ -302,16 +336,16 @@ fn the_orbital_daemon_serves_the_issue_surface_over_the_control_socket() {
         "{resp:?}"
     );
 
-    // Stop the daemon.
+    // Stop the process-backed bridge.
     let _ = req(&client_rt, &home, Request::Stop);
     let _ = handle.join();
     let _ = std::fs::remove_dir_all(&home);
 }
 
-/// Write the orbital identity seed where the daemon's `load_or_create_identity`
+/// Write the orbital identity seed where the bridge runner's `load_or_create_identity`
 /// expects it (the same file the real `lait init` provisions).
 fn write_identity(home: &Path, seed: &[u8; 32]) {
-    // The daemon reads config::identity_dir(); a $LAIT_HOME-scoped run collapses
+    // The runner reads config::identity_dir(); a $LAIT_HOME-scoped run collapses
     // it onto `home`, so the seed file lives at `home/secret.key`.
     std::env::set_var("LAIT_HOME", home);
     std::fs::write(

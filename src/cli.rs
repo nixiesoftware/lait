@@ -16,9 +16,10 @@ use std::{
 use anyhow::{anyhow, Context, Result};
 
 use crate::{
-    control::{self, request, ErrorKind, Event, EventKind, Request, Response},
+    client_action::{ClientAction, ClientPayload},
+    control::{self, request, ControlRoute, ErrorKind, Event, EventKind, Request, Response},
+    daemon::{ClientScope, LocalOrbitId, OrbitAddress},
     diagnose::{DiagnosisView, GateState},
-    dto::{BoardView, IssueView, Priority, Row},
     spaces::{self, SpaceEntry, StorePresence},
 };
 
@@ -161,11 +162,11 @@ pub enum Confirmed {
 /// * `--yes` → [`Confirmed::Yes`] without asking (scripts, CI, agents).
 /// * `--json` or no TTY on **stdin or stdout** → [`Confirmed::CannotAsk`]. A
 ///   prompt written into a pipe is invisible, and reading a reply from a
-///   redirected stdin would eat data meant for the command (`lait comment`
+///   redirected stdin would eat data meant for the command (`lait issues comment`
 ///   reads stdin) or block forever with no visible question. Both checks matter:
 ///   stdout carries the question, stdin carries the answer.
 /// * otherwise → ask on **stderr** (stdout is the data channel; a prompt must
-///   never land in `lait ls | cat`), read one line, `y`/`yes` is yes and
+///   never land in `lait issues ls | cat`), read one line, `y`/`yes` is yes and
 ///   everything else — including a bare Enter or EOF — is no.
 pub fn confirm(question: &str, out: Out) -> Confirmed {
     if out.yes {
@@ -225,9 +226,6 @@ fn paint(on: bool, code: &str, s: &str) -> String {
 /// dangerous.
 pub(crate) fn destructive_question(req: &Request) -> Option<String> {
     match req {
-        // The ref is inferred from the git branch when omitted, so this is the
-        // one verb that can destroy something you never named.
-        Request::IssueDelete { reff } => Some(format!("delete {reff}?")),
         Request::MemberRemove { who } => Some(format!(
             "remove {who} from this space and rotate the space key?"
         )),
@@ -236,43 +234,25 @@ pub(crate) fn destructive_question(req: &Request) -> Option<String> {
     }
 }
 
-/// Best-effort title lookup for a ref, to name what a prompt is about to destroy.
-/// A failure just returns `None` — the prompt falls back to the bare ref rather
-/// than blocking on a lookup that isn't essential.
-async fn peek_title(home: &Path, reff: &str) -> Option<String> {
-    match client(
-        home,
-        Request::IssueView {
-            reff: reff.to_string(),
-        },
-    )
-    .await
-    {
-        Ok(Response::Issue(v)) => Some(v.title),
-        _ => None,
-    }
+/// Gate one package-declared destructive operation behind the shell's common
+/// confirmation affordance.
+pub fn confirm_client(question: &str, out: Out) -> bool {
+    ask_confirmation(question, out)
 }
 
 /// Gate a destructive request behind a confirmation. `true` = go ahead.
 ///
 /// Non-destructive requests pass straight through, so this can sit on the uniform
 /// dispatch path without every verb paying for it.
-pub async fn confirm_destructive(home: &Path, req: &Request, out: Out) -> bool {
+pub async fn confirm_destructive(req: &Request, out: Out) -> bool {
     let Some(question) = destructive_question(req) else {
         return true;
     };
-    // Name the thing, not just its handle: `lait delete` on a `eng-142-…` branch
-    // takes its ref from the branch, so "delete ENG-142?" is unanswerable if you
-    // don't remember which issue that is — which is exactly the case where a
-    // stale checkout deletes the wrong one.
-    let question = match req {
-        Request::IssueDelete { reff } => match peek_title(home, reff).await {
-            Some(t) => format!("delete {reff} “{t}”? this tombstones it for every peer"),
-            None => question,
-        },
-        _ => question,
-    };
-    match confirm(&question, out) {
+    ask_confirmation(&question, out)
+}
+
+fn ask_confirmation(question: &str, out: Out) -> bool {
+    match confirm(question, out) {
         Confirmed::Yes => true,
         Confirmed::No => {
             eprintln!("aborted.");
@@ -318,89 +298,28 @@ fn daemon_log_tail(path: &Path, lines: usize) -> Option<String> {
     )
 }
 
-/// Homes whose daemon this process has already verified.
-///
-/// One CLI invocation can reach [`client`] several times — `delete` peeks the
-/// issue's title before asking about it — and each [`control::probe`] is a fresh
-/// connect. That is not free: on Windows the control channel is a named pipe
-/// serving one client per accepted instance, and a client that connects while no
-/// instance is free can park (see the teardown note in `node::run_daemon`). Verify
-/// once per home, then stay out of the way.
-type VerifiedSet = std::sync::Mutex<std::collections::HashSet<PathBuf>>;
-static VERIFIED_DAEMONS: std::sync::OnceLock<VerifiedSet> = std::sync::OnceLock::new();
-
-fn already_verified(home: &Path) -> bool {
-    VERIFIED_DAEMONS
-        .get_or_init(VerifiedSet::default)
-        .lock()
-        .map(|s| s.contains(home))
-        .unwrap_or(false)
-}
-
-fn mark_verified(home: &Path) {
-    if let Ok(mut s) = VERIFIED_DAEMONS.get_or_init(VerifiedSet::default).lock() {
-        s.insert(home.to_path_buf());
-    }
-}
-
-/// Forget that `home`'s daemon was verified, so the next [`ensure_daemon`] probes
-/// again instead of trusting the memo.
-///
-/// The memo is only sound because a CLI process resolves one store and exits: it
-/// cannot outlive the daemon it verified, so re-probing would be pure cost. A
-/// long-lived supervisor breaks that assumption — `lait serve` can watch a daemon
-/// stop and then be asked for it again, and a stale entry there does not mean
-/// "already fine", it means **"never respawn this"**, which is exactly wrong. The
-/// symptom is a connect error that no retry can clear.
-///
-/// So the one caller that can outlive a daemon says so when it notices.
-pub(crate) fn forget_verified(home: &Path) {
-    if let Ok(mut s) = VERIFIED_DAEMONS.get_or_init(VerifiedSet::default).lock() {
-        s.remove(home);
-    }
-}
-
-/// Ensure a daemon is running for this home dir, spawning one if needed.
-///
-/// Uses whatever identity this process would use — i.e. `$LAIT_HOME` if set,
-/// else the global `secret.key`. That is right for every caller that resolved
-/// its own store, which is every CLI invocation. A caller that supervises
-/// *several* homes at once cannot rely on its own env and must say which
-/// identity it means: see [`ensure_daemon_as`].
+/// Ensure the identity-scoped Lait daemon is running and the addressed Orbit
+/// exists, spawning the one host process if needed.
 pub async fn ensure_daemon(home: &Path) -> Result<()> {
-    ensure_daemon_as(home, None).await
+    if !crate::orbital::space_store_present(home) {
+        return Err(anyhow!(
+            "no space at {} — found one with `lait init`, or join one with `lait join <link>`",
+            home.display()
+        ));
+    }
+    ensure_lait_daemon().await
 }
 
-/// Ensure a daemon is running for `home`, pinning the identity it runs as.
-///
-/// `identity: Some(dir)` spawns the daemon with `LAIT_HOME=dir`, which makes
-/// [`crate::config::identity_dir`] resolve there and the daemon sign with
-/// *that* home's `secret.key`.
-///
-/// This exists because identity does not follow the store. `identity_dir` reads
-/// `$LAIT_HOME` and nothing else — never `$LAIT_STORE` — so pointing a spawn at a
-/// self-contained home's store while `LAIT_HOME` is unset opens that store under
-/// the *global* key, silently ignoring the `secret.key` sitting inside it. For a
-/// named agent's home that is not a subtle mismatch: the space key is sealed
-/// to the agent's X25519 key, so the daemon cannot unwrap it, and it would
-/// announce the wrong identity as a peer in the agent's space.
-///
-/// One process resolving one store never notices, because its own env already
-/// says which identity it is. `lait serve` holds N homes across *two* identity
-/// kinds at once and cannot express that through a process-global env var, so
-/// the choice becomes an argument.
-pub async fn ensure_daemon_as(home: &Path, identity: Option<&Path>) -> Result<()> {
-    if already_verified(home) {
-        return Ok(());
-    }
-    match control::probe(home).await {
-        control::Probe::Healthy => {
-            mark_verified(home);
-            return Ok(());
-        }
+/// Ensure the current identity's process-level Lait daemon without selecting
+/// or activating an Orbit. The web viewer uses this even for an empty catalog.
+pub async fn ensure_lait_daemon() -> Result<()> {
+    let client = crate::daemon::LaitDaemonClient::current()?;
+    let daemon_home = client.home();
+    match client.probe().await {
+        control::Probe::Healthy => return Ok(()),
         control::Probe::Foreign { why, replaceable } => {
             return Err(ForeignDaemon {
-                home: home.to_path_buf(),
+                home: daemon_home.to_path_buf(),
                 why,
                 replaceable,
             }
@@ -408,38 +327,18 @@ pub async fn ensure_daemon_as(home: &Path, identity: Option<&Path>) -> Result<()
         }
         control::Probe::Absent => {}
     }
-    // A daemon can only open an initialized store — fail fast with guidance
-    // instead of spawning a doomed process and timing out 20s later. This is a
-    // missing store, not an unreachable daemon: `1`, not `3`.
-    if !crate::orbital::space_store_present(home) {
-        return Err(anyhow!(
-            "no space at {} — found one with `lait init`, or join one with `lait join <link>`",
-            home.display()
-        ));
-    }
     let exe = std::env::current_exe().context("locate own executable")?;
-    // Keep the daemon's stderr instead of discarding it: when a spawn fails, its
-    // own message ("another lait daemon is already running for this home …") is
-    // the whole diagnosis, and `Stdio::null()` used to throw exactly that away.
-    let log_path = daemon_log_path(home);
+    let log_path = daemon_log_path(daemon_home);
     let log = std::fs::File::create(&log_path).ok();
-    // The daemon outlives us, so it must come up holding *only* what we hand it:
-    // on Windows a plain spawn would also give it every other inheritable handle
-    // we own — including a captured caller's stdout pipe, which then never sees
-    // EOF. See `daemon_spawn`.
-    //
-    // `identity` rides as an argv (`--home`), not an env var. On Windows the
-    // spawn deliberately hands the child our *own* env block so the OS keeps it
-    // correctly sorted — which means an env override there would be a
-    // process-wide `set_var`. That is fine for `LAIT_STORE` in a CLI that
-    // resolves one store and exits, and wrong for `lait serve`, which holds N
-    // homes across two identity kinds at once and would race itself. An argument
-    // is scoped to the child by construction.
+    // Passing the ordinary config root through `--home` would collapse the
+    // global catalog into a self-contained identity, so pin only an explicit
+    // self-contained `$LAIT_HOME`.
+    let identity = std::env::var_os("LAIT_HOME").map(PathBuf::from);
     let mut child =
-        crate::daemon_spawn::spawn(&exe, home, log, identity).context("spawn daemon")?;
+        crate::daemon_spawn::spawn(&exe, log, identity.as_deref()).context("spawn Lait daemon")?;
     for _ in 0..100 {
         tokio::time::sleep(Duration::from_millis(200)).await;
-        if request(home, &Request::Status).await.is_ok() {
+        if matches!(client.probe().await, control::Probe::Healthy) {
             return Ok(());
         }
         // A daemon that has already exited is never going to answer. Without this
@@ -461,8 +360,7 @@ pub async fn ensure_daemon_as(home: &Path, identity: Option<&Path>) -> Result<()
             // spawn (bind failure, held lock) still fails in about a second rather
             // than the full 20 this check exists to avoid.
             for _ in 0..12 {
-                if request(home, &Request::Status).await.is_ok() {
-                    mark_verified(home);
+                if matches!(client.probe().await, control::Probe::Healthy) {
                     return Ok(());
                 }
                 tokio::time::sleep(Duration::from_millis(100)).await;
@@ -471,7 +369,7 @@ pub async fn ensure_daemon_as(home: &Path, identity: Option<&Path>) -> Result<()
         }
     }
     Err(CliError::unreachable(format!(
-        "daemon did not come online within 20s — it is running but not answering.\n\
+        "Lait daemon did not come online within 20s — it is running but not answering.\n\
          see {log}, or run `lait daemon` in the foreground to watch it start.",
         log = log_path.display(),
     ))
@@ -521,7 +419,7 @@ pub async fn heal_from_error(e: &anyhow::Error, out: Out) -> Result<()> {
     // ("speaks control protocol v1, this build speaks v2") rather than whichever
     // field happened to fail to decode.
     eprintln!(
-        "a daemon is already running for this space{pid}: {why}",
+        "the Lait daemon is already running{pid}: {why}",
         why = f.why
     );
     match confirm("stop it and continue?", out) {
@@ -562,12 +460,16 @@ async fn wait_until_absent(home: &Path, within: Duration) -> bool {
 /// permit to a subscriber instead of the accept loop (fixed in
 /// `node::signal_shutdown`, but the daemons that need stopping are precisely the
 /// ones that predate the fix). So: ask, watch, and escalate if it lied.
-pub async fn stop_daemon_verified(home: &Path) -> Result<()> {
+pub async fn stop_daemon_verified(_home: &Path) -> Result<()> {
+    let daemon_home = crate::config::lait_daemon_home()?;
     // Read the pid before asking — a daemon that honours `stop` takes its lock
     // file with it, and we'd rather have the signal target than race for it.
-    let pid = crate::config::daemon_pid(home);
-    let _ = control::request(home, &Request::Stop).await;
-    if wait_until_absent(home, Duration::from_secs(3)).await {
+    let pid = crate::config::daemon_pid(&daemon_home);
+    let daemon = crate::daemon::LaitDaemonClient::at(daemon_home.clone());
+    let _ = daemon
+        .request(ControlRoute::Daemon, &Request::Stop, None)
+        .await;
+    if wait_until_absent(&daemon_home, Duration::from_secs(3)).await {
         return Ok(());
     }
     let Some(pid) = pid else {
@@ -583,7 +485,7 @@ pub async fn stop_daemon_verified(home: &Path) -> Result<()> {
             // a standard termination signal. An already-dead pid just returns
             // ESRCH, which the wait below treats as gone.
             unsafe { libc::kill(pid as libc::pid_t, sig) };
-            if wait_until_absent(home, Duration::from_secs(3)).await {
+            if wait_until_absent(&daemon_home, Duration::from_secs(3)).await {
                 return Ok(());
             }
         }
@@ -613,7 +515,7 @@ impl std::fmt::Display for ForeignDaemon {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "a daemon is already running for this space, but {why}  (home: {home})",
+            "the Lait daemon is already running, but {why}  (home: {home})",
             why = self.why,
             home = self.home.display(),
         )
@@ -638,34 +540,218 @@ fn daemon_exited_error(status: std::process::ExitStatus, log_path: &Path) -> any
     }
 }
 
-/// Ensure the daemon is up, then send one request as the primary identity — or,
-/// if `$LAIT_AS` names a local agent, as that agent (the shell-scoped selector,
-/// e.g. `LAIT_AS=scout lait new "…"`). Architecture B's "act as" on the CLI.
-pub async fn client(home: &Path, req: Request) -> Result<Response> {
-    // `LAIT_AS` is the CLI's own selector; `LAIT_AGENT` is what the MCP surface
-    // uses (and what an agent's launch env sets). Honour either here so a single
-    // exported var attributes both CLI and MCP calls to the same agent.
+/// Ensure the daemon is up, then send one already-routed action as the primary
+/// identity — or, if an acting identity is selected, as that local agent.
+pub async fn client_action(home: &Path, action: ClientAction) -> Result<Response> {
     let act_as = std::env::var("LAIT_AS")
         .ok()
         .or_else(|| std::env::var("LAIT_AGENT").ok())
         .filter(|s| !s.is_empty());
-    client_as(home, req, act_as.as_deref()).await
+    let scope = scope_for_home(home);
+    client_action_as_scoped(home, action, &scope, act_as.as_deref()).await
+}
+
+/// Ensure the daemon is up, then send one request as the primary identity — or,
+/// if `$LAIT_AS` names a local agent, as that agent (the shell-scoped selector,
+/// e.g. `LAIT_AS=scout lait issues new "…"`). Architecture B's "act as" on the CLI.
+pub async fn client(home: &Path, req: Request) -> Result<Response> {
+    client_action(home, ClientAction::from_legacy(req)).await
 }
 
 /// Ensure the daemon is up, then send one request acting as `act_as` (a local
 /// agent name, or `None` for the primary human identity).
 pub async fn client_as(home: &Path, req: Request, act_as: Option<&str>) -> Result<Response> {
+    let scope = scope_for_home(home);
+    client_action_as_scoped(home, ClientAction::from_legacy(req), &scope, act_as).await
+}
+
+/// The single-Orbit scope implied by cwd/`--orbit`/`--home` store resolution.
+pub fn scope_for_home(home: &Path) -> ClientScope {
+    ClientScope::pinned(LocalOrbitId::for_store(home))
+}
+
+/// Resolve the complete typed address for the one Orbit under `home`.
+pub fn orbit_address_for_home(home: &Path) -> Result<OrbitAddress> {
+    let space = crate::orbital::discover_space_id(home)
+        .ok_or_else(|| anyhow!("no local Orbit under {}", home.display()))?;
+    Ok(OrbitAddress::for_store(home, space))
+}
+
+/// Send through a caller scope derived by a trusted client adapter.
+///
+/// The allowed set never rides on the wire: authorizing locally chooses an
+/// explicit Orbit route, and the receiving SpaceBridge independently validates
+/// that it occupies the named Orbit and Space.
+pub async fn client_as_scoped(
+    home: &Path,
+    req: Request,
+    scope: &ClientScope,
+    act_as: Option<&str>,
+) -> Result<Response> {
+    client_action_as_scoped(home, ClientAction::from_legacy(req), scope, act_as).await
+}
+
+/// Send an action whose terminal owner was fixed by the command registry.
+pub async fn client_action_as_scoped(
+    home: &Path,
+    action: ClientAction,
+    scope: &ClientScope,
+    act_as: Option<&str>,
+) -> Result<Response> {
+    let address = orbit_address_for_home(home)?;
+    scope.authorize(&address)?;
     ensure_daemon(home).await?;
-    // The daemon answered the probe a moment ago, so a failure here is the
-    // transport giving out mid-exchange: `3`, daemon unreachable.
-    crate::control::request_as(home, &req, act_as)
+    let daemon = crate::daemon::LaitDaemonClient::current()?;
+    // The process endpoint answered the probe a moment ago, so a failure here
+    // is the transport giving out mid-exchange: `3`, daemon unreachable.
+    match action.payload() {
+        ClientPayload::Control(request) => {
+            let route = action.route(address);
+            daemon
+                .request(route, request, act_as)
+                .await
+                .map_err(|e| CliError::unreachable(format!("{e:#}")).into())
+        }
+        ClientPayload::World(_) => Err(anyhow!(
+            "World actions must be dispatched through their client package"
+        )),
+    }
+}
+
+/// Generic facilities supplied by the Lait navigation shell to one client
+/// package invocation.
+pub struct PackageClientHost {
+    home: PathBuf,
+    scope: ClientScope,
+    act_as: Option<String>,
+}
+
+impl PackageClientHost {
+    pub fn new(home: impl Into<PathBuf>, scope: ClientScope, act_as: Option<String>) -> Self {
+        Self {
+            home: home.into(),
+            scope,
+            act_as,
+        }
+    }
+}
+
+impl world_interface::ClientHost for PackageClientHost {
+    fn local_root(&self) -> &Path {
+        &self.home
+    }
+
+    fn call_world<'a>(
+        &'a self,
+        call: crate::orbital::WorldCall,
+    ) -> world_interface::ClientFuture<'a, crate::orbital::WorldReply> {
+        Box::pin(async move {
+            world_reply_as_scoped(&self.home, call, &self.scope, self.act_as.as_deref())
+                .await
+                .map_err(|error| world_interface::InterfaceError::new(format!("{error:#}")))
+        })
+    }
+
+    fn call_control<'a>(
+        &'a self,
+        request: world_interface::HostControlRequest,
+    ) -> world_interface::ClientFuture<'a, serde_json::Value> {
+        Box::pin(async move {
+            let request = match request {
+                world_interface::HostControlRequest::AssignmentList { actor } => {
+                    Request::AssignmentList { actor }
+                }
+                world_interface::HostControlRequest::AssignmentGrant { actor, assignments } => {
+                    Request::AssignmentGrant {
+                        actor,
+                        assignments: assignments
+                            .into_iter()
+                            .map(|assignment| crate::control::AssignmentSpec {
+                                world: assignment.world,
+                                capability: assignment.capability,
+                                resource: assignment.resource,
+                            })
+                            .collect(),
+                    }
+                }
+                world_interface::HostControlRequest::AssignmentRevoke { grant_id } => {
+                    Request::AssignmentRevoke { grant_id }
+                }
+                world_interface::HostControlRequest::WorldActivate { world } => {
+                    Request::WorldActivate {
+                        world: world.as_str().to_string(),
+                    }
+                }
+            };
+            let response =
+                client_as_scoped(&self.home, request, &self.scope, self.act_as.as_deref())
+                    .await
+                    .map_err(|error| world_interface::InterfaceError::new(format!("{error:#}")))?;
+            serde_json::to_value(response).map_err(|error| {
+                world_interface::InterfaceError::new(format!(
+                    "encode host control response: {error}"
+                ))
+            })
+        })
+    }
+}
+
+/// Emit a complete product-owned presentation without inspecting its response.
+pub fn print_presentation(presentation: &world_interface::Presentation) -> i32 {
+    print!("{}", presentation.stdout);
+    eprint!("{}", presentation.stderr);
+    presentation.exit_code
+}
+
+/// Send one package-owned call without decoding its opaque reply in the shell.
+pub async fn world_reply_as_scoped(
+    home: &Path,
+    call: crate::orbital::WorldCall,
+    scope: &ClientScope,
+    act_as: Option<&str>,
+) -> Result<crate::orbital::WorldReply> {
+    let address = orbit_address_for_home(home)?;
+    scope.authorize(&address)?;
+    let route = ControlRoute::World {
+        address,
+        world: call.world().as_str().to_string(),
+    };
+    ensure_daemon(home).await?;
+    crate::daemon::LaitDaemonClient::current()?
+        .call_world(route, call, act_as)
         .await
-        .map_err(|e| CliError::unreachable(format!("{e:#}")).into())
+        .map_err(|error| CliError::unreachable(format!("{error:#}")).into())
+}
+
+/// Send through the current Lait daemon only if it is already running.
+///
+/// This preserves best-effort surfaces such as live config reload and the
+/// optional actor line in `lait id`: they must not start a background service
+/// merely to deliver an advisory request.
+pub async fn request_running(home: &Path, req: &Request, act_as: Option<&str>) -> Result<Response> {
+    if act_as.is_some() {
+        return Err(anyhow!("passive requests do not select an acting identity"));
+    }
+    let address = orbit_address_for_home(home)?;
+    let scope = scope_for_home(home);
+    scope.authorize(&address)?;
+    let action = ClientAction::from_legacy(req.clone());
+    let route = action.route(address);
+    let daemon = crate::daemon::LaitDaemonClient::current()?;
+    if !matches!(daemon.probe().await, control::Probe::Healthy) {
+        return Err(anyhow!("Lait daemon is not running"));
+    }
+    daemon.request_if_running(route, req).await
 }
 
 /// Run a request, print the response, and exit with the corresponding code.
 pub async fn run(home: &Path, req: Request, out: Out) -> Result<()> {
-    match client(home, req).await {
+    run_action(home, ClientAction::from_legacy(req), out).await
+}
+
+/// Run an already-routed action, print the response, and preserve CLI exits.
+pub async fn run_action(home: &Path, action: ClientAction, out: Out) -> Result<()> {
+    match client_action(home, action).await {
         Ok(resp) => {
             let code = print_response(&resp, out);
             if code != 0 {
@@ -832,228 +918,6 @@ pub async fn run_join(home: &Path, ticket: String, out: Out) -> Result<()> {
     Ok(())
 }
 
-/// One-line issue summary for the work-state verbs: `MP-3  fix login  in_progress`.
-/// Prefers the friendly `KEY-n` handle; the collision-free short id is `--json`'s.
-fn workstate_line(v: &crate::dto::IssueView) -> String {
-    let handle = v.key_alias.as_deref().unwrap_or(&v.reff);
-    format!("{handle}  {}  {}", v.title, v.status)
-}
-
-/// A git branch name for an issue: lowercased `KEY-n` + a hyphenated title slug
-/// (≤40 chars of slug). Predictable by design — `done`/`show` infer the issue
-/// back out of it, and so do agents.
-fn branch_name_for(v: &crate::dto::IssueView) -> String {
-    let handle = v
-        .key_alias
-        .clone()
-        .unwrap_or_else(|| v.reff.clone())
-        .to_ascii_lowercase();
-    let mut slug = String::new();
-    for c in v.title.to_ascii_lowercase().chars() {
-        if slug.len() >= 40 {
-            break;
-        }
-        if c.is_ascii_alphanumeric() {
-            slug.push(c);
-        } else if !slug.ends_with('-') && !slug.is_empty() {
-            slug.push('-');
-        }
-    }
-    let slug = slug.trim_matches('-');
-    if slug.is_empty() {
-        handle
-    } else {
-        format!("{handle}-{slug}")
-    }
-}
-
-/// Create + checkout the issue's branch, best-effort: outside a git work-tree
-/// this silently does nothing; inside one, an existing branch is switched to and
-/// any failure is a warning — a branch hiccup must never fail the `start`.
-fn checkout_issue_branch(v: &crate::dto::IssueView, out: Out) {
-    let in_repo = std::process::Command::new("git")
-        .args(["rev-parse", "--is-inside-work-tree"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-    if !in_repo {
-        return;
-    }
-    let name = branch_name_for(v);
-    // `switch -c` for a fresh branch; if it already exists, plain `switch`.
-    let created = std::process::Command::new("git")
-        .args(["switch", "-c", &name])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-    let ok = created
-        || std::process::Command::new("git")
-            .args(["switch", &name])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-    if !out.json {
-        if ok {
-            println!(
-                "{}",
-                paint(
-                    out.color,
-                    ansi::DIM,
-                    &format!(
-                        "{} branch '{name}'",
-                        if created {
-                            "switched to new"
-                        } else {
-                            "switched to"
-                        }
-                    )
-                )
-            );
-        } else {
-            eprintln!("(could not create/switch branch '{name}' — continue manually)");
-        }
-    }
-}
-
-/// `lait start`: claim + activate + branch. The daemon does the atomic
-/// state move; the branch is client-side sugar on top (skippable, best-effort).
-pub async fn run_start(home: &Path, reff: String, no_branch: bool, out: Out) -> Result<()> {
-    let resp = client(home, Request::IssueStart { reff }).await?;
-    match &resp {
-        Response::Issue(v) => {
-            if out.json {
-                print_response(&resp, out);
-            } else {
-                println!("{}  · you", workstate_line(v));
-            }
-            if !no_branch {
-                checkout_issue_branch(v, out);
-            }
-            Ok(())
-        }
-        other => {
-            let code = print_response(other, out);
-            if code != 0 {
-                std::process::exit(code);
-            }
-            Ok(())
-        }
-    }
-}
-
-/// `lait done` / `lait stop`: the branchless work-state verbs.
-pub async fn run_workstate(home: &Path, req: Request, out: Out) -> Result<()> {
-    let resp = client(home, req).await?;
-    match &resp {
-        Response::Issue(v) => {
-            if out.json {
-                print_response(&resp, out);
-            } else {
-                println!("{}", workstate_line(v));
-            }
-            Ok(())
-        }
-        other => {
-            let code = print_response(other, out);
-            if code != 0 {
-                std::process::exit(code);
-            }
-            Ok(())
-        }
-    }
-}
-
-/// `lait new --start`: file the issue, then claim it (two honest commits).
-pub async fn run_new_start(home: &Path, new_req: Request, out: Out) -> Result<()> {
-    let resp = client(home, new_req).await?;
-    match &resp {
-        Response::Ref { reff } => {
-            if !out.json {
-                println!("{reff}");
-            }
-            run_start(home, reff.clone(), false, out).await
-        }
-        other => {
-            let code = print_response(other, out);
-            if code != 0 {
-                std::process::exit(code);
-            }
-            Ok(())
-        }
-    }
-}
-
-/// Bare `lait` — the FOCUS view: unread inbox summary + your open issues.
-/// Must answer "what's addressed to me / what am I on" faster than a browser
-/// tab could open, and its empty states name the next command.
-pub async fn run_focus(home: &Path, out: Out) -> Result<()> {
-    let inbox = client(home, Request::Inbox { clear: false }).await?;
-    let mine = request(
-        home,
-        &Request::List {
-            project: None,
-            filter: crate::control::Filter {
-                mine: true,
-                status: None,
-                label: None,
-                milestone: None,
-                all: false,
-            },
-        },
-    )
-    .await?;
-    if out.json {
-        // Machine focus = the two DTOs on two lines (each independently stable).
-        print_response(&inbox, out);
-        print_response(&mine, out);
-        return Ok(());
-    }
-    if let Response::Inbox { entries, unread } = &inbox {
-        if *unread > 0 {
-            let heads: Vec<String> = entries
-                .iter()
-                .take(3)
-                .map(|e| format!("{} {}", inbox_line_verb(e), e.reff))
-                .collect();
-            println!(
-                "{} {}",
-                paint(out.color, ansi::CYAN, &format!("Inbox ({unread}):")),
-                heads.join(" · ")
-            );
-        }
-    }
-    match &mine {
-        Response::List { rows } if rows.is_empty() => {
-            println!("nothing assigned to you — grab something: `lait ls`, or file one: `lait new \"...\"`");
-        }
-        Response::List { rows } => {
-            for r in rows {
-                println!("  {}  {:<10}  {}", r.reff, r.status, r.title);
-            }
-        }
-        other => {
-            print_response(other, out);
-        }
-    }
-    Ok(())
-}
-
-/// The inbox verb phrase for a summary line ("assigned you", "commented on"…).
-fn inbox_line_verb(e: &crate::dto::InboxEntry) -> String {
-    let who = e.actor_nick.clone().unwrap_or_else(|| "someone".into());
-    match e.kind.as_str() {
-        "assigned" => format!("{who} assigned you"),
-        "comment" => format!("{who} commented on"),
-        _ => format!("{who} moved"),
-    }
-}
-
 /// Render a `Diagnosis` response, or fall back gracefully if the daemon returned
 /// some other variant (e.g. an error) to the tail request.
 fn print_diagnosis_or(resp: &Response, out: Out) {
@@ -1065,10 +929,119 @@ fn print_diagnosis_or(resp: &Response, out: Out) {
     }
 }
 
+/// Print the current navigation context without activating an Orbit.
+pub async fn print_context(home: Option<PathBuf>, source: &str, out: Out) -> Result<()> {
+    let selected = home
+        .filter(|path| crate::orbital::space_store_present(path))
+        .and_then(|path| {
+            let space = crate::orbital::discover_space_id(&path)?;
+            Some((
+                LocalOrbitId::for_store(&path).to_string(),
+                space.to_string(),
+                path,
+            ))
+        });
+    let worlds: Vec<String> = crate::world::packages()
+        .world_ids()
+        .map(ToString::to_string)
+        .collect();
+    let acting_as = std::env::var("LAIT_AS")
+        .ok()
+        .or_else(|| std::env::var("LAIT_AGENT").ok())
+        .filter(|value| !value.is_empty());
+    let identity_home = crate::config::identity_dir()?;
+
+    if out.json {
+        let orbit = selected.as_ref().map(|(orbit, space, path)| {
+            serde_json::json!({
+                "id": orbit,
+                "space": space,
+                "path": path,
+            })
+        });
+        println!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({
+                "context": {
+                    "selection": source,
+                    "identity": {
+                        "home": identity_home,
+                        "acting_as": acting_as,
+                    },
+                    "orbit": orbit,
+                    "worlds": worlds,
+                    "known_orbits": spaces::list().len(),
+                }
+            }))
+            .unwrap_or_else(|_| "{}".into())
+        );
+        return Ok(());
+    }
+
+    println!("{}", paint(out.color, ansi::BOLD, "lait context"));
+    println!("identity   {}", acting_as.as_deref().unwrap_or("primary"));
+    println!("selection  {source}");
+    if let Some((orbit, space, path)) = selected {
+        println!("orbit      {orbit}");
+        println!("space      {space}");
+        println!("path       {}", path.display());
+    } else {
+        println!("orbit      (none selected)");
+        println!("space      (none selected)");
+    }
+    println!(
+        "worlds     {}",
+        if worlds.is_empty() {
+            "(none installed)".to_string()
+        } else {
+            worlds.join(", ")
+        }
+    );
+    if source == "none" {
+        let known = spaces::list().len();
+        if known == 0 {
+            println!();
+            println!("found a Space with `lait init`, or enter one with `lait join <link>`.");
+        } else {
+            println!();
+            println!(
+                "{known} local Orbit{} known — select one with `lait --orbit <selector>`.",
+                if known == 1 { "" } else { "s" }
+            );
+        }
+    }
+    Ok(())
+}
+
+/// List World packages installed in this application composition.
+pub fn print_worlds(out: Out) {
+    let worlds: Vec<String> = crate::world::packages()
+        .world_ids()
+        .map(ToString::to_string)
+        .collect();
+    if out.json {
+        let rows: Vec<_> = worlds
+            .iter()
+            .map(|world| serde_json::json!({ "id": world, "installed": true }))
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({ "worlds": rows }))
+                .unwrap_or_else(|_| "{}".into())
+        );
+    } else if worlds.is_empty() {
+        println!("(no World packages installed)");
+    } else {
+        for world in worlds {
+            println!("{world}");
+        }
+    }
+}
+
 /// Live status of one registry entry: `missing` (store gone from disk), `up`
 /// (a daemon answers on its control channel), or `idle` (store present, no
 /// daemon). The probe is a short-deadline `Status` round-trip — never a spawn.
-async fn space_status(e: &SpaceEntry) -> &'static str {
+async fn orbit_status(e: &SpaceEntry) -> &'static str {
     if spaces::presence(e) == StorePresence::Missing {
         return "missing";
     }
@@ -1086,13 +1059,12 @@ async fn space_status(e: &SpaceEntry) -> &'static str {
     }
 }
 
-/// `lait spaces`: every space on this machine (founded and joined),
-/// with live status. Honours `--json`.
-pub async fn print_spaces(out: Out) {
+/// `lait orbits`: every durable local participation known on this machine.
+pub async fn print_orbits(out: Out) {
     let entries = spaces::list();
     let mut statuses = Vec::with_capacity(entries.len());
     for e in &entries {
-        statuses.push(space_status(e).await);
+        statuses.push(orbit_status(e).await);
     }
     if out.json {
         let rows: Vec<serde_json::Value> = entries
@@ -1101,6 +1073,10 @@ pub async fn print_spaces(out: Out) {
             .map(|(e, s)| {
                 let mut v = serde_json::to_value(e).unwrap_or_default();
                 if let Some(o) = v.as_object_mut() {
+                    o.insert(
+                        "orbit".into(),
+                        serde_json::json!(LocalOrbitId::for_store(Path::new(&e.path))),
+                    );
                     o.insert("status".into(), serde_json::json!(s));
                 }
                 v
@@ -1108,17 +1084,25 @@ pub async fn print_spaces(out: Out) {
             .collect();
         println!(
             "{}",
-            serde_json::to_string(&serde_json::json!({ "spaces": rows }))
-                .unwrap_or_else(|_| "{}".into())
+            // `spaces` is retained as a compatibility key for scripts written
+            // against the former command name. Its rows were always path-keyed
+            // local participations; `orbits` names that truth.
+            serde_json::to_string(&serde_json::json!({
+                "orbits": rows.clone(),
+                "spaces": rows,
+            }))
+            .unwrap_or_else(|_| "{}".into())
         );
         return;
     }
     if entries.is_empty() {
-        println!("(no spaces yet — `lait init` to found one, or `lait join <link>`)");
+        println!("(no Orbits yet — `lait init` to found one, or `lait join <link>`)");
         return;
     }
     for (e, status) in entries.iter().zip(&statuses) {
-        let short: String = e.space.chars().take(12).collect();
+        let orbit = LocalOrbitId::for_store(Path::new(&e.path));
+        let orbit_short: String = orbit.as_str().chars().take(14).collect();
+        let space_short: String = e.space.chars().take(12).collect();
         let code = match *status {
             "up" => ansi::GREEN,
             "idle" => ansi::DIM,
@@ -1141,7 +1125,7 @@ pub async fn print_spaces(out: Out) {
             format!("  (from {})", e.host_nick)
         };
         println!(
-            "{name}  {short}  {}  {}{projects}{nick}",
+            "{name}  {orbit_short}  {space_short}  {}  {}{projects}{nick}",
             e.origin,
             paint(out.color, code, status),
         );
@@ -1157,7 +1141,7 @@ pub fn err_no_store_here(out: Out) {
     let known = spaces::list();
     if !known.is_empty() {
         eprintln!();
-        eprintln!("spaces on this machine:");
+        eprintln!("local Orbits on this machine:");
         for e in &known {
             let name = if e.name.is_empty() {
                 "(unnamed)"
@@ -1172,62 +1156,12 @@ pub fn err_no_store_here(out: Out) {
         }
         eprintln!();
         eprintln!(
-            "cd into one, target one from here with `-w <name>`, or `lait spaces` for details."
+            "cd into one, target one with `--orbit <name>`, or run `lait orbits` for details."
         );
     } else {
         eprintln!();
         eprintln!("found a space here with `lait init`, or join one with `lait join <link>`.");
     }
-}
-
-/// Render the issue-graph neighborhood (`lait graph <ref>`).
-fn print_graph(g: &crate::dto::GraphView, out: Out) {
-    let row_line = |r: &crate::dto::Row| {
-        let handle = r.key_alias.as_deref().unwrap_or(&r.reff);
-        format!("{handle}  {}  ({})", r.title, r.status)
-    };
-    println!("{}", paint(out.color, ansi::BOLD, &g.reff));
-    if let Some(p) = &g.parent {
-        println!("  parent    {}", row_line(p));
-    }
-    for c in &g.children {
-        println!("  child     {}", row_line(c));
-    }
-    for l in &g.links {
-        let arrow = if l.direction == "out" { "→" } else { "←" };
-        println!("  {} {arrow}  {}", l.kind, row_line(&l.row));
-    }
-    if !g.blocked_by.is_empty() {
-        println!(
-            "{}",
-            paint(out.color, ansi::YELLOW, "  blocked by (open, transitive):")
-        );
-        for b in &g.blocked_by {
-            println!("    ⚠ {}", row_line(b));
-        }
-    }
-    if g.parent.is_none() && g.children.is_empty() && g.links.is_empty() {
-        println!("  (no relations — `lait link <ref> blocks <ref>` or `lait parent <ref> <epic>`)");
-    }
-}
-
-/// Print a response; return the process exit code it implies.
-/// Render unix seconds as the UTC `YYYY-MM-DD` day (the inverse of the
-/// router's `parse_due`; same civil-date arithmetic).
-fn fmt_day(ts: u64) -> String {
-    let days = (ts / 86_400) as i64;
-    // Howard Hinnant's civil-from-days.
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-    format!("{y:04}-{m:02}-{d:02}")
 }
 
 pub fn print_response(resp: &Response, out: Out) -> i32 {
@@ -1236,7 +1170,6 @@ pub fn print_response(resp: &Response, out: Out) -> i32 {
         println!("{json}");
         return match resp {
             Response::Error { error_kind, .. } => exit_code_for_kind(*error_kind),
-            Response::Candidates { .. } => 2,
             _ => 0,
         };
     }
@@ -1255,216 +1188,6 @@ pub fn print_response(resp: &Response, out: Out) -> i32 {
         }
         Response::Ref { reff } => {
             println!("{reff}");
-            0
-        }
-        Response::Issue(v) => {
-            print_issue(v, out);
-            0
-        }
-        Response::List { rows } => {
-            print_rows(rows, out);
-            0
-        }
-        Response::Board(b) => {
-            print_board(b, out);
-            0
-        }
-        Response::Graph(g) => {
-            print_graph(g, out);
-            0
-        }
-        Response::Inbox { entries, unread } => {
-            if entries.is_empty() {
-                println!("inbox zero — nothing addressed to you. the backlog is `lait ls`.");
-                return 0;
-            }
-            // Newest-first + a ts watermark ⇒ exactly the first `unread` are unread.
-            for (i, e) in entries.iter().enumerate() {
-                let mark = if (i as u64) < *unread { "•" } else { " " };
-                let detail = if e.detail.is_empty() {
-                    String::new()
-                } else {
-                    format!("  — {}", e.detail)
-                };
-                println!(
-                    "{} {}  {}  {}{}",
-                    paint(out.color, ansi::CYAN, mark),
-                    e.reff,
-                    inbox_line_verb(e),
-                    e.title,
-                    detail
-                );
-            }
-            println!(
-                "{}",
-                paint(
-                    out.color,
-                    ansi::DIM,
-                    &format!("({unread} unread — `lait inbox --clear` to mark read)")
-                )
-            );
-            0
-        }
-        Response::Activity { events, .. } => {
-            if events.is_empty() {
-                println!("(no activity yet — it fills as the space moves: `lait new \"...\"`)");
-            }
-            for e in events {
-                let changes = if e.changes.is_empty() {
-                    String::new()
-                } else {
-                    let cs: Vec<String> = e
-                        .changes
-                        .iter()
-                        .map(|c| {
-                            format!(
-                                "{} {}→{}",
-                                c.field,
-                                c.from.as_deref().unwrap_or("∅"),
-                                c.to.as_deref().unwrap_or("∅")
-                            )
-                        })
-                        .collect();
-                    format!("  {}", cs.join(", "))
-                };
-                let warn = if e.collision { " ⚠" } else { "" };
-                println!("{} {} {}{}{}", e.reff, e.actor_nick, e.kind, changes, warn);
-            }
-            0
-        }
-        Response::Projects { projects } => {
-            if projects.is_empty() {
-                println!("(no projects — create one: `lait projects add KEY`)");
-                // A just-joined peer sees this too, but should wait for sync, not
-                // create — point them at the verifier so an empty board is legible.
-                println!(
-                    "{}",
-                    paint(
-                        out.color,
-                        ansi::DIM,
-                        "  just joined? run `lait doctor` to check sync status"
-                    )
-                );
-            }
-            for p in projects {
-                println!("{:<6} {}  ({})", p.key, p.name, p.id);
-            }
-            0
-        }
-        Response::Updates { updates } => {
-            if updates.is_empty() {
-                println!("(no updates yet — post one: `lait projects update KEY \"…\"`)");
-            }
-            for u in updates {
-                let health = if u.health.is_empty() {
-                    String::new()
-                } else {
-                    format!(" [{}]", u.health.replace('_', " "))
-                };
-                println!("{}{health}  {}", u.ts, u.body);
-                let _ = &u.author;
-            }
-            0
-        }
-        Response::Milestones { milestones } => {
-            if milestones.is_empty() {
-                println!("(no milestones — add one: `lait milestone new KEY \"…\"`)");
-            }
-            for m in milestones {
-                let target = m
-                    .target_date
-                    .map(|t| format!("  → {}", fmt_day(t)))
-                    .unwrap_or_default();
-                println!("{:<24} {}/{}{target}  ({})", m.name, m.done, m.total, m.id);
-            }
-            0
-        }
-        Response::Cycles { cycles } => {
-            if cycles.is_empty() {
-                println!("(no cycles — add one: `lait cycle new KEY \"…\"`)");
-            }
-            for c in cycles {
-                let window = match (c.start, c.end) {
-                    (0, 0) => String::new(),
-                    (s, 0) => format!("  {} →", fmt_day(s)),
-                    (0, e) => format!("  → {}", fmt_day(e)),
-                    (s, e) => format!("  {} → {}", fmt_day(s), fmt_day(e)),
-                };
-                println!("{:<24} {}/{}{window}  ({})", c.name, c.done, c.total, c.id);
-            }
-            0
-        }
-        Response::Initiatives { initiatives } => {
-            if initiatives.is_empty() {
-                println!("(no initiatives — add one: `lait initiative new \"…\"`)");
-            }
-            for i in initiatives {
-                let health = if i.health.is_empty() {
-                    String::new()
-                } else {
-                    format!(" [{}]", i.health.replace('_', " "))
-                };
-                let projects = if i.projects.is_empty() {
-                    "(no projects)".to_string()
-                } else {
-                    i.projects.join(", ")
-                };
-                println!(
-                    "{:<24} {}/{}{health}  {}  ({})",
-                    i.name, i.done, i.total, projects, i.id
-                );
-            }
-            0
-        }
-        Response::Teams { teams } => {
-            if teams.is_empty() {
-                println!("(no teams — add one: `lait team new \"…\" --key T`)");
-            }
-            for t in teams {
-                let projects = if t.projects.is_empty() {
-                    String::new()
-                } else {
-                    format!("  → {}", t.projects.join(", "))
-                };
-                println!(
-                    "{:<8} {:<20} {} member(s){projects}  ({})",
-                    t.key,
-                    t.name,
-                    t.members.len(),
-                    t.id
-                );
-            }
-            0
-        }
-        Response::TriageItems { items } => {
-            if items.is_empty() {
-                println!("(triage queue is empty — report with `lait triage submit \"…\"`)");
-            }
-            for t in items {
-                let state = if t.outcome.is_empty() {
-                    "pending".to_string()
-                } else if t.reff.is_empty() {
-                    t.outcome.clone()
-                } else {
-                    format!("{} → {}", t.outcome, t.reff)
-                };
-                println!("{}  {:<10} {}", t.id, state, t.title);
-            }
-            0
-        }
-        Response::Attachment { name, mime, .. } => {
-            // Reaching stdout with a payload would splat base64; the CLI's
-            // `attachment get` writes the file itself and never prints this.
-            println!("attachment {name} ({mime}) — use `lait attachment get` to save it");
-            0
-        }
-        Response::Labels { labels } => {
-            if labels.is_empty() {
-                println!("(no labels)");
-            }
-            for l in labels {
-                println!("{:<16} {}  ({})", l.name, l.color, l.id);
-            }
             0
         }
         Response::Assignments { rows } => {
@@ -1544,24 +1267,6 @@ pub fn print_response(resp: &Response, out: Out) -> i32 {
                 println!("{}  {:<12}  {}", short, nick, s.state);
             }
             0
-        }
-        Response::Candidates {
-            candidates,
-            near_miss_for,
-        } => {
-            match near_miss_for {
-                Some(input) => eprintln!("no issue matches '{input}' — did you mean:"),
-                None => eprintln!("ambiguous ref — {} candidates:", candidates.len()),
-            }
-            for c in candidates {
-                let alias = c
-                    .key_alias
-                    .as_deref()
-                    .map(|a| format!(" [{a}]"))
-                    .unwrap_or_default();
-                eprintln!("  {}{}  {}", c.reff, alias, c.title);
-            }
-            2
         }
         Response::Status(s) => {
             println!("id:        {}", s.id);
@@ -1732,120 +1437,6 @@ fn exit_code_for_kind(kind: ErrorKind) -> i32 {
     match kind {
         ErrorKind::NotFound => 2,
         ErrorKind::Error | ErrorKind::Denied => 1,
-    }
-}
-
-fn prio_badge(p: Priority, color: bool) -> String {
-    let badge = format!("·{}·", p.badge());
-    let code = match p {
-        Priority::Urgent => ansi::RED,
-        Priority::High => ansi::YELLOW,
-        Priority::Medium => ansi::CYAN,
-        Priority::Low => ansi::DIM,
-        Priority::None => ansi::DIM,
-    };
-    paint(color, code, &badge)
-}
-
-fn print_rows(rows: &[Row], out: Out) {
-    if rows.is_empty() {
-        println!(
-            "(no issues here — file one: `lait new \"...\"`, or `lait ls --all` to include done)"
-        );
-        return;
-    }
-    for r in rows {
-        let alias = r.key_alias.as_deref().unwrap_or(&r.reff);
-        let asg = if r.assignee_summary.is_empty() {
-            String::new()
-        } else {
-            format!("  {}", r.assignee_summary)
-        };
-        let dim = if r.provisional {
-            paint(out.color, ansi::DIM, " (provisional)")
-        } else {
-            String::new()
-        };
-        println!(
-            "{} {} {:<12} {}{}{}",
-            paint(out.color, ansi::BOLD, &format!("{alias:<10}")),
-            prio_badge(r.priority, out.color),
-            r.status,
-            r.title,
-            asg,
-            dim
-        );
-    }
-}
-
-fn print_board(b: &BoardView, out: Out) {
-    println!(
-        "{} · {}",
-        paint(out.color, ansi::BOLD, &b.project.key),
-        b.project.name
-    );
-    for col in &b.columns {
-        let header = format!("┌ {} ({}) ", col.state.name, col.rows.len());
-        println!("\n{}", paint(out.color, ansi::CYAN, &header));
-        for r in &col.rows {
-            let alias = r.key_alias.as_deref().unwrap_or(&r.reff);
-            let asg = if r.assignee_summary.is_empty() {
-                String::new()
-            } else {
-                format!("  {}", r.assignee_summary)
-            };
-            println!(
-                "│ {:<10} {} {}{}",
-                alias,
-                prio_badge(r.priority, out.color),
-                r.title,
-                asg
-            );
-        }
-    }
-}
-
-fn print_issue(v: &IssueView, out: Out) {
-    let alias = v.key_alias.as_deref().unwrap_or(&v.reff);
-    println!(
-        "{}  {}",
-        paint(out.color, ansi::BOLD, alias),
-        paint(out.color, ansi::BOLD, &v.title)
-    );
-    println!("{}", paint(out.color, ansi::DIM, &"─".repeat(60)));
-    println!("id:       {}", v.reff);
-    println!("project:  {}", v.project_key.as_deref().unwrap_or("?"));
-    println!("status:   {}", v.status);
-    println!("priority: {}", v.priority.as_str());
-    if !v.assignees.is_empty() {
-        let names: Vec<String> = v.assignees.iter().map(|u| u.short()).collect();
-        println!("assignees: {}", names.join(", "));
-    }
-    if !v.label_names.is_empty() {
-        println!("labels:   {}", v.label_names.join(", "));
-    }
-    if v.provisional {
-        println!("(provisional — issue body not yet synced)");
-    }
-    if !v.description.is_empty() {
-        println!("\n{}", v.description);
-    }
-    if !v.comments.is_empty() {
-        println!("\n## Comments ({})", v.comments.len());
-        for c in &v.comments {
-            let who = c.author_nick.clone().unwrap_or_else(|| c.author.short());
-            println!("{} · {}  {}", who, c.ts, c.body);
-        }
-    }
-    // Corruption is reported, never rendered as content: a malformed record gets
-    // a diagnostic line under its own heading, so it can't be mistaken for
-    // something a person actually wrote.
-    if !v.corrupt_records.is_empty() {
-        println!("\n## Corrupt records ({})", v.corrupt_records.len());
-        for r in &v.corrupt_records {
-            println!("{} · {}", r.locus, r.reason);
-        }
-        println!("(these are stored records that do not conform to the schema; run with --json for the raw values)");
     }
 }
 
@@ -2181,12 +1772,22 @@ pub async fn watch(
     exec: Option<String>,
     notify: bool,
 ) -> Result<()> {
+    let scope = scope_for_home(home);
+    let address = orbit_address_for_home(home)?;
+    scope.authorize(&address)?;
+    let space_route = ControlRoute::Space {
+        address: address.clone(),
+    };
     ensure_daemon(home).await?;
+    let daemon = crate::daemon::LaitDaemonClient::current()?;
     // Default to the current high-water: `watch` follows from now, not from the
     // start of the daemon's history.
     let mut cursor = match since {
         Some(n) => n,
-        None => match request(home, &Request::Log { since: 0 }).await? {
+        None => match daemon
+            .request(space_route.clone(), &Request::Log { since: 0 }, None)
+            .await?
+        {
             Response::Events { last, .. } => last,
             _ => 0,
         },
@@ -2195,7 +1796,7 @@ pub async fn watch(
 
     let mut epoch: Option<u64> = None;
     loop {
-        let mut sub = match control::subscribe(home, 0).await {
+        let mut sub = match daemon.subscribe_space(space_route.clone(), 0).await {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("watch: {e}; reconnecting\u{2026}");
@@ -2228,7 +1829,10 @@ pub async fn watch(
             if !(frame.presence_advanced || frame.reset) {
                 continue;
             }
-            match request(home, &Request::Log { since: cursor }).await {
+            match daemon
+                .request(space_route.clone(), &Request::Log { since: cursor }, None)
+                .await
+            {
                 Ok(Response::Events { events, last }) => {
                     for e in &events {
                         print_event(e);
@@ -2253,7 +1857,7 @@ pub async fn watch(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dto::Priority;
+    use crate::ids::SpaceId;
 
     #[test]
     fn client_side_exit_codes_come_from_the_type_not_the_prose() {
@@ -2273,53 +1877,21 @@ mod tests {
         // wrapped not-found is still a not-found. (This is the whole reason the
         // class is a type and not a prefix on the message.)
         let wrapped = Err::<(), _>(anyhow::Error::from(CliError::not_found("gone")))
-            .context("while resolving -w")
+            .context("while resolving --orbit")
             .unwrap_err();
         assert_eq!(exit_code_for_error(&wrapped), 2);
     }
 
     #[test]
     fn destructive_verbs_ask_and_the_rest_do_not() {
-        // The three that destroy something ask. This list IS the policy, so a new
-        // destructive verb that forgets to register here fails this test rather
-        // than silently shipping without a prompt.
+        // Space-level destructive operations remain host policy.
         for req in [
-            Request::IssueDelete {
-                reff: "ENG-1".into(),
-            },
             Request::MemberRemove { who: "ada".into() },
             Request::KeyRotate,
         ] {
             assert!(
                 destructive_question(&req).is_some(),
                 "{req:?} destroys something and must be confirmed",
-            );
-        }
-        // Reads and ordinary writes must never prompt — prompting on these would
-        // break every script that files or lists issues.
-        for req in [
-            Request::List {
-                project: None,
-                filter: Default::default(),
-            },
-            Request::IssueView {
-                reff: "ENG-1".into(),
-            },
-            Request::IssueNew {
-                title: "t".into(),
-                project: None,
-                project_hint: None,
-                body: None,
-                due: None,
-                estimate: None,
-                assignees: vec![],
-                priority: None,
-                labels: vec![],
-            },
-        ] {
-            assert!(
-                destructive_question(&req).is_none(),
-                "{req:?} is not destructive and must not prompt",
             );
         }
     }
@@ -2391,10 +1963,15 @@ mod tests {
     }
 
     #[test]
-    fn prio_badge_colorless_is_plain() {
-        assert_eq!(prio_badge(Priority::Urgent, false), "·U·");
-        // Colored urgent badge carries an ANSI escape but the same visible text.
-        let c = prio_badge(Priority::Urgent, true);
-        assert!(c.contains("·U·") && c.contains('\u{1b}'));
+    fn a_directory_selected_cli_scope_cannot_address_a_sibling_orbit() {
+        let selected = PathBuf::from("/tmp/lait-cli-selected");
+        let sibling = PathBuf::from("/tmp/lait-cli-sibling");
+        let space = SpaceId::from_digest([8; 16]);
+        let scope = scope_for_home(&selected);
+        let own = OrbitAddress::for_store(&selected, space.clone());
+        let other = OrbitAddress::for_store(&sibling, space);
+
+        assert!(scope.authorize(&own).is_ok());
+        assert!(scope.authorize(&other).is_err());
     }
 }

@@ -32,7 +32,8 @@ fn tmp_home(tag: &str) -> std::path::PathBuf {
 }
 
 /// Run `lait --home <home> …`, optionally acting as a local agent (`LAIT_AS`).
-/// `LAIT_IDLE_SECS=0` so an auto-spawned daemon never lingers between calls.
+/// `LAIT_IDLE_SECS=0` keeps each placed Station alive between calls. The
+/// identity-scoped daemon is shut down explicitly at the end of the test.
 fn lait(
     home: &std::path::Path,
     cfg: &std::path::Path,
@@ -75,7 +76,7 @@ fn a_sponsored_agent_acts_as_itself_in_one_store() {
         &["init", "--name", "PROJ", "--nick", "Huginn"],
     );
     assert!(!init.starts_with("ERR:"), "init failed: {init}");
-    lait(&home, &cfg, None, &["new", "human-filed issue"]);
+    lait(&home, &cfg, None, &["issues", "new", "human-filed issue"]);
 
     let human = json(&lait(&home, &cfg, None, &["--json", "whoami"]));
     let human_actor = human["actor"].as_str().unwrap().to_string();
@@ -139,7 +140,7 @@ fn a_sponsored_agent_acts_as_itself_in_one_store() {
         &home,
         &cfg,
         Some("scout"),
-        &["new", "agent-filed issue", "-p", "PROJ"],
+        &["issues", "new", "agent-filed issue", "-p", "PROJ"],
     );
     assert!(
         !filed.starts_with("ERR:") && filed.to_uppercase().contains("PROJ-"),
@@ -158,5 +159,6 @@ fn a_sponsored_agent_acts_as_itself_in_one_store() {
         .iter()
         .any(|m| m["key"].as_str() == Some(&human_actor) && m["role"] == "admin"));
 
+    lait(&home, &cfg, None, &["shutdown"]);
     std::fs::remove_dir_all(&home).ok();
 }

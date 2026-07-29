@@ -1,0 +1,19 @@
+[package]
+name = "lait-issues"
+version = "0.6.0"
+edition = "2021"
+rust-version = "1.91"
+description = "LAIT's canonical IssuesWorld product: schemas, semantic model, DTOs, and product identifiers"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+mechanics = { path = "../../crates/mechanics" }
+replica = { path = "../../crates/replica" }
+runtime = { path = "../../crates/runtime" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+schemars = "1"
+postcard = { version = "1", features = ["use-std"] }
+data-encoding = "2.6"
+blake3 = "1"

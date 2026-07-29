@@ -2,7 +2,7 @@
 
 lait is a local-first, peer-to-peer issue tracker. One binary provides a CLI,
 a local web application, and MCP tools for agents; every surface talks to the
-same per-space daemon and receives the same versioned projections.
+same local control plane and receives the same versioned projections.
 
 Start with the product, then go deeper only when you need to understand a
 contract or operate a deployment.
@@ -22,12 +22,16 @@ The normal product model is deliberately small:
   Orbit from signed Coordinates. Other commands never create stores implicitly.
 - `lait <verb>` is the scriptable and interactive CLI. `--json` returns the
   same versioned DTOs used by other clients.
-- `lait serve` supervises local space daemons and exposes the product over a
+- `lait daemon` is the identity-scoped process host. It lazily places Stations
+  for addressed Orbits, shares one transport endpoint per device identity, and
+  remains independent of any viewer.
+- `lait serve` is a client adapter exposing the same daemon contract over a
   loopback-only HTTP/SSE surface.
 - `lait mcp` exposes the same command contract to agents.
-- The daemon activates one Station, which exclusively owns Mechanics, Replica,
-  Fabric, Contacts, hosted Worlds, and Sessions. Clients submit intents and
-  re-read Manifest-pinned projections after Observation notifications.
+- The LaitDaemon places a Station-backed SpaceBridge in each addressed local
+  Orbit. Each WorldBridge owns that World's docked Sessions. Clients submit
+  intents and re-read Manifest-pinned projections after Observation
+  notifications.
 
 An identity is an actor, not a device. An `ActorId` remains stable while its
 device keys are added, revoked, or recovered. Names are local petnames and do

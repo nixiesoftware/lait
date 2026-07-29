@@ -1,9 +1,9 @@
 //! Guided-join verifier + directory-trap fix, end to end (see `docs/UI.md`,
-//! joining) — over the **orbital daemon**.
+//! joining) — over process-backed **SpaceBridges**.
 //!
 //! The `Diagnose` verb is a keystone onboarding feature: it projects live daemon
 //! state into the ordered gate list so a stalled joiner gets one legible blocker
-//! instead of a blank board. Here two in-process orbital daemons (in-memory
+//! instead of a blank board. Here two in-process SpaceBridges (in-memory
 //! transport) walk the join lifecycle: a fresh joiner blocks on `membership`
 //! while un-admitted, then — driven only by accepting the invite and Contact
 //! (orbital's automatic admission, no manual approve) — flips to all-pass. A
@@ -23,7 +23,7 @@ use async_trait::async_trait;
 use lait::control::{request, Request, Response};
 use lait::diagnose::{DiagnosisView, GateState};
 use lait::net::Network;
-use lait::orbital::run_orbital_daemon_with;
+use lait::orbital::run_space_bridge_with;
 use lait::spaces::{Origin, SpaceEntry};
 use lait::transport::mem::MemNet;
 use lait::transport::{Alpn, Transport, TransportFactory};
@@ -92,7 +92,7 @@ fn spawn_daemon(home: PathBuf, seed: [u8; 32], net: MemNet) -> std::thread::Join
     std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async move {
-            if let Err(e) = run_orbital_daemon_with(home, seed, &MemFactory(net)).await {
+            if let Err(e) = run_space_bridge_with(home, seed, &MemFactory(net)).await {
                 eprintln!("DAEMON ERR: {e:#}");
             }
         });
@@ -105,7 +105,7 @@ fn wait_online(rt: &tokio::runtime::Runtime, home: &Path) {
     });
     assert!(
         online.is_some(),
-        "orbital daemon at {} never came online",
+        "SpaceBridge at {} never came online",
         home.display()
     );
 }
@@ -313,7 +313,7 @@ fn stop_kills_the_daemon_even_with_a_live_subscriber() {
 /// The decoy-store guard: a read-only command run in a directory with no `.lait/`,
 /// when the registry knows of joined spaces, must refuse to create an empty store
 /// and instead point the user at the real one — exit non-zero, no `.lait/` left
-/// behind. This is the direct fix for "joined, but `lait projects` shows nothing"
+/// behind. This is the direct fix for "joined, but `lait issues projects` shows nothing"
 /// caused by running from the wrong folder.
 #[test]
 fn read_command_in_empty_dir_refuses_to_create_a_decoy_store() {
@@ -337,7 +337,7 @@ fn read_command_in_empty_dir_refuses_to_create_a_decoy_store() {
     .unwrap();
 
     let out = Command::new(bin())
-        .arg("projects")
+        .args(["issues", "projects"])
         .current_dir(&cwd)
         .env("LAIT_CONFIG_ROOT", &cfg)
         // Deliberately NO LAIT_HOME: force the git-style discovery path where the
@@ -345,7 +345,7 @@ fn read_command_in_empty_dir_refuses_to_create_a_decoy_store() {
         .env_remove("LAIT_HOME")
         .env_remove("LAIT_STORE")
         .output()
-        .expect("spawn `lait projects`");
+        .expect("spawn `lait issues projects`");
 
     assert!(
         !out.status.success(),
@@ -385,13 +385,13 @@ fn read_command_with_empty_registry_still_refuses_and_suggests_creation_verbs() 
     let cwd = unique("guard0-cwd");
 
     let out = Command::new(bin())
-        .arg("projects")
+        .args(["issues", "projects"])
         .current_dir(&cwd)
         .env("LAIT_CONFIG_ROOT", &cfg)
         .env_remove("LAIT_HOME")
         .env_remove("LAIT_STORE")
         .output()
-        .expect("spawn `lait projects`");
+        .expect("spawn `lait issues projects`");
 
     assert!(
         !out.status.success(),

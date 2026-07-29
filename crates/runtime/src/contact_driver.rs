@@ -399,6 +399,9 @@ async fn drive(ctx: DriverContext) {
         let mut registry = ctx.registry.lock().unwrap_or_else(|p| p.into_inner());
         let _ = registry.flush_now(now_ms());
     }
+    // End this Station's Space-scoped view. In a multi-Space host this
+    // unregisters only the Space; the identity endpoint closes after every
+    // Station has gone dormant.
     ctx.options.transport.shutdown().await;
 }
 

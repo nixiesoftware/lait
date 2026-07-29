@@ -9,7 +9,10 @@ import { IssueDetail } from "./IssueDetail";
 import { TooltipProvider } from "./primitives";
 
 const rpcMock = vi.hoisted(() => vi.fn());
-vi.mock("../api", () => ({ rpc: rpcMock }));
+const spaceRpcMock = vi.hoisted(() => vi.fn());
+// Both transports: the store defaults to the real ones, so a partial mock of
+// `../api` would leave it holding an undefined space transport.
+vi.mock("../api", () => ({ rpc: rpcMock, spaceRpc: spaceRpcMock }));
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean })
   .IS_REACT_ACT_ENVIRONMENT = true;

@@ -1,13 +1,13 @@
-//! Restart durability over the **orbital daemon** (in-process, in-memory
-//! transport): a joiner that is admitted and converged, then has its daemon
+//! Restart durability over a process-backed **SpaceBridge** (in-process, in-memory
+//! transport): a joiner that is admitted and converged, then has its bridge
 //! killed and restarted on the SAME home, must come back holding its persisted
 //! membership and reconverge with a peer that files new content while it was
 //! down.
 //!
 //! `orbital_two_node.rs` proves the cold form → invite → enter → admit →
 //! converge arc. This adds the restart in the middle: after admission, the
-//! joiner daemon is dropped, the founder files a new issue, and the joiner
-//! daemon is respawned on its persisted store. It must re-dock from persisted
+//! joiner bridge is dropped, the founder files a new issue, and the joiner
+//! bridge is respawned on its persisted store. It must re-dock from persisted
 //! membership and, once Contact is re-driven, converge to the post-restart
 //! issue — proving the orbital store survives a crash and rejoins.
 
@@ -18,9 +18,11 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use async_trait::async_trait;
-use lait::control::{request, Filter, Request, Response};
+use issues_app::IssuesResponse as IssueResponse;
+use lait::control::{request, ControlRoute, Request, Response};
+use lait::daemon::OrbitAddress;
 use lait::net::Network;
-use lait::orbital::run_orbital_daemon_with;
+use lait::orbital::run_space_bridge_with;
 use lait::transport::mem::MemNet;
 use lait::transport::{Alpn, Transport, TransportFactory};
 
@@ -58,6 +60,31 @@ fn req(rt: &tokio::runtime::Runtime, home: &Path, r: Request) -> Response {
         .unwrap_or_else(|e| Response::err(format!("{e:#}")))
 }
 
+fn issue_req(
+    rt: &tokio::runtime::Runtime,
+    home: &Path,
+    request: issues_app::IssuesRequest,
+) -> IssueResponse {
+    rt.block_on(async {
+        let space = lait::orbital::discover_space_id(home).expect("test Space");
+        let call = issues_app::encode_call(&request)?;
+        let reply = lait::control::call_world(
+            home,
+            ControlRoute::World {
+                address: OrbitAddress::for_store(home, space),
+                world: call.world().as_str().to_string(),
+            },
+            call.clone(),
+            None,
+        )
+        .await?;
+        Ok::<IssueResponse, anyhow::Error>(serde_json::from_value(issues_app::decode_reply(
+            &call, reply,
+        )?)?)
+    })
+    .unwrap_or_else(|error| IssueResponse::err(format!("{error:#}")))
+}
+
 fn poll_until<T>(timeout: Duration, mut check: impl FnMut() -> Option<T>) -> Option<T> {
     let start = Instant::now();
     loop {
@@ -75,7 +102,7 @@ fn spawn_daemon(home: PathBuf, seed: [u8; 32], net: MemNet) -> std::thread::Join
     std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async move {
-            if let Err(e) = run_orbital_daemon_with(home, seed, &MemFactory(net)).await {
+            if let Err(e) = run_space_bridge_with(home, seed, &MemFactory(net)).await {
                 eprintln!("DAEMON ERR: {e:#}");
             }
         });
@@ -88,30 +115,30 @@ fn wait_online(rt: &tokio::runtime::Runtime, home: &Path) {
     });
     assert!(
         online.is_some(),
-        "orbital daemon at {} never came online",
+        "SpaceBridge at {} never came online",
         home.display()
     );
 }
 
 fn list_titles(rt: &tokio::runtime::Runtime, home: &Path) -> Vec<String> {
-    match req(
+    match issue_req(
         rt,
         home,
-        Request::List {
+        issues_app::IssuesRequest::List {
             project: None,
-            filter: Filter::default(),
+            filter: issues_app::protocol::Filter::default(),
         },
     ) {
-        Response::List { rows } => rows.into_iter().map(|r| r.title).collect(),
+        IssueResponse::List { rows } => rows.into_iter().map(|r| r.title).collect(),
         _ => Vec::new(),
     }
 }
 
-fn new_issue(rt: &tokio::runtime::Runtime, home: &Path, title: &str) -> Response {
-    req(
+fn new_issue(rt: &tokio::runtime::Runtime, home: &Path, title: &str) -> IssueResponse {
+    issue_req(
         rt,
         home,
-        Request::IssueNew {
+        issues_app::IssuesRequest::IssueNew {
             due: None,
             estimate: None,
             title: title.into(),
@@ -139,23 +166,23 @@ fn restarted_joiner_daemon_reconverges_from_its_persisted_store() {
 
     assert!(
         matches!(
-            req(
+            issue_req(
                 &rt,
                 &founder_home,
-                Request::ProjectNew {
+                issues_app::IssuesRequest::ProjectNew {
                     name: "Engineering".into(),
                     key: "ENG".into(),
                     color: None,
                 }
             ),
-            Response::Ref { .. }
+            IssueResponse::Ref { .. }
         ),
         "founder: projects new"
     );
     assert!(
         matches!(
             new_issue(&rt, &founder_home, "before restart"),
-            Response::Ref { .. }
+            IssueResponse::Ref { .. }
         ),
         "founder: first issue"
     );
@@ -235,7 +262,7 @@ fn restarted_joiner_daemon_reconverges_from_its_persisted_store() {
     assert!(
         matches!(
             new_issue(&rt, &founder_home, "after restart"),
-            Response::Ref { .. }
+            IssueResponse::Ref { .. }
         ),
         "founder: post-restart issue"
     );

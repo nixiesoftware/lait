@@ -9,7 +9,7 @@ import { SERIALIZE } from "./MilkdownEditor";
 /**
  * The whole reason Milkdown was chosen over Tiptap and Lexical: the document is
  * parsed and serialized by remark, so what the editor writes back is what it was
- * given. lait stores descriptions as plain CRDT text and `lait show` prints them
+ * given. lait stores descriptions as plain CRDT text and `lait issues show` prints them
  * verbatim — an editor that normalises on save rewrites an agent's issue body
  * the moment a human touches one word.
  *

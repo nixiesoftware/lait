@@ -5,8 +5,7 @@
 //! instead of a blank board. Kept deliberately free of I/O, ANSI, and daemon
 //! types: it takes primitive inputs and returns a [`DiagnosisView`] DTO, so the
 //! exact same logic backs CLI `doctor`, the `join` tail, and the MCP `doctor`
-//! tool, and is unit-tested without a
-//! running node. The orbital daemon is the only caller that
+//! tool, and is unit-tested without a running node. The active SpaceBridge
 //! gathers the inputs; everything downstream renders the DTO.
 
 use serde::{Deserialize, Serialize};
@@ -312,7 +311,7 @@ fn summarize(blocked: Option<&DiagnosisGate>, projects: usize, issues: usize) ->
             format!("you're in — {projects} project(s), {issues} issue(s) synced. get to work.")
         }
         Some("space") => "wrong directory: this store is a different space than the invite. \
-             cd to where you ran `lait join`, or run `lait spaces`."
+             cd to where you ran `lait join`, or run `lait orbits`."
             .to_string(),
         Some("membership") => {
             "waiting for an admin to approve your join — the board is still encrypted.".to_string()

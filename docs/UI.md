@@ -30,14 +30,14 @@ Common flows:
 
 ```text
 lait init
-lait new "Fix the import path"
-lait ls
-lait show <ref>
-lait edit <ref>
-lait start <ref>
-lait done <ref>
-lait comment <ref> "Reproduced on Windows"
-lait board
+lait issues new "Fix the import path"
+lait issues ls
+lait issues show <ref>
+lait issues edit <ref>
+lait issues start <ref>
+lait issues done <ref>
+lait issues comment <ref> "Reproduced on Windows"
+lait issues board
 ```
 
 `<ref>` resolution happens in the daemon. Full ids, unique prefixes, friendly
@@ -55,12 +55,16 @@ than relying on a prompt.
 ## 3. Web
 
 `lait serve` starts a loopback-only web application that can list locally known
-spaces and attach to their daemons. It is a local client and supervisor, not an
-iroh peer and not a space member.
+spaces through the local daemon control layer. It is a local client, not an iroh
+peer and not a space member.
 
 The server uses a per-run bearer capability and origin/rebinding checks. A
-browser may list navigation metadata without waking every daemon. Attaching to a
-space starts or reuses only that space's daemon under the correct local identity.
+browser may list navigation metadata without activating every Space. Attaching
+to a row starts or reuses only the Station placed in that local Orbit, under the
+correct local identity. Rows use local Orbit ids because two local stores may
+participate in the same Space. The web process owns no Station: it sends routed
+requests and receives catalog doorbells through the same identity-scoped
+LaitDaemon endpoint as CLI and MCP.
 
 The web application provides issue lists, boards, detail, inbox, activity,
 members, filters, and command actions. Server-side semantics such as reference
@@ -73,8 +77,9 @@ Use the CLI for device enrollment, revocation, and recovery until parity lands.
 ## 4. MCP
 
 `lait mcp` exposes the daemon command surface as MCP tools for agents. MCP uses
-the same request and response types as other clients. A parity test guards the
-intentional tool mapping.
+the same request and response types as other clients and remains pinned to the
+Orbit selected at launch even though the daemon knows the wider local catalog.
+A parity test guards the intentional tool mapping.
 
 Agents do not receive a privileged storage API. They resolve references, submit
 commands, encounter the same authorization checks, and receive the same

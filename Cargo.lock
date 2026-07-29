@@ -2918,6 +2918,8 @@ dependencies = [
  "getrandom 0.3.4",
  "include_dir",
  "interprocess",
+ "lait-issues",
+ "lait-issues-app",
  "libc",
  "mechanics",
  "n0-future",
@@ -2941,7 +2943,43 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "windows-sys 0.61.2",
+ "world-bridge",
+ "world-interface",
  "zip",
+]
+
+[[package]]
+name = "lait-issues"
+version = "0.6.0"
+dependencies = [
+ "blake3",
+ "data-encoding",
+ "mechanics",
+ "postcard",
+ "replica",
+ "runtime",
+ "schemars",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "lait-issues-app"
+version = "0.6.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "data-encoding",
+ "lait-issues",
+ "mechanics",
+ "postcard",
+ "replica",
+ "runtime",
+ "schemars",
+ "serde",
+ "serde_json",
+ "world-bridge",
+ "world-interface",
 ]
 
 [[package]]
@@ -6796,6 +6834,28 @@ dependencies = [
  "thiserror 2.0.18",
  "windows",
  "windows-core",
+]
+
+[[package]]
+name = "world-bridge"
+version = "0.6.0"
+dependencies = [
+ "data-encoding",
+ "replica",
+ "runtime",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "world-interface"
+version = "0.6.0"
+dependencies = [
+ "clap",
+ "replica",
+ "schemars",
+ "serde_json",
+ "world-bridge",
 ]
 
 [[package]]
