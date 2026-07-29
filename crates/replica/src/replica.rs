@@ -493,6 +493,10 @@ pub struct Replica {
 /// transaction bytes)`.
 type RetainedHead = ([u8; 32], Vec<u8>, Vec<u8>);
 
+/// One Body a reconciliation found divergent, and the head commitments the peer
+/// advertises for it.
+pub type DivergentBody = (BodyKey, Vec<[u8; 32]>);
+
 /// The canonical Fabric key for a Body: `BLAKE3(domain || world || 0x00 || body)`.
 fn fabric_key(key: &BodyKey) -> FabricKey {
     let mut h = blake3::Hasher::new();
@@ -2656,6 +2660,88 @@ impl Replica {
         )
         .ok_or_else(|| ReplicaCommitError::Illegitimate("sign manifest root".into()))?;
         Ok((root.encode(), sink.written))
+    }
+
+    /// The root of this Replica's published catalog — what a peer compares
+    /// against to discover divergence without either side enumerating.
+    ///
+    /// This replaces the holdings declaration as the thing a Contact opens
+    /// with. A declaration had to name every head, and the frame carrying it
+    /// was sized for exactly that; a root is 40 bytes whatever the catalog
+    /// holds, and equal roots prove equal catalogs outright because the
+    /// encoding is canonical.
+    pub fn published_root(&self) -> Option<fabric::journal::index::ChildRef> {
+        self.manifest_body_root
+    }
+
+    /// Serve the requested published-catalog nodes to a descending peer.
+    ///
+    /// Bounded by the caller and by what exists: an unknown hash is simply
+    /// absent from the answer, so a peer cannot use requests to probe for
+    /// anything it could not already address.
+    pub fn published_nodes(&self, hashes: &[[u8; 32]], max: usize) -> BTreeMap<[u8; 32], Vec<u8>> {
+        use fabric::journal::index::NodeSource;
+        let Some(store) = self.durable.as_ref() else {
+            return BTreeMap::new();
+        };
+        let nodes = store.nodes();
+        hashes
+            .iter()
+            .take(max)
+            .filter_map(|hash| nodes.node(hash).map(|bytes| (*hash, bytes)))
+            .collect()
+    }
+
+    /// Begin discovering what a peer holds that this Replica does not.
+    ///
+    /// The session is a pure state machine: it asks for node hashes, is fed
+    /// the answers, and eventually names the Bodies whose advertised heads
+    /// differ. Cost is proportional to the disagreement, not to either
+    /// catalog — two converged peers exchange nothing at all.
+    pub fn begin_reconciliation(
+        &self,
+        peer_root: Option<fabric::journal::index::ChildRef>,
+        max_nodes: u64,
+    ) -> fabric::journal::index::Reconciliation {
+        fabric::journal::index::Reconciliation::begin(self.manifest_body_root, peer_root, max_nodes)
+    }
+
+    /// Feed a reconciliation the nodes it asked for, against this Replica's own
+    /// catalog.
+    pub fn absorb_reconciliation(
+        &self,
+        session: &mut fabric::journal::index::Reconciliation,
+        nodes: &BTreeMap<[u8; 32], Vec<u8>>,
+    ) -> Result<(), ReplicaCommitError> {
+        let Some(store) = self.durable.as_ref() else {
+            return Err(ReplicaCommitError::Illegitimate(
+                "a non-durable Replica has no catalog to reconcile against".into(),
+            ));
+        };
+        session
+            .absorb(&store.nodes(), nodes)
+            .map_err(|e| ReplicaCommitError::Integrity(format!("reconciliation: {e}")))
+    }
+
+    /// Decode the divergent entries a completed reconciliation produced into
+    /// the Bodies and heads this Replica should ask for.
+    pub fn divergent_heads(
+        entries: &[fabric::journal::index::IndexEntry],
+    ) -> Result<Vec<DivergentBody>, ReplicaCommitError> {
+        entries
+            .iter()
+            .map(|entry| {
+                let published = ManifestEntry::decode_canonical(&entry.value).map_err(|e| {
+                    ReplicaCommitError::Illegitimate(format!("published entry: {e}"))
+                })?;
+                let commitments = published
+                    .heads
+                    .iter()
+                    .map(|h| h.transaction_commitment)
+                    .collect();
+                Ok((published.key, commitments))
+            })
+            .collect()
     }
 
     /// The complete per-head holdings summary: every `(key, transaction

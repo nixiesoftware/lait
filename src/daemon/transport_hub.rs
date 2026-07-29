@@ -627,6 +627,7 @@ mod tests {
             responder,
             [9; 32],
             runtime::ContactId::from_bytes([7; 16]),
+            [0; 32],
             0,
             [0; 32],
             &seed_a,

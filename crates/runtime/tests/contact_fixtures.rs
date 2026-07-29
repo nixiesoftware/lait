@@ -45,6 +45,7 @@ fn hello() -> ContactHello {
         station_of(&RESPONDER_SEED).key_bytes(),
         [3u8; 32],
         contact(),
+        [0u8; 32],
         0,
         [0u8; 32],
         &INITIATOR_SEED,
@@ -69,6 +70,7 @@ fn an_unsupported_contact_protocol_is_refused() {
         station_of(&RESPONDER_SEED).key_bytes(),
         [3u8; 32],
         contact(),
+        [0u8; 32],
         0,
         [0u8; 32],
         &INITIATOR_SEED,
@@ -112,6 +114,7 @@ fn ack_binds_the_exact_hello_and_a_fresh_nonce() {
         station_of(&RESPONDER_SEED).key_bytes(),
         [30u8; 32],
         contact(),
+        [0u8; 32],
         0,
         [0u8; 32],
         &INITIATOR_SEED,
@@ -172,7 +175,7 @@ fn frame_tags_are_the_canonical_wire_values() {
             5,
             ContactFrame::ManifestRequest {
                 root: [0u8; 32],
-                node_count: 1,
+                nodes: vec![[1u8; 32]],
             },
         ),
         (
@@ -662,7 +665,7 @@ fn frame_count_overflow_fails_closed() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn manifest_requests_must_reference_the_offer_in_range() {
+fn manifest_requests_must_reference_the_offer_and_stay_bounded() {
     let mut acc = AccepterValidator::new(contact());
     let root_bytes = b"the-root".to_vec();
     let root = manifest_root_ref(&root_bytes);
@@ -671,7 +674,7 @@ fn manifest_requests_must_reference_the_offer_in_range() {
         acc.on_frame(
             &ContactFrame::ManifestRequest {
                 root,
-                node_count: 1,
+                nodes: vec![[1u8; 32]],
             }
             .encode(&contact()),
         ),
@@ -694,19 +697,44 @@ fn manifest_requests_must_reference_the_offer_in_range() {
         acc.on_frame(
             &ContactFrame::ManifestRequest {
                 root,
-                node_count: 2,
+                nodes: vec![[1u8; 32], [2u8; 32]],
             }
             .encode(&contact()),
         )
         .unwrap(),
         AccepterEvent::ManifestRequest { .. }
     ));
-    // Out-of-range and wrong-root requests are refused.
+    // A hash the accepter does not hold is *not* an error. A descent asks for
+    // the subtrees whose roots differ, and asking for one that turns out not to
+    // exist tells the peer nothing it could not already address — it simply
+    // gets nothing back. Refusing here would leak which nodes exist.
+    assert!(matches!(
+        acc.on_frame(
+            &ContactFrame::ManifestRequest {
+                root,
+                nodes: vec![[0xAB; 32]],
+            }
+            .encode(&contact()),
+        )
+        .unwrap(),
+        AccepterEvent::ManifestRequest { .. }
+    ));
+    // An empty request, an over-bound one, and a wrong-root one are refused.
     assert_eq!(
         acc.on_frame(
             &ContactFrame::ManifestRequest {
                 root,
-                node_count: 3,
+                nodes: Vec::new(),
+            }
+            .encode(&contact()),
+        ),
+        Err(abort::BAD_REQUEST)
+    );
+    assert_eq!(
+        acc.on_frame(
+            &ContactFrame::ManifestRequest {
+                root,
+                nodes: vec![[1u8; 32]; runtime::contact::MAX_DESCENT_REQUEST + 1],
             }
             .encode(&contact()),
         ),
@@ -716,7 +744,7 @@ fn manifest_requests_must_reference_the_offer_in_range() {
         acc.on_frame(
             &ContactFrame::ManifestRequest {
                 root: [0xEE; 32],
-                node_count: 1,
+                nodes: vec![[1u8; 32]],
             }
             .encode(&contact()),
         ),
@@ -751,6 +779,7 @@ fn the_signed_hello_binds_the_holdings_declaration() {
         station_of(&RESPONDER_SEED).key_bytes(),
         [3u8; 32],
         contact(),
+        [0u8; 32],
         held.len() as u32,
         digest,
         &INITIATOR_SEED,

@@ -619,9 +619,20 @@ async fn initiate(
     let contact = ContactId::mint();
     let mut nonce = [0u8; 32];
     getrandom::fill(&mut nonce).map_err(|e| ContactError::Transfer(e.to_string()))?;
-    // The O(changed) declaration: every head this replica already holds, so
-    // the accepter serves only the difference. Bound into the SIGNED hello
-    // (count + digest) and streamed as chunked frames right after it.
+    // The declaration is a root. It used to be every head this replica holds,
+    // streamed as chunked frames after the hello; a root is 40 bytes whatever
+    // the catalog contains, and equal roots prove equal catalogs outright
+    // because the encoding is canonical.
+    let published = ctx
+        .core
+        .with_replica(|replica| Ok(replica.published_root()))
+        .map_err(|e: replica::ReplicaCommitError| ContactError::Transfer(e.to_string()))?;
+    let holdings_root = published.map(|r| r.hash).unwrap_or([0u8; 32]);
+
+    // The declaration is the fallback. It costs O(heads) to send, so it is only
+    // worth sending when the roots already say the catalogs differ — and when
+    // they agree, the accepter can stop without either side enumerating
+    // anything, which is the steady state.
     let held = ctx
         .core
         .with_replica(|replica| Ok(replica.head_commitments()))
@@ -639,6 +650,7 @@ async fn initiate(
         responder.key_bytes(),
         nonce,
         contact,
+        holdings_root,
         holdings_count,
         holdings_digest,
         &ctx.options.station_seed,
@@ -762,6 +774,17 @@ async fn serve_contact(
     // digest/count mismatch is a protocol violation, and a wrong (or lying)
     // declaration can only starve the initiator — the transfer we build from
     // it still advertises the FULL manifest, and adoption is judged whole.
+    // Equal catalog roots prove equal catalogs, because the encoding is
+    // canonical — so a converged peer is answered from 40 signed bytes and
+    // nothing is streamed in either direction. This is the case that happens
+    // constantly, and it used to cost a declaration naming every head.
+    let our_root = ctx
+        .core
+        .with_replica(|replica| Ok(replica.published_root()))
+        .map_err(|e: replica::ReplicaCommitError| ContactError::Transfer(e.to_string()))?;
+    let roots_agree = our_root.map(|r| r.hash).unwrap_or([0u8; 32]) == hello.holdings_root
+        && hello.holdings_root != [0u8; 32];
+
     let mut held: std::collections::BTreeSet<(replica::BodyKey, [u8; 32])> =
         std::collections::BTreeSet::new();
     if hello.holdings_count > 0 {

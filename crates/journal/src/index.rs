@@ -610,3 +610,209 @@ pub fn validate(source: &dyn NodeSource, root: Option<ChildRef>) -> Result<u64, 
         Some(child) => walk(source, &child, 0, &[]),
     }
 }
+
+/// Finding what two replicas disagree about, without either enumerating what it
+/// holds.
+///
+/// The alternative — each peer naming every entry it has — does not fit and was
+/// never going to. Contact's holdings frame is sized for *heads*, roughly 64
+/// bytes each, while a Replica's required set after the content and history
+/// work is checkpoints, delta tails, index nodes, archives, and every content
+/// descriptor. At a hundred thousand Bodies that is orders of magnitude past
+/// what the frame was measured for.
+///
+/// Two roots make the question cheap instead. Equal roots mean equal sets, full
+/// stop, because the encoding is canonical — so the common case costs one
+/// comparison. Unequal roots are descended: at each level only the child slots
+/// whose subtree hashes differ are worth following, and an identical subtree is
+/// dismissed by one hash comparison however much it contains. Cost becomes
+/// O(divergence), and neither side ever renders a flat set of hashes.
+///
+/// This is a pure state machine. It performs no I/O and knows nothing about
+/// frames or connections: a caller feeds it remote nodes and it answers with
+/// either more nodes to fetch or the entries that differ.
+#[derive(Debug)]
+pub struct Reconciliation {
+    /// Remote nodes still to fetch, paired with the local subtree to compare
+    /// them against and the depth they sit at.
+    wanted: Vec<(ChildRef, Option<ChildRef>, usize)>,
+    /// Entries the remote holds that the local side does not.
+    missing: Vec<IndexEntry>,
+    /// Nodes already absorbed, so a peer cannot make us walk one twice.
+    seen: std::collections::BTreeSet<[u8; 32]>,
+    fetched: u64,
+    max_nodes: u64,
+}
+
+/// What a reconciliation step needs next.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReconciliationStep {
+    /// Fetch these remote nodes and feed them back.
+    Fetch(Vec<[u8; 32]>),
+    /// Nothing further: these are the entries the remote holds and we do not.
+    Complete(Vec<IndexEntry>),
+}
+
+impl Reconciliation {
+    /// Begin comparing a local root against a remote one.
+    ///
+    /// `max_nodes` bounds how much a peer can make us fetch. A remote root is
+    /// remote input, and a descent it controls is a descent it could otherwise
+    /// make unbounded.
+    pub fn begin(local: Option<ChildRef>, remote: Option<ChildRef>, max_nodes: u64) -> Self {
+        let mut wanted = Vec::new();
+        if let Some(remote) = remote {
+            // Equal roots, equal sets. The canonical encoding is what makes
+            // this a proof rather than a heuristic.
+            if Some(remote) != local {
+                wanted.push((remote, local, 0));
+            }
+        }
+        Self {
+            wanted,
+            missing: Vec::new(),
+            seen: std::collections::BTreeSet::new(),
+            fetched: 0,
+            max_nodes,
+        }
+    }
+
+    /// What to do next. `Complete` when nothing is outstanding.
+    pub fn step(&mut self) -> ReconciliationStep {
+        if self.wanted.is_empty() {
+            let mut out = std::mem::take(&mut self.missing);
+            out.sort_by_key(|e| e.key);
+            out.dedup_by_key(|e| e.key);
+            return ReconciliationStep::Complete(out);
+        }
+        ReconciliationStep::Fetch(
+            self.wanted
+                .iter()
+                .map(|(remote, _, _)| remote.hash)
+                .collect(),
+        )
+    }
+
+    /// Feed back the remote nodes the last step asked for.
+    ///
+    /// A node whose bytes do not match the hash that named it is refused rather
+    /// than trusted: the request was for one specific address, and anything
+    /// else is not an answer to it.
+    pub fn absorb(
+        &mut self,
+        local: &dyn NodeSource,
+        remote_nodes: &std::collections::BTreeMap<[u8; 32], Vec<u8>>,
+    ) -> Result<(), IndexError> {
+        let outstanding = std::mem::take(&mut self.wanted);
+        for (remote, local_child, depth) in outstanding {
+            let Some(bytes) = remote_nodes.get(&remote.hash) else {
+                // Not supplied this round; ask again next time.
+                self.wanted.push((remote, local_child, depth));
+                continue;
+            };
+            if node_hash(bytes) != remote.hash {
+                return Err(IndexError::NonCanonical);
+            }
+            if !self.seen.insert(remote.hash) {
+                continue;
+            }
+            self.fetched += 1;
+            if self.fetched > self.max_nodes || depth > MAX_DEPTH {
+                return Err(IndexError::Bounds);
+            }
+            let node = IndexNode::decode_canonical(bytes)?;
+            self.compare(local, &node, local_child, depth)?;
+        }
+        Ok(())
+    }
+
+    fn compare(
+        &mut self,
+        local: &dyn NodeSource,
+        remote: &IndexNode,
+        local_child: Option<ChildRef>,
+        depth: usize,
+    ) -> Result<(), IndexError> {
+        let local_node = match local_child {
+            None => None,
+            Some(child) => local
+                .node(&child.hash)
+                .map(|bytes| IndexNode::decode_canonical(&bytes))
+                .transpose()?,
+        };
+
+        match (remote, &local_node) {
+            (IndexNode::Leaf(remote_entries), Some(IndexNode::Leaf(local_entries))) => {
+                for entry in remote_entries {
+                    let held = local_entries
+                        .iter()
+                        .any(|l| l.key == entry.key && l.value == entry.value);
+                    if !held {
+                        self.missing.push(entry.clone());
+                    }
+                }
+            }
+            (IndexNode::Leaf(remote_entries), _) => {
+                // No local node here, or a branch where the remote has a leaf.
+                // Either way each remote entry is checked individually, because
+                // the local side may hold it deeper down.
+                for entry in remote_entries {
+                    let held = lookup_from(local, local_child, &entry.key, depth)?
+                        .is_some_and(|value| value == entry.value);
+                    if !held {
+                        self.missing.push(entry.clone());
+                    }
+                }
+            }
+            (IndexNode::Branch(remote_children), Some(IndexNode::Branch(local_children))) => {
+                for (slot, remote_slot) in remote_children.iter().enumerate() {
+                    let Some(remote_slot) = remote_slot else {
+                        continue;
+                    };
+                    // The whole point: an identical subtree is dismissed by one
+                    // hash comparison, however much it holds.
+                    if local_children[slot] == Some(*remote_slot) {
+                        continue;
+                    }
+                    self.wanted
+                        .push((*remote_slot, local_children[slot], depth + 1));
+                }
+            }
+            (IndexNode::Branch(remote_children), _) => {
+                for remote_slot in remote_children.iter().flatten() {
+                    self.wanted.push((*remote_slot, None, depth + 1));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Look one key up starting from a subtree at `depth`.
+fn lookup_from(
+    source: &dyn NodeSource,
+    root: Option<ChildRef>,
+    key: &IndexKey,
+    start_depth: usize,
+) -> Result<Option<Vec<u8>>, IndexError> {
+    let mut current = root;
+    let mut depth = start_depth;
+    while let Some(child) = current {
+        if depth > MAX_DEPTH {
+            return Err(IndexError::Bounds);
+        }
+        let Some(bytes) = source.node(&child.hash) else {
+            return Ok(None);
+        };
+        match IndexNode::decode_canonical(&bytes)? {
+            IndexNode::Leaf(entries) => {
+                return Ok(entries.into_iter().find(|e| &e.key == key).map(|e| e.value))
+            }
+            IndexNode::Branch(children) => {
+                current = children[nibble(key, depth)];
+                depth += 1;
+            }
+        }
+    }
+    Ok(None)
+}
