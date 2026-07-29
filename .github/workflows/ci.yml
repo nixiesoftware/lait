@@ -257,7 +257,7 @@ jobs:
           # refusal, and the commit-cost baseline. Each is a claim the docket
           # makes about the substrate; each fails loudly if it stops being true.
           - job: core-fabric-foundations
-            filter: "binary(causal_evidence) + binary(history_growth) + binary(algebra_reservation) + binary(clean_break) + binary(commit_cost_baseline)"
+            filter: "binary(causal_evidence) + binary(history_growth) + binary(algebra_reservation) + binary(clean_break) + binary(commit_cost_baseline) + binary(causal_contract)"
           - job: orbital-faults
             filter: "binary(journal_faults) + binary(journal_child_crash) + binary(manifest_atomicity) + binary(orbital_catalog) + binary(concurrent_heads)"
           - job: orbital-contact-real

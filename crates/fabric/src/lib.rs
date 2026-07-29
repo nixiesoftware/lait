@@ -25,6 +25,12 @@ pub mod journal {
     pub use ::journal::*;
 }
 
+pub mod causal;
+pub use causal::{
+    AnchorResolution, ArtifactRef, BodyMaterial, CausalError, CausalRelation, CheckpointPolicy,
+    FabricAnchor, FabricArtifact, FabricVersion, ImportStatus, OpHead, CAUSAL_FORMAT_VERSION,
+    MAX_HEADS,
+};
 pub use fabric::{is_implemented_type_tag, is_reserved_type_tag};
 pub use fabric::{
     BodyExport, CausalToken, CollaborativeView, CrdtFabric, Fabric, FabricCommitReceipt,
