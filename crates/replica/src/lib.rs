@@ -22,6 +22,7 @@
 
 pub mod algebra;
 pub mod body;
+pub mod content;
 pub mod convergence;
 pub mod frontier;
 pub mod ids;
@@ -33,11 +34,15 @@ pub mod replica;
 pub mod transaction;
 
 pub use body::{BodyOp, BodySchema, CollaborativeSchema, ContentCommitment, MutationModel};
+pub use content::{
+    ChunkLeaf, ChunkProof, ContentDescriptor, ContentError, ContentRef, ProofStep, SealedContent,
+    CHUNK_PLAINTEXT_LEN, CONTENT_FORMAT_VERSION, MAX_CONTENT_LEN, MAX_PROOF_DEPTH,
+};
 pub use convergence::{
     AuthorityBatchReceipt, AuthorityIncorporator, ConvergenceOutcome, IncorporationClass,
     StagedContactMaterial, ValidatedContactBundle,
 };
-pub use fabric::{CollaborativeView, ListElement};
+pub use fabric::{CollaborativeView, ListElement, ProjectionError};
 pub use frontier::{AuthorityFrontier, ReplicaFrontier};
 pub use ids::{BodyId, BodyKey, EncodingId, SchemaId, WorldId};
 pub use manifest::{

@@ -150,8 +150,11 @@ impl runtime::BodyReader for StubReader {
     fn read_collaborative_body(
         &self,
         key: &replica::ids::BodyKey,
-    ) -> Option<replica::CollaborativeView> {
-        self.views.get(key).cloned()
+    ) -> Result<replica::CollaborativeView, replica::ProjectionError> {
+        self.views
+            .get(key)
+            .cloned()
+            .ok_or(replica::ProjectionError::NotCollaborative)
     }
     fn bodies_with_schema(
         &self,

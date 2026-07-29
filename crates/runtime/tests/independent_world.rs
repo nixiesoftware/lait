@@ -167,6 +167,7 @@ impl World for MultiWorld {
                 let text = v["text"].as_str().unwrap_or_default();
                 let at = ctx
                     .read_collaborative(&key)
+                    .ok()
                     .and_then(|p| p.texts.get("body").map(|t| t.chars().count() as u64))
                     .unwrap_or(0);
                 declare(
@@ -250,6 +251,7 @@ impl World for MultiWorld {
                 .unwrap_or_default(),
             Some("pad") => ctx
                 .read_collaborative(&self.pad_key())
+                .ok()
                 .and_then(|p| p.texts.get("body").cloned())
                 .unwrap_or_default()
                 .into_bytes(),

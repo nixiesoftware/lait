@@ -387,7 +387,10 @@ impl crate::world::BodyReader for ReplicaReader<'_> {
     fn read_body(&self, key: &BodyKey) -> Option<Vec<u8>> {
         self.0.read(key)
     }
-    fn read_collaborative_body(&self, key: &BodyKey) -> Option<replica::CollaborativeView> {
+    fn read_collaborative_body(
+        &self,
+        key: &BodyKey,
+    ) -> Result<replica::CollaborativeView, replica::ProjectionError> {
         self.0.read_collaborative(key)
     }
     fn bodies_with_schema(&self, world: &WorldId, schema: &SchemaId) -> Vec<BodyKey> {

@@ -389,10 +389,11 @@ fn checked_catalog_view(
     match catalogs.as_slice() {
         [] => Ok(None),
         [one] if one == &expected => match ctx.read_collaborative(&expected) {
-            Some(view) => Ok(Some(view)),
-            // Bound as a catalog but unreadable under the collaborative
-            // model: a wrong-model/encoding Body, not a missing one.
-            None => Err(WorldError::WorldStateCorrupt),
+            Ok(view) => Ok(Some(view)),
+            // Bound as a catalog but unreadable: a wrong-model/encoding Body,
+            // or one carrying a collaborative type this build cannot project.
+            // Either way not a missing catalog.
+            Err(_) => Err(WorldError::WorldStateCorrupt),
         },
         _ => Err(WorldError::WorldStateCorrupt),
     }
@@ -405,6 +406,7 @@ fn catalog_state(ctx: &WorldContext<'_>) -> Result<CatalogState, WorldError> {
 
 fn issue_state(ctx: &WorldContext<'_>, doc: &str) -> Option<IssueState> {
     ctx.read_collaborative(&issue_key(doc))
+        .ok()
         .map(|v| IssueState::from_view(&v))
 }
 
@@ -413,6 +415,7 @@ fn push_event(staging: &mut Staging, ctx: &WorldContext<'_>, doc: &str, event: &
     let key = issue_key(doc);
     let len = ctx
         .read_collaborative(&key)
+        .ok()
         .and_then(|v| v.lists.get("events").map(|l| l.len() as u64))
         .unwrap_or(0);
     staging.issue(
@@ -1920,7 +1923,7 @@ impl World for IssuesWorld {
                 let referenced = ctx
                     .bodies_with_schema(&contract::world_id(), &contract::issue_schema())
                     .iter()
-                    .filter_map(|key| ctx.read_collaborative(key))
+                    .filter_map(|key| ctx.read_collaborative(key).ok())
                     .any(|view| IssueState::from_view(&view).project == id);
                 if referenced {
                     return Err(WorldError::Conflict);
@@ -3164,7 +3167,7 @@ impl World for IssuesWorld {
                 // map, bypassing the metadata-only snapshot cache.
                 let view = ctx
                     .read_collaborative(&issue_key(&doc))
-                    .ok_or(WorldError::InvalidRequest)?;
+                    .map_err(|_| WorldError::InvalidRequest)?;
                 let raw = view
                     .maps
                     .get("attachments")

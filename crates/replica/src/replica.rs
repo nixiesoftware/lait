@@ -2517,9 +2517,17 @@ impl Replica {
         self.fabric.read(&fabric_key(key))
     }
 
-    /// Read the committed collaborative view of a Body, if the key holds one.
-    /// List elements carry the stable ids `ListRemove`/`ListMove` take.
-    pub fn read_collaborative(&self, key: &BodyKey) -> Option<fabric::CollaborativeView> {
+    /// Project the committed collaborative view of a Body. List elements carry
+    /// the stable ids `ListRemove`/`ListMove` take.
+    ///
+    /// A Body whose collaborative types this build does not implement returns
+    /// `SchemaAhead` rather than a partial view — the material is still stored,
+    /// forwarded, and converged, because byte-completeness does not require
+    /// comprehension.
+    pub fn read_collaborative(
+        &self,
+        key: &BodyKey,
+    ) -> Result<fabric::CollaborativeView, fabric::ProjectionError> {
         self.fabric.read_collaborative(&fabric_key(key))
     }
 }

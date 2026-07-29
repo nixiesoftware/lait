@@ -355,7 +355,7 @@ fn adversarial_stagings_are_rejected_whole() {
     ));
 
     // Nothing reached the engine through any of it.
-    assert!(b.read_collaborative(&body(2)).is_none());
+    assert!(b.read_collaborative(&body(2)).is_err());
     assert!(b.body_keys().is_empty());
 
     // But the AUTHORITY phase did run, durably, in every one of those refusals.

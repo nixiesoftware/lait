@@ -210,6 +210,10 @@ windows-sys = { version = "0.61", features = [
     "Win32_Security",
     "Win32_Storage_FileSystem",
     "Win32_System_Memory",
+    # Peak working set, for the plan-13 F0 commit-cost baseline. The existing
+    # perf gate reports RSS on Linux only; a write-cost measurement that is
+    # blank on the platform lait is developed on is not a measurement.
+    "Win32_System_ProcessStatus",
     # DPAPI wrap for device-bound secrets (never for portable recovery keys).
     "Win32_Security_Cryptography",
 ] }

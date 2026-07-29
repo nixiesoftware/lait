@@ -25,8 +25,9 @@ pub mod journal {
     pub use ::journal::*;
 }
 
+pub use fabric::{is_implemented_type_tag, is_reserved_type_tag};
 pub use fabric::{
     BodyExport, CausalToken, CollaborativeView, CrdtFabric, Fabric, FabricCommitReceipt,
-    FabricError, FabricKey, FabricOp, FabricTransactionRequest, ListElement,
+    FabricError, FabricKey, FabricOp, FabricTransactionRequest, ListElement, ProjectionError,
 };
 pub use journal::{FaultInjector, JournaledStore, ObjectRef, StoreManifest, FAULT_POINTS};

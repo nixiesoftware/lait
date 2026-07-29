@@ -417,7 +417,7 @@ fn illegitimate_or_tampered_material_never_reaches_the_engine() {
         b.incorporate(&ctx, tx, payloads, &DenyAll),
         Err(ReplicaCommitError::Illegitimate(_))
     ));
-    assert!(b.read_collaborative(&body(4)).is_none());
+    assert!(b.read_collaborative(&body(4)).is_err());
 
     // Tampered payload: the commitment binding refuses it.
     let mut tampered = payloads.clone();
@@ -426,7 +426,7 @@ fn illegitimate_or_tampered_material_never_reaches_the_engine() {
         b.incorporate(&ctx, tx, &tampered, &WriterAuthorized),
         Err(ReplicaCommitError::Illegitimate(_))
     ));
-    assert!(b.read_collaborative(&body(4)).is_none());
+    assert!(b.read_collaborative(&body(4)).is_err());
 
     // A payload keyed to a Body the transaction has no descriptor for.
     let stray = vec![(body(9), payloads[0].1.clone())];
@@ -476,7 +476,7 @@ fn unknown_world_material_is_retained_opaquely_and_forwarded_byte_identically() 
     assert!(outcome.advanced(), "opaque retention advances the frontier");
     assert!(b.is_opaque(&body(5)));
     assert!(
-        b.read_collaborative(&body(5)).is_none() && b.read(&body(5)).is_none(),
+        b.read_collaborative(&body(5)).is_err() && b.read(&body(5)).is_none(),
         "opaque material has no interpreted view"
     );
 
@@ -538,7 +538,7 @@ fn a_missing_key_epoch_takes_the_opaque_branch() {
         .unwrap();
     assert_eq!(outcome.unsupported_retained, 1);
     assert!(b.is_opaque(&body(6)));
-    assert!(b.read_collaborative(&body(6)).is_none());
+    assert!(b.read_collaborative(&body(6)).is_err());
     let _ = std::fs::remove_dir_all(&dir_a);
 }
 

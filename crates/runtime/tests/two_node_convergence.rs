@@ -322,7 +322,7 @@ fn a_tampered_transfer_never_reaches_the_engine() {
         )
         .is_err());
     assert!(
-        b.read_collaborative(&note_key()).is_none(),
+        b.read_collaborative(&note_key()).is_err(),
         "nothing reached the engine"
     );
 }

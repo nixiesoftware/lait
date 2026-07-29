@@ -270,9 +270,15 @@ pub trait Fabric {
     /// Read the committed canonical bytes at a key, if present.
     fn read(&self, key: &FabricKey) -> Option<Vec<u8>>;
 
-    /// Read the committed collaborative view of a Body, if the key holds one
-    /// (`None` for absent keys and atomic values).
-    fn read_collaborative(&self, key: &FabricKey) -> Option<CollaborativeView>;
+    /// Project the committed collaborative view of a Body.
+    ///
+    /// Fallible rather than optional, because "there is nothing here" and "there
+    /// is something here I cannot read" are different answers and a caller acts
+    /// differently on each. A Body carrying a collaborative type this build does
+    /// not implement is [`ProjectionError::SchemaAhead`] — its bytes stay
+    /// stored, forwarded, and converged, and no caller is handed a view that
+    /// looks complete and is not.
+    fn read_collaborative(&self, key: &FabricKey) -> Result<CollaborativeView, ProjectionError>;
 
     /// Export **one Body's** canonical representation, if the Body exists. A
     /// collaborative export preserves causal history and stable element
@@ -351,6 +357,61 @@ const CAUSAL_DOMAIN: &[u8] = b"lait/fabric-causal/1";
 
 /// The collaborative type tags a path can be bound to.
 const TYPE_TAGS: [&str; 6] = ["reg", "map", "list", "text", "set", "cnt"];
+
+/// Type tags reserved for collaborative types a later docket adds. Reserving
+/// them costs nothing now and keeps a seventh type a `CollaborativeSchema`
+/// version bump plus a fixture set, rather than a format migration — the
+/// checkpoint and delta encodings freeze on top of this algebra, and after that
+/// an unreserved tag is expensive.
+///
+/// The two named are the ones the product is already working around. `tree` is
+/// a movable hierarchy with stable node ids: sub-issues, milestone nesting, and
+/// threaded comments are all hierarchies, and Issues currently hand-encodes
+/// threading through a `reply_to` field over flat storage, which gives
+/// concurrent re-parenting no defined outcome. `log` is an append-only sequence
+/// whose state function is *last N plus a count* — activity feeds are unbounded
+/// Lists today, re-checkpointed in full on every append.
+const RESERVED_TYPE_TAGS: [&str; 2] = ["tree", "log"];
+
+/// Why a collaborative projection could not be produced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProjectionError {
+    /// No Body at this key, or the Body is atomic rather than collaborative.
+    NotCollaborative,
+    /// The Body binds a path to a collaborative type this build does not
+    /// implement. Reserved-but-unimplemented tags land here, which is the
+    /// point: schema gating upstream should have refused the Body already, and
+    /// the projection layer is the wrong place to paper over that.
+    SchemaAhead { tag: String },
+    /// A known tag bound to a value shape it cannot hold. Corruption or a
+    /// schema disagreement, not a version gap.
+    Malformed { tag: String },
+}
+
+impl std::fmt::Display for ProjectionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ProjectionError::NotCollaborative => write!(f, "not a collaborative Body"),
+            ProjectionError::SchemaAhead { tag } => {
+                write!(f, "collaborative type `{tag}` is ahead of this build")
+            }
+            ProjectionError::Malformed { tag } => {
+                write!(f, "collaborative type `{tag}` holds an impossible value")
+            }
+        }
+    }
+}
+impl std::error::Error for ProjectionError {}
+
+/// Whether a tag names a collaborative type this build implements.
+pub fn is_implemented_type_tag(tag: &str) -> bool {
+    TYPE_TAGS.contains(&tag)
+}
+
+/// Whether a tag is reserved for a future collaborative type.
+pub fn is_reserved_type_tag(tag: &str) -> bool {
+    RESERVED_TYPE_TAGS.contains(&tag)
+}
 
 /// A list element id is 16 minted bytes, rendered as 32 hex chars.
 const ELEMENT_ID_LEN: usize = 16;
@@ -798,16 +859,16 @@ impl Fabric for CrdtFabric {
         }
     }
 
-    fn read_collaborative(&self, key: &FabricKey) -> Option<CollaborativeView> {
-        let BodyState::Collab(doc) = self.bodies.get(key)? else {
-            return None;
+    fn read_collaborative(&self, key: &FabricKey) -> Result<CollaborativeView, ProjectionError> {
+        let Some(BodyState::Collab(doc)) = self.bodies.get(key) else {
+            return Err(ProjectionError::NotCollaborative);
         };
         // The projection walks the doc's ROOT value tree once: registers live
         // as `reg:<path>` keys in the `body` root map; every other typed path
         // is a name-identified root container `<tag>:<path>`.
         let mut view = CollaborativeView::default();
         let loro::LoroValue::Map(roots) = doc.get_deep_value() else {
-            return Some(view);
+            return Ok(view);
         };
         for (name, value) in roots.iter() {
             if name == BODY_MAP {
@@ -824,8 +885,15 @@ impl Fabric for CrdtFabric {
                 continue;
             }
             let Some((tag, path)) = name.split_once(':') else {
-                continue;
+                return Err(ProjectionError::SchemaAhead {
+                    tag: name.to_string(),
+                });
             };
+            if !is_implemented_type_tag(tag) {
+                return Err(ProjectionError::SchemaAhead {
+                    tag: tag.to_string(),
+                });
+            }
             let path = path.to_string();
             match (tag, value) {
                 ("map", loro::LoroValue::Map(m)) => {
@@ -878,10 +946,14 @@ impl Fabric for CrdtFabric {
                         .fold(0i64, i64::saturating_add);
                     view.counters.insert(path, total);
                 }
-                _ => {}
+                _ => {
+                    return Err(ProjectionError::Malformed {
+                        tag: tag.to_string(),
+                    })
+                }
             }
         }
-        Some(view)
+        Ok(view)
     }
 
     fn export_body(&self, key: &FabricKey) -> Option<BodyExport> {
@@ -974,7 +1046,7 @@ mod tests {
             b"one".to_vec()
         );
         assert!(
-            b.read_collaborative(&k2).is_none() && b.read(&k2).is_none(),
+            b.read_collaborative(&k2).is_err() && b.read(&k2).is_none(),
             "the second Body did not ride along"
         );
     }

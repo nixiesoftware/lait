@@ -305,6 +305,102 @@ pub fn body_epoch_id(envelope: &[u8]) -> Option<[u8; BODY_EPOCH_ID_LEN]> {
     envelope.get(..BODY_EPOCH_ID_LEN)?.try_into().ok()
 }
 
+/// Domain for immutable-content chunk protection. Distinct from Body
+/// protection so a chunk envelope can never be opened as a Body or the
+/// reverse, even under the same epoch key.
+const CONTENT_CHUNK_DOMAIN: &[u8] = b"lait/content-chunk/1";
+
+/// The binding a content chunk is sealed under: everything about the chunk's
+/// place in its content that must not be substitutable. A chunk lifted into a
+/// different position, a different content, or a re-declared geometry fails to
+/// open — the associated data is not decoration.
+///
+/// `content_nonce` rather than the final `ContentId` is bound, and that is
+/// forced: the id contains the Merkle root over these very ciphertexts, so
+/// binding it would be circular.
+#[derive(Debug, Clone, Copy)]
+pub struct ContentChunkBinding<'a> {
+    pub space: &'a str,
+    pub content_nonce: &'a [u8; 16],
+    pub chunk_index: u32,
+    pub chunk_count: u32,
+    pub plaintext_len: u64,
+}
+
+impl ContentChunkBinding<'_> {
+    /// The canonical associated data. Length-framed so no two distinct
+    /// bindings share a preimage.
+    fn associated_data(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(CONTENT_CHUNK_DOMAIN.len() + self.space.len() + 48);
+        out.extend_from_slice(&(CONTENT_CHUNK_DOMAIN.len() as u16).to_be_bytes());
+        out.extend_from_slice(CONTENT_CHUNK_DOMAIN);
+        out.extend_from_slice(&(self.space.len() as u16).to_be_bytes());
+        out.extend_from_slice(self.space.as_bytes());
+        out.extend_from_slice(self.content_nonce);
+        out.extend_from_slice(&self.chunk_index.to_be_bytes());
+        out.extend_from_slice(&self.chunk_count.to_be_bytes());
+        out.extend_from_slice(&self.plaintext_len.to_be_bytes());
+        out
+    }
+}
+
+/// Seal one immutable-content chunk under an authorized key epoch, bound to its
+/// position. The envelope is `epoch_id(16) || nonce(12) || ciphertext_and_tag`,
+/// the same shape a Body envelope uses, under a different domain and with the
+/// binding as associated data.
+///
+/// Nonces are random per chunk, so two ingests of identical bytes produce
+/// unequal ciphertexts: there is no convergent encryption and no
+/// plaintext-equality oracle for a relay that holds both.
+pub fn content_chunk_seal(
+    key: &AuthorizedBodyKey,
+    binding: &ContentChunkBinding<'_>,
+    plaintext: &[u8],
+) -> Vec<u8> {
+    let cipher = ChaCha20Poly1305::new((&key.key).into());
+    let nonce = random_nonce();
+    let ct = cipher
+        .encrypt(
+            Nonce::from_slice(&nonce),
+            chacha20poly1305::aead::Payload {
+                msg: plaintext,
+                aad: &binding.associated_data(),
+            },
+        )
+        .expect("aead encrypt");
+    let mut out = Vec::with_capacity(BODY_EPOCH_ID_LEN + NONCE_LEN + ct.len());
+    out.extend_from_slice(&key.epoch);
+    out.extend_from_slice(&nonce);
+    out.extend_from_slice(&ct);
+    out
+}
+
+/// Open a content-chunk envelope with the capability for **its** epoch and the
+/// binding it was sealed under. `None` when the epoch differs, the key is
+/// wrong, the binding disagrees, or the blob is malformed — one answer for
+/// every failure, so nothing is an oracle.
+pub fn content_chunk_open(
+    key: &AuthorizedBodyKey,
+    binding: &ContentChunkBinding<'_>,
+    envelope: &[u8],
+) -> Option<Vec<u8>> {
+    let (epoch, rest) = envelope.split_at_checked(BODY_EPOCH_ID_LEN)?;
+    if epoch != key.epoch {
+        return None;
+    }
+    let (nonce, ct) = rest.split_at_checked(NONCE_LEN)?;
+    let cipher = ChaCha20Poly1305::new((&key.key).into());
+    cipher
+        .decrypt(
+            Nonce::from_slice(nonce),
+            chacha20poly1305::aead::Payload {
+                msg: ct,
+                aad: &binding.associated_data(),
+            },
+        )
+        .ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

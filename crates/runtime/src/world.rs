@@ -311,9 +311,14 @@ pub struct WorldProjection {
 pub trait BodyReader {
     /// The committed canonical bytes of an atomic Body, if present.
     fn read_body(&self, key: &BodyKey) -> Option<Vec<u8>>;
-    /// The committed collaborative view of a Body, if the key holds one. List
-    /// elements carry the stable ids `ListRemove`/`ListMove` take.
-    fn read_collaborative_body(&self, key: &BodyKey) -> Option<replica::CollaborativeView>;
+    /// The committed collaborative view of a Body. List elements carry the
+    /// stable ids `ListRemove`/`ListMove` take. A Body binding a collaborative
+    /// type this build does not implement is `SchemaAhead`, never a view with
+    /// the unreadable part quietly missing.
+    fn read_collaborative_body(
+        &self,
+        key: &BodyKey,
+    ) -> Result<replica::CollaborativeView, replica::ProjectionError>;
     /// Every interpreted Body of `world` bound to `schema` — the
     /// singleton-integrity seam (a World validating that exactly its one
     /// deterministic instance of a schema exists).
@@ -398,8 +403,14 @@ impl<'a> WorldContext<'a> {
     }
 
     /// Read a collaborative Body's view from the stable committed snapshot.
-    pub fn read_collaborative(&self, key: &BodyKey) -> Option<replica::CollaborativeView> {
-        self.reads.and_then(|r| r.read_collaborative_body(key))
+    pub fn read_collaborative(
+        &self,
+        key: &BodyKey,
+    ) -> Result<replica::CollaborativeView, replica::ProjectionError> {
+        match self.reads {
+            Some(reads) => reads.read_collaborative_body(key),
+            None => Err(replica::ProjectionError::NotCollaborative),
+        }
     }
 }
 
