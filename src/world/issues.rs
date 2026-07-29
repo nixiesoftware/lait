@@ -2035,7 +2035,7 @@ impl World for IssuesWorld {
                     .filter(|m| !m.tombstone)
                     .cloned()
                     .collect();
-                ordered.sort_by(|a, b| milestone_order(a, b));
+                ordered.sort_by(milestone_order);
                 let backfilling = ordered.iter().any(|m| m.rank.is_empty());
                 if backfilling {
                     let mut previous = String::new();
@@ -3419,7 +3419,7 @@ mod milestone_order_tests {
     }
 
     fn order(mut list: Vec<Milestone>) -> Vec<String> {
-        list.sort_by(|a, b| milestone_order(a, b));
+        list.sort_by(milestone_order);
         list.into_iter().map(|m| m.name).collect()
     }
 
