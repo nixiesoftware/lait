@@ -702,7 +702,7 @@ dependencies = [
 
 [[package]]
 name = "comms"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1520,7 +1520,7 @@ dependencies = [
 
 [[package]]
 name = "fabric"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "blake3",
@@ -2895,7 +2895,7 @@ dependencies = [
 
 [[package]]
 name = "lait"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2950,7 +2950,7 @@ dependencies = [
 
 [[package]]
 name = "lait-issues"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "blake3",
  "data-encoding",
@@ -2965,7 +2965,7 @@ dependencies = [
 
 [[package]]
 name = "lait-issues-app"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -3269,7 +3269,7 @@ checksum = "490cc448043f947bae3cbee9c203358d62dbee0db12107a74be5c30ccfd09771"
 
 [[package]]
 name = "mechanics"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "argon2",
@@ -4592,7 +4592,7 @@ dependencies = [
 
 [[package]]
 name = "replica"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "blake3",
@@ -4711,7 +4711,7 @@ checksum = "323c417e1d9665a65b263ec744ba09030cfb277e9daa0b018a4ab62e57bc8189"
 
 [[package]]
 name = "runtime"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "blake3",
@@ -6838,7 +6838,7 @@ dependencies = [
 
 [[package]]
 name = "world-bridge"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "data-encoding",
  "replica",
@@ -6849,7 +6849,7 @@ dependencies = [
 
 [[package]]
 name = "world-interface"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "clap",
  "replica",

@@ -1,5 +1,91 @@
 # Changelog
 
+## v0.6.1 — the daily loop moves house, and the viewer grows up
+
+> **Every issue command now lives under `lait issues`.** The shell keeps the
+> Space-level verbs; the tracker's daily loop belongs to the tracker, because the
+> tracker is now a package the shell mounts rather than something welded into it.
+> There are no top-level aliases — `lait ls` is gone, not deprecated.
+>
+> ```
+> lait update                  # everywhere
+> lait ls        -> lait issues ls
+> lait board     -> lait issues board
+> lait new "…"   -> lait issues new "…"
+> lait comment   -> lait issues comment
+> lait issues --help           # the whole loop, in one place
+> ```
+>
+> Nothing on disk or on the wire changed: no re-init, no re-join, no re-invite.
+> If you have scripts or aliases, this is the release that breaks them.
+
+### The daily loop moves house
+
+- **`lait issues …` is the tracker.** `ls`, `board`, `new`, `edit`, `comment`,
+  `label`, `assign`, `move`, `milestone`, `cycle`, `activity`, `attachment` and
+  the rest are mounted from the Issues package's own CLI. `lait` itself keeps
+  what belongs to a Space — `init`, `join`, `invite`, `members`, `status`,
+  `serve`, `update`, and the ceremonies.
+- **The shell refuses collisions rather than resolving them.** A World client
+  package cannot claim a namespace a shell command already uses; the check runs
+  at construction, so a package that would shadow `join` fails loudly instead of
+  quietly winning.
+- **MCP tools are namespaced the same way**, so an agent's tool list reads as the
+  same shape as the CLI.
+
+### Milestones you can steer
+
+- **Manual order.** `lait issues milestone edit <project> <milestone> --top`,
+  `--bottom`, `--before <other>`, `--after <other>`. Order is a fractional rank
+  on each record, so moving one milestone writes one record — two people
+  reordering at once cannot lose each other's work, and the reader breaks ties on
+  the milestone id so every replica agrees.
+- **A prose body.** `--description` on `milestone new` and `milestone edit`;
+  absent leaves it alone, `""` clears it.
+- **A filter.** `lait issues ls --project ENG --milestone "Beta"`. A milestone
+  belongs to exactly one project, so the filter is refused without a project to
+  resolve the name against rather than guessed at.
+- **A rail that scopes.** The viewer's project rail draws each milestone's state
+  from its live counts and scopes the issue surfaces on click, with the
+  No-milestone bucket kept distinct from no filter at all.
+
+### The viewer reads like Linear
+
+- **In-place editing on every issue surface**, with every row field predicted
+  optimistically and the write living on the store rather than the component.
+- **The issue as a document** — a standing reply composer, comment cards, event
+  glyphs, and history narrated as sentences instead of a field-diff dump.
+- **The project overview becomes a project shell**, with tabs over one scope.
+- **Light mode climbs like dark** — grey canvas, white cards — and colour is
+  generated from the design axes rather than authored per component. Radius,
+  control height, icon and mark sizing each got one vocabulary and one pinned
+  axis, so a new control inherits its geometry instead of picking one.
+- **Inter Variable for text, Roboto Mono for code.**
+
+### Fixes
+
+- **The doorbell says what moved, not merely that something did** — dependencies
+  match by project id, so a rename cannot silently detach a panel from its data,
+  and a Contact no longer collapses several semantic changes into one ring or
+  drops authority news on the way through.
+- **Issue rows share one key column**, sized in `ch`, so keys of different widths
+  stop ragging the list.
+- **Packaging manifests and release metadata point at `nixiesoftware`**, and the
+  workspace crates are marked `publish = false` — they are internal, and the
+  release no longer tries to publish what cannot be published.
+- **Release verification docs named the wrong file**: `sha256.sum` covers
+  `source.tar.gz`, not the platform archives, which carry their own `.sha256`.
+
+### Under the hood
+
+The tracker is now two packages — `products/issues` (the semantic World: schemas,
+DTOs, identifiers) and `products/issues-app` (its CLI, MCP, protocol, router,
+presentation) — reached through a product-neutral call boundary. The daemon hosts
+Stations in-process behind an orbit control router, transport endpoints are shared
+by device identity rather than per Space, and `lait` is an orbital navigation
+shell that mounts World client packages. None of this is visible from the outside
+except as the namespace move above.
+
 ## v0.6.0 — one word for one thing
 
 > **A naming flag day, a clean break, and the release where the tracker became a
