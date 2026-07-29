@@ -44,6 +44,20 @@ cache miss or an invitation to reconstruct guesses.
 Mechanics and Fabric reuse the semantics-free journal mechanism but maintain
 separate semantic manifests. A journal is not replicated product state.
 
+A store manifest names **index roots**, not inventories. An index is a
+persistent authenticated radix map from a 32-byte key to bounded bytes: one
+nibble per level, leaves holding at most 256 entries, nodes content-addressed
+and immutable, and therefore themselves ordinary journal objects under the same
+object domain. Two indexes with the same contents have the same root regardless
+of insertion order, and an update rewrites only the spine from the changed leaf
+to the root — so commit cost is proportional to what changed, not to what is
+stored.
+
+Canonical shape is part of the contract, not an optimisation. A leaf that could
+have been merged into its parent, or a branch that should have split, is an
+integrity error on read: two encodings of the same map would otherwise produce
+two roots, and the root is what a signature covers.
+
 ## 3. Mechanics authority data
 
 Mechanics stores signed effects, graph/index deltas, authority checkpoints, and
@@ -79,8 +93,8 @@ The transaction id identifies the complete signed envelope. Reusing a request
 identity with identical bytes returns the original result; reusing it with
 different content is a conflict.
 
-A signed Manifest commits a complete Body set through canonical pages. Entries
-are globally ordered. A Body may have multiple constituent transaction heads;
+A signed Manifest commits a complete Body set through one canonical
+authenticated index (§2). Entries are globally ordered by key. A Body may have multiple constituent transaction heads;
 concurrent writes are retained rather than collapsed into a single transport
 winner. Same-coordinate equivocation rejects.
 
@@ -93,6 +107,20 @@ Remote work may reference a verified historical or concurrent parent rather
 than the receiver's current root. That exact parent's authenticated snapshot
 must be reconstructable. Missing material returns a retryable
 `ParentManifestUnavailable`; current state is never substituted.
+
+A Manifest root is a fixed-size record. It carries the Space, the Replica
+frontier, a body index root with its count, a content index root with its
+count, the signer, and the authority frontier the signature is evaluated at. It
+does not carry, and must never carry, a list of Bodies: an advertisement whose
+size grows with the store is how a Space stops being able to announce itself.
+
+A Body entry names its concurrent heads and the `ContentRef`s that Body
+references. Content references are Manifest data — they must survive a restart
+and reach every participant — while the bytes they name are not.
+
+An observer keeps a bounded number of roots per signer and evicts the oldest
+rather than refusing new ones; a peer that publishes quickly must not be able to
+exhaust a watcher's memory, and must not be able to silence itself either.
 
 ## 5. Protected and opaque Bodies
 
@@ -112,7 +140,47 @@ Opaque retention does not grant authority and cannot bypass historical receipt
 validation. Becoming interpretable later requires validation through the normal
 Replica path.
 
-## 6. Fabric representations
+## 6. Content plane
+
+Content is bulk immutable bytes referenced by a Body: attachments, images, and
+files. It is a separate plane from Body payloads because it has a different
+completeness contract. A Replica is **descriptor-complete** — it holds every
+`ContentDescriptor` its Manifest references, and that is required for the root
+to reconstruct. It is not byte-complete: chunks are fetched, cached, and
+forgotten locally without changing a single committed root.
+
+A descriptor is the whole identity of one ingest:
+
+```text
+format_version, space, content_nonce, plaintext_len,
+chunk_plaintext_len, chunk_count, ciphertext_merkle_root, epoch
+```
+
+`content_nonce` is random per ingest, so two ingests of identical bytes are
+different content. That is deliberate: convergent encryption would make
+identical plaintext detectable across Spaces by anyone who can guess it.
+
+The Merkle tree is built over **ciphertext** leaves. A peer serving a chunk to
+someone who cannot decrypt it still proves the bytes are the right bytes, and a
+provider needs no key to be useful. Chunk plaintext is a fixed 256 KiB except
+the last; an odd node is promoted rather than duplicated, so no two distinct
+chunk sequences share a root.
+
+Each chunk is sealed independently under associated data binding the Space, the
+content nonce, and the chunk index — and deliberately *not* the chunk count or
+plaintext length, both of which the Merkle root already commits. Omitting them
+is what lets a sender seal chunk `n` before it knows how many there will be.
+
+A chunk is only servable when its ciphertext **and** a validated proof sidecar
+are both resident locally. Residency, leases, and pins are local state (§13) and
+never appear in a Manifest.
+
+Content reachability is derived, never counted. A stored count would be a second
+source of truth that can disagree with the Bodies; what is authoritative is the
+set of `ContentRef`s the committed Manifest names, plus explicitly declared
+local intents. Sweeping removes only what neither reaches.
+
+## 7. Fabric representations
 
 Fabric exposes two Body representation classes:
 
@@ -138,7 +206,7 @@ product must preserve concurrent intent, require explicit predecessors,
 immutable records, or revision heads built from generic Bodies. Application code
 must not infer a different hidden winner after reading the merged primitive.
 
-## 7. World schemas and containment
+## 8. World schemas and containment
 
 Every operation identifies its target World, Body, schema, schema version, and
 mutation model. Runtime rejects:
@@ -159,7 +227,7 @@ The authority-approved `WorldImplementationId` pins the descriptor, policy
 table, schemas, and artifact identity that selected the demand. Remote adoption
 validates the bound identity without executing the World.
 
-## 8. IssuesWorld data
+## 9. IssuesWorld data
 
 IssuesWorld is the canonical first-party World, not a privileged lower layer.
 Its Catalog has one deterministic Body identity per `(SpaceId, WorldId)` and is
@@ -200,7 +268,7 @@ idempotent and concurrent actors do not overwrite each other.
 These product rules must not introduce comment, issue, workflow, or project
 types into Mechanics, Fabric, Replica, Runtime, or Comms.
 
-## 9. Scoped authorization data
+## 10. Scoped authorization data
 
 Mechanics stores effective generic assignments over exact World resources and
 capabilities. IssuesWorld stores product role and workflow definitions and
@@ -215,10 +283,11 @@ Manifest, active World implementation, demand, policy witness, intent, complete
 operations, and transaction core. Substitution of any bound coordinate or
 digest rejects.
 
-## 10. Contact and convergence
+## 11. Contact and convergence
 
 Contact is a bounded framing protocol. It transfers signed Mechanics material,
-Manifest advertisements/pages, transactions, and protected Body material. A
+Manifest advertisements and index nodes, transactions, and protected Body
+material. A
 transfer acknowledgment proves only framing receipt.
 
 An initiator may declare the Body-head commitments it already holds. Holdings
@@ -239,7 +308,18 @@ Mechanics validates authority material
 A false holdings declaration can prevent its claimant from completing a root;
 it cannot cause partial or corrupt adoption.
 
-## 11. Projections and caches
+Equal Manifest roots prove equal *catalogs*, not equal readable material: a
+declaration deliberately omits opaque heads, so two peers can agree on a root
+and still owe each other bytes. Agreement on a root is therefore never a reason
+to skip serving.
+
+Where a catalog is large, peers may reconcile by descending the shared index
+instead of transferring it: matching subtree hashes are skipped whole, and only
+divergent spines are walked. The descent is bounded by depth and by the number
+of nodes a single reconciliation may request, and it changes only how a
+difference is *found* — adoption still runs the full validation path above.
+
+## 12. Projections and caches
 
 Projections are deterministic views of one committed Manifest and authority
 frontier. They are not replicated truth.
@@ -257,18 +337,29 @@ Projection distinguishes valid, absent, unavailable, and corrupt data. It must
 not turn an unavailable query into false zero counts or silently coerce malformed
 stored values into valid DTOs.
 
-## 12. Local-only state
+## 13. Local-only state
 
 Device private keys, actor recovery material, custody shares, local petnames,
-configuration, route/backoff state, space navigation, and disposable projection
-caches are local state. They are not product Bodies and do not gain authority by
+configuration, route/backoff state, space navigation, disposable projection
+caches, resident content chunks and their proof sidecars, leases, pins, staging
+areas, and delivery-plane session state are local state. They are not product Bodies and do not gain authority by
 being stored beside an Orbit.
+
+Residency is held by lease, and a lease is scoped to the operation that took
+it. Releasing an operation releases everything it held, including on the paths
+where the operation failed — a reader that dies must not pin bytes forever.
+Eviction under quota may remove anything unleased and unpinned; it may never
+remove a descriptor, because that would break Manifest reconstruction.
+
+A delivery-plane session id and epoch are local, per-connection, and randomly
+minted. They are not identity, they confer nothing, and they exist so that a
+replayed opening is recognisable as one.
 
 Secrets are written with restrictive permissions and atomic replacement. They
 must not appear in Debug output, logs, DTO examples, Fabric, Manifests, or Contact
 frames except for an explicitly authenticated encrypted custody package.
 
-## 13. Evolution
+## 14. Evolution
 
 - Store, wire, schema, and signed formats carry explicit versions and reject
   unknown incompatible input.
@@ -281,7 +372,7 @@ frames except for an explicitly authenticated encrypted custody package.
 - Backward compatibility exists only when explicitly specified; there is no
   legacy architecture fallback.
 
-## 14. Known limitations
+## 15. Known limitations
 
 - Lazy revocation cannot erase plaintext or keys previously copied by a removed
   participant.

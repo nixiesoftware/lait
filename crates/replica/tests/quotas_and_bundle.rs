@@ -2,10 +2,10 @@
 //!
 //! Bundle: staged (untrusted) Contact material becomes incorporable **only**
 //! through `Replica::validate_contact`, whose sealed output binds exactly the
-//! chain authority → verified Manifest root → complete pages → authorized
+//! chain authority → verified Manifest root → complete index → authorized
 //! transactions → descriptor-bound payloads. Authority incorporation is an
 //! explicit first durable phase with its own receipt. Adversarial stagings —
-//! stray payloads, omitted pages, tampered bytes, unauthorized signers —
+//! stray payloads, omitted nodes, tampered bytes, unauthorized signers —
 //! reject with nothing (but the independently valid authority batch) retained.
 //!
 //! Quotas: Body count, Space material bytes, and the unknown-World retention
@@ -327,7 +327,7 @@ fn adversarial_stagings_are_rejected_whole() {
         Err(ReplicaCommitError::Illegitimate(_))
     ));
 
-    // An omitted manifest page.
+    // An omitted manifest index node.
     let mut omitted = staged.clone();
     omitted.manifest_nodes.clear();
     assert!(matches!(

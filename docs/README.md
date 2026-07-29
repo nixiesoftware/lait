@@ -45,6 +45,7 @@ not carry authority.
 | [`DATA-CONTRACT.md`](./DATA-CONTRACT.md) | Journals, authority, transactions, Manifests, Bodies, convergence, and projections. |
 | [`PROTOCOL.md`](./PROTOCOL.md) | Coordinates, Beacon/presence, Contact, convergence, and local-control compatibility. |
 | [`THREAT-MODEL.md`](./THREAT-MODEL.md) | Assets, adversaries, security claims, and explicit non-goals. |
+| [`COMPATIBILITY.md`](./COMPATIBILITY.md) | Every versioned surface, how each one is enforced, and what a bump costs. |
 
 These documents describe the current branch. Historical phase plans and
 superseded alternatives are not normative. Exact Rust APIs live in rustdoc and

@@ -149,11 +149,11 @@ The transfer carries bounded frame families for:
 
 1. ordered Mechanics authority records and their set commitment;
 2. a signed Manifest-root offer;
-3. requested canonical Manifest pages;
+3. requested canonical Manifest index nodes;
 4. requested protected Body chunks and completion commitments;
 5. transcript completion, acknowledgment, or typed abort.
 
-Each frame binds its Contact id. Records, sets, pages, chunks, payloads, and the
+Each frame binds its Contact id. Records, sets, nodes, chunks, payloads, and the
 transcript use distinct domain-separated commitments. Chunk assembly rejects
 conflicting duplicates, overlap, gaps, empty illegal chunks, overflow, and a
 final commitment mismatch. An abort discards staged transfer material.
@@ -195,7 +195,7 @@ The compatibility surface includes canonical encodings and fixtures for:
 - World actions and authorization receipts;
 - Body transactions and descriptors;
 - protected Body payloads;
-- Manifest roots and pages;
+- Manifest roots and index nodes;
 - store markers/manifests and journal objects;
 - external DTO identifiers, projections, observations, and errors.
 
@@ -299,7 +299,7 @@ are not state deltas; clients re-query after notification or reset.
 
 ## 11. Failure and resource behavior
 
-Every protocol has explicit limits for frames, records, pages, chunks, payloads,
+Every protocol has explicit limits for frames, records, nodes, chunks, payloads,
 holdings, concurrency, and time. A peer cannot request unbounded buffering or
 keep an untracked Station task alive indefinitely.
 
@@ -311,7 +311,129 @@ An unreachable peer, interrupted join, or aborted Contact leaves a recoverable
 Orbit and bounded retry state. It does not create membership, expose a partial
 Manifest, or mutate guarded relay/discovery policy.
 
-## 12. Conformance
+## 12. Delivery planes
+
+Two versioned ALPNs run on the identity-scoped endpoint alongside Contact and
+neighbour presence:
+
+```text
+lait/freight/1       reliable exact-object request and response
+lait/session/1       long-lived realtime session
+```
+
+They are separate because they have different admission, timeouts, memory
+profiles, shutdown semantics, and compatibility lifetimes. A file fetch must not
+keep a realtime session alive; a cursor bug must not block artifact recovery.
+
+**The ALPN is the version gate.** The transport negotiates it during the QUIC
+handshake, so peers on different generations share no common ALPN and cannot
+connect at all. There is no in-band version check and no half-speaking pair.
+That makes a bump expensive, so the discipline is: bump only for a change an old
+peer would *misinterpret* — a removed or repurposed field, or changed semantics
+of an existing one — and carry every additive capability as a feature bit
+inside the advertisement, where an absent field decodes to zero exactly as an
+older build would send it.
+
+Within `lait/session/1`, one connection carries typed stream kinds:
+
+| Byte | Kind | Status |
+|---|---|---|
+| `0x01` | control | implemented |
+| `0x02` | reliable signal | implemented |
+| `0x03` | media frame | reserved, never reassigned |
+| `0x04` | media feedback | reserved, never reassigned |
+
+Reserved kinds are known and unimplemented, which is a different answer from
+unknown: an unknown kind resets that stream, a reserved one means a peer is
+speaking a protocol generation this build agreed to and has not built.
+
+### 12.1 Opening, and 0.5-RTT replay
+
+Both planes begin with one bounded canonical opening carrying the plane, the
+generation, feature bits, the Space, both Station claims, a random session id,
+a random session epoch, the authority frontier, and the requested lanes.
+
+**Accepting an opening must be idempotent.** QUIC lets the accepting side write
+before the client finishes its handshake, and the client's initial bytes can be
+replayed by an attacker who intercepts handshake packets. A replayed opening
+must not allocate a second session, consume a budget twice, or mint state the
+first one already minted; `session_id` and `session_epoch` together are what
+make a replay recognisable. No lane whose demand has an effect may dispatch on
+0.5-RTT data — reads and availability answers are idempotent and safe, anything
+that writes waits for a completed handshake.
+
+A refusal is deliberately coarse. Distinguishing "not admitted" from "not
+authorized for this lane" from "over budget" would tell an unadmitted peer more
+about a Space than being turned away should reveal. Only an unsupported
+generation is named, because it is the one refusal a peer can act on.
+
+### 12.2 Frozen bounds, and which are ours
+
+Every bound is a pre-allocation ceiling: checked against a declared length
+before a buffer is reserved, never after bytes have arrived.
+
+| Bound | Value | Source |
+|---|---|---|
+| `MAX_OPENING_BYTES` | 4 KiB | lait policy |
+| `MAX_CONTROL_FRAME_BYTES` | 64 KiB | lait policy |
+| `MAX_SIGNAL_BYTES` | 16 KiB | lait policy (docket ceiling) |
+| `MAX_FLOW_READ_BYTES` | 256 KiB | lait policy |
+| `MAX_CHUNK_FRAME_BYTES` | 320 KiB | derived from frozen content geometry |
+| `MAX_DATAGRAM_BYTES` | 1200 B | **advisory** — see below |
+| `MAX_LANES` | 8 | lait policy |
+| `MAX_STREAM_WORKERS` | 32 | lait policy |
+
+`comms::MAX_FRAME` is 64 MiB, the framing guard for whole protocol messages on
+the existing framed `Stream`. Raw flows must **not** inherit it: a flow is read
+incrementally, so its ceiling bounds one read rather than one message, and
+64 MiB of pre-allocation per flow is how a handful of concurrent transfers
+exhausts a receiver. `MAX_FLOW_READ_BYTES` is that separate ceiling.
+
+**Observed, not chosen.** The transport is pinned at `iroh = 1.0.0-rc.1`, whose
+QUIC implementation is `noq` with multipath and NAT traversal at the QUIC layer.
+Measured over a direct local path by
+`crates/comms/tests/transport_capabilities.rs`:
+
+| Observation | Value |
+|---|---|
+| `max_datagram_size` | `Some(1382)`, then `Some(1162)` on a second run of the same test |
+| `datagram_send_buffer_space` | 1 MiB |
+| `open_uni` + write + finish | ~725 ns each over 64 |
+| `SendStream::reset` after a partial write | `Ok(())`, and the receiver's read fails rather than ending clean |
+
+The first row is the important one, and it is why `MAX_DATAGRAM_BYTES` is marked
+advisory: two runs of the same test on the same machine returned different
+capacities, and the second was **below** lait's own 1200 ceiling. The real limit
+is the connection's current `max_datagram_size`, which is path-dependent and
+moves with NAT traversal and relay fallback. A sender therefore checks capacity
+at send time and coalesces or drops; it never truncates, and it never assumes
+1200 is available.
+
+Cheap stream opens are what make the "one short stream per unit of work" pattern
+affordable rather than a design lait has to avoid. A reset surfacing as a read
+error is what lets a receiver tell an abandoned transfer from a completed one —
+without it, truncation would be silent.
+
+If the pin moves, this table is re-measured. Every row in the bounds table above
+is a lait choice and moves only when we decide it should.
+
+### 12.3 Freight
+
+Requests are exact. There is no "list what you have" and no remote path: a peer
+asks for one chunk of one content whose id it already holds, having learned it
+from durable state. Availability answers are private, bounded, and say only
+which chunks are servable — and a chunk counts only when its ciphertext *and* a
+validated proof sidecar are both resident.
+
+A provider may refuse without revealing whether authorization, policy, load,
+absence, or incomplete proof material caused it.
+
+Resume is per immutable ciphertext chunk. A resumed request carries the leaf
+hash the partial transfer already validated, and a provider whose leaf differs
+is rejected before a byte is appended — so a resumed transfer cannot be steered
+onto different content.
+
+## 13. Conformance
 
 An independent implementation must match:
 

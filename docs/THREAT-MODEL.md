@@ -80,6 +80,18 @@ sandbox guarantee.
   that keyed the projection.
 - Malformed or corrupt input rejects or surfaces as typed corruption rather than
   becoming a valid value or panicking the Station.
+- Content chunks are individually authenticated against a ciphertext Merkle root
+  bound to the descriptor, so a provider that cannot decrypt them also cannot
+  substitute them, and a partial transfer cannot be steered onto other bytes.
+- Two ingests of identical plaintext produce unrelated content ids, so holding a
+  guessable file does not let a peer confirm that someone else holds it.
+- Local residency is not authority: caching, pinning, and evicting a chunk
+  changes no committed root and grants no read that the keys did not already
+  grant.
+- Accepting a delivery-plane opening is idempotent, so a replayed opening
+  allocates no second session and consumes no budget twice.
+- A refusal on a delivery plane distinguishes only "unsupported generation" from
+  everything else, so an unadmitted peer cannot probe a Space by reading errors.
 
 ## Explicit non-goals and residual risks
 
@@ -102,6 +114,13 @@ sandbox guarantee.
   storage, or bandwidth exhaustion by authorized or reachable peers.
 - **Native-loop preemption.** Runtime contains World panics but cannot preempt an
   arbitrary infinite loop in trusted native World code.
+- **0.5-RTT is not authenticated.** Data the accepter sends before the client's
+  handshake completes, and the client's own initial flight, are replayable by an
+  interceptor. LAIT treats them as untrusted: nothing with an effect is
+  dispatched on them, and nothing sent on them is a commitment.
+- **Residency is observable.** Which chunks a peer will serve is metadata. A
+  private, bounded availability answer narrows it but does not hide it, and
+  timing still distinguishes a resident chunk from a fetched one.
 - **Formal verification.** The protocols are tested and fault-injected, not
   formally verified.
 
@@ -149,6 +168,18 @@ used only to omit redundant transfer.
 
 A ciphertext-only relay or opaque peer may learn sizes, timing, identifiers,
 and graph relationships. LAIT does not claim metadata-private replication.
+
+The delivery planes add two more exposures of the same kind. A Freight request
+names one content id and one chunk index, so a provider learns exactly which
+content a peer is assembling and how far along it is; and a realtime session's
+datagram cadence tracks a person's activity closely enough to infer presence
+even though every payload is sealed. Both are traffic analysis against an
+already-admitted peer, and neither is mitigated by encryption.
+
+An opening is bounded and canonical, and is refused on length before it is
+decoded. Refusals are deliberately coarse — a peer that is not admitted, not
+authorized for a lane, or over budget receives the same answer — because the
+alternative is an oracle for what a Space holds and who may reach it.
 
 ## Product conflict integrity
 

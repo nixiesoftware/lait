@@ -114,8 +114,8 @@ const RECORD_DOMAIN: &[u8] = b"lait/contact/1/authority-record";
 const AUTHORITY_SET_DOMAIN: &[u8] = b"lait/contact/1/authority-set";
 /// Domain for the manifest-root reference hash (over the canonical root bytes).
 const ROOT_REF_DOMAIN: &[u8] = b"lait/contact/1/manifest-root";
-/// Domain for one manifest page's hash.
-const PAGE_DOMAIN: &[u8] = b"lait/contact/1/manifest-page";
+/// Domain for one manifest index node's hash.
+const MANIFEST_NODE_DOMAIN: &[u8] = b"lait/contact/1/manifest-node";
 /// Domain for one body chunk's hash.
 const CHUNK_DOMAIN: &[u8] = b"lait/contact/1/body-chunk";
 
@@ -168,7 +168,7 @@ pub fn manifest_root_ref(root_bytes: &[u8]) -> [u8; 32] {
 /// store's object address, because a manifest index node *is* an object and
 /// naming it any other way would let the two disagree.
 pub fn manifest_node_hash(bytes: &[u8]) -> [u8; 32] {
-    domain_hash(PAGE_DOMAIN, bytes)
+    domain_hash(MANIFEST_NODE_DOMAIN, bytes)
 }
 
 /// The hash a `chunk_hash` field must carry for its chunk bytes.
@@ -527,8 +527,8 @@ pub enum ContactFrame {
     /// One node of the manifest's Body index.
     ///
     /// Nodes are named by hash rather than by ordinal, which is the whole
-    /// point of the index replacing pages: an ordinal shifts when a Body is
-    /// inserted, so every later page changed, and a hash does not.
+    /// point of the index: inserting a Body shifts every later ordinal, so an
+    /// ordinal-named unit changes when its contents did not. A hash does not.
     ManifestNode {
         root: [u8; 32],
         node_hash: [u8; 32],
@@ -1094,7 +1094,7 @@ pub struct OutboundTransfer {
 }
 
 /// Build the complete, canonical, ordered frame sequence for a transfer:
-/// authority section, manifest root + pages, chunked protected Body payloads
+/// authority section, manifest root + index nodes, chunked protected Body payloads
 /// (each chunk at most [`MAX_CHUNK`]), and the terminal `TransferEnd` carrying
 /// the transcript hash over every prior frame.
 pub fn build_transfer_frames(contact: &ContactId, t: &OutboundTransfer) -> Vec<Vec<u8>> {
@@ -1184,8 +1184,8 @@ pub fn build_transfer_frames(contact: &ContactId, t: &OutboundTransfer) -> Vec<V
 /// The accepter's validator for the frames it *receives* (requests and the
 /// final ack). The accepter's send side is driver-scheduled; this enforces the
 /// normative receive rules: manifest requests must reference the offered root
-/// and a contiguous in-range page interval, body requests are bounded, and
-/// exactly one `TransferAck` (with the sent transcript) is accepted.
+/// and no more nodes than were offered, body requests are bounded, and exactly
+/// one `TransferAck` (with the sent transcript) is accepted.
 pub struct AccepterValidator {
     contact: ContactId,
     offered_root: Option<[u8; 32]>,

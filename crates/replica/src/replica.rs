@@ -12,7 +12,7 @@
 //! [`ProtectedBodyPayload`] object per changed Body (`epoch_id[16] ||
 //! nonce[12] || ciphertext_and_tag`; no plaintext Body payload is ever at
 //! rest), the [`RequestReceipt`] idempotency record, and the signed Manifest
-//! root/pages over the full Body set. Recovery reopens exactly that graph: a
+//! root over the full Body set. Recovery reopens exactly that graph: a
 //! Body whose key-epoch material is locally held is opened, validated, and
 //! imported into the engine; a Body whose epoch key is absent is retained
 //! **opaquely** — byte-identical, never decrypted, absent from reads — until a
@@ -2458,7 +2458,7 @@ impl Replica {
     ///    history and may survive a later Body failure);
     /// 3. the manifest root must be canonical, correctly signed, and its
     ///    signer authorized at its authority frontier;
-    /// 4. the pages must be complete, canonical, and exactly the root's;
+    /// 4. the index must be complete, canonical, and exactly the root's;
     /// 5. every transaction must verify with signer standing at its referenced
     ///    historical frontier;
     /// 6. every received Body payload must resolve to exactly one descriptor
@@ -2506,7 +2506,7 @@ impl Replica {
             .map_err(|e| illegit(format!("authority batch: {e}")))?;
         // An **authority-only** staging (an unadmitted peer serving its
         // mechanics records — its admission request — with no standing to
-        // advertise a Manifest): empty root bytes, and therefore no pages, no
+        // advertise a Manifest): empty root bytes, and therefore no nodes, no
         // transactions, and no Body payloads. The authority phase above is the
         // whole exchange.
         if staged.manifest_root_bytes.is_empty() {
@@ -2673,7 +2673,7 @@ impl Replica {
     ///
     /// Shipping the whole index is what F4 replaces: two peers will compare
     /// roots, descend only where subtree hashes differ, and exchange divergent
-    /// leaves. Until then this costs what pages cost, and is correct.
+    /// leaves. Until then this costs what a full walk costs, and is correct.
     pub fn export_manifest(
         &self,
         ctx: &CommitContext<'_>,

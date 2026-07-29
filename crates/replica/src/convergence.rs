@@ -78,7 +78,8 @@ pub struct StagedContactMaterial {
     pub authority_records: Vec<Vec<u8>>,
     /// The signed manifest root, byte-canonical.
     pub manifest_root_bytes: Vec<u8>,
-    /// The manifest pages, ordered by page index, byte-canonical.
+    /// The manifest's Body-index nodes, byte-canonical. Content-addressed, so
+    /// order carries no meaning.
     pub manifest_nodes: Vec<Vec<u8>>,
     /// Received protected Body payloads: `(transaction id, key, envelope)`.
     /// The transaction id is the full signed-envelope digest.
@@ -125,7 +126,7 @@ pub trait AuthorityIncorporator {
 /// A **sealed** validated Contact bundle: constructible only by
 /// [`crate::Replica::validate_contact`], after every check passed — transcript
 /// -complete staging, durable authority receipt, authority-verified manifest
-/// root, complete verified pages, per-entry authorized transactions,
+/// root, a complete verified index, per-entry authorized transactions,
 /// descriptor-bound payloads, and no received object outside the verified
 /// graph. [`crate::Replica::incorporate_bundle`] accepts only this.
 pub struct ValidatedContactBundle {

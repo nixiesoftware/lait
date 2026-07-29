@@ -2,7 +2,7 @@
 //!
 //! Proves the durable Replica addresses **canonical objects** — signed
 //! transaction records, sealed protected Body payloads, idempotency receipts,
-//! and Manifest root/pages — rather than one opaque engine snapshot; that no
+//! and Manifest root/index — rather than one opaque engine snapshot; that no
 //! plaintext Body payload is at rest; that receipts and replay survive a cold
 //! reopen; and that exact incorporation (signed transaction + descriptor-bound
 //! payloads) converges, refuses illegitimate material, retains unknown material

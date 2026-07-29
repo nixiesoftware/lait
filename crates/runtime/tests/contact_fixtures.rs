@@ -265,7 +265,7 @@ fn unknown_tags_and_trailing_bytes_are_rejected() {
 // ---------------------------------------------------------------------------
 
 /// Build the accepter's happy-path frame sequence: 2 authority records, a
-/// manifest with one page, one body in two chunks, and the closing TransferEnd
+/// manifest with one index node, one body in two chunks, and the closing TransferEnd
 /// (with the correct transcript hash over everything before it).
 fn happy_frames() -> Vec<Vec<u8>> {
     let records: Vec<Vec<u8>> = vec![b"rec-0".to_vec(), b"rec-1".to_vec()];
@@ -680,7 +680,7 @@ fn manifest_requests_must_reference_the_offer_and_stay_bounded() {
         ),
         Err(abort::BAD_REQUEST)
     );
-    // Offer + two pages sent.
+    // Offer + two nodes sent.
     acc.record_sent(&ContactFrame::ManifestOffer { root_bytes }.encode(&contact()));
     for i in 0..2u32 {
         acc.record_sent(
