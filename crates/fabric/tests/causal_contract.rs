@@ -427,6 +427,89 @@ fn a_batch_that_creates_a_body_and_fails_leaves_no_body() {
     );
 }
 
+// The three ways the bounded rollback used to lose a pre-existing Body. All
+// three are the same root cause: a saved *position* indexes a document, and
+// `Remove` destroys the document it indexes. Restoring a position is only
+// enough while the Body survives the batch.
+
+#[test]
+fn a_failed_batch_that_removed_a_body_restores_it() {
+    let mut fabric = CrdtFabric::new();
+    commit(&mut fabric, "seed", vec![splice(&key(), 0, "important")]);
+
+    let outcome = fabric.commit(FabricTransactionRequest {
+        request: "doomed".into(),
+        ops: vec![
+            FabricOp::Remove { key: key() },
+            splice(&other_key(), 999_999, "impossible"),
+        ],
+    });
+    assert!(outcome.is_err());
+    assert_eq!(text(&fabric, &key()), "important");
+}
+
+#[test]
+fn a_failed_batch_that_removed_and_recreated_a_body_restores_the_original() {
+    // The variant that used to fail *inside* the rollback: the recreated Body
+    // is a fresh document, so reverting it to the old one's frontiers is
+    // `FrontiersNotFound` — and the early return that produced left every
+    // later Body in the batch still dirty.
+    let mut fabric = CrdtFabric::new();
+    commit(
+        &mut fabric,
+        "seed",
+        vec![
+            splice(&key(), 0, "important"),
+            splice(&other_key(), 0, "keep"),
+        ],
+    );
+
+    let third = FabricKey::from_bytes(b"third".to_vec());
+    let outcome = fabric.commit(FabricTransactionRequest {
+        request: "doomed".into(),
+        ops: vec![
+            FabricOp::Remove { key: key() },
+            FabricOp::CreateBody { key: key() },
+            splice(&other_key(), 0, "DIRTY-"),
+            splice(&third, 999_999, "impossible"),
+        ],
+    });
+    assert!(outcome.is_err());
+    assert_eq!(text(&fabric, &key()), "important");
+    assert_eq!(
+        text(&fabric, &other_key()),
+        "keep",
+        "a Body later in the batch must be restored even if an earlier one was hard to restore"
+    );
+    assert!(
+        fabric.version(&third).is_err(),
+        "and a Body the failed batch invented must not survive it"
+    );
+}
+
+#[test]
+fn a_failed_batch_cannot_replace_a_collaborative_body_with_a_value() {
+    // The worst variant: remove, write an atomic value over the same key, then
+    // fail. The failed batch's value used to survive as the Body's contents.
+    let mut fabric = CrdtFabric::new();
+    commit(&mut fabric, "seed", vec![splice(&key(), 0, "important")]);
+
+    let outcome = fabric.commit(FabricTransactionRequest {
+        request: "doomed".into(),
+        ops: vec![
+            FabricOp::Remove { key: key() },
+            FabricOp::PutCanonical {
+                key: key(),
+                value: b"attacker value".to_vec(),
+            },
+            splice(&other_key(), 999_999, "impossible"),
+        ],
+    });
+    assert!(outcome.is_err());
+    assert_eq!(fabric.read(&key()), None, "no value from a failed batch");
+    assert_eq!(text(&fabric, &key()), "important");
+}
+
 #[test]
 fn the_checkpoint_policy_is_decided_by_size_not_by_time() {
     let policy = CheckpointPolicy::default();

@@ -898,24 +898,26 @@ impl Fabric for CrdtFabric {
             .iter()
             .map(|op| Self::op_key(op).clone())
             .collect();
-        let mut positions: BTreeMap<FabricKey, Option<loro::Frontiers>> = BTreeMap::new();
-        for key in &touched {
-            let prior = match self.bodies.get(key) {
-                Some(BodyState::Collab(doc)) => Some(doc.oplog_frontiers()),
-                // An atomic Body's whole value *is* its state, and it is
-                // already bounded by the Body envelope; there is no history to
-                // avoid exporting.
-                Some(BodyState::Atomic(_)) => None,
-                None => None,
-            };
-            positions.insert(key.clone(), prior);
-        }
-        let atomic_backups: BTreeMap<FabricKey, Option<Vec<u8>>> = touched
+        //
+        // A position alone is not enough, though. `Remove` destroys the doc the
+        // position indexes, and a `CreateBody` after it installs a *different*
+        // doc whose history has never seen those operation ids — so the
+        // snapshot holds the Body's whole prior state as well. That is cheap:
+        // a `LoroDoc` clone is a reference clone sharing one underlying
+        // document, so putting the clone back restores the original Body
+        // rather than a copy of it.
+        let prior: BTreeMap<FabricKey, Option<(BodyState, Option<loro::Frontiers>)>> = touched
             .iter()
-            .filter_map(|key| match self.bodies.get(key) {
-                Some(BodyState::Atomic(bytes)) => Some((key.clone(), Some(bytes.clone()))),
-                Some(BodyState::Collab(_)) => None,
-                None => Some((key.clone(), None)),
+            .map(|key| {
+                let snapshot = self.bodies.get(key).map(|state| match state {
+                    // An atomic Body's whole value *is* its state, and it is
+                    // already bounded by the Body envelope.
+                    BodyState::Atomic(bytes) => (BodyState::Atomic(bytes.clone()), None),
+                    BodyState::Collab(doc) => {
+                        (BodyState::Collab(doc.clone()), Some(doc.oplog_frontiers()))
+                    }
+                });
+                (key.clone(), snapshot)
             })
             .collect();
 
@@ -927,28 +929,31 @@ impl Fabric for CrdtFabric {
             }
         }
         if let Some(e) = failed {
-            for (key, prior) in positions {
-                match (prior, self.bodies.get(&key)) {
-                    (Some(frontiers), Some(BodyState::Collab(doc))) => {
-                        doc.commit();
-                        if doc.revert_to(&frontiers).is_err() {
-                            return Err(FabricError::Durability(
-                                "rollback after failed apply did not restore".into(),
-                            ));
-                        }
+            // Total, not best-effort. One Body that will not revert must not
+            // abandon the rest of the batch half-applied, so every key is put
+            // back before anything is reported.
+            let mut unrestored = 0usize;
+            for (key, snapshot) in prior {
+                let Some((state, frontiers)) = snapshot else {
+                    // The Body did not exist before this batch, so undoing the
+                    // batch means it does not exist now either.
+                    self.bodies.remove(&key);
+                    continue;
+                };
+                self.bodies.insert(key.clone(), state);
+                if let (Some(frontiers), Some(BodyState::Collab(doc))) =
+                    (frontiers, self.bodies.get(&key))
+                {
+                    doc.commit();
+                    if doc.revert_to(&frontiers).is_err() {
+                        unrestored += 1;
                     }
-                    _ => match atomic_backups.get(&key) {
-                        Some(Some(bytes)) => {
-                            self.bodies.insert(key, BodyState::Atomic(bytes.clone()));
-                        }
-                        // The Body did not exist before this batch, so undoing
-                        // the batch means it does not exist now either.
-                        Some(None) => {
-                            self.bodies.remove(&key);
-                        }
-                        None => {}
-                    },
                 }
+            }
+            if unrestored > 0 {
+                return Err(FabricError::Durability(format!(
+                    "rollback after failed apply did not restore {unrestored} bodies"
+                )));
             }
             return Err(e);
         }
