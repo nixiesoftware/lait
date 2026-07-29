@@ -72,7 +72,7 @@ fn coordinates() -> (SpaceId, SignedCoordinates) {
             .key_bytes()
             .unwrap(),
         approach_nick_hint: "a".into(),
-        approach_routes: vec![ApproachRoute::DirectV4 {
+        approach_routes: vec![ApproachRoute::DirectIpv4 {
             ip: [127, 0, 0, 1],
             port: 4242,
         }],

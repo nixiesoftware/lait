@@ -1,0 +1,4 @@
+# Deliberate exemptions from the semantic-naming gate.
+# Format: path<TAB>identifier<TAB>justification. Every entry needs a reason, and
+# an entry that stops matching fails the gate — a stale exemption reads as
+# coverage it no longer provides.

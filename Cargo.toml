@@ -222,6 +222,11 @@ windows-sys = { version = "0.61", features = [
 # _path_does` exactly this way). Tests that *want* those vars set them explicitly
 # afterward (serialized by `ENV_LOCK`). Pulls only syn/quote, already in the tree.
 ctor = "0.2"
+# The semantic-naming gate parses rather than scanning lines: fields, locals,
+# parameters, enum variants, and `impl`-block declarations are all violation
+# positions a prefix scan cannot see, and `let v1 = …`/`ipv4` are false
+# positives it cannot avoid. `full` + `visit` is what walks a whole file.
+syn = { version = "2", features = ["full", "visit", "parsing"] }
 # Raw crypto primitives are TEST-ONLY at this layer: `identity_interop.rs` and
 # `frost_interop.rs` forge keys and drive ceremony rounds against the kernel's
 # public surface, which is exactly the kind of adversarial construction that has

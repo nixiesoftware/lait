@@ -43,24 +43,25 @@ pub const MAX_ADDRS: usize = 8;
 /// The fixed byte length of a rendered SpaceId (`ws_` + 26 Crockford chars).
 pub const SPACE_ID_LEN: usize = 29;
 
-/// A signed direct route to the approach Station. Tag 0 = DirectV4, tag 1 =
-/// DirectV6 (postcard variant order). Relay/discovery configuration is guarded
+/// A signed direct route to the approach Station. Tag 0 = DirectIpv4, tag 1 =
+/// DirectIpv6 — postcard encodes the variant *index*, so the order is the wire
+/// contract and the names are free to be semantic. Relay/discovery configuration is guarded
 /// local transport policy and never travels here — a route is always a direct,
 /// dialable IP + port.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum ApproachRoute {
-    DirectV4 { ip: [u8; 4], port: u16 },
-    DirectV6 { ip: [u8; 16], port: u16 },
+    DirectIpv4 { ip: [u8; 4], port: u16 },
+    DirectIpv6 { ip: [u8; 16], port: u16 },
 }
 
 impl ApproachRoute {
     pub fn from_socket(addr: &SocketAddr) -> Self {
         match addr {
-            SocketAddr::V4(a) => ApproachRoute::DirectV4 {
+            SocketAddr::V4(a) => ApproachRoute::DirectIpv4 {
                 ip: a.ip().octets(),
                 port: a.port(),
             },
-            SocketAddr::V6(a) => ApproachRoute::DirectV6 {
+            SocketAddr::V6(a) => ApproachRoute::DirectIpv6 {
                 ip: a.ip().octets(),
                 port: a.port(),
             },
@@ -68,10 +69,10 @@ impl ApproachRoute {
     }
     pub fn to_socket(&self) -> SocketAddr {
         match self {
-            ApproachRoute::DirectV4 { ip, port } => {
+            ApproachRoute::DirectIpv4 { ip, port } => {
                 SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::from(*ip), *port))
             }
-            ApproachRoute::DirectV6 { ip, port } => {
+            ApproachRoute::DirectIpv6 { ip, port } => {
                 SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::from(*ip), *port, 0, 0))
             }
         }
@@ -81,11 +82,11 @@ impl ApproachRoute {
     /// port and a specified, non-multicast unicast IP.
     pub fn is_usable(&self) -> bool {
         match self {
-            ApproachRoute::DirectV4 { ip, port } => {
+            ApproachRoute::DirectIpv4 { ip, port } => {
                 let ip = Ipv4Addr::from(*ip);
                 *port != 0 && !ip.is_unspecified() && !ip.is_multicast() && !ip.is_broadcast()
             }
-            ApproachRoute::DirectV6 { ip, port } => {
+            ApproachRoute::DirectIpv6 { ip, port } => {
                 let ip = Ipv6Addr::from(*ip);
                 *port != 0 && !ip.is_unspecified() && !ip.is_multicast()
             }

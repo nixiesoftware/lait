@@ -1,26 +1,39 @@
-//! M6 — the semantic-naming gate, as its own named artifact.
+//! The semantic-naming gate, on a real parser.
 //!
-//! Project-owned Rust identifiers are semantic: no protocol-version suffix
-//! (`FooV1`, `foo_v1`, `FOO_V1`) may be *declared* anywhere in production
-//! sources — struct, enum, trait, type alias, fn, const, static, or mod. Wire
-//! formats keep their encoded version **fields** and their versioned
-//! signing-domain/ALPN/magic **string contents**; those are data, not names.
-//! Byte stability across the renames is pinned by the golden fixture suites
-//! (`coordinates_fixtures`, `contact_fixtures`, `beacon_presence_fixtures`,
-//! `manifest_fixtures`, `transaction_marker_fixtures`), which fail if a rename
-//! ever changes an encoding.
+//! Project-owned identifiers are semantic: no protocol- or storage-generation
+//! suffix (`FooV1`, `foo_v1`, `FOO_V1`) may be *declared* anywhere in production
+//! sources. Wire formats keep their encoded version **fields** and their
+//! versioned signing-domain/ALPN/magic **string contents**; those are data, not
+//! names. Byte stability across renames is pinned by the golden fixture suites,
+//! which fail if a rename ever changes an encoding.
 //!
 //! No alias or deprecated suffixed wrapper is permitted: a `type FooV1 = Foo;`
-//! shim *declares* a suffixed identifier and fails this gate like any other.
+//! shim *declares* a suffixed identifier and fails like any other.
+//!
+//! This gate parses. The line-oriented prefix scan it replaces could only see
+//! sixteen declaration keywords at the start of a line, so it missed fields,
+//! locals, parameters, enum variants, and every declaration inside an `impl`
+//! block — and it walked six crates, silently exempting `world-bridge`,
+//! `world-interface`, and both `products/*` packages. Extending the old
+//! technique to fields and locals would have produced false positives
+//! immediately (`let v1 = …`, a field named `ipv4`); a syntax tree does not
+//! have that problem.
+//!
+//! The TypeScript half runs as its own CI step over `viewer/`; see
+//! `viewer/scripts/naming-gate.mjs`.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+
+use syn::visit::Visit;
 
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
-/// Every production Rust source: the package `src/**` and each concept crate's
-/// `src/**`. Tests and fixtures are not production names.
+/// Every production Rust source: the package `src/**`, each concept crate's
+/// `src/**`, and each product package's `src/**`. Tests and fixtures are not
+/// production names.
 fn production_sources() -> Vec<PathBuf> {
     fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
         let Ok(entries) = std::fs::read_dir(dir) else {
@@ -38,28 +51,35 @@ fn production_sources() -> Vec<PathBuf> {
     let root = workspace_root();
     let mut out = Vec::new();
     walk(&root.join("src"), &mut out);
-    for crate_dir in [
-        "journal",
-        "mechanics",
-        "fabric",
-        "comms",
-        "replica",
-        "runtime",
-    ] {
-        walk(&root.join("crates").join(crate_dir).join("src"), &mut out);
+    for group in ["crates", "products"] {
+        let Ok(entries) = std::fs::read_dir(root.join(group)) else {
+            panic!("{group}/ must exist — the gate's coverage is not optional");
+        };
+        for entry in entries.flatten() {
+            if entry.path().is_dir() {
+                walk(&entry.path().join("src"), &mut out);
+            }
+        }
     }
     out.sort();
     out
 }
 
-/// Whether an identifier carries a protocol-version suffix. IP-family names
-/// (`Ipv4`, `Ipv6Addr`) are not versions: the `V` must introduce a *trailing*
-/// number after a lowercase letter or digit, or a `_v<digits>` tail.
+/// Whether an identifier carries a generation suffix.
+///
+/// IP-family names (`Ipv4`, `Ipv6Addr`) are not versions: the `V` must be a
+/// *trailing* number after a lowercase letter or digit, or a `_v<digits>` tail.
+/// A bare `v1`/`V1` is a version name with nothing else to it and counts.
 fn versioned_ident(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     if let Some(idx) = lower.rfind("_v") {
         let tail = &lower[idx + 2..];
         if !tail.is_empty() && tail.bytes().all(|b| b.is_ascii_digit()) {
+            return true;
+        }
+    }
+    if let Some(digits) = lower.strip_prefix('v') {
+        if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) {
             return true;
         }
     }
@@ -78,49 +98,204 @@ fn versioned_ident(name: &str) -> bool {
     false
 }
 
-/// The version-suffixed identifiers a source file *declares* (declarations are
-/// the violation unit; usages follow declarations).
-fn versioned_declarations(text: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    for line in text.lines() {
-        let trimmed = line.trim_start();
-        for kw in [
-            "pub struct ",
-            "struct ",
-            "pub enum ",
-            "enum ",
-            "pub trait ",
-            "trait ",
-            "pub type ",
-            "type ",
-            "pub fn ",
-            "fn ",
-            "pub const ",
-            "const ",
-            "pub static ",
-            "static ",
-            "pub mod ",
-            "mod ",
-        ] {
-            if let Some(rest) = trimmed.strip_prefix(kw) {
-                let name: String = rest
-                    .chars()
-                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
-                    .collect();
-                if !name.is_empty() && versioned_ident(&name) {
-                    out.push(name);
-                }
-                break;
+/// Whether an item is compiled only for tests. An inline `#[cfg(test)] mod`
+/// inside `src/` is a test, and the gate is about production names — otherwise
+/// a fixture called `v1` in a migration test becomes pressure to rename the
+/// thing the test is *about*.
+fn test_gated(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|attr| {
+        if attr.path().is_ident("test") {
+            return true;
+        }
+        if !attr.path().is_ident("cfg") {
+            return false;
+        }
+        let mut gated = false;
+        let _ = attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("test") {
+                gated = true;
+            }
+            Ok(())
+        });
+        gated
+    })
+}
+
+/// Collects every version-suffixed identifier a file *declares*. Declarations
+/// are the violation unit; usages follow declarations.
+#[derive(Default)]
+struct Declarations {
+    found: BTreeSet<String>,
+}
+
+impl Declarations {
+    fn note(&mut self, ident: &syn::Ident) {
+        let name = ident.to_string();
+        if versioned_ident(&name) {
+            self.found.insert(name);
+        }
+    }
+
+    /// A binding pattern can introduce several names at once (`let (a, b) = …`).
+    fn note_pattern(&mut self, pat: &syn::Pat) {
+        match pat {
+            syn::Pat::Ident(p) => self.note(&p.ident),
+            syn::Pat::Type(p) => self.note_pattern(&p.pat),
+            syn::Pat::Reference(p) => self.note_pattern(&p.pat),
+            syn::Pat::Tuple(p) => p.elems.iter().for_each(|e| self.note_pattern(e)),
+            syn::Pat::TupleStruct(p) => p.elems.iter().for_each(|e| self.note_pattern(e)),
+            syn::Pat::Slice(p) => p.elems.iter().for_each(|e| self.note_pattern(e)),
+            syn::Pat::Or(p) => p.cases.iter().for_each(|e| self.note_pattern(e)),
+            syn::Pat::Struct(p) => p.fields.iter().for_each(|f| self.note_pattern(&f.pat)),
+            _ => {}
+        }
+    }
+
+    fn note_signature(&mut self, sig: &syn::Signature) {
+        self.note(&sig.ident);
+        for arg in &sig.inputs {
+            if let syn::FnArg::Typed(t) = arg {
+                self.note_pattern(&t.pat);
             }
         }
     }
-    out
+
+    fn note_fields(&mut self, fields: &syn::Fields) {
+        if let syn::Fields::Named(named) = fields {
+            for field in &named.named {
+                if let Some(ident) = &field.ident {
+                    self.note(ident);
+                }
+            }
+        }
+    }
 }
 
-#[test]
-fn no_production_identifier_carries_a_version_suffix() {
+impl<'ast> Visit<'ast> for Declarations {
+    fn visit_item_struct(&mut self, node: &'ast syn::ItemStruct) {
+        self.note(&node.ident);
+        self.note_fields(&node.fields);
+        syn::visit::visit_item_struct(self, node);
+    }
+    fn visit_item_enum(&mut self, node: &'ast syn::ItemEnum) {
+        self.note(&node.ident);
+        for variant in &node.variants {
+            self.note(&variant.ident);
+            self.note_fields(&variant.fields);
+        }
+        syn::visit::visit_item_enum(self, node);
+    }
+    fn visit_item_union(&mut self, node: &'ast syn::ItemUnion) {
+        self.note(&node.ident);
+        for field in &node.fields.named {
+            if let Some(ident) = &field.ident {
+                self.note(ident);
+            }
+        }
+        syn::visit::visit_item_union(self, node);
+    }
+    fn visit_item_trait(&mut self, node: &'ast syn::ItemTrait) {
+        self.note(&node.ident);
+        syn::visit::visit_item_trait(self, node);
+    }
+    fn visit_item_type(&mut self, node: &'ast syn::ItemType) {
+        self.note(&node.ident);
+        syn::visit::visit_item_type(self, node);
+    }
+    fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
+        if test_gated(&node.attrs) {
+            return;
+        }
+        self.note(&node.ident);
+        syn::visit::visit_item_mod(self, node);
+    }
+    fn visit_item_const(&mut self, node: &'ast syn::ItemConst) {
+        self.note(&node.ident);
+        syn::visit::visit_item_const(self, node);
+    }
+    fn visit_item_static(&mut self, node: &'ast syn::ItemStatic) {
+        self.note(&node.ident);
+        syn::visit::visit_item_static(self, node);
+    }
+    fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
+        if test_gated(&node.attrs) {
+            return;
+        }
+        self.note_signature(&node.sig);
+        syn::visit::visit_item_fn(self, node);
+    }
+    fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
+        self.note_signature(&node.sig);
+        syn::visit::visit_impl_item_fn(self, node);
+    }
+    fn visit_impl_item_const(&mut self, node: &'ast syn::ImplItemConst) {
+        self.note(&node.ident);
+        syn::visit::visit_impl_item_const(self, node);
+    }
+    fn visit_impl_item_type(&mut self, node: &'ast syn::ImplItemType) {
+        self.note(&node.ident);
+        syn::visit::visit_impl_item_type(self, node);
+    }
+    fn visit_trait_item_fn(&mut self, node: &'ast syn::TraitItemFn) {
+        self.note_signature(&node.sig);
+        syn::visit::visit_trait_item_fn(self, node);
+    }
+    fn visit_trait_item_const(&mut self, node: &'ast syn::TraitItemConst) {
+        self.note(&node.ident);
+        syn::visit::visit_trait_item_const(self, node);
+    }
+    fn visit_trait_item_type(&mut self, node: &'ast syn::TraitItemType) {
+        self.note(&node.ident);
+        syn::visit::visit_trait_item_type(self, node);
+    }
+    fn visit_local(&mut self, node: &'ast syn::Local) {
+        self.note_pattern(&node.pat);
+        syn::visit::visit_local(self, node);
+    }
+    fn visit_expr_closure(&mut self, node: &'ast syn::ExprClosure) {
+        for input in &node.inputs {
+            self.note_pattern(input);
+        }
+        syn::visit::visit_expr_closure(self, node);
+    }
+}
+
+fn versioned_declarations(text: &str) -> Vec<String> {
+    let Ok(file) = syn::parse_file(text) else {
+        return Vec::new();
+    };
+    let mut declarations = Declarations::default();
+    declarations.visit_file(&file);
+    declarations.found.into_iter().collect()
+}
+
+/// Deliberate exemptions, as `path<TAB>identifier<TAB>justification`. An entry
+/// that no longer matches anything is itself a failure: a stale exemption reads
+/// as coverage it no longer provides.
+fn allowlist() -> Vec<(String, String)> {
+    let path = workspace_root().join("tests/semantic-name-allowlist.tsv");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    text.lines()
+        .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'))
+        .filter_map(|line| {
+            let mut parts = line.split('\t');
+            let file = parts.next()?.trim().to_string();
+            let ident = parts.next()?.trim().to_string();
+            let justification = parts.next().unwrap_or("").trim();
+            assert!(
+                !justification.is_empty(),
+                "allowlist entry `{file} {ident}` carries no justification"
+            );
+            Some((file, ident))
+        })
+        .collect()
+}
+
+fn violations() -> Vec<(String, String)> {
     let root = workspace_root();
-    let mut violations = Vec::new();
+    let mut out = Vec::new();
     for file in production_sources() {
         let rel = file
             .strip_prefix(&root)
@@ -129,44 +304,116 @@ fn no_production_identifier_carries_a_version_suffix() {
             .replace('\\', "/");
         let text = std::fs::read_to_string(&file).unwrap_or_default();
         for name in versioned_declarations(&text) {
-            violations.push(format!("{rel}: `{name}`"));
+            out.push((rel.clone(), name));
+        }
+    }
+    out
+}
+
+#[test]
+fn no_production_identifier_carries_a_version_suffix() {
+    let allowed = allowlist();
+    let found: Vec<String> = violations()
+        .into_iter()
+        .filter(|entry| !allowed.contains(entry))
+        .map(|(file, name)| format!("{file}: `{name}`"))
+        .collect();
+    assert!(
+        found.is_empty(),
+        "version-suffixed identifier declarations in production sources:\n  {}",
+        found.join("\n  ")
+    );
+}
+
+#[test]
+fn every_allowlist_entry_still_applies() {
+    let found = violations();
+    let stale: Vec<String> = allowlist()
+        .into_iter()
+        .filter(|entry| !found.contains(entry))
+        .map(|(file, name)| format!("{file}: `{name}`"))
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "allowlist entries that no longer match anything — delete them:\n  {}",
+        stale.join("\n  ")
+    );
+}
+
+#[test]
+fn the_gate_covers_every_production_package() {
+    let root = workspace_root();
+    let sources = production_sources();
+    let covered = |needle: &str| {
+        sources.iter().any(|p| {
+            p.to_string_lossy()
+                .replace('\\', "/")
+                .contains(&format!("/{needle}/src/"))
+        })
+    };
+    let mut missing = Vec::new();
+    for group in ["crates", "products"] {
+        for entry in std::fs::read_dir(root.join(group))
+            .expect("group dir")
+            .flatten()
+        {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if entry.path().join("src").is_dir() && !covered(&name) {
+                missing.push(format!("{group}/{name}"));
+            }
         }
     }
     assert!(
-        violations.is_empty(),
-        "version-suffixed identifier declarations in production sources:\n  {}",
-        violations.join("\n  ")
+        missing.is_empty(),
+        "packages the gate does not scan: {missing:?}"
+    );
+    assert!(
+        sources.iter().any(|p| p.starts_with(root.join("src"))),
+        "the root package's src/ must be scanned"
     );
 }
 
 #[test]
 fn the_detector_has_teeth() {
-    // Positive samples: every declaration form and suffix style fires.
+    // Every declaration position the old line scanner could not reach.
     for sample in [
-        "pub struct BodyTransactionV1 {",
-        "struct payload_v2;",
-        "pub enum FrameV10 {",
+        "pub struct BodyTransactionV1 { field: u8 }",
+        "struct Payload { payload_v2: u8 }",
+        "pub enum Frame { HeaderV10 }",
+        "pub enum Frame { Header { len_v2: u8 } }",
         "pub type SignedCoordinatesV1 = ();",
         "type ShimV1 = Real;",
         "fn decode_v1() {}",
+        "fn decode(bytes_v2: &[u8]) {}",
         "pub const PRESENCE_ALPN_V1: &[u8] = b\"x\";",
         "static TABLE_V3: u8 = 0;",
         "mod wire_v1;",
+        "impl T { fn read_v1(&self) {} }",
+        "impl T { const LIMIT_V2: u8 = 0; }",
+        "trait T { fn write_v1(&self); }",
+        "fn f() { let parsed_v1 = 0; }",
+        "fn f() { let (a, frame_v2) = (0, 0); }",
+        "fn f() { let cb = |arg_v1: u8| arg_v1; }",
+        "fn f() { let v1 = 0; }",
     ] {
         assert!(
             !versioned_declarations(sample).is_empty(),
             "detector missed: {sample}"
         );
     }
-    // Negative controls: semantic names, IP families, and versioned *string
-    // contents* are not identifier violations.
+    // Semantic names, IP families, and versioned *string contents* are fine.
     for sample in [
-        "pub struct BodyTransaction {",
-        "pub struct SignedCoordinates {",
-        "pub struct Ipv4Header {",
-        "use std::net::Ipv6Addr;",
+        "pub struct BodyTransaction { format_version: u8 }",
+        "pub struct SignedCoordinates;",
+        "pub struct Ipv4Header { ipv6: u8 }",
+        "fn f() { use std::net::Ipv6Addr; }",
         "const DOMAIN: &str = \"lait.coordinates.v1\";",
-        "let alpn = b\"lait/contact/1\";",
+        "fn f() { let alpn = b\"lait/contact/1\"; }",
+        "fn f(protocol_version: u32) {}",
+        "pub const CONTENT_FORMAT_VERSION: u8 = 1;",
+        // Inline test modules inside src/ are tests, not production names.
+        "#[cfg(test)] mod tests { fn t() { let v1 = 0; } }",
+        "#[test] fn a_v1_file_migrates() { let v1 = 0; }",
     ] {
         assert!(
             versioned_declarations(sample).is_empty(),

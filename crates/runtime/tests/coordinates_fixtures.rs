@@ -43,7 +43,7 @@ fn valid_payload() -> (SpaceId, CoordinatesPayload) {
         display_name_hint: "My Space".into(),
         approach_station: station_pubkey(),
         approach_nick_hint: "host".into(),
-        approach_routes: vec![ApproachRoute::DirectV4 {
+        approach_routes: vec![ApproachRoute::DirectIpv4 {
             ip: [10, 0, 0, 1],
             port: 4242,
         }],
@@ -167,15 +167,15 @@ fn unusable_routes_are_rejected() {
     use runtime::coordinates::canonical_routes;
     // A signed route that is unspecified, multicast, or zero-port fails verify.
     for bad in [
-        ApproachRoute::DirectV4 {
+        ApproachRoute::DirectIpv4 {
             ip: [0, 0, 0, 0],
             port: 4242,
         },
-        ApproachRoute::DirectV4 {
+        ApproachRoute::DirectIpv4 {
             ip: [224, 0, 0, 1],
             port: 4242,
         },
-        ApproachRoute::DirectV4 {
+        ApproachRoute::DirectIpv4 {
             ip: [10, 0, 0, 1],
             port: 0,
         },
@@ -231,11 +231,11 @@ fn tampered_payload_breaks_the_outer_signature() {
 fn unsorted_or_duplicate_addresses_are_rejected() {
     let (_ws, mut payload) = valid_payload();
     payload.approach_routes = vec![
-        ApproachRoute::DirectV4 {
+        ApproachRoute::DirectIpv4 {
             ip: [10, 0, 0, 2],
             port: 1,
         },
-        ApproachRoute::DirectV4 {
+        ApproachRoute::DirectIpv4 {
             ip: [10, 0, 0, 1],
             port: 1,
         },

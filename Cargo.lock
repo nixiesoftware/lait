@@ -2936,6 +2936,7 @@ dependencies = [
  "serde",
  "serde-byte-array",
  "serde_json",
+ "syn 2.0.117",
  "tar",
  "tokio",
  "tokio-stream",
