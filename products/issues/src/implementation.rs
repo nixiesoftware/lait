@@ -331,6 +331,7 @@ impl Staging {
     fn into_effect(self, doc: Option<String>) -> WorldEffect {
         let demand = self.demand.unwrap_or_else(contract::demand_contributor);
         WorldEffect {
+            content_refs: Vec::new(),
             operations: self.ops,
             scopes: self.scopes,
             effect: IssueEffect {
@@ -361,6 +362,7 @@ fn map_set(path: &str, key: impl Into<String>, value: impl Into<Vec<u8>>) -> Bod
 
 fn unchanged_effect(doc: Option<String>) -> WorldEffect {
     WorldEffect {
+        content_refs: Vec::new(),
         operations: vec![],
         scopes: vec![],
         effect: IssueEffect {

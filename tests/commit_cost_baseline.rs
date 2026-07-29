@@ -150,6 +150,7 @@ fn commit(replica: &mut Replica, seq: u64, ops: &[(BodyKey, BodyOp)]) {
             "baseline",
             ops,
             &bindings,
+            &[],
         )
         .expect("durable commit");
 }

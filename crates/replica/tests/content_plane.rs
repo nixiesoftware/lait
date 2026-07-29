@@ -153,6 +153,7 @@ fn commit_body(replica: &mut Replica, seq: u8, key: &BodyKey, value: &[u8]) {
                 },
             )],
             &[(key.clone(), binding())],
+            &[],
         )
         .expect("commit body");
 }

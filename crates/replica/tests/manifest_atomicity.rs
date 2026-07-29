@@ -172,6 +172,7 @@ fn commit_note(
             },
         )],
         &[(key.clone(), binding())],
+        &[],
     )
 }
 

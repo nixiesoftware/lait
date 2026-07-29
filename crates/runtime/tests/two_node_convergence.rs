@@ -137,6 +137,7 @@ fn commit_votes(r: &mut Replica, request: [u8; 16], delta: i64) {
             ),
         ],
         &[(note_key(), binding())],
+        &[],
     )
     .unwrap();
 }

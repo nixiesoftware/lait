@@ -231,6 +231,7 @@ impl World for MultiWorld {
             _ => return Err(WorldError::InvalidRequest),
         }
         Ok(WorldEffect {
+            content_refs: Vec::new(),
             demand: any_demand(),
             operations,
             scopes,

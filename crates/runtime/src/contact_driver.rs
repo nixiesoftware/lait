@@ -778,12 +778,6 @@ async fn serve_contact(
     // canonical — so a converged peer is answered from 40 signed bytes and
     // nothing is streamed in either direction. This is the case that happens
     // constantly, and it used to cost a declaration naming every head.
-    let our_root = ctx
-        .core
-        .with_replica(|replica| Ok(replica.published_root()))
-        .map_err(|e: replica::ReplicaCommitError| ContactError::Transfer(e.to_string()))?;
-    let roots_agree = our_root.map(|r| r.hash).unwrap_or([0u8; 32]) == hello.holdings_root
-        && hello.holdings_root != [0u8; 32];
 
     let mut held: std::collections::BTreeSet<(replica::BodyKey, [u8; 32])> =
         std::collections::BTreeSet::new();

@@ -157,6 +157,7 @@ impl World for NoteWorld {
         // Deterministic body key: same World, a fixed body for this test.
         let key = BodyKey::new(self.id.clone(), BodyId::from_bytes([0u8; 16]));
         Ok(WorldEffect {
+            content_refs: Vec::new(),
             demand: any_demand(),
             operations: vec![(
                 key.clone(),
@@ -628,6 +629,7 @@ impl World for RogueWorld {
             BodyId::from_bytes([0u8; 16]),
         );
         Ok(WorldEffect {
+            content_refs: Vec::new(),
             demand: any_demand(),
             operations: vec![(
                 foreign.clone(),
@@ -840,6 +842,7 @@ impl World for BoardWorld {
     ) -> Result<WorldEffect, WorldError> {
         let key = self.body();
         Ok(WorldEffect {
+            content_refs: Vec::new(),
             demand: any_demand(),
             operations: vec![
                 (
@@ -962,6 +965,7 @@ impl World for MixedWorld {
         // Regardless of which schema the intent named, stage a collaborative op.
         let key = BodyKey::new(self.id.clone(), BodyId::from_bytes([5u8; 16]));
         Ok(WorldEffect {
+            content_refs: Vec::new(),
             demand: any_demand(),
             operations: vec![(
                 key.clone(),

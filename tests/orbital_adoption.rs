@@ -109,6 +109,7 @@ impl World for TallyWorld {
         let next = self.current(ctx) + intent.payload.len() as u64;
         let key = self.body();
         Ok(WorldEffect {
+            content_refs: Vec::new(),
             demand: any_demand(),
             operations: vec![(
                 key.clone(),

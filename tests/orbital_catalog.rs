@@ -156,6 +156,31 @@ impl runtime::BodyReader for StubReader {
             .cloned()
             .ok_or(replica::ProjectionError::NotCollaborative)
     }
+    fn body_version(&self, _key: &replica::ids::BodyKey) -> Option<replica::FabricVersion> {
+        None
+    }
+    fn anchor_in_body(
+        &self,
+        _key: &replica::ids::BodyKey,
+        _path: &str,
+        _position: u64,
+    ) -> Option<replica::FabricAnchor> {
+        None
+    }
+    fn resolve_anchor(
+        &self,
+        _key: &replica::ids::BodyKey,
+        _anchor: &replica::FabricAnchor,
+    ) -> replica::AnchorResolution {
+        replica::AnchorResolution::Drifted
+    }
+    fn content_status(
+        &self,
+        _content: &replica::ContentRef,
+    ) -> Option<runtime::world::WorldContentStatus> {
+        None
+    }
+
     fn bodies_with_schema(
         &self,
         _world: &replica::ids::WorldId,

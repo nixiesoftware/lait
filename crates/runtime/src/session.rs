@@ -294,12 +294,19 @@ impl ObservationStream {
 /// The Station's exclusive committing state, shared with its Sessions. Held
 /// behind an `Arc` by the Station and every Session; a Session can commit
 /// through it but never stop the Station.
-pub(crate) struct StationCore {
+pub struct StationCore {
     inner: std::sync::Mutex<CoreInner>,
     pub(crate) broadcaster: Arc<Broadcaster>,
 }
 
 impl StationCore {
+    /// A core wrapping a Replica directly, for tests that exercise a surface
+    /// built over one without standing up a Station.
+    #[doc(hidden)]
+    pub fn for_test(replica: replica::Replica) -> Self {
+        Self::new(StationEpoch::ZERO, DEFAULT_OBSERVATION_CAPACITY, replica)
+    }
+
     pub(crate) fn new(
         epoch: StationEpoch,
         observation_capacity: usize,
@@ -325,7 +332,7 @@ impl StationCore {
 
     /// Run a closure against the exclusive Replica writer (the Contact plane's
     /// snapshot/incorporation entry). Refused once the core is closed.
-    pub(crate) fn with_replica<T>(
+    pub fn with_replica<T>(
         &self,
         f: impl FnOnce(&mut replica::Replica) -> Result<T, replica::ReplicaCommitError>,
     ) -> Result<T, replica::ReplicaCommitError> {
@@ -392,6 +399,40 @@ impl crate::world::BodyReader for ReplicaReader<'_> {
         key: &BodyKey,
     ) -> Result<replica::CollaborativeView, replica::ProjectionError> {
         self.0.read_collaborative(key)
+    }
+    fn body_version(&self, key: &BodyKey) -> Option<replica::FabricVersion> {
+        self.0.body_version(key)
+    }
+    fn anchor_in_body(
+        &self,
+        key: &BodyKey,
+        path: &str,
+        position: u64,
+    ) -> Option<replica::FabricAnchor> {
+        self.0.anchor(key, path, position)
+    }
+    fn resolve_anchor(
+        &self,
+        key: &BodyKey,
+        anchor: &replica::FabricAnchor,
+    ) -> replica::AnchorResolution {
+        self.0.resolve_anchor(key, anchor)
+    }
+    fn content_status(
+        &self,
+        content: &replica::ContentRef,
+    ) -> Option<crate::world::WorldContentStatus> {
+        // Residency is the host's question, not the Replica's, so a World
+        // reading through a committed snapshot sees geometry with zero
+        // residency. The host surface is where "how much is here" is answered,
+        // because that is where the cache is.
+        self.0
+            .content_descriptor(content)
+            .map(|d| crate::world::WorldContentStatus {
+                plaintext_len: d.plaintext_len,
+                chunk_count: d.chunk_count,
+                resident_chunks: 0,
+            })
     }
     fn bodies_with_schema(&self, world: &WorldId, schema: &SchemaId) -> Vec<BodyKey> {
         self.0
@@ -794,6 +835,7 @@ impl Session {
                 &label,
                 &effect.operations,
                 &bindings,
+                &effect.content_refs,
             )
             .map_err(|e| match e {
                 // A staged op the engine cannot express is a World bug.

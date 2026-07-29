@@ -158,6 +158,7 @@ fn commit(
         label,
         ops,
         bindings,
+        &[],
     )
 }
 
@@ -242,6 +243,7 @@ fn a_durable_commit_survives_cold_reopen_with_receipts_and_replay() {
             "bump",
             &counter_ops(&body(1), 5),
             &[(body(1), collab_binding())],
+            &[],
         )
         .unwrap_err();
     assert_eq!(err, ReplicaCommitError::RequestIdConflict);

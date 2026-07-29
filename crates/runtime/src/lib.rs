@@ -32,6 +32,7 @@ pub mod action;
 pub mod beacon;
 pub mod contact;
 pub mod contact_driver;
+pub mod content_host;
 pub mod coordinates;
 #[cfg(test)]
 mod dispatch_tests;

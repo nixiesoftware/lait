@@ -374,6 +374,37 @@ impl ResidentCache {
         Ok(removed)
     }
 
+    /// Drop one entry now, if nothing holds it.
+    ///
+    /// Distinct from [`Self::sweep`] on purpose. A sweep runs because space is
+    /// tight and picks its own victims; this runs because a caller asked for
+    /// these bytes to go, and a caller that asked should not have to wait for
+    /// quota pressure that may never come. Both refuse to touch a held entry —
+    /// "I want this gone" does not outrank "someone is reading it".
+    pub fn evict(&self, entry: &[u8; 32]) -> Result<bool, CacheError> {
+        if self.held().contains(entry) {
+            return Ok(false);
+        }
+        self.drop_entry(entry);
+        Ok(true)
+    }
+
+    /// Every resident entry's address. O(entries) and meant for a sweep or a
+    /// scan, not a hot path.
+    pub fn entries(&self) -> Vec<[u8; 32]> {
+        let mut out = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(self.root.join(CHUNKS_DIR)) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if let Some(hash) = unhex(&name) {
+                    out.push(hash);
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+
     /// Total resident bytes.
     pub fn resident_bytes(&self) -> u64 {
         let mut total = 0;

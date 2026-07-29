@@ -1224,6 +1224,25 @@ impl Replica {
         )
     }
 
+    /// A Body's causal position, in lait's own head-set terms.
+    pub fn body_version(&self, key: &BodyKey) -> Option<fabric::FabricVersion> {
+        self.fabric.version(&fabric_key(key)).ok()
+    }
+
+    /// Take an anchor at a position inside a collaborative value.
+    pub fn anchor(&self, key: &BodyKey, path: &str, position: u64) -> Option<fabric::FabricAnchor> {
+        self.fabric.anchor(&fabric_key(key), path, position).ok()
+    }
+
+    /// Resolve an anchor. Total, and never mutates the Body.
+    pub fn resolve_anchor(
+        &self,
+        key: &BodyKey,
+        anchor: &fabric::FabricAnchor,
+    ) -> fabric::AnchorResolution {
+        self.fabric.resolve(&fabric_key(key), anchor)
+    }
+
     /// Drop a Body's declaration without republishing — what a tombstone does
     /// to the content it used to hold. Reachability is over *live* Bodies, so
     /// forgetting the declaration is what makes the content collectable.
@@ -1524,6 +1543,7 @@ impl Replica {
         request_label: &str,
         ops: &[(BodyKey, BodyOp)],
         bindings: &[(BodyKey, BodyBinding)],
+        content_refs: &[(BodyKey, Vec<crate::content::ContentRef>)],
     ) -> Result<ActionOutcome, ReplicaCommitError> {
         if self.poisoned {
             return Err(ReplicaCommitError::Poisoned);
@@ -1586,6 +1606,29 @@ impl Replica {
                 _ => {}
             }
         }
+        // The World's content declaration, validated before anything applies.
+        // Shallow on purpose — bounds, order, and that every named descriptor
+        // is committed — because anything deeper would mean decoding the
+        // product bytes it describes, which is the boundary it exists to
+        // respect.
+        let mut declared: BTreeMap<BodyKey, Vec<[u8; 32]>> = BTreeMap::new();
+        for (key, refs) in content_refs {
+            if refs.len() > crate::manifest::MAX_CONTENT_REFS_PER_BODY {
+                return Err(ReplicaCommitError::QuotaExceeded);
+            }
+            for reference in refs {
+                if self.content_descriptor(reference).is_none() {
+                    return Err(ReplicaCommitError::Illegitimate(
+                        "a declaration names content with no committed descriptor".into(),
+                    ));
+                }
+            }
+            let mut ids: Vec<[u8; 32]> = refs.iter().map(|r| *r.as_bytes()).collect();
+            ids.sort();
+            ids.dedup();
+            declared.insert(key.clone(), ids);
+        }
+
         // Body-count quota, reserved under the writer BEFORE anything applies.
         let new_bodies = touched
             .iter()
@@ -1753,6 +1796,7 @@ impl Replica {
                     &mut new_records,
                     Some(receipt_record),
                     next_frontier,
+                    &declared,
                 )?)
             } else {
                 // Non-durable but keyed: retain the signed material in memory
@@ -2925,6 +2969,7 @@ impl Replica {
     /// Persist a local signed transaction: the transaction record, sealed
     /// payloads, receipt, and manifest, at one journal linearization point.
     /// Returns the durable receipt.
+    #[allow(clippy::too_many_arguments)]
     fn persist_transaction(
         &mut self,
         ctx: &CommitContext<'_>,
@@ -2933,13 +2978,22 @@ impl Replica {
         new_records: &mut BTreeMap<BodyKey, Option<BodyRecord>>,
         receipt: Option<RequestReceipt>,
         next_frontier: ReplicaFrontier,
+        declared: &BTreeMap<BodyKey, Vec<[u8; 32]>>,
     ) -> Result<RequestReceipt, ReplicaCommitError> {
         let sealed: Vec<(BodyKey, Vec<u8>, ())> = sealed
             .iter()
             .map(|(k, e, _)| (k.clone(), e.clone(), ()))
             .collect();
         let receipt = receipt.expect("local commits carry a receipt");
-        self.persist_graph(ctx, tx, &sealed, new_records, Some(&receipt), next_frontier)?;
+        self.persist_graph(
+            ctx,
+            tx,
+            &sealed,
+            new_records,
+            Some(&receipt),
+            next_frontier,
+            declared,
+        )?;
         Ok(receipt)
     }
 
@@ -2968,6 +3022,7 @@ impl Replica {
     /// the journal protocol. Every failure before the manifest linearization
     /// point poisons this handle (the engine has already applied in memory);
     /// `OutcomeUnknown` demands reopen-not-retry.
+    #[allow(clippy::too_many_arguments)]
     fn persist_graph(
         &mut self,
         ctx: &CommitContext<'_>,
@@ -2976,6 +3031,7 @@ impl Replica {
         new_records: &mut BTreeMap<BodyKey, Option<BodyRecord>>,
         receipt: Option<&RequestReceipt>,
         next_frontier: ReplicaFrontier,
+        declared: &BTreeMap<BodyKey, Vec<[u8; 32]>>,
     ) -> Result<(), ReplicaCommitError> {
         let tx_bytes = tx.encode();
         let tx_ref = object_ref(&tx_bytes);
@@ -3006,7 +3062,7 @@ impl Replica {
         self.persist(
             Some(ctx),
             new_records,
-            &BTreeMap::new(),
+            declared,
             &[],
             receipt,
             new_objects,

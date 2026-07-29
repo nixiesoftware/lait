@@ -153,6 +153,7 @@ fn commit_blob(
             },
         )],
         &[(key.clone(), atomic_binding())],
+        &[],
     )
 }
 
@@ -237,6 +238,7 @@ fn commit_note(
             },
         )],
         &[(key.clone(), binding())],
+        &[],
     )
 }
 

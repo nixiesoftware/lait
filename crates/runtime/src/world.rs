@@ -274,6 +274,19 @@ pub struct BodyDeclaration {
 /// pinned authority frontier and commits nothing if it is unsatisfied.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorldEffect {
+    /// The content each touched Body references, declared by the World.
+    ///
+    /// A `ContentRef` committed inside a Body is product-encoded, and the
+    /// substrate may not decode product bytes to find it. Without a declaration
+    /// the content catalog could only grow: tombstone every Body that
+    /// referenced an upload and its descriptor stays signed state on every peer
+    /// forever. So the World says which content its Bodies name, Replica
+    /// validates the claim against committed descriptors, and reachability
+    /// becomes computable without the boundary moving.
+    ///
+    /// Absent means unchanged. An empty vector means "this Body references
+    /// nothing", which is how content is released.
+    pub content_refs: Vec<(BodyKey, Vec<replica::ContentRef>)>,
     /// Body operations staged this transaction, each keyed to the Body it
     /// mutates.
     pub operations: Vec<(BodyKey, BodyOp)>,
@@ -305,6 +318,23 @@ pub struct WorldProjection {
     pub demand: Vec<u8>,
 }
 
+/// What a World may know about one content: enough to render it, and nothing
+/// that would let it reach the bytes without asking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorldContentStatus {
+    pub plaintext_len: u64,
+    pub chunk_count: u32,
+    /// How many chunks are here now. A fact about this moment on this machine,
+    /// and never replicated.
+    pub resident_chunks: u32,
+}
+
+impl WorldContentStatus {
+    pub fn is_complete(&self) -> bool {
+        self.resident_chunks == self.chunk_count
+    }
+}
+
 /// A read view of the committed Body snapshot, handed to a World during a query.
 /// It exposes only authorized canonical reads — no CRDT internals, no mutation, no keys.
 /// Runtime backs it with the Station's Replica.
@@ -323,6 +353,43 @@ pub trait BodyReader {
     /// singleton-integrity seam (a World validating that exactly its one
     /// deterministic instance of a schema exists).
     fn bodies_with_schema(&self, world: &WorldId, schema: &SchemaId) -> Vec<BodyKey>;
+
+    /// A Body's position in its collaborative history.
+    ///
+    /// Opaque and orderable, and never the convergence engine's own type. A
+    /// World uses it to compare
+    /// positions and to stamp anchors; it cannot use it to reach the engine.
+    fn body_version(&self, key: &BodyKey) -> Option<replica::FabricVersion>;
+
+    /// Take an anchor at a position inside a collaborative value.
+    ///
+    /// This is the seam plan 14's carets and range-attached comments consume,
+    /// and it is exposed here rather than there because only the algebra that
+    /// moves a position can mint one that survives being moved.
+    fn anchor_in_body(
+        &self,
+        key: &BodyKey,
+        path: &str,
+        position: u64,
+    ) -> Option<replica::FabricAnchor>;
+
+    /// Resolve an anchor against a Body's current state.
+    ///
+    /// Total and read-only: a position whose material was deleted, or whose
+    /// anchor predates what this replica retains, is `Drifted`. Never an error,
+    /// never a mutation, and never a silently wrong index.
+    fn resolve_anchor(
+        &self,
+        key: &BodyKey,
+        anchor: &replica::FabricAnchor,
+    ) -> replica::AnchorResolution;
+
+    /// What one content is, and how much of it is here.
+    ///
+    /// A World sees size, geometry, and residency — never a path, never bytes,
+    /// never a key. Reading the bytes is a host call with its own demand, and
+    /// a `ContentRef` alone authorizes nothing.
+    fn content_status(&self, content: &replica::ContentRef) -> Option<WorldContentStatus>;
 
     /// An opaque per-Body VERSION STAMP: two reads returning the same stamp
     /// for a key are guaranteed byte-equivalent Bodies, so a World may reuse
@@ -400,6 +467,39 @@ impl<'a> WorldContext<'a> {
     /// if the Body is absent or this context has no read access.
     pub fn read_body(&self, key: &BodyKey) -> Option<Vec<u8>> {
         self.reads.and_then(|r| r.read_body(key))
+    }
+
+    /// A Body's causal position, for comparison and for stamping anchors.
+    pub fn body_version(&self, key: &BodyKey) -> Option<replica::FabricVersion> {
+        self.reads.and_then(|r| r.body_version(key))
+    }
+
+    /// Take an anchor at a position inside a collaborative value.
+    pub fn anchor(
+        &self,
+        key: &BodyKey,
+        path: &str,
+        position: u64,
+    ) -> Option<replica::FabricAnchor> {
+        self.reads
+            .and_then(|r| r.anchor_in_body(key, path, position))
+    }
+
+    /// Resolve an anchor. Total: `Drifted` rather than an error or a guess.
+    pub fn resolve_anchor(
+        &self,
+        key: &BodyKey,
+        anchor: &replica::FabricAnchor,
+    ) -> replica::AnchorResolution {
+        match self.reads {
+            Some(reads) => reads.resolve_anchor(key, anchor),
+            None => replica::AnchorResolution::Drifted,
+        }
+    }
+
+    /// What one content is, and how much of it is here.
+    pub fn content_status(&self, content: &replica::ContentRef) -> Option<WorldContentStatus> {
+        self.reads.and_then(|r| r.content_status(content))
     }
 
     /// Read a collaborative Body's view from the stable committed snapshot.

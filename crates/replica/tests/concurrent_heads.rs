@@ -190,6 +190,7 @@ fn commit_register(
             },
         )],
         &[(shared_body(), binding())],
+        &[],
     )
 }
 
@@ -421,6 +422,7 @@ fn a_delta_pull_ships_only_missing_heads_and_converges() {
             },
         )],
         &[(second_body(), binding())],
+        &[],
     )
     .unwrap();
 
