@@ -12,20 +12,40 @@
 //! is the safety property: a caller cannot satisfy a required-object reference
 //! from an unverified cache entry, because the two are not the same call.
 //!
-//! Like the rest of this crate it is semantics-free. It stores blobs addressed
-//! by hash, each with an optional sidecar blob beside it, and named tags that
-//! keep entries alive. It does not know what content is, what a proof proves,
-//! or why anything is pinned.
+//! **One file per entry.** The bytes and the sidecar that proves them live in
+//! a single file, so a rename publishes both or neither. They used to be two
+//! files published by two renames, which meant a real window in which the
+//! sidecar existed and the chunk did not — indistinguishable from the wreckage
+//! of an interrupted run, and reclaimed as such by a concurrent sweep. An entry
+//! that half-exists is the one state this cache must not be able to reach.
+//!
+//! **The caller names the slot; the entry carries its own address.** An entry
+//! used to be filed under the hash of its own bytes, which sounds right and
+//! costs a great deal: a caller holding a descriptor cannot compute the hash of
+//! a chunk it has not fetched, so answering "which chunks do I have" meant
+//! reading and hashing the entire cache. A slot is whatever 32 bytes the caller
+//! derives — for content, from the root and the index — so residency becomes a
+//! question about *this* content rather than a scan of everything. Integrity is
+//! not given up for it: the file header carries the bytes' content address, and
+//! every read checks it.
+//!
+//! Like the rest of this crate it is semantics-free. It stores blobs under
+//! 32-byte slots, each with a sidecar blob attached, and named tags that keep
+//! them alive. It does not know what content is, what a proof proves, or why
+//! anything is pinned.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use crate::{atomic_replace, io_err, sync_dir, write_sync, JournalError};
 
-const CHUNKS_DIR: &str = "chunks";
-const SIDECARS_DIR: &str = "sidecars";
+const ENTRIES_DIR: &str = "chunks";
 const TAGS_DIR: &str = "tags";
 const STAGING_DIR: &str = "staging";
+
+/// The fixed header on an entry file: the sidecar's length, then the content
+/// address of the bytes that follow it.
+const ENTRY_HEADER_LEN: usize = 4 + 32;
 
 /// Why a cache operation failed.
 ///
@@ -37,9 +57,12 @@ pub enum CacheError {
     /// The entry is not here. Expected, and usually means "go fetch it".
     NotResident,
     /// The bytes are here but do not match the address they are filed under, or
-    /// their sidecar is missing. The entry is dropped and becomes refetchable.
+    /// the entry file is malformed. The entry is dropped and becomes
+    /// refetchable.
     Corrupt,
-    /// A durable write failed.
+    /// A durable write or read failed. Distinct from `Corrupt` on purpose: a
+    /// transient I/O failure is not evidence that the bytes are wrong, and
+    /// treating it as such deletes good data on a bad day.
     Durability(String),
     /// A bound was exceeded before anything was allocated.
     Bounds,
@@ -63,9 +86,33 @@ impl From<JournalError> for CacheError {
     }
 }
 
-/// A hold on one entry, keyed by the operation that took it.
+/// What kind of holder took a lease.
 ///
-/// Keyed per *operation*, not per entry: two concurrent fetches of the same
+/// The two live in one tag directory but must never release each other. An
+/// operation id is a local, ephemeral handle; a content nonce is a public field
+/// of a replicated descriptor, so anything that could be persuaded to treat a
+/// nonce as an operation id would be a way to drop another holder's bytes. They
+/// are both `[u8; 16]`, so only the kind keeps them apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum LeaseKind {
+    /// One in-flight operation: a read, an ingest, a transfer.
+    Operation,
+    /// One committed content, keyed by its nonce. Released by reachability.
+    Content,
+}
+
+impl LeaseKind {
+    fn prefix(self) -> &'static str {
+        match self {
+            LeaseKind::Operation => "op",
+            LeaseKind::Content => "content",
+        }
+    }
+}
+
+/// A hold on one entry, keyed by whoever took it.
+///
+/// Keyed per *holder*, not per entry: two concurrent fetches of the same
 /// content are two leases over one chunk set, and the bytes survive until the
 /// last of them releases. A lease keyed by content id alone would let the first
 /// transfer to finish sweep the second's staged bytes.
@@ -74,32 +121,59 @@ impl From<JournalError> for CacheError {
 /// are recoverable after restart without a side file to keep consistent.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Lease {
-    pub operation: [u8; 16],
+    pub kind: LeaseKind,
+    pub holder: [u8; 16],
     pub entry: [u8; 32],
 }
 
 impl Lease {
+    /// A hold for the duration of one operation.
+    pub fn operation(operation: [u8; 16], entry: [u8; 32]) -> Self {
+        Self {
+            kind: LeaseKind::Operation,
+            holder: operation,
+            entry,
+        }
+    }
+
+    /// A hold that lasts as long as the content is reachable.
+    pub fn content(content_nonce: [u8; 16], entry: [u8; 32]) -> Self {
+        Self {
+            kind: LeaseKind::Content,
+            holder: content_nonce,
+            entry,
+        }
+    }
+
     fn tag_name(&self) -> String {
         format!(
-            "{}.{}",
-            data_encoding::HEXLOWER.encode(&self.operation),
+            "{}.{}.{}",
+            self.kind.prefix(),
+            data_encoding::HEXLOWER.encode(&self.holder),
             data_encoding::HEXLOWER.encode(&self.entry)
         )
     }
 
     fn parse(name: &str) -> Option<Self> {
-        let (op, entry) = name.split_once('.')?;
-        let op = data_encoding::HEXLOWER.decode(op.as_bytes()).ok()?;
+        let (kind, rest) = name.split_once('.')?;
+        let kind = match kind {
+            "op" => LeaseKind::Operation,
+            "content" => LeaseKind::Content,
+            _ => return None,
+        };
+        let (holder, entry) = rest.split_once('.')?;
+        let holder = data_encoding::HEXLOWER.decode(holder.as_bytes()).ok()?;
         let entry = data_encoding::HEXLOWER.decode(entry.as_bytes()).ok()?;
         Some(Self {
-            operation: <[u8; 16]>::try_from(op.as_slice()).ok()?,
+            kind,
+            holder: <[u8; 16]>::try_from(holder.as_slice()).ok()?,
             entry: <[u8; 32]>::try_from(entry.as_slice()).ok()?,
         })
     }
 }
 
 /// A durable pin: a caller's statement that an entry should survive quota
-/// pressure. Unlike a lease it has no operation and no expiry.
+/// pressure. Unlike a lease it has no holder and no expiry.
 fn pin_name(entry: &[u8; 32]) -> String {
     format!("pin.{}", data_encoding::HEXLOWER.encode(entry))
 }
@@ -110,6 +184,15 @@ pub struct SweepReport {
     pub entries_removed: u64,
     pub bytes_reclaimed: u64,
     pub staging_removed: u64,
+    /// How far over quota the cache still is once every eligible victim is
+    /// gone.
+    ///
+    /// A sweep that cannot reach the quota is the normal case, not an error:
+    /// committed content holds its own chunks resident, and a hold outranks
+    /// operator policy. But a sweep that reports success while sitting 32× over
+    /// quota tells the operator nothing, so the shortfall is reported rather
+    /// than swallowed.
+    pub over_quota_bytes: u64,
 }
 
 /// The resident cache.
@@ -128,12 +211,28 @@ fn unhex(name: &str) -> Option<[u8; 32]> {
     <[u8; 32]>::try_from(raw.as_slice()).ok()
 }
 
+/// Split a stored entry file into its declared byte address, its sidecar, and
+/// its bytes.
+fn split_entry(raw: &[u8]) -> Option<([u8; 32], &[u8], &[u8])> {
+    if raw.len() < ENTRY_HEADER_LEN {
+        return None;
+    }
+    let sidecar_len = u32::from_le_bytes(raw[..4].try_into().ok()?) as usize;
+    let address: [u8; 32] = raw[4..ENTRY_HEADER_LEN].try_into().ok()?;
+    let body = raw.get(ENTRY_HEADER_LEN..)?;
+    if sidecar_len > body.len() {
+        return None;
+    }
+    let (sidecar, bytes) = body.split_at(sidecar_len);
+    Some((address, sidecar, bytes))
+}
+
 impl ResidentCache {
     /// Open (creating) a cache under `root`, reclaiming anything a previous run
-    /// left half-installed.
+    /// left half-written.
     pub fn open(root: impl Into<PathBuf>, quota_bytes: u64) -> Result<Self, CacheError> {
         let root = root.into();
-        for dir in [CHUNKS_DIR, SIDECARS_DIR, TAGS_DIR, STAGING_DIR] {
+        for dir in [ENTRIES_DIR, TAGS_DIR, STAGING_DIR] {
             std::fs::create_dir_all(root.join(dir))
                 .map_err(|e| CacheError::Durability(format!("cache dir: {e}")))?;
         }
@@ -146,103 +245,110 @@ impl ResidentCache {
         self.quota_bytes
     }
 
-    fn chunk_path(&self, entry: &[u8; 32]) -> PathBuf {
-        self.root.join(CHUNKS_DIR).join(hex(entry))
+    fn entry_path(&self, entry: &[u8; 32]) -> PathBuf {
+        self.root.join(ENTRIES_DIR).join(hex(entry))
     }
 
-    fn sidecar_path(&self, entry: &[u8; 32]) -> PathBuf {
-        self.root.join(SIDECARS_DIR).join(hex(entry))
-    }
-
-    /// Install one verified entry: its bytes and the sidecar that proves them.
+    /// Install one entry into `slot`: its bytes and the sidecar that proves
+    /// them.
     ///
-    /// Ordering is the contract. Both temporaries are written and fsynced, the
-    /// bytes are checked against the address they will be filed under, then
-    /// both are renamed. An interruption anywhere leaves temporaries, which the
-    /// next open reclaims — never a chunk without its sidecar, which would be
-    /// an entry that cannot be served and cannot be told apart from one that
-    /// can.
-    pub fn install(
-        &self,
-        entry: &[u8; 32],
-        bytes: &[u8],
-        sidecar: &[u8],
-    ) -> Result<(), CacheError> {
-        if crate::object_content_hash(bytes) != *entry {
-            return Err(CacheError::Corrupt);
-        }
-        let chunk_tmp = self.chunk_path(entry).with_extension("tmp");
-        let sidecar_tmp = self.sidecar_path(entry).with_extension("tmp");
-        write_sync(&chunk_tmp, bytes)?;
-        write_sync(&sidecar_tmp, sidecar)?;
-        atomic_replace(&sidecar_tmp, &self.sidecar_path(entry))?;
-        atomic_replace(&chunk_tmp, &self.chunk_path(entry))?;
-        sync_dir(&self.root.join(SIDECARS_DIR))?;
-        sync_dir(&self.root.join(CHUNKS_DIR))?;
+    /// The bytes' content address goes in the header, the whole thing is
+    /// written and fsynced as one temporary, and one rename publishes it. An
+    /// interruption leaves a temporary, which the next open reclaims — there is
+    /// no state in which the entry exists without its sidecar.
+    ///
+    /// The slot is the caller's to choose and this call does not interpret it.
+    /// What it guarantees is that whatever comes back out of a slot is
+    /// byte-identical to what went in; whether those are the *right* bytes for
+    /// that slot is the caller's question, and the sidecar is how it answers.
+    pub fn install(&self, slot: &[u8; 32], bytes: &[u8], sidecar: &[u8]) -> Result<(), CacheError> {
+        let sidecar_len = u32::try_from(sidecar.len()).map_err(|_| CacheError::Bounds)?;
+        let mut raw = Vec::with_capacity(ENTRY_HEADER_LEN + sidecar.len() + bytes.len());
+        raw.extend_from_slice(&sidecar_len.to_le_bytes());
+        raw.extend_from_slice(&crate::object_content_hash(bytes));
+        raw.extend_from_slice(sidecar);
+        raw.extend_from_slice(bytes);
+
+        let path = self.entry_path(slot);
+        let tmp = path.with_extension("tmp");
+        write_sync(&tmp, &raw)?;
+        atomic_replace(&tmp, &path)?;
+        sync_dir(&self.root.join(ENTRIES_DIR))?;
         Ok(())
     }
 
-    /// Read one entry's bytes and sidecar.
+    /// Read one slot's bytes and sidecar.
     ///
-    /// Verifies on the way out, and a failure *drops* the entry rather than
-    /// reporting an integrity error: the authoritative state is untouched by a
-    /// bad cache line, and the caller's correct response is to fetch again.
-    pub fn read(&self, entry: &[u8; 32]) -> Result<(Vec<u8>, Vec<u8>), CacheError> {
-        let bytes = match std::fs::read(self.chunk_path(entry)) {
-            Ok(b) => b,
-            Err(_) => return Err(CacheError::NotResident),
-        };
-        let sidecar = match std::fs::read(self.sidecar_path(entry)) {
-            Ok(b) => b,
-            Err(_) => {
-                self.drop_entry(entry);
-                return Err(CacheError::NotResident);
+    /// Verifies against the address stored beside them. Bytes that fail it
+    /// *drop* the entry rather than reporting an integrity error: the
+    /// authoritative state is untouched by a bad cache line, and the caller's
+    /// correct response is to fetch again. A transient read failure is a
+    /// different answer — it is not evidence the entry is wrong, and deleting on
+    /// it would turn a busy filesystem into data loss.
+    pub fn read(&self, slot: &[u8; 32]) -> Result<(Vec<u8>, Vec<u8>), CacheError> {
+        let raw = match std::fs::read(self.entry_path(slot)) {
+            Ok(raw) => raw,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(CacheError::NotResident)
             }
+            Err(e) => return Err(CacheError::Durability(format!("cache read: {e}"))),
         };
-        if crate::object_content_hash(&bytes) != *entry {
-            self.drop_entry(entry);
+        let Some((address, sidecar, bytes)) = split_entry(&raw) else {
+            self.drop_entry(slot);
+            return Err(CacheError::Corrupt);
+        };
+        if crate::object_content_hash(bytes) != address {
+            self.drop_entry(slot);
             return Err(CacheError::Corrupt);
         }
-        Ok((bytes, sidecar))
+        Ok((bytes.to_vec(), sidecar.to_vec()))
     }
 
-    /// Whether an entry is advertisable: bytes and validated sidecar both here.
+    /// Whether an entry is advertisable.
+    ///
+    /// Presence is the whole answer, because [`Self::install`] is the only door
+    /// and it verifies before it publishes — an entry that exists was validated
+    /// when it landed. This is a cheap check by design; [`Self::read`] is the
+    /// one that re-verifies, and it is what actually serves bytes.
     pub fn is_resident(&self, entry: &[u8; 32]) -> bool {
-        self.chunk_path(entry).exists() && self.sidecar_path(entry).exists()
+        self.entry_path(entry).exists()
     }
 
-    /// A bounded range of one entry's bytes, without materialising the rest.
+    /// A bounded range of one entry's bytes.
+    ///
+    /// Verifies the whole entry first. A chunk is a quarter of a megabyte, so
+    /// the alternative — seeking into an unverified file — buys almost nothing
+    /// and gives up the property that every byte this cache hands out has been
+    /// checked against its address.
     pub fn read_range(
         &self,
         entry: &[u8; 32],
         offset: u64,
         len: usize,
     ) -> Result<Vec<u8>, CacheError> {
-        use std::io::{Read, Seek, SeekFrom};
         if len > crate::index::MAX_NODE_BYTES {
             return Err(CacheError::Bounds);
         }
-        let mut file =
-            std::fs::File::open(self.chunk_path(entry)).map_err(|_| CacheError::NotResident)?;
-        if !self.sidecar_path(entry).exists() {
-            return Err(CacheError::NotResident);
+        let (bytes, _) = self.read(entry)?;
+        let start = usize::try_from(offset).map_err(|_| CacheError::Bounds)?;
+        if start > bytes.len() {
+            return Err(CacheError::Bounds);
         }
-        file.seek(SeekFrom::Start(offset))
-            .map_err(|e| CacheError::Durability(e.to_string()))?;
-        let mut out = vec![0u8; len];
-        let read = file
-            .read(&mut out)
-            .map_err(|e| CacheError::Durability(e.to_string()))?;
-        out.truncate(read);
-        Ok(out)
+        let end = start.saturating_add(len).min(bytes.len());
+        Ok(bytes[start..end].to_vec())
     }
 
-    fn drop_entry(&self, entry: &[u8; 32]) {
-        let _ = std::fs::remove_file(self.chunk_path(entry));
-        let _ = std::fs::remove_file(self.sidecar_path(entry));
+    /// Remove an entry's file. Reports whether it is actually gone, because
+    /// both callers act on the answer: a sweep counts bytes it believes it
+    /// freed, and an eviction tells a caller its request was carried out.
+    fn drop_entry(&self, entry: &[u8; 32]) -> bool {
+        match std::fs::remove_file(self.entry_path(entry)) {
+            Ok(()) => true,
+            Err(e) => e.kind() == std::io::ErrorKind::NotFound,
+        }
     }
 
-    /// Take a lease. Idempotent: the same operation taking the same lease twice
+    /// Take a lease. Idempotent: the same holder taking the same lease twice
     /// holds it once.
     pub fn lease(&self, lease: &Lease) -> Result<(), CacheError> {
         let dir = self.root.join(TAGS_DIR);
@@ -264,19 +370,33 @@ impl ResidentCache {
     }
 
     /// Release every lease an operation holds — what a cancelled or crashed
-    /// transfer needs, and why lease names carry their operation.
+    /// transfer needs, and why lease names carry their holder.
+    ///
+    /// Operation holds only. A content hold that happened to share the same
+    /// sixteen bytes is a different kind of promise and survives.
     pub fn release_operation(&self, operation: &[u8; 16]) -> Result<u64, CacheError> {
+        self.release_holder(LeaseKind::Operation, operation)
+    }
+
+    /// Release every hold one content's nonce took, which is what forgetting a
+    /// content means.
+    pub fn release_content(&self, content_nonce: &[u8; 16]) -> Result<u64, CacheError> {
+        self.release_holder(LeaseKind::Content, content_nonce)
+    }
+
+    fn release_holder(&self, kind: LeaseKind, holder: &[u8; 16]) -> Result<u64, CacheError> {
         let mut released = 0;
-        if let Ok(entries) = std::fs::read_dir(self.root.join(TAGS_DIR)) {
-            for entry in entries.flatten() {
-                let name = entry.file_name().to_string_lossy().into_owned();
-                if Lease::parse(&name).is_some_and(|l| &l.operation == operation) {
-                    let _ = std::fs::remove_file(entry.path());
-                    released += 1;
-                }
+        let dir = self.root.join(TAGS_DIR);
+        let entries = std::fs::read_dir(&dir)
+            .map_err(|e| CacheError::Durability(format!("tags dir: {e}")))?;
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if Lease::parse(&name).is_some_and(|l| l.kind == kind && &l.holder == holder) {
+                let _ = std::fs::remove_file(entry.path());
+                released += 1;
             }
         }
-        let _ = sync_dir(&self.root.join(TAGS_DIR));
+        let _ = sync_dir(&dir);
         Ok(released)
     }
 
@@ -297,22 +417,38 @@ impl ResidentCache {
         Ok(())
     }
 
+    /// Whether this entry carries a durable pin.
+    pub fn is_pinned(&self, entry: &[u8; 32]) -> bool {
+        self.root.join(TAGS_DIR).join(pin_name(entry)).exists()
+    }
+
+    /// Whether anything currently holds this entry.
+    pub fn is_held(&self, entry: &[u8; 32]) -> Result<bool, CacheError> {
+        Ok(self.held()?.contains(entry))
+    }
+
     /// Every entry currently held by a pin or a live lease.
-    fn held(&self) -> BTreeSet<[u8; 32]> {
+    ///
+    /// Fails rather than answering "nothing". This is the one read that decides
+    /// whether deletion is allowed, so an unreadable tag directory has to stop
+    /// the sweep — returning an empty set on error would make every pinned and
+    /// leased entry collectable at exactly the moment the filesystem is unwell.
+    fn held(&self) -> Result<BTreeSet<[u8; 32]>, CacheError> {
         let mut out = BTreeSet::new();
-        if let Ok(entries) = std::fs::read_dir(self.root.join(TAGS_DIR)) {
-            for entry in entries.flatten() {
-                let name = entry.file_name().to_string_lossy().into_owned();
-                if let Some(rest) = name.strip_prefix("pin.") {
-                    if let Some(hash) = unhex(rest) {
-                        out.insert(hash);
-                    }
-                } else if let Some(lease) = Lease::parse(&name) {
-                    out.insert(lease.entry);
+        let entries = std::fs::read_dir(self.root.join(TAGS_DIR))
+            .map_err(|e| CacheError::Durability(format!("tags dir: {e}")))?;
+        for entry in entries {
+            let entry = entry.map_err(|e| CacheError::Durability(format!("tag: {e}")))?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if let Some(rest) = name.strip_prefix("pin.") {
+                if let Some(hash) = unhex(rest) {
+                    out.insert(hash);
                 }
+            } else if let Some(lease) = Lease::parse(&name) {
+                out.insert(lease.entry);
             }
         }
-        out
+        Ok(out)
     }
 
     /// Open a staging slot for a partial transfer. Staged bytes live under an
@@ -382,18 +518,17 @@ impl ResidentCache {
     /// quota pressure that may never come. Both refuse to touch a held entry —
     /// "I want this gone" does not outrank "someone is reading it".
     pub fn evict(&self, entry: &[u8; 32]) -> Result<bool, CacheError> {
-        if self.held().contains(entry) {
+        if self.held()?.contains(entry) {
             return Ok(false);
         }
-        self.drop_entry(entry);
-        Ok(true)
+        Ok(self.drop_entry(entry))
     }
 
     /// Every resident entry's address. O(entries) and meant for a sweep or a
     /// scan, not a hot path.
     pub fn entries(&self) -> Vec<[u8; 32]> {
         let mut out = Vec::new();
-        if let Ok(entries) = std::fs::read_dir(self.root.join(CHUNKS_DIR)) {
+        if let Ok(entries) = std::fs::read_dir(self.root.join(ENTRIES_DIR)) {
             for entry in entries.flatten() {
                 let name = entry.file_name().to_string_lossy().into_owned();
                 if let Some(hash) = unhex(&name) {
@@ -408,41 +543,29 @@ impl ResidentCache {
     /// Total resident bytes.
     pub fn resident_bytes(&self) -> u64 {
         let mut total = 0;
-        for dir in [CHUNKS_DIR, SIDECARS_DIR] {
-            if let Ok(entries) = std::fs::read_dir(self.root.join(dir)) {
-                for entry in entries.flatten() {
-                    if let Ok(meta) = entry.metadata() {
-                        total += meta.len();
-                    }
+        if let Ok(entries) = std::fs::read_dir(self.root.join(ENTRIES_DIR)) {
+            for entry in entries.flatten() {
+                if let Ok(meta) = entry.metadata() {
+                    total += meta.len();
                 }
             }
         }
         total
     }
 
-    /// Drop half-installed pairs left by an interrupted run.
+    /// Drop temporaries left by an interrupted run.
+    ///
+    /// There is nothing else to reclaim: an entry is one file published by one
+    /// rename, so the only wreckage a crash can leave is a temporary that was
+    /// never renamed.
     fn reclaim_incomplete(&self) -> Result<(), CacheError> {
-        let mut removed = Vec::new();
-        for dir in [CHUNKS_DIR, SIDECARS_DIR] {
-            if let Ok(entries) = std::fs::read_dir(self.root.join(dir)) {
-                for entry in entries.flatten() {
-                    let name = entry.file_name().to_string_lossy().into_owned();
-                    if name.ends_with(".tmp") {
-                        let _ = std::fs::remove_file(entry.path());
-                        continue;
-                    }
-                    if let Some(hash) = unhex(&name) {
-                        if !self.chunk_path(&hash).exists() || !self.sidecar_path(&hash).exists() {
-                            removed.push(hash);
-                        }
-                    } else {
-                        let _ = std::fs::remove_file(entry.path());
-                    }
+        if let Ok(entries) = std::fs::read_dir(self.root.join(ENTRIES_DIR)) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if name.ends_with(".tmp") || unhex(&name).is_none() {
+                    let _ = std::fs::remove_file(entry.path());
                 }
             }
-        }
-        for hash in removed {
-            self.drop_entry(&hash);
         }
         Ok(())
     }
@@ -453,14 +576,20 @@ impl ResidentCache {
     /// old, it is evictable because something else needs the room. Eviction
     /// order is largest-first, which reclaims the most room for the fewest
     /// refetches.
+    ///
+    /// The quota is a target, not a guarantee, and the gap is reported rather
+    /// than hidden: every chunk of a committed content is held by that
+    /// content's own lease, so a cache full of committed content has no
+    /// eligible victims at all. `over_quota_bytes` is what an operator needs to
+    /// see to know the answer is "unpin or forget something", not "wait".
     pub fn sweep(&self) -> Result<SweepReport, CacheError> {
         let mut report = SweepReport::default();
         self.reclaim_incomplete()?;
 
-        let held = self.held();
+        let held = self.held()?;
         let mut candidates: Vec<([u8; 32], u64)> = Vec::new();
         let mut total = 0u64;
-        if let Ok(entries) = std::fs::read_dir(self.root.join(CHUNKS_DIR)) {
+        if let Ok(entries) = std::fs::read_dir(self.root.join(ENTRIES_DIR)) {
             for entry in entries.flatten() {
                 let name = entry.file_name().to_string_lossy().into_owned();
                 let Some(hash) = unhex(&name) else { continue };
@@ -480,11 +609,17 @@ impl ResidentCache {
             if total <= self.quota_bytes {
                 break;
             }
-            self.drop_entry(&hash);
+            // Only count what actually went. A removal that failed leaves the
+            // bytes on disk, and a report that counted them would have the
+            // caller believe the cache is inside a quota it is not.
+            if !self.drop_entry(&hash) {
+                continue;
+            }
             total = total.saturating_sub(len);
             report.entries_removed += 1;
             report.bytes_reclaimed += len;
         }
+        report.over_quota_bytes = total.saturating_sub(self.quota_bytes);
         Ok(report)
     }
 

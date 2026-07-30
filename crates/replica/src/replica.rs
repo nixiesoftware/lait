@@ -1429,7 +1429,7 @@ impl Replica {
         // bytes are already gone.
         if let Some(cache) = cache {
             for descriptor in &unreferenced {
-                let _ = cache.release_operation(&descriptor.content_nonce);
+                let _ = cache.release_content(&descriptor.content_nonce);
             }
         }
         Ok(unreferenced.iter().map(|d| d.content_ref()).collect())

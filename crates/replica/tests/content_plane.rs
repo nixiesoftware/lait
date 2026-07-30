@@ -288,10 +288,10 @@ fn a_provider_holding_a_proper_subset_still_serves_what_it_has() {
     let partial = ResidentCache::open(fx.cache.root(), 0).unwrap();
     partial.release(&out.leases[1]).unwrap();
     partial
-        .release(&fabric::journal::cache::Lease {
-            operation: out.descriptor.content_nonce,
-            entry: out.leases[1].entry,
-        })
+        .release(&fabric::journal::cache::Lease::content(
+            out.descriptor.content_nonce,
+            out.leases[1].entry,
+        ))
         .unwrap();
     partial.sweep().unwrap();
 
@@ -304,10 +304,11 @@ fn a_provider_holding_a_proper_subset_still_serves_what_it_has() {
 }
 
 #[test]
-fn losing_a_proof_sidecar_costs_the_chunk_and_nothing_more() {
-    // Sidecars are reconstructable resident metadata, not authoritative
-    // material: losing one makes that chunk unservable until it is rebuilt or
-    // refetched, and nothing else.
+fn losing_a_resident_chunk_costs_that_chunk_and_nothing_more() {
+    // Resident bytes are reconstructable, not authoritative: losing one chunk
+    // makes it unservable until it is refetched, and nothing else. The proof
+    // cannot be lost separately — bytes and sidecar are one file, so there is
+    // no state where a chunk is here and unservable.
     let fx = fixture("sidecar");
     let plaintext = filler(4, 3_000);
     let out = ingest(&fx, 1, &plaintext);
@@ -316,7 +317,7 @@ fn losing_a_proof_sidecar_costs_the_chunk_and_nothing_more() {
     std::fs::remove_file(
         fx.cache
             .root()
-            .join("sidecars")
+            .join("chunks")
             .join(data_encoding::HEXLOWER.encode(&entry)),
     )
     .unwrap();

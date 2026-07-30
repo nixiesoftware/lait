@@ -42,13 +42,26 @@ fn an_installed_entry_reads_back_with_its_sidecar() {
 }
 
 #[test]
-fn bytes_that_do_not_match_their_address_are_refused_at_the_door() {
-    let cache = ResidentCache::open(temp_root("address"), 1 << 20).unwrap();
+fn a_slot_returns_exactly_what_was_put_in_it() {
+    // The slot is the caller's name and this cache does not interpret it. What
+    // it does promise is that the bytes come back byte-identical — the address
+    // travels *with* them rather than being the filename, so tampering is still
+    // caught and still drops the entry.
+    let root = temp_root("address");
+    let cache = ResidentCache::open(&root, 1 << 20).unwrap();
+    let slot = [7u8; 32];
+    cache.install(&slot, b"anything", b"proof").unwrap();
     assert_eq!(
-        cache.install(&[7u8; 32], b"anything", b"proof"),
-        Err(CacheError::Corrupt)
+        cache.read(&slot).unwrap(),
+        (b"anything".to_vec(), b"proof".to_vec())
     );
-    assert!(!cache.is_resident(&[7u8; 32]));
+
+    let path = root.join("chunks").join(hex(&slot));
+    let mut raw = std::fs::read(&path).unwrap();
+    *raw.last_mut().unwrap() ^= 0xFF;
+    std::fs::write(&path, &raw).unwrap();
+    assert_eq!(cache.read(&slot), Err(CacheError::Corrupt));
+    assert!(!cache.is_resident(&slot), "corrupt bytes are dropped");
 }
 
 #[test]
@@ -79,19 +92,28 @@ fn corruption_drops_the_entry_and_leaves_it_refetchable() {
 }
 
 #[test]
-fn a_chunk_without_its_sidecar_is_not_advertisable() {
-    // A cache entry counts as resident only when both halves are here: a chunk
-    // whose proof is missing cannot be served, and must not look like one that
-    // can.
+fn an_entry_cannot_be_half_present() {
+    // The state this cache must not be able to reach. Bytes and sidecar are one
+    // file published by one rename, so there is no window in which a chunk
+    // exists without the proof that makes it servable.
     let root = temp_root("halfpair");
     let cache = ResidentCache::open(&root, 1 << 20).unwrap();
     let bytes = b"ciphertext".to_vec();
     let entry = address(&bytes);
     cache.install(&entry, &bytes, b"proof").unwrap();
 
-    std::fs::remove_file(root.join("sidecars").join(hex(&entry))).unwrap();
+    let files: Vec<String> = std::fs::read_dir(root.join("chunks"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(files, vec![hex(&entry)], "one file per entry");
+
+    // A truncated entry file is corrupt rather than half-resident, and reading
+    // it drops it so the next attempt refetches.
+    std::fs::write(root.join("chunks").join(hex(&entry)), b"	").unwrap();
+    assert_eq!(cache.read(&entry), Err(CacheError::Corrupt));
     assert!(!cache.is_resident(&entry));
-    assert_eq!(cache.read(&entry), Err(CacheError::NotResident));
 }
 
 #[test]
@@ -102,20 +124,24 @@ fn an_interrupted_install_is_reclaimed_on_open() {
         let bytes = b"ciphertext".to_vec();
         let entry = address(&bytes);
         cache.install(&entry, &bytes, b"proof").unwrap();
-        // Simulate the window between the two renames.
-        std::fs::remove_file(root.join("sidecars").join(hex(&entry))).unwrap();
+        // What a crash before the rename actually leaves behind.
+        std::fs::write(
+            root.join("chunks").join(format!("{}.tmp", hex(&entry))),
+            b"x",
+        )
+        .unwrap();
     }
-    let cache = ResidentCache::open(&root, 1 << 20).unwrap();
+    let _cache = ResidentCache::open(&root, 1 << 20).unwrap();
     let names: Vec<String> = std::fs::read_dir(root.join("chunks"))
         .unwrap()
         .flatten()
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .collect();
     assert!(
-        names.is_empty(),
-        "a half-installed pair survives: {names:?}"
+        !names.iter().any(|n| n.ends_with(".tmp")),
+        "a temporary survives: {names:?}"
     );
-    let _ = cache;
+    assert_eq!(names.len(), 1, "and the installed entry is untouched");
 }
 
 #[test]
@@ -127,14 +153,8 @@ fn two_operations_holding_one_entry_both_have_to_release_it() {
     let entry = address(&bytes);
     cache.install(&entry, &bytes, b"proof").unwrap();
 
-    let first = Lease {
-        operation: operation(1),
-        entry,
-    };
-    let second = Lease {
-        operation: operation(2),
-        entry,
-    };
+    let first = Lease::operation(operation(1), entry);
+    let second = Lease::operation(operation(2), entry);
     cache.lease(&first).unwrap();
     cache.lease(&second).unwrap();
 
@@ -157,10 +177,7 @@ fn taking_a_lease_twice_holds_it_once() {
     let bytes = b"once".to_vec();
     let entry = address(&bytes);
     cache.install(&entry, &bytes, b"proof").unwrap();
-    let lease = Lease {
-        operation: operation(1),
-        entry,
-    };
+    let lease = Lease::operation(operation(1), entry);
     cache.lease(&lease).unwrap();
     cache.lease(&lease).unwrap();
     cache.release(&lease).unwrap();
@@ -178,12 +195,7 @@ fn a_crashed_operation_releases_every_lease_it_held() {
         let bytes = vec![n; 32];
         let entry = address(&bytes);
         cache.install(&entry, &bytes, b"proof").unwrap();
-        cache
-            .lease(&Lease {
-                operation: operation(9),
-                entry,
-            })
-            .unwrap();
+        cache.lease(&Lease::operation(operation(9), entry)).unwrap();
         entries.push(entry);
     }
     assert_eq!(cache.release_operation(&operation(9)).unwrap(), 5);
@@ -288,8 +300,10 @@ fn a_range_read_returns_only_what_was_asked_for() {
 
 #[test]
 fn eviction_reclaims_the_most_room_for_the_fewest_refetches() {
-    let cache = ResidentCache::open(temp_root("largest"), 40).unwrap();
-    let big = vec![1u8; 200];
+    // The quota has to sit above one small entry and below the pair, or the
+    // test is not about eviction order.
+    let cache = ResidentCache::open(temp_root("largest"), 128).unwrap();
+    let big = vec![1u8; 400];
     let small = vec![2u8; 10];
     cache.install(&address(&big), &big, b"p").unwrap();
     cache.install(&address(&small), &small, b"p").unwrap();
@@ -301,4 +315,101 @@ fn eviction_reclaims_the_most_room_for_the_fewest_refetches() {
 
 fn hex(hash: &[u8; 32]) -> String {
     data_encoding::HEXLOWER.encode(hash)
+}
+
+#[test]
+fn an_operation_release_cannot_drop_a_content_hold() {
+    // Both holders are sixteen bytes, and a content nonce is a public field of
+    // a replicated descriptor. Only the kind keeps them apart, so a caller that
+    // released "the operation whose id happens to equal this nonce" would be
+    // dropping bytes some other holder committed.
+    let cache = ResidentCache::open(temp_root("kinds"), 1 << 20).unwrap();
+    let bytes = b"ciphertext".to_vec();
+    let entry = address(&bytes);
+    cache.install(&entry, &bytes, b"proof").unwrap();
+
+    let shared = operation(5);
+    cache.lease(&Lease::content(shared, entry)).unwrap();
+    assert_eq!(cache.release_operation(&shared).unwrap(), 0);
+    assert!(cache.is_held(&entry).unwrap(), "the content hold survives");
+
+    assert_eq!(cache.release_content(&shared).unwrap(), 1);
+    assert!(!cache.is_held(&entry).unwrap());
+}
+
+#[test]
+fn a_sweep_that_cannot_reach_the_quota_says_so() {
+    // Every chunk of a committed content is held by that content's own lease,
+    // so a cache full of committed content has no eligible victims at all. The
+    // sweep must not report success while sitting far over quota — an operator
+    // reading "0 reclaimed, Ok" learns nothing about needing to forget
+    // something.
+    let cache = ResidentCache::open(temp_root("shortfall"), 16).unwrap();
+    let mut resident = 0u64;
+    for n in 0..4u8 {
+        let bytes = vec![n; 4096];
+        let entry = address(&bytes);
+        cache.install(&entry, &bytes, b"proof").unwrap();
+        cache.lease(&Lease::content([7u8; 16], entry)).unwrap();
+        resident += 1;
+    }
+    assert_eq!(resident, 4);
+
+    let report = cache.sweep().unwrap();
+    assert_eq!(report.entries_removed, 0);
+    assert!(
+        report.over_quota_bytes > 16_000,
+        "the shortfall must be reported: {report:?}"
+    );
+
+    // Forgetting the content makes them evictable, and then the quota is met.
+    cache.release_content(&[7u8; 16]).unwrap();
+    let report = cache.sweep().unwrap();
+    assert_eq!(report.entries_removed, 4);
+    assert_eq!(report.over_quota_bytes, 0);
+}
+
+#[test]
+fn an_unreadable_tag_directory_stops_the_sweep_rather_than_freeing_everything() {
+    // The one read that decides whether deletion is allowed. Answering
+    // "nothing is held" on an I/O error would make every pinned and leased
+    // entry collectable at exactly the moment the filesystem is unwell.
+    let root = temp_root("tags-gone");
+    let cache = ResidentCache::open(&root, 0).unwrap();
+    let bytes = b"ciphertext".to_vec();
+    let entry = address(&bytes);
+    cache.install(&entry, &bytes, b"proof").unwrap();
+    cache.pin(&entry).unwrap();
+
+    std::fs::remove_dir_all(root.join("tags")).unwrap();
+    assert!(
+        matches!(cache.sweep(), Err(CacheError::Durability(_))),
+        "a sweep that cannot read the holds must refuse"
+    );
+    assert!(cache.is_resident(&entry), "and must not have deleted");
+    assert!(matches!(
+        cache.evict(&entry),
+        Err(CacheError::Durability(_))
+    ));
+    assert!(cache.is_resident(&entry));
+}
+
+#[test]
+fn a_transient_read_failure_does_not_delete_the_entry() {
+    // Corrupt means "these bytes are wrong", and dropping is the right answer.
+    // A read that failed for any other reason is not evidence of anything, and
+    // deleting on it turns a busy filesystem into data loss.
+    let root = temp_root("transient");
+    let cache = ResidentCache::open(&root, 1 << 20).unwrap();
+    let bytes = b"ciphertext".to_vec();
+    let entry = address(&bytes);
+    cache.install(&entry, &bytes, b"proof").unwrap();
+
+    // A directory where the entry file should be: reads fail, but not because
+    // the bytes are wrong.
+    let path = root.join("chunks").join(hex(&entry));
+    std::fs::remove_file(&path).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    assert!(matches!(cache.read(&entry), Err(CacheError::Durability(_))));
+    assert!(path.exists(), "a transient failure must not delete");
 }

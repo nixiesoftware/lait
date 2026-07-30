@@ -30,6 +30,9 @@ pub const CONTENT_ID_DOMAIN: &[u8] = b"lait/content-id/1";
 pub const CONTENT_LEAF_DOMAIN: &[u8] = b"lait/content-leaf/1";
 /// Domain for an interior Merkle node.
 pub const CONTENT_NODE_DOMAIN: &[u8] = b"lait/content-node/1";
+/// Domain for the local cache slot a chunk is filed under. Local naming only —
+/// nothing derived here crosses the wire or is signed.
+pub const CONTENT_SLOT_DOMAIN: &[u8] = b"lait/content-slot/1";
 
 /// The frozen chunk plaintext size. 256 KiB rather than 1 MiB because it fits
 /// comfortably inside Contact's 1 MiB frame and bounds what a failed transfer
@@ -443,7 +446,6 @@ pub struct ContentIngest<'a> {
     cache: &'a fabric::journal::cache::ResidentCache,
     buffer: Vec<u8>,
     leaves: Vec<ChunkLeaf>,
-    ciphertexts: Vec<(u32, Vec<u8>)>,
     plaintext_len: u64,
     max_len: u64,
     finished: bool,
@@ -483,7 +485,6 @@ impl<'a> ContentIngest<'a> {
             cache,
             buffer: Vec::with_capacity(CHUNK_PLAINTEXT_LEN as usize),
             leaves: Vec::new(),
-            ciphertexts: Vec::new(),
             plaintext_len: 0,
             max_len: max_len.min(MAX_CONTENT_LEN),
             finished: false,
@@ -522,7 +523,14 @@ impl<'a> ContentIngest<'a> {
         let sealed = mechanics::crypto::content_chunk_seal(&self.key, &binding, &self.buffer);
         self.buffer.clear();
         self.leaves.push(ChunkLeaf::of(index, &sealed));
-        self.ciphertexts.push((index, sealed));
+        // Staged, not retained. A sealed chunk cannot be installed until the
+        // tree it proves against exists, and the tree is not known until the
+        // last chunk — so holding them would make peak memory the whole
+        // content, which is the one thing streaming is for. Staging is opaque
+        // and never advertised, so a half-finished ingest is not servable.
+        self.cache
+            .append_staged(&self.operation, index, 0, &sealed)
+            .map_err(|_| ContentError::ChunkMismatch)?;
         Ok(())
     }
 
@@ -550,13 +558,24 @@ impl<'a> ContentIngest<'a> {
         };
         descriptor.validate()?;
 
-        let mut leases = Vec::with_capacity(self.ciphertexts.len());
-        for (index, ciphertext) in &self.ciphertexts {
-            let proof = chunk_proof(&self.leaves, *index).ok_or(ContentError::ProofMismatch)?;
+        let mut leases = Vec::with_capacity(self.leaves.len());
+        for leaf in &self.leaves {
+            let index = leaf.chunk_index;
+            let ciphertext = self
+                .cache
+                .read_staged(&self.operation, index)
+                .map_err(|_| ContentError::ChunkMismatch)?;
+            // The staged bytes round-tripped through the filesystem, so check
+            // them against the leaf that was built from them before they become
+            // an entry anything can serve.
+            if ChunkLeaf::of(index, &ciphertext) != *leaf {
+                return Err(ContentError::ChunkMismatch);
+            }
+            let proof = chunk_proof(&self.leaves, index).ok_or(ContentError::ProofMismatch)?;
             let sidecar = postcard::to_stdvec(&proof).map_err(|_| ContentError::NonCanonical)?;
-            let entry = fabric::journal::object_content_hash(ciphertext);
+            let entry = chunk_slot(&descriptor, index);
             self.cache
-                .install(&entry, ciphertext, &sidecar)
+                .install(&entry, &ciphertext, &sidecar)
                 .map_err(|_| ContentError::ChunkMismatch)?;
             // Two holds, for two different lifetimes. The ingest's own lease
             // lasts while the caller decides whether to commit the descriptor
@@ -569,21 +588,19 @@ impl<'a> ContentIngest<'a> {
             // the first of two concurrent fetches collect the other's bytes;
             // keying a transfer by content would make a cancelled fetch drop
             // content someone else committed.
-            let lease = fabric::journal::cache::Lease {
-                operation: self.operation,
-                entry,
-            };
+            let lease = fabric::journal::cache::Lease::operation(self.operation, entry);
             self.cache
                 .lease(&lease)
                 .map_err(|_| ContentError::ChunkMismatch)?;
             self.cache
-                .lease(&fabric::journal::cache::Lease {
-                    operation: self.content_nonce,
+                .lease(&fabric::journal::cache::Lease::content(
+                    self.content_nonce,
                     entry,
-                })
+                ))
                 .map_err(|_| ContentError::ChunkMismatch)?;
             leases.push(lease);
         }
+        let _ = self.cache.discard_staged(&self.operation);
         self.finished = true;
         Ok(IngestedContent {
             content_ref: descriptor.content_ref(),
@@ -610,9 +627,26 @@ impl Drop for ContentIngest<'_> {
     }
 }
 
-/// The cache address one of a content's chunks is filed under.
-pub fn chunk_entry(ciphertext: &[u8]) -> [u8; 32] {
-    fabric::journal::object_content_hash(ciphertext)
+/// The cache slot one of a content's chunks is filed under.
+///
+/// Derived from the descriptor and the index, not from the bytes. A holder of a
+/// descriptor can therefore ask "do I have chunk 7" with one lookup — filing
+/// chunks under their own ciphertext hash meant the only way to answer was to
+/// read and hash the entire cache, once per question.
+///
+/// The root is in the preimage so two contents never collide, and the index is
+/// in it so a chunk cannot be filed at another position. What the slot does not
+/// do is prove anything: the sidecar proves the bytes, and every read of them
+/// checks the proof.
+pub fn chunk_slot(descriptor: &ContentDescriptor, chunk_index: u32) -> [u8; 32] {
+    let preimage = framed(
+        CONTENT_SLOT_DOMAIN,
+        &[
+            &descriptor.ciphertext_merkle_root,
+            &chunk_index.to_be_bytes(),
+        ],
+    );
+    *blake3::hash(&preimage).as_bytes()
 }
 
 /// Read one chunk of committed content out of the cache, verified and opened.

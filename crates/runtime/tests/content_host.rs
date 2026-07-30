@@ -341,8 +341,14 @@ fn a_provider_serves_a_chunk_and_a_receiver_installs_it_verified() {
         )
         .expect("ingest");
 
-    assert_eq!(sender.host.resident_indices(&content).unwrap(), vec![0, 1]);
-    let (ciphertext, proof) = sender.host.chunk(&content, 0).expect("serve chunk 0");
+    assert_eq!(
+        sender.host.resident_indices(&policy, &content).unwrap(),
+        vec![0, 1]
+    );
+    let (ciphertext, proof) = sender
+        .host
+        .chunk(&policy, &content, 0)
+        .expect("serve chunk 0");
 
     // A receiver holding the descriptor but none of the bytes.
     let receiver = fixture("receiver");
@@ -353,7 +359,7 @@ fn a_provider_serves_a_chunk_and_a_receiver_installs_it_verified() {
         .and_then(|_| {
             receiver
                 .host
-                .install_chunk(&content, [9u8; 16], &proof, &ciphertext)
+                .install_chunk(&policy, &content, [9u8; 16], &proof, &ciphertext)
                 .err()
                 .map(Err)
                 .unwrap_or(Ok(()))
@@ -368,7 +374,7 @@ fn a_provider_serves_a_chunk_and_a_receiver_installs_it_verified() {
     tampered[0] ^= 0xFF;
     assert!(sender
         .host
-        .install_chunk(&content, [9u8; 16], &proof, &tampered)
+        .install_chunk(&policy, &content, [9u8; 16], &proof, &tampered)
         .is_err());
 
     let _ = receiver.dir;
@@ -397,4 +403,103 @@ fn the_host_surface_names_no_path() {
             );
         }
     }
+}
+
+#[test]
+fn serving_a_chunk_is_authorized_and_costs_only_this_content() {
+    // The two things that were wrong about the provider surface. It took no
+    // policy at all, so the peer-facing half — the one remote input actually
+    // reaches — was the only half that checked nothing. And answering "which
+    // chunks do I have" read and twice-hashed the entire cache, once per
+    // question, so a provider's cost grew with everything it held rather than
+    // with what was asked about.
+    let fx = fixture("serve");
+    let space = space();
+    let auth = Authorizer::default();
+    let check = |a| auth.check(a);
+    let policy = policy(&space, &check);
+    let signer = replica::SeedSigner(&WRITER_SEED);
+
+    let wanted = fx
+        .host
+        .ingest(
+            &policy,
+            [1u8; 16],
+            &mut std::io::Cursor::new(filler(1, CHUNK_PLAINTEXT_LEN as usize + 32)),
+            &commit_ctx(&signer, &space),
+        )
+        .expect("ingest");
+    // Several unrelated contents sharing the cache. Under the old scan these
+    // were read and hashed on every question about `wanted`.
+    for n in 2..8u8 {
+        fx.host
+            .ingest(
+                &policy,
+                [n; 16],
+                &mut std::io::Cursor::new(filler(n as u64, CHUNK_PLAINTEXT_LEN as usize + 32)),
+                &commit_ctx(&signer, &space),
+            )
+            .expect("ingest");
+    }
+
+    assert_eq!(
+        fx.host.resident_indices(&policy, &wanted).unwrap(),
+        vec![0, 1],
+        "residency answers about this content, not about the cache"
+    );
+    let (bytes, _) = fx.host.chunk(&policy, &wanted, 1).expect("serve");
+    assert!(!bytes.is_empty());
+
+    // And a Station that may read its own files has not thereby agreed to
+    // serve them to peers.
+    let refuse = Authorizer {
+        refuse: vec![ContentAction::Serve],
+        ..Default::default()
+    };
+    let deny = |a| refuse.check(a);
+    let denied = ContentPolicy {
+        space: &space,
+        keys: Arc::new(Keys),
+        authorize: &deny,
+        max_content_len: u64::MAX,
+    };
+    assert!(matches!(
+        fx.host.chunk(&denied, &wanted, 0),
+        Err(ContentHostError::Denied { .. })
+    ));
+    assert!(matches!(
+        fx.host.resident_indices(&denied, &wanted),
+        Err(ContentHostError::Denied { .. })
+    ));
+    // Reading locally still works, because that is a different permission.
+    assert!(fx.host.stat(&denied, &wanted).is_ok());
+}
+
+#[test]
+fn a_pin_is_reported_by_stat() {
+    let fx = fixture("pinned");
+    let space = space();
+    let auth = Authorizer::default();
+    let check = |a| auth.check(a);
+    let policy = policy(&space, &check);
+    let signer = replica::SeedSigner(&WRITER_SEED);
+
+    let content = fx
+        .host
+        .ingest(
+            &policy,
+            [1u8; 16],
+            &mut std::io::Cursor::new(filler(1, 4_096)),
+            &commit_ctx(&signer, &space),
+        )
+        .expect("ingest");
+
+    assert!(!fx.host.stat(&policy, &content).unwrap().pinned);
+    fx.host.pin(&policy, &content).unwrap();
+    assert!(
+        fx.host.stat(&policy, &content).unwrap().pinned,
+        "a World rendering pin state must not always render unpinned"
+    );
+    fx.host.unpin(&policy, &content).unwrap();
+    assert!(!fx.host.stat(&policy, &content).unwrap().pinned);
 }

@@ -494,9 +494,19 @@ fn the_ingest_hold_and_the_content_hold_hand_over() {
         "the content hold outlives the ingest that created it"
     );
 
-    // Only a reachability sweep, which releases by content nonce, lets go.
+    // Only a reachability sweep, which releases the content hold by nonce,
+    // lets go. Releasing it as an *operation* must not work: the two kinds
+    // share a sixteen-byte namespace and a nonce is public.
     cache
         .release_operation(&out.descriptor.content_nonce)
+        .unwrap();
+    cache.sweep().unwrap();
+    assert!(
+        cache.is_resident(&out.leases[0].entry),
+        "an operation release cannot drop a content hold"
+    );
+    cache
+        .release_content(&out.descriptor.content_nonce)
         .unwrap();
     cache.sweep().unwrap();
     assert!(!cache.is_resident(&out.leases[0].entry));

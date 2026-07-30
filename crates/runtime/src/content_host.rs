@@ -15,7 +15,6 @@
 //! `install_chunk` — so those shapes are frozen here rather than invented
 //! there.
 
-use std::collections::BTreeSet;
 use std::io::Read;
 use std::sync::Arc;
 
@@ -103,6 +102,10 @@ pub enum ContentAction {
     Read,
     Pin,
     RemoveLocal,
+    /// Hand bytes to a peer. Distinct from Read because it is: a member who may
+    /// open a file locally has not thereby agreed to become its provider, and
+    /// the peer-facing surface is the one remote input reaches.
+    Serve,
 }
 
 impl ContentAction {
@@ -113,6 +116,7 @@ impl ContentAction {
             ContentAction::Read => "content.read",
             ContentAction::Pin => "content.pin",
             ContentAction::RemoveLocal => "content.remove-local",
+            ContentAction::Serve => "content.serve",
         }
     }
 }
@@ -198,11 +202,24 @@ impl ContentHost {
         }
         let ingested = ingest.finish()?;
 
-        self.core
-            .with_replica(|replica| {
-                replica.commit_content(ctx, std::slice::from_ref(&ingested.descriptor))
-            })
-            .map_err(|e| ContentHostError::Storage(e.to_string()))?;
+        let committed = self.core.with_replica(|replica| {
+            replica.commit_content(ctx, std::slice::from_ref(&ingested.descriptor))
+        });
+        if let Err(e) = committed {
+            // Nothing durable survives a failed ingest. The chunks are already
+            // installed and holding two leases, and the descriptor that would
+            // have made them reachable does not exist — so without this they
+            // would sit in the cache forever, held by a content nobody can name
+            // and therefore invisible to every sweep.
+            let _ = self
+                .cache
+                .release_content(&ingested.descriptor.content_nonce);
+            let _ = self.cache.release_operation(&operation);
+            for (_, slot) in self.resident_entries(&ingested.descriptor) {
+                let _ = self.cache.evict(&slot);
+            }
+            return Err(ContentHostError::Storage(e.to_string()));
+        }
 
         // The descriptor is committed, so the ingest's own hold hands over to
         // the content-scoped one.
@@ -226,7 +243,7 @@ impl ContentHost {
             chunk_count: descriptor.chunk_count,
             chunk_plaintext_len: descriptor.chunk_plaintext_len,
             resident_chunks: resident,
-            pinned: false,
+            pinned: self.is_pinned(&descriptor),
         })
     }
 
@@ -330,7 +347,7 @@ impl ContentHost {
         let descriptor = self.descriptor(content)?;
         let entries = self.resident_entries(&descriptor);
         self.cache
-            .release_operation(&descriptor.content_nonce)
+            .release_content(&descriptor.content_nonce)
             .map_err(|e| ContentHostError::Storage(e.to_string()))?;
         for (_, entry) in entries {
             let _ = self.cache.unpin(&entry);
@@ -354,9 +371,12 @@ impl ContentHost {
     /// exactly why the tree commits ciphertexts.
     pub fn chunk(
         &self,
+        policy: &ContentPolicy<'_>,
         content: &ContentRef,
         chunk_index: u32,
     ) -> Result<(Vec<u8>, ChunkProof), ContentHostError> {
+        (policy.authorize)(ContentAction::Serve)
+            .map_err(|demand| ContentHostError::Denied { demand })?;
         let descriptor = self.descriptor(content)?;
         let entry = self
             .resident_entries(&descriptor)
@@ -378,33 +398,42 @@ impl ContentHost {
     /// before anything is written where it could be served on.
     pub fn install_chunk(
         &self,
+        policy: &ContentPolicy<'_>,
         content: &ContentRef,
         operation: [u8; 16],
         proof: &ChunkProof,
         ciphertext: &[u8],
     ) -> Result<(), ContentHostError> {
+        (policy.authorize)(ContentAction::Read)
+            .map_err(|demand| ContentHostError::Denied { demand })?;
         let descriptor = self.descriptor(content)?;
         descriptor.verify_chunk(proof, ciphertext)?;
-        let entry = replica::content::chunk_entry(ciphertext);
+        let entry = replica::content::chunk_slot(&descriptor, proof.leaf.chunk_index);
         let sidecar =
             postcard::to_stdvec(proof).map_err(|e| ContentHostError::Storage(e.to_string()))?;
         self.cache
             .install(&entry, ciphertext, &sidecar)
             .map_err(|e| ContentHostError::Storage(e.to_string()))?;
         // Both holds, as ingest takes them: the transfer's, and the content's.
-        for hold in [operation, descriptor.content_nonce] {
+        for hold in [
+            replica::journal::cache::Lease::operation(operation, entry),
+            replica::journal::cache::Lease::content(descriptor.content_nonce, entry),
+        ] {
             self.cache
-                .lease(&replica::journal::cache::Lease {
-                    operation: hold,
-                    entry,
-                })
+                .lease(&hold)
                 .map_err(|e| ContentHostError::Storage(e.to_string()))?;
         }
         Ok(())
     }
 
     /// Which chunk indices this Station can serve right now.
-    pub fn resident_indices(&self, content: &ContentRef) -> Result<Vec<u32>, ContentHostError> {
+    pub fn resident_indices(
+        &self,
+        policy: &ContentPolicy<'_>,
+        content: &ContentRef,
+    ) -> Result<Vec<u32>, ContentHostError> {
+        (policy.authorize)(ContentAction::Serve)
+            .map_err(|demand| ContentHostError::Denied { demand })?;
         let descriptor = self.descriptor(content)?;
         Ok(self
             .resident_entries(&descriptor)
@@ -420,29 +449,30 @@ impl ContentHost {
             .ok_or(ContentHostError::Unknown)
     }
 
-    /// The resident chunks of one content, as `(index, cache entry)`.
+    /// The resident chunks of one content, as `(index, cache slot)`.
     ///
-    /// Derived from the sidecars rather than from an index, because a sidecar
-    /// is what makes a chunk servable and holding a second map of the same fact
-    /// would be a second thing to keep true.
+    /// Costs one existence check per chunk of *this* content, because the slot
+    /// is derived from the descriptor. It used to read and twice-hash the
+    /// entire cache on every call — and every call meant every `stat`, every
+    /// range read, every pin, and once per chunk served to a peer, so a
+    /// provider's cost was quadratic in what it held.
+    ///
+    /// Presence is the answer here; the proof is checked when the bytes are
+    /// actually used, by [`Self::chunk`] and by `open_resident_chunk`.
     fn resident_entries(&self, descriptor: &ContentDescriptor) -> Vec<(u32, [u8; 32])> {
-        let mut out = Vec::new();
-        let mut seen = BTreeSet::new();
-        for entry in self.cache.entries() {
-            let Ok((bytes, sidecar)) = self.cache.read(&entry) else {
-                continue;
-            };
-            let Ok(proof) = postcard::from_bytes::<ChunkProof>(&sidecar) else {
-                continue;
-            };
-            if descriptor.verify_chunk(&proof, &bytes).is_ok()
-                && seen.insert(proof.leaf.chunk_index)
-            {
-                out.push((proof.leaf.chunk_index, entry));
-            }
-        }
-        out.sort_by_key(|(index, _)| *index);
-        out
+        (0..descriptor.chunk_count)
+            .map(|index| (index, replica::content::chunk_slot(descriptor, index)))
+            .filter(|(_, slot)| self.cache.is_resident(slot))
+            .collect()
+    }
+
+    /// Whether every resident chunk of this content is pinned.
+    ///
+    /// Pinning is per entry, so a content with no resident chunks is not
+    /// pinned — there is nothing holding anything.
+    fn is_pinned(&self, descriptor: &ContentDescriptor) -> bool {
+        let entries = self.resident_entries(descriptor);
+        !entries.is_empty() && entries.iter().all(|(_, slot)| self.cache.is_pinned(slot))
     }
 }
 
