@@ -46,7 +46,7 @@ pub const CONTACT_PROTOCOL: u16 = 2;
 /// descriptor, orders of magnitude past what that frame was measured for.
 /// Descending asks for nodes instead, and a node budget is what stops a peer
 /// steering the descent.
-pub const MAX_DESCENT_NODES: u64 = 8192;
+pub const MAX_DESCENT_NODES: u64 = 2048;
 /// Maximum node hashes in one request frame.
 pub const MAX_DESCENT_REQUEST: usize = 256;
 
@@ -94,9 +94,23 @@ pub fn decode_holdings(bytes: &[u8]) -> Result<Vec<(BodyKey, [u8; 32])>, Contact
 }
 
 /// Maximum encoded frame size.
-pub const MAX_FRAME: usize = 1024 * 1024;
+///
+/// Sized to carry one canonical index node at its own legal maximum plus the
+/// frame envelope around it. Equal to [`replica::journal::index::MAX_NODE_BYTES`]
+/// would mean a legal node is untransmittable by construction, which is the
+/// kind of contradiction that shows up as an unexplainable Contact failure
+/// years later rather than as a test.
+pub const MAX_FRAME: usize = replica::journal::index::MAX_NODE_BYTES + 64 * 1024;
 /// Maximum frames per Contact.
 pub const MAX_FRAMES: u32 = 4096;
+
+// The descent has to fit inside the Contact that carries it. One delivered node
+// is one frame, and the rest of the Contact — authority, payloads, control —
+// needs the remainder, so the node budget takes half. Asserted rather than
+// commented because the two numbers were set independently once and did not
+// fit: 8192 nodes could not be delivered inside 4096 frames, so a descent that
+// legitimately needed them could never complete.
+const _: () = assert!(MAX_DESCENT_NODES * 2 <= MAX_FRAMES as u64);
 /// Maximum bytes per Contact, including framing overhead.
 pub const MAX_CONTACT_BYTES: u64 = 80 * 1024 * 1024;
 /// Maximum chunk payload (authority records and body chunks).

@@ -790,8 +790,15 @@ impl Reconciliation {
                 }
             }
             (IndexNode::Branch(remote_children), _) => {
+                // The local side is a leaf here, or unreadable. A leaf covers
+                // this whole prefix, so it is carried down rather than dropped:
+                // discarding it would compare every remote entry against
+                // nothing and report the lot as missing, including the ones the
+                // local side holds byte-identically one level up — which turns
+                // an O(difference) descent into an O(remote) transfer at
+                // exactly the shapes where the two sides disagree about depth.
                 for remote_slot in remote_children.iter().flatten() {
-                    self.wanted.push((*remote_slot, None, depth + 1));
+                    self.wanted.push((*remote_slot, local_child, depth + 1));
                 }
             }
         }

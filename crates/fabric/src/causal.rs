@@ -267,6 +267,14 @@ pub struct ImportStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FabricAnchor {
     pub format_version: u8,
+    /// Which Body this position is inside.
+    ///
+    /// Load-bearing, not bookkeeping. Every Body of one activation shares a
+    /// writer id, so operation ids collide across documents — without this an
+    /// anchor taken in one Body resolves against another to a plausible,
+    /// silently wrong index, which is the one thing resolving must never
+    /// produce.
+    pub body: [u8; 32],
     /// The typed path within the Body, as the collaborative schema names it.
     pub path: String,
     /// The operation the position is attached to, if the algebra could bind one.

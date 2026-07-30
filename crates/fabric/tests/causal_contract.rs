@@ -594,3 +594,88 @@ fn causal_encodings_are_canonical() {
         Err(CausalError::NonCanonical)
     );
 }
+
+#[test]
+fn an_anchor_does_not_resolve_against_another_body() {
+    // Every Body of one activation shares a writer id, so operation ids collide
+    // across documents. Without the Body in the anchor, a caret taken in one
+    // Body resolves against another to a plausible index — the silently wrong
+    // answer `Drifted` exists to prevent.
+    let mut fabric = CrdtFabric::new();
+    commit(
+        &mut fabric,
+        "seed",
+        vec![
+            splice(&key(), 0, "hello world"),
+            splice(&other_key(), 0, "a completely different document"),
+        ],
+    );
+    let anchor = fabric.anchor(&key(), "body", 6).expect("anchor");
+
+    assert!(matches!(
+        fabric.resolve(&key(), &anchor),
+        AnchorResolution::Resolved(6)
+    ));
+    assert_eq!(
+        fabric.resolve(&other_key(), &anchor),
+        AnchorResolution::Drifted,
+        "an anchor belongs to the Body it was taken in"
+    );
+}
+
+#[test]
+fn a_deleted_anchor_drifts_rather_than_landing_one_place_over() {
+    // When the anchored character is gone the engine answers with the gap it
+    // left. Treating that like a live resolution and adding one puts the caret
+    // a character to the right of where it belongs, which is exactly the
+    // silently wrong index the type promises never to return.
+    let mut fabric = CrdtFabric::new();
+    commit(&mut fabric, "seed", vec![splice(&key(), 0, "abcdef")]);
+    let anchor = fabric.anchor(&key(), "body", 3).expect("anchor");
+    assert_eq!(
+        fabric.resolve(&key(), &anchor),
+        AnchorResolution::Resolved(3)
+    );
+
+    // Delete exactly the character the anchor bound to.
+    commit(
+        &mut fabric,
+        "delete",
+        vec![FabricOp::TextSplice {
+            key: key(),
+            path: "body".into(),
+            index: 2,
+            delete: 1,
+            insert: String::new(),
+        }],
+    );
+    assert_eq!(
+        fabric.resolve(&key(), &anchor),
+        AnchorResolution::Drifted,
+        "the character it was attached to is gone"
+    );
+}
+
+#[test]
+fn a_replacement_artifact_cannot_flatten_a_collaborative_body() {
+    // The mirror of `import_body`'s refusal. A peer sending the wrong artifact
+    // kind must not be able to discard a Body's whole history by overwriting it
+    // with a value.
+    use fabric::FabricArtifact;
+    let mut fabric = CrdtFabric::new();
+    commit(
+        &mut fabric,
+        "seed",
+        vec![splice(&key(), 0, "history worth keeping")],
+    );
+
+    let outcome = fabric.import_artifact(
+        &key(),
+        &FabricArtifact::Replace {
+            format_version: 1,
+            bytes: b"a flat value".to_vec(),
+        },
+    );
+    assert!(outcome.is_err(), "a model mismatch is a conflict");
+    assert_eq!(text(&fabric, &key()), "history worth keeping");
+}

@@ -366,6 +366,15 @@ pub trait Fabric {
     ) -> Result<Option<FabricCommitReceipt>, FabricError>;
 }
 
+/// The Body identity an anchor carries. A digest rather than the key itself so
+/// an anchor stays fixed-size whatever a caller names its Bodies.
+fn body_digest(key: &FabricKey) -> [u8; 32] {
+    let mut h = blake3::Hasher::new();
+    h.update(b"lait/fabric-anchor-body/1");
+    h.update(key.as_bytes());
+    *h.finalize().as_bytes()
+}
+
 /// One Body's canonical exported representation: an atomic Body's canonical
 /// application bytes, or a collaborative Body's canonical per-Body Fabric
 /// export (causality and stable element identity preserved).
@@ -1186,6 +1195,14 @@ impl Fabric for CrdtFabric {
         use crate::causal::{CausalError, FabricArtifact, FabricVersion, ImportStatus};
 
         if let FabricArtifact::Replace { bytes, .. } = artifact {
+            // A model mismatch is a conflict, not an overwrite. `import_body`
+            // refuses the same pair, and the reverse direction — a delta onto
+            // an atomic Body — is refused below; flattening a collaborative
+            // Body into a value here would discard its whole history because a
+            // peer sent the wrong artifact kind.
+            if matches!(self.bodies.get(key), Some(BodyState::Collab(_))) {
+                return Err(CausalError::NotCollaborative);
+            }
             let changed = !matches!(
                 self.bodies.get(key),
                 Some(BodyState::Atomic(current)) if current == bytes
@@ -1278,6 +1295,7 @@ impl Fabric for CrdtFabric {
         };
         Ok(crate::causal::FabricAnchor {
             format_version: crate::causal::CAUSAL_FORMAT_VERSION,
+            body: body_digest(key),
             path: path.to_string(),
             anchored_to,
             offset: position,
@@ -1292,6 +1310,9 @@ impl Fabric for CrdtFabric {
         anchor: &crate::causal::FabricAnchor,
     ) -> crate::causal::AnchorResolution {
         use crate::causal::AnchorResolution;
+        if anchor.body != body_digest(key) {
+            return AnchorResolution::Drifted;
+        }
         let Some(BodyState::Collab(doc)) = self.bodies.get(key) else {
             return AnchorResolution::Drifted;
         };
@@ -1320,12 +1341,18 @@ impl Fabric for CrdtFabric {
             anchor.offset as usize,
         );
         match doc.get_cursor_pos(&cursor) {
-            Ok(position) => {
+            // The anchor bound to the character *before* the caret, so a live
+            // resolution sits one past it — and only a live one. When the
+            // anchored character is gone the engine answers with the gap it
+            // left, flipping the side; adding one to that puts the caret a
+            // character to the right of where it belongs. `Drifted` is what
+            // this case is documented to be, and it is what a renderer can act
+            // on.
+            Ok(position) if position.current.side == loro::cursor::Side::Right => {
                 AnchorResolution::Resolved((position.current.pos as u64 + 1).min(length))
             }
-            // Deleted material, or an anchor older than what this replica
-            // retains. Either way the position cannot be mapped, and saying so
-            // is the contract.
+            Ok(_) => AnchorResolution::Drifted,
+            // An anchor older than what this replica retains.
             Err(_) => AnchorResolution::Drifted,
         }
     }

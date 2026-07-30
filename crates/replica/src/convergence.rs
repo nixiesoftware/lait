@@ -132,6 +132,14 @@ pub trait AuthorityIncorporator {
 pub struct ValidatedContactBundle {
     pub(crate) authority_receipt: AuthorityBatchReceipt,
     pub(crate) units: BundleUnits,
+    /// What the *author* declared each Body references, taken from the
+    /// verified manifest entry rather than from local state.
+    ///
+    /// Local declarations are the wrong answer for incorporated material: a
+    /// receiver has never declared anything about a Body it did not write, so
+    /// falling back to them drops the author's references and the receiver
+    /// republishes a Body whose content it no longer names.
+    pub(crate) declared_content: std::collections::BTreeMap<crate::ids::BodyKey, Vec<[u8; 32]>>,
 }
 
 /// The bundle's validated transactions with their per-Body payloads.

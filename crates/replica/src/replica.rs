@@ -519,6 +519,29 @@ fn advance(prev: ReplicaFrontier, causal: &[u8]) -> ReplicaFrontier {
     )
 }
 
+/// Move the published coordinate without claiming a transaction.
+///
+/// A content commit changes the signed root — a different content index, a
+/// different catalog — but accepts no Body transaction. Both halves matter. If
+/// the coordinate did not move, an honest Station that ingested a file and then
+/// declared it would publish three different roots at one `(signer, frontier)`
+/// and every peer applying the equivocation rule would flag it. If the count
+/// moved, a peer comparing frontiers would read a Body transaction that never
+/// happened.
+///
+/// This is sound for equivocation detection precisely because it is
+/// deterministic: an honest signer's root always folds forward, so two
+/// different roots still sharing a coordinate remain what the rule says they
+/// are.
+fn advance_published(prev: ReplicaFrontier, causal: &[u8]) -> ReplicaFrontier {
+    let mut h = blake3::Hasher::new();
+    h.update(FRONTIER_DOMAIN);
+    h.update(&prev.root);
+    h.update(b"published");
+    h.update(causal);
+    ReplicaFrontier::new(*h.finalize().as_bytes(), prev.transaction_count)
+}
+
 /// Advance a Body's chain frontier from the transaction that wrote it.
 fn advance_chain(prev: ReplicaFrontier, tx: &[u8; 16]) -> ReplicaFrontier {
     let mut h = blake3::Hasher::new();
@@ -902,11 +925,16 @@ impl Replica {
 
     /// What the signed manifest advertises for one Body, as distinct from the
     /// local record, which also names objects no peer should learn about.
+    ///
+    /// Returns an error rather than `None`. `None` is the encoding of "delete
+    /// this Body from the catalog", so swallowing a bounds failure here would
+    /// quietly drop a live Body out of the signed advertisement while the body
+    /// index kept it — two catalogs disagreeing, and no one told.
     fn manifest_entry(
         key: &BodyKey,
         record: &BodyRecord,
         content_refs: Vec<[u8; 32]>,
-    ) -> Option<ManifestEntry> {
+    ) -> Result<ManifestEntry, ReplicaCommitError> {
         ManifestEntry::declaring(
             key.clone(),
             record
@@ -919,7 +947,7 @@ impl Replica {
                 .collect(),
             content_refs,
         )
-        .ok()
+        .map_err(|e| ReplicaCommitError::Integrity(format!("manifest entry for {key:?}: {e}")))
     }
 
     /// The single durable write.
@@ -990,12 +1018,13 @@ impl Replica {
                 .get(key)
                 .cloned()
                 .unwrap_or_else(|| self.declared_content.get(key).cloned().unwrap_or_default());
+            let advertised = match record {
+                None => None,
+                Some(r) => Some(Self::manifest_entry(key, r, refs.clone())?.encode()),
+            };
             manifest_changes.push(IndexChange {
                 key: body_index_key(key),
-                value: record
-                    .as_ref()
-                    .and_then(|r| Self::manifest_entry(key, r, refs.clone()))
-                    .map(|e| e.encode()),
+                value: advertised,
             });
             match record {
                 None => {
@@ -1163,7 +1192,11 @@ impl Replica {
         if self.poisoned {
             return Err(ReplicaCommitError::Poisoned);
         }
-        let frontier = self.frontier;
+        let mut causal = Vec::with_capacity(descriptors.len() * 32);
+        for descriptor in descriptors {
+            causal.extend_from_slice(descriptor.content_ref().as_bytes());
+        }
+        let frontier = advance_published(self.frontier, &causal);
         self.persist(
             Some(ctx),
             &BTreeMap::new(),
@@ -1173,6 +1206,7 @@ impl Replica {
             Vec::new(),
             frontier,
         )?;
+        self.frontier = frontier;
         Ok(descriptors.iter().map(|d| d.content_ref()).collect())
     }
 
@@ -1222,7 +1256,14 @@ impl Replica {
             declared.insert(key.clone(), ids);
             changed.insert(key, Some(record.clone()));
         }
-        let frontier = self.frontier;
+        let mut causal = Vec::new();
+        for (key, ids) in &declared {
+            causal.extend_from_slice(&body_index_key(key));
+            for id in ids {
+                causal.extend_from_slice(id);
+            }
+        }
+        let frontier = advance_published(self.frontier, &causal);
         self.persist(
             Some(ctx),
             &changed,
@@ -1231,7 +1272,9 @@ impl Replica {
             None,
             Vec::new(),
             frontier,
-        )
+        )?;
+        self.frontier = frontier;
+        Ok(())
     }
 
     /// A Body's causal position, in lait's own head-set terms.
@@ -1361,9 +1404,14 @@ impl Replica {
         // Republish under the shrunken catalog before touching residency, so a
         // crash between the two leaves bytes without a descriptor — reclaimable
         // garbage — rather than a descriptor whose bytes are gone.
+        let mut causal = Vec::with_capacity(unreferenced.len() * 32);
+        for descriptor in &unreferenced {
+            causal.extend_from_slice(descriptor.content_ref().as_bytes());
+        }
+        let frontier = advance_published(self.frontier, &causal);
         let root = ManifestRoot::sign_with(
             ctx.space,
-            self.frontier,
+            frontier,
             self.manifest_body_root,
             content_index_root,
             ctx.authority_frontier.clone(),
@@ -1383,7 +1431,7 @@ impl Replica {
         let meta = StoreMeta {
             format_version: STORE_META_FORMAT_VERSION,
             space: self.space.clone(),
-            frontier: self.frontier,
+            frontier,
             quota: self.quota,
             body_index_root: self.body_index_root,
             manifest_body_root: self.manifest_body_root,
@@ -1421,6 +1469,7 @@ impl Replica {
         }
         self.content_index_root = content_index_root;
         self.manifest_root_object = Some(root_ref);
+        self.frontier = frontier;
 
         // Residency last, and releasing is all this does — the cache's own
         // sweep decides when the bytes actually go, under its own quota. A
@@ -1891,7 +1940,12 @@ impl Replica {
         payloads: &[(BodyKey, Vec<u8>)],
         authority: &dyn AuthoritySource,
     ) -> Result<ConvergenceOutcome, ReplicaCommitError> {
-        self.incorporate_units(ctx, &[(tx.clone(), payloads.to_vec())], authority)
+        self.incorporate_units(
+            ctx,
+            &[(tx.clone(), payloads.to_vec())],
+            &BTreeMap::new(),
+            authority,
+        )
     }
 
     /// The one Convergence adoption path: incorporate a set of validated
@@ -1906,6 +1960,7 @@ impl Replica {
         &mut self,
         ctx: &CommitContext<'_>,
         units: &[IncorporationUnit],
+        bundle_declared: &BTreeMap<BodyKey, Vec<[u8; 32]>>,
         authority: &dyn AuthoritySource,
     ) -> Result<ConvergenceOutcome, ReplicaCommitError> {
         if self.poisoned {
@@ -2364,6 +2419,7 @@ impl Replica {
                 units,
                 &staged_material,
                 &final_records,
+                &bundle_declared,
                 next_frontier,
             )?)
         } else {
@@ -2400,12 +2456,14 @@ impl Replica {
     /// The bundle's one durable write: every staged head's envelope, every
     /// referenced signed transaction record, and the replacement Manifest over
     /// the complete post-bundle Body set — a single journal commit.
+    #[allow(clippy::too_many_arguments)]
     fn persist_bundle(
         &mut self,
         ctx: &CommitContext<'_>,
         units: &[IncorporationUnit],
         staged_material: &[(BodyKey, [u8; 32], Vec<u8>, usize)],
         final_records: &BTreeMap<BodyKey, BodyRecord>,
+        declared: &BTreeMap<BodyKey, Vec<[u8; 32]>>,
         next_frontier: ReplicaFrontier,
     ) -> Result<BTreeMap<BodyKey, BodyRecord>, ReplicaCommitError> {
         // Fill object refs into a working copy of the final records: each
@@ -2445,7 +2503,7 @@ impl Replica {
         self.persist(
             Some(ctx),
             &staged,
-            &BTreeMap::new(),
+            declared,
             &[],
             None,
             new_objects,
@@ -2535,6 +2593,7 @@ impl Replica {
             return Ok(crate::convergence::ValidatedContactBundle {
                 authority_receipt,
                 units: Vec::new(),
+                declared_content: BTreeMap::new(),
             });
         }
         // 3. + 4. Authority-verified manifest root and its complete index.
@@ -2660,7 +2719,13 @@ impl Replica {
                 }
             }
         }
+        let declared_content = entries
+            .iter()
+            .filter(|(_, entry)| !entry.content_refs.is_empty())
+            .map(|(key, entry)| (key.clone(), entry.content_refs.clone()))
+            .collect();
         Ok(crate::convergence::ValidatedContactBundle {
+            declared_content,
             authority_receipt,
             units: units.into_values().collect(),
         })
@@ -2677,7 +2742,7 @@ impl Replica {
         bundle: crate::convergence::ValidatedContactBundle,
         authority: &dyn AuthoritySource,
     ) -> Result<ConvergenceOutcome, ReplicaCommitError> {
-        self.incorporate_units(ctx, &bundle.units, authority)
+        self.incorporate_units(ctx, &bundle.units, &bundle.declared_content, authority)
     }
 
     /// Build and sign the current Manifest over the full Body set, returning
@@ -2697,14 +2762,14 @@ impl Replica {
         let entries: Vec<ManifestEntry> = self
             .bodies
             .iter()
-            .filter_map(|(key, record)| {
+            .map(|(key, record)| {
                 Self::manifest_entry(
                     key,
                     record,
                     self.declared_content.get(key).cloned().unwrap_or_default(),
                 )
             })
-            .collect();
+            .collect::<Result<_, _>>()?;
         let mut sink = NodeSink::default();
         let body_root = crate::manifest::build_body_index(entries, &mut sink)
             .map_err(|e| ReplicaCommitError::Illegitimate(format!("manifest index: {e}")))?;
@@ -2730,6 +2795,13 @@ impl Replica {
     /// encoding is canonical.
     pub fn published_root(&self) -> Option<fabric::journal::index::ChildRef> {
         self.manifest_body_root
+    }
+
+    /// The signed manifest root this Replica is currently advertising.
+    pub fn published_manifest_root(&self) -> Option<ManifestRoot> {
+        let reference = self.manifest_root_object?;
+        let bytes = self.durable.as_ref()?.read_object(&reference).ok()?;
+        ManifestRoot::decode_canonical(&bytes).ok()
     }
 
     /// How many objects the store has promised to keep.
@@ -3091,7 +3163,21 @@ impl Replica {
             }
         }
 
-        let mut new_objects: Vec<Vec<u8>> = vec![tx_bytes.clone()];
+        // The transaction object is written only if a head names it. A batch
+        // whose every touched Body is a tombstone leaves no head at all, and an
+        // object nothing references enters the required set with a refcount of
+        // zero — permanent, because the only thing that could release it is a
+        // reference that was never taken.
+        let referenced = new_records.values().flatten().any(|record| {
+            record
+                .heads
+                .iter()
+                .any(|head| head.transaction == Some(tx_ref))
+        });
+        let mut new_objects: Vec<Vec<u8>> = Vec::new();
+        if referenced {
+            new_objects.push(tx_bytes.clone());
+        }
         for (_, envelope, _) in sealed {
             new_objects.push(envelope.clone());
         }

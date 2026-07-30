@@ -514,3 +514,62 @@ fn a_descriptor_is_the_same_size_whatever_it_describes() {
     assert!(large_len < 128, "and stays tiny: {large_len} bytes");
     let _: &ContentDescriptor = &small.descriptor;
 }
+
+#[test]
+fn the_content_paths_never_publish_two_roots_at_one_coordinate() {
+    // Equivocation is one signer claiming two different states at one point,
+    // and `ManifestBook` defines the point as `(signer, replica_frontier)`.
+    // Every content path signs a *new* root — a different content index, a
+    // different catalog — so if the coordinate did not move with it, an honest
+    // Station that ingested a file and then declared it would flag itself the
+    // moment a peer wired incorporation to the book.
+    let mut fx = fixture("no-equivocation");
+    let space = space();
+    let signer = SeedSigner(&WRITER_SEED);
+    let context = ctx(&signer, &space);
+
+    let mut seen: Vec<([u8; 32], replica::frontier::ReplicaFrontier, [u8; 32])> = Vec::new();
+    let mut record = |replica: &Replica, label: &str| {
+        let root = replica
+            .published_manifest_root()
+            .unwrap_or_else(|| panic!("{label}: no published root"));
+        let (signer, frontier) = root.coordinate();
+        let hash = root.root_hash();
+        if let Some((_, _, prior)) = seen.iter().find(|(s, f, _)| *s == signer && *f == frontier) {
+            assert_eq!(
+                *prior, hash,
+                "{label}: a second root at one coordinate is equivocation"
+            );
+        }
+        seen.push((signer, frontier, hash));
+    };
+
+    let body = body(1);
+    commit_body(&mut fx.replica, 1, &body, b"a body to hang content on");
+    record(&fx.replica, "after the body");
+
+    let out = ingest(&fx, 1, &filler(1, 5_000));
+    fx.replica
+        .commit_content(&context, std::slice::from_ref(&out.descriptor))
+        .expect("commit content");
+    record(&fx.replica, "after committing content");
+
+    fx.replica
+        .declare_content(
+            &context,
+            BTreeMap::from([(body.clone(), vec![out.content_ref])]),
+        )
+        .expect("declare");
+    record(&fx.replica, "after declaring");
+
+    fx.replica.forget_declaration(&body);
+    fx.replica
+        .sweep_unreferenced_content(&context, Some(&fx.cache))
+        .expect("sweep");
+    record(&fx.replica, "after sweeping");
+
+    // Four distinct published states, four distinct coordinates.
+    let mut coordinates: Vec<_> = seen.iter().map(|(s, f, _)| (*s, *f)).collect();
+    coordinates.dedup();
+    assert_eq!(coordinates.len(), 4, "{seen:?}");
+}
