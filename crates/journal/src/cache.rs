@@ -200,6 +200,13 @@ pub struct ResidentCache {
     root: PathBuf,
     /// Maximum resident bytes before a sweep starts evicting. Operator policy.
     quota_bytes: u64,
+    /// How many residency questions this cache has been asked.
+    ///
+    /// Counted because "a range read costs the range, not the content" is a
+    /// complexity claim, and a complexity claim nothing can observe is a
+    /// comment. Each probe is a filesystem stat, so the counter is free beside
+    /// what it counts.
+    probes: std::sync::atomic::AtomicU64,
 }
 
 fn hex(hash: &[u8; 32]) -> String {
@@ -236,7 +243,11 @@ impl ResidentCache {
             std::fs::create_dir_all(root.join(dir))
                 .map_err(|e| CacheError::Durability(format!("cache dir: {e}")))?;
         }
-        let cache = Self { root, quota_bytes };
+        let cache = Self {
+            root,
+            quota_bytes,
+            probes: std::sync::atomic::AtomicU64::new(0),
+        };
         cache.reclaim_incomplete()?;
         Ok(cache)
     }
@@ -311,7 +322,19 @@ impl ResidentCache {
     /// when it landed. This is a cheap check by design; [`Self::read`] is the
     /// one that re-verifies, and it is what actually serves bytes.
     pub fn is_resident(&self, entry: &[u8; 32]) -> bool {
+        self.probes
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.entry_path(entry).exists()
+    }
+
+    /// How many times [`Self::is_resident`] has been asked, since this cache
+    /// was opened.
+    ///
+    /// Monotonic and never reset: a caller measuring one operation reads it
+    /// either side and subtracts, which is the only reading that means anything
+    /// when several callers share a cache.
+    pub fn residency_probes(&self) -> u64 {
+        self.probes.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// A bounded range of one entry's bytes.

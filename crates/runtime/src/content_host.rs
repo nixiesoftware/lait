@@ -246,6 +246,11 @@ impl ContentHost {
         (policy.authorize)(ContentAction::Read)
             .map_err(|demand| ContentHostError::Denied { demand })?;
         let descriptor = self.descriptor(content)?;
+        // The one call that genuinely walks the whole content, because
+        // "resident_chunks" is a question about all of them. Nothing on the
+        // read path may use it: a Range request is about a span, and paying
+        // chunk_count to answer a question about three chunks is how a 4 GiB
+        // file makes every seek cost sixteen thousand existence checks.
         let resident = self.resident_entries(&descriptor).len() as u32;
         Ok(ContentStatus {
             content: *content,
@@ -288,17 +293,37 @@ impl ContentHost {
         if offset >= descriptor.plaintext_len {
             return Ok(Vec::new());
         }
+
+        // Resolve the whole span's residency before opening anything.
+        //
+        // Two reasons, and the second is the one that matters. First, cost:
+        // only the chunks the span touches are asked about, so a range read is
+        // proportional to the range and not to the content — the difference
+        // between three existence checks and sixteen thousand on a 4 GiB file.
+        //
+        // Second, a hole is an answer, not a failure partway through. Opening
+        // chunk by chunk means the caller learns about a missing chunk after
+        // the ones before it were fetched from cache, decrypted, and verified —
+        // work thrown away, and on a streaming surface a status line already
+        // sent. Deciding first makes `NotResident` arrive before the first byte
+        // is produced.
+        let first = (offset / chunk_len) as u32;
+        let last = ((end - 1) / chunk_len) as u32;
+        let mut spanned = Vec::with_capacity((last - first + 1) as usize);
+        for index in first..=last {
+            let slot = replica::content::chunk_slot(&descriptor, index);
+            if !self.cache.is_resident(&slot) {
+                return Err(ContentHostError::NotResident);
+            }
+            spanned.push(slot);
+        }
+
         let mut out = Vec::with_capacity((end - offset) as usize);
         let mut cursor = offset;
-        let entries = self.resident_entries(&descriptor);
         while cursor < end {
             let index = (cursor / chunk_len) as u32;
             let within = (cursor % chunk_len) as usize;
-            let entry = entries
-                .iter()
-                .find(|(i, _)| *i == index)
-                .map(|(_, e)| *e)
-                .ok_or(ContentHostError::NotResident)?;
+            let entry = spanned[(index - first) as usize];
             let plaintext =
                 replica::content::open_resident_chunk(&descriptor, &key, &self.cache, &entry)?;
             let take = ((end - cursor) as usize).min(plaintext.len().saturating_sub(within));

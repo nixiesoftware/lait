@@ -674,3 +674,128 @@ fn installing_one_staged_chunk_leaves_the_rest_of_the_transfer_alone() {
     );
     assert!(receiver.host.cache().staged_bytes() < staged_before);
 }
+
+#[test]
+fn a_range_read_costs_the_span_and_not_the_content() {
+    // The same rule `resident_among` follows, applied to reading. A seek into
+    // one chunk of a large file must cost one chunk's worth of questions —
+    // otherwise every Range request a browser makes while scrubbing a video is
+    // a full walk of the content, and the walk grows with the file.
+    let fx = fixture("span-cost");
+    let space = space();
+    let auth = Authorizer::default();
+    let check = |a| auth.check(a);
+    let policy = policy(&space, &check);
+    let signer = replica::SeedSigner(&WRITER_SEED);
+
+    let chunk = CHUNK_PLAINTEXT_LEN as usize;
+    let plaintext = filler(4, chunk * 8 + 64);
+    let content = fx
+        .host
+        .ingest(
+            &policy,
+            [4u8; 16],
+            &mut std::io::Cursor::new(plaintext.clone()),
+            &commit_ctx(&signer, &space),
+        )
+        .expect("ingest");
+    let descriptor = fx.host.descriptor_of(&policy, &content).unwrap();
+    assert_eq!(descriptor.chunk_count, 9);
+
+    // One chunk's worth of bytes, entirely inside chunk 3.
+    let before = fx.host.cache().residency_probes();
+    let got = fx
+        .host
+        .read_range(&policy, &content, (chunk * 3) as u64, 100)
+        .expect("read");
+    let spanned = fx.host.cache().residency_probes() - before;
+    assert_eq!(got, plaintext[chunk * 3..chunk * 3 + 100]);
+    assert_eq!(
+        spanned, 1,
+        "a range inside one chunk asked about one chunk, not all {}",
+        descriptor.chunk_count
+    );
+
+    // A span crossing a boundary costs both, and still nothing else.
+    let before = fx.host.cache().residency_probes();
+    fx.host
+        .read_range(&policy, &content, (chunk * 2 - 10) as u64, 20)
+        .expect("read across the seam");
+    assert_eq!(fx.host.cache().residency_probes() - before, 2);
+
+    // `stat` is the one call that genuinely walks everything, because
+    // "how much of this is here" is a question about all of it.
+    let before = fx.host.cache().residency_probes();
+    let status = fx.host.stat(&policy, &content).unwrap();
+    assert_eq!(status.resident_chunks, descriptor.chunk_count);
+    assert!(
+        fx.host.cache().residency_probes() - before >= descriptor.chunk_count as u64,
+        "stat is allowed to walk; the read path is not"
+    );
+}
+
+#[test]
+fn a_hole_in_the_span_is_reported_before_any_chunk_is_opened() {
+    // A missing chunk is an answer about the request, not a failure partway
+    // through serving it. Deciding first means the work of opening, verifying,
+    // and decrypting the chunks before the hole is never done — and on a
+    // streaming surface, that a status line is not sent before the failure is
+    // known.
+    //
+    // Observed without instrumenting the open path: chunk 0 is left resident
+    // but corrupt, so opening it would fail loudly and differently. Reaching
+    // `NotResident` proves it was never opened.
+    let fx = fixture("hole-first");
+    let space = space();
+    let auth = Authorizer::default();
+    let check = |a| auth.check(a);
+    let policy = policy(&space, &check);
+    let signer = replica::SeedSigner(&WRITER_SEED);
+
+    let chunk = CHUNK_PLAINTEXT_LEN as usize;
+    let content = fx
+        .host
+        .ingest(
+            &policy,
+            [5u8; 16],
+            &mut std::io::Cursor::new(filler(5, chunk * 2 + 8)),
+            &commit_ctx(&signer, &space),
+        )
+        .expect("ingest");
+    let descriptor = fx.host.descriptor_of(&policy, &content).unwrap();
+    assert_eq!(descriptor.chunk_count, 3);
+
+    // Chunk 2 goes missing; chunk 0 stays present and is made unopenable.
+    let cache = fx.host.cache();
+    cache.release_content(&descriptor.content_nonce).unwrap();
+    cache
+        .evict(&replica::content::chunk_slot(&descriptor, 2))
+        .unwrap();
+    // The cache files an entry under its slot's hex, in `chunks/`.
+    let first = fx
+        .dir
+        .join("cache/chunks")
+        .join(data_encoding::HEXLOWER.encode(&replica::content::chunk_slot(&descriptor, 0)));
+    let mut corrupt = std::fs::read(&first).unwrap();
+    let last = corrupt.len() - 1;
+    corrupt[last] ^= 0xFF;
+    std::fs::write(&first, &corrupt).unwrap();
+
+    // Reading chunk 0 alone finds the corruption — proof the trap is armed.
+    assert!(
+        !matches!(
+            fx.host.read_range(&policy, &content, 0, 16),
+            Err(ContentHostError::NotResident)
+        ),
+        "chunk 0 is resident, so its own failure must not be NotResident"
+    );
+
+    // Reading a span that reaches the hole never gets that far.
+    assert!(
+        matches!(
+            fx.host.read_range(&policy, &content, 0, chunk * 3),
+            Err(ContentHostError::NotResident)
+        ),
+        "the hole is the answer, and it arrives before chunk 0 is touched"
+    );
+}
