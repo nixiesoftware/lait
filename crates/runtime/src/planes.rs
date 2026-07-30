@@ -259,8 +259,12 @@ impl SessionOpen {
         if open.protocol_version != open.plane.protocol_version() {
             return Err(PlaneWireError::UnsupportedVersion(open.protocol_version));
         }
+        // Half an opening, not a control frame. The outer length gate already
+        // refuses anything past MAX_OPENING_BYTES, so a 64 KiB inner check could
+        // never fire — a bound that cannot be reached is not a bound, and
+        // reading one as though it were is how a ceiling gets quietly raised.
         if open.requested_lanes.len() > bounds::MAX_LANES
-            || open.authority_frontier.len() > bounds::MAX_CONTROL_FRAME_BYTES
+            || open.authority_frontier.len() > bounds::MAX_OPENING_BYTES / 2
         {
             return Err(PlaneWireError::Bounds);
         }
@@ -343,6 +347,22 @@ pub enum FreightFrame {
 impl FreightFrame {
     pub fn encode(&self) -> Vec<u8> {
         postcard::to_stdvec(self).expect("postcard freight frame")
+    }
+
+    /// Encode, substituting a coarse refusal for anything that would exceed
+    /// what the peer is allowed to read.
+    ///
+    /// A bound checked only on receive turns a local mistake into a remote
+    /// protocol error: the peer refuses a frame we should never have written,
+    /// and the failure is attributed to the wrong side. A provider that finds
+    /// itself about to answer with something oversized says no instead — which
+    /// is a legal answer, and the only one that keeps the refusal coarse.
+    pub fn encode_bounded(&self) -> Vec<u8> {
+        let bytes = self.encode();
+        if self.validate().is_err() || bytes.len() > bounds::MAX_CONTROL_FRAME_BYTES {
+            return FreightFrame::Refused.encode();
+        }
+        bytes
     }
 
     pub fn decode_canonical(bytes: &[u8]) -> Result<Self, PlaneWireError> {

@@ -298,6 +298,7 @@ fn a_real_iroh_contact_converges_two_stations() {
         .enter_orbit(&coords, EnterOptions)
         .unwrap()
         .activate(ActivationOptions {
+            content: Default::default(),
             drain_deadline: Duration::from_secs(5),
             comms: Some(comms_options(ta, STATION_A_SEED)),
             observation_capacity: 0,
@@ -309,6 +310,7 @@ fn a_real_iroh_contact_converges_two_stations() {
         .enter_orbit(&coords, EnterOptions)
         .unwrap()
         .activate(ActivationOptions {
+            content: Default::default(),
             drain_deadline: Duration::from_secs(5),
             comms: Some(comms_options(tb, STATION_B_SEED)),
             observation_capacity: 0,

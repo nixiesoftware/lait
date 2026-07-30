@@ -93,7 +93,7 @@ fn fixture(tag: &str) -> Fixture {
     );
     let cache = Arc::new(ResidentCache::open(dir.join("cache"), 1 << 30).unwrap());
     Fixture {
-        host: ContentHost::new(core, cache),
+        host: ContentHost::new(std::sync::Arc::new(core), cache),
         dir,
     }
 }

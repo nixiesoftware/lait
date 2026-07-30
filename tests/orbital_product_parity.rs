@@ -639,6 +639,7 @@ fn two_stations_converge_product_issues_over_the_contact_plane() {
         .enter_orbit(&coords, EnterOptions)
         .unwrap()
         .activate(ActivationOptions {
+            content: Default::default(),
             drain_deadline: Duration::from_secs(5),
             comms: Some(comms_options(ta, STATION_A_SEED)),
             observation_capacity: 0,
@@ -651,6 +652,7 @@ fn two_stations_converge_product_issues_over_the_contact_plane() {
         .enter_orbit(&coords, EnterOptions)
         .unwrap()
         .activate(ActivationOptions {
+            content: Default::default(),
             drain_deadline: Duration::from_secs(5),
             comms: Some(comms_options(tb, STATION_B_SEED)),
             observation_capacity: 0,

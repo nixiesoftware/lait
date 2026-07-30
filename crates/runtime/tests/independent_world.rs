@@ -445,6 +445,7 @@ fn bodies_authority_restart_idempotency_and_observation() {
         .form_space(runtime::SpaceFormationOptions::default())
         .unwrap()
         .activate(ActivationOptions {
+            content: Default::default(),
             drain_deadline: Duration::from_secs(5),
             comms: None,
             observation_capacity: 1, // force overruns for the backpressure case
@@ -619,6 +620,7 @@ fn beacons_contact_and_opaque_forwarding_across_three_stations() {
         .enter_orbit(&coords, EnterOptions)
         .unwrap()
         .activate(ActivationOptions {
+            content: Default::default(),
             drain_deadline: Duration::from_secs(5),
             comms: Some(comms_options(ta, STATION_A_SEED)),
             observation_capacity: 0,
@@ -638,6 +640,7 @@ fn beacons_contact_and_opaque_forwarding_across_three_stations() {
         .enter_orbit(&coords, EnterOptions)
         .unwrap()
         .activate(ActivationOptions {
+            content: Default::default(),
             drain_deadline: Duration::from_secs(5),
             comms: Some(comms_options(tb, STATION_B_SEED)),
             observation_capacity: 0,
@@ -660,6 +663,7 @@ fn beacons_contact_and_opaque_forwarding_across_three_stations() {
         .enter_orbit(&coords, EnterOptions)
         .unwrap()
         .activate(ActivationOptions {
+            content: Default::default(),
             drain_deadline: Duration::from_secs(5),
             comms: Some(comms_options(tc, STATION_C_SEED)),
             observation_capacity: 0,
@@ -732,6 +736,7 @@ fn the_eclipse_fence_quarantines_unadmitted_beacon_emitters() {
         .enter_orbit(&coords, EnterOptions)
         .unwrap()
         .activate(ActivationOptions {
+            content: Default::default(),
             drain_deadline: Duration::from_secs(5),
             comms: Some(comms_options(tc, STATION_C_SEED)),
             observation_capacity: 0,

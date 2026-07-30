@@ -248,6 +248,7 @@ fn activate_with(
     rt.enter_orbit(coords, EnterOptions)
         .unwrap()
         .activate(ActivationOptions {
+            content: Default::default(),
             drain_deadline: Duration::from_secs(5),
             comms: Some(comms_options(transport, seed, gossip)),
             observation_capacity: 0,
@@ -372,6 +373,7 @@ fn two_stations_converge_through_the_public_contact_api() {
         .orbit(&space)
         .unwrap()
         .activate(ActivationOptions {
+            content: Default::default(),
             drain_deadline: Duration::from_secs(5),
             comms: Some(comms_options(tb2, STATION_B_SEED, None)),
             observation_capacity: 0,

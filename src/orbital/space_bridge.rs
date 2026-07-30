@@ -372,6 +372,7 @@ impl SpaceBridge {
             .orbit(&space)
             .map_err(|e| anyhow!("acquire orbit: {e:?}"))?
             .activate(ActivationOptions {
+                content: Default::default(),
                 drain_deadline: Duration::from_secs(5),
                 comms: Some(comms_options(
                     transport,

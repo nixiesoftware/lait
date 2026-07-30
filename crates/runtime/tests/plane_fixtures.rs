@@ -284,3 +284,181 @@ fn a_signal_cannot_exceed_its_hard_ceiling() {
     assert_eq!(bounds::MAX_SIGNAL_BYTES, 16 * 1024);
     assert!(bounds::MAX_SIGNAL_BYTES < bounds::MAX_CONTROL_FRAME_BYTES);
 }
+
+// ---------------------------------------------------------------------------
+// Golden encodings
+// ---------------------------------------------------------------------------
+
+/// Hex, so a diff shows which byte moved rather than that something did.
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+#[test]
+fn every_plane_shape_has_a_frozen_encoding() {
+    // Identifiers carry no version suffix, so nothing in the *source* records
+    // which generation a shape belongs to. These bytes are that record. A
+    // refactor that changes an encoding without changing an ALPN is the failure
+    // this catches, and it is silent by construction otherwise.
+    let open = SessionOpen {
+        plane: Plane::Freight,
+        protocol_version: FREIGHT_PROTOCOL_VERSION,
+        features: feature::UNSOLICITED_PROVIDE | feature::RESIDENCY_HINTS,
+        space: [7u8; SPACE_ID_LEN],
+        initiator_station: [1u8; 32],
+        responder_station: [2u8; 32],
+        session_id: [3u8; 16],
+        session_epoch: [4u8; 16],
+        authority_frontier: vec![9, 8, 7],
+        requested_lanes: vec![stream_kind::CONTROL, stream_kind::RELIABLE_SIGNAL],
+    };
+    let accept = SessionAccept {
+        session_id: [3u8; 16],
+        session_epoch: [4u8; 16],
+        capability: ProtocolCapability {
+            plane: Plane::Freight,
+            protocol_version: FREIGHT_PROTOCOL_VERSION,
+            features: feature::RESIDENCY_HINTS,
+        },
+        granted_lanes: vec![stream_kind::CONTROL],
+    };
+
+    let goldens: Vec<(&str, Vec<u8>)> = vec![
+        ("SessionOpen", open.encode()),
+        ("SessionAccept", accept.encode()),
+        (
+            "Have",
+            FreightFrame::Have {
+                content_id: [5u8; 32],
+                wanted: vec![0, 3, 9],
+            }
+            .encode(),
+        ),
+        (
+            "Available",
+            FreightFrame::Available {
+                content_id: [5u8; 32],
+                chunks: vec![0, 9],
+            }
+            .encode(),
+        ),
+        (
+            "GetChunk",
+            FreightFrame::GetChunk {
+                content_id: [5u8; 32],
+                chunk_index: 3,
+                offset: 1024,
+                max_len: 262_144,
+                resume_leaf: Some([6u8; 32]),
+            }
+            .encode(),
+        ),
+        (
+            "ChunkHeader",
+            FreightFrame::ChunkHeader {
+                content_id: [5u8; 32],
+                chunk_index: 3,
+                proof: vec![1, 2, 3, 4],
+                total_len: 262_144,
+            }
+            .encode(),
+        ),
+        ("Refused", FreightFrame::Refused.encode()),
+    ];
+
+    let rendered: Vec<String> = goldens
+        .iter()
+        .map(|(name, bytes)| format!("{name} {}", hex(bytes)))
+        .collect();
+    let frozen = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/plane_goldens.txt"),
+    )
+    .unwrap_or_default();
+    let frozen: Vec<String> = frozen
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect();
+    if frozen.is_empty() {
+        std::fs::write(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/plane_goldens.txt"),
+            rendered.join("\n") + "\n",
+        )
+        .expect("write goldens");
+        panic!("goldens were missing and have been written; re-run to verify");
+    }
+    assert_eq!(rendered, frozen, "an encoded plane shape moved");
+
+    // And every golden still decodes to what produced it.
+    assert_eq!(SessionOpen::decode_canonical(&open.encode()).unwrap(), open);
+    assert_eq!(
+        SessionAccept::decode_canonical(&accept.encode()).unwrap(),
+        accept
+    );
+    for (_, bytes) in goldens.iter().skip(2) {
+        FreightFrame::decode_canonical(bytes).expect("a golden frame decodes");
+    }
+}
+
+#[test]
+fn a_frame_we_should_not_have_written_becomes_a_refusal_rather_than_a_protocol_error() {
+    // A bound checked only on receive turns a local mistake into a remote
+    // protocol error, and the failure is then attributed to the wrong side.
+    let oversized = FreightFrame::Available {
+        content_id: [1u8; 32],
+        chunks: vec![0; MAX_WANTED_CHUNKS + 1],
+    };
+    assert_eq!(
+        FreightFrame::decode_canonical(&oversized.encode_bounded()).unwrap(),
+        FreightFrame::Refused
+    );
+    // A legal frame is untouched.
+    let fine = FreightFrame::Available {
+        content_id: [1u8; 32],
+        chunks: vec![0, 1, 2],
+    };
+    assert_eq!(fine.encode_bounded(), fine.encode());
+}
+
+#[test]
+fn the_openings_inner_bound_is_one_that_can_actually_fire() {
+    // The outer length gate refuses anything past MAX_OPENING_BYTES, so an
+    // inner check at a larger number is unreachable — and an unreachable bound
+    // reads like protection while providing none.
+    let mut open = opening(Plane::Live);
+    open.authority_frontier = vec![0u8; bounds::MAX_OPENING_BYTES / 2 + 1];
+    assert_eq!(
+        SessionOpen::decode_canonical(&open.encode()),
+        Err(PlaneWireError::Bounds),
+        "the inner bound fires before the outer one"
+    );
+    let mut open = opening(Plane::Live);
+    open.authority_frontier = vec![0u8; bounds::MAX_OPENING_BYTES / 2 - 64];
+    assert!(SessionOpen::decode_canonical(&open.encode()).is_ok());
+}
+
+#[test]
+fn the_wire_bounds_agree_with_the_geometry_and_the_store() {
+    // Constants set independently in different crates that must hold a fixed
+    // relationship. Each of these was checked by hand once; asserting them is
+    // what keeps the next change from quietly breaking one.
+    assert_eq!(
+        MAX_PROOF_BYTES,
+        replica::content::MAX_PROOF_BYTES,
+        "one sidecar ceiling, not a wire one and a storage one"
+    );
+    assert!(
+        bounds::MAX_CHUNK_FRAME_BYTES > replica::content::max_ciphertext_len() + MAX_PROOF_BYTES,
+        "a chunk frame must carry a maximal chunk and its proof"
+    );
+    assert!(
+        MAX_WANTED_CHUNKS as u64 <= replica::content::MAX_CHUNK_COUNT as u64,
+        "a request cannot name more chunks than any content can have"
+    );
+    assert_eq!(
+        runtime::contact::MAX_CHUNK,
+        replica::content::CHUNK_PLAINTEXT_LEN as usize,
+        "Contact's body chunk and the content chunk are one number by intent, \
+         not by coincidence"
+    );
+}

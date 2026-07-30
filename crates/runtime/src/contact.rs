@@ -46,6 +46,12 @@ pub const CONTACT_PROTOCOL: u16 = 2;
 /// descriptor, orders of magnitude past what that frame was measured for.
 /// Descending asks for nodes instead, and a node budget is what stops a peer
 /// steering the descent.
+///
+/// **Not yet enforced on a live path.** `Replica::begin_reconciliation` takes
+/// this as its `max_nodes` and `index::Reconciliation` counts against it, but
+/// nothing in `contact_driver` descends yet — the F4 remainder. Said plainly
+/// because a constant that reads as a bound and is not one is worse than no
+/// constant: the next reader would otherwise assume the descent is capped.
 pub const MAX_DESCENT_NODES: u64 = 2048;
 /// Maximum node hashes in one request frame.
 pub const MAX_DESCENT_REQUEST: usize = 256;

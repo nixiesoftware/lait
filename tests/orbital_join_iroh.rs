@@ -95,6 +95,7 @@ fn activate(
         .enter_orbit(coords, EnterOptions)
         .unwrap()
         .activate(ActivationOptions {
+            content: Default::default(),
             drain_deadline: Duration::from_secs(5),
             comms: Some(comms_for(transport, seed, mech, bootstrap)),
             observation_capacity: 0,

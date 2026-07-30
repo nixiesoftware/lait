@@ -65,6 +65,14 @@ impl BodyKeySource for NoBodyKeys {
 /// The default deadline for draining tracked tasks during dormancy.
 pub const DEFAULT_DRAIN_DEADLINE: Duration = Duration::from_secs(10);
 
+/// Where the resident cache lives, under the Orbit store directory.
+///
+/// A sibling of the journal rather than inside it. The journal promises that
+/// everything a root names is present and intact; a content chunk is optional
+/// by design, and losing one should mean "fetch it again" rather than "this
+/// store is broken".
+const CACHE_DIR: &str = "content-cache";
+
 /// A cooperative cancellation signal shared by a Station and its tracked tasks.
 /// A task polls [`CancelToken::is_cancelled`] and exits promptly when set. The
 /// API cannot preempt a task that ignores it — such a task is drained on a
@@ -102,6 +110,9 @@ pub struct EnterOptions;
 pub struct ActivationOptions {
     /// The deadline for draining tracked tasks at dormancy.
     pub drain_deadline: Duration,
+    /// The content plane's local policy: how much disk it may hold, and how
+    /// large a single content this Station will accept.
+    pub content: ContentOptions,
     /// The Station's Contact plane: transport, station identity, mechanics
     /// seams, and gossip. `None` activates an offline Station (valid; grants
     /// no new authority; `neighbors` still serves the persisted registry).
@@ -116,8 +127,37 @@ impl ActivationOptions {
     pub fn offline() -> Self {
         Self {
             drain_deadline: DEFAULT_DRAIN_DEADLINE,
+            content: ContentOptions::default(),
             comms: None,
             observation_capacity: 0,
+        }
+    }
+}
+
+/// Local policy for the content plane.
+///
+/// Hand-written `Default` rather than derived, because both fields fail closed
+/// at zero: a zero quota would sweep every chunk the moment it landed, and a
+/// zero maximum would refuse every content. A caller that leaves this alone
+/// should get a working Station, not a silently disabled one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContentOptions {
+    /// Resident bytes this Station will hold before a sweep starts evicting.
+    ///
+    /// A target, not a guarantee: every chunk of a committed content is held by
+    /// that content's own lease, so a cache full of committed content has no
+    /// eligible victims. The sweep reports the shortfall rather than hiding it.
+    pub cache_quota_bytes: u64,
+    /// The largest single content this Station will ingest or fetch. May only
+    /// *lower* the protocol maximum, never raise it.
+    pub max_content_len: u64,
+}
+
+impl Default for ContentOptions {
+    fn default() -> Self {
+        Self {
+            cache_quota_bytes: 4 * 1024 * 1024 * 1024,
+            max_content_len: 256 * 1024 * 1024,
         }
     }
 }
@@ -420,6 +460,30 @@ impl Orbit {
             options.observation_capacity
         };
         let core = Arc::new(crate::session::StationCore::new(epoch, capacity, replica));
+
+        // The resident cache lives beside the store rather than inside it: the
+        // journal's promise is that everything a root names is present, and a
+        // chunk is optional by design. Mixing them would let a refetchable
+        // chunk take a store down.
+        let cache = Arc::new(
+            replica::journal::cache::ResidentCache::open(
+                self.store.dir().join(CACHE_DIR),
+                options.content.cache_quota_bytes,
+            )
+            .map_err(|e| LifecycleError::StoreIo(e.to_string()))?,
+        );
+        // Nothing was in flight before this Station existed, so every operation
+        // lease and every staging slot on disk belongs to a run that is over.
+        // Reclaiming here — before anything registers a transfer — is what
+        // keeps a killed transfer from holding its chunks resident forever.
+        cache
+            .sweep_leases(&std::collections::BTreeSet::new())
+            .map_err(|e| LifecycleError::StoreIo(e.to_string()))?;
+        cache
+            .sweep_staging(&std::collections::BTreeSet::new())
+            .map_err(|e| LifecycleError::StoreIo(e.to_string()))?;
+        let content = Arc::new(crate::content_host::ContentHost::new(core.clone(), cache));
+
         let station = Station {
             store: self.store,
             registry: self.registry,
@@ -439,6 +503,7 @@ impl Orbit {
                 .as_ref()
                 .map(|c| c.whole_deadline)
                 .unwrap_or(Duration::from_secs(60)),
+            content,
         };
         if let Some(comms) = options.comms {
             let space = station.store.space().clone();
@@ -520,6 +585,10 @@ pub struct Station {
     driver: Mutex<Option<std::sync::mpsc::Sender<crate::contact_driver::DriverCmd>>>,
     /// The whole-contact deadline (bounds the administrative contact wait).
     contact_deadline: Duration,
+    /// The content plane. Opened at activation beside the Replica, because a
+    /// Station that can name content and cannot hold any is a Station whose
+    /// content surface is unreachable.
+    content: Arc<crate::content_host::ContentHost>,
 }
 
 impl std::fmt::Debug for Station {
@@ -535,6 +604,15 @@ impl Station {
     /// This activation's epoch.
     pub fn epoch(&self) -> StationEpoch {
         self.epoch
+    }
+
+    /// The content plane.
+    ///
+    /// One per Station and opened at activation, so a caller never constructs
+    /// a second cache over the same directory — two caches over one directory
+    /// would sweep each other's staging.
+    pub fn content(&self) -> Arc<crate::content_host::ContentHost> {
+        self.content.clone()
     }
 
     /// The Space this Station serves.

@@ -150,12 +150,15 @@ pub trait ContentKeys: Send + Sync {
 
 /// The content plane, bound to one Station.
 pub struct ContentHost {
-    core: StationCore,
+    /// Shared rather than owned: the Station holds the same core, and both
+    /// commit through the one Replica writer. A host with its own core would
+    /// be a second writer, which the store does not have.
+    core: Arc<StationCore>,
     cache: Arc<replica::journal::cache::ResidentCache>,
 }
 
 impl ContentHost {
-    pub fn new(core: StationCore, cache: Arc<replica::journal::cache::ResidentCache>) -> Self {
+    pub fn new(core: Arc<StationCore>, cache: Arc<replica::journal::cache::ResidentCache>) -> Self {
         Self { core, cache }
     }
 
