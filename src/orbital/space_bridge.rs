@@ -288,7 +288,10 @@ impl SpaceBridge {
             .build_scoped(
                 &device_seed,
                 &network,
-                &[runtime::contact::CONTACT_ALPN, runtime::PRESENCE_ALPN],
+                comms::Protocols {
+                    framed: &[runtime::contact::CONTACT_ALPN, runtime::PRESENCE_ALPN],
+                    session: &[runtime::planes::FREIGHT_ALPN, runtime::planes::LIVE_ALPN],
+                },
                 &space,
             )
             .await?;

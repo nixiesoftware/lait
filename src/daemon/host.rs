@@ -581,7 +581,7 @@ mod tests {
             &self,
             identity_seed: &[u8; 32],
             _network: &Network,
-            _alpns: &[Alpn],
+            _protocols: comms::Protocols<'_>,
         ) -> Result<Arc<dyn Transport>> {
             Ok(Arc::new(
                 self.0.peer(crate::crypto::device_from_seed(identity_seed)),

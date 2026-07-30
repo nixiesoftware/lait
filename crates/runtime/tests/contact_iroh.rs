@@ -264,14 +264,20 @@ fn a_real_iroh_contact_converges_two_stations() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let alpns: &[comms::Alpn] = &[CONTACT_ALPN, PRESENCE_ALPN];
     let (ta, tb) = rt.block_on(async {
-        let a =
-            comms::DefaultTransport::new(&STATION_A_SEED, &comms::policy::Network::Isolated, alpns)
-                .await
-                .unwrap();
-        let b =
-            comms::DefaultTransport::new(&STATION_B_SEED, &comms::policy::Network::Isolated, alpns)
-                .await
-                .unwrap();
+        let a = comms::DefaultTransport::new(
+            &STATION_A_SEED,
+            &comms::policy::Network::Isolated,
+            comms::Protocols::framed(alpns),
+        )
+        .await
+        .unwrap();
+        let b = comms::DefaultTransport::new(
+            &STATION_B_SEED,
+            &comms::policy::Network::Isolated,
+            comms::Protocols::framed(alpns),
+        )
+        .await
+        .unwrap();
         use comms::Transport;
         let a_addrs = a.advertised_addrs();
         let b_addrs = b.advertised_addrs();

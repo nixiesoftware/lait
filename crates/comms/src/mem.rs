@@ -23,10 +23,11 @@ use std::sync::{Arc, Mutex as StdMutex};
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use tokio::sync::{broadcast, mpsc, Mutex as TokioMutex};
+use tokio::sync::{broadcast, mpsc, watch, Mutex as TokioMutex};
 
 use super::{
-    Alpn, GossipEvent, GossipReceiver, GossipSender, Incoming, PeerId, Stream, Topic, Transport,
+    Alpn, GossipEvent, GossipReceiver, GossipSender, Incoming, IncomingConnection, PeerId,
+    RecvFlow, SendFlow, Stream, Topic, Transport,
 };
 
 /// The shared switchboard every in-memory peer is wired to. Cloneable; all clones
@@ -38,6 +39,10 @@ pub struct MemNet(Arc<StdMutex<Inner>>);
 struct Inner {
     /// Inbound-connection inbox per peer.
     peers: HashMap<PeerId, mpsc::UnboundedSender<Incoming>>,
+    /// Inbound multi-flow-connection inbox per peer. Separate from `peers`
+    /// because a connection handed over whole and a connection wrapped in a
+    /// framed stream are two different deliveries, and one consumes it.
+    sessions: HashMap<PeerId, mpsc::UnboundedSender<IncomingConnection>>,
     /// One broadcast bus per gossip topic.
     topics: HashMap<Topic, broadcast::Sender<TopicMsg>>,
 }
@@ -56,11 +61,17 @@ impl MemNet {
     /// Attach a new peer `id` to this network and return its transport.
     pub fn peer(&self, id: PeerId) -> MemTransport {
         let (tx, rx) = mpsc::unbounded_channel();
-        self.0.lock().unwrap().peers.insert(id.clone(), tx);
+        let (session_tx, session_rx) = mpsc::unbounded_channel();
+        {
+            let mut inner = self.0.lock().unwrap();
+            inner.peers.insert(id.clone(), tx);
+            inner.sessions.insert(id.clone(), session_tx);
+        }
         MemTransport {
             id,
             net: self.clone(),
             incoming: TokioMutex::new(rx),
+            incoming_sessions: TokioMutex::new(session_rx),
         }
     }
 
@@ -80,6 +91,7 @@ pub struct MemTransport {
     id: PeerId,
     net: MemNet,
     incoming: TokioMutex<mpsc::UnboundedReceiver<Incoming>>,
+    incoming_sessions: TokioMutex<mpsc::UnboundedReceiver<IncomingConnection>>,
 }
 
 /// A framed duplex stream backed by a pair of channels.
@@ -142,6 +154,308 @@ impl Stream for MemStream {
         // only when the peer drops its whole stream handle. The ordering half
         // of the accepter contract (park until the dialer is done and drops).
         self.peer_alive.closed().await;
+    }
+}
+
+/// One end of an in-memory multi-flow connection.
+///
+/// Models what Runtime tests actually depend on: flows arrive in the order they
+/// were opened, a finish and a reset are different endings, datagrams are
+/// unreliable in principle and refused when oversized, and closing wakes
+/// everyone parked. It does not model loss or reordering — the iroh
+/// implementation is the contract where the two diverge, and the cross-
+/// implementation tests are what keep the divergence honest.
+struct MemConnection {
+    peer: PeerId,
+    alpn: Vec<u8>,
+    /// Flows this end opens, delivered to the far end.
+    open_tx: mpsc::UnboundedSender<MemFlowHandoff>,
+    /// Flows the far end opened.
+    open_rx: TokioMutex<mpsc::UnboundedReceiver<MemFlowHandoff>>,
+    datagram_tx: mpsc::UnboundedSender<Vec<u8>>,
+    datagram_rx: TokioMutex<mpsc::UnboundedReceiver<Vec<u8>>>,
+    /// This end's own closed state. A watch rather than a notify because a
+    /// parked accept has to see a close that happened before it parked — a
+    /// notification that fires into an empty room is how a shutdown deadline
+    /// becomes a hang.
+    close: watch::Sender<bool>,
+    /// The other end's, so either side closing wakes both.
+    peer_close: watch::Receiver<bool>,
+}
+
+impl MemConnection {
+    /// Resolves once either end has closed.
+    async fn until_closed(&self) {
+        let mut mine = self.close.subscribe();
+        let mut theirs = self.peer_close.clone();
+        if *mine.borrow() || *theirs.borrow() {
+            return;
+        }
+        tokio::select! {
+            _ = mine.wait_for(|closed| *closed) => {}
+            _ = theirs.wait_for(|closed| *closed) => {}
+        }
+    }
+}
+
+/// What travels when one end opens a flow: the far end's halves.
+struct MemFlowHandoff {
+    send: Option<MemSendFlow>,
+    recv: MemRecvFlow,
+}
+
+/// The datagram ceiling the in-memory transport reports.
+///
+/// A fixed number, and deliberately one that a caller must still ask for rather
+/// than assume — the real limit is path-dependent, so code that reads this
+/// constant at send time is code that will keep working when it is not.
+const MEM_DATAGRAM_CAPACITY: usize = 1_200;
+
+fn flow_pair() -> (MemSendFlow, MemRecvFlow, MemSendFlow, MemRecvFlow) {
+    let (a_tx, a_rx) = mpsc::unbounded_channel();
+    let (b_tx, b_rx) = mpsc::unbounded_channel();
+    (
+        MemSendFlow {
+            tx: Some(a_tx),
+            pending: None,
+        },
+        MemRecvFlow {
+            rx: b_rx,
+            buffered: Vec::new(),
+            reset: false,
+        },
+        MemSendFlow {
+            tx: Some(b_tx),
+            pending: None,
+        },
+        MemRecvFlow {
+            rx: a_rx,
+            buffered: Vec::new(),
+            reset: false,
+        },
+    )
+}
+
+fn connection_pair(dialer: PeerId, accepter: PeerId, alpn: Alpn) -> (MemConnection, MemConnection) {
+    let (a_open_tx, a_open_rx) = mpsc::unbounded_channel();
+    let (b_open_tx, b_open_rx) = mpsc::unbounded_channel();
+    let (a_dg_tx, a_dg_rx) = mpsc::unbounded_channel();
+    let (b_dg_tx, b_dg_rx) = mpsc::unbounded_channel();
+    let a_close = watch::Sender::new(false);
+    let b_close = watch::Sender::new(false);
+    let a_close_rx = a_close.subscribe();
+    let b_close_rx = b_close.subscribe();
+    (
+        MemConnection {
+            peer: accepter,
+            alpn: alpn.to_vec(),
+            open_tx: b_open_tx,
+            open_rx: TokioMutex::new(a_open_rx),
+            datagram_tx: b_dg_tx,
+            datagram_rx: TokioMutex::new(a_dg_rx),
+            close: a_close,
+            peer_close: b_close_rx,
+        },
+        MemConnection {
+            peer: dialer,
+            alpn: alpn.to_vec(),
+            open_tx: a_open_tx,
+            open_rx: TokioMutex::new(b_open_rx),
+            datagram_tx: a_dg_tx,
+            datagram_rx: TokioMutex::new(b_dg_rx),
+            close: b_close,
+            peer_close: a_close_rx,
+        },
+    )
+}
+
+#[async_trait]
+impl super::Connection for MemConnection {
+    fn peer(&self) -> PeerId {
+        self.peer.clone()
+    }
+
+    fn alpn(&self) -> Vec<u8> {
+        self.alpn.clone()
+    }
+
+    async fn open_bi(&self) -> Result<(Box<dyn SendFlow>, Box<dyn RecvFlow>)> {
+        let (mut mine_send, mine_recv, theirs_send, theirs_recv) = flow_pair();
+        // Deferred until the first write, because that is when a QUIC stream
+        // becomes visible to the peer. Handing it over eagerly would make this
+        // transport *laxer* than the wire, and every test above it would then
+        // pass against a network that does not behave that way.
+        mine_send.pending = Some((
+            self.open_tx.clone(),
+            Box::new(MemFlowHandoff {
+                send: Some(theirs_send),
+                recv: theirs_recv,
+            }),
+        ));
+        Ok((Box::new(mine_send), Box::new(mine_recv)))
+    }
+
+    async fn accept_bi(&self) -> Result<Option<(Box<dyn SendFlow>, Box<dyn RecvFlow>)>> {
+        let mut rx = self.open_rx.lock().await;
+        let next = tokio::select! {
+            item = rx.recv() => item,
+            _ = self.until_closed() => None,
+        };
+        match next {
+            Some(handoff) => {
+                let send = handoff
+                    .send
+                    .ok_or_else(|| anyhow!("peer opened a unidirectional flow"))?;
+                Ok(Some((
+                    Box::new(send) as Box<dyn SendFlow>,
+                    Box::new(handoff.recv) as Box<dyn RecvFlow>,
+                )))
+            }
+            None => Ok(None),
+        }
+    }
+
+    async fn open_uni(&self) -> Result<Box<dyn SendFlow>> {
+        let (mut mine_send, _mine_recv, _theirs_send, theirs_recv) = flow_pair();
+        mine_send.pending = Some((
+            self.open_tx.clone(),
+            Box::new(MemFlowHandoff {
+                send: None,
+                recv: theirs_recv,
+            }),
+        ));
+        Ok(Box::new(mine_send))
+    }
+
+    async fn accept_uni(&self) -> Result<Option<Box<dyn RecvFlow>>> {
+        let mut rx = self.open_rx.lock().await;
+        let next = tokio::select! {
+            item = rx.recv() => item,
+            _ = self.until_closed() => None,
+        };
+        match next {
+            Some(handoff) => Ok(Some(Box::new(handoff.recv) as Box<dyn RecvFlow>)),
+            None => Ok(None),
+        }
+    }
+
+    fn send_datagram(&self, payload: &[u8]) -> Result<()> {
+        if payload.len() > MEM_DATAGRAM_CAPACITY {
+            anyhow::bail!(
+                "datagram of {} bytes exceeds the path capacity of {MEM_DATAGRAM_CAPACITY}",
+                payload.len()
+            );
+        }
+        self.datagram_tx
+            .send(payload.to_vec())
+            .map_err(|_| anyhow!("connection is closed"))
+    }
+
+    async fn read_datagram(&self) -> Result<Option<Vec<u8>>> {
+        let mut rx = self.datagram_rx.lock().await;
+        Ok(tokio::select! {
+            item = rx.recv() => item,
+            _ = self.until_closed() => None,
+        })
+    }
+
+    fn datagram_capacity(&self) -> Option<usize> {
+        Some(MEM_DATAGRAM_CAPACITY)
+    }
+
+    fn close(&self, _code: u32, _reason: &[u8]) {
+        let _ = self.close.send(true);
+    }
+
+    async fn closed(&self) {
+        self.until_closed().await;
+    }
+}
+
+/// What one write put on a flow, or how it ended.
+enum MemFlowItem {
+    Bytes(Vec<u8>),
+    Reset,
+}
+
+struct MemSendFlow {
+    /// `None` after `finish`: dropping the sender is the clean end the peer
+    /// sees, exactly as dropping a framed stream's sender is.
+    tx: Option<mpsc::UnboundedSender<MemFlowItem>>,
+    /// The peer's halves, not yet handed over. Delivered by the first write,
+    /// finish, or reset — see [`Connection::open_bi`](crate::Connection::open_bi).
+    pending: Option<(mpsc::UnboundedSender<MemFlowHandoff>, Box<MemFlowHandoff>)>,
+}
+
+impl MemSendFlow {
+    fn announce(&mut self) -> Result<()> {
+        if let Some((opener, handoff)) = self.pending.take() {
+            opener
+                .send(*handoff)
+                .map_err(|_| anyhow!("connection is closed"))?;
+        }
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl SendFlow for MemSendFlow {
+    async fn write_all(&mut self, bytes: &[u8]) -> Result<()> {
+        self.announce()?;
+        self.tx
+            .as_ref()
+            .ok_or_else(|| anyhow!("flow already finished"))?
+            .send(MemFlowItem::Bytes(bytes.to_vec()))
+            .map_err(|_| anyhow!("peer stopped the flow"))
+    }
+
+    fn finish(&mut self) -> Result<()> {
+        self.announce()?;
+        self.tx = None;
+        Ok(())
+    }
+
+    fn reset(&mut self, _code: u32) {
+        let _ = self.announce();
+        // A reset has to be distinguishable from a finish at the receiver, so
+        // it is an item rather than a drop. Truncation is loud.
+        if let Some(tx) = self.tx.take() {
+            let _ = tx.send(MemFlowItem::Reset);
+        }
+    }
+}
+
+struct MemRecvFlow {
+    rx: mpsc::UnboundedReceiver<MemFlowItem>,
+    /// Bytes read from the channel but not yet handed to the caller. A caller
+    /// asking for fewer bytes than one write produced must not lose the rest.
+    buffered: Vec<u8>,
+    reset: bool,
+}
+
+#[async_trait]
+impl RecvFlow for MemRecvFlow {
+    async fn read_chunk(&mut self, max: usize) -> Result<Option<Vec<u8>>> {
+        if self.reset {
+            anyhow::bail!("flow was reset by the peer");
+        }
+        if self.buffered.is_empty() {
+            match self.rx.recv().await {
+                Some(MemFlowItem::Bytes(bytes)) => self.buffered = bytes,
+                Some(MemFlowItem::Reset) => {
+                    self.reset = true;
+                    anyhow::bail!("flow was reset by the peer");
+                }
+                None => return Ok(None),
+            }
+        }
+        let take = max.min(self.buffered.len());
+        let out: Vec<u8> = self.buffered.drain(..take).collect();
+        Ok(Some(out))
+    }
+
+    fn stop(&mut self, _code: u32) {
+        self.rx.close();
     }
 }
 
@@ -219,6 +533,35 @@ impl Transport for MemTransport {
 
     async fn accept(&self) -> Option<Incoming> {
         self.incoming.lock().await.recv().await
+    }
+
+    async fn connect_session(
+        &self,
+        peer: PeerId,
+        alpn: Alpn,
+    ) -> Result<Box<dyn super::Connection>> {
+        let inbox = self
+            .net
+            .0
+            .lock()
+            .unwrap()
+            .sessions
+            .get(&peer)
+            .cloned()
+            .ok_or_else(|| anyhow!("no such peer on the in-memory network"))?;
+        let (mine, theirs) = connection_pair(self.id.clone(), peer, alpn);
+        inbox
+            .send(IncomingConnection {
+                from: self.id.clone(),
+                alpn: alpn.to_vec(),
+                connection: Box::new(theirs),
+            })
+            .map_err(|_| anyhow!("peer is gone"))?;
+        Ok(Box::new(mine))
+    }
+
+    async fn accept_connection(&self) -> Option<IncomingConnection> {
+        self.incoming_sessions.lock().await.recv().await
     }
 
     fn advertised_addrs(&self) -> Vec<SocketAddr> {
