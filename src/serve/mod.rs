@@ -45,8 +45,6 @@ use axum::{
 };
 use serde::Deserialize;
 use tokio::net::TcpListener;
-use tokio_stream::wrappers::{errors::BroadcastStreamRecvError, BroadcastStream};
-use tokio_stream::StreamExt;
 
 use crate::control::{ErrorKind, Request};
 use crate::daemon::{LaitDaemonClient, OrbitDirectory, OrbitDoorbell, StationIdentity};
@@ -77,6 +75,11 @@ struct App {
     daemon: LaitDaemonClient,
     doorbells: tokio::sync::broadcast::Sender<ViewerEvent>,
     cookie: String,
+    /// Latched when this server begins shutting down.
+    ///
+    /// On `App` rather than passed down, because every long-lived response has
+    /// to see it and they are constructed by handlers that share nothing else.
+    stop: tokio::sync::watch::Sender<bool>,
 }
 
 #[derive(Clone)]
@@ -122,14 +125,26 @@ pub async fn run(port: u16, open: bool, json: bool) -> Result<()> {
         .context("start Lait daemon")?;
     let daemon = LaitDaemonClient::current()?;
     let (doorbells, _) = tokio::sync::broadcast::channel(256);
+    // Created before anything that has to watch it. Every long-lived response
+    // and every background task selects on this one channel.
+    let (stop, _) = tokio::sync::watch::channel(false);
     let app = Arc::new(App {
         guard: Guard::new(token.clone(), bound.port()),
         directory: OrbitDirectory::new(identity, agents_base, self_contained),
         daemon: daemon.clone(),
         doorbells: doorbells.clone(),
         cookie: cookie_name(bound.port()),
+        stop: stop.clone(),
     });
-    let event_pump = tokio::spawn(pump_daemon_events(daemon, doorbells));
+    // The signal is fired before `shutdown_signal()` reaches axum, not after.
+    // Graceful shutdown waits on in-flight responses, and this server has two
+    // that never complete on their own: an SSE stream whose item type is
+    // `Infallible` and whose broadcast receiver only ends when every sender
+    // drops, and (from the bridge onward) a WebSocket. Handing axum a shutdown
+    // future while those are open is a wait with no end, so the signal has to
+    // reach *them* first.
+    let mut tasks = tokio::task::JoinSet::new();
+    tasks.spawn(pump_daemon_events(daemon, doorbells, stop.subscribe()));
 
     let url = format!("http://127.0.0.1:{}/?token={}", bound.port(), token);
     if json {
@@ -150,42 +165,89 @@ pub async fn run(port: u16, open: bool, json: bool) -> Result<()> {
     }
 
     let serve_result = axum::serve(listener, router(app))
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown({
+            let stop = stop.clone();
+            async move {
+                shutdown_signal().await;
+                // Every long-lived task selects on this. Sending before axum
+                // begins draining is what lets the drain finish at all.
+                let _ = stop.send(true);
+            }
+        })
         .await
         .context("serve");
-    event_pump.abort();
-    let _ = event_pump.await;
+    // Joined rather than aborted. An abort drops a task at whatever await it
+    // happened to be sitting on, which for the pump is in the middle of a
+    // daemon subscription; joining after the signal lets it return on its own
+    // and makes "did it stop" a fact rather than a hope.
+    let _ = stop.send(true);
+    tasks.shutdown().await;
     serve_result
 }
+
+/// The shortest and longest waits between reconnection attempts.
+///
+/// Bounded at both ends. Half a second is fast enough that a daemon restart
+/// looks instant; thirty seconds is where an unreachable daemon stops costing
+/// anything. The old fixed half-second was the problem: an unreachable daemon
+/// emitted `Lagged` twice a second forever, and every one of those costs the
+/// viewer a full rebaseline.
+const PUMP_BACKOFF_FLOOR: std::time::Duration = std::time::Duration::from_millis(500);
+const PUMP_BACKOFF_CEILING: std::time::Duration = std::time::Duration::from_secs(30);
 
 async fn pump_daemon_events(
     daemon: LaitDaemonClient,
     doorbells: tokio::sync::broadcast::Sender<ViewerEvent>,
+    mut stop: tokio::sync::watch::Receiver<bool>,
 ) {
+    let mut backoff = PUMP_BACKOFF_FLOOR;
+    // A run of failures is one event, not one per attempt. The viewer's response
+    // to `Lagged` is to re-read everything, so repeating it while the daemon is
+    // still down is a rebaseline storm that tells the user nothing new. The flag
+    // clears on the first success, so the *next* outage is announced again.
+    let mut announced = false;
     loop {
+        if *stop.borrow() {
+            return;
+        }
         match daemon.subscribe_catalog().await {
-            Ok(mut subscription) => loop {
-                match subscription.next().await {
-                    Ok(Some(doorbell)) => {
-                        let _ = doorbells.send(ViewerEvent::Doorbell(doorbell));
-                    }
-                    Ok(None) => {
-                        let _ = doorbells.send(ViewerEvent::Lagged);
-                        break;
-                    }
-                    Err(error) => {
-                        tracing::warn!(%error, "Lait daemon event stream ended");
-                        let _ = doorbells.send(ViewerEvent::Lagged);
-                        break;
+            Ok(mut subscription) => {
+                backoff = PUMP_BACKOFF_FLOOR;
+                announced = false;
+                loop {
+                    let next = tokio::select! {
+                        biased;
+                        _ = stop.changed() => return,
+                        next = subscription.next() => next,
+                    };
+                    match next {
+                        Ok(Some(doorbell)) => {
+                            let _ = doorbells.send(ViewerEvent::Doorbell(doorbell));
+                        }
+                        Ok(None) => break,
+                        Err(error) => {
+                            tracing::warn!(%error, "Lait daemon event stream ended");
+                            break;
+                        }
                     }
                 }
-            },
-            Err(error) => {
-                tracing::debug!(%error, "Lait daemon event endpoint is unavailable");
+                // The stream ending IS news the viewer has to act on, whatever
+                // happens next: frames were missed, so its projection is stale.
                 let _ = doorbells.send(ViewerEvent::Lagged);
             }
+            Err(error) => {
+                tracing::debug!(%error, "Lait daemon event endpoint is unavailable");
+                if !announced {
+                    announced = true;
+                    let _ = doorbells.send(ViewerEvent::Lagged);
+                }
+            }
         }
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        tokio::select! {
+            _ = stop.changed() => return,
+            _ = tokio::time::sleep(backoff) => {}
+        }
+        backoff = (backoff * 2).min(PUMP_BACKOFF_CEILING);
     }
 }
 
@@ -215,13 +277,50 @@ async fn shutdown_signal() {
     ctrl_c.await;
 }
 
+/// Every path this server answers, and how to reach it.
+///
+/// A list rather than a sequence of `.route` calls, because the property that
+/// matters is not "these paths exist" but "no path escapes the gate", and
+/// `Router::layer` wraps only what precedes it. A route registered after the
+/// layer ships with no origin check and no token check, and nothing about the
+/// code looks wrong.
+///
+/// Sourcing the router from this list is what makes the guarantee checkable: a
+/// test can walk the same list, and a route added anywhere else is a route the
+/// test never sees — which is the failure it is supposed to catch.
+const ROUTES: &[(&str, Method)] = &[
+    ("/", Method::Get),
+    ("/api/spaces", Method::Get),
+    ("/api/spaces/{id}/rpc", Method::Post),
+    ("/api/spaces/{id}/worlds/{world}/rpc", Method::Post),
+    ("/api/events", Method::Get),
+];
+
+/// Which verb a registered path answers. Two, because that is all this surface
+/// uses; a third belongs here rather than in a special case at the call site.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Method {
+    Get,
+    Post,
+}
+
+fn handler(path: &str) -> axum::routing::MethodRouter<Arc<App>> {
+    match path {
+        "/" => get(index),
+        "/api/spaces" => get(list_spaces),
+        "/api/spaces/{id}/rpc" => post(rpc),
+        "/api/spaces/{id}/worlds/{world}/rpc" => post(world_rpc),
+        "/api/events" => get(events),
+        other => unreachable!("{other} is in ROUTES with no handler"),
+    }
+}
+
 fn router(app: Arc<App>) -> Router {
-    Router::new()
-        .route("/", get(index))
-        .route("/api/spaces", get(list_spaces))
-        .route("/api/spaces/{id}/rpc", post(rpc))
-        .route("/api/spaces/{id}/worlds/{world}/rpc", post(world_rpc))
-        .route("/api/events", get(events))
+    let mut router = Router::new();
+    for (path, _) in ROUTES {
+        router = router.route(path, handler(path));
+    }
+    router
         // Everything else is the client: a real asset, or the SPA entry so the
         // app can resolve its own routes. Registered last so it can never shadow
         // `/api`, and inside the gate like everything else — the bundle is not
@@ -591,22 +690,63 @@ async fn rpc(
 async fn events(
     State(app): State<Arc<App>>,
 ) -> Sse<impl tokio_stream::Stream<Item = Result<Event, std::convert::Infallible>>> {
-    let stream = BroadcastStream::new(app.doorbells.subscribe()).map(|r| {
-        Ok(match r {
-            Ok(ViewerEvent::Doorbell(sd)) => Event::default()
-                .event("doorbell")
-                .json_data(sd)
-                .unwrap_or_else(|_| Event::default().event("lagged").data("encode")),
-            Ok(ViewerEvent::Lagged) => Event::default().event("lagged").data("daemon"),
-            Err(BroadcastStreamRecvError::Lagged(n)) => {
-                Event::default().event("lagged").data(n.to_string())
+    // The stream that ends when told to.
+    //
+    // A `BroadcastStream` will not: it yields `None` only when every sender has
+    // dropped, and two outlive this handler — the one on `App` and the one the
+    // pump holds. The item type is `Infallible`, so the body cannot fail out
+    // either. Handed straight to `Sse`, an open SSE response is something
+    // `with_graceful_shutdown` waits on forever.
+    //
+    // So the broadcast is pumped into a channel whose sender lives on a task
+    // that selects on the stop signal. When that task returns, the sender drops
+    // and the response body completes — termination by construction rather than
+    // by an adapter nobody can see from here.
+    let (tx, rx) = tokio::sync::mpsc::channel(EVENT_QUEUE);
+    let mut doorbells = app.doorbells.subscribe();
+    let mut stop = app.stop.subscribe();
+    tokio::spawn(async move {
+        if *stop.borrow_and_update() {
+            return;
+        }
+        loop {
+            let received = tokio::select! {
+                biased;
+                _ = stop.changed() => return,
+                received = doorbells.recv() => received,
+            };
+            let event = match received {
+                Ok(ViewerEvent::Doorbell(sd)) => Event::default()
+                    .event("doorbell")
+                    .json_data(sd)
+                    .unwrap_or_else(|_| Event::default().event("lagged").data("encode")),
+                Ok(ViewerEvent::Lagged) => Event::default().event("lagged").data("daemon"),
+                // Surfaced rather than hidden: the client's response is the same
+                // rebaseline it already performs for a reset or an epoch change,
+                // so dropping frames under load is recoverable by construction.
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    Event::default().event("lagged").data(n.to_string())
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+            };
+            // A full queue means this client is not reading. Sending blocks
+            // rather than dropping, because every frame is a dirty flag the
+            // viewer needs; the client going away closes the channel and ends
+            // the task, which is the only way out that is not a leak.
+            if tx.send(Ok(event)).await.is_err() {
+                return;
             }
-        })
+        }
     });
     // Keep-alive so an idle space (no doorbells for minutes) doesn't look like a
     // dead connection to an intermediary or to the browser's own reconnect logic.
-    Sse::new(stream).keep_alive(KeepAlive::default())
+    Sse::new(tokio_stream::wrappers::ReceiverStream::new(rx)).keep_alive(KeepAlive::default())
 }
+
+/// How many doorbells one browser may fall behind before its own reader becomes
+/// the thing that blocks. Small: the frames are flags, and a client this far
+/// behind is about to rebaseline anyway.
+const EVENT_QUEUE: usize = 64;
 
 /// Best-effort browser launch. Failure is not an error: the URL is already on
 /// stdout, which is the contract; opening a window is a courtesy.
@@ -645,6 +785,7 @@ mod tests {
             daemon: LaitDaemonClient::at(nowhere),
             doorbells: tokio::sync::broadcast::channel(1).0,
             cookie: cookie_name(7717),
+            stop: tokio::sync::watch::channel(false).0,
         }))
     }
 
@@ -857,5 +998,173 @@ mod tests {
         assert_eq!(a.len(), 64);
         assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
         assert_ne!(a, b, "a per-run token must not be deterministic");
+    }
+}
+
+#[cfg(test)]
+mod gate_coverage {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::Request as HttpRequest;
+    use tower::ServiceExt;
+
+    const TOKEN: &str = "9f8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c5b4a39281706f5e4d3c2b1a0";
+
+    fn app() -> Router {
+        let nowhere = std::path::PathBuf::from("/nonexistent-for-tests");
+        router(Arc::new(App {
+            guard: Guard::new(TOKEN.into(), 7717),
+            directory: OrbitDirectory::new(nowhere.clone(), nowhere.clone(), true),
+            daemon: LaitDaemonClient::at(nowhere),
+            doorbells: tokio::sync::broadcast::channel(1).0,
+            cookie: cookie_name(7717),
+            stop: tokio::sync::watch::channel(false).0,
+        }))
+    }
+
+    /// A concrete URI for a registered path, with the placeholders filled in.
+    ///
+    /// The gate runs before routing resolves parameters, so any value does — but
+    /// it has to be *some* value, or axum answers 404 from outside the layer and
+    /// the row proves nothing.
+    fn concrete(path: &str) -> String {
+        path.replace("{id}", "ws_x")
+            .replace("{world}", "com.example.w")
+    }
+
+    fn request(method: Method, uri: &str, headers: &[(&str, &str)]) -> HttpRequest<Body> {
+        let mut builder = HttpRequest::builder().uri(uri).method(match method {
+            Method::Get => "GET",
+            Method::Post => "POST",
+        });
+        for (k, v) in headers {
+            builder = builder.header(*k, *v);
+        }
+        builder.body(Body::empty()).expect("request")
+    }
+
+    #[tokio::test]
+    async fn every_registered_route_is_behind_the_gate() {
+        // The point is not that these paths refuse — it is that the list the
+        // router is built from is the list this walks. `Router::layer` wraps only
+        // what precedes it, so a route registered after the layer ships with no
+        // origin check and no token check and looks entirely normal. A test that
+        // hand-copied the paths would stay green through exactly that mistake.
+        assert!(!ROUTES.is_empty());
+        for (path, method) in ROUTES {
+            let uri = concrete(path);
+
+            let unauthenticated = app()
+                .oneshot(request(*method, &uri, &[("host", "127.0.0.1:7717")]))
+                .await
+                .expect("response");
+            assert_eq!(
+                unauthenticated.status(),
+                StatusCode::UNAUTHORIZED,
+                "{path} answered without a credential"
+            );
+
+            let rebound = app()
+                .oneshot(request(
+                    *method,
+                    &uri,
+                    &[
+                        ("host", "evil.example.com"),
+                        ("authorization", &format!("Bearer {TOKEN}")),
+                    ],
+                ))
+                .await
+                .expect("response");
+            assert_eq!(
+                rebound.status(),
+                StatusCode::FORBIDDEN,
+                "{path} served a rebound Host"
+            );
+
+            // And the credential does reach it — otherwise the two rows above
+            // would pass just as well against a path that does not exist.
+            let admitted = app()
+                .oneshot(request(
+                    *method,
+                    &uri,
+                    &[
+                        ("host", "127.0.0.1:7717"),
+                        ("authorization", &format!("Bearer {TOKEN}")),
+                    ],
+                ))
+                .await
+                .expect("response");
+            assert_ne!(admitted.status(), StatusCode::UNAUTHORIZED, "{path}");
+            assert_ne!(admitted.status(), StatusCode::FORBIDDEN, "{path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_open_event_stream_ends_when_the_server_is_told_to_stop() {
+        // The regression this exists for: `with_graceful_shutdown` waits on
+        // in-flight responses, and an SSE body built straight off a broadcast
+        // has no termination condition — its receiver ends only when every
+        // sender drops, and two outlive the handler. A viewer left open was
+        // therefore enough to make shutdown never return.
+        let nowhere = std::path::PathBuf::from("/nonexistent-for-tests");
+        let stop = tokio::sync::watch::channel(false).0;
+        // Both senders are held here for the whole test, because a running
+        // server holds them for its whole life. Letting the router drop them is
+        // a second way for the stream to end, and it is the uninteresting one —
+        // it would pass whether or not the stop signal works.
+        let doorbells = tokio::sync::broadcast::channel(4).0;
+        let app = Arc::new(App {
+            guard: Guard::new(TOKEN.into(), 7717),
+            directory: OrbitDirectory::new(nowhere.clone(), nowhere.clone(), true),
+            daemon: LaitDaemonClient::at(nowhere),
+            doorbells: doorbells.clone(),
+            cookie: cookie_name(7717),
+            stop: stop.clone(),
+        });
+        let response = router(app.clone())
+            .oneshot(request(
+                Method::Get,
+                "/api/events",
+                &[
+                    ("host", "127.0.0.1:7717"),
+                    ("authorization", &format!("Bearer {TOKEN}")),
+                ],
+            ))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Draining the body is what a browser does. It must not finish yet.
+        let body = response.into_body();
+        let mut drained = tokio::spawn(async move { axum::body::to_bytes(body, 64 * 1024).await });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(150), &mut drained)
+                .await
+                .is_err(),
+            "the stream ended before anything asked it to"
+        );
+
+        let _ = stop.send(true);
+        let ended = tokio::time::timeout(std::time::Duration::from_secs(5), drained)
+            .await
+            .expect("the event stream must end inside the shutdown deadline");
+        ended.expect("join").expect("body");
+        drop((app, doorbells));
+    }
+
+    #[tokio::test]
+    async fn the_fallback_is_gated_too() {
+        // Not in ROUTES, because it is not a route — but it is inside the layer,
+        // and an unauthenticated bundle that 401s on every fetch afterwards is a
+        // worse experience than an honest refusal.
+        let response = app()
+            .oneshot(request(
+                Method::Get,
+                "/app.js",
+                &[("host", "127.0.0.1:7717")],
+            ))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 }

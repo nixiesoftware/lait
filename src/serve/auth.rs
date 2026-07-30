@@ -132,6 +132,37 @@ impl Guard {
         Ok(())
     }
 
+    /// The stricter Origin check a WebSocket upgrade needs.
+    ///
+    /// [`Self::check_origin`] admits an absent Origin, and it is right to: a
+    /// `curl` or an MCP client sends none, and refusing them would make the
+    /// surface browser-only. An upgrade is the case where that reasoning
+    /// inverts. A WebSocket handshake is **exempt from CORS** — the browser
+    /// sends it cross-origin without a preflight and hands over our cookie —
+    /// so Origin is the whole defence, and an absent one is not a non-browser
+    /// client but an attacker who simply did not send it.
+    ///
+    /// Required, and required to be one of ours.
+    pub fn check_upgrade_origin(
+        &self,
+        host: Option<&str>,
+        origin: Option<&str>,
+    ) -> Result<(), Refusal> {
+        self.check_origin(host, origin)?;
+        let Some(origin) = origin else {
+            return Err(Refusal::ForeignOrigin);
+        };
+        if self
+            .authorities
+            .iter()
+            .any(|a| origin == format!("http://{a}"))
+        {
+            Ok(())
+        } else {
+            Err(Refusal::ForeignOrigin)
+        }
+    }
+
     /// Check a presented credential against this run's token.
     ///
     /// Compared in constant time. The window is admittedly narrow — an attacker
@@ -278,5 +309,76 @@ mod tests {
         assert!(ct_eq(b"abc", b"abc"));
         assert!(!ct_eq(b"abc", b"abd"));
         assert!(!ct_eq(b"abc", b"ab"));
+    }
+}
+
+#[cfg(test)]
+mod upgrade_origin {
+    use super::*;
+
+    const PORT: u16 = 7717;
+
+    fn guard() -> Guard {
+        Guard::new("s3cret-token".into(), PORT)
+    }
+
+    #[test]
+    fn an_upgrade_without_an_origin_is_refused() {
+        // The one case where absent-is-fine inverts. A WebSocket handshake is
+        // exempt from CORS: the browser sends it cross-origin with no preflight
+        // and attaches our cookie, so Origin is the whole defence and an absent
+        // one is not a `curl` — it is an attacker who did not send it.
+        assert!(guard().check_origin(Some("127.0.0.1:7717"), None).is_ok());
+        assert_eq!(
+            guard().check_upgrade_origin(Some("127.0.0.1:7717"), None),
+            Err(Refusal::ForeignOrigin),
+        );
+    }
+
+    #[test]
+    fn a_foreign_origin_is_refused_however_the_host_reads() {
+        for host in ["127.0.0.1:7717", "localhost:7717", "[::1]:7717"] {
+            assert_eq!(
+                guard().check_upgrade_origin(Some(host), Some("http://evil.example.com")),
+                Err(Refusal::ForeignOrigin),
+                "{host}"
+            );
+        }
+    }
+
+    #[test]
+    fn each_loopback_spelling_upgrades() {
+        for host in ["127.0.0.1:7717", "localhost:7717", "[::1]:7717"] {
+            assert!(
+                guard()
+                    .check_upgrade_origin(Some(host), Some(&format!("http://{host}")))
+                    .is_ok(),
+                "{host}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_host_check_still_runs_first() {
+        // An upgrade to a rebound Host is refused as a rebind, not as an origin
+        // problem — the ordering the shared gate already establishes, kept.
+        assert_eq!(
+            guard().check_upgrade_origin(Some("evil.example.com"), Some("http://evil.example.com")),
+            Err(Refusal::ForeignHost),
+        );
+        assert_eq!(
+            guard().check_upgrade_origin(None, Some("http://127.0.0.1:7717")),
+            Err(Refusal::MissingHost),
+        );
+    }
+
+    #[test]
+    fn https_is_not_one_of_ours() {
+        // The authorities are compared scheme-and-all. A page served over TLS
+        // from a loopback name it does not own is still not us.
+        assert_eq!(
+            guard().check_upgrade_origin(Some("127.0.0.1:7717"), Some("https://127.0.0.1:7717")),
+            Err(Refusal::ForeignOrigin),
+        );
     }
 }
