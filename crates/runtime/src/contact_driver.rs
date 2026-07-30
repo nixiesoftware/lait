@@ -629,10 +629,17 @@ async fn initiate(
         .map_err(|e: replica::ReplicaCommitError| ContactError::Transfer(e.to_string()))?;
     let holdings_root = published.map(|r| r.hash).unwrap_or([0u8; 32]);
 
-    // The declaration is the fallback. It costs O(heads) to send, so it is only
-    // worth sending when the roots already say the catalogs differ — and when
-    // they agree, the accepter can stop without either side enumerating
-    // anything, which is the steady state.
+    // The declaration is sent whenever this replica holds anything, and equal
+    // roots are not a reason to skip it. A root proves equal *catalogs*; the
+    // declaration deliberately omits heads held opaquely, so at equal roots it
+    // is precisely the list of material this replica can name and cannot read.
+    // Skipping it there is what would break a peer whose keys arrived after the
+    // Bodies did.
+    //
+    // What equal roots could still save is the O(catalog) manifest
+    // advertisement, which is served unconditionally today. Collecting that
+    // needs a receive path that can adopt payloads against a root it already
+    // holds rather than one just offered — the F4 remainder.
     let held = ctx
         .core
         .with_replica(|replica| Ok(replica.head_commitments()))
@@ -774,10 +781,12 @@ async fn serve_contact(
     // digest/count mismatch is a protocol violation, and a wrong (or lying)
     // declaration can only starve the initiator — the transfer we build from
     // it still advertises the FULL manifest, and adoption is judged whole.
-    // Equal catalog roots prove equal catalogs, because the encoding is
-    // canonical — so a converged peer is answered from 40 signed bytes and
-    // nothing is streamed in either direction. This is the case that happens
-    // constantly, and it used to cost a declaration naming every head.
+
+    // A catalog root with an empty declaration is *not* a contradiction, which
+    // is worth stating because it looks like one. The declaration omits heads
+    // held opaquely, so a replica that holds a Space entirely as material it
+    // cannot read publishes a root and declares nothing — and it is exactly
+    // that peer the full advertisement has to reach.
 
     let mut held: std::collections::BTreeSet<(replica::BodyKey, [u8; 32])> =
         std::collections::BTreeSet::new();

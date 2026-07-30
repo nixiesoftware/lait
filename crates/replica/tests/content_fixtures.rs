@@ -511,3 +511,27 @@ fn the_ingest_hold_and_the_content_hold_hand_over() {
     cache.sweep().unwrap();
     assert!(!cache.is_resident(&out.leases[0].entry));
 }
+
+#[test]
+fn a_proof_of_the_wrong_depth_is_refused() {
+    // A path longer than the geometry produces would need a collision to
+    // reconstruct the right root, so this is not what keeps content honest. It
+    // is what keeps the proof shape tied to *this* descriptor rather than to a
+    // global ceiling — a check the descriptor can make and a global bound
+    // cannot.
+    let sealed = seal_content(&space(), &key(), [9u8; 16], &filler(1, 300_000)).expect("seal");
+    assert!(sealed.descriptor.chunk_count >= 2);
+
+    let mut proof = sealed.proofs[0].clone();
+    let ciphertext = &sealed.ciphertexts[0];
+    assert!(sealed.descriptor.verify_chunk(&proof, ciphertext).is_ok());
+
+    proof.path.push(ProofStep {
+        sibling: [0u8; 32],
+        sibling_is_left: false,
+    });
+    assert_eq!(
+        sealed.descriptor.verify_chunk(&proof, ciphertext),
+        Err(ContentError::ProofMismatch)
+    );
+}

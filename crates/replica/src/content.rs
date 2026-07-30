@@ -340,11 +340,39 @@ impl ContentDescriptor {
         if *blake3::hash(ciphertext).as_bytes() != proof.leaf.ciphertext_hash {
             return Err(ContentError::ChunkMismatch);
         }
+        // The path has to be the length this content's geometry produces. A
+        // longer one reconstructing the right root would take a collision, so
+        // this is not the load-bearing check — it is the one that keeps the
+        // proof shape tied to the descriptor rather than to a global ceiling,
+        // and it costs an integer comparison.
+        if proof.path.len() != proof_depth(self.chunk_count, proof.leaf.chunk_index) {
+            return Err(ContentError::ProofMismatch);
+        }
         if proof.root()? != self.ciphertext_merkle_root {
             return Err(ContentError::ProofMismatch);
         }
         Ok(())
     }
+}
+
+/// How many path steps prove one leaf, under the promoting reduction
+/// [`merkle_root`] uses. A promoted node has no sibling at that level, so the
+/// depth depends on the leaf's position and not only on the count.
+fn proof_depth(chunk_count: u32, chunk_index: u32) -> usize {
+    let mut width = chunk_count.max(1) as u64;
+    let mut position = chunk_index as u64;
+    let mut steps = 0;
+    while width > 1 {
+        // An odd last node is carried up rather than paired, so it gains no
+        // step at this level.
+        let promoted = width % 2 == 1 && position == width - 1;
+        if !promoted {
+            steps += 1;
+        }
+        position /= 2;
+        width = width.div_ceil(2);
+    }
+    steps
 }
 
 /// How many chunks a plaintext of this length occupies. Zero-length content is
