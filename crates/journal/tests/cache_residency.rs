@@ -413,3 +413,66 @@ fn a_transient_read_failure_does_not_delete_the_entry() {
     assert!(matches!(cache.read(&entry), Err(CacheError::Durability(_))));
     assert!(path.exists(), "a transient failure must not delete");
 }
+
+#[test]
+fn finishing_one_staged_part_leaves_the_others_alone() {
+    // `discard_staged` is prefix-matched over the whole operation, which is
+    // right for a cancelled transfer and catastrophic for a finished chunk: a
+    // transfer that installed its third chunk and then discarded the operation
+    // would delete the partials for every other chunk still in flight.
+    let cache = ResidentCache::open(temp_root("staged-part"), 1 << 20).unwrap();
+    let op = operation(3);
+    for part in 0..4u32 {
+        cache
+            .append_staged(&op, part, 0, &vec![part as u8; 100])
+            .unwrap();
+    }
+    assert_eq!(cache.staged_bytes(), 400);
+    assert_eq!(cache.staged_len(&op, 2), 100);
+
+    cache.discard_staged_part(&op, 2).unwrap();
+    assert_eq!(cache.staged_len(&op, 2), 0);
+    assert_eq!(cache.staged_bytes(), 300, "only part 2 went");
+    for part in [0u32, 1, 3] {
+        assert_eq!(cache.read_staged(&op, part).unwrap().len(), 100);
+    }
+
+    // Discarding a part that is already gone is not an error — a retry after a
+    // crash between install and discard must be able to finish.
+    cache.discard_staged_part(&op, 2).unwrap();
+
+    // And the whole-operation door still works.
+    cache.discard_staged(&op).unwrap();
+    assert_eq!(cache.staged_bytes(), 0);
+}
+
+#[test]
+fn a_dead_operations_lease_is_released_and_a_content_hold_is_not() {
+    // An operation lease outlives the process that took it, which is what lets
+    // an interrupted transfer resume. The cost is that a crashed transfer holds
+    // its chunks forever unless someone says the operation is over — and only
+    // the caller knows which are still live.
+    let cache = ResidentCache::open(temp_root("sweep-leases"), 1 << 20).unwrap();
+    let bytes = b"ciphertext".to_vec();
+    let entry = address(&bytes);
+    cache.install(&entry, &bytes, b"proof").unwrap();
+    cache.lease(&Lease::operation(operation(1), entry)).unwrap();
+    cache.lease(&Lease::operation(operation(2), entry)).unwrap();
+    cache.lease(&Lease::content([9u8; 16], entry)).unwrap();
+
+    let live = BTreeSet::from([operation(1)]);
+    assert_eq!(
+        cache.sweep_leases(&live).unwrap(),
+        1,
+        "only operation 2 was dead"
+    );
+    assert!(cache.is_held(&entry).unwrap());
+
+    assert_eq!(cache.sweep_leases(&BTreeSet::new()).unwrap(), 1);
+    assert!(
+        cache.is_held(&entry).unwrap(),
+        "a content hold belongs to committed content, and no restart makes it stale"
+    );
+    cache.release_content(&[9u8; 16]).unwrap();
+    assert!(!cache.is_held(&entry).unwrap());
+}

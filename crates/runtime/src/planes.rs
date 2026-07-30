@@ -391,6 +391,9 @@ impl FreightFrame {
 
 /// Maximum chunk indices one `Have`/`Available` may name.
 pub const MAX_WANTED_CHUNKS: usize = 4096;
-/// Maximum encoded proof sidecar. A path is at most 22 siblings at the frozen
-/// geometry, so this is generous by design and still bounded.
-pub const MAX_PROOF_BYTES: usize = 4 * 1024;
+/// Maximum encoded proof sidecar.
+///
+/// The same number the resident cache accepts, and deliberately not a second
+/// one: a sidecar that arrives inside the wire bound and then cannot be stored
+/// would be a transfer that verifies and fails.
+pub const MAX_PROOF_BYTES: usize = replica::content::MAX_PROOF_BYTES;

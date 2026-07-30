@@ -671,7 +671,7 @@ mod tests {
     use crate::net::Network;
     use crate::spaces::{Origin, SpaceEntry};
     use crate::transport::mem::MemNet;
-    use crate::transport::{Alpn, Transport};
+    use crate::transport::Transport;
 
     static HOME_COUNTER: AtomicUsize = AtomicUsize::new(0);
 

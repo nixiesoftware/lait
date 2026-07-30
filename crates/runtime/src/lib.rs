@@ -30,6 +30,7 @@
 
 pub mod action;
 pub mod beacon;
+pub mod budget;
 pub mod contact;
 pub mod contact_driver;
 pub mod content_host;

@@ -18,7 +18,7 @@ use lait::daemon::OrbitAddress;
 use lait::net::Network;
 use lait::orbital::run_space_bridge_with;
 use lait::transport::mem::MemNet;
-use lait::transport::{Alpn, Transport, TransportFactory};
+use lait::transport::{Transport, TransportFactory};
 
 const FOUNDER_SEED: [u8; 32] = [221u8; 32];
 const JOINER_SEED: [u8; 32] = [222u8; 32];

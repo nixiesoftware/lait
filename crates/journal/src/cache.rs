@@ -489,8 +489,49 @@ impl ResidentCache {
         Ok(current + bytes.len() as u64)
     }
 
+    /// How much one staging slot already holds. What a resumed transfer asks
+    /// before it decides where to continue from.
+    pub fn staged_len(&self, operation: &[u8; 16], part: u32) -> u64 {
+        std::fs::metadata(self.stage(operation, part))
+            .map(|m| m.len())
+            .unwrap_or(0)
+    }
+
+    /// Total bytes across every staging slot.
+    ///
+    /// Staged bytes are real disk that the quota does not see: an entry is not
+    /// resident until it installs, so a fleet of half-finished transfers can
+    /// fill a disk while the cache reports itself comfortably inside its
+    /// ceiling. A caller that stages needs its own budget, and this is what it
+    /// checks against.
+    pub fn staged_bytes(&self) -> u64 {
+        let mut total = 0;
+        if let Ok(entries) = std::fs::read_dir(self.root.join(STAGING_DIR)) {
+            for entry in entries.flatten() {
+                if let Ok(meta) = entry.metadata() {
+                    total += meta.len();
+                }
+            }
+        }
+        total
+    }
+
     pub fn read_staged(&self, operation: &[u8; 16], part: u32) -> Result<Vec<u8>, CacheError> {
         std::fs::read(self.stage(operation, part)).map_err(|_| CacheError::NotResident)
+    }
+
+    /// Discard one staging slot.
+    ///
+    /// Distinct from [`Self::discard_staged`], which is prefix-matched over the
+    /// whole operation. A transfer that installed its third chunk and then
+    /// discarded *the operation* would delete the partials for every other
+    /// chunk still in flight — so finishing one part has to say so.
+    pub fn discard_staged_part(&self, operation: &[u8; 16], part: u32) -> Result<(), CacheError> {
+        match std::fs::remove_file(self.stage(operation, part)) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(CacheError::Durability(format!("discard staged part: {e}"))),
+        }
     }
 
     /// Discard everything an operation staged. A cancelled ingest or transfer
@@ -621,6 +662,36 @@ impl ResidentCache {
         }
         report.over_quota_bytes = total.saturating_sub(self.quota_bytes);
         Ok(report)
+    }
+
+    /// Release every operation lease no live operation holds.
+    ///
+    /// An operation lease outlives the process that took it — that is the point
+    /// of deriving the tag name rather than storing a side table, and it is
+    /// what lets an interrupted transfer be resumed rather than restarted. The
+    /// cost is that a transfer killed by a crash holds its chunks resident
+    /// forever unless someone says the operation is over, and only the caller
+    /// knows which operations are still live.
+    ///
+    /// Content holds are untouched: they belong to committed content, not to an
+    /// operation, and no restart makes them stale.
+    pub fn sweep_leases(&self, live: &BTreeSet<[u8; 16]>) -> Result<u64, CacheError> {
+        let mut released = 0;
+        let dir = self.root.join(TAGS_DIR);
+        let entries = std::fs::read_dir(&dir)
+            .map_err(|e| CacheError::Durability(format!("tags dir: {e}")))?;
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let Some(lease) = Lease::parse(&name) else {
+                continue;
+            };
+            if lease.kind == LeaseKind::Operation && !live.contains(&lease.holder) {
+                let _ = std::fs::remove_file(entry.path());
+                released += 1;
+            }
+        }
+        let _ = sync_dir(&dir);
+        Ok(released)
     }
 
     /// Discard staging older than the caller's cutoff set — the caller decides

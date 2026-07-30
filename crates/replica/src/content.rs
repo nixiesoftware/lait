@@ -46,6 +46,15 @@ pub const MAX_CONTENT_LEN: u64 = 1024 * 1024 * 1024 * 1024;
 /// is 2^22 chunks, so a path is at most 22 siblings.
 pub const MAX_PROOF_DEPTH: u8 = 22;
 
+/// Maximum encoded proof sidecar.
+///
+/// A path is at most [`MAX_PROOF_DEPTH`] siblings of 32 bytes each, so a legal
+/// proof is well under a kilobyte and this is generous by design: it bounds a
+/// hostile encoding rather than a real one. It is also the number the wire
+/// uses — a sidecar that arrives inside a wire bound and then cannot be stored
+/// would be a transfer that verifies and fails.
+pub const MAX_PROOF_BYTES: usize = 4 * 1024;
+
 /// The maximum number of chunks any content may declare.
 pub const MAX_CHUNK_COUNT: u32 = (MAX_CONTENT_LEN / CHUNK_PLAINTEXT_LEN as u64) as u32;
 
@@ -235,6 +244,32 @@ pub fn chunk_proof(leaves: &[ChunkLeaf], chunk_index: u32) -> Option<ChunkProof>
 }
 
 impl ChunkProof {
+    /// Canonical bytes.
+    pub fn encode(&self) -> Vec<u8> {
+        postcard::to_stdvec(self).expect("postcard chunk proof")
+    }
+
+    /// Decode a proof a peer sent, insisting the encoding was canonical.
+    ///
+    /// A sidecar is stored under a slot the caller named, so unlike a
+    /// content-addressed object nothing about where it was found constrains
+    /// what it says. Re-encode equality is what keeps one proof from having two
+    /// spellings, and the depth bound is checked here so a hostile path is
+    /// refused before [`Self::root`] walks it.
+    pub fn decode_canonical(bytes: &[u8]) -> Result<Self, ContentError> {
+        if bytes.len() > MAX_PROOF_BYTES {
+            return Err(ContentError::ProofMismatch);
+        }
+        let proof: Self = postcard::from_bytes(bytes).map_err(|_| ContentError::NonCanonical)?;
+        if proof.path.len() > MAX_PROOF_DEPTH as usize {
+            return Err(ContentError::ProofMismatch);
+        }
+        if proof.encode() != bytes {
+            return Err(ContentError::NonCanonical);
+        }
+        Ok(proof)
+    }
+
     /// Recompute this chunk's root. Bounded before it allocates: a path longer
     /// than the protocol depth is refused rather than walked.
     pub fn root(&self) -> Result<[u8; 32], ContentError> {
@@ -327,6 +362,28 @@ impl ContentDescriptor {
 
     /// Everything `open_chunk` checks except the decryption — what a provider or
     /// a cache does when it has no key and no business having one.
+    /// Verify a proof against this descriptor without having the bytes.
+    ///
+    /// Everything [`Self::verify_chunk`] does except hashing the ciphertext,
+    /// which is exactly what a receiver can check on a chunk header before it
+    /// has agreed to read a body. A leaf that fails here means the bytes about
+    /// to arrive are the wrong bytes, and refusing now costs nothing.
+    pub fn verify_leaf(&self, proof: &ChunkProof) -> Result<(), ContentError> {
+        if proof.leaf.chunk_index >= self.chunk_count {
+            return Err(ContentError::Geometry);
+        }
+        if proof.leaf.ciphertext_len as usize > max_ciphertext_len() {
+            return Err(ContentError::ChunkMismatch);
+        }
+        if proof.path.len() != proof_depth(self.chunk_count, proof.leaf.chunk_index) {
+            return Err(ContentError::ProofMismatch);
+        }
+        if proof.root()? != self.ciphertext_merkle_root {
+            return Err(ContentError::ProofMismatch);
+        }
+        Ok(())
+    }
+
     pub fn verify_chunk(&self, proof: &ChunkProof, ciphertext: &[u8]) -> Result<(), ContentError> {
         if proof.leaf.chunk_index >= self.chunk_count {
             return Err(ContentError::Geometry);
@@ -358,7 +415,7 @@ impl ContentDescriptor {
 /// How many path steps prove one leaf, under the promoting reduction
 /// [`merkle_root`] uses. A promoted node has no sibling at that level, so the
 /// depth depends on the leaf's position and not only on the count.
-fn proof_depth(chunk_count: u32, chunk_index: u32) -> usize {
+pub fn proof_depth(chunk_count: u32, chunk_index: u32) -> usize {
     let mut width = chunk_count.max(1) as u64;
     let mut position = chunk_index as u64;
     let mut steps = 0;

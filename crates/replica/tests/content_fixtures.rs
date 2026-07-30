@@ -9,7 +9,7 @@ use mechanics::ids::SpaceId;
 use replica::content::{
     chunk_proof, expected_chunk_count, merkle_root, seal_content, ChunkLeaf, ChunkProof,
     ContentDescriptor, ContentError, ProofStep, SealedContent, CHUNK_PLAINTEXT_LEN,
-    CONTENT_FORMAT_VERSION, MAX_PROOF_DEPTH,
+    CONTENT_FORMAT_VERSION, MAX_PROOF_BYTES, MAX_PROOF_DEPTH,
 };
 
 const EPOCH: [u8; 16] = [3u8; 16];
@@ -532,6 +532,75 @@ fn a_proof_of_the_wrong_depth_is_refused() {
     });
     assert_eq!(
         sealed.descriptor.verify_chunk(&proof, ciphertext),
+        Err(ContentError::ProofMismatch)
+    );
+}
+
+#[test]
+fn a_leaf_can_be_judged_before_its_bytes_arrive() {
+    // What a receiver checks on a chunk header, before it has agreed to read a
+    // body. Everything verify_chunk does except hashing bytes it does not have
+    // — so a wrong leaf costs a refusal rather than a quarter megabyte.
+    let sealed = seal_content(&space(), &key(), [9u8; 16], &filler(1, 300_000)).expect("seal");
+    let proof = sealed.proofs[0].clone();
+    assert_eq!(sealed.descriptor.verify_leaf(&proof), Ok(()));
+    assert_eq!(
+        sealed
+            .descriptor
+            .verify_chunk(&proof, &sealed.ciphertexts[0]),
+        Ok(())
+    );
+
+    // A leaf from a different content does not belong to this root.
+    let other = seal_content(&space(), &key(), [8u8; 16], &filler(2, 300_000)).expect("seal");
+    assert_eq!(
+        sealed.descriptor.verify_leaf(&other.proofs[0]),
+        Err(ContentError::ProofMismatch)
+    );
+
+    // An index past the declared geometry is refused before the path is walked.
+    let mut beyond = proof.clone();
+    beyond.leaf.chunk_index = sealed.descriptor.chunk_count;
+    assert_eq!(
+        sealed.descriptor.verify_leaf(&beyond),
+        Err(ContentError::Geometry)
+    );
+}
+
+#[test]
+fn a_proof_from_a_peer_must_be_canonical_and_bounded() {
+    // A sidecar is stored under a slot the caller named, so nothing about where
+    // it was found constrains what it says. Re-encode equality is what keeps
+    // one proof from having two spellings.
+    let sealed = seal_content(&space(), &key(), [9u8; 16], &filler(1, 300_000)).expect("seal");
+    let encoded = sealed.proofs[0].encode();
+    assert_eq!(
+        ChunkProof::decode_canonical(&encoded).unwrap(),
+        sealed.proofs[0]
+    );
+
+    let mut trailing = encoded.clone();
+    trailing.push(0);
+    assert_eq!(
+        ChunkProof::decode_canonical(&trailing),
+        Err(ContentError::NonCanonical)
+    );
+    assert_eq!(
+        ChunkProof::decode_canonical(&vec![0u8; MAX_PROOF_BYTES + 1]),
+        Err(ContentError::ProofMismatch),
+        "refused by length before it is decoded"
+    );
+
+    // A path longer than the protocol depth is refused here rather than walked.
+    let mut deep = sealed.proofs[0].clone();
+    deep.path = (0..=MAX_PROOF_DEPTH)
+        .map(|_| ProofStep {
+            sibling: [0u8; 32],
+            sibling_is_left: false,
+        })
+        .collect();
+    assert_eq!(
+        ChunkProof::decode_canonical(&deep.encode()),
         Err(ContentError::ProofMismatch)
     );
 }
