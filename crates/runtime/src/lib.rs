@@ -51,6 +51,7 @@ pub mod plane_stream;
 pub mod planes;
 pub mod registry;
 pub mod session;
+pub mod signal;
 pub mod store;
 pub mod transfer;
 pub mod transient;

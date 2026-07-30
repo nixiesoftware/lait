@@ -167,6 +167,19 @@ fn the_deadlines_layer_so_a_timeout_names_one_side() {
         deadline::LIVE_DIAL < deadline::LIVE_IDLE,
         "dialling must give up long before an established session is reaped"
     );
+    // A signal's sender budget has to cover the receiver's read *and* write plus
+    // a margin, or every slow-but-legal acknowledgement presents as the
+    // receiver's fault.
+    assert!(
+        deadline::SIGNAL_RESPONSE
+            >= deadline::SIGNAL_READ + deadline::SIGNAL_WRITE + Duration::from_secs(2),
+        "the sender's budget must cover the receiver's plus a margin"
+    );
+    assert!(deadline::SIGNAL_OPEN <= deadline::SIGNAL_RESPONSE);
+    assert!(
+        deadline::SIGNAL_IDLE > deadline::SIGNAL_RESPONSE,
+        "a lane must outlive the exchange it carries"
+    );
     assert!(
         deadline::LIVE_IDLE > deadline::PRESENCE_TTL,
         "a session must outlive the presence it carries, or it is reaped while          somebody is still visible"
@@ -187,6 +200,11 @@ fn a_dial_deadline_never_outlives_the_drain_it_would_be_joined_by() {
         ("FLUSH_BEFORE_DROP", deadline::FLUSH_BEFORE_DROP),
         ("LIVE_IDLE", deadline::LIVE_IDLE),
         ("LIVE_DIAL", deadline::LIVE_DIAL),
+        ("SIGNAL_OPEN", deadline::SIGNAL_OPEN),
+        ("SIGNAL_READ", deadline::SIGNAL_READ),
+        ("SIGNAL_WRITE", deadline::SIGNAL_WRITE),
+        ("SIGNAL_RESPONSE", deadline::SIGNAL_RESPONSE),
+        ("SIGNAL_IDLE", deadline::SIGNAL_IDLE),
     ] {
         if value >= drain {
             // Not a failure — it is a requirement on the caller, recorded here
@@ -245,6 +263,11 @@ fn the_slot_ceilings_are_consistent_with_each_other() {
     );
     // The transient table has to hold what the sessions it admits can fill, or
     // an honest Station evicts honest peers under no load at all.
+    assert!(
+        slots::SIGNAL_LANE_WORKERS * slots::MAX_CONNECTIONS_PER_PEER_PLANE
+            <= runtime::planes::bounds::MAX_STREAM_WORKERS,
+        "one peer's signal lanes must fit inside the per-connection stream budget"
+    );
     assert!(
         slots::MAX_TRANSIENT_SLOTS >= slots::MAX_LIVE_SESSIONS * slots::MAX_SLOTS_PER_CONNECTION,
         "the transient table ({}) must cover every admitted session's slots ({})",

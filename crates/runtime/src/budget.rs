@@ -319,6 +319,26 @@ pub mod deadline {
     /// slot it would resurrect.
     pub const CARET_GRACE: Duration = Duration::from_secs(2);
 
+    /// Opening the stream a signal rides. One message per stream, so this is
+    /// the whole handshake budget.
+    pub const SIGNAL_OPEN: Duration = Duration::from_secs(5);
+
+    /// Reading one signal off its stream.
+    pub const SIGNAL_READ: Duration = Duration::from_secs(5);
+
+    /// Writing one signal onto its stream.
+    pub const SIGNAL_WRITE: Duration = Duration::from_secs(5);
+
+    /// The sender's whole budget for a signal that expects an acknowledgement.
+    ///
+    /// Layered above the receiver's read and write so a timeout names one side:
+    /// if the sender's budget were the tighter one, every slow-but-legal
+    /// acknowledgement would present as the receiver's fault.
+    pub const SIGNAL_RESPONSE: Duration = Duration::from_secs(20);
+
+    /// A signal lane with nothing on it.
+    pub const SIGNAL_IDLE: Duration = Duration::from_secs(60);
+
     /// Writing the accept. Longer than this and the peer is not reading.
     pub const ACCEPT_WRITE: Duration = Duration::from_secs(2);
 
@@ -460,6 +480,31 @@ pub mod gates {
         strike_limit: 128,
     };
 
+    /// Reliable signals accepted on one connection.
+    ///
+    /// A signal is a person-scale event — an invitation, a file offer, an
+    /// attention ping. Nothing honest emits them quickly, so this is tight, and
+    /// tight is what makes it a bound worth having: an unbounded signal rate is
+    /// a member who can make every peer's Station do bounded work forever.
+    pub const SIGNAL_RATE: GateSpec = GateSpec {
+        per_second: 4,
+        burst: 16,
+        strike_limit: 32,
+    };
+
+    /// Reliable signal bytes accepted on one connection.
+    ///
+    /// Each signal is individually bounded, so this bounds the aggregate — and
+    /// the aggregate is what decides whether a member can spend a Station's
+    /// uplink on invitations nobody asked for.
+    pub const SIGNAL_BYTES: ByteGateSpec = ByteGateSpec {
+        messages_per_second: 4,
+        message_burst: 16,
+        bytes_per_second: 64 * 1024,
+        byte_burst: 256 * 1024,
+        strike_limit: 32,
+    };
+
     /// New streams accepted on one connection.
     ///
     /// A stream is cheap to open and not cheap to serve, which is the shape of
@@ -546,6 +591,12 @@ pub mod slots {
 
     /// Concurrent inbound transfers per Space.
     pub const MAX_FETCH_TRANSFERS: usize = 8;
+
+    /// Concurrent signal-lane workers per connection.
+    ///
+    /// A signal is one bounded message on its own short stream, so this bounds
+    /// how many a peer may have in flight rather than how many it may send.
+    pub const SIGNAL_LANE_WORKERS: usize = 4;
 
     /// Live sessions one Station will hold.
     ///
