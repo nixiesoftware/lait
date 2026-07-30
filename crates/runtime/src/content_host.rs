@@ -367,6 +367,113 @@ impl ContentHost {
 
     // --- The provider half plan 14's Freight consumes -----------------------
 
+    /// The committed descriptor for a content this Station can name.
+    ///
+    /// A fetcher needs the geometry before it asks for anything — how many
+    /// chunks there are, how large the last one is, which root a proof must
+    /// reconstruct — and all of that is the descriptor. Reading it is a read,
+    /// so it asks the same question a range read does.
+    pub fn descriptor_of(
+        &self,
+        policy: &ContentPolicy<'_>,
+        content: &ContentRef,
+    ) -> Result<ContentDescriptor, ContentHostError> {
+        (policy.authorize)(ContentAction::Read)
+            .map_err(|demand| ContentHostError::Denied { demand })?;
+        self.descriptor(content)
+    }
+
+    /// Which of the chunks a peer asked about this Station can serve.
+    ///
+    /// Bounded by what was *asked*, not by what the content has. A peer naming
+    /// three indices costs three existence checks even if the content has four
+    /// million, so a request cannot be turned into work by being about
+    /// something large.
+    ///
+    /// The answer is deliberately the same shape when the descriptor is
+    /// unknown: an empty list. A caller that could tell "I do not hold this
+    /// content" from "I have never heard of it" would have an oracle for what
+    /// a Space contains, answerable by guessing content ids.
+    pub fn resident_among(
+        &self,
+        policy: &ContentPolicy<'_>,
+        content: &ContentRef,
+        wanted: &[u32],
+    ) -> Result<Vec<u32>, ContentHostError> {
+        (policy.authorize)(ContentAction::Serve)
+            .map_err(|demand| ContentHostError::Denied { demand })?;
+        let Ok(descriptor) = self.descriptor(content) else {
+            return Ok(Vec::new());
+        };
+        let mut answer: Vec<u32> = wanted
+            .iter()
+            .copied()
+            .filter(|index| *index < descriptor.chunk_count)
+            .filter(|index| {
+                self.cache
+                    .is_resident(&replica::content::chunk_slot(&descriptor, *index))
+            })
+            .collect();
+        answer.sort_unstable();
+        answer.dedup();
+        Ok(answer)
+    }
+
+    /// A bounded range of one chunk's *ciphertext*, with the proof that binds
+    /// it, for serving to a peer.
+    ///
+    /// Ranged because a transfer that dies at 90% of a chunk should resume at
+    /// 90%, not at zero. The proof covers the whole chunk regardless of the
+    /// range, which is what lets a resuming peer check that it is still talking
+    /// about the same bytes before it appends any.
+    pub fn chunk_range(
+        &self,
+        policy: &ContentPolicy<'_>,
+        content: &ContentRef,
+        chunk_index: u32,
+        offset: u64,
+        max_len: usize,
+    ) -> Result<(Vec<u8>, ChunkProof, u32), ContentHostError> {
+        let (bytes, proof) = self.chunk(policy, content, chunk_index)?;
+        let total = u32::try_from(bytes.len()).map_err(|_| ContentHostError::Bounds)?;
+        let start = usize::try_from(offset).map_err(|_| ContentHostError::Bounds)?;
+        if start > bytes.len() {
+            return Err(ContentHostError::Bounds);
+        }
+        let end = start.saturating_add(max_len).min(bytes.len());
+        Ok((bytes[start..end].to_vec(), proof, total))
+    }
+
+    /// Promote one staged chunk into a resident, servable entry.
+    ///
+    /// The whole verification happens here and nowhere earlier: the staged
+    /// bytes are read back, re-hashed, and checked against the descriptor's
+    /// Merkle root before anything is filed where it could be served on. Bytes
+    /// that arrived over a wire have no standing until this passes.
+    ///
+    /// Only *this* part is discarded on success. Discarding the operation would
+    /// take every other chunk of the same transfer still in flight with it.
+    pub fn install_staged_chunk(
+        &self,
+        policy: &ContentPolicy<'_>,
+        content: &ContentRef,
+        operation: [u8; 16],
+        part: u32,
+        proof: &ChunkProof,
+    ) -> Result<(), ContentHostError> {
+        (policy.authorize)(ContentAction::Read)
+            .map_err(|demand| ContentHostError::Denied { demand })?;
+        let staged = self
+            .cache
+            .read_staged(&operation, part)
+            .map_err(|_| ContentHostError::NotResident)?;
+        self.install_chunk(policy, content, operation, proof, &staged)?;
+        self.cache
+            .discard_staged_part(&operation, part)
+            .map_err(|e| ContentHostError::Storage(e.to_string()))?;
+        Ok(())
+    }
+
     /// One chunk's sealed bytes and its proof, for serving to a peer.
     ///
     /// Returns ciphertext. A provider does not need — and must not require —

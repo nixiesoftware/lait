@@ -77,6 +77,7 @@ fn filler(seed: u64, len: usize) -> Vec<u8> {
 
 struct Fixture {
     host: ContentHost,
+    core: Arc<runtime::session::StationCore>,
     dir: PathBuf,
 }
 
@@ -92,8 +93,10 @@ fn fixture(tag: &str) -> Fixture {
         .unwrap(),
     );
     let cache = Arc::new(ResidentCache::open(dir.join("cache"), 1 << 30).unwrap());
+    let core = Arc::new(core);
     Fixture {
-        host: ContentHost::new(std::sync::Arc::new(core), cache),
+        host: ContentHost::new(core.clone(), cache),
+        core,
         dir,
     }
 }
@@ -502,4 +505,172 @@ fn a_pin_is_reported_by_stat() {
     );
     fx.host.unpin(&policy, &content).unwrap();
     assert!(!fx.host.stat(&policy, &content).unwrap().pinned);
+}
+
+#[test]
+fn an_availability_answer_costs_what_was_asked_not_what_is_held() {
+    // A peer naming three indices must cost three checks even when the content
+    // has four million. A request that can be turned into work by being about
+    // something large is a request that can be turned into a denial of service.
+    let fx = fixture("among");
+    let space = space();
+    let auth = Authorizer::default();
+    let check = |a| auth.check(a);
+    let policy = policy(&space, &check);
+    let signer = replica::SeedSigner(&WRITER_SEED);
+
+    let content = fx
+        .host
+        .ingest(
+            &policy,
+            [1u8; 16],
+            &mut std::io::Cursor::new(filler(1, CHUNK_PLAINTEXT_LEN as usize * 3 + 10)),
+            &commit_ctx(&signer, &space),
+        )
+        .expect("ingest");
+
+    assert_eq!(
+        fx.host.resident_among(&policy, &content, &[2, 0]).unwrap(),
+        vec![0, 2],
+        "answered in canonical order, and only about what was asked"
+    );
+    assert_eq!(
+        fx.host
+            .resident_among(&policy, &content, &[1, 1, 1])
+            .unwrap(),
+        vec![1],
+        "a repeated index is one answer"
+    );
+    assert!(
+        fx.host
+            .resident_among(&policy, &content, &[9_999])
+            .unwrap()
+            .is_empty(),
+        "an index past the geometry is simply absent"
+    );
+
+    // An unknown content answers exactly as a known-but-absent one does.
+    let unknown = replica::content::ContentRef {
+        content_id: [0xAB; 32],
+    };
+    assert!(fx
+        .host
+        .resident_among(&policy, &unknown, &[0, 1, 2])
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn a_ranged_chunk_carries_the_proof_for_the_whole_chunk() {
+    // A transfer that dies at 90% of a chunk should resume at 90%. The proof
+    // covers the whole chunk regardless of the range, which is what lets the
+    // resuming peer check it is still talking about the same bytes before it
+    // appends any.
+    let fx = fixture("ranged");
+    let space = space();
+    let auth = Authorizer::default();
+    let check = |a| auth.check(a);
+    let policy = policy(&space, &check);
+    let signer = replica::SeedSigner(&WRITER_SEED);
+
+    let content = fx
+        .host
+        .ingest(
+            &policy,
+            [1u8; 16],
+            &mut std::io::Cursor::new(filler(1, 40_000)),
+            &commit_ctx(&signer, &space),
+        )
+        .expect("ingest");
+
+    let (whole, proof, total) = fx
+        .host
+        .chunk_range(&policy, &content, 0, 0, 1 << 20)
+        .unwrap();
+    assert_eq!(whole.len(), total as usize);
+    let (tail, tail_proof, tail_total) = fx
+        .host
+        .chunk_range(&policy, &content, 0, total as u64 - 100, 1 << 20)
+        .unwrap();
+    assert_eq!(tail, whole[whole.len() - 100..]);
+    assert_eq!(tail_proof, proof, "the proof does not depend on the range");
+    assert_eq!(tail_total, total);
+
+    // Past the end is a bound, not an empty answer: a peer asking beyond a
+    // chunk it is resuming has lost track of where it is.
+    assert!(matches!(
+        fx.host
+            .chunk_range(&policy, &content, 0, total as u64 + 1, 16),
+        Err(ContentHostError::Bounds)
+    ));
+}
+
+#[test]
+fn installing_one_staged_chunk_leaves_the_rest_of_the_transfer_alone() {
+    // The blocking defect the review found. `discard_staged` is prefix-matched
+    // over the whole operation, so installing chunk 3 of an eight-way transfer
+    // would have deleted the partials for every other chunk in flight.
+    let sender = fixture("staged-sender");
+    let receiver = fixture("staged-receiver");
+    let space = space();
+    let auth = Authorizer::default();
+    let check = |a| auth.check(a);
+    let policy = policy(&space, &check);
+    let signer = replica::SeedSigner(&WRITER_SEED);
+
+    let plaintext = filler(3, CHUNK_PLAINTEXT_LEN as usize * 2 + 500);
+    let content = sender
+        .host
+        .ingest(
+            &policy,
+            [1u8; 16],
+            &mut std::io::Cursor::new(plaintext.clone()),
+            &commit_ctx(&signer, &space),
+        )
+        .expect("ingest");
+    // The receiver needs the descriptor to judge anything.
+    let descriptor = sender.host.descriptor_of(&policy, &content).unwrap();
+    assert_eq!(descriptor.chunk_count, 3);
+    receiver
+        .core
+        .with_replica(|replica| {
+            replica.commit_content(
+                &commit_ctx(&signer, &space),
+                std::slice::from_ref(&descriptor),
+            )
+        })
+        .expect("the receiver commits the descriptor it learned");
+
+    let operation = [9u8; 16];
+    // Stage all three chunks, as a real transfer would.
+    let mut proofs = Vec::new();
+    for index in 0..3u32 {
+        let (bytes, proof, _) = sender
+            .host
+            .chunk_range(&policy, &content, index, 0, 1 << 20)
+            .unwrap();
+        receiver
+            .host
+            .cache()
+            .append_staged(&operation, index, 0, &bytes)
+            .unwrap();
+        proofs.push(proof);
+    }
+    let staged_before = receiver.host.cache().staged_bytes();
+
+    receiver
+        .host
+        .install_staged_chunk(&policy, &content, operation, 1, &proofs[1])
+        .expect("install the middle chunk");
+
+    assert_eq!(
+        receiver.host.resident_indices(&policy, &content).unwrap(),
+        vec![1]
+    );
+    assert!(
+        receiver.host.cache().staged_len(&operation, 0) > 0
+            && receiver.host.cache().staged_len(&operation, 2) > 0,
+        "the other chunks are still staged"
+    );
+    assert!(receiver.host.cache().staged_bytes() < staged_before);
 }
