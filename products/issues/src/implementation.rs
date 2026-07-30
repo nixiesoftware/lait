@@ -2544,9 +2544,17 @@ impl World for IssuesWorld {
                 device,
                 ts,
             } => {
+                // The name is refused here rather than repaired, because the
+                // party proposing it is a local actor holding write authority
+                // who can simply pick another. Repair belongs at the far end,
+                // where the proposer is remote and refusing would let them make
+                // their own attachment unsaveable.
+                let name = name.trim();
                 if ActorId::parse(&actor).is_none()
                     || !id.starts_with("att_")
-                    || name.trim().is_empty()
+                    || name.is_empty()
+                    || name.len() > contract::MAX_ATTACHMENT_NAME_BYTES
+                    || name.chars().any(|c| c.is_control())
                 {
                     return Err(WorldError::InvalidRequest);
                 }
@@ -2572,7 +2580,7 @@ impl World for IssuesWorld {
                         return Err(WorldError::InvalidRequest);
                     }
                 }
-                let name = name.trim().to_string();
+                let name = name.to_string();
                 let record = serde_json::json!({
                     "id": id,
                     "name": name,

@@ -607,6 +607,21 @@ async fn run_attach(
     Ok(issues_output(&response, options))
 }
 
+/// Where `attachment get` writes, given what the caller asked for and what the
+/// attachment calls itself.
+///
+/// The stored display name is authored by whoever attached the file, which on a
+/// synced issue is any peer — so it is a path supplied by a remote party, and a
+/// path supplied by a remote party is not a path. Untreated it is an arbitrary
+/// write triggered by a local user running an ordinary read command, and the
+/// CLI's own output invites exactly that command.
+///
+/// `--out` passes through untouched. That one the caller typed, and a caller
+/// naming a directory of their own is the feature.
+fn destination_for(out: Option<String>, stored_name: &str) -> String {
+    out.unwrap_or_else(|| world_interface::destination::sanitize_display_name(stored_name))
+}
+
 async fn run_attachment_get(
     host: &dyn ClientHost,
     reff: String,
@@ -621,7 +636,7 @@ async fn run_attachment_get(
     let bytes = data_encoding::BASE64
         .decode(data_b64.as_bytes())
         .map_err(|_| InterfaceError::new("stored attachment did not decode"))?;
-    let destination = out.unwrap_or(name);
+    let destination = destination_for(out, &name);
     std::fs::write(&destination, &bytes)
         .map_err(|error| InterfaceError::new(format!("could not write {destination}: {error}")))?;
     let message = format!("saved {} bytes to {destination}", bytes.len());
@@ -958,6 +973,37 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn a_peer_named_attachment_is_saved_beside_us_not_wherever_it_asked() {
+        for hostile in [
+            r"..\..\..\Users\Public\startup.bat",
+            "../../../../etc/cron.d/evil",
+            r"C:\Windows\System32\evil.dll",
+        ] {
+            let chosen = destination_for(None, hostile);
+            let path = Path::new(&chosen);
+            assert!(path.is_relative(), "{hostile:?} became {chosen:?}");
+            assert_eq!(
+                path.components().count(),
+                1,
+                "{hostile:?} became {chosen:?}, which is more than one component"
+            );
+        }
+    }
+
+    #[test]
+    fn an_explicit_out_is_the_callers_own_choice_and_is_left_alone() {
+        // The whole point of the flag: a path the person typed, including one
+        // that walks up out of the working directory.
+        let chosen = destination_for(Some("../saved/report.pdf".into()), "notes.txt");
+        assert_eq!(chosen, "../saved/report.pdf");
+    }
+
+    #[test]
+    fn an_ordinary_name_still_saves_under_its_own_name() {
+        assert_eq!(destination_for(None, "report.pdf"), "report.pdf");
+    }
 
     #[test]
     fn decodes_work_state_at_the_product_boundary() {

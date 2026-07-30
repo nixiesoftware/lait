@@ -38,6 +38,18 @@ pub const MAX_ESTIMATE: u32 = 1000;
 /// blob store is the large-file follow-on, not this.
 pub const MAX_ATTACHMENT_BYTES: usize = 256 * 1024;
 pub const MAX_ATTACHMENTS_PER_ISSUE: usize = 8;
+/// The longest attachment display name, in UTF-8 bytes.
+///
+/// A display name is shown, synced, and — the reason for a bound rather than a
+/// convention — offered as the file name when someone saves the attachment.
+/// Sanitising at that moment is what keeps the write safe, but sanitising is
+/// downstream of convergence: an unbounded name has already reached every peer
+/// by then. The engine legitimizes, so the name is bounded where it enters.
+///
+/// Sits under [`world_interface::destination::MAX_DISPLAY_NAME_BYTES`] so a
+/// name that was accepted here always survives sanitising with its extension
+/// intact.
+pub const MAX_ATTACHMENT_NAME_BYTES: usize = 180;
 /// The triage outcomes, frozen.
 pub const TRIAGE_OUTCOMES: [&str; 3] = ["accepted", "declined", "duplicate"];
 /// The self-reported health labels (project updates, initiatives).

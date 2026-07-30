@@ -247,6 +247,26 @@ identities and historical authorization. An actor id inside unsigned application
 content is not cryptographic proof of authorship; signed Body transactions and
 receipts provide the attribution boundary.
 
+## Peer-authored names on local paths
+
+Product data authored by a peer is not a path. An attachment's display name is
+the clearest case: it converges from whoever attached the file, it is what a
+person naturally saves the file as, and the CLI's own output invites exactly
+that command — so untreated it is an arbitrary-path write of peer-supplied
+bytes, triggered by a local user doing something that reads like a read.
+
+The name is treated at both ends, differently, because the proposer differs. At
+intake the Issues engine **refuses** a name that is over-long or carries control
+characters: the proposer there is a local actor holding write authority who can
+simply pick another. At save time the name is **repaired**, never refused, into
+a single relative file-name component — the proposer there is remote, and
+refusing would let a peer make their own attachment unsaveable by naming it
+badly. An explicit `--out` is untouched: that path the caller typed.
+
+Repair is what the far end owes regardless of intake, because a Body reaching
+this machine through convergence never passed local intake at all. Intake bounds
+what this Space publishes; it is not a defense, and is not relied on as one.
+
 ## Local web surface
 
 `lait serve` binds to loopback and uses a per-run bearer capability with origin

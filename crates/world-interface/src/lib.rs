@@ -5,6 +5,8 @@
 //! and MCP tools, while the Lait shell supplies process lifecycle, Orbit
 //! selection, transport, and output policy.
 
+pub mod destination;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::future::Future;
