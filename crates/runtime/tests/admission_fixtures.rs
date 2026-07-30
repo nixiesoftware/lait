@@ -210,6 +210,7 @@ fn operator_policy_and_membership_answer_different_questions() {
     let off = PlanePolicy {
         serve_enabled: false,
         fetch_enabled: false,
+        live_enabled: false,
     };
     assert_eq!(
         judge(
@@ -220,6 +221,45 @@ fn operator_policy_and_membership_answer_different_questions() {
         ),
         Admission::Refuse(SessionRefusal::Refused),
         "and the refusal is the same coarse one, so it leaks nothing"
+    );
+    // Every plane gets its own switch, and each is answerable alone. A Station
+    // that will move files but wants nothing to do with other people's cursors
+    // is an ordinary configuration, not a contradiction.
+    assert_eq!(
+        judge(
+            &opening(&space, Plane::Live),
+            &context(&space, Plane::Live),
+            &member(),
+            &off
+        ),
+        Admission::Refuse(SessionRefusal::Refused),
+    );
+    let files_only = PlanePolicy {
+        serve_enabled: true,
+        fetch_enabled: true,
+        live_enabled: false,
+    };
+    assert_eq!(
+        judge(
+            &opening(&space, Plane::Live),
+            &context(&space, Plane::Live),
+            &member(),
+            &files_only
+        ),
+        Admission::Refuse(SessionRefusal::Refused),
+        "declining Live must not require declining Freight"
+    );
+    assert!(
+        !matches!(
+            judge(
+                &opening(&space, Plane::Freight),
+                &context(&space, Plane::Freight),
+                &member(),
+                &files_only
+            ),
+            Admission::Refuse(_)
+        ),
+        "and Freight is unaffected by the Live switch"
     );
 }
 

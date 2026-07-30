@@ -272,6 +272,53 @@ impl ByteGate {
 pub mod deadline {
     use std::time::Duration;
 
+    /// A Live session with no traffic at all.
+    ///
+    /// Longer than Freight's, because a person reading an issue emits nothing
+    /// for a while and is still there — but bounded just above
+    /// [`PRESENCE_TTL`], because past that point their presence has already
+    /// expired and the session is holding a connection to say nothing about
+    /// somebody nobody can see. They reconnect the moment they do anything.
+    ///
+    /// It also has to stay under the ceiling `budget_fixtures` enforces on any
+    /// deadline longer than the drain budget: a task that outlives the drain is
+    /// a task that outlives its Station, so a long deadline is only safe when
+    /// it is raced against cancellation, and the fixture is what stops one
+    /// being added on the assumption that it is.
+    pub const LIVE_IDLE: Duration = Duration::from_secs(100);
+
+    /// Dialling a peer's Live plane. Short: a Station that does not answer
+    /// promptly is one whose cursors nobody is waiting for.
+    pub const LIVE_DIAL: Duration = Duration::from_secs(5);
+
+    /// How long a caret is held before it is sent.
+    ///
+    /// A caret moves as fast as a person types and is superseded by its own
+    /// next position, so sending each one costs a packet to deliver a number
+    /// that is already wrong. Below the threshold where a remote cursor stops
+    /// feeling live.
+    pub const CURSOR_COALESCE: Duration = Duration::from_millis(80);
+
+    /// How long typing is held before it is sent. Coarser than a caret,
+    /// because "someone is typing" has no intermediate values worth sending.
+    pub const TYPING_COALESCE: Duration = Duration::from_millis(500);
+
+    /// How long a cursor survives without an update.
+    ///
+    /// This is what makes a crashed tab disappear rather than leaving a ghost
+    /// caret in a document forever. Transient state has no goodbye it can rely
+    /// on, so every slot expires on its own.
+    pub const CURSOR_TTL: Duration = Duration::from_secs(30);
+
+    /// How long presence survives without an update. Longer than a cursor: a
+    /// reader who is not typing is still reading.
+    pub const PRESENCE_TTL: Duration = Duration::from_secs(90);
+
+    /// How long a caret survives a `Retire` that may have raced a datagram
+    /// already in flight. Below every TTL, so a raced item cannot outlive the
+    /// slot it would resurrect.
+    pub const CARET_GRACE: Duration = Duration::from_secs(2);
+
     /// Writing the accept. Longer than this and the peer is not reading.
     pub const ACCEPT_WRITE: Duration = Duration::from_secs(2);
 
@@ -358,6 +405,113 @@ pub mod gates {
         byte_burst: 32 * 1024 * 1024,
         strike_limit: 128,
     };
+
+    /// Live control messages per connection.
+    ///
+    /// Control is subscribe and retire — a person opening and closing views, so
+    /// a handful per second sustained with room for a burst when a tab opens
+    /// several at once. Far tighter than Freight because a control message
+    /// costs a subscription table entry rather than bytes off a disk.
+    pub const LIVE_CONTROL: GateSpec = GateSpec {
+        per_second: 16,
+        burst: 64,
+        strike_limit: 64,
+    };
+
+    /// Live control bytes per connection.
+    ///
+    /// A subscription names scopes, so its size is bounded by the scope ceiling
+    /// rather than by anything a peer chooses freely. This exists to bound the
+    /// peer that sends maximal messages at the maximal rate, which the message
+    /// gate alone does not.
+    pub const LIVE_CONTROL_BYTES: ByteGateSpec = ByteGateSpec {
+        messages_per_second: 16,
+        message_burst: 64,
+        bytes_per_second: 256 * 1024,
+        byte_burst: 1024 * 1024,
+        strike_limit: 64,
+    };
+
+    /// Live datagrams per connection.
+    ///
+    /// A caret moves as fast as a person types; presence and typing coalesce on
+    /// their own deadlines. 64/s sustained is well above what any honest client
+    /// emits after coalescing, and the burst absorbs a reconnect replaying
+    /// what it holds.
+    ///
+    /// A gate never closes below twice its rate — see this module's opening
+    /// note — so choosing 64 is choosing "closes above 128/s, sustained".
+    pub const LIVE_DATAGRAMS: GateSpec = GateSpec {
+        per_second: 64,
+        burst: 256,
+        strike_limit: 128,
+    };
+
+    /// Live datagram bytes per connection.
+    ///
+    /// Small on purpose. Every transient item is bounded individually, so this
+    /// bounds the aggregate — and the aggregate is the number that decides
+    /// whether one member can make a Station spend its uplink on cursors.
+    pub const LIVE_DATAGRAM_BYTES: ByteGateSpec = ByteGateSpec {
+        messages_per_second: 64,
+        message_burst: 256,
+        bytes_per_second: 512 * 1024,
+        byte_burst: 2 * 1024 * 1024,
+        strike_limit: 128,
+    };
+
+    /// New streams accepted on one connection.
+    ///
+    /// A stream is cheap to open and not cheap to serve, which is the shape of
+    /// every accept-side flood. Separate from the message gates because a peer
+    /// that opens streams and sends nothing on them never reaches those.
+    pub const STREAM_ACCEPT: GateSpec = GateSpec {
+        per_second: 32,
+        burst: 128,
+        strike_limit: 64,
+    };
+}
+
+/// A ledger that counts and never forgives.
+///
+/// [`Gate`] decays: every admitted message subtracts a strike, which is right
+/// for a peer whose behaviour is mostly fine and occasionally bursty. It is
+/// wrong for eviction. An eviction means this peer's own subscriptions pushed
+/// another's out of a bounded table, and a peer that alternates one eviction
+/// with eight honest datagrams would sit at zero strikes forever while steadily
+/// displacing everyone else — because `Gate::check` decrements on every admit
+/// and `penalise` shares that same counter.
+///
+/// So this is its own type rather than a `Gate` used carefully. There is no
+/// decay path, and there is no way to add one without noticing.
+#[derive(Debug, Clone)]
+pub struct Evictions {
+    charged: u32,
+    limit: u32,
+}
+
+impl Evictions {
+    pub fn new(limit: u32) -> Self {
+        Self {
+            charged: 0,
+            limit: limit.max(1),
+        }
+    }
+
+    /// Charge `n` evictions. `Close` once the limit is reached, and every time
+    /// after — a closed ledger stays closed.
+    pub fn charge(&mut self, n: u32) -> Verdict {
+        self.charged = self.charged.saturating_add(n);
+        if self.charged >= self.limit {
+            Verdict::Close
+        } else {
+            Verdict::Allow
+        }
+    }
+
+    pub fn charged(&self) -> u32 {
+        self.charged
+    }
 }
 
 /// Counting permits and slot ceilings.
@@ -392,6 +546,42 @@ pub mod slots {
 
     /// Concurrent inbound transfers per Space.
     pub const MAX_FETCH_TRANSFERS: usize = 8;
+
+    /// Live sessions one Station will hold.
+    ///
+    /// Below the Space connection ceiling, because a Live session costs a
+    /// subscription table and a slot budget that a bare connection does not.
+    pub const MAX_LIVE_SESSIONS: usize = 32;
+
+    /// Live sessions one peer Station may hold. One reconnect may overlap one
+    /// session still closing; more is a member consuming the Space's share.
+    pub const MAX_LIVE_SESSIONS_PER_STATION: usize = 2;
+
+    /// Outbound Live dials in flight at once.
+    pub const MAX_LIVE_DIALS_IN_FLIGHT: usize = 4;
+
+    /// Transient slots one Station will hold across every session.
+    ///
+    /// The whole transient table. Nothing in it is durable and all of it is
+    /// evictable, so this bounds memory rather than correctness — but an
+    /// unbounded table is a Station a Space can make allocate without ever
+    /// committing anything.
+    pub const MAX_TRANSIENT_SLOTS: usize = 4096;
+
+    /// Scopes one connection may subscribe to.
+    ///
+    /// A person has a handful of views open. This is generous enough that no
+    /// honest client meets it and tight enough that a hostile one cannot make
+    /// the subscription table the expensive part.
+    pub const MAX_SUBSCRIBED_SCOPES_PER_CONNECTION: usize = 64;
+
+    /// Transient slots one connection may occupy.
+    ///
+    /// Exactly twice the scope ceiling, and that is a fact rather than a
+    /// choice: the legality table admits at most two payload kinds per scope
+    /// (a text caret takes `Caret` or `Selection`; every other scope takes
+    /// one). A connection cannot hold more slots than its scopes allow.
+    pub const MAX_SLOTS_PER_CONNECTION: usize = MAX_SUBSCRIBED_SCOPES_PER_CONNECTION * 2;
 
     /// Chunks in flight to one provider. Four 256 KiB chunks keeps an ~80 Mbit/s
     /// path busy at 100 ms of round trip; more is buffer, not throughput.

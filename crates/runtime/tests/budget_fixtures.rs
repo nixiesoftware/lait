@@ -7,7 +7,7 @@
 
 use std::time::{Duration, Instant};
 
-use runtime::budget::{deadline, slots, ByteGate, Gate, Pace, Verdict};
+use runtime::budget::{deadline, gates, slots, ByteGate, Evictions, Gate, Pace, Verdict};
 
 /// A fixed origin, so every test reads as a timeline rather than a clock.
 fn origin() -> Instant {
@@ -145,6 +145,32 @@ fn the_deadlines_layer_so_a_timeout_names_one_side() {
         deadline::DRIVER_POLL < deadline::ACCEPT_WRITE,
         "a driver must observe cancellation faster than it does anything"
     );
+    // Live's own layering. A slot has to outlive the thing that refreshes it,
+    // or a cursor that is being updated correctly still disappears.
+    assert!(
+        deadline::CURSOR_TTL > deadline::CURSOR_COALESCE * 8,
+        "a cursor must survive many coalescing windows, or it flickers"
+    );
+    assert!(
+        deadline::PRESENCE_TTL > deadline::TYPING_COALESCE * 8,
+        "presence must survive many typing windows"
+    );
+    assert!(
+        deadline::PRESENCE_TTL > deadline::CURSOR_TTL,
+        "a reader who is not typing is still reading"
+    );
+    assert!(
+        deadline::CARET_GRACE < deadline::CURSOR_TTL,
+        "a datagram racing a Retire must not outlive the slot it would resurrect"
+    );
+    assert!(
+        deadline::LIVE_DIAL < deadline::LIVE_IDLE,
+        "dialling must give up long before an established session is reaped"
+    );
+    assert!(
+        deadline::LIVE_IDLE > deadline::PRESENCE_TTL,
+        "a session must outlive the presence it carries, or it is reaped while          somebody is still visible"
+    );
 }
 
 #[test]
@@ -159,6 +185,8 @@ fn a_dial_deadline_never_outlives_the_drain_it_would_be_joined_by() {
         ("CHUNK_BODY_IDLE", deadline::CHUNK_BODY_IDLE),
         ("FREIGHT_IDLE", deadline::FREIGHT_IDLE),
         ("FLUSH_BEFORE_DROP", deadline::FLUSH_BEFORE_DROP),
+        ("LIVE_IDLE", deadline::LIVE_IDLE),
+        ("LIVE_DIAL", deadline::LIVE_DIAL),
     ] {
         if value >= drain {
             // Not a failure — it is a requirement on the caller, recorded here
@@ -196,4 +224,91 @@ fn the_slot_ceilings_are_consistent_with_each_other() {
         "staged bytes ({}) must cover the worst in-flight window ({worst_in_flight})",
         slots::MAX_STAGED_BYTES
     );
+
+    // Live's ceilings, and the one relationship between them that is a fact
+    // rather than a choice: the scope-to-kind legality table admits at most two
+    // payload kinds for any scope, so a connection cannot hold more slots than
+    // twice its scopes. Written as an equality because if the table ever admits
+    // a third, this is where that shows up.
+    assert_eq!(
+        slots::MAX_SLOTS_PER_CONNECTION,
+        slots::MAX_SUBSCRIBED_SCOPES_PER_CONNECTION * 2,
+        "slots per connection is derived from the legality table, not chosen"
+    );
+    assert!(
+        slots::MAX_LIVE_SESSIONS <= slots::MAX_SPACE_CONNECTIONS,
+        "a Space cannot hold more Live sessions than it holds connections"
+    );
+    assert!(
+        slots::MAX_LIVE_SESSIONS_PER_STATION * 4 <= slots::MAX_LIVE_SESSIONS,
+        "no single Station may plausibly consume the Space's Live allowance"
+    );
+    // The transient table has to hold what the sessions it admits can fill, or
+    // an honest Station evicts honest peers under no load at all.
+    assert!(
+        slots::MAX_TRANSIENT_SLOTS >= slots::MAX_LIVE_SESSIONS * slots::MAX_SLOTS_PER_CONNECTION,
+        "the transient table ({}) must cover every admitted session's slots ({})",
+        slots::MAX_TRANSIENT_SLOTS,
+        slots::MAX_LIVE_SESSIONS * slots::MAX_SLOTS_PER_CONNECTION
+    );
+}
+
+#[test]
+fn an_eviction_ledger_does_not_forgive_the_way_a_gate_does() {
+    // The reason `Evictions` is its own type rather than a `Gate` used
+    // carefully. `Gate::check` subtracts a strike on every admitted item, so a
+    // peer that alternates one eviction with a handful of honest datagrams sits
+    // at zero strikes forever while steadily displacing everyone else.
+    //
+    // An eviction means this peer's subscriptions pushed another's out of a
+    // bounded table. There is no amount of subsequent good behaviour that
+    // un-displaces them, so there is no decay path here to find.
+    let mut gate = Gate::new(Instant::now(), 1000, 1000, 4);
+    let now = Instant::now();
+    for _ in 0..3 {
+        gate.penalise(1);
+        for _ in 0..8 {
+            let _ = gate.check(now);
+        }
+    }
+    assert!(
+        !matches!(gate.check(now), Verdict::Close),
+        "a Gate forgives, which is why it is the wrong ledger for evictions"
+    );
+
+    let mut evictions = Evictions::new(4);
+    for _ in 0..3 {
+        assert!(matches!(evictions.charge(1), Verdict::Allow));
+    }
+    assert_eq!(evictions.charged(), 3);
+    assert!(matches!(evictions.charge(1), Verdict::Close));
+    // And it stays closed. A closed ledger that reopens is a ledger a peer can
+    // wait out.
+    assert!(matches!(evictions.charge(0), Verdict::Close));
+    assert!(matches!(evictions.charge(1), Verdict::Close));
+}
+
+#[test]
+fn a_live_gate_never_closes_below_twice_its_rate() {
+    // The module's own sizing rule: choosing R is choosing 2R, because a peer
+    // at rate L accumulates strikes only when L - R > R. Asserted for the Live
+    // specs so nobody picks a rate believing it is the closing threshold.
+    for (name, spec) in [
+        ("LIVE_CONTROL", gates::LIVE_CONTROL),
+        ("LIVE_DATAGRAMS", gates::LIVE_DATAGRAMS),
+        ("STREAM_ACCEPT", gates::STREAM_ACCEPT),
+    ] {
+        let mut gate = Gate::from_spec(Instant::now(), spec);
+        let start = Instant::now();
+        // Exactly the permitted rate, for long enough to exhaust the burst.
+        let step = Duration::from_nanos(1_000_000_000 / spec.per_second as u64);
+        let mut now = start;
+        for _ in 0..(spec.per_second * 4) {
+            now += step;
+            assert!(
+                !matches!(gate.check(now), Verdict::Close),
+                "{name} closed on a peer sending exactly its permitted rate"
+            );
+        }
+    }
 }

@@ -69,6 +69,13 @@ pub struct PlanePolicy {
     pub serve_enabled: bool,
     /// Whether this Station fetches content it does not hold.
     pub fetch_enabled: bool,
+    /// Whether this Station answers on the Live plane at all.
+    ///
+    /// An operator switch, not an authorization decision. A Station with no
+    /// browser attached and no interest in other people's cursors should be
+    /// able to say so without refusing them one at a time — and a plane that
+    /// cannot be turned off is a plane whose cost an operator cannot decline.
+    pub live_enabled: bool,
 }
 
 impl Default for PlanePolicy {
@@ -76,6 +83,7 @@ impl Default for PlanePolicy {
         Self {
             serve_enabled: true,
             fetch_enabled: true,
+            live_enabled: true,
         }
     }
 }
@@ -179,7 +187,7 @@ fn policy_admits(plane: Plane, policy: &PlanePolicy) -> bool {
         // peer may be about to ask for something we would refuse anyway, and
         // refusing at the connection rather than the request tells it more.
         Plane::Freight => policy.serve_enabled || policy.fetch_enabled,
-        Plane::Live => true,
+        Plane::Live => policy.live_enabled,
     }
 }
 
