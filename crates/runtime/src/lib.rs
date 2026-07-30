@@ -52,6 +52,7 @@ pub mod registry;
 pub mod session;
 pub mod store;
 pub mod transfer;
+pub mod transient;
 pub(crate) mod wire;
 pub mod world;
 
