@@ -40,6 +40,7 @@ pub mod coordinates;
 mod dispatch_tests;
 pub mod dto;
 pub mod error;
+pub mod fetch;
 pub mod freight;
 pub mod implementation;
 pub mod lifecycle;
