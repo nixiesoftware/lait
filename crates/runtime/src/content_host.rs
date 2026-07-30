@@ -166,23 +166,6 @@ impl ContentHost {
         &self.cache
     }
 
-    /// Commit a descriptor this Station learned rather than sealed.
-    ///
-    /// What Contact convergence does when a Manifest names content this Station
-    /// does not hold: the descriptor becomes required material so the content
-    /// is nameable and fetchable, while the bytes stay absent. Exposed for
-    /// tests until the convergence path calls it directly.
-    pub fn commit_descriptor_for_test(
-        &self,
-        ctx: &replica::CommitContext<'_>,
-        descriptor: &replica::content::ContentDescriptor,
-    ) -> Result<(), ContentHostError> {
-        self.core
-            .with_replica(|replica| replica.commit_content(ctx, std::slice::from_ref(descriptor)))
-            .map(|_| ())
-            .map_err(|e| ContentHostError::Storage(e.to_string()))
-    }
-
     /// A shared handle to the same cache, for a caller that must outlive a
     /// borrow — a transfer's drop guard has to be able to let go of its leases
     /// after the host reference that created it is gone.

@@ -125,6 +125,9 @@ pub const MAX_CHUNK: usize = 256 * 1024;
 /// leaves this covers well past the Body-count ceiling, and it is what stops a
 /// peer from streaming nodes until the receiver runs out of memory.
 pub const MAX_MANIFEST_NODES: usize = 8192;
+// Both indexes an advertisement carries — Body and content — draw on this one
+// budget, because they arrive as one content-addressed node family and a
+// receiver cannot tell which is which until the root tells it.
 
 /// Domain for the running transcript hash (over every raw frame, in order).
 const TRANSCRIPT_DOMAIN: &[u8] = b"lait/contact/1/transcript";

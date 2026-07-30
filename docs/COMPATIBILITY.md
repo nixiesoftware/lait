@@ -50,6 +50,20 @@ where — while the manifest version identifies *what a commit records*. Replaci
 the paged manifest with an authenticated index changed the second and not the
 first.
 
+A Manifest root's acceptance rule tightened without its version moving, which
+is worth stating plainly because the two usually move together. A root whose
+Body entries declare `ContentRef`s is now refused unless every one of them
+resolves — from the root's own content index, or from a descriptor the receiver
+already holds. The encoding did not change: `content_index_root` and
+`content_count` have been in the record since `lait/manifest/2`, and a root that
+declares no content is accepted exactly as before. What changed is that
+advertising a declaration you cannot back is no longer a valid advertisement.
+
+No peer in the field is affected. Nothing produces a content declaration yet —
+the Issues attachment cutover is what will — so the set of roots this newly
+refuses is empty today, and that is precisely why the rule lands now rather than
+after there is state to break.
+
 Index nodes carry no version of their own. They are content-addressed, immutable
 journal objects reachable only from a root recorded in a versioned manifest, so
 the manifest that names a node is what decides how it is read. Giving a node its

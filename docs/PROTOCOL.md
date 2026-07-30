@@ -149,7 +149,9 @@ The transfer carries bounded frame families for:
 
 1. ordered Mechanics authority records and their set commitment;
 2. a signed Manifest-root offer;
-3. requested canonical Manifest index nodes;
+3. requested canonical Manifest index nodes, Body and content alike — one node
+   family, addressed by content, so which index a node belongs to is decided by
+   the signed root that reaches it and not by the frame that carried it;
 4. requested protected Body chunks and completion commitments;
 5. transcript completion, acknowledgment, or typed abort.
 
@@ -183,6 +185,15 @@ forwarded opaquely.
 Manifest adoption is root-atomic. A transfer containing only a prefix of the
 advertised root cannot partially advance the visible Replica. Idempotent replay
 changes nothing; same identity with different bytes is equivocation.
+
+Completeness covers the content catalog on the same terms as the Body set. A
+root's content index is verified like its Body index — every entry canonical,
+belonging to the root's Space, and sitting under the key its own hash derives —
+and every `ContentRef` an adopted entry declares must resolve, either from the
+advertised catalog or from a descriptor the receiver already holds. A root that
+declares content it does not advertise is refused whole, because adopting it
+would leave permanent local state naming bytes nobody here can ask anyone for.
+The descriptors an advertisement carries are exactly those live Bodies reach.
 
 ## 9. Replicated object families
 

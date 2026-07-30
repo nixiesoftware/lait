@@ -1944,6 +1944,7 @@ impl Replica {
             ctx,
             &[(tx.clone(), payloads.to_vec())],
             &BTreeMap::new(),
+            &[],
             authority,
         )
     }
@@ -1956,11 +1957,13 @@ impl Replica {
     /// a failure in transaction N never leaves transactions 0..N-1 committed
     /// under an error result, and a crash at any staging or journal boundary
     /// exposes the complete old or the complete new root.
+    #[allow(clippy::too_many_arguments)]
     fn incorporate_units(
         &mut self,
         ctx: &CommitContext<'_>,
         units: &[IncorporationUnit],
         bundle_declared: &BTreeMap<BodyKey, Vec<[u8; 32]>>,
+        bundle_descriptors: &[crate::content::ContentDescriptor],
         authority: &dyn AuthoritySource,
     ) -> Result<ConvergenceOutcome, ReplicaCommitError> {
         if self.poisoned {
@@ -2420,6 +2423,7 @@ impl Replica {
                 &staged_material,
                 &final_records,
                 &bundle_declared,
+                bundle_descriptors,
                 next_frontier,
             )?)
         } else {
@@ -2464,6 +2468,7 @@ impl Replica {
         staged_material: &[(BodyKey, [u8; 32], Vec<u8>, usize)],
         final_records: &BTreeMap<BodyKey, BodyRecord>,
         declared: &BTreeMap<BodyKey, Vec<[u8; 32]>>,
+        descriptors: &[crate::content::ContentDescriptor],
         next_frontier: ReplicaFrontier,
     ) -> Result<BTreeMap<BodyKey, BodyRecord>, ReplicaCommitError> {
         // Fill object refs into a working copy of the final records: each
@@ -2500,11 +2505,15 @@ impl Replica {
             .iter()
             .map(|(k, v)| (k.clone(), Some(v.clone())))
             .collect();
+        // The descriptors land in the same journal commit as the Bodies that
+        // declare them. Two commits would leave a window in which this Replica
+        // advertises a declaration it cannot back — which its own peers would
+        // then correctly refuse.
         self.persist(
             Some(ctx),
             &staged,
             declared,
-            &[],
+            descriptors,
             None,
             new_objects,
             next_frontier,
@@ -2594,6 +2603,7 @@ impl Replica {
                 authority_receipt,
                 units: Vec::new(),
                 declared_content: BTreeMap::new(),
+                descriptors: Vec::new(),
             });
         }
         // 3. + 4. Authority-verified manifest root and its complete index.
@@ -2719,16 +2729,92 @@ impl Replica {
                 }
             }
         }
-        let declared_content = entries
+        let declared_content: BTreeMap<BodyKey, Vec<[u8; 32]>> = entries
             .iter()
             .filter(|(_, entry)| !entry.content_refs.is_empty())
             .map(|(key, entry)| (key.clone(), entry.content_refs.clone()))
             .collect();
+
+        // 8. Content completeness, the same rule as rule 7 and for the same
+        //    reason: adopting the advertised root is atomic, so every content
+        //    id it declares must resolve — from the advertised catalog, or from
+        //    a descriptor this Replica already holds. Anything else adopts a
+        //    manifest naming content nobody on this machine can ever ask for,
+        //    and the gap would only surface when someone tried to open it.
+        //
+        //    Held-locally counts because convergence is incremental: a peer
+        //    that sent us the descriptor last week is not obliged to send it
+        //    again for us to accept a comment on the same issue.
+        let advertised = self.advertised_content(&nodes, authorized.root())?;
+        let mut descriptors = Vec::new();
+        for (key, refs) in &declared_content {
+            for content in refs {
+                if let Some(descriptor) = advertised.get(content) {
+                    if self
+                        .content_descriptor(&crate::content::ContentRef {
+                            content_id: *content,
+                        })
+                        .is_none()
+                    {
+                        descriptors.push(descriptor.clone());
+                    }
+                    continue;
+                }
+                if self
+                    .content_descriptor(&crate::content::ContentRef {
+                        content_id: *content,
+                    })
+                    .is_some()
+                {
+                    continue;
+                }
+                return Err(illegit(format!(
+                    "manifest declares content it does not advertise: {}/{}",
+                    key.world.as_str(),
+                    key.body
+                )));
+            }
+        }
+        descriptors.sort_by_key(|d| *d.content_ref().as_bytes());
+        descriptors.dedup_by_key(|d| *d.content_ref().as_bytes());
+
         Ok(crate::convergence::ValidatedContactBundle {
             declared_content,
             authority_receipt,
             units: units.into_values().collect(),
+            descriptors,
         })
+    }
+
+    /// The content catalog an advertisement carries, keyed by content id.
+    ///
+    /// The index was already structurally verified by
+    /// [`crate::manifest::ManifestRoot::verify_index`] — every entry decodes,
+    /// sits under the key it hashes to, and belongs to the root's Space. This
+    /// only reads it out.
+    fn advertised_content(
+        &self,
+        nodes: &dyn fabric::journal::index::NodeSource,
+        root: &ManifestRoot,
+    ) -> Result<BTreeMap<[u8; 32], crate::content::ContentDescriptor>, ReplicaCommitError> {
+        let mut catalog = BTreeMap::new();
+        let mut failure: Option<String> = None;
+        fabric::journal::index::stream(nodes, root.content_index_root, &mut |entry| {
+            if failure.is_some() {
+                return;
+            }
+            match crate::content::ContentDescriptor::decode_canonical(&entry.value) {
+                Ok(descriptor) => {
+                    catalog.insert(*descriptor.content_ref().as_bytes(), descriptor);
+                }
+                Err(e) => failure = Some(format!("content entry: {e}")),
+            }
+        })
+        .map_err(|e| ReplicaCommitError::Illegitimate(format!("content index: {e}")))?;
+        match failure {
+            Some(reason) => Err(ReplicaCommitError::Illegitimate(reason)),
+            None => Ok(catalog),
+        }
     }
 
     /// Incorporate a sealed validated bundle — the only Convergence entry for
@@ -2742,13 +2828,30 @@ impl Replica {
         bundle: crate::convergence::ValidatedContactBundle,
         authority: &dyn AuthoritySource,
     ) -> Result<ConvergenceOutcome, ReplicaCommitError> {
-        self.incorporate_units(ctx, &bundle.units, &bundle.declared_content, authority)
+        self.incorporate_units(
+            ctx,
+            &bundle.units,
+            &bundle.declared_content,
+            &bundle.descriptors,
+            authority,
+        )
     }
 
-    /// Build and sign the current Manifest over the full Body set, returning
-    /// the root plus every index node a peer needs to verify it — the
-    /// advertisement a Contact serves. Deterministic for a given state and
-    /// signer.
+    /// Build and sign the current Manifest over the full Body set **and the
+    /// content catalog those Bodies reach**, returning the root plus every
+    /// index node a peer needs to verify it — the advertisement a Contact
+    /// serves. Deterministic for a given state and signer.
+    ///
+    /// Both halves travel or neither is any use. A Body's manifest entry names
+    /// content ids; a content id alone is a name for bytes nobody but the
+    /// author can ask for, because asking requires the geometry, the epoch, and
+    /// the Merkle root that only the descriptor carries. Advertising the first
+    /// without the second converges an attachment as an opaque id.
+    ///
+    /// Only *reachable* descriptors are advertised — the same set
+    /// [`Self::sweep_unreferenced_content`] would keep. A descriptor no live
+    /// Body declares is this Station's own garbage awaiting a sweep, and
+    /// pushing it at a peer would make their catalog grow from ours.
     ///
     /// Shipping the whole index is what F4 replaces: two peers will compare
     /// roots, descend only where subtree hashes differ, and exchange divergent
@@ -2773,16 +2876,58 @@ impl Replica {
         let mut sink = NodeSink::default();
         let body_root = crate::manifest::build_body_index(entries, &mut sink)
             .map_err(|e| ReplicaCommitError::Illegitimate(format!("manifest index: {e}")))?;
+        let content_root =
+            crate::manifest::build_content_index(self.advertised_descriptors()?, &mut sink)
+                .map_err(|e| ReplicaCommitError::Illegitimate(format!("content index: {e}")))?;
         let root = ManifestRoot::sign_with(
             ctx.space,
             self.frontier,
             body_root,
-            None,
+            content_root,
             ctx.authority_frontier.clone(),
             ctx.signer,
         )
         .ok_or_else(|| ReplicaCommitError::Illegitimate("sign manifest root".into()))?;
         Ok((root.encode(), sink.written))
+    }
+
+    /// The descriptors an advertisement carries: every committed descriptor
+    /// some live Body declares.
+    ///
+    /// Derived from the Body set on every export rather than maintained,
+    /// because that is the same rule the sweep applies — a maintained set and a
+    /// derived one would eventually disagree, and the disagreement would be
+    /// invisible until a peer could not open an attachment.
+    fn advertised_descriptors(
+        &self,
+    ) -> Result<Vec<crate::content::ContentDescriptor>, ReplicaCommitError> {
+        let Some(store) = self.durable.as_ref() else {
+            return Ok(Vec::new());
+        };
+        let reachable = self.reachable_content();
+        if reachable.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut descriptors = Vec::with_capacity(reachable.len());
+        let mut failure: Option<String> = None;
+        fabric::journal::index::stream(&store.nodes(), self.content_index_root, &mut |entry| {
+            if failure.is_some() {
+                return;
+            }
+            match crate::content::ContentDescriptor::decode_canonical(&entry.value) {
+                Ok(descriptor) => {
+                    if reachable.contains(descriptor.content_ref().as_bytes()) {
+                        descriptors.push(descriptor);
+                    }
+                }
+                Err(e) => failure = Some(format!("content entry: {e}")),
+            }
+        })
+        .map_err(|e| ReplicaCommitError::Integrity(format!("content index: {e}")))?;
+        match failure {
+            Some(reason) => Err(ReplicaCommitError::Integrity(reason)),
+            None => Ok(descriptors),
+        }
     }
 
     /// The root of this Replica's published catalog — what a peer compares

@@ -78,8 +78,11 @@ pub struct StagedContactMaterial {
     pub authority_records: Vec<Vec<u8>>,
     /// The signed manifest root, byte-canonical.
     pub manifest_root_bytes: Vec<u8>,
-    /// The manifest's Body-index nodes, byte-canonical. Content-addressed, so
-    /// order carries no meaning.
+    /// The manifest's index nodes, byte-canonical — Body and content alike.
+    ///
+    /// One family, not two: a node is content-addressed, so which index it
+    /// belongs to is decided by the signed root that reaches it and not by the
+    /// frame that carried it. A node no root reaches is simply never read.
     pub manifest_nodes: Vec<Vec<u8>>,
     /// Received protected Body payloads: `(transaction id, key, envelope)`.
     /// The transaction id is the full signed-envelope digest.
@@ -140,6 +143,14 @@ pub struct ValidatedContactBundle {
     /// falling back to them drops the author's references and the receiver
     /// republishes a Body whose content it no longer names.
     pub(crate) declared_content: std::collections::BTreeMap<crate::ids::BodyKey, Vec<[u8; 32]>>,
+    /// The content descriptors the advertisement carried, for content this
+    /// receiver does not already hold a descriptor for.
+    ///
+    /// A declaration names content by id; only the descriptor says how to ask
+    /// for it. Carrying the ids without the descriptors converges an attachment
+    /// as a name nobody but its author can open, so both cross together or the
+    /// bundle is refused.
+    pub(crate) descriptors: Vec<crate::content::ContentDescriptor>,
 }
 
 /// The bundle's validated transactions with their per-Body payloads.
@@ -156,6 +167,11 @@ impl ValidatedContactBundle {
     /// How many validated transactions the bundle carries.
     pub fn transaction_count(&self) -> usize {
         self.units.len()
+    }
+    /// How many content descriptors this bundle brings that the receiver did
+    /// not already hold.
+    pub fn descriptor_count(&self) -> usize {
+        self.descriptors.len()
     }
 }
 

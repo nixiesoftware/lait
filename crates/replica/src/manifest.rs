@@ -310,13 +310,17 @@ impl ManifestRoot {
         Ok(())
     }
 
-    /// Verify the Body index against this (already-verified) root: canonical
-    /// index structure, then every entry's own validity and its placement under
-    /// the key it hashes to.
+    /// Verify **both** advertised indexes against this (already-verified)
+    /// root: canonical index structure, then every entry's own validity and its
+    /// placement under the key it hashes to. Returns the Body count.
     ///
     /// The placement check is what stops a substituted entry. Index validation
     /// proves an entry sits under some key; only re-deriving the key from the
-    /// entry's own `BodyKey` proves it sits under *its* key.
+    /// entry's own identity proves it sits under *its* key. For a content
+    /// descriptor that identity is its own hash, so the check is stronger than
+    /// it looks: an entry cannot sit under a key it does not hash to, and a
+    /// descriptor's hash is over the whole descriptor. Substituting a geometry,
+    /// a nonce, or a Merkle root moves the entry.
     pub fn verify_index(&self, nodes: &dyn NodeSource) -> Result<u64, ManifestError> {
         let counted = index::validate(nodes, self.body_index_root)
             .map_err(|_| ManifestError::IndexInvalid)?;
@@ -332,6 +336,44 @@ impl ManifestRoot {
                 Ok(decoded) if body_index_key(&decoded.key) == entry.key => {}
                 Ok(_) => failure = Some(ManifestError::KeyMismatch),
                 Err(e) => failure = Some(e),
+            }
+        })
+        .map_err(|_| ManifestError::IndexInvalid)?;
+        if let Some(e) = failure {
+            return Err(e);
+        }
+        self.verify_content_index(nodes)?;
+        Ok(counted)
+    }
+
+    /// The content half of [`Self::verify_index`].
+    ///
+    /// Split out because it is the part a peer can advertise as empty and be
+    /// telling the truth — a Space with no content has no descriptors, and that
+    /// is not a degraded advertisement. The Space check is here rather than in
+    /// [`crate::content::ContentDescriptor::validate`] because only the root
+    /// knows which Space this catalog claims to be.
+    fn verify_content_index(&self, nodes: &dyn NodeSource) -> Result<u64, ManifestError> {
+        let counted = index::validate(nodes, self.content_index_root)
+            .map_err(|_| ManifestError::IndexInvalid)?;
+        if counted != self.content_count {
+            return Err(ManifestError::CountMismatch);
+        }
+        let space = std::str::from_utf8(&self.space).map_err(|_| ManifestError::BadSpaceId)?;
+        let mut failure: Option<ManifestError> = None;
+        index::stream(nodes, self.content_index_root, &mut |entry| {
+            if failure.is_some() {
+                return;
+            }
+            match crate::content::ContentDescriptor::decode_canonical(&entry.value) {
+                Ok(descriptor) => {
+                    if descriptor.space != space {
+                        failure = Some(ManifestError::BadSpaceId);
+                    } else if content_index_key(descriptor.content_ref().as_bytes()) != entry.key {
+                        failure = Some(ManifestError::KeyMismatch);
+                    }
+                }
+                Err(_) => failure = Some(ManifestError::NonCanonical),
             }
         })
         .map_err(|_| ManifestError::IndexInvalid)?;
@@ -386,6 +428,34 @@ pub fn build_body_index(
             Ok(IndexEntry {
                 key: body_index_key(&entry.key),
                 value: entry.encode(),
+            })
+        })
+        .collect::<Result<_, ManifestError>>()?;
+    index::build_index(indexed, sink).map_err(|_| ManifestError::IndexInvalid)
+}
+
+/// Build the content catalog a Contact advertises: every committed descriptor,
+/// under its own content id.
+///
+/// The mirror of [`build_body_index`], and deliberately the same shape — a
+/// descriptor is catalog material exactly as a Body's manifest entry is. What
+/// makes it safe to serve is that a descriptor says nothing a peer could not
+/// already derive from bytes it is entitled to: geometry, an epoch id, a
+/// per-ingest nonce, and a Merkle root over ciphertext. None of it opens
+/// anything.
+pub fn build_content_index(
+    descriptors: Vec<crate::content::ContentDescriptor>,
+    sink: &mut NodeSink,
+) -> Result<Option<ChildRef>, ManifestError> {
+    let indexed: Vec<IndexEntry> = descriptors
+        .into_iter()
+        .map(|descriptor| {
+            descriptor
+                .validate()
+                .map_err(|_| ManifestError::NonCanonical)?;
+            Ok(IndexEntry {
+                key: content_index_key(descriptor.content_ref().as_bytes()),
+                value: descriptor.encode(),
             })
         })
         .collect::<Result<_, ManifestError>>()?;

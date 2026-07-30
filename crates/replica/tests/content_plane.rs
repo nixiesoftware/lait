@@ -24,8 +24,9 @@ use replica::content::{
 };
 use replica::frontier::AuthorityFrontier;
 use replica::{
-    BodyBinding, BodyId, BodyKey, BodyOp, CommitAuthorization, CommitContext, EncodingId, Replica,
-    SchemaId, SeedSigner, StaticBodyKeys, SupportedSchemas, WorldId, MUTATION_ATOMIC,
+    AuthorityBatchReceipt, AuthorityIncorporator, BodyBinding, BodyId, BodyKey, BodyOp,
+    CommitAuthorization, CommitContext, EncodingId, ManifestRoot, Replica, SchemaId, SeedSigner,
+    StagedContactMaterial, StaticBodyKeys, SupportedSchemas, WorldId, MUTATION_ATOMIC,
 };
 
 const WRITER_SEED: [u8; 32] = [61u8; 32];
@@ -572,4 +573,299 @@ fn the_content_paths_never_publish_two_roots_at_one_coordinate() {
     let mut coordinates: Vec<_> = seen.iter().map(|(s, f, _)| (*s, *f)).collect();
     coordinates.dedup();
     assert_eq!(coordinates.len(), 4, "{seen:?}");
+}
+
+// ---------------------------------------------------------------------------
+// Descriptor convergence: the half of the plane that makes content openable by
+// anyone but its author.
+//
+// A Body's manifest entry names content by id. An id is not enough to ask for
+// bytes — asking needs the geometry, the epoch, and the Merkle root, and those
+// live only in the descriptor. A Contact that carried declarations without
+// descriptors converged an attachment as a name its recipients could see and
+// never open. These tests are about the descriptor making the same crossing the
+// declaration makes, in the same commit, under the same signature.
+// ---------------------------------------------------------------------------
+
+struct WriterAuthorized;
+impl replica::AuthoritySource for WriterAuthorized {
+    fn signer_authorized(&self, signer: &[u8; 32], _f: &AuthorityFrontier) -> bool {
+        *signer
+            == mechanics::crypto::device_from_seed(&WRITER_SEED)
+                .key_bytes()
+                .unwrap()
+    }
+}
+
+struct FixtureIncorporator;
+impl AuthorityIncorporator for FixtureIncorporator {
+    fn incorporate_authority(
+        &mut self,
+        records: &[Vec<u8>],
+    ) -> Result<AuthorityBatchReceipt, String> {
+        Ok(AuthorityBatchReceipt {
+            space: space(),
+            prior_frontier: AuthorityFrontier::from_canonical_bytes(vec![]),
+            resulting_frontier: AuthorityFrontier::from_canonical_bytes(vec![9]),
+            batch_digest: *blake3::hash(&records.concat()).as_bytes(),
+        })
+    }
+}
+
+/// A bag of index nodes that remembers which ones were read.
+///
+/// Reading is the only way to learn which nodes a root reaches: the index is
+/// content-addressed, so a node carries no label saying which root wants it.
+struct ReadingBag {
+    nodes: BTreeMap<[u8; 32], Vec<u8>>,
+    read: std::cell::RefCell<std::collections::BTreeSet<[u8; 32]>>,
+}
+
+impl ReadingBag {
+    fn new(nodes: &[Vec<u8>]) -> Self {
+        Self {
+            nodes: nodes
+                .iter()
+                .map(|bytes| (fabric::journal::object_content_hash(bytes), bytes.clone()))
+                .collect(),
+            read: std::cell::RefCell::new(std::collections::BTreeSet::new()),
+        }
+    }
+}
+
+impl fabric::journal::index::NodeSource for ReadingBag {
+    fn node(&self, hash: &[u8; 32]) -> Option<Vec<u8>> {
+        self.read.borrow_mut().insert(*hash);
+        self.nodes.get(hash).cloned()
+    }
+}
+
+/// Everything one replica would serve a peer over Contact, staged as the
+/// untrusted material the peer actually receives.
+fn stage(fx: &Fixture) -> StagedContactMaterial {
+    let space = space();
+    let signer = SeedSigner(&WRITER_SEED);
+    let context = ctx(&signer, &space);
+    let material = fx.replica.export_material().unwrap();
+    let (root, nodes) = fx.replica.export_manifest(&context).unwrap();
+    let mut authority_records = vec![b"mechanics-authority-record".to_vec()];
+    let mut bodies = Vec::new();
+    for (tx, payloads) in &material {
+        authority_records.push(tx.encode());
+        for (key, envelope) in payloads {
+            bodies.push((tx.id(), key.clone(), envelope.clone()));
+        }
+    }
+    StagedContactMaterial {
+        authority_records,
+        manifest_root_bytes: root,
+        manifest_nodes: nodes,
+        bodies,
+    }
+}
+
+/// Commit a Body, ingest content, commit its descriptor, and declare the one
+/// against the other — an attachment, as far as the substrate is concerned.
+fn author_with_content(fx: &mut Fixture, seq: u8, plaintext: &[u8]) -> ContentRef {
+    let space = space();
+    let signer = SeedSigner(&WRITER_SEED);
+    commit_body(&mut fx.replica, seq, &body(seq), b"an issue with a file");
+    let out = ingest(fx, seq, plaintext);
+    fx.replica
+        .commit_content(&ctx(&signer, &space), std::slice::from_ref(&out.descriptor))
+        .unwrap();
+    let mut declarations = BTreeMap::new();
+    declarations.insert(body(seq), vec![out.content_ref]);
+    fx.replica
+        .declare_content(&ctx(&signer, &space), declarations)
+        .unwrap();
+    out.content_ref
+}
+
+fn incorporate(fx: &mut Fixture, staged: &StagedContactMaterial) -> Result<(), String> {
+    let space = space();
+    let signer = SeedSigner(&WRITER_SEED);
+    let context = ctx(&signer, &space);
+    let mut incorporator = FixtureIncorporator;
+    let bundle = fx
+        .replica
+        .validate_contact(staged, &WriterAuthorized, &mut incorporator)
+        .map_err(|e| e.to_string())?;
+    fx.replica
+        .incorporate_bundle(&context, bundle, &WriterAuthorized)
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[test]
+fn a_descriptor_crosses_a_contact_with_the_declaration_that_names_it() {
+    // The gate on everything downstream: after one Contact, the receiver can
+    // say what shape this content is without ever having held its bytes, and
+    // nothing local planted the answer.
+    let mut author = fixture("converge-author");
+    let mut peer = fixture("converge-peer");
+    let plaintext = filler(11, CHUNK_PLAINTEXT_LEN as usize * 2 + 17);
+    let content = author_with_content(&mut author, 1, &plaintext);
+
+    assert!(
+        peer.replica.content_descriptor(&content).is_none(),
+        "the peer starts knowing nothing about this content"
+    );
+    incorporate(&mut peer, &stage(&author)).expect("the bundle validates and incorporates");
+
+    let here = peer
+        .replica
+        .content_descriptor(&content)
+        .expect("the descriptor crossed");
+    assert_eq!(
+        here,
+        author.replica.content_descriptor(&content).unwrap(),
+        "and it is the author's descriptor, byte for byte"
+    );
+    assert_eq!(here.plaintext_len, plaintext.len() as u64);
+    assert_eq!(here.content_ref(), content, "it is self-identifying");
+    assert_eq!(
+        peer.replica.declared_content(&body(1)),
+        vec![content],
+        "the declaration that names it crossed in the same bundle"
+    );
+    // What did not cross: the bytes. That asymmetry is the whole plane.
+    assert_eq!(
+        peer.cache.staged_bytes(),
+        0,
+        "a descriptor is not its content"
+    );
+}
+
+#[test]
+fn an_advertisement_that_cannot_back_its_declarations_is_refused_whole() {
+    // The completeness rule, and why it is a rule: adopting an advertised root
+    // is atomic, so a declaration the receiver cannot resolve would become
+    // permanent local state naming content nobody here can ever ask for. The
+    // gap would surface only when someone finally tried to open it.
+    //
+    // Two ways an advertisement fails to back itself, and they fail at
+    // different depths.
+    let mut author = fixture("incomplete-author");
+    author_with_content(&mut author, 3, b"a file that will not travel");
+    let honest = stage(&author);
+    let root = ManifestRoot::decode_canonical(&honest.manifest_root_bytes).unwrap();
+    assert!(
+        root.content_index_root.is_some(),
+        "the honest advertisement carries a content catalog"
+    );
+
+    // 1. The catalog's nodes are withheld. Omission is the tamper actually
+    //    available: the root is signed, so substituting a descriptor moves its
+    //    index key, and rewriting the root needs the author's key. This is
+    //    caught by index verification, before any declaration is read.
+    let bag = ReadingBag::new(&honest.manifest_nodes);
+    fabric::journal::index::stream(&bag, root.content_index_root, &mut |_| {}).unwrap();
+    let catalog_nodes = bag.read.borrow().clone();
+    assert!(
+        !catalog_nodes.is_empty(),
+        "the catalog has nodes to withhold"
+    );
+    let mut withheld = stage(&author);
+    withheld
+        .manifest_nodes
+        .retain(|node| !catalog_nodes.contains(&fabric::journal::object_content_hash(node)));
+    let mut peer = fixture("incomplete-peer");
+    let refusal = incorporate(&mut peer, &withheld)
+        .expect_err("an advertisement missing its own catalog is refused");
+    assert!(refusal.contains("index"), "{refusal}");
+    assert!(peer.replica.declared_content(&body(3)).is_empty());
+
+    // 2. A correctly signed advertisement that declares content and carries no
+    //    catalog at all. This is not hypothetical: it is exactly what a peer
+    //    running the shape this commit replaces publishes — entries naming
+    //    content ids under a root whose content index is empty. Everything
+    //    verifies; the declarations still cannot be resolved, and the rule that
+    //    catches it is the one about resolving declarations, not the one about
+    //    valid indexes.
+    let signer = SeedSigner(&WRITER_SEED);
+    let blind = ManifestRoot::sign_with(
+        &space(),
+        root.replica_frontier,
+        root.body_index_root,
+        None,
+        AuthorityFrontier::from_canonical_bytes(vec![9]),
+        &signer,
+    )
+    .unwrap();
+    let mut content_blind = stage(&author);
+    content_blind.manifest_root_bytes = blind.encode();
+    content_blind
+        .manifest_nodes
+        .retain(|node| !catalog_nodes.contains(&fabric::journal::object_content_hash(node)));
+    let mut peer = fixture("blind-peer");
+    let refusal = incorporate(&mut peer, &content_blind)
+        .expect_err("a declaration with no descriptor behind it is refused");
+    assert!(
+        refusal.contains("does not advertise"),
+        "the refusal must say what is unbacked: {refusal}"
+    );
+    assert!(
+        peer.replica.declared_content(&body(3)).is_empty(),
+        "nothing partial is retained"
+    );
+}
+
+#[test]
+fn a_peer_that_already_holds_the_descriptor_needs_it_sent_only_once() {
+    // Convergence is incremental. A comment on an issue with an attachment must
+    // not require re-resolving the attachment against the wire, or every later
+    // Contact pays for every earlier upload.
+    let mut author = fixture("incremental-author");
+    let mut peer = fixture("incremental-peer");
+    let content = author_with_content(&mut author, 5, b"the file");
+    incorporate(&mut peer, &stage(&author)).expect("first contact");
+    assert!(peer.replica.content_descriptor(&content).is_some());
+
+    commit_body(&mut author.replica, 6, &body(5), b"the issue, commented on");
+    let second = stage(&author);
+    let bundle = {
+        let mut incorporator = FixtureIncorporator;
+        peer.replica
+            .validate_contact(&second, &WriterAuthorized, &mut incorporator)
+            .expect("second contact validates")
+    };
+    assert_eq!(
+        bundle.descriptor_count(),
+        0,
+        "nothing new to adopt — the peer already holds this descriptor"
+    );
+    let space = space();
+    let signer = SeedSigner(&WRITER_SEED);
+    peer.replica
+        .incorporate_bundle(&ctx(&signer, &space), bundle, &WriterAuthorized)
+        .expect("second contact incorporates");
+    assert!(
+        peer.replica.content_descriptor(&content).is_some(),
+        "and the descriptor is still here"
+    );
+    assert_eq!(peer.replica.declared_content(&body(5)), vec![content]);
+}
+
+#[test]
+fn content_a_body_stopped_declaring_is_not_pushed_at_a_peer() {
+    // An advertisement carries what live Bodies reach, not everything on disk.
+    // A descriptor awaiting this Station's own sweep is this Station's garbage;
+    // exporting it would grow the peer's catalog from ours, and their sweep
+    // would then have to undo it.
+    let mut author = fixture("orphan-author");
+    let mut peer = fixture("orphan-peer");
+    let content = author_with_content(&mut author, 7, b"a file about to be orphaned");
+
+    author.replica.forget_declaration(&body(7));
+    assert!(
+        author.replica.content_descriptor(&content).is_some(),
+        "the author still holds it — the sweep is a separate beat"
+    );
+
+    incorporate(&mut peer, &stage(&author)).expect("contact");
+    assert!(
+        peer.replica.content_descriptor(&content).is_none(),
+        "an unreachable descriptor is not advertised"
+    );
 }

@@ -73,6 +73,7 @@ fn filler(seed: u64, len: usize) -> Vec<u8> {
 /// One Station's content plane plus, optionally, a running Freight provider.
 struct Node {
     host: Arc<ContentHost>,
+    core: Arc<runtime::session::StationCore>,
     station: StationId,
     transport: Arc<dyn comms::Transport>,
     cancel: CancelToken,
@@ -109,15 +110,16 @@ impl Node {
     /// run that is over.
     fn restart(&mut self) {
         self.stop();
-        let core = Arc::new(runtime::session::StationCore::for_test(
-            replica::Replica::open_journaled(
-                self.dir.join("store"),
-                Arc::new(replica::StaticBodyKeys::new(
-                    AuthorizedBodyKey::for_authorized_epoch(EPOCH, EPOCH_KEY),
-                )),
-            )
-            .unwrap(),
-        ));
+        let mut replica = replica::Replica::open_journaled(
+            self.dir.join("store"),
+            Arc::new(replica::StaticBodyKeys::new(
+                AuthorizedBodyKey::for_authorized_epoch(EPOCH, EPOCH_KEY),
+            )),
+        )
+        .unwrap();
+        replica.set_supported(supported());
+        let core = Arc::new(runtime::session::StationCore::for_test(replica));
+        self.core = core.clone();
         let cache = Arc::new(ResidentCache::open(self.dir.join("cache"), 1 << 30).unwrap());
         cache
             .sweep_leases(&std::collections::BTreeSet::new())
@@ -142,17 +144,17 @@ fn node(net: &comms::mem::MemNet, tag: &str, seed: [u8; 32], serving: bool) -> N
     let dir = std::env::temp_dir().join(format!("lait-2node-{tag}-{}-{n}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
 
-    let core = Arc::new(runtime::session::StationCore::for_test(
-        replica::Replica::open_journaled(
-            dir.join("store"),
-            Arc::new(replica::StaticBodyKeys::new(
-                AuthorizedBodyKey::for_authorized_epoch(EPOCH, EPOCH_KEY),
-            )),
-        )
-        .unwrap(),
-    ));
+    let mut replica = replica::Replica::open_journaled(
+        dir.join("store"),
+        Arc::new(replica::StaticBodyKeys::new(
+            AuthorizedBodyKey::for_authorized_epoch(EPOCH, EPOCH_KEY),
+        )),
+    )
+    .unwrap();
+    replica.set_supported(supported());
+    let core = Arc::new(runtime::session::StationCore::for_test(replica));
     let cache = Arc::new(ResidentCache::open(dir.join("cache"), 1 << 30).unwrap());
-    let host = Arc::new(ContentHost::new(core, cache));
+    let host = Arc::new(ContentHost::new(core.clone(), cache));
     let device = mechanics::crypto::device_from_seed(&seed);
     let station = StationId::from_device(&device).expect("station");
     let transport: Arc<dyn comms::Transport> = Arc::new(net.peer(device));
@@ -182,11 +184,171 @@ fn node(net: &comms::mem::MemNet, tag: &str, seed: [u8; 32], serving: bool) -> N
 
     Node {
         host,
+        core,
         station,
         transport,
         cancel,
         driver,
         dir,
+    }
+}
+
+// ---- the Space a declaring Body lives in ---------------------------------
+//
+// Content is only advertised when a live Body declares it, so a holder that
+// wants a peer to be able to fetch has to have committed the Body that names
+// it. That is not test scaffolding — it is the reachability rule, and a test
+// that skipped it would be proving convergence of something no advertisement
+// would ever carry.
+
+fn world() -> replica::WorldId {
+    replica::WorldId::parse("com.example.notes").unwrap()
+}
+
+fn body_key(n: u8) -> replica::BodyKey {
+    replica::BodyKey::new(world(), replica::BodyId::from_bytes([n; 16]))
+}
+
+fn binding() -> replica::BodyBinding {
+    replica::BodyBinding {
+        schema: replica::SchemaId::parse("blob").unwrap(),
+        schema_version: 1,
+        encoding: replica::EncodingId::parse("bytes").unwrap(),
+        mutation_model: replica::MUTATION_ATOMIC,
+    }
+}
+
+fn supported() -> replica::SupportedSchemas {
+    let mut s = replica::SupportedSchemas::new();
+    s.declare(
+        world(),
+        replica::SchemaId::parse("blob").unwrap(),
+        1,
+        replica::EncodingId::parse("bytes").unwrap(),
+        replica::MUTATION_ATOMIC,
+    );
+    s
+}
+
+fn demand() -> Vec<u8> {
+    use mechanics::demand::{AuthorizationDemand, PolicyCapability, PolicyResource};
+    AuthorizationDemand::require(
+        PolicyCapability::new("com.example.notes", "write"),
+        PolicyResource::space("com.example.notes"),
+    )
+    .encode_canonical()
+    .expect("canonical demand")
+}
+
+const AUTHOR_SEED: [u8; 32] = [77u8; 32];
+
+fn commit_context<'a>(
+    space: &'a SpaceId,
+    signer: &'a replica::SeedSigner<'a>,
+) -> replica::CommitContext<'a> {
+    replica::CommitContext {
+        space,
+        signer,
+        authority_frontier: replica::frontier::AuthorityFrontier::from_canonical_bytes(vec![9]),
+    }
+}
+
+/// Every signer is authorized here: this suite is about moving bytes, and
+/// mechanics standing has its own tests.
+struct AnySigner;
+impl replica::AuthoritySource for AnySigner {
+    fn signer_authorized(
+        &self,
+        _signer: &[u8; 32],
+        _f: &replica::frontier::AuthorityFrontier,
+    ) -> bool {
+        true
+    }
+}
+
+struct BatchReceipts;
+impl replica::AuthorityIncorporator for BatchReceipts {
+    fn incorporate_authority(
+        &mut self,
+        records: &[Vec<u8>],
+    ) -> Result<replica::AuthorityBatchReceipt, String> {
+        Ok(replica::AuthorityBatchReceipt {
+            space: space(),
+            prior_frontier: replica::frontier::AuthorityFrontier::from_canonical_bytes(vec![]),
+            resulting_frontier: replica::frontier::AuthorityFrontier::from_canonical_bytes(vec![9]),
+            batch_digest: *blake3::hash(&records.concat()).as_bytes(),
+        })
+    }
+}
+
+/// Commit the Body that will declare this content, so the holder has something
+/// to advertise it from.
+fn commit_declaring_body(node: &Node, seq: u8) {
+    let space = space();
+    let signer = replica::SeedSigner(&AUTHOR_SEED);
+    let ctx = commit_context(&space, &signer);
+    let mut request = [0u8; 16];
+    request[0] = seq;
+    node.core
+        .with_replica(|replica| {
+            replica.commit_action(
+                &ctx,
+                &replica::CommitAuthorization {
+                    actor: "author",
+                    parent_manifest_root: [0u8; 32],
+                    demand: demand(),
+                    intent_digest: [7u8; 32],
+                    authorizer: &replica::StaticAuthorizer {
+                        world: world(),
+                        implementation_id: [0u8; 32],
+                    },
+                },
+                &world(),
+                &mechanics::crypto::device_from_seed(&AUTHOR_SEED),
+                &request,
+                &[7u8; 32],
+                Vec::new(),
+                Vec::new(),
+                "author",
+                &[(
+                    body_key(seq),
+                    replica::BodyOp::ReplaceAtomic {
+                        value: b"an issue with a file".to_vec(),
+                    },
+                )],
+                &[(body_key(seq), binding())],
+                &[],
+            )
+        })
+        .expect("commit the declaring Body");
+}
+
+/// Stage everything this node would serve a peer over Contact.
+fn stage(node: &Node) -> replica::StagedContactMaterial {
+    let space = space();
+    let signer = replica::SeedSigner(&AUTHOR_SEED);
+    let ctx = commit_context(&space, &signer);
+    let (material, root, nodes) = node
+        .core
+        .with_replica(|replica| {
+            let material = replica.export_material()?;
+            let (root, nodes) = replica.export_manifest(&ctx)?;
+            Ok((material, root, nodes))
+        })
+        .expect("export");
+    let mut authority_records = vec![b"mechanics-authority-record".to_vec()];
+    let mut bodies = Vec::new();
+    for (tx, payloads) in &material {
+        authority_records.push(tx.encode());
+        for (key, envelope) in payloads {
+            bodies.push((tx.id(), key.clone(), envelope.clone()));
+        }
+    }
+    replica::StagedContactMaterial {
+        authority_records,
+        manifest_root_bytes: root,
+        manifest_nodes: nodes,
+        bodies,
     }
 }
 
@@ -201,36 +363,50 @@ fn seed_content(node: &Node, operation: u8, plaintext: &[u8]) -> ContentRef {
         signer: &signer,
         authority_frontier: replica::frontier::AuthorityFrontier::from_canonical_bytes(vec![9]),
     };
-    node.host
+    let content = node
+        .host
         .ingest(
             &policy,
             [operation; 16],
             &mut std::io::Cursor::new(plaintext.to_vec()),
             &ctx,
         )
-        .expect("ingest")
+        .expect("ingest");
+    // A Body has to name it or nothing advertises it: reachability is derived
+    // from what live Bodies declare, on the wire exactly as it is on disk.
+    commit_declaring_body(node, operation);
+    let mut declarations = std::collections::BTreeMap::new();
+    declarations.insert(body_key(operation), vec![content]);
+    node.core
+        .with_replica(|replica| replica.declare_content(&ctx, declarations))
+        .expect("declare");
+    content
 }
 
-/// Give a node the descriptor without the bytes — what Contact convergence
-/// does, modelled directly so this test needs no Contact.
+/// Give a node the descriptor without the bytes, by converging on it.
+///
+/// This is a real Contact: the holder's signed advertisement, validated and
+/// incorporated through the same path a peer's would be. Nothing is planted —
+/// which is the point, because a planted descriptor would prove the fetch works
+/// on state no advertisement could ever produce.
 fn learn_descriptor(learner: &Node, from: &Node, content: &ContentRef) {
+    let staged = stage(from);
     let space = space();
+    let signer = replica::SeedSigner(&AUTHOR_SEED);
+    let ctx = commit_context(&space, &signer);
+    learner
+        .core
+        .with_replica(|replica| {
+            let bundle = replica.validate_contact(&staged, &AnySigner, &mut BatchReceipts)?;
+            replica.incorporate_bundle(&ctx, bundle, &AnySigner)
+        })
+        .expect("the learner converges on what the holder advertised");
     let allow = |_: ContentAction| Ok(());
-    let policy = from.policy(&space, &allow);
-    let descriptor = from
-        .host
-        .descriptor_of(&policy, content)
-        .expect("the holder knows it");
-    let signer = replica::SeedSigner(&[78u8; 32]);
-    let ctx = replica::CommitContext {
-        space: &space,
-        signer: &signer,
-        authority_frontier: replica::frontier::AuthorityFrontier::from_canonical_bytes(vec![9]),
-    };
+    let policy = learner.policy(&space, &allow);
     learner
         .host
-        .commit_descriptor_for_test(&ctx, &descriptor)
-        .expect("the learner commits what it converged on");
+        .descriptor_of(&policy, content)
+        .expect("and now knows the content's shape without holding a byte of it");
 }
 
 /// Give a node the content itself, the only way a peer legitimately can.

@@ -126,6 +126,20 @@ A Body entry names its concurrent heads and the `ContentRef`s that Body
 references. Content references are Manifest data — they must survive a restart
 and reach every participant — while the bytes they name are not.
 
+An advertisement carries **both** indexes or it is refused. A `ContentRef` is a
+name; asking for the bytes behind it needs the geometry, the epoch, and the
+Merkle root, and those live only in the descriptor. A root that declares content
+its content index does not carry names bytes the receiver could never ask
+anyone for, so a receiver rejects it whole rather than adopting a declaration it
+cannot resolve. Already holding the descriptor satisfies the rule as well as
+receiving it does: convergence is incremental, and a comment on an issue must
+not re-resolve that issue's attachment.
+
+The content index advertises what live Bodies reach, and only that. A descriptor
+awaiting its holder's own sweep is that holder's garbage; pushing it at a peer
+would grow the peer's catalog from ours, and the peer's own sweep would then
+have to undo it.
+
 An observer keeps a bounded number of roots per signer and evicts the oldest
 rather than refusing new ones; a peer that publishes quickly must not be able to
 exhaust a watcher's memory, and must not be able to silence itself either.
