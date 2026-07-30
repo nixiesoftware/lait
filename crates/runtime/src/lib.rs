@@ -48,6 +48,7 @@ pub mod planes;
 pub mod registry;
 pub mod session;
 pub mod store;
+pub mod transfer;
 pub(crate) mod wire;
 pub mod world;
 
