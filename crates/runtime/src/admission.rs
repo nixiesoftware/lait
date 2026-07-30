@@ -55,6 +55,16 @@ pub struct AdmittedPeer {
     /// question on this connection is answered against the same view.
     pub authority_frontier: AuthorityFrontier,
     pub granted_lanes: Vec<u8>,
+    /// The session this connection is, and which reconnect of it.
+    ///
+    /// Carried because the driver is the only thing that sees them and the
+    /// service is the only thing that needs them: the driver judges the
+    /// opening, writes the accept, and then had nothing to hand on. A transient
+    /// item's epoch is checked for equality against *this* one, so a plane
+    /// service that could not see it could not tell a live datagram from one
+    /// belonging to a session that has already reconnected.
+    pub session_id: [u8; 16],
+    pub session_epoch: [u8; 16],
 }
 
 /// Local operator policy for a plane.
@@ -177,6 +187,8 @@ pub fn judge(
             actor: resolution.actor,
             authority_frontier: resolution.authority_frontier,
             granted_lanes: granted,
+            session_id: open.session_id,
+            session_epoch: open.session_epoch,
         }),
     )
 }

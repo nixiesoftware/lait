@@ -264,6 +264,33 @@ fn operator_policy_and_membership_answer_different_questions() {
 }
 
 #[test]
+fn the_admitted_peer_carries_the_session_the_accept_names() {
+    // The driver judges the opening, writes the accept, and then hands the
+    // service an `AdmittedPeer`. Without these two fields that hand-off dropped
+    // the only thing that identifies *which* session this is — and a transient
+    // item's epoch is checked for equality against exactly this one, so a
+    // service that could not see it could not tell a live datagram from one
+    // belonging to a session that has already reconnected.
+    let space = space();
+    let open = opening(&space, Plane::Freight);
+    let Admission::Accept(accept, peer) = judge(
+        &open,
+        &context(&space, Plane::Freight),
+        &member(),
+        &PlanePolicy::default(),
+    ) else {
+        panic!("a member is admitted");
+    };
+    assert_eq!(peer.session_id, open.session_id);
+    assert_eq!(peer.session_epoch, open.session_epoch);
+    assert_eq!(
+        accept.session_id, open.session_id,
+        "and the accept names the same session the peer proposed"
+    );
+    assert_eq!(accept.session_epoch, open.session_epoch);
+}
+
+#[test]
 fn a_replayed_opening_returns_the_same_accept_and_mints_nothing() {
     // Acceptance 11. 0.5-RTT data is replayable by anyone who can intercept
     // handshake packets, so accepting has to be idempotent.
