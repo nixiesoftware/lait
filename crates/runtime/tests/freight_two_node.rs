@@ -12,7 +12,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use mechanics::crypto::AuthorizedBodyKey;
 use mechanics::ids::{SpaceId, StationId};
@@ -25,7 +25,7 @@ use runtime::freight::FreightService;
 use runtime::lifecycle::CancelToken;
 use runtime::plane_driver::{run_driver, PlaneContext};
 use runtime::planes::Plane;
-use runtime::transfer::{TransferRegistry, TransferState};
+use runtime::transfer::{TransferHandle, TransferRegistry, TransferState};
 use runtime::world::{AuthorityView, PrincipalResolution};
 
 const EPOCH: [u8; 16] = [3u8; 16];
@@ -100,6 +100,34 @@ impl Node {
             let _ = handle.join();
         }
     }
+
+    /// Reopen the store and cache over the same directory, running exactly the
+    /// reclaim that `Orbit::activate` runs.
+    ///
+    /// Nothing was in flight before this moment — that is what a restart means
+    /// — so every operation lease and every staging slot on disk belongs to a
+    /// run that is over.
+    fn restart(&mut self) {
+        self.stop();
+        let core = Arc::new(runtime::session::StationCore::for_test(
+            replica::Replica::open_journaled(
+                self.dir.join("store"),
+                Arc::new(replica::StaticBodyKeys::new(
+                    AuthorizedBodyKey::for_authorized_epoch(EPOCH, EPOCH_KEY),
+                )),
+            )
+            .unwrap(),
+        ));
+        let cache = Arc::new(ResidentCache::open(self.dir.join("cache"), 1 << 30).unwrap());
+        cache
+            .sweep_leases(&std::collections::BTreeSet::new())
+            .unwrap();
+        cache
+            .sweep_staging(&std::collections::BTreeSet::new())
+            .unwrap();
+        self.host = Arc::new(ContentHost::new(core, cache));
+        self.cancel = CancelToken::new();
+    }
 }
 
 impl Drop for Node {
@@ -142,7 +170,13 @@ fn node(net: &comms::mem::MemNet, tag: &str, seed: [u8; 32], serving: bool) -> N
             drain_deadline: runtime::lifecycle::DEFAULT_DRAIN_DEADLINE,
             authority_tick: None,
         };
-        let service = FreightService::new(host.clone(), Arc::new(Keys), space(), u64::MAX);
+        let service = FreightService::new(
+            host.clone(),
+            Arc::new(TransferRegistry::new()),
+            Arc::new(Keys),
+            space(),
+            u64::MAX,
+        );
         std::thread::spawn(move || run_driver(context, service))
     });
 
@@ -537,4 +571,226 @@ async fn a_fetch_without_a_descriptor_cannot_start() {
     );
     let _ = Duration::from_secs(0);
     let _ = TransferState::Queued;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restart_reclaims_a_dead_transfer_and_keeps_what_was_installed() {
+    // The two halves of what a restart must do, and they pull in opposite
+    // directions: forget the partial (nothing binds it any more — the leaf a
+    // resume would name lives in the fetch loop, not on disk) while keeping the
+    // chunks that verified (those are durable, and re-fetching them would be
+    // moving bytes we already own).
+    let net = comms::mem::MemNet::new();
+    let holder = node(&net, "restart-holder", [52u8; 32], true);
+    let mut seeker = node(&net, "restart-seeker", [53u8; 32], false);
+    let plaintext = filler(5, replica::content::CHUNK_PLAINTEXT_LEN as usize * 3 + 200);
+    let content = seed_content(&holder, 1, &plaintext);
+    learn_descriptor(&seeker, &holder, &content);
+
+    let space = space();
+    let allow = |_: ContentAction| Ok(());
+
+    // A first fetch that really completes, so there is something to keep.
+    let provider = connect_provider(
+        seeker.transport.as_ref(),
+        &space,
+        &seeker.station,
+        &holder.station,
+        [40u8; 16],
+    )
+    .await
+    .expect("admitted");
+    fetcher(&seeker)
+        .fetch(&content, [40u8; 16], std::slice::from_ref(&provider))
+        .await
+        .expect("first fetch");
+    let installed = {
+        let policy = seeker.policy(&space, &allow);
+        seeker.host.resident_indices(&policy, &content).unwrap()
+    };
+    assert_eq!(installed.len(), 4);
+
+    // Now the wreckage a killed transfer leaves: a staged partial and an
+    // operation lease that no live transfer holds.
+    let dead = [0xDDu8; 16];
+    let held_entry = {
+        let policy = seeker.policy(&space, &allow);
+        let descriptor = seeker.host.descriptor_of(&policy, &content).unwrap();
+        replica::content::chunk_slot(&descriptor, 0)
+    };
+    seeker
+        .host
+        .cache()
+        .append_staged(&dead, 7, 0, b"half a chunk")
+        .unwrap();
+    seeker
+        .host
+        .cache()
+        .lease(&replica::journal::cache::Lease::operation(dead, held_entry))
+        .unwrap();
+    assert!(seeker.host.cache().staged_bytes() > 0);
+
+    seeker.restart();
+
+    assert_eq!(
+        seeker.host.cache().staged_bytes(),
+        0,
+        "a partial with nothing binding it is not resumable, so it is not kept"
+    );
+    let policy = seeker.policy(&space, &allow);
+    assert_eq!(
+        seeker.host.resident_indices(&policy, &content).unwrap(),
+        installed,
+        "and every chunk that verified survives the restart"
+    );
+    assert_eq!(
+        seeker
+            .host
+            .read_range(&policy, &content, 0, plaintext.len())
+            .unwrap(),
+        plaintext
+    );
+
+    // Re-fetching moves nothing: the whole content is already here.
+    fetcher(&seeker)
+        .fetch(&content, [41u8; 16], &[])
+        .await
+        .expect("nothing is missing, so no provider is needed");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restart_re_fetches_at_chunk_granularity() {
+    // The other side of the same rule. Chunks that never installed are gone
+    // after a restart and have to move again — but only those, and the ones
+    // that did install are not asked for.
+    let net = comms::mem::MemNet::new();
+    let holder = node(&net, "granular-holder", [54u8; 32], true);
+    let mut seeker = node(&net, "granular-seeker", [55u8; 32], false);
+    let plaintext = filler(6, replica::content::CHUNK_PLAINTEXT_LEN as usize * 3 + 50);
+    let content = seed_content(&holder, 1, &plaintext);
+    learn_descriptor(&seeker, &holder, &content);
+
+    let space = space();
+    let allow = |_: ContentAction| Ok(());
+    let provider = connect_provider(
+        seeker.transport.as_ref(),
+        &space,
+        &seeker.station,
+        &holder.station,
+        [42u8; 16],
+    )
+    .await
+    .expect("admitted");
+    fetcher(&seeker)
+        .fetch(&content, [42u8; 16], std::slice::from_ref(&provider))
+        .await
+        .expect("fetch");
+
+    // Drop one installed chunk, as a quota eviction would.
+    let descriptor = {
+        let policy = seeker.policy(&space, &allow);
+        seeker.host.descriptor_of(&policy, &content).unwrap()
+    };
+    let slot = replica::content::chunk_slot(&descriptor, 2);
+    seeker
+        .host
+        .cache()
+        .release_content(&descriptor.content_nonce)
+        .unwrap();
+    seeker.host.cache().evict(&slot).unwrap();
+    for index in 0..descriptor.chunk_count {
+        if index == 2 {
+            continue;
+        }
+        seeker
+            .host
+            .cache()
+            .lease(&replica::journal::cache::Lease::content(
+                descriptor.content_nonce,
+                replica::content::chunk_slot(&descriptor, index),
+            ))
+            .unwrap();
+    }
+    seeker.restart();
+
+    let policy = seeker.policy(&space, &allow);
+    let before = seeker.host.resident_indices(&policy, &content).unwrap();
+    assert!(!before.contains(&2) && before.len() == 3);
+
+    let provider = connect_provider(
+        seeker.transport.as_ref(),
+        &space,
+        &seeker.station,
+        &holder.station,
+        [43u8; 16],
+    )
+    .await
+    .expect("admitted");
+    fetcher(&seeker)
+        .fetch(&content, [43u8; 16], std::slice::from_ref(&provider))
+        .await
+        .expect("the gap closes");
+    assert_eq!(
+        seeker
+            .host
+            .read_range(&policy, &content, 0, plaintext.len())
+            .unwrap(),
+        plaintext
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn housekeeping_reclaims_dead_staging_and_reports_what_it_cannot() {
+    // Two things a quiet Station still has to do. Reclaiming what a finished
+    // transfer left is the easy half; the other is admitting that a quota it
+    // cannot meet is not a failure to sweep — every chunk of committed content
+    // is held by that content's own lease, so there is nothing eligible, and
+    // "0 reclaimed, Ok" while far over quota tells an operator nothing.
+    let net = comms::mem::MemNet::new();
+    let holder = node(&net, "maintain", [56u8; 32], false);
+    let plaintext = filler(7, 40_000);
+    let content = seed_content(&holder, 1, &plaintext);
+
+    let registry = Arc::new(TransferRegistry::new());
+    let service = FreightService::new(
+        holder.host.clone(),
+        registry.clone(),
+        Arc::new(Keys),
+        space(),
+        u64::MAX,
+    );
+
+    // A dead operation's staging, and a live one's.
+    holder
+        .host
+        .cache()
+        .append_staged(&[0xAAu8; 16], 0, 0, b"orphaned")
+        .unwrap();
+    let live = TransferHandle::new(
+        registry.clone(),
+        holder.host.cache_handle(),
+        [0xBBu8; 16],
+        content,
+        Instant::now(),
+    )
+    .expect("registered");
+    holder
+        .host
+        .cache()
+        .append_staged(&[0xBBu8; 16], 0, 0, b"in flight")
+        .unwrap();
+
+    runtime::plane_driver::PlaneService::maintain(&service).await;
+
+    assert_eq!(
+        holder.host.cache().staged_len(&[0xAAu8; 16], 0),
+        0,
+        "an operation no transfer claims is over"
+    );
+    assert_eq!(
+        holder.host.cache().staged_len(&[0xBBu8; 16], 0),
+        9,
+        "and a live one is left alone"
+    );
+    drop(live);
 }

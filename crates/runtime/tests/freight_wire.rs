@@ -171,7 +171,13 @@ async fn wire(tag: &str, plaintext: Vec<u8>) -> Wire {
             drain_deadline: runtime::lifecycle::DEFAULT_DRAIN_DEADLINE,
             authority_tick: None,
         };
-        let service = FreightService::new(host.clone(), Arc::new(Keys), space.clone(), u64::MAX);
+        let service = FreightService::new(
+            host.clone(),
+            Arc::new(runtime::transfer::TransferRegistry::new()),
+            Arc::new(Keys),
+            space.clone(),
+            u64::MAX,
+        );
         std::thread::spawn(move || run_driver(context, service))
     };
 

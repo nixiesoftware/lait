@@ -64,6 +64,16 @@ pub struct PlaneContext {
 /// plane owns the conversation. Splitting it here is what lets the admission
 /// path, the budgets, and the shutdown ladder be written once.
 pub trait PlaneService {
+    /// Housekeeping, on a slow beat.
+    ///
+    /// Separate from serving because it must happen whether or not anyone is
+    /// connected — reclaiming what a dead transfer left is exactly the work a
+    /// quiet Station needs done. The default does nothing, so a plane with no
+    /// housekeeping says so by omission.
+    fn maintain(&self) -> impl std::future::Future<Output = ()> {
+        std::future::ready(())
+    }
+
     /// Serve one admitted connection until it ends or the driver stops.
     /// Shared rather than owned, because the driver keeps its own handle: a
     /// revocation has to be able to close a connection out from under whatever
@@ -99,6 +109,7 @@ where
     let service = Rc::new(service);
     let replays = Rc::new(std::cell::RefCell::new(AcceptedOpenings::default()));
     let mut connections = tokio::task::JoinSet::new();
+    let mut last_maintained = Instant::now();
     // Two ceilings, because they answer different questions: how much this
     // Space will hold at once, and how much of that any one member may take.
     // Without the second, one peer's reconnect storm is indistinguishable from
@@ -117,7 +128,16 @@ where
         // stop when a peer happens to connect is a driver that does not stop.
         let accepted = tokio::select! {
             incoming = context.transport.accept_connection() => incoming,
-            _ = tokio::time::sleep(deadline::DRIVER_POLL) => continue,
+            _ = tokio::time::sleep(deadline::DRIVER_POLL) => {
+                // The poll exists so cancellation is never missed. Maintenance
+                // rides it on a much slower beat: sweeping on every 25 ms tick
+                // would be a directory walk forty times a second.
+                if last_maintained.elapsed() >= MAINTENANCE_INTERVAL {
+                    last_maintained = Instant::now();
+                    service.maintain().await;
+                }
+                continue;
+            }
         };
         let Some(incoming) = accepted else {
             break;
@@ -172,6 +192,13 @@ where
 
 /// The coarse close code. One for every reason a connection is not served.
 const REFUSED: u32 = 1;
+
+/// How often a driver does housekeeping.
+///
+/// Slow, because the work it does — walking a staging directory, deciding what
+/// a quota can still evict — costs the same whether it runs every second or
+/// every minute, and only the second one is free.
+const MAINTENANCE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
 async fn serve_connection<S>(
     context: Rc<PlaneContext>,

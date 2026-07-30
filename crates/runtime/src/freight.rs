@@ -95,6 +95,14 @@ impl From<ContentHostError> for FreightError {
 /// Everything the provider half needs.
 pub struct FreightService {
     host: std::sync::Arc<ContentHost>,
+    /// What the transfer registry says is still live. Housekeeping reads it;
+    /// nothing else can answer the question.
+    registry: std::sync::Arc<crate::transfer::TransferRegistry>,
+    /// How far over quota the last sweep left this Station, or zero.
+    ///
+    /// Surfaced rather than logged, because the operator action it implies —
+    /// unpin or forget something — is one only they can take.
+    over_quota: std::sync::atomic::AtomicU64,
     /// Concurrent serve tasks across this Space's connections.
     ///
     /// Acquired before a task is spawned. Inside would let a flood outrun the
@@ -108,17 +116,25 @@ pub struct FreightService {
 impl FreightService {
     pub fn new(
         host: std::sync::Arc<ContentHost>,
+        registry: std::sync::Arc<crate::transfer::TransferRegistry>,
         keys: std::sync::Arc<dyn crate::content_host::ContentKeys>,
         space: mechanics::ids::SpaceId,
         max_content_len: u64,
     ) -> Self {
         Self {
             host,
+            registry,
+            over_quota: std::sync::atomic::AtomicU64::new(0),
             workers: std::sync::Arc::new(tokio::sync::Semaphore::new(slots::MAX_SERVE_WORKERS)),
             keys,
             space,
             max_content_len,
         }
+    }
+
+    /// How far over its quota this Station was at the last sweep.
+    pub fn over_quota_bytes(&self) -> u64 {
+        self.over_quota.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -146,6 +162,38 @@ fn serve_predicate(
 }
 
 impl crate::plane_driver::PlaneService for FreightService {
+    /// Reclaim what finished transfers left, then let the quota do what it can.
+    ///
+    /// The live set comes from the transfer registry *and* nothing else knows
+    /// it — an operation lease outlives its process by design, so the only way
+    /// a staging slot is ever declared dead is somebody saying which operations
+    /// are alive. Getting that set wrong in the safe direction leaks disk;
+    /// getting it wrong in the other deletes a live transfer's bytes, so the
+    /// registry is asked rather than inferred.
+    async fn maintain(&self) {
+        let live = self.registry.live_operations();
+        let cache = self.host.cache();
+        let _ = cache.sweep_staging(&live);
+
+        // The quota is a target, not a guarantee: every chunk of a committed
+        // content is held by that content's own lease, so a Station full of
+        // committed content has no eligible victims at all. Reporting the
+        // shortfall is the whole point — "0 reclaimed, Ok" while sitting far
+        // over quota tells an operator nothing, and the answer they need is
+        // "forget something", not "wait".
+        if let Ok(report) = cache.sweep() {
+            if report.over_quota_bytes > 0 {
+                self.over_quota.store(
+                    report.over_quota_bytes,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+            } else {
+                self.over_quota
+                    .store(0, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    }
+
     async fn serve(
         &self,
         connection: std::sync::Arc<dyn comms::Connection>,
