@@ -57,14 +57,25 @@ use crate::orbital::{WorldCall, WorldReply};
 ///
 /// **v6:** product host projections, including Issues inbox, leave root
 /// `Request`/`Response`. Their local facilities now wrap opaque World calls.
-pub const CONTROL_PROTOCOL_VERSION: u32 = 6;
+///
+/// **v7:** a third envelope. Until now every exchange on this channel was one
+/// JSON line each way, which is the wrong shape for a 256 MiB attachment: it
+/// would have to be base64'd, held whole in memory on both sides, and parsed as
+/// one token. The content envelope declares a byte length in its header line
+/// and then sends exactly that many raw bytes, in both directions. A v6 process
+/// cannot serve it — it would read the body as a malformed second request — so
+/// v6 is retired rather than tolerated.
+pub const CONTROL_PROTOCOL_VERSION: u32 = 7;
 
 /// The oldest control protocol a client still talks to. Raising this retires a
 /// version; the gap to [`CONTROL_PROTOCOL_VERSION`] is the mixed-version window.
 ///
-/// Protocol v6 is a deliberate compatibility cutoff: root control contains
-/// only daemon, Space, Mechanics, Station, Observation, and lifecycle calls.
-pub const MIN_SUPPORTED_CONTROL_PROTOCOL: u32 = 6;
+/// Protocol v7 is a deliberate compatibility cutoff. A v6 process attached as a
+/// SpaceBridge would accept a content request's header line and then read the
+/// raw body as a second request, so leaving the minimum at 6 would let
+/// `StationPlacement::establish` attach a process that cannot frame content and
+/// will desynchronise the channel the first time someone uploads.
+pub const MIN_SUPPORTED_CONTROL_PROTOCOL: u32 = 7;
 
 /// Whether this build can talk to a daemon advertising control protocol `peer`.
 ///
@@ -475,6 +486,121 @@ impl WorldClientRequest {
 
 fn is_false(value: &bool) -> bool {
     !value
+}
+
+/// The longest header line this build will read on the control channel.
+///
+/// A header is a JSON object naming a call and, for content, a byte count — so
+/// a bounded thing. Nothing else on this channel bounded its lines at all: an
+/// `AsyncBufReadExt::read_line` grows until it finds a newline or the sender
+/// stops, which makes a peer that never sends one a memory attack that needs no
+/// authorization. The content envelope reads through this bound, and the body
+/// it declares is bounded separately by the Station's own `max_content_len`.
+pub const MAX_CONTROL_FRAME_BYTES: u64 = 64 * 1024;
+
+/// One call on the content plane.
+///
+/// Deliberately not a `Request` variant. Every other call on this channel is a
+/// JSON line whose answer is a JSON line; these are the only ones that carry
+/// bytes, and framing them the same way would mean every reader on the channel
+/// has to know when a line is followed by a body.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum ContentCall {
+    /// What is known about one content, and how much of it is here.
+    Stat { content: String },
+    /// One bounded range of plaintext. The answer carries a body.
+    Read {
+        content: String,
+        offset: u64,
+        len: u64,
+    },
+    /// Seal and commit the bytes this request's body carries.
+    Write {
+        /// The operation id, so a resumed or replayed upload is the same
+        /// operation rather than a second one.
+        operation: String,
+    },
+    /// Drop the local bytes and keep the name.
+    Forget { content: String },
+}
+
+/// The wire envelope for a content call: the call, the route it may traverse,
+/// the acting identity, and how many raw bytes follow this line.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContentClientRequest {
+    pub content: ContentCall,
+    pub route: ControlRoute,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub act_as: Option<String>,
+    /// Exactly how many raw bytes follow the newline. Authoritative: a body
+    /// that ends early is an error and a body with one byte too many is
+    /// refused, because "however much arrives" is indistinguishable from a
+    /// truncated upload and would commit a permanently wrong content that
+    /// hashes fine.
+    #[serde(default)]
+    pub body_len: u64,
+}
+
+/// Why a content call was refused, in the vocabulary a local surface maps to
+/// its own status codes.
+///
+/// Typed rather than a message, because the caller has to *act* differently:
+/// a missing chunk is worth retrying after a transfer, an unknown content
+/// never will be, and a refusal names a demand the caller can go and satisfy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContentErrorCode {
+    /// Authorization refused. The message names the demand.
+    Denied,
+    /// No descriptor here — and deliberately the same answer whether the
+    /// content never existed or this Station simply never heard of it.
+    Unknown,
+    /// The descriptor is here and the bytes are not. Retryable, after a fetch.
+    NotResident,
+    /// A range past the content, or a length past what one call may return.
+    Bounds,
+    /// The store or the cache failed. Ours, not the caller's.
+    Storage,
+    /// The request did not make sense: a malformed id, a body that disagreed
+    /// with its declaration.
+    Invalid,
+}
+
+/// The answer to a [`ContentCall`].
+///
+/// `ContentStream` is the only variant followed by raw bytes, and it says how
+/// many. Everything else is a complete answer on its own line.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ContentReply {
+    /// What is known about one content.
+    ContentStatus {
+        content: String,
+        plaintext_len: u64,
+        chunk_count: u32,
+        resident_chunks: u32,
+        pinned: bool,
+    },
+    /// `len` raw bytes follow this line.
+    ContentStream { len: u64 },
+    /// The content this upload became.
+    ContentWritten { content: String, plaintext_len: u64 },
+    /// The bytes are gone and the name is kept.
+    ContentForgotten,
+    ContentError {
+        code: ContentErrorCode,
+        message: String,
+    },
+}
+
+impl ContentReply {
+    pub fn error(code: ContentErrorCode, message: impl Into<String>) -> Self {
+        Self::ContentError {
+            code,
+            message: message.into(),
+        }
+    }
 }
 
 /// The terminal owner of a control request — the single orbital plane that
@@ -1171,6 +1297,299 @@ async fn exchange_raw<T: Serialize>(stream: Stream, env: &T) -> Result<String> {
         .context("read response")?;
     Ok(resp_line)
 }
+
+/// Send one content call and read the whole answer.
+///
+/// For calls whose answer is bounded: a status, a forget, or a range read,
+/// which one call may never return more than
+/// [`runtime::content_host::MAX_RANGE_BYTES`] of. An upload does not come
+/// through here — see [`ContentUpload`], which streams.
+///
+/// The caller builds the whole envelope rather than passing a call and having
+/// this fill in the rest. That is what makes the adversarial shapes
+/// expressible: a header declaring a body it never sends is exactly the request
+/// a daemon has to refuse without reading, and a helper that always wrote
+/// `body_len: 0` could not ask for it.
+pub async fn content_call(
+    home: &Path,
+    request: &ContentClientRequest,
+) -> Result<(ContentReply, Vec<u8>)> {
+    let name = control_name(home)?;
+    let stream = Stream::connect(name)
+        .await
+        .context("connect to Lait daemon")?;
+    let (read_half, mut write_half) = tokio::io::split(stream);
+    write_header(&mut write_half, request).await?;
+    let mut reader = BufReader::new(read_half);
+    read_content_reply(&mut reader).await
+}
+
+/// One content call with no body, which is every call but a write.
+pub fn content_request(route: ControlRoute, call: ContentCall) -> ContentClientRequest {
+    ContentClientRequest {
+        content: call,
+        route,
+        act_as: None,
+        body_len: 0,
+    }
+}
+
+/// A streaming upload on the control channel.
+///
+/// Open, push, finish. The length is declared up front and is authoritative on
+/// both sides — a caller that pushes fewer bytes than it promised gets an
+/// error rather than a truncated content, and the daemon refuses the first byte
+/// past the declaration rather than reading to the end to find out.
+///
+/// Exists rather than a `Vec<u8>` parameter because the whole point of moving
+/// attachments off the inline path is not to hold one in memory. A caller
+/// forwarding an HTTP body forwards it.
+pub struct ContentUpload {
+    write_half: tokio::io::WriteHalf<Stream>,
+    reader: BufReader<tokio::io::ReadHalf<Stream>>,
+    declared: u64,
+    sent: u64,
+}
+
+impl ContentUpload {
+    /// Open an upload of exactly `declared_len` bytes.
+    pub async fn open(
+        home: &Path,
+        route: ControlRoute,
+        operation: [u8; 16],
+        act_as: Option<&str>,
+        declared_len: u64,
+    ) -> Result<Self> {
+        let name = control_name(home)?;
+        let stream = Stream::connect(name)
+            .await
+            .context("connect to Lait daemon")?;
+        let (read_half, mut write_half) = tokio::io::split(stream);
+        write_header(
+            &mut write_half,
+            &ContentClientRequest {
+                content: ContentCall::Write {
+                    operation: data_encoding::HEXLOWER.encode(&operation),
+                },
+                route,
+                act_as: act_as.map(str::to_string),
+                body_len: declared_len,
+            },
+        )
+        .await?;
+        Ok(Self {
+            write_half,
+            reader: BufReader::new(read_half),
+            declared: declared_len,
+            sent: 0,
+        })
+    }
+
+    /// Push the next piece. Refuses locally rather than sending a byte past the
+    /// declaration, so the caller's own bug is reported where it happened
+    /// instead of arriving as a remote refusal.
+    pub async fn push(&mut self, bytes: &[u8]) -> Result<()> {
+        let next = self.sent.saturating_add(bytes.len() as u64);
+        if next > self.declared {
+            return Err(anyhow!(
+                "upload declared {} bytes and tried to send {next}",
+                self.declared
+            ));
+        }
+        self.write_half
+            .write_all(bytes)
+            .await
+            .context("write content body")?;
+        self.sent = next;
+        Ok(())
+    }
+
+    /// Finish and read the answer.
+    pub async fn finish(mut self) -> Result<ContentReply> {
+        if self.sent != self.declared {
+            return Err(anyhow!(
+                "upload declared {} bytes and sent {}",
+                self.declared,
+                self.sent
+            ));
+        }
+        self.write_half.flush().await.ok();
+        let (reply, _) = read_content_reply(&mut self.reader).await?;
+        Ok(reply)
+    }
+}
+
+async fn write_header<T: Serialize>(
+    write_half: &mut tokio::io::WriteHalf<Stream>,
+    header: &T,
+) -> Result<()> {
+    let mut line = serde_json::to_string(header).context("encode content request")?;
+    line.push('\n');
+    write_half
+        .write_all(line.as_bytes())
+        .await
+        .context("write content request")?;
+    write_half.flush().await.ok();
+    Ok(())
+}
+
+/// Read one content answer: its header line, and the body the header declares.
+async fn read_content_reply(
+    reader: &mut BufReader<tokio::io::ReadHalf<Stream>>,
+) -> Result<(ContentReply, Vec<u8>)> {
+    use tokio::io::AsyncReadExt;
+
+    let mut line = String::new();
+    {
+        // The header is bounded, so read it bounded. An answer with no newline
+        // is a daemon that stopped mid-sentence, not an invitation to keep
+        // allocating.
+        let mut bounded = reader.take(MAX_CONTROL_FRAME_BYTES);
+        bounded
+            .read_line(&mut line)
+            .await
+            .context("read content reply")?;
+    }
+    if line.trim().is_empty() {
+        return Err(anyhow!("the daemon closed without answering"));
+    }
+    let reply: ContentReply = serde_json::from_str(line.trim()).context("decode content reply")?;
+    let ContentReply::ContentStream { len } = reply else {
+        return Ok((reply, Vec::new()));
+    };
+    if len > runtime::content_host::MAX_RANGE_BYTES as u64 {
+        return Err(anyhow!(
+            "the daemon offered {len} bytes in one answer, past the {} this \
+             channel carries",
+            runtime::content_host::MAX_RANGE_BYTES
+        ));
+    }
+    let mut body = vec![0u8; len as usize];
+    reader
+        .read_exact(&mut body)
+        .await
+        .context("read content body")?;
+    Ok((reply, body))
+}
+
+/// How much of an upload is in flight between the socket and the sealer.
+///
+/// Two pieces of a quarter-megabyte chunk, so the sealer never waits on the
+/// socket for a chunk it could already be working on, and the socket cannot run
+/// ahead into unbounded memory. Backpressure is the point: without it a fast
+/// client on a loopback socket outruns a disk and the difference accumulates in
+/// this process.
+const UPLOAD_PIECES_IN_FLIGHT: usize = 2;
+
+/// One piece of an upload as it crosses from the socket to the sealer.
+type UploadPiece = std::io::Result<Vec<u8>>;
+
+/// The sealer's end of a streaming upload: a synchronous [`std::io::Read`] fed
+/// by an async task pumping the socket.
+///
+/// The content plane seals from a `Read` on a blocking thread, and the socket
+/// is async — so something has to cross that line, and this is it rather than
+/// a buffer holding the whole upload. A 256 MiB attachment never exists in this
+/// process as one allocation.
+///
+/// Cancellation arrives by the sender being dropped: the next read sees the
+/// channel closed before its declared length arrived and returns
+/// `UnexpectedEof`, which fails the ingest, which leaves nothing durable. That
+/// is why the length is declared up front — "as much as arrived" and "all of
+/// it" are otherwise the same thing, and a truncated upload would commit a
+/// permanently wrong content that hashes perfectly well.
+pub struct UploadReader {
+    pieces: tokio::sync::mpsc::Receiver<UploadPiece>,
+    current: Vec<u8>,
+    at: usize,
+    outstanding: u64,
+}
+
+impl UploadReader {
+    fn new(pieces: tokio::sync::mpsc::Receiver<UploadPiece>, declared: u64) -> Self {
+        Self {
+            pieces,
+            current: Vec::new(),
+            at: 0,
+            outstanding: declared,
+        }
+    }
+}
+
+impl std::io::Read for UploadReader {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        while self.at >= self.current.len() {
+            if self.outstanding == 0 {
+                return Ok(0);
+            }
+            match self.pieces.blocking_recv() {
+                Some(Ok(piece)) => {
+                    self.current = piece;
+                    self.at = 0;
+                }
+                Some(Err(error)) => return Err(error),
+                // The pump stopped before the declared length arrived: a
+                // truncated body, or a caller that went away mid-upload. Both
+                // are the same answer, and neither may look like EOF.
+                None => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        format!("upload ended {} bytes early", self.outstanding),
+                    ))
+                }
+            }
+        }
+        let take = out.len().min(self.current.len() - self.at);
+        out[..take].copy_from_slice(&self.current[self.at..self.at + take]);
+        self.at += take;
+        self.outstanding = self.outstanding.saturating_sub(take as u64);
+        Ok(take)
+    }
+}
+
+/// Open the two ends of a streaming upload: the sealer's reader, and the task
+/// that feeds it exactly `declared` bytes from `reader`.
+///
+/// The body must be read through whatever reader consumed the header line. A
+/// `BufReader` has already pulled the first bytes of the body into its buffer
+/// while looking for the newline, so reading from the raw half instead silently
+/// drops them — and the content that commits is wrong in a way that hashes
+/// fine. A small body hides this completely, which is why it is stated here.
+pub fn upload_body<R>(
+    mut reader: R,
+    declared: u64,
+) -> (UploadReader, impl std::future::Future<Output = R>)
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+{
+    use tokio::io::AsyncReadExt;
+
+    let (tx, rx) = tokio::sync::mpsc::channel::<UploadPiece>(UPLOAD_PIECES_IN_FLIGHT);
+    let pump = async move {
+        let mut left = declared;
+        while left > 0 {
+            let want = left.min(UPLOAD_PIECE_BYTES as u64) as usize;
+            let mut piece = vec![0u8; want];
+            match reader.read_exact(&mut piece).await {
+                Ok(_) => {
+                    if tx.send(Ok(piece)).await.is_err() {
+                        break;
+                    }
+                    left -= want as u64;
+                }
+                Err(error) => {
+                    let _ = tx.send(Err(error)).await;
+                    break;
+                }
+            }
+        }
+        reader
+    };
+    (UploadReader::new(rx, declared), pump)
+}
+
+/// One piece of an upload as it moves across the socket.
+const UPLOAD_PIECE_BYTES: usize = 256 * 1024;
 
 /// A live dirty-notification subscription — the client side of [`Request::Subscribe`]
 /// stream. Holds the whole duplex stream (never split, so nothing

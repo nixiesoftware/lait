@@ -504,6 +504,7 @@ impl Orbit {
                 .map(|c| c.whole_deadline)
                 .unwrap_or(Duration::from_secs(60)),
             content,
+            max_content_len: options.content.max_content_len,
         };
         if let Some(comms) = options.comms {
             let space = station.store.space().clone();
@@ -589,6 +590,10 @@ pub struct Station {
     /// Station that can name content and cannot hold any is a Station whose
     /// content surface is unreachable.
     content: Arc<crate::content_host::ContentHost>,
+    /// The largest single content this Station will ingest, from operator
+    /// policy. Kept here because every local content call has to enforce it and
+    /// the options struct does not outlive activation.
+    max_content_len: u64,
 }
 
 impl std::fmt::Debug for Station {
@@ -613,6 +618,125 @@ impl Station {
     /// would sweep each other's staging.
     pub fn content(&self) -> Arc<crate::content_host::ContentHost> {
         self.content.clone()
+    }
+
+    /// The largest single content this Station will ingest.
+    pub fn max_content_len(&self) -> u64 {
+        self.max_content_len
+    }
+
+    /// What is known about one content.
+    pub fn content_stat(
+        &self,
+        identity: &crate::world::LocalIdentity,
+        content: &replica::ContentRef,
+    ) -> Result<crate::content_host::ContentStatus, crate::content_host::ContentHostError> {
+        let keys = self.content_keys();
+        let allow = self.content_authorization(identity)?;
+        self.content
+            .stat(&self.content_policy(&keys, &allow), content)
+    }
+
+    /// One bounded range of a content's plaintext.
+    pub fn content_read(
+        &self,
+        identity: &crate::world::LocalIdentity,
+        content: &replica::ContentRef,
+        offset: u64,
+        len: usize,
+    ) -> Result<Vec<u8>, crate::content_host::ContentHostError> {
+        let keys = self.content_keys();
+        let allow = self.content_authorization(identity)?;
+        self.content
+            .read_range(&self.content_policy(&keys, &allow), content, offset, len)
+    }
+
+    /// Seal and commit content read from `reader`.
+    ///
+    /// The reader is consumed incrementally, so a caller forwarding a stream
+    /// never holds the whole content — which is the reason this plane exists
+    /// rather than an inline field on a Body.
+    pub fn content_write(
+        &self,
+        identity: &crate::world::LocalIdentity,
+        operation: [u8; 16],
+        reader: &mut dyn std::io::Read,
+    ) -> Result<replica::ContentRef, crate::content_host::ContentHostError> {
+        let keys = self.content_keys();
+        let allow = self.content_authorization(identity)?;
+        let frontier = self.identity_frontier(identity)?;
+        let ctx = replica::CommitContext {
+            space: self.store.space(),
+            signer: identity,
+            authority_frontier: frontier,
+        };
+        self.content
+            .ingest(&self.content_policy(&keys, &allow), operation, reader, &ctx)
+    }
+
+    /// Drop this Station's copy of the bytes and keep the name.
+    pub fn content_forget(
+        &self,
+        identity: &crate::world::LocalIdentity,
+        content: &replica::ContentRef,
+    ) -> Result<(), crate::content_host::ContentHostError> {
+        let keys = self.content_keys();
+        let allow = self.content_authorization(identity)?;
+        self.content
+            .remove_local(&self.content_policy(&keys, &allow), content)
+    }
+
+    fn content_keys(&self) -> Arc<dyn crate::content_host::ContentKeys> {
+        Arc::new(crate::content_host::StationContentKeys::new(
+            self.keys.clone(),
+        ))
+    }
+
+    fn content_policy<'a>(
+        &'a self,
+        keys: &Arc<dyn crate::content_host::ContentKeys>,
+        authorize: &'a dyn Fn(crate::content_host::ContentAction) -> Result<(), Vec<u8>>,
+    ) -> crate::content_host::ContentPolicy<'a> {
+        crate::content_host::ContentPolicy {
+            space: self.store.space(),
+            keys: keys.clone(),
+            authorize,
+            max_content_len: self.max_content_len,
+        }
+    }
+
+    /// The authority frontier a local identity acts at, or a refusal.
+    fn identity_frontier(
+        &self,
+        identity: &crate::world::LocalIdentity,
+    ) -> Result<replica::frontier::AuthorityFrontier, crate::content_host::ContentHostError> {
+        self.authority
+            .resolve(identity.device())
+            .map(|resolved| resolved.authority_frontier)
+            .ok_or_else(|| crate::content_host::ContentHostError::Denied {
+                demand: b"space.member".to_vec(),
+            })
+    }
+
+    /// Whether a local identity may act on this Station's content, as a closure
+    /// the host can ask per operation.
+    ///
+    /// Membership is the whole check, and that is a deliberate position rather
+    /// than an omission: content authorization is Space-core, so a member may
+    /// read any content this Station holds. The consequence is the same one
+    /// Freight already carries — residency is Space-wide, and a per-resource
+    /// read restriction would be advisory until a `content.serve` grant exists
+    /// to make it real. A non-member is refused here, before the store is
+    /// touched.
+    fn content_authorization(
+        &self,
+        identity: &crate::world::LocalIdentity,
+    ) -> Result<
+        impl Fn(crate::content_host::ContentAction) -> Result<(), Vec<u8>>,
+        crate::content_host::ContentHostError,
+    > {
+        self.identity_frontier(identity)?;
+        Ok(|_action| Ok(()))
     }
 
     /// The Space this Station serves.

@@ -148,6 +148,31 @@ pub trait ContentKeys: Send + Sync {
     fn opening_key(&self, epoch: &[u8; 16]) -> Option<AuthorizedBodyKey>;
 }
 
+/// A Station's Body keys, seen as content keys.
+///
+/// The two traits have the same shape and different owners: [`ContentKeys`] is
+/// what the content plane asks for, `BodyKeySource` is what the Space's key
+/// custody offers. They are not merged because the content plane must be able
+/// to exist without the Body plane's vocabulary — but on a real Station they
+/// are the same epochs, and pretending otherwise would mean a Station holding
+/// two answers to "which key is current".
+pub struct StationContentKeys(Arc<dyn replica::BodyKeySource>);
+
+impl StationContentKeys {
+    pub fn new(keys: Arc<dyn replica::BodyKeySource>) -> Self {
+        Self(keys)
+    }
+}
+
+impl ContentKeys for StationContentKeys {
+    fn sealing_key(&self) -> Option<AuthorizedBodyKey> {
+        self.0.sealing_key()
+    }
+    fn opening_key(&self, epoch: &[u8; 16]) -> Option<AuthorizedBodyKey> {
+        self.0.opening_key(epoch)
+    }
+}
+
 /// The content plane, bound to one Station.
 pub struct ContentHost {
     /// Shared rather than owned: the Station holds the same core, and both

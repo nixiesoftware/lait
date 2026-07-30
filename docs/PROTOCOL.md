@@ -308,6 +308,55 @@ identifier grammars remain enforced after JSON decoding.
 semantics, committed frontier, and dirty scopes. Frames may be coalesced. They
 are not state deltas; clients re-query after notification or reset.
 
+### 10.1 The content envelope
+
+Protocol v7 adds a third envelope, the only one on this channel whose frames are
+not entirely JSON:
+
+```text
+{ content: ContentCall, route, act_as?, body_len: N }
+
+<exactly N raw bytes>
+  -> { kind: "content_stream", len: M }
+ <exactly M raw bytes>
+  -> or one JSON line and no body
+```
+
+It exists because the alternative does not work at the sizes this plane is for.
+A 256 MiB attachment as a JSON string is base64 on the wire, one allocation on
+each side, and one token to the parser. The declared length is what lets both
+ends stream, and it is authoritative in both directions: a body that ends early
+is an error rather than a shorter content, because "however much arrived" and
+"all of it" are otherwise the same thing, and the difference would be a
+permanently wrong content that hashes perfectly well.
+
+Order is fixed and each step is what makes the next one safe. The declared
+length is checked against the Station's `max_content_len` **before** any body is
+read, so a request that was always going to be refused cannot spend the disk
+budget first. The header is read under a frame bound, so a sender that never
+sends a newline is refused rather than buffered. The body is read through the
+same reader that consumed the header — that reader has already pulled the first
+bytes of the body while looking for the newline, and reading from anywhere else
+silently drops them.
+
+Refusals are typed — denied, unknown, not-resident, bounds, storage, invalid —
+because a caller acts differently on each: a missing chunk is worth retrying
+after a transfer and an unknown content never will be. Unknown says nothing
+about whether the content exists elsewhere; a caller that could tell "not here"
+from "never heard of it" would have an oracle for what a Space contains,
+answerable by guessing ids.
+
+An owned Station serves the call in process, so the body crosses from the socket
+to the sealer without leaving that address space. An attached SpaceBridge is
+proxied byte for byte down its per-Orbit socket, never refused: `Attached` is a
+reachable placement, and a surface that works only when the Station happens to
+be in-process has a hidden precondition. Sealing runs on a blocking thread
+because it takes the Replica's one writer, not because it touches a disk —
+holding that writer on a runtime thread stalls the Contact driver too.
+
+One connection is one request. A content transfer gets its own connection, which
+is the grain this channel already had.
+
 ## 11. Failure and resource behavior
 
 Every protocol has explicit limits for frames, records, nodes, chunks, payloads,

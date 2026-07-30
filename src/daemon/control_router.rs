@@ -61,6 +61,22 @@ pub struct StationPlacement {
     doorbell_pump: StdMutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
+/// Which process will serve a content call, resolved before a byte moves.
+///
+/// Split out rather than answered inline because the two branches move bytes
+/// differently — one hands a reader to a host in this address space, the other
+/// forwards a declared number of bytes down a second socket — and a function
+/// returning one answer for both would have to materialise the body.
+pub enum ContentPlacement {
+    InProcess {
+        bridge: Arc<crate::orbital::space_bridge::SpaceBridge>,
+        address: OrbitAddress,
+    },
+    Attached {
+        home: std::path::PathBuf,
+    },
+}
+
 enum PlacementMode {
     Owned {
         bridge: std::sync::Weak<crate::orbital::space_bridge::SpaceBridge>,
@@ -530,6 +546,41 @@ impl ControlRouter {
         let address = routed_address(&route)?;
         let resolved = self.place_address(address).await?;
         control::request_as_routed(&resolved.home, request, Some(route), act_as).await
+    }
+
+    /// Where a content call has to go, and how.
+    ///
+    /// Modelled on [`Self::call_world`] rather than on `request_routed`,
+    /// because `request_routed` re-opens the per-Orbit socket even for a
+    /// Station this process already owns — which for content would mean copying
+    /// every byte through a second socket to reach a `ContentHost` in this
+    /// address space.
+    pub async fn content_placement(
+        &self,
+        route: &control::ControlRoute,
+    ) -> Result<ContentPlacement> {
+        let address = match route {
+            control::ControlRoute::Space { address }
+            | control::ControlRoute::World { address, .. } => address,
+            control::ControlRoute::Daemon => {
+                return Err(anyhow!("a content call requires an explicit Space route"))
+            }
+        };
+        let (resolved, placement) = self.place_address_with_host(address).await?;
+        match &placement.mode {
+            PlacementMode::Owned { bridge, .. } => {
+                let bridge = bridge
+                    .upgrade()
+                    .ok_or_else(|| anyhow!("owned SpaceBridge is draining"))?;
+                Ok(ContentPlacement::InProcess {
+                    bridge,
+                    address: resolved.address.clone(),
+                })
+            }
+            PlacementMode::Attached => Ok(ContentPlacement::Attached {
+                home: resolved.home,
+            }),
+        }
     }
 
     /// Dispatch one product-neutral call to its explicitly addressed World.

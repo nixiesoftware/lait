@@ -172,11 +172,18 @@ use is a slot held open for nothing.
 |---|---|---|---|
 | Local DTOs | `runtime::dto::DTO_PROTOCOL_VERSION` | 1 | loopback control plane and viewer |
 
-| Local control channel | `control::CONTROL_PROTOCOL_VERSION` | 6 | daemon socket; `MIN_SUPPORTED_CONTROL_PROTOCOL` is also 6, so the mixed-version window is currently empty |
+| Local control channel | `control::CONTROL_PROTOCOL_VERSION` | 7 | daemon socket; `MIN_SUPPORTED_CONTROL_PROTOCOL` is also 7, so the mixed-version window is currently empty |
 
 DTOs are a local contract between the engine and its own clients. They are
 versioned because a stale viewer bundle is a real situation, not because they
 cross a trust boundary.
+
+v7 moved the minimum with the version rather than leaving a window, and that is
+not the usual caution. A v6 process would accept a content request's header line
+and then read the raw body as a second request — so an attached SpaceBridge on
+v6 does not fail the call, it desynchronises the channel the first time anyone
+uploads, and every later request on that connection reads someone else's bytes.
+A window whose only content is that outcome is not a window worth having.
 
 ## 6. The pinned dependency
 

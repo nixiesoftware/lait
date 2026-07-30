@@ -39,7 +39,8 @@ use runtime::{
 
 use crate::config::{acquire_daemon_lock, load_or_create_identity, DaemonLock};
 use crate::control::{
-    control_name, CatalogScope, ControlRoute, Doorbell, Request, RequestOwner, Response, StatusInfo,
+    control_name, CatalogScope, ContentCall, ContentErrorCode, ContentReply, ControlRoute,
+    Doorbell, Request, RequestOwner, Response, StatusInfo, UploadReader,
 };
 use crate::daemon::OrbitAddress;
 use crate::orbital::{
@@ -479,6 +480,142 @@ impl SpaceBridge {
             );
         }
         self.route_world_call(call, act_as)
+    }
+
+    /// Direct host-local entry for a content call, minus the body.
+    ///
+    /// Blocking on purpose: every branch commits through the Replica's one
+    /// writer, and a caller must be on a blocking thread before it gets here.
+    /// The reason is the shared writer mutex, not the filesystem — holding it
+    /// on a runtime thread stalls the Contact driver as surely as it stalls
+    /// this call.
+    pub(crate) fn content_call(
+        &self,
+        address: &OrbitAddress,
+        call: &ContentCall,
+        body: Option<UploadReader>,
+    ) -> (ContentReply, Vec<u8>) {
+        let _activity = self.track_activity();
+        if address != &self.address {
+            return (
+                ContentReply::error(
+                    ContentErrorCode::Invalid,
+                    format!(
+                        "content call targets Orbit {} in Space {}, but this bridge \
+                         occupies Orbit {} in Space {}",
+                        address.orbit, address.space, self.address.orbit, self.address.space
+                    ),
+                ),
+                Vec::new(),
+            );
+        }
+        match call {
+            ContentCall::Stat { content } => {
+                let Some(content) = parse_content_ref(content) else {
+                    return (invalid_content_id(), Vec::new());
+                };
+                match self.station.content_stat(&self.identity, &content) {
+                    Ok(status) => (
+                        ContentReply::ContentStatus {
+                            content: data_encoding::HEXLOWER.encode(content.as_bytes()),
+                            plaintext_len: status.plaintext_len,
+                            chunk_count: status.chunk_count,
+                            resident_chunks: status.resident_chunks,
+                            pinned: status.pinned,
+                        },
+                        Vec::new(),
+                    ),
+                    Err(error) => (content_refusal(&error), Vec::new()),
+                }
+            }
+            ContentCall::Read {
+                content,
+                offset,
+                len,
+            } => {
+                let Some(content) = parse_content_ref(content) else {
+                    return (invalid_content_id(), Vec::new());
+                };
+                if *len > runtime::content_host::MAX_RANGE_BYTES as u64 {
+                    return (
+                        ContentReply::error(
+                            ContentErrorCode::Bounds,
+                            format!(
+                                "one range may carry at most {} bytes",
+                                runtime::content_host::MAX_RANGE_BYTES
+                            ),
+                        ),
+                        Vec::new(),
+                    );
+                }
+                match self
+                    .station
+                    .content_read(&self.identity, &content, *offset, *len as usize)
+                {
+                    Ok(bytes) => (
+                        ContentReply::ContentStream {
+                            len: bytes.len() as u64,
+                        },
+                        bytes,
+                    ),
+                    Err(error) => (content_refusal(&error), Vec::new()),
+                }
+            }
+            ContentCall::Write { operation } => {
+                let Some(operation) = parse_operation_id(operation) else {
+                    return (
+                        ContentReply::error(
+                            ContentErrorCode::Invalid,
+                            "an operation id is 16 bytes of lowercase hex",
+                        ),
+                        Vec::new(),
+                    );
+                };
+                let Some(mut body) = body else {
+                    return (
+                        ContentReply::error(
+                            ContentErrorCode::Invalid,
+                            "a content write carries a body",
+                        ),
+                        Vec::new(),
+                    );
+                };
+                match self
+                    .station
+                    .content_write(&self.identity, operation, &mut body)
+                {
+                    Ok(content) => {
+                        let plaintext_len = self
+                            .station
+                            .content_stat(&self.identity, &content)
+                            .map(|status| status.plaintext_len)
+                            .unwrap_or_default();
+                        (
+                            ContentReply::ContentWritten {
+                                content: data_encoding::HEXLOWER.encode(content.as_bytes()),
+                                plaintext_len,
+                            },
+                            Vec::new(),
+                        )
+                    }
+                    Err(error) => (content_refusal(&error), Vec::new()),
+                }
+            }
+            ContentCall::Forget { content } => {
+                let Some(content) = parse_content_ref(content) else {
+                    return (invalid_content_id(), Vec::new());
+                };
+                match self.station.content_forget(&self.identity, &content) {
+                    Ok(()) => (ContentReply::ContentForgotten, Vec::new()),
+                    Err(error) => (content_refusal(&error), Vec::new()),
+                }
+            }
+        }
+    }
+
+    /// The declared-length ceiling this Station will accept for one upload.
+    pub(crate) fn max_content_len(&self) -> u64 {
+        self.station.max_content_len()
     }
 
     /// Route a product call through its registered World package, or refuse
@@ -1800,6 +1937,95 @@ impl SpaceBridge {
         idle_for >= window
     }
 
+    /// Serve one content call: its body in, its answer out.
+    ///
+    /// Three things have to happen in the right order. The declared length is
+    /// checked against operator policy **before** a byte is read, because
+    /// reading first and refusing after is a free way to make this process
+    /// spend a Station's disk budget. The body is read through the same
+    /// `BufReader` that consumed the header, because that reader already holds
+    /// the first bytes of the body. And the sealing runs on a blocking thread,
+    /// because it takes the Replica's one writer.
+    async fn serve_content(
+        self: Arc<Self>,
+        reader: BufReader<tokio::io::ReadHalf<LocalStream>>,
+        mut write_half: tokio::io::WriteHalf<LocalStream>,
+        request: crate::control::ContentClientRequest,
+    ) {
+        let ceiling = self.max_content_len();
+        if request.body_len > ceiling {
+            // Refused without reading the body, so the channel is out of step
+            // and the connection ends here. One connection is one request, so
+            // there is nothing to resynchronise for.
+            let _ = write_line_half(
+                &mut write_half,
+                &ContentReply::error(
+                    ContentErrorCode::Bounds,
+                    format!(
+                        "this Station accepts at most {ceiling} bytes in one content; \
+                         the request declared {}",
+                        request.body_len
+                    ),
+                ),
+            )
+            .await;
+            return;
+        }
+        let address = match &request.route {
+            ControlRoute::Space { address } | ControlRoute::World { address, .. } => {
+                address.clone()
+            }
+            ControlRoute::Daemon => {
+                let _ = write_line_half(
+                    &mut write_half,
+                    &ContentReply::error(
+                        ContentErrorCode::Invalid,
+                        "a content call requires an explicit Space route",
+                    ),
+                )
+                .await;
+                return;
+            }
+        };
+
+        let expects_body = matches!(request.content, crate::control::ContentCall::Write { .. });
+        let (body, pump) = crate::control::upload_body(reader, request.body_len);
+        let bridge = self.clone();
+        let call = request.content.clone();
+        let work = tokio::task::spawn_blocking(move || {
+            bridge.content_call(&address, &call, expects_body.then_some(body))
+        });
+        // The pump has to run while the sealer consumes it, and the sealer is
+        // on another thread: awaiting them in sequence would deadlock at the
+        // first full channel.
+        let mut stopping = self.stop_tx.subscribe();
+        let (_, sealed) = tokio::join!(pump, work);
+        let (reply, payload) = match sealed {
+            Ok(answer) => answer,
+            Err(_) => (
+                ContentReply::error(ContentErrorCode::Storage, "the content call did not finish"),
+                Vec::new(),
+            ),
+        };
+        // A stop that landed mid-upload is reported rather than answered, so a
+        // caller does not read "written" from a process that is going away.
+        if *stopping.borrow_and_update() && !matches!(reply, ContentReply::ContentError { .. }) {
+            let _ = write_line_half(
+                &mut write_half,
+                &ContentReply::error(ContentErrorCode::Storage, "this Space is shutting down"),
+            )
+            .await;
+            return;
+        }
+        if write_line_half(&mut write_half, &reply).await.is_err() {
+            return;
+        }
+        if !payload.is_empty() {
+            let _ = write_half.write_all(&payload).await;
+            let _ = write_half.flush().await;
+        }
+    }
+
     async fn handle_conn(self: Arc<Self>, stream: LocalStream) {
         let _activity = self.track_activity();
 
@@ -1817,6 +2043,31 @@ impl SpaceBridge {
                 return;
             }
         };
+        if value.get("content").is_some() {
+            let request: crate::control::ContentClientRequest = match serde_json::from_value(value)
+            {
+                Ok(request) => request,
+                Err(error) => {
+                    let _ = write_line(
+                        write_half,
+                        &ContentReply::error(
+                            ContentErrorCode::Invalid,
+                            format!("bad content call: {error}"),
+                        ),
+                    )
+                    .await;
+                    return;
+                }
+            };
+            // `self` is cloned rather than moved: the activity guard taken at
+            // the top of this function borrows it for the whole call, and
+            // dropping it late is what keeps the idle timer honest about a
+            // long upload.
+            self.clone()
+                .serve_content(reader, write_half, request)
+                .await;
+            return;
+        }
         if value.get("call").is_some() {
             let crate::control::WorldClientRequest {
                 route,
@@ -2222,6 +2473,57 @@ fn comms_options(
         progress_deadline: Duration::from_secs(10),
         route_lease: Duration::from_secs(120),
     }
+}
+
+/// A content id as it travels on the control channel: 32 bytes of lowercase
+/// hex, and nothing else accepted.
+fn parse_content_ref(raw: &str) -> Option<replica::ContentRef> {
+    let bytes = data_encoding::HEXLOWER.decode(raw.as_bytes()).ok()?;
+    Some(replica::ContentRef {
+        content_id: <[u8; 32]>::try_from(bytes.as_slice()).ok()?,
+    })
+}
+
+fn parse_operation_id(raw: &str) -> Option<[u8; 16]> {
+    let bytes = data_encoding::HEXLOWER.decode(raw.as_bytes()).ok()?;
+    <[u8; 16]>::try_from(bytes.as_slice()).ok()
+}
+
+fn invalid_content_id() -> ContentReply {
+    ContentReply::error(
+        ContentErrorCode::Invalid,
+        "a content id is 32 bytes of lowercase hex",
+    )
+}
+
+/// Translate a content refusal into the vocabulary a local surface maps to its
+/// own status codes.
+///
+/// `Unknown` deliberately says nothing about whether the content exists
+/// elsewhere: a caller that could tell "not here" from "never heard of it"
+/// would have an oracle for what a Space contains, answerable by guessing ids.
+fn content_refusal(error: &runtime::content_host::ContentHostError) -> ContentReply {
+    use runtime::content_host::ContentHostError as E;
+    let (code, message) = match error {
+        E::Denied { demand } => (
+            ContentErrorCode::Denied,
+            format!("refused: {}", String::from_utf8_lossy(demand)),
+        ),
+        E::Unknown => (
+            ContentErrorCode::Unknown,
+            "no descriptor for that content here".to_string(),
+        ),
+        E::NotResident => (
+            ContentErrorCode::NotResident,
+            "the descriptor is here and the bytes are not".to_string(),
+        ),
+        E::Bounds => (
+            ContentErrorCode::Bounds,
+            "the range is outside what this call may return".to_string(),
+        ),
+        other => (ContentErrorCode::Storage, other.to_string()),
+    };
+    ContentReply::error(code, message)
 }
 
 async fn write_line<T: serde::Serialize>(
