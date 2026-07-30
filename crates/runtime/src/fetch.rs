@@ -45,6 +45,9 @@ pub enum FetchError {
     Incomplete { missing: usize },
     /// Local storage refused.
     Storage(String),
+    /// This operation is already in flight, or this Station is already moving
+    /// as much as it will at once.
+    Busy,
 }
 
 /// One provider's local reputation. Local policy, never replicated truth.
@@ -277,7 +280,8 @@ impl Fetcher {
             operation,
             *content,
             Instant::now(),
-        );
+        )
+        .map_err(|_| FetchError::Busy)?;
         handle.advance(TransferState::Connecting, Instant::now());
 
         // Who can serve what. Asked once per provider about the whole gap,

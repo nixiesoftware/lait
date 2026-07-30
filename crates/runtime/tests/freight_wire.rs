@@ -168,6 +168,8 @@ async fn wire(tag: &str, plaintext: Vec<u8>) -> Wire {
             transport: provider_transport.clone(),
             policy: PlanePolicy::default(),
             cancel: cancel.clone(),
+            drain_deadline: runtime::lifecycle::DEFAULT_DRAIN_DEADLINE,
+            authority_tick: None,
         };
         let service = FreightService::new(host.clone(), Arc::new(Keys), space.clone(), u64::MAX);
         std::thread::spawn(move || run_driver(context, service))

@@ -115,14 +115,28 @@ fn a_reserved_stream_kind_is_known_and_unimplemented() {
 }
 
 #[test]
-fn an_opening_requesting_an_unimplemented_lane_is_refused() {
+fn an_opening_may_name_a_lane_this_build_does_not_implement() {
+    // Refusing the whole opening here would break the one thing feature
+    // negotiation exists for: a newer peer asking for something extra must get
+    // everything it asked for that we *do* have, not a closed door. The grant
+    // decides — `admission::judge` keeps only the lanes it can serve — and a
+    // peer that then opens an ungranted flow is refused at the flow, where the
+    // cost is a reset rather than a connection.
     let mut open = opening(Plane::Live);
-    open.requested_lanes = vec![stream_kind::RESERVED_MEDIA_FRAME];
+    open.requested_lanes = vec![stream_kind::CONTROL, stream_kind::RESERVED_MEDIA_FRAME];
+    let decoded = SessionOpen::decode_canonical(&open.encode()).expect("it decodes");
     assert_eq!(
-        SessionOpen::decode_canonical(&open.encode()),
-        Err(PlaneWireError::UnknownStreamKind(
-            stream_kind::RESERVED_MEDIA_FRAME
-        ))
+        decoded.requested_lanes.len(),
+        2,
+        "carried, not filtered here"
+    );
+
+    // The count bound still holds, because that one is about allocation.
+    let mut greedy = opening(Plane::Live);
+    greedy.requested_lanes = vec![stream_kind::CONTROL; bounds::MAX_LANES + 1];
+    assert_eq!(
+        SessionOpen::decode_canonical(&greedy.encode()),
+        Err(PlaneWireError::Bounds)
     );
 }
 

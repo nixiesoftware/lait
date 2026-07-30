@@ -297,6 +297,19 @@ impl ObservationStream {
 pub struct StationCore {
     inner: std::sync::Mutex<CoreInner>,
     pub(crate) broadcaster: Arc<Broadcaster>,
+    /// Bumped whenever Space authority advances.
+    ///
+    /// A bare counter, deliberately not a frontier: a watcher does not need to
+    /// know *what* changed, only that its pinned view is stale and must be
+    /// asked again. Carrying the frontier here would put an authority value on
+    /// a channel that is not the authority, and give a reader something it
+    /// could be tempted to act on without re-resolving.
+    ///
+    /// It is not the Observation ring. That ring's entries correspond to
+    /// durable commits and are consumed by clients; this is a wake-up for the
+    /// delivery planes, and a plane falling behind on it must not cost a
+    /// client its cursor.
+    authority_tick: tokio::sync::watch::Sender<u64>,
 }
 
 impl StationCore {
@@ -319,7 +332,24 @@ impl StationCore {
                 closed: false,
             }),
             broadcaster: Arc::new(Broadcaster::new(epoch, observation_capacity, frontier)),
+            authority_tick: tokio::sync::watch::Sender::new(0),
         }
+    }
+
+    /// Watch for authority advancing.
+    ///
+    /// A live session pins the authority view it was admitted at. Something has
+    /// to tell it that view is stale, or a revoked peer keeps whatever it was
+    /// holding until it happens to disconnect — which is not a bound.
+    pub fn authority_tick(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.authority_tick.subscribe()
+    }
+
+    /// Announce that Space authority advanced. Called after the write is
+    /// durable, never before.
+    pub fn note_authority_advanced(&self) {
+        self.authority_tick
+            .send_modify(|n| *n = n.saturating_add(1));
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, CoreInner> {
@@ -966,6 +996,10 @@ impl Session {
             inner.replica.frontier()
         };
         self.core.broadcaster.publish(Vec::new(), frontier, true);
+        // And wake anything holding a pinned authority view. A client learns
+        // through the Observation above; a delivery plane learns here, because
+        // it must not be able to cost a client its cursor by falling behind.
+        self.core.note_authority_advanced();
     }
 
     /// Close this Session, consuming it. Never affects the Station.

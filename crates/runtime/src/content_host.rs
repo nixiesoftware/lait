@@ -426,8 +426,14 @@ impl ContentHost {
     ) -> Result<Vec<u32>, ContentHostError> {
         (policy.authorize)(ContentAction::Serve)
             .map_err(|demand| ContentHostError::Denied { demand })?;
-        let Ok(descriptor) = self.descriptor(content) else {
-            return Ok(Vec::new());
+        let descriptor = match self.descriptor(content) {
+            Ok(descriptor) => descriptor,
+            // Never heard of it — the same empty answer a known-but-absent
+            // content gets, so the two are indistinguishable.
+            Err(ContentHostError::Unknown) => return Ok(Vec::new()),
+            // Anything else is *our* problem, and reporting it as "I hold
+            // nothing" would have a fetcher cache that answer and stop asking.
+            Err(other) => return Err(other),
         };
         let mut answer: Vec<u32> = wanted
             .iter()
@@ -487,15 +493,37 @@ impl ContentHost {
     ) -> Result<(), ContentHostError> {
         (policy.authorize)(ContentAction::Read)
             .map_err(|demand| ContentHostError::Denied { demand })?;
+        // The proof's leaf length is authenticated — the caller verified it
+        // against the committed root before staging a byte — so it is the right
+        // ceiling for this read, and a slot holding anything else is already
+        // wrong.
+        let staged_len = self.cache.staged_len(&operation, part);
+        if staged_len != proof.leaf.ciphertext_len as u64 {
+            let _ = self.cache.discard_staged_part(&operation, part);
+            return Err(ContentHostError::Bounds);
+        }
         let staged = self
             .cache
             .read_staged(&operation, part)
             .map_err(|_| ContentHostError::NotResident)?;
-        self.install_chunk(policy, content, operation, proof, &staged)?;
-        self.cache
-            .discard_staged_part(&operation, part)
-            .map_err(|e| ContentHostError::Storage(e.to_string()))?;
-        Ok(())
+
+        match self.install_chunk(policy, content, operation, proof, &staged) {
+            Ok(()) => {
+                self.cache
+                    .discard_staged_part(&operation, part)
+                    .map_err(|e| ContentHostError::Storage(e.to_string()))?;
+                Ok(())
+            }
+            // Convicted: these bytes will never verify, so keeping them would
+            // hold disk the quota check counts against the next fetch.
+            Err(e @ (ContentHostError::Invalid(_) | ContentHostError::Bounds)) => {
+                let _ = self.cache.discard_staged_part(&operation, part);
+                Err(e)
+            }
+            // Not the bytes' fault. A storage failure is retryable and the
+            // partial is still worth resuming from.
+            Err(e) => Err(e),
+        }
     }
 
     /// One chunk's sealed bytes and its proof, for serving to a peer.
@@ -512,12 +540,14 @@ impl ContentHost {
         (policy.authorize)(ContentAction::Serve)
             .map_err(|demand| ContentHostError::Denied { demand })?;
         let descriptor = self.descriptor(content)?;
-        let entry = self
-            .resident_entries(&descriptor)
-            .into_iter()
-            .find(|(i, _)| *i == chunk_index)
-            .map(|(_, e)| e)
-            .ok_or(ContentHostError::NotResident)?;
+        if chunk_index >= descriptor.chunk_count {
+            return Err(ContentHostError::Bounds);
+        }
+        // The slot is derived, so one chunk costs one lookup. Finding it by
+        // scanning the whole content's residency would mean a one-byte request
+        // buying a four-million-entry sweep — which is a peer choosing how much
+        // work we do.
+        let entry = replica::content::chunk_slot(&descriptor, chunk_index);
         let (bytes, sidecar) = self
             .cache
             .read(&entry)

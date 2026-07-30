@@ -384,7 +384,12 @@ impl RecvFlow for IrohRecvFlow {
         if max == 0 {
             return Ok(Some(Vec::new()));
         }
-        let mut buf = vec![0u8; max];
+        // Sized to what one read plausibly returns, not to the caller's whole
+        // ceiling. `max` is a pre-allocation *limit*; allocating and zeroing all
+        // of it on every iteration turns a dribbled 256 KiB flow into hundreds
+        // of megabytes of memset, which is a peer choosing how much work we do.
+        const READ_SLAB: usize = 16 * 1024;
+        let mut buf = vec![0u8; max.min(READ_SLAB)];
         match self.0.read(&mut buf).await.context("read flow")? {
             Some(read) => {
                 buf.truncate(read);

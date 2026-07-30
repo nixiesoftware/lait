@@ -268,11 +268,13 @@ impl SessionOpen {
         {
             return Err(PlaneWireError::Bounds);
         }
-        for lane in &open.requested_lanes {
-            if !stream_kind::is_implemented(*lane) {
-                return Err(PlaneWireError::UnknownStreamKind(*lane));
-            }
-        }
+        // Deliberately *not* refused here. Rejecting an opening that names a
+        // lane this build has not implemented would break the one thing feature
+        // negotiation exists for: a newer peer asking for something extra must
+        // get everything it asked for that we do have, not a closed door. The
+        // grant decides — see `admission::judge`, which keeps only the lanes it
+        // can serve — and a peer that then opens an ungranted flow is refused at
+        // the flow, where the cost is a reset rather than a connection.
         Ok(open)
     }
 

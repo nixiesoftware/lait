@@ -26,7 +26,7 @@ use mechanics::ids::{SpaceId, StationId};
 use crate::admission::{
     judge, AcceptedOpenings, Admission, AdmittedPeer, OpeningContext, PlanePolicy, Replay,
 };
-use crate::budget::deadline;
+use crate::budget::{deadline, slots};
 use crate::lifecycle::CancelToken;
 use crate::planes::{Plane, SessionOpen, SessionRefusal};
 use crate::world::AuthorityView;
@@ -40,6 +40,22 @@ pub struct PlaneContext {
     pub transport: Arc<dyn comms::Transport>,
     pub policy: PlanePolicy,
     pub cancel: CancelToken,
+    /// The Station's own drain deadline.
+    ///
+    /// Taken rather than assumed, because `Station::drain_tasks` leaks an
+    /// unfinished handle instead of blocking: a driver budgeted from a constant
+    /// outlives any Station configured with a shorter one, and then holds a
+    /// cache whose store lock has already been released.
+    pub drain_deadline: std::time::Duration,
+    /// Bumped when Space authority advances.
+    ///
+    /// A session pins the view it was admitted at, which is what makes every
+    /// later question on it answerable consistently — and also what makes a
+    /// revocation invisible to it. This is the wake-up: on a bump, every live
+    /// session re-asks whether its peer still has standing, and one that does
+    /// not is closed. Without it a revoked peer keeps what it was holding until
+    /// it happens to disconnect, which is not a bound.
+    pub authority_tick: Option<tokio::sync::watch::Receiver<u64>>,
 }
 
 /// What a plane does with an admitted connection.
@@ -49,9 +65,12 @@ pub struct PlaneContext {
 /// path, the budgets, and the shutdown ladder be written once.
 pub trait PlaneService {
     /// Serve one admitted connection until it ends or the driver stops.
+    /// Shared rather than owned, because the driver keeps its own handle: a
+    /// revocation has to be able to close a connection out from under whatever
+    /// the plane is doing with it.
     fn serve(
         &self,
-        connection: Box<dyn comms::Connection>,
+        connection: Arc<dyn comms::Connection>,
         peer: AdmittedPeer,
         cancel: CancelToken,
     ) -> impl std::future::Future<Output = ()>;
@@ -80,6 +99,14 @@ where
     let service = Rc::new(service);
     let replays = Rc::new(std::cell::RefCell::new(AcceptedOpenings::default()));
     let mut connections = tokio::task::JoinSet::new();
+    // Two ceilings, because they answer different questions: how much this
+    // Space will hold at once, and how much of that any one member may take.
+    // Without the second, one peer's reconnect storm is indistinguishable from
+    // the Space being busy.
+    let held = Rc::new(std::cell::RefCell::new(std::collections::BTreeMap::<
+        StationId,
+        usize,
+    >::new()));
 
     loop {
         if context.cancel.is_cancelled() {
@@ -100,11 +127,39 @@ where
             break;
         }
 
+        let Some(peer) = StationId::from_device(&incoming.from) else {
+            incoming.connection.close(REFUSED, b"");
+            continue;
+        };
+        {
+            let mut held = held.borrow_mut();
+            let total: usize = held.values().sum();
+            let mine = held.get(&peer).copied().unwrap_or(0);
+            if total >= slots::MAX_SPACE_CONNECTIONS
+                || mine >= slots::MAX_CONNECTIONS_PER_PEER_PLANE
+            {
+                drop(held);
+                // Coarse, like every other refusal: a peer learns it was not
+                // served, not whether the Space is full or it is greedy.
+                incoming.connection.close(REFUSED, b"");
+                continue;
+            }
+            *held.entry(peer.clone()).or_insert(0) += 1;
+        }
+
         let context = context.clone();
         let service = service.clone();
         let replays = replays.clone();
+        let held_for_task = held.clone();
         connections.spawn_local(async move {
             serve_connection(context, service, replays, incoming).await;
+            let mut held = held_for_task.borrow_mut();
+            if let Some(count) = held.get_mut(&peer) {
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    held.remove(&peer);
+                }
+            }
         });
 
         // Reap finished connections without waiting for them, so the set does
@@ -112,7 +167,7 @@ where
         while connections.try_join_next().is_some() {}
     }
 
-    shut_down(connections).await;
+    shut_down(&context, connections).await;
 }
 
 /// The coarse close code. One for every reason a connection is not served.
@@ -126,7 +181,14 @@ async fn serve_connection<S>(
 ) where
     S: PlaneService,
 {
-    let connection = incoming.connection;
+    let connection: Arc<dyn comms::Connection> = Arc::from(incoming.connection);
+    if incoming.alpn != context.plane.alpn() {
+        // The ALPN is the version gate and it also fixes the plane, so a
+        // connection routed here under another one is a routing bug on our side
+        // or an attempt on theirs. Either way this driver is not its owner.
+        refuse(connection.as_ref(), Some(SessionRefusal::Malformed)).await;
+        return;
+    }
     let Some(peer_station) = StationId::from_device(&incoming.from) else {
         refuse(connection.as_ref(), None).await;
         return;
@@ -162,7 +224,12 @@ async fn serve_connection<S>(
     // second charge against any session-scoped budget. The connection itself is
     // real and was charged as one, which is why it is still closed afterwards.
     let now = Instant::now();
-    if let Replay::Repeat(previous) = replays.borrow_mut().lookup(&open, now) {
+    // Bound before the branch. `if let` extends its scrutinee's temporaries to
+    // the end of the block, so borrowing inside the condition would hold the
+    // `RefCell` across both awaits below — and a second opening arriving on
+    // this driver would panic rather than be served.
+    let replay = replays.borrow_mut().lookup(&open, now);
+    if let Replay::Repeat(previous) = replay {
         answer(connection.as_ref(), &previous.encode()).await;
         close_after_flush(connection.as_ref()).await;
         return;
@@ -192,9 +259,45 @@ async fn serve_connection<S>(
         return;
     }
 
-    service
-        .serve(connection, *peer, context.cancel.clone())
-        .await;
+    // Serving races a revocation watch. Whichever finishes first ends the
+    // session — and if it is the watch, the connection is closed under the
+    // service rather than politely asked to stop, because a peer that has lost
+    // standing does not get to finish what it was doing.
+    let station = peer.station.clone();
+    let serving = service.serve(connection.clone(), *peer, context.cancel.clone());
+    let revoked = watch_for_revocation(&context, station);
+    tokio::select! {
+        _ = serving => {}
+        _ = revoked => {}
+    }
+    // Both endings go through the same close. Dropping a connection resets its
+    // streams, so a served chunk whose last bytes are still in flight would be
+    // truncated by our own teardown — a transfer failing for a reason that is
+    // entirely ours.
+    close_after_flush(connection.as_ref()).await;
+}
+
+/// Resolve once this peer no longer has standing.
+///
+/// Parks forever when nothing publishes an authority tick, which is the honest
+/// answer for a driver with no authority source: it never spuriously closes a
+/// session it has no reason to doubt.
+async fn watch_for_revocation(context: &PlaneContext, station: StationId) {
+    let Some(mut tick) = context.authority_tick.clone() else {
+        std::future::pending::<()>().await;
+        return;
+    };
+    loop {
+        if tick.changed().await.is_err() {
+            std::future::pending::<()>().await;
+            return;
+        }
+        // Re-asked, not remembered. The pinned view is exactly what has gone
+        // stale, so the answer has to come from the authority again.
+        if context.authority.admit_peer(&station).is_none() {
+            return;
+        }
+    }
 }
 
 /// Read the opening off the connection's first flow, bounded before anything
@@ -248,11 +351,14 @@ async fn close_after_flush(connection: &dyn comms::Connection) {
 /// in flight finish inside a budget strictly smaller than the Station's drain
 /// deadline, and return from the driver last so the runtime drops after its
 /// tasks rather than aborting them mid-await.
-async fn shut_down(mut connections: tokio::task::JoinSet<()>) {
-    // Strictly less than the Station's drain deadline: `drain_tasks` leaks an
-    // unfinished handle rather than blocking, so a driver that takes the whole
-    // budget is a driver that can outlive the Station that owns it.
-    let budget = crate::lifecycle::DEFAULT_DRAIN_DEADLINE.saturating_sub(deadline::ACCEPT_WRITE);
+async fn shut_down(context: &PlaneContext, mut connections: tokio::task::JoinSet<()>) {
+    // Strictly less than the Station's, and every rung below is strictly less
+    // than this: a ladder where each step has margin over the one under it is
+    // what makes the ordinary path a clean join rather than an abort.
+    let budget = context
+        .drain_deadline
+        .saturating_sub(deadline::ACCEPT_WRITE)
+        .max(deadline::DRIVER_POLL * 2);
     let joined = tokio::time::timeout(budget, async {
         while connections.join_next().await.is_some() {}
     })
@@ -262,6 +368,11 @@ async fn shut_down(mut connections: tokio::task::JoinSet<()>) {
         // budget is a bug, and the alternative to aborting it is a Station that
         // never stops.
         connections.abort_all();
-        while connections.join_next().await.is_some() {}
+        // Bounded even here. An aborted task still runs its drops, and a drop
+        // that blocks would turn "we gave up waiting" into "we hung anyway".
+        let _ = tokio::time::timeout(deadline::ACCEPT_WRITE, async {
+            while connections.join_next().await.is_some() {}
+        })
+        .await;
     }
 }

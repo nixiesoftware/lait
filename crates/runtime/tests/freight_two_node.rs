@@ -139,6 +139,8 @@ fn node(net: &comms::mem::MemNet, tag: &str, seed: [u8; 32], serving: bool) -> N
             transport: transport.clone(),
             policy: PlanePolicy::default(),
             cancel: cancel.clone(),
+            drain_deadline: runtime::lifecycle::DEFAULT_DRAIN_DEADLINE,
+            authority_tick: None,
         };
         let service = FreightService::new(host.clone(), Arc::new(Keys), space(), u64::MAX);
         std::thread::spawn(move || run_driver(context, service))

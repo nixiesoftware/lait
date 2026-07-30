@@ -307,3 +307,50 @@ fn the_replay_ledger_is_bounded_and_forgets_rather_than_refuses() {
     );
     assert!(ledger.is_empty());
 }
+
+#[test]
+fn a_lane_this_build_cannot_serve_is_dropped_from_the_grant_not_the_opening() {
+    // Where the decision actually belongs. The opening carries what the peer
+    // asked for; the accept says what it got. A newer peer asking for a media
+    // lane still gets its control lane — which is the whole reason additive
+    // capability exists inside an ALPN rather than requiring a new one.
+    let space = space();
+    let mut open = opening(&space, Plane::Live);
+    open.plane = Plane::Live;
+    open.protocol_version = Plane::Live.protocol_version();
+    open.requested_lanes = vec![
+        stream_kind::CONTROL,
+        stream_kind::RESERVED_MEDIA_FRAME,
+        stream_kind::RELIABLE_SIGNAL,
+    ];
+
+    let outcome = judge(
+        &open,
+        &context(&space, Plane::Live),
+        &member(),
+        &PlanePolicy::default(),
+    );
+    let Admission::Accept(accept, peer) = outcome else {
+        panic!("a member asking for one thing we cannot do is still a member");
+    };
+    assert_eq!(
+        accept.granted_lanes,
+        vec![stream_kind::CONTROL, stream_kind::RELIABLE_SIGNAL],
+        "granted what we can serve, and nothing else"
+    );
+    assert_eq!(peer.granted_lanes, accept.granted_lanes);
+
+    // A peer that asked for *only* things we cannot serve gets nothing, and
+    // "nothing" is a refusal rather than an empty grant it would sit on.
+    let mut hopeless = open.clone();
+    hopeless.requested_lanes = vec![stream_kind::RESERVED_MEDIA_FRAME];
+    assert_eq!(
+        judge(
+            &hopeless,
+            &context(&space, Plane::Live),
+            &member(),
+            &PlanePolicy::default()
+        ),
+        Admission::Refuse(SessionRefusal::Refused)
+    );
+}

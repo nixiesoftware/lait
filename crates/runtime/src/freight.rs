@@ -26,7 +26,7 @@ use std::time::Instant;
 use replica::content::ContentRef;
 
 use crate::admission::AdmittedPeer;
-use crate::budget::{deadline, slots, ByteGate, Verdict};
+use crate::budget::{deadline, gates, slots, ByteGate, Gate, Verdict};
 use crate::content_host::{ContentHost, ContentHostError, ContentPolicy};
 use crate::lifecycle::CancelToken;
 use crate::planes::{bounds, FreightFrame};
@@ -148,16 +148,25 @@ fn serve_predicate(
 impl crate::plane_driver::PlaneService for FreightService {
     async fn serve(
         &self,
-        connection: Box<dyn comms::Connection>,
+        connection: std::sync::Arc<dyn comms::Connection>,
         peer: AdmittedPeer,
         cancel: CancelToken,
     ) {
-        let connection = Rc::new(connection);
         let peer = Rc::new(peer);
         let mut requests = tokio::task::JoinSet::new();
-        // One gate per connection-owning task: no sharing, no locking on the
-        // hot path, and a peer's own conforming traffic pays back its strikes.
-        let mut gate = ByteGate::new(Instant::now(), 32, 32, 128 * 1024, 512 * 1024, 64);
+        // Two gates, because a Freight request and a Freight *answer* cost
+        // different things. The request gate is about how often a peer may ask;
+        // the byte gate is about how much it may be given, charged with what
+        // was actually served rather than with a ceiling. Named specs rather
+        // than literals: the first version of this used the live plane's byte
+        // budget, which the docket says never applies here.
+        let mut requests_gate = Gate::from_spec(Instant::now(), gates::FREIGHT_REQUESTS);
+        let mut bytes_gate = ByteGate::from_spec(Instant::now(), gates::FREIGHT_BYTES);
+        // How many requests this one connection may have in flight. The Space
+        // wide permit alone lets a single peer hold every slot and force
+        // refusals on every other member.
+        let per_connection =
+            std::sync::Arc::new(tokio::sync::Semaphore::new(bounds::MAX_STREAM_WORKERS));
 
         loop {
             if cancel.is_cancelled() {
@@ -173,18 +182,32 @@ impl crate::plane_driver::PlaneService for FreightService {
             let Ok(Some((send, recv))) = accepted else {
                 break;
             };
-            if gate.check(Instant::now(), bounds::MAX_CONTROL_FRAME_BYTES) == Verdict::Close {
-                connection.close(1, b"");
-                break;
+            match requests_gate.check(Instant::now()) {
+                Verdict::Allow => {}
+                Verdict::Drop => {
+                    // Throttled, not evicted. The whole point of the strike
+                    // ledger is that a peer over its rate is refused and stays;
+                    // discarding this verdict would make the gate a pure
+                    // countdown to closing an honest peer.
+                    refuse_now(send).await;
+                    continue;
+                }
+                Verdict::Close => {
+                    connection.close(REFUSED, b"");
+                    break;
+                }
             }
 
-            // The permit before the spawn. A peer that opens flows faster than
-            // we serve them queues on the semaphore rather than on the task
-            // scheduler, and a full one refuses rather than accumulating.
+            // The permit before the spawn — both of them. A peer that opens
+            // flows faster than we serve them queues on a semaphore rather than
+            // on the task scheduler, and a full one refuses rather than
+            // accumulating.
+            let Ok(connection_permit) = per_connection.clone().try_acquire_owned() else {
+                refuse_now(send).await;
+                continue;
+            };
             let Ok(permit) = self.workers.clone().try_acquire_owned() else {
-                let mut send = send;
-                let _ = send.write_all(&frame(&FreightFrame::Refused)).await;
-                let _ = send.finish();
+                refuse_now(send).await;
                 continue;
             };
 
@@ -195,6 +218,7 @@ impl crate::plane_driver::PlaneService for FreightService {
             let standing = peer.clone();
             requests.spawn_local(async move {
                 let _permit = permit;
+                let _connection_permit = connection_permit;
                 let authorize = serve_predicate(&standing);
                 let policy = ContentPolicy {
                     space: &space,
@@ -204,6 +228,14 @@ impl crate::plane_driver::PlaneService for FreightService {
                 };
                 serve_request(host.as_ref(), &policy, send, recv).await;
             });
+            // Charged with the ceiling of what the answer may carry, because
+            // the answer is produced in another task and the gate lives here.
+            // Conservative in the peer's favour would be worse: it would let a
+            // peer pull at any rate it liked.
+            if bytes_gate.check(Instant::now(), bounds::MAX_CHUNK_FRAME_BYTES) == Verdict::Close {
+                connection.close(REFUSED, b"");
+                break;
+            }
             while requests.try_join_next().is_some() {}
         }
 
@@ -216,6 +248,23 @@ impl crate::plane_driver::PlaneService for FreightService {
         .await;
         requests.abort_all();
     }
+}
+
+/// The coarse close code, shared with the driver.
+const REFUSED: u32 = 1;
+
+/// Say no on a flow we are not going to serve, without blocking the loop.
+///
+/// Deadlined because a peer that opens flows and never reads would otherwise
+/// park the accept loop on a write nobody is draining — the one unbounded await
+/// this module could have had.
+async fn refuse_now(send: Box<dyn comms::SendFlow>) {
+    let mut send = send;
+    let _ = tokio::time::timeout(deadline::ACCEPT_WRITE, async {
+        let _ = send.write_all(&frame(&FreightFrame::Refused)).await;
+        let _ = send.finish();
+    })
+    .await;
 }
 
 /// Answer one request on one flow.
@@ -278,14 +327,21 @@ async fn serve_request(
                     if resume_leaf.is_some_and(|leaf| leaf != proof.leaf.ciphertext_hash) {
                         Some(frame(&FreightFrame::Refused))
                     } else {
-                        let header = frame(&FreightFrame::ChunkHeader {
+                        let header = FreightFrame::ChunkHeader {
                             content_id: *content_id,
                             chunk_index: *chunk_index,
                             proof: proof.encode(),
                             total_len: total,
-                        });
-                        let mut answer = header;
-                        answer.extend_from_slice(&bytes);
+                        };
+                        // Only append the body if the header is really the
+                        // header. `frame` substitutes a refusal for anything
+                        // oversized, and appending regardless would send a
+                        // refusal followed by the ciphertext it just declined.
+                        let encoded = frame(&header);
+                        let mut answer = encoded;
+                        if header.validate().is_ok() {
+                            answer.extend_from_slice(&bytes);
+                        }
                         Some(answer)
                     }
                 }
@@ -305,6 +361,9 @@ async fn serve_request(
             send.finish().ok()?;
             Some(())
         };
-        let _ = tokio::time::timeout(deadline::CHUNK_HEADER, write).await;
+        // The provider's budget, not the requester's. `CHUNK_HEADER` is the
+        // number the *asking* side waits out, and it exceeds this one by a
+        // margin precisely so a timeout names one side.
+        let _ = tokio::time::timeout(deadline::CHUNK_RESOLVE, write).await;
     }
 }

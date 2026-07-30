@@ -16,10 +16,17 @@
 //! **Why strikes decay on admit rather than on a timer.** The shape is
 //! Rayfish's: a token bucket plus a strike counter, where every admitted
 //! message decays a strike. A chatty peer that occasionally overshoots is
-//! therefore never closed — its own conforming traffic pays its strikes back —
-//! while a sustained flood, which by definition admits nothing, accumulates
-//! them. A timer-based decay would let a peer flood in bursts spaced to the
-//! timer and never close.
+//! therefore never closed — its own conforming traffic pays its strikes back.
+//!
+//! That gives an exact never-close ceiling, and it is worth stating rather than
+//! discovering: a peer arriving at rate λ against a permitted rate R has R
+//! admitted and λ−R denied per second, so strikes accumulate only while
+//! λ − R > R — that is, **above twice the permitted rate**. Everything between
+//! R and 2R is throttled forever and never closed, which is the intended
+//! answer for a peer that is merely enthusiastic. Sizing R is therefore sizing
+//! 2R, and every gate below is chosen with that in mind. A timer-based decay
+//! would have no such ceiling: a peer could flood in bursts spaced to the timer
+//! and never close at any rate.
 //!
 //! One gate per connection-owning task. Nothing here is `Sync`, nothing takes a
 //! lock, and that is the point: the hot path is a comparison and an add.
@@ -58,8 +65,14 @@ impl Pace {
     /// clamped rather than trusted: a gate misconfigured to zero should throttle
     /// hard, not divide by zero or admit everything.
     pub fn new(now: Instant, per_second: u32, burst: u32) -> Self {
-        let per_second = per_second.clamp(1, 1_000_000);
-        let interval = Duration::from_nanos(1_000_000_000 / per_second as u64);
+        // No upper clamp. A byte pace is a rate in *bytes* per second, so eight
+        // million is an ordinary number here — clamping it at a million would
+        // silently throttle every byte lane to under a megabyte a second, and
+        // the symptom would be "the network is slow" rather than "a constant is
+        // wrong". The quotient is floored at one nanosecond instead, which is
+        // the only value that actually breaks the arithmetic.
+        let per_second = per_second.max(1);
+        let interval = Duration::from_nanos((1_000_000_000 / per_second as u64).max(1));
         Self {
             next: now,
             interval,
@@ -78,25 +91,32 @@ impl Pace {
     /// with bytes as the unit, so it shares the implementation rather than
     /// growing a parallel one.
     pub fn admit_cost(&mut self, now: Instant, cost: u32) -> bool {
-        let cost = self.interval.saturating_mul(cost.max(1));
-        // Credit is capped at `burst`: an idle gate does not accrue arrears.
-        let theoretical = self.next.max(now);
-        if theoretical.checked_sub(self.burst).is_some_and(|e| e > now) {
+        let charge = self.interval.saturating_mul(cost.max(1));
+        // Compared forward, never by subtracting from an `Instant`. On Windows
+        // an `Instant` is time since boot, so `next - burst` underflows during
+        // the first seconds of uptime — and a `checked_sub` returning `None`
+        // read as "conforming" would hand out an extra burst exactly then.
+        if self.next.max(now) > now + self.burst {
             return false;
         }
-        self.next = self.next.max(now).checked_add(cost).unwrap_or(self.next);
+        // Failing closed on overflow. Admitting an item and charging nothing
+        // for it is the one outcome a rate limiter must never have.
+        let Some(next) = self.next.max(now).checked_add(charge) else {
+            return false;
+        };
+        self.next = next;
         true
     }
 
     /// Whether `cost` would conform, without consuming anything. What a paired
     /// gate uses so a rejected item is charged to neither half.
+    ///
+    /// Weighted like [`Self::admit_cost`]: asking whether one *byte* fits and
+    /// then charging for sixty-four kilobytes would let a large item through a
+    /// gate that has room for a small one.
     pub fn would_admit(&self, now: Instant, cost: u32) -> bool {
-        let _ = cost;
-        !self
-            .next
-            .max(now)
-            .checked_sub(self.burst)
-            .is_some_and(|earliest| earliest > now)
+        let charge = self.interval.saturating_mul(cost.max(1));
+        self.next.max(now).checked_add(charge).is_some() && self.next.max(now) <= now + self.burst
     }
 }
 
@@ -116,6 +136,11 @@ pub struct Gate {
 }
 
 impl Gate {
+    /// Build from a named spec. The door a call site should use.
+    pub fn from_spec(now: Instant, spec: gates::GateSpec) -> Self {
+        Self::new(now, spec.per_second, spec.burst, spec.strike_limit)
+    }
+
     pub fn new(now: Instant, per_second: u32, burst: u32, strike_limit: u16) -> Self {
         Self {
             pace: Pace::new(now, per_second, burst),
@@ -147,6 +172,11 @@ impl Gate {
     pub fn penalise(&mut self, count: u16) -> Verdict {
         if self.closed {
             return Verdict::Close;
+        }
+        if count == 0 {
+            // Charging nothing is not a denial. A caller sweeping on a quiet
+            // tick would otherwise drop an item for no reason.
+            return Verdict::Allow;
         }
         self.strikes = self.strikes.saturating_add(count);
         if self.strikes >= self.strike_limit {
@@ -181,6 +211,18 @@ pub struct ByteGate {
 }
 
 impl ByteGate {
+    /// Build from a named spec.
+    pub fn from_spec(now: Instant, spec: gates::ByteGateSpec) -> Self {
+        Self::new(
+            now,
+            spec.messages_per_second,
+            spec.message_burst,
+            spec.bytes_per_second,
+            spec.byte_burst,
+            spec.strike_limit,
+        )
+    }
+
     pub fn new(
         now: Instant,
         messages_per_second: u32,
@@ -264,6 +306,58 @@ pub mod deadline {
 
     /// A driver's poll interval, so cancellation is never missed while parked.
     pub const DRIVER_POLL: Duration = Duration::from_millis(25);
+}
+
+/// The gates, by name.
+///
+/// A call site that constructs a gate from literals is a call site that can
+/// pick the wrong table — and the first one to do it did, using the live
+/// plane's byte budget for Freight, where the docket says that budget never
+/// applies. Naming them here means a fixture can see them and a reviewer can
+/// compare them.
+pub mod gates {
+    /// How many, how large, and how much abuse before closing.
+    #[derive(Debug, Clone, Copy)]
+    pub struct GateSpec {
+        pub per_second: u32,
+        pub burst: u32,
+        pub strike_limit: u16,
+    }
+
+    /// A paced count paired with a paced volume.
+    #[derive(Debug, Clone, Copy)]
+    pub struct ByteGateSpec {
+        pub messages_per_second: u32,
+        pub message_burst: u32,
+        pub bytes_per_second: u32,
+        pub byte_burst: u32,
+        pub strike_limit: u16,
+    }
+
+    /// Freight requests per connection.
+    ///
+    /// A request is one flow carrying one bounded frame; the expensive part is
+    /// what it asks for, which the byte gate meters separately. 64/s sustained
+    /// means an honest fetcher pulling 256 KiB chunks saturates a gigabit link
+    /// long before it saturates this.
+    pub const FREIGHT_REQUESTS: GateSpec = GateSpec {
+        per_second: 64,
+        burst: 256,
+        strike_limit: 128,
+    };
+
+    /// Freight bytes served per connection.
+    ///
+    /// Deliberately generous: this is bulk transfer, and the whole point of the
+    /// plane is that it moves files. It bounds a peer that asks for everything
+    /// at once, not one that asks steadily.
+    pub const FREIGHT_BYTES: ByteGateSpec = ByteGateSpec {
+        messages_per_second: 64,
+        message_burst: 256,
+        bytes_per_second: 8 * 1024 * 1024,
+        byte_burst: 32 * 1024 * 1024,
+        strike_limit: 128,
+    };
 }
 
 /// Counting permits and slot ceilings.

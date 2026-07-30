@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use replica::content::ContentRef;
 use replica::journal::cache::{Lease, ResidentCache};
 use runtime::transfer::{
-    TransferHandle, TransferRegistry, TransferState, MAX_COMPLETED, PROGRESS_TICK,
+    TransferError, TransferHandle, TransferRegistry, TransferState, MAX_COMPLETED, PROGRESS_TICK,
 };
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -41,8 +41,10 @@ fn two_operations_over_one_content_do_not_collect_each_others_staged_bytes() {
     let now = Instant::now();
     let target = content(1);
 
-    let first = TransferHandle::new(registry.clone(), cache.clone(), [1u8; 16], target, now);
-    let second = TransferHandle::new(registry.clone(), cache.clone(), [2u8; 16], target, now);
+    let first = TransferHandle::new(registry.clone(), cache.clone(), [1u8; 16], target, now)
+        .expect("registered");
+    let second = TransferHandle::new(registry.clone(), cache.clone(), [2u8; 16], target, now)
+        .expect("registered");
 
     // Both are partway through the same content.
     let entry = replica::journal::object_content_hash(b"chunk-0");
@@ -87,7 +89,8 @@ fn a_dropped_transfer_fails_itself_and_lets_go() {
 
     {
         let handle =
-            TransferHandle::new(registry.clone(), cache.clone(), [7u8; 16], content(2), now);
+            TransferHandle::new(registry.clone(), cache.clone(), [7u8; 16], content(2), now)
+                .expect("registered");
         cache
             .append_staged(&handle.operation(), 0, 0, b"partial")
             .unwrap();
@@ -127,7 +130,8 @@ fn a_state_change_publishes_at_once_and_byte_counts_coalesce() {
         [3u8; 16],
         content(3),
         start,
-    );
+    )
+    .expect("registered");
     let mut watch = registry.subscribe();
     let after_begin = *watch.borrow_and_update();
 
@@ -187,7 +191,8 @@ fn the_completed_tail_is_bounded_and_keeps_the_recent_end() {
     for n in 0..(MAX_COMPLETED + 16) {
         let mut op = [0u8; 16];
         op[..8].copy_from_slice(&(n as u64).to_be_bytes());
-        let handle = TransferHandle::new(registry.clone(), cache.clone(), op, content(4), now);
+        let handle = TransferHandle::new(registry.clone(), cache.clone(), op, content(4), now)
+            .expect("registered");
         handle.succeed(now);
     }
     let completed = registry.completed();
@@ -197,5 +202,56 @@ fn the_completed_tail_is_bounded_and_keeps_the_recent_end() {
         u64::from_be_bytes(last.operation[..8].try_into().unwrap()),
         (MAX_COMPLETED + 15) as u64,
         "the recent end is the end that is kept"
+    );
+}
+
+#[test]
+fn a_second_handle_for_a_live_operation_is_refused() {
+    // Replacing looks harmless and is not: the displaced handle's Drop still
+    // runs, and it releases the *new* transfer's leases and deletes its staged
+    // bytes, because both are keyed by the same operation id. Silent data loss
+    // with no failure anywhere to point at.
+    let cache = cache("duplicate");
+    let registry = Arc::new(TransferRegistry::new());
+    let now = Instant::now();
+    let first = TransferHandle::new(registry.clone(), cache.clone(), [4u8; 16], content(5), now)
+        .expect("registered");
+
+    assert_eq!(
+        TransferHandle::new(registry.clone(), cache.clone(), [4u8; 16], content(5), now).err(),
+        Some(TransferError::DuplicateOperation)
+    );
+
+    // And once the first is done, the id is free again.
+    first.succeed(now);
+    assert!(
+        TransferHandle::new(registry.clone(), cache.clone(), [4u8; 16], content(5), now).is_ok()
+    );
+}
+
+#[test]
+fn the_active_set_is_bounded_because_a_cache_sweep_reads_it() {
+    // `live_operations` is what says which staging is still wanted. An
+    // unbounded active set is therefore not just memory — it is disk that is
+    // never reclaimed.
+    let cache = cache("active-bound");
+    let registry = Arc::new(TransferRegistry::new());
+    let now = Instant::now();
+    let mut held = Vec::new();
+    for n in 0..runtime::transfer::MAX_ACTIVE {
+        let mut op = [0u8; 16];
+        op[..8].copy_from_slice(&(n as u64).to_be_bytes());
+        held.push(
+            TransferHandle::new(registry.clone(), cache.clone(), op, content(6), now)
+                .expect("inside the ceiling"),
+        );
+    }
+    assert_eq!(
+        TransferHandle::new(registry.clone(), cache.clone(), [0xFF; 16], content(6), now).err(),
+        Some(TransferError::TooManyActive)
+    );
+    assert_eq!(
+        registry.live_operations().len(),
+        runtime::transfer::MAX_ACTIVE
     );
 }
