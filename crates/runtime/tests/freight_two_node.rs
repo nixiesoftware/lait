@@ -563,12 +563,12 @@ async fn an_interrupted_transfer_resumes_and_installs_only_after_verification() 
     )
     .await;
     let outcome = match dead {
-        Some(provider) => {
+        Ok(provider) => {
             fetch
                 .fetch(&content, [3u8; 16], std::slice::from_ref(&provider))
                 .await
         }
-        None => Err(FetchError::NoProvider),
+        Err(_) => Err(FetchError::NoProvider),
     };
     assert!(outcome.is_err(), "a dead provider completes nothing");
     assert!(

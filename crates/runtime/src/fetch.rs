@@ -166,26 +166,32 @@ impl Provider {
 /// The opening goes on the initiator's first flow and the answer comes back on
 /// the responder's, which is the same shape the accepting driver implements —
 /// stated in one place on each side rather than negotiated.
+///
+/// The error says *why*, rather than collapsing every outcome into absence.
+/// One of the reasons is actionable and the rest are not, and a caller that
+/// could not tell them apart is a caller that reports a generation mismatch as
+/// a flaky network.
 pub async fn connect_provider(
     transport: &dyn comms::Transport,
     space: &SpaceId,
     local: &StationId,
     peer: &StationId,
     session_id: [u8; 16],
-) -> Option<Provider> {
+) -> Result<Provider, ProviderRefusal> {
+    let unreachable = || ProviderRefusal::Unreachable;
     let connection = transport
         .connect_session(peer.as_device(), crate::planes::FREIGHT_ALPN)
         .await
-        .ok()?;
+        .map_err(|_| unreachable())?;
 
     let mut space_bytes = [0u8; SPACE_ID_LEN];
     let raw = space.as_str().as_bytes();
     if raw.len() != SPACE_ID_LEN {
-        return None;
+        return Err(unreachable());
     }
     space_bytes.copy_from_slice(raw);
     let mut epoch = [0u8; 16];
-    getrandom::fill(&mut epoch).ok()?;
+    getrandom::fill(&mut epoch).map_err(|_| unreachable())?;
 
     let open = SessionOpen {
         plane: Plane::Freight,
@@ -202,25 +208,76 @@ pub async fn connect_provider(
         requested_lanes: Vec::new(),
     };
 
-    let mut flow = connection.open_uni().await.ok()?;
-    flow.write_all(&open.encode()).await.ok()?;
-    flow.finish().ok()?;
+    let mut flow = connection.open_uni().await.map_err(|_| unreachable())?;
+    flow.write_all(&open.encode())
+        .await
+        .map_err(|_| unreachable())?;
+    flow.finish().map_err(|_| unreachable())?;
 
-    // The answer, bounded and deadlined. A refusal and a silence are the same
-    // outcome to us — this provider is not available — which is exactly what
-    // the coarse refusal intends.
+    // The answer, bounded and deadlined.
     let answer = tokio::time::timeout(deadline::CHUNK_HEADER, async {
         let mut recv = connection.accept_uni().await.ok()??;
         recv.read_to_end(bounds::MAX_OPENING_BYTES).await.ok()
     })
     .await
-    .ok()??;
-    SessionAccept::decode_canonical(&answer).ok()?;
+    .map_err(|_| unreachable())?
+    .ok_or_else(unreachable)?;
+    if SessionAccept::decode_canonical(&answer).is_ok() {
+        return Ok(Provider {
+            station: peer.clone(),
+            connection,
+        });
+    }
 
-    Some(Provider {
-        station: peer.clone(),
-        connection,
-    })
+    // Not an accept. Most refusals are deliberately coarse and mean the same
+    // thing to a fetcher — this provider is not available — but one of them is
+    // actionable, and collapsing it into the rest is how a version mismatch
+    // presents as an intermittent network problem for a week.
+    //
+    // Reported and not returned: a fetcher's caller has no version to change.
+    // What it needs is for the operator to be able to find out why every peer
+    // is suddenly unavailable, which a log line answers and a `None` does not.
+    Err(
+        match crate::planes::SessionRefusal::decode_canonical(&answer) {
+            Ok(refusal) => ProviderRefusal::Refused(refusal),
+            // Neither an accept nor a refusal: a truncated stream, or something that
+            // is not this protocol at all. Distinct from a refusal because it is our
+            // problem to explain rather than theirs to have sent.
+            Err(_) => ProviderRefusal::Unintelligible,
+        },
+    )
+}
+
+/// Why a provider did not become one.
+///
+/// A type rather than a log line, because the distinction is testable and a log
+/// line is not. Most refusals are deliberately coarse and mean the same thing to
+/// a fetcher — this provider is not available — but `UnsupportedVersion` is
+/// actionable, and collapsing it into the rest is how a generation mismatch
+/// presents as an intermittent network fault for a week.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProviderRefusal {
+    /// The dial, the opening, or the answer did not complete in time.
+    Unreachable,
+    /// The peer said no, in its own words.
+    Refused(crate::planes::SessionRefusal),
+    /// The peer answered with something that is neither an accept nor a
+    /// refusal.
+    Unintelligible,
+}
+
+impl ProviderRefusal {
+    /// Whether an operator could do something about this.
+    ///
+    /// The only one that is worth telling somebody about: every other refusal
+    /// is a peer exercising a policy it is entitled to, and a fetcher that
+    /// reported those would be reporting normal operation.
+    pub fn is_actionable(&self) -> bool {
+        matches!(
+            self,
+            Self::Refused(crate::planes::SessionRefusal::UnsupportedVersion { .. })
+        )
+    }
 }
 
 /// What a fetch needs that is not about one particular content.

@@ -476,3 +476,60 @@ fn the_wire_bounds_agree_with_the_geometry_and_the_store() {
          not by coincidence"
     );
 }
+
+/// A refusal is a message, and a message that only sometimes decodes is worse
+/// than no message.
+#[cfg(test)]
+mod refusals {
+    use runtime::planes::{bounds, PlaneWireError, SessionRefusal};
+
+    #[test]
+    fn every_refusal_round_trips_and_has_exactly_one_spelling() {
+        for refusal in [
+            SessionRefusal::Malformed,
+            SessionRefusal::Refused,
+            SessionRefusal::UnsupportedVersion { supported: 1 },
+            SessionRefusal::UnsupportedVersion {
+                supported: u16::MAX,
+            },
+        ] {
+            let bytes = refusal.encode();
+            assert_eq!(SessionRefusal::decode_canonical(&bytes), Ok(refusal));
+            assert!(
+                bytes.len() < 16,
+                "a refusal is small: {} bytes",
+                bytes.len()
+            );
+        }
+    }
+
+    #[test]
+    fn a_refusal_is_refused_before_it_is_allocated_for() {
+        assert_eq!(
+            SessionRefusal::decode_canonical(&vec![0u8; bounds::MAX_OPENING_BYTES + 1]),
+            Err(PlaneWireError::TooLarge)
+        );
+    }
+
+    #[test]
+    fn something_that_is_not_a_refusal_does_not_decode_as_one() {
+        // The case this exists for: a dialer reads whatever came back on the
+        // responder's flow. If a truncated stream or an unrelated frame decoded
+        // as some refusal, a version mismatch and a broken connection would be
+        // indistinguishable — and only one of those is worth telling anyone
+        // about.
+        for corpus in [
+            &b""[..],
+            &b"\xff\xff\xff\xff"[..],
+            &b"not a refusal"[..],
+            // A trailing byte past a valid encoding. Re-encode equality is what
+            // catches this, and it is why the check exists.
+            &[SessionRefusal::Refused.encode(), vec![0u8]].concat()[..],
+        ] {
+            assert!(
+                SessionRefusal::decode_canonical(corpus).is_err(),
+                "{corpus:?} decoded as a refusal"
+            );
+        }
+    }
+}

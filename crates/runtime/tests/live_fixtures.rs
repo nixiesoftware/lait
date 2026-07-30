@@ -451,3 +451,46 @@ fn a_scope_with_an_empty_or_oversize_name_is_refused() {
         AdmitOutcome::Refused(TransientError::Bounds)
     );
 }
+
+/// A dialer that can tell "another generation" from "not there".
+#[cfg(test)]
+mod provider_refusals {
+    use runtime::fetch::ProviderRefusal;
+    use runtime::planes::SessionRefusal;
+
+    #[test]
+    fn exactly_one_refusal_is_worth_telling_someone_about() {
+        // Every other refusal is a peer exercising a policy it is entitled to,
+        // and a fetcher that reported those would be reporting normal
+        // operation. A version mismatch is the one an operator can fix — and
+        // the one that, collapsed into "unavailable", presents as an
+        // intermittent network fault for a week.
+        assert!(
+            ProviderRefusal::Refused(SessionRefusal::UnsupportedVersion { supported: 2 })
+                .is_actionable()
+        );
+        for quiet in [
+            ProviderRefusal::Unreachable,
+            ProviderRefusal::Refused(SessionRefusal::Refused),
+            ProviderRefusal::Refused(SessionRefusal::Malformed),
+            ProviderRefusal::Unintelligible,
+        ] {
+            assert!(!quiet.is_actionable(), "{quiet:?}");
+        }
+    }
+
+    #[test]
+    fn a_peer_that_answered_nonsense_is_not_a_peer_that_refused() {
+        // Ours to explain rather than theirs to have sent, so it is its own
+        // variant. Folding it into `Refused` would attribute our own decode
+        // failure to the peer's policy.
+        assert_ne!(
+            ProviderRefusal::Unintelligible,
+            ProviderRefusal::Refused(SessionRefusal::Refused)
+        );
+        assert_ne!(
+            ProviderRefusal::Unintelligible,
+            ProviderRefusal::Unreachable
+        );
+    }
+}

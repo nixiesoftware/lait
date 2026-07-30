@@ -169,6 +169,33 @@ pub enum SessionRefusal {
     UnsupportedVersion { supported: u16 },
 }
 
+impl SessionRefusal {
+    pub fn encode(&self) -> Vec<u8> {
+        postcard::to_stdvec(self).expect("postcard session refusal")
+    }
+
+    /// Decode a refusal, with the same discipline every other shape on this
+    /// plane has.
+    ///
+    /// It matters more here than it looks. A refusal is the one message a peer
+    /// reads when something has already gone wrong, so it is the message most
+    /// likely to be read from a stream that is truncated, reset, or carrying
+    /// something else entirely — and a decoder that guessed would turn "this
+    /// peer is on another generation" into "this peer is unavailable", which is
+    /// the difference between a fix and a mystery.
+    pub fn decode_canonical(bytes: &[u8]) -> Result<Self, PlaneWireError> {
+        if bytes.len() > bounds::MAX_OPENING_BYTES {
+            return Err(PlaneWireError::TooLarge);
+        }
+        let refusal: Self =
+            postcard::from_bytes(bytes).map_err(|_| PlaneWireError::NonCanonical)?;
+        if refusal.encode() != bytes {
+            return Err(PlaneWireError::NonCanonical);
+        }
+        Ok(refusal)
+    }
+}
+
 /// The fixed rendered-SpaceId length.
 pub const SPACE_ID_LEN: usize = 29;
 

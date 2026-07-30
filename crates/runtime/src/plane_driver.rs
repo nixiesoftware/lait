@@ -358,8 +358,11 @@ async fn answer(connection: &dyn comms::Connection, bytes: &[u8]) -> bool {
 /// peer can actually act on.
 async fn refuse(connection: &dyn comms::Connection, refusal: Option<SessionRefusal>) {
     let refusal = refusal.unwrap_or(SessionRefusal::Refused);
-    let bytes = postcard::to_stdvec(&refusal).unwrap_or_default();
-    answer(connection, &bytes).await;
+    // `unwrap_or_default` here would have written an empty vector on an encode
+    // failure, which the peer reads as a closed stream — a silence where a
+    // refusal was meant. The encode cannot fail for this shape, and saying so
+    // is better than a fallback that quietly means the opposite.
+    answer(connection, &refusal.encode()).await;
     close_after_flush(connection).await;
 }
 
