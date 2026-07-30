@@ -29,6 +29,7 @@
 //! consumption semantics.
 
 pub mod action;
+pub mod admission;
 pub mod beacon;
 pub mod budget;
 pub mod contact;

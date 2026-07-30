@@ -67,6 +67,18 @@ pub trait AuthorityView: Send + Sync {
     /// standing in the Space.
     fn resolve(&self, device: &DeviceId) -> Option<PrincipalResolution>;
 
+    /// Resolve a *remote* Station's principal for a delivery-plane admission.
+    ///
+    /// Defaults to [`Self::resolve`] over the same key, because a Station is a
+    /// device and membership is membership. It is a separate method so an
+    /// implementation cannot acquire a local-only assumption underneath the
+    /// peer path — `resolve` is called about our own devices constantly, and
+    /// the day one of those callers wants a local shortcut, the peer path must
+    /// not silently inherit it.
+    fn admit_peer(&self, station: &mechanics::ids::StationId) -> Option<PrincipalResolution> {
+        self.resolve(&station.as_device())
+    }
+
     /// The active World implementation id at `authority_frontier`. The default
     /// treats every implementation as active (fixtures without a policy
     /// history); the orbital composition overrides it with the ledger's
