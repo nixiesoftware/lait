@@ -472,6 +472,22 @@ pub struct Replica {
     content_index_root: Option<IndexRef>,
     /// Declared content references per Body, for the reachability sweep.
     declared_content: BTreeMap<BodyKey, Vec<[u8; 32]>>,
+    /// Content committed but not yet declared by any Body, and the moment each
+    /// hold lapses.
+    ///
+    /// There is a window between committing a descriptor and the Body that
+    /// names it reaching the store — an upload finishes, then a person decides
+    /// which issue to attach it to. Reachability is derived from live Bodies,
+    /// so for the whole of that window the content is garbage by the sweep's
+    /// only rule, and the sweep is right: nothing distinguishes an upload
+    /// awaiting an attach from an upload nobody ever attached.
+    ///
+    /// A hold is what distinguishes them, and it is deliberately in memory. A
+    /// hold is a claim about an operation this process is running; after a
+    /// restart there is no such operation, so the claim is correctly gone and
+    /// the abandoned upload becomes collectable — which is the behaviour a
+    /// durable hold would have had to reproduce with an expiry sweep anyway.
+    pending_content: BTreeMap<[u8; 32], std::time::Instant>,
     receipt_index_root: Option<IndexRef>,
     manifest_root_object: Option<ObjectRef>,
     /// How many live references each stored object has.
@@ -628,6 +644,7 @@ impl Replica {
             manifest_body_root: None,
             content_index_root: None,
             declared_content: BTreeMap::new(),
+            pending_content: BTreeMap::new(),
             receipt_index_root: None,
             manifest_root_object: None,
             object_refs: BTreeMap::new(),
@@ -1210,6 +1227,32 @@ impl Replica {
         Ok(descriptors.iter().map(|d| d.content_ref()).collect())
     }
 
+    /// Hold committed content against the sweep until `until`, because a Body
+    /// that will declare it is still being assembled.
+    ///
+    /// The caller supplies the deadline rather than the Replica reading a
+    /// clock, for the same reason it supplies a [`CommitContext`]: what time it
+    /// is is the caller's business, and a store that reads clocks is a store
+    /// whose behaviour cannot be stated in a test.
+    ///
+    /// A hold is not a declaration. It stops the content being collected; it
+    /// does not put it in an advertisement, because a peer receiving a
+    /// descriptor no Body names would adopt catalog it has no reason to keep
+    /// and its own sweep would have to undo.
+    pub fn hold_content(
+        &mut self,
+        content: &crate::content::ContentRef,
+        until: std::time::Instant,
+    ) {
+        self.pending_content.insert(*content.as_bytes(), until);
+    }
+
+    /// Drop a hold before its deadline — an upload the caller abandoned, or one
+    /// whose Body arrived by another route.
+    pub fn release_content_hold(&mut self, content: &crate::content::ContentRef) {
+        self.pending_content.remove(content.as_bytes());
+    }
+
     /// Record which content each named Body references.
     ///
     /// The World supplies this when it stages a transaction; Replica validates
@@ -1274,6 +1317,14 @@ impl Replica {
             frontier,
         )?;
         self.frontier = frontier;
+        // The Body that the hold was waiting for has arrived, so the hold has
+        // done its job. Released here rather than by the caller, because a
+        // caller that had to remember would eventually not.
+        for ids in declared.values() {
+            for id in ids {
+                self.pending_content.remove(id);
+            }
+        }
         Ok(())
     }
 
@@ -1332,12 +1383,34 @@ impl Replica {
 
     /// Every content id some live Body declares. The reachability rule, stated
     /// as the pure function it is.
+    ///
+    /// This is the *advertisement* question — what a peer may be told about —
+    /// and it deliberately excludes held content. See [`Self::retained_content`]
+    /// for the deletion question, which is not the same one.
     fn reachable_content(&self) -> std::collections::BTreeSet<[u8; 32]> {
         self.declared_content
             .iter()
             .filter(|(key, _)| self.bodies.contains_key(key))
             .flat_map(|(_, refs)| refs.iter().copied())
             .collect()
+    }
+
+    /// Every content id this Replica must not collect: what live Bodies declare,
+    /// plus what an unexpired hold is still waiting to declare.
+    ///
+    /// Wider than [`Self::reachable_content`] on purpose. "May I show this to a
+    /// peer" and "may I delete this" are different questions, and answering
+    /// them with one set forces a choice between deleting an upload mid-attach
+    /// and pushing an undeclared descriptor at every peer.
+    fn retained_content(&self, now: std::time::Instant) -> std::collections::BTreeSet<[u8; 32]> {
+        let mut retained = self.reachable_content();
+        retained.extend(
+            self.pending_content
+                .iter()
+                .filter(|(_, until)| **until > now)
+                .map(|(id, _)| *id),
+        );
+        retained
     }
 
     /// Drop every content descriptor no live Body declares, and release the
@@ -1360,7 +1433,9 @@ impl Replica {
     ) -> Result<Vec<crate::content::ContentRef>, ReplicaCommitError> {
         use fabric::journal::index::{self, IndexChange, NodeSink};
 
-        let reachable = self.reachable_content();
+        let now = std::time::Instant::now();
+        self.pending_content.retain(|_, until| *until > now);
+        let reachable = self.retained_content(now);
         let mut unreferenced: Vec<crate::content::ContentDescriptor> = Vec::new();
         {
             let store = self.durable.as_ref().expect("durable path");

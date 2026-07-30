@@ -799,3 +799,57 @@ fn a_hole_in_the_span_is_reported_before_any_chunk_is_opened() {
         "the hole is the answer, and it arrives before chunk 0 is touched"
     );
 }
+
+#[test]
+fn an_ingest_holds_its_content_until_something_declares_it() {
+    // The window this closes is between two calls that a person stands
+    // between: the upload finishes, and then they choose an issue. Nothing on
+    // disk tells a sweep those two are related, so `ingest` says so.
+    let fx = fixture("pending");
+    let space = space();
+    let auth = Authorizer::default();
+    let check = |a| auth.check(a);
+    let policy = policy(&space, &check);
+    let signer = replica::SeedSigner(&WRITER_SEED);
+    let ctx = commit_ctx(&signer, &space);
+
+    let content = fx
+        .host
+        .ingest(
+            &policy,
+            [7u8; 16],
+            &mut std::io::Cursor::new(filler(7, 4096)),
+            &ctx,
+        )
+        .expect("ingest");
+
+    // A sweep landing in the window collects nothing, and the content is still
+    // readable afterwards — the bytes were never at risk, the descriptor was.
+    let collected = fx
+        .core
+        .with_replica(|replica| replica.sweep_unreferenced_content(&ctx, None))
+        .expect("sweep");
+    assert!(
+        collected.is_empty(),
+        "a fresh upload is not garbage: {collected:?}"
+    );
+    assert_eq!(
+        fx.host.read_range(&policy, &content, 0, 16).unwrap(),
+        filler(7, 4096)[..16]
+    );
+
+    // Let go of the hold and the same sweep collects, so the window is a
+    // window and not a permanent exemption.
+    fx.core
+        .with_replica(|replica| {
+            replica.release_content_hold(&content);
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(
+        fx.core
+            .with_replica(|replica| replica.sweep_unreferenced_content(&ctx, None))
+            .unwrap(),
+        vec![content]
+    );
+}

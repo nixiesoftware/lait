@@ -231,9 +231,22 @@ impl ContentHost {
             return Err(ContentHostError::Storage(e.to_string()));
         }
 
-        // The descriptor is committed, so the ingest's own hold hands over to
-        // the content-scoped one.
+        // The descriptor is committed, so the ingest's own hold on the chunks
+        // hands over to the content-scoped one — those bytes are safe from here.
         let _ = self.cache.release_operation(&operation);
+
+        // The descriptor is not. Nothing declares this content yet, so by the
+        // reachability rule it is already garbage, and it stays garbage until a
+        // Body names it — which is a person choosing an issue, not a machine
+        // finishing a write. The hold is what buys that window, and it lapses
+        // on its own so an upload nobody ever attaches is still collectable.
+        let _ = self.core.with_replica(|replica| {
+            replica.hold_content(
+                &ingested.content_ref,
+                std::time::Instant::now() + PENDING_DECLARATION_TTL,
+            );
+            Ok(())
+        });
         Ok(ingested.content_ref)
     }
 
@@ -651,3 +664,12 @@ impl ContentHost {
 /// Maximum bytes one range read may return. A caller wanting more loops, which
 /// is what keeps a slow reader from pinning an unbounded buffer.
 pub const MAX_RANGE_BYTES: usize = 4 * 1024 * 1024;
+
+/// How long freshly ingested content is held against the sweep while it waits
+/// for a Body to declare it.
+///
+/// Long enough for a person: an upload finishes, and then they pick the issue,
+/// write the comment, and press the button. Short enough that an upload nobody
+/// ever attaches is not permanent — it is disk held by a decision that was
+/// never made, and the only honest ceiling on that is a clock.
+pub const PENDING_DECLARATION_TTL: std::time::Duration = std::time::Duration::from_secs(600);

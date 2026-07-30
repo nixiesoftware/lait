@@ -869,3 +869,154 @@ fn content_a_body_stopped_declaring_is_not_pushed_at_a_peer() {
         "an unreachable descriptor is not advertised"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The upload-to-attach window.
+//
+// Reachability is derived from live Bodies, and between committing a descriptor
+// and committing the Body that names it there is no such Body. For the whole of
+// that window the content is garbage by the only rule the sweep has — and the
+// sweep is right, because nothing on disk distinguishes an upload awaiting an
+// attach from an upload nobody ever attached. A hold is what distinguishes
+// them, and it lapses so the second case still ends.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn content_awaiting_its_body_survives_a_sweep_that_runs_first() {
+    // Hostile ordering deliberately: upload, sweep, then attach. The sweep runs
+    // on its own beat, so it can land anywhere, and "anywhere" includes the
+    // worst moment.
+    let mut fx = fixture("pending-hold");
+    let space = space();
+    let signer = SeedSigner(&WRITER_SEED);
+    commit_body(
+        &mut fx.replica,
+        1,
+        &body(1),
+        b"an issue, not yet carrying a file",
+    );
+
+    let out = ingest(&fx, 2, b"bytes waiting for somewhere to belong");
+    fx.replica
+        .commit_content(&ctx(&signer, &space), std::slice::from_ref(&out.descriptor))
+        .unwrap();
+    fx.replica.hold_content(
+        &out.content_ref,
+        std::time::Instant::now() + std::time::Duration::from_secs(600),
+    );
+
+    let collected = fx
+        .replica
+        .sweep_unreferenced_content(&ctx(&signer, &space), Some(&fx.cache))
+        .unwrap();
+    assert!(
+        collected.is_empty(),
+        "a held upload is not garbage yet: {collected:?}"
+    );
+
+    // And the attach still lands — which it could not if the descriptor were
+    // gone, because a declaration must name committed content.
+    let mut declarations = BTreeMap::new();
+    declarations.insert(body(1), vec![out.content_ref]);
+    fx.replica
+        .declare_content(&ctx(&signer, &space), declarations)
+        .expect("the attach lands on content the sweep left alone");
+    assert_eq!(fx.replica.declared_content(&body(1)), vec![out.content_ref]);
+    assert_eq!(
+        read_whole(&fx, &out),
+        b"bytes waiting for somewhere to belong"
+    );
+}
+
+#[test]
+fn an_upload_nobody_attaches_is_collected_when_its_hold_lapses() {
+    // The other half, and the reason the hold has a deadline at all: a window
+    // that never closes is a leak with a comment on it.
+    let mut fx = fixture("pending-lapse");
+    let space = space();
+    let signer = SeedSigner(&WRITER_SEED);
+
+    let out = ingest(&fx, 3, b"an upload that was thought better of");
+    fx.replica
+        .commit_content(&ctx(&signer, &space), std::slice::from_ref(&out.descriptor))
+        .unwrap();
+    fx.replica
+        .hold_content(&out.content_ref, std::time::Instant::now());
+
+    let collected = fx
+        .replica
+        .sweep_unreferenced_content(&ctx(&signer, &space), Some(&fx.cache))
+        .unwrap();
+    assert_eq!(
+        collected,
+        vec![out.content_ref],
+        "the lapsed hold held nothing"
+    );
+    assert!(fx.replica.content_descriptor(&out.content_ref).is_none());
+}
+
+#[test]
+fn a_held_descriptor_is_kept_here_and_shown_to_nobody() {
+    // A hold answers "may I delete this", not "may I show this to a peer".
+    // Advertising a descriptor no Body names would hand the peer catalog it has
+    // no reason to keep, and their own sweep would have to undo it.
+    let mut author = fixture("held-author");
+    let mut peer = fixture("held-peer");
+    let space = space();
+    let signer = SeedSigner(&WRITER_SEED);
+    commit_body(
+        &mut author.replica,
+        4,
+        &body(4),
+        b"an issue with nothing attached",
+    );
+
+    let out = ingest(&author, 5, b"held, undeclared");
+    author
+        .replica
+        .commit_content(&ctx(&signer, &space), std::slice::from_ref(&out.descriptor))
+        .unwrap();
+    author.replica.hold_content(
+        &out.content_ref,
+        std::time::Instant::now() + std::time::Duration::from_secs(600),
+    );
+
+    incorporate(&mut peer, &stage(&author)).expect("contact");
+    assert!(
+        peer.replica.content_descriptor(&out.content_ref).is_none(),
+        "the peer was told about a Body, and nothing about a pending upload"
+    );
+    assert!(
+        author
+            .replica
+            .content_descriptor(&out.content_ref)
+            .is_some(),
+        "and the author still has it"
+    );
+}
+
+#[test]
+fn abandoning_a_hold_makes_its_content_collectable_at_once() {
+    // A caller that knows the upload is dead should not have to wait out a
+    // deadline meant for a caller that does not know.
+    let mut fx = fixture("hold-abandon");
+    let space = space();
+    let signer = SeedSigner(&WRITER_SEED);
+
+    let out = ingest(&fx, 6, b"cancelled halfway through deciding");
+    fx.replica
+        .commit_content(&ctx(&signer, &space), std::slice::from_ref(&out.descriptor))
+        .unwrap();
+    fx.replica.hold_content(
+        &out.content_ref,
+        std::time::Instant::now() + std::time::Duration::from_secs(600),
+    );
+    fx.replica.release_content_hold(&out.content_ref);
+
+    assert_eq!(
+        fx.replica
+            .sweep_unreferenced_content(&ctx(&signer, &space), Some(&fx.cache))
+            .unwrap(),
+        vec![out.content_ref]
+    );
+}

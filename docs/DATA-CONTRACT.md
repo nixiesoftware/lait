@@ -207,6 +207,20 @@ chunk does not — a half-existing entry is the one state this cache must not be
 able to reach. Evicting an entry changes no root: the descriptor stays, the
 Replica is still descriptor-complete, and what was lost is refetchable.
 
+Between committing a descriptor and committing the Body that names it, nothing
+declares the content — so by the reachability rule it is already collectable,
+and the rule is not wrong: nothing on disk distinguishes an upload awaiting an
+attach from an upload nobody ever attached. A **hold** distinguishes them. It is
+in-memory and carries a deadline, and both properties are load-bearing: a hold
+is a claim about an operation this process is running, so a restart correctly
+ends it, and a deadline is what stops an upload nobody attaches from becoming
+permanent disk.
+
+A hold answers "may I delete this" and not "may I show this to a peer". Held
+content is kept locally and never advertised — a peer receiving a descriptor no
+Body names would adopt catalog it has no reason to keep, and its own sweep would
+have to undo it.
+
 Content reachability is derived, never counted. A stored count would be a second
 source of truth that can disagree with the Bodies; what is authoritative is the
 set of `ContentRef`s the committed Manifest names, plus explicitly declared
