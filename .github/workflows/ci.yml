@@ -263,7 +263,7 @@ jobs:
           # transport pin moves. The real-socket measurements are #[ignore]d and
           # run by hand; this job runs everything that does not bind a port.
           - job: core-plane-shapes
-            filter: "binary(plane_fixtures) + binary(transport_capabilities) + binary(flows) + binary(budget_fixtures) + binary(admission_fixtures) + binary(freight_transfer)"
+            filter: "binary(plane_fixtures) + binary(transport_capabilities) + binary(flows) + binary(budget_fixtures) + binary(admission_fixtures) + binary(freight_transfer) + binary(freight_wire)"
           - job: orbital-faults
             filter: "binary(journal_faults) + binary(journal_child_crash) + binary(manifest_atomicity) + binary(orbital_catalog) + binary(concurrent_heads)"
           - job: orbital-contact-real
