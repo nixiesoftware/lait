@@ -32,6 +32,29 @@ content catalog, receipts). Total bytes written fell anyway, which is the trade
 that matters: many small immutable nodes instead of one enormous rewritten
 vector.
 
+## After F6 — what the store keeps
+
+Writing less per commit is not the same as keeping less. The F0 warning below
+("F1's streaming GC from roots should not inherit that") was inherited, and
+measured at `714618f` by editing **one** Body eighty times with live state
+constant throughout:
+
+| | required objects | index nodes | unreachable index nodes |
+|---|---:|---:|---:|
+| before | 323 | 240 | 237 |
+| after | 83 | 0 | 0 |
+
+The required set grew at `4N + 3` — one receipt plus three permanently orphaned
+leaves per commit, one per caller index the commit touched. Not proportional to
+the store; proportional to the number of commits the store had ever performed.
+Index nodes handed to the journal as ordinary `added` objects became entries in
+the required-object index, and a required entry is a promise that never expires.
+
+They travel through `CallerIndex` now and live by reachability. What remains is
+one signed Body transaction per commit, which is the authenticated chain rather
+than overhead. `required_set_tracks_live_state` in `journal_faults` and
+`store_growth` in `replica` are what keep it true.
+
 ## Before F1 — the paged manifest and inline catalog
 
 One single-Body edit against a store already holding N Bodies:
