@@ -97,6 +97,15 @@ pub mod feature {
     pub const UNSOLICITED_PROVIDE: u64 = 1 << 0;
     /// The peer understands residency hints.
     pub const RESIDENCY_HINTS: u64 = 1 << 1;
+
+    /// What *this* build actually implements.
+    ///
+    /// Zero, and that is the honest answer: both bits above are allocated and
+    /// neither has a consumer yet. Intersecting against this rather than
+    /// against "every bit we have a name for" is the difference between
+    /// advertising a capability and advertising a constant — a peer that acted
+    /// on a bit we echoed back but do not honour would be right to be annoyed.
+    pub const LOCAL_SUPPORTED: u64 = 0;
 }
 
 /// What a peer advertises about a plane it speaks.

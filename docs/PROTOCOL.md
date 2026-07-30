@@ -347,11 +347,49 @@ Reserved kinds are known and unimplemented, which is a different answer from
 unknown: an unknown kind resets that stream, a reserved one means a peer is
 speaking a protocol generation this build agreed to and has not built.
 
-### 12.1 Opening, and 0.5-RTT replay
+### 12.1 Flows, framing, and 0.5-RTT replay
 
 Both planes begin with one bounded canonical opening carrying the plane, the
 generation, feature bits, the Space, both Station claims, a random session id,
 a random session epoch, the authority frontier, and the requested lanes.
+
+**Which flow carries what.** The opening arrives on the initiator's first
+unidirectional flow and nothing else is written there. The answer — an accept or
+a refusal — goes back on the responder's first unidirectional flow. Each is one
+whole message with no length prefix: one message per flow needs no delimiter
+because finishing the flow is the delimiter. Both are refused against the
+opening ceiling before a buffer that size exists.
+
+A router that demultiplexes by Space has to read the opening to do it, and
+reading a flow consumes it, so the opening bytes travel *with* the connection to
+the Space that owns it rather than being replayed. The owner decodes what the
+router decoded. If the two disagree the connection is refused, because
+everything downstream trusts that parse and the more permissive reading is never
+the safe one.
+
+**Freight flows carry no stream-kind byte.** The ALPN types the connection. The
+stream-kind table above is scoped to `lait/session/1`, an opening's requested
+lanes are values from that table, and a Freight opening therefore names no lanes
+at all — an opening cannot name a Freight lane, and one that tries is refused
+before any admission question is asked. Freight's quarantine is not a lane
+filter but an ordering rule: no bidirectional flow is served before the accept
+has been written.
+
+**One bidirectional flow per Freight request.** The flow is the correlator, so
+there is no request id, no table keyed by one, and nothing of that shape to
+bound. An abandoned request is a reset flow, and a peer cannot accumulate
+outstanding state by asking without listening; concurrency is bounded by flows
+rather than by identifiers.
+
+**The framing on a Freight flow** is a 4-byte little-endian length prefix
+followed by one canonical postcard frame. The prefix is what is checked: the
+*declared* length is compared against the ceiling before a buffer that size is
+reserved, so a peer cannot make a receiver allocate by claiming a large number
+and then sending nothing. For a chunk answer the raw ciphertext follows the
+header frame on the same flow, unframed, and the flow's finish ends it. Both
+directions use the same framing so one reader serves both, but only the answer
+strictly needs it — a request is the only thing on its flow, while a chunk
+answer has a boundary inside it.
 
 **Accepting an opening must be idempotent.** QUIC lets the accepting side write
 before the client finishes its handshake, and the client's initial bytes can be
@@ -417,7 +455,134 @@ without it, truncation would be silent.
 If the pin moves, this table is re-measured. Every row in the bounds table above
 is a lait choice and moves only when we decide it should.
 
-### 12.3 Freight
+Not every number below is a lait choice. Some are *host-derived* — calibrated
+against the machine lait was developed on rather than against anything the
+protocol requires. No row in the bounds table above is one of those; those are
+pre-allocation ceilings and all ours. The concurrency and disk ceilings below
+are, and they are operator-configurable precisely so a laptop default is never
+later read as a protocol limit. A peer may assume none of them.
+`COMPATIBILITY.md` §7 is where the three sources are argued and where the
+host-derived ceilings are listed with their configurability.
+
+| Ceiling | Value | Source |
+|---|---|---|
+| inbound connections per identity endpoint | 128 | host-derived |
+| inbound connections per Space | 64 | host-derived |
+| inbound connections per peer per ALPN | 2 | lait policy |
+| concurrent serve tasks per Space | 32 | lait policy |
+| concurrent inbound transfers per Space | 8 | lait policy |
+| chunks in flight per provider / per transfer | 4 / 8 | lait policy |
+| staged bytes per Space | 64 MiB | host-derived |
+| resident cache quota | 4 GiB default, operator-set | host-derived |
+| largest single content | 256 MiB default, operator-set; may only lower the protocol maximum | host-derived |
+
+Two connections per peer per plane because one reconnect may legitimately
+overlap one connection that is still closing. Two ALPNs share one endpoint, so a
+peer holding a Freight connection and a live connection at once is ordinary
+rather than suspicious, and the per-Space ceiling is half the endpoint's so no
+Space can starve a sibling. Staged bytes get their own ceiling because staging
+is real disk that the cache quota does not count — an entry is not resident
+until it installs, so without it a fleet of half-finished transfers fills a disk
+while the cache reports itself comfortably inside its quota.
+
+**The named deadlines.** Every one bounds how long a peer can hold something of
+ours. They are layered rather than independent: a requester's budget covers the
+provider's plus a margin, so a timeout names one side instead of a race.
+
+| Deadline | Value | Source | What it bounds |
+|---|---|---|---|
+| opening read | 5 s | lait policy | a dialer that connects and then says nothing |
+| accept write | 2 s | lait policy | writing the answer; longer means the peer is not reading |
+| flush before drop | 5 s | iroh-derived | waiting for a written refusal to land |
+| chunk resolve | 5 s | lait policy | a provider resolving a descriptor and answering |
+| chunk header | 8 s | lait policy | the requester's side of that same exchange |
+| chunk body idle | 10 s | lait policy | *progress*, not duration — reset only by a non-empty read |
+| availability answer | 5 s | lait policy | a unary answer; a provider never scans to produce one |
+| freight idle | 60 s | lait policy | a connection with no transfer in flight still holds slots |
+| authority revalidation | 2 s | lait policy | how long a session can outlive a revocation |
+| driver poll | 25 ms | lait policy | how long a driver may be parked without noticing cancellation |
+
+The flush wait is iroh-derived because dropping a connection resets its streams:
+without it a refusal that was correctly written reaches the peer as an ambiguous
+transport error it will retry, which is the opposite of a refusal. If the pin's
+close semantics change, that number is re-derived.
+
+Four relations are asserted rather than assumed, because each one silently
+breaks something if a value is lowered in isolation: the chunk-header deadline
+exceeds the chunk-resolve deadline by a margin; the flush wait outlasts the
+accept write; revalidation is far shorter than the idle reap; and the driver
+poll is shorter than anything a driver does.
+
+### 12.3 Admission, in order
+
+Every opening is judged in one order, and the order is contract rather than an
+implementation detail:
+
+1. **Plane agreement.** The opening's plane must be the one the ALPN already
+   fixed. An opening that disagrees is not confused, it is trying something.
+2. **Generation.** The declared protocol version must be the one this ALPN
+   speaks.
+3. **Space.** The opening must name the Space this route serves.
+4. **Initiator claim.** The claimed initiator Station must equal the identity
+   the transport negotiated. This step is what turns a claim into a fact.
+5. **Responder claim.** The claimed responder must be this Station. An opening
+   addressed elsewhere is not ours to accept however well formed it is.
+6. **Operator policy.** Whether this Station *will*, which is a different
+   question from whether the peer *may*: an operator declining to serve bytes
+   over a metered link is making no statement about anyone's membership.
+7. **Mechanics.** Only now is the peer resolved to an actor at a locally
+   resolvable frontier, and that frontier is pinned for the connection's life so
+   every later question is answered against one view.
+
+**Why that order.** Everything before step 7 is a comparison against a
+fixed-size value the local side already holds. Nothing a remote peer writes can
+make any of it more expensive, so a misaddressed or unadmitted opening costs
+comparisons rather than an authority resolution — the one step that touches
+shared state, and the one whose cost a flood would most like to multiply. An
+implementation that resolved first and checked afterwards would reach the same
+verdicts and still be exploitable.
+
+**The claimed frontier is diagnostic.** Admission resolves at the *local*
+frontier and never at the one the opening asserts, so a fabricated or dominating
+claim buys nothing. It is also the only variable-length field of any size in the
+opening, and is bounded at half the opening ceiling for that reason.
+
+**Lanes are granted, not requested into existence.** The accept carries the
+intersection of what the peer asked for with what this build implements. A lane
+nobody asked for is never granted; a lane this build does not implement is
+dropped from the intersection rather than refused, so a newer peer asking for
+one lane we do not have still gets the lanes we do — that is what makes lanes
+additive inside a generation. An opening whose requested lanes leave nothing
+granted is refused, and a peer that later opens an ungranted flow is refused at
+that flow rather than retroactively at the opening.
+
+**Feature bits are intersected, never echoed.** The accept advertises the bits
+the peer set that this build also implements. An unknown bit is ignored and not
+reflected back, so setting bits at a peer is not a way to enumerate what it
+supports.
+
+**The refusal funnel.** One answer covers every question about standing: not
+admitted, not authorized for a lane, over budget, and operator policy are
+indistinguishable, because a peer that could tell them apart could map a Space
+by being turned away from it in different ways. A second, structurally different
+answer covers an opening that is not ours to judge at all — unparseable, bound
+to another peer, or addressed to another Station or Space — and it says nothing
+about the Space, only that the bytes were wrong. Below both, a connection the
+router cannot place is closed with no answer at all, which is the coarsest
+answer there is, and every close carries one code for every reason.
+
+The single exception is an unsupported generation, which names the version this
+build speaks because it is the one refusal a peer can act on. In practice the
+ALPN gate makes it nearly unreachable — peers on different generations share no
+ALPN and never connect — so it is best read as a reserved vocabulary for a
+mismatch that arrives some other way; an opening whose declared version this
+build cannot speak is still refused without elaboration.
+
+A refusal is always written before the connection is closed, and the close waits
+out the flush deadline. A close on its own arrives as a transport error the peer
+will retry.
+
+### 12.4 Freight
 
 Requests are exact. There is no "list what you have" and no remote path: a peer
 asks for one chunk of one content whose id it already holds, having learned it
@@ -427,6 +592,53 @@ validated proof sidecar are both resident.
 
 A provider may refuse without revealing whether authorization, policy, load,
 absence, or incomplete proof material caused it.
+
+**Exactness, stated as a rule.** An availability question names one content id
+the peer already holds and the exact chunk indices it cares about. Both halves
+matter: the id is not discoverable on this plane, and the indices are what bound
+the work. A question about three chunks costs three existence checks whether the
+content has four or four million, so a request cannot be turned into work by
+being about something large. At most 4096 indices may be named.
+
+An answer is bounded by what was asked. It is a subset of the named indices,
+ascending and duplicate-free, and never mentions a chunk the question did not.
+
+**Residency and ignorance are the same answer.** Content this Station has never
+heard of answers exactly as content it holds no chunk of: the availability frame
+with an empty list. A peer able to tell those apart would have an oracle for
+what a Space contains, answerable by guessing ids, and the exactness rule above
+would buy nothing. The guarantee is over the answer's *shape*; `THREAT-MODEL.md`
+records what it does not cover.
+
+**A chunk answer** is a header frame naming the content, the chunk index, the
+canonical proof, and the whole chunk's ciphertext length, which agrees with the
+proof's leaf. The proof is bounded at the same ceiling the resident cache
+accepts, deliberately not a second one — a sidecar that arrived inside the wire
+bound and then could not be stored would be a transfer that verifies and fails.
+The requested range of raw ciphertext follows on the same flow and the flow's
+finish ends it; what follows is never more than the request's own maximum or the
+frozen chunk ceiling, whichever is smaller.
+
+Those bytes are ciphertext. A provider does not need the Body key and must not
+require it: verification is against the descriptor's ciphertext Merkle root,
+which is exactly why the tree commits ciphertexts. A requester verifies the leaf
+against its own descriptor before it appends a byte, and re-hashes the whole
+chunk and re-verifies its proof before anything is installed where it could be
+served on.
+
+**The funnel covers answers, not only requests.** A provider that finds itself
+about to write something past a ceiling writes the refusal instead — and writes
+*only* the refusal. A bound checked only on receive turns a local mistake into a
+remote protocol error attributed to the wrong side; refusing is a legal answer
+and the only one that keeps every refusal identical, which it stops being the
+moment a refusal is followed by a body. A peer that sends an answer frame where
+a request belongs is refused the same way.
+
+Standing on this plane is Space membership at the pinned frontier plus local
+operator policy. There is no per-content read demand yet, so an admitted member
+can pull the ciphertext of content attached to something it holds no read grant
+on. That gap and its migration are recorded in `THREAT-MODEL.md` rather than
+left implied here.
 
 Resume is per immutable ciphertext chunk. A resumed request carries the leaf
 hash the partial transfer already validated, and a provider whose leaf differs

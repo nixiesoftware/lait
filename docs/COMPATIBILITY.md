@@ -55,6 +55,17 @@ journal objects reachable only from a root recorded in a versioned manifest, so
 the manifest that names a node is what decides how it is read. Giving a node its
 own version would let a node and its root disagree.
 
+The content cache is the other unversioned thing on disk, and it is unversioned
+for a different reason. `content-cache/` appeared beside the journal when the
+content plane opened at activation, and it moved neither the marker nor the
+manifest version — correctly, because the marker identifies the layout the
+*record* is read from and the cache holds nothing the record names
+(`DATA-CONTRACT.md` §13 says what does live there). Every entry is filed under
+its own content address and re-checked on read, so an entry this build cannot
+make sense of is dropped and refetched rather than interpreted. A format that can
+always be discarded needs no version to refuse an old one, and giving it one
+would imply a store could be made unreadable by its cache.
+
 ## 3. Signed and addressed domains
 
 A domain is versioned prose baked into a hash. These are the ones that carry a
@@ -77,8 +88,31 @@ old one.
 |---|---|---|
 | `lait/contact/1` | Contact — authority, manifest nodes, Body payloads | implemented |
 | `lait/neighbor-presence/1` | liveness probe | implemented |
-| `lait/freight/1` | reliable exact-object request and response | shapes frozen, routing pending |
+| `lait/freight/1` | reliable exact-object request and response | implemented — provider half; the fetcher lands in the same stage |
 | `lait/session/1` | long-lived realtime session | shapes frozen, routing pending |
+
+**What "implemented" means in this column.** It means a dial on that ALPN
+reaches a handler that reads the opening, judges it, and answers — not that
+every message the generation defines has a sender. `lait/freight/1` routes now:
+an admitted peer's availability question and ranged chunk request are served
+from committed descriptors and validated proof sidecars, behind one coarse
+refusal. The fetching half is the same generation seen from the other end and
+needs no wire change to arrive, which is why the status is recorded against the
+generation rather than against a feature — the frames, bounds, and refusal
+vocabulary a `1` peer must implement are already fixed by what serves them.
+
+Advertising an ALPN is not the same as serving it. The endpoint registers
+`lait/session/1` today and a peer that dials it completes a handshake, but no
+driver owns that plane yet, so the opening is turned away. This column tracks
+the service and not the registration: a successful handshake is not evidence a
+plane is live.
+
+One detail reads like a contradiction and is not. The opening still carries
+`protocol_version` and the refusal vocabulary still has `UnsupportedVersion`,
+even though the ALPN already stops a mismatched pair from connecting at all. It
+is belt and braces, and it costs a comparison. It is also the *only* refusal
+that names its reason — every other one is deliberately coarse — so a peer
+reading a bare refusal must not read it as a version problem.
 
 Gossip rides iroh's own ALPN inside `crates/comms` and is transport plumbing, not
 a LAIT protocol generation.
@@ -94,11 +128,37 @@ change an old peer would *misinterpret* — a removed or repurposed field, or
 changed semantics for an existing one. Adding a lane, a hint, or an optional
 answer is a bit.
 
+**How a bit is negotiated, now that bits are negotiated.** Admission intersects
+what the peer offered with what this build implements, and that intersection —
+not the peer's offer — is what the accept carries. Three consequences, none of
+them an error path:
+
+- an absent or zero `features` is a peer that offers nothing, not a peer that is
+  malformed. Zero is exactly what an older build sends, and being able to decode
+  to it is what makes the field additive at all;
+- a bit this build does not know is dropped from the intersection and never
+  echoed, so a peer cannot discover what a later generation calls something by
+  watching what we reflect back;
+- a capability the peer did not offer is never used against it. A bit is
+  permission to speak, not a hint, and the intersection is computed once at
+  admission so no later decision re-guesses it.
+
+Requested lanes are intersected the same way and for the same reason: a lane is
+granted only when this build implements it *and* the peer asked for it. A lane
+this build does not implement is dropped from the intersection, not treated as a
+malformed opening — refusing the whole connection over one unknown lane byte
+would make lanes an ALPN-level change, which is exactly what the additive rule
+exists to avoid. An opening that asks for lanes and would be granted none is
+refused rather than admitted lane-less, because a connection neither side can
+use is a slot held open for nothing.
+
 ## 5. Local surfaces
 
 | Surface | Constant | Value | Note |
 |---|---|---|---|
 | Local DTOs | `runtime::dto::DTO_PROTOCOL_VERSION` | 1 | loopback control plane and viewer |
+
+| Local control channel | `control::CONTROL_PROTOCOL_VERSION` | 6 | daemon socket; `MIN_SUPPORTED_CONTROL_PROTOCOL` is also 6, so the mixed-version window is currently empty |
 
 DTOs are a local contract between the engine and its own clients. They are
 versioned because a stale viewer bundle is a real situation, not because they
@@ -111,3 +171,50 @@ rather than *chooses* is recorded separately under "Frozen bounds, and which
 are ours" in `PROTOCOL.md`, and measured
 by `crates/comms/tests/transport_capabilities.rs`. When the pin moves, those
 observations are re-measured; the LAIT policy numbers beside them are unaffected.
+
+Observed and chosen are not the only two answers a frozen number can have. §7
+adds the third.
+
+## 7. Upgrade posture — whose number is it?
+
+A frozen number stays re-examinable only if the reason it holds that value sits
+beside it. There are three reasons, and they age differently.
+
+**lait policy.** Chosen by us and moved when we decide it should move:
+`MAX_OPENING_BYTES`, `MAX_FLOW_READ_BYTES`, `MAX_LANES`, the refusal
+vocabulary, the ALPN generations. A dependency bump does not touch these.
+
+**Observed.** Measured from the pinned transport rather than chosen:
+`max_datagram_size`, send-buffer space, reset semantics. §6 governs them — when
+the pin moves they are re-measured, and `MAX_DATAGRAM_BYTES` is advisory rather
+than authoritative because a measurement already came in under it.
+
+**Host-derived.** Calibrated to the machine lait was built on — one developer
+laptop, with a laptop's disk, memory, and uplink — rather than to anything the
+protocol requires. This is the category that needed adding, because a laptop
+default frozen into a shipped constant becomes, a year later, indistinguishable
+from a ceiling a peer is entitled to rely on. Nothing on the wire reads any of
+them: a peer meets one only as a refusal it already has to handle, which is
+precisely why an operator may raise or lower it without speaking a different
+protocol. `PROTOCOL.md` §12.2 lists the same ceilings from the peer's side.
+
+| Constant | Value | Operator-configurable today |
+|---|---|---|
+| `runtime::budget::slots::MAX_ENDPOINT_CONNECTIONS` | 128 inbound | no — compiled in |
+| `runtime::budget::slots::MAX_SPACE_CONNECTIONS` | 64 inbound | no — compiled in |
+| `runtime::budget::slots::MAX_STAGED_BYTES` | 64 MiB per Space | no — compiled in |
+| `runtime::lifecycle::ContentOptions::cache_quota_bytes` | 4 GiB | yes, per activation |
+
+The cache quota is the shape the other three are headed for: a default on an
+options struct the composition root fills in, not a constant. Until they get
+there, this table is the whole defence — "128 inbound connections" is otherwise
+a sentence somebody quotes back as a rule of the protocol.
+
+`ContentOptions::max_content_len` (256 MiB) sits beside the quota and is *not*
+host-derived. It is an operator lowering plan 13's maximum, so it may only ever
+move down, and a peer that meets it has met this Station's policy rather than a
+limit of the format.
+
+Ceilings the S2–S5 blueprint names as host-derived but this build has not yet
+minted — `MAX_ENDPOINT_MEMORY_INFLIGHT`, `SPACE_MEMORY_INFLIGHT`, and
+`CONN_MEMORY_INFLIGHT` — join this table when they land.

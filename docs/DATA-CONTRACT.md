@@ -44,6 +44,14 @@ cache miss or an invitation to reconstruct guesses.
 Mechanics and Fabric reuse the semantics-free journal mechanism but maintain
 separate semantic manifests. A journal is not replicated product state.
 
+Not everything under a store directory is journaled. An Orbit's directory also
+holds `content-cache/`, a sibling of the journal rather than a part of it,
+because the journal's promise — everything a root names is present and intact —
+is the wrong promise for a content chunk, which is optional by design. A missing
+object means the store is broken; a missing chunk means fetch it again. §13
+states what lives there and what activation reclaims; `COMPATIBILITY.md` §2
+states why it carries no format version.
+
 A store manifest names **index roots**, not inventories. An index is a
 persistent authenticated radix map from a 32-byte key to bounded bytes: one
 nibble per level, leaves holding at most 256 entries, nodes content-addressed
@@ -174,6 +182,16 @@ is what lets a sender seal chunk `n` before it knows how many there will be.
 A chunk is only servable when its ciphertext **and** a validated proof sidecar
 are both resident locally. Residency, leases, and pins are local state (§13) and
 never appear in a Manifest.
+
+A fetched chunk and its validated proof sidecar are **cache state held under a
+lease**, not required objects. They live in the resident cache, not the journal's
+object store, and reaching them is a different call on purpose: a caller cannot
+satisfy a required-object reference out of the cache, and a cache miss is
+`NotResident` rather than an integrity error. Bytes and sidecar are one entry
+published by one rename, so there is no window in which a proof exists and its
+chunk does not — a half-existing entry is the one state this cache must not be
+able to reach. Evicting an entry changes no root: the descriptor stays, the
+Replica is still descriptor-complete, and what was lost is refetchable.
 
 Content reachability is derived, never counted. A stored count would be a second
 source of truth that can disagree with the Bodies; what is authoritative is the
@@ -342,7 +360,9 @@ stored values into valid DTOs.
 Device private keys, actor recovery material, custody shares, local petnames,
 configuration, route/backoff state, space navigation, disposable projection
 caches, resident content chunks and their proof sidecars, leases, pins, staging
-areas, and delivery-plane session state are local state. They are not product Bodies and do not gain authority by
+areas, transfer progress, provider-selection statistics, and delivery-plane
+session state are local state. They are not product Bodies and do not gain
+authority by
 being stored beside an Orbit.
 
 Residency is held by lease, and a lease is scoped to the operation that took
@@ -350,6 +370,60 @@ it. Releasing an operation releases everything it held, including on the paths
 where the operation failed — a reader that dies must not pin bytes forever.
 Eviction under quota may remove anything unleased and unpinned; it may never
 remove a descriptor, because that would break Manifest reconstruction.
+
+Transfer progress is local state and nothing else. It is never a Body, an
+Observation, a journal entry, a frontier change, a Doorbell, a Beacon, or an
+activity item. It lives in `runtime::transfer::TransferRegistry`: one entry per
+in-flight operation, its own watch channel that a reader re-reads a snapshot
+from, and a 64-entry tail of finished transfers so a caller that asked a moment
+ago can learn how it went. Both halves are bounded — the active set by the
+ceiling on concurrent transfers, the completed tail by its fixed length. A
+registry that grew one entry per completed transfer would be a memory leak with a
+respectable name.
+
+It is deliberately not on the Observation ring. That ring's contract is that an
+entry corresponds to a durable commit; a progress frame corresponds to bytes
+arriving on a socket. Putting the second in the stream of the first would give a
+fact nobody agreed to a sequence number among facts everybody did, and would let
+a chatty transfer push real commits out of a slow consumer's window. A watcher
+that stalls on the progress channel falls behind on progress and on nothing else.
+Progress is monotone, so coalescing loses nothing: a state change publishes
+immediately, a moving byte count at most twice a second.
+
+No part of a transfer survives a restart. The ladder — queued, connecting,
+transferring, verifying, available, and the cancelled, failed, and evicted exits
+— describes this machine's disk and this machine's network, and a peer's opinion
+about it is not evidence. A transfer's lifetime is tied to a handle whose drop
+fails it and releases what it held, so a fetch that panics or returns early
+through a `?` cannot leave an operation lease pinning chunks nobody is fetching.
+
+Provider-selection statistics are local and are not replicated truth. Which peers
+answered `Have`, what they recently delivered, how often they refused or stalled,
+and any operator preference among them are one Station's opinion formed from its
+own measurements. They are never advertised, never committed, and never an input
+another peer can influence except by actually serving well or badly. Two Stations
+fetching the same content may choose different providers; neither is wrong, and
+neither is evidence about the other.
+
+The resident cache is an additive store-layout addition, not a journal change.
+`content-cache/` sits beside the journal inside the Orbit's directory and holds
+chunk entries, the tag directory recording leases and pins, and the staging area
+for partly arrived chunks. It is a sibling rather than a part for the reason §2
+gives: the journal fails closed on anything missing, and a chunk is allowed to be
+missing. No marker, root, or Manifest names it, and deleting the whole directory
+costs refetches and nothing else.
+
+Activation opens that cache and immediately reclaims every operation lease and
+every staging slot, because nothing was in flight before the Station existed —
+any lease or partial on disk belongs to a run that is over. Content leases are
+untouched: they belong to committed content and no restart makes them stale, so
+installed chunks survive and an interrupted fetch resumes at chunk granularity
+rather than from zero. One Station owns one cache over one directory; a second
+cache over the same directory would sweep the first's staging. Dormancy leaves
+the directory exactly as it is — the cache is durable local state, and the next
+activation reclaims whatever the last one abandoned. Deorbit removes it with the
+rest of the store, which is the only correct answer: the bytes were refetchable
+copies of content this device no longer participates in.
 
 A delivery-plane session id and epoch are local, per-connection, and randomly
 minted. They are not identity, they confer nothing, and they exist so that a

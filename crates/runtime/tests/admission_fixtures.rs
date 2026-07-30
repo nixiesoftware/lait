@@ -83,10 +83,15 @@ fn a_member_talking_to_the_right_station_about_the_right_space_is_admitted() {
     };
     assert_eq!(accept.granted_lanes, vec![stream_kind::CONTROL]);
     assert_eq!(standing.station, station(&PEER_SEED));
+    // The intersection of what the peer offered with what this build
+    // implements — currently nothing, and the assertion says so rather than
+    // papering over it. Echoing back a bit we merely have a name for would be
+    // advertising a constant, and a peer acting on it would be right to be
+    // annoyed.
     assert_eq!(
         accept.capability.features,
-        feature::RESIDENCY_HINTS,
-        "only bits the peer offered"
+        feature::RESIDENCY_HINTS & feature::LOCAL_SUPPORTED,
+        "a capability is advertised only if both sides have it"
     );
     assert_eq!(
         accept.capability.features & feature::UNSOLICITED_PROVIDE,

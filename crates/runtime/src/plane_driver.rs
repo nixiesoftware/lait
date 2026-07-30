@@ -341,8 +341,14 @@ async fn refuse(connection: &dyn comms::Connection, refusal: Option<SessionRefus
 /// Dropping a connection resets its streams. Without this wait a refusal that
 /// was correctly written arrives as an ambiguous transport failure.
 async fn close_after_flush(connection: &dyn comms::Connection) {
-    connection.close(REFUSED, b"");
+    // Wait *first*, then close. Closing and then awaiting `closed()` is a zero
+    // width window — the future resolves immediately because we are the ones
+    // who closed it — and the refusal we just wrote reaches the peer as an
+    // ambiguous transport error it will retry. Waiting for the peer to hang up
+    // gives it the read; the deadline is what stops a peer that never does from
+    // holding the slot.
     let _ = tokio::time::timeout(deadline::FLUSH_BEFORE_DROP, connection.closed()).await;
+    connection.close(REFUSED, b"");
 }
 
 /// The shutdown ladder.

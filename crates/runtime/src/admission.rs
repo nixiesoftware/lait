@@ -154,10 +154,11 @@ pub fn judge(
         capability: ProtocolCapability {
             plane: context.plane,
             protocol_version: context.plane.protocol_version(),
-            // Only bits both sides set. A capability the peer did not offer is
-            // one it will not understand being used.
-            features: open.features & crate::planes::feature::UNSOLICITED_PROVIDE
-                | open.features & crate::planes::feature::RESIDENCY_HINTS,
+            // Bits both sides set: what the peer offered, intersected with
+            // what this build implements. Echoing back a capability we merely
+            // have a name for would be advertising a constant, and a peer
+            // acting on it would be right to be annoyed.
+            features: open.features & crate::planes::feature::LOCAL_SUPPORTED,
         },
         granted_lanes: granted.clone(),
     };

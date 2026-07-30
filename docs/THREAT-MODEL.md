@@ -93,6 +93,18 @@ sandbox guarantee.
 - A refusal on a delivery plane distinguishes only "unsupported generation" from
   everything else, so an unadmitted peer cannot probe a Space by reading errors.
 
+- Answering a Freight request creates no Neighbor, no presence, and no Beacon
+  observation. A fetch is not a heartbeat. Neighbor liveness is written only on
+  the Contact and neighbor-presence ALPNs; a plane driver reads authority to
+  admit and the content host to answer, and neither of those is a liveness
+  record. A Freight refusal, timeout, reset, or lie therefore never promotes,
+  demotes, or evicts Neighbor state, so no peer can move another peer's standing
+  by transferring — or by failing to.
+- Freight authorization is decided before residency is consulted. The serve
+  demand is answered first, and a request that fails it never reaches the
+  committed descriptor or the cache, so a refusal cannot be timed to reveal what
+  is held.
+
 ## Explicit non-goals and residual risks
 
 - **No clawback.** Removal cannot erase plaintext, snapshots, keys, or exported
@@ -121,6 +133,31 @@ sandbox guarantee.
 - **Residency is observable.** Which chunks a peer will serve is metadata. A
   private, bounded availability answer narrows it but does not hide it, and
   timing still distinguishes a resident chunk from a fetched one.
+- **Freight residency is Space-wide.** The serve predicate authorizes any
+  admitted member. This is deliberate and it is a compromise: no member holds
+  `content.serve` on day one, so a grant-gated plane would refuse universally,
+  which is not caution but the feature not working. Until that grant is seeded,
+  any per-resource read restriction on attached content is advisory against a
+  member — a member can pull the ciphertext of content attached to a project
+  they hold no read grant on. What they gain is the ciphertext itself, plus
+  confirmation of the content's size, its chunk count, and the fact that this
+  Station holds those bytes now; the ciphertext is the durable half of that,
+  because bytes copied today become readable to whoever obtains that epoch key
+  in a future compromise. What they do not gain is plaintext — the Body key
+  still gates reading, and a provider serves without holding it — nor any way to
+  name content whose id they did not already learn from durable state, nor any
+  standing they did not already have. The migration is a `content.serve` grant
+  slotting into the same `ContentPolicy` closure: no change to `ContentHost`, to
+  the wire, or to the refusal a peer sees.
+- **An availability answer is shape-indistinguishable, not time-indistinguishable.**
+  Content this Station never heard of and content it holds no chunk of return the
+  same empty answer, but the first costs no filesystem probes and the second
+  costs one per named index. A member who obtained a content id out of band can
+  therefore confirm by timing that this Space has committed that descriptor. It
+  requires an id the caller already legitimately holds — a 32-byte blake3
+  preimage is not guessable — and closing it properly needs a constant-cost
+  residency index rather than padding.
+
 - **Formal verification.** The protocols are tested and fault-injected, not
   formally verified.
 
@@ -180,6 +217,23 @@ An opening is bounded and canonical, and is refused on length before it is
 decoded. Refusals are deliberately coarse — a peer that is not admitted, not
 authorized for a lane, or over budget receives the same answer — because the
 alternative is an oracle for what a Space holds and who may reach it.
+
+The refusal funnel is a confidentiality device, and its ordering is what makes it
+one. `PROTOCOL.md` §12.3 gives the sequence; the property it buys is that a
+refusal is never a statement about what is held. Authorization is decided before
+residency is consulted, so a peer that may not serve is refused whether or not
+the bytes are here, and a peer that may serve receives the same empty
+availability answer for content this Station has never heard of as for content it
+holds no chunk of. Absence and ignorance are the same answer on purpose; the
+alternative is an oracle for what a Space contains, answerable by guessing
+content ids.
+
+It is not an anti-traffic-analysis device. It hides which of several reasons
+produced a refusal; it does not hide the request, and the request is the exposure
+recorded above. An availability question carries a bounded index set and a
+resumed chunk request carries the leaf hash it left off at, so a provider reads a
+peer's progress from the requests alone, whether it serves them or refuses them
+all.
 
 ## Product conflict integrity
 
