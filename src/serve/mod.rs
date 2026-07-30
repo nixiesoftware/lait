@@ -23,6 +23,7 @@
 //! remains the only network identity.
 
 pub mod auth;
+mod content;
 pub mod policy;
 pub mod spaces;
 
@@ -80,6 +81,8 @@ struct App {
     /// On `App` rather than passed down, because every long-lived response has
     /// to see it and they are constructed by handlers that share nothing else.
     stop: tokio::sync::watch::Sender<bool>,
+    /// How many content transfers may be in flight at once.
+    content_permits: content::ContentStreamPermits,
 }
 
 #[derive(Clone)]
@@ -135,6 +138,7 @@ pub async fn run(port: u16, open: bool, json: bool) -> Result<()> {
         doorbells: doorbells.clone(),
         cookie: cookie_name(bound.port()),
         stop: stop.clone(),
+        content_permits: content::ContentStreamPermits::new(),
     });
     // The signal is fired before `shutdown_signal()` reaches axum, not after.
     // Graceful shutdown waits on in-flight responses, and this server has two
@@ -288,37 +292,80 @@ async fn shutdown_signal() {
 /// Sourcing the router from this list is what makes the guarantee checkable: a
 /// test can walk the same list, and a route added anywhere else is a route the
 /// test never sees — which is the failure it is supposed to catch.
-const ROUTES: &[(&str, Method)] = &[
-    ("/", Method::Get),
-    ("/api/spaces", Method::Get),
-    ("/api/spaces/{id}/rpc", Method::Post),
-    ("/api/spaces/{id}/worlds/{world}/rpc", Method::Post),
-    ("/api/events", Method::Get),
+const ROUTES: &[Route] = &[
+    Route::open("/", Method::Get),
+    Route::open("/api/spaces", Method::Get),
+    Route::open("/api/spaces/{id}/rpc", Method::Post),
+    Route::open("/api/spaces/{id}/worlds/{world}/rpc", Method::Post),
+    Route::open("/api/events", Method::Get),
+    Route::no_query_token("/api/spaces/{id}/content", Method::Post),
+    Route::no_query_token("/api/spaces/{id}/content/{content}", Method::Get),
+    Route::no_query_token("/api/spaces/{id}/content/{content}", Method::Head),
 ];
 
-/// Which verb a registered path answers. Two, because that is all this surface
-/// uses; a third belongs here rather than in a special case at the call site.
+/// One registered path: how to reach it, and whether it will take a credential
+/// out of the query string.
+struct Route {
+    path: &'static str,
+    method: Method,
+    /// Whether `?token=` is accepted here.
+    ///
+    /// It is, on `/`, and that is deliberate — the opening navigation carries
+    /// the token in the URL and `index` immediately trades it for a cookie and
+    /// redirects, so it never lingers. Every other path had no reason to accept
+    /// it and no reason to refuse it either, until content: a download URL is a
+    /// thing people paste, put in a `src`, and leave in their history. A live
+    /// credential in one of those is a credential in the URL bar, in devtools,
+    /// in the download list, and in whatever logs the dev proxy keeps.
+    ///
+    /// So the refusal is a property of the route, decided once, rather than a
+    /// branch each new handler remembers to write.
+    query_token: bool,
+}
+
+impl Route {
+    const fn open(path: &'static str, method: Method) -> Self {
+        Self {
+            path,
+            method,
+            query_token: true,
+        }
+    }
+    const fn no_query_token(path: &'static str, method: Method) -> Self {
+        Self {
+            path,
+            method,
+            query_token: false,
+        }
+    }
+}
+
+/// Which verb a registered path answers.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Method {
     Get,
     Post,
+    Head,
 }
 
-fn handler(path: &str) -> axum::routing::MethodRouter<Arc<App>> {
-    match path {
-        "/" => get(index),
-        "/api/spaces" => get(list_spaces),
-        "/api/spaces/{id}/rpc" => post(rpc),
-        "/api/spaces/{id}/worlds/{world}/rpc" => post(world_rpc),
-        "/api/events" => get(events),
-        other => unreachable!("{other} is in ROUTES with no handler"),
+fn handler(route: &Route) -> axum::routing::MethodRouter<Arc<App>> {
+    match (route.path, route.method) {
+        ("/", _) => get(index),
+        ("/api/spaces", _) => get(list_spaces),
+        ("/api/spaces/{id}/rpc", _) => post(rpc),
+        ("/api/spaces/{id}/worlds/{world}/rpc", _) => post(world_rpc),
+        ("/api/events", _) => get(events),
+        ("/api/spaces/{id}/content", _) => post(content::upload),
+        ("/api/spaces/{id}/content/{content}", Method::Head) => axum::routing::head(content::head),
+        ("/api/spaces/{id}/content/{content}", _) => get(content::download),
+        (other, _) => unreachable!("{other} is in ROUTES with no handler"),
     }
 }
 
 fn router(app: Arc<App>) -> Router {
     let mut router = Router::new();
-    for (path, _) in ROUTES {
-        router = router.route(path, handler(path));
+    for route in ROUTES {
+        router = router.route(route.path, handler(route));
     }
     router
         // Everything else is the client: a real asset, or the SPA entry so the
@@ -372,6 +419,14 @@ async fn gate(State(app): State<Arc<App>>, req: axum::extract::Request, next: Ne
         .and_then(|c| auth::cookie_value(c, &app.cookie));
     let query = req.uri().query().and_then(|q| query_param(q, "token"));
 
+    // Whether the query form counts here is a property of the path, read from
+    // the same table the router is built from. Matched against the raw path,
+    // because the gate runs before routing resolves parameters — so the
+    // comparison is structural, not string equality.
+    let query = accepts_query_token(req.uri().path())
+        .then_some(query)
+        .flatten();
+
     if let Err(r) = app
         .guard
         .check_token(resolve_token(bearer, query.as_deref(), cookie))
@@ -379,6 +434,43 @@ async fn gate(State(app): State<Arc<App>>, req: axum::extract::Request, next: Ne
         return refuse(r);
     }
     next.run(req).await
+}
+
+/// Whether this concrete path is allowed to present its credential in the query
+/// string.
+///
+/// Unknown paths default to refusing it. The fallback serves the bundle, which
+/// a browser reaches with a cookie it already has; a path nobody registered has
+/// no business carrying a token in a URL either way, and defaulting the other
+/// direction would make every future route opt *out* of the risk.
+fn accepts_query_token(path: &str) -> bool {
+    ROUTES
+        .iter()
+        .find(|route| path_matches(route.path, path))
+        .is_some_and(|route| route.query_token)
+}
+
+/// Whether a concrete request path matches a registered pattern.
+///
+/// `{name}` matches exactly one segment. Deliberately not a general router: the
+/// question here is only "which registered route is this", asked before axum
+/// answers it, and a second full matcher would be a second thing to keep in
+/// step with the first.
+fn path_matches(pattern: &str, path: &str) -> bool {
+    let mut pattern = pattern.split('/');
+    let mut path = path.split('/');
+    loop {
+        match (pattern.next(), path.next()) {
+            (None, None) => return true,
+            (Some(p), Some(c)) if p.starts_with('{') && p.ends_with('}') => {
+                if c.is_empty() {
+                    return false;
+                }
+            }
+            (Some(p), Some(c)) if p == c => {}
+            _ => return false,
+        }
+    }
 }
 
 /// Which presented credential wins.
@@ -786,6 +878,7 @@ mod tests {
             doorbells: tokio::sync::broadcast::channel(1).0,
             cookie: cookie_name(7717),
             stop: tokio::sync::watch::channel(false).0,
+            content_permits: content::ContentStreamPermits::new(),
         }))
     }
 
@@ -1019,6 +1112,7 @@ mod gate_coverage {
             doorbells: tokio::sync::broadcast::channel(1).0,
             cookie: cookie_name(7717),
             stop: tokio::sync::watch::channel(false).0,
+            content_permits: content::ContentStreamPermits::new(),
         }))
     }
 
@@ -1036,6 +1130,7 @@ mod gate_coverage {
         let mut builder = HttpRequest::builder().uri(uri).method(match method {
             Method::Get => "GET",
             Method::Post => "POST",
+            Method::Head => "HEAD",
         });
         for (k, v) in headers {
             builder = builder.header(*k, *v);
@@ -1051,7 +1146,8 @@ mod gate_coverage {
         // origin check and no token check and looks entirely normal. A test that
         // hand-copied the paths would stay green through exactly that mistake.
         assert!(!ROUTES.is_empty());
-        for (path, method) in ROUTES {
+        for route in ROUTES {
+            let (path, method) = (&route.path, &route.method);
             let uri = concrete(path);
 
             let unauthenticated = app()
@@ -1100,6 +1196,63 @@ mod gate_coverage {
     }
 
     #[tokio::test]
+    async fn a_content_url_will_not_take_its_credential_from_the_query_string() {
+        // A download URL is a thing people paste, put in a `src`, and leave in
+        // their history. A live credential in one is a credential in the URL
+        // bar, in devtools, in the download list, and in the dev proxy's logs.
+        //
+        // `/` still accepts it, and must: the opening navigation carries the
+        // token that way and `index` trades it for a cookie immediately.
+        for route in ROUTES {
+            let uri = format!("{}?token={TOKEN}", concrete(route.path));
+            let response = app()
+                .oneshot(request(route.method, &uri, &[("host", "127.0.0.1:7717")]))
+                .await
+                .expect("response");
+            if route.query_token {
+                assert_ne!(
+                    response.status(),
+                    StatusCode::UNAUTHORIZED,
+                    "{} refused a credential it advertises accepting",
+                    route.path
+                );
+            } else {
+                assert_eq!(
+                    response.status(),
+                    StatusCode::UNAUTHORIZED,
+                    "{} took its credential out of the URL",
+                    route.path
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_path_pattern_matches_one_segment_and_not_a_path() {
+        // The gate runs before routing resolves parameters, so it does its own
+        // matching — and a `{id}` that swallowed a slash would let
+        // `/api/spaces/a/b/content` be treated as a registered content route
+        // (or not) by accident.
+        assert!(path_matches("/api/spaces/{id}/rpc", "/api/spaces/ws_x/rpc"));
+        assert!(!path_matches("/api/spaces/{id}/rpc", "/api/spaces/a/b/rpc"));
+        assert!(!path_matches("/api/spaces/{id}/rpc", "/api/spaces//rpc"));
+        assert!(!path_matches("/api/spaces/{id}/rpc", "/api/spaces/ws_x"));
+        assert!(path_matches("/", "/"));
+        assert!(!path_matches("/", "/anything"));
+    }
+
+    #[test]
+    fn an_unregistered_path_does_not_accept_a_query_credential() {
+        // The fallback serves the bundle to a browser that already has a
+        // cookie. Defaulting the other way would make every future route opt
+        // *out* of putting a live token in a URL, which is the wrong default to
+        // have to remember.
+        assert!(!accepts_query_token("/app.js"));
+        assert!(!accepts_query_token("/api/spaces/ws_x/content/deadbeef"));
+        assert!(accepts_query_token("/"));
+    }
+
+    #[tokio::test]
     async fn an_open_event_stream_ends_when_the_server_is_told_to_stop() {
         // The regression this exists for: `with_graceful_shutdown` waits on
         // in-flight responses, and an SSE body built straight off a broadcast
@@ -1120,6 +1273,7 @@ mod gate_coverage {
             doorbells: doorbells.clone(),
             cookie: cookie_name(7717),
             stop: stop.clone(),
+            content_permits: content::ContentStreamPermits::new(),
         });
         let response = router(app.clone())
             .oneshot(request(
