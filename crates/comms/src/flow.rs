@@ -165,4 +165,13 @@ pub struct IncomingConnection {
     pub from: PeerId,
     pub alpn: Vec<u8>,
     pub connection: Box<dyn Connection>,
+    /// The bytes a router already read to decide where this connection goes.
+    ///
+    /// Empty when nobody read anything. It is carried rather than replayed
+    /// because a flow is consumed by reading it: a router that reads an opening
+    /// to find the Space cannot put it back, and the Space's owner needs the
+    /// same bytes to bind the peer, check the lanes, and answer. Handing over
+    /// the parse rather than the position is also what stops the two of them
+    /// disagreeing about what the peer said.
+    pub opening: Vec<u8>,
 }

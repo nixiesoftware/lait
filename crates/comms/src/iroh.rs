@@ -251,6 +251,7 @@ impl ProtocolHandler for SessionHandler {
                     peer: from,
                     conn,
                 }),
+                opening: Vec::new(),
             })
             .await;
         Ok(())

@@ -555,6 +555,7 @@ impl Transport for MemTransport {
                 from: self.id.clone(),
                 alpn: alpn.to_vec(),
                 connection: Box::new(theirs),
+                opening: Vec::new(),
             })
             .map_err(|_| anyhow!("peer is gone"))?;
         Ok(Box::new(mine))

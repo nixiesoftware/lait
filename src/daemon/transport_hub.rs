@@ -300,14 +300,22 @@ impl IdentityTransportHub {
             target.stopping.send_replace(true);
         }
         self.transport.shutdown().await;
-        let task = self
-            .accept_task
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .take();
-        if let Some(task) = task {
+        // Both pumps. `session_task` was spawned and stored and never awaited,
+        // which is a task outliving the hub that owns it — the kind of leak
+        // that only shows up as a Station that will not stop.
+        let tasks = [
+            self.accept_task
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .take(),
+            self.session_task
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .take(),
+        ];
+        for task in tasks.into_iter().flatten() {
             if let Err(error) = task.await {
-                tracing::debug!(%error, "identity transport accept pump failed");
+                tracing::debug!(%error, "identity transport pump failed");
             }
         }
     }
@@ -443,6 +451,8 @@ async fn dispatch_connection(
     mut hub_stopping: watch::Receiver<bool>,
     _permit: tokio::sync::OwnedSemaphorePermit,
 ) {
+    // Shadowed so the permit can be moved into the routed connection below.
+    let _permit = _permit;
     if *hub_stopping.borrow() {
         return;
     }
@@ -489,10 +499,17 @@ async fn dispatch_connection(
         incoming.connection.close(REFUSED_CODE, b"");
         return;
     }
+    // The permit rides with the connection. Releasing it here would let the
+    // pending-opener budget count a connection as finished the moment it was
+    // routed, which is exactly when it starts costing something.
     let routed = IncomingConnection {
         from: incoming.from,
         alpn: incoming.alpn,
-        connection: incoming.connection,
+        connection: Box::new(HeldConnection {
+            inner: incoming.connection,
+            _permit,
+        }),
+        opening,
     };
     tokio::select! {
         sent = target.incoming_sessions.send(routed) => {
@@ -506,6 +523,78 @@ async fn dispatch_connection(
         changed = hub_stopping.changed() => {
             let _ = changed;
         }
+    }
+}
+
+/// A routed connection that still holds its pending-opener permit.
+///
+/// The permit has to outlive the routing decision, not end with it: a
+/// connection is cheapest at the moment it is handed over and most expensive
+/// afterwards, so releasing the slot on delivery would bound the wrong thing.
+/// Wrapping rather than threading a permit through every caller keeps the
+/// Space's owner from having to know the hub has a budget at all — the same
+/// shape `ReplayStream` already uses for the framed pump.
+struct HeldConnection {
+    inner: Box<dyn crate::transport::Connection>,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
+
+#[async_trait]
+impl crate::transport::Connection for HeldConnection {
+    fn peer(&self) -> PeerId {
+        self.inner.peer()
+    }
+
+    fn alpn(&self) -> Vec<u8> {
+        self.inner.alpn()
+    }
+
+    async fn open_bi(
+        &self,
+    ) -> Result<(
+        Box<dyn crate::transport::SendFlow>,
+        Box<dyn crate::transport::RecvFlow>,
+    )> {
+        self.inner.open_bi().await
+    }
+
+    async fn accept_bi(
+        &self,
+    ) -> Result<
+        Option<(
+            Box<dyn crate::transport::SendFlow>,
+            Box<dyn crate::transport::RecvFlow>,
+        )>,
+    > {
+        self.inner.accept_bi().await
+    }
+
+    async fn open_uni(&self) -> Result<Box<dyn crate::transport::SendFlow>> {
+        self.inner.open_uni().await
+    }
+
+    async fn accept_uni(&self) -> Result<Option<Box<dyn crate::transport::RecvFlow>>> {
+        self.inner.accept_uni().await
+    }
+
+    fn send_datagram(&self, payload: &[u8]) -> Result<()> {
+        self.inner.send_datagram(payload)
+    }
+
+    async fn read_datagram(&self) -> Result<Option<Vec<u8>>> {
+        self.inner.read_datagram().await
+    }
+
+    fn datagram_capacity(&self) -> Option<usize> {
+        self.inner.datagram_capacity()
+    }
+
+    fn close(&self, code: u32, reason: &[u8]) {
+        self.inner.close(code, reason);
+    }
+
+    async fn closed(&self) {
+        self.inner.closed().await;
     }
 }
 
@@ -877,6 +966,21 @@ mod tests {
             .expect("a connection");
         assert_eq!(routed.alpn, runtime::planes::FREIGHT_ALPN.to_vec());
         assert_eq!(routed.from, crate::crypto::device_from_seed(&seed_a));
+        // The bytes the hub read to decide, handed over rather than replayed.
+        // Reading a flow consumes it, so without this the Space's owner would
+        // have to guess at what the peer said — or the two would parse it
+        // separately and be free to disagree.
+        assert_eq!(
+            routed.opening,
+            session_open(&space_a),
+            "the routed connection carries the opening the hub parsed"
+        );
+        assert_eq!(
+            runtime::planes::SessionOpen::decode_canonical(&routed.opening)
+                .expect("and it is still canonical")
+                .space,
+            space_bytes(&space_a)
+        );
 
         // And Space B, on the same device endpoint, saw nothing.
         assert!(
