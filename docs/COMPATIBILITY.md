@@ -80,6 +80,28 @@ make sense of is dropped and refetched rather than interpreted. A format that ca
 always be discarded needs no version to refuse an old one, and giving it one
 would imply a store could be made unreadable by its cache.
 
+### The attachment migration window
+
+Two record shapes coexist in the `attachments` map of an issue Body, and the
+window has no end date because it needs none.
+
+| Shape | Written by | Read by |
+|---|---|---|
+| `{…, data_b64}` | builds before the content cutover | every build, permanently |
+| `{…, content}` | this build onward | this build onward |
+
+`AttachmentMeta` carries no `deny_unknown_fields` and defaults every field but
+`id` and `name`, which is why both shapes decode through one type and why the
+new field could be added without a version moving. The *write* path is a clean
+break — nothing emits `data_b64` any more, and the encoder that produced it is
+deleted in both the engine and the viewer.
+
+The read path is not a deprecation. It is the permanent cost of having once
+written files into Bodies, and it is cheap: the old shape was bounded at 256 KiB
+by 8 attachments, so the worst legacy Body is 2 MiB and needs no streaming
+reader. `MAX_LEGACY_ATTACHMENT_BYTES` records that bound as what it now is — the
+shape of what was already written, not a policy anyone tunes.
+
 ## 3. Signed and addressed domains
 
 A domain is versioned prose baked into a hash. These are the ones that carry a

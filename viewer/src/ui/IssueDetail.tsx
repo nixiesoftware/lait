@@ -36,6 +36,7 @@ import {
 } from "lucide-react";
 
 import { rpc } from "../api";
+import { downloadUrl, upload as uploadContent } from "../content";
 import { useIssueDetail, useProjectViewerStore } from "../projectStore";
 import { clearDraft, loadDraft, saveDraft } from "../core/drafts";
 import {
@@ -1073,21 +1074,14 @@ function FollowToggle({
   );
 }
 
-/** Base64 helpers for the attachment payloads (standard alphabet, padded). */
-const bufToB64 = (buf: ArrayBuffer): string => {
-  const bytes = new Uint8Array(buf);
-  let bin = "";
-  for (let i = 0; i < bytes.length; i += 0x8000) {
-    bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
-  }
-  return btoa(bin);
-};
+/** Decode a legacy inline attachment.
+ *
+ *  Read-only and permanent. Records written before the content cutover carry
+ *  their bytes base64'd inside the issue Body, and those Bodies are in the
+ *  field — a reader that dropped this would lose the files rather than migrate
+ *  them. There is deliberately no encoder any more: nothing writes that shape. */
 const b64ToBytes = (b64: string): Uint8Array =>
   Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
-
-/** The engine's cap (contract.rs MAX_ATTACHMENT_BYTES), mirrored for a
- *  friendly refusal before the bytes ever leave the browser. */
-const MAX_ATTACHMENT_BYTES = 256 * 1024;
 
 /**
  * Attachments (CREATE-5): bounded files riding the issue document's own
@@ -1111,21 +1105,24 @@ function Attachments({
   const [busy, setBusy] = useState(false);
 
   const upload = async (file: File) => {
-    if (file.size > MAX_ATTACHMENT_BYTES) {
-      onError(
-        `${file.name} is ${Math.ceil(file.size / 1024)} KiB — attachments are capped at ${MAX_ATTACHMENT_BYTES / 1024} KiB`,
-      );
-      return;
-    }
+    // No size check here any more. The engine owns `max_content_len` and
+    // refuses past it with a sentence; a mirrored constant would be a second
+    // number to keep in step, and the one a person met would be whichever was
+    // smaller — which is how a ceiling starts lying about itself.
     setBusy(true);
     try {
-      const data_b64 = bufToB64(await file.arrayBuffer());
+      // Two steps, in this order, because the engine enforces it: the bytes go
+      // to the content plane, and only then does the issue name what came back.
+      // `uploadContent` streams the file, so a large attachment is never held
+      // in this tab as one buffer.
+      const stored = await uploadContent(spaceId, file);
       await rpc(spaceId, {
         cmd: "attach",
         reff,
         name: file.name,
         mime: file.type || null,
-        data_b64,
+        content: stored.content,
+        size: stored.size,
       });
     } catch (e) {
       onError(e instanceof Error ? e.message : String(e));
@@ -1136,8 +1133,35 @@ function Attachments({
 
   const download = async (att: AttachmentMetaDto) => {
     try {
+      // A content-plane file is fetched by navigation, not by this tab. Pulling
+      // megabytes through JavaScript to hand them straight back to the browser
+      // is work the browser does better, and it is the difference between a
+      // large file downloading and a large file wedging the page.
+      //
+      // The URL carries no credential — the cookie rides a same-origin request,
+      // and the engine refuses a query token on that route anyway.
+      if (att.content) {
+        const link = document.createElement("a");
+        link.href = downloadUrl(spaceId, att.content, att.name);
+        link.download = att.name;
+        link.click();
+        return;
+      }
+      // A record from before the cutover. Its bytes are inside the Body, so
+      // there is nothing to navigate to and the blob path is the only one.
       const r = await rpc(spaceId, { cmd: "attachment_get", reff, id: att.id });
       if (r.kind !== "attachment") return;
+      if (r.content) {
+        const link = document.createElement("a");
+        link.href = downloadUrl(spaceId, r.content, r.name || att.name);
+        link.download = r.name || att.name;
+        link.click();
+        return;
+      }
+      if (!r.data_b64) {
+        onError("this attachment carries neither bytes nor a content id");
+        return;
+      }
       const bytes = b64ToBytes(r.data_b64);
       const blob = new Blob([bytes.buffer as ArrayBuffer], {
         type: r.mime || "application/octet-stream",
@@ -1157,8 +1181,8 @@ function Attachments({
     <>
       {/* Always mounted, never shown: the overflow menu's "Attach a file" opens
           this picker, and it has to exist even when the section below does not.
-          The 256 KiB cap is the engine's, mirrored so the refusal happens
-          before the bytes leave the browser. */}
+          No size is checked here — the engine refuses past its own ceiling and
+          says so, which is one number instead of two. */}
       <input
         id="issue-attach"
         ref={fileRef}

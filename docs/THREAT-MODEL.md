@@ -274,6 +274,37 @@ and rebinding defenses. Listing local Spaces must not activate all Stations.
 Attaching to a Space preserves the selected local identity. The browser is a
 local client, not an iroh peer or Space member.
 
+### Files on the local web surface
+
+One origin serves the viewer, the API, and every attachment. That origin holds
+the session credential, so a stored attachment rendered inline would run there —
+which is why nothing on the content routes is ever rendered: always
+`application/octet-stream` whatever the stored MIME type says, always `nosniff`,
+always `Content-Security-Policy: sandbox; default-src 'none'`, and always a
+`Content-Disposition: attachment`. The stored MIME type is a peer's claim about
+a peer's bytes and is not honoured.
+
+The filename in that header passes two different escapes: the shared sanitiser
+reduces a peer-authored name to one relative component, and the result is then
+percent-encoded into the `filename*` form. A header is a line, and a name that
+could end it early would inject the next one.
+
+Content routes refuse a `?token=` credential. A download URL is pasted, put in a
+`src`, and left in browser history — so a live token on one is a live token in
+the URL bar, in devtools, in the download list, and in whatever the dev proxy
+logs. The refusal is a property of the route, read from the same table the
+router is built from, and an unregistered path defaults to refusing.
+
+The WebSocket upgrade is the one place an absent `Origin` is not benign. A
+handshake is exempt from CORS: the browser sends it cross-origin with no
+preflight and attaches the cookie, so `check_upgrade_origin` requires an Origin
+where the shared gate admits its absence.
+
+Per-resource read restriction on attached content is still advisory, and this
+surface does not change that. A member may read any content their Station
+holds — the same Space-wide residency gap Freight carries, closed by the same
+`content.serve` grant when it exists.
+
 ## Security maintenance
 
 Security claims require executable tests at the enforcing boundary. Protocol

@@ -597,10 +597,15 @@ export type Request =
   | { cmd: "milestone_set"; project: string; milestone?: string | null; name?: string | null; description?: string | null; target?: string | null; pos?: BoardPos | null; remove?: boolean }
   /** Point an issue at a milestone in its project (`null`/"none" clears). */
   | { cmd: "issue_milestone"; reff: string; milestone?: string | null }
-  /** Attach a file (standard base64; raw ≤ 256 KiB) — CREATE-5. */
-  | { cmd: "attach"; reff: string; name: string; mime?: string | null; data_b64: string; comment?: string | null }
+  /** Attach a file already sealed onto the content plane.
+   *
+   *  The bytes went up first, through `content.ts`; this names what came back.
+   *  The engine refuses a content id it has no committed descriptor for, so the
+   *  order is enforced rather than assumed. */
+  | { cmd: "attach"; reff: string; name: string; mime?: string | null; content: string; size: number; comment?: string | null }
   | { cmd: "detach"; reff: string; id: string }
-  /** Reply is `attachment` — the full record incl. payload. */
+  /** Reply is `attachment` — the record, and either a content id or, for a
+   *  record written before the cutover, its inline payload. */
   | { cmd: "attachment_get"; reff: string; id: string }
   | { cmd: "label_new"; name: string; color?: string | null }
   | { cmd: "label_list" }

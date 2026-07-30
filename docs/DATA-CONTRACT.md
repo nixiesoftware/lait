@@ -280,6 +280,20 @@ Its Catalog has one deterministic Body identity per `(SpaceId, WorldId)` and is
 created atomically by `InitializeTracker`. Missing, wrong, or duplicate semantic
 Catalog state is corruption; it is never synthesized during open.
 
+An issue attachment is a `ContentRef` and a size, not bytes. The record names
+content the content plane already holds, and the Body declares that reference —
+which is what makes reachability, prefetch, and progress attribution work
+without anything decoding product bytes. `size` means plaintext bytes in both
+record shapes.
+
+Records written before the cutover carry their payload inline as base64 and are
+**read forever**. They are in Bodies in the field; a reader that refused them
+would lose files rather than migrate them. Nothing writes that shape any more,
+and the only encoder for it is gone. A record carries one or the other, never
+both, and a record carrying neither is refused rather than defaulted — a missing
+payload silently read as empty produces a zero-byte file and a success message,
+which is worse than an error.
+
 Issue content currently uses one Body per issue. Product schema—not Fabric—defines
 the meaning of each field. The canonical conflict contract is:
 
