@@ -248,6 +248,31 @@ pub enum HostControlRequest {
     },
 }
 
+/// One content operation a package asks the shell to carry out.
+///
+/// The package names a file; the shell moves it. That split is the point. A
+/// package that handled the bytes would need the control channel, a streaming
+/// reader, and a ceiling — and would then be a second place where an attachment
+/// can be truncated, buffered whole, or written somewhere nobody chose. Here it
+/// says *what*, and the shell, which already owns transport, does the moving.
+#[derive(Debug, Clone)]
+pub enum HostContentRequest {
+    /// Seal a local file onto the content plane. Answers `{content, size}`.
+    Write { path: std::path::PathBuf },
+    /// Save a committed content to a local path, streamed. Answers `{size}`.
+    ///
+    /// The path is the package's decision, because naming is product knowledge
+    /// — see [`destination::sanitize_display_name`], which is how a peer-chosen
+    /// name becomes one. The shell writes exactly where it is told.
+    Read {
+        content: String,
+        destination: std::path::PathBuf,
+    },
+    /// What is known about one content, without moving it. Answers the same
+    /// shape the web surface reports in headers.
+    Stat { content: String },
+}
+
 /// One exact generic Mechanics assignment planned by a product package.
 #[derive(Debug, Clone)]
 pub struct HostAssignment {
@@ -268,6 +293,13 @@ pub trait ClientHost: Send + Sync {
     fn local_root(&self) -> &Path;
     fn call_world<'a>(&'a self, call: WorldCall) -> ClientFuture<'a, WorldReply>;
     fn call_control<'a>(&'a self, request: HostControlRequest) -> ClientFuture<'a, Value>;
+    /// Move bytes on and off the content plane.
+    ///
+    /// Separate from [`Self::call_control`] because its answers are about a
+    /// file rather than about Space authority, and because the shell streams
+    /// here — the package never holds an attachment in memory, whatever its
+    /// size.
+    fn call_content<'a>(&'a self, request: HostContentRequest) -> ClientFuture<'a, Value>;
 }
 
 pub type LocalInvocationHandler = for<'a> fn(

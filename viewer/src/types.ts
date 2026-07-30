@@ -177,6 +177,9 @@ export interface AttachmentMetaDto {
   by?: string;
   ts: number;
   comment?: string;
+  /** The content id, for records written after the attachment cutover.
+   *  Absent on a legacy record, whose bytes are inline in the Body. */
+  content?: string;
 }
 
 /** One project milestone with derived progress (SCOPE-1). */
@@ -680,7 +683,16 @@ export type Response =
   | { kind: "projects"; projects: ProjectDto[] }
   | { kind: "updates"; updates: ProjectUpdateDto[] }
   | { kind: "milestones"; milestones: MilestoneDto[] }
-  | { kind: "attachment"; name: string; mime: string; data_b64: string }
+  /** Exactly one of `content` and `data_b64` is present, and which one says
+   *  which era the record is from. */
+  | {
+      kind: "attachment";
+      name: string;
+      mime: string;
+      content?: string;
+      data_b64?: string;
+      size?: number;
+    }
   | { kind: "labels"; labels: LabelDto[] }
   | { kind: "members"; members: MemberDto[] }
   | { kind: "assignments"; rows: AssignmentDto[] }

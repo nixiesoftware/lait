@@ -326,7 +326,10 @@ pub enum IssuesRequest {
         name: String,
         #[serde(default)]
         mime: Option<String>,
-        data_b64: String,
+        /// The content id this attachment names, already on the content plane.
+        content: String,
+        /// Plaintext bytes, as the uploader saw them.
+        size: u64,
         #[serde(default)]
         comment: Option<String>,
     },
@@ -474,7 +477,23 @@ pub enum IssuesResponse {
     Attachment {
         name: String,
         mime: String,
-        data_b64: String,
+        /// The content id, when this record was written after the cutover.
+        ///
+        /// Exactly one of `content` and `data_b64` is present, and which one
+        /// says which era the record is from. Both are optional rather than an
+        /// enum because this type is decoded by clients that predate the split
+        /// and must not fail on a shape they do not recognise.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        content: Option<String>,
+        /// The inline payload, for records written before the cutover.
+        ///
+        /// Read-only and permanent. Those records are in Bodies in the field;
+        /// a reader that dropped this would lose the files rather than migrate
+        /// them.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        data_b64: Option<String>,
+        #[serde(default)]
+        size: u64,
     },
     Text {
         text: String,

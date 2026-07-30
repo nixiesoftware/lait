@@ -23,6 +23,7 @@
 //! remains the only network identity.
 
 pub mod auth;
+mod bridge;
 mod content;
 pub mod policy;
 pub mod spaces;
@@ -83,6 +84,10 @@ struct App {
     stop: tokio::sync::watch::Sender<bool>,
     /// How many content transfers may be in flight at once.
     content_permits: content::ContentStreamPermits,
+    /// The bridge's own fan-out. Deliberately not `doorbells`: one ring for what
+    /// every tab must see, one for what only the tab that started a transfer
+    /// cares about.
+    bridge: bridge::BridgeHub,
 }
 
 #[derive(Clone)]
@@ -139,6 +144,7 @@ pub async fn run(port: u16, open: bool, json: bool) -> Result<()> {
         cookie: cookie_name(bound.port()),
         stop: stop.clone(),
         content_permits: content::ContentStreamPermits::new(),
+        bridge: bridge::BridgeHub::new(),
     });
     // The signal is fired before `shutdown_signal()` reaches axum, not after.
     // Graceful shutdown waits on in-flight responses, and this server has two
@@ -301,6 +307,11 @@ const ROUTES: &[Route] = &[
     Route::no_query_token("/api/spaces/{id}/content", Method::Post),
     Route::no_query_token("/api/spaces/{id}/content/{content}", Method::Get),
     Route::no_query_token("/api/spaces/{id}/content/{content}", Method::Head),
+    // The upgrade takes a cookie or a Bearer header and never a query token. A
+    // browser's `WebSocket` constructor cannot set a header, so in practice this
+    // is the cookie — which is the credential that already rides a same-origin
+    // handshake, and the one that does not end up in history.
+    Route::no_query_token("/api/session", Method::Get),
 ];
 
 /// One registered path: how to reach it, and whether it will take a credential
@@ -358,6 +369,7 @@ fn handler(route: &Route) -> axum::routing::MethodRouter<Arc<App>> {
         ("/api/spaces/{id}/content", _) => post(content::upload),
         ("/api/spaces/{id}/content/{content}", Method::Head) => axum::routing::head(content::head),
         ("/api/spaces/{id}/content/{content}", _) => get(content::download),
+        ("/api/session", _) => get(bridge::session),
         (other, _) => unreachable!("{other} is in ROUTES with no handler"),
     }
 }
@@ -879,6 +891,7 @@ mod tests {
             cookie: cookie_name(7717),
             stop: tokio::sync::watch::channel(false).0,
             content_permits: content::ContentStreamPermits::new(),
+            bridge: bridge::BridgeHub::new(),
         }))
     }
 
@@ -1113,6 +1126,7 @@ mod gate_coverage {
             cookie: cookie_name(7717),
             stop: tokio::sync::watch::channel(false).0,
             content_permits: content::ContentStreamPermits::new(),
+            bridge: bridge::BridgeHub::new(),
         }))
     }
 
@@ -1274,6 +1288,7 @@ mod gate_coverage {
             cookie: cookie_name(7717),
             stop: stop.clone(),
             content_permits: content::ContentStreamPermits::new(),
+            bridge: bridge::BridgeHub::new(),
         });
         let response = router(app.clone())
             .oneshot(request(

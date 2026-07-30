@@ -643,6 +643,7 @@ mod end_to_end {
             cookie: cookie_name(7717),
             stop: tokio::sync::watch::channel(false).0,
             content_permits: ContentStreamPermits::new(),
+            bridge: crate::serve::bridge::BridgeHub::new(),
         });
 
         // Larger than one control-channel read buffer, so the body's first bytes

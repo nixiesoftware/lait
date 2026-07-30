@@ -575,31 +575,42 @@ async fn run_attach(
     comment: Option<String>,
     options: PresentationOptions,
 ) -> Result<ClientOutput, InterfaceError> {
-    let bytes = std::fs::read(&path)
-        .map_err(|error| InterfaceError::new(format!("could not read {path}: {error}")))?;
-    if bytes.is_empty() {
-        return Err(InterfaceError::new(format!(
-            "{path} is empty — nothing to attach"
-        )));
-    }
-    if bytes.len() > issues::contract::MAX_ATTACHMENT_BYTES {
-        return Err(InterfaceError::new(format!(
-            "{path} is {} KiB — attachments are capped at {} KiB",
-            bytes.len() / 1024,
-            issues::contract::MAX_ATTACHMENT_BYTES / 1024
-        )));
-    }
+    // Two steps, and the order is the contract: the content is committed
+    // first, then the issue names it. The substrate refuses a declaration whose
+    // descriptor is not committed, so doing it the other way round does not
+    // race — it simply fails.
+    //
+    // The file is never read into this process. `call_content` streams it, so
+    // `lait issues attach` on a gigabyte costs a gigabyte of disk and a
+    // quarter-megabyte of memory.
     let name = Path::new(&path)
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.clone());
+    let stored = host
+        .call_content(world_interface::HostContentRequest::Write {
+            path: std::path::PathBuf::from(&path),
+        })
+        .await?;
+    let content = stored
+        .get("content")
+        .and_then(|c| c.as_str())
+        .ok_or_else(|| {
+            InterfaceError::new("the content plane stored the file but did not name it")
+        })?
+        .to_string();
+    let size = stored
+        .get("size")
+        .and_then(|s| s.as_u64())
+        .unwrap_or_default();
     let response = call_issues(
         host,
         IssuesRequest::Attach {
             reff,
             mime: Some(mime_for(&name)),
             name,
-            data_b64: data_encoding::BASE64.encode(&bytes),
+            content,
+            size,
             comment,
         },
     )
@@ -630,16 +641,50 @@ async fn run_attachment_get(
     options: PresentationOptions,
 ) -> Result<ClientOutput, InterfaceError> {
     let response = call_issues(host, IssuesRequest::AttachmentGet { reff, id }).await?;
-    let crate::IssuesResponse::Attachment { name, data_b64, .. } = response else {
+    let crate::IssuesResponse::Attachment {
+        name,
+        content,
+        data_b64,
+        ..
+    } = response
+    else {
         return Ok(issues_output(&response, options));
     };
-    let bytes = data_encoding::BASE64
-        .decode(data_b64.as_bytes())
-        .map_err(|_| InterfaceError::new("stored attachment did not decode"))?;
     let destination = destination_for(out, &name);
-    std::fs::write(&destination, &bytes)
-        .map_err(|error| InterfaceError::new(format!("could not write {destination}: {error}")))?;
-    let message = format!("saved {} bytes to {destination}", bytes.len());
+    // Which era this record is from decides how it is saved, and both are
+    // permanent. An inline record is bytes in a Body and always will be — the
+    // files are in the field, and a reader that refused them would lose them
+    // rather than migrate them. A content record is streamed, so a large
+    // attachment is never held in memory here.
+    let written = match (content, data_b64) {
+        (Some(content), _) => {
+            let saved = host
+                .call_content(world_interface::HostContentRequest::Read {
+                    content,
+                    destination: std::path::PathBuf::from(&destination),
+                })
+                .await?;
+            saved
+                .get("size")
+                .and_then(|s| s.as_u64())
+                .unwrap_or_default()
+        }
+        (None, Some(data_b64)) => {
+            let bytes = data_encoding::BASE64
+                .decode(data_b64.as_bytes())
+                .map_err(|_| InterfaceError::new("stored attachment did not decode"))?;
+            std::fs::write(&destination, &bytes).map_err(|error| {
+                InterfaceError::new(format!("could not write {destination}: {error}"))
+            })?;
+            bytes.len() as u64
+        }
+        (None, None) => {
+            return Err(InterfaceError::new(
+                "this attachment record carries neither bytes nor a content id",
+            ))
+        }
+    };
+    let message = format!("saved {written} bytes to {destination}");
     let value = json!({ "kind": "ok", "message": message });
     let stdout = if options.json {
         format!(

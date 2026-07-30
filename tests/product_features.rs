@@ -90,6 +90,81 @@ fn ok(
     response
 }
 
+fn filler(seed: u64, len: usize) -> Vec<u8> {
+    let mut state = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+    (0..len)
+        .map(|_| {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (state >> 33) as u8
+        })
+        .collect()
+}
+
+fn content_route(home: &Path) -> lait::control::ControlRoute {
+    let space = lait::orbital::discover_space_id(home).expect("test Space");
+    lait::control::station_route(OrbitAddress::for_store(home, space))
+}
+
+/// Seal bytes onto the content plane, the way the CLI's `attach` does.
+fn upload_content(rt: &tokio::runtime::Runtime, home: &Path, bytes: &[u8]) -> String {
+    rt.block_on(async {
+        let mut operation = [0u8; 16];
+        getrandom::fill(&mut operation).expect("operation id");
+        let mut upload = lait::control::ContentUpload::open(
+            home,
+            content_route(home),
+            operation,
+            None,
+            bytes.len() as u64,
+        )
+        .await
+        .expect("open upload");
+        for piece in bytes.chunks(64 * 1024) {
+            upload.push(piece).await.expect("push");
+        }
+        match upload.finish().await.expect("finish") {
+            lait::control::ContentReply::ContentWritten { content, .. } => content,
+            other => panic!("expected a stored content, got {other:?}"),
+        }
+    })
+}
+
+/// Read it back in ranges, which is the only way this surface offers.
+fn read_content(
+    rt: &tokio::runtime::Runtime,
+    home: &Path,
+    content: &str,
+    expected: usize,
+) -> Vec<u8> {
+    rt.block_on(async {
+        let mut got: Vec<u8> = Vec::new();
+        while got.len() < expected {
+            let (reply, piece) = lait::control::content_call(
+                home,
+                &lait::control::content_request(
+                    content_route(home),
+                    lait::control::ContentCall::Read {
+                        content: content.to_string(),
+                        offset: got.len() as u64,
+                        len: 256 * 1024,
+                    },
+                ),
+            )
+            .await
+            .expect("read");
+            assert!(
+                matches!(reply, lait::control::ContentReply::ContentStream { .. }),
+                "{reply:?}"
+            );
+            assert!(!piece.is_empty(), "a short read that never ends is a hang");
+            got.extend_from_slice(&piece);
+        }
+        got
+    })
+}
+
 fn poll_until<T>(timeout: Duration, mut check: impl FnMut() -> Option<T>) -> Option<T> {
     let start = Instant::now();
     loop {
@@ -613,8 +688,14 @@ fn milestones_cycles_initiatives_teams_triage_delete_and_attachments() {
     assert_eq!(view.title, "login breaks on refresh");
     assert_eq!(view.description, "steps: refresh twice");
 
-    // ---- attachments (CREATE-5): attach, list, fetch, cap, detach. ----
-    let payload = b"tiny attachment payload".to_vec();
+    // ---- attachments: upload, attach, fetch, cap, detach. ----
+    //
+    // Two steps now, and the order is the contract. The bytes go to the content
+    // plane first and the issue names what came back; the substrate refuses a
+    // declaration whose descriptor is not committed, so doing it the other way
+    // round does not race, it fails.
+    let payload = filler(9, 700 * 1024);
+    let stored = upload_content(&client, &home, &payload);
     ok(
         &client,
         &home,
@@ -622,7 +703,8 @@ fn milestones_cycles_initiatives_teams_triage_delete_and_attachments() {
             reff: issue.clone(),
             name: "notes.txt".into(),
             mime: Some("text/plain".into()),
-            data_b64: data_encoding::BASE64.encode(&payload),
+            content: stored.clone(),
+            size: payload.len() as u64,
             comment: None,
         },
     );
@@ -642,7 +724,9 @@ fn milestones_cycles_initiatives_teams_triage_delete_and_attachments() {
     let IssueResponse::Attachment {
         name,
         mime,
+        content,
         data_b64,
+        size,
     } = ok(
         &client,
         &home,
@@ -656,31 +740,30 @@ fn milestones_cycles_initiatives_teams_triage_delete_and_attachments() {
     };
     assert_eq!(name, "notes.txt");
     assert_eq!(mime, "text/plain");
+    assert_eq!(size, payload.len() as u64);
     assert_eq!(
-        data_encoding::BASE64.decode(data_b64.as_bytes()).unwrap(),
-        payload
-    );
-    // Over the cap refuses loudly.
-    let big = vec![0u8; lait::world::contract::MAX_ATTACHMENT_BYTES + 1];
-    let resp = issue_req(
-        &client,
-        &home,
-        issues_app::IssuesRequest::Attach {
-            reff: issue.clone(),
-            name: "big.bin".into(),
-            mime: None,
-            data_b64: data_encoding::BASE64.encode(&big),
-            comment: None,
-        },
+        content.as_deref(),
+        Some(stored.as_str()),
+        "a record written after the cutover names its content"
     );
     assert!(
-        matches!(&resp, IssueResponse::Error { message, .. } if message.contains("KiB")),
-        "oversize must refuse: {resp:?}"
+        data_b64.is_none(),
+        "and carries no bytes — the Body is not where files live any more"
     );
-    // A name a peer could have chosen. The engine takes it — separators are
-    // legal in a display name, and refusing them here would protect nothing:
-    // a Body arriving through convergence never passes local intake at all.
-    // What must hold is that saving it lands beside us.
+
+    // The bytes really are on the content plane, and really are the ones sent.
+    let read_back = read_content(&client, &home, &stored, payload.len());
+    assert_eq!(
+        blake3::hash(&read_back),
+        blake3::hash(&payload),
+        "the round trip through the content plane lost or reordered bytes"
+    );
+
+    // A name a peer could have chosen. The engine stores it as authored —
+    // separators are legal in a display name, and refusing them at intake would
+    // protect nothing, because a Body arriving through convergence never passes
+    // local intake at all. What must hold is that saving it lands beside us.
+    let hostile_content = upload_content(&client, &home, b"not yours to place");
     ok(
         &client,
         &home,
@@ -688,7 +771,8 @@ fn milestones_cycles_initiatives_teams_triage_delete_and_attachments() {
             reff: issue.clone(),
             name: "../../evil.txt".into(),
             mime: None,
-            data_b64: data_encoding::BASE64.encode(b"not yours to place"),
+            content: hostile_content,
+            size: 18,
             comment: None,
         },
     );
@@ -715,15 +799,36 @@ fn milestones_cycles_initiatives_teams_triage_delete_and_attachments() {
         hostile.name
     );
     assert!(path.is_relative(), "{saved:?}");
+    let hostile_id = hostile.id.clone();
+
+    // An attachment naming content nobody committed is refused by the
+    // substrate, not by the product — which is what makes the ordering a rule
+    // rather than a convention.
+    let phantom = issue_req(
+        &client,
+        &home,
+        issues_app::IssuesRequest::Attach {
+            reff: issue.clone(),
+            name: "phantom.bin".into(),
+            mime: None,
+            content: "ab".repeat(32),
+            size: 10,
+            comment: None,
+        },
+    );
+    assert!(
+        matches!(&phantom, IssueResponse::Error { .. }),
+        "attaching uncommitted content must refuse: {phantom:?}"
+    );
+
     ok(
         &client,
         &home,
         issues_app::IssuesRequest::Detach {
             reff: issue.clone(),
-            id: hostile.id.clone(),
+            id: hostile_id,
         },
     );
-
     ok(
         &client,
         &home,

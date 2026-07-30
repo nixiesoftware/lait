@@ -1439,7 +1439,8 @@ impl<'a> IssueRouter<'a> {
                 reff,
                 name,
                 mime,
-                data_b64,
+                content,
+                size,
                 comment,
             } => {
                 let doc = self.resolve(&snapshot, &reff)?;
@@ -1448,17 +1449,21 @@ impl<'a> IssueRouter<'a> {
                     id: issues::ids::mint_attachment_id(self.clock),
                     name,
                     mime: mime.unwrap_or_else(|| "application/octet-stream".into()),
-                    data_b64,
+                    content,
+                    size,
                     comment,
                     actor: facts.actor.clone(),
                     device: facts.device.clone(),
                     ts: facts.now,
                 })
                 .map_err(|e| match e {
+                    // One refusal, one cause. The byte cap left with the
+                    // inline write path — the Station's `max_content_len` is
+                    // what bounds a file now, and it refuses at upload, long
+                    // before an intent is built.
                     WorldError::LimitExceeded => Response::err(format!(
-                        "attachment refused: at most {} files per issue, {} KiB each",
+                        "attachment refused: at most {} files per issue",
                         contract::MAX_ATTACHMENTS_PER_ISSUE,
-                        contract::MAX_ATTACHMENT_BYTES / 1024,
                     )),
                     other => Self::effect_err(other),
                 })?;
@@ -1480,11 +1485,26 @@ impl<'a> IssueRouter<'a> {
                 let record: serde_json::Value = self
                     .query(&IssueQuery::Attachment { doc, id })
                     .map_err(Self::effect_err)?;
+                // Both eras, and neither faked. A record written after the
+                // cutover names a content and carries no bytes; one written
+                // before carries bytes and names nothing. The previous shape
+                // defaulted a missing `data_b64` to `""`, which a caller then
+                // decoded to zero bytes and wrote out as a 0-byte file
+                // reporting success — the one outcome worse than an error.
+                let content = record["content"].as_str().map(str::to_string);
+                let data_b64 = record["data_b64"].as_str().map(str::to_string);
+                if content.is_none() && data_b64.is_none() {
+                    return Err(Response::err(
+                        "this attachment record carries neither bytes nor a content id",
+                    ));
+                }
                 Ok((
                     Response::Attachment {
                         name: record["name"].as_str().unwrap_or_default().to_string(),
                         mime: record["mime"].as_str().unwrap_or_default().to_string(),
-                        data_b64: record["data_b64"].as_str().unwrap_or_default().to_string(),
+                        content,
+                        data_b64,
+                        size: record["size"].as_u64().unwrap_or_default(),
                     },
                     false,
                 ))

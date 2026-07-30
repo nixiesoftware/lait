@@ -33,11 +33,25 @@ pub const MAX_REACTION_EMOJI_BYTES: usize = 32;
 /// The largest accepted estimate. Every scale humans use tops out far below
 /// this; the cap exists so a typo cannot become a permanent register.
 pub const MAX_ESTIMATE: u32 = 1000;
-/// Attachment bounds (CREATE-5): inline sealed records riding the issue Body
-/// and its existing sync/E2EE. Deliberately tight — the content-addressed
-/// blob store is the large-file follow-on, not this.
-pub const MAX_ATTACHMENT_BYTES: usize = 256 * 1024;
+/// How many files one issue may carry.
+///
+/// Kept, and now enforced against the raw record map rather than the decoded
+/// list. That is a real change: a record this build cannot decode used to
+/// occupy a slot without counting toward the limit, could never be removed
+/// through the product surface, and stayed fetchable by id. Counting the raw
+/// map makes the cap mean what it says.
 pub const MAX_ATTACHMENTS_PER_ISSUE: usize = 8;
+
+/// The largest inline attachment this build will still *read*.
+///
+/// The write path is gone: an attachment is a `ContentRef` now, and its bytes
+/// live on the content plane. This bound remains because records written before
+/// the cutover are still in Bodies in the field, and a reader that refused them
+/// would lose files rather than migrate them.
+///
+/// It is not a policy an operator tunes. It is the shape of what was already
+/// written, and it can only be removed when no such record can exist.
+pub const MAX_LEGACY_ATTACHMENT_BYTES: usize = 256 * 1024;
 /// The longest attachment display name, in UTF-8 bytes.
 ///
 /// A display name is shown, synced, and — the reason for a bound rather than a
@@ -689,7 +703,24 @@ pub enum IssueIntent {
         id: String,
         name: String,
         mime: String,
-        data_b64: String,
+        /// The content this attachment *is*, already committed on the content
+        /// plane.
+        ///
+        /// The engine never sees the bytes. It could not usefully: they are
+        /// sealed under a content nonce it does not hold, and a World that
+        /// handled plaintext would be a World that had to be trusted with it.
+        /// What it does instead is name them, and the substrate refuses a
+        /// declaration whose descriptor is not committed — which is what makes
+        /// upload-then-attach an ordering the store enforces rather than a
+        /// convention the product hopes for.
+        content: String,
+        /// Plaintext bytes, as the uploader saw them.
+        ///
+        /// Carried rather than derived because the engine has no way to ask the
+        /// content plane anything. It is checked against the descriptor at the
+        /// substrate boundary; here it is what the issue view reports, so a
+        /// wrong value would be a wrong number on a screen, not a wrong file.
+        size: u64,
         comment: Option<String>,
         actor: String,
         device: String,

@@ -163,7 +163,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # (iroh, self_update), so the adapter buys routing and SSE rather than a new
 # stack. `tokio-stream`'s `sync` feature is the `broadcast::Receiver` -> `Stream`
 # bridge the doorbell multiplex needs.
-axum = "0.8"
+# `ws` is on for the browser bridge (`src/serve/bridge.rs`). It pulls
+# tokio-tungstenite; nothing else in the tree does, so the feature is genuinely
+# additive rather than unified in from another crate. `http2` stays off — it buys
+# nothing without TLS, and this surface is loopback plaintext by design.
+axum = { version = "0.8", features = ["ws"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 # The web client, compiled into the binary. `include_dir` reads `src/serve/assets`
 # at compile time, which is why the built bundle is COMMITTED and lives under

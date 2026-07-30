@@ -247,6 +247,14 @@ struct Staging {
     ops: Vec<(BodyKey, BodyOp)>,
     scopes: Vec<BodyKey>,
     declarations: Vec<BodyDeclaration>,
+    /// The complete content set for each Body this transaction declares one for.
+    ///
+    /// Sparse on purpose. `content_refs` on an effect *replaces* what a Body
+    /// declared, so an entry for a Body that did not mean to say anything would
+    /// erase its set — which is what would happen on the next comment if every
+    /// staged Body got an entry. Only a key that explicitly declares appears
+    /// here.
+    declared: std::collections::BTreeMap<BodyKey, Vec<replica::ContentRef>>,
     /// Whether a catalog op must carry the creation declaration — true exactly
     /// when the committed snapshot holds no Catalog yet (first-ever write).
     declare_catalog_on_use: bool,
@@ -261,6 +269,7 @@ impl Staging {
             ops: Vec::new(),
             scopes: Vec::new(),
             declarations: Vec::new(),
+            declared: std::collections::BTreeMap::new(),
             declare_catalog_on_use,
             demand: None,
         }
@@ -328,10 +337,21 @@ impl Staging {
         self.demand = Some(demand);
     }
 
+    /// Declare the complete content set for one Body.
+    ///
+    /// Complete, not additive: `content_refs` on an effect replaces whatever
+    /// the Body declared before, so an entry naming one file detaches the rest.
+    /// Only a key that calls this appears in the effect at all — a blanket
+    /// declaration would erase the set on the next comment, which is exactly
+    /// the failure this shape exists to make impossible.
+    fn declare(&mut self, key: &BodyKey, refs: Vec<replica::ContentRef>) {
+        self.declared.insert(key.clone(), refs);
+    }
+
     fn into_effect(self, doc: Option<String>) -> WorldEffect {
         let demand = self.demand.unwrap_or_else(contract::demand_contributor);
         WorldEffect {
-            content_refs: Vec::new(),
+            content_refs: self.declared.into_iter().collect(),
             operations: self.ops,
             scopes: self.scopes,
             effect: IssueEffect {
@@ -343,6 +363,54 @@ impl Staging {
             demand,
         }
     }
+}
+
+/// A content id as a World writes it: 32 bytes of lowercase hex.
+fn parse_content_ref(raw: &str) -> Option<replica::ContentRef> {
+    let bytes = data_encoding::HEXLOWER.decode(raw.as_bytes()).ok()?;
+    Some(replica::ContentRef {
+        content_id: <[u8; 32]>::try_from(bytes.as_slice()).ok()?,
+    })
+}
+
+/// The attachment records exactly as they sit in the Body, undecoded.
+///
+/// The decoded list is the wrong input for anything that has to be complete: it
+/// silently drops a record this build cannot read, and a dropped record is one
+/// that does not count toward the cap, cannot be detached, and — worst — is
+/// missing from a declaration that is supposed to name everything this Body
+/// references.
+fn raw_attachments(ctx: &WorldContext<'_>, doc: &str) -> BTreeMap<String, Vec<u8>> {
+    ctx.read_collaborative(&issue_key(doc))
+        .ok()
+        .and_then(|view| view.maps.get("attachments").cloned())
+        .unwrap_or_default()
+}
+
+/// The content set a record map references, refusing rather than guessing.
+///
+/// Fail-closed: a record that does not decode, or names a content id that is not
+///32 bytes of hex, refuses the whole transaction. The alternative is to skip it
+/// — and skipping means publishing a declaration that omits content the Body
+/// still references, which makes those bytes collectable while something still
+/// points at them.
+fn content_of(records: &BTreeMap<String, Vec<u8>>) -> Result<Vec<replica::ContentRef>, WorldError> {
+    let mut refs = Vec::new();
+    for value in records.values() {
+        let record: serde_json::Value =
+            serde_json::from_slice(value).map_err(|_| WorldError::ContractViolation)?;
+        let Some(content) = record.get("content").and_then(|c| c.as_str()) else {
+            // A legacy record carries its bytes inline and references no
+            // content at all. That is not a failure to decode; it is a record
+            // from before the content plane, and it declares nothing.
+            continue;
+        };
+        let reference = parse_content_ref(content).ok_or(WorldError::ContractViolation)?;
+        if !refs.contains(&reference) {
+            refs.push(reference);
+        }
+    }
+    Ok(refs)
 }
 
 fn reg(path: &str, value: impl Into<Vec<u8>>) -> BodyOp {
@@ -362,6 +430,9 @@ fn map_set(path: &str, key: impl Into<String>, value: impl Into<Vec<u8>>) -> Bod
 
 fn unchanged_effect(doc: Option<String>) -> WorldEffect {
     WorldEffect {
+        // A no-op declares nothing, which is not the same as declaring nothing
+        // *for* a Body: an empty list here means no key is named at all, so no
+        // Body's existing declaration is touched.
         content_refs: Vec::new(),
         operations: vec![],
         scopes: vec![],
@@ -2538,7 +2609,8 @@ impl World for IssuesWorld {
                 id,
                 name,
                 mime,
-                data_b64,
+                content,
+                size,
                 comment,
                 actor,
                 device,
@@ -2558,17 +2630,21 @@ impl World for IssuesWorld {
                 {
                     return Err(WorldError::InvalidRequest);
                 }
-                let issue = issue_state(ctx, &doc).ok_or(WorldError::InvalidRequest)?;
-                if issue.attachments.iter().any(|a| a.id == id) {
+                let Some(content_ref) = parse_content_ref(&content) else {
+                    return Err(WorldError::InvalidRequest);
+                };
+                if size == 0 {
                     return Err(WorldError::InvalidRequest);
                 }
-                if issue.attachments.len() >= contract::MAX_ATTACHMENTS_PER_ISSUE {
-                    return Err(WorldError::LimitExceeded);
+                let issue = issue_state(ctx, &doc).ok_or(WorldError::InvalidRequest)?;
+                let existing = raw_attachments(ctx, &doc);
+                if existing.contains_key(&id) {
+                    return Err(WorldError::InvalidRequest);
                 }
-                let raw = data_encoding::BASE64
-                    .decode(data_b64.as_bytes())
-                    .map_err(|_| WorldError::InvalidRequest)?;
-                if raw.is_empty() || raw.len() > contract::MAX_ATTACHMENT_BYTES {
+                // Counted against the raw map rather than the decoded list. A
+                // record this build cannot read still occupies a slot, and a cap
+                // that skipped it would let a corrupt record raise the ceiling.
+                if existing.len() >= contract::MAX_ATTACHMENTS_PER_ISSUE {
                     return Err(WorldError::LimitExceeded);
                 }
                 if let Some(comment) = &comment {
@@ -2585,20 +2661,35 @@ impl World for IssuesWorld {
                     "id": id,
                     "name": name,
                     "mime": mime,
-                    "size": raw.len() as u64,
+                    "size": size,
                     "by": actor,
                     "ts": ts,
                     "comment": comment.unwrap_or_default(),
-                    "data_b64": data_b64,
+                    "content": content,
                 });
+                let key = issue_key(&doc);
                 staging.issue(
-                    &issue_key(&doc),
+                    &key,
                     BodyOp::MapSet {
                         path: "attachments".into(),
-                        key: id,
+                        key: id.clone(),
                         value: serde_json::to_vec(&record).expect("attachment json"),
                     },
                 );
+                // The Body's whole content set, re-derived over the map this
+                // operation is about to change.
+                //
+                // Whole rather than incremental, because a declaration replaces
+                // rather than adds: an entry naming only the new file would
+                // silently detach every earlier one. Fail-closed for the same
+                // reason the cap counts raw records — a record that does not
+                // decode is content this Body still references, and leaving it
+                // out of the declaration would make those bytes collectable.
+                let mut refs = content_of(&existing)?;
+                if !refs.contains(&content_ref) {
+                    refs.push(content_ref);
+                }
+                staging.declare(&key, refs);
                 let mut ev = event("attached", &device, ts);
                 ev.x = name;
                 push_event(&mut staging, ctx, &doc, &ev);
