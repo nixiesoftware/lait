@@ -51,6 +51,14 @@ pub type PeerId = DeviceId;
 /// A protocol selector for a direct connection (lait's ALPNs: sync, presence).
 pub type Alpn = &'static [u8];
 
+/// One plane's inbound connections, handed over whole.
+///
+/// A transport that demultiplexes by ALPN owns one of these per session
+/// protocol. Whoever takes it owns everything arriving on that protocol and
+/// nothing that does not — which is the only shape under which "one driver per
+/// plane" is a fact rather than an intention.
+pub type SessionQueue = tokio::sync::mpsc::Receiver<IncomingConnection>;
+
 /// Which protocols a transport accepts, and how each one is delivered.
 ///
 /// The split is not a preference. A framed protocol is one bounded message at a
@@ -276,6 +284,25 @@ pub trait Transport: Send + Sync {
     /// arrive.
     async fn accept_connection(&self) -> Option<IncomingConnection> {
         std::future::pending().await
+    }
+
+    /// Take this view's inbound queue for one session ALPN — once.
+    ///
+    /// [`accept_connection`](Transport::accept_connection) is one door for
+    /// every session protocol. That is right for one owner and wrong for two:
+    /// the door is a mutex over one receiver, so two parked drivers take
+    /// strictly alternating connections and each refuses half of what it was
+    /// handed. A transport that demultiplexes by ALPN gives each plane its own
+    /// queue instead.
+    ///
+    /// Handed over *once*. A second taker gets `None` rather than a second
+    /// handle on the same connections, so the mis-wiring this exists to prevent
+    /// is not expressible through it.
+    ///
+    /// The default is `None`: a transport with one undivided session door says
+    /// so, and its caller keeps using `accept_connection`.
+    fn take_session_queue(&self, _alpn: Alpn) -> Option<SessionQueue> {
+        None
     }
 
     /// Accept the next inbound direct connection (any registered ALPN). A

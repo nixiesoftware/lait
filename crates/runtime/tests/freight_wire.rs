@@ -165,7 +165,6 @@ async fn wire(tag: &str, plaintext: Vec<u8>) -> Wire {
             space: space.clone(),
             local_station: station(&PROVIDER_SEED),
             authority: Arc::new(Everyone),
-            transport: provider_transport.clone(),
             policy: PlanePolicy::default(),
             cancel: cancel.clone(),
             drain_deadline: runtime::lifecycle::DEFAULT_DRAIN_DEADLINE,
@@ -178,7 +177,25 @@ async fn wire(tag: &str, plaintext: Vec<u8>) -> Wire {
             space.clone(),
             u64::MAX,
         );
-        std::thread::spawn(move || run_driver(context, service))
+        // The hub splits inbound connections per plane in production; a test
+        // that talks to a bare transport does the same job with one pump, so
+        // the driver is exercised through the shape it actually has.
+        let (queue_tx, queue_rx) = tokio::sync::mpsc::channel(16);
+        let pump_transport = provider_transport.clone();
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("pump runtime");
+            rt.block_on(async move {
+                while let Some(incoming) = pump_transport.accept_connection().await {
+                    if queue_tx.send(incoming).await.is_err() {
+                        break;
+                    }
+                }
+            });
+        });
+        std::thread::spawn(move || run_driver(context, queue_rx, service))
     };
 
     let client = client_transport

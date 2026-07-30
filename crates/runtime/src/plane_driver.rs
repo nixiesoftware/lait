@@ -37,7 +37,6 @@ pub struct PlaneContext {
     pub space: SpaceId,
     pub local_station: StationId,
     pub authority: Arc<dyn AuthorityView>,
-    pub transport: Arc<dyn comms::Transport>,
     pub policy: PlanePolicy,
     pub cancel: CancelToken,
     /// The Station's own drain deadline.
@@ -87,7 +86,13 @@ pub trait PlaneService {
 }
 
 /// Run a plane driver until cancelled. Blocking; call it on its own thread.
-pub fn run_driver<S>(context: PlaneContext, service: S)
+///
+/// The queue is a parameter rather than a context field for two reasons. `drive`
+/// shares its context by `Rc` with every per-connection task and
+/// `mpsc::Receiver::recv` takes `&mut self`; and it is the honest shape — a
+/// driver owns one plane's inbound connections, not an endpoint. Everything a
+/// plane dials *out* on, it gets from elsewhere.
+pub fn run_driver<S>(context: PlaneContext, queue: comms::SessionQueue, service: S)
 where
     S: PlaneService + 'static,
 {
@@ -98,10 +103,10 @@ where
         return;
     };
     let local = tokio::task::LocalSet::new();
-    local.block_on(&runtime, drive(context, service));
+    local.block_on(&runtime, drive(context, queue, service));
 }
 
-async fn drive<S>(context: PlaneContext, service: S)
+async fn drive<S>(context: PlaneContext, mut queue: comms::SessionQueue, service: S)
 where
     S: PlaneService + 'static,
 {
@@ -127,7 +132,9 @@ where
         // even when nothing is arriving. A driver that only notices it should
         // stop when a peer happens to connect is a driver that does not stop.
         let accepted = tokio::select! {
-            incoming = context.transport.accept_connection() => incoming,
+            // `recv` is cancel-safe, so the poll below still drops this future
+            // between connections without losing one.
+            incoming = queue.recv() => incoming,
             _ = tokio::time::sleep(deadline::DRIVER_POLL) => {
                 // The poll exists so cancellation is never missed. Maintenance
                 // rides it on a much slower beat: sweeping on every 25 ms tick
@@ -187,6 +194,10 @@ where
         while connections.try_join_next().is_some() {}
     }
 
+    // Dropped before the drain. A dispatcher parked on a full lane learns
+    // immediately that nobody is reading and gives its peer a coarse close,
+    // rather than holding a pending-opener permit until it times out.
+    drop(queue);
     shut_down(&context, connections).await;
 }
 
