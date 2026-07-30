@@ -75,14 +75,22 @@ pub fn sanitize_display_name(raw: &str) -> String {
         return FALLBACK.to_string();
     }
 
+    // A device name is prefixed rather than returned, so the bounds below still
+    // apply to it. Returning here skipped both — and the prefix *adds* eleven
+    // bytes, so the one path that most needed truncating was the one that
+    // never got it.
     let stem_lower = cleaned
         .split('.')
         .next()
         .unwrap_or(cleaned)
         .to_ascii_lowercase();
-    if RESERVED.contains(&stem_lower.as_str()) {
-        return format!("{FALLBACK}-{cleaned}");
-    }
+    let prefixed;
+    let cleaned = if RESERVED.contains(&stem_lower.as_str()) {
+        prefixed = format!("{FALLBACK}-{cleaned}");
+        prefixed.as_str()
+    } else {
+        cleaned
+    };
 
     let truncated = truncate_preserving_extension(cleaned, MAX_DISPLAY_NAME_BYTES);
 
@@ -182,6 +190,28 @@ mod tests {
         for empty in ["", ".", "..", "   ", "///", "\u{7}"] {
             assert!(!sanitize_display_name(empty).is_empty(), "{empty:?}");
         }
+    }
+
+    #[test]
+    fn a_device_name_is_still_bounded_and_still_trimmed() {
+        // The reserved branch used to return early, before truncation and
+        // before the trailing-dot trim — so the one path that *added* eleven
+        // bytes was the only one that never got shortened. A peer naming an
+        // attachment `CON.` + 400 characters produced a 415-byte name, past
+        // every filesystem's component limit, and the write failed with
+        // ENAMETOOLONG rather than saving anything.
+        let hostile = format!("CON.{}", "a".repeat(400));
+        let safe = sanitize_display_name(&hostile);
+        assert!(
+            safe.len() <= MAX_DISPLAY_NAME_BYTES,
+            "a device name escaped the bound at {} bytes: {safe}",
+            safe.len()
+        );
+        assert!(safe.starts_with(FALLBACK));
+        // And the trailing dot, which Windows strips — the reason it is
+        // stripped here is that `evil.txt.` and `evil.txt` are one file and
+        // only one of them was looked at.
+        assert_eq!(sanitize_display_name("nul."), "attachment-nul");
     }
 
     #[test]

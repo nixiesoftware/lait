@@ -63,15 +63,15 @@ const MAX_RANGE_BYTES: u64 = runtime::content_host::MAX_RANGE_BYTES as u64;
 /// On `App` rather than per-request state because the ceiling is a property of
 /// this server, not of a handler.
 pub struct ContentStreamPermits {
-    transfers: tokio::sync::Semaphore,
-    uploads: tokio::sync::Semaphore,
+    transfers: Arc<tokio::sync::Semaphore>,
+    uploads: Arc<tokio::sync::Semaphore>,
 }
 
 impl ContentStreamPermits {
     pub fn new() -> Self {
         Self {
-            transfers: tokio::sync::Semaphore::new(MAX_CONCURRENT_TRANSFERS),
-            uploads: tokio::sync::Semaphore::new(MAX_CONCURRENT_UPLOADS),
+            transfers: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_TRANSFERS)),
+            uploads: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_UPLOADS)),
         }
     }
 }
@@ -81,19 +81,31 @@ impl ContentStreamPermits {
 /// `try_acquire` and never `acquire`: a queued request holds one of the
 /// browser's six connections while it waits, so waiting is how a slow transfer
 /// becomes a hung page.
-fn admit(
-    permits: &ContentStreamPermits,
-    upload: bool,
-) -> Result<
-    (
-        tokio::sync::SemaphorePermit<'_>,
-        Option<tokio::sync::SemaphorePermit<'_>>,
-    ),
-    Response,
-> {
-    let transfer = permits.transfers.try_acquire().map_err(|_| busy())?;
+///
+/// Owned permits, not borrowed ones. A download outlives the handler that
+/// started it — the body is fed by a task — so a permit tied to the handler's
+/// stack would be released the moment the response headers went out, and the
+/// ceiling would bound how many transfers *begin* rather than how many are
+/// running. Which is a bound on nothing.
+type Permits = (
+    tokio::sync::OwnedSemaphorePermit,
+    Option<tokio::sync::OwnedSemaphorePermit>,
+);
+
+fn admit(permits: &ContentStreamPermits, upload: bool) -> Result<Permits, Response> {
+    let transfer = permits
+        .transfers
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| busy())?;
     let write = if upload {
-        Some(permits.uploads.try_acquire().map_err(|_| busy())?)
+        Some(
+            permits
+                .uploads
+                .clone()
+                .try_acquire_owned()
+                .map_err(|_| busy())?,
+        )
     } else {
         None
     };
@@ -209,16 +221,27 @@ pub(super) async fn head(
     }
 }
 
-/// `GET /api/spaces/{id}/content/{content}` — one bounded range.
+/// `GET /api/spaces/{id}/content/{content}` — the file, or a range of it.
 ///
-/// Deliberately not a whole-file endpoint. The engine has no "read it all" call
-/// — a surface that offered one could not carry a large file — so this carries
-/// one range and the client loops, which is what a browser's own range requests
-/// do anyway.
+/// A bare GET answers the **whole** resource, streamed. It used to answer the
+/// first 4 MiB with a 200 and a matching `Content-Length`, which is HTTP's only
+/// way of saying "this is the entire thing" — so a browser saving a 30 MB video
+/// wrote 4 MiB of it, with no error, no warning, and no way to notice: the body
+/// was exactly as long as the header promised. The client that `Content-Disposition`
+/// exists for is precisely the one that cannot loop.
+///
+/// A `Range:` header gets `206` and a `Content-Range`, which is what a browser
+/// and every download manager already know how to resume. `Accept-Ranges` is
+/// advertised so they know to try.
+///
+/// The bytes are still never accumulated here: the response body is fed by a
+/// task looping `read_range`, so this process holds one range at a time
+/// whatever the file's size.
 pub(super) async fn download(
     State(app): State<Arc<App>>,
     Path((id, content)): Path<(String, String)>,
     Query(range): Query<RangeQuery>,
+    headers: HeaderMap,
 ) -> Response {
     let Some(home) = station(&app, &id, false) else {
         return not_found(&id);
@@ -227,48 +250,159 @@ pub(super) async fn download(
         Ok(home) => home,
         Err(response) => return response,
     };
-    let Ok((_transfer, _)) = admit(&app.content_permits, false) else {
+    let Ok((transfer, _)) = admit(&app.content_permits, false) else {
         return busy();
     };
 
-    let len = range.len.unwrap_or(MAX_RANGE_BYTES);
-    if len > MAX_RANGE_BYTES {
-        return refuse_content(
-            ContentErrorCode::Bounds,
-            &format!("one range may carry at most {MAX_RANGE_BYTES} bytes"),
-        );
-    }
-    let route = crate::control::station_route(home.address);
-    let answer = crate::control::content_call(
+    // How large is it? Asked first, because every answer below needs it — a
+    // `Content-Length` for the whole resource, the end of an open-ended range,
+    // and the `Content-Range` total.
+    let route = crate::control::station_route(home.address.clone());
+    let total = match crate::control::content_call(
         home.daemon_home.as_path(),
         &crate::control::content_request(
-            route,
-            ContentCall::Read {
-                content,
-                offset: range.offset.unwrap_or(0),
-                len,
+            route.clone(),
+            ContentCall::Stat {
+                content: content.clone(),
             },
         ),
     )
-    .await;
-    match answer {
-        Ok((ContentReply::ContentStream { .. }, bytes)) => {
-            let mut headers = HeaderMap::new();
-            headers.insert(header::CONTENT_LENGTH, number(bytes.len() as u64));
-            headers.insert(
-                header::CONTENT_DISPOSITION,
-                disposition(range.name.as_deref()),
-            );
-            harden(&mut headers);
-            (StatusCode::OK, headers, Body::from(bytes)).into_response()
+    .await
+    {
+        Ok((ContentReply::ContentStatus { plaintext_len, .. }, _)) => plaintext_len,
+        Ok((ContentReply::ContentError { code, message }, _)) => {
+            return refuse_content(code, &message)
         }
-        Ok((ContentReply::ContentError { code, message }, _)) => refuse_content(code, &message),
-        Ok((other, _)) => refuse_content(
-            ContentErrorCode::Storage,
-            &format!("unexpected answer: {other:?}"),
-        ),
-        Err(error) => unreachable(&format!("{error:#}")),
+        Ok((other, _)) => {
+            return refuse_content(
+                ContentErrorCode::Storage,
+                &format!("unexpected answer: {other:?}"),
+            )
+        }
+        Err(error) => return unreachable(&format!("{error:#}")),
+    };
+
+    // `?offset=`/`?len=` remain for a caller that wants one piece and knows it
+    // — the control-plane shape. A `Range:` header wins when both are present,
+    // because it is the one with agreed semantics.
+    let requested = parse_range(headers.get(header::RANGE), total).or_else(|| {
+        range.offset.or(range.len).map(|_| {
+            (
+                range.offset.unwrap_or(0),
+                range.len.unwrap_or(MAX_RANGE_BYTES),
+            )
+        })
+    });
+    let partial = requested.is_some();
+    let (start, wanted) = requested.unwrap_or((0, total));
+    if start > total {
+        return refuse_content(
+            ContentErrorCode::Bounds,
+            &format!("offset {start} is past the end of a {total}-byte content"),
+        );
     }
+    let length = wanted.min(total.saturating_sub(start));
+
+    let mut response_headers = HeaderMap::new();
+    response_headers.insert(header::CONTENT_LENGTH, number(length));
+    response_headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+    response_headers.insert(
+        header::CONTENT_DISPOSITION,
+        disposition(range.name.as_deref()),
+    );
+    if partial {
+        let last = start + length.saturating_sub(1);
+        response_headers.insert(
+            header::CONTENT_RANGE,
+            HeaderValue::from_str(&format!("bytes {start}-{last}/{total}"))
+                .unwrap_or(HeaderValue::from_static("bytes */*")),
+        );
+    }
+    harden(&mut response_headers);
+
+    // One range in flight at a time, fed to the body as it arrives. The permit
+    // rides the task rather than this function, because the transfer outlives
+    // the handler that started it.
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<axum::body::Bytes, std::io::Error>>(2);
+    let home_path = home.daemon_home.clone();
+    tokio::spawn(async move {
+        let _transfer = transfer;
+        let mut at = start;
+        let mut left = length;
+        while left > 0 {
+            let want = left.min(MAX_RANGE_BYTES);
+            let answer = crate::control::content_call(
+                home_path.as_path(),
+                &crate::control::content_request(
+                    route.clone(),
+                    ContentCall::Read {
+                        content: content.clone(),
+                        offset: at,
+                        len: want,
+                    },
+                ),
+            )
+            .await;
+            let piece = match answer {
+                Ok((ContentReply::ContentStream { .. }, bytes)) if !bytes.is_empty() => bytes,
+                // Anything else mid-stream is a truncated file, and the only
+                // honest report is to end the body short — the status line was
+                // spent before the first byte.
+                _ => {
+                    let _ = tx
+                        .send(Err(std::io::Error::other("the content ended early")))
+                        .await;
+                    return;
+                }
+            };
+            at += piece.len() as u64;
+            left = left.saturating_sub(piece.len() as u64);
+            if tx.send(Ok(piece.into())).await.is_err() {
+                return;
+            }
+        }
+    });
+
+    let status = if partial {
+        StatusCode::PARTIAL_CONTENT
+    } else {
+        StatusCode::OK
+    };
+    (
+        status,
+        response_headers,
+        Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(rx)),
+    )
+        .into_response()
+}
+
+/// Parse a single-range `Range: bytes=…` header.
+///
+/// One range only. Multi-range replies are a multipart body, and a surface
+/// whose whole job is handing a file to a browser has no use for one — a client
+/// that asks for several gets the whole resource instead, which is what the
+/// specification permits and what every browser copes with.
+fn parse_range(value: Option<&HeaderValue>, total: u64) -> Option<(u64, u64)> {
+    let raw = value?.to_str().ok()?;
+    let spec = raw.strip_prefix("bytes=")?.trim();
+    if spec.contains(',') {
+        return None;
+    }
+    let (first, last) = spec.split_once('-')?;
+    if first.is_empty() {
+        // `bytes=-N` — the final N bytes.
+        let suffix: u64 = last.parse().ok()?;
+        let suffix = suffix.min(total);
+        return Some((total - suffix, suffix));
+    }
+    let start: u64 = first.parse().ok()?;
+    let length = if last.is_empty() {
+        total.saturating_sub(start)
+    } else {
+        let end: u64 = last.parse().ok()?;
+        end.saturating_sub(start).saturating_add(1)
+    };
+    Some((start, length))
 }
 
 /// `POST /api/spaces/{id}/content?len=N` — a streaming upload.
@@ -709,7 +843,8 @@ mod end_to_end {
                 ))
                 .await
                 .expect("download");
-            assert_eq!(response.status(), StatusCode::OK);
+            // An explicit offset/len is a partial request, and says so.
+            assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
             let disposition = response.headers()[header::CONTENT_DISPOSITION]
                 .to_str()
                 .unwrap()
@@ -726,6 +861,63 @@ mod end_to_end {
             blake3::hash(&plaintext),
             "the round trip lost or reordered bytes"
         );
+
+        // A bare GET is the whole file, not the first slice of it.
+        //
+        // This used to answer 200 with a Content-Length of 4 MiB — HTTP's only
+        // way of saying "this is all of it" — so a browser saving a large file
+        // wrote a truncated one with no error and no way to notice, because the
+        // body was exactly as long as the header promised. The client that
+        // Content-Disposition exists for is the one that cannot loop.
+        let whole = router(app.clone())
+            .oneshot(authorized(
+                "GET",
+                &format!("/api/spaces/{orbit}/content/{content}?name=notes.txt"),
+                Body::empty(),
+            ))
+            .await
+            .expect("download");
+        assert_eq!(whole.status(), StatusCode::OK);
+        assert_eq!(
+            whole.headers()[header::CONTENT_LENGTH],
+            plaintext.len().to_string(),
+            "a bare GET must declare the whole length"
+        );
+        assert_eq!(whole.headers()[header::ACCEPT_RANGES], "bytes");
+        let body = axum::body::to_bytes(whole.into_body(), 8 << 20)
+            .await
+            .expect("body");
+        assert_eq!(
+            blake3::hash(&body),
+            blake3::hash(&plaintext),
+            "a bare GET returned a truncated file"
+        );
+
+        // And a Range gets 206 with a Content-Range, which is what a browser
+        // and every download manager already know how to resume.
+        let ranged = router(app.clone())
+            .oneshot({
+                let mut request = authorized(
+                    "GET",
+                    &format!("/api/spaces/{orbit}/content/{content}"),
+                    Body::empty(),
+                );
+                request
+                    .headers_mut()
+                    .insert(header::RANGE, "bytes=100-199".parse().unwrap());
+                request
+            })
+            .await
+            .expect("ranged download");
+        assert_eq!(ranged.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(
+            ranged.headers()[header::CONTENT_RANGE],
+            format!("bytes 100-199/{}", plaintext.len())
+        );
+        let piece = axum::body::to_bytes(ranged.into_body(), 1 << 20)
+            .await
+            .expect("body");
+        assert_eq!(&piece[..], &plaintext[100..200]);
 
         // A content id nobody has heard of is a 404, and it says nothing about
         // whether it exists anywhere else.

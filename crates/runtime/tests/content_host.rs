@@ -853,3 +853,45 @@ fn an_ingest_holds_its_content_until_something_declares_it() {
         vec![content]
     );
 }
+
+#[test]
+fn a_zero_length_read_is_an_empty_answer_and_not_an_underflow() {
+    // A span of nothing has no last chunk. Without the guard, `end - 1`
+    // underflows: a panic under overflow-checks, and in release a `last` of
+    // u32::MAX that walks the whole chunk space and reports a fully resident
+    // content as NotResident.
+    //
+    // Answered rather than refused, because asking for zero bytes is a legal
+    // thing to do — a loop whose remaining length has reached zero asks exactly
+    // this, and every caller of a ranged read eventually has one.
+    let fx = fixture("zero-span");
+    let space = space();
+    let auth = Authorizer::default();
+    let check = |a| auth.check(a);
+    let policy = policy(&space, &check);
+    let signer = replica::SeedSigner(&WRITER_SEED);
+    let content = fx
+        .host
+        .ingest(
+            &policy,
+            [8u8; 16],
+            &mut std::io::Cursor::new(filler(8, 4096)),
+            &commit_ctx(&signer, &space),
+        )
+        .expect("ingest");
+
+    assert_eq!(
+        fx.host.read_range(&policy, &content, 0, 0).unwrap(),
+        Vec::<u8>::new(),
+        "zero bytes from the start"
+    );
+    assert_eq!(
+        fx.host.read_range(&policy, &content, 100, 0).unwrap(),
+        Vec::<u8>::new(),
+        "zero bytes from the middle"
+    );
+    // And it costs nothing to answer: a span of nothing asks about no chunks.
+    let before = fx.host.cache().residency_probes();
+    let _ = fx.host.read_range(&policy, &content, 0, 0).unwrap();
+    assert_eq!(fx.host.cache().residency_probes(), before);
+}

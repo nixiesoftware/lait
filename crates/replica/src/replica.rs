@@ -1413,8 +1413,12 @@ impl Replica {
         retained
     }
 
-    /// Drop every content descriptor no live Body declares, and release the
-    /// residency behind it.
+    /// Drop every content descriptor nothing keeps, and release the residency
+    /// behind it.
+    ///
+    /// "Nothing keeps" is wider than "no live Body declares": content under an
+    /// unexpired hold is retained too, because an upload waiting for the Body
+    /// that will name it is not garbage yet. See [`Self::retained_content`].
     ///
     /// Reachability is **derived, never maintained**: no reference count is
     /// stored, because counts do not converge across independently committing
@@ -2923,10 +2927,17 @@ impl Replica {
     /// the Merkle root that only the descriptor carries. Advertising the first
     /// without the second converges an attachment as an opaque id.
     ///
-    /// Only *reachable* descriptors are advertised — the same set
-    /// [`Self::sweep_unreferenced_content`] would keep. A descriptor no live
-    /// Body declares is this Station's own garbage awaiting a sweep, and
-    /// pushing it at a peer would make their catalog grow from ours.
+    /// Only *reachable* descriptors are advertised: those some live Body
+    /// declares. A descriptor no live Body declares is this Station's own
+    /// business, and pushing it at a peer would grow their catalog from ours.
+    ///
+    /// Deliberately **narrower** than what the sweep keeps. The sweep also
+    /// spares content under a live pending-declaration hold — an upload whose
+    /// Body has not been committed yet — and that content is exactly what a
+    /// peer has no use for: no Body names it, so nothing on their side would
+    /// ever reference it, and their own sweep would have to undo the adoption.
+    /// "May I delete this" and "may I show this to a peer" are two questions,
+    /// and [`Self::retained_content`] answers the first.
     ///
     /// Shipping the whole index is what F4 replaces: two peers will compare
     /// roots, descend only where subtree hashes differ, and exchange divergent

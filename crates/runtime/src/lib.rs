@@ -47,6 +47,7 @@ pub mod lifecycle;
 pub mod neighbor_presence;
 pub mod neighbors;
 pub mod plane_driver;
+pub mod plane_stream;
 pub mod planes;
 pub mod registry;
 pub mod session;

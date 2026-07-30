@@ -41,31 +41,26 @@ const FRAME_PREFIX: usize = 4;
 
 /// Encode one frame with its length prefix, refusing rather than overflowing.
 pub fn frame(message: &FreightFrame) -> Vec<u8> {
-    let body = message.encode_bounded();
-    let mut out = Vec::with_capacity(FRAME_PREFIX + body.len());
-    out.extend_from_slice(&(body.len() as u32).to_le_bytes());
-    out.extend_from_slice(&body);
-    out
+    crate::plane_stream::frame(&message.encode_bounded())
 }
 
 /// Read one length-prefixed frame, bounded before anything is allocated.
+///
+/// The framing itself lives in `plane_stream` now, because Live needs the same
+/// one and a second copy would be a second place for "refused by the declared
+/// length, before a buffer that size exists" to be got subtly wrong. Freight
+/// keeps its own error vocabulary — these are local diagnostics and none of
+/// them reaches a peer.
 pub async fn read_frame(
     flow: &mut dyn comms::RecvFlow,
     max: usize,
 ) -> Result<FreightFrame, FreightError> {
-    let header = flow
-        .read_exact(FRAME_PREFIX)
+    let body = crate::plane_stream::read_framed(flow, max)
         .await
-        .map_err(|_| FreightError::Truncated)?;
-    let len = u32::from_le_bytes(header.try_into().expect("four bytes")) as usize;
-    if len > max.min(bounds::MAX_CONTROL_FRAME_BYTES) {
-        // Refused by the *declared* length, before a buffer that size exists.
-        return Err(FreightError::TooLarge);
-    }
-    let body = flow
-        .read_exact(len)
-        .await
-        .map_err(|_| FreightError::Truncated)?;
+        .map_err(|error| match error {
+            crate::plane_stream::StreamError::TooLarge => FreightError::TooLarge,
+            _ => FreightError::Truncated,
+        })?;
     FreightFrame::decode_canonical(&body).map_err(|_| FreightError::Malformed)
 }
 

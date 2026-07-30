@@ -300,15 +300,26 @@ impl LaitDaemon {
                 }
             }
             ContentPlacement::Attached { home } => {
-                if let Err(error) = proxy_content(&home, reader, &mut write_half, &request).await {
-                    let _ = write_line(
-                        &mut write_half,
-                        &control::ContentReply::error(
-                            control::ContentErrorCode::Storage,
-                            format!("{error:#}"),
-                        ),
-                    )
-                    .await;
+                match proxy_content(&home, reader, &mut write_half, &request).await {
+                    Ok(()) => {}
+                    // Only before the answer's header has been forwarded. Once
+                    // the client has been told how many bytes follow, it is
+                    // inside `read_exact` for exactly that many — so a JSON
+                    // error appended here is not an error message, it is the
+                    // first bytes of the file, and the client cannot tell.
+                    // After the header, the only honest report is the truncated
+                    // stream itself.
+                    Err(ProxyFailure::BeforeHeader(error)) => {
+                        let _ = write_line(
+                            &mut write_half,
+                            &control::ContentReply::error(
+                                control::ContentErrorCode::Storage,
+                                error,
+                            ),
+                        )
+                        .await;
+                    }
+                    Err(ProxyFailure::AfterHeader) => {}
                 }
             }
         }
@@ -665,6 +676,17 @@ async fn shutdown_signal() {
     ctrl_c.await;
 }
 
+/// Where a proxied exchange broke, which decides whether anything may still be
+/// said about it.
+enum ProxyFailure {
+    /// Nothing has reached the client yet, so a typed refusal is still a
+    /// refusal.
+    BeforeHeader(String),
+    /// The client has already been told how many bytes follow. Anything written
+    /// now *is* those bytes.
+    AfterHeader,
+}
+
 /// Forward one content call to the attached process that owns the Station, and
 /// its answer back.
 ///
@@ -673,24 +695,41 @@ async fn shutdown_signal() {
 /// control-frame bound, and the answer's body is exactly as long as that header
 /// declared. Nothing here decodes the content — the router is not a party to
 /// what the bytes are.
+///
+/// The failure type carries *when* rather than only *what*, because after the
+/// header has been forwarded there is nothing safe to say. The client is inside
+/// `read_exact` for the declared length; a JSON error appended there is not an
+/// error message, it is the first bytes of the file, and nothing on the far side
+/// can tell the difference.
 async fn proxy_content(
     home: &std::path::Path,
     mut reader: BufReader<tokio::io::ReadHalf<LocalStream>>,
     write_half: &mut tokio::io::WriteHalf<LocalStream>,
     request: &control::ContentClientRequest,
-) -> anyhow::Result<()> {
-    use anyhow::Context;
+) -> Result<(), ProxyFailure> {
     use tokio::io::AsyncReadExt;
 
-    let name = control::control_name(home)?;
+    fn before(what: &str) -> impl Fn(String) -> ProxyFailure + '_ {
+        move |e| ProxyFailure::BeforeHeader(format!("{what}: {e}"))
+    }
+
+    let name =
+        control::control_name(home).map_err(|e| ProxyFailure::BeforeHeader(format!("{e:#}")))?;
     let upstream = LocalStream::connect(name)
         .await
-        .context("connect to the attached Space process")?;
+        .map_err(|e| before("connect to the attached Space process")(e.to_string()))?;
     let (upstream_read, mut upstream_write) = tokio::io::split(upstream);
-    let mut header = serde_json::to_string(request).context("encode content request")?;
+    let mut header = serde_json::to_string(request)
+        .map_err(|e| before("encode content request")(e.to_string()))?;
     header.push('\n');
-    upstream_write.write_all(header.as_bytes()).await?;
-    upstream_write.flush().await?;
+    upstream_write
+        .write_all(header.as_bytes())
+        .await
+        .map_err(|e| before("write content request")(e.to_string()))?;
+    upstream_write
+        .flush()
+        .await
+        .map_err(|e| before("write content request")(e.to_string()))?;
 
     let mut left = request.body_len;
     let mut piece = vec![0u8; PROXY_PIECE_BYTES];
@@ -699,11 +738,17 @@ async fn proxy_content(
         reader
             .read_exact(&mut piece[..want])
             .await
-            .context("read content body")?;
-        upstream_write.write_all(&piece[..want]).await?;
+            .map_err(|e| before("read content body")(e.to_string()))?;
+        upstream_write
+            .write_all(&piece[..want])
+            .await
+            .map_err(|e| before("forward content body")(e.to_string()))?;
         left -= want as u64;
     }
-    upstream_write.flush().await?;
+    upstream_write
+        .flush()
+        .await
+        .map_err(|e| before("forward content body")(e.to_string()))?;
 
     let mut upstream = BufReader::new(upstream_read);
     let mut line = String::new();
@@ -712,27 +757,48 @@ async fn proxy_content(
         bounded
             .read_line(&mut line)
             .await
-            .context("read the attached process's answer")?;
+            .map_err(|e| before("read the attached answer")(e.to_string()))?;
     }
     if line.trim().is_empty() {
-        anyhow::bail!("the attached Space process closed without answering");
+        return Err(ProxyFailure::BeforeHeader(
+            "the attached Space process closed without answering".into(),
+        ));
     }
-    write_half.write_all(line.as_bytes()).await?;
-    let reply: control::ContentReply =
-        serde_json::from_str(line.trim()).context("decode content reply")?;
+    let reply: control::ContentReply = serde_json::from_str(line.trim())
+        .map_err(|e| before("decode the attached answer")(e.to_string()))?;
+    // Everything that could be checked about the answer is checked *before* the
+    // header goes out, so that a bad answer is still a refusal rather than a
+    // truncated file.
     if let control::ContentReply::ContentStream { len } = reply {
         if len > runtime::content_host::MAX_RANGE_BYTES as u64 {
-            anyhow::bail!("the attached Space process offered an answer past the range bound");
+            return Err(ProxyFailure::BeforeHeader(
+                "the attached Space process offered an answer past the range bound".into(),
+            ));
         }
+    }
+    write_half
+        .write_all(line.as_bytes())
+        .await
+        .map_err(|e| before("write the answer")(e.to_string()))?;
+
+    // Past this point the client is counting bytes, so every failure is silent
+    // by necessity: the connection ends and the short read is the report.
+    if let control::ContentReply::ContentStream { len } = reply {
         let mut left = len;
         while left > 0 {
             let want = left.min(PROXY_PIECE_BYTES as u64) as usize;
-            upstream.read_exact(&mut piece[..want]).await?;
-            write_half.write_all(&piece[..want]).await?;
+            if upstream.read_exact(&mut piece[..want]).await.is_err() {
+                return Err(ProxyFailure::AfterHeader);
+            }
+            if write_half.write_all(&piece[..want]).await.is_err() {
+                return Err(ProxyFailure::AfterHeader);
+            }
             left -= want as u64;
         }
     }
-    write_half.flush().await?;
+    if write_half.flush().await.is_err() {
+        return Err(ProxyFailure::AfterHeader);
+    }
     Ok(())
 }
 

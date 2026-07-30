@@ -345,6 +345,17 @@ impl ContentHost {
         // work thrown away, and on a streaming surface a status line already
         // sent. Deciding first makes `NotResident` arrive before the first byte
         // is produced.
+        // A zero-length read spans nothing, and "nothing" has no last chunk.
+        // Without this, `end - 1` underflows: a panic under `overflow-checks`
+        // and, in release, a `last` of `u32::MAX` that walks the whole chunk
+        // space and reports a fully resident content as `NotResident`.
+        //
+        // Answered as an empty read rather than refused, because asking for
+        // zero bytes is a legal thing for a caller to do — a loop whose
+        // remaining length has reached zero asks exactly this.
+        if end <= offset {
+            return Ok(Vec::new());
+        }
         let first = (offset / chunk_len) as u32;
         let last = ((end - 1) / chunk_len) as u32;
         let mut spanned = Vec::with_capacity((last - first + 1) as usize);
