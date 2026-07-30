@@ -2032,8 +2032,15 @@ impl SpaceBridge {
         let (read_half, write_half) = tokio::io::split(stream);
         let mut reader = BufReader::new(read_half);
         let mut line = String::new();
-        if reader.read_line(&mut line).await.is_err() {
-            return;
+        {
+            // Bounded for the same reason the daemon's is: a header is a
+            // bounded thing, and an unbounded `read_line` is a memory attack
+            // that needs no authorization.
+            use tokio::io::AsyncReadExt;
+            let mut bounded = (&mut reader).take(crate::control::MAX_CONTROL_LINE_BYTES);
+            if bounded.read_line(&mut line).await.is_err() {
+                return;
+            }
         }
         let value = match serde_json::from_str::<serde_json::Value>(line.trim()) {
             Ok(value) => value,

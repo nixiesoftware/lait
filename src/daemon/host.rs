@@ -260,6 +260,7 @@ impl LaitDaemon {
                 let expects_body = matches!(request.content, control::ContentCall::Write { .. });
                 let (body, pump) = control::upload_body(reader, request.body_len);
                 let call = request.content.clone();
+                let mut stopping = self.stopping.subscribe();
                 let work = tokio::task::spawn_blocking(move || {
                     bridge.content_call(&address, &call, expects_body.then_some(body))
                 });
@@ -273,6 +274,23 @@ impl LaitDaemon {
                         Vec::new(),
                     )
                 });
+                // A stop that landed mid-transfer is reported rather than
+                // answered. The drain that follows is bounded and hard-fails if
+                // a connection outlives it, so a caller reading "written" from
+                // a daemon that is going away is the worse of the two answers.
+                if *stopping.borrow_and_update()
+                    && !matches!(reply, control::ContentReply::ContentError { .. })
+                {
+                    let _ = write_line(
+                        &mut write_half,
+                        &control::ContentReply::error(
+                            control::ContentErrorCode::Storage,
+                            "this daemon is shutting down",
+                        ),
+                    )
+                    .await;
+                    return;
+                }
                 if write_line(&mut write_half, &reply).await.is_err() {
                     return;
                 }
@@ -297,11 +315,20 @@ impl LaitDaemon {
     }
 
     async fn handle_conn(self: Arc<Self>, stream: LocalStream) {
+        use tokio::io::AsyncReadExt;
+
         let (read_half, mut write_half) = tokio::io::split(stream);
         let mut reader = BufReader::new(read_half);
         let mut line = String::new();
-        if reader.read_line(&mut line).await.is_err() {
-            return;
+        {
+            // Bounded, because a request header is a bounded thing. An
+            // unbounded `read_line` grows until it finds a newline or the
+            // sender stops, so a client that opens the socket and sends no
+            // newline is a memory attack that needs no authorization.
+            let mut bounded = (&mut reader).take(control::MAX_CONTROL_LINE_BYTES);
+            if bounded.read_line(&mut line).await.is_err() {
+                return;
+            }
         }
         let value = match serde_json::from_str::<serde_json::Value>(line.trim()) {
             Ok(value) => value,

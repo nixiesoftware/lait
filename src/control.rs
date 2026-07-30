@@ -488,15 +488,30 @@ fn is_false(value: &bool) -> bool {
     !value
 }
 
-/// The longest header line this build will read on the control channel.
+/// The longest **content** header line this build will read.
 ///
-/// A header is a JSON object naming a call and, for content, a byte count — so
-/// a bounded thing. Nothing else on this channel bounded its lines at all: an
-/// `AsyncBufReadExt::read_line` grows until it finds a newline or the sender
-/// stops, which makes a peer that never sends one a memory attack that needs no
-/// authorization. The content envelope reads through this bound, and the body
-/// it declares is bounded separately by the Station's own `max_content_len`.
+/// A content header is a JSON object naming a call and a byte count, and
+/// nothing else — the bytes travel after it, not inside it. So this is small on
+/// purpose, and the body it declares is bounded separately by the Station's own
+/// `max_content_len`.
 pub const MAX_CONTROL_FRAME_BYTES: u64 = 64 * 1024;
+
+/// The longest **request** line this build will read on the control channel.
+///
+/// Nothing bounded these at all: `AsyncBufReadExt::read_line` grows until it
+/// finds a newline or the sender stops, so a client that opens the socket and
+/// sends no newline was a memory attack that needed no authorization.
+///
+/// It is this much larger than [`MAX_CONTROL_FRAME_BYTES`] because an ordinary
+/// request still carries its whole payload inline, and the largest legitimate
+/// one today is an attachment: 256 KiB of bytes is about 342 KB of base64 plus
+/// an envelope. That is the number this bound is sized against, and it is the
+/// reason the bound is generous rather than tight — a limit that refuses
+/// something the product still does is not a limit, it is a bug.
+///
+/// It shrinks toward the frame bound when the inline attachment write path goes
+/// away and the only large thing on this channel is a declared body.
+pub const MAX_CONTROL_LINE_BYTES: u64 = 4 * 1024 * 1024;
 
 /// One call on the content plane.
 ///

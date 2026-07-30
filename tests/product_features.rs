@@ -677,6 +677,53 @@ fn milestones_cycles_initiatives_teams_triage_delete_and_attachments() {
         matches!(&resp, IssueResponse::Error { message, .. } if message.contains("KiB")),
         "oversize must refuse: {resp:?}"
     );
+    // A name a peer could have chosen. The engine takes it — separators are
+    // legal in a display name, and refusing them here would protect nothing:
+    // a Body arriving through convergence never passes local intake at all.
+    // What must hold is that saving it lands beside us.
+    ok(
+        &client,
+        &home,
+        issues_app::IssuesRequest::Attach {
+            reff: issue.clone(),
+            name: "../../evil.txt".into(),
+            mime: None,
+            data_b64: data_encoding::BASE64.encode(b"not yours to place"),
+            comment: None,
+        },
+    );
+    let IssueResponse::Issue(view) = ok(
+        &client,
+        &home,
+        issues_app::IssuesRequest::IssueView {
+            reff: issue.clone(),
+        },
+    ) else {
+        panic!("expected Issue");
+    };
+    let hostile = view
+        .attachments
+        .iter()
+        .find(|a| a.name == "../../evil.txt")
+        .expect("the name is stored as authored — it is product data");
+    let saved = world_interface::destination::sanitize_display_name(&hostile.name);
+    let path = std::path::Path::new(&saved);
+    assert_eq!(
+        path.components().count(),
+        1,
+        "{:?} would be saved as {saved:?}, which is more than one component",
+        hostile.name
+    );
+    assert!(path.is_relative(), "{saved:?}");
+    ok(
+        &client,
+        &home,
+        issues_app::IssuesRequest::Detach {
+            reff: issue.clone(),
+            id: hostile.id.clone(),
+        },
+    );
+
     ok(
         &client,
         &home,
