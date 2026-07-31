@@ -1023,6 +1023,17 @@ impl Station {
     }
 
     /// The current committed Replica frontier (advances as Sessions submit).
+    /// Where this Station's durable state lives.
+    ///
+    /// Exposed because "nothing was written" is a claim that has to be
+    /// checkable, and the only honest way to check it is to look at the bytes.
+    /// A frontier can be unchanged across a commit that wrote and then swept,
+    /// so a test asserting non-durability against the frontier alone is
+    /// asserting less than it thinks.
+    pub fn store_dir(&self) -> &std::path::Path {
+        self.store.dir()
+    }
+
     pub fn frontier(&self) -> replica::frontier::ReplicaFrontier {
         self.core.frontier()
     }

@@ -168,3 +168,430 @@ fn the_gate_can_see_what_it_claims_to_see() {
     "#;
     assert!(offenders(clean).is_empty());
 }
+
+/// The same property, proved by running rather than by parsing.
+///
+/// The gate above says signal code *cannot reach* the Replica writer. This says
+/// the running system *does not write*. Both are needed, and the second catches
+/// what the first cannot: a handler that reaches the Replica indirectly, through
+/// a World `submit` several calls away, on a path the parser reads as ordinary.
+/// The parser sees nothing; the store fingerprint sees `journal/` change.
+mod behaviour {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use mechanics::crypto::AuthorizedBodyKey;
+    use mechanics::ids::{ActorId, DeviceId, StationId};
+    use replica::body::{BodyOp, BodySchema, MutationModel};
+    use replica::frontier::{AuthorityFrontier, ReplicaFrontier};
+    use replica::ids::{BodyId, BodyKey, EncodingId, SchemaId, WorldId};
+    use runtime::planes::Signal;
+    use runtime::signal::DeliveredSignal;
+    use runtime::{
+        ActivationOptions, LocalIdentity, RequestId, Runtime, RuntimeBuilder, Session,
+        SpaceFormationOptions, Station, World, WorldContext, WorldEffect, WorldError, WorldIntent,
+        WorldLimits, WorldProjection, WorldQuery, WorldRegistration, WorldVersion,
+    };
+
+    const WRITER_SEED: [u8; 32] = [55u8; 32];
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    fn temp_root() -> std::path::PathBuf {
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!("lait-sig-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn demand() -> Vec<u8> {
+        mechanics::demand::AuthorizationDemand::require(
+            mechanics::demand::PolicyCapability::new("w", "c"),
+            mechanics::demand::PolicyResource::space("w"),
+        )
+        .encode_canonical()
+        .expect("canonical demand")
+    }
+
+    struct KvWorld {
+        id: WorldId,
+        schemas: Vec<BodySchema>,
+    }
+
+    impl KvWorld {
+        fn new() -> Self {
+            Self {
+                id: WorldId::parse("dev.example.kv").unwrap(),
+                schemas: vec![BodySchema {
+                    id: SchemaId::parse("entry").unwrap(),
+                    version: 1,
+                    encoding: EncodingId::parse("bytes").unwrap(),
+                    mutation: MutationModel::Atomic,
+                    readable_predecessors: vec![],
+                }],
+            }
+        }
+        fn body(&self, key: &str) -> BodyKey {
+            let mut raw = [0u8; 16];
+            let k = key.as_bytes();
+            raw[..k.len().min(16)].copy_from_slice(&k[..k.len().min(16)]);
+            BodyKey::new(self.id.clone(), BodyId::from_bytes(raw))
+        }
+    }
+
+    impl World for KvWorld {
+        fn id(&self) -> WorldId {
+            self.id.clone()
+        }
+        fn schemas(&self) -> &[BodySchema] {
+            &self.schemas
+        }
+        fn submit(
+            &self,
+            _ctx: &mut WorldContext<'_>,
+            intent: WorldIntent,
+        ) -> Result<WorldEffect, WorldError> {
+            let text = String::from_utf8(intent.payload).map_err(|_| WorldError::InvalidRequest)?;
+            let (key, value) = text.split_once('=').ok_or(WorldError::InvalidRequest)?;
+            let body = self.body(key);
+            Ok(WorldEffect {
+                content_refs: Vec::new(),
+                demand: demand(),
+                operations: vec![(
+                    body.clone(),
+                    BodyOp::ReplaceAtomic {
+                        value: value.as_bytes().to_vec(),
+                    },
+                )],
+                scopes: vec![body],
+                effect: vec![],
+                declarations: vec![],
+            })
+        }
+        fn query(
+            &self,
+            ctx: &WorldContext<'_>,
+            query: WorldQuery,
+        ) -> Result<WorldProjection, WorldError> {
+            let key = String::from_utf8(query.payload).map_err(|_| WorldError::InvalidRequest)?;
+            Ok(WorldProjection {
+                demand: demand(),
+                schema: SchemaId::parse("entry").unwrap(),
+                schema_version: 1,
+                bytes: ctx.read_body(&self.body(&key)).unwrap_or_default(),
+                frontier: ReplicaFrontier::EMPTY,
+            })
+        }
+    }
+
+    struct Permissive;
+    impl runtime::AuthorityView for Permissive {
+        fn resolve(&self, _device: &DeviceId) -> Option<runtime::PrincipalResolution> {
+            Some(runtime::PrincipalResolution {
+                actor: ActorId::from_incept_hash(&"e".repeat(64)),
+                authority_frontier: AuthorityFrontier::from_canonical_bytes(vec![5]),
+            })
+        }
+    }
+
+    fn runtime_at(root: &std::path::Path) -> Runtime {
+        let world = KvWorld::new();
+        let registration = WorldRegistration {
+            id: world.id(),
+            implementation_version: WorldVersion(1),
+            schemas: world.schemas().to_vec(),
+            limits: WorldLimits::default(),
+            scope_schemas: Vec::new(),
+            signal_schemas: Vec::new(),
+        };
+        let registry = RuntimeBuilder::new()
+            .register(registration, Arc::new(world))
+            .build()
+            .unwrap();
+        Runtime::open(
+            root.to_path_buf(),
+            registry,
+            Arc::new(Permissive),
+            Arc::new(replica::StaticBodyKeys::new(
+                AuthorizedBodyKey::for_authorized_epoch([17u8; 16], [18u8; 32]),
+            )),
+        )
+    }
+
+    fn station_at(root: &std::path::Path) -> Station {
+        runtime_at(root)
+            .form_space(SpaceFormationOptions::default())
+            .unwrap()
+            .activate(options())
+            .unwrap()
+    }
+
+    fn options() -> ActivationOptions {
+        ActivationOptions {
+            planes: Default::default(),
+            content: Default::default(),
+            drain_deadline: Duration::from_secs(5),
+            comms: None,
+            observation_capacity: 0,
+        }
+    }
+
+    fn dock(station: &Station) -> (Session, LocalIdentity) {
+        let world = WorldId::parse("dev.example.kv").unwrap();
+        let writer = Runtime::identity_from_seed(&WRITER_SEED);
+        let session = station.dock(&world, &writer).unwrap();
+        (session, writer)
+    }
+
+    /// Every byte under the store directory, as one digest.
+    ///
+    /// Not a journal commit count: `commits_since_sweep` is private with no
+    /// accessor, and this catches strictly more anyway. A frontier can be
+    /// unchanged across a commit that wrote and then swept — the bytes cannot.
+    fn fingerprint(dir: &std::path::Path) -> [u8; 32] {
+        let mut files: Vec<(String, Vec<u8>)> = Vec::new();
+        fn walk(dir: &std::path::Path, base: &std::path::Path, out: &mut Vec<(String, Vec<u8>)>) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, base, out);
+                } else if let Ok(bytes) = std::fs::read(&path) {
+                    let name = path
+                        .strip_prefix(base)
+                        .unwrap_or(&path)
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    out.push((name, bytes));
+                }
+            }
+        }
+        walk(dir, dir, &mut files);
+        // Sorted, because directory order is a filesystem's business and two
+        // identical stores must fingerprint identically.
+        files.sort();
+        let mut hasher = blake3::Hasher::new();
+        for (name, bytes) in files {
+            hasher.update(&(name.len() as u64).to_le_bytes());
+            hasher.update(name.as_bytes());
+            hasher.update(&(bytes.len() as u64).to_le_bytes());
+            hasher.update(&bytes);
+        }
+        *hasher.finalize().as_bytes()
+    }
+
+    /// The subtrees a signal would have to touch to be durable.
+    ///
+    /// `journal/` and `objects/` and nothing else. The store also holds a
+    /// `counter` that activation increments on purpose, and a `content-cache/`
+    /// that is not durable material — a comparison spanning either would fail
+    /// across a restart for reasons that have nothing to do with signals.
+    fn durable_fingerprint(dir: &std::path::Path) -> [u8; 32] {
+        let mut hasher = blake3::Hasher::new();
+        for name in ["journal", "objects"] {
+            hasher.update(name.as_bytes());
+            hasher.update(&fingerprint(&dir.join(name)));
+        }
+        *hasher.finalize().as_bytes()
+    }
+
+    /// What a durable write moves.
+    #[derive(Debug, PartialEq, Eq)]
+    struct Observables {
+        frontier: ReplicaFrontier,
+        store: [u8; 32],
+    }
+
+    fn snapshot(station: &Station) -> Observables {
+        Observables {
+            frontier: station.frontier(),
+            store: fingerprint(station.store_dir()),
+        }
+    }
+
+    /// How many records arrived on an already-open stream.
+    ///
+    /// One stream, held across the whole test, and never a fresh
+    /// `observe(None)` per measurement. A fresh stream yields exactly one reset
+    /// record and then waits for live delivery, so counting a fresh one always
+    /// returns one — which is how the first version of this passed its positive
+    /// case and failed its own negative control.
+    fn drain(stream: &mut runtime::ObservationStream) -> usize {
+        let mut seen = 0usize;
+        while stream.try_next().is_ok_and(|record| record.is_some()) {
+            seen += 1;
+            if seen > 4096 {
+                break;
+            }
+        }
+        seen
+    }
+
+    fn signals() -> Vec<Signal> {
+        vec![
+            Signal::Ping { nonce: [1u8; 16] },
+            Signal::Acknowledge { nonce: [1u8; 16] },
+            Signal::Attention {
+                scope: runtime::transient::TransientScope::IssueView {
+                    world: "dev.example.kv".into(),
+                    body: [2u8; 16],
+                },
+            },
+            Signal::FileOffer {
+                content: [3u8; 32],
+                plaintext_len: 4096,
+                display_name: "notes.txt".into(),
+                media_type: "text/plain".into(),
+            },
+        ]
+    }
+
+    fn drive(station: &Station, rounds: usize) {
+        let from = StationId::from_device(&mechanics::crypto::device_from_seed(&[91u8; 32]))
+            .expect("station");
+        let live = station.live();
+        for round in 0..rounds {
+            for signal in signals() {
+                live.deliver(DeliveredSignal {
+                    from: from.clone(),
+                    session_id: [(round % 251) as u8; 16],
+                    session_epoch: [(round % 249) as u8; 16],
+                    signal,
+                });
+            }
+        }
+    }
+
+    #[test]
+    fn ten_thousand_delivered_signals_move_nothing_durable() {
+        let root = temp_root();
+        let station = station_at(&root);
+        let (session, _writer) = dock(&station);
+
+        let mut stream = session.observe(None);
+        drain(&mut stream);
+        let before = snapshot(&station);
+
+        drive(&station, 2_500);
+
+        let after = snapshot(&station);
+        assert_eq!(
+            before.frontier, after.frontier,
+            "a signal is not a commit, so the frontier does not move"
+        );
+        assert_eq!(
+            before.store, after.store,
+            "and nothing under the store directory changed — not the journal, \
+             not the objects, not the manifest"
+        );
+        assert_eq!(
+            drain(&mut stream),
+            0,
+            "and no Observation was published, which is the whole of 'not activity': \
+             SpaceBridge derives activity_advanced from an Observation's scopes, and \
+             there is no other route in"
+        );
+    }
+
+    #[test]
+    fn one_ordinary_commit_moves_all_three() {
+        // The negative control, and the reason the test above is evidence rather
+        // than decoration. A run that passes because nothing was driven is
+        // indistinguishable from a run that passes because signals are not
+        // durable — unless something in the same file shows the observables
+        // moving when they should.
+        let root = temp_root();
+        let station = station_at(&root);
+        let (session, writer) = dock(&station);
+
+        let mut stream = session.observe(None);
+        drain(&mut stream);
+        let before = snapshot(&station);
+        let signed = writer
+            .sign_action(
+                &session,
+                RequestId::from_bytes([9u8; 16]),
+                WorldIntent {
+                    schema: SchemaId::parse("entry").unwrap(),
+                    schema_version: 1,
+                    payload: b"k=v".to_vec(),
+                },
+            )
+            .expect("signed");
+        session.submit(signed).expect("committed");
+
+        let after = snapshot(&station);
+        assert_ne!(
+            before.frontier, after.frontier,
+            "a commit moves the frontier"
+        );
+        assert_ne!(before.store, after.store, "and writes bytes");
+        assert_eq!(
+            drain(&mut stream),
+            1,
+            "and publishes exactly one Observation"
+        );
+    }
+
+    #[test]
+    fn a_restart_delivers_nothing_that_was_signalled_before_it() {
+        // The third property is a consequence rather than a mechanism:
+        // `Orbit::activate` builds a fresh core and reads nothing signal-shaped
+        // from disk. Asserted anyway, because "we never wrote it" and "we never
+        // read it back" fail independently.
+        let root = temp_root();
+        let station = station_at(&root);
+        let frontier_before = station.frontier();
+        drive(&station, 100);
+        let durable_before = durable_fingerprint(station.store_dir());
+
+        let orbit = station.go_dormant().expect("dormant");
+        let station = orbit.activate(options()).expect("reactivated");
+
+        let mut listener = station.signals();
+        assert!(
+            listener.try_recv().is_err(),
+            "a restart replays nothing: a signal is an event, and the event is over"
+        );
+        assert_eq!(
+            durable_before,
+            durable_fingerprint(station.store_dir()),
+            "and nothing a signal touched was flushed to disk on the way out"
+        );
+        assert_eq!(
+            frontier_before,
+            station.frontier(),
+            "the frontier survives the restart unchanged, because nothing moved it"
+        );
+    }
+
+    #[test]
+    fn a_subscriber_that_stops_reading_changes_nothing_for_the_sender() {
+        // Delivery failure must not be observable. Zero subscribers and a lagged
+        // ring are local facts; if either changed what a peer sees, a peer could
+        // learn whether a viewer is open by pinging with an `Attention`.
+        let root = temp_root();
+        let station = station_at(&root);
+        let (session, _writer) = dock(&station);
+
+        let mut stream = session.observe(None);
+        drain(&mut stream);
+        let quiet = snapshot(&station);
+
+        drive(&station, 50);
+        assert_eq!(quiet, snapshot(&station), "nobody listening");
+
+        let _listener = station.signals();
+        drive(&station, 50);
+        assert_eq!(quiet, snapshot(&station), "somebody listening");
+
+        // A subscriber that never reads, well past the ring bound.
+        let _lagged = station.signals();
+        drive(&station, 500);
+        assert_eq!(quiet, snapshot(&station), "somebody lagged");
+        assert_eq!(drain(&mut stream), 0);
+    }
+}
