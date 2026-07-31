@@ -205,8 +205,11 @@ async fn a_ping_round_trips_and_its_answer_carries_the_same_nonce() {
 async fn a_one_way_signal_is_accepted_and_that_is_not_a_delivery_receipt() {
     on_both("one-way", async |pair: Pair| {
         // `Accepted` says the bytes left, framed and bounded. It says nothing
-        // about whether a person saw them — and the test says so here because
-        // the type cannot.
+        // about whether a person saw them — but the signal does have to *reach*
+        // a responder, and this asserts that it does. It did not until the flow
+        // kind was fixed: a one-way signal on a unidirectional flow succeeded
+        // locally, reported `Accepted`, and was never served by anything,
+        // because the Live plane accepts bidirectional flows only.
         let policy = policy(vec![stream_kind::RELIABLE_SIGNAL]);
         let responder = tokio::spawn({
             let accepter = pair.accepter.clone();
@@ -219,15 +222,15 @@ async fn a_one_way_signal_is_accepted_and_that_is_not_a_delivery_receipt() {
                 body: [4u8; 16],
             },
         };
-        // `Forbidden`, so this rides a unidirectional flow and never waits.
-        let outcome = send_signal(pair.dialer.as_ref(), &attention)
+        let outcome = send_signal(pair.dialer.as_ref(), &attention.clone())
             .await
             .expect("sent");
         assert_eq!(outcome, SignalOutcome::Accepted);
-        // The responder is accepting a *bi* flow and this was uni, so it is
-        // still waiting — which is the point: nothing about `Accepted` depended
-        // on anyone reading.
-        responder.abort();
+        // And it arrived. `Accepted` does not promise this — it is about the
+        // bytes leaving — but a plane on which one-way signals silently reach
+        // nobody would satisfy `Accepted` just as well, which is exactly the
+        // bug this assertion exists to catch.
+        assert_eq!(responder.await.expect("responder"), Ok(attention));
     })
     .await;
 }
@@ -384,13 +387,14 @@ async fn a_file_offer_crosses_intact_and_triggers_nothing() {
             display_name: "notes.txt".into(),
             media_type: "text/plain".into(),
         };
-        // `Forbidden`, so uni — and the responder here is accepting bi, so this
-        // test drives the framing rather than the handoff.
         assert_eq!(
-            send_signal(pair.dialer.as_ref(), &offer).await,
+            send_signal(pair.dialer.as_ref(), &offer.clone()).await,
             Ok(SignalOutcome::Accepted)
         );
-        responder.abort();
+        // The offer crosses intact, field for field. A display name is
+        // peer-supplied and is carried exactly as sent — sanitising here would
+        // mean the name shown to a person is not the name that was offered.
+        assert_eq!(responder.await.expect("responder"), Ok(offer));
     })
     .await;
 }

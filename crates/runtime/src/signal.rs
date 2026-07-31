@@ -423,12 +423,20 @@ pub enum SignalOutcome {
 
 /// Send one signal on its own flow.
 ///
-/// The flow kind follows the declaration, which is the whole reason
-/// `ResponsePolicy` lives on the declaration rather than being decided per
-/// call: a `Forbidden` signal opens a unidirectional flow and has no second
-/// deadline to budget, while an `Acknowledge` opens a bidirectional one and
-/// pays for the round trip. A caller cannot choose to wait for an answer to
-/// something nobody promised to answer.
+/// **Every signal rides a bidirectional flow, whatever its response policy.**
+/// The obvious design is the one the plan asked for — one-way signals on
+/// `open_uni`, answerable ones on `open_bi` — and it does not work here. The
+/// Live plane accepts bidirectional flows only, because MemNet has a single
+/// handoff queue for both kinds and `accept_bi` errors when the next handoff is
+/// a uni flow, which the accept loop reads as end of connection. A one-way
+/// signal sent on a unidirectional flow is therefore a signal nothing on this
+/// plane will ever serve: it succeeds locally, reports `Accepted`, and is never
+/// received.
+///
+/// So the response policy governs what it is actually about — whether an answer
+/// is read and a second deadline is spent — and not which flow is opened. A
+/// caller still cannot choose to wait for an answer to something nobody
+/// promised to answer.
 pub async fn send_signal(
     connection: &dyn comms::Connection,
     signal: &crate::planes::Signal,
@@ -436,26 +444,24 @@ pub async fn send_signal(
     let framed = frame_signal(signal)?;
     let declaration = declaration_for(signal.selector()).ok_or(SignalError::NotRegistered)?;
 
+    let (mut send, mut recv) = tokio::time::timeout(deadline::SIGNAL_OPEN, connection.open_bi())
+        .await
+        .map_err(|_| SignalError::Deadline)?
+        .map_err(|_| SignalError::PeerRefused)?;
+    // Written and finished before anything is read. A flow does not exist for
+    // the peer until the opener writes to it, so accepting first and waiting is
+    // a hang on both transports rather than a failed assertion.
+    write_and_finish(send.as_mut(), &framed).await?;
+
     match declaration.response {
         ResponsePolicy::Forbidden => {
-            let mut send = tokio::time::timeout(deadline::SIGNAL_OPEN, connection.open_uni())
-                .await
-                .map_err(|_| SignalError::Deadline)?
-                .map_err(|_| SignalError::PeerRefused)?;
-            write_and_finish(send.as_mut(), &framed).await?;
+            // Nothing is coming, so nothing is waited for. The read half is
+            // stopped rather than dropped: dropping it leaves the peer able to
+            // write into a flow this side will never read.
+            recv.stop(REFUSED);
             Ok(SignalOutcome::Accepted)
         }
         ResponsePolicy::Acknowledge => {
-            let (mut send, mut recv) =
-                tokio::time::timeout(deadline::SIGNAL_OPEN, connection.open_bi())
-                    .await
-                    .map_err(|_| SignalError::Deadline)?
-                    .map_err(|_| SignalError::PeerRefused)?;
-            // Written and finished before the answer is read. A flow does not
-            // exist for the peer until the opener writes to it, so accepting
-            // first and waiting is a hang on both transports rather than a
-            // failed assertion.
-            write_and_finish(send.as_mut(), &framed).await?;
             let answered =
                 tokio::time::timeout(deadline::SIGNAL_RESPONSE, read_signal(recv.as_mut()))
                     .await

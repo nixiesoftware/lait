@@ -10,9 +10,12 @@
 //! has one handoff queue for both uni and bi flows, and `accept_bi` errors when
 //! the next handoff is a uni flow — which the accept loop reads as end of
 //! connection. So this plane accepts bidirectional flows only: the control
-//! stream is bidirectional, subscriptions arrive on it, and everything else is
-//! a datagram. That is a constraint the transport imposes rather than a
-//! preference, and it is written here rather than discovered in a test.
+//! stream is bidirectional, subscriptions arrive on it, signal flows are
+//! bidirectional whether or not they expect an answer, and everything else is a
+//! datagram. That is a constraint the transport imposes rather than a
+//! preference, and it is written here rather than discovered in a test — which
+//! is the whole reason it is worth writing down, because a one-way signal on a
+//! unidirectional flow succeeds locally, reports success, and reaches nobody.
 //!
 //! Three things are bounded before anything is spent, and the order is the
 //! bound: a permit before the stream kind is read, the gate before the message,

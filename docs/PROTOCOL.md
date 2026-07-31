@@ -874,14 +874,21 @@ cost the refused rather than the refuser.
 fixes the selector, the ceiling, what the sender must satisfy, and whether an
 answer is permitted. A signal nobody declared is one nothing knows how to bound.
 
-**The response policy lives on the declaration, not on the call.** A one-way
-signal opens a unidirectional flow and has no second deadline to budget; one
-that expects an answer opens a bidirectional flow and pays for the round trip. A
-caller cannot choose to wait for an answer to something nobody promised to
-answer. Only the liveness ping expects one, and its answer carries the same
+**Every signal flow is bidirectional, whatever its response policy.** The
+obvious design is one-way signals on a unidirectional flow and answerable ones
+on a bidirectional flow, and it does not work: the Live plane accepts
+bidirectional flows only — a transport constraint, not a preference — so a
+signal sent on a unidirectional flow succeeds locally, reports success, and is
+served by nobody.
+
+**The response policy lives on the declaration, not on the call**, and it governs
+what it is actually about: whether an answer is read and a second deadline
+spent. A caller cannot choose to wait for an answer to something nobody promised
+to answer. Only the liveness ping expects one, and its answer carries the same
 nonce — which is what makes it an answer to *that* ping rather than to any ping.
 The acknowledgement is itself one-way, which is how a ping does not become a
-loop.
+loop. A sender that expects nothing stops its read half rather than dropping it,
+so a peer cannot write into a flow the other side will never read.
 
 **A World signal is refused when this build cannot interpret it.** A World this
 Station does not host, and a World whose implementation is not active at the
