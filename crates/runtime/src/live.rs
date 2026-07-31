@@ -237,6 +237,12 @@ pub struct LiveHandle {
     signals: SignalSink,
     anchors: Option<std::sync::Arc<dyn AnchorSource>>,
     residency: std::sync::Arc<dyn ResidencyOracle>,
+    /// Files somebody offered, waiting for a person.
+    ///
+    /// Beside the transient table rather than in it: a slot expires on a TTL
+    /// because a cursor that stopped moving is stale, and an offer that has been
+    /// sitting for an hour is exactly as valid as it was when it arrived.
+    offers: std::sync::Mutex<crate::signal::OfferQueue>,
 }
 
 #[derive(Default)]
@@ -279,7 +285,41 @@ impl LiveHandle {
             signals: tokio::sync::broadcast::channel(SIGNAL_QUEUE).0,
             anchors,
             residency,
+            offers: std::sync::Mutex::new(crate::signal::OfferQueue::new()),
         }
+    }
+
+    /// Hold a file somebody offered.
+    ///
+    /// Queueing is the whole of what receiving an offer does. No fetch starts,
+    /// no path is resolved and no byte is written — the three auto-accept gates
+    /// are asked by whoever decides, not by the plane that carried the message.
+    pub fn offer(&self, offer: crate::signal::PendingOffer) -> crate::signal::OfferOutcome {
+        self.offers().admit(offer)
+    }
+
+    /// What is waiting for a decision.
+    pub fn pending_offers(&self) -> Vec<crate::signal::PendingOffer> {
+        self.offers().pending().to_vec()
+    }
+
+    pub fn take_offer(
+        &self,
+        from: &StationId,
+        content: &[u8; 32],
+    ) -> Option<crate::signal::PendingOffer> {
+        self.offers().take(from, content)
+    }
+
+    /// Drop everything one peer offered. What a revocation does — and only a
+    /// revocation: a peer whose laptop slept is still somebody whose file offer
+    /// is worth keeping.
+    pub fn forget_offers(&self, from: &StationId) -> usize {
+        self.offers().forget(from)
+    }
+
+    fn offers(&self) -> std::sync::MutexGuard<'_, crate::signal::OfferQueue> {
+        self.offers.lock().unwrap_or_else(|p| p.into_inner())
     }
 
     /// How much of a content this Station holds, for a peer that asked.
@@ -653,7 +693,12 @@ pub async fn serve_session(
                 // Immediately, not at TTL. A peer that lost standing keeps
                 // nothing, and a cursor lingering for thirty seconds after a
                 // removal is a person still visibly in a room they were asked
-                // to leave.
+                // to leave. Its offers go too — a file offered by somebody who
+                // is no longer a member is not one anyone should be shown a
+                // button for.
+                if let Some(handle) = &handle {
+                    handle.forget_offers(&peer.station);
+                }
                 connection.close(REFUSED, b"");
                 break;
             }
@@ -809,6 +854,26 @@ pub async fn serve_session(
                         break;
                     }
                     if let Some(handle) = &handle {
+                        if let crate::planes::Signal::FileOffer {
+                            content,
+                            plaintext_len,
+                            display_name,
+                            media_type,
+                        } = &signal
+                        {
+                            // Queued, and that is all. An offer names content
+                            // the sender holds; starting a transfer here would
+                            // let any member spend this Station's disk by
+                            // sending a message.
+                            handle.offer(crate::signal::PendingOffer {
+                                from: peer.station.clone(),
+                                session_epoch: peer.session_epoch,
+                                content: *content,
+                                plaintext_len: *plaintext_len,
+                                display_name: display_name.clone(),
+                                media_type: media_type.clone(),
+                            });
+                        }
                         handle.deliver(crate::signal::DeliveredSignal {
                             from: peer.station.clone(),
                             session_id: peer.session_id,

@@ -94,6 +94,16 @@ pub struct PlanePolicy {
     /// able to say so without refusing them one at a time — and a plane that
     /// cannot be turned off is a plane whose cost an operator cannot decline.
     pub live_enabled: bool,
+    /// Whether a file offered by one of this identity's own devices may land on
+    /// disk without anyone clicking.
+    ///
+    /// Off unless an operator says otherwise, and it is the second of the three
+    /// gates in the docket's auto-accept rule — the one the docket said had no
+    /// representation anywhere. Policy rather than authority, because it answers
+    /// "will this Station" and not "may that peer": somebody who does not want
+    /// files appearing on a laptop is not making a claim about anyone's
+    /// membership.
+    pub auto_accept_offers: bool,
 }
 
 impl Default for PlanePolicy {
@@ -102,6 +112,10 @@ impl Default for PlanePolicy {
             serve_enabled: true,
             fetch_enabled: true,
             live_enabled: true,
+            // The one switch here that defaults to off. Every other field
+            // enables something a peer asked for; this one writes to a disk
+            // nobody asked about at the moment it happens.
+            auto_accept_offers: false,
         }
     }
 }

@@ -177,6 +177,14 @@ pub struct PlaneOptions {
     pub freight_enabled: bool,
     /// Whether this Station answers on the Live plane.
     pub live_enabled: bool,
+    /// Whether a file offered by one of this identity's own devices may land on
+    /// disk without anyone clicking.
+    ///
+    /// The one option here that defaults to *off*, and deliberately breaking
+    /// this struct's own fail-open rule. Every other field enables something a
+    /// peer asked for; this one writes to a disk nobody asked about at the
+    /// moment it happens, and an operator who has not said yes has not said yes.
+    pub auto_accept_offers: bool,
 }
 
 impl Default for PlaneOptions {
@@ -184,6 +192,7 @@ impl Default for PlaneOptions {
         Self {
             freight_enabled: true,
             live_enabled: true,
+            auto_accept_offers: false,
         }
     }
 }
@@ -194,6 +203,7 @@ impl PlaneOptions {
             serve_enabled: self.freight_enabled,
             fetch_enabled: self.freight_enabled,
             live_enabled: self.live_enabled,
+            auto_accept_offers: self.auto_accept_offers,
         }
     }
 }

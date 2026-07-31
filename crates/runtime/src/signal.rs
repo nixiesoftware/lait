@@ -552,3 +552,155 @@ fn acknowledgement(signal: &crate::planes::Signal) -> Option<crate::planes::Sign
         _ => None,
     }
 }
+
+/// How many unanswered offers this Station will hold.
+///
+/// Person-scale. An offer waits for somebody to decide about it, and a hundred
+/// of them waiting is not a backlog anyone works through — it is a Station being
+/// used as somebody else's queue.
+pub const MAX_PENDING_OFFERS: usize = 32;
+
+/// A file somebody offered, waiting for a decision.
+///
+/// Holding an offer costs a name and a content id. It does **not** cost the
+/// file: receiving one starts no transfer and touches no filesystem, because
+/// whether the receiver wants a gigabyte is a decision a person makes and not a
+/// protocol answer due inside a deadline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingOffer {
+    pub from: mechanics::ids::StationId,
+    /// The session it arrived on. An offer from a session that has since
+    /// reconnected is not stale — the file is still there — but a caller
+    /// answering it has to dial again rather than reply on a connection that is
+    /// gone.
+    pub session_epoch: [u8; 16],
+    pub content: [u8; 32],
+    pub plaintext_len: u64,
+    /// What the sender calls it. Peer-supplied, never sanitised here: a name is
+    /// sanitised at the point it becomes a path, and rewriting it on arrival
+    /// would mean the thing shown to a person is not the thing that was sent.
+    pub display_name: String,
+    pub media_type: String,
+}
+
+/// Why an offer was not queued.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OfferOutcome {
+    /// Held, waiting for a decision.
+    Queued,
+    /// Already here. An offer is identified by its content and its sender, so a
+    /// peer repeating itself does not fill the queue.
+    Duplicate,
+    /// The queue is full.
+    ///
+    /// The **newest** is refused rather than the oldest evicted. This is an
+    /// inbox: what is already in it may be about to be acted on, and silently
+    /// dropping that to make room for something newer loses the decision
+    /// somebody was in the middle of making.
+    Full,
+}
+
+/// The bounded set of offers nobody has answered.
+#[derive(Debug, Default)]
+pub struct OfferQueue {
+    pending: Vec<PendingOffer>,
+    refused: u64,
+}
+
+impl OfferQueue {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn admit(&mut self, offer: PendingOffer) -> OfferOutcome {
+        if self
+            .pending
+            .iter()
+            .any(|held| held.content == offer.content && held.from == offer.from)
+        {
+            return OfferOutcome::Duplicate;
+        }
+        if self.pending.len() >= MAX_PENDING_OFFERS {
+            self.refused = self.refused.saturating_add(1);
+            return OfferOutcome::Full;
+        }
+        self.pending.push(offer);
+        OfferOutcome::Queued
+    }
+
+    pub fn pending(&self) -> &[PendingOffer] {
+        &self.pending
+    }
+
+    /// How many were refused for want of room. Not reported to any sender:
+    /// `Accepted` says the bytes arrived and nothing about what happened next,
+    /// and a peer that could tell a full queue from an empty one would learn
+    /// whether anyone is using this Station.
+    pub fn refused(&self) -> u64 {
+        self.refused
+    }
+
+    /// Take one offer out, by content and sender.
+    pub fn take(
+        &mut self,
+        from: &mechanics::ids::StationId,
+        content: &[u8; 32],
+    ) -> Option<PendingOffer> {
+        let at = self
+            .pending
+            .iter()
+            .position(|held| &held.content == content && &held.from == from)?;
+        Some(self.pending.remove(at))
+    }
+
+    /// Drop everything one peer offered. What a revocation does — a file offered
+    /// by somebody who is no longer a member is not an offer anyone should be
+    /// shown a button for.
+    pub fn forget(&mut self, from: &mechanics::ids::StationId) -> usize {
+        let before = self.pending.len();
+        self.pending.retain(|held| &held.from != from);
+        before - self.pending.len()
+    }
+}
+
+/// What this layer can decide about taking an offer without asking a person.
+///
+/// §7.3 names three gates. Two of them are answerable here and the third is
+/// not, and saying so in the type is better than pretending otherwise: the only
+/// thing that can resolve a local destination is `LocalDestination`, which lives
+/// in `world-interface` — a crate that depends on this one. Answering gate three
+/// here would mean inverting that edge and pulling a CLI's dependencies into the
+/// engine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OfferGates {
+    /// Both gates this layer owns are open. The caller still has to resolve a
+    /// destination, which is the third and is not this crate's question.
+    DestinationRemains,
+    /// The sender is not one of this identity's own devices.
+    ///
+    /// The strictest of the three, and the reason automatic acceptance is
+    /// defensible at all: a file that lands on disk without anyone clicking
+    /// came from another device belonging to the same person.
+    NotOurDevice,
+    /// This Station has not opted this Space into automatic acceptance.
+    SpaceNotOptedIn,
+}
+
+/// Evaluate the two gates that belong to this layer.
+///
+/// `ours` is the actor this Station acts as. An offer auto-accepts only from a
+/// device resolving to that same actor — which is what makes it a file moving
+/// between somebody's own machines rather than a stranger writing to their disk.
+pub fn offer_gates(
+    from: &crate::admission::AdmittedPeer,
+    ours: &mechanics::ids::ActorId,
+    policy: &crate::admission::PlanePolicy,
+) -> OfferGates {
+    if &from.actor != ours {
+        return OfferGates::NotOurDevice;
+    }
+    if !policy.auto_accept_offers {
+        return OfferGates::SpaceNotOptedIn;
+    }
+    OfferGates::DestinationRemains
+}

@@ -966,3 +966,72 @@ mod residency {
         assert_eq!(handle.residency(&[1u8; 32], &[]), ResidencyState::Absent);
     }
 }
+
+/// A received offer costs a name and a content id, and nothing else.
+mod offers_on_the_plane {
+    use super::*;
+    use runtime::signal::{OfferOutcome, PendingOffer};
+
+    fn offer(from: u8, content: u8) -> PendingOffer {
+        PendingOffer {
+            from: station(from),
+            session_epoch: [2u8; 16],
+            content: [content; 32],
+            plaintext_len: 1_073_741_824,
+            display_name: "big.iso".into(),
+            media_type: "application/octet-stream".into(),
+        }
+    }
+
+    #[test]
+    fn an_offer_is_queued_and_survives_what_a_cursor_does_not() {
+        // Beside the transient table rather than in it. A slot expires on a TTL
+        // because a cursor that stopped moving is stale; an offer that has been
+        // sitting for an hour is exactly as valid as it was when it arrived.
+        let handle = LiveHandle::new(None);
+        let now = Instant::now();
+        assert_eq!(handle.offer(offer(1, 7)), OfferOutcome::Queued);
+
+        handle.sweep(now + Duration::from_secs(600));
+        assert_eq!(handle.pending_offers().len(), 1, "no TTL reaches an offer");
+
+        // And a disconnect does not take it: the file is still there, and the
+        // peer whose laptop slept is still somebody worth fetching from.
+        handle.forget(&station(1));
+        assert_eq!(handle.pending_offers().len(), 1);
+    }
+
+    #[test]
+    fn losing_standing_takes_the_offers_with_it() {
+        let handle = LiveHandle::new(None);
+        handle.offer(offer(1, 7));
+        handle.offer(offer(2, 8));
+        assert_eq!(handle.forget_offers(&station(1)), 1);
+        let left = handle.pending_offers();
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].from, station(2));
+    }
+
+    #[test]
+    fn a_gigabyte_offered_costs_a_name_and_a_content_id() {
+        // The whole point. Receiving an offer must not let any member spend this
+        // Station's disk by sending a message.
+        let handle = LiveHandle::new(None);
+        handle.offer(offer(1, 7));
+        let held = handle.pending_offers();
+        assert_eq!(held[0].plaintext_len, 1_073_741_824);
+        // The name is what the sender called it, unrewritten: a name is
+        // sanitised where it becomes a path, and rewriting it here would mean
+        // the thing shown to a person is not the thing that was sent.
+        assert_eq!(held[0].display_name, "big.iso");
+    }
+
+    #[test]
+    fn taking_an_offer_is_the_only_way_it_leaves() {
+        let handle = LiveHandle::new(None);
+        handle.offer(offer(1, 7));
+        assert!(handle.take_offer(&station(1), &[7u8; 32]).is_some());
+        assert!(handle.pending_offers().is_empty());
+        assert!(handle.take_offer(&station(1), &[7u8; 32]).is_none());
+    }
+}

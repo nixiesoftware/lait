@@ -237,6 +237,7 @@ fn operator_policy_and_membership_answer_different_questions() {
     // membership.
     let space = space();
     let off = PlanePolicy {
+        auto_accept_offers: false,
         serve_enabled: false,
         fetch_enabled: false,
         live_enabled: false,
@@ -264,6 +265,7 @@ fn operator_policy_and_membership_answer_different_questions() {
         Admission::Refuse(SessionRefusal::Refused),
     );
     let files_only = PlanePolicy {
+        auto_accept_offers: false,
         serve_enabled: true,
         fetch_enabled: true,
         live_enabled: false,
