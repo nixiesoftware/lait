@@ -80,6 +80,30 @@ sandbox guarantee.
   that keyed the projection.
 - Malformed or corrupt input rejects or surfaces as typed corruption rather than
   becoming a valid value or panicking the Station.
+- Content chunks are individually authenticated against a ciphertext Merkle root
+  bound to the descriptor, so a provider that cannot decrypt them also cannot
+  substitute them, and a partial transfer cannot be steered onto other bytes.
+- Two ingests of identical plaintext produce unrelated content ids, so holding a
+  guessable file does not let a peer confirm that someone else holds it.
+- Local residency is not authority: caching, pinning, and evicting a chunk
+  changes no committed root and grants no read that the keys did not already
+  grant.
+- Accepting a delivery-plane opening is idempotent, so a replayed opening
+  allocates no second session and consumes no budget twice.
+- A refusal on a delivery plane distinguishes only "unsupported generation" from
+  everything else, so an unadmitted peer cannot probe a Space by reading errors.
+
+- Answering a Freight request creates no Neighbor, no presence, and no Beacon
+  observation. A fetch is not a heartbeat. Neighbor liveness is written only on
+  the Contact and neighbor-presence ALPNs; a plane driver reads authority to
+  admit and the content host to answer, and neither of those is a liveness
+  record. A Freight refusal, timeout, reset, or lie therefore never promotes,
+  demotes, or evicts Neighbor state, so no peer can move another peer's standing
+  by transferring — or by failing to.
+- Freight authorization is decided before residency is consulted. The serve
+  demand is answered first, and a request that fails it never reaches the
+  committed descriptor or the cache, so a refusal cannot be timed to reveal what
+  is held.
 
 ## Explicit non-goals and residual risks
 
@@ -102,6 +126,38 @@ sandbox guarantee.
   storage, or bandwidth exhaustion by authorized or reachable peers.
 - **Native-loop preemption.** Runtime contains World panics but cannot preempt an
   arbitrary infinite loop in trusted native World code.
+- **0.5-RTT is not authenticated.** Data the accepter sends before the client's
+  handshake completes, and the client's own initial flight, are replayable by an
+  interceptor. LAIT treats them as untrusted: nothing with an effect is
+  dispatched on them, and nothing sent on them is a commitment.
+- **Residency is observable.** Which chunks a peer will serve is metadata. A
+  private, bounded availability answer narrows it but does not hide it, and
+  timing still distinguishes a resident chunk from a fetched one.
+- **Freight residency is Space-wide.** The serve predicate authorizes any
+  admitted member. This is deliberate and it is a compromise: no member holds
+  `content.serve` on day one, so a grant-gated plane would refuse universally,
+  which is not caution but the feature not working. Until that grant is seeded,
+  any per-resource read restriction on attached content is advisory against a
+  member — a member can pull the ciphertext of content attached to a project
+  they hold no read grant on. What they gain is the ciphertext itself, plus
+  confirmation of the content's size, its chunk count, and the fact that this
+  Station holds those bytes now; the ciphertext is the durable half of that,
+  because bytes copied today become readable to whoever obtains that epoch key
+  in a future compromise. What they do not gain is plaintext — the Body key
+  still gates reading, and a provider serves without holding it — nor any way to
+  name content whose id they did not already learn from durable state, nor any
+  standing they did not already have. The migration is a `content.serve` grant
+  slotting into the same `ContentPolicy` closure: no change to `ContentHost`, to
+  the wire, or to the refusal a peer sees.
+- **An availability answer is shape-indistinguishable, not time-indistinguishable.**
+  Content this Station never heard of and content it holds no chunk of return the
+  same empty answer, but the first costs no filesystem probes and the second
+  costs one per named index. A member who obtained a content id out of band can
+  therefore confirm by timing that this Space has committed that descriptor. It
+  requires an id the caller already legitimately holds — a 32-byte blake3
+  preimage is not guessable — and closing it properly needs a constant-cost
+  residency index rather than padding.
+
 - **Formal verification.** The protocols are tested and fault-injected, not
   formally verified.
 
@@ -150,6 +206,35 @@ used only to omit redundant transfer.
 A ciphertext-only relay or opaque peer may learn sizes, timing, identifiers,
 and graph relationships. LAIT does not claim metadata-private replication.
 
+The delivery planes add two more exposures of the same kind. A Freight request
+names one content id and one chunk index, so a provider learns exactly which
+content a peer is assembling and how far along it is; and a realtime session's
+datagram cadence tracks a person's activity closely enough to infer presence
+even though every payload is sealed. Both are traffic analysis against an
+already-admitted peer, and neither is mitigated by encryption.
+
+An opening is bounded and canonical, and is refused on length before it is
+decoded. Refusals are deliberately coarse — a peer that is not admitted, not
+authorized for a lane, or over budget receives the same answer — because the
+alternative is an oracle for what a Space holds and who may reach it.
+
+The refusal funnel is a confidentiality device, and its ordering is what makes it
+one. `PROTOCOL.md` §12.3 gives the sequence; the property it buys is that a
+refusal is never a statement about what is held. Authorization is decided before
+residency is consulted, so a peer that may not serve is refused whether or not
+the bytes are here, and a peer that may serve receives the same empty
+availability answer for content this Station has never heard of as for content it
+holds no chunk of. Absence and ignorance are the same answer on purpose; the
+alternative is an oracle for what a Space contains, answerable by guessing
+content ids.
+
+It is not an anti-traffic-analysis device. It hides which of several reasons
+produced a refusal; it does not hide the request, and the request is the exposure
+recorded above. An availability question carries a bounded index set and a
+resumed chunk request carries the leaf hash it left off at, so a provider reads a
+peer's progress from the requests alone, whether it serves them or refuses them
+all.
+
 ## Product conflict integrity
 
 CRDT convergence is not authorization and is not automatically a correct
@@ -162,12 +247,143 @@ identities and historical authorization. An actor id inside unsigned application
 content is not cryptographic proof of authorship; signed Body transactions and
 receipts provide the attribution boundary.
 
+## Peer-authored names on local paths
+
+Product data authored by a peer is not a path. An attachment's display name is
+the clearest case: it converges from whoever attached the file, it is what a
+person naturally saves the file as, and the CLI's own output invites exactly
+that command — so untreated it is an arbitrary-path write of peer-supplied
+bytes, triggered by a local user doing something that reads like a read.
+
+The name is treated at both ends, differently, because the proposer differs. At
+intake the Issues engine **refuses** a name that is over-long or carries control
+characters: the proposer there is a local actor holding write authority who can
+simply pick another. At save time the name is **repaired**, never refused, into
+a single relative file-name component — the proposer there is remote, and
+refusing would let a peer make their own attachment unsaveable by naming it
+badly. An explicit `--out` is untouched: that path the caller typed.
+
+Repair is what the far end owes regardless of intake, because a Body reaching
+this machine through convergence never passed local intake at all. Intake bounds
+what this Space publishes; it is not a defense, and is not relied on as one.
+
+## Transient state and reliable signals
+
+The Live plane carries what people are doing and the signal lane carries
+one-message events. Neither is durable, and the interesting exposures are not
+about confidentiality of the payloads — a cursor position is not a secret — but
+about what a peer can *learn* or *make happen* by sending them.
+
+**A signal is authenticated by the connection and never signed.** It cannot be
+forwarded and cannot be retained as evidence: there is nothing to show a third
+party, and a Station repeating one is making a claim on its own authority. That
+is intentional. A signed signal would be a durable artefact by another name, and
+the whole contract here is that nothing is retained.
+
+**A World signal is trusted only when this build's reviewed implementation is
+active at the session's pinned frontier.** A World the Station does not host and
+a World whose implementation nobody approved get the same refusal, and neither
+reveals the other. Acting on a payload whose schema was never reviewed is the
+failure this prevents.
+
+**Delivery failure is not observable to the sender.** Zero local listeners, a
+lagged local ring, and a full offer queue all leave the wire outcome identical.
+Otherwise a peer could learn whether a viewer is open, or whether anyone is using
+a Station at all, by sending an attention signal and watching what comes back.
+
+**Residency hints answer in three states and never a chunk list.** A complete
+bitmap would let a peer reconstruct which parts of a file somebody had opened,
+which is a read-activity oracle over content the peer may legitimately hold. The
+hint is keyed by the full content id: a prefix would let a peer probe for
+holdings without knowing an id, which is weaker than Freight's exact
+availability question. A peer that did not negotiate the capability may neither
+receive hints nor publish them.
+
+**A peer-supplied anchor path reaches the collaborative document's container
+namespace.** It is bounded independently of the item, and it must equal the
+field the peer already subscribed to — so a peer can only ask about what it said
+it was watching. Without that binding, an anchor would let a peer name arbitrary
+root containers on a receiver. This is the sharpest edge on the plane, because
+it is the one place remote bytes reach a data structure rather than a decoder.
+
+**A file offer starts nothing.** Receiving one writes no byte and resolves no
+path, so a member cannot spend a Station's disk by sending a message. Automatic
+acceptance requires the sender to resolve to one of the receiving identity's own
+devices, an explicit local opt-in that defaults to off, and an explicitly
+resolvable destination. The first gate is not widened by the second: a Station
+that opted in still refuses a stranger.
+
+**A caret resolve takes the same lock a commit takes.** `RwLock` is not
+expressible here — the collaborative document underneath is not `Sync` — so
+concurrent readers do not exist for anchors or for anything else. What bounds
+the damage is the rate, not the access pattern: the per-connection datagram gate
+and the session ceiling together bound resolutions to a few thousand a second
+against a commit measured in milliseconds. That is a small duty cycle rather
+than a safe one, and it is the number to re-derive if either ceiling moves.
+
+**Presence is a gate on delivery, which makes it worth lying about.** A signal
+goes to a peer that currently holds a session, so a peer that could fake presence
+could pull other people's nudges toward itself. It cannot: presence for delivery
+is the set of Stations this node holds a session with, established by the
+transport's own authentication and the admission that followed it, and never a
+claim carried in a message. A peer that says it is somebody else is refused before
+it has a session at all.
+
+**A nudge names durable material and never carries it.** Losing one costs
+timeliness. That is deliberate — an alert that carried the fact would be a second
+copy of it on a plane that keeps nothing, and would then have to be as trustworthy
+as the record, which nothing here signs.
+
+**A World's declared surface is enforced at delivery, not only reviewed at
+registration.** A scope naming an undeclared schema is refused before it takes a
+slot, and a signal past its World's declared ceiling is refused before its payload
+reaches the World. Reviewing a declaration and then not enforcing it is the shape
+of a reviewed identity that means nothing — the descriptor would move an
+implementation id, every peer would see a different build, and a peer could still
+send whatever it liked.
+
+**Awareness is allowed to be incomplete; durable convergence is not.** Over the
+session ceiling, or after a gate drop, the view reports itself partial. A
+surface that can be incomplete and does not say so is worse than one that is
+plainly unavailable.
+
 ## Local web surface
 
 `lait serve` binds to loopback and uses a per-run bearer capability with origin
 and rebinding defenses. Listing local Spaces must not activate all Stations.
 Attaching to a Space preserves the selected local identity. The browser is a
 local client, not an iroh peer or Space member.
+
+### Files on the local web surface
+
+One origin serves the viewer, the API, and every attachment. That origin holds
+the session credential, so a stored attachment rendered inline would run there —
+which is why nothing on the content routes is ever rendered: always
+`application/octet-stream` whatever the stored MIME type says, always `nosniff`,
+always `Content-Security-Policy: sandbox; default-src 'none'`, and always a
+`Content-Disposition: attachment`. The stored MIME type is a peer's claim about
+a peer's bytes and is not honoured.
+
+The filename in that header passes two different escapes: the shared sanitiser
+reduces a peer-authored name to one relative component, and the result is then
+percent-encoded into the `filename*` form. A header is a line, and a name that
+could end it early would inject the next one.
+
+Content routes refuse a `?token=` credential. A download URL is pasted, put in a
+`src`, and left in browser history — so a live token on one is a live token in
+the URL bar, in devtools, in the download list, and in whatever the dev proxy
+logs. The refusal is a property of the route, read from the same table the
+router is built from, and an unregistered path defaults to refusing.
+
+The WebSocket upgrade is the one place an absent `Origin` is not benign. A
+handshake is exempt from CORS: the browser sends it cross-origin with no
+preflight and attaches the cookie, so `check_upgrade_origin` requires an Origin
+where the shared gate admits its absence.
+
+Per-resource read restriction on attached content is still advisory, and this
+surface does not change that. A member may read any content their Station
+holds — the same Space-wide residency gap Freight carries, closed by the same
+`content.serve` grant when it exists.
 
 ## Security maintenance
 

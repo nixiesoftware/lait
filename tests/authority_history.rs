@@ -228,6 +228,7 @@ fn signed_note_tx(
             },
         )],
         &[(body(n), binding())],
+        &[],
     )?;
     let material = r.export_material().unwrap();
     Ok(material.into_iter().next().unwrap())
@@ -394,6 +395,7 @@ fn authority_survives_a_body_crash_and_the_retry_incorporates_exactly_once() {
                 },
             )],
             &[(body(1), binding())],
+            &[],
         )
         .unwrap();
     let material = source.export_material().unwrap();
@@ -409,7 +411,7 @@ fn authority_survives_a_body_crash_and_the_retry_incorporates_exactly_once() {
     let staged = StagedContactMaterial {
         authority_records,
         manifest_root_bytes: root_bytes,
-        manifest_pages: pages,
+        manifest_nodes: pages,
         bodies,
     };
 

@@ -157,6 +157,7 @@ impl World for NoteWorld {
         // Deterministic body key: same World, a fixed body for this test.
         let key = BodyKey::new(self.id.clone(), BodyId::from_bytes([0u8; 16]));
         Ok(WorldEffect {
+            content_refs: Vec::new(),
             demand: any_demand(),
             operations: vec![(
                 key.clone(),
@@ -199,6 +200,8 @@ fn note_registration() -> (WorldRegistration, Arc<dyn World>) {
         implementation_version: WorldVersion(1),
         schemas: world.schemas().to_vec(),
         limits: WorldLimits::default(),
+        scope_schemas: Vec::new(),
+        signal_schemas: Vec::new(),
     };
     (reg, Arc::new(world))
 }
@@ -394,6 +397,8 @@ fn a_world_panic_is_contained_and_does_not_end_the_station() {
         implementation_version: WorldVersion(1),
         schemas: schemas.clone(),
         limits: WorldLimits::default(),
+        scope_schemas: Vec::new(),
+        signal_schemas: Vec::new(),
     };
     let world: Arc<dyn World> = Arc::new(PanicWorld {
         id: id.clone(),
@@ -628,6 +633,7 @@ impl World for RogueWorld {
             BodyId::from_bytes([0u8; 16]),
         );
         Ok(WorldEffect {
+            content_refs: Vec::new(),
             demand: any_demand(),
             operations: vec![(
                 foreign.clone(),
@@ -664,6 +670,8 @@ fn a_world_cannot_write_outside_its_namespace() {
         implementation_version: WorldVersion(1),
         schemas: schemas.clone(),
         limits: WorldLimits::default(),
+        scope_schemas: Vec::new(),
+        signal_schemas: Vec::new(),
     };
     let world: Arc<dyn World> = Arc::new(RogueWorld {
         id: id.clone(),
@@ -744,6 +752,8 @@ fn a_changed_authority_frontier_refuses_the_commit() {
         implementation_version: WorldVersion(1),
         schemas: inner.schemas().to_vec(),
         limits: WorldLimits::default(),
+        scope_schemas: Vec::new(),
+        signal_schemas: Vec::new(),
     };
     let world: Arc<dyn World> = Arc::new(FlipDuringSubmit {
         inner,
@@ -840,6 +850,7 @@ impl World for BoardWorld {
     ) -> Result<WorldEffect, WorldError> {
         let key = self.body();
         Ok(WorldEffect {
+            content_refs: Vec::new(),
             demand: any_demand(),
             operations: vec![
                 (
@@ -901,6 +912,8 @@ fn a_collaborative_world_commits_and_reads_through_the_session() {
         implementation_version: WorldVersion(1),
         schemas: world.schemas().to_vec(),
         limits: WorldLimits::default(),
+        scope_schemas: Vec::new(),
+        signal_schemas: Vec::new(),
     };
     let registry = RuntimeBuilder::new()
         .register(reg, Arc::new(world))
@@ -962,6 +975,7 @@ impl World for MixedWorld {
         // Regardless of which schema the intent named, stage a collaborative op.
         let key = BodyKey::new(self.id.clone(), BodyId::from_bytes([5u8; 16]));
         Ok(WorldEffect {
+            content_refs: Vec::new(),
             demand: any_demand(),
             operations: vec![(
                 key.clone(),
@@ -1008,6 +1022,8 @@ fn containment_is_bound_to_the_intent_schema_not_the_world() {
         implementation_version: WorldVersion(1),
         schemas: schemas.clone(),
         limits: WorldLimits::default(),
+        scope_schemas: Vec::new(),
+        signal_schemas: Vec::new(),
     };
     let world: Arc<dyn World> = Arc::new(MixedWorld {
         id: id.clone(),
@@ -1054,6 +1070,8 @@ fn an_identical_signed_replay_returns_the_original_result_without_reapplying() {
         implementation_version: WorldVersion(1),
         schemas: world.schemas().to_vec(),
         limits: WorldLimits::default(),
+        scope_schemas: Vec::new(),
+        signal_schemas: Vec::new(),
     };
     let station = station_with(reg, Arc::new(world));
     let session = station.dock(&id, &writer()).unwrap();

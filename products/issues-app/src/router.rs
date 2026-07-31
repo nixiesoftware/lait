@@ -14,7 +14,7 @@ use runtime::{RequestId, Session, WorldError, WorldIntent, WorldQuery};
 use serde::de::DeserializeOwned;
 use world_bridge::{
     WorldCall, WorldCallAccess, WorldCallContext, WorldCallError, WorldCallErrorCode,
-    WorldCallHandler, WorldReply,
+    WorldCallHandler, WorldNudge, WorldReply,
 };
 
 use crate::{
@@ -109,6 +109,58 @@ impl WorldCallHandler for IssuesCallHandler {
                 format!("encode Issues response: {error}"),
             ),
         }
+    }
+
+    /// Who should hear about this, and which signal says so.
+    ///
+    /// Two calls answer at all. Assigning tells the people on the issue that it
+    /// moved to them; commenting tells them somebody said something. Everything
+    /// else changes durable state that converges on its own, and a signal for
+    /// each would be a notification for every field edit anybody makes.
+    ///
+    /// The acting identity is filtered out. Nobody is told about their own
+    /// action — Linear does not, and a person notified of everything they did
+    /// stops reading notifications.
+    fn nudges(
+        &self,
+        call: &WorldCall,
+        reply: &WorldReply,
+        context: &WorldCallContext<'_>,
+    ) -> Vec<WorldNudge> {
+        // Asked only about work that happened. A refused call changed nothing,
+        // and an idempotent replay changed nothing twice.
+        if !reply.succeeded() {
+            return Vec::new();
+        }
+        let Ok(request) = Self::decode_request(call) else {
+            return Vec::new();
+        };
+        let (reff, schema) = match &request {
+            Request::Assign { reff, .. } => (reff, contract::signal::ASSIGNED),
+            Request::Comment { reff, .. } | Request::CommentAt { reff, .. } => {
+                (reff, contract::signal::COMMENTED)
+            }
+            _ => return Vec::new(),
+        };
+        static CLOCK: std::sync::OnceLock<SystemUlidSource> = std::sync::OnceLock::new();
+        let router = IssueRouter::new(
+            context.session,
+            context.identity,
+            CLOCK.get_or_init(|| SystemUlidSource),
+        );
+        let Some((doc, actors)) = router.interested(reff) else {
+            return Vec::new();
+        };
+        let payload = contract::IssueNudge { issue: doc }.encode();
+        actors
+            .into_iter()
+            .filter(|actor| actor != context.actor)
+            .map(|actor| WorldNudge {
+                actor,
+                schema: schema.to_string(),
+                payload: payload.clone(),
+            })
+            .collect()
     }
 }
 
@@ -325,6 +377,36 @@ impl<'a> IssueRouter<'a> {
         )
     }
 
+    /// Who is on this issue, and what it is called.
+    ///
+    /// Read *after* the commit, so the answer is the set as it now stands rather
+    /// than the set the caller named — assigning somebody tells them, and it
+    /// also tells whoever was already there.
+    ///
+    /// Assignees and followers together: Linear subscribes you on assignment and
+    /// keeps you subscribed after, and separating the two here would mean a
+    /// person who asked to follow an issue heard less about it than one who was
+    /// put on it and left.
+    pub fn interested(&self, reff: &str) -> Option<(String, Vec<String>)> {
+        let snapshot = self.snapshot();
+        let doc = self.resolve(&snapshot, reff).ok()?;
+        let view: IssueView = self
+            .query(&IssueQuery::View {
+                doc: doc.clone(),
+                me: None,
+            })
+            .ok()?;
+        let mut actors: Vec<String> = view
+            .assignees
+            .iter()
+            .chain(view.followers.iter())
+            .map(|actor| actor.as_str().to_string())
+            .collect();
+        actors.sort();
+        actors.dedup();
+        Some((doc, actors))
+    }
+
     fn query<T: DeserializeOwned>(&self, query: &IssueQuery) -> Result<T, WorldError> {
         let bytes = self
             .session
@@ -456,6 +538,7 @@ impl<'a> IssueRouter<'a> {
                 | Request::Assign { .. }
                 | Request::Label { .. }
                 | Request::Comment { .. }
+                | Request::CommentAt { .. }
                 | Request::React { .. }
                 | Request::IssueDelete { .. }
                 | Request::IssueRestore { .. }
@@ -718,6 +801,34 @@ impl<'a> IssueRouter<'a> {
                     // The adapter mints the id (lowercase — it doubles as a
                     // Body path segment); the World re-validates it.
                     id: Some(issues::ids::mint_comment_id(self.clock)),
+                    parent: reply_to,
+                    actor: facts.actor.clone(),
+                    device: facts.device.clone(),
+                    ts: facts.now,
+                })
+                .map_err(Self::effect_err)?;
+                Ok((self.ref_response(&doc), true))
+            }
+            Request::CommentAt {
+                reff,
+                body,
+                field,
+                start,
+                end,
+                reply_to,
+            } => {
+                let doc = self.resolve(&snapshot, &reff)?;
+                self.submit(&IssueIntent::CommentAt {
+                    doc: doc.clone(),
+                    body,
+                    field,
+                    start,
+                    end,
+                    // The adapter mints the id (lowercase — it doubles as a
+                    // Body path segment); the World re-validates it. Required
+                    // rather than optional here: a span with no comment id
+                    // behind it is a span no reader can name.
+                    id: issues::ids::mint_comment_id(self.clock),
                     parent: reply_to,
                     actor: facts.actor.clone(),
                     device: facts.device.clone(),
@@ -1439,7 +1550,8 @@ impl<'a> IssueRouter<'a> {
                 reff,
                 name,
                 mime,
-                data_b64,
+                content,
+                size,
                 comment,
             } => {
                 let doc = self.resolve(&snapshot, &reff)?;
@@ -1448,17 +1560,21 @@ impl<'a> IssueRouter<'a> {
                     id: issues::ids::mint_attachment_id(self.clock),
                     name,
                     mime: mime.unwrap_or_else(|| "application/octet-stream".into()),
-                    data_b64,
+                    content,
+                    size,
                     comment,
                     actor: facts.actor.clone(),
                     device: facts.device.clone(),
                     ts: facts.now,
                 })
                 .map_err(|e| match e {
+                    // One refusal, one cause. The byte cap left with the
+                    // inline write path — the Station's `max_content_len` is
+                    // what bounds a file now, and it refuses at upload, long
+                    // before an intent is built.
                     WorldError::LimitExceeded => Response::err(format!(
-                        "attachment refused: at most {} files per issue, {} KiB each",
+                        "attachment refused: at most {} files per issue",
                         contract::MAX_ATTACHMENTS_PER_ISSUE,
-                        contract::MAX_ATTACHMENT_BYTES / 1024,
                     )),
                     other => Self::effect_err(other),
                 })?;
@@ -1480,11 +1596,26 @@ impl<'a> IssueRouter<'a> {
                 let record: serde_json::Value = self
                     .query(&IssueQuery::Attachment { doc, id })
                     .map_err(Self::effect_err)?;
+                // Both eras, and neither faked. A record written after the
+                // cutover names a content and carries no bytes; one written
+                // before carries bytes and names nothing. The previous shape
+                // defaulted a missing `data_b64` to `""`, which a caller then
+                // decoded to zero bytes and wrote out as a 0-byte file
+                // reporting success — the one outcome worse than an error.
+                let content = record["content"].as_str().map(str::to_string);
+                let data_b64 = record["data_b64"].as_str().map(str::to_string);
+                if content.is_none() && data_b64.is_none() {
+                    return Err(Response::err(
+                        "this attachment record carries neither bytes nor a content id",
+                    ));
+                }
                 Ok((
                     Response::Attachment {
                         name: record["name"].as_str().unwrap_or_default().to_string(),
                         mime: record["mime"].as_str().unwrap_or_default().to_string(),
-                        data_b64: record["data_b64"].as_str().unwrap_or_default().to_string(),
+                        content,
+                        data_b64,
+                        size: record["size"].as_u64().unwrap_or_default(),
                     },
                     false,
                 ))

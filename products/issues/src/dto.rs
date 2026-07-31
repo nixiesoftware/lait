@@ -14,7 +14,10 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::ids::{ActorId, DeviceId, DocId, LabelId, ProjectId, SpaceId};
+// No `DeviceId`. This layer had exactly one device-typed field and it was the
+// one named `actor` — every other identity a client is shown is an actor, which
+// is the shape the whole DTO surface already had and that one field did not.
+use crate::ids::{ActorId, DocId, LabelId, ProjectId, SpaceId};
 
 /// Generate the committed JSON Schema 2020-12 bundle for the product policy
 /// surface — every role/access/workflow definition shape plan 04 names —
@@ -547,6 +550,61 @@ pub struct CommentDto {
     /// Emoji reactions, grouped: each emoji with the actors who reacted.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reactions: Vec<ReactionDto>,
+    /// Where this comment attaches in the issue's collaborative text, resolved
+    /// against the snapshot this projection was built from. Absent on an
+    /// ordinary comment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<CommentAnchorDto>,
+}
+
+/// A comment's attachment to a span of the issue's collaborative text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommentAnchorDto {
+    /// The collaborative text field the span lies in.
+    pub field: String,
+    pub state: CommentAnchorState,
+}
+
+/// Where a range-attached comment points, as of THIS read.
+///
+/// Computed on every read and never written back. A stored resolution is a
+/// number that was right once, and every edit made after the comment is a
+/// chance for it to become the silently wrong index the anchor algebra exists
+/// to rule out. The transient plane states the same rule for carets
+/// (`runtime::live::CaretState`); this is the durable half, where the window
+/// for going stale is the lifetime of the issue rather than a few seconds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CommentAnchorState {
+    /// A span of the field as it stands now, in Unicode scalar offsets — the
+    /// coordinates the convergence engine counts text in, not UTF-8 bytes and
+    /// not UTF-16 code units.
+    ///
+    /// One edge is approximate, and it is the algebra's edge rather than one
+    /// this World introduced: an anchor at offset 0 binds to no operation,
+    /// because there is no character before it to bind to. A span works around
+    /// that by binding its head to the first character INSIDE it, so a span is
+    /// exact wherever it starts. A caret has no character of its own to bind
+    /// to, so a caret at offset 0 stays an offset from the start: text inserted
+    /// at the very front of a field grows past it instead of pushing it along.
+    At { start: u64, end: u64 },
+    /// The material the span was on is gone, the field it named has been
+    /// emptied, the anchor predates what this replica retains, or the two ends
+    /// resolved out of order and no longer describe a span.
+    ///
+    /// A drifted comment is still a comment somebody wrote: it renders, and it
+    /// renders without a position. Dropping it would delete a person's words
+    /// because an unrelated edit landed.
+    Drifted,
+    /// No answer was available — the stored anchor is not canonical bytes, it
+    /// names a different field than the record it sits in, or it names a field
+    /// with no positions in it at all.
+    ///
+    /// Every one of those is a fact about the record, not about the text: the
+    /// span was never placeable here, rather than placeable once and not now.
+    /// Distinct from `Drifted`, which IS an answer. Conflating them tells
+    /// someone their text was deleted when nothing of the sort happened.
+    Unresolved,
 }
 
 /// One emoji's reactions on one comment.
@@ -619,7 +677,16 @@ pub struct ActivityEvent {
     pub reff: String,
     pub kind: String,
     pub changes: Vec<FieldChange>,
-    pub actor: Option<DeviceId>,
+    /// Who did it, as an **actor** — which is what the field was always named
+    /// and, until this landed, never carried. It held the committing `DeviceId`,
+    /// so the member lookup that resolves a display name (keyed by actor) missed
+    /// on every row and every author was drawn as a hex prefix, coloured by
+    /// hashing that hex, in a colour nothing else on the screen agreed with.
+    ///
+    /// `None` for an event written before events carried one. That is the
+    /// honest answer and the viewer already draws it as no name rather than
+    /// inventing one.
+    pub actor: Option<ActorId>,
     pub actor_nick: String,
     pub text: String,
     pub ts: u64,

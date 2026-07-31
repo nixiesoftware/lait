@@ -36,8 +36,8 @@ use n0_future::StreamExt;
 use tokio::sync::{mpsc, watch, Mutex as TokioMutex};
 
 use super::{
-    Alpn, GossipEvent, GossipReceiver, GossipSender, Incoming, PeerId, Stream, Topic, Transport,
-    MAX_FRAME,
+    Alpn, GossipEvent, GossipReceiver, GossipSender, Incoming, IncomingConnection, PeerId,
+    Protocols, RecvFlow, SendFlow, Stream, Topic, Transport, MAX_FRAME,
 };
 use mechanics::ids::DeviceId;
 
@@ -99,6 +99,11 @@ pub struct IrohTransport {
     router: Router,
     /// Fed by the [`ForwardHandler`]s; drained by [`Transport::accept`].
     incoming: TokioMutex<mpsc::Receiver<Incoming>>,
+    /// Fed by the [`SessionHandler`]s; drained by
+    /// [`Transport::accept_connection`]. A separate queue because a connection
+    /// handed over whole and a connection wrapped in a framed stream are two
+    /// different deliveries of the same thing, and one of them consumes it.
+    incoming_sessions: TokioMutex<mpsc::Receiver<IncomingConnection>>,
     /// Flipped by [`Transport::shutdown`] so a parked `accept` unblocks even
     /// while it holds the `incoming` lock.
     shutdown: watch::Sender<bool>,
@@ -121,15 +126,16 @@ impl IrohTransport {
     pub async fn new(
         identity_seed: &[u8; 32],
         network: &crate::policy::Network,
-        alpns: &[Alpn],
+        protocols: Protocols<'_>,
     ) -> Result<Self> {
         let secret_key = SecretKey::from_bytes(identity_seed);
         let (endpoint, peers) = crate::policy::build_endpoint(&secret_key, network).await?;
         let gossip = Gossip::builder().spawn(endpoint.clone());
 
         let (tx, rx) = mpsc::channel(INCOMING_BUFFER);
+        let (session_tx, session_rx) = mpsc::channel(INCOMING_BUFFER);
         let mut builder = Router::builder(endpoint.clone()).accept(GOSSIP_ALPN, gossip.clone());
-        for &alpn in alpns {
+        for &alpn in protocols.framed {
             builder = builder.accept(
                 alpn,
                 ForwardHandler {
@@ -138,9 +144,19 @@ impl IrohTransport {
                 },
             );
         }
-        // Drop the original sender: only the handlers hold one now, so the
-        // channel closes when the Router (and with it the handlers) shuts down.
+        for &alpn in protocols.session {
+            builder = builder.accept(
+                alpn,
+                SessionHandler {
+                    alpn,
+                    tx: session_tx.clone(),
+                },
+            );
+        }
+        // Drop the original senders: only the handlers hold one now, so the
+        // channels close when the Router (and with it the handlers) shuts down.
         drop(tx);
+        drop(session_tx);
         let router = builder.spawn();
 
         // Waiting for a home relay only makes sense when the policy provides
@@ -161,6 +177,7 @@ impl IrohTransport {
             peers,
             router,
             incoming: TokioMutex::new(rx),
+            incoming_sessions: TokioMutex::new(session_rx),
             shutdown: watch::Sender::new(false),
             my_id,
         })
@@ -176,10 +193,10 @@ impl super::TransportFactory for IrohFactory {
         &self,
         identity_seed: &[u8; 32],
         network: &crate::policy::Network,
-        alpns: &[Alpn],
+        protocols: Protocols<'_>,
     ) -> Result<std::sync::Arc<dyn Transport>> {
         Ok(std::sync::Arc::new(
-            IrohTransport::new(identity_seed, network, alpns).await?,
+            IrohTransport::new(identity_seed, network, protocols).await?,
         ))
     }
 }
@@ -208,6 +225,182 @@ impl ProtocolHandler for ForwardHandler {
             })
             .await;
         Ok(())
+    }
+}
+
+/// Router handler for one session ALPN: forwards the whole connection, so the
+/// consumer decides what flows to open on it. Returning immediately is sound
+/// for the same reason [`ForwardHandler`] is — the forwarded `Connection` clone
+/// keeps it alive.
+#[derive(Debug, Clone)]
+struct SessionHandler {
+    alpn: Alpn,
+    tx: mpsc::Sender<IncomingConnection>,
+}
+
+impl ProtocolHandler for SessionHandler {
+    async fn accept(&self, conn: Connection) -> std::result::Result<(), AcceptError> {
+        let from = peer_id(conn.remote_id());
+        let _ = self
+            .tx
+            .send(IncomingConnection {
+                from: from.clone(),
+                alpn: self.alpn.to_vec(),
+                connection: Box::new(IrohConnection {
+                    alpn: self.alpn.to_vec(),
+                    peer: from,
+                    conn,
+                }),
+                opening: Vec::new(),
+            })
+            .await;
+        Ok(())
+    }
+}
+
+/// One multi-flow connection to one peer.
+struct IrohConnection {
+    alpn: Vec<u8>,
+    peer: PeerId,
+    conn: Connection,
+}
+
+#[async_trait]
+impl super::Connection for IrohConnection {
+    fn peer(&self) -> PeerId {
+        self.peer.clone()
+    }
+
+    fn alpn(&self) -> Vec<u8> {
+        self.alpn.clone()
+    }
+
+    async fn open_bi(&self) -> Result<(Box<dyn SendFlow>, Box<dyn RecvFlow>)> {
+        let (send, recv) = self
+            .conn
+            .open_bi()
+            .await
+            .context("open bidirectional flow")?;
+        Ok((Box::new(IrohSendFlow(send)), Box::new(IrohRecvFlow(recv))))
+    }
+
+    async fn accept_bi(&self) -> Result<Option<(Box<dyn SendFlow>, Box<dyn RecvFlow>)>> {
+        match self.conn.accept_bi().await {
+            Ok((send, recv)) => Ok(Some((
+                Box::new(IrohSendFlow(send)) as Box<dyn SendFlow>,
+                Box::new(IrohRecvFlow(recv)) as Box<dyn RecvFlow>,
+            ))),
+            Err(e) if is_clean_end(&e) => Ok(None),
+            Err(e) => Err(anyhow!("accept bidirectional flow: {e}")),
+        }
+    }
+
+    async fn open_uni(&self) -> Result<Box<dyn SendFlow>> {
+        let send = self.conn.open_uni().await.context("open flow")?;
+        Ok(Box::new(IrohSendFlow(send)))
+    }
+
+    async fn accept_uni(&self) -> Result<Option<Box<dyn RecvFlow>>> {
+        match self.conn.accept_uni().await {
+            Ok(recv) => Ok(Some(Box::new(IrohRecvFlow(recv)) as Box<dyn RecvFlow>)),
+            Err(e) if is_clean_end(&e) => Ok(None),
+            Err(e) => Err(anyhow!("accept flow: {e}")),
+        }
+    }
+
+    fn send_datagram(&self, payload: &[u8]) -> Result<()> {
+        self.conn
+            .send_datagram(payload.to_vec().into())
+            .map_err(|e| anyhow!("send datagram: {e}"))
+    }
+
+    async fn read_datagram(&self) -> Result<Option<Vec<u8>>> {
+        match self.conn.read_datagram().await {
+            Ok(bytes) => Ok(Some(bytes.to_vec())),
+            Err(e) if is_clean_end(&e) => Ok(None),
+            Err(e) => Err(anyhow!("read datagram: {e}")),
+        }
+    }
+
+    fn datagram_capacity(&self) -> Option<usize> {
+        self.conn.max_datagram_size()
+    }
+
+    fn close(&self, code: u32, reason: &[u8]) {
+        self.conn.close(code.into(), reason);
+    }
+
+    async fn closed(&self) {
+        self.conn.closed().await;
+    }
+}
+
+/// Whether a connection error means "nothing more is coming" rather than
+/// "something went wrong". A peer that closed cleanly and a peer that vanished
+/// are different answers, and a caller looping on `accept_uni` needs the first
+/// to terminate the loop rather than propagate.
+fn is_clean_end(error: &iroh::endpoint::ConnectionError) -> bool {
+    use iroh::endpoint::ConnectionError;
+    matches!(
+        error,
+        ConnectionError::ApplicationClosed(_)
+            | ConnectionError::ConnectionClosed(_)
+            | ConnectionError::LocallyClosed
+    )
+}
+
+struct IrohSendFlow(SendStream);
+
+#[async_trait]
+impl SendFlow for IrohSendFlow {
+    async fn write_all(&mut self, bytes: &[u8]) -> Result<()> {
+        self.0.write_all(bytes).await.context("write flow")
+    }
+
+    fn finish(&mut self) -> Result<()> {
+        // Idempotent, and finishing a flow the peer already reset is not an
+        // error — the peer has already said it wants nothing more.
+        let _ = self.0.finish();
+        Ok(())
+    }
+
+    fn reset(&mut self, code: u32) {
+        let _ = self.0.reset(code.into());
+    }
+
+    fn set_priority(&mut self, priority: i32) {
+        let _ = self.0.set_priority(priority);
+    }
+}
+
+struct IrohRecvFlow(RecvStream);
+
+#[async_trait]
+impl RecvFlow for IrohRecvFlow {
+    async fn read_chunk(&mut self, max: usize) -> Result<Option<Vec<u8>>> {
+        // `max` bounds the allocation, not the wire: the buffer is sized to
+        // what the caller will accept, and a short read is a short read rather
+        // than an end.
+        if max == 0 {
+            return Ok(Some(Vec::new()));
+        }
+        // Sized to what one read plausibly returns, not to the caller's whole
+        // ceiling. `max` is a pre-allocation *limit*; allocating and zeroing all
+        // of it on every iteration turns a dribbled 256 KiB flow into hundreds
+        // of megabytes of memset, which is a peer choosing how much work we do.
+        const READ_SLAB: usize = 16 * 1024;
+        let mut buf = vec![0u8; max.min(READ_SLAB)];
+        match self.0.read(&mut buf).await.context("read flow")? {
+            Some(read) => {
+                buf.truncate(read);
+                Ok(Some(buf))
+            }
+            None => Ok(None),
+        }
+    }
+
+    fn stop(&mut self, code: u32) {
+        let _ = self.0.stop(code.into());
     }
 }
 
@@ -411,6 +604,36 @@ impl Transport for IrohTransport {
             .context("connect to peer")?;
         let (send, recv) = conn.open_bi().await.context("open stream")?;
         Ok(Box::new(IrohStream::dialed(conn, send, recv)))
+    }
+
+    async fn connect_session(
+        &self,
+        peer: PeerId,
+        alpn: Alpn,
+    ) -> Result<Box<dyn super::Connection>> {
+        let id = endpoint_id(&peer)?;
+        let conn = self
+            .endpoint
+            .connect(id, alpn)
+            .await
+            .context("connect to peer")?;
+        Ok(Box::new(IrohConnection {
+            alpn: alpn.to_vec(),
+            peer,
+            conn,
+        }))
+    }
+
+    async fn accept_connection(&self) -> Option<IncomingConnection> {
+        let mut shutdown = self.shutdown.subscribe();
+        if *shutdown.borrow() {
+            return None;
+        }
+        let mut rx = self.incoming_sessions.lock().await;
+        tokio::select! {
+            inc = rx.recv() => inc,
+            _ = shutdown.wait_for(|s| *s) => None,
+        }
     }
 
     /// The Router does the real accepting; this drains what the handlers

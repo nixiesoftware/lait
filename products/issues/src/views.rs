@@ -11,8 +11,8 @@ use replica::CollaborativeView;
 use serde::{Deserialize, Serialize};
 
 use crate::dto::{
-    BoardColumn, BoardView, CommentDto, IssueView, LabelDto, Priority, ProjectDto, Row,
-    StatusCategory, WorkflowState,
+    BoardColumn, BoardView, CommentAnchorDto, CommentDto, IssueView, LabelDto, Priority,
+    ProjectDto, Row, StatusCategory, WorkflowState,
 };
 use crate::ids::{ActorId, DocId, LabelId, ProjectId};
 
@@ -513,6 +513,31 @@ pub struct AttachmentMeta {
 }
 
 impl IssueState {
+    /// The current text of a field a comment may attach a span to.
+    ///
+    /// THE list of anchorable paths, and the reason it is a list rather than a
+    /// pass-through: [`runtime::BodyReader::anchor_in_body`] mints an anchor
+    /// for **any** path on a collaborative Body, including one that names a
+    /// register and one no operation ever wrote. There is no text at such a
+    /// path, so the anchor binds to no operation, and resolving it answers
+    /// position zero forever and never reports drift — a well-typed lie, and
+    /// the exact failure `AnchorResolution` is shaped to prevent everywhere
+    /// else.
+    ///
+    /// So an issue's anchorable surface is not "its fields": it is the fields
+    /// this build writes with a text operation. `title`, `status`, `priority`,
+    /// `duedate` and the rest are registers — atomic values, replaced whole,
+    /// with no positions inside them for the algebra to move. A comment
+    /// attached to one is not a comment the algebra can keep pointing at, and
+    /// it is refused at the seam rather than stored as an anchor nothing can
+    /// resolve.
+    pub fn anchorable_text(&self, field: &str) -> Option<&str> {
+        match field {
+            "description" => Some(self.description.as_str()),
+            _ => None,
+        }
+    }
+
     pub fn from_view(view: &CollaborativeView) -> Self {
         let mut assignees: Vec<ActorId> = view
             .sets
@@ -803,6 +828,15 @@ pub fn project_row(
     }
 }
 
+/// How one stored comment's span resolves against the snapshot the view is
+/// built from.
+///
+/// Supplied by the caller because resolving needs the Body reader and this
+/// module is a pure projection over already-parsed state. A parameter rather
+/// than a field of [`IssueState`] on purpose: `IssueState` is memoized per Body
+/// version stamp, and a memoized resolution outlives the Body it was true of.
+pub type ResolveCommentAnchor<'a> = &'a dyn Fn(&StoredComment) -> Option<CommentAnchorDto>;
+
 /// Build the legacy IssueView.
 #[allow(clippy::too_many_arguments)]
 pub fn issue_view(
@@ -811,6 +845,7 @@ pub fn issue_view(
     space: &crate::ids::SpaceId,
     doc: &str,
     issue: &IssueState,
+    resolve_anchor: ResolveCommentAnchor<'_>,
 ) -> IssueView {
     let label_names = issue
         .labels
@@ -860,6 +895,7 @@ pub fn issue_view(
                         .and_then(|id| issue.reactions.get(id))
                         .map(|pairs| group_reactions(pairs))
                         .unwrap_or_default(),
+                    anchor: resolve_anchor(c),
                 })
             })
             .collect(),

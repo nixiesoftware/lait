@@ -525,7 +525,7 @@ async fn contact_neighbor(
     let staged = StagedContactMaterial {
         authority_records: received.authority_records,
         manifest_root_bytes: received.manifest_root_bytes,
-        manifest_pages: received.manifest_pages.into_values().collect(),
+        manifest_nodes: received.manifest_nodes.into_values().collect(),
         bodies: received
             .bodies
             .into_iter()
@@ -586,6 +586,17 @@ async fn contact_neighbor(
             .broadcaster
             .publish(scopes, body_frontier, authority_advanced);
     }
+    if authority_advanced {
+        // Rung here as well as on a local write, and this is the half that
+        // matters most. A revocation is almost always somebody *else's*
+        // decision: it is signed elsewhere, reaches this Station over Contact,
+        // and lands in the ledger without any local authority write. Without
+        // this line the delivery drivers never wake for it, and the peer who
+        // was just removed keeps its session until it happens to disconnect —
+        // which is the exact bound `watch_for_revocation` exists to provide,
+        // silently absent in the case it was built for.
+        ctx.core.note_authority_advanced();
+    }
     let convergence = attempted?;
     Ok(ContactOutcome {
         bytes_moved,
@@ -619,9 +630,27 @@ async fn initiate(
     let contact = ContactId::mint();
     let mut nonce = [0u8; 32];
     getrandom::fill(&mut nonce).map_err(|e| ContactError::Transfer(e.to_string()))?;
-    // The O(changed) declaration: every head this replica already holds, so
-    // the accepter serves only the difference. Bound into the SIGNED hello
-    // (count + digest) and streamed as chunked frames right after it.
+    // The declaration is a root. It used to be every head this replica holds,
+    // streamed as chunked frames after the hello; a root is 40 bytes whatever
+    // the catalog contains, and equal roots prove equal catalogs outright
+    // because the encoding is canonical.
+    let published = ctx
+        .core
+        .with_replica(|replica| Ok(replica.published_root()))
+        .map_err(|e: replica::ReplicaCommitError| ContactError::Transfer(e.to_string()))?;
+    let holdings_root = published.map(|r| r.hash).unwrap_or([0u8; 32]);
+
+    // The declaration is sent whenever this replica holds anything, and equal
+    // roots are not a reason to skip it. A root proves equal *catalogs*; the
+    // declaration deliberately omits heads held opaquely, so at equal roots it
+    // is precisely the list of material this replica can name and cannot read.
+    // Skipping it there is what would break a peer whose keys arrived after the
+    // Bodies did.
+    //
+    // What equal roots could still save is the O(catalog) manifest
+    // advertisement, which is served unconditionally today. Collecting that
+    // needs a receive path that can adopt payloads against a root it already
+    // holds rather than one just offered — the F4 remainder.
     let held = ctx
         .core
         .with_replica(|replica| Ok(replica.head_commitments()))
@@ -639,6 +668,7 @@ async fn initiate(
         responder.key_bytes(),
         nonce,
         contact,
+        holdings_root,
         holdings_count,
         holdings_digest,
         &ctx.options.station_seed,
@@ -762,6 +792,13 @@ async fn serve_contact(
     // digest/count mismatch is a protocol violation, and a wrong (or lying)
     // declaration can only starve the initiator — the transfer we build from
     // it still advertises the FULL manifest, and adoption is judged whole.
+
+    // A catalog root with an empty declaration is *not* a contradiction, which
+    // is worth stating because it looks like one. The declaration omits heads
+    // held opaquely, so a replica that holds a Space entirely as material it
+    // cannot read publishes a root and declares nothing — and it is exactly
+    // that peer the full advertisement has to reach.
+
     let mut held: std::collections::BTreeSet<(replica::BodyKey, [u8; 32])> =
         std::collections::BTreeSet::new();
     if hello.holdings_count > 0 {
@@ -861,7 +898,7 @@ async fn serve_contact(
         authority_frontier: frontier.as_bytes().to_vec(),
         authority_records,
         manifest_root_bytes: manifest.0,
-        manifest_pages: manifest.1,
+        manifest_nodes: manifest.1,
         bodies,
     };
     let contact = hello.contact;

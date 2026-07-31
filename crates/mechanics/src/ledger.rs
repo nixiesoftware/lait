@@ -647,10 +647,10 @@ impl AuthorityLedger {
         semantics: u16,
     ) -> Result<Self, LedgerError> {
         let store = JournaledStore::open(root)?;
-        let manifest = store
-            .manifest()
+        let meta_bytes = store
+            .caller_meta()?
             .ok_or_else(|| LedgerError::Corrupt("no committed ledger at this root".into()))?;
-        let meta: LedgerMeta = postcard::from_bytes(&manifest.meta)
+        let meta: LedgerMeta = postcard::from_bytes(&meta_bytes)
             .map_err(|e| LedgerError::Corrupt(format!("ledger meta: {e}")))?;
         if meta.version != 1 {
             return Err(LedgerError::Corrupt(format!(
@@ -977,7 +977,7 @@ impl AuthorityLedger {
         new_objects.retain(|b| seen.insert(journal::object_content_hash(b)));
 
         // 3. One journal commit; unwind the staged in-memory state on failure.
-        if let Err(e) = self.store.commit(&new_objects, &keep, meta) {
+        if let Err(e) = self.store.commit_required_set(&new_objects, &keep, meta) {
             for (hash, _, _) in &fresh {
                 self.ceremony_refs.remove(hash);
             }
@@ -1028,7 +1028,7 @@ impl AuthorityLedger {
         let (mut keep, meta) = self.assemble_meta();
         keep.retain(|r| r.hash != audit_obj.hash);
 
-        if let Err(e) = self.store.commit(&[audit_bytes], &keep, meta) {
+        if let Err(e) = self.store.commit_required_set(&[audit_bytes], &keep, meta) {
             self.ceremony = prior_ceremony;
             self.ceremony_refs = prior_refs;
             self.ceremony_audits.pop();
@@ -1487,7 +1487,7 @@ impl AuthorityLedger {
         let (mut keep, meta) = self.assemble_meta();
         // The checkpoint object is written by this commit — not carried.
         keep.retain(|r| r.hash != obj.hash);
-        match self.store.commit(&[bytes], &keep, meta) {
+        match self.store.commit_required_set(&[bytes], &keep, meta) {
             Ok(_) => Ok(()),
             Err(e) => {
                 self.checkpoint_refs.remove(&digest);
@@ -1688,7 +1688,7 @@ impl AuthorityLedger {
         let mut seen: BTreeSet<[u8; 32]> = BTreeSet::new();
         new_objects.retain(|b| seen.insert(journal::object_content_hash(b)));
 
-        match self.store.commit(&new_objects, &keep, meta) {
+        match self.store.commit_required_set(&new_objects, &keep, meta) {
             Ok(_) => {}
             Err(e) => {
                 // Unwind the staged in-memory state: the durable ledger is

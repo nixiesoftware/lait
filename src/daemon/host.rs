@@ -208,12 +208,138 @@ impl LaitDaemon {
         Ok(())
     }
 
+    /// Serve one content call, in whichever process owns the Station.
+    ///
+    /// An owned placement is served here: the body crosses from the socket to
+    /// the sealer without leaving this address space. An attached one is
+    /// proxied byte for byte down the per-Orbit socket — never refused, because
+    /// `Attached` is a reachable placement and a surface that works only when
+    /// the Station happens to be in-process is a surface with a hidden
+    /// precondition.
+    async fn serve_content(
+        self: Arc<Self>,
+        reader: BufReader<tokio::io::ReadHalf<LocalStream>>,
+        mut write_half: tokio::io::WriteHalf<LocalStream>,
+        request: control::ContentClientRequest,
+    ) {
+        use crate::daemon::control_router::ContentPlacement;
+
+        let placement = match self.router.content_placement(&request.route).await {
+            Ok(placement) => placement,
+            Err(error) => {
+                let _ = write_line(
+                    &mut write_half,
+                    &control::ContentReply::error(
+                        control::ContentErrorCode::Invalid,
+                        format!("{error:#}"),
+                    ),
+                )
+                .await;
+                return;
+            }
+        };
+
+        match placement {
+            ContentPlacement::InProcess { bridge, address } => {
+                let ceiling = bridge.max_content_len();
+                if request.body_len > ceiling {
+                    let _ = write_line(
+                        &mut write_half,
+                        &control::ContentReply::error(
+                            control::ContentErrorCode::Bounds,
+                            format!(
+                                "this Station accepts at most {ceiling} bytes in one \
+                                 content; the request declared {}",
+                                request.body_len
+                            ),
+                        ),
+                    )
+                    .await;
+                    return;
+                }
+                let expects_body = matches!(request.content, control::ContentCall::Write { .. });
+                let (body, pump) = control::upload_body(reader, request.body_len);
+                let call = request.content.clone();
+                let mut stopping = self.stopping.subscribe();
+                let work = tokio::task::spawn_blocking(move || {
+                    bridge.content_call(&address, &call, expects_body.then_some(body))
+                });
+                let (_, sealed) = tokio::join!(pump, work);
+                let (reply, payload) = sealed.unwrap_or_else(|_| {
+                    (
+                        control::ContentReply::error(
+                            control::ContentErrorCode::Storage,
+                            "the content call did not finish",
+                        ),
+                        Vec::new(),
+                    )
+                });
+                // A stop that landed mid-transfer is reported rather than
+                // answered. The drain that follows is bounded and hard-fails if
+                // a connection outlives it, so a caller reading "written" from
+                // a daemon that is going away is the worse of the two answers.
+                if *stopping.borrow_and_update()
+                    && !matches!(reply, control::ContentReply::ContentError { .. })
+                {
+                    let _ = write_line(
+                        &mut write_half,
+                        &control::ContentReply::error(
+                            control::ContentErrorCode::Storage,
+                            "this daemon is shutting down",
+                        ),
+                    )
+                    .await;
+                    return;
+                }
+                if write_line(&mut write_half, &reply).await.is_err() {
+                    return;
+                }
+                if !payload.is_empty() {
+                    let _ = write_half.write_all(&payload).await;
+                    let _ = write_half.flush().await;
+                }
+            }
+            ContentPlacement::Attached { home } => {
+                match proxy_content(&home, reader, &mut write_half, &request).await {
+                    Ok(()) => {}
+                    // Only before the answer's header has been forwarded. Once
+                    // the client has been told how many bytes follow, it is
+                    // inside `read_exact` for exactly that many — so a JSON
+                    // error appended here is not an error message, it is the
+                    // first bytes of the file, and the client cannot tell.
+                    // After the header, the only honest report is the truncated
+                    // stream itself.
+                    Err(ProxyFailure::BeforeHeader(error)) => {
+                        let _ = write_line(
+                            &mut write_half,
+                            &control::ContentReply::error(
+                                control::ContentErrorCode::Storage,
+                                error,
+                            ),
+                        )
+                        .await;
+                    }
+                    Err(ProxyFailure::AfterHeader) => {}
+                }
+            }
+        }
+    }
+
     async fn handle_conn(self: Arc<Self>, stream: LocalStream) {
+        use tokio::io::AsyncReadExt;
+
         let (read_half, mut write_half) = tokio::io::split(stream);
         let mut reader = BufReader::new(read_half);
         let mut line = String::new();
-        if reader.read_line(&mut line).await.is_err() {
-            return;
+        {
+            // Bounded, because a request header is a bounded thing. An
+            // unbounded `read_line` grows until it finds a newline or the
+            // sender stops, so a client that opens the socket and sends no
+            // newline is a memory attack that needs no authorization.
+            let mut bounded = (&mut reader).take(control::MAX_CONTROL_LINE_BYTES);
+            if bounded.read_line(&mut line).await.is_err() {
+                return;
+            }
         }
         let value = match serde_json::from_str::<serde_json::Value>(line.trim()) {
             Ok(value) => value,
@@ -226,6 +352,25 @@ impl LaitDaemon {
                 return;
             }
         };
+
+        if value.get("content").is_some() {
+            let request: control::ContentClientRequest = match serde_json::from_value(value) {
+                Ok(request) => request,
+                Err(error) => {
+                    let _ = write_line(
+                        &mut write_half,
+                        &control::ContentReply::error(
+                            control::ContentErrorCode::Invalid,
+                            format!("bad content call: {error}"),
+                        ),
+                    )
+                    .await;
+                    return;
+                }
+            };
+            self.serve_content(reader, write_half, request).await;
+            return;
+        }
 
         if value.get("call").is_some() {
             let WorldClientRequest {
@@ -531,6 +676,136 @@ async fn shutdown_signal() {
     ctrl_c.await;
 }
 
+/// Where a proxied exchange broke, which decides whether anything may still be
+/// said about it.
+enum ProxyFailure {
+    /// Nothing has reached the client yet, so a typed refusal is still a
+    /// refusal.
+    BeforeHeader(String),
+    /// The client has already been told how many bytes follow. Anything written
+    /// now *is* those bytes.
+    AfterHeader,
+}
+
+/// Forward one content call to the attached process that owns the Station, and
+/// its answer back.
+///
+/// Byte for byte and bounded at every step: the request body is pumped across
+/// in pieces rather than collected, the answer's header is read under the
+/// control-frame bound, and the answer's body is exactly as long as that header
+/// declared. Nothing here decodes the content — the router is not a party to
+/// what the bytes are.
+///
+/// The failure type carries *when* rather than only *what*, because after the
+/// header has been forwarded there is nothing safe to say. The client is inside
+/// `read_exact` for the declared length; a JSON error appended there is not an
+/// error message, it is the first bytes of the file, and nothing on the far side
+/// can tell the difference.
+async fn proxy_content(
+    home: &std::path::Path,
+    mut reader: BufReader<tokio::io::ReadHalf<LocalStream>>,
+    write_half: &mut tokio::io::WriteHalf<LocalStream>,
+    request: &control::ContentClientRequest,
+) -> Result<(), ProxyFailure> {
+    use tokio::io::AsyncReadExt;
+
+    fn before(what: &str) -> impl Fn(String) -> ProxyFailure + '_ {
+        move |e| ProxyFailure::BeforeHeader(format!("{what}: {e}"))
+    }
+
+    let name =
+        control::control_name(home).map_err(|e| ProxyFailure::BeforeHeader(format!("{e:#}")))?;
+    let upstream = LocalStream::connect(name)
+        .await
+        .map_err(|e| before("connect to the attached Space process")(e.to_string()))?;
+    let (upstream_read, mut upstream_write) = tokio::io::split(upstream);
+    let mut header = serde_json::to_string(request)
+        .map_err(|e| before("encode content request")(e.to_string()))?;
+    header.push('\n');
+    upstream_write
+        .write_all(header.as_bytes())
+        .await
+        .map_err(|e| before("write content request")(e.to_string()))?;
+    upstream_write
+        .flush()
+        .await
+        .map_err(|e| before("write content request")(e.to_string()))?;
+
+    let mut left = request.body_len;
+    let mut piece = vec![0u8; PROXY_PIECE_BYTES];
+    while left > 0 {
+        let want = left.min(PROXY_PIECE_BYTES as u64) as usize;
+        reader
+            .read_exact(&mut piece[..want])
+            .await
+            .map_err(|e| before("read content body")(e.to_string()))?;
+        upstream_write
+            .write_all(&piece[..want])
+            .await
+            .map_err(|e| before("forward content body")(e.to_string()))?;
+        left -= want as u64;
+    }
+    upstream_write
+        .flush()
+        .await
+        .map_err(|e| before("forward content body")(e.to_string()))?;
+
+    let mut upstream = BufReader::new(upstream_read);
+    let mut line = String::new();
+    {
+        let mut bounded = (&mut upstream).take(control::MAX_CONTROL_FRAME_BYTES);
+        bounded
+            .read_line(&mut line)
+            .await
+            .map_err(|e| before("read the attached answer")(e.to_string()))?;
+    }
+    if line.trim().is_empty() {
+        return Err(ProxyFailure::BeforeHeader(
+            "the attached Space process closed without answering".into(),
+        ));
+    }
+    let reply: control::ContentReply = serde_json::from_str(line.trim())
+        .map_err(|e| before("decode the attached answer")(e.to_string()))?;
+    // Everything that could be checked about the answer is checked *before* the
+    // header goes out, so that a bad answer is still a refusal rather than a
+    // truncated file.
+    if let control::ContentReply::ContentStream { len } = reply {
+        if len > runtime::content_host::MAX_RANGE_BYTES as u64 {
+            return Err(ProxyFailure::BeforeHeader(
+                "the attached Space process offered an answer past the range bound".into(),
+            ));
+        }
+    }
+    write_half
+        .write_all(line.as_bytes())
+        .await
+        .map_err(|e| before("write the answer")(e.to_string()))?;
+
+    // Past this point the client is counting bytes, so every failure is silent
+    // by necessity: the connection ends and the short read is the report.
+    if let control::ContentReply::ContentStream { len } = reply {
+        let mut left = len;
+        while left > 0 {
+            let want = left.min(PROXY_PIECE_BYTES as u64) as usize;
+            if upstream.read_exact(&mut piece[..want]).await.is_err() {
+                return Err(ProxyFailure::AfterHeader);
+            }
+            if write_half.write_all(&piece[..want]).await.is_err() {
+                return Err(ProxyFailure::AfterHeader);
+            }
+            left -= want as u64;
+        }
+    }
+    if write_half.flush().await.is_err() {
+        return Err(ProxyFailure::AfterHeader);
+    }
+    Ok(())
+}
+
+/// How much the proxy moves at a time. One chunk, so a forward never holds more
+/// than the sealer on the other end would.
+const PROXY_PIECE_BYTES: usize = 256 * 1024;
+
 async fn write_line<T: serde::Serialize>(
     write_half: &mut tokio::io::WriteHalf<LocalStream>,
     value: &T,
@@ -569,7 +844,7 @@ mod tests {
     use crate::net::Network;
     use crate::spaces::{Origin, SpaceEntry};
     use crate::transport::mem::MemNet;
-    use crate::transport::{Alpn, Transport};
+    use crate::transport::Transport;
 
     static HOME_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
@@ -581,7 +856,7 @@ mod tests {
             &self,
             identity_seed: &[u8; 32],
             _network: &Network,
-            _alpns: &[Alpn],
+            _protocols: comms::Protocols<'_>,
         ) -> Result<Arc<dyn Transport>> {
             Ok(Arc::new(
                 self.0.peer(crate::crypto::device_from_seed(identity_seed)),

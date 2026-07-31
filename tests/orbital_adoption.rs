@@ -109,6 +109,7 @@ impl World for TallyWorld {
         let next = self.current(ctx) + intent.payload.len() as u64;
         let key = self.body();
         Ok(WorldEffect {
+            content_refs: Vec::new(),
             demand: any_demand(),
             operations: vec![(
                 key.clone(),
@@ -142,6 +143,8 @@ fn registration(world: &TallyWorld) -> WorldRegistration {
         implementation_version: WorldVersion(1),
         schemas: world.schemas().to_vec(),
         limits: WorldLimits::default(),
+        scope_schemas: Vec::new(),
+        signal_schemas: Vec::new(),
     }
 }
 

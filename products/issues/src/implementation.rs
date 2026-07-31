@@ -92,6 +92,10 @@ fn place(ordered: &[Milestone], id: &str, pos: &Pos) -> Option<String> {
 pub struct IssuesWorld {
     id: replica::ids::WorldId,
     schemas: Vec<BodySchema>,
+    /// Owned rather than built on demand, because the trait hands back a slice
+    /// and the registry compares it against the registration byte for byte —
+    /// two constructions of "the same" list is how they come to differ.
+    signal_schemas: Vec<runtime::world::SignalSchema>,
     /// The derived read-model cache, keyed by the EXACT Manifest root each
     /// query is pinned to — registered in `tests/mixed_root_guard.rs` with its
     /// mixed-root rejection proof. A hit is only ever the same root, so output
@@ -191,6 +195,7 @@ impl IssuesWorld {
         Self {
             id: contract::world_id(),
             cache: std::sync::Mutex::new(RootKeyedCache::default()),
+            signal_schemas: contract::signal_schemas(),
             schemas: vec![
                 BodySchema {
                     id: contract::issue_schema(),
@@ -218,6 +223,13 @@ impl IssuesWorld {
             implementation_version: runtime::WorldVersion(1),
             schemas: world.schemas.clone(),
             limits: runtime::WorldLimits::default(),
+            // No scopes. Presence, carets and typing on an issue are the
+            // substrate's own shapes over a Body — `IssueView`, `TextCaret`,
+            // `Typing` — and this World gets them without declaring anything. A
+            // declaration is for a scope the substrate has no name for, and
+            // Issues has none yet.
+            scope_schemas: Vec::new(),
+            signal_schemas: world.signal_schemas.clone(),
         }
     }
 
@@ -227,12 +239,9 @@ impl IssuesWorld {
     /// policy-table commitment and artifact identity are build-embedded
     /// release ids (fixed here until a versioned policy table lands).
     pub fn implementation_descriptor() -> runtime::implementation::WorldImplementationDescriptor {
-        let world = Self::new();
-        runtime::implementation::WorldImplementationDescriptor::from_schemas(
-            world.id.clone(),
+        runtime::implementation::WorldImplementationDescriptor::from_registration(
+            &Self::registration(),
             1,
-            1,
-            &world.schemas,
             *blake3::hash(b"lait.issues.policy-table.v1").as_bytes(),
             *blake3::hash(b"lait.issues.artifact.v1").as_bytes(),
         )
@@ -247,6 +256,14 @@ struct Staging {
     ops: Vec<(BodyKey, BodyOp)>,
     scopes: Vec<BodyKey>,
     declarations: Vec<BodyDeclaration>,
+    /// The complete content set for each Body this transaction declares one for.
+    ///
+    /// Sparse on purpose. `content_refs` on an effect *replaces* what a Body
+    /// declared, so an entry for a Body that did not mean to say anything would
+    /// erase its set — which is what would happen on the next comment if every
+    /// staged Body got an entry. Only a key that explicitly declares appears
+    /// here.
+    declared: std::collections::BTreeMap<BodyKey, Vec<replica::ContentRef>>,
     /// Whether a catalog op must carry the creation declaration — true exactly
     /// when the committed snapshot holds no Catalog yet (first-ever write).
     declare_catalog_on_use: bool,
@@ -261,6 +278,7 @@ impl Staging {
             ops: Vec::new(),
             scopes: Vec::new(),
             declarations: Vec::new(),
+            declared: std::collections::BTreeMap::new(),
             declare_catalog_on_use,
             demand: None,
         }
@@ -328,9 +346,21 @@ impl Staging {
         self.demand = Some(demand);
     }
 
+    /// Declare the complete content set for one Body.
+    ///
+    /// Complete, not additive: `content_refs` on an effect replaces whatever
+    /// the Body declared before, so an entry naming one file detaches the rest.
+    /// Only a key that calls this appears in the effect at all — a blanket
+    /// declaration would erase the set on the next comment, which is exactly
+    /// the failure this shape exists to make impossible.
+    fn declare(&mut self, key: &BodyKey, refs: Vec<replica::ContentRef>) {
+        self.declared.insert(key.clone(), refs);
+    }
+
     fn into_effect(self, doc: Option<String>) -> WorldEffect {
         let demand = self.demand.unwrap_or_else(contract::demand_contributor);
         WorldEffect {
+            content_refs: self.declared.into_iter().collect(),
             operations: self.ops,
             scopes: self.scopes,
             effect: IssueEffect {
@@ -342,6 +372,54 @@ impl Staging {
             demand,
         }
     }
+}
+
+/// A content id as a World writes it: 32 bytes of lowercase hex.
+fn parse_content_ref(raw: &str) -> Option<replica::ContentRef> {
+    let bytes = data_encoding::HEXLOWER.decode(raw.as_bytes()).ok()?;
+    Some(replica::ContentRef {
+        content_id: <[u8; 32]>::try_from(bytes.as_slice()).ok()?,
+    })
+}
+
+/// The attachment records exactly as they sit in the Body, undecoded.
+///
+/// The decoded list is the wrong input for anything that has to be complete: it
+/// silently drops a record this build cannot read, and a dropped record is one
+/// that does not count toward the cap, cannot be detached, and — worst — is
+/// missing from a declaration that is supposed to name everything this Body
+/// references.
+fn raw_attachments(ctx: &WorldContext<'_>, doc: &str) -> BTreeMap<String, Vec<u8>> {
+    ctx.read_collaborative(&issue_key(doc))
+        .ok()
+        .and_then(|view| view.maps.get("attachments").cloned())
+        .unwrap_or_default()
+}
+
+/// The content set a record map references, refusing rather than guessing.
+///
+/// Fail-closed: a record that does not decode, or names a content id that is not
+///32 bytes of hex, refuses the whole transaction. The alternative is to skip it
+/// — and skipping means publishing a declaration that omits content the Body
+/// still references, which makes those bytes collectable while something still
+/// points at them.
+fn content_of(records: &BTreeMap<String, Vec<u8>>) -> Result<Vec<replica::ContentRef>, WorldError> {
+    let mut refs = Vec::new();
+    for value in records.values() {
+        let record: serde_json::Value =
+            serde_json::from_slice(value).map_err(|_| WorldError::ContractViolation)?;
+        let Some(content) = record.get("content").and_then(|c| c.as_str()) else {
+            // A legacy record carries its bytes inline and references no
+            // content at all. That is not a failure to decode; it is a record
+            // from before the content plane, and it declares nothing.
+            continue;
+        };
+        let reference = parse_content_ref(content).ok_or(WorldError::ContractViolation)?;
+        if !refs.contains(&reference) {
+            refs.push(reference);
+        }
+    }
+    Ok(refs)
 }
 
 fn reg(path: &str, value: impl Into<Vec<u8>>) -> BodyOp {
@@ -361,6 +439,10 @@ fn map_set(path: &str, key: impl Into<String>, value: impl Into<Vec<u8>>) -> Bod
 
 fn unchanged_effect(doc: Option<String>) -> WorldEffect {
     WorldEffect {
+        // A no-op declares nothing, which is not the same as declaring nothing
+        // *for* a Body: an empty list here means no key is named at all, so no
+        // Body's existing declaration is touched.
+        content_refs: Vec::new(),
         operations: vec![],
         scopes: vec![],
         effect: IssueEffect {
@@ -389,10 +471,11 @@ fn checked_catalog_view(
     match catalogs.as_slice() {
         [] => Ok(None),
         [one] if one == &expected => match ctx.read_collaborative(&expected) {
-            Some(view) => Ok(Some(view)),
-            // Bound as a catalog but unreadable under the collaborative
-            // model: a wrong-model/encoding Body, not a missing one.
-            None => Err(WorldError::WorldStateCorrupt),
+            Ok(view) => Ok(Some(view)),
+            // Bound as a catalog but unreadable: a wrong-model/encoding Body,
+            // or one carrying a collaborative type this build cannot project.
+            // Either way not a missing catalog.
+            Err(_) => Err(WorldError::WorldStateCorrupt),
         },
         _ => Err(WorldError::WorldStateCorrupt),
     }
@@ -405,14 +488,241 @@ fn catalog_state(ctx: &WorldContext<'_>) -> Result<CatalogState, WorldError> {
 
 fn issue_state(ctx: &WorldContext<'_>, doc: &str) -> Option<IssueState> {
     ctx.read_collaborative(&issue_key(doc))
+        .ok()
         .map(|v| IssueState::from_view(&v))
+}
+
+/// The preconditions both comment verbs share, and the issue they hold for.
+///
+/// The daemon mints the id; the World re-validates it — including uniqueness,
+/// because a duplicated id would fuse two comments' reactions, replies and
+/// spans.
+fn check_comment(
+    ctx: &WorldContext<'_>,
+    doc: &str,
+    body: &str,
+    actor: &str,
+    id: Option<&str>,
+    parent: Option<&str>,
+) -> Result<IssueState, WorldError> {
+    if body.is_empty() || ActorId::parse(actor).is_none() {
+        return Err(WorldError::InvalidRequest);
+    }
+    let issue = issue_state(ctx, doc).ok_or(WorldError::InvalidRequest)?;
+    if let Some(id) = id {
+        if !contract::is_comment_id(id)
+            || issue.comments.iter().any(|c| c.id.as_deref() == Some(id))
+        {
+            return Err(WorldError::InvalidRequest);
+        }
+    }
+    if let Some(parent) = parent {
+        // A reply needs an addressable target: an existing comment that carries
+        // an id (pre-identity comments cannot anchor threads) and is itself a
+        // root — one level, no ladders.
+        let target = issue
+            .comments
+            .iter()
+            .find(|c| c.id.as_deref() == Some(parent))
+            .ok_or(WorldError::InvalidRequest)?;
+        if id.is_none() || target.parent.is_some() {
+            return Err(WorldError::InvalidRequest);
+        }
+    }
+    Ok(issue)
+}
+
+/// Append a comment record and its history event.
+fn stage_comment(
+    staging: &mut Staging,
+    ctx: &WorldContext<'_>,
+    doc: &str,
+    issue: &IssueState,
+    record: StoredComment,
+    device: &str,
+    ts: u64,
+) {
+    let mut ev = event("commented", device, ts);
+    ev.x = record.b.clone();
+    staging.issue(
+        &issue_key(doc),
+        BodyOp::ListInsert {
+            path: "comments".into(),
+            index: issue.comments.len() as u64,
+            value: serde_json::to_vec(&record).expect("comment json"),
+        },
+    );
+    push_event(staging, ctx, doc, &ev);
+}
+
+/// Mint the durable anchors for a range-attached comment, or refuse.
+///
+/// Every refusal here has the same shape: the alternative is storing an anchor
+/// nothing can resolve, which reads back as a confident position that was never
+/// true.
+///
+/// - A field this build does not write with a text operation. See
+///   [`IssueState::anchorable_text`] — `anchor_in_body` answers `Some` for any
+///   path, so an anchor into a register is minted happily and then answers
+///   position zero forever.
+/// - A field with no material yet. A span of an empty text names nothing; the
+///   anchor the algebra returns for it binds to no operation and can therefore
+///   never report drift.
+/// - A span running backwards or past the end of what it names.
+/// - A Body the algebra will not anchor in at all — absent, or not
+///   collaborative. `anchor_in_body` returning `None` is the substrate saying
+///   there is no position here, and the World does not invent one.
+///
+/// A span with material binds its head to the first character INSIDE it rather
+/// than to the character in front of it. `BodyReader::anchor_in_body` binds
+/// position `p` to whatever wrote character `p - 1`, so minting the head at
+/// `start` would tie the comment to a character nobody marked: deleting the
+/// space in front of a marked word would then report the word as gone. Minting
+/// the head at `start + 1` binds it to the word's own first character, and the
+/// read half subtracts the one back. An empty span has no first character to
+/// bind to, so it is stored as the caret it is — `end` absent — and keeps the
+/// character-in-front binding, which is the only one a caret at the very end of
+/// a text can have.
+fn mint_comment_anchor(
+    ctx: &WorldContext<'_>,
+    doc: &str,
+    issue: &IssueState,
+    field: &str,
+    start: u64,
+    end: Option<u64>,
+) -> Result<contract::StoredAnchor, WorldError> {
+    let text = issue
+        .anchorable_text(field)
+        .ok_or(WorldError::InvalidRequest)?;
+    // Unicode scalars: the coordinate system `BodyOp::TextSplice` is validated
+    // in, so a span counted any other way would name a different place.
+    let length = text.chars().count() as u64;
+    let last = end.unwrap_or(start);
+    if length == 0 || start > last || last > length {
+        return Err(WorldError::InvalidRequest);
+    }
+    let key = issue_key(doc);
+    let mint = |position: u64| -> Result<String, WorldError> {
+        ctx.anchor(&key, field, position)
+            .map(|anchor| data_encoding::HEXLOWER.encode(&anchor.encode()))
+            .ok_or(WorldError::InvalidRequest)
+    };
+    let span = start < last;
+    Ok(contract::StoredAnchor {
+        field: field.to_string(),
+        start: mint(if span { start + 1 } else { start })?,
+        end: span.then(|| mint(last)).transpose()?,
+    })
+}
+
+/// Resolve one stored comment's span against the snapshot THIS query is pinned
+/// to.
+///
+/// Called per read and never memoized. The parsed [`IssueState`] is cached
+/// under a Body version stamp, so a resolution placed in it would be served
+/// against a Body it was never true of — the stale index the algebra exists to
+/// prevent. What is cached is the anchor; what is computed is the position.
+///
+/// The two preconditions [`mint_comment_anchor`] refuses on are checked again
+/// here, against the record instead of the request. A comment is a list element
+/// of a shared Body, so a record arrives over Contact from peers running builds
+/// this one does not control; `anchor_in_body` validates no path, and an anchor
+/// naming a register resolves to a confident position zero that can never
+/// drift. Refusing that only at the write seam would leave the read seam
+/// affirming the exact lie the write seam exists to stop.
+fn resolve_comment_anchor(
+    ctx: &WorldContext<'_>,
+    doc: &str,
+    issue: &IssueState,
+    comment: &StoredComment,
+) -> Option<crate::dto::CommentAnchorDto> {
+    use crate::dto::CommentAnchorState;
+    let at = comment.at.as_ref()?;
+    let dto = |state| {
+        Some(crate::dto::CommentAnchorDto {
+            field: at.field.clone(),
+            state,
+        })
+    };
+    match issue.anchorable_text(&at.field) {
+        // A field with no text in it has no positions for the algebra to move.
+        // That is not a lost position — this reader has no answer at all, and
+        // `Drifted` would assert one.
+        None => return dto(CommentAnchorState::Unresolved),
+        // The mint side's rule, applied to the material as it stands rather
+        // than as it stood: a span of an empty text names nothing.
+        Some("") => return dto(CommentAnchorState::Drifted),
+        Some(_) => {}
+    }
+    let key = issue_key(doc);
+    let one = |hex: &str| -> Option<replica::AnchorResolution> {
+        let raw = data_encoding::HEXLOWER.decode(hex.as_bytes()).ok()?;
+        let anchor = replica::FabricAnchor::decode_canonical(&raw).ok()?;
+        // The record names a field and so does the anchor inside it. This
+        // build writes them together and they always agree; a record from
+        // anywhere else that disagrees cannot say which one its writer meant,
+        // and resolving the anchor while reporting the record's field would
+        // hand back the right offset of the wrong value.
+        (anchor.path == at.field).then_some(())?;
+        Some(ctx.resolve_anchor(&key, &anchor))
+    };
+    let Some(head) = one(&at.start) else {
+        return dto(CommentAnchorState::Unresolved);
+    };
+    let tail = match &at.end {
+        None => Some(head),
+        Some(hex) => one(hex),
+    };
+    let state = match (head, tail) {
+        (replica::AnchorResolution::Resolved(h), Some(replica::AnchorResolution::Resolved(t))) => {
+            // A resolved anchor sits one past the character it bound to. For a
+            // span that character is the first one inside it, so the span's
+            // start is one back; a caret bound to the character in front of it
+            // already resolves to itself.
+            let start = if at.end.is_some() {
+                h.saturating_sub(1)
+            } else {
+                h
+            };
+            // Out of order is no longer a span, and half a span is the guess
+            // the algebra forbids.
+            if t >= start {
+                CommentAnchorState::At { start, end: t }
+            } else {
+                CommentAnchorState::Drifted
+            }
+        }
+        (_, Some(_)) => CommentAnchorState::Drifted,
+        (_, None) => CommentAnchorState::Unresolved,
+    };
+    dto(state)
+}
+
+/// Who a history row is attributed to.
+///
+/// `None` rather than the device it was committed on. An event written before
+/// events carried an actor has no honest name, and the viewer already draws that
+/// as no name — where a device id would be drawn as a name, in a colour derived
+/// from hashing hex, that nothing else on the screen agrees with.
+fn actor_of(event: &IssueEvent) -> Option<ActorId> {
+    ActorId::parse(&event.a)
 }
 
 /// Append one history event to an issue's `events` list.
 fn push_event(staging: &mut Staging, ctx: &WorldContext<'_>, doc: &str, event: &IssueEvent) {
+    // Stamped here rather than at each construction site, which is why the
+    // eleven of them and the intents carrying `device` are untouched. The actor
+    // is the Session's own, re-derived by the authority view at every submit —
+    // never a string the caller supplied, which is the whole reason it is worth
+    // showing.
+    let event = &IssueEvent {
+        a: ctx.principal().actor.as_str().to_string(),
+        ..event.clone()
+    };
     let key = issue_key(doc);
     let len = ctx
         .read_collaborative(&key)
+        .ok()
         .and_then(|v| v.lists.get("events").map(|l| l.len() as u64))
         .unwrap_or(0);
     staging.issue(
@@ -532,6 +842,10 @@ fn event(kind: &str, device: &str, ts: u64) -> IssueEvent {
     IssueEvent {
         k: kind.into(),
         d: device.into(),
+        // Filled by `push_event` from the Session's own principal. Left empty
+        // here so no construction site can supply one: an actor a caller passed
+        // in is a claim, and the whole value of showing this is that it is not.
+        a: String::new(),
         t: ts,
         c: vec![],
         x: String::new(),
@@ -687,6 +1001,10 @@ impl World for IssuesWorld {
 
     fn schemas(&self) -> &[BodySchema] {
         &self.schemas
+    }
+
+    fn signal_schemas(&self) -> &[runtime::world::SignalSchema] {
+        &self.signal_schemas
     }
 
     fn submit(
@@ -1209,52 +1527,56 @@ impl World for IssuesWorld {
                 device,
                 ts,
             } => {
-                if body.is_empty() || ActorId::parse(&actor).is_none() {
-                    return Err(WorldError::InvalidRequest);
-                }
-                let issue = issue_state(ctx, &doc).ok_or(WorldError::InvalidRequest)?;
-                if let Some(id) = &id {
-                    // The daemon mints; the World re-validates — including
-                    // uniqueness, because a duplicated id would fuse two
-                    // comments' reactions and replies.
-                    if !contract::is_comment_id(id)
-                        || issue.comments.iter().any(|c| c.id.as_deref() == Some(id))
-                    {
-                        return Err(WorldError::InvalidRequest);
-                    }
-                }
-                if let Some(parent) = &parent {
-                    // A reply needs an addressable target: an existing comment
-                    // that carries an id (pre-identity comments cannot anchor
-                    // threads) and is itself a root — one level, no ladders.
-                    let target = issue
-                        .comments
-                        .iter()
-                        .find(|c| c.id.as_deref() == Some(parent.as_str()))
-                        .ok_or(WorldError::InvalidRequest)?;
-                    if id.is_none() || target.parent.is_some() {
-                        return Err(WorldError::InvalidRequest);
-                    }
-                }
-                let key = issue_key(&doc);
-                staging.issue(
-                    &key,
-                    BodyOp::ListInsert {
-                        path: "comments".into(),
-                        index: issue.comments.len() as u64,
-                        value: serde_json::to_vec(&StoredComment {
-                            a: actor,
-                            t: ts,
-                            b: body.clone(),
-                            id,
-                            parent,
-                        })
-                        .expect("comment json"),
+                let issue =
+                    check_comment(ctx, &doc, &body, &actor, id.as_deref(), parent.as_deref())?;
+                stage_comment(
+                    &mut staging,
+                    ctx,
+                    &doc,
+                    &issue,
+                    StoredComment {
+                        a: actor,
+                        t: ts,
+                        b: body,
+                        id,
+                        parent,
+                        at: None,
                     },
+                    &device,
+                    ts,
                 );
-                let mut ev = event("commented", &device, ts);
-                ev.x = body;
-                push_event(&mut staging, ctx, &doc, &ev);
+                Ok(staging.into_effect(Some(doc)))
+            }
+            IssueIntent::CommentAt {
+                doc,
+                body,
+                field,
+                start,
+                end,
+                id,
+                parent,
+                actor,
+                device,
+                ts,
+            } => {
+                let issue = check_comment(ctx, &doc, &body, &actor, Some(&id), parent.as_deref())?;
+                let at = mint_comment_anchor(ctx, &doc, &issue, &field, start, end)?;
+                stage_comment(
+                    &mut staging,
+                    ctx,
+                    &doc,
+                    &issue,
+                    StoredComment {
+                        a: actor,
+                        t: ts,
+                        b: body,
+                        id: Some(id),
+                        parent,
+                        at: Some(at),
+                    },
+                    &device,
+                    ts,
+                );
                 Ok(staging.into_effect(Some(doc)))
             }
             IssueIntent::React {
@@ -1920,7 +2242,7 @@ impl World for IssuesWorld {
                 let referenced = ctx
                     .bodies_with_schema(&contract::world_id(), &contract::issue_schema())
                     .iter()
-                    .filter_map(|key| ctx.read_collaborative(key))
+                    .filter_map(|key| ctx.read_collaborative(key).ok())
                     .any(|view| IssueState::from_view(&view).project == id);
                 if referenced {
                     return Err(WorldError::Conflict);
@@ -2533,29 +2855,42 @@ impl World for IssuesWorld {
                 id,
                 name,
                 mime,
-                data_b64,
+                content,
+                size,
                 comment,
                 actor,
                 device,
                 ts,
             } => {
+                // The name is refused here rather than repaired, because the
+                // party proposing it is a local actor holding write authority
+                // who can simply pick another. Repair belongs at the far end,
+                // where the proposer is remote and refusing would let them make
+                // their own attachment unsaveable.
+                let name = name.trim();
                 if ActorId::parse(&actor).is_none()
                     || !id.starts_with("att_")
-                    || name.trim().is_empty()
+                    || name.is_empty()
+                    || name.len() > contract::MAX_ATTACHMENT_NAME_BYTES
+                    || name.chars().any(|c| c.is_control())
                 {
                     return Err(WorldError::InvalidRequest);
                 }
-                let issue = issue_state(ctx, &doc).ok_or(WorldError::InvalidRequest)?;
-                if issue.attachments.iter().any(|a| a.id == id) {
+                let Some(content_ref) = parse_content_ref(&content) else {
+                    return Err(WorldError::InvalidRequest);
+                };
+                if size == 0 {
                     return Err(WorldError::InvalidRequest);
                 }
-                if issue.attachments.len() >= contract::MAX_ATTACHMENTS_PER_ISSUE {
-                    return Err(WorldError::LimitExceeded);
+                let issue = issue_state(ctx, &doc).ok_or(WorldError::InvalidRequest)?;
+                let existing = raw_attachments(ctx, &doc);
+                if existing.contains_key(&id) {
+                    return Err(WorldError::InvalidRequest);
                 }
-                let raw = data_encoding::BASE64
-                    .decode(data_b64.as_bytes())
-                    .map_err(|_| WorldError::InvalidRequest)?;
-                if raw.is_empty() || raw.len() > contract::MAX_ATTACHMENT_BYTES {
+                // Counted against the raw map rather than the decoded list. A
+                // record this build cannot read still occupies a slot, and a cap
+                // that skipped it would let a corrupt record raise the ceiling.
+                if existing.len() >= contract::MAX_ATTACHMENTS_PER_ISSUE {
                     return Err(WorldError::LimitExceeded);
                 }
                 if let Some(comment) = &comment {
@@ -2567,25 +2902,40 @@ impl World for IssuesWorld {
                         return Err(WorldError::InvalidRequest);
                     }
                 }
-                let name = name.trim().to_string();
+                let name = name.to_string();
                 let record = serde_json::json!({
                     "id": id,
                     "name": name,
                     "mime": mime,
-                    "size": raw.len() as u64,
+                    "size": size,
                     "by": actor,
                     "ts": ts,
                     "comment": comment.unwrap_or_default(),
-                    "data_b64": data_b64,
+                    "content": content,
                 });
+                let key = issue_key(&doc);
                 staging.issue(
-                    &issue_key(&doc),
+                    &key,
                     BodyOp::MapSet {
                         path: "attachments".into(),
-                        key: id,
+                        key: id.clone(),
                         value: serde_json::to_vec(&record).expect("attachment json"),
                     },
                 );
+                // The Body's whole content set, re-derived over the map this
+                // operation is about to change.
+                //
+                // Whole rather than incremental, because a declaration replaces
+                // rather than adds: an entry naming only the new file would
+                // silently detach every earlier one. Fail-closed for the same
+                // reason the cap counts raw records — a record that does not
+                // decode is content this Body still references, and leaving it
+                // out of the declaration would make those bytes collectable.
+                let mut refs = content_of(&existing)?;
+                if !refs.contains(&content_ref) {
+                    refs.push(content_ref);
+                }
+                staging.declare(&key, refs);
                 let mut ev = event("attached", &device, ts);
                 ev.x = name;
                 push_event(&mut staging, ctx, &doc, &ev);
@@ -2656,7 +3006,17 @@ impl World for IssuesWorld {
                         // World does not know it — stamp a placeholder the
                         // daemon replaces? No: the daemon supplies it in the
                         // query. Provisional views come from the row path.
-                        issue_view(catalog, aliases, &space_placeholder(), &doc, issue)
+                        let resolve = |comment: &StoredComment| {
+                            resolve_comment_anchor(ctx, &doc, issue, comment)
+                        };
+                        issue_view(
+                            catalog,
+                            aliases,
+                            &space_placeholder(),
+                            &doc,
+                            issue,
+                            &resolve,
+                        )
                     }
                     None => provisional_view(catalog, aliases, &doc),
                 };
@@ -2761,7 +3121,7 @@ impl World for IssuesWorld {
                                 to: c.to.clone(),
                             })
                             .collect(),
-                        actor: crate::ids::DeviceId::parse(&e.d),
+                        actor: actor_of(e),
                         actor_nick: String::new(),
                         text: e.x.clone(),
                         ts: e.t,
@@ -2804,7 +3164,7 @@ impl World for IssuesWorld {
                                 to: c.to.clone(),
                             })
                             .collect(),
-                        actor: crate::ids::DeviceId::parse(&e.d),
+                        actor: actor_of(e),
                         actor_nick: String::new(),
                         text: e.x.clone(),
                         ts: e.t,
@@ -3164,7 +3524,7 @@ impl World for IssuesWorld {
                 // map, bypassing the metadata-only snapshot cache.
                 let view = ctx
                     .read_collaborative(&issue_key(&doc))
-                    .ok_or(WorldError::InvalidRequest)?;
+                    .map_err(|_| WorldError::InvalidRequest)?;
                 let raw = view
                     .maps
                     .get("attachments")
@@ -3467,5 +3827,327 @@ mod milestone_order_tests {
             milestone("mls_a", "First", "5", None),
         ];
         assert_eq!(order(list), ["First", "Second"]);
+    }
+}
+
+#[cfg(test)]
+mod comment_anchor_tests {
+    use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+    use crate::dto::CommentAnchorState;
+
+    /// A reader that answers a scripted resolution per anchor offset, and
+    /// counts how often it was asked.
+    ///
+    /// [`WorldContext::new`] carries no reader and answers `Drifted` for every
+    /// anchor, which puts the resolved arms of [`resolve_comment_anchor`] out
+    /// of reach — a module built on it passes unchanged when the resolver is
+    /// replaced by a constant. The offsets of a stored span's two ends differ,
+    /// so a script keyed on them drives each arm, including the ones a live
+    /// replica reaches only after one specific edit. The count is what proves
+    /// the guards ahead of the reader stop before it.
+    #[derive(Default)]
+    struct ScriptedReader {
+        by_offset: BTreeMap<u64, replica::AnchorResolution>,
+        asked: AtomicUsize,
+    }
+
+    impl runtime::BodyReader for ScriptedReader {
+        fn read_body(&self, _key: &replica::ids::BodyKey) -> Option<Vec<u8>> {
+            None
+        }
+        fn read_collaborative_body(
+            &self,
+            _key: &replica::ids::BodyKey,
+        ) -> Result<replica::CollaborativeView, replica::ProjectionError> {
+            Err(replica::ProjectionError::NotCollaborative)
+        }
+        fn bodies_with_schema(
+            &self,
+            _world: &replica::ids::WorldId,
+            _schema: &replica::ids::SchemaId,
+        ) -> Vec<replica::ids::BodyKey> {
+            Vec::new()
+        }
+        fn body_version(&self, _key: &replica::ids::BodyKey) -> Option<replica::FabricVersion> {
+            None
+        }
+        fn anchor_in_body(
+            &self,
+            _key: &replica::ids::BodyKey,
+            _path: &str,
+            _position: u64,
+        ) -> Option<replica::FabricAnchor> {
+            None
+        }
+        fn resolve_anchor(
+            &self,
+            _key: &replica::ids::BodyKey,
+            anchor: &replica::FabricAnchor,
+        ) -> replica::AnchorResolution {
+            self.asked.fetch_add(1, Ordering::SeqCst);
+            self.by_offset
+                .get(&anchor.offset)
+                .copied()
+                .unwrap_or(replica::AnchorResolution::Drifted)
+        }
+        fn content_status(
+            &self,
+            _content: &replica::ContentRef,
+        ) -> Option<runtime::world::WorldContentStatus> {
+            None
+        }
+    }
+
+    fn scripted<const N: usize>(script: [(u64, replica::AnchorResolution); N]) -> ScriptedReader {
+        ScriptedReader {
+            by_offset: script.into_iter().collect(),
+            asked: AtomicUsize::new(0),
+        }
+    }
+
+    fn facts() -> runtime::PrincipalFacts {
+        let device = mechanics::crypto::device_from_seed(&[3u8; 32]);
+        runtime::PrincipalFacts {
+            actor: ActorId::from_incept_hash(&"cd".repeat(32)),
+            station: mechanics::ids::StationId::from_device(&device).unwrap(),
+            device,
+            space: mechanics::ids::SpaceId::from_digest([5u8; 16]),
+            authority_frontier: replica::frontier::AuthorityFrontier::from_canonical_bytes(vec![]),
+        }
+    }
+
+    fn issue(description: &str) -> IssueState {
+        IssueState {
+            description: description.into(),
+            ..Default::default()
+        }
+    }
+
+    fn comment(at: Option<contract::StoredAnchor>) -> StoredComment {
+        StoredComment {
+            a: ActorId::from_incept_hash(&"cd".repeat(32)).as_str().into(),
+            t: 1,
+            b: "body".into(),
+            id: Some("cmt_00000000000000000000000000".into()),
+            parent: None,
+            at,
+        }
+    }
+
+    /// Bytes with the shape a real stored anchor has: canonical, naming a path,
+    /// and carrying the offset the script keys on.
+    fn anchor_hex(path: &str, offset: u64) -> String {
+        let anchor = replica::FabricAnchor {
+            format_version: replica::CAUSAL_FORMAT_VERSION,
+            body: [9u8; 32],
+            path: path.into(),
+            anchored_to: None,
+            offset,
+            after: true,
+            taken_at: replica::FabricVersion::empty(),
+        };
+        data_encoding::HEXLOWER.encode(&anchor.encode())
+    }
+
+    /// A stored attachment whose ends the script addresses by `head`/`tail`.
+    fn stored(field: &str, head: u64, tail: Option<u64>) -> contract::StoredAnchor {
+        contract::StoredAnchor {
+            field: field.into(),
+            start: anchor_hex(field, head),
+            end: tail.map(|t| anchor_hex(field, t)),
+        }
+    }
+
+    fn resolve(
+        reader: &ScriptedReader,
+        issue: &IssueState,
+        at: Option<contract::StoredAnchor>,
+    ) -> Option<crate::dto::CommentAnchorDto> {
+        let facts = facts();
+        let ctx = WorldContext::with_reads(&facts, reader, [0u8; 32]);
+        resolve_comment_anchor(&ctx, "iss_x", issue, &comment(at))
+    }
+
+    /// An unattached comment has no anchor to report, which is not a state of
+    /// an anchor.
+    #[test]
+    fn an_unattached_comment_resolves_to_nothing() {
+        let reader = ScriptedReader::default();
+        assert!(resolve(&reader, &issue("the quick brown fox"), None).is_none());
+    }
+
+    /// A span's ends resolve one past the characters they bound to, and the
+    /// head's one is taken back off.
+    ///
+    /// The only test in this module that reaches the reader's answer, and the
+    /// one that fails if [`resolve_comment_anchor`] stops resolving: the script
+    /// answers with positions eight characters along from where the anchors
+    /// were taken, as an insertion in front of the span would.
+    #[test]
+    fn a_resolved_span_reports_the_material_its_ends_bound_to() {
+        let reader = scripted([
+            (5, replica::AnchorResolution::Resolved(13)),
+            (9, replica::AnchorResolution::Resolved(17)),
+        ]);
+        let resolved = resolve(
+            &reader,
+            &issue("PRE ther quick brown fox"),
+            Some(stored("description", 5, Some(9))),
+        )
+        .unwrap();
+        assert_eq!(resolved.field, "description");
+        assert_eq!(
+            resolved.state,
+            CommentAnchorState::At { start: 12, end: 17 },
+            "the head bound to the span's first character, so the span starts one back"
+        );
+    }
+
+    /// A caret bound to the character in front of it already resolves to
+    /// itself, so nothing is taken off.
+    #[test]
+    fn a_resolved_caret_reports_the_position_it_bound_to() {
+        let reader = scripted([(4, replica::AnchorResolution::Resolved(12))]);
+        let resolved = resolve(
+            &reader,
+            &issue("PRE the quick brown fox"),
+            Some(stored("description", 4, None)),
+        )
+        .unwrap();
+        assert_eq!(
+            resolved.state,
+            CommentAnchorState::At { start: 12, end: 12 }
+        );
+    }
+
+    /// Either end lost is a lost span. Half a span is the guess the algebra
+    /// forbids.
+    #[test]
+    fn either_end_lost_drifts_the_whole_span() {
+        for script in [
+            [
+                (5, replica::AnchorResolution::Drifted),
+                (9, replica::AnchorResolution::Resolved(17)),
+            ],
+            [
+                (5, replica::AnchorResolution::Resolved(13)),
+                (9, replica::AnchorResolution::Drifted),
+            ],
+        ] {
+            let reader = scripted(script);
+            let resolved = resolve(
+                &reader,
+                &issue("the quick brown fox"),
+                Some(stored("description", 5, Some(9))),
+            )
+            .unwrap();
+            assert_eq!(resolved.state, CommentAnchorState::Drifted);
+        }
+    }
+
+    /// Ends that resolve out of order no longer describe a span.
+    #[test]
+    fn ends_that_resolve_out_of_order_are_not_a_span() {
+        let reader = scripted([
+            (5, replica::AnchorResolution::Resolved(13)),
+            (9, replica::AnchorResolution::Resolved(3)),
+        ]);
+        let resolved = resolve(
+            &reader,
+            &issue("the quick brown fox"),
+            Some(stored("description", 5, Some(9))),
+        )
+        .unwrap();
+        assert_eq!(resolved.state, CommentAnchorState::Drifted);
+    }
+
+    /// Stored bytes that are not a canonical anchor are `Unresolved`, never
+    /// `Drifted`.
+    ///
+    /// The distinction is the whole reason both states exist: `Drifted` says
+    /// the span has no place in the text, and telling someone that because a
+    /// decode failed would be a claim about their document made from a bug in
+    /// ours.
+    #[test]
+    fn undecodable_bytes_are_unresolved_and_not_drifted() {
+        let reader = scripted([(4, replica::AnchorResolution::Resolved(4))]);
+        for bad in ["", "zz", "00"] {
+            let at = contract::StoredAnchor {
+                field: "description".into(),
+                start: bad.into(),
+                end: None,
+            };
+            let resolved = resolve(&reader, &issue("the quick brown fox"), Some(at)).unwrap();
+            assert_eq!(
+                resolved.state,
+                CommentAnchorState::Unresolved,
+                "`{bad}` is not an anchor, so there is no answer — not a lost one"
+            );
+        }
+
+        // One end decodable and the other not is still no answer.
+        let at = contract::StoredAnchor {
+            field: "description".into(),
+            start: anchor_hex("description", 4),
+            end: Some("zz".into()),
+        };
+        let resolved = resolve(&reader, &issue("the quick brown fox"), Some(at)).unwrap();
+        assert_eq!(resolved.state, CommentAnchorState::Unresolved);
+    }
+
+    /// A record whose field disagrees with its own anchor's path resolves to
+    /// nothing, without asking the reader.
+    ///
+    /// Both name the value the span is inside. Trusting either one over the
+    /// other would report a position in a field the writer may not have meant,
+    /// which is a wrong index wearing the right shape.
+    #[test]
+    fn a_record_that_disagrees_with_its_own_anchor_is_unresolved() {
+        let reader = scripted([(4, replica::AnchorResolution::Resolved(4))]);
+        let at = contract::StoredAnchor {
+            field: "description".into(),
+            start: anchor_hex("title", 4),
+            end: None,
+        };
+        let resolved = resolve(&reader, &issue("the quick brown fox"), Some(at)).unwrap();
+        assert_eq!(resolved.state, CommentAnchorState::Unresolved);
+        assert_eq!(reader.asked.load(Ordering::SeqCst), 0);
+    }
+
+    /// A record naming a field with no positions in it is `Unresolved`, and the
+    /// reader is never asked.
+    ///
+    /// The write seam refuses to mint such a record; a peer on another build
+    /// can still put one in the shared Body, and `anchor_in_body` validates no
+    /// path — so the reader would answer position zero, forever, for a register.
+    /// [`IssueState::anchorable_text`] is the list, and it binds both seams.
+    #[test]
+    fn a_record_naming_a_field_with_no_positions_is_unresolved() {
+        let reader = scripted([(4, replica::AnchorResolution::Resolved(4))]);
+        let resolved = resolve(
+            &reader,
+            &issue("the quick brown fox"),
+            Some(stored("title", 4, None)),
+        )
+        .unwrap();
+        assert_eq!(resolved.field, "title");
+        assert_eq!(resolved.state, CommentAnchorState::Unresolved);
+        assert_eq!(reader.asked.load(Ordering::SeqCst), 0);
+    }
+
+    /// A field that has been emptied has drifted, whatever the reader says.
+    ///
+    /// An anchor at offset zero binds to no operation, so the algebra keeps
+    /// answering zero for it after the last character is deleted. Zero is a
+    /// position, and there are no positions in an empty text.
+    #[test]
+    fn a_record_in_an_emptied_field_has_drifted() {
+        let reader = scripted([(0, replica::AnchorResolution::Resolved(0))]);
+        let resolved = resolve(&reader, &issue(""), Some(stored("description", 0, None))).unwrap();
+        assert_eq!(resolved.state, CommentAnchorState::Drifted);
+        assert_eq!(reader.asked.load(Ordering::SeqCst), 0);
     }
 }

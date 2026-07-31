@@ -36,6 +36,7 @@ import {
 } from "lucide-react";
 
 import { rpc } from "../api";
+import { downloadUrl, upload as uploadContent } from "../content";
 import { useIssueDetail, useProjectViewerStore } from "../projectStore";
 import { clearDraft, loadDraft, saveDraft } from "../core/drafts";
 import {
@@ -44,6 +45,8 @@ import {
   type EventPhraseContext,
   type NameResolver,
 } from "../core/activity";
+import { codeUnitSpan } from "../core/anchor";
+import { caretPhrase, carets, typists, useLiveTable, watching } from "../live";
 import type { Field as PredictField } from "../core/overlay";
 import type { IssueField } from "../core/registry";
 import { inverseWorkAction, workTarget } from "../core/workflow";
@@ -828,6 +831,13 @@ export function IssueDetail({
             />
           </RailRow>
           </RailSection>
+
+          <LiveRail
+            spaceId={spaceId}
+            docId={issue.doc_id}
+            members={members}
+            memberOf={memberOf}
+          />
         </div>
 
         <Description
@@ -867,6 +877,7 @@ export function IssueDetail({
           key={reff}
           events={events}
           comments={issue.comments}
+          description={issue.description}
           memberOf={memberOf}
           states={states}
           graph={graph}
@@ -1073,21 +1084,119 @@ function FollowToggle({
   );
 }
 
-/** Base64 helpers for the attachment payloads (standard alphabet, padded). */
-const bufToB64 = (buf: ArrayBuffer): string => {
-  const bytes = new Uint8Array(buf);
-  let bin = "";
-  for (let i = 0; i < bytes.length; i += 0x8000) {
-    bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
-  }
-  return btoa(bin);
-};
+/**
+ * Who else is on this issue, and where their carets are.
+ *
+ * In the rail rather than in `HeaderActions`. That slot is a portal into a node
+ * the shell only mounts when the detail pane is the full-width surface, so a
+ * facepile there would render nothing — silently, no warning — on every other
+ * layout, and it would be absent from this file's own test for the same reason.
+ *
+ * Nothing here rings a doorbell or bumps a revision. A face arriving is not a
+ * change to the issue, and routing it through the projection invalidation would
+ * make every glance somebody takes at a document cost every open tab a re-read.
+ */
+function LiveRail({
+  spaceId,
+  docId,
+  members,
+  memberOf,
+}: {
+  spaceId: string;
+  /**
+   * The `iss_` doc id, and not the `reff` every verb on this page takes.
+   *
+   * The Live plane keys its scopes by a Body id derived from the doc id, and
+   * that derivation is a hash of whatever string it is handed: a project alias
+   * hashes to a Body nothing publishes under, so the rail would answer an empty
+   * table for ever and draw nothing, on every issue, with nothing to say about it.
+   */
+  docId: string;
+  /** The ACL array itself, because `stackFor` caches its index on that identity. */
+  members: MemberDto[];
+  memberOf: (key: string) => MemberDto | undefined;
+}) {
+  const live = useLiveTable(spaceId, docId);
+  const here = watching(live.entries);
+  const marks = carets(live.entries);
+  const typing = typists(live.entries);
+
+  // The daemon cannot answer at all — an older build, or one with the Live plane
+  // off. Drawing "nobody is here" from that would be inventing an answer, and
+  // drawing an apology on every issue would be noise about a thing the reader
+  // cannot act on.
+  if (live.unavailable) return null;
+  if (here.length === 0 && marks.length === 0 && typing.length === 0 && !live.partial) return null;
+
+  const name = (actor: string) => nameOf(actor, memberOf(actor));
+  const present = here.filter((row) => !row.uncertain);
+  // Shown, and shown as a guess. Hiding them is how a collaborator who has gone
+  // quiet for a minute disappears from a room they are still in.
+  const unsure = here.filter((row) => row.uncertain);
+
+  return (
+    <RailSection title="Live">
+      {here.length > 0 && (
+        <RailRow label="Here now">
+          <span className="flex min-w-0 items-center gap-1.5">
+            <AvatarStack members={stackFor(present.map((row) => row.actor), members)} />
+            {unsure.length > 0 && (
+              <AvatarStack
+                members={stackFor(unsure.map((row) => row.actor), members)}
+                className="opacity-60"
+              />
+            )}
+            <span className="min-w-0 truncate">
+              {present.map((row) => name(row.actor)).join(", ")}
+              {unsure.length > 0 && (
+                <span className="text-mute">
+                  {present.length > 0 ? " · " : ""}
+                  {unsure.map((row) => name(row.actor)).join(", ")} may have left
+                </span>
+              )}
+            </span>
+          </span>
+        </RailRow>
+      )}
+
+      {typing.length > 0 && (
+        <RailRow label="Typing">
+          {/* The row's own label says "Typing", so the value is the names and
+              nothing else — a verb here would have to pick a number, and the
+              fact is coarse enough already. */}
+          <span className="text-mute min-w-0 truncate">{typing.map(name).join(", ")}</span>
+        </RailRow>
+      )}
+
+      {marks.map((mark) => (
+        <RailRow key={`${mark.actor} ${mark.field}`} label="Caret">
+          <span className={cn("min-w-0 truncate", mark.uncertain && "text-mute")}>
+            {name(mark.actor)} — {mark.field}, {caretPhrase(mark.position)}
+            {mark.uncertain && " (last known)"}
+          </span>
+        </RailRow>
+      ))}
+
+      {live.partial && (
+        <RailRow label="Awareness">
+          <span className="text-mute flex min-w-0 items-center gap-1.5">
+            <Info className="size-icon-sm shrink-0" />
+            <span className="min-w-0 truncate">This node is not hearing from everyone.</span>
+          </span>
+        </RailRow>
+      )}
+    </RailSection>
+  );
+}
+
+/** Decode a legacy inline attachment.
+ *
+ *  Read-only and permanent. Records written before the content cutover carry
+ *  their bytes base64'd inside the issue Body, and those Bodies are in the
+ *  field — a reader that dropped this would lose the files rather than migrate
+ *  them. There is deliberately no encoder any more: nothing writes that shape. */
 const b64ToBytes = (b64: string): Uint8Array =>
   Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
-
-/** The engine's cap (contract.rs MAX_ATTACHMENT_BYTES), mirrored for a
- *  friendly refusal before the bytes ever leave the browser. */
-const MAX_ATTACHMENT_BYTES = 256 * 1024;
 
 /**
  * Attachments (CREATE-5): bounded files riding the issue document's own
@@ -1111,21 +1220,24 @@ function Attachments({
   const [busy, setBusy] = useState(false);
 
   const upload = async (file: File) => {
-    if (file.size > MAX_ATTACHMENT_BYTES) {
-      onError(
-        `${file.name} is ${Math.ceil(file.size / 1024)} KiB — attachments are capped at ${MAX_ATTACHMENT_BYTES / 1024} KiB`,
-      );
-      return;
-    }
+    // No size check here any more. The engine owns `max_content_len` and
+    // refuses past it with a sentence; a mirrored constant would be a second
+    // number to keep in step, and the one a person met would be whichever was
+    // smaller — which is how a ceiling starts lying about itself.
     setBusy(true);
     try {
-      const data_b64 = bufToB64(await file.arrayBuffer());
+      // Two steps, in this order, because the engine enforces it: the bytes go
+      // to the content plane, and only then does the issue name what came back.
+      // `uploadContent` streams the file, so a large attachment is never held
+      // in this tab as one buffer.
+      const stored = await uploadContent(spaceId, file);
       await rpc(spaceId, {
         cmd: "attach",
         reff,
         name: file.name,
         mime: file.type || null,
-        data_b64,
+        content: stored.content,
+        size: stored.size,
       });
     } catch (e) {
       onError(e instanceof Error ? e.message : String(e));
@@ -1136,8 +1248,35 @@ function Attachments({
 
   const download = async (att: AttachmentMetaDto) => {
     try {
+      // A content-plane file is fetched by navigation, not by this tab. Pulling
+      // megabytes through JavaScript to hand them straight back to the browser
+      // is work the browser does better, and it is the difference between a
+      // large file downloading and a large file wedging the page.
+      //
+      // The URL carries no credential — the cookie rides a same-origin request,
+      // and the engine refuses a query token on that route anyway.
+      if (att.content) {
+        const link = document.createElement("a");
+        link.href = downloadUrl(spaceId, att.content, att.name);
+        link.download = att.name;
+        link.click();
+        return;
+      }
+      // A record from before the cutover. Its bytes are inside the Body, so
+      // there is nothing to navigate to and the blob path is the only one.
       const r = await rpc(spaceId, { cmd: "attachment_get", reff, id: att.id });
       if (r.kind !== "attachment") return;
+      if (r.content) {
+        const link = document.createElement("a");
+        link.href = downloadUrl(spaceId, r.content, r.name || att.name);
+        link.download = r.name || att.name;
+        link.click();
+        return;
+      }
+      if (!r.data_b64) {
+        onError("this attachment carries neither bytes nor a content id");
+        return;
+      }
       const bytes = b64ToBytes(r.data_b64);
       const blob = new Blob([bytes.buffer as ArrayBuffer], {
         type: r.mime || "application/octet-stream",
@@ -1157,8 +1296,8 @@ function Attachments({
     <>
       {/* Always mounted, never shown: the overflow menu's "Attach a file" opens
           this picker, and it has to exist even when the section below does not.
-          The 256 KiB cap is the engine's, mirrored so the refusal happens
-          before the bytes leave the browser. */}
+          No size is checked here — the engine refuses past its own ceiling and
+          says so, which is one number instead of two. */}
       <input
         id="issue-attach"
         ref={fileRef}
@@ -1716,6 +1855,7 @@ function Timeline({
   memberOf,
   states,
   graph,
+  description,
   readOnly,
   meKey,
   onReact,
@@ -1725,6 +1865,10 @@ function Timeline({
 }: {
   events: ActivityEvent[];
   comments: CommentDto[];
+  /** The description as it stands, so an anchored comment can quote the words
+   *  it is attached to. Passed down rather than re-fetched: it is the same text
+   *  the engine resolved the anchor against on this read. */
+  description: string;
   memberOf: (key: string) => MemberDto | undefined;
   /** The workflow, so a status change can say "Backlog", not "backlog". */
   states: WorkflowState[];
@@ -1874,6 +2018,7 @@ function Timeline({
             key={`c${entry.order}`}
             comment={entry.comment}
             replies={entry.comment.id ? (repliesByParent.get(entry.comment.id) ?? []) : []}
+            description={description}
             memberOf={memberOf}
             readOnly={readOnly}
             meKey={meKey}
@@ -1915,12 +2060,15 @@ function Comment({
   readOnly,
   meKey,
   onReact,
+  description,
   onReply,
   onCopyLink,
   onCreateFromComment,
 }: {
   comment: CommentDto;
   replies: CommentDto[];
+  /** The text an anchored comment marks, for quoting the words it is on. */
+  description: string;
   memberOf: (key: string) => MemberDto | undefined;
   readOnly: boolean;
   meKey: string | null;
@@ -1932,6 +2080,7 @@ function Comment({
   const block = (comment: CommentDto) => (
     <CommentBlock
       comment={comment}
+      description={description}
       memberOf={memberOf}
       readOnly={readOnly}
       meKey={meKey}
@@ -1958,10 +2107,57 @@ function Comment({
   );
 }
 
+/**
+ * Where an anchored comment is attached, above the comment itself.
+ *
+ * Three states and three renderings, because they are three different facts.
+ *
+ * A resolved span quotes the words it is on — which is the whole value of
+ * anchoring, and the only rendering that needs the text. `drifted` says the
+ * words are gone and shows no position: a stale offset drawn as a number is a
+ * highlight over the wrong words, which is worse than no highlight. The comment
+ * stays either way, because somebody wrote it and the text moving out from under
+ * it does not unwrite it.
+ *
+ * `unresolved` is not `drifted`. It says nobody worked out where this is, which
+ * is a fact about this node rather than about the text, and a reader who is told
+ * "the text is gone" when it is not would go looking for a deletion nobody made.
+ */
+function AnchorNote({
+  anchor,
+  description,
+}: {
+  anchor: CommentDto["anchor"];
+  description: string;
+}) {
+  if (!anchor) return null;
+  const state = anchor.state;
+  if (state.kind === "at") {
+    // Converted before slicing. The engine counts Unicode scalars and a JS
+    // string indexes UTF-16, so slicing the raw offsets is correct until
+    // somebody puts an emoji in the description and silently wrong after.
+    const span = codeUnitSpan(description, state.start, state.end);
+    const marked = description.slice(span.start, span.end);
+    return (
+      <p className="text-mute mt-1 truncate text-xs">
+        on <span className="text-default">{marked || "\u2014"}</span>
+      </p>
+    );
+  }
+  return (
+    <p className="text-mute mt-1 text-xs">
+      {state.kind === "drifted"
+        ? "the text this marked has changed"
+        : "this node cannot place this comment"}
+    </p>
+  );
+}
+
 /** A single comment inside the card: header (face, name, time, actions), body,
  *  reaction chips. Shared by the root comment and each reply. */
 function CommentBlock({
   comment: c,
+  description,
   memberOf,
   readOnly,
   meKey,
@@ -1970,6 +2166,7 @@ function CommentBlock({
   onCreateFromComment,
 }: {
   comment: CommentDto;
+  description: string;
   memberOf: (key: string) => MemberDto | undefined;
   readOnly: boolean;
   meKey: string | null;
@@ -2046,6 +2243,7 @@ function CommentBlock({
           </span>
         )}
       </div>
+      <AnchorNote anchor={c.anchor} description={description} />
       <Markdown text={c.body} density="tight" className="mt-1.5" />
       {(c.reactions?.length ?? 0) > 0 && (
         <div className="mt-1.5 flex flex-wrap items-center gap-1">

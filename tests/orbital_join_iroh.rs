@@ -95,6 +95,8 @@ fn activate(
         .enter_orbit(coords, EnterOptions)
         .unwrap()
         .activate(ActivationOptions {
+            planes: Default::default(),
+            content: Default::default(),
             drain_deadline: Duration::from_secs(5),
             comms: Some(comms_for(transport, seed, mech, bootstrap)),
             observation_capacity: 0,
@@ -162,7 +164,7 @@ fn coordinates_only_two_endpoint_bootstrap_over_real_iroh() {
     // A long-lived multi-thread runtime hosts both endpoints' background tasks.
     let rt = tokio::runtime::Runtime::new().unwrap();
     let (t_founder, founder_routes) = rt.block_on(async {
-        let t = comms::DefaultTransport::new(&FOUNDER_SEED, &net, alpns)
+        let t = comms::DefaultTransport::new(&FOUNDER_SEED, &net, comms::Protocols::framed(alpns))
             .await
             .unwrap();
         use comms::Transport;
@@ -170,7 +172,7 @@ fn coordinates_only_two_endpoint_bootstrap_over_real_iroh() {
         (t, routes)
     });
     let t_joiner = rt.block_on(async {
-        comms::DefaultTransport::new(&JOINER_SEED, &net, alpns)
+        comms::DefaultTransport::new(&JOINER_SEED, &net, comms::Protocols::framed(alpns))
             .await
             .unwrap()
     });

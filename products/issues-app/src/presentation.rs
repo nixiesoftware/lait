@@ -2,7 +2,10 @@
 
 use std::fmt::Write as _;
 
-use issues::dto::{BoardView, GraphView, InboxEntry, IssueView, Priority, Row};
+use issues::dto::{
+    BoardView, CommentAnchorDto, CommentAnchorState, GraphView, InboxEntry, IssueView, Priority,
+    Row,
+};
 use serde_json::Value;
 use world_interface::{InterfaceError, Presentation, PresentationFailure, PresentationOptions};
 
@@ -496,6 +499,9 @@ fn render_issue(output: &mut String, issue: &IssueView, color: bool) {
                 output,
                 &format!("{} · {}  {}", who, comment.ts, comment.body),
             );
+            if let Some(anchor) = &comment.anchor {
+                line(output, &format!("  on {}", attachment(anchor)));
+            }
         }
     }
     if !issue.corrupt_records.is_empty() {
@@ -511,6 +517,26 @@ fn render_issue(output: &mut String, issue: &IssueView, color: bool) {
             output,
             "(these are stored records that do not conform to the schema; run with --json for the raw values)",
         );
+    }
+}
+
+/// One comment's attachment, rendered so a lost position reads as a lost
+/// position and not as a missing comment.
+///
+/// `Drifted` is worded about the span rather than about the text. It covers an
+/// anchor older than what this replica retains and two ends that resolved out
+/// of order, and in both of those the marked words are still on screen — so
+/// "the text this marked is gone" would be a claim about the reader's document
+/// made from a fact about ours.
+fn attachment(anchor: &CommentAnchorDto) -> String {
+    let field = &anchor.field;
+    match anchor.state {
+        CommentAnchorState::At { start, end } if end > start => {
+            format!("{field} {start}..{end}")
+        }
+        CommentAnchorState::At { start, .. } => format!("{field} {start}"),
+        CommentAnchorState::Drifted => format!("{field} (the span has no place in the text now)"),
+        CommentAnchorState::Unresolved => format!("{field} (position unavailable)"),
     }
 }
 
@@ -603,5 +629,100 @@ mod tests {
         assert_eq!(priority_badge(Priority::Urgent, false), "·U·");
         let colored = priority_badge(Priority::Urgent, true);
         assert!(colored.contains("·U·") && colored.contains('\u{1b}'));
+    }
+
+    fn attached(state: CommentAnchorState) -> issues::dto::CommentDto {
+        issues::dto::CommentDto {
+            author: issues::ids::ActorId::from_incept_hash(&"a".repeat(64)),
+            author_nick: Some("ann".into()),
+            ts: 1000,
+            body: "this word is wrong".into(),
+            id: Some("cmt_00000000000000000000000001".into()),
+            parent: None,
+            reactions: Vec::new(),
+            anchor: Some(CommentAnchorDto {
+                field: "description".into(),
+                state,
+            }),
+        }
+    }
+
+    fn issue_with(comments: Vec<issues::dto::CommentDto>) -> IssueView {
+        let ulid = issues::ids::SystemUlidSource;
+        IssueView {
+            schema_version: issues::dto::SCHEMA_VERSION,
+            reff: "iss_1".into(),
+            doc_id: issues::ids::DocId::mint(&ulid),
+            space_id: issues::ids::SpaceId::mint(&ulid),
+            project_id: issues::ids::ProjectId::mint(&ulid),
+            project_key: Some("ENG".into()),
+            key_alias: Some("ENG-1".into()),
+            title: "fix login race".into(),
+            description: "the quick brown fox".into(),
+            status: "todo".into(),
+            priority: Priority::High,
+            assignees: Vec::new(),
+            labels: Vec::new(),
+            label_names: Vec::new(),
+            comments,
+            created_by: issues::ids::ActorId::from_incept_hash(&"a".repeat(64)),
+            created_at: 1,
+            due_date: None,
+            estimate: None,
+            followers: Vec::new(),
+            milestone: None,
+            cycle: None,
+            attachments: Vec::new(),
+            provisional: false,
+            corrupt_records: Vec::new(),
+        }
+    }
+
+    fn rendered_issue(comments: Vec<issues::dto::CommentDto>) -> String {
+        render(
+            &IssuesResponse::Issue(Box::new(issue_with(comments))),
+            PresentationOptions {
+                json: false,
+                color: false,
+            },
+        )
+        .stdout
+    }
+
+    /// A range-attached comment renders its attachment, and each state renders
+    /// as the thing it means.
+    #[test]
+    fn an_attached_comment_renders_where_it_is_attached() {
+        let out = rendered_issue(vec![attached(CommentAnchorState::At { start: 4, end: 9 })]);
+        assert!(out.contains("on description 4..9"), "{out}");
+
+        let out = rendered_issue(vec![attached(CommentAnchorState::At { start: 4, end: 4 })]);
+        assert!(out.contains("on description 4"), "{out}");
+        assert!(!out.contains("4..4"), "a caret is a position, not a span");
+
+        // Nothing here may claim the reader's text was deleted: `Drifted` also
+        // covers an anchor this replica can no longer place, and `Unresolved`
+        // is the absence of an answer rather than a lost one.
+        let out = rendered_issue(vec![attached(CommentAnchorState::Drifted)]);
+        assert!(
+            out.contains("on description (the span has no place"),
+            "{out}"
+        );
+
+        let out = rendered_issue(vec![attached(CommentAnchorState::Unresolved)]);
+        assert!(
+            out.contains("on description (position unavailable)"),
+            "{out}"
+        );
+    }
+
+    /// An ordinary comment renders no attachment line at all.
+    #[test]
+    fn an_unattached_comment_renders_no_attachment() {
+        let mut comment = attached(CommentAnchorState::Drifted);
+        comment.anchor = None;
+        let out = rendered_issue(vec![comment]);
+        assert!(out.contains("this word is wrong"));
+        assert!(!out.contains("on description"), "{out}");
     }
 }

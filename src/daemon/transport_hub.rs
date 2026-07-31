@@ -20,8 +20,8 @@ use tokio::sync::{mpsc, watch, Mutex, Semaphore};
 use crate::ids::{DeviceId, SpaceId};
 use crate::net::Network;
 use crate::transport::{
-    Alpn, GossipReceiver, GossipSender, Incoming, PeerId, Stream, Topic, Transport,
-    TransportFactory,
+    Alpn, GossipReceiver, GossipSender, Incoming, IncomingConnection, PeerId, Stream, Topic,
+    Transport, TransportFactory,
 };
 
 const SPACE_INCOMING_BUFFER: usize = 16;
@@ -63,7 +63,7 @@ impl TransportFactory for TransportHubFactory {
         &self,
         _identity_seed: &[u8; 32],
         _network: &Network,
-        _alpns: &[Alpn],
+        _protocols: crate::transport::Protocols<'_>,
     ) -> Result<Arc<dyn Transport>> {
         Err(anyhow!(
             "the identity transport hub requires an explicit Space scope"
@@ -74,7 +74,7 @@ impl TransportFactory for TransportHubFactory {
         &self,
         identity_seed: &[u8; 32],
         network: &Network,
-        alpns: &[Alpn],
+        protocols: crate::transport::Protocols<'_>,
         space: &SpaceId,
     ) -> Result<Arc<dyn Transport>> {
         if self.stopping.load(Ordering::Acquire) {
@@ -89,11 +89,11 @@ impl TransportFactory for TransportHubFactory {
 
         let hub = match occupied.as_ref() {
             Some(hub) => {
-                hub.require_compatible(network, alpns)?;
+                hub.require_compatible(network, protocols)?;
                 hub.clone()
             }
             None => {
-                let transport = self.inner.build(identity_seed, network, alpns).await?;
+                let transport = self.inner.build(identity_seed, network, protocols).await?;
                 if transport.my_id() != identity {
                     transport.shutdown().await;
                     return Err(anyhow!(
@@ -102,7 +102,7 @@ impl TransportFactory for TransportHubFactory {
                         identity
                     ));
                 }
-                let hub = IdentityTransportHub::start(transport, network, alpns);
+                let hub = IdentityTransportHub::start(transport, network, protocols);
                 *occupied = Some(hub.clone());
                 hub
             }
@@ -147,8 +147,8 @@ impl From<&Network> for NetworkKey {
     }
 }
 
-fn normalized_alpns(alpns: &[Alpn]) -> Vec<Vec<u8>> {
-    let mut values: Vec<_> = alpns.iter().map(|alpn| alpn.to_vec()).collect();
+fn normalized_alpns(protocols: crate::transport::Protocols<'_>) -> Vec<Vec<u8>> {
+    let mut values: Vec<_> = protocols.all().map(|alpn| alpn.to_vec()).collect();
     values.sort();
     values.dedup();
     values
@@ -158,42 +158,84 @@ fn normalized_alpns(alpns: &[Alpn]) -> Vec<Vec<u8>> {
 struct RouteTarget {
     token: u64,
     incoming: mpsc::Sender<Incoming>,
+    /// One sender per registered session ALPN, not one per Space.
+    ///
+    /// Two planes on one queue share its slots and its single reader: a backlog
+    /// on either is a stall on both, and whichever driver happens to be parked
+    /// takes the next connection whatever plane it was for. Two entries, so a
+    /// linear scan beats a map.
+    session_lanes: Arc<[(comms::Alpn, mpsc::Sender<IncomingConnection>)]>,
     stopping: watch::Sender<bool>,
+}
+
+impl RouteTarget {
+    fn lane(&self, alpn: &[u8]) -> Option<&mpsc::Sender<IncomingConnection>> {
+        self.session_lanes
+            .iter()
+            .find(|(lane, _)| *lane == alpn)
+            .map(|(_, sender)| sender)
+    }
 }
 
 struct IdentityTransportHub {
     transport: Arc<dyn Transport>,
     network: NetworkKey,
     alpns: Vec<Vec<u8>>,
+    /// The session ALPNs, still distinguishable.
+    ///
+    /// `alpns` above is the flattened union used for the endpoint-compatibility
+    /// check; once flattened, which of them carry sessions is unrecoverable —
+    /// and that is exactly the question every route now has to answer.
+    session_alpns: Arc<[comms::Alpn]>,
     routes: Arc<StdMutex<HashMap<SpaceBytes, RouteTarget>>>,
     next_token: AtomicU64,
     stopping: watch::Sender<bool>,
     accept_task: StdMutex<Option<tokio::task::JoinHandle<()>>>,
+    session_task: StdMutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl IdentityTransportHub {
-    fn start(transport: Arc<dyn Transport>, network: &Network, alpns: &[Alpn]) -> Arc<Self> {
+    fn start(
+        transport: Arc<dyn Transport>,
+        network: &Network,
+        protocols: crate::transport::Protocols<'_>,
+    ) -> Arc<Self> {
         let hub = Arc::new(Self {
             transport: transport.clone(),
             network: NetworkKey::from(network),
-            alpns: normalized_alpns(alpns),
+            alpns: normalized_alpns(protocols),
+            session_alpns: protocols.session.to_vec().into(),
             routes: Arc::new(StdMutex::new(HashMap::new())),
             next_token: AtomicU64::new(1),
             stopping: watch::Sender::new(false),
             accept_task: StdMutex::new(None),
+            session_task: StdMutex::new(None),
         });
         let task = tokio::spawn(run_accept_pump(
-            transport,
+            transport.clone(),
             hub.routes.clone(),
             hub.stopping.subscribe(),
         ));
         *hub.accept_task
             .lock()
             .unwrap_or_else(|error| error.into_inner()) = Some(task);
+        let session_task = tokio::spawn(run_session_pump(
+            transport,
+            hub.routes.clone(),
+            hub.session_alpns.clone(),
+            hub.stopping.subscribe(),
+        ));
+        *hub.session_task
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(session_task);
         hub
     }
 
-    fn require_compatible(&self, network: &Network, alpns: &[Alpn]) -> Result<()> {
+    fn require_compatible(
+        &self,
+        network: &Network,
+        protocols: crate::transport::Protocols<'_>,
+    ) -> Result<()> {
         let requested_network = NetworkKey::from(network);
         if self.network != requested_network {
             return Err(anyhow!(
@@ -203,7 +245,7 @@ impl IdentityTransportHub {
                 requested_network
             ));
         }
-        let requested_alpns = normalized_alpns(alpns);
+        let requested_alpns = normalized_alpns(protocols);
         if self.alpns != requested_alpns {
             return Err(anyhow!(
                 "one device identity requested incompatible protocol sets"
@@ -217,10 +259,21 @@ impl IdentityTransportHub {
             .map_err(|_| anyhow!("Space id does not have the canonical 29-byte shape"))?;
         let token = self.next_token.fetch_add(1, Ordering::Relaxed);
         let (incoming_tx, incoming_rx) = mpsc::channel(SPACE_INCOMING_BUFFER);
+        // One session queue per plane. Still one registration and one route: a
+        // second `build_scoped` for this Space is refused below, so the split
+        // has to happen inside the one view rather than by minting two.
+        let mut lanes = Vec::with_capacity(self.session_alpns.len());
+        let mut queues = Vec::with_capacity(self.session_alpns.len());
+        for &alpn in self.session_alpns.iter() {
+            let (session_tx, session_rx) = mpsc::channel(SPACE_INCOMING_BUFFER);
+            lanes.push((alpn, session_tx));
+            queues.push((alpn, Some(session_rx)));
+        }
         let stopping = watch::Sender::new(false);
         let target = RouteTarget {
             token,
             incoming: incoming_tx,
+            session_lanes: lanes.into(),
             stopping: stopping.clone(),
         };
         let mut routes = self
@@ -243,6 +296,7 @@ impl IdentityTransportHub {
             space: space_bytes,
             token,
             incoming: Mutex::new(incoming_rx),
+            session_queues: StdMutex::new(queues),
             stopping,
             stopped: AtomicBool::new(false),
         }))
@@ -278,14 +332,22 @@ impl IdentityTransportHub {
             target.stopping.send_replace(true);
         }
         self.transport.shutdown().await;
-        let task = self
-            .accept_task
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .take();
-        if let Some(task) = task {
+        // Both pumps. `session_task` was spawned and stored and never awaited,
+        // which is a task outliving the hub that owns it — the kind of leak
+        // that only shows up as a Station that will not stop.
+        let tasks = [
+            self.accept_task
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .take(),
+            self.session_task
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .take(),
+        ];
+        for task in tasks.into_iter().flatten() {
             if let Err(error) = task.await {
-                tracing::debug!(%error, "identity transport accept pump failed");
+                tracing::debug!(%error, "identity transport pump failed");
             }
         }
     }
@@ -344,6 +406,274 @@ async fn run_accept_pump(
             tracing::debug!(%error, "identity transport dispatcher failed during shutdown");
         }
     }
+}
+
+/// The connection half of the pump.
+///
+/// Same shape as [`run_accept_pump`] and same bounds — a permit is taken before
+/// a dispatcher is spawned, so a flood of openers cannot outrun the cap by
+/// queueing tasks. What differs is what gets routed: a whole connection, after
+/// one bounded opening read on one control flow, rather than a framed stream
+/// per protocol message.
+async fn run_session_pump(
+    transport: Arc<dyn Transport>,
+    routes: Arc<StdMutex<HashMap<SpaceBytes, RouteTarget>>>,
+    session_alpns: Arc<[comms::Alpn]>,
+    mut stopping: watch::Receiver<bool>,
+) {
+    // One budget per plane, not one per device. A shared pool lets a stalled
+    // plane hold every pending slot for every Space — the same head-of-line
+    // failure the split queues remove, one level up, and the one that would
+    // make "a saturated transfer cannot delay a cursor" false.
+    let permits: Vec<(comms::Alpn, Arc<Semaphore>)> = session_alpns
+        .iter()
+        .map(|&alpn| (alpn, Arc::new(Semaphore::new(MAX_PENDING_OPENERS))))
+        .collect();
+    let mut dispatches = tokio::task::JoinSet::new();
+    loop {
+        if *stopping.borrow() {
+            break;
+        }
+        tokio::select! {
+            changed = stopping.changed() => {
+                if changed.is_err() || *stopping.borrow() {
+                    break;
+                }
+            }
+            incoming = transport.accept_connection() => {
+                let Some(incoming) = incoming else {
+                    break;
+                };
+                // The ALPN is known before anything is read or spent, and the
+                // registered set is the hub's own — so an unregistered protocol
+                // is refused here rather than after a dispatcher task and an
+                // opening read have been spent on it.
+                let Some(plane_permits) = permits
+                    .iter()
+                    .find(|(alpn, _)| *alpn == incoming.alpn.as_slice())
+                    .map(|(_, plane_permits)| plane_permits.clone())
+                else {
+                    incoming.connection.close(REFUSED_CODE, b"");
+                    continue;
+                };
+                let permit = tokio::select! {
+                    permit = plane_permits.acquire_owned() => match permit {
+                        Ok(permit) => permit,
+                        Err(_) => break,
+                    },
+                    changed = stopping.changed() => {
+                        if changed.is_err() || *stopping.borrow() {
+                            break;
+                        }
+                        continue;
+                    }
+                };
+                dispatches.spawn(dispatch_connection(
+                    incoming,
+                    routes.clone(),
+                    stopping.clone(),
+                    permit,
+                ));
+            }
+            result = dispatches.join_next(), if !dispatches.is_empty() => {
+                if let Some(Err(error)) = result {
+                    tracing::debug!(%error, "identity transport session dispatcher failed");
+                }
+            }
+        }
+    }
+
+    while let Some(result) = dispatches.join_next().await {
+        if let Err(error) = result {
+            tracing::debug!(%error, "identity transport session dispatcher failed during shutdown");
+        }
+    }
+}
+
+/// Read one bounded opening off the connection's first flow, derive the Space,
+/// and hand the **whole connection** to that Space's route.
+///
+/// The opening is read here and not replayed. A framed stream needs its first
+/// message put back because the protocol above expects to read it; a plane's
+/// opening is consumed by the routing decision and delivered alongside the
+/// connection, so the owner does not re-parse what the hub already parsed.
+async fn dispatch_connection(
+    incoming: IncomingConnection,
+    routes: Arc<StdMutex<HashMap<SpaceBytes, RouteTarget>>>,
+    mut hub_stopping: watch::Receiver<bool>,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+) {
+    // Shadowed so the permit can be moved into the routed connection below.
+    let _permit = _permit;
+    if *hub_stopping.borrow() {
+        return;
+    }
+
+    let opening = tokio::select! {
+        changed = hub_stopping.changed() => {
+            let _ = changed;
+            return;
+        }
+        read = tokio::time::timeout(
+            OPENING_FRAME_DEADLINE,
+            read_opening(incoming.connection.as_ref()),
+        ) => match read {
+            Ok(Ok(opening)) => opening,
+            _ => {
+                incoming.connection.close(REFUSED_CODE, b"");
+                return;
+            }
+        }
+    };
+
+    let Some(space) = session_opening_space(&opening) else {
+        incoming.connection.close(REFUSED_CODE, b"");
+        return;
+    };
+    let target = routes
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .get(&space)
+        .cloned();
+    let Some(target) = target else {
+        // Coarse on purpose: telling an unadmitted peer apart from an unknown
+        // Space is an oracle for which Spaces this device holds.
+        incoming.connection.close(REFUSED_CODE, b"");
+        return;
+    };
+    // Routed by the ALPN, not by the opening's `plane` field. Both are in hand
+    // here and only one of them was fixed by the handshake — routing on the
+    // peer's own assertion would turn a claim into a dispatch decision.
+    // `judge` still refuses an opening whose plane disagrees with its ALPN.
+    let Some(lane) = target.lane(&incoming.alpn).cloned() else {
+        incoming.connection.close(REFUSED_CODE, b"");
+        return;
+    };
+
+    let mut route_stopping = target.stopping.subscribe();
+    if *route_stopping.borrow() || *hub_stopping.borrow() {
+        incoming.connection.close(REFUSED_CODE, b"");
+        return;
+    }
+    // The permit rides with the connection. Releasing it here would let the
+    // pending-opener budget count a connection as finished the moment it was
+    // routed, which is exactly when it starts costing something.
+    let routed = IncomingConnection {
+        from: incoming.from,
+        alpn: incoming.alpn,
+        connection: Box::new(HeldConnection {
+            inner: incoming.connection,
+            _permit,
+        }),
+        opening,
+    };
+    tokio::select! {
+        sent = lane.send(routed) => {
+            if let Err(refused) = sent {
+                refused.0.connection.close(REFUSED_CODE, b"");
+            }
+        }
+        changed = route_stopping.changed() => {
+            let _ = changed;
+        }
+        changed = hub_stopping.changed() => {
+            let _ = changed;
+        }
+    }
+}
+
+/// A routed connection that still holds its pending-opener permit.
+///
+/// The permit has to outlive the routing decision, not end with it: a
+/// connection is cheapest at the moment it is handed over and most expensive
+/// afterwards, so releasing the slot on delivery would bound the wrong thing.
+/// Wrapping rather than threading a permit through every caller keeps the
+/// Space's owner from having to know the hub has a budget at all — the same
+/// shape `ReplayStream` already uses for the framed pump.
+struct HeldConnection {
+    inner: Box<dyn crate::transport::Connection>,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
+
+#[async_trait]
+impl crate::transport::Connection for HeldConnection {
+    fn peer(&self) -> PeerId {
+        self.inner.peer()
+    }
+
+    fn alpn(&self) -> Vec<u8> {
+        self.inner.alpn()
+    }
+
+    async fn open_bi(
+        &self,
+    ) -> Result<(
+        Box<dyn crate::transport::SendFlow>,
+        Box<dyn crate::transport::RecvFlow>,
+    )> {
+        self.inner.open_bi().await
+    }
+
+    async fn accept_bi(
+        &self,
+    ) -> Result<
+        Option<(
+            Box<dyn crate::transport::SendFlow>,
+            Box<dyn crate::transport::RecvFlow>,
+        )>,
+    > {
+        self.inner.accept_bi().await
+    }
+
+    async fn open_uni(&self) -> Result<Box<dyn crate::transport::SendFlow>> {
+        self.inner.open_uni().await
+    }
+
+    async fn accept_uni(&self) -> Result<Option<Box<dyn crate::transport::RecvFlow>>> {
+        self.inner.accept_uni().await
+    }
+
+    fn send_datagram(&self, payload: &[u8]) -> Result<()> {
+        self.inner.send_datagram(payload)
+    }
+
+    async fn read_datagram(&self) -> Result<Option<Vec<u8>>> {
+        self.inner.read_datagram().await
+    }
+
+    fn datagram_capacity(&self) -> Option<usize> {
+        self.inner.datagram_capacity()
+    }
+
+    fn close(&self, code: u32, reason: &[u8]) {
+        self.inner.close(code, reason);
+    }
+
+    async fn closed(&self) {
+        self.inner.closed().await;
+    }
+}
+
+/// The close code a hub uses when it will not route a connection.
+///
+/// One code for every reason. Distinguishing "no such Space" from "not
+/// admitted" from "shutting down" would tell a peer what this device holds.
+const REFUSED_CODE: u32 = 1;
+
+/// Read the opening from the connection's first flow, bounded before anything
+/// is allocated for it.
+async fn read_opening(connection: &dyn crate::transport::Connection) -> Result<Vec<u8>> {
+    let mut recv = connection
+        .accept_uni()
+        .await?
+        .ok_or_else(|| anyhow!("the peer opened no control flow"))?;
+    recv.read_to_end(runtime::planes::bounds::MAX_OPENING_BYTES)
+        .await
+}
+
+fn session_opening_space(opening: &[u8]) -> Option<SpaceBytes> {
+    let open = runtime::planes::SessionOpen::decode_canonical(opening).ok()?;
+    Some(open.space)
 }
 
 async fn dispatch_incoming(
@@ -463,6 +793,11 @@ struct ScopedTransport {
     space: SpaceBytes,
     token: u64,
     incoming: Mutex<mpsc::Receiver<Incoming>>,
+    /// One un-taken queue per registered session ALPN.
+    ///
+    /// A `std` mutex because taking one is a synchronous hand-over at mount
+    /// time, not an await on any hot path.
+    session_queues: StdMutex<Vec<(comms::Alpn, Option<mpsc::Receiver<IncomingConnection>>)>>,
     stopping: watch::Sender<bool>,
     stopped: AtomicBool,
 }
@@ -519,6 +854,35 @@ impl Transport for ScopedTransport {
         }
     }
 
+    async fn connect_session(
+        &self,
+        peer: PeerId,
+        alpn: Alpn,
+    ) -> Result<Box<dyn crate::transport::Connection>> {
+        self.ensure_running()?;
+        self.hub.transport.connect_session(peer, alpn).await
+    }
+
+    /// A scoped view has no undivided session door — sessions arrive per plane
+    /// through [`Transport::take_session_queue`].
+    ///
+    /// `None` rather than the trait's `pending()`: a caller reaching for this
+    /// has mis-wired a driver, and an immediate end-of-stream says so on the
+    /// first poll. Parking would make that mistake indistinguishable from a
+    /// Station nobody has dialled.
+    async fn accept_connection(&self) -> Option<IncomingConnection> {
+        None
+    }
+
+    fn take_session_queue(&self, alpn: comms::Alpn) -> Option<comms::SessionQueue> {
+        self.session_queues
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .iter_mut()
+            .find(|(lane, _)| *lane == alpn)
+            .and_then(|(_, queue)| queue.take())
+    }
+
     fn advertised_addrs(&self) -> Vec<SocketAddr> {
         self.hub.transport.advertised_addrs()
     }
@@ -548,6 +912,17 @@ impl Transport for ScopedTransport {
 
 #[cfg(test)]
 mod tests {
+    /// The Freight queue for a scoped view.
+    ///
+    /// A scoped view has no undivided session door any more — each plane owns
+    /// its own queue, and taking one is how a driver gets its connections. The
+    /// tests below say which plane they mean rather than accepting whatever
+    /// arrived first, which is the property the split exists to give them.
+    fn freight_queue(view: &std::sync::Arc<dyn Transport>) -> comms::SessionQueue {
+        view.take_session_queue(runtime::planes::FREIGHT_ALPN)
+            .expect("the Freight queue is taken exactly once")
+    }
+
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
@@ -564,7 +939,7 @@ mod tests {
             &self,
             identity_seed: &[u8; 32],
             _network: &Network,
-            _alpns: &[Alpn],
+            _protocols: crate::transport::Protocols<'_>,
         ) -> Result<Arc<dyn Transport>> {
             self.builds.fetch_add(1, Ordering::SeqCst);
             Ok(Arc::new(
@@ -583,6 +958,365 @@ mod tests {
     }
 
     const ALPNS: &[Alpn] = &[runtime::contact::CONTACT_ALPN, runtime::PRESENCE_ALPN];
+    const SESSION_ALPNS: &[Alpn] = &[runtime::planes::FREIGHT_ALPN, runtime::planes::LIVE_ALPN];
+    fn protocols() -> crate::transport::Protocols<'static> {
+        crate::transport::Protocols {
+            framed: ALPNS,
+            session: SESSION_ALPNS,
+        }
+    }
+
+    fn session_open(space: &SpaceId) -> Vec<u8> {
+        runtime::planes::SessionOpen {
+            plane: runtime::planes::Plane::Freight,
+            protocol_version: runtime::planes::FREIGHT_PROTOCOL_VERSION,
+            features: 0,
+            space: space_bytes(space),
+            initiator_station: [1u8; 32],
+            responder_station: [2u8; 32],
+            session_id: [3u8; 16],
+            session_epoch: [4u8; 16],
+            authority_frontier: Vec::new(),
+            requested_lanes: vec![runtime::planes::stream_kind::CONTROL],
+        }
+        .encode()
+    }
+
+    /// Dial a session and send its opening on the first flow, which is what the
+    /// hub reads to decide where the connection goes.
+    async fn dial_session(
+        from: &Arc<dyn Transport>,
+        to: PeerId,
+        space: &SpaceId,
+    ) -> Box<dyn crate::transport::Connection> {
+        let connection = from
+            .connect_session(to, runtime::planes::FREIGHT_ALPN)
+            .await
+            .expect("dial");
+        let mut opening = connection.open_uni().await.expect("open");
+        opening
+            .write_all(&session_open(space))
+            .await
+            .expect("write opening");
+        opening.finish().expect("finish");
+        connection
+    }
+
+    /// Dial one named plane, so a test can be about which queue a connection
+    /// lands in rather than about whichever one happened to be read first.
+    async fn dial_plane(
+        from: &Arc<dyn Transport>,
+        to: PeerId,
+        space: &SpaceId,
+        plane: runtime::planes::Plane,
+    ) -> Box<dyn crate::transport::Connection> {
+        let connection = from.connect_session(to, plane.alpn()).await.expect("dial");
+        let mut opening = connection.open_uni().await.expect("open");
+        let open = runtime::planes::SessionOpen {
+            plane,
+            protocol_version: plane.protocol_version(),
+            features: 0,
+            space: <[u8; 29]>::try_from(space.as_str().as_bytes()).expect("space"),
+            initiator_station: [1u8; 32],
+            responder_station: [2u8; 32],
+            session_id: [3u8; 16],
+            session_epoch: [4u8; 16],
+            authority_frontier: Vec::new(),
+            requested_lanes: Vec::new(),
+        };
+        opening
+            .write_all(&open.encode())
+            .await
+            .expect("write opening");
+        opening.finish().expect("finish");
+        connection
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn each_plane_gets_its_own_queue_and_neither_drains_the_other() {
+        // The reason the split exists. One queue per Space meant two drivers
+        // racing one receiver: each would take strictly alternating connections
+        // and refuse half of what it was handed as a foreign ALPN — which the
+        // driver's own comment calls "a routing bug on our side". Freight would
+        // have broken the day Live shipped.
+        //
+        // Asserted in the order that catches it: Live is dialled FIRST and read
+        // SECOND. A shared queue would hand the Live connection to whoever
+        // asked first, so reading Freight would either block or return the
+        // wrong connection.
+        let inner = Arc::new(MemFactory {
+            net: MemNet::new(),
+            builds: AtomicUsize::new(0),
+        });
+        let factory = TransportHubFactory::new(inner.clone());
+        let network = Network::Isolated;
+        let seed_a = [71; 32];
+        let seed_b = [72; 32];
+        let space = space(7);
+
+        let dialer = factory
+            .build_scoped(&seed_a, &network, protocols(), &space)
+            .await
+            .unwrap();
+        let listener = factory
+            .build_scoped(&seed_b, &network, protocols(), &space)
+            .await
+            .unwrap();
+        let peer_b = crate::crypto::device_from_seed(&seed_b);
+
+        let mut live_queue = listener
+            .take_session_queue(runtime::planes::LIVE_ALPN)
+            .expect("the Live queue");
+        let mut freight_queue = listener
+            .take_session_queue(runtime::planes::FREIGHT_ALPN)
+            .expect("the Freight queue");
+
+        let _live = dial_plane(
+            &dialer,
+            peer_b.clone(),
+            &space,
+            runtime::planes::Plane::Live,
+        )
+        .await;
+        let _freight = dial_plane(
+            &dialer,
+            peer_b.clone(),
+            &space,
+            runtime::planes::Plane::Freight,
+        )
+        .await;
+
+        let freight = tokio::time::timeout(Duration::from_secs(5), freight_queue.recv())
+            .await
+            .expect("the Freight connection was not delayed by the Live one")
+            .expect("a Freight connection");
+        assert_eq!(freight.alpn, runtime::planes::FREIGHT_ALPN.to_vec());
+
+        let live = tokio::time::timeout(Duration::from_secs(5), live_queue.recv())
+            .await
+            .expect("the Live connection was still waiting for its own reader")
+            .expect("a Live connection");
+        assert_eq!(live.alpn, runtime::planes::LIVE_ALPN.to_vec());
+
+        // And neither queue holds the other's traffic.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), freight_queue.recv())
+                .await
+                .is_err(),
+            "the Freight queue received something that was not Freight"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_queue_is_handed_over_once() {
+        // A second handle on the same connections is the mis-wiring the split
+        // exists to prevent, so it is not expressible.
+        let inner = Arc::new(MemFactory {
+            net: MemNet::new(),
+            builds: AtomicUsize::new(0),
+        });
+        let factory = TransportHubFactory::new(inner.clone());
+        let view = factory
+            .build_scoped(&[73; 32], &Network::Isolated, protocols(), &space(8))
+            .await
+            .unwrap();
+        assert!(view
+            .take_session_queue(runtime::planes::FREIGHT_ALPN)
+            .is_some());
+        assert!(
+            view.take_session_queue(runtime::planes::FREIGHT_ALPN)
+                .is_none(),
+            "a second taker got a second handle on one plane's connections"
+        );
+        // An ALPN this view never registered has no queue to take.
+        assert!(view.take_session_queue(b"lait/not-a-plane/1").is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_whole_connection_routes_to_the_space_its_opening_names() {
+        // The framed pump replays the opener because the protocol above wants
+        // to read it. A plane's opening is consumed by the routing decision, so
+        // what must be right here is *where the connection went*, not what the
+        // owner can still read off it.
+        let inner = Arc::new(MemFactory {
+            net: MemNet::new(),
+            builds: AtomicUsize::new(0),
+        });
+        let factory = TransportHubFactory::new(inner.clone());
+        let network = Network::Isolated;
+        let seed_a = [51; 32];
+        let seed_b = [52; 32];
+        let space_a = space(1);
+        let space_b = space(2);
+
+        let a_space_a = factory
+            .build_scoped(&seed_a, &network, protocols(), &space_a)
+            .await
+            .unwrap();
+        let b_space_a = factory
+            .build_scoped(&seed_b, &network, protocols(), &space_a)
+            .await
+            .unwrap();
+        let b_space_b = factory
+            .build_scoped(&seed_b, &network, protocols(), &space_b)
+            .await
+            .unwrap();
+
+        let peer_b = crate::crypto::device_from_seed(&seed_b);
+        let dialed = dial_session(&a_space_a, peer_b.clone(), &space_a).await;
+
+        let routed = tokio::time::timeout(Duration::from_secs(5), freight_queue(&b_space_a).recv())
+            .await
+            .expect("routed in time")
+            .expect("a connection");
+        assert_eq!(routed.alpn, runtime::planes::FREIGHT_ALPN.to_vec());
+        assert_eq!(routed.from, crate::crypto::device_from_seed(&seed_a));
+        // The bytes the hub read to decide, handed over rather than replayed.
+        // Reading a flow consumes it, so without this the Space's owner would
+        // have to guess at what the peer said — or the two would parse it
+        // separately and be free to disagree.
+        assert_eq!(
+            routed.opening,
+            session_open(&space_a),
+            "the routed connection carries the opening the hub parsed"
+        );
+        assert_eq!(
+            runtime::planes::SessionOpen::decode_canonical(&routed.opening)
+                .expect("and it is still canonical")
+                .space,
+            space_bytes(&space_a)
+        );
+
+        // And Space B, on the same device endpoint, saw nothing.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), freight_queue(&b_space_b).recv())
+                .await
+                .is_err(),
+            "a connection belongs to the Space its opening named"
+        );
+        dialed.close(0, b"done");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_connection_for_an_unknown_space_is_refused_without_saying_why() {
+        let inner = Arc::new(MemFactory {
+            net: MemNet::new(),
+            builds: AtomicUsize::new(0),
+        });
+        let factory = TransportHubFactory::new(inner.clone());
+        let network = Network::Isolated;
+        let seed_a = [53; 32];
+        let seed_b = [54; 32];
+        let space_a = space(1);
+        let unknown = space(9);
+
+        let a_space_a = factory
+            .build_scoped(&seed_a, &network, protocols(), &space_a)
+            .await
+            .unwrap();
+        let b_space_a = factory
+            .build_scoped(&seed_b, &network, protocols(), &space_a)
+            .await
+            .unwrap();
+
+        let peer_b = crate::crypto::device_from_seed(&seed_b);
+        let dialed = dial_session(&a_space_a, peer_b, &unknown).await;
+
+        // The dialer learns only that it was closed.
+        tokio::time::timeout(Duration::from_secs(5), dialed.closed())
+            .await
+            .expect("refused in time");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), freight_queue(&b_space_a).recv())
+                .await
+                .is_err(),
+            "an unknown Space routes nowhere"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_connection_whose_opening_never_arrives_is_dropped_rather_than_held() {
+        // The leak this bounds. An opener that dials and then says nothing must
+        // cost one pending slot for a deadline, not a route and not forever.
+        let inner = Arc::new(MemFactory {
+            net: MemNet::new(),
+            builds: AtomicUsize::new(0),
+        });
+        let factory = TransportHubFactory::new(inner.clone());
+        let network = Network::Isolated;
+        let seed_a = [55; 32];
+        let seed_b = [56; 32];
+        let space_a = space(1);
+
+        let a_space_a = factory
+            .build_scoped(&seed_a, &network, protocols(), &space_a)
+            .await
+            .unwrap();
+        let b_space_a = factory
+            .build_scoped(&seed_b, &network, protocols(), &space_a)
+            .await
+            .unwrap();
+
+        let peer_b = crate::crypto::device_from_seed(&seed_b);
+        let silent = a_space_a
+            .connect_session(peer_b, runtime::planes::FREIGHT_ALPN)
+            .await
+            .expect("dial");
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), freight_queue(&b_space_a).recv())
+                .await
+                .is_err(),
+            "a silent opener routes nothing"
+        );
+        drop(silent);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shutting_a_space_down_stops_routing_connections_to_it() {
+        let inner = Arc::new(MemFactory {
+            net: MemNet::new(),
+            builds: AtomicUsize::new(0),
+        });
+        let factory = TransportHubFactory::new(inner.clone());
+        let network = Network::Isolated;
+        let seed_a = [57; 32];
+        let seed_b = [58; 32];
+        let space_a = space(1);
+
+        let a_space_a = factory
+            .build_scoped(&seed_a, &network, protocols(), &space_a)
+            .await
+            .unwrap();
+        let b_space_a = factory
+            .build_scoped(&seed_b, &network, protocols(), &space_a)
+            .await
+            .unwrap();
+
+        b_space_a.shutdown().await;
+        assert!(
+            freight_queue(&b_space_a).recv().await.is_none(),
+            "a shut-down Space answers None rather than parking"
+        );
+
+        let peer_b = crate::crypto::device_from_seed(&seed_b);
+        let dialed = dial_session(&a_space_a, peer_b, &space_a).await;
+        tokio::time::timeout(Duration::from_secs(5), dialed.closed())
+            .await
+            .expect("refused in time");
+
+        factory.shutdown().await;
+        assert!(
+            a_space_a
+                .connect_session(
+                    crate::crypto::device_from_seed(&seed_b),
+                    runtime::planes::FREIGHT_ALPN
+                )
+                .await
+                .is_err(),
+            "a shut-down hub refuses new dials"
+        );
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn one_identity_endpoint_demultiplexes_and_replays_openers_by_space() {
@@ -598,19 +1332,19 @@ mod tests {
         let space_b = space(2);
 
         let a_space_a = factory
-            .build_scoped(&seed_a, &network, ALPNS, &space_a)
+            .build_scoped(&seed_a, &network, protocols(), &space_a)
             .await
             .unwrap();
         let a_space_b = factory
-            .build_scoped(&seed_a, &network, ALPNS, &space_b)
+            .build_scoped(&seed_a, &network, protocols(), &space_b)
             .await
             .unwrap();
         let b_space_a = factory
-            .build_scoped(&seed_b, &network, ALPNS, &space_a)
+            .build_scoped(&seed_b, &network, protocols(), &space_a)
             .await
             .unwrap();
         let b_space_b = factory
-            .build_scoped(&seed_b, &network, ALPNS, &space_b)
+            .build_scoped(&seed_b, &network, protocols(), &space_b)
             .await
             .unwrap();
         assert_eq!(
@@ -627,6 +1361,7 @@ mod tests {
             responder,
             [9; 32],
             runtime::ContactId::from_bytes([7; 16]),
+            [0; 32],
             0,
             [0; 32],
             &seed_a,
@@ -693,23 +1428,23 @@ mod tests {
         let space_b = space(4);
 
         let a_space_a = factory
-            .build_scoped(&seed_a, &network, ALPNS, &space_a)
+            .build_scoped(&seed_a, &network, protocols(), &space_a)
             .await
             .unwrap();
         let a_space_b = factory
-            .build_scoped(&seed_a, &network, ALPNS, &space_b)
+            .build_scoped(&seed_a, &network, protocols(), &space_b)
             .await
             .unwrap();
         let b_space_a = factory
-            .build_scoped(&seed_b, &network, ALPNS, &space_a)
+            .build_scoped(&seed_b, &network, protocols(), &space_a)
             .await
             .unwrap();
         let b_space_b = factory
-            .build_scoped(&seed_b, &network, ALPNS, &space_b)
+            .build_scoped(&seed_b, &network, protocols(), &space_b)
             .await
             .unwrap();
         let duplicate = match factory
-            .build_scoped(&seed_a, &network, ALPNS, &space_a)
+            .build_scoped(&seed_a, &network, protocols(), &space_a)
             .await
         {
             Ok(_) => panic!("duplicate identity/Space registration must fail"),

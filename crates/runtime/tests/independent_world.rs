@@ -75,7 +75,7 @@ fn coordinates() -> (SpaceId, SignedCoordinates) {
             .key_bytes()
             .unwrap(),
         approach_nick_hint: "a".into(),
-        approach_routes: vec![ApproachRoute::DirectV4 {
+        approach_routes: vec![ApproachRoute::DirectIpv4 {
             ip: [127, 0, 0, 1],
             port: 4242,
         }],
@@ -167,6 +167,7 @@ impl World for MultiWorld {
                 let text = v["text"].as_str().unwrap_or_default();
                 let at = ctx
                     .read_collaborative(&key)
+                    .ok()
                     .and_then(|p| p.texts.get("body").map(|t| t.chars().count() as u64))
                     .unwrap_or(0);
                 declare(
@@ -230,6 +231,7 @@ impl World for MultiWorld {
             _ => return Err(WorldError::InvalidRequest),
         }
         Ok(WorldEffect {
+            content_refs: Vec::new(),
             demand: any_demand(),
             operations,
             scopes,
@@ -250,6 +252,7 @@ impl World for MultiWorld {
                 .unwrap_or_default(),
             Some("pad") => ctx
                 .read_collaborative(&self.pad_key())
+                .ok()
                 .and_then(|p| p.texts.get("body").cloned())
                 .unwrap_or_default()
                 .into_bytes(),
@@ -366,6 +369,8 @@ fn registry(with_world: bool) -> runtime::WorldRegistry {
             implementation_version: WorldVersion(1),
             schemas: world.schemas().to_vec(),
             limits: WorldLimits::default(),
+            scope_schemas: Vec::new(),
+            signal_schemas: Vec::new(),
         };
         builder = builder.register(reg, Arc::new(world));
     }
@@ -442,6 +447,8 @@ fn bodies_authority_restart_idempotency_and_observation() {
         .form_space(runtime::SpaceFormationOptions::default())
         .unwrap()
         .activate(ActivationOptions {
+            planes: Default::default(),
+            content: Default::default(),
             drain_deadline: Duration::from_secs(5),
             comms: None,
             observation_capacity: 1, // force overruns for the backpressure case
@@ -616,6 +623,8 @@ fn beacons_contact_and_opaque_forwarding_across_three_stations() {
         .enter_orbit(&coords, EnterOptions)
         .unwrap()
         .activate(ActivationOptions {
+            planes: Default::default(),
+            content: Default::default(),
             drain_deadline: Duration::from_secs(5),
             comms: Some(comms_options(ta, STATION_A_SEED)),
             observation_capacity: 0,
@@ -635,6 +644,8 @@ fn beacons_contact_and_opaque_forwarding_across_three_stations() {
         .enter_orbit(&coords, EnterOptions)
         .unwrap()
         .activate(ActivationOptions {
+            planes: Default::default(),
+            content: Default::default(),
             drain_deadline: Duration::from_secs(5),
             comms: Some(comms_options(tb, STATION_B_SEED)),
             observation_capacity: 0,
@@ -657,6 +668,8 @@ fn beacons_contact_and_opaque_forwarding_across_three_stations() {
         .enter_orbit(&coords, EnterOptions)
         .unwrap()
         .activate(ActivationOptions {
+            planes: Default::default(),
+            content: Default::default(),
             drain_deadline: Duration::from_secs(5),
             comms: Some(comms_options(tc, STATION_C_SEED)),
             observation_capacity: 0,
@@ -729,6 +742,8 @@ fn the_eclipse_fence_quarantines_unadmitted_beacon_emitters() {
         .enter_orbit(&coords, EnterOptions)
         .unwrap()
         .activate(ActivationOptions {
+            planes: Default::default(),
+            content: Default::default(),
             drain_deadline: Duration::from_secs(5),
             comms: Some(comms_options(tc, STATION_C_SEED)),
             observation_capacity: 0,

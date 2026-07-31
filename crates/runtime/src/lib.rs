@@ -29,21 +29,33 @@
 //! consumption semantics.
 
 pub mod action;
+pub mod admission;
 pub mod beacon;
+pub mod budget;
 pub mod contact;
 pub mod contact_driver;
+pub mod content_host;
 pub mod coordinates;
 #[cfg(test)]
 mod dispatch_tests;
 pub mod dto;
 pub mod error;
+pub mod fetch;
+pub mod freight;
 pub mod implementation;
 pub mod lifecycle;
+pub mod live;
 pub mod neighbor_presence;
 pub mod neighbors;
+pub mod plane_driver;
+pub mod plane_stream;
+pub mod planes;
 pub mod registry;
 pub mod session;
+pub mod signal;
 pub mod store;
+pub mod transfer;
+pub mod transient;
 pub(crate) mod wire;
 pub mod world;
 

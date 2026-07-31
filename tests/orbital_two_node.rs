@@ -22,7 +22,7 @@ use lait::daemon::OrbitAddress;
 use lait::net::Network;
 use lait::orbital::run_space_bridge_with;
 use lait::transport::mem::MemNet;
-use lait::transport::{Alpn, Transport, TransportFactory};
+use lait::transport::{Transport, TransportFactory};
 
 const FOUNDER_SEED: [u8; 32] = [201u8; 32];
 const JOINER_SEED: [u8; 32] = [202u8; 32];
@@ -37,7 +37,7 @@ impl TransportFactory for MemFactory {
         &self,
         identity_seed: &[u8; 32],
         _network: &Network,
-        _alpns: &[Alpn],
+        _protocols: comms::Protocols<'_>,
     ) -> Result<Arc<dyn Transport>> {
         Ok(Arc::new(
             self.0.peer(lait::crypto::device_from_seed(identity_seed)),

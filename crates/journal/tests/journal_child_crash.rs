@@ -15,7 +15,7 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-use journal::JournaledStore;
+use journal::{CallerIndex, JournaledStore};
 
 const ENV_DIR: &str = "LAIT_JOURNAL_CRASH_DIR";
 const ENV_POINT: &str = "LAIT_JOURNAL_CRASH_POINT";
@@ -43,7 +43,12 @@ fn crash_child() {
             }
             false
         }));
-    let _ = store.commit(&[b"new-object".to_vec()], &[], b"new-meta".to_vec());
+    let _ = store.commit(
+        &[b"new-object".to_vec()],
+        &[],
+        CallerIndex::NONE,
+        b"new-meta".to_vec(),
+    );
     // Post-authoritative points may let commit() return; exit cleanly then —
     // the parent classifies by on-disk state, not exit code.
     std::process::exit(0);
@@ -66,7 +71,12 @@ fn a_killed_process_recovers_to_exactly_one_complete_state() {
         let old_seq = {
             let mut store = JournaledStore::open(&dir).unwrap();
             store
-                .commit(&[b"old-object".to_vec()], &[], b"old-meta".to_vec())
+                .commit(
+                    &[b"old-object".to_vec()],
+                    &[],
+                    CallerIndex::NONE,
+                    b"old-meta".to_vec(),
+                )
                 .unwrap()
         };
 
@@ -87,7 +97,9 @@ fn a_killed_process_recovers_to_exactly_one_complete_state() {
         // state — and after the manifest rename, only the new one.
         let store = JournaledStore::open(&dir).unwrap();
         let manifest = store.manifest().expect("a manifest survives").clone();
-        for obj in &manifest.objects {
+        let meta = store.caller_meta().unwrap().expect("meta survives");
+        let required = store.required_objects().unwrap();
+        for obj in &required {
             store
                 .read_object(obj)
                 .expect("every object named by the exposed manifest is intact");
@@ -95,12 +107,12 @@ fn a_killed_process_recovers_to_exactly_one_complete_state() {
         match point {
             // Before the manifest rename the old state is authoritative.
             "objects" | "rename-objects" | "manifest-rename" => {
-                assert_eq!(manifest.meta, b"old-meta", "{point}: old state exposed");
+                assert_eq!(meta, b"old-meta", "{point}: old state exposed");
                 assert_eq!(manifest.sequence, old_seq);
             }
             // After the rename the commit IS committed; only cleanup was lost.
             "journal-committed" => {
-                assert_eq!(manifest.meta, b"new-meta", "{point}: new state exposed");
+                assert_eq!(meta, b"new-meta", "{point}: new state exposed");
                 assert!(manifest.sequence > old_seq);
             }
             _ => unreachable!(),
@@ -109,7 +121,12 @@ fn a_killed_process_recovers_to_exactly_one_complete_state() {
         // The next commit proceeds with a strictly-forward sequence.
         let mut store = store;
         let next = store
-            .commit(&[b"after".to_vec()], &[], b"after-meta".to_vec())
+            .commit(
+                &[b"after".to_vec()],
+                &[],
+                CallerIndex::NONE,
+                b"after-meta".to_vec(),
+            )
             .unwrap();
         assert!(next > manifest.sequence, "sequences never reuse");
         let _ = std::fs::remove_dir_all(&dir);
@@ -128,6 +145,7 @@ fn many_consecutive_commits_stay_monotone_and_complete() {
             .commit(
                 &[format!("object-{i}").into_bytes()],
                 &[],
+                CallerIndex::NONE,
                 format!("meta-{i}").into_bytes(),
             )
             .unwrap();
@@ -137,9 +155,10 @@ fn many_consecutive_commits_stay_monotone_and_complete() {
     // A cold reopen exposes the final complete state.
     drop(store);
     let store = JournaledStore::open(&dir).unwrap();
-    let manifest = store.manifest().unwrap();
-    assert_eq!(manifest.meta, b"meta-24");
-    for obj in &manifest.objects {
+    let meta = store.caller_meta().unwrap().expect("meta survives");
+    let required = store.required_objects().unwrap();
+    assert_eq!(meta, b"meta-24");
+    for obj in &required {
         store.read_object(obj).unwrap();
     }
     let _ = std::fs::remove_dir_all(&dir);

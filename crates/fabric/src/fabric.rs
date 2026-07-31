@@ -270,15 +270,88 @@ pub trait Fabric {
     /// Read the committed canonical bytes at a key, if present.
     fn read(&self, key: &FabricKey) -> Option<Vec<u8>>;
 
-    /// Read the committed collaborative view of a Body, if the key holds one
-    /// (`None` for absent keys and atomic values).
-    fn read_collaborative(&self, key: &FabricKey) -> Option<CollaborativeView>;
+    /// Project the committed collaborative view of a Body.
+    ///
+    /// Fallible rather than optional, because "there is nothing here" and "there
+    /// is something here I cannot read" are different answers and a caller acts
+    /// differently on each. A Body carrying a collaborative type this build does
+    /// not implement is [`ProjectionError::SchemaAhead`] — its bytes stay
+    /// stored, forwarded, and converged, and no caller is handed a view that
+    /// looks complete and is not.
+    fn read_collaborative(&self, key: &FabricKey) -> Result<CollaborativeView, ProjectionError>;
 
     /// Export **one Body's** canonical representation, if the Body exists. A
     /// collaborative export preserves causal history and stable element
     /// identity for exactly that Body — never a whole-engine or cross-Body
     /// snapshot. This is the payload the protected Body object seals.
     fn export_body(&self, key: &FabricKey) -> Option<BodyExport>;
+
+    /// This Body's current position in its collaborative history.
+    fn version(
+        &self,
+        key: &FabricKey,
+    ) -> Result<crate::causal::FabricVersion, crate::causal::CausalError>;
+
+    /// Operations after `from`, as an independently importable artifact.
+    ///
+    /// `from` is always this replica's own prior version. It cannot be a remote
+    /// claim: expanding a head set requires the history it names, so a diverged
+    /// peer could not be answered anyway — which is why convergence exchanges
+    /// artifacts rather than versions.
+    fn export_delta(
+        &self,
+        key: &FabricKey,
+        from: &crate::causal::FabricVersion,
+    ) -> Result<crate::causal::FabricArtifact, crate::causal::CausalError>;
+
+    /// Current state with history trimmed at `retention_frontier`.
+    fn export_checkpoint(
+        &self,
+        key: &FabricKey,
+        retention_frontier: &crate::causal::FabricVersion,
+    ) -> Result<crate::causal::FabricArtifact, crate::causal::CausalError>;
+
+    /// The complete history as it stands now — taken immediately before a trim,
+    /// so the work the trim will refuse can still be readmitted later.
+    fn export_history(
+        &self,
+        key: &FabricKey,
+    ) -> Result<crate::causal::FabricArtifact, crate::causal::CausalError>;
+
+    /// Import one artifact. Order-independent: material whose dependencies have
+    /// not arrived is held pending rather than refused.
+    fn import_artifact(
+        &mut self,
+        key: &FabricKey,
+        artifact: &crate::causal::FabricArtifact,
+    ) -> Result<crate::causal::ImportStatus, crate::causal::CausalError>;
+
+    /// How two positions in this Body's history relate.
+    fn relation(
+        &self,
+        key: &FabricKey,
+        a: &crate::causal::FabricVersion,
+        b: &crate::causal::FabricVersion,
+    ) -> crate::causal::CausalRelation;
+
+    /// Take an anchor at a position in a collaborative value.
+    fn anchor(
+        &self,
+        key: &FabricKey,
+        path: &str,
+        position: u64,
+    ) -> Result<crate::causal::FabricAnchor, crate::causal::CausalError>;
+
+    /// Resolve an anchor against the Body's current state.
+    ///
+    /// Total, and never mutates: a position that cannot be mapped is `Drifted`,
+    /// so this is safe on a read-only replica and a renderer is never handed a
+    /// silently wrong index.
+    fn resolve(
+        &self,
+        key: &FabricKey,
+        anchor: &crate::causal::FabricAnchor,
+    ) -> crate::causal::AnchorResolution;
 
     /// Import one Body's canonical exported representation, addressed to
     /// exactly the given key. A collaborative import merges causally (already
@@ -291,6 +364,15 @@ pub trait Fabric {
         key: &FabricKey,
         export: &BodyExport,
     ) -> Result<Option<FabricCommitReceipt>, FabricError>;
+}
+
+/// The Body identity an anchor carries. A digest rather than the key itself so
+/// an anchor stays fixed-size whatever a caller names its Bodies.
+fn body_digest(key: &FabricKey) -> [u8; 32] {
+    let mut h = blake3::Hasher::new();
+    h.update(b"lait/fabric-anchor-body/1");
+    h.update(key.as_bytes());
+    *h.finalize().as_bytes()
 }
 
 /// One Body's canonical exported representation: an atomic Body's canonical
@@ -335,6 +417,12 @@ pub enum BodyExport {
 /// suffer under concurrency cannot occur (the multi-writer reference corpus
 /// proved that shadowing fatal for a shared catalog).
 pub struct CrdtFabric {
+    /// This activation's writer id, minted once and shared by every document
+    /// this engine authors into. One id per activation rather than one per
+    /// document keeps a Body's version vector growing with restarts rather than
+    /// with Bodies, and never persisting it is what keeps a copied store from
+    /// minting colliding operation ids.
+    writer: u64,
     bodies: BTreeMap<FabricKey, BodyState>,
 }
 
@@ -351,6 +439,61 @@ const CAUSAL_DOMAIN: &[u8] = b"lait/fabric-causal/1";
 
 /// The collaborative type tags a path can be bound to.
 const TYPE_TAGS: [&str; 6] = ["reg", "map", "list", "text", "set", "cnt"];
+
+/// Type tags reserved for collaborative types a later docket adds. Reserving
+/// them costs nothing now and keeps a seventh type a `CollaborativeSchema`
+/// version bump plus a fixture set, rather than a format migration — the
+/// checkpoint and delta encodings freeze on top of this algebra, and after that
+/// an unreserved tag is expensive.
+///
+/// The two named are the ones the product is already working around. `tree` is
+/// a movable hierarchy with stable node ids: sub-issues, milestone nesting, and
+/// threaded comments are all hierarchies, and Issues currently hand-encodes
+/// threading through a `reply_to` field over flat storage, which gives
+/// concurrent re-parenting no defined outcome. `log` is an append-only sequence
+/// whose state function is *last N plus a count* — activity feeds are unbounded
+/// Lists today, re-checkpointed in full on every append.
+const RESERVED_TYPE_TAGS: [&str; 2] = ["tree", "log"];
+
+/// Why a collaborative projection could not be produced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProjectionError {
+    /// No Body at this key, or the Body is atomic rather than collaborative.
+    NotCollaborative,
+    /// The Body binds a path to a collaborative type this build does not
+    /// implement. Reserved-but-unimplemented tags land here, which is the
+    /// point: schema gating upstream should have refused the Body already, and
+    /// the projection layer is the wrong place to paper over that.
+    SchemaAhead { tag: String },
+    /// A known tag bound to a value shape it cannot hold. Corruption or a
+    /// schema disagreement, not a version gap.
+    Malformed { tag: String },
+}
+
+impl std::fmt::Display for ProjectionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ProjectionError::NotCollaborative => write!(f, "not a collaborative Body"),
+            ProjectionError::SchemaAhead { tag } => {
+                write!(f, "collaborative type `{tag}` is ahead of this build")
+            }
+            ProjectionError::Malformed { tag } => {
+                write!(f, "collaborative type `{tag}` holds an impossible value")
+            }
+        }
+    }
+}
+impl std::error::Error for ProjectionError {}
+
+/// Whether a tag names a collaborative type this build implements.
+pub fn is_implemented_type_tag(tag: &str) -> bool {
+    TYPE_TAGS.contains(&tag)
+}
+
+/// Whether a tag is reserved for a future collaborative type.
+pub fn is_reserved_type_tag(tag: &str) -> bool {
+    RESERVED_TYPE_TAGS.contains(&tag)
+}
 
 /// A list element id is 16 minted bytes, rendered as 32 hex chars.
 const ELEMENT_ID_LEN: usize = 16;
@@ -370,10 +513,11 @@ fn set_member_prefix(value: &[u8]) -> String {
     data_encoding::HEXLOWER.encode(&blake3::hash(value).as_bytes()[..16])
 }
 
-/// A fresh per-Body doc with the crate's canonical Loro config.
-fn new_body_doc() -> loro::LoroDoc {
+/// A fresh per-Body doc with the crate's canonical Loro config, authoring as
+/// `writer`.
+fn new_body_doc(writer: Option<u64>) -> loro::LoroDoc {
     let doc = loro::LoroDoc::new();
-    crate::op::configure(&doc, None);
+    crate::op::configure(&doc, writer);
     doc
 }
 
@@ -401,7 +545,10 @@ impl BodyState {
         match export {
             BodyExport::Atomic(bytes) => Ok(BodyState::Atomic(bytes.clone())),
             BodyExport::Collaborative(snapshot) => {
-                let doc = new_body_doc();
+                // A doc reconstructed from an export is not yet authoring, so
+                // it keeps Loro's own id until this activation writes into it
+                // through `collab_doc`.
+                let doc = new_body_doc(None);
                 doc.import(snapshot)
                     .map_err(|e| FabricError::InvalidOp(format!("import body: {e}")))?;
                 Ok(BodyState::Collab(doc))
@@ -411,11 +558,17 @@ impl BodyState {
 }
 
 impl CrdtFabric {
-    /// A fresh, empty Loro-backed engine.
+    /// A fresh, empty Loro-backed engine, minting this activation's writer id.
     pub fn new() -> Self {
         Self {
+            writer: crate::op::mint_activation_peer(),
             bodies: BTreeMap::new(),
         }
+    }
+
+    /// This activation's writer id.
+    pub fn writer(&self) -> u64 {
+        self.writer
     }
 
     /// The keys of every present Body.
@@ -441,7 +594,9 @@ impl CrdtFabric {
                 BodyState::Atomic(_) => Err(FabricError::TypeConflict),
             },
             Entry::Vacant(v) if create => {
-                let BodyState::Collab(doc) = v.insert(BodyState::Collab(new_body_doc())) else {
+                let BodyState::Collab(doc) =
+                    v.insert(BodyState::Collab(new_body_doc(Some(self.writer))))
+                else {
                     unreachable!()
                 };
                 Ok(Some(doc))
@@ -732,22 +887,49 @@ impl Fabric for CrdtFabric {
         &mut self,
         request: FabricTransactionRequest,
     ) -> Result<FabricCommitReceipt, FabricError> {
-        // Batch atomicity: back up every Body the batch touches (by export),
-        // apply, and on any error restore exactly those Bodies — a failed
-        // batch changes nothing.
+        // Batch atomicity, bounded. This used to back every touched Body up by
+        // full export before applying — a complete-history snapshot per
+        // ordinary edit, paid inside Fabric before anything was sealed, and no
+        // amount of delta-shaped sealing downstream removed it.
+        //
+        // What replaces it is a *position*: one head set per touched Body,
+        // which is one or two operation ids. On failure the engine reverts to
+        // that position by applying the inverse of what was done, at a cost
+        // proportional to the failed batch rather than to the Body's life.
+        //
+        // Reverting appends compensating operations rather than erasing the
+        // failed ones, and that is the honest thing for a CRDT to do — you
+        // cannot unsay an operation another replica may already hold. A failed
+        // batch therefore costs a little history and no correctness, and a
+        // checkpoint reclaims it.
         let touched: std::collections::BTreeSet<FabricKey> = request
             .ops
             .iter()
             .map(|op| Self::op_key(op).clone())
             .collect();
-        let mut backups: BTreeMap<FabricKey, Option<BodyExport>> = BTreeMap::new();
-        for key in &touched {
-            let prior = match self.bodies.get(key) {
-                None => None,
-                Some(state) => Some(state.export()?),
-            };
-            backups.insert(key.clone(), prior);
-        }
+        //
+        // A position alone is not enough, though. `Remove` destroys the doc the
+        // position indexes, and a `CreateBody` after it installs a *different*
+        // doc whose history has never seen those operation ids — so the
+        // snapshot holds the Body's whole prior state as well. That is cheap:
+        // a `LoroDoc` clone is a reference clone sharing one underlying
+        // document, so putting the clone back restores the original Body
+        // rather than a copy of it.
+        let prior: BTreeMap<FabricKey, Option<(BodyState, Option<loro::Frontiers>)>> = touched
+            .iter()
+            .map(|key| {
+                let snapshot = self.bodies.get(key).map(|state| match state {
+                    // An atomic Body's whole value *is* its state, and it is
+                    // already bounded by the Body envelope.
+                    BodyState::Atomic(bytes) => (BodyState::Atomic(bytes.clone()), None),
+                    BodyState::Collab(doc) => {
+                        (BodyState::Collab(doc.clone()), Some(doc.oplog_frontiers()))
+                    }
+                });
+                (key.clone(), snapshot)
+            })
+            .collect();
+
         let mut failed = None;
         for op in &request.ops {
             if let Err(e) = self.apply(op) {
@@ -756,24 +938,31 @@ impl Fabric for CrdtFabric {
             }
         }
         if let Some(e) = failed {
-            for (key, prior) in backups {
-                match prior {
-                    None => {
-                        self.bodies.remove(&key);
+            // Total, not best-effort. One Body that will not revert must not
+            // abandon the rest of the batch half-applied, so every key is put
+            // back before anything is reported.
+            let mut unrestored = 0usize;
+            for (key, snapshot) in prior {
+                let Some((state, frontiers)) = snapshot else {
+                    // The Body did not exist before this batch, so undoing the
+                    // batch means it does not exist now either.
+                    self.bodies.remove(&key);
+                    continue;
+                };
+                self.bodies.insert(key.clone(), state);
+                if let (Some(frontiers), Some(BodyState::Collab(doc))) =
+                    (frontiers, self.bodies.get(&key))
+                {
+                    doc.commit();
+                    if doc.revert_to(&frontiers).is_err() {
+                        unrestored += 1;
                     }
-                    Some(export) => match BodyState::from_export(&export) {
-                        Ok(state) => {
-                            self.bodies.insert(key, state);
-                        }
-                        Err(_) => {
-                            // The rollback itself failed: the in-memory state
-                            // has diverged. Fail stop.
-                            return Err(FabricError::Durability(
-                                "rollback after failed apply did not restore".into(),
-                            ));
-                        }
-                    },
                 }
+            }
+            if unrestored > 0 {
+                return Err(FabricError::Durability(format!(
+                    "rollback after failed apply did not restore {unrestored} bodies"
+                )));
             }
             return Err(e);
         }
@@ -798,16 +987,16 @@ impl Fabric for CrdtFabric {
         }
     }
 
-    fn read_collaborative(&self, key: &FabricKey) -> Option<CollaborativeView> {
-        let BodyState::Collab(doc) = self.bodies.get(key)? else {
-            return None;
+    fn read_collaborative(&self, key: &FabricKey) -> Result<CollaborativeView, ProjectionError> {
+        let Some(BodyState::Collab(doc)) = self.bodies.get(key) else {
+            return Err(ProjectionError::NotCollaborative);
         };
         // The projection walks the doc's ROOT value tree once: registers live
         // as `reg:<path>` keys in the `body` root map; every other typed path
         // is a name-identified root container `<tag>:<path>`.
         let mut view = CollaborativeView::default();
         let loro::LoroValue::Map(roots) = doc.get_deep_value() else {
-            return Some(view);
+            return Ok(view);
         };
         for (name, value) in roots.iter() {
             if name == BODY_MAP {
@@ -824,8 +1013,15 @@ impl Fabric for CrdtFabric {
                 continue;
             }
             let Some((tag, path)) = name.split_once(':') else {
-                continue;
+                return Err(ProjectionError::SchemaAhead {
+                    tag: name.to_string(),
+                });
             };
+            if !is_implemented_type_tag(tag) {
+                return Err(ProjectionError::SchemaAhead {
+                    tag: tag.to_string(),
+                });
+            }
             let path = path.to_string();
             match (tag, value) {
                 ("map", loro::LoroValue::Map(m)) => {
@@ -878,10 +1074,287 @@ impl Fabric for CrdtFabric {
                         .fold(0i64, i64::saturating_add);
                     view.counters.insert(path, total);
                 }
-                _ => {}
+                _ => {
+                    return Err(ProjectionError::Malformed {
+                        tag: tag.to_string(),
+                    })
+                }
             }
         }
-        Some(view)
+        Ok(view)
+    }
+
+    fn version(
+        &self,
+        key: &FabricKey,
+    ) -> Result<crate::causal::FabricVersion, crate::causal::CausalError> {
+        match self.bodies.get(key) {
+            Some(BodyState::Collab(doc)) => Ok(crate::causal::FabricVersion::from_frontiers(
+                &doc.oplog_frontiers(),
+            )),
+            // An atomic Body has one writer at a time and no operation history,
+            // so its position is the empty one. It still answers, because a
+            // caller should not have to know which model a key holds to ask.
+            Some(BodyState::Atomic(_)) => Ok(crate::causal::FabricVersion::empty()),
+            None => Err(crate::causal::CausalError::NotCollaborative),
+        }
+    }
+
+    fn export_delta(
+        &self,
+        key: &FabricKey,
+        from: &crate::causal::FabricVersion,
+    ) -> Result<crate::causal::FabricArtifact, crate::causal::CausalError> {
+        from.validate()?;
+        match self.bodies.get(key) {
+            Some(BodyState::Collab(doc)) => {
+                let base = from.to_frontiers();
+                let Some(vv) = doc.frontiers_to_vv(&base) else {
+                    return Err(crate::causal::CausalError::MissingBase);
+                };
+                let bytes = doc
+                    .export(loro::ExportMode::updates(&vv))
+                    .map_err(|e| crate::causal::CausalError::Engine(e.to_string()))?;
+                Ok(crate::causal::FabricArtifact::Delta {
+                    format_version: crate::causal::CAUSAL_FORMAT_VERSION,
+                    base: from.clone(),
+                    result: crate::causal::FabricVersion::from_frontiers(&doc.oplog_frontiers()),
+                    bytes,
+                })
+            }
+            Some(BodyState::Atomic(bytes)) => Ok(crate::causal::FabricArtifact::Replace {
+                format_version: crate::causal::CAUSAL_FORMAT_VERSION,
+                bytes: bytes.clone(),
+            }),
+            None => Err(crate::causal::CausalError::NotCollaborative),
+        }
+    }
+
+    fn export_checkpoint(
+        &self,
+        key: &FabricKey,
+        retention_frontier: &crate::causal::FabricVersion,
+    ) -> Result<crate::causal::FabricArtifact, crate::causal::CausalError> {
+        retention_frontier.validate()?;
+        match self.bodies.get(key) {
+            Some(BodyState::Collab(doc)) => {
+                let frontier = if retention_frontier.is_empty() {
+                    doc.oplog_frontiers()
+                } else {
+                    retention_frontier.to_frontiers()
+                };
+                if doc.frontiers_to_vv(&frontier).is_none() {
+                    return Err(crate::causal::CausalError::MissingBase);
+                }
+                let bytes = doc
+                    .export(loro::ExportMode::shallow_snapshot(&frontier))
+                    .map_err(|e| crate::causal::CausalError::Engine(e.to_string()))?;
+                Ok(crate::causal::FabricArtifact::Checkpoint {
+                    format_version: crate::causal::CAUSAL_FORMAT_VERSION,
+                    retention_frontier: crate::causal::FabricVersion::from_frontiers(&frontier),
+                    result: crate::causal::FabricVersion::from_frontiers(&doc.oplog_frontiers()),
+                    bytes,
+                })
+            }
+            Some(BodyState::Atomic(bytes)) => Ok(crate::causal::FabricArtifact::Replace {
+                format_version: crate::causal::CAUSAL_FORMAT_VERSION,
+                bytes: bytes.clone(),
+            }),
+            None => Err(crate::causal::CausalError::NotCollaborative),
+        }
+    }
+
+    fn export_history(
+        &self,
+        key: &FabricKey,
+    ) -> Result<crate::causal::FabricArtifact, crate::causal::CausalError> {
+        match self.bodies.get(key) {
+            Some(BodyState::Collab(doc)) => {
+                let bytes = doc
+                    .export(loro::ExportMode::Snapshot)
+                    .map_err(|e| crate::causal::CausalError::Engine(e.to_string()))?;
+                Ok(crate::causal::FabricArtifact::Archive {
+                    format_version: crate::causal::CAUSAL_FORMAT_VERSION,
+                    result: crate::causal::FabricVersion::from_frontiers(&doc.oplog_frontiers()),
+                    bytes,
+                })
+            }
+            Some(BodyState::Atomic(bytes)) => Ok(crate::causal::FabricArtifact::Replace {
+                format_version: crate::causal::CAUSAL_FORMAT_VERSION,
+                bytes: bytes.clone(),
+            }),
+            None => Err(crate::causal::CausalError::NotCollaborative),
+        }
+    }
+
+    fn import_artifact(
+        &mut self,
+        key: &FabricKey,
+        artifact: &crate::causal::FabricArtifact,
+    ) -> Result<crate::causal::ImportStatus, crate::causal::CausalError> {
+        use crate::causal::{CausalError, FabricArtifact, FabricVersion, ImportStatus};
+
+        if let FabricArtifact::Replace { bytes, .. } = artifact {
+            // A model mismatch is a conflict, not an overwrite. `import_body`
+            // refuses the same pair, and the reverse direction — a delta onto
+            // an atomic Body — is refused below; flattening a collaborative
+            // Body into a value here would discard its whole history because a
+            // peer sent the wrong artifact kind.
+            if matches!(self.bodies.get(key), Some(BodyState::Collab(_))) {
+                return Err(CausalError::NotCollaborative);
+            }
+            let changed = !matches!(
+                self.bodies.get(key),
+                Some(BodyState::Atomic(current)) if current == bytes
+            );
+            if changed {
+                self.bodies
+                    .insert(key.clone(), BodyState::Atomic(bytes.clone()));
+            }
+            return Ok(ImportStatus {
+                applied: changed,
+                pending: false,
+            });
+        }
+
+        let bytes = match artifact {
+            FabricArtifact::Delta { bytes, .. }
+            | FabricArtifact::Checkpoint { bytes, .. }
+            | FabricArtifact::Archive { bytes, .. } => bytes,
+            FabricArtifact::Replace { .. } => unreachable!("handled above"),
+        };
+
+        let writer = self.writer;
+        let entry = self
+            .bodies
+            .entry(key.clone())
+            .or_insert_with(|| BodyState::Collab(new_body_doc(Some(writer))));
+        let BodyState::Collab(doc) = entry else {
+            return Err(CausalError::NotCollaborative);
+        };
+        let before = doc.oplog_frontiers();
+        let status = doc.import(bytes).map_err(|e| {
+            // A compacted document refuses work whose dependencies precede its
+            // shallow root. That refusal is the whole of §5.2 outcome 2, and it
+            // is named rather than reported as a generic engine error so a
+            // writer can act on it: rebuild from the archive, or re-bootstrap.
+            let message = e.to_string();
+            if message.contains("shallow") || message.contains("Shallow") {
+                CausalError::BeforeRetentionFrontier {
+                    frontier: FabricVersion::from_frontiers(&doc.shallow_since_frontiers()),
+                }
+            } else {
+                CausalError::Engine(message)
+            }
+        })?;
+        let after = doc.oplog_frontiers();
+        Ok(ImportStatus {
+            applied: before != after,
+            pending: status.pending.is_some(),
+        })
+    }
+
+    fn relation(
+        &self,
+        key: &FabricKey,
+        a: &crate::causal::FabricVersion,
+        b: &crate::causal::FabricVersion,
+    ) -> crate::causal::CausalRelation {
+        match self.bodies.get(key) {
+            Some(BodyState::Collab(doc)) => crate::causal::relation(doc, a, b),
+            _ => crate::causal::CausalRelation::Undetermined,
+        }
+    }
+
+    fn anchor(
+        &self,
+        key: &FabricKey,
+        path: &str,
+        position: u64,
+    ) -> Result<crate::causal::FabricAnchor, crate::causal::CausalError> {
+        let Some(BodyState::Collab(doc)) = self.bodies.get(key) else {
+            return Err(crate::causal::CausalError::NotCollaborative);
+        };
+        let text = doc.get_text(typed_key("text", path));
+        let length = text.len_unicode() as u64;
+        // Bind the position to the operation that wrote the character before
+        // it. That is what survives concurrent edits: an offset does not, and a
+        // caret that does not survive a concurrent edit is worse than no caret.
+        let anchored_to = if position == 0 || length == 0 {
+            None
+        } else {
+            text.get_cursor(
+                (position.min(length) as usize).saturating_sub(1),
+                loro::cursor::Side::Right,
+            )
+            .and_then(|cursor| cursor.id)
+            .map(|id| crate::causal::OpHead {
+                writer: id.peer,
+                sequence: id.counter,
+            })
+        };
+        Ok(crate::causal::FabricAnchor {
+            format_version: crate::causal::CAUSAL_FORMAT_VERSION,
+            body: body_digest(key),
+            path: path.to_string(),
+            anchored_to,
+            offset: position,
+            after: true,
+            taken_at: crate::causal::FabricVersion::from_frontiers(&doc.oplog_frontiers()),
+        })
+    }
+
+    fn resolve(
+        &self,
+        key: &FabricKey,
+        anchor: &crate::causal::FabricAnchor,
+    ) -> crate::causal::AnchorResolution {
+        use crate::causal::AnchorResolution;
+        if anchor.body != body_digest(key) {
+            return AnchorResolution::Drifted;
+        }
+        let Some(BodyState::Collab(doc)) = self.bodies.get(key) else {
+            return AnchorResolution::Drifted;
+        };
+        let text = doc.get_text(typed_key("text", &anchor.path));
+        let length = text.len_unicode() as u64;
+
+        // An anchor at the very start is the one position concurrent edits
+        // cannot move.
+        let Some(head) = anchor.anchored_to else {
+            return AnchorResolution::Resolved(anchor.offset.min(length));
+        };
+        let cursor = loro::cursor::Cursor::new(
+            Some(loro::ID {
+                peer: head.writer,
+                counter: head.sequence,
+            }),
+            loro::ContainerID::Root {
+                name: typed_key("text", &anchor.path).into(),
+                container_type: loro::ContainerType::Text,
+            },
+            if anchor.after {
+                loro::cursor::Side::Right
+            } else {
+                loro::cursor::Side::Left
+            },
+            anchor.offset as usize,
+        );
+        match doc.get_cursor_pos(&cursor) {
+            // The anchor bound to the character *before* the caret, so a live
+            // resolution sits one past it — and only a live one. When the
+            // anchored character is gone the engine answers with the gap it
+            // left, flipping the side; adding one to that puts the caret a
+            // character to the right of where it belongs. `Drifted` is what
+            // this case is documented to be, and it is what a renderer can act
+            // on.
+            Ok(position) if position.current.side == loro::cursor::Side::Right => {
+                AnchorResolution::Resolved((position.current.pos as u64 + 1).min(length))
+            }
+            Ok(_) => AnchorResolution::Drifted,
+            // An anchor older than what this replica retains.
+            Err(_) => AnchorResolution::Drifted,
+        }
     }
 
     fn export_body(&self, key: &FabricKey) -> Option<BodyExport> {
@@ -974,7 +1447,7 @@ mod tests {
             b"one".to_vec()
         );
         assert!(
-            b.read_collaborative(&k2).is_none() && b.read(&k2).is_none(),
+            b.read_collaborative(&k2).is_err() && b.read(&k2).is_none(),
             "the second Body did not ride along"
         );
     }

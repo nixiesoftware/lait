@@ -65,6 +65,14 @@ impl BodyKeySource for NoBodyKeys {
 /// The default deadline for draining tracked tasks during dormancy.
 pub const DEFAULT_DRAIN_DEADLINE: Duration = Duration::from_secs(10);
 
+/// Where the resident cache lives, under the Orbit store directory.
+///
+/// A sibling of the journal rather than inside it. The journal promises that
+/// everything a root names is present and intact; a content chunk is optional
+/// by design, and losing one should mean "fetch it again" rather than "this
+/// store is broken".
+const CACHE_DIR: &str = "content-cache";
+
 /// A cooperative cancellation signal shared by a Station and its tracked tasks.
 /// A task polls [`CancelToken::is_cancelled`] and exits promptly when set. The
 /// API cannot preempt a task that ignores it — such a task is drained on a
@@ -102,6 +110,11 @@ pub struct EnterOptions;
 pub struct ActivationOptions {
     /// The deadline for draining tracked tasks at dormancy.
     pub drain_deadline: Duration,
+    /// The content plane's local policy: how much disk it may hold, and how
+    /// large a single content this Station will accept.
+    pub content: ContentOptions,
+    /// Which delivery planes this Station answers on.
+    pub planes: PlaneOptions,
     /// The Station's Contact plane: transport, station identity, mechanics
     /// seams, and gossip. `None` activates an offline Station (valid; grants
     /// no new authority; `neighbors` still serves the persisted registry).
@@ -116,8 +129,81 @@ impl ActivationOptions {
     pub fn offline() -> Self {
         Self {
             drain_deadline: DEFAULT_DRAIN_DEADLINE,
+            content: ContentOptions::default(),
+            planes: PlaneOptions::default(),
             comms: None,
             observation_capacity: 0,
+        }
+    }
+}
+
+/// Local policy for the content plane.
+///
+/// Hand-written `Default` rather than derived, because both fields fail closed
+/// at zero: a zero quota would sweep every chunk the moment it landed, and a
+/// zero maximum would refuse every content. A caller that leaves this alone
+/// should get a working Station, not a silently disabled one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContentOptions {
+    /// Resident bytes this Station will hold before a sweep starts evicting.
+    ///
+    /// A target, not a guarantee: every chunk of a committed content is held by
+    /// that content's own lease, so a cache full of committed content has no
+    /// eligible victims. The sweep reports the shortfall rather than hiding it.
+    pub cache_quota_bytes: u64,
+    /// The largest single content this Station will ingest or fetch. May only
+    /// *lower* the protocol maximum, never raise it.
+    pub max_content_len: u64,
+}
+
+impl Default for ContentOptions {
+    fn default() -> Self {
+        Self {
+            cache_quota_bytes: 4 * 1024 * 1024 * 1024,
+            max_content_len: 256 * 1024 * 1024,
+        }
+    }
+}
+
+/// Local policy for the delivery planes.
+///
+/// Hand-written `Default` for the same reason [`ContentOptions`] has one: a
+/// derived `Default` would leave every plane off, and a caller that says
+/// nothing should get a Station that works rather than one that is silently
+/// deaf. Turning a plane off is a thing an operator does on purpose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaneOptions {
+    /// Whether this Station serves and fetches content over Freight.
+    pub freight_enabled: bool,
+    /// Whether this Station answers on the Live plane.
+    pub live_enabled: bool,
+    /// Whether a file offered by one of this identity's own devices may land on
+    /// disk without anyone clicking.
+    ///
+    /// The one option here that defaults to *off*, and deliberately breaking
+    /// this struct's own fail-open rule. Every other field enables something a
+    /// peer asked for; this one writes to a disk nobody asked about at the
+    /// moment it happens, and an operator who has not said yes has not said yes.
+    pub auto_accept_offers: bool,
+}
+
+impl Default for PlaneOptions {
+    fn default() -> Self {
+        Self {
+            freight_enabled: true,
+            live_enabled: true,
+            auto_accept_offers: false,
+        }
+    }
+}
+
+impl PlaneOptions {
+    fn policy(self) -> crate::admission::PlanePolicy {
+        crate::admission::PlanePolicy {
+            serve_enabled: self.freight_enabled,
+            fetch_enabled: self.freight_enabled,
+            live_enabled: self.live_enabled,
+            auto_accept_offers: self.auto_accept_offers,
         }
     }
 }
@@ -420,6 +506,48 @@ impl Orbit {
             options.observation_capacity
         };
         let core = Arc::new(crate::session::StationCore::new(epoch, capacity, replica));
+
+        // The resident cache lives beside the store rather than inside it: the
+        // journal's promise is that everything a root names is present, and a
+        // chunk is optional by design. Mixing them would let a refetchable
+        // chunk take a store down.
+        let cache = Arc::new(
+            replica::journal::cache::ResidentCache::open(
+                self.store.dir().join(CACHE_DIR),
+                options.content.cache_quota_bytes,
+            )
+            .map_err(|e| LifecycleError::StoreIo(e.to_string()))?,
+        );
+        // Nothing was in flight before this Station existed, so every operation
+        // lease and every staging slot on disk belongs to a run that is over.
+        // Reclaiming here — before anything registers a transfer — is what
+        // keeps a killed transfer from holding its chunks resident forever.
+        cache
+            .sweep_leases(&std::collections::BTreeSet::new())
+            .map_err(|e| LifecycleError::StoreIo(e.to_string()))?;
+        cache
+            .sweep_staging(&std::collections::BTreeSet::new())
+            .map_err(|e| LifecycleError::StoreIo(e.to_string()))?;
+        let content = Arc::new(crate::content_host::ContentHost::new(core.clone(), cache));
+        // The oracle over this Station's own content host. Built here rather
+        // than inside the plane because a `ContentPolicy` names the Space, the
+        // epoch key source and the operator ceiling — all of which belong to the
+        // composition root, and a plane that invented its own would be a plane
+        // deciding who may be served.
+        let residency: Arc<dyn crate::live::ResidencyOracle> =
+            Arc::new(crate::live::HostResidency::new(
+                content.clone(),
+                Arc::new(crate::content_host::StationContentKeys::new(
+                    self.keys.clone(),
+                )),
+                self.store.space().clone(),
+                options.content.max_content_len,
+            ));
+        let live = Arc::new(crate::live::LiveHandle::with_residency(
+            Some(core.clone()),
+            residency,
+        ));
+
         let station = Station {
             store: self.store,
             registry: self.registry,
@@ -439,8 +567,17 @@ impl Orbit {
                 .as_ref()
                 .map(|c| c.whole_deadline)
                 .unwrap_or(Duration::from_secs(60)),
+            content,
+            live,
+            max_content_len: options.content.max_content_len,
         };
         if let Some(comms) = options.comms {
+            // Held before `comms` moves into the Contact driver's context: the
+            // plane driver needs the same transport and the same identity, and
+            // taking them afterwards would mean cloning the whole options
+            // struct for two fields.
+            let plane_transport = comms.transport.clone();
+            let station_seed = comms.station_seed;
             let space = station.store.space().clone();
             let space_bytes = <[u8; 29]>::try_from(space.as_str().as_bytes())
                 .map_err(|_| LifecycleError::IntegrityFailure("space id shape".into()))?;
@@ -463,6 +600,121 @@ impl Orbit {
                 .spawn_tracked(move |_cancel| crate::contact_driver::run_driver(ctx))
                 .expect("station is live at activation");
             *station.driver.lock().expect("driver slot") = Some(tx);
+
+            // The first plane driver in a shipped Station.
+            //
+            // `lait/freight/1` has had a service since S2 and no mount, so a
+            // peer that dialled it completed a handshake and was turned away by
+            // the hub — the ALPN was advertised and the plane was not served.
+            // Mounting Freight first is deliberate: it proves the wiring where
+            // a service already exists and is already tested, so when Live's
+            // driver arrives the only new thing is Live.
+            //
+            // Taking the queue is what makes this exclusive. A second mount for
+            // the same plane gets `None` rather than a second reader.
+            let local_station =
+                StationId::from_device(&mechanics::crypto::device_from_seed(&station_seed))
+                    .ok_or_else(|| LifecycleError::IntegrityFailure("station id".into()))?;
+            if options.planes.freight_enabled {
+                if let Some(queue) = plane_transport.take_session_queue(crate::planes::FREIGHT_ALPN)
+                {
+                    let context = crate::plane_driver::PlaneContext {
+                        plane: crate::planes::Plane::Freight,
+                        space: station.store.space().clone(),
+                        local_station: local_station.clone(),
+                        authority: station.authority.clone(),
+                        policy: options.planes.policy(),
+                        cancel: station.cancel.clone(),
+                        drain_deadline,
+                        // A real tick, for the first time. `watch_for_revocation`
+                        // has had a live branch since S2 and nothing to watch —
+                        // this is rung by every authority advance, so a revoked
+                        // peer's session now closes on the change rather than
+                        // whenever it happens to disconnect.
+                        authority_tick: Some(station.core.authority_tick()),
+                    };
+                    let service = crate::freight::FreightService::new(
+                        station.content.clone(),
+                        Arc::new(crate::transfer::TransferRegistry::new()),
+                        Arc::new(crate::content_host::StationContentKeys::new(
+                            station.keys.clone(),
+                        )),
+                        station.store.space().clone(),
+                        options.content.max_content_len,
+                    );
+                    // Spawned tracked, so `drain_tasks` joins it rather than
+                    // leaving a thread holding a queue after the Station is
+                    // gone.
+                    station
+                        .spawn_tracked(move |_cancel| {
+                            crate::plane_driver::run_driver(context, queue, service)
+                        })
+                        .expect("station is live at activation");
+                }
+            }
+
+            // The second driver, and the reason the queue split had to land
+            // first: on one shared queue these two would take strictly
+            // alternating connections and each refuse half of what it was
+            // handed.
+            let dial_station = local_station.clone();
+            if options.planes.live_enabled {
+                if let Some(queue) = plane_transport.take_session_queue(crate::planes::LIVE_ALPN) {
+                    let context = crate::plane_driver::PlaneContext {
+                        plane: crate::planes::Plane::Live,
+                        space: station.store.space().clone(),
+                        local_station,
+                        authority: station.authority.clone(),
+                        policy: options.planes.policy(),
+                        cancel: station.cancel.clone(),
+                        drain_deadline,
+                        authority_tick: Some(station.core.authority_tick()),
+                    };
+                    let service = crate::live::LiveService::new(
+                        station.live.clone(),
+                        station.authority.clone(),
+                        station.registry.clone(),
+                    );
+                    station
+                        .spawn_tracked(move |_cancel| {
+                            crate::plane_driver::run_driver(context, queue, service)
+                        })
+                        .expect("station is live at activation");
+                }
+
+                // And the outbound half, on its own thread for the same reason
+                // the driver has one: a dialled session is served by exactly the
+                // same `serve_session` an accepted one is, and that function is
+                // not `Send`. Two implementations of a Live session is the way
+                // the two quietly stop agreeing.
+                //
+                // Unconditional on `take_session_queue` succeeding: dialling out
+                // is not the same capability as accepting in, and a Station
+                // whose inbound queue was already claimed can still reach its
+                // neighbours.
+                let neighbors = station.neighbor_registry.clone();
+                let dial = crate::live::DialContext {
+                    space: station.store.space().clone(),
+                    local_station: dial_station,
+                    transport: plane_transport.clone(),
+                    candidates: Arc::new(move || {
+                        neighbors
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .snapshot()
+                            .into_iter()
+                            .map(|neighbor| neighbor.station)
+                            .collect()
+                    }),
+                    handle: station.live.clone(),
+                    authority: station.authority.clone(),
+                    worlds: station.registry.clone(),
+                    cancel: station.cancel.clone(),
+                };
+                station
+                    .spawn_tracked(move |_cancel| crate::live::run_dialer(dial))
+                    .expect("station is live at activation");
+            }
         }
         Ok(station)
     }
@@ -520,6 +772,20 @@ pub struct Station {
     driver: Mutex<Option<std::sync::mpsc::Sender<crate::contact_driver::DriverCmd>>>,
     /// The whole-contact deadline (bounds the administrative contact wait).
     contact_deadline: Duration,
+    /// The content plane. Opened at activation beside the Replica, because a
+    /// Station that can name content and cannot hold any is a Station whose
+    /// content surface is unreachable.
+    content: Arc<crate::content_host::ContentHost>,
+    /// The Live plane's shared view.
+    ///
+    /// Held whether or not a driver was mounted. A Station with no transport
+    /// still answers "who is here" — with nobody — and a caller that had to
+    /// branch on whether the plane exists would write that branch everywhere.
+    live: Arc<crate::live::LiveHandle>,
+    /// The largest single content this Station will ingest, from operator
+    /// policy. Kept here because every local content call has to enforce it and
+    /// the options struct does not outlive activation.
+    max_content_len: u64,
 }
 
 impl std::fmt::Debug for Station {
@@ -535,6 +801,162 @@ impl Station {
     /// This activation's epoch.
     pub fn epoch(&self) -> StationEpoch {
         self.epoch
+    }
+
+    /// What a World declared at registration.
+    ///
+    /// Narrower than handing out the registry: a caller outside this crate needs
+    /// to check a declaration, not to enumerate or resolve Worlds. The registry
+    /// is how a Station dispatches, and that is not a composition root's
+    /// business.
+    pub fn registration(&self, world: &WorldId) -> Option<&crate::world::WorldRegistration> {
+        self.registry.registration(world)
+    }
+
+    /// What this Station currently believes about who is doing what.
+    ///
+    /// Never durable and never authoritative: a Station with no Live driver
+    /// answers with an empty view rather than an error, because "nobody is
+    /// here" is the truth about a Station nobody is connected to.
+    pub fn live(&self) -> Arc<crate::live::LiveHandle> {
+        self.live.clone()
+    }
+
+    /// Listen for reliable signals this Station receives.
+    ///
+    /// Subscribe before anything arrives. A signal is an event, not a state
+    /// anyone can re-read, so a listener that attaches late missed what it
+    /// missed — the same way a person who was out of the room did.
+    pub fn signals(&self) -> tokio::sync::broadcast::Receiver<crate::signal::DeliveredSignal> {
+        self.live.signals()
+    }
+
+    /// The content plane.
+    ///
+    /// One per Station and opened at activation, so a caller never constructs
+    /// a second cache over the same directory — two caches over one directory
+    /// would sweep each other's staging.
+    pub fn content(&self) -> Arc<crate::content_host::ContentHost> {
+        self.content.clone()
+    }
+
+    /// The largest single content this Station will ingest.
+    pub fn max_content_len(&self) -> u64 {
+        self.max_content_len
+    }
+
+    /// What is known about one content.
+    pub fn content_stat(
+        &self,
+        identity: &crate::world::LocalIdentity,
+        content: &replica::ContentRef,
+    ) -> Result<crate::content_host::ContentStatus, crate::content_host::ContentHostError> {
+        let keys = self.content_keys();
+        let allow = self.content_authorization(identity)?;
+        self.content
+            .stat(&self.content_policy(&keys, &allow), content)
+    }
+
+    /// One bounded range of a content's plaintext.
+    pub fn content_read(
+        &self,
+        identity: &crate::world::LocalIdentity,
+        content: &replica::ContentRef,
+        offset: u64,
+        len: usize,
+    ) -> Result<Vec<u8>, crate::content_host::ContentHostError> {
+        let keys = self.content_keys();
+        let allow = self.content_authorization(identity)?;
+        self.content
+            .read_range(&self.content_policy(&keys, &allow), content, offset, len)
+    }
+
+    /// Seal and commit content read from `reader`.
+    ///
+    /// The reader is consumed incrementally, so a caller forwarding a stream
+    /// never holds the whole content — which is the reason this plane exists
+    /// rather than an inline field on a Body.
+    pub fn content_write(
+        &self,
+        identity: &crate::world::LocalIdentity,
+        operation: [u8; 16],
+        reader: &mut dyn std::io::Read,
+    ) -> Result<replica::ContentRef, crate::content_host::ContentHostError> {
+        let keys = self.content_keys();
+        let allow = self.content_authorization(identity)?;
+        let frontier = self.identity_frontier(identity)?;
+        let ctx = replica::CommitContext {
+            space: self.store.space(),
+            signer: identity,
+            authority_frontier: frontier,
+        };
+        self.content
+            .ingest(&self.content_policy(&keys, &allow), operation, reader, &ctx)
+    }
+
+    /// Drop this Station's copy of the bytes and keep the name.
+    pub fn content_forget(
+        &self,
+        identity: &crate::world::LocalIdentity,
+        content: &replica::ContentRef,
+    ) -> Result<(), crate::content_host::ContentHostError> {
+        let keys = self.content_keys();
+        let allow = self.content_authorization(identity)?;
+        self.content
+            .remove_local(&self.content_policy(&keys, &allow), content)
+    }
+
+    fn content_keys(&self) -> Arc<dyn crate::content_host::ContentKeys> {
+        Arc::new(crate::content_host::StationContentKeys::new(
+            self.keys.clone(),
+        ))
+    }
+
+    fn content_policy<'a>(
+        &'a self,
+        keys: &Arc<dyn crate::content_host::ContentKeys>,
+        authorize: &'a dyn Fn(crate::content_host::ContentAction) -> Result<(), Vec<u8>>,
+    ) -> crate::content_host::ContentPolicy<'a> {
+        crate::content_host::ContentPolicy {
+            space: self.store.space(),
+            keys: keys.clone(),
+            authorize,
+            max_content_len: self.max_content_len,
+        }
+    }
+
+    /// The authority frontier a local identity acts at, or a refusal.
+    fn identity_frontier(
+        &self,
+        identity: &crate::world::LocalIdentity,
+    ) -> Result<replica::frontier::AuthorityFrontier, crate::content_host::ContentHostError> {
+        self.authority
+            .resolve(identity.device())
+            .map(|resolved| resolved.authority_frontier)
+            .ok_or_else(|| crate::content_host::ContentHostError::Denied {
+                demand: b"space.member".to_vec(),
+            })
+    }
+
+    /// Whether a local identity may act on this Station's content, as a closure
+    /// the host can ask per operation.
+    ///
+    /// Membership is the whole check, and that is a deliberate position rather
+    /// than an omission: content authorization is Space-core, so a member may
+    /// read any content this Station holds. The consequence is the same one
+    /// Freight already carries — residency is Space-wide, and a per-resource
+    /// read restriction would be advisory until a `content.serve` grant exists
+    /// to make it real. A non-member is refused here, before the store is
+    /// touched.
+    fn content_authorization(
+        &self,
+        identity: &crate::world::LocalIdentity,
+    ) -> Result<
+        impl Fn(crate::content_host::ContentAction) -> Result<(), Vec<u8>>,
+        crate::content_host::ContentHostError,
+    > {
+        self.identity_frontier(identity)?;
+        Ok(|_action| Ok(()))
     }
 
     /// The Space this Station serves.
@@ -618,6 +1040,17 @@ impl Station {
             self.core.clone(),
             self.authority.clone(),
         ))
+    }
+
+    /// Where this Station's durable state lives.
+    ///
+    /// Exposed because "nothing was written" is a claim that has to be
+    /// checkable, and the only honest way to check it is to look at the bytes.
+    /// A frontier can be unchanged across a commit that wrote and then swept,
+    /// so a test asserting non-durability against the frontier alone is
+    /// asserting less than it thinks.
+    pub fn store_dir(&self) -> &std::path::Path {
+        self.store.dir()
     }
 
     /// The current committed Replica frontier (advances as Sessions submit).

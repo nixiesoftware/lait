@@ -294,12 +294,32 @@ impl ObservationStream {
 /// The Station's exclusive committing state, shared with its Sessions. Held
 /// behind an `Arc` by the Station and every Session; a Session can commit
 /// through it but never stop the Station.
-pub(crate) struct StationCore {
+pub struct StationCore {
     inner: std::sync::Mutex<CoreInner>,
     pub(crate) broadcaster: Arc<Broadcaster>,
+    /// Bumped whenever Space authority advances.
+    ///
+    /// A bare counter, deliberately not a frontier: a watcher does not need to
+    /// know *what* changed, only that its pinned view is stale and must be
+    /// asked again. Carrying the frontier here would put an authority value on
+    /// a channel that is not the authority, and give a reader something it
+    /// could be tempted to act on without re-resolving.
+    ///
+    /// It is not the Observation ring. That ring's entries correspond to
+    /// durable commits and are consumed by clients; this is a wake-up for the
+    /// delivery planes, and a plane falling behind on it must not cost a
+    /// client its cursor.
+    authority_tick: tokio::sync::watch::Sender<u64>,
 }
 
 impl StationCore {
+    /// A core wrapping a Replica directly, for tests that exercise a surface
+    /// built over one without standing up a Station.
+    #[doc(hidden)]
+    pub fn for_test(replica: replica::Replica) -> Self {
+        Self::new(StationEpoch::ZERO, DEFAULT_OBSERVATION_CAPACITY, replica)
+    }
+
     pub(crate) fn new(
         epoch: StationEpoch,
         observation_capacity: usize,
@@ -312,7 +332,24 @@ impl StationCore {
                 closed: false,
             }),
             broadcaster: Arc::new(Broadcaster::new(epoch, observation_capacity, frontier)),
+            authority_tick: tokio::sync::watch::Sender::new(0),
         }
+    }
+
+    /// Watch for authority advancing.
+    ///
+    /// A live session pins the authority view it was admitted at. Something has
+    /// to tell it that view is stale, or a revoked peer keeps whatever it was
+    /// holding until it happens to disconnect — which is not a bound.
+    pub fn authority_tick(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.authority_tick.subscribe()
+    }
+
+    /// Announce that Space authority advanced. Called after the write is
+    /// durable, never before.
+    pub fn note_authority_advanced(&self) {
+        self.authority_tick
+            .send_modify(|n| *n = n.saturating_add(1));
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, CoreInner> {
@@ -325,7 +362,26 @@ impl StationCore {
 
     /// Run a closure against the exclusive Replica writer (the Contact plane's
     /// snapshot/incorporation entry). Refused once the core is closed.
-    pub(crate) fn with_replica<T>(
+    ///
+    /// **Exclusive is not a choice here, and it is worth knowing why before
+    /// anyone tries to relax it.** The obvious improvement is a `RwLock`, so
+    /// that read-only questions — resolving a caret anchor, reading a
+    /// projection — stop queueing behind commits. It does not compile:
+    /// `RwLock<T>: Sync` requires `T: Sync`, and `CoreInner` holds a Replica
+    /// holding `dyn Fabric + Send`, which is not `Sync` because the underlying
+    /// collaborative document is not. Concurrent readers are not expressible
+    /// at all, whatever the access pattern.
+    ///
+    /// So a caret resolve takes the same lock a commit takes. What bounds the
+    /// damage is the rate: `gates::LIVE_DATAGRAMS` admits 64 items a second per
+    /// connection and `slots::MAX_LIVE_SESSIONS` is 32, so the worst honest
+    /// load is a few thousand microsecond-scale resolutions a second against a
+    /// commit measured in milliseconds. That is a small duty cycle rather than
+    /// a safe one, and it is the number to re-derive if either ceiling moves.
+    ///
+    /// The real fix, if it is ever needed, is a snapshot the reader owns — not
+    /// a second kind of borrow on state that cannot be shared.
+    pub fn with_replica<T>(
         &self,
         f: impl FnOnce(&mut replica::Replica) -> Result<T, replica::ReplicaCommitError>,
     ) -> Result<T, replica::ReplicaCommitError> {
@@ -380,6 +436,39 @@ impl replica::TransactionAuthorizer for SessionAuthorizer<'_> {
     }
 }
 
+/// The Live plane's caret reads, at the price `with_replica` documents.
+///
+/// Implemented here rather than in `live.rs` because this is the type that owns
+/// the lock: a caller reading these two methods sees `with_replica` one line
+/// away and the paragraph explaining why it is exclusive one line after that.
+impl crate::live::AnchorSource for StationCore {
+    fn anchor_in_body(
+        &self,
+        key: &BodyKey,
+        path: &str,
+        position: u64,
+    ) -> Option<replica::FabricAnchor> {
+        // A dormant core answers `None`, which is the same answer a position
+        // the algebra cannot bind gets. Both mean there is no anchor to send,
+        // and a caller has nothing different to do about them.
+        self.with_replica(|replica| Ok(replica.anchor(key, path, position)))
+            .ok()
+            .flatten()
+    }
+
+    fn resolve_anchor(
+        &self,
+        key: &BodyKey,
+        anchor: &replica::FabricAnchor,
+    ) -> replica::AnchorResolution {
+        // Total, so a dormant core is `Drifted` rather than an error — the
+        // renderer's contract is that this never fails and never lies, not that
+        // it always knows.
+        self.with_replica(|replica| Ok(replica.resolve_anchor(key, anchor)))
+            .unwrap_or(replica::AnchorResolution::Drifted)
+    }
+}
+
 /// A [`BodyReader`] over a locked Replica, handed to a World during a query.
 struct ReplicaReader<'a>(&'a replica::Replica);
 
@@ -387,8 +476,45 @@ impl crate::world::BodyReader for ReplicaReader<'_> {
     fn read_body(&self, key: &BodyKey) -> Option<Vec<u8>> {
         self.0.read(key)
     }
-    fn read_collaborative_body(&self, key: &BodyKey) -> Option<replica::CollaborativeView> {
+    fn read_collaborative_body(
+        &self,
+        key: &BodyKey,
+    ) -> Result<replica::CollaborativeView, replica::ProjectionError> {
         self.0.read_collaborative(key)
+    }
+    fn body_version(&self, key: &BodyKey) -> Option<replica::FabricVersion> {
+        self.0.body_version(key)
+    }
+    fn anchor_in_body(
+        &self,
+        key: &BodyKey,
+        path: &str,
+        position: u64,
+    ) -> Option<replica::FabricAnchor> {
+        self.0.anchor(key, path, position)
+    }
+    fn resolve_anchor(
+        &self,
+        key: &BodyKey,
+        anchor: &replica::FabricAnchor,
+    ) -> replica::AnchorResolution {
+        self.0.resolve_anchor(key, anchor)
+    }
+    fn content_status(
+        &self,
+        content: &replica::ContentRef,
+    ) -> Option<crate::world::WorldContentStatus> {
+        // Residency is the host's question, not the Replica's, so a World
+        // reading through a committed snapshot sees geometry with zero
+        // residency. The host surface is where "how much is here" is answered,
+        // because that is where the cache is.
+        self.0
+            .content_descriptor(content)
+            .map(|d| crate::world::WorldContentStatus {
+                plaintext_len: d.plaintext_len,
+                chunk_count: d.chunk_count,
+                resident_chunks: 0,
+            })
     }
     fn bodies_with_schema(&self, world: &WorldId, schema: &SchemaId) -> Vec<BodyKey> {
         self.0
@@ -791,6 +917,7 @@ impl Session {
                 &label,
                 &effect.operations,
                 &bindings,
+                &effect.content_refs,
             )
             .map_err(|e| match e {
                 // A staged op the engine cannot express is a World bug.
@@ -921,6 +1048,10 @@ impl Session {
             inner.replica.frontier()
         };
         self.core.broadcaster.publish(Vec::new(), frontier, true);
+        // And wake anything holding a pinned authority view. A client learns
+        // through the Observation above; a delivery plane learns here, because
+        // it must not be able to cost a client its cursor by falling behind.
+        self.core.note_authority_advanced();
     }
 
     /// Close this Session, consuming it. Never affects the Station.

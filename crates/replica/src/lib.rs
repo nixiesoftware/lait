@@ -22,6 +22,13 @@
 
 pub mod algebra;
 pub mod body;
+/// The durability layer beneath Replica, re-exported so a consumer keeps one
+/// namespace for objects, indexes, and the resident cache.
+pub mod journal {
+    pub use fabric::journal::*;
+}
+
+pub mod content;
 pub mod convergence;
 pub mod frontier;
 pub mod ids;
@@ -33,15 +40,22 @@ pub mod replica;
 pub mod transaction;
 
 pub use body::{BodyOp, BodySchema, CollaborativeSchema, ContentCommitment, MutationModel};
+pub use content::{
+    ChunkLeaf, ChunkProof, ContentDescriptor, ContentError, ContentRef, ProofStep, SealedContent,
+    CHUNK_PLAINTEXT_LEN, CONTENT_FORMAT_VERSION, MAX_CONTENT_LEN, MAX_PROOF_DEPTH,
+};
 pub use convergence::{
     AuthorityBatchReceipt, AuthorityIncorporator, ConvergenceOutcome, IncorporationClass,
     StagedContactMaterial, ValidatedContactBundle,
 };
-pub use fabric::{CollaborativeView, ListElement};
+pub use fabric::{
+    AnchorResolution, CollaborativeView, FabricAnchor, FabricVersion, ListElement, OpHead,
+    ProjectionError, CAUSAL_FORMAT_VERSION,
+};
 pub use frontier::{AuthorityFrontier, ReplicaFrontier};
 pub use ids::{BodyId, BodyKey, EncodingId, SchemaId, WorldId};
 pub use manifest::{
-    AuthorizedRoot, ManifestBook, ManifestEntry, ManifestError, ManifestPage, ManifestRoot,
+    AuthorizedRoot, ManifestBook, ManifestEntry, ManifestError, ManifestHead, ManifestRoot,
     RootObservation,
 };
 pub use marker::{MarkerError, StoreMarker};

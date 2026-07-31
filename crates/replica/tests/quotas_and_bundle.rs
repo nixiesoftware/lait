@@ -2,10 +2,10 @@
 //!
 //! Bundle: staged (untrusted) Contact material becomes incorporable **only**
 //! through `Replica::validate_contact`, whose sealed output binds exactly the
-//! chain authority → verified Manifest root → complete pages → authorized
+//! chain authority → verified Manifest root → complete index → authorized
 //! transactions → descriptor-bound payloads. Authority incorporation is an
 //! explicit first durable phase with its own receipt. Adversarial stagings —
-//! stray payloads, omitted pages, tampered bytes, unauthorized signers —
+//! stray payloads, omitted nodes, tampered bytes, unauthorized signers —
 //! reject with nothing (but the independently valid authority batch) retained.
 //!
 //! Quotas: Body count, Space material bytes, and the unknown-World retention
@@ -153,6 +153,7 @@ fn commit_blob(
             },
         )],
         &[(key.clone(), atomic_binding())],
+        &[],
     )
 }
 
@@ -237,6 +238,7 @@ fn commit_note(
             },
         )],
         &[(key.clone(), binding())],
+        &[],
     )
 }
 
@@ -261,7 +263,7 @@ fn stage(r: &Replica) -> StagedContactMaterial {
     StagedContactMaterial {
         authority_records,
         manifest_root_bytes: root,
-        manifest_pages: pages,
+        manifest_nodes: pages,
         bodies,
     }
 }
@@ -325,9 +327,9 @@ fn adversarial_stagings_are_rejected_whole() {
         Err(ReplicaCommitError::Illegitimate(_))
     ));
 
-    // An omitted manifest page.
+    // An omitted manifest index node.
     let mut omitted = staged.clone();
-    omitted.manifest_pages.clear();
+    omitted.manifest_nodes.clear();
     assert!(matches!(
         b.validate_contact(&omitted, &WriterAuthorized, &mut incorporator),
         Err(ReplicaCommitError::Illegitimate(_))
@@ -355,7 +357,7 @@ fn adversarial_stagings_are_rejected_whole() {
     ));
 
     // Nothing reached the engine through any of it.
-    assert!(b.read_collaborative(&body(2)).is_none());
+    assert!(b.read_collaborative(&body(2)).is_err());
     assert!(b.body_keys().is_empty());
 
     // But the AUTHORITY phase did run, durably, in every one of those refusals.

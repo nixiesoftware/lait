@@ -38,12 +38,37 @@ pub const CONTACT_ALPN: &[u8] = b"lait/contact/1";
 /// negotiated (clean-break formats).
 pub const CONTACT_PROTOCOL: u16 = 2;
 
+/// Maximum catalog nodes one descending peer may request across a Contact.
+///
+/// This replaces a 64 MiB holdings bound that was sized for *heads* — about 64
+/// bytes each — and had stopped fitting: after the content and history work a
+/// Replica's advertised catalog is head sets, declarations, and every content
+/// descriptor, orders of magnitude past what that frame was measured for.
+/// Descending asks for nodes instead, and a node budget is what stops a peer
+/// steering the descent.
+///
+/// **Not yet enforced on a live path.** `Replica::begin_reconciliation` takes
+/// this as its `max_nodes` and `index::Reconciliation` counts against it, but
+/// nothing in `contact_driver` descends yet — the F4 remainder. Said plainly
+/// because a constant that reads as a bound and is not one is worse than no
+/// constant: the next reader would otherwise assume the descent is capped.
+pub const MAX_DESCENT_NODES: u64 = 2048;
+/// Maximum node hashes in one request frame.
+pub const MAX_DESCENT_REQUEST: usize = 256;
+
 /// Domain for the initiator's holdings declaration digest (bound into the
 /// SIGNED hello, so the declaration cannot be altered in transit).
 const HOLDINGS_DOMAIN: &[u8] = b"lait/contact-holdings/1";
 
-/// Hard bound on a declared holdings encoding. Generous: ~64 bytes per head
-/// puts a million declared heads well inside it.
+/// Hard bound on a streamed holdings encoding.
+///
+/// The declaration is now the *fallback*, sent only when the two catalog roots
+/// disagree — converged peers compare 40 bytes and stop. It is still bounded,
+/// and the bound is still uncomfortable: it was sized for heads at ~64 bytes
+/// each, and a Replica's advertised catalog has since grown head sets,
+/// declarations, and content descriptors. Removing the fallback entirely needs
+/// the descent to run initiator-side, which is a pull restructure of the
+/// transfer loop rather than a frame change.
 pub const MAX_HOLDINGS_BYTES: usize = 64 * 1024 * 1024;
 /// Hello signing domain.
 pub const HELLO_DOMAIN: &[u8] = b"lait/contact/1/hello";
@@ -52,14 +77,57 @@ pub const HELLO_ACK_DOMAIN: &[u8] = b"lait/contact/1/ack";
 /// Ed25519 algorithm tag.
 pub const SIG_ALG_ED25519: u8 = 1;
 
+/// Canonically encode a holdings declaration: `(key, transaction commitment)`
+/// pairs, sorted and deduplicated so the digest is a function of the set.
+pub fn encode_holdings(held: &[(BodyKey, [u8; 32])]) -> Vec<u8> {
+    let mut sorted = held.to_vec();
+    sorted.sort();
+    sorted.dedup();
+    postcard::to_stdvec(&sorted).expect("postcard holdings")
+}
+
+/// The signed-hello digest over a canonical holdings encoding.
+pub fn holdings_digest(bytes: &[u8]) -> [u8; 32] {
+    domain_hash(HOLDINGS_DOMAIN, bytes)
+}
+
+/// Decode a holdings declaration (canonical, bounded).
+pub fn decode_holdings(bytes: &[u8]) -> Result<Vec<(BodyKey, [u8; 32])>, ContactWireError> {
+    if bytes.len() > MAX_HOLDINGS_BYTES {
+        return Err(ContactWireError::FrameTooLarge);
+    }
+    postcard::from_bytes(bytes).map_err(|_| ContactWireError::NonCanonical)
+}
+
 /// Maximum encoded frame size.
-pub const MAX_FRAME: usize = 1024 * 1024;
+///
+/// Sized to carry one canonical index node at its own legal maximum plus the
+/// frame envelope around it. Equal to [`replica::journal::index::MAX_NODE_BYTES`]
+/// would mean a legal node is untransmittable by construction, which is the
+/// kind of contradiction that shows up as an unexplainable Contact failure
+/// years later rather than as a test.
+pub const MAX_FRAME: usize = replica::journal::index::MAX_NODE_BYTES + 64 * 1024;
 /// Maximum frames per Contact.
 pub const MAX_FRAMES: u32 = 4096;
+
+// The descent has to fit inside the Contact that carries it. One delivered node
+// is one frame, and the rest of the Contact — authority, payloads, control —
+// needs the remainder, so the node budget takes half. Asserted rather than
+// commented because the two numbers were set independently once and did not
+// fit: 8192 nodes could not be delivered inside 4096 frames, so a descent that
+// legitimately needed them could never complete.
+const _: () = assert!(MAX_DESCENT_NODES * 2 <= MAX_FRAMES as u64);
 /// Maximum bytes per Contact, including framing overhead.
 pub const MAX_CONTACT_BYTES: u64 = 80 * 1024 * 1024;
 /// Maximum chunk payload (authority records and body chunks).
 pub const MAX_CHUNK: usize = 256 * 1024;
+/// Maximum manifest index nodes one Contact may offer. At the index's 256-entry
+/// leaves this covers well past the Body-count ceiling, and it is what stops a
+/// peer from streaming nodes until the receiver runs out of memory.
+pub const MAX_MANIFEST_NODES: usize = 8192;
+// Both indexes an advertisement carries — Body and content — draw on this one
+// budget, because they arrive as one content-addressed node family and a
+// receiver cannot tell which is which until the root tells it.
 
 /// Domain for the running transcript hash (over every raw frame, in order).
 const TRANSCRIPT_DOMAIN: &[u8] = b"lait/contact/1/transcript";
@@ -69,8 +137,8 @@ const RECORD_DOMAIN: &[u8] = b"lait/contact/1/authority-record";
 const AUTHORITY_SET_DOMAIN: &[u8] = b"lait/contact/1/authority-set";
 /// Domain for the manifest-root reference hash (over the canonical root bytes).
 const ROOT_REF_DOMAIN: &[u8] = b"lait/contact/1/manifest-root";
-/// Domain for one manifest page's hash.
-const PAGE_DOMAIN: &[u8] = b"lait/contact/1/manifest-page";
+/// Domain for one manifest index node's hash.
+const MANIFEST_NODE_DOMAIN: &[u8] = b"lait/contact/1/manifest-node";
 /// Domain for one body chunk's hash.
 const CHUNK_DOMAIN: &[u8] = b"lait/contact/1/body-chunk";
 
@@ -89,6 +157,7 @@ pub mod abort {
     pub const EMPTY_CHUNK: u16 = 11;
     pub const SET_MISMATCH: u16 = 12;
     pub const BAD_REQUEST: u16 = 13;
+    pub const TOO_LARGE: u16 = 14;
 }
 
 fn domain_hash(domain: &[u8], bytes: &[u8]) -> [u8; 32] {
@@ -113,14 +182,16 @@ pub fn authority_set_hash(record_hashes: &[[u8; 32]]) -> [u8; 32] {
     *h.finalize().as_bytes()
 }
 
-/// The reference hash `ManifestRequest`/`ManifestPage` use for an offered root.
+/// The reference hash `ManifestRequest`/`ManifestNode` use for an offered root.
 pub fn manifest_root_ref(root_bytes: &[u8]) -> [u8; 32] {
     domain_hash(ROOT_REF_DOMAIN, root_bytes)
 }
 
-/// The hash a `page_hash` field must carry for its page bytes.
-pub fn manifest_page_hash(bytes: &[u8]) -> [u8; 32] {
-    domain_hash(PAGE_DOMAIN, bytes)
+/// The hash a `node_hash` field must carry for its node bytes. It is the
+/// store's object address, because a manifest index node *is* an object and
+/// naming it any other way would let the two disagree.
+pub fn manifest_node_hash(bytes: &[u8]) -> [u8; 32] {
+    domain_hash(MANIFEST_NODE_DOMAIN, bytes)
 }
 
 /// The hash a `chunk_hash` field must carry for its chunk bytes.
@@ -160,16 +231,26 @@ pub struct ContactHello {
     pub initiator_transport: [u8; 32],
     pub nonce: [u8; 32],
     pub contact: ContactId,
-    /// How many `(key, transaction commitment)` heads the initiator DECLARES
-    /// it already holds (0 = full transfer). The declaration itself follows
-    /// the hello as `HoldingsChunk`/`HoldingsEnd` frames; the accepter serves
-    /// only the difference (O(changed) Contact). A false declaration can only
-    /// starve the claimant: adoption is still judged whole by the receiver's
-    /// root-completeness rule.
+    /// The root of the initiator's published catalog, or zeros when it has
+    /// none. Signed like the rest of the hello.
+    ///
+    /// This is what the descent will compare, and it is deliberately *not* yet
+    /// used to skip serving. Equal roots prove equal *catalogs*, but a catalog
+    /// records what a peer advertises, not what it can read: a Body retained
+    /// opaquely — held byte-complete under a key this peer does not have —
+    /// appears in the root and still needs re-serving once the key arrives.
+    /// The holdings declaration excludes opaque heads precisely so that upgrade
+    /// path works, and a root cannot express the difference.
+    ///
+    /// Closing that gap needs either a second root over readable material or
+    /// the initiator-side pull the descent is designed for. Until then the root
+    /// is carried, signed, and compared by tests; the declaration still decides
+    /// what is served.
+    pub holdings_root: [u8; 32],
+    /// How many `(key, transaction commitment)` heads the streamed declaration
+    /// will carry, and the digest binding it. Zero when the roots already
+    /// agree, which is the case this exists to make cheap.
     pub holdings_count: u32,
-    /// BLAKE3 domain digest of the canonical holdings encoding (zeros when
-    /// `holdings_count` is 0). Signed, so the streamed declaration is
-    /// tamper-evident.
     pub holdings_digest: [u8; 32],
     pub signature_algorithm: u8,
     #[serde(with = "serde_byte_array")]
@@ -231,6 +312,7 @@ impl ContactHello {
         initiator_transport: &[u8; 32],
         nonce: &[u8; 32],
         contact: &ContactId,
+        holdings_root: &[u8; 32],
         holdings_count: u32,
         holdings_digest: &[u8; 32],
     ) -> Vec<u8> {
@@ -242,6 +324,7 @@ impl ContactHello {
             initiator_transport,
             nonce,
             contact,
+            holdings_root,
             holdings_count,
             holdings_digest,
         ))
@@ -258,6 +341,7 @@ impl ContactHello {
         responder_station: [u8; 32],
         nonce: [u8; 32],
         contact: ContactId,
+        holdings_root: [u8; 32],
         holdings_count: u32,
         holdings_digest: [u8; 32],
         initiator_seed: &[u8; 32],
@@ -271,6 +355,7 @@ impl ContactHello {
             &station,
             &nonce,
             &contact,
+            &holdings_root,
             holdings_count,
             &holdings_digest,
         );
@@ -283,6 +368,7 @@ impl ContactHello {
             initiator_transport: station,
             nonce,
             contact,
+            holdings_root,
             holdings_count,
             holdings_digest,
             signature_algorithm: SIG_ALG_ED25519,
@@ -310,6 +396,7 @@ impl ContactHello {
                 &self.initiator_transport,
                 &self.nonce,
                 &self.contact,
+                &self.holdings_root,
                 self.holdings_count,
                 &self.holdings_digest,
             ),
@@ -346,6 +433,7 @@ impl ContactHello {
             &self.initiator_transport,
             &self.nonce,
             &self.contact,
+            &self.holdings_root,
             self.holdings_count,
             &self.holdings_digest,
         );
@@ -450,16 +538,24 @@ pub enum ContactFrame {
     ManifestOffer {
         root_bytes: Vec<u8>,
     },
+    /// The nodes a descending peer needs next.
+    ///
+    /// Explicit hashes rather than a count: the descent asks for the subtrees
+    /// whose roots differ, and only those. A count would have to mean "the next
+    /// N in some order", which is enumeration again.
     ManifestRequest {
         root: [u8; 32],
-        first_page: u32,
-        page_count: u16,
+        nodes: Vec<[u8; 32]>,
     },
-    ManifestPage {
+    /// One node of the manifest's Body index.
+    ///
+    /// Nodes are named by hash rather than by ordinal, which is the whole
+    /// point of the index: inserting a Body shifts every later ordinal, so an
+    /// ordinal-named unit changes when its contents did not. A hash does not.
+    ManifestNode {
         root: [u8; 32],
-        page_index: u32,
-        page_hash: [u8; 32],
-        page_bytes: Vec<u8>,
+        node_hash: [u8; 32],
+        node_bytes: Vec<u8>,
     },
     BodyRequest {
         transaction: [u8; 32],
@@ -494,14 +590,17 @@ pub enum ContactFrame {
     Abort {
         code: u16,
     },
-    /// One chunk of the initiator's holdings declaration (initiator → accepter,
-    /// between Hello and Ack). Integrity rides the SIGNED hello digest.
+    // Appended, never inserted. postcard encodes an enum by variant *index*,
+    // so adding a variant anywhere but the end silently renumbers every frame
+    // after it — which is a wire break that compiles cleanly and fails as a
+    // malformed frame at the far end.
+    /// One chunk of the initiator's holdings declaration, sent only when the
+    /// signed catalog roots disagree.
     HoldingsChunk {
         index: u32,
         bytes: Vec<u8>,
     },
-    /// Terminates the holdings declaration; must match the signed hello's
-    /// count and digest exactly.
+    /// Terminates the holdings declaration; must match the signed hello.
     HoldingsEnd {
         count: u32,
         digest: [u8; 32],
@@ -517,15 +616,15 @@ impl ContactFrame {
             ContactFrame::AuthorityEnd { .. } => 3,
             ContactFrame::ManifestOffer { .. } => 4,
             ContactFrame::ManifestRequest { .. } => 5,
-            ContactFrame::ManifestPage { .. } => 6,
+            ContactFrame::ManifestNode { .. } => 6,
             ContactFrame::BodyRequest { .. } => 7,
             ContactFrame::BodyChunk { .. } => 8,
             ContactFrame::BodyEnd { .. } => 9,
             ContactFrame::TransferEnd { .. } => 10,
-            ContactFrame::TransferAck { .. } => 11,
-            ContactFrame::Abort { .. } => 12,
             ContactFrame::HoldingsChunk { .. } => 13,
             ContactFrame::HoldingsEnd { .. } => 14,
+            ContactFrame::TransferAck { .. } => 11,
+            ContactFrame::Abort { .. } => 12,
         }
     }
 
@@ -565,30 +664,8 @@ impl ContactFrame {
 }
 
 // ---------------------------------------------------------------------------
-// Holdings declaration (O(changed) Contact)
+// Catalog declaration
 // ---------------------------------------------------------------------------
-
-/// Canonically encode a holdings declaration: `(key, transaction commitment)`
-/// pairs, sorted and deduplicated, postcard-encoded.
-pub fn encode_holdings(held: &[(BodyKey, [u8; 32])]) -> Vec<u8> {
-    let mut sorted: Vec<&(BodyKey, [u8; 32])> = held.iter().collect();
-    sorted.sort();
-    sorted.dedup();
-    postcard::to_stdvec(&sorted).expect("postcard holdings")
-}
-
-/// The signed-hello digest over a canonical holdings encoding.
-pub fn holdings_digest(bytes: &[u8]) -> [u8; 32] {
-    domain_hash(HOLDINGS_DOMAIN, bytes)
-}
-
-/// Decode a holdings declaration (canonical, bounded).
-pub fn decode_holdings(bytes: &[u8]) -> Result<Vec<(BodyKey, [u8; 32])>, ContactWireError> {
-    if bytes.len() > MAX_HOLDINGS_BYTES {
-        return Err(ContactWireError::FrameTooLarge);
-    }
-    decode_canonical(bytes)
-}
 
 // ---------------------------------------------------------------------------
 // Initiator receive machine
@@ -645,8 +722,8 @@ pub struct ReceivedMaterial {
     pub authority_frontier: Vec<u8>,
     pub authority_records: Vec<Vec<u8>>,
     pub manifest_root_bytes: Vec<u8>,
-    /// page index → canonical page bytes.
-    pub manifest_pages: BTreeMap<u32, Vec<u8>>,
+    /// node hash → canonical node bytes of the manifest's Body index.
+    pub manifest_nodes: BTreeMap<[u8; 32], Vec<u8>>,
     /// (transaction, BodyKey) → assembled protected payload.
     pub bodies: BTreeMap<([u8; 32], BodyKey), Vec<u8>>,
 }
@@ -665,7 +742,7 @@ pub struct InitiatorReceiver {
     authority_frontier: Vec<u8>,
     manifest_root_ref: Option<[u8; 32]>,
     manifest_root_bytes: Vec<u8>,
-    manifest_pages: BTreeMap<u32, ([u8; 32], Vec<u8>)>,
+    manifest_nodes: BTreeMap<[u8; 32], Vec<u8>>,
     bodies: BTreeMap<([u8; 32], BodyKey), BodyStaging>,
     ended_bodies: u32,
 }
@@ -684,7 +761,7 @@ impl InitiatorReceiver {
             authority_frontier: Vec::new(),
             manifest_root_ref: None,
             manifest_root_bytes: Vec::new(),
-            manifest_pages: BTreeMap::new(),
+            manifest_nodes: BTreeMap::new(),
             bodies: BTreeMap::new(),
             ended_bodies: 0,
         }
@@ -699,7 +776,7 @@ impl InitiatorReceiver {
         self.authority = None;
         self.manifest_root_ref = None;
         self.manifest_root_bytes.clear();
-        self.manifest_pages.clear();
+        self.manifest_nodes.clear();
         self.bodies.clear();
         self.state = InitiatorState::Aborted;
         code
@@ -734,15 +811,6 @@ impl InitiatorReceiver {
             self.transcript.update(raw);
         }
         match frame {
-            // Holdings frames flow initiator -> accepter only, before the
-            // Ack; receiving one here is a protocol violation.
-            ContactFrame::HoldingsChunk { .. } | ContactFrame::HoldingsEnd { .. } => {
-                Err(self.abort(abort::BAD_REQUEST))
-            }
-            ContactFrame::Abort { code } => {
-                self.abort(0);
-                Ok(Progress::PeerAborted(code))
-            }
             ContactFrame::AuthorityOffer {
                 authority_frontier,
                 record_count,
@@ -827,11 +895,10 @@ impl InitiatorReceiver {
                 self.manifest_root_bytes = root_bytes;
                 Ok(Progress::Continue)
             }
-            ContactFrame::ManifestPage {
+            ContactFrame::ManifestNode {
                 root,
-                page_index,
-                page_hash,
-                page_bytes,
+                node_hash,
+                node_bytes,
             } => {
                 if self.state != InitiatorState::ManifestReceiving {
                     return Err(self.abort(abort::WRONG_STATE));
@@ -842,19 +909,16 @@ impl InitiatorReceiver {
                 if root != offered {
                     return Err(self.abort(abort::HASH_MISMATCH));
                 }
-                if manifest_page_hash(&page_bytes) != page_hash {
+                if manifest_node_hash(&node_bytes) != node_hash {
                     return Err(self.abort(abort::HASH_MISMATCH));
                 }
-                match self.manifest_pages.get(&page_index) {
-                    // An exact duplicate page is idempotent.
-                    Some((h, _)) if *h == page_hash => Ok(Progress::Continue),
-                    Some(_) => Err(self.abort(abort::CHUNK_CONFLICT)),
-                    None => {
-                        self.manifest_pages
-                            .insert(page_index, (page_hash, page_bytes));
-                        Ok(Progress::Continue)
-                    }
+                if self.manifest_nodes.len() >= MAX_MANIFEST_NODES {
+                    return Err(self.abort(abort::TOO_LARGE));
                 }
+                // Content-addressed, so a duplicate is idempotent by
+                // construction and a conflict is not expressible.
+                self.manifest_nodes.insert(node_hash, node_bytes);
+                Ok(Progress::Continue)
             }
             ContactFrame::BodyChunk {
                 transaction,
@@ -1000,10 +1064,14 @@ impl InitiatorReceiver {
                     received_bytes: self.bytes,
                 }))
             }
-            // Frames the initiator never receives.
+            // Frames the initiator never receives: requests flow the other
+            // way, and the holdings declaration is something it sends.
             ContactFrame::ManifestRequest { .. }
             | ContactFrame::BodyRequest { .. }
-            | ContactFrame::TransferAck { .. } => Err(self.abort(abort::WRONG_STATE)),
+            | ContactFrame::TransferAck { .. }
+            | ContactFrame::HoldingsChunk { .. }
+            | ContactFrame::HoldingsEnd { .. }
+            | ContactFrame::Abort { .. } => Err(self.abort(abort::WRONG_STATE)),
         }
     }
 
@@ -1019,10 +1087,7 @@ impl InitiatorReceiver {
             authority_frontier: std::mem::take(&mut self.authority_frontier),
             authority_records: authority.records,
             manifest_root_bytes: std::mem::take(&mut self.manifest_root_bytes),
-            manifest_pages: std::mem::take(&mut self.manifest_pages)
-                .into_iter()
-                .map(|(i, (_, b))| (i, b))
-                .collect(),
+            manifest_nodes: std::mem::take(&mut self.manifest_nodes),
             bodies: std::mem::take(&mut self.bodies)
                 .into_iter()
                 .filter_map(|(k, mut s)| s.chunks.remove(&0).map(|(_, b)| (k, b)))
@@ -1041,17 +1106,18 @@ impl InitiatorReceiver {
 pub struct OutboundTransfer {
     pub authority_frontier: Vec<u8>,
     /// Canonical authority-section records (mechanics material and signed
-    /// `BodyTransactionV1` records), byte-exact.
+    /// `BodyTransaction` records), byte-exact.
     pub authority_records: Vec<Vec<u8>>,
     pub manifest_root_bytes: Vec<u8>,
-    /// Ordered canonical page bytes.
-    pub manifest_pages: Vec<Vec<u8>>,
+    /// Canonical node bytes of the manifest's Body index, in any order — they
+    /// are content-addressed, so order carries no meaning.
+    pub manifest_nodes: Vec<Vec<u8>>,
     /// `(transaction id, key, protected payload bytes)`.
     pub bodies: Vec<([u8; 32], BodyKey, Vec<u8>)>,
 }
 
 /// Build the complete, canonical, ordered frame sequence for a transfer:
-/// authority section, manifest root + pages, chunked protected Body payloads
+/// authority section, manifest root + index nodes, chunked protected Body payloads
 /// (each chunk at most [`MAX_CHUNK`]), and the terminal `TransferEnd` carrying
 /// the transcript hash over every prior frame.
 pub fn build_transfer_frames(contact: &ContactId, t: &OutboundTransfer) -> Vec<Vec<u8>> {
@@ -1085,12 +1151,11 @@ pub fn build_transfer_frames(contact: &ContactId, t: &OutboundTransfer) -> Vec<V
     frames.push(ContactFrame::ManifestOffer {
         root_bytes: t.manifest_root_bytes.clone(),
     });
-    for (i, page) in t.manifest_pages.iter().enumerate() {
-        frames.push(ContactFrame::ManifestPage {
+    for node in &t.manifest_nodes {
+        frames.push(ContactFrame::ManifestNode {
             root,
-            page_index: i as u32,
-            page_hash: manifest_page_hash(page),
-            page_bytes: page.clone(),
+            node_hash: manifest_node_hash(node),
+            node_bytes: node.clone(),
         });
     }
     let mut body_count = 0u32;
@@ -1142,12 +1207,12 @@ pub fn build_transfer_frames(contact: &ContactId, t: &OutboundTransfer) -> Vec<V
 /// The accepter's validator for the frames it *receives* (requests and the
 /// final ack). The accepter's send side is driver-scheduled; this enforces the
 /// normative receive rules: manifest requests must reference the offered root
-/// and a contiguous in-range page interval, body requests are bounded, and
-/// exactly one `TransferAck` (with the sent transcript) is accepted.
+/// and no more nodes than were offered, body requests are bounded, and exactly
+/// one `TransferAck` (with the sent transcript) is accepted.
 pub struct AccepterValidator {
     contact: ContactId,
     offered_root: Option<[u8; 32]>,
-    offered_pages: u32,
+    offered_nodes: u32,
     sent_transcript: blake3::Hasher,
     end_sent: bool,
     acked: bool,
@@ -1157,8 +1222,7 @@ pub struct AccepterValidator {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AccepterEvent {
     ManifestRequest {
-        first_page: u32,
-        page_count: u16,
+        nodes: Vec<[u8; 32]>,
     },
     BodyRequest {
         transaction: [u8; 32],
@@ -1179,7 +1243,7 @@ impl AccepterValidator {
         Self {
             contact,
             offered_root: None,
-            offered_pages: 0,
+            offered_nodes: 0,
             sent_transcript,
             end_sent: false,
             acked: false,
@@ -1194,8 +1258,8 @@ impl AccepterValidator {
                 ContactFrame::ManifestOffer { root_bytes } => {
                     self.offered_root = Some(manifest_root_ref(root_bytes));
                 }
-                ContactFrame::ManifestPage { page_index, .. } => {
-                    self.offered_pages = self.offered_pages.max(page_index + 1);
+                ContactFrame::ManifestNode { .. } => {
+                    self.offered_nodes += 1;
                 }
                 ContactFrame::TransferEnd { .. } => {
                     self.end_sent = true;
@@ -1225,26 +1289,18 @@ impl AccepterValidator {
         }
         match frame {
             ContactFrame::Abort { code } => Ok(AccepterEvent::PeerAborted(code)),
-            ContactFrame::ManifestRequest {
-                root,
-                first_page,
-                page_count,
-            } => {
+            ContactFrame::ManifestRequest { root, nodes } => {
                 let Some(offered) = self.offered_root else {
                     return Err(abort::BAD_REQUEST);
                 };
-                // Must reference the offered root and a nonempty, contiguous,
-                // in-range page interval.
-                if root != offered
-                    || page_count == 0
-                    || u64::from(first_page) + u64::from(page_count) > u64::from(self.offered_pages)
-                {
+                // Must reference the offered root and stay inside the request
+                // bound. An unknown hash is not an error — the accepter simply
+                // has nothing to send for it — so a peer learns nothing from
+                // asking that it could not already address.
+                if root != offered || nodes.is_empty() || nodes.len() > MAX_DESCENT_REQUEST {
                     return Err(abort::BAD_REQUEST);
                 }
-                Ok(AccepterEvent::ManifestRequest {
-                    first_page,
-                    page_count,
-                })
+                Ok(AccepterEvent::ManifestRequest { nodes })
             }
             ContactFrame::BodyRequest {
                 transaction,

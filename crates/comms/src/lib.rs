@@ -26,6 +26,7 @@
 //! T0 identity agreement). The concrete transport converts at its own edge;
 //! nothing above this seam names a foreign id type.
 
+mod flow;
 mod iroh;
 pub mod mem;
 pub mod policy;
@@ -41,12 +42,58 @@ use mechanics::ids::{DeviceId, SpaceId};
 /// else — no consumer names it, and the module behind these is private.
 pub use iroh::{IrohFactory as DefaultFactory, IrohTransport as DefaultTransport};
 
+pub use flow::{Connection, IncomingConnection, RecvFlow, SendFlow};
+
 /// A peer's stable identity — its ed25519 public key. Same 32 bytes iroh calls an
 /// `EndpointId`; lait names it a `DeviceId` everywhere above the transport edge.
 pub type PeerId = DeviceId;
 
 /// A protocol selector for a direct connection (lait's ALPNs: sync, presence).
 pub type Alpn = &'static [u8];
+
+/// One plane's inbound connections, handed over whole.
+///
+/// A transport that demultiplexes by ALPN owns one of these per session
+/// protocol. Whoever takes it owns everything arriving on that protocol and
+/// nothing that does not — which is the only shape under which "one driver per
+/// plane" is a fact rather than an intention.
+pub type SessionQueue = tokio::sync::mpsc::Receiver<IncomingConnection>;
+
+/// Which protocols a transport accepts, and how each one is delivered.
+///
+/// The split is not a preference. A framed protocol is one bounded message at a
+/// time and the transport owns the length prefix; a session protocol is a
+/// connection with many concurrent flows, and the *caller* owns every bound
+/// inside it. A transport cannot deliver one connection both ways, so which
+/// door an ALPN comes through is decided here, once, by whoever registers it.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Protocols<'a> {
+    /// Delivered as framed streams through [`Transport::accept`].
+    pub framed: &'a [Alpn],
+    /// Delivered as whole connections through
+    /// [`Transport::accept_connection`].
+    pub session: &'a [Alpn],
+}
+
+impl<'a> Protocols<'a> {
+    /// Only framed protocols — what every caller wanted before the delivery
+    /// planes existed.
+    pub const fn framed(alpns: &'a [Alpn]) -> Self {
+        Self {
+            framed: alpns,
+            session: &[],
+        }
+    }
+
+    /// Every ALPN, in registration order, for a transport that dispatches on
+    /// the string alone.
+    pub fn all(&self) -> impl Iterator<Item = Alpn> + '_ {
+        self.framed
+            .iter()
+            .copied()
+            .chain(self.session.iter().copied())
+    }
+}
 
 /// A gossip room id — a pure function of the space id (derived by the application protocol).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -71,7 +118,7 @@ pub trait TransportFactory: Send + Sync {
         &self,
         identity_seed: &[u8; 32],
         network: &policy::Network,
-        alpns: &[Alpn],
+        protocols: Protocols<'_>,
     ) -> Result<std::sync::Arc<dyn Transport>>;
 
     /// Build a transport view scoped to one Space.
@@ -83,10 +130,10 @@ pub trait TransportFactory: Send + Sync {
         &self,
         identity_seed: &[u8; 32],
         network: &policy::Network,
-        alpns: &[Alpn],
+        protocols: Protocols<'_>,
         _space: &SpaceId,
     ) -> Result<std::sync::Arc<dyn Transport>> {
-        self.build(identity_seed, network, alpns).await
+        self.build(identity_seed, network, protocols).await
     }
 
     /// Drain process-owned transport resources after all scoped views stop.
@@ -218,6 +265,45 @@ pub trait Transport: Send + Sync {
 
     /// Open a direct, framed connection to `peer` for protocol `alpn`.
     async fn connect(&self, peer: PeerId, alpn: Alpn) -> Result<Box<dyn Stream>>;
+
+    /// Open a multi-flow connection to `peer` for protocol `alpn`.
+    ///
+    /// Separate from [`connect`](Transport::connect) rather than replacing it:
+    /// Contact and presence want one framed conversation and would gain nothing
+    /// from owning a connection, and a transport that cannot offer flows should
+    /// still be able to carry them.
+    async fn connect_session(&self, _peer: PeerId, _alpn: Alpn) -> Result<Box<dyn Connection>> {
+        anyhow::bail!("this transport does not offer multi-flow connections")
+    }
+
+    /// Accept the next inbound connection on a session ALPN.
+    ///
+    /// `None` once the view has shut down, exactly as
+    /// [`accept`](Transport::accept). A transport with no session ALPNs
+    /// registered parks forever, which is the honest answer — nothing will
+    /// arrive.
+    async fn accept_connection(&self) -> Option<IncomingConnection> {
+        std::future::pending().await
+    }
+
+    /// Take this view's inbound queue for one session ALPN — once.
+    ///
+    /// [`accept_connection`](Transport::accept_connection) is one door for
+    /// every session protocol. That is right for one owner and wrong for two:
+    /// the door is a mutex over one receiver, so two parked drivers take
+    /// strictly alternating connections and each refuses half of what it was
+    /// handed. A transport that demultiplexes by ALPN gives each plane its own
+    /// queue instead.
+    ///
+    /// Handed over *once*. A second taker gets `None` rather than a second
+    /// handle on the same connections, so the mis-wiring this exists to prevent
+    /// is not expressible through it.
+    ///
+    /// The default is `None`: a transport with one undivided session door says
+    /// so, and its caller keeps using `accept_connection`.
+    fn take_session_queue(&self, _alpn: Alpn) -> Option<SessionQueue> {
+        None
+    }
 
     /// Accept the next inbound direct connection (any registered ALPN). A
     /// concrete endpoint yields every Space; a scoped view yields only the

@@ -190,6 +190,7 @@ fn commit_register(
             },
         )],
         &[(shared_body(), binding())],
+        &[],
     )
 }
 
@@ -219,7 +220,7 @@ fn stage_excluding(
     StagedContactMaterial {
         authority_records,
         manifest_root_bytes: root,
-        manifest_pages: pages,
+        manifest_nodes: pages,
         bodies,
     }
 }
@@ -245,7 +246,7 @@ fn stage(r: &Replica, seed: &'static [u8; 32]) -> StagedContactMaterial {
     StagedContactMaterial {
         authority_records,
         manifest_root_bytes: root,
-        manifest_pages: pages,
+        manifest_nodes: pages,
         bodies,
     }
 }
@@ -272,7 +273,7 @@ fn pull(
 }
 
 fn register_of(r: &Replica, path: &str) -> Option<String> {
-    r.read_collaborative(&shared_body()).and_then(|v| {
+    r.read_collaborative(&shared_body()).ok().and_then(|v| {
         v.registers
             .get(path)
             .map(|b| String::from_utf8_lossy(b).into_owned())
@@ -421,6 +422,7 @@ fn a_delta_pull_ships_only_missing_heads_and_converges() {
             },
         )],
         &[(second_body(), binding())],
+        &[],
     )
     .unwrap();
 
@@ -442,6 +444,7 @@ fn a_delta_pull_ships_only_missing_heads_and_converges() {
     assert_eq!(register_of(&b, "froma").as_deref(), Some("alpha"));
     let fresh = b
         .read_collaborative(&second_body())
+        .ok()
         .and_then(|v| v.registers.get("fresh").cloned());
     assert_eq!(fresh.as_deref(), Some(b"new-body".as_slice()));
 

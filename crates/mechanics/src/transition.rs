@@ -108,15 +108,15 @@ pub struct CustodyAck {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CandidateEvidence {
     /// Version 1 evidence: possession plus per-leaf custody attestations.
-    ParticipantAttestationsV1 {
+    ParticipantAttestations {
         candidate: CandidateAuthority,
         custody: Vec<CustodyAck>,
     },
     /// Reserved: a publicly-verifiable DKG transcript proof, once one exists that
     /// is demonstrably compatible with Ed25519 and the access structure.
-    PublicTranscriptProofV1 { proof: Vec<u8> },
+    PublicTranscriptProof { proof: Vec<u8> },
     /// Both, when a reviewed transcript proof augments the attestations.
-    CombinedV1 {
+    Combined {
         candidate: CandidateAuthority,
         custody: Vec<CustodyAck>,
         proof: Vec<u8>,

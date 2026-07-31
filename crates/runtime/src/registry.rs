@@ -3,7 +3,10 @@
 //! World implementations register with a [`RuntimeBuilder`]. `build()` validates
 //! and **freezes** the set: registration is immutable per Runtime, and dynamic
 //! loading is deferred. Runtime rejects duplicate ids, duplicate schema
-//! versions within a World, invalid limits, and contradictory upgrade claims.
+//! versions within a World, invalid limits, contradictory upgrade claims, and
+//! scope/signal declarations that repeat a name, bound it at zero, exceed the
+//! substrate ceiling they may only tighten, or carry demand bytes that are not
+//! canonical.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -11,6 +14,17 @@ use std::sync::Arc;
 use replica::ids::WorldId;
 
 use crate::world::{World, WorldRegistration};
+
+/// Which declaration list a registration failure is about.
+///
+/// One discriminated pair of variants rather than four near-identical ones:
+/// the two lists fail for the same reasons and a caller that wants to report
+/// them differently already has the kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeclarationKind {
+    Scope,
+    Signal,
+}
 
 /// Why registration was rejected at `build()`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,7 +48,27 @@ pub enum RegistrationError {
     },
     /// A World declared an invalid limit.
     InvalidLimits(WorldId),
+    /// A World declared the same scope or signal name twice.
+    DuplicateDeclaration {
+        world: WorldId,
+        kind: DeclarationKind,
+        name: String,
+    },
+    /// A declaration's bound is zero, exceeds the substrate ceiling it may only
+    /// tighten, or its demand is not canonical.
+    InvalidDeclaration {
+        world: WorldId,
+        kind: DeclarationKind,
+        name: String,
+    },
 }
+
+/// Declarations one descriptor section may carry.
+///
+/// The section's entry count is a `u16` on the wire, so this is what that type
+/// can say. A World past it would encode a count that wrapped and derive an
+/// implementation id over bytes nothing can decode.
+pub const MAX_DECLARATIONS_PER_SECTION: usize = u16::MAX as usize;
 
 impl std::fmt::Display for RegistrationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -119,16 +153,22 @@ impl RuntimeBuilder {
     }
 
     /// Validate and freeze the registry. Rejects duplicate Worlds/schema
-    /// versions, registration/impl mismatch, invalid limits, and contradictory
-    /// upgrade claims.
+    /// versions, registration/impl mismatch, invalid limits, contradictory
+    /// upgrade claims, and invalid or duplicated scope/signal declarations.
     pub fn build(self) -> Result<WorldRegistry, RegistrationError> {
         let mut worlds: BTreeMap<WorldId, Arc<Hosted>> = BTreeMap::new();
         for hosted in self.pending {
             let id = hosted.registration.id.clone();
 
-            // The declared registration must match what the impl reports.
+            // The declared registration must match what the impl reports. The
+            // declaration lists are compared for the same reason the schemas
+            // are: the registration is what the implementation descriptor is
+            // built from, so a list that disagrees with the running code is a
+            // reviewed identity describing something else.
             if hosted.world.id() != id
                 || hosted.world.schemas() != hosted.registration.schemas.as_slice()
+                || hosted.world.scope_schemas() != hosted.registration.scope_schemas.as_slice()
+                || hosted.world.signal_schemas() != hosted.registration.signal_schemas.as_slice()
             {
                 return Err(RegistrationError::RegistrationMismatch(id));
             }
@@ -163,6 +203,88 @@ impl RuntimeBuilder {
                 }
             }
 
+            // Declared bounds are policy, so they are checked here rather than
+            // in the codec: the descriptor decides canonicality, `build()`
+            // decides what a declaration is allowed to say. A declaration may
+            // only tighten the substrate's ceiling, never raise it.
+            //
+            // The list *length* is checked first, and it is not decoration. The
+            // descriptor writes each section's entry count as a `u16`, so a
+            // World declaring 65,536 entries would encode a count word of zero
+            // followed by all of them — an implementation id derived over bytes
+            // that `decode` then rejects, which breaks the round trip the whole
+            // canonical rule rests on. Refused here rather than made
+            // unrepresentable in the codec, because this is where a World's
+            // declaration becomes this build's problem.
+            for (kind, count) in [
+                (
+                    DeclarationKind::Scope,
+                    hosted.registration.scope_schemas.len(),
+                ),
+                (
+                    DeclarationKind::Signal,
+                    hosted.registration.signal_schemas.len(),
+                ),
+            ] {
+                if count > MAX_DECLARATIONS_PER_SECTION {
+                    return Err(RegistrationError::InvalidDeclaration {
+                        world: id.clone(),
+                        kind,
+                        name: format!("{count} declarations"),
+                    });
+                }
+            }
+
+            let mut seen_scopes: std::collections::BTreeSet<String> =
+                std::collections::BTreeSet::new();
+            for scope in &hosted.registration.scope_schemas {
+                let name = scope.name.as_str().to_string();
+                if !seen_scopes.insert(name.clone()) {
+                    return Err(RegistrationError::DuplicateDeclaration {
+                        world: id.clone(),
+                        kind: DeclarationKind::Scope,
+                        name,
+                    });
+                }
+                if scope.max_key_bytes == 0
+                    || scope.max_key_bytes as usize > crate::transient::MAX_SCOPE_FIELD_BYTES
+                {
+                    return Err(RegistrationError::InvalidDeclaration {
+                        world: id.clone(),
+                        kind: DeclarationKind::Scope,
+                        name,
+                    });
+                }
+            }
+
+            let mut seen_signals: std::collections::BTreeSet<String> =
+                std::collections::BTreeSet::new();
+            for signal in &hosted.registration.signal_schemas {
+                let name = signal.name.as_str().to_string();
+                if !seen_signals.insert(name.clone()) {
+                    return Err(RegistrationError::DuplicateDeclaration {
+                        world: id.clone(),
+                        kind: DeclarationKind::Signal,
+                        name,
+                    });
+                }
+                let bound_ok = signal.max_payload_bytes > 0
+                    && signal.max_payload_bytes as usize <= crate::planes::bounds::MAX_SIGNAL_BYTES;
+                // The bytes are what policy evaluates, so they are parsed here
+                // rather than carried unread into a reviewed identity that
+                // would fail the first time anyone sent the signal.
+                let demand_ok =
+                    mechanics::demand::AuthorizationDemand::decode_canonical(&signal.demand)
+                        .is_ok();
+                if !bound_ok || !demand_ok {
+                    return Err(RegistrationError::InvalidDeclaration {
+                        world: id.clone(),
+                        kind: DeclarationKind::Signal,
+                        name,
+                    });
+                }
+            }
+
             if worlds.insert(id.clone(), Arc::new(hosted)).is_some() {
                 return Err(RegistrationError::DuplicateWorld(id));
             }
@@ -178,8 +300,8 @@ mod tests {
     use super::*;
     use crate::error::WorldError;
     use crate::world::{
-        World, WorldContext, WorldEffect, WorldIntent, WorldLimits, WorldProjection, WorldQuery,
-        WorldVersion,
+        ScopeSchema, SignalSchema, World, WorldContext, WorldEffect, WorldIntent, WorldLimits,
+        WorldProjection, WorldQuery, WorldVersion,
     };
     use replica::body::{BodySchema, MutationModel};
     use replica::ids::{EncodingId, SchemaId};
@@ -189,6 +311,8 @@ mod tests {
     struct TestWorld {
         id: WorldId,
         schemas: Vec<BodySchema>,
+        scope_schemas: Vec<ScopeSchema>,
+        signal_schemas: Vec<SignalSchema>,
     }
 
     impl World for TestWorld {
@@ -197,6 +321,12 @@ mod tests {
         }
         fn schemas(&self) -> &[BodySchema] {
             &self.schemas
+        }
+        fn scope_schemas(&self) -> &[ScopeSchema] {
+            &self.scope_schemas
+        }
+        fn signal_schemas(&self) -> &[SignalSchema] {
+            &self.signal_schemas
         }
         fn submit(
             &self,
@@ -231,8 +361,15 @@ mod tests {
             implementation_version: WorldVersion(1),
             schemas: schemas.clone(),
             limits: WorldLimits::default(),
+            scope_schemas: Vec::new(),
+            signal_schemas: Vec::new(),
         };
-        let world: Arc<dyn World> = Arc::new(TestWorld { id: wid, schemas });
+        let world: Arc<dyn World> = Arc::new(TestWorld {
+            id: wid,
+            schemas,
+            scope_schemas: Vec::new(),
+            signal_schemas: Vec::new(),
+        });
         (reg, world)
     }
 
@@ -307,10 +444,14 @@ mod tests {
             implementation_version: WorldVersion(1),
             schemas: vec![schema("issue", 1, vec![])],
             limits: WorldLimits::default(),
+            scope_schemas: Vec::new(),
+            signal_schemas: Vec::new(),
         };
         let world: Arc<dyn World> = Arc::new(TestWorld {
             id: wid,
             schemas: vec![], // disagrees with the registration
+            scope_schemas: Vec::new(),
+            signal_schemas: Vec::new(),
         });
         let err = RuntimeBuilder::new()
             .register(reg, world)

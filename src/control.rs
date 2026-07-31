@@ -57,14 +57,25 @@ use crate::orbital::{WorldCall, WorldReply};
 ///
 /// **v6:** product host projections, including Issues inbox, leave root
 /// `Request`/`Response`. Their local facilities now wrap opaque World calls.
-pub const CONTROL_PROTOCOL_VERSION: u32 = 6;
+///
+/// **v7:** a third envelope. Until now every exchange on this channel was one
+/// JSON line each way, which is the wrong shape for a 256 MiB attachment: it
+/// would have to be base64'd, held whole in memory on both sides, and parsed as
+/// one token. The content envelope declares a byte length in its header line
+/// and then sends exactly that many raw bytes, in both directions. A v6 process
+/// cannot serve it — it would read the body as a malformed second request — so
+/// v6 is retired rather than tolerated.
+pub const CONTROL_PROTOCOL_VERSION: u32 = 7;
 
 /// The oldest control protocol a client still talks to. Raising this retires a
 /// version; the gap to [`CONTROL_PROTOCOL_VERSION`] is the mixed-version window.
 ///
-/// Protocol v6 is a deliberate compatibility cutoff: root control contains
-/// only daemon, Space, Mechanics, Station, Observation, and lifecycle calls.
-pub const MIN_SUPPORTED_CONTROL_PROTOCOL: u32 = 6;
+/// Protocol v7 is a deliberate compatibility cutoff. A v6 process attached as a
+/// SpaceBridge would accept a content request's header line and then read the
+/// raw body as a second request, so leaving the minimum at 6 would let
+/// `StationPlacement::establish` attach a process that cannot frame content and
+/// will desynchronise the channel the first time someone uploads.
+pub const MIN_SUPPORTED_CONTROL_PROTOCOL: u32 = 7;
 
 /// Whether this build can talk to a daemon advertising control protocol `peer`.
 ///
@@ -340,6 +351,74 @@ pub enum Request {
         since: u64,
     },
     Who,
+    /// What this Station currently believes about who is doing what — the Live
+    /// plane's transient table, resolved to actors.
+    ///
+    /// Distinct from [`Request::Who`], which reports durable neighbours and
+    /// their reachability. This reports what is on screen right now: who is
+    /// looking at an issue, where a caret is, who is typing. None of it is
+    /// durable and none of it survives the session that published it.
+    /// Say what this node is looking at, so peers can be told.
+    ///
+    /// **Replace-all**, and the whole set every time: this is a snapshot of what
+    /// somebody has open, and an incremental form would let a client that
+    /// navigates faster than its messages arrive publish a set neither side
+    /// agrees on. An empty list is a node that is looking at nothing, which is
+    /// how presence stops.
+    ///
+    /// The counterpart of [`Request::Live`], which asks what *others* are doing.
+    /// Two verbs rather than one because they fail differently: this one is
+    /// lossy by nature — a declaration that does not arrive is corrected by the
+    /// next one — and a read that silently returned a stale table would not be.
+    Watching {
+        /// The `iss_` doc ids, never project aliases. The Body id is derived
+        /// from the string as given, so an alias publishes presence on a Body
+        /// nothing reads and nobody sees a face.
+        #[serde(default)]
+        issues: Vec<String>,
+    },
+    Live {
+        /// The generation the caller already holds. When it still stands the
+        /// answer is [`Response::LiveUnchanged`], so a poll that finds nothing
+        /// new costs a `u64` comparison instead of a re-serialised table.
+        ///
+        /// `None` rather than a defaulted `0`: generation starts at zero, so a
+        /// caller that has never asked would otherwise be indistinguishable
+        /// from one holding an empty table, and its first read would answer
+        /// "unchanged" about a view it has never seen.
+        #[serde(default)]
+        since_generation: Option<u64>,
+        /// Narrow to one issue, by its `iss_` doc id.
+        ///
+        /// Every scope about that issue's Body and not the viewing one alone:
+        /// who is looking at it, where their carets are, who is typing. Those
+        /// are three scopes over one Body, and a caller that named the issue
+        /// asked about all three.
+        ///
+        /// A doc id, never a project alias. The Body id is derived from the
+        /// string as given, so `ENG-12` hashes to a Body nothing publishes
+        /// under and the answer is an empty table rather than an error.
+        ///
+        /// `None` is the whole table, which carries Body ids from every hosted
+        /// World. A browser cannot map those back to anything it displays — the
+        /// derivation runs one way — so the scoped form is the one a viewer
+        /// uses and the unscoped one is for an operator.
+        ///
+        /// It narrows the rows, not the generation: the counter belongs to the
+        /// whole table, so a caller watching one issue is told to re-read when
+        /// anything anywhere moves. That costs a wasted read and never a missed
+        /// one, which is the right way round for a surface about who is here.
+        #[serde(default)]
+        issue: Option<String>,
+    },
+    /// Take every signal delivered since the last call, and leave the queue
+    /// empty.
+    ///
+    /// A drain rather than a read. A signal is an event, not a state anyone can
+    /// re-read, so answering the same one twice would have a client act on it
+    /// twice — an invitation accepted, a file offered, a person's attention
+    /// asked for.
+    Signals,
     /// Re-read the layered local settings (`lait config set` sends this
     /// best-effort so a daemon-read key like `user.nick` applies live instead
     /// of silently waiting for a restart). Transport-plane like `Stop` — not
@@ -477,6 +556,136 @@ fn is_false(value: &bool) -> bool {
     !value
 }
 
+/// The longest **content** header line this build will read.
+///
+/// A content header is a JSON object naming a call and a byte count, and
+/// nothing else — the bytes travel after it, not inside it. So this is small on
+/// purpose, and the body it declares is bounded separately by the Station's own
+/// `max_content_len`.
+pub const MAX_CONTROL_FRAME_BYTES: u64 = 64 * 1024;
+
+/// The longest **request** line this build will read on the control channel.
+///
+/// Nothing bounded these at all: `AsyncBufReadExt::read_line` grows until it
+/// finds a newline or the sender stops, so a client that opens the socket and
+/// sends no newline was a memory attack that needed no authorization.
+///
+/// It is this much larger than [`MAX_CONTROL_FRAME_BYTES`] because an ordinary
+/// request still carries its whole payload inline, and the largest legitimate
+/// one today is an attachment: 256 KiB of bytes is about 342 KB of base64 plus
+/// an envelope. That is the number this bound is sized against, and it is the
+/// reason the bound is generous rather than tight — a limit that refuses
+/// something the product still does is not a limit, it is a bug.
+///
+/// It shrinks toward the frame bound when the inline attachment write path goes
+/// away and the only large thing on this channel is a declared body.
+pub const MAX_CONTROL_LINE_BYTES: u64 = 4 * 1024 * 1024;
+
+/// One call on the content plane.
+///
+/// Deliberately not a `Request` variant. Every other call on this channel is a
+/// JSON line whose answer is a JSON line; these are the only ones that carry
+/// bytes, and framing them the same way would mean every reader on the channel
+/// has to know when a line is followed by a body.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum ContentCall {
+    /// What is known about one content, and how much of it is here.
+    Stat { content: String },
+    /// One bounded range of plaintext. The answer carries a body.
+    Read {
+        content: String,
+        offset: u64,
+        len: u64,
+    },
+    /// Seal and commit the bytes this request's body carries.
+    Write {
+        /// The operation id, so a resumed or replayed upload is the same
+        /// operation rather than a second one.
+        operation: String,
+    },
+    /// Drop the local bytes and keep the name.
+    Forget { content: String },
+}
+
+/// The wire envelope for a content call: the call, the route it may traverse,
+/// the acting identity, and how many raw bytes follow this line.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContentClientRequest {
+    pub content: ContentCall,
+    pub route: ControlRoute,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub act_as: Option<String>,
+    /// Exactly how many raw bytes follow the newline. Authoritative: a body
+    /// that ends early is an error and a body with one byte too many is
+    /// refused, because "however much arrives" is indistinguishable from a
+    /// truncated upload and would commit a permanently wrong content that
+    /// hashes fine.
+    #[serde(default)]
+    pub body_len: u64,
+}
+
+/// Why a content call was refused, in the vocabulary a local surface maps to
+/// its own status codes.
+///
+/// Typed rather than a message, because the caller has to *act* differently:
+/// a missing chunk is worth retrying after a transfer, an unknown content
+/// never will be, and a refusal names a demand the caller can go and satisfy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContentErrorCode {
+    /// Authorization refused. The message names the demand.
+    Denied,
+    /// No descriptor here — and deliberately the same answer whether the
+    /// content never existed or this Station simply never heard of it.
+    Unknown,
+    /// The descriptor is here and the bytes are not. Retryable, after a fetch.
+    NotResident,
+    /// A range past the content, or a length past what one call may return.
+    Bounds,
+    /// The store or the cache failed. Ours, not the caller's.
+    Storage,
+    /// The request did not make sense: a malformed id, a body that disagreed
+    /// with its declaration.
+    Invalid,
+}
+
+/// The answer to a [`ContentCall`].
+///
+/// `ContentStream` is the only variant followed by raw bytes, and it says how
+/// many. Everything else is a complete answer on its own line.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ContentReply {
+    /// What is known about one content.
+    ContentStatus {
+        content: String,
+        plaintext_len: u64,
+        chunk_count: u32,
+        resident_chunks: u32,
+        pinned: bool,
+    },
+    /// `len` raw bytes follow this line.
+    ContentStream { len: u64 },
+    /// The content this upload became.
+    ContentWritten { content: String, plaintext_len: u64 },
+    /// The bytes are gone and the name is kept.
+    ContentForgotten,
+    ContentError {
+        code: ContentErrorCode,
+        message: String,
+    },
+}
+
+impl ContentReply {
+    pub fn error(code: ContentErrorCode, message: impl Into<String>) -> Self {
+        Self::ContentError {
+            code,
+            message: message.into(),
+        }
+    }
+}
+
 /// The terminal owner of a control request — the single orbital plane that
 /// serves it (plan 01, "External architecture"):
 ///
@@ -546,7 +755,15 @@ pub fn classify(req: &Request) -> RequestOwner {
         | Request::Whoami => Mechanics,
 
         // ---- Station: connect/neighbor/Contact ----
-        Request::Connect { .. } | Request::Who | Request::Sync => Station,
+        // Live and Signals sit here for the same reason Who does: both read
+        // state the Station's own delivery planes hold, and neither is a
+        // projection of anything durable.
+        Request::Connect { .. }
+        | Request::Who
+        | Request::Sync
+        | Request::Live { .. }
+        | Request::Watching { .. }
+        | Request::Signals => Station,
 
         // ---- Observation: generic status and subscription surfaces ----
         Request::Status | Request::Subscribe { .. } => Observation,
@@ -658,6 +875,11 @@ pub fn representative_requests() -> Vec<Request> {
         Request::SeedRemove { who: s() },
         Request::Log { since: 0 },
         Request::Who,
+        Request::Live {
+            since_generation: None,
+            issue: None,
+        },
+        Request::Signals,
         Request::ConfigReload,
         Request::Stop,
         Request::Hello {
@@ -735,6 +957,43 @@ pub enum Response {
     },
     Who {
         peers: Vec<PresenceEntry>,
+    },
+    /// The Live plane's transient table (reply to [`Request::Live`]).
+    Live {
+        /// Bumped on every change. A reader that sees the same number saw the
+        /// same view and does not have to diff to find that out. It wraps, so
+        /// equality is the only comparison it admits.
+        generation: u64,
+        /// This Station is not hearing from everyone it could be — over its
+        /// session cap, or dropping scopes at a gate.
+        ///
+        /// Carried rather than inferred. Awareness is allowed to be incomplete
+        /// and durable convergence is not, so the surface that can be partial
+        /// has to say when it is; a viewer showing three of five people with no
+        /// indication is telling a confident lie.
+        partial: bool,
+        entries: Vec<LiveEntry>,
+    },
+    /// The generation the caller already held still stands (reply to
+    /// [`Request::Live`]).
+    ///
+    /// Its own variant rather than an absent `entries` on [`Response::Live`].
+    /// This enum is tagged by `kind` and a client branches on that tag; "nothing
+    /// changed" spelled as a missing field is a thing a client has to remember
+    /// to notice, and an empty table and an unchanged one would then look alike.
+    LiveUnchanged {
+        generation: u64,
+    },
+    /// The signals drained by [`Request::Signals`], oldest first.
+    Signals {
+        signals: Vec<SignalEntry>,
+        /// How many were dropped for want of room, oldest first.
+        ///
+        /// A signal is not replaceable the way a caret is, so the queue does not
+        /// drop the newest the way the progress lane does: what has not been
+        /// seen yet is what somebody is about to act on. Reported rather than
+        /// swallowed — a client that lost an invitation can at least say so.
+        dropped: u64,
     },
     /// The one-shot identity + standing + view-completeness projection.
     Whoami(crate::dto::WhoamiDto),
@@ -872,6 +1131,135 @@ pub struct PresenceEntry {
     pub state: String,
     pub online: bool,
     pub last_seen_secs: u64,
+}
+
+/// What a transient item is about — the wire mirror of
+/// `runtime::transient::TransientScope`.
+///
+/// Ids are rendered, not raw. This channel is JSON, where a `[u8; 16]` arrives
+/// as a list of sixteen numbers; a Body takes the lowercase base32 the rest of
+/// the tree renders Body ids in, and a content id takes hex like every other
+/// content id here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "scope", rename_all = "snake_case")]
+pub enum LiveScope {
+    /// Somebody is looking at this issue.
+    IssueView { world: String, body: String },
+    /// Somebody is looking at this document.
+    DocumentView { world: String, body: String },
+    /// Somebody's cursor is in this field of this Body.
+    TextCaret {
+        world: String,
+        body: String,
+        field: String,
+    },
+    /// Somebody is typing in this field.
+    Typing {
+        world: String,
+        body: String,
+        field: String,
+    },
+    /// How much of this content a peer holds. A hint about who to ask first,
+    /// never a promise.
+    ContentResidency { content: String },
+    /// A World's own scope, uninterpreted here.
+    CustomWorld {
+        world: String,
+        schema: String,
+        key: String,
+    },
+}
+
+/// Where a peer's cursor is, as of this read — the wire mirror of
+/// `runtime::live::CaretState`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "caret", rename_all = "snake_case")]
+pub enum CaretPosition {
+    /// A position in the Body as it stands now.
+    At { position: u64 },
+    /// The material this position was attached to is gone, or the anchor
+    /// predates what this node retains.
+    Drifted,
+    /// Nothing was available to resolve against. Distinct from `Drifted`, which
+    /// is an answer — this is the absence of one, and a renderer that conflated
+    /// them would draw a live caret as lost.
+    Unresolved,
+}
+
+/// One thing a peer is currently doing — the wire mirror of
+/// `runtime::live::LiveEntry`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LiveEntry {
+    /// The **actor**, resolved daemon-side through the Station's authority view.
+    ///
+    /// Never the device id the transient table is keyed by. [`PresenceEntry::id`]
+    /// is a device and `MemberDto.key` is an actor, and the viewer colours an
+    /// avatar by hashing whatever string it is handed — so a device id here
+    /// draws one person in two colours on one screen, on a surface whose whole
+    /// job is telling people apart. An entry whose Station does not resolve is
+    /// omitted rather than carried under an invented identity.
+    pub actor: String,
+    pub scope: LiveScope,
+    /// `presence` | `caret` | `selection` | `typing` | `residency`.
+    pub kind: String,
+    /// How long ago **this** Station saw it. Ours, not theirs — a peer's clock
+    /// is a peer's claim.
+    pub age_ms: u64,
+    /// Past the caret grace window. Still shown, and shown as uncertain: a caret
+    /// whose Body has moved under it is not wrong yet, but it is no longer known
+    /// to be right.
+    pub uncertain: bool,
+    pub caret: Option<CaretPosition>,
+    /// A selection's far end.
+    pub focus: Option<CaretPosition>,
+}
+
+/// What a signal says — the wire mirror of `runtime::planes::Signal`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "signal", rename_all = "snake_case")]
+pub enum SignalBody {
+    /// Are you there. The one signal that expects an answer.
+    Ping { nonce: String },
+    /// I am.
+    Acknowledge { nonce: String },
+    /// Look at this.
+    Attention { scope: LiveScope },
+    /// Come and work on this with me. `invite` is the kind of collaboration
+    /// offered.
+    SessionInvite { invite: String, scope: LiveScope },
+    /// I have a file you may want. An offer, not a transfer: nothing has moved
+    /// and nothing will until somebody decides.
+    FileOffer {
+        content: String,
+        plaintext_len: u64,
+        /// What the sender calls it. Peer-supplied and never sanitised here — a
+        /// name is sanitised at the point it becomes a path, and rewriting it in
+        /// flight would mean the thing shown to a person is not the thing sent.
+        display_name: String,
+        media_type: String,
+    },
+    /// A World's own signal. Opaque to the substrate, so it arrives base64
+    /// rather than as a shape this module pretends to understand.
+    WorldSignal {
+        world: String,
+        schema: String,
+        payload_b64: String,
+    },
+}
+
+/// One signal this Station received — the wire mirror of
+/// `runtime::signal::DeliveredSignal`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignalEntry {
+    /// The sender's **actor**, resolved daemon-side. Same rule as
+    /// [`LiveEntry::actor`]: unresolved is omitted, never invented.
+    pub actor: String,
+    /// The session it arrived on, 32-hex. Two of these are compared and never
+    /// ordered — the only answerable question is whether this is still the open
+    /// one.
+    pub session_id: String,
+    pub session_epoch: String,
+    pub signal: SignalBody,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1172,6 +1560,299 @@ async fn exchange_raw<T: Serialize>(stream: Stream, env: &T) -> Result<String> {
     Ok(resp_line)
 }
 
+/// Send one content call and read the whole answer.
+///
+/// For calls whose answer is bounded: a status, a forget, or a range read,
+/// which one call may never return more than
+/// [`runtime::content_host::MAX_RANGE_BYTES`] of. An upload does not come
+/// through here — see [`ContentUpload`], which streams.
+///
+/// The caller builds the whole envelope rather than passing a call and having
+/// this fill in the rest. That is what makes the adversarial shapes
+/// expressible: a header declaring a body it never sends is exactly the request
+/// a daemon has to refuse without reading, and a helper that always wrote
+/// `body_len: 0` could not ask for it.
+pub async fn content_call(
+    home: &Path,
+    request: &ContentClientRequest,
+) -> Result<(ContentReply, Vec<u8>)> {
+    let name = control_name(home)?;
+    let stream = Stream::connect(name)
+        .await
+        .context("connect to Lait daemon")?;
+    let (read_half, mut write_half) = tokio::io::split(stream);
+    write_header(&mut write_half, request).await?;
+    let mut reader = BufReader::new(read_half);
+    read_content_reply(&mut reader).await
+}
+
+/// One content call with no body, which is every call but a write.
+pub fn content_request(route: ControlRoute, call: ContentCall) -> ContentClientRequest {
+    ContentClientRequest {
+        content: call,
+        route,
+        act_as: None,
+        body_len: 0,
+    }
+}
+
+/// A streaming upload on the control channel.
+///
+/// Open, push, finish. The length is declared up front and is authoritative on
+/// both sides — a caller that pushes fewer bytes than it promised gets an
+/// error rather than a truncated content, and the daemon refuses the first byte
+/// past the declaration rather than reading to the end to find out.
+///
+/// Exists rather than a `Vec<u8>` parameter because the whole point of moving
+/// attachments off the inline path is not to hold one in memory. A caller
+/// forwarding an HTTP body forwards it.
+pub struct ContentUpload {
+    write_half: tokio::io::WriteHalf<Stream>,
+    reader: BufReader<tokio::io::ReadHalf<Stream>>,
+    declared: u64,
+    sent: u64,
+}
+
+impl ContentUpload {
+    /// Open an upload of exactly `declared_len` bytes.
+    pub async fn open(
+        home: &Path,
+        route: ControlRoute,
+        operation: [u8; 16],
+        act_as: Option<&str>,
+        declared_len: u64,
+    ) -> Result<Self> {
+        let name = control_name(home)?;
+        let stream = Stream::connect(name)
+            .await
+            .context("connect to Lait daemon")?;
+        let (read_half, mut write_half) = tokio::io::split(stream);
+        write_header(
+            &mut write_half,
+            &ContentClientRequest {
+                content: ContentCall::Write {
+                    operation: data_encoding::HEXLOWER.encode(&operation),
+                },
+                route,
+                act_as: act_as.map(str::to_string),
+                body_len: declared_len,
+            },
+        )
+        .await?;
+        Ok(Self {
+            write_half,
+            reader: BufReader::new(read_half),
+            declared: declared_len,
+            sent: 0,
+        })
+    }
+
+    /// Push the next piece. Refuses locally rather than sending a byte past the
+    /// declaration, so the caller's own bug is reported where it happened
+    /// instead of arriving as a remote refusal.
+    pub async fn push(&mut self, bytes: &[u8]) -> Result<()> {
+        let next = self.sent.saturating_add(bytes.len() as u64);
+        if next > self.declared {
+            return Err(anyhow!(
+                "upload declared {} bytes and tried to send {next}",
+                self.declared
+            ));
+        }
+        self.write_half
+            .write_all(bytes)
+            .await
+            .context("write content body")?;
+        self.sent = next;
+        Ok(())
+    }
+
+    /// Finish and read the answer.
+    pub async fn finish(mut self) -> Result<ContentReply> {
+        if self.sent != self.declared {
+            return Err(anyhow!(
+                "upload declared {} bytes and sent {}",
+                self.declared,
+                self.sent
+            ));
+        }
+        self.write_half.flush().await.ok();
+        let (reply, _) = read_content_reply(&mut self.reader).await?;
+        Ok(reply)
+    }
+}
+
+async fn write_header<T: Serialize>(
+    write_half: &mut tokio::io::WriteHalf<Stream>,
+    header: &T,
+) -> Result<()> {
+    let mut line = serde_json::to_string(header).context("encode content request")?;
+    line.push('\n');
+    write_half
+        .write_all(line.as_bytes())
+        .await
+        .context("write content request")?;
+    write_half.flush().await.ok();
+    Ok(())
+}
+
+/// Read one content answer: its header line, and the body the header declares.
+async fn read_content_reply(
+    reader: &mut BufReader<tokio::io::ReadHalf<Stream>>,
+) -> Result<(ContentReply, Vec<u8>)> {
+    use tokio::io::AsyncReadExt;
+
+    let mut line = String::new();
+    {
+        // The header is bounded, so read it bounded. An answer with no newline
+        // is a daemon that stopped mid-sentence, not an invitation to keep
+        // allocating.
+        let mut bounded = reader.take(MAX_CONTROL_FRAME_BYTES);
+        bounded
+            .read_line(&mut line)
+            .await
+            .context("read content reply")?;
+    }
+    if line.trim().is_empty() {
+        return Err(anyhow!("the daemon closed without answering"));
+    }
+    let reply: ContentReply = serde_json::from_str(line.trim()).context("decode content reply")?;
+    let ContentReply::ContentStream { len } = reply else {
+        return Ok((reply, Vec::new()));
+    };
+    if len > runtime::content_host::MAX_RANGE_BYTES as u64 {
+        return Err(anyhow!(
+            "the daemon offered {len} bytes in one answer, past the {} this \
+             channel carries",
+            runtime::content_host::MAX_RANGE_BYTES
+        ));
+    }
+    let mut body = vec![0u8; len as usize];
+    reader
+        .read_exact(&mut body)
+        .await
+        .context("read content body")?;
+    Ok((reply, body))
+}
+
+/// How much of an upload is in flight between the socket and the sealer.
+///
+/// Two pieces of a quarter-megabyte chunk, so the sealer never waits on the
+/// socket for a chunk it could already be working on, and the socket cannot run
+/// ahead into unbounded memory. Backpressure is the point: without it a fast
+/// client on a loopback socket outruns a disk and the difference accumulates in
+/// this process.
+const UPLOAD_PIECES_IN_FLIGHT: usize = 2;
+
+/// One piece of an upload as it crosses from the socket to the sealer.
+type UploadPiece = std::io::Result<Vec<u8>>;
+
+/// The sealer's end of a streaming upload: a synchronous [`std::io::Read`] fed
+/// by an async task pumping the socket.
+///
+/// The content plane seals from a `Read` on a blocking thread, and the socket
+/// is async — so something has to cross that line, and this is it rather than
+/// a buffer holding the whole upload. A 256 MiB attachment never exists in this
+/// process as one allocation.
+///
+/// Cancellation arrives by the sender being dropped: the next read sees the
+/// channel closed before its declared length arrived and returns
+/// `UnexpectedEof`, which fails the ingest, which leaves nothing durable. That
+/// is why the length is declared up front — "as much as arrived" and "all of
+/// it" are otherwise the same thing, and a truncated upload would commit a
+/// permanently wrong content that hashes perfectly well.
+pub struct UploadReader {
+    pieces: tokio::sync::mpsc::Receiver<UploadPiece>,
+    current: Vec<u8>,
+    at: usize,
+    outstanding: u64,
+}
+
+impl UploadReader {
+    fn new(pieces: tokio::sync::mpsc::Receiver<UploadPiece>, declared: u64) -> Self {
+        Self {
+            pieces,
+            current: Vec::new(),
+            at: 0,
+            outstanding: declared,
+        }
+    }
+}
+
+impl std::io::Read for UploadReader {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        while self.at >= self.current.len() {
+            if self.outstanding == 0 {
+                return Ok(0);
+            }
+            match self.pieces.blocking_recv() {
+                Some(Ok(piece)) => {
+                    self.current = piece;
+                    self.at = 0;
+                }
+                Some(Err(error)) => return Err(error),
+                // The pump stopped before the declared length arrived: a
+                // truncated body, or a caller that went away mid-upload. Both
+                // are the same answer, and neither may look like EOF.
+                None => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        format!("upload ended {} bytes early", self.outstanding),
+                    ))
+                }
+            }
+        }
+        let take = out.len().min(self.current.len() - self.at);
+        out[..take].copy_from_slice(&self.current[self.at..self.at + take]);
+        self.at += take;
+        self.outstanding = self.outstanding.saturating_sub(take as u64);
+        Ok(take)
+    }
+}
+
+/// Open the two ends of a streaming upload: the sealer's reader, and the task
+/// that feeds it exactly `declared` bytes from `reader`.
+///
+/// The body must be read through whatever reader consumed the header line. A
+/// `BufReader` has already pulled the first bytes of the body into its buffer
+/// while looking for the newline, so reading from the raw half instead silently
+/// drops them — and the content that commits is wrong in a way that hashes
+/// fine. A small body hides this completely, which is why it is stated here.
+pub fn upload_body<R>(
+    mut reader: R,
+    declared: u64,
+) -> (UploadReader, impl std::future::Future<Output = R>)
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+{
+    use tokio::io::AsyncReadExt;
+
+    let (tx, rx) = tokio::sync::mpsc::channel::<UploadPiece>(UPLOAD_PIECES_IN_FLIGHT);
+    let pump = async move {
+        let mut left = declared;
+        while left > 0 {
+            let want = left.min(UPLOAD_PIECE_BYTES as u64) as usize;
+            let mut piece = vec![0u8; want];
+            match reader.read_exact(&mut piece).await {
+                Ok(_) => {
+                    if tx.send(Ok(piece)).await.is_err() {
+                        break;
+                    }
+                    left -= want as u64;
+                }
+                Err(error) => {
+                    let _ = tx.send(Err(error)).await;
+                    break;
+                }
+            }
+        }
+        reader
+    };
+    (UploadReader::new(rx, declared), pump)
+}
+
+/// One piece of an upload as it moves across the socket.
+const UPLOAD_PIECE_BYTES: usize = 256 * 1024;
+
 /// A live dirty-notification subscription — the client side of [`Request::Subscribe`]
 /// stream. Holds the whole duplex stream (never split, so nothing
 /// leaks); the subscribe verb is write-once, then read-many.
@@ -1397,5 +2078,121 @@ mod tests {
                 serde_json::json!({"protocol_version": MIN_SUPPORTED_CONTROL_PROTOCOL - 1})
             ));
         }
+    }
+
+    /// The generation a caller does not have is absent, not zero.
+    ///
+    /// `Option<u64>` rather than a defaulted `u64` because the daemon's counter
+    /// starts at zero: a first read spelled `since_generation: 0` would be
+    /// answered `live_unchanged` about a view nobody has seen. Pinned on the
+    /// wire because that is where the distinction has to survive.
+    #[test]
+    fn a_first_live_read_carries_no_generation_at_all() {
+        let json = serde_json::to_value(Request::Live {
+            since_generation: None,
+            issue: None,
+        })
+        .unwrap();
+        assert_eq!(json["cmd"], "live");
+        assert!(json["since_generation"].is_null());
+
+        let held = serde_json::to_value(Request::Live {
+            since_generation: Some(0),
+            issue: Some("iss_01".into()),
+        })
+        .unwrap();
+        assert_eq!(held["since_generation"], 0);
+        assert_eq!(held["issue"], "iss_01");
+
+        // And absence decodes back to absence rather than to zero.
+        let decoded: Request = serde_json::from_value(serde_json::json!({"cmd": "live"})).unwrap();
+        match decoded {
+            Request::Live {
+                since_generation,
+                issue,
+            } => {
+                assert!(since_generation.is_none());
+                assert!(issue.is_none());
+            }
+            other => panic!("decoded as {other:?}"),
+        }
+    }
+
+    /// "Unchanged" is a tag, never a missing field.
+    ///
+    /// A client branches on `kind` everywhere else on this channel. Spelling
+    /// "nothing moved" as an absent `entries` would make an empty table and an
+    /// unchanged one arrive looking alike, and leave the difference to whether
+    /// somebody remembered to check.
+    #[test]
+    fn an_unchanged_live_view_is_its_own_kind() {
+        let unchanged = serde_json::to_value(Response::LiveUnchanged { generation: 9 }).unwrap();
+        assert_eq!(unchanged["kind"], "live_unchanged");
+        assert!(unchanged.get("entries").is_none());
+
+        let empty = serde_json::to_value(Response::Live {
+            generation: 9,
+            partial: false,
+            entries: vec![],
+        })
+        .unwrap();
+        assert_eq!(empty["kind"], "live");
+        assert_eq!(empty["entries"], serde_json::json!([]));
+    }
+
+    /// The shapes a browser branches on, pinned by their tags.
+    #[test]
+    fn live_rows_name_an_actor_and_tag_every_nested_union() {
+        let entry = LiveEntry {
+            actor: "act_ab".into(),
+            scope: LiveScope::TextCaret {
+                world: "com.lait.issues".into(),
+                body: "aaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+                field: "description".into(),
+            },
+            kind: "caret".into(),
+            age_ms: 40,
+            uncertain: false,
+            caret: Some(CaretPosition::At { position: 12 }),
+            focus: Some(CaretPosition::Drifted),
+        };
+        let json = serde_json::to_value(Response::Live {
+            generation: 1,
+            partial: true,
+            entries: vec![entry],
+        })
+        .unwrap();
+        let row = &json["entries"][0];
+        assert_eq!(row["actor"], "act_ab");
+        assert_eq!(row["scope"]["scope"], "text_caret");
+        assert_eq!(
+            row["caret"],
+            serde_json::json!({"caret": "at", "position": 12})
+        );
+        assert_eq!(row["focus"], serde_json::json!({"caret": "drifted"}));
+        assert_eq!(json["partial"], true);
+    }
+
+    #[test]
+    fn a_drained_signal_says_how_many_were_lost() {
+        let json = serde_json::to_value(Response::Signals {
+            signals: vec![SignalEntry {
+                actor: "act_ab".into(),
+                session_id: "00".repeat(16),
+                session_epoch: "11".repeat(16),
+                signal: SignalBody::FileOffer {
+                    content: "22".repeat(32),
+                    plaintext_len: 9,
+                    display_name: "notes.md".into(),
+                    media_type: "text/markdown".into(),
+                },
+            }],
+            dropped: 3,
+        })
+        .unwrap();
+        assert_eq!(json["kind"], "signals");
+        assert_eq!(json["signals"][0]["signal"]["signal"], "file_offer");
+        assert_eq!(json["signals"][0]["actor"], "act_ab");
+        assert_eq!(json["dropped"], 3);
     }
 }

@@ -28,6 +28,12 @@ pub fn is_read(req: &Request) -> bool {
         | Request::SeedList
         | Request::Log { .. }
         | Request::Who
+        | Request::Live { .. }
+        // Declaring what you are looking at is a read, even though peers see the
+        // result. Being present is a consequence of looking, and a reader who
+        // cannot write is still in the room — Linear shows your cursor in a
+        // document you have no permission to edit, for the same reason.
+        | Request::Watching { .. }
         | Request::AssignmentList { .. }
         | Request::Hello { .. } => true,
 
@@ -63,6 +69,10 @@ pub fn is_read(req: &Request) -> bool {
         | Request::AssignmentGrant { .. }
         | Request::AssignmentRevoke { .. }
         | Request::WorldActivate { .. }
+        // …draining signals, which empties a queue somebody else is waiting to
+        // act on — the signals are addressed to that identity, not to whoever
+        // has its space open in a browser…
+        | Request::Signals
         // …and node control.
         | Request::ConfigReload
         | Request::Stop => false,

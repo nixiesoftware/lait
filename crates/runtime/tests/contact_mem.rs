@@ -74,7 +74,7 @@ fn coordinates() -> (SpaceId, SignedCoordinates) {
             .key_bytes()
             .unwrap(),
         approach_nick_hint: "a".into(),
-        approach_routes: vec![ApproachRoute::DirectV4 {
+        approach_routes: vec![ApproachRoute::DirectIpv4 {
             ip: [127, 0, 0, 1],
             port: 4242,
         }],
@@ -126,6 +126,7 @@ impl World for KvWorld {
         let (key, value) = text.split_once('=').ok_or(WorldError::InvalidRequest)?;
         let body = self.body(key);
         Ok(WorldEffect {
+            content_refs: Vec::new(),
             demand: any_demand(),
             operations: vec![(
                 body.clone(),
@@ -203,6 +204,8 @@ fn runtime_at(root: &std::path::Path) -> Runtime {
         implementation_version: WorldVersion(1),
         schemas: world.schemas().to_vec(),
         limits: WorldLimits::default(),
+        scope_schemas: Vec::new(),
+        signal_schemas: Vec::new(),
     };
     let registry = RuntimeBuilder::new()
         .register(reg, Arc::new(world))
@@ -247,6 +250,8 @@ fn activate_with(
     rt.enter_orbit(coords, EnterOptions)
         .unwrap()
         .activate(ActivationOptions {
+            planes: Default::default(),
+            content: Default::default(),
             drain_deadline: Duration::from_secs(5),
             comms: Some(comms_options(transport, seed, gossip)),
             observation_capacity: 0,
@@ -371,6 +376,8 @@ fn two_stations_converge_through_the_public_contact_api() {
         .orbit(&space)
         .unwrap()
         .activate(ActivationOptions {
+            planes: Default::default(),
+            content: Default::default(),
             drain_deadline: Duration::from_secs(5),
             comms: Some(comms_options(tb2, STATION_B_SEED, None)),
             observation_capacity: 0,

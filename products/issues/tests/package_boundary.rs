@@ -53,3 +53,24 @@ fn semantic_package_has_no_shell_or_process_dependency() {
         }
     }
 }
+
+/// The reviewed implementation identity this build ships.
+///
+/// Pinned because it is not a hash of convenience: the founder activates this id
+/// and every product transaction pins it, so a Space running an older build sees
+/// a descriptor it never approved. Moving it is a real event and has to be a
+/// deliberate one — which is what this test makes it.
+#[test]
+fn the_implementation_id_is_pinned_and_moving_it_is_deliberate() {
+    let descriptor = lait_issues::IssuesWorld::implementation_descriptor();
+    // Version 2, because this World declares signal schemas. A World that
+    // declared nothing would still encode as version 1, byte-identical to what
+    // shipped before sections existed.
+    assert_eq!(descriptor.version(), 2);
+    let id = descriptor.id().expect("canonical descriptor");
+    assert_eq!(
+        id.iter().map(|b| format!("{b:02x}")).collect::<String>(),
+        "142d7a76f8d7f1c559225004fe0e70c9e9cecf86b4a53d232604b6f42c0d344c",
+        "the Issues implementation id moved — see COMPATIBILITY.md before updating this"
+    );
+}

@@ -329,6 +329,12 @@ fn corrupt_objects_fail_open_as_integrity() {
             )
             .unwrap();
     }
+    // Open once so the store sweeps what earlier commits superseded. Objects
+    // are content-addressed and immutable, so a superseded one lingers until a
+    // sweep collects it — corrupting garbage proves nothing, and the claim
+    // worth making is about the objects the exposed state actually names.
+    drop(AuthorityLedger::open(&dir).unwrap());
+
     // Corrupt every stored object in turn; each corruption must fail open.
     let objects: Vec<PathBuf> = std::fs::read_dir(dir.join("objects"))
         .unwrap()

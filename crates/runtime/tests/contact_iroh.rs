@@ -72,7 +72,7 @@ fn coordinates() -> (SpaceId, SignedCoordinates) {
             .key_bytes()
             .unwrap(),
         approach_nick_hint: "a".into(),
-        approach_routes: vec![ApproachRoute::DirectV4 {
+        approach_routes: vec![ApproachRoute::DirectIpv4 {
             ip: [127, 0, 0, 1],
             port: 4242,
         }],
@@ -123,6 +123,7 @@ impl World for KvWorld {
         let (key, value) = text.split_once('=').ok_or(WorldError::InvalidRequest)?;
         let body = self.body(key);
         Ok(WorldEffect {
+            content_refs: Vec::new(),
             demand: any_demand(),
             operations: vec![(
                 body.clone(),
@@ -192,6 +193,8 @@ fn runtime_at(root: &std::path::Path) -> Runtime {
         implementation_version: WorldVersion(1),
         schemas: world.schemas().to_vec(),
         limits: WorldLimits::default(),
+        scope_schemas: Vec::new(),
+        signal_schemas: Vec::new(),
     };
     let registry = RuntimeBuilder::new()
         .register(reg, Arc::new(world))
@@ -263,14 +266,20 @@ fn a_real_iroh_contact_converges_two_stations() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let alpns: &[comms::Alpn] = &[CONTACT_ALPN, PRESENCE_ALPN];
     let (ta, tb) = rt.block_on(async {
-        let a =
-            comms::DefaultTransport::new(&STATION_A_SEED, &comms::policy::Network::Isolated, alpns)
-                .await
-                .unwrap();
-        let b =
-            comms::DefaultTransport::new(&STATION_B_SEED, &comms::policy::Network::Isolated, alpns)
-                .await
-                .unwrap();
+        let a = comms::DefaultTransport::new(
+            &STATION_A_SEED,
+            &comms::policy::Network::Isolated,
+            comms::Protocols::framed(alpns),
+        )
+        .await
+        .unwrap();
+        let b = comms::DefaultTransport::new(
+            &STATION_B_SEED,
+            &comms::policy::Network::Isolated,
+            comms::Protocols::framed(alpns),
+        )
+        .await
+        .unwrap();
         use comms::Transport;
         let a_addrs = a.advertised_addrs();
         let b_addrs = b.advertised_addrs();
@@ -291,6 +300,8 @@ fn a_real_iroh_contact_converges_two_stations() {
         .enter_orbit(&coords, EnterOptions)
         .unwrap()
         .activate(ActivationOptions {
+            planes: Default::default(),
+            content: Default::default(),
             drain_deadline: Duration::from_secs(5),
             comms: Some(comms_options(ta, STATION_A_SEED)),
             observation_capacity: 0,
@@ -302,6 +313,8 @@ fn a_real_iroh_contact_converges_two_stations() {
         .enter_orbit(&coords, EnterOptions)
         .unwrap()
         .activate(ActivationOptions {
+            planes: Default::default(),
+            content: Default::default(),
             drain_deadline: Duration::from_secs(5),
             comms: Some(comms_options(tb, STATION_B_SEED)),
             observation_capacity: 0,

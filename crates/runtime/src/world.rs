@@ -67,6 +67,18 @@ pub trait AuthorityView: Send + Sync {
     /// standing in the Space.
     fn resolve(&self, device: &DeviceId) -> Option<PrincipalResolution>;
 
+    /// Resolve a *remote* Station's principal for a delivery-plane admission.
+    ///
+    /// Defaults to [`Self::resolve`] over the same key, because a Station is a
+    /// device and membership is membership. It is a separate method so an
+    /// implementation cannot acquire a local-only assumption underneath the
+    /// peer path — `resolve` is called about our own devices constantly, and
+    /// the day one of those callers wants a local shortcut, the peer path must
+    /// not silently inherit it.
+    fn admit_peer(&self, station: &mechanics::ids::StationId) -> Option<PrincipalResolution> {
+        self.resolve(&station.as_device())
+    }
+
     /// The active World implementation id at `authority_frontier`. The default
     /// treats every implementation as active (fixtures without a policy
     /// history); the orbital composition overrides it with the ledger's
@@ -229,6 +241,71 @@ pub struct WorldLimits {
     pub max_payload_bytes: u32,
 }
 
+/// A transient scope a World declares under
+/// [`TransientScope::CustomWorld`](crate::transient::TransientScope).
+///
+/// A key ceiling and nothing else. A payload ceiling was considered and
+/// rejected: `CustomWorld` admits only `TransientKind::Presence`, which carries
+/// no bytes, so the number would bound nothing. A per-scope authorization
+/// demand is absent because nothing has decided what one would mean for a
+/// scope; carrying the field before its semantics exist is the wrong order.
+///
+/// The ceiling below is declared and reviewed — it is in the implementation id
+/// — and it is **not yet applied at delivery**. `transient.rs` bounds every
+/// scope field at
+/// [`MAX_SCOPE_FIELD_BYTES`](crate::transient::MAX_SCOPE_FIELD_BYTES) and
+/// consults no registered `ScopeSchema`, so a World declaring 8 still sees 128.
+/// Committing the number to the reviewed identity ahead of the check is
+/// deliberate: wiring it changes no descriptor bytes and therefore moves no id
+/// an authority has already activated.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScopeSchema {
+    pub name: SchemaId,
+    /// The World's declared ceiling on a scope field. Registration refuses one
+    /// that does not tighten the substrate's
+    /// [`MAX_SCOPE_FIELD_BYTES`](crate::transient::MAX_SCOPE_FIELD_BYTES),
+    /// which is the only place it is read today.
+    pub max_key_bytes: u32,
+}
+
+/// A World signal schema: what it is called, how large it may be, and what
+/// authority sending it demands.
+///
+/// The authority is canonical `mechanics::demand::AuthorizationDemand` bytes
+/// rather than a capability name, because that is the form
+/// [`SignalDemand::World`](crate::signal::SignalDemand) carries and policy
+/// evaluates; a name would need a translation to demand bytes that nobody has
+/// written.
+///
+/// Neither the ceiling nor the demand is applied at delivery yet. Every World
+/// signal rides `selector::WORLD`, whose core declaration carries
+/// `SignalDemand::Session` and
+/// [`MAX_SIGNAL_BYTES`](crate::planes::bounds::MAX_SIGNAL_BYTES), and the read
+/// path resolves its bound and its authority from that declaration without
+/// consulting the registered schema. Both numbers are declared, reviewed, and
+/// committed to the implementation id; what is missing is the resolution step
+/// that turns a `selector::WORLD` frame into its schema's declaration. Wiring
+/// it changes no descriptor bytes, so it moves no already-activated id.
+///
+/// There is deliberately no answer policy, and that omission is a different
+/// case from the two above. `selector::WORLD` declares
+/// `ResponsePolicy::Forbidden`, so a per-schema `Acknowledge` would be a
+/// declaration the substrate *contradicts* rather than one it has not started
+/// applying. If one ever becomes enforceable it is a new descriptor section
+/// tag, not an edit to this one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignalSchema {
+    pub name: SchemaId,
+    /// The World's declared ceiling. Registration refuses one that does not
+    /// tighten the plane's
+    /// [`MAX_SIGNAL_BYTES`](crate::planes::bounds::MAX_SIGNAL_BYTES), which is
+    /// the only place it is read today.
+    pub max_payload_bytes: u32,
+    /// Canonical [`mechanics::demand::AuthorizationDemand`] bytes. Parsed at
+    /// registration; not evaluated on any delivery path yet.
+    pub demand: Vec<u8>,
+}
+
 /// What a World supplies at registration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorldRegistration {
@@ -236,6 +313,11 @@ pub struct WorldRegistration {
     pub implementation_version: WorldVersion,
     pub schemas: Vec<BodySchema>,
     pub limits: WorldLimits,
+    /// Declared transient scopes. Empty is the ordinary case and costs nothing:
+    /// the implementation descriptor omits an empty section entirely.
+    pub scope_schemas: Vec<ScopeSchema>,
+    /// Declared World signals, under the same rule.
+    pub signal_schemas: Vec<SignalSchema>,
 }
 
 /// A decoded, authorized-by-Runtime application intent handed to a World. The
@@ -274,6 +356,19 @@ pub struct BodyDeclaration {
 /// pinned authority frontier and commits nothing if it is unsatisfied.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorldEffect {
+    /// The content each touched Body references, declared by the World.
+    ///
+    /// A `ContentRef` committed inside a Body is product-encoded, and the
+    /// substrate may not decode product bytes to find it. Without a declaration
+    /// the content catalog could only grow: tombstone every Body that
+    /// referenced an upload and its descriptor stays signed state on every peer
+    /// forever. So the World says which content its Bodies name, Replica
+    /// validates the claim against committed descriptors, and reachability
+    /// becomes computable without the boundary moving.
+    ///
+    /// Absent means unchanged. An empty vector means "this Body references
+    /// nothing", which is how content is released.
+    pub content_refs: Vec<(BodyKey, Vec<replica::ContentRef>)>,
     /// Body operations staged this transaction, each keyed to the Body it
     /// mutates.
     pub operations: Vec<(BodyKey, BodyOp)>,
@@ -305,19 +400,78 @@ pub struct WorldProjection {
     pub demand: Vec<u8>,
 }
 
+/// What a World may know about one content: enough to render it, and nothing
+/// that would let it reach the bytes without asking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorldContentStatus {
+    pub plaintext_len: u64,
+    pub chunk_count: u32,
+    /// How many chunks are here now. A fact about this moment on this machine,
+    /// and never replicated.
+    pub resident_chunks: u32,
+}
+
+impl WorldContentStatus {
+    pub fn is_complete(&self) -> bool {
+        self.resident_chunks == self.chunk_count
+    }
+}
+
 /// A read view of the committed Body snapshot, handed to a World during a query.
 /// It exposes only authorized canonical reads — no CRDT internals, no mutation, no keys.
 /// Runtime backs it with the Station's Replica.
 pub trait BodyReader {
     /// The committed canonical bytes of an atomic Body, if present.
     fn read_body(&self, key: &BodyKey) -> Option<Vec<u8>>;
-    /// The committed collaborative view of a Body, if the key holds one. List
-    /// elements carry the stable ids `ListRemove`/`ListMove` take.
-    fn read_collaborative_body(&self, key: &BodyKey) -> Option<replica::CollaborativeView>;
+    /// The committed collaborative view of a Body. List elements carry the
+    /// stable ids `ListRemove`/`ListMove` take. A Body binding a collaborative
+    /// type this build does not implement is `SchemaAhead`, never a view with
+    /// the unreadable part quietly missing.
+    fn read_collaborative_body(
+        &self,
+        key: &BodyKey,
+    ) -> Result<replica::CollaborativeView, replica::ProjectionError>;
     /// Every interpreted Body of `world` bound to `schema` — the
     /// singleton-integrity seam (a World validating that exactly its one
     /// deterministic instance of a schema exists).
     fn bodies_with_schema(&self, world: &WorldId, schema: &SchemaId) -> Vec<BodyKey>;
+
+    /// A Body's position in its collaborative history.
+    ///
+    /// Opaque and orderable, and never the convergence engine's own type. A
+    /// World uses it to compare
+    /// positions and to stamp anchors; it cannot use it to reach the engine.
+    fn body_version(&self, key: &BodyKey) -> Option<replica::FabricVersion>;
+
+    /// Take an anchor at a position inside a collaborative value.
+    ///
+    /// This is the seam plan 14's carets and range-attached comments consume,
+    /// and it is exposed here rather than there because only the algebra that
+    /// moves a position can mint one that survives being moved.
+    fn anchor_in_body(
+        &self,
+        key: &BodyKey,
+        path: &str,
+        position: u64,
+    ) -> Option<replica::FabricAnchor>;
+
+    /// Resolve an anchor against a Body's current state.
+    ///
+    /// Total and read-only: a position whose material was deleted, or whose
+    /// anchor predates what this replica retains, is `Drifted`. Never an error,
+    /// never a mutation, and never a silently wrong index.
+    fn resolve_anchor(
+        &self,
+        key: &BodyKey,
+        anchor: &replica::FabricAnchor,
+    ) -> replica::AnchorResolution;
+
+    /// What one content is, and how much of it is here.
+    ///
+    /// A World sees size, geometry, and residency — never a path, never bytes,
+    /// never a key. Reading the bytes is a host call with its own demand, and
+    /// a `ContentRef` alone authorizes nothing.
+    fn content_status(&self, content: &replica::ContentRef) -> Option<WorldContentStatus>;
 
     /// An opaque per-Body VERSION STAMP: two reads returning the same stamp
     /// for a key are guaranteed byte-equivalent Bodies, so a World may reuse
@@ -397,9 +551,48 @@ impl<'a> WorldContext<'a> {
         self.reads.and_then(|r| r.read_body(key))
     }
 
+    /// A Body's causal position, for comparison and for stamping anchors.
+    pub fn body_version(&self, key: &BodyKey) -> Option<replica::FabricVersion> {
+        self.reads.and_then(|r| r.body_version(key))
+    }
+
+    /// Take an anchor at a position inside a collaborative value.
+    pub fn anchor(
+        &self,
+        key: &BodyKey,
+        path: &str,
+        position: u64,
+    ) -> Option<replica::FabricAnchor> {
+        self.reads
+            .and_then(|r| r.anchor_in_body(key, path, position))
+    }
+
+    /// Resolve an anchor. Total: `Drifted` rather than an error or a guess.
+    pub fn resolve_anchor(
+        &self,
+        key: &BodyKey,
+        anchor: &replica::FabricAnchor,
+    ) -> replica::AnchorResolution {
+        match self.reads {
+            Some(reads) => reads.resolve_anchor(key, anchor),
+            None => replica::AnchorResolution::Drifted,
+        }
+    }
+
+    /// What one content is, and how much of it is here.
+    pub fn content_status(&self, content: &replica::ContentRef) -> Option<WorldContentStatus> {
+        self.reads.and_then(|r| r.content_status(content))
+    }
+
     /// Read a collaborative Body's view from the stable committed snapshot.
-    pub fn read_collaborative(&self, key: &BodyKey) -> Option<replica::CollaborativeView> {
-        self.reads.and_then(|r| r.read_collaborative_body(key))
+    pub fn read_collaborative(
+        &self,
+        key: &BodyKey,
+    ) -> Result<replica::CollaborativeView, replica::ProjectionError> {
+        match self.reads {
+            Some(reads) => reads.read_collaborative_body(key),
+            None => Err(replica::ProjectionError::NotCollaborative),
+        }
     }
 }
 
@@ -416,6 +609,22 @@ pub trait World: Send + Sync + 'static {
 
     /// The Body schemas this World supports.
     fn schemas(&self) -> &[BodySchema];
+
+    /// The transient scopes this World declares.
+    ///
+    /// Defaulted to none rather than made a required method: a World with
+    /// nothing to declare needs no edit, and because the descriptor omits an
+    /// empty section it also keeps the implementation id it already has.
+    /// `build()` refuses a World whose answer here disagrees with its
+    /// registration, so the default is a declaration and not a hole.
+    fn scope_schemas(&self) -> &[ScopeSchema] {
+        &[]
+    }
+
+    /// The World signals this World declares, under the same rule.
+    fn signal_schemas(&self) -> &[SignalSchema] {
+        &[]
+    }
 
     /// Decode, authorize, and stage Body operations for an application intent.
     fn submit(

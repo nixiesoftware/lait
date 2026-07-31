@@ -39,7 +39,8 @@ use runtime::{
 
 use crate::config::{acquire_daemon_lock, load_or_create_identity, DaemonLock};
 use crate::control::{
-    control_name, CatalogScope, ControlRoute, Doorbell, Request, RequestOwner, Response, StatusInfo,
+    control_name, CatalogScope, ContentCall, ContentErrorCode, ContentReply, ControlRoute,
+    Doorbell, Request, RequestOwner, Response, StatusInfo, UploadReader,
 };
 use crate::daemon::OrbitAddress;
 use crate::orbital::{
@@ -138,6 +139,20 @@ pub struct SpaceBridge {
     /// When the last control connection was accepted or completed — the idle
     /// clock's reference point.
     last_activity: Mutex<std::time::Instant>,
+    /// The undrained tail of the Live plane's signal broadcast.
+    ///
+    /// Subscribed once, at activation, rather than per request: a signal is an
+    /// event and not a state anyone can re-read, so a receiver created when
+    /// somebody asks would only ever see what arrived after the asking.
+    ///
+    /// This *is* the bounded queue, and there is deliberately no second one in
+    /// front of it. A tokio broadcast ring overwrites its **oldest** slot when
+    /// it is full and tells the lagging reader how many it lost — which is
+    /// exactly the rule a signal needs. A caret superseded by a newer caret has
+    /// lost nothing; an invitation superseded by a ping has lost the
+    /// invitation, so what goes is what somebody has had the longest chance to
+    /// act on rather than what they have not seen yet.
+    signals: Mutex<tokio::sync::broadcast::Receiver<runtime::signal::DeliveredSignal>>,
 }
 
 struct PrincipalFacts {
@@ -288,7 +303,10 @@ impl SpaceBridge {
             .build_scoped(
                 &device_seed,
                 &network,
-                &[runtime::contact::CONTACT_ALPN, runtime::PRESENCE_ALPN],
+                comms::Protocols {
+                    framed: &[runtime::contact::CONTACT_ALPN, runtime::PRESENCE_ALPN],
+                    session: &[runtime::planes::FREIGHT_ALPN, runtime::planes::LIVE_ALPN],
+                },
                 &space,
             )
             .await?;
@@ -369,6 +387,12 @@ impl SpaceBridge {
             .orbit(&space)
             .map_err(|e| anyhow!("acquire orbit: {e:?}"))?
             .activate(ActivationOptions {
+                content: Default::default(),
+                // Both planes on, which is what `lait/freight/1` being
+                // advertised has always implied and, until now, has not meant:
+                // the ALPN was registered and no driver owned it, so a peer
+                // that dialled completed a handshake and was turned away.
+                planes: Default::default(),
                 drain_deadline: Duration::from_secs(5),
                 comms: Some(comms_options(
                     transport,
@@ -416,6 +440,10 @@ impl SpaceBridge {
             }
         }
 
+        // Before the Station moves into the struct, and before anything can be
+        // delivered: a receiver only holds what arrives after it exists.
+        let signals = Mutex::new(station.signals());
+
         Ok(Self {
             address: OrbitAddress::for_store(home, space),
             mechanics,
@@ -434,6 +462,7 @@ impl SpaceBridge {
             pump: tokio::sync::Mutex::new(None),
             active_conns: std::sync::atomic::AtomicU64::new(0),
             last_activity: Mutex::new(std::time::Instant::now()),
+            signals,
         })
     }
 
@@ -475,6 +504,142 @@ impl SpaceBridge {
             );
         }
         self.route_world_call(call, act_as)
+    }
+
+    /// Direct host-local entry for a content call, minus the body.
+    ///
+    /// Blocking on purpose: every branch commits through the Replica's one
+    /// writer, and a caller must be on a blocking thread before it gets here.
+    /// The reason is the shared writer mutex, not the filesystem — holding it
+    /// on a runtime thread stalls the Contact driver as surely as it stalls
+    /// this call.
+    pub(crate) fn content_call(
+        &self,
+        address: &OrbitAddress,
+        call: &ContentCall,
+        body: Option<UploadReader>,
+    ) -> (ContentReply, Vec<u8>) {
+        let _activity = self.track_activity();
+        if address != &self.address {
+            return (
+                ContentReply::error(
+                    ContentErrorCode::Invalid,
+                    format!(
+                        "content call targets Orbit {} in Space {}, but this bridge \
+                         occupies Orbit {} in Space {}",
+                        address.orbit, address.space, self.address.orbit, self.address.space
+                    ),
+                ),
+                Vec::new(),
+            );
+        }
+        match call {
+            ContentCall::Stat { content } => {
+                let Some(content) = parse_content_ref(content) else {
+                    return (invalid_content_id(), Vec::new());
+                };
+                match self.station.content_stat(&self.identity, &content) {
+                    Ok(status) => (
+                        ContentReply::ContentStatus {
+                            content: data_encoding::HEXLOWER.encode(content.as_bytes()),
+                            plaintext_len: status.plaintext_len,
+                            chunk_count: status.chunk_count,
+                            resident_chunks: status.resident_chunks,
+                            pinned: status.pinned,
+                        },
+                        Vec::new(),
+                    ),
+                    Err(error) => (content_refusal(&error), Vec::new()),
+                }
+            }
+            ContentCall::Read {
+                content,
+                offset,
+                len,
+            } => {
+                let Some(content) = parse_content_ref(content) else {
+                    return (invalid_content_id(), Vec::new());
+                };
+                if *len > runtime::content_host::MAX_RANGE_BYTES as u64 {
+                    return (
+                        ContentReply::error(
+                            ContentErrorCode::Bounds,
+                            format!(
+                                "one range may carry at most {} bytes",
+                                runtime::content_host::MAX_RANGE_BYTES
+                            ),
+                        ),
+                        Vec::new(),
+                    );
+                }
+                match self
+                    .station
+                    .content_read(&self.identity, &content, *offset, *len as usize)
+                {
+                    Ok(bytes) => (
+                        ContentReply::ContentStream {
+                            len: bytes.len() as u64,
+                        },
+                        bytes,
+                    ),
+                    Err(error) => (content_refusal(&error), Vec::new()),
+                }
+            }
+            ContentCall::Write { operation } => {
+                let Some(operation) = parse_operation_id(operation) else {
+                    return (
+                        ContentReply::error(
+                            ContentErrorCode::Invalid,
+                            "an operation id is 16 bytes of lowercase hex",
+                        ),
+                        Vec::new(),
+                    );
+                };
+                let Some(mut body) = body else {
+                    return (
+                        ContentReply::error(
+                            ContentErrorCode::Invalid,
+                            "a content write carries a body",
+                        ),
+                        Vec::new(),
+                    );
+                };
+                match self
+                    .station
+                    .content_write(&self.identity, operation, &mut body)
+                {
+                    Ok(content) => {
+                        let plaintext_len = self
+                            .station
+                            .content_stat(&self.identity, &content)
+                            .map(|status| status.plaintext_len)
+                            .unwrap_or_default();
+                        (
+                            ContentReply::ContentWritten {
+                                content: data_encoding::HEXLOWER.encode(content.as_bytes()),
+                                plaintext_len,
+                            },
+                            Vec::new(),
+                        )
+                    }
+                    Err(error) => (content_refusal(&error), Vec::new()),
+                }
+            }
+            ContentCall::Forget { content } => {
+                let Some(content) = parse_content_ref(content) else {
+                    return (invalid_content_id(), Vec::new());
+                };
+                match self.station.content_forget(&self.identity, &content) {
+                    Ok(()) => (ContentReply::ContentForgotten, Vec::new()),
+                    Err(error) => (content_refusal(&error), Vec::new()),
+                }
+            }
+        }
+    }
+
+    /// The declared-length ceiling this Station will accept for one upload.
+    pub(crate) fn max_content_len(&self) -> u64 {
+        self.station.max_content_len()
     }
 
     /// Route a product call through its registered World package, or refuse
@@ -605,8 +770,124 @@ impl SpaceBridge {
             },
         );
         match reply.validate_for(call) {
-            Ok(()) => reply,
+            Ok(()) => {
+                self.deliver_nudges(control.nudges(
+                    call,
+                    &reply,
+                    &WorldCallContext {
+                        session,
+                        identity,
+                        actor: &facts.actor,
+                        device: &facts.device,
+                    },
+                ));
+                reply
+            }
             Err(error) => WorldReply::error(call, error.code, error.message),
+        }
+    }
+
+    /// Which present peers each nudge reaches.
+    ///
+    /// Pulled out of `deliver_nudges` because this is the whole policy and the rest
+    /// is plumbing: given who is here and who a World named, decide what goes where.
+    /// A method on `SpaceBridge` would need a Station, a transport and a docked
+    /// Session to test three rules that need none of them.
+    ///
+    /// Actor equality and nothing looser. A nudge names one actor, and the only
+    /// question is which of the sessions currently open belong to it — a peer with
+    /// two devices is two Stations under one actor and hears once per device, which
+    /// is what having two devices means.
+    fn reachable<'a>(
+        here: &'a [(mechanics::ids::StationId, String)],
+        nudges: &'a [crate::orbital::WorldNudge],
+    ) -> Vec<(
+        &'a mechanics::ids::StationId,
+        &'a crate::orbital::WorldNudge,
+    )> {
+        nudges
+            .iter()
+            .flat_map(|nudge| {
+                here.iter()
+                    .filter(move |(_, actor)| actor == &nudge.actor)
+                    .map(move |(station, _)| (station, nudge))
+            })
+            .collect()
+    }
+
+    /// Whether a World actually declared what its handler asked to send.
+    ///
+    /// `WorldNudge`'s own doc states this as a fact about the host, and for a
+    /// while the host did not do it. A handler is ordinary product code: it can
+    /// name a schema that was never registered, or build a payload past the
+    /// ceiling its own registration declared, and neither is caught by anything
+    /// between it and the wire.
+    fn declares(&self, world: &replica::ids::WorldId, nudge: &crate::orbital::WorldNudge) -> bool {
+        let Some(registration) = self.station.registration(world) else {
+            return false;
+        };
+        let Some(schema) = replica::ids::SchemaId::parse(&nudge.schema) else {
+            return false;
+        };
+        registration
+            .signal_schemas
+            .iter()
+            .find(|declared| declared.name == schema)
+            .is_some_and(|declared| nudge.payload.len() <= declared.max_payload_bytes as usize)
+    }
+
+    /// Hand a World's nudges to whichever peers are actually here.
+    ///
+    /// **Presence is the gate, and it is better information than a preference
+    /// pane.** Linear picks a channel from what a person configured months ago;
+    /// this picks from whether they are looking at the product right now. A peer
+    /// with no session is not queued for and not retried — the durable record is
+    /// already committed and already converging, and it is their path.
+    ///
+    /// The World said who and what. This says whether they are reachable, which
+    /// is the half a World must not know: one that could see who is connected
+    /// would be a World holding a delivery plane.
+    fn deliver_nudges(&self, nudges: Vec<crate::orbital::WorldNudge>) {
+        if nudges.is_empty() {
+            return;
+        }
+        let live = self.station.live();
+        // Resolved once. `actor_for` asks Mechanics per Station, and a fan-out
+        // to a dozen followers would otherwise ask about the same peer a dozen
+        // times.
+        //
+        // A Station that does not resolve is dropped rather than delivered to
+        // under an invented identity — the same rule the live view follows.
+        let here: Vec<(mechanics::ids::StationId, String)> = live
+            .present_stations()
+            .into_iter()
+            .filter_map(|station| {
+                let actor = self.actor_for(&station)?;
+                Some((station, actor))
+            })
+            .collect();
+        let world_id = crate::world::contract::world_id();
+        let world = world_id.as_str().to_string();
+        for (station, nudge) in Self::reachable(&here, &nudges) {
+            if !self.declares(&world_id, nudge) {
+                // Refused here rather than sent for the peer to refuse. The
+                // receiver checks the same thing — a signal naming a schema its
+                // World never declared is one nobody reviewed — so sending it
+                // spends an outbox slot and a flow to be told what this side
+                // already knew, and a World whose handler is wrong would spend
+                // them on every call.
+                continue;
+            }
+            let signal = runtime::planes::Signal::WorldSignal {
+                world: world.clone(),
+                schema: nudge.schema.clone(),
+                payload: nudge.payload.clone(),
+            };
+            // A full outbox is not reported to anyone. The record behind every
+            // nudge is durable, so a refused one costs timeliness and nothing
+            // else — and telling the *sender* would be telling them something
+            // about the receiver's queue.
+            live.nudge(station, signal);
         }
     }
 
@@ -962,11 +1243,50 @@ impl SpaceBridge {
         }
     }
 
+    /// Publish what this node is looking at, so peers can draw a face.
+    ///
+    /// The send side of the Live plane, and the only thing that puts this
+    /// Station *into* anybody else's transient table. Without it every viewer
+    /// renders other people and nobody renders this one.
+    ///
+    /// Replace-all: the declaration is what is on screen now, so a scope that has
+    /// left the set is retired on every peer rather than left to expire.
+    ///
+    /// **Truncated at the subscription ceiling rather than sent whole.** A peer
+    /// refuses an entire `Subscribe` frame carrying more scopes than a connection
+    /// may hold, so one declaration past the cap does not lose the excess — it
+    /// loses *everything*, silently, on every peer, until the declaration
+    /// changes. Somebody with a hundred tabs open would simply stop existing.
+    ///
+    /// A doc id is not validated here and cannot be: the Body id is a hash of the
+    /// string as given, so every string is a legal input and an unresolvable one
+    /// names a Body nothing publishes under. That is an empty answer rather than
+    /// an error, and it is what a stale link should get.
+    fn watching(&self, issues: &[String]) -> Response {
+        let world = crate::world::contract::world_id().as_str().to_string();
+        let scopes = issues
+            .iter()
+            .take(runtime::budget::slots::MAX_SUBSCRIBED_SCOPES_PER_CONNECTION)
+            .map(|doc| runtime::transient::TransientScope::IssueView {
+                world: world.clone(),
+                body: crate::world::contract::issue_body_id(doc).as_bytes(),
+            })
+            .collect();
+        self.station.live().declare_local(scopes);
+        Response::Ok { message: None }
+    }
+
     /// Connect/neighbor/Contact requests — served by the Station.
     fn dispatch_station(&self, req: Request) -> Response {
         match req {
             Request::Connect { ticket } => self.connect(&ticket),
             Request::Who => Response::Who { peers: self.who() },
+            Request::Live {
+                since_generation,
+                issue,
+            } => self.live(since_generation, issue.as_deref()),
+            Request::Watching { issues } => self.watching(&issues),
+            Request::Signals => self.drain_signals(),
             Request::Sync => self.sync(),
             other => unreachable!("misclassified station request: {other:?}"),
         }
@@ -1128,6 +1448,123 @@ impl SpaceBridge {
                 }
             })
             .collect()
+    }
+
+    /// The actor a Station speaks for, or `None`.
+    ///
+    /// The Station's own authority view answers it — the same question the Live
+    /// plane's admission asked before it accepted the session. A peer that lost
+    /// standing between admission and this read resolves to nothing and its row
+    /// disappears, which is the right outcome for a surface whose entire subject
+    /// is who is here right now.
+    ///
+    /// The device id is never a fallback. `PresenceEntry.id` is a device and
+    /// `MemberDto.key` is an actor; the viewer colours an avatar by hashing
+    /// whatever string it is handed, so one person on two devices would arrive
+    /// as two people in two colours.
+    fn actor_for(&self, station: &StationId) -> Option<String> {
+        use runtime::AuthorityView;
+        self.mechanics
+            .admit_peer(station)
+            .map(|resolution| resolution.actor.as_str().to_string())
+    }
+
+    /// What this Station currently believes about who is doing what.
+    ///
+    /// Modelled on [`Self::who`] and reporting a different truth: `who` is the
+    /// durable Neighbor registry's reachability, this is the Live plane's
+    /// transient table, which nothing journals and nothing replays.
+    fn live(&self, since_generation: Option<u64>, issue: Option<&str>) -> Response {
+        let handle = self.station.live();
+        // The issue's Body id, by the same one-way derivation the Issues World
+        // commits under. It only runs this direction, which is why an unscoped
+        // read hands back Body ids a browser cannot name.
+        let want = issue.map(|doc| {
+            (
+                crate::world::contract::world_id().as_str().to_string(),
+                crate::world::contract::issue_body_id(doc).as_bytes(),
+            )
+        });
+        // `LiveNarrow::Body` and never a scope. Scope narrowing is *equality*,
+        // and an issue's caret and typing rows are `TextCaret` and `Typing` over
+        // the same Body — so asking for `IssueView` returns the presence rows
+        // and silently drops the two a caret surface exists to draw.
+        let narrow = match &want {
+            Some((world, body)) => runtime::live::LiveNarrow::Body { world, body: *body },
+            None => runtime::live::LiveNarrow::Everything,
+        };
+        let view = handle.view_narrowed(narrow, std::time::Instant::now());
+        let entries: Vec<_> = view.entries.iter().collect();
+
+        // Equality and never an ordering: the counter wraps. It is also not the
+        // whole answer — `uncertain` is derived per read from a slot's age and
+        // nothing bumps the counter when one crosses the grace window, so a
+        // caller told "unchanged" would draw a caret as certain until the slot
+        // expired half a minute later. Once every row is already uncertain
+        // nothing more can flip, and the cheap answer is true again.
+        if since_generation == Some(view.generation) && entries.iter().all(|entry| entry.uncertain)
+        {
+            return Response::LiveUnchanged {
+                generation: view.generation,
+            };
+        }
+        Response::Live {
+            generation: view.generation,
+            partial: view.partial,
+            entries: entries
+                .into_iter()
+                .filter_map(|entry| self.live_entry(entry))
+                .collect(),
+        }
+    }
+
+    /// One transient row, or nothing when its Station names no actor here.
+    fn live_entry(&self, entry: &runtime::live::LiveEntry) -> Option<crate::control::LiveEntry> {
+        Some(crate::control::LiveEntry {
+            actor: self.actor_for(&entry.station)?,
+            scope: live_scope(&entry.scope),
+            kind: transient_kind(entry.kind).to_string(),
+            age_ms: entry.age_ms,
+            uncertain: entry.uncertain,
+            caret: entry.caret.map(caret_position),
+            focus: entry.focus.map(caret_position),
+        })
+    }
+
+    /// Take everything the signal queue holds and leave it empty.
+    ///
+    /// The loop does not stop at a lag. A full ring overwrote its oldest slots
+    /// and moved this reader past them; what follows is still there and still
+    /// worth handing over, so the count is accumulated and the drain continues.
+    fn drain_signals(&self) -> Response {
+        use tokio::sync::broadcast::error::TryRecvError;
+        let mut queue = self
+            .signals
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut signals = Vec::new();
+        let mut dropped = 0u64;
+        loop {
+            match queue.try_recv() {
+                Ok(delivered) => {
+                    let Some(actor) = self.actor_for(&delivered.from) else {
+                        // A signal attributed to nobody is one a person cannot
+                        // decide about, and a device id in the `actor` field is
+                        // worse than an absent row.
+                        continue;
+                    };
+                    signals.push(crate::control::SignalEntry {
+                        actor,
+                        session_id: data_encoding::HEXLOWER.encode(&delivered.session_id),
+                        session_epoch: data_encoding::HEXLOWER.encode(&delivered.session_epoch),
+                        signal: signal_body(&delivered.signal),
+                    });
+                }
+                Err(TryRecvError::Lagged(missed)) => dropped = dropped.saturating_add(missed),
+                Err(TryRecvError::Empty | TryRecvError::Closed) => break,
+            }
+        }
+        Response::Signals { signals, dropped }
     }
 
     /// The one number both `status` and `who` report as "online".
@@ -1796,14 +2233,110 @@ impl SpaceBridge {
         idle_for >= window
     }
 
+    /// Serve one content call: its body in, its answer out.
+    ///
+    /// Three things have to happen in the right order. The declared length is
+    /// checked against operator policy **before** a byte is read, because
+    /// reading first and refusing after is a free way to make this process
+    /// spend a Station's disk budget. The body is read through the same
+    /// `BufReader` that consumed the header, because that reader already holds
+    /// the first bytes of the body. And the sealing runs on a blocking thread,
+    /// because it takes the Replica's one writer.
+    async fn serve_content(
+        self: Arc<Self>,
+        reader: BufReader<tokio::io::ReadHalf<LocalStream>>,
+        mut write_half: tokio::io::WriteHalf<LocalStream>,
+        request: crate::control::ContentClientRequest,
+    ) {
+        let ceiling = self.max_content_len();
+        if request.body_len > ceiling {
+            // Refused without reading the body, so the channel is out of step
+            // and the connection ends here. One connection is one request, so
+            // there is nothing to resynchronise for.
+            let _ = write_line_half(
+                &mut write_half,
+                &ContentReply::error(
+                    ContentErrorCode::Bounds,
+                    format!(
+                        "this Station accepts at most {ceiling} bytes in one content; \
+                         the request declared {}",
+                        request.body_len
+                    ),
+                ),
+            )
+            .await;
+            return;
+        }
+        let address = match &request.route {
+            ControlRoute::Space { address } | ControlRoute::World { address, .. } => {
+                address.clone()
+            }
+            ControlRoute::Daemon => {
+                let _ = write_line_half(
+                    &mut write_half,
+                    &ContentReply::error(
+                        ContentErrorCode::Invalid,
+                        "a content call requires an explicit Space route",
+                    ),
+                )
+                .await;
+                return;
+            }
+        };
+
+        let expects_body = matches!(request.content, crate::control::ContentCall::Write { .. });
+        let (body, pump) = crate::control::upload_body(reader, request.body_len);
+        let bridge = self.clone();
+        let call = request.content.clone();
+        let work = tokio::task::spawn_blocking(move || {
+            bridge.content_call(&address, &call, expects_body.then_some(body))
+        });
+        // The pump has to run while the sealer consumes it, and the sealer is
+        // on another thread: awaiting them in sequence would deadlock at the
+        // first full channel.
+        let mut stopping = self.stop_tx.subscribe();
+        let (_, sealed) = tokio::join!(pump, work);
+        let (reply, payload) = match sealed {
+            Ok(answer) => answer,
+            Err(_) => (
+                ContentReply::error(ContentErrorCode::Storage, "the content call did not finish"),
+                Vec::new(),
+            ),
+        };
+        // A stop that landed mid-upload is reported rather than answered, so a
+        // caller does not read "written" from a process that is going away.
+        if *stopping.borrow_and_update() && !matches!(reply, ContentReply::ContentError { .. }) {
+            let _ = write_line_half(
+                &mut write_half,
+                &ContentReply::error(ContentErrorCode::Storage, "this Space is shutting down"),
+            )
+            .await;
+            return;
+        }
+        if write_line_half(&mut write_half, &reply).await.is_err() {
+            return;
+        }
+        if !payload.is_empty() {
+            let _ = write_half.write_all(&payload).await;
+            let _ = write_half.flush().await;
+        }
+    }
+
     async fn handle_conn(self: Arc<Self>, stream: LocalStream) {
         let _activity = self.track_activity();
 
         let (read_half, write_half) = tokio::io::split(stream);
         let mut reader = BufReader::new(read_half);
         let mut line = String::new();
-        if reader.read_line(&mut line).await.is_err() {
-            return;
+        {
+            // Bounded for the same reason the daemon's is: a header is a
+            // bounded thing, and an unbounded `read_line` is a memory attack
+            // that needs no authorization.
+            use tokio::io::AsyncReadExt;
+            let mut bounded = (&mut reader).take(crate::control::MAX_CONTROL_LINE_BYTES);
+            if bounded.read_line(&mut line).await.is_err() {
+                return;
+            }
         }
         let value = match serde_json::from_str::<serde_json::Value>(line.trim()) {
             Ok(value) => value,
@@ -1813,6 +2346,31 @@ impl SpaceBridge {
                 return;
             }
         };
+        if value.get("content").is_some() {
+            let request: crate::control::ContentClientRequest = match serde_json::from_value(value)
+            {
+                Ok(request) => request,
+                Err(error) => {
+                    let _ = write_line(
+                        write_half,
+                        &ContentReply::error(
+                            ContentErrorCode::Invalid,
+                            format!("bad content call: {error}"),
+                        ),
+                    )
+                    .await;
+                    return;
+                }
+            };
+            // `self` is cloned rather than moved: the activity guard taken at
+            // the top of this function borrows it for the whole call, and
+            // dropping it late is what keeps the idle timer honest about a
+            // long upload.
+            self.clone()
+                .serve_content(reader, write_half, request)
+                .await;
+            return;
+        }
         if value.get("call").is_some() {
             let crate::control::WorldClientRequest {
                 route,
@@ -2130,6 +2688,111 @@ impl SpaceBridge {
     }
 }
 
+/// Render a Body id the way the rest of the tree renders one.
+///
+/// The raw 16 bytes would arrive over this channel as a JSON list of sixteen
+/// numbers, which is a shape nothing else here uses and nothing can compare
+/// against a Body id printed anywhere else.
+fn render_body(body: &[u8; 16]) -> String {
+    replica::ids::BodyId::from_bytes(*body).render()
+}
+
+fn live_scope(scope: &runtime::transient::TransientScope) -> crate::control::LiveScope {
+    use crate::control::LiveScope;
+    use runtime::transient::TransientScope;
+    match scope {
+        TransientScope::IssueView { world, body } => LiveScope::IssueView {
+            world: world.clone(),
+            body: render_body(body),
+        },
+        TransientScope::DocumentView { world, body } => LiveScope::DocumentView {
+            world: world.clone(),
+            body: render_body(body),
+        },
+        TransientScope::TextCaret { world, body, field } => LiveScope::TextCaret {
+            world: world.clone(),
+            body: render_body(body),
+            field: field.clone(),
+        },
+        TransientScope::Typing { world, body, field } => LiveScope::Typing {
+            world: world.clone(),
+            body: render_body(body),
+            field: field.clone(),
+        },
+        TransientScope::ContentResidency { content } => LiveScope::ContentResidency {
+            content: data_encoding::HEXLOWER.encode(content),
+        },
+        TransientScope::CustomWorld { world, schema, key } => LiveScope::CustomWorld {
+            world: world.clone(),
+            schema: schema.clone(),
+            key: key.clone(),
+        },
+    }
+}
+
+fn caret_position(state: runtime::live::CaretState) -> crate::control::CaretPosition {
+    use crate::control::CaretPosition;
+    use runtime::live::CaretState;
+    match state {
+        CaretState::At(position) => CaretPosition::At { position },
+        CaretState::Drifted => CaretPosition::Drifted,
+        CaretState::Unresolved => CaretPosition::Unresolved,
+    }
+}
+
+fn transient_kind(kind: runtime::transient::TransientKind) -> &'static str {
+    use runtime::transient::TransientKind;
+    match kind {
+        TransientKind::Presence => "presence",
+        TransientKind::Caret => "caret",
+        TransientKind::Selection => "selection",
+        TransientKind::Typing => "typing",
+        TransientKind::Residency => "residency",
+    }
+}
+
+fn signal_body(signal: &runtime::planes::Signal) -> crate::control::SignalBody {
+    use crate::control::SignalBody;
+    use runtime::planes::{InviteKind, Signal};
+    match signal {
+        Signal::Ping { nonce } => SignalBody::Ping {
+            nonce: data_encoding::HEXLOWER.encode(nonce),
+        },
+        Signal::Acknowledge { nonce } => SignalBody::Acknowledge {
+            nonce: data_encoding::HEXLOWER.encode(nonce),
+        },
+        Signal::Attention { scope } => SignalBody::Attention {
+            scope: live_scope(scope),
+        },
+        Signal::SessionInvite { kind, scope } => SignalBody::SessionInvite {
+            invite: match kind {
+                InviteKind::Collaborate => "collaborate".into(),
+            },
+            scope: live_scope(scope),
+        },
+        Signal::FileOffer {
+            content,
+            plaintext_len,
+            display_name,
+            media_type,
+        } => SignalBody::FileOffer {
+            content: data_encoding::HEXLOWER.encode(content),
+            plaintext_len: *plaintext_len,
+            display_name: display_name.clone(),
+            media_type: media_type.clone(),
+        },
+        Signal::WorldSignal {
+            world,
+            schema,
+            payload,
+        } => SignalBody::WorldSignal {
+            world: world.clone(),
+            schema: schema.clone(),
+            payload_b64: data_encoding::BASE64.encode(payload),
+        },
+    }
+}
+
 fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::SystemTime::UNIX_EPOCH)
@@ -2218,6 +2881,57 @@ fn comms_options(
         progress_deadline: Duration::from_secs(10),
         route_lease: Duration::from_secs(120),
     }
+}
+
+/// A content id as it travels on the control channel: 32 bytes of lowercase
+/// hex, and nothing else accepted.
+fn parse_content_ref(raw: &str) -> Option<replica::ContentRef> {
+    let bytes = data_encoding::HEXLOWER.decode(raw.as_bytes()).ok()?;
+    Some(replica::ContentRef {
+        content_id: <[u8; 32]>::try_from(bytes.as_slice()).ok()?,
+    })
+}
+
+fn parse_operation_id(raw: &str) -> Option<[u8; 16]> {
+    let bytes = data_encoding::HEXLOWER.decode(raw.as_bytes()).ok()?;
+    <[u8; 16]>::try_from(bytes.as_slice()).ok()
+}
+
+fn invalid_content_id() -> ContentReply {
+    ContentReply::error(
+        ContentErrorCode::Invalid,
+        "a content id is 32 bytes of lowercase hex",
+    )
+}
+
+/// Translate a content refusal into the vocabulary a local surface maps to its
+/// own status codes.
+///
+/// `Unknown` deliberately says nothing about whether the content exists
+/// elsewhere: a caller that could tell "not here" from "never heard of it"
+/// would have an oracle for what a Space contains, answerable by guessing ids.
+fn content_refusal(error: &runtime::content_host::ContentHostError) -> ContentReply {
+    use runtime::content_host::ContentHostError as E;
+    let (code, message) = match error {
+        E::Denied { demand } => (
+            ContentErrorCode::Denied,
+            format!("refused: {}", String::from_utf8_lossy(demand)),
+        ),
+        E::Unknown => (
+            ContentErrorCode::Unknown,
+            "no descriptor for that content here".to_string(),
+        ),
+        E::NotResident => (
+            ContentErrorCode::NotResident,
+            "the descriptor is here and the bytes are not".to_string(),
+        ),
+        E::Bounds => (
+            ContentErrorCode::Bounds,
+            "the range is outside what this call may return".to_string(),
+        ),
+        other => (ContentErrorCode::Storage, other.to_string()),
+    };
+    ContentReply::error(code, message)
 }
 
 async fn write_line<T: serde::Serialize>(
@@ -2361,4 +3075,196 @@ pub async fn run_space_bridge_with_packages(
         .await?
         .run()
         .await
+}
+
+#[cfg(test)]
+mod tests {
+    use runtime::live::LiveNarrow;
+    use runtime::transient::TransientScope;
+
+    const BODY: [u8; 16] = [7u8; 16];
+    const OTHER: [u8; 16] = [8u8; 16];
+
+    #[test]
+    fn narrowing_to_an_issue_keeps_every_scope_over_its_body() {
+        // What a scoped read has to answer with. A person reading the issue, a
+        // caret in its description and a typing flag in its title are three
+        // different scopes over one Body, and matching by scope equality — as
+        // the transient table's own filter does — would hand back the first and
+        // silently drop the two a caret surface exists to draw.
+        let world = crate::world::contract::world_id().as_str().to_string();
+        let over_the_body = [
+            TransientScope::IssueView {
+                world: world.clone(),
+                body: BODY,
+            },
+            TransientScope::DocumentView {
+                world: world.clone(),
+                body: BODY,
+            },
+            TransientScope::TextCaret {
+                world: world.clone(),
+                body: BODY,
+                field: "description".into(),
+            },
+            TransientScope::Typing {
+                world: world.clone(),
+                body: BODY,
+                field: "title".into(),
+            },
+        ];
+        for scope in &over_the_body {
+            assert!(
+                LiveNarrow::Body {
+                    world: &world,
+                    body: BODY
+                }
+                .admits(scope),
+                "{scope:?} is about that Body and was dropped"
+            );
+        }
+    }
+
+    #[test]
+    fn narrowing_to_an_issue_admits_nothing_about_another_body() {
+        let world = crate::world::contract::world_id().as_str().to_string();
+        // A Body is addressed by World *and* id: operation ids collide across
+        // documents of one activation, so a match on the id alone is not a
+        // lookup miss, it is a plausible and silently wrong answer.
+        let elsewhere = [
+            TransientScope::IssueView {
+                world: world.clone(),
+                body: OTHER,
+            },
+            TransientScope::TextCaret {
+                world: "com.example.other".into(),
+                body: BODY,
+                field: "description".into(),
+            },
+            TransientScope::ContentResidency { content: [0u8; 32] },
+            TransientScope::CustomWorld {
+                world: world.clone(),
+                schema: "s".into(),
+                key: "k".into(),
+            },
+        ];
+        for scope in &elsewhere {
+            assert!(
+                !LiveNarrow::Body {
+                    world: &world,
+                    body: BODY
+                }
+                .admits(scope),
+                "{scope:?} is not about that Body and was kept"
+            );
+        }
+    }
+
+    #[test]
+    fn an_issue_is_named_by_its_doc_id_and_an_alias_names_nothing() {
+        // The derivation is a hash of the string as given. A viewer that sent
+        // `ENG-12` would ask about a Body nothing publishes under and be
+        // answered an empty table for ever, with nothing anywhere to say so.
+        let doc = "iss_01jz0000000000000000000000";
+        assert_ne!(
+            crate::world::contract::issue_body_id(doc).as_bytes(),
+            crate::world::contract::issue_body_id("ENG-12").as_bytes()
+        );
+    }
+}
+#[cfg(test)]
+/// Who a World's nudges actually reach.
+mod nudge_delivery {
+    use crate::orbital::WorldNudge;
+    use mechanics::ids::StationId;
+
+    fn station(seed: u8) -> StationId {
+        StationId::from_device(&mechanics::crypto::device_from_seed(&[seed; 32])).expect("station")
+    }
+
+    fn nudge(actor: &str) -> WorldNudge {
+        WorldNudge {
+            actor: actor.into(),
+            schema: "assigned".into(),
+            payload: vec![1, 2, 3],
+        }
+    }
+
+    /// The same helper the delivery path uses. Free rather than a method so it
+    /// can be exercised without a Station, a transport and a docked Session.
+    fn reachable<'a>(
+        here: &'a [(StationId, String)],
+        nudges: &'a [WorldNudge],
+    ) -> Vec<(&'a StationId, &'a WorldNudge)> {
+        super::SpaceBridge::reachable(here, nudges)
+    }
+
+    #[test]
+    fn a_nudge_reaches_only_sessions_belonging_to_the_actor_it_names() {
+        // Presence is the gate. Somebody who is not here is not queued for, and
+        // somebody who is here under a different actor is not somebody else's
+        // notification.
+        let here = vec![
+            (station(1), "act_alice".to_string()),
+            (station(2), "act_bob".to_string()),
+        ];
+        let nudges = vec![nudge("act_bob")];
+        let sent = reachable(&here, &nudges);
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].0, &station(2));
+    }
+
+    #[test]
+    fn an_actor_with_nobody_here_reaches_nobody_and_is_not_an_error() {
+        // The durable record is already committed and already converging, and it
+        // is the absent peer's path. Queueing here would make this a mailbox.
+        let here = vec![(station(1), "act_alice".to_string())];
+        assert!(reachable(&here, &[nudge("act_carol")]).is_empty());
+        assert!(reachable(&[], &[nudge("act_alice")]).is_empty());
+    }
+
+    #[test]
+    fn two_devices_of_one_person_each_hear_once() {
+        // Which is what having two devices means. The alternative — picking one
+        // — would mean the notification landed on whichever machine the fan-out
+        // happened to see first.
+        let here = vec![
+            (station(1), "act_alice".to_string()),
+            (station(2), "act_alice".to_string()),
+        ];
+        let nudges = [nudge("act_alice")];
+        let sent = reachable(&here, &nudges);
+        assert_eq!(sent.len(), 2);
+        assert_ne!(sent[0].0, sent[1].0);
+    }
+
+    #[test]
+    fn several_nudges_each_find_their_own_actor() {
+        // A comment on an issue with three people on it is three nudges, and
+        // each has to land on its own — a fan-out that matched the first actor
+        // and stopped would tell one person and silently drop the rest.
+        let here = vec![
+            (station(1), "act_alice".to_string()),
+            (station(2), "act_bob".to_string()),
+            (station(3), "act_carol".to_string()),
+        ];
+        let nudges = vec![nudge("act_alice"), nudge("act_carol")];
+        let sent = reachable(&here, &nudges);
+        assert_eq!(sent.len(), 2);
+        let reached: Vec<_> = sent.iter().map(|(s, _)| *s).collect();
+        assert!(reached.contains(&&station(1)));
+        assert!(reached.contains(&&station(3)));
+        assert!(!reached.contains(&&station(2)));
+    }
+
+    #[test]
+    fn actor_matching_is_equality_and_not_a_prefix() {
+        // An actor id is a canonical string. Anything looser here would deliver
+        // one person's notifications to another whose id happened to start the
+        // same way, which is a real shape for base32 identifiers.
+        let here = vec![(station(1), "act_alice".to_string())];
+        assert!(reachable(&here, &[nudge("act_ali")]).is_empty());
+        assert!(reachable(&here, &[nudge("act_alicexx")]).is_empty());
+        assert_eq!(reachable(&here, &[nudge("act_alice")]).len(), 1);
+    }
 }

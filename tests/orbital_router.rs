@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use issues::dto::Priority;
+use issues::dto::{CommentAnchorState, Priority};
 use issues::ids::{ActorId, DeviceId, SystemUlidSource};
 use issues::IssuesWorld;
 use issues_app::{
@@ -156,6 +156,61 @@ fn the_router_maps_the_control_surface_to_the_issues_world() {
         },
         &facts(),
     );
+
+    // A range-attached comment routes too: the adapter mints the comment id the
+    // World demands for it, and the projection resolves the span on the read.
+    let (resp, changed) = router.route(
+        Request::CommentAt {
+            reff: "ENG-1".into(),
+            body: "this word is wrong".into(),
+            field: "description".into(),
+            start: 0,
+            end: Some(4),
+            reply_to: None,
+        },
+        &facts(),
+    );
+    assert!(changed);
+    assert!(matches!(resp, Response::Ref { .. }));
+    let (resp, _) = router.route(
+        Request::IssueView {
+            reff: "ENG-1".into(),
+        },
+        &facts(),
+    );
+    let view = match resp {
+        Response::Issue(v) => v,
+        other => panic!("expected Issue, got {other:?}"),
+    };
+    let attached = view
+        .comments
+        .iter()
+        .find(|c| c.anchor.is_some())
+        .expect("the attached comment");
+    assert_eq!(attached.body, "this word is wrong");
+    let anchor = attached.anchor.as_ref().expect("anchor");
+    assert_eq!(anchor.field, "description");
+    assert_eq!(
+        anchor.state,
+        CommentAnchorState::At { start: 0, end: 4 },
+        "the span names `body` in `body text`"
+    );
+
+    // A field the algebra cannot move a position inside is a typed refusal, not
+    // a comment stored with an anchor nothing can resolve.
+    let (resp, changed) = router.route(
+        Request::CommentAt {
+            reff: "ENG-1".into(),
+            body: "the title is wrong".into(),
+            field: "title".into(),
+            start: 0,
+            end: Some(3),
+            reply_to: None,
+        },
+        &facts(),
+    );
+    assert!(!changed);
+    assert!(matches!(resp, Response::Error { .. }));
     let (resp, changed) = router.route(
         Request::IssueStart {
             reff: "ENG-1".into(),

@@ -107,18 +107,18 @@ struct PriorNeighborRecord {
 }
 
 impl From<PriorNeighborRecord> for NeighborRecord {
-    fn from(v1: PriorNeighborRecord) -> Self {
+    fn from(prior: PriorNeighborRecord) -> Self {
         NeighborRecord {
-            station: v1.station,
-            epoch: v1.epoch,
-            sequence: v1.sequence,
-            frontier_root: v1.frontier_root,
-            frontier_count: v1.frontier_count,
-            routes: v1.routes,
-            reachability: v1.reachability,
-            failures: v1.failures,
-            next_attempt_ms: v1.next_attempt_ms,
-            pending: v1.pending,
+            station: prior.station,
+            epoch: prior.epoch,
+            sequence: prior.sequence,
+            frontier_root: prior.frontier_root,
+            frontier_count: prior.frontier_count,
+            routes: prior.routes,
+            reachability: prior.reachability,
+            failures: prior.failures,
+            next_attempt_ms: prior.next_attempt_ms,
+            pending: prior.pending,
             last_seen_ms: 0,
         }
     }

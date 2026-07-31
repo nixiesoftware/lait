@@ -11,7 +11,7 @@
 use std::time::Duration;
 
 use comms::policy::Network;
-use comms::{Alpn, DefaultTransport, GossipEvent, Topic, Transport};
+use comms::{Alpn, DefaultTransport, GossipEvent, Protocols, Topic, Transport};
 use iroh::{endpoint::presets, Endpoint, RelayMap, RelayMode, RelayUrl, SecretKey};
 use iroh_relay::tls::CaRootsConfig;
 
@@ -33,10 +33,10 @@ async fn isolated_pair(
     b_seed: u8,
     alpns: &[Alpn],
 ) -> (DefaultTransport, DefaultTransport) {
-    let a = DefaultTransport::new(&[a_seed; 32], &Network::Isolated, alpns)
+    let a = DefaultTransport::new(&[a_seed; 32], &Network::Isolated, Protocols::framed(alpns))
         .await
         .expect("build A");
-    let b = DefaultTransport::new(&[b_seed; 32], &Network::Isolated, alpns)
+    let b = DefaultTransport::new(&[b_seed; 32], &Network::Isolated, Protocols::framed(alpns))
         .await
         .expect("build B");
     let a_addrs = a.advertised_addrs();
@@ -142,7 +142,7 @@ async fn framing_interops_with_legacy_read_msg_bytes() {
         conn.closed().await;
     });
 
-    let dialer = DefaultTransport::new(&[81u8; 32], &Network::Isolated, &[])
+    let dialer = DefaultTransport::new(&[81u8; 32], &Network::Isolated, Protocols::default())
         .await
         .expect("build dialer");
     dialer.learn(
@@ -326,9 +326,13 @@ async fn gossip_room_roundtrip() {
 async fn shutdown_unblocks_accept() {
     use std::sync::Arc;
     let a = Arc::new(
-        DefaultTransport::new(&[9u8; 32], &Network::Isolated, &[SYNC_ALPN])
-            .await
-            .expect("build"),
+        DefaultTransport::new(
+            &[9u8; 32],
+            &Network::Isolated,
+            Protocols::framed(&[SYNC_ALPN]),
+        )
+        .await
+        .expect("build"),
     );
     let parked = {
         let a = a.clone();

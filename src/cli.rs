@@ -694,6 +694,193 @@ impl world_interface::ClientHost for PackageClientHost {
             })
         })
     }
+
+    fn call_content<'a>(
+        &'a self,
+        request: world_interface::HostContentRequest,
+    ) -> world_interface::ClientFuture<'a, serde_json::Value> {
+        Box::pin(async move {
+            let fail =
+                |error: anyhow::Error| world_interface::InterfaceError::new(format!("{error:#}"));
+            let address = orbit_address_for_home(&self.home).map_err(&fail)?;
+            self.scope
+                .authorize(&address)
+                .map_err(|error| fail(anyhow!("{error:#}")))?;
+            ensure_daemon(&self.home).await.map_err(&fail)?;
+            let daemon = crate::daemon::LaitDaemonClient::current().map_err(&fail)?;
+            let route = crate::control::station_route(address);
+            match request {
+                world_interface::HostContentRequest::Write { path } => {
+                    content_write(daemon.home(), route, &path).await
+                }
+                world_interface::HostContentRequest::Read {
+                    content,
+                    destination,
+                } => content_read(daemon.home(), route, &content, &destination).await,
+                world_interface::HostContentRequest::Stat { content } => {
+                    content_stat(daemon.home(), route, &content).await
+                }
+            }
+        })
+    }
+}
+
+/// Stream a local file onto the content plane.
+///
+/// Read in pieces and forwarded as they arrive: a file larger than memory is
+/// the case this whole plane exists for, so materialising it here would defeat
+/// the purpose one layer above where it matters.
+async fn content_write(
+    home: &Path,
+    route: crate::control::ControlRoute,
+    path: &Path,
+) -> Result<serde_json::Value, world_interface::InterfaceError> {
+    use tokio::io::AsyncReadExt;
+
+    let fail = |message: String| world_interface::InterfaceError::new(message);
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .map_err(|e| fail(format!("could not read {}: {e}", path.display())))?;
+    let declared = file
+        .metadata()
+        .await
+        .map_err(|e| fail(format!("could not measure {}: {e}", path.display())))?
+        .len();
+    if declared == 0 {
+        return Err(fail(format!(
+            "{} is empty — nothing to attach",
+            path.display()
+        )));
+    }
+    let mut operation = [0u8; 16];
+    getrandom::fill(&mut operation).map_err(|e| fail(format!("operation id: {e}")))?;
+    let mut upload = crate::control::ContentUpload::open(home, route, operation, None, declared)
+        .await
+        .map_err(|e| fail(format!("{e:#}")))?;
+    let mut buffer = vec![0u8; 256 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .await
+            .map_err(|e| fail(format!("could not read {}: {e}", path.display())))?;
+        if read == 0 {
+            break;
+        }
+        upload
+            .push(&buffer[..read])
+            .await
+            .map_err(|e| fail(format!("{e:#}")))?;
+    }
+    match upload.finish().await.map_err(|e| fail(format!("{e:#}")))? {
+        crate::control::ContentReply::ContentWritten {
+            content,
+            plaintext_len,
+        } => Ok(serde_json::json!({ "content": content, "size": plaintext_len })),
+        crate::control::ContentReply::ContentError { message, .. } => Err(fail(message)),
+        other => Err(fail(format!("unexpected answer: {other:?}"))),
+    }
+}
+
+/// Stream a committed content to a local path.
+///
+/// Written to a temporary beside the destination and renamed, so an interrupted
+/// save leaves either the old file or none — never a half-written one under the
+/// name somebody will open.
+async fn content_read(
+    home: &Path,
+    route: crate::control::ControlRoute,
+    content: &str,
+    destination: &Path,
+) -> Result<serde_json::Value, world_interface::InterfaceError> {
+    use tokio::io::AsyncWriteExt;
+
+    let fail = |message: String| world_interface::InterfaceError::new(message);
+    let temporary = destination.with_extension("lait-partial");
+    let mut file = tokio::fs::File::create(&temporary)
+        .await
+        .map_err(|e| fail(format!("could not write {}: {e}", temporary.display())))?;
+    let mut offset = 0u64;
+    loop {
+        let (reply, bytes) = crate::control::content_call(
+            home,
+            &crate::control::content_request(
+                route.clone(),
+                crate::control::ContentCall::Read {
+                    content: content.to_string(),
+                    offset,
+                    len: runtime::content_host::MAX_RANGE_BYTES as u64,
+                },
+            ),
+        )
+        .await
+        .map_err(|e| fail(format!("{e:#}")))?;
+        match reply {
+            crate::control::ContentReply::ContentStream { .. } => {}
+            crate::control::ContentReply::ContentError { message, .. } => {
+                let _ = tokio::fs::remove_file(&temporary).await;
+                return Err(fail(message));
+            }
+            other => {
+                let _ = tokio::fs::remove_file(&temporary).await;
+                return Err(fail(format!("unexpected answer: {other:?}")));
+            }
+        }
+        if bytes.is_empty() {
+            break;
+        }
+        file.write_all(&bytes)
+            .await
+            .map_err(|e| fail(format!("could not write {}: {e}", temporary.display())))?;
+        offset += bytes.len() as u64;
+    }
+    file.flush().await.ok();
+    // Durable before it is visible: the rename is what publishes the file, and
+    // renaming an unflushed file publishes a name over bytes that may not be
+    // there after a crash.
+    file.sync_all()
+        .await
+        .map_err(|e| fail(format!("could not flush {}: {e}", temporary.display())))?;
+    drop(file);
+    tokio::fs::rename(&temporary, destination)
+        .await
+        .map_err(|e| fail(format!("could not write {}: {e}", destination.display())))?;
+    Ok(serde_json::json!({ "size": offset }))
+}
+
+async fn content_stat(
+    home: &Path,
+    route: crate::control::ControlRoute,
+    content: &str,
+) -> Result<serde_json::Value, world_interface::InterfaceError> {
+    let fail = |message: String| world_interface::InterfaceError::new(message);
+    let (reply, _) = crate::control::content_call(
+        home,
+        &crate::control::content_request(
+            route,
+            crate::control::ContentCall::Stat {
+                content: content.to_string(),
+            },
+        ),
+    )
+    .await
+    .map_err(|e| fail(format!("{e:#}")))?;
+    match reply {
+        crate::control::ContentReply::ContentStatus {
+            content,
+            plaintext_len,
+            chunk_count,
+            resident_chunks,
+            pinned,
+        } => Ok(serde_json::json!({
+            "content": content,
+            "size": plaintext_len,
+            "chunk_count": chunk_count,
+            "resident_chunks": resident_chunks,
+            "pinned": pinned,
+        })),
+        crate::control::ContentReply::ContentError { message, .. } => Err(fail(message)),
+        other => Err(fail(format!("unexpected answer: {other:?}"))),
+    }
 }
 
 /// Emit a complete product-owned presentation without inspecting its response.
@@ -1367,6 +1554,45 @@ pub fn print_response(resp: &Response, out: Out) -> i32 {
                     _ => ("\u{25CB}", ansi::DIM),
                 };
                 println!("{} {}  ({})", paint(out.color, code, glyph), p.nick, p.id);
+            }
+            0
+        }
+        Response::Live {
+            generation,
+            partial,
+            entries,
+        } => {
+            if entries.is_empty() {
+                println!("(nobody is doing anything here right now)");
+            }
+            for entry in entries {
+                let uncertain = if entry.uncertain { " (uncertain)" } else { "" };
+                println!(
+                    "{}  {}  {}ms{uncertain}",
+                    entry.actor, entry.kind, entry.age_ms
+                );
+            }
+            println!("generation {generation}");
+            if *partial {
+                // Loud, because an incomplete awareness surface that says
+                // nothing is a confident lie about who is here.
+                eprintln!("this node is not hearing from everyone it could be");
+            }
+            0
+        }
+        Response::LiveUnchanged { generation } => {
+            println!("unchanged at generation {generation}");
+            0
+        }
+        Response::Signals { signals, dropped } => {
+            if signals.is_empty() {
+                println!("(no signals)");
+            }
+            for entry in signals {
+                println!("{}  {:?}", entry.actor, entry.signal);
+            }
+            if *dropped > 0 {
+                eprintln!("{dropped} signal(s) were dropped for want of room");
             }
             0
         }

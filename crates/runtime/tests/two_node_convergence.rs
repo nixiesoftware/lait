@@ -24,7 +24,7 @@ use replica::{
 };
 use replica::{CommitAuthorization, StaticAuthorizer};
 use runtime::contact::{
-    authority_record_hash, authority_set_hash, body_chunk_hash, manifest_page_hash,
+    authority_record_hash, authority_set_hash, body_chunk_hash, manifest_node_hash,
     manifest_root_ref, ContactFrame, ContactId, InitiatorReceiver, InitiatorState, Progress,
     ReceivedMaterial,
 };
@@ -137,6 +137,7 @@ fn commit_votes(r: &mut Replica, request: [u8; 16], delta: i64) {
             ),
         ],
         &[(note_key(), binding())],
+        &[],
     )
     .unwrap();
 }
@@ -150,7 +151,7 @@ fn frame_transfer(contact: &ContactId, tx: &BodyTransaction, payload: &[u8]) -> 
     let set_hash = authority_set_hash(&record_hashes);
     let root_bytes = b"convergence-manifest-root".to_vec();
     let root = manifest_root_ref(&root_bytes);
-    let page_bytes = b"page".to_vec();
+    let node_bytes = b"node".to_vec();
     let commitment = replica::body::ContentCommitment::over_protected_payload(payload).as_bytes();
 
     let mut frames = vec![
@@ -172,11 +173,10 @@ fn frame_transfer(contact: &ContactId, tx: &BodyTransaction, payload: &[u8]) -> 
         ContactFrame::ManifestOffer {
             root_bytes: root_bytes.clone(),
         },
-        ContactFrame::ManifestPage {
+        ContactFrame::ManifestNode {
             root,
-            page_index: 0,
-            page_hash: manifest_page_hash(&page_bytes),
-            page_bytes,
+            node_hash: manifest_node_hash(&node_bytes),
+            node_bytes,
         },
         ContactFrame::BodyChunk {
             transaction: tx.id(),
@@ -322,7 +322,7 @@ fn a_tampered_transfer_never_reaches_the_engine() {
         )
         .is_err());
     assert!(
-        b.read_collaborative(&note_key()).is_none(),
+        b.read_collaborative(&note_key()).is_err(),
         "nothing reached the engine"
     );
 }

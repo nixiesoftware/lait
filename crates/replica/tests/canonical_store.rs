@@ -2,7 +2,7 @@
 //!
 //! Proves the durable Replica addresses **canonical objects** — signed
 //! transaction records, sealed protected Body payloads, idempotency receipts,
-//! and Manifest root/pages — rather than one opaque engine snapshot; that no
+//! and Manifest root/index — rather than one opaque engine snapshot; that no
 //! plaintext Body payload is at rest; that receipts and replay survive a cold
 //! reopen; and that exact incorporation (signed transaction + descriptor-bound
 //! payloads) converges, refuses illegitimate material, retains unknown material
@@ -158,6 +158,7 @@ fn commit(
         label,
         ops,
         bindings,
+        &[],
     )
 }
 
@@ -242,6 +243,7 @@ fn a_durable_commit_survives_cold_reopen_with_receipts_and_replay() {
             "bump",
             &counter_ops(&body(1), 5),
             &[(body(1), collab_binding())],
+            &[],
         )
         .unwrap_err();
     assert_eq!(err, ReplicaCommitError::RequestIdConflict);
@@ -268,27 +270,27 @@ fn the_store_addresses_canonical_objects_not_an_engine_snapshot() {
     .unwrap();
     drop(r);
 
-    // Inspect the raw store: the current manifest must name at least the
+    // Inspect the raw store: the required set must name at least the
     // transaction record, one protected Body object, the receipt, and the
-    // manifest root/page — and every stored byte object must decode as one of
-    // those canonical forms (no whole-engine snapshot object).
+    // manifest root — and every required object must decode as one of those
+    // canonical forms or as an index node (no whole-engine snapshot object).
     let store = fabric::JournaledStore::open(&dir).unwrap();
-    let manifest = store.manifest().unwrap().clone();
+    let required = store.required_objects().unwrap();
     assert!(
-        manifest.objects.len() >= 4,
+        required.len() >= 4,
         "transaction + protected body + receipt + manifest objects, got {}",
-        manifest.objects.len()
+        required.len()
     );
     let mut classified = 0;
-    for obj in &manifest.objects {
+    for obj in &required {
         let bytes = store.read_object(obj).unwrap();
         let is_tx = replica::BodyTransaction::decode_canonical(&bytes).is_ok();
         let is_receipt = replica::RequestReceipt::decode_canonical(&bytes).is_ok();
         let is_root = replica::ManifestRoot::decode_canonical(&bytes).is_ok();
-        let is_page = replica::ManifestPage::decode_canonical(&bytes).is_ok();
+        let is_node = fabric::journal::index::IndexNode::decode_canonical(&bytes).is_ok();
         let is_protected = mechanics::crypto::body_epoch_id(&bytes) == Some(EPOCH);
         assert!(
-            is_tx || is_receipt || is_root || is_page || is_protected,
+            is_tx || is_receipt || is_root || is_node || is_protected,
             "an object is none of the canonical forms"
         );
         classified += 1;
@@ -301,7 +303,7 @@ fn the_store_addresses_canonical_objects_not_an_engine_snapshot() {
             );
         }
     }
-    assert_eq!(classified, manifest.objects.len());
+    assert_eq!(classified, required.len());
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -417,7 +419,7 @@ fn illegitimate_or_tampered_material_never_reaches_the_engine() {
         b.incorporate(&ctx, tx, payloads, &DenyAll),
         Err(ReplicaCommitError::Illegitimate(_))
     ));
-    assert!(b.read_collaborative(&body(4)).is_none());
+    assert!(b.read_collaborative(&body(4)).is_err());
 
     // Tampered payload: the commitment binding refuses it.
     let mut tampered = payloads.clone();
@@ -426,7 +428,7 @@ fn illegitimate_or_tampered_material_never_reaches_the_engine() {
         b.incorporate(&ctx, tx, &tampered, &WriterAuthorized),
         Err(ReplicaCommitError::Illegitimate(_))
     ));
-    assert!(b.read_collaborative(&body(4)).is_none());
+    assert!(b.read_collaborative(&body(4)).is_err());
 
     // A payload keyed to a Body the transaction has no descriptor for.
     let stray = vec![(body(9), payloads[0].1.clone())];
@@ -476,7 +478,7 @@ fn unknown_world_material_is_retained_opaquely_and_forwarded_byte_identically() 
     assert!(outcome.advanced(), "opaque retention advances the frontier");
     assert!(b.is_opaque(&body(5)));
     assert!(
-        b.read_collaborative(&body(5)).is_none() && b.read(&body(5)).is_none(),
+        b.read_collaborative(&body(5)).is_err() && b.read(&body(5)).is_none(),
         "opaque material has no interpreted view"
     );
 
@@ -538,7 +540,7 @@ fn a_missing_key_epoch_takes_the_opaque_branch() {
         .unwrap();
     assert_eq!(outcome.unsupported_retained, 1);
     assert!(b.is_opaque(&body(6)));
-    assert!(b.read_collaborative(&body(6)).is_none());
+    assert!(b.read_collaborative(&body(6)).is_err());
     let _ = std::fs::remove_dir_all(&dir_a);
 }
 

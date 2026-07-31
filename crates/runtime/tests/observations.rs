@@ -89,6 +89,7 @@ impl World for KvWorld {
         let (key, value) = text.split_once('=').ok_or(WorldError::InvalidRequest)?;
         let body = self.body(key);
         Ok(WorldEffect {
+            content_refs: Vec::new(),
             demand: any_demand(),
             operations: vec![(
                 body.clone(),
@@ -181,6 +182,8 @@ fn runtime_at(root: &std::path::Path) -> Runtime {
         implementation_version: WorldVersion(1),
         schemas: world.schemas().to_vec(),
         limits: WorldLimits::default(),
+        scope_schemas: Vec::new(),
+        signal_schemas: Vec::new(),
     };
     let registry = RuntimeBuilder::new()
         .register(reg, Arc::new(world))
@@ -201,6 +204,8 @@ fn station_with_capacity(root: &std::path::Path, capacity: usize) -> Station {
         .form_space(SpaceFormationOptions::default())
         .unwrap()
         .activate(ActivationOptions {
+            planes: Default::default(),
+            content: Default::default(),
             drain_deadline: Duration::from_secs(5),
             comms: None,
             observation_capacity: capacity,
@@ -417,6 +422,101 @@ fn dormancy_terminates_streams_typed_and_concurrent_sessions_both_receive() {
     assert_eq!(
         stream2.try_next(),
         Err(ObservationStreamError::StationDormant)
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_live_station_can_hold_content_and_reclaims_a_dead_run_at_activation() {
+    // The content plane was unreachable: `ResidentCache::open` and
+    // `ContentHost::new` had no production caller, so everything plan 13 built
+    // could be exercised only from a test that constructed them by hand.
+    // Activation opens one cache per Station, and one is the operative number —
+    // two caches over one directory would sweep each other's staging.
+    use runtime::content_host::{ContentAction, ContentPolicy};
+
+    let root = temp_root();
+    let rt = runtime_at(&root);
+    let station = rt
+        .form_space(SpaceFormationOptions::default())
+        .unwrap()
+        .activate(ActivationOptions::offline())
+        .unwrap();
+
+    // Leave behind exactly what a killed run leaves: a staging slot and an
+    // operation lease that no live transfer holds.
+    let host = station.content();
+    let cache = host.cache();
+    let dead = [0xEEu8; 16];
+    cache.append_staged(&dead, 0, 0, b"half a chunk").unwrap();
+    let orphan = replica::journal::object_content_hash(b"orphan");
+    cache.install(&orphan, b"orphan", b"proof").unwrap();
+    cache
+        .lease(&replica::journal::cache::Lease::operation(dead, orphan))
+        .unwrap();
+    assert!(cache.staged_bytes() > 0);
+    assert!(cache.is_held(&orphan).unwrap());
+    let space_id = station.space_id().clone();
+    station.go_dormant().expect("dormant");
+
+    // Reactivating is what says the operation is over.
+    let station = rt
+        .orbit(&space_id)
+        .unwrap()
+        .activate(ActivationOptions::offline())
+        .unwrap();
+    let host = station.content();
+    let cache = host.cache();
+    assert_eq!(cache.staged_bytes(), 0, "a dead run's staging is reclaimed");
+    assert!(
+        !cache.is_held(&orphan).unwrap(),
+        "and its operation lease is released"
+    );
+
+    // And the plane works: ingest through the real host, read it back.
+    struct Keys;
+    impl runtime::content_host::ContentKeys for Keys {
+        fn sealing_key(&self) -> Option<AuthorizedBodyKey> {
+            Some(AuthorizedBodyKey::for_authorized_epoch(
+                [3u8; 16], [4u8; 32],
+            ))
+        }
+        fn opening_key(&self, _epoch: &[u8; 16]) -> Option<AuthorizedBodyKey> {
+            Some(AuthorizedBodyKey::for_authorized_epoch(
+                [3u8; 16], [4u8; 32],
+            ))
+        }
+    }
+    let space = station.space_id().clone();
+    let allow = |_: ContentAction| Ok(());
+    let policy = ContentPolicy {
+        space: &space,
+        keys: Arc::new(Keys),
+        authorize: &allow,
+        max_content_len: u64::MAX,
+    };
+    let signer = replica::SeedSigner(&WRITER_SEED);
+    let ctx = replica::CommitContext {
+        space: &space,
+        signer: &signer,
+        authority_frontier: AuthorityFrontier::from_canonical_bytes(vec![9]),
+    };
+    let plaintext = vec![7u8; 5_000];
+    let content = station
+        .content()
+        .ingest(
+            &policy,
+            [1u8; 16],
+            &mut std::io::Cursor::new(plaintext.clone()),
+            &ctx,
+        )
+        .expect("ingest through a live Station");
+    assert_eq!(
+        station
+            .content()
+            .read_range(&policy, &content, 0, plaintext.len())
+            .unwrap(),
+        plaintext
     );
     let _ = std::fs::remove_dir_all(&root);
 }

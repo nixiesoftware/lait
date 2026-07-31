@@ -25,8 +25,17 @@ pub mod journal {
     pub use ::journal::*;
 }
 
+pub mod causal;
+pub use causal::{
+    AnchorResolution, ArtifactRef, BodyMaterial, CausalError, CausalRelation, CheckpointPolicy,
+    FabricAnchor, FabricArtifact, FabricVersion, ImportStatus, OpHead, CAUSAL_FORMAT_VERSION,
+    MAX_HEADS,
+};
+pub use fabric::{is_implemented_type_tag, is_reserved_type_tag};
 pub use fabric::{
     BodyExport, CausalToken, CollaborativeView, CrdtFabric, Fabric, FabricCommitReceipt,
-    FabricError, FabricKey, FabricOp, FabricTransactionRequest, ListElement,
+    FabricError, FabricKey, FabricOp, FabricTransactionRequest, ListElement, ProjectionError,
 };
-pub use journal::{FaultInjector, JournaledStore, ObjectRef, StoreManifest, FAULT_POINTS};
+pub use journal::{
+    CallerIndex, FaultInjector, JournaledStore, ObjectRef, StoreManifest, FAULT_POINTS,
+};

@@ -33,11 +33,37 @@ pub const MAX_REACTION_EMOJI_BYTES: usize = 32;
 /// The largest accepted estimate. Every scale humans use tops out far below
 /// this; the cap exists so a typo cannot become a permanent register.
 pub const MAX_ESTIMATE: u32 = 1000;
-/// Attachment bounds (CREATE-5): inline sealed records riding the issue Body
-/// and its existing sync/E2EE. Deliberately tight — the content-addressed
-/// blob store is the large-file follow-on, not this.
-pub const MAX_ATTACHMENT_BYTES: usize = 256 * 1024;
+/// How many files one issue may carry.
+///
+/// Kept, and now enforced against the raw record map rather than the decoded
+/// list. That is a real change: a record this build cannot decode used to
+/// occupy a slot without counting toward the limit, could never be removed
+/// through the product surface, and stayed fetchable by id. Counting the raw
+/// map makes the cap mean what it says.
 pub const MAX_ATTACHMENTS_PER_ISSUE: usize = 8;
+
+/// The largest inline attachment this build will still *read*.
+///
+/// The write path is gone: an attachment is a `ContentRef` now, and its bytes
+/// live on the content plane. This bound remains because records written before
+/// the cutover are still in Bodies in the field, and a reader that refused them
+/// would lose files rather than migrate them.
+///
+/// It is not a policy an operator tunes. It is the shape of what was already
+/// written, and it can only be removed when no such record can exist.
+pub const MAX_LEGACY_ATTACHMENT_BYTES: usize = 256 * 1024;
+/// The longest attachment display name, in UTF-8 bytes.
+///
+/// A display name is shown, synced, and — the reason for a bound rather than a
+/// convention — offered as the file name when someone saves the attachment.
+/// Sanitising at that moment is what keeps the write safe, but sanitising is
+/// downstream of convergence: an unbounded name has already reached every peer
+/// by then. The engine legitimizes, so the name is bounded where it enters.
+///
+/// Sits under [`world_interface::destination::MAX_DISPLAY_NAME_BYTES`] so a
+/// name that was accepted here always survives sanitising with its extension
+/// intact.
+pub const MAX_ATTACHMENT_NAME_BYTES: usize = 180;
 /// The triage outcomes, frozen.
 pub const TRIAGE_OUTCOMES: [&str; 3] = ["accepted", "declined", "duplicate"];
 /// The self-reported health labels (project updates, initiatives).
@@ -114,6 +140,77 @@ pub fn demand_read() -> Vec<u8> {
     AuthorizationDemand::require(space_cap("space.issue.read"), space_resource())
         .encode_canonical()
         .expect("canonical read demand")
+}
+
+// ---- Reliable signals -----------------------------------------------------
+
+/// The signals this World declares, by name.
+///
+/// Each is a *nudge*: it says where to look and never what happened. That is not
+/// minimalism, it is the rule that makes a signal safe to lose. The durable
+/// record — the issue, its assignee, its comments — is already committed and
+/// already reaches everyone through convergence; a signal only makes it timely.
+/// A signal that carried the fact would be a second copy of it, on a plane whose
+/// whole contract is that it keeps nothing.
+/// Two, and only because two are emitted. A declared signal nothing sends is a
+/// reviewed surface with nothing behind it — the same shape as a feature bit
+/// advertised by a build that does not honour it — and it moves this World's
+/// implementation id to say so. `mentioned` and `review-requested` were in the
+/// first version of this list and are not here now: nothing parses a mention and
+/// no verb requests a review, so both were promises.
+pub mod signal {
+    /// Somebody put an issue on you.
+    pub const ASSIGNED: &str = "assigned";
+    /// Somebody said something on an issue you are on.
+    pub const COMMENTED: &str = "commented";
+}
+
+/// What every Issues signal carries.
+///
+/// A doc id and nothing else. The receiver already has, or can converge, the
+/// issue itself — so the largest thing this ever needs to say is which one.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct IssueNudge {
+    /// The `iss_` doc id, never a project alias: an alias is a display form and
+    /// the receiver would have nothing to resolve it against.
+    pub issue: String,
+}
+
+impl IssueNudge {
+    pub fn encode(&self) -> Vec<u8> {
+        postcard::to_stdvec(self).expect("postcard issue nudge")
+    }
+
+    /// Decode one nudge, in the order every other shape in this tree uses:
+    /// postcard, then re-encode equality, so one value has one spelling.
+    pub fn decode_canonical(bytes: &[u8]) -> Option<Self> {
+        let nudge: Self = postcard::from_bytes(bytes).ok()?;
+        (nudge.encode() == bytes).then_some(nudge)
+    }
+}
+
+/// The ceiling every Issues signal declares.
+///
+/// A doc id is around thirty bytes and a nudge carries one. This is generous for
+/// what it holds and tight against anything that wanted to become a message —
+/// which is the point of a per-schema bound, since the plane's own ceiling is
+/// sixteen kilobytes.
+pub const MAX_NUDGE_BYTES: u32 = 128;
+
+/// The signal declarations this World registers.
+///
+/// Every one demands `space.issue.read`. Being told about an issue is a read of
+/// it: a signal naming something you may not open would tell you it exists, and
+/// its assignee, and when somebody touched it.
+pub fn signal_schemas() -> Vec<runtime::world::SignalSchema> {
+    [signal::ASSIGNED, signal::COMMENTED]
+        .into_iter()
+        .map(|name| runtime::world::SignalSchema {
+            name: SchemaId::parse(name).expect("declared signal name"),
+            max_payload_bytes: MAX_NUDGE_BYTES,
+            demand: demand_read(),
+        })
+        .collect()
 }
 
 /// The full Space capability set the founder is granted at formation:
@@ -461,6 +558,42 @@ pub enum IssueIntent {
         device: String,
         ts: u64,
     },
+    /// Comment on a span of an issue's collaborative text.
+    ///
+    /// Its own verb rather than an optional field on [`IssueIntent::Comment`]:
+    /// it carries preconditions a plain comment has none of — the field must be
+    /// collaborative text and the span must lie inside material that exists —
+    /// and `Comment`'s field set is the wire form clients already write.
+    ///
+    /// The span arrives as offsets and NEVER as an encoded anchor. The World
+    /// mints the anchor itself, which is what makes the stored anchor sound:
+    /// `FabricAnchor::decode_canonical` bounds neither `path` nor `offset`, and
+    /// the `body` digest a correct anchor needs is computed by a substrate
+    /// function no product can call — so a wire-supplied anchor is either
+    /// unbounded or permanently drifted, and there is no third case.
+    CommentAt {
+        doc: String,
+        body: String,
+        /// The collaborative text path the span lies in.
+        field: String,
+        /// The span's start, in Unicode scalar offsets into `field` — the
+        /// coordinates the convergence engine validates text ops in.
+        start: u64,
+        /// The span's end. Absent names a position rather than a span.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        end: Option<u64>,
+        /// Required here, unlike on [`IssueIntent::Comment`]. Reactions and
+        /// replies already refuse to attach to an id-less comment; a span is
+        /// the third thing a comment cannot carry without an identity of its
+        /// own, because a reader that cannot name the comment cannot tell a
+        /// caller which span moved.
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent: Option<String>,
+        actor: String,
+        device: String,
+        ts: u64,
+    },
     /// Toggle one actor's emoji reaction on one comment. Deliberately writes
     /// **no history event**: a reaction is a social signal, not a change of
     /// record, and history rows for every 👍 would bury the changes that are.
@@ -677,7 +810,24 @@ pub enum IssueIntent {
         id: String,
         name: String,
         mime: String,
-        data_b64: String,
+        /// The content this attachment *is*, already committed on the content
+        /// plane.
+        ///
+        /// The engine never sees the bytes. It could not usefully: they are
+        /// sealed under a content nonce it does not hold, and a World that
+        /// handled plaintext would be a World that had to be trusted with it.
+        /// What it does instead is name them, and the substrate refuses a
+        /// declaration whose descriptor is not committed — which is what makes
+        /// upload-then-attach an ordering the store enforces rather than a
+        /// convention the product hopes for.
+        content: String,
+        /// Plaintext bytes, as the uploader saw them.
+        ///
+        /// Carried rather than derived because the engine has no way to ask the
+        /// content plane anything. It is checked against the descriptor at the
+        /// substrate boundary; here it is what the issue view reports, so a
+        /// wrong value would be a wrong number on a screen, not a wrong file.
+        size: u64,
         comment: Option<String>,
         actor: String,
         device: String,
@@ -996,7 +1146,24 @@ pub struct IssueEvent {
     /// The request kind (`created`, `edited`, `assigned`, …).
     pub k: String,
     /// The committing device (advisory attribution).
+    ///
+    /// Kept, and not what a reader is shown: `IssueQuery::Inbox` filters on it to
+    /// answer "what happened that was not me on this machine", which an actor
+    /// cannot answer because a person's other device is still them.
     pub d: String,
+    /// The acting actor.
+    ///
+    /// Absent-means-absent, so every event written before this field re-encodes
+    /// byte-identically and reads back as "no name" — which the viewer already
+    /// renders honestly rather than inventing one.
+    ///
+    /// This is what a person is shown. The device was, and a device id is not an
+    /// actor id: the lookup that resolves a display name is keyed by actor, so
+    /// it missed on every row and every author fell back to a hex prefix,
+    /// coloured by hashing that hex — a different colour from the same person's
+    /// roster chip.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub a: String,
     /// Unix seconds.
     pub t: u64,
     /// Field changes.
@@ -1018,11 +1185,12 @@ pub struct EventChange {
 
 /// A stored comment list element.
 ///
-/// `id`/`parent` arrived after v0.6 comments shipped, so both are optional
-/// with absent-means-absent serialization: pre-existing comments keep their
-/// exact stored bytes, and older builds deserialize enriched comments
-/// unchanged (serde ignores unknown fields). A comment without an `id`
-/// predates identity and simply cannot anchor reactions or replies.
+/// `id`/`parent` arrived after v0.6 comments shipped, and `at` after them, so
+/// all three are optional with absent-means-absent serialization: pre-existing
+/// comments keep their exact stored bytes, and older builds deserialize
+/// enriched comments unchanged (serde ignores unknown fields). A comment
+/// without an `id` predates identity and simply cannot anchor reactions or
+/// replies.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredComment {
     pub a: String,
@@ -1035,6 +1203,34 @@ pub struct StoredComment {
     /// the same root).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<String>,
+    /// Where in the issue's collaborative text this comment is attached.
+    /// Absent on an ordinary comment, which is most of them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<StoredAnchor>,
+}
+
+/// A comment's durable attachment to a span of collaborative text.
+///
+/// What is stored is the ANCHOR, never a resolved offset. An offset is true of
+/// one version of the Body and of no other; the anchors are the only form that
+/// survives the edits made after the comment. See
+/// [`crate::dto::CommentAnchorState`] for the read half of that rule.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredAnchor {
+    /// The collaborative text path the span lies in — see
+    /// [`crate::views::IssueState::anchorable_text`], which is the list of
+    /// paths this build will anchor into and the reason there is a list.
+    pub field: String,
+    /// The span's start, a hex-encoded [`replica::FabricAnchor`].
+    ///
+    /// Hex rather than the raw bytes because the record is JSON and
+    /// `serde_json` writes a `Vec<u8>` as a decimal array — about four bytes of
+    /// record per byte of anchor.
+    pub start: String,
+    /// The span's end. Absent means the comment names a position rather than a
+    /// span.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end: Option<String>,
 }
 
 /// The default workflow, exactly the legacy seed.
@@ -1093,5 +1289,52 @@ mod ring_digest_tests {
     fn an_unknown_plane_fails_the_decode() {
         let json = br#"{"planes":[{"plane":{"scope":"from_the_future"},"digest":"x"}],"docs":[]}"#;
         assert!(serde_json::from_slice::<RingDigestView>(json).is_err());
+    }
+}
+
+#[cfg(test)]
+mod stored_comment_tests {
+    use super::*;
+
+    /// A comment written before spans existed decodes unchanged, and re-encodes
+    /// to the same bytes.
+    ///
+    /// This is what "additive" has to mean for a record that is already in
+    /// Bodies in the field: absent `at` is absent, not `null`, so a peer running
+    /// this build and a peer running the previous one agree byte for byte about
+    /// every comment neither of them attached to anything.
+    #[test]
+    fn a_comment_written_before_spans_existed_is_byte_neutral() {
+        let stored = br#"{"a":"act_1","t":7,"b":"hello","id":"cmt_1"}"#;
+        let comment: StoredComment = serde_json::from_slice(stored).expect("decode");
+        assert!(comment.at.is_none());
+        assert_eq!(serde_json::to_vec(&comment).expect("encode"), stored);
+    }
+
+    /// A point attachment does not serialize an `end`, so the two forms stay
+    /// distinguishable on the wire.
+    #[test]
+    fn a_point_attachment_omits_the_end() {
+        let comment = StoredComment {
+            a: "act_1".into(),
+            t: 7,
+            b: "hello".into(),
+            id: Some("cmt_1".into()),
+            parent: None,
+            at: Some(StoredAnchor {
+                field: "description".into(),
+                start: "ab".into(),
+                end: None,
+            }),
+        };
+        let json = serde_json::to_string(&comment).expect("encode");
+        assert_eq!(
+            json,
+            r#"{"a":"act_1","t":7,"b":"hello","id":"cmt_1","at":{"field":"description","start":"ab"}}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<StoredComment>(&json).expect("decode"),
+            comment
+        );
     }
 }

@@ -123,6 +123,27 @@ pub enum IssuesRequest {
         #[serde(default)]
         reply_to: Option<String>,
     },
+    /// Comment on a span of an issue's collaborative text.
+    ///
+    /// A separate verb from [`IssuesRequest::Comment`] for the same reason
+    /// `IssueIntent::CommentAt` is separate from `IssueIntent::Comment`: the
+    /// span carries preconditions a plain comment has none of, and `comment`'s
+    /// field set is the wire form clients already write.
+    CommentAt {
+        reff: String,
+        body: String,
+        /// The collaborative text field the span lies in — `description`.
+        field: String,
+        /// The span's start, in Unicode scalar offsets. A browser client
+        /// counts a `string` in UTF-16 code units and must convert; the two
+        /// disagree on every astral character.
+        start: u64,
+        /// The span's end. Absent names a position rather than a span.
+        #[serde(default)]
+        end: Option<u64>,
+        #[serde(default)]
+        reply_to: Option<String>,
+    },
     React {
         reff: String,
         comment: String,
@@ -326,7 +347,10 @@ pub enum IssuesRequest {
         name: String,
         #[serde(default)]
         mime: Option<String>,
-        data_b64: String,
+        /// The content id this attachment names, already on the content plane.
+        content: String,
+        /// Plaintext bytes, as the uploader saw them.
+        size: u64,
         #[serde(default)]
         comment: Option<String>,
     },
@@ -474,7 +498,23 @@ pub enum IssuesResponse {
     Attachment {
         name: String,
         mime: String,
-        data_b64: String,
+        /// The content id, when this record was written after the cutover.
+        ///
+        /// Exactly one of `content` and `data_b64` is present, and which one
+        /// says which era the record is from. Both are optional rather than an
+        /// enum because this type is decoded by clients that predate the split
+        /// and must not fail on a shape they do not recognise.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        content: Option<String>,
+        /// The inline payload, for records written before the cutover.
+        ///
+        /// Read-only and permanent. Those records are in Bodies in the field;
+        /// a reader that dropped this would lose the files rather than migrate
+        /// them.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        data_b64: Option<String>,
+        #[serde(default)]
+        size: u64,
     },
     Text {
         text: String,
@@ -557,6 +597,7 @@ impl IssuesRequest {
             | Assign { .. }
             | Label { .. }
             | Comment { .. }
+            | CommentAt { .. }
             | React { .. }
             | IssueDelete { .. }
             | IssueRestore { .. }

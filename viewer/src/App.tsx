@@ -183,7 +183,7 @@ export function App() {
    *  not know it), so the trash comes from `list all:true`, not the board. */
   const [deletedRows, setDeletedRows] = useState<Row[]>([]);
   const [mutationNotice, setMutationNotice] = useState("");
-  /** Last doorbell epoch seen per space — the daemon-boot nonce (UI.md §4.1). */
+  /** Last doorbell epoch seen per space — the daemon-boot nonce (UI.md §5). */
   const epochs = useRef(new Map<string, number>());
   // Bumped on every doorbell for this space: the detail pane re-reads off it.
   const [revision, setRevision] = useState(0);
@@ -536,7 +536,7 @@ export function App() {
         // `epoch` is a per-daemon-boot nonce: a change means that daemon
         // restarted, so our position in its stream is meaningless and nothing we
         // hold about the space is trustworthy — which is exactly what `reset`
-        // says (UI.md §4.1). The server sends `reset` on the death it can see;
+        // says (UI.md §5). The server sends `reset` on the death it can see;
         // the epoch catches a restart it can't, where a daemon dies and returns
         // between two frames. Recorded for every space, not just the selected
         // one, so switching to a space doesn't compare against a stale nonce.

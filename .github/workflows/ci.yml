@@ -251,7 +251,20 @@ jobs:
           - job: orbital-authority
             filter: "binary(authority_history) + binary(authority_checkpoint) + binary(world_policy) + binary(ceremony_frontier_isolation)"
           - job: orbital-formats
-            filter: "binary(dto_schema) + binary(product_schema) + binary(coordinates_fixtures) + binary(contact_fixtures) + binary(beacon_presence_fixtures) + binary(manifest_fixtures) + binary(transaction_marker_fixtures) + binary(canonical_ids) + binary(canonical_store) + binary(algebra_fixtures)"
+            filter: "binary(dto_schema) + binary(product_schema) + binary(coordinates_fixtures) + binary(contact_fixtures) + binary(beacon_presence_fixtures) + binary(manifest_fixtures) + binary(transaction_marker_fixtures) + binary(canonical_ids) + binary(canonical_store) + binary(algebra_fixtures) + binary(content_fixtures) + binary(index_fixtures) + binary(content_plane) + binary(cache_residency) + binary(reconciliation) + binary(content_host)"
+          # Plan 13's frozen ground: the causal evidence §5.2 rests on, the
+          # algebra reservation a seventh type depends on, the clean-break
+          # refusal, and the commit-cost baseline. Each is a claim the docket
+          # makes about the substrate; each fails loudly if it stops being true.
+          - job: core-fabric-foundations
+            filter: "binary(causal_evidence) + binary(history_growth) + binary(algebra_reservation) + binary(clean_break) + binary(commit_cost_baseline) + binary(causal_contract) + binary(batch_atomicity) + binary(store_growth)"
+          # Plan 14 S0-S2: the frozen delivery-plane shapes, the transport
+          # posture gate, the cross-implementation flow contract, and Freight —
+          # admission, budgets, transfer bookkeeping, the provider on the wire,
+          # and two Stations moving real bytes. Acceptances 1, 2, 3, 8, 11 and
+          # 12 live in this job.
+          - job: core-plane-shapes
+            filter: "binary(plane_fixtures) + binary(transport_capabilities) + binary(flows) + binary(budget_fixtures) + binary(admission_fixtures) + binary(freight_transfer) + binary(freight_wire) + binary(freight_two_node)"
           - job: orbital-faults
             filter: "binary(journal_faults) + binary(journal_child_crash) + binary(manifest_atomicity) + binary(orbital_catalog) + binary(concurrent_heads)"
           - job: orbital-contact-real
@@ -276,6 +289,14 @@ jobs:
         uses: taiki-e/install-action@e658debeddbabf20b2b866d9235eb08a2375b1ad
         with:
           tool: nextest
+      # Only the clean-break gate needs Node — it runs the TypeScript half of
+      # the semantic-naming rule below. Every other gate skips this.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        if: matrix.job == 'orbital-clean-break'
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: viewer/package-lock.json
       # --workspace is load-bearing: without it cargo builds only the root
       # package, so filters naming crate-level binaries (runtime::dto_schema,
       # mechanics::ceremony_frontier_isolation, …) silently select nothing —
@@ -298,6 +319,17 @@ jobs:
           python3 -m venv .schema-venv
           .schema-venv/bin/pip install --quiet "jsonschema>=4"
           .schema-venv/bin/python ci/validate-dto-schema.py
+      # The clean-break gate owns semantic naming, and naming is not a
+      # Rust-only rule: the viewer declares the same DTO shapes in TypeScript.
+      # `semantic_type_names` walks the Rust tree with syn; this walks the
+      # TypeScript tree with tsc's own parser. Both must be green for the gate
+      # to mean what it says.
+      - name: Semantic naming (TypeScript)
+        if: matrix.job == 'orbital-clean-break'
+        working-directory: viewer
+        run: |
+          npm ci --no-audit --no-fund
+          npm run naming-gate
 
   # Aggregate required check: green only when every orbital gate (and the
   # cross-platform workspace matrix) is green. Branch protection points here so

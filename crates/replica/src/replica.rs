@@ -12,7 +12,7 @@
 //! [`ProtectedBodyPayload`] object per changed Body (`epoch_id[16] ||
 //! nonce[12] || ciphertext_and_tag`; no plaintext Body payload is ever at
 //! rest), the [`RequestReceipt`] idempotency record, and the signed Manifest
-//! root/pages over the full Body set. Recovery reopens exactly that graph: a
+//! root over the full Body set. Recovery reopens exactly that graph: a
 //! Body whose key-epoch material is locally held is opened, validated, and
 //! imported into the engine; a Body whose epoch key is absent is retained
 //! **opaquely** — byte-identical, never decrypted, absent from reads — until a
@@ -46,7 +46,7 @@ use crate::body::{BodyOp, ContentCommitment};
 use crate::convergence::ConvergenceOutcome;
 use crate::frontier::{AuthorityFrontier, ReplicaFrontier};
 use crate::ids::{BodyKey, EncodingId, SchemaId, WorldId};
-use crate::manifest::{ManifestEntry, ManifestPage, ManifestRoot, MAX_ENTRIES_PER_PAGE};
+use crate::manifest::{body_index_key, ManifestEntry, ManifestHead, ManifestRoot};
 use crate::protected::{BodyKeySource, ProtectedBodyPayload, ProtectedError, MAX_BODY_BYTES};
 use crate::receipt::RequestReceipt;
 use crate::transaction::{
@@ -398,18 +398,57 @@ impl BodyRecord {
     }
 }
 
-/// The store's opaque caller metadata: the complete Replica index, persisted
-/// with every commit at the journal's manifest linearization point.
+/// The store's opaque caller metadata, persisted with every commit at the
+/// journal's manifest linearization point.
+///
+/// Every large map here is a *root*, not a vector. The shape this replaced
+/// carried the complete Body catalog inline, so changing one Body re-encoded
+/// and fsynced all of them — 28.8 MB at 100,000 Bodies, which is the whole
+/// reason this docket exists. What is left is fixed-size.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct StoreMeta {
-    version: u8,
+    format_version: u8,
     space: Option<SpaceId>,
     frontier: ReplicaFrontier,
     quota: QuotaConfig,
-    bodies: Vec<(BodyKey, BodyRecord)>,
-    receipts: Vec<(Vec<u8>, ObjectRef)>,
+    /// `BodyKey` → the Body's record. Nodes live in the object store and are
+    /// kept alive through the journal's `caller_index_roots`.
+    body_index_root: Option<IndexRef>,
+    /// The published catalog root the signed manifest commits to.
+    manifest_body_root: Option<IndexRef>,
+    /// The content catalog root the signed manifest commits to.
+    content_index_root: Option<IndexRef>,
+    /// Idempotency scope → the receipt object that answers a replay.
+    receipt_index_root: Option<IndexRef>,
     manifest_root: Option<ObjectRef>,
-    manifest_pages: Vec<ObjectRef>,
+}
+
+/// The store meta's encoded generation.
+const STORE_META_FORMAT_VERSION: u8 = 2;
+
+type IndexRef = fabric::journal::index::ChildRef;
+
+/// One Body's indexed entry. The key travels with the record because an index
+/// key is a hash and cannot be inverted, and reopening needs the Body back.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct IndexedBody {
+    key: BodyKey,
+    record: BodyRecord,
+}
+
+/// One receipt's indexed entry, same reasoning.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct IndexedReceipt {
+    scope: Vec<u8>,
+    object: ObjectRef,
+}
+
+/// The index key a receipt scope sits under.
+fn receipt_index_key(scope: &[u8]) -> [u8; 32] {
+    let mut h = blake3::Hasher::new();
+    h.update(b"lait/replica/receipt-scope/1");
+    h.update(scope);
+    *h.finalize().as_bytes()
 }
 
 /// The Orbit's durable local materialization, over a Fabric engine.
@@ -424,6 +463,42 @@ pub struct Replica {
     quota: QuotaConfig,
     bodies: BTreeMap<BodyKey, BodyRecord>,
     receipts: BTreeMap<Vec<u8>, (RequestReceipt, Option<ObjectRef>)>,
+    /// Roots of the durable catalogs, carried so a commit can apply a delta
+    /// rather than rebuild.
+    body_index_root: Option<IndexRef>,
+    /// The published catalog: head sets and declarations, no local refs.
+    manifest_body_root: Option<IndexRef>,
+    /// `ContentId` -> committed descriptor.
+    content_index_root: Option<IndexRef>,
+    /// Declared content references per Body, for the reachability sweep.
+    declared_content: BTreeMap<BodyKey, Vec<[u8; 32]>>,
+    /// Content committed but not yet declared by any Body, and the moment each
+    /// hold lapses.
+    ///
+    /// There is a window between committing a descriptor and the Body that
+    /// names it reaching the store — an upload finishes, then a person decides
+    /// which issue to attach it to. Reachability is derived from live Bodies,
+    /// so for the whole of that window the content is garbage by the sweep's
+    /// only rule, and the sweep is right: nothing distinguishes an upload
+    /// awaiting an attach from an upload nobody ever attached.
+    ///
+    /// A hold is what distinguishes them, and it is deliberately in memory. A
+    /// hold is a claim about an operation this process is running; after a
+    /// restart there is no such operation, so the claim is correctly gone and
+    /// the abandoned upload becomes collectable — which is the behaviour a
+    /// durable hold would have had to reproduce with an expiry sweep anyway.
+    pending_content: BTreeMap<[u8; 32], std::time::Instant>,
+    receipt_index_root: Option<IndexRef>,
+    manifest_root_object: Option<ObjectRef>,
+    /// How many live references each stored object has.
+    ///
+    /// A commit must tell the journal which objects stopped being required, and
+    /// "the ones this Body used to name" is the wrong answer: one signed
+    /// transaction record covers every Body in its batch, so dropping it when
+    /// one of them moves on would strand the others. Counting is the cheap
+    /// correct answer, and it stays O(changed) because only touched Bodies
+    /// adjust it.
+    object_refs: BTreeMap<[u8; 32], u64>,
     /// Opaque retained material kept in memory for non-durable replicas (a
     /// durable store keeps it as objects; this map indexes the raw envelope
     /// bytes + transaction bytes for byte-identical forwarding either way).
@@ -433,6 +508,10 @@ pub struct Replica {
 /// One retained head's raw material: `(transaction id, envelope bytes,
 /// transaction bytes)`.
 type RetainedHead = ([u8; 32], Vec<u8>, Vec<u8>);
+
+/// One Body a reconciliation found divergent, and the head commitments the peer
+/// advertises for it.
+pub type DivergentBody = (BodyKey, Vec<[u8; 32]>);
 
 /// The canonical Fabric key for a Body: `BLAKE3(domain || world || 0x00 || body)`.
 fn fabric_key(key: &BodyKey) -> FabricKey {
@@ -454,6 +533,29 @@ fn advance(prev: ReplicaFrontier, causal: &[u8]) -> ReplicaFrontier {
         *h.finalize().as_bytes(),
         prev.transaction_count.saturating_add(1),
     )
+}
+
+/// Move the published coordinate without claiming a transaction.
+///
+/// A content commit changes the signed root — a different content index, a
+/// different catalog — but accepts no Body transaction. Both halves matter. If
+/// the coordinate did not move, an honest Station that ingested a file and then
+/// declared it would publish three different roots at one `(signer, frontier)`
+/// and every peer applying the equivocation rule would flag it. If the count
+/// moved, a peer comparing frontiers would read a Body transaction that never
+/// happened.
+///
+/// This is sound for equivocation detection precisely because it is
+/// deterministic: an honest signer's root always folds forward, so two
+/// different roots still sharing a coordinate remain what the rule says they
+/// are.
+fn advance_published(prev: ReplicaFrontier, causal: &[u8]) -> ReplicaFrontier {
+    let mut h = blake3::Hasher::new();
+    h.update(FRONTIER_DOMAIN);
+    h.update(&prev.root);
+    h.update(b"published");
+    h.update(causal);
+    ReplicaFrontier::new(*h.finalize().as_bytes(), prev.transaction_count)
 }
 
 /// Advance a Body's chain frontier from the transaction that wrote it.
@@ -538,6 +640,14 @@ impl Replica {
             supported: SupportedSchemas::default(),
             quota: QuotaConfig::default(),
             bodies: BTreeMap::new(),
+            body_index_root: None,
+            manifest_body_root: None,
+            content_index_root: None,
+            declared_content: BTreeMap::new(),
+            pending_content: BTreeMap::new(),
+            receipt_index_root: None,
+            manifest_root_object: None,
+            object_refs: BTreeMap::new(),
             receipts: BTreeMap::new(),
             raw_material: BTreeMap::new(),
         }
@@ -623,22 +733,68 @@ impl Replica {
             Err(e) => return Err(ReplicaCommitError::Durability(e.to_string())),
         };
         let mut replica = Self::new(Box::new(CrdtFabric::new())).with_keys(keys.clone());
-        let Some(manifest) = store.manifest() else {
+        let Some(meta_bytes) = store
+            .caller_meta()
+            .map_err(|e| ReplicaCommitError::Integrity(e.to_string()))?
+        else {
             replica.durable = Some(store);
             return Ok(replica);
         };
-        let meta: StoreMeta = postcard::from_bytes(&manifest.meta)
+        let meta: StoreMeta = postcard::from_bytes(&meta_bytes)
             .map_err(|e| ReplicaCommitError::Integrity(format!("store meta: {e}")))?;
-        if meta.version != 1 {
+        if meta.format_version != STORE_META_FORMAT_VERSION {
             return Err(ReplicaCommitError::Integrity(format!(
-                "unsupported store meta version {}",
-                meta.version
+                "unsupported store meta version {} — an older store is refused, \
+                 never upgraded",
+                meta.format_version
             )));
         }
         replica.frontier = meta.frontier;
         replica.space = meta.space.clone();
         replica.quota = meta.quota.clamped();
-        for (key, mut record) in meta.bodies {
+        replica.body_index_root = meta.body_index_root;
+        replica.manifest_body_root = meta.manifest_body_root;
+        replica.content_index_root = meta.content_index_root;
+        replica.receipt_index_root = meta.receipt_index_root;
+        replica.manifest_root_object = meta.manifest_root;
+
+        // Stream the catalogs rather than decoding one giant vector. The engine
+        // still materialises every Body — Fabric holds a document per Body — so
+        // opening remains proportional to the store. What changed is that the
+        // commit point no longer is.
+        let mut indexed_bodies: Vec<IndexedBody> = Vec::new();
+        let mut decode_failure: Option<String> = None;
+        fabric::journal::index::stream(&store.nodes(), meta.body_index_root, &mut |entry| {
+            if decode_failure.is_some() {
+                return;
+            }
+            match postcard::from_bytes::<IndexedBody>(&entry.value) {
+                Ok(body) => indexed_bodies.push(body),
+                Err(e) => decode_failure = Some(format!("body entry: {e}")),
+            }
+        })
+        .map_err(|e| ReplicaCommitError::Integrity(format!("body index: {e}")))?;
+        if let Some(reason) = decode_failure {
+            return Err(ReplicaCommitError::Integrity(reason));
+        }
+
+        let mut indexed_receipts: Vec<IndexedReceipt> = Vec::new();
+        let mut decode_failure: Option<String> = None;
+        fabric::journal::index::stream(&store.nodes(), meta.receipt_index_root, &mut |entry| {
+            if decode_failure.is_some() {
+                return;
+            }
+            match postcard::from_bytes::<IndexedReceipt>(&entry.value) {
+                Ok(receipt) => indexed_receipts.push(receipt),
+                Err(e) => decode_failure = Some(format!("receipt entry: {e}")),
+            }
+        })
+        .map_err(|e| ReplicaCommitError::Integrity(format!("receipt index: {e}")))?;
+        if let Some(reason) = decode_failure {
+            return Err(ReplicaCommitError::Integrity(reason));
+        }
+
+        for IndexedBody { key, mut record } in indexed_bodies {
             if record.heads.is_empty() {
                 return Err(ReplicaCommitError::Integrity(
                     "body record without heads".into(),
@@ -708,18 +864,703 @@ impl Replica {
                     .collect();
                 replica.raw_material.insert(key.clone(), entries);
             }
+            for hash in Self::record_object_refs(&record) {
+                *replica.object_refs.entry(hash).or_insert(0) += 1;
+            }
             replica.bodies.insert(key, record);
         }
-        for (scope, receipt_ref) in meta.receipts {
+        // Declarations live in the published catalog, so reopening recovers
+        // them from the same place a peer would read them.
+        let mut declared_failure: Option<String> = None;
+        fabric::journal::index::stream(&store.nodes(), meta.manifest_body_root, &mut |entry| {
+            if declared_failure.is_some() {
+                return;
+            }
+            match crate::manifest::ManifestEntry::decode_canonical(&entry.value) {
+                Ok(published) if !published.content_refs.is_empty() => {
+                    replica
+                        .declared_content
+                        .insert(published.key, published.content_refs);
+                }
+                Ok(_) => {}
+                Err(e) => declared_failure = Some(format!("published entry: {e}")),
+            }
+        })
+        .map_err(|e| ReplicaCommitError::Integrity(format!("published index: {e}")))?;
+        if let Some(reason) = declared_failure {
+            return Err(ReplicaCommitError::Integrity(reason));
+        }
+
+        for IndexedReceipt { scope, object } in indexed_receipts {
             let bytes = store
-                .read_object(&receipt_ref)
+                .read_object(&object)
                 .map_err(|e| ReplicaCommitError::Integrity(e.to_string()))?;
             let receipt = RequestReceipt::decode_canonical(&bytes)
                 .map_err(|e| ReplicaCommitError::Integrity(format!("receipt: {e}")))?;
-            replica.receipts.insert(scope, (receipt, Some(receipt_ref)));
+            *replica.object_refs.entry(object.hash).or_insert(0) += 1;
+            replica.receipts.insert(scope, (receipt, Some(object)));
+        }
+        if let Some(root) = meta.manifest_root {
+            *replica.object_refs.entry(root.hash).or_insert(0) += 1;
         }
         replica.durable = Some(store);
         Ok(replica)
+    }
+
+    /// Every object one Body record names, for reference counting.
+    fn record_object_refs(record: &BodyRecord) -> Vec<[u8; 32]> {
+        let mut out = Vec::with_capacity(record.heads.len() * 2);
+        for head in &record.heads {
+            if let Some(r) = head.protected {
+                out.push(r.hash);
+            }
+            if let Some(r) = head.transaction {
+                out.push(r.hash);
+            }
+        }
+        out
+    }
+
+    fn retain_object(&mut self, hash: [u8; 32]) {
+        *self.object_refs.entry(hash).or_insert(0) += 1;
+    }
+
+    /// Drop one reference, reporting whether that was the last.
+    fn release_object(&mut self, hash: [u8; 32]) -> bool {
+        match self.object_refs.get_mut(&hash) {
+            Some(count) if *count > 1 => {
+                *count -= 1;
+                false
+            }
+            Some(_) => {
+                self.object_refs.remove(&hash);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// What the signed manifest advertises for one Body, as distinct from the
+    /// local record, which also names objects no peer should learn about.
+    ///
+    /// Returns an error rather than `None`. `None` is the encoding of "delete
+    /// this Body from the catalog", so swallowing a bounds failure here would
+    /// quietly drop a live Body out of the signed advertisement while the body
+    /// index kept it — two catalogs disagreeing, and no one told.
+    fn manifest_entry(
+        key: &BodyKey,
+        record: &BodyRecord,
+        content_refs: Vec<[u8; 32]>,
+    ) -> Result<ManifestEntry, ReplicaCommitError> {
+        ManifestEntry::declaring(
+            key.clone(),
+            record
+                .heads
+                .iter()
+                .map(|h| ManifestHead {
+                    descriptor_hash: h.descriptor_hash,
+                    transaction_commitment: h.tx_commitment,
+                })
+                .collect(),
+            content_refs,
+        )
+        .map_err(|e| ReplicaCommitError::Integrity(format!("manifest entry for {key:?}: {e}")))
+    }
+
+    /// The single durable write.
+    ///
+    /// Everything proportional to the store size is gone from here: the
+    /// catalogs update by delta, the journal is told what changed rather than
+    /// what to keep, and the signed manifest commits to index roots. What this
+    /// writes is the changed Bodies, their objects, the nodes on the paths they
+    /// touch, and one root.
+    #[allow(clippy::too_many_arguments)]
+    fn persist(
+        &mut self,
+        ctx: Option<&CommitContext<'_>>,
+        changed: &BTreeMap<BodyKey, Option<BodyRecord>>,
+        declared: &BTreeMap<BodyKey, Vec<[u8; 32]>>,
+        descriptors: &[crate::content::ContentDescriptor],
+        new_receipt: Option<&RequestReceipt>,
+        mut new_objects: Vec<Vec<u8>>,
+        next_frontier: ReplicaFrontier,
+    ) -> Result<(), ReplicaCommitError> {
+        use fabric::journal::index::{self, IndexChange, NodeSink};
+
+        let mut sink = NodeSink::default();
+        let mut removed: Vec<[u8; 32]> = Vec::new();
+        let mut manifest_changes: Vec<IndexChange> = Vec::with_capacity(changed.len());
+
+        // 1. Body catalog: one index change per touched Body, plus a refcount
+        //    pass that decides which objects genuinely stopped being needed.
+        //    One signed transaction record covers every Body in its batch, so
+        //    "the objects this Body used to name" is the wrong removal set.
+        let mut body_changes: Vec<IndexChange> = Vec::with_capacity(changed.len());
+        for (key, record) in changed {
+            let prior = self
+                .bodies
+                .get(key)
+                .map(Self::record_object_refs)
+                .unwrap_or_default();
+            let now = record
+                .as_ref()
+                .map(Self::record_object_refs)
+                .unwrap_or_default();
+            for hash in &now {
+                self.retain_object(*hash);
+            }
+            for hash in prior {
+                if self.release_object(hash) && !now.contains(&hash) {
+                    removed.push(hash);
+                }
+            }
+            let value = match record {
+                None => None,
+                Some(record) => {
+                    let entry = IndexedBody {
+                        key: key.clone(),
+                        record: record.clone(),
+                    };
+                    Some(
+                        postcard::to_stdvec(&entry)
+                            .map_err(|e| ReplicaCommitError::Fabric(e.to_string()))?,
+                    )
+                }
+            };
+            body_changes.push(IndexChange {
+                key: body_index_key(key),
+                value,
+            });
+            let refs = declared
+                .get(key)
+                .cloned()
+                .unwrap_or_else(|| self.declared_content.get(key).cloned().unwrap_or_default());
+            let advertised = match record {
+                None => None,
+                Some(r) => Some(Self::manifest_entry(key, r, refs.clone())?.encode()),
+            };
+            manifest_changes.push(IndexChange {
+                key: body_index_key(key),
+                value: advertised,
+            });
+            match record {
+                None => {
+                    self.declared_content.remove(key);
+                }
+                Some(_) if refs.is_empty() => {
+                    self.declared_content.remove(key);
+                }
+                Some(_) => {
+                    self.declared_content.insert(key.clone(), refs);
+                }
+            }
+        }
+
+        // Content descriptors committed by this transaction. A descriptor is
+        // required material on every full Replica; its chunks are not.
+        let mut content_changes: Vec<IndexChange> = Vec::with_capacity(descriptors.len());
+        for descriptor in descriptors {
+            descriptor
+                .validate()
+                .map_err(|e| ReplicaCommitError::Illegitimate(format!("content: {e}")))?;
+            content_changes.push(IndexChange {
+                key: crate::manifest::content_index_key(descriptor.content_ref().as_bytes()),
+                value: Some(descriptor.encode()),
+            });
+        }
+
+        let (body_index_root, manifest_body_root, content_index_root) = {
+            let nodes = self.durable.as_ref().expect("durable path").nodes();
+            let body_index_root =
+                index::apply(&nodes, self.body_index_root, body_changes, &mut sink)
+                    .map_err(|e| ReplicaCommitError::Integrity(format!("body index: {e}")))?;
+            let manifest_body_root =
+                index::apply(&nodes, self.manifest_body_root, manifest_changes, &mut sink)
+                    .map_err(|e| ReplicaCommitError::Integrity(format!("manifest index: {e}")))?;
+            let content_index_root =
+                index::apply(&nodes, self.content_index_root, content_changes, &mut sink)
+                    .map_err(|e| ReplicaCommitError::Integrity(format!("content index: {e}")))?;
+            (body_index_root, manifest_body_root, content_index_root)
+        };
+
+        // 2. Receipt catalog.
+        let mut receipt_index_root = self.receipt_index_root;
+        if let Some(receipt) = new_receipt {
+            let bytes = receipt.encode();
+            let reference = object_ref(&bytes);
+            new_objects.push(bytes);
+            self.retain_object(reference.hash);
+            let entry = IndexedReceipt {
+                scope: receipt.scope_key(),
+                object: reference,
+            };
+            let value = postcard::to_stdvec(&entry)
+                .map_err(|e| ReplicaCommitError::Fabric(e.to_string()))?;
+            let nodes = self.durable.as_ref().expect("durable path").nodes();
+            receipt_index_root = index::apply(
+                &nodes,
+                receipt_index_root,
+                vec![IndexChange {
+                    key: receipt_index_key(&receipt.scope_key()),
+                    value: Some(value),
+                }],
+                &mut sink,
+            )
+            .map_err(|e| ReplicaCommitError::Integrity(format!("receipt index: {e}")))?;
+        }
+
+        // 3. The signed root over the catalogs. A commit with no attribution
+        //    context is a receipt-only replay and republishes nothing.
+        let manifest_root_object = match ctx {
+            None => self.manifest_root_object,
+            Some(ctx) => {
+                let root = ManifestRoot::sign_with(
+                    ctx.space,
+                    next_frontier,
+                    manifest_body_root,
+                    content_index_root,
+                    ctx.authority_frontier.clone(),
+                    ctx.signer,
+                )
+                .ok_or_else(|| ReplicaCommitError::Illegitimate("sign manifest root".into()))?;
+                let bytes = root.encode();
+                let reference = object_ref(&bytes);
+                new_objects.push(bytes);
+                self.retain_object(reference.hash);
+                if let Some(prior) = self.manifest_root_object {
+                    if prior.hash != reference.hash && self.release_object(prior.hash) {
+                        removed.push(prior.hash);
+                    }
+                }
+                Some(reference)
+            }
+        };
+
+        let meta = StoreMeta {
+            format_version: STORE_META_FORMAT_VERSION,
+            space: self.space.clone(),
+            frontier: next_frontier,
+            quota: self.quota,
+            body_index_root,
+            manifest_body_root,
+            content_index_root,
+            receipt_index_root,
+            manifest_root: manifest_root_object,
+        };
+        let meta_bytes =
+            postcard::to_stdvec(&meta).map_err(|e| ReplicaCommitError::Fabric(e.to_string()))?;
+
+        // Index nodes are handed over separately, not folded into `added`. An
+        // entry in the required set is a promise that never expires, so a node
+        // admitted there would outlive every rewrite that superseded it and the
+        // store would grow with the number of commits rather than with what it
+        // holds. As caller-index nodes they live by reachability instead.
+        let mut added = new_objects;
+        let mut seen = std::collections::BTreeSet::new();
+        added.retain(|b| seen.insert(object_ref(b).hash));
+        let mut index_nodes = sink.written;
+        index_nodes.retain(|b| seen.insert(object_ref(b).hash));
+        // An object written by this commit is not also collectable by it.
+        removed.retain(|h| !seen.contains(h));
+        removed.sort();
+        removed.dedup();
+
+        let roots: Vec<IndexRef> = body_index_root
+            .into_iter()
+            .chain(manifest_body_root)
+            .chain(content_index_root)
+            .chain(receipt_index_root)
+            .collect();
+
+        let store = self.durable.as_mut().expect("durable path");
+        let caller_index = fabric::journal::CallerIndex {
+            roots: &roots,
+            nodes: &index_nodes,
+        };
+        match store.commit(&added, &removed, caller_index, meta_bytes) {
+            Ok(_) => {}
+            Err(fabric::journal::JournalError::OutcomeUnknown) => {
+                self.poisoned = true;
+                return Err(ReplicaCommitError::OutcomeUnknown);
+            }
+            Err(e) => {
+                self.poisoned = true;
+                return Err(ReplicaCommitError::Durability(e.to_string()));
+            }
+        }
+        self.body_index_root = body_index_root;
+        self.manifest_body_root = manifest_body_root;
+        self.content_index_root = content_index_root;
+        self.receipt_index_root = receipt_index_root;
+        self.manifest_root_object = manifest_root_object;
+        Ok(())
+    }
+
+    /// Commit content descriptors, making the content nameable by a Body.
+    ///
+    /// The descriptor becomes required material on every full Replica; the
+    /// chunks stay residency. That asymmetry is the content plane: a World can
+    /// name a gigabyte without every peer downloading a gigabyte.
+    pub fn commit_content(
+        &mut self,
+        ctx: &CommitContext<'_>,
+        descriptors: &[crate::content::ContentDescriptor],
+    ) -> Result<Vec<crate::content::ContentRef>, ReplicaCommitError> {
+        if self.poisoned {
+            return Err(ReplicaCommitError::Poisoned);
+        }
+        let mut causal = Vec::with_capacity(descriptors.len() * 32);
+        for descriptor in descriptors {
+            causal.extend_from_slice(descriptor.content_ref().as_bytes());
+        }
+        let frontier = advance_published(self.frontier, &causal);
+        self.persist(
+            Some(ctx),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            descriptors,
+            None,
+            Vec::new(),
+            frontier,
+        )?;
+        self.frontier = frontier;
+        Ok(descriptors.iter().map(|d| d.content_ref()).collect())
+    }
+
+    /// Hold committed content against the sweep until `until`, because a Body
+    /// that will declare it is still being assembled.
+    ///
+    /// The caller supplies the deadline rather than the Replica reading a
+    /// clock, for the same reason it supplies a [`CommitContext`]: what time it
+    /// is is the caller's business, and a store that reads clocks is a store
+    /// whose behaviour cannot be stated in a test.
+    ///
+    /// A hold is not a declaration. It stops the content being collected; it
+    /// does not put it in an advertisement, because a peer receiving a
+    /// descriptor no Body names would adopt catalog it has no reason to keep
+    /// and its own sweep would have to undo.
+    pub fn hold_content(
+        &mut self,
+        content: &crate::content::ContentRef,
+        until: std::time::Instant,
+    ) {
+        self.pending_content.insert(*content.as_bytes(), until);
+    }
+
+    /// Drop a hold before its deadline — an upload the caller abandoned, or one
+    /// whose Body arrived by another route.
+    pub fn release_content_hold(&mut self, content: &crate::content::ContentRef) {
+        self.pending_content.remove(content.as_bytes());
+    }
+
+    /// Record which content each named Body references.
+    ///
+    /// The World supplies this when it stages a transaction; Replica validates
+    /// it and signs it into the root. Validation is deliberately shallow — it
+    /// checks bounds, order, uniqueness, and that every named descriptor is
+    /// actually committed — because anything deeper would mean decoding the
+    /// product bytes the declaration describes, which is the boundary this
+    /// exists to respect.
+    ///
+    /// F5 folds this into the staging call so a Body and its declaration commit
+    /// together. It is separate here so F2 can prove the reachability rule
+    /// without waiting on the World surface.
+    pub fn declare_content(
+        &mut self,
+        ctx: &CommitContext<'_>,
+        declarations: BTreeMap<BodyKey, Vec<crate::content::ContentRef>>,
+    ) -> Result<(), ReplicaCommitError> {
+        if self.poisoned {
+            return Err(ReplicaCommitError::Poisoned);
+        }
+        let mut declared: BTreeMap<BodyKey, Vec<[u8; 32]>> = BTreeMap::new();
+        let mut changed: BTreeMap<BodyKey, Option<BodyRecord>> = BTreeMap::new();
+        for (key, refs) in declarations {
+            if refs.len() > crate::manifest::MAX_CONTENT_REFS_PER_BODY {
+                return Err(ReplicaCommitError::Illegitimate(
+                    "declared content references exceed the per-Body bound".into(),
+                ));
+            }
+            let Some(record) = self.bodies.get(&key) else {
+                return Err(ReplicaCommitError::Illegitimate(
+                    "a declaration names a Body this Replica does not hold".into(),
+                ));
+            };
+            for reference in &refs {
+                if self.content_descriptor(reference).is_none() {
+                    return Err(ReplicaCommitError::Illegitimate(
+                        "a declaration names content with no committed descriptor".into(),
+                    ));
+                }
+            }
+            let mut ids: Vec<[u8; 32]> = refs.iter().map(|r| *r.as_bytes()).collect();
+            ids.sort();
+            ids.dedup();
+            declared.insert(key.clone(), ids);
+            changed.insert(key, Some(record.clone()));
+        }
+        let mut causal = Vec::new();
+        for (key, ids) in &declared {
+            causal.extend_from_slice(&body_index_key(key));
+            for id in ids {
+                causal.extend_from_slice(id);
+            }
+        }
+        let frontier = advance_published(self.frontier, &causal);
+        self.persist(
+            Some(ctx),
+            &changed,
+            &declared,
+            &[],
+            None,
+            Vec::new(),
+            frontier,
+        )?;
+        self.frontier = frontier;
+        // The Body that the hold was waiting for has arrived, so the hold has
+        // done its job. Released here rather than by the caller, because a
+        // caller that had to remember would eventually not.
+        for ids in declared.values() {
+            for id in ids {
+                self.pending_content.remove(id);
+            }
+        }
+        Ok(())
+    }
+
+    /// A Body's causal position, in lait's own head-set terms.
+    pub fn body_version(&self, key: &BodyKey) -> Option<fabric::FabricVersion> {
+        self.fabric.version(&fabric_key(key)).ok()
+    }
+
+    /// Take an anchor at a position inside a collaborative value.
+    pub fn anchor(&self, key: &BodyKey, path: &str, position: u64) -> Option<fabric::FabricAnchor> {
+        self.fabric.anchor(&fabric_key(key), path, position).ok()
+    }
+
+    /// Resolve an anchor. Total, and never mutates the Body.
+    pub fn resolve_anchor(
+        &self,
+        key: &BodyKey,
+        anchor: &fabric::FabricAnchor,
+    ) -> fabric::AnchorResolution {
+        self.fabric.resolve(&fabric_key(key), anchor)
+    }
+
+    /// Drop a Body's declaration without republishing — what a tombstone does
+    /// to the content it used to hold. Reachability is over *live* Bodies, so
+    /// forgetting the declaration is what makes the content collectable.
+    pub fn forget_declaration(&mut self, key: &BodyKey) {
+        self.declared_content.remove(key);
+    }
+
+    /// The content one Body declares.
+    pub fn declared_content(&self, key: &BodyKey) -> Vec<crate::content::ContentRef> {
+        self.declared_content
+            .get(key)
+            .map(|refs| {
+                refs.iter()
+                    .map(|id| crate::content::ContentRef { content_id: *id })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// A committed content descriptor, if this Replica holds one.
+    pub fn content_descriptor(
+        &self,
+        content: &crate::content::ContentRef,
+    ) -> Option<crate::content::ContentDescriptor> {
+        let store = self.durable.as_ref()?;
+        let value = fabric::journal::index::lookup(
+            &store.nodes(),
+            self.content_index_root,
+            &crate::manifest::content_index_key(content.as_bytes()),
+        )
+        .ok()??;
+        crate::content::ContentDescriptor::decode_canonical(&value).ok()
+    }
+
+    /// Every content id some live Body declares. The reachability rule, stated
+    /// as the pure function it is.
+    ///
+    /// This is the *advertisement* question — what a peer may be told about —
+    /// and it deliberately excludes held content. See [`Self::retained_content`]
+    /// for the deletion question, which is not the same one.
+    fn reachable_content(&self) -> std::collections::BTreeSet<[u8; 32]> {
+        self.declared_content
+            .iter()
+            .filter(|(key, _)| self.bodies.contains_key(key))
+            .flat_map(|(_, refs)| refs.iter().copied())
+            .collect()
+    }
+
+    /// Every content id this Replica must not collect: what live Bodies declare,
+    /// plus what an unexpired hold is still waiting to declare.
+    ///
+    /// Wider than [`Self::reachable_content`] on purpose. "May I show this to a
+    /// peer" and "may I delete this" are different questions, and answering
+    /// them with one set forces a choice between deleting an upload mid-attach
+    /// and pushing an undeclared descriptor at every peer.
+    fn retained_content(&self, now: std::time::Instant) -> std::collections::BTreeSet<[u8; 32]> {
+        let mut retained = self.reachable_content();
+        retained.extend(
+            self.pending_content
+                .iter()
+                .filter(|(_, until)| **until > now)
+                .map(|(id, _)| *id),
+        );
+        retained
+    }
+
+    /// Drop every content descriptor nothing keeps, and release the residency
+    /// behind it.
+    ///
+    /// "Nothing keeps" is wider than "no live Body declares": content under an
+    /// unexpired hold is retained too, because an upload waiting for the Body
+    /// that will name it is not garbage yet. See [`Self::retained_content`].
+    ///
+    /// Reachability is **derived, never maintained**: no reference count is
+    /// stored, because counts do not converge across independently committing
+    /// replicas while a pure function of the converged Body set does. The sweep
+    /// streams the catalog exactly as the journal's own sweep does, so it is
+    /// periodic and quota-driven, never a per-commit cost.
+    ///
+    /// What this is not: erasure. A peer that has not yet converged on the
+    /// tombstones keeps the descriptor until it does, and a peer that copied
+    /// the bytes out was never bound by this at all. That is the same promise
+    /// Body tombstones already make, and content does not get a stronger one.
+    pub fn sweep_unreferenced_content(
+        &mut self,
+        ctx: &CommitContext<'_>,
+        cache: Option<&fabric::journal::cache::ResidentCache>,
+    ) -> Result<Vec<crate::content::ContentRef>, ReplicaCommitError> {
+        use fabric::journal::index::{self, IndexChange, NodeSink};
+
+        let now = std::time::Instant::now();
+        self.pending_content.retain(|_, until| *until > now);
+        let reachable = self.retained_content(now);
+        let mut unreferenced: Vec<crate::content::ContentDescriptor> = Vec::new();
+        {
+            let store = self.durable.as_ref().expect("durable path");
+            let mut failure: Option<String> = None;
+            index::stream(&store.nodes(), self.content_index_root, &mut |entry| {
+                if failure.is_some() {
+                    return;
+                }
+                match crate::content::ContentDescriptor::decode_canonical(&entry.value) {
+                    Ok(descriptor) => {
+                        if !reachable.contains(descriptor.content_ref().as_bytes()) {
+                            unreferenced.push(descriptor);
+                        }
+                    }
+                    Err(e) => failure = Some(format!("content entry: {e}")),
+                }
+            })
+            .map_err(|e| ReplicaCommitError::Integrity(format!("content index: {e}")))?;
+            if let Some(reason) = failure {
+                return Err(ReplicaCommitError::Integrity(reason));
+            }
+        }
+        if unreferenced.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut sink = NodeSink::default();
+        let changes: Vec<IndexChange> = unreferenced
+            .iter()
+            .map(|d| IndexChange {
+                key: crate::manifest::content_index_key(d.content_ref().as_bytes()),
+                value: None,
+            })
+            .collect();
+        let content_index_root = {
+            let store = self.durable.as_ref().expect("durable path");
+            index::apply(&store.nodes(), self.content_index_root, changes, &mut sink)
+                .map_err(|e| ReplicaCommitError::Integrity(format!("content index: {e}")))?
+        };
+
+        // Republish under the shrunken catalog before touching residency, so a
+        // crash between the two leaves bytes without a descriptor — reclaimable
+        // garbage — rather than a descriptor whose bytes are gone.
+        let mut causal = Vec::with_capacity(unreferenced.len() * 32);
+        for descriptor in &unreferenced {
+            causal.extend_from_slice(descriptor.content_ref().as_bytes());
+        }
+        let frontier = advance_published(self.frontier, &causal);
+        let root = ManifestRoot::sign_with(
+            ctx.space,
+            frontier,
+            self.manifest_body_root,
+            content_index_root,
+            ctx.authority_frontier.clone(),
+            ctx.signer,
+        )
+        .ok_or_else(|| ReplicaCommitError::Illegitimate("sign manifest root".into()))?;
+        let root_bytes = root.encode();
+        let root_ref = object_ref(&root_bytes);
+        self.retain_object(root_ref.hash);
+        let mut removed = Vec::new();
+        if let Some(prior) = self.manifest_root_object {
+            if prior.hash != root_ref.hash && self.release_object(prior.hash) {
+                removed.push(prior.hash);
+            }
+        }
+
+        let meta = StoreMeta {
+            format_version: STORE_META_FORMAT_VERSION,
+            space: self.space.clone(),
+            frontier,
+            quota: self.quota,
+            body_index_root: self.body_index_root,
+            manifest_body_root: self.manifest_body_root,
+            content_index_root,
+            receipt_index_root: self.receipt_index_root,
+            manifest_root: Some(root_ref),
+        };
+        let meta_bytes =
+            postcard::to_stdvec(&meta).map_err(|e| ReplicaCommitError::Fabric(e.to_string()))?;
+        let added = vec![root_bytes];
+        let index_nodes = sink.written;
+        let roots: Vec<IndexRef> = self
+            .body_index_root
+            .into_iter()
+            .chain(self.manifest_body_root)
+            .chain(content_index_root)
+            .chain(self.receipt_index_root)
+            .collect();
+
+        let store = self.durable.as_mut().expect("durable path");
+        let caller_index = fabric::journal::CallerIndex {
+            roots: &roots,
+            nodes: &index_nodes,
+        };
+        match store.commit(&added, &removed, caller_index, meta_bytes) {
+            Ok(_) => {}
+            Err(fabric::journal::JournalError::OutcomeUnknown) => {
+                self.poisoned = true;
+                return Err(ReplicaCommitError::OutcomeUnknown);
+            }
+            Err(e) => {
+                self.poisoned = true;
+                return Err(ReplicaCommitError::Durability(e.to_string()));
+            }
+        }
+        self.content_index_root = content_index_root;
+        self.manifest_root_object = Some(root_ref);
+        self.frontier = frontier;
+
+        // Residency last, and releasing is all this does — the cache's own
+        // sweep decides when the bytes actually go, under its own quota. A
+        // crash between the two leaves bytes nothing points at, which is
+        // reclaimable garbage; the other order would leave a descriptor whose
+        // bytes are already gone.
+        if let Some(cache) = cache {
+            for descriptor in &unreferenced {
+                let _ = cache.release_content(&descriptor.content_nonce);
+            }
+        }
+        Ok(unreferenced.iter().map(|d| d.content_ref()).collect())
     }
 
     /// Test seam: attach a fault injector to the underlying journaled store
@@ -741,17 +1582,8 @@ impl Replica {
     /// [`crate::transaction::NO_PARENT_ROOT`] before any durable commit — the
     /// parent a local submit authors against.
     pub fn manifest_root(&self) -> [u8; 32] {
-        self.durable
-            .as_ref()
-            .and_then(|store| store.manifest())
-            .and_then(|m| {
-                // The Replica meta records the manifest-root object ref; a
-                // fresh or non-durable store has none.
-                postcard::from_bytes::<StoreMeta>(&m.meta)
-                    .ok()
-                    .and_then(|meta| meta.manifest_root)
-                    .map(|r| r.hash)
-            })
+        self.manifest_root_object
+            .map(|r| r.hash)
             .unwrap_or(crate::transaction::NO_PARENT_ROOT)
     }
 
@@ -853,6 +1685,7 @@ impl Replica {
         request_label: &str,
         ops: &[(BodyKey, BodyOp)],
         bindings: &[(BodyKey, BodyBinding)],
+        content_refs: &[(BodyKey, Vec<crate::content::ContentRef>)],
     ) -> Result<ActionOutcome, ReplicaCommitError> {
         if self.poisoned {
             return Err(ReplicaCommitError::Poisoned);
@@ -915,6 +1748,29 @@ impl Replica {
                 _ => {}
             }
         }
+        // The World's content declaration, validated before anything applies.
+        // Shallow on purpose — bounds, order, and that every named descriptor
+        // is committed — because anything deeper would mean decoding the
+        // product bytes it describes, which is the boundary it exists to
+        // respect.
+        let mut declared: BTreeMap<BodyKey, Vec<[u8; 32]>> = BTreeMap::new();
+        for (key, refs) in content_refs {
+            if refs.len() > crate::manifest::MAX_CONTENT_REFS_PER_BODY {
+                return Err(ReplicaCommitError::QuotaExceeded);
+            }
+            for reference in refs {
+                if self.content_descriptor(reference).is_none() {
+                    return Err(ReplicaCommitError::Illegitimate(
+                        "a declaration names content with no committed descriptor".into(),
+                    ));
+                }
+            }
+            let mut ids: Vec<[u8; 32]> = refs.iter().map(|r| *r.as_bytes()).collect();
+            ids.sort();
+            ids.dedup();
+            declared.insert(key.clone(), ids);
+        }
+
         // Body-count quota, reserved under the writer BEFORE anything applies.
         let new_bodies = touched
             .iter()
@@ -1082,6 +1938,7 @@ impl Replica {
                     &mut new_records,
                     Some(receipt_record),
                     next_frontier,
+                    &declared,
                 )?)
             } else {
                 // Non-durable but keyed: retain the signed material in memory
@@ -1162,7 +2019,13 @@ impl Replica {
         payloads: &[(BodyKey, Vec<u8>)],
         authority: &dyn AuthoritySource,
     ) -> Result<ConvergenceOutcome, ReplicaCommitError> {
-        self.incorporate_units(ctx, &[(tx.clone(), payloads.to_vec())], authority)
+        self.incorporate_units(
+            ctx,
+            &[(tx.clone(), payloads.to_vec())],
+            &BTreeMap::new(),
+            &[],
+            authority,
+        )
     }
 
     /// The one Convergence adoption path: incorporate a set of validated
@@ -1173,10 +2036,13 @@ impl Replica {
     /// a failure in transaction N never leaves transactions 0..N-1 committed
     /// under an error result, and a crash at any staging or journal boundary
     /// exposes the complete old or the complete new root.
+    #[allow(clippy::too_many_arguments)]
     fn incorporate_units(
         &mut self,
         ctx: &CommitContext<'_>,
         units: &[IncorporationUnit],
+        bundle_declared: &BTreeMap<BodyKey, Vec<[u8; 32]>>,
+        bundle_descriptors: &[crate::content::ContentDescriptor],
         authority: &dyn AuthoritySource,
     ) -> Result<ConvergenceOutcome, ReplicaCommitError> {
         if self.poisoned {
@@ -1635,6 +2501,8 @@ impl Replica {
                 units,
                 &staged_material,
                 &final_records,
+                bundle_declared,
+                bundle_descriptors,
                 next_frontier,
             )?)
         } else {
@@ -1671,12 +2539,15 @@ impl Replica {
     /// The bundle's one durable write: every staged head's envelope, every
     /// referenced signed transaction record, and the replacement Manifest over
     /// the complete post-bundle Body set — a single journal commit.
+    #[allow(clippy::too_many_arguments)]
     fn persist_bundle(
         &mut self,
         ctx: &CommitContext<'_>,
         units: &[IncorporationUnit],
         staged_material: &[(BodyKey, [u8; 32], Vec<u8>, usize)],
         final_records: &BTreeMap<BodyKey, BodyRecord>,
+        declared: &BTreeMap<BodyKey, Vec<[u8; 32]>>,
+        descriptors: &[crate::content::ContentDescriptor],
         next_frontier: ReplicaFrontier,
     ) -> Result<BTreeMap<BodyKey, BodyRecord>, ReplicaCommitError> {
         // Fill object refs into a working copy of the final records: each
@@ -1700,124 +2571,33 @@ impl Replica {
             }
         }
 
-        // The post-commit body index: current records overlaid with the new.
-        let mut bodies: BTreeMap<BodyKey, BodyRecord> = self.bodies.clone();
-        for (key, record) in &new_records {
-            bodies.insert(key.clone(), record.clone());
-        }
-
-        // Manifest pages over the full Body set.
-        let space = ctx.space;
-        // One entry per constituent head: a multi-writer Body is advertised
-        // as the exact set of author-signed heads whose union is its state.
-        let entries: Vec<ManifestEntry> = bodies
-            .iter()
-            .flat_map(|(key, r)| {
-                r.heads.iter().map(move |h| ManifestEntry {
-                    key: key.clone(),
-                    descriptor_hash: h.descriptor_hash,
-                    transaction_commitment: h.tx_commitment,
-                })
-            })
-            .collect();
-        let mut entries = entries;
-        entries.sort_by(|a, b| {
-            (&a.key, &a.transaction_commitment).cmp(&(&b.key, &b.transaction_commitment))
-        });
-        let entries = entries;
-        let mut pages: Vec<ManifestPage> = Vec::new();
-        for (i, chunk) in entries.chunks(MAX_ENTRIES_PER_PAGE).enumerate() {
-            pages.push(
-                ManifestPage::new(space, i as u32, chunk.to_vec())
-                    .ok_or_else(|| ReplicaCommitError::Illegitimate("space id shape".into()))?,
-            );
-        }
-        let root = ManifestRoot::sign_with(
-            space,
-            next_frontier,
-            &pages,
-            ctx.authority_frontier.clone(),
-            ctx.signer,
-        )
-        .ok_or_else(|| ReplicaCommitError::Illegitimate("sign manifest root".into()))?;
-        let root_bytes = root.encode();
-        let page_bytes: Vec<Vec<u8>> = pages.iter().map(|p| p.encode()).collect();
-
-        // Receipts: existing durable refs are kept.
-        let mut receipt_meta: Vec<(Vec<u8>, ObjectRef)> = Vec::new();
-        let mut keep: Vec<ObjectRef> = Vec::new();
-        for (scope, (_, existing_ref)) in &self.receipts {
-            if let Some(r) = existing_ref {
-                receipt_meta.push((scope.clone(), *r));
-                keep.push(*r);
-            }
-        }
-
-        // New objects, deduped by content address.
+        // Only the touched Bodies reach the durable write. The shape this
+        // replaced overlaid every record into one map and re-encoded it.
         let mut new_objects: Vec<Vec<u8>> = Vec::new();
-        let mut seen: std::collections::BTreeSet<[u8; 32]> = std::collections::BTreeSet::new();
-        let push_obj = |bytes: &Vec<u8>,
-                        out: &mut Vec<Vec<u8>>,
-                        seen: &mut std::collections::BTreeSet<[u8; 32]>| {
-            let r = object_ref(bytes);
-            if seen.insert(r.hash) {
-                out.push(bytes.clone());
-            }
-        };
         for tx_bytes in tx_bytes_by_unit.values() {
-            push_obj(tx_bytes, &mut new_objects, &mut seen);
+            new_objects.push(tx_bytes.clone());
         }
         for (_, _, envelope, _) in staged_material {
-            push_obj(envelope, &mut new_objects, &mut seen);
+            new_objects.push(envelope.clone());
         }
-        push_obj(&root_bytes, &mut new_objects, &mut seen);
-        for p in &page_bytes {
-            push_obj(p, &mut new_objects, &mut seen);
-        }
+        let staged: BTreeMap<BodyKey, Option<BodyRecord>> = new_records
+            .iter()
+            .map(|(k, v)| (k.clone(), Some(v.clone())))
+            .collect();
+        // The descriptors land in the same journal commit as the Bodies that
+        // declare them. Two commits would leave a window in which this Replica
+        // advertises a declaration it cannot back — which its own peers would
+        // then correctly refuse.
+        self.persist(
+            Some(ctx),
+            &staged,
+            declared,
+            descriptors,
+            None,
+            new_objects,
+            next_frontier,
+        )?;
 
-        // Keep: every carried object the post-commit index references.
-        for record in bodies.values() {
-            for head in &record.heads {
-                if let Some(r) = head.protected {
-                    if !seen.contains(&r.hash) {
-                        keep.push(r);
-                    }
-                }
-                if let Some(r) = head.transaction {
-                    if !seen.contains(&r.hash) {
-                        keep.push(r);
-                    }
-                }
-            }
-        }
-        keep.sort_by_key(|r| r.hash);
-        keep.dedup_by_key(|r| r.hash);
-
-        let meta = StoreMeta {
-            version: 1,
-            space: Some(space.clone()),
-            frontier: next_frontier,
-            quota: self.quota,
-            bodies: bodies.into_iter().collect(),
-            receipts: receipt_meta,
-            manifest_root: Some(object_ref(&root_bytes)),
-            manifest_pages: page_bytes.iter().map(|p| object_ref(p)).collect(),
-        };
-        let meta_bytes =
-            postcard::to_stdvec(&meta).map_err(|e| ReplicaCommitError::Fabric(e.to_string()))?;
-
-        let store = self.durable.as_mut().expect("durable path");
-        match store.commit(&new_objects, &keep, meta_bytes) {
-            Ok(_) => {}
-            Err(fabric::journal::JournalError::OutcomeUnknown) => {
-                self.poisoned = true;
-                return Err(ReplicaCommitError::OutcomeUnknown);
-            }
-            Err(e) => {
-                self.poisoned = true;
-                return Err(ReplicaCommitError::Durability(e.to_string()));
-            }
-        }
         // The caller's in-memory index must adopt THESE records — the ones
         // carrying the object refs just persisted — or the replica cannot
         // re-serve incorporated material until a reopen reloads the meta
@@ -1838,7 +2618,7 @@ impl Replica {
     ///    history and may survive a later Body failure);
     /// 3. the manifest root must be canonical, correctly signed, and its
     ///    signer authorized at its authority frontier;
-    /// 4. the pages must be complete, canonical, and exactly the root's;
+    /// 4. the index must be complete, canonical, and exactly the root's;
     /// 5. every transaction must verify with signer standing at its referenced
     ///    historical frontier;
     /// 6. every received Body payload must resolve to exactly one descriptor
@@ -1886,11 +2666,11 @@ impl Replica {
             .map_err(|e| illegit(format!("authority batch: {e}")))?;
         // An **authority-only** staging (an unadmitted peer serving its
         // mechanics records — its admission request — with no standing to
-        // advertise a Manifest): empty root bytes, and therefore no pages, no
+        // advertise a Manifest): empty root bytes, and therefore no nodes, no
         // transactions, and no Body payloads. The authority phase above is the
         // whole exchange.
         if staged.manifest_root_bytes.is_empty() {
-            if !staged.manifest_pages.is_empty()
+            if !staged.manifest_nodes.is_empty()
                 || !staged.bodies.is_empty()
                 || !transactions.is_empty()
             {
@@ -1901,31 +2681,54 @@ impl Replica {
             return Ok(crate::convergence::ValidatedContactBundle {
                 authority_receipt,
                 units: Vec::new(),
+                declared_content: BTreeMap::new(),
+                descriptors: Vec::new(),
             });
         }
-        // 3. + 4. Authority-verified manifest root and its complete pages.
+        // 3. + 4. Authority-verified manifest root and its complete index.
         let root = ManifestRoot::decode_canonical(&staged.manifest_root_bytes)
             .map_err(|e| illegit(format!("manifest root: {e}")))?;
         let root_space = root.space;
         let authorized = root
             .verify_authorized(authority)
             .map_err(|e| illegit(format!("manifest root: {e}")))?;
-        let mut pages = Vec::with_capacity(staged.manifest_pages.len());
-        for bytes in &staged.manifest_pages {
-            pages.push(
-                ManifestPage::decode_canonical(bytes)
-                    .map_err(|e| illegit(format!("manifest page: {e}")))?,
-            );
+
+        // The index nodes arrive as a bag of bytes; address them and let the
+        // root say which ones belong. A node the sender threw in that no root
+        // reaches is simply never read.
+        let offered: BTreeMap<[u8; 32], Vec<u8>> = staged
+            .manifest_nodes
+            .iter()
+            .map(|bytes| (fabric::journal::object_content_hash(bytes), bytes.clone()))
+            .collect();
+        struct OfferedNodes<'a>(&'a BTreeMap<[u8; 32], Vec<u8>>);
+        impl fabric::journal::index::NodeSource for OfferedNodes<'_> {
+            fn node(&self, hash: &[u8; 32]) -> Option<Vec<u8>> {
+                self.0.get(hash).cloned()
+            }
         }
+        let nodes = OfferedNodes(&offered);
         authorized
             .root()
-            .verify_pages(&pages)
-            .map_err(|e| illegit(format!("manifest pages: {e}")))?;
-        // A multi-writer Body is advertised as several heads under one key:
-        // the entry index is a multimap grouped by key.
-        let mut entries: BTreeMap<BodyKey, Vec<&ManifestEntry>> = BTreeMap::new();
-        for e in pages.iter().flat_map(|p| p.entries.iter()) {
-            entries.entry(e.key.clone()).or_default().push(e);
+            .verify_index(&nodes)
+            .map_err(|e| illegit(format!("manifest index: {e}")))?;
+
+        let mut entries: BTreeMap<BodyKey, ManifestEntry> = BTreeMap::new();
+        let mut entry_failure: Option<String> = None;
+        fabric::journal::index::stream(&nodes, authorized.root().body_index_root, &mut |entry| {
+            if entry_failure.is_some() {
+                return;
+            }
+            match ManifestEntry::decode_canonical(&entry.value) {
+                Ok(decoded) => {
+                    entries.insert(decoded.key.clone(), decoded);
+                }
+                Err(e) => entry_failure = Some(format!("manifest entry: {e}")),
+            }
+        })
+        .map_err(|e| illegit(format!("manifest index: {e}")))?;
+        if let Some(reason) = entry_failure {
+            return Err(illegit(reason));
         }
         // 5. Every provided transaction verifies with historical standing,
         //    bound to the root's Space.
@@ -1954,12 +2757,12 @@ impl Replica {
                     "payload does not match the signed commitment".into(),
                 ));
             }
-            let Some(key_entries) = entries.get(key) else {
+            let Some(key_entry) = entries.get(key) else {
                 return Err(illegit("payload outside the advertised manifest".into()));
             };
-            let bound = key_entries.iter().any(|entry| {
-                entry.descriptor_hash == descriptor_hash(descriptor)
-                    && entry.transaction_commitment == tx_commitment(tx_bytes)
+            let bound = key_entry.heads.iter().any(|head| {
+                head.descriptor_hash == descriptor_hash(descriptor)
+                    && head.transaction_commitment == tx_commitment(tx_bytes)
             });
             if !bound {
                 return Err(illegit(
@@ -1985,8 +2788,8 @@ impl Replica {
                 received.insert((key, tx_commitment(tx_bytes)));
             }
         }
-        for (key, key_entries) in &entries {
-            for entry in key_entries {
+        for (key, key_entry) in &entries {
+            for entry in &key_entry.heads {
                 if received.contains(&(key, entry.transaction_commitment)) {
                     continue;
                 }
@@ -2005,10 +2808,92 @@ impl Replica {
                 }
             }
         }
+        let declared_content: BTreeMap<BodyKey, Vec<[u8; 32]>> = entries
+            .iter()
+            .filter(|(_, entry)| !entry.content_refs.is_empty())
+            .map(|(key, entry)| (key.clone(), entry.content_refs.clone()))
+            .collect();
+
+        // 8. Content completeness, the same rule as rule 7 and for the same
+        //    reason: adopting the advertised root is atomic, so every content
+        //    id it declares must resolve — from the advertised catalog, or from
+        //    a descriptor this Replica already holds. Anything else adopts a
+        //    manifest naming content nobody on this machine can ever ask for,
+        //    and the gap would only surface when someone tried to open it.
+        //
+        //    Held-locally counts because convergence is incremental: a peer
+        //    that sent us the descriptor last week is not obliged to send it
+        //    again for us to accept a comment on the same issue.
+        let advertised = self.advertised_content(&nodes, authorized.root())?;
+        let mut descriptors = Vec::new();
+        for (key, refs) in &declared_content {
+            for content in refs {
+                if let Some(descriptor) = advertised.get(content) {
+                    if self
+                        .content_descriptor(&crate::content::ContentRef {
+                            content_id: *content,
+                        })
+                        .is_none()
+                    {
+                        descriptors.push(descriptor.clone());
+                    }
+                    continue;
+                }
+                if self
+                    .content_descriptor(&crate::content::ContentRef {
+                        content_id: *content,
+                    })
+                    .is_some()
+                {
+                    continue;
+                }
+                return Err(illegit(format!(
+                    "manifest declares content it does not advertise: {}/{}",
+                    key.world.as_str(),
+                    key.body
+                )));
+            }
+        }
+        descriptors.sort_by_key(|d| *d.content_ref().as_bytes());
+        descriptors.dedup_by_key(|d| *d.content_ref().as_bytes());
+
         Ok(crate::convergence::ValidatedContactBundle {
+            declared_content,
             authority_receipt,
             units: units.into_values().collect(),
+            descriptors,
         })
+    }
+
+    /// The content catalog an advertisement carries, keyed by content id.
+    ///
+    /// The index was already structurally verified by
+    /// [`crate::manifest::ManifestRoot::verify_index`] — every entry decodes,
+    /// sits under the key it hashes to, and belongs to the root's Space. This
+    /// only reads it out.
+    fn advertised_content(
+        &self,
+        nodes: &dyn fabric::journal::index::NodeSource,
+        root: &ManifestRoot,
+    ) -> Result<BTreeMap<[u8; 32], crate::content::ContentDescriptor>, ReplicaCommitError> {
+        let mut catalog = BTreeMap::new();
+        let mut failure: Option<String> = None;
+        fabric::journal::index::stream(nodes, root.content_index_root, &mut |entry| {
+            if failure.is_some() {
+                return;
+            }
+            match crate::content::ContentDescriptor::decode_canonical(&entry.value) {
+                Ok(descriptor) => {
+                    catalog.insert(*descriptor.content_ref().as_bytes(), descriptor);
+                }
+                Err(e) => failure = Some(format!("content entry: {e}")),
+            }
+        })
+        .map_err(|e| ReplicaCommitError::Illegitimate(format!("content index: {e}")))?;
+        match failure {
+            Some(reason) => Err(ReplicaCommitError::Illegitimate(reason)),
+            None => Ok(catalog),
+        }
     }
 
     /// Incorporate a sealed validated bundle — the only Convergence entry for
@@ -2022,49 +2907,224 @@ impl Replica {
         bundle: crate::convergence::ValidatedContactBundle,
         authority: &dyn AuthoritySource,
     ) -> Result<ConvergenceOutcome, ReplicaCommitError> {
-        self.incorporate_units(ctx, &bundle.units, authority)
+        self.incorporate_units(
+            ctx,
+            &bundle.units,
+            &bundle.declared_content,
+            &bundle.descriptors,
+            authority,
+        )
     }
 
-    /// Build and sign the current Manifest (root + pages) over the full Body
-    /// set — the advertisement a Contact serves. Deterministic for a given
-    /// state and signer.
+    /// Build and sign the current Manifest over the full Body set **and the
+    /// content catalog those Bodies reach**, returning the root plus every
+    /// index node a peer needs to verify it — the advertisement a Contact
+    /// serves. Deterministic for a given state and signer.
+    ///
+    /// Both halves travel or neither is any use. A Body's manifest entry names
+    /// content ids; a content id alone is a name for bytes nobody but the
+    /// author can ask for, because asking requires the geometry, the epoch, and
+    /// the Merkle root that only the descriptor carries. Advertising the first
+    /// without the second converges an attachment as an opaque id.
+    ///
+    /// Only *reachable* descriptors are advertised: those some live Body
+    /// declares. A descriptor no live Body declares is this Station's own
+    /// business, and pushing it at a peer would grow their catalog from ours.
+    ///
+    /// Deliberately **narrower** than what the sweep keeps. The sweep also
+    /// spares content under a live pending-declaration hold — an upload whose
+    /// Body has not been committed yet — and that content is exactly what a
+    /// peer has no use for: no Body names it, so nothing on their side would
+    /// ever reference it, and their own sweep would have to undo the adoption.
+    /// "May I delete this" and "may I show this to a peer" are two questions,
+    /// and [`Self::retained_content`] answers the first.
+    ///
+    /// Shipping the whole index is what F4 replaces: two peers will compare
+    /// roots, descend only where subtree hashes differ, and exchange divergent
+    /// leaves. Until then this costs what a full walk costs, and is correct.
     pub fn export_manifest(
         &self,
         ctx: &CommitContext<'_>,
     ) -> Result<(Vec<u8>, Vec<Vec<u8>>), ReplicaCommitError> {
-        // One entry per constituent head (see `persist_bundle`).
+        use fabric::journal::index::NodeSink;
+
         let entries: Vec<ManifestEntry> = self
             .bodies
             .iter()
-            .flat_map(|(key, r)| {
-                r.heads.iter().map(move |h| ManifestEntry {
-                    key: key.clone(),
-                    descriptor_hash: h.descriptor_hash,
-                    transaction_commitment: h.tx_commitment,
-                })
+            .map(|(key, record)| {
+                Self::manifest_entry(
+                    key,
+                    record,
+                    self.declared_content.get(key).cloned().unwrap_or_default(),
+                )
             })
-            .collect();
-        let mut entries = entries;
-        entries.sort_by(|a, b| {
-            (&a.key, &a.transaction_commitment).cmp(&(&b.key, &b.transaction_commitment))
-        });
-        let entries = entries;
-        let mut pages: Vec<ManifestPage> = Vec::new();
-        for (i, chunk) in entries.chunks(MAX_ENTRIES_PER_PAGE).enumerate() {
-            pages.push(
-                ManifestPage::new(ctx.space, i as u32, chunk.to_vec())
-                    .ok_or_else(|| ReplicaCommitError::Illegitimate("space id shape".into()))?,
-            );
-        }
+            .collect::<Result<_, _>>()?;
+        let mut sink = NodeSink::default();
+        let body_root = crate::manifest::build_body_index(entries, &mut sink)
+            .map_err(|e| ReplicaCommitError::Illegitimate(format!("manifest index: {e}")))?;
+        let content_root =
+            crate::manifest::build_content_index(self.advertised_descriptors()?, &mut sink)
+                .map_err(|e| ReplicaCommitError::Illegitimate(format!("content index: {e}")))?;
         let root = ManifestRoot::sign_with(
             ctx.space,
             self.frontier,
-            &pages,
+            body_root,
+            content_root,
             ctx.authority_frontier.clone(),
             ctx.signer,
         )
         .ok_or_else(|| ReplicaCommitError::Illegitimate("sign manifest root".into()))?;
-        Ok((root.encode(), pages.iter().map(|p| p.encode()).collect()))
+        Ok((root.encode(), sink.written))
+    }
+
+    /// The descriptors an advertisement carries: every committed descriptor
+    /// some live Body declares.
+    ///
+    /// Derived from the Body set on every export rather than maintained,
+    /// because that is the same rule the sweep applies — a maintained set and a
+    /// derived one would eventually disagree, and the disagreement would be
+    /// invisible until a peer could not open an attachment.
+    fn advertised_descriptors(
+        &self,
+    ) -> Result<Vec<crate::content::ContentDescriptor>, ReplicaCommitError> {
+        let Some(store) = self.durable.as_ref() else {
+            return Ok(Vec::new());
+        };
+        let reachable = self.reachable_content();
+        if reachable.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut descriptors = Vec::with_capacity(reachable.len());
+        let mut failure: Option<String> = None;
+        fabric::journal::index::stream(&store.nodes(), self.content_index_root, &mut |entry| {
+            if failure.is_some() {
+                return;
+            }
+            match crate::content::ContentDescriptor::decode_canonical(&entry.value) {
+                Ok(descriptor) => {
+                    if reachable.contains(descriptor.content_ref().as_bytes()) {
+                        descriptors.push(descriptor);
+                    }
+                }
+                Err(e) => failure = Some(format!("content entry: {e}")),
+            }
+        })
+        .map_err(|e| ReplicaCommitError::Integrity(format!("content index: {e}")))?;
+        match failure {
+            Some(reason) => Err(ReplicaCommitError::Integrity(reason)),
+            None => Ok(descriptors),
+        }
+    }
+
+    /// The root of this Replica's published catalog — what a peer compares
+    /// against to discover divergence without either side enumerating.
+    ///
+    /// This replaces the holdings declaration as the thing a Contact opens
+    /// with. A declaration had to name every head, and the frame carrying it
+    /// was sized for exactly that; a root is 40 bytes whatever the catalog
+    /// holds, and equal roots prove equal catalogs outright because the
+    /// encoding is canonical.
+    pub fn published_root(&self) -> Option<fabric::journal::index::ChildRef> {
+        self.manifest_body_root
+    }
+
+    /// The signed manifest root this Replica is currently advertising.
+    pub fn published_manifest_root(&self) -> Option<ManifestRoot> {
+        let reference = self.manifest_root_object?;
+        let bytes = self.durable.as_ref()?.read_object(&reference).ok()?;
+        ManifestRoot::decode_canonical(&bytes).ok()
+    }
+
+    /// How many objects the store has promised to keep.
+    ///
+    /// A maintenance and test observation, not a product surface. It exists
+    /// because the required set is the one thing whose growth has no natural
+    /// ceiling: an entry is a promise that never expires, so anything admitted
+    /// there by mistake is permanent.
+    pub fn required_object_count(&self) -> Option<usize> {
+        Some(self.durable.as_ref()?.required_objects().ok()?.len())
+    }
+
+    /// Collect objects no root reaches. A maintenance beat, safe at any quiet
+    /// moment — the store sweeps periodically on its own, and this lets a
+    /// caller that knows it is idle pre-empt that.
+    pub fn collect_unreachable_objects(&self) -> Result<(), ReplicaCommitError> {
+        let Some(store) = self.durable.as_ref() else {
+            return Ok(());
+        };
+        store
+            .collect_unreachable()
+            .map_err(|e| ReplicaCommitError::Durability(e.to_string()))
+    }
+
+    /// Serve the requested published-catalog nodes to a descending peer.
+    ///
+    /// Bounded by the caller and by what exists: an unknown hash is simply
+    /// absent from the answer, so a peer cannot use requests to probe for
+    /// anything it could not already address.
+    pub fn published_nodes(&self, hashes: &[[u8; 32]], max: usize) -> BTreeMap<[u8; 32], Vec<u8>> {
+        use fabric::journal::index::NodeSource;
+        let Some(store) = self.durable.as_ref() else {
+            return BTreeMap::new();
+        };
+        let nodes = store.nodes();
+        hashes
+            .iter()
+            .take(max)
+            .filter_map(|hash| nodes.node(hash).map(|bytes| (*hash, bytes)))
+            .collect()
+    }
+
+    /// Begin discovering what a peer holds that this Replica does not.
+    ///
+    /// The session is a pure state machine: it asks for node hashes, is fed
+    /// the answers, and eventually names the Bodies whose advertised heads
+    /// differ. Cost is proportional to the disagreement, not to either
+    /// catalog — two converged peers exchange nothing at all.
+    pub fn begin_reconciliation(
+        &self,
+        peer_root: Option<fabric::journal::index::ChildRef>,
+        max_nodes: u64,
+    ) -> fabric::journal::index::Reconciliation {
+        fabric::journal::index::Reconciliation::begin(self.manifest_body_root, peer_root, max_nodes)
+    }
+
+    /// Feed a reconciliation the nodes it asked for, against this Replica's own
+    /// catalog.
+    pub fn absorb_reconciliation(
+        &self,
+        session: &mut fabric::journal::index::Reconciliation,
+        nodes: &BTreeMap<[u8; 32], Vec<u8>>,
+    ) -> Result<(), ReplicaCommitError> {
+        let Some(store) = self.durable.as_ref() else {
+            return Err(ReplicaCommitError::Illegitimate(
+                "a non-durable Replica has no catalog to reconcile against".into(),
+            ));
+        };
+        session
+            .absorb(&store.nodes(), nodes)
+            .map_err(|e| ReplicaCommitError::Integrity(format!("reconciliation: {e}")))
+    }
+
+    /// Decode the divergent entries a completed reconciliation produced into
+    /// the Bodies and heads this Replica should ask for.
+    pub fn divergent_heads(
+        entries: &[fabric::journal::index::IndexEntry],
+    ) -> Result<Vec<DivergentBody>, ReplicaCommitError> {
+        entries
+            .iter()
+            .map(|entry| {
+                let published = ManifestEntry::decode_canonical(&entry.value).map_err(|e| {
+                    ReplicaCommitError::Illegitimate(format!("published entry: {e}"))
+                })?;
+                let commitments = published
+                    .heads
+                    .iter()
+                    .map(|h| h.transaction_commitment)
+                    .collect();
+                Ok((published.key, commitments))
+            })
+            .collect()
     }
 
     /// The complete per-head holdings summary: every `(key, transaction
@@ -2248,6 +3308,7 @@ impl Replica {
     /// Persist a local signed transaction: the transaction record, sealed
     /// payloads, receipt, and manifest, at one journal linearization point.
     /// Returns the durable receipt.
+    #[allow(clippy::too_many_arguments)]
     fn persist_transaction(
         &mut self,
         ctx: &CommitContext<'_>,
@@ -2256,83 +3317,42 @@ impl Replica {
         new_records: &mut BTreeMap<BodyKey, Option<BodyRecord>>,
         receipt: Option<RequestReceipt>,
         next_frontier: ReplicaFrontier,
+        declared: &BTreeMap<BodyKey, Vec<[u8; 32]>>,
     ) -> Result<RequestReceipt, ReplicaCommitError> {
         let sealed: Vec<(BodyKey, Vec<u8>, ())> = sealed
             .iter()
             .map(|(k, e, _)| (k.clone(), e.clone(), ()))
             .collect();
         let receipt = receipt.expect("local commits carry a receipt");
-        self.persist_graph(ctx, tx, &sealed, new_records, Some(&receipt), next_frontier)?;
+        self.persist_graph(
+            ctx,
+            tx,
+            &sealed,
+            new_records,
+            Some(&receipt),
+            next_frontier,
+            declared,
+        )?;
         Ok(receipt)
     }
 
-    /// Persist ONLY a new idempotency receipt: the body index, manifest, and
-    /// frontier are unchanged; every existing object is carried forward.
+    /// Persist ONLY a new idempotency receipt. No Body changed and no manifest
+    /// is republished, so this writes the receipt, one index path, and the
+    /// commit point — and nothing else.
     fn persist_receipt_only(&mut self, receipt: &RequestReceipt) -> Result<(), ReplicaCommitError> {
-        let store = self.durable.as_ref().expect("durable path");
-        let prior: Option<StoreMeta> = store
-            .manifest()
-            .map(|m| postcard::from_bytes(&m.meta))
-            .transpose()
-            .map_err(|e| ReplicaCommitError::Integrity(format!("store meta: {e}")))?;
-        let receipt_bytes = receipt.encode();
-        let receipt_ref = object_ref(&receipt_bytes);
-        let mut keep: Vec<ObjectRef> = Vec::new();
-        let mut receipt_meta: Vec<(Vec<u8>, ObjectRef)> = Vec::new();
-        for (scope, (_, existing_ref)) in &self.receipts {
-            if let Some(r) = existing_ref {
-                receipt_meta.push((scope.clone(), *r));
-                keep.push(*r);
-            }
-        }
-        receipt_meta.push((receipt.scope_key(), receipt_ref));
-        let (bodies, manifest_root, manifest_pages) = match prior {
-            Some(meta) => (meta.bodies, meta.manifest_root, meta.manifest_pages),
-            None => (self.bodies.clone().into_iter().collect(), None, Vec::new()),
-        };
-        for (_, record) in &bodies {
-            for head in &record.heads {
-                if let Some(r) = head.protected {
-                    keep.push(r);
-                }
-                if let Some(r) = head.transaction {
-                    keep.push(r);
-                }
-            }
-        }
-        if let Some(r) = manifest_root {
-            keep.push(r);
-        }
-        keep.extend(manifest_pages.iter().copied());
-        keep.sort_by_key(|r| r.hash);
-        keep.dedup_by_key(|r| r.hash);
-        let meta = StoreMeta {
-            version: 1,
-            space: self.space.clone(),
-            frontier: self.frontier,
-            quota: self.quota,
-            bodies,
-            receipts: receipt_meta,
-            manifest_root,
-            manifest_pages,
-        };
-        let meta_bytes =
-            postcard::to_stdvec(&meta).map_err(|e| ReplicaCommitError::Fabric(e.to_string()))?;
-        let store = self.durable.as_mut().expect("durable path");
-        match store.commit(std::slice::from_ref(&receipt_bytes), &keep, meta_bytes) {
-            Ok(_) => {}
-            Err(fabric::journal::JournalError::OutcomeUnknown) => {
-                self.poisoned = true;
-                return Err(ReplicaCommitError::OutcomeUnknown);
-            }
-            Err(e) => {
-                self.poisoned = true;
-                return Err(ReplicaCommitError::Durability(e.to_string()));
-            }
-        }
+        let frontier = self.frontier;
+        self.persist(
+            None,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &[],
+            Some(receipt),
+            Vec::new(),
+            frontier,
+        )?;
         self.receipts.insert(
             receipt.scope_key(),
-            (receipt.clone(), Some(object_ref(&receipt_bytes))),
+            (receipt.clone(), Some(object_ref(&receipt.encode()))),
         );
         Ok(())
     }
@@ -2341,6 +3361,7 @@ impl Replica {
     /// the journal protocol. Every failure before the manifest linearization
     /// point poisons this handle (the engine has already applied in memory);
     /// `OutcomeUnknown` demands reopen-not-retry.
+    #[allow(clippy::too_many_arguments)]
     fn persist_graph(
         &mut self,
         ctx: &CommitContext<'_>,
@@ -2349,6 +3370,7 @@ impl Replica {
         new_records: &mut BTreeMap<BodyKey, Option<BodyRecord>>,
         receipt: Option<&RequestReceipt>,
         next_frontier: ReplicaFrontier,
+        declared: &BTreeMap<BodyKey, Vec<[u8; 32]>>,
     ) -> Result<(), ReplicaCommitError> {
         let tx_bytes = tx.encode();
         let tx_ref = object_ref(&tx_bytes);
@@ -2372,137 +3394,37 @@ impl Replica {
             }
         }
 
-        // The post-commit body index: current records overlaid with the new.
-        let mut bodies: BTreeMap<BodyKey, BodyRecord> = self.bodies.clone();
-        for (key, record) in new_records.iter() {
-            match record {
-                None => {
-                    bodies.remove(key);
-                }
-                Some(r) => {
-                    bodies.insert(key.clone(), r.clone());
-                }
-            }
-        }
-
-        // Manifest pages over the full Body set.
-        let space = ctx.space;
-        // One entry per constituent head (see `persist_bundle`).
-        let entries: Vec<ManifestEntry> = bodies
-            .iter()
-            .flat_map(|(key, r)| {
-                r.heads.iter().map(move |h| ManifestEntry {
-                    key: key.clone(),
-                    descriptor_hash: h.descriptor_hash,
-                    transaction_commitment: h.tx_commitment,
-                })
-            })
-            .collect();
-        let mut entries = entries;
-        entries.sort_by(|a, b| {
-            (&a.key, &a.transaction_commitment).cmp(&(&b.key, &b.transaction_commitment))
+        // The transaction object is written only if a head names it. A batch
+        // whose every touched Body is a tombstone leaves no head at all, and an
+        // object nothing references enters the required set with a refcount of
+        // zero — permanent, because the only thing that could release it is a
+        // reference that was never taken.
+        let referenced = new_records.values().flatten().any(|record| {
+            record
+                .heads
+                .iter()
+                .any(|head| head.transaction == Some(tx_ref))
         });
-        let entries = entries;
-        let mut pages: Vec<ManifestPage> = Vec::new();
-        for (i, chunk) in entries.chunks(MAX_ENTRIES_PER_PAGE).enumerate() {
-            pages.push(
-                ManifestPage::new(space, i as u32, chunk.to_vec())
-                    .ok_or_else(|| ReplicaCommitError::Illegitimate("space id shape".into()))?,
-            );
-        }
-        let root = ManifestRoot::sign_with(
-            space,
-            next_frontier,
-            &pages,
-            ctx.authority_frontier.clone(),
-            ctx.signer,
-        )
-        .ok_or_else(|| ReplicaCommitError::Illegitimate("sign manifest root".into()))?;
-        let root_bytes = root.encode();
-        let page_bytes: Vec<Vec<u8>> = pages.iter().map(|p| p.encode()).collect();
-
-        // Receipts: existing durable refs are kept; the new one is written.
-        let mut receipt_meta: Vec<(Vec<u8>, ObjectRef)> = Vec::new();
-        let mut keep: Vec<ObjectRef> = Vec::new();
-        for (scope, (_, existing_ref)) in &self.receipts {
-            if let Some(r) = existing_ref {
-                receipt_meta.push((scope.clone(), *r));
-                keep.push(*r);
-            }
-        }
-        let receipt_bytes = receipt.map(|r| r.encode());
-        if let (Some(receipt), Some(bytes)) = (receipt, &receipt_bytes) {
-            receipt_meta.push((receipt.scope_key(), object_ref(bytes)));
-        }
-
-        // New objects, deduped by content address.
         let mut new_objects: Vec<Vec<u8>> = Vec::new();
-        let mut seen: std::collections::BTreeSet<[u8; 32]> = std::collections::BTreeSet::new();
-        let push_obj = |bytes: &Vec<u8>,
-                        seen: &mut std::collections::BTreeSet<[u8; 32]>,
-                        out: &mut Vec<Vec<u8>>| {
-            let r = object_ref(bytes);
-            if seen.insert(r.hash) {
-                out.push(bytes.clone());
-            }
-        };
-        push_obj(&tx_bytes, &mut seen, &mut new_objects);
+        if referenced {
+            new_objects.push(tx_bytes.clone());
+        }
         for (_, envelope, _) in sealed {
-            push_obj(envelope, &mut seen, &mut new_objects);
+            new_objects.push(envelope.clone());
         }
-        if let Some(bytes) = &receipt_bytes {
-            push_obj(bytes, &mut seen, &mut new_objects);
-        }
-        push_obj(&root_bytes, &mut seen, &mut new_objects);
-        for p in &page_bytes {
-            push_obj(p, &mut seen, &mut new_objects);
-        }
+        self.persist(
+            Some(ctx),
+            new_records,
+            declared,
+            &[],
+            receipt,
+            new_objects,
+            next_frontier,
+        )?;
 
-        // Keep: every carried object the post-commit index references.
-        for record in bodies.values() {
-            for head in &record.heads {
-                if let Some(r) = head.protected {
-                    if !seen.contains(&r.hash) {
-                        keep.push(r);
-                    }
-                }
-                if let Some(r) = head.transaction {
-                    if !seen.contains(&r.hash) {
-                        keep.push(r);
-                    }
-                }
-            }
-        }
-        keep.sort_by_key(|r| r.hash);
-        keep.dedup_by_key(|r| r.hash);
-
-        let meta = StoreMeta {
-            version: 1,
-            space: Some(space.clone()),
-            frontier: next_frontier,
-            quota: self.quota,
-            bodies: bodies.clone().into_iter().collect(),
-            receipts: receipt_meta.clone(),
-            manifest_root: Some(object_ref(&root_bytes)),
-            manifest_pages: page_bytes.iter().map(|p| object_ref(p)).collect(),
-        };
-        let meta_bytes =
-            postcard::to_stdvec(&meta).map_err(|e| ReplicaCommitError::Fabric(e.to_string()))?;
-
-        let store = self.durable.as_mut().expect("durable path");
-        match store.commit(&new_objects, &keep, meta_bytes) {
-            Ok(_) => {}
-            Err(fabric::journal::JournalError::OutcomeUnknown) => {
-                self.poisoned = true;
-                return Err(ReplicaCommitError::OutcomeUnknown);
-            }
-            Err(e) => {
-                self.poisoned = true;
-                return Err(ReplicaCommitError::Durability(e.to_string()));
-            }
-        }
         // Durable receipt refs become authoritative in memory.
-        if let (Some(receipt), Some(bytes)) = (receipt, &receipt_bytes) {
+        if let Some(receipt) = receipt {
+            let bytes = &receipt.encode();
             self.receipts.insert(
                 receipt.scope_key(),
                 (receipt.clone(), Some(object_ref(bytes))),
@@ -2517,9 +3439,17 @@ impl Replica {
         self.fabric.read(&fabric_key(key))
     }
 
-    /// Read the committed collaborative view of a Body, if the key holds one.
-    /// List elements carry the stable ids `ListRemove`/`ListMove` take.
-    pub fn read_collaborative(&self, key: &BodyKey) -> Option<fabric::CollaborativeView> {
+    /// Project the committed collaborative view of a Body. List elements carry
+    /// the stable ids `ListRemove`/`ListMove` take.
+    ///
+    /// A Body whose collaborative types this build does not implement returns
+    /// `SchemaAhead` rather than a partial view — the material is still stored,
+    /// forwarded, and converged, because byte-completeness does not require
+    /// comprehension.
+    pub fn read_collaborative(
+        &self,
+        key: &BodyKey,
+    ) -> Result<fabric::CollaborativeView, fabric::ProjectionError> {
         self.fabric.read_collaborative(&fabric_key(key))
     }
 }

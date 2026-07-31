@@ -53,6 +53,10 @@ anyhow = "1"
 
 [dev-dependencies]
 regex = "1.13.1"
+# `comms::Connection` is an `#[async_trait]`, so a test stub of it needs the
+# same macro. Only a stub needs one — production code holds `Box<dyn Connection>`
+# and never implements the trait.
+async-trait = "0.1"
 # The real-iroh Contact gate test builds two loopback endpoints on a
 # multi-thread runtime that outlives the Stations driving them.
 tokio = { version = "1", features = ["rt-multi-thread", "time", "macros"] }

@@ -44,6 +44,28 @@ cache miss or an invitation to reconstruct guesses.
 Mechanics and Fabric reuse the semantics-free journal mechanism but maintain
 separate semantic manifests. A journal is not replicated product state.
 
+Not everything under a store directory is journaled. An Orbit's directory also
+holds `content-cache/`, a sibling of the journal rather than a part of it,
+because the journal's promise — everything a root names is present and intact —
+is the wrong promise for a content chunk, which is optional by design. A missing
+object means the store is broken; a missing chunk means fetch it again. §13
+states what lives there and what activation reclaims; `COMPATIBILITY.md` §2
+states why it carries no format version.
+
+A store manifest names **index roots**, not inventories. An index is a
+persistent authenticated radix map from a 32-byte key to bounded bytes: one
+nibble per level, leaves holding at most 256 entries, nodes content-addressed
+and immutable, and therefore themselves ordinary journal objects under the same
+object domain. Two indexes with the same contents have the same root regardless
+of insertion order, and an update rewrites only the spine from the changed leaf
+to the root — so commit cost is proportional to what changed, not to what is
+stored.
+
+Canonical shape is part of the contract, not an optimisation. A leaf that could
+have been merged into its parent, or a branch that should have split, is an
+integrity error on read: two encodings of the same map would otherwise produce
+two roots, and the root is what a signature covers.
+
 ## 3. Mechanics authority data
 
 Mechanics stores signed effects, graph/index deltas, authority checkpoints, and
@@ -79,8 +101,8 @@ The transaction id identifies the complete signed envelope. Reusing a request
 identity with identical bytes returns the original result; reusing it with
 different content is a conflict.
 
-A signed Manifest commits a complete Body set through canonical pages. Entries
-are globally ordered. A Body may have multiple constituent transaction heads;
+A signed Manifest commits a complete Body set through one canonical
+authenticated index (§2). Entries are globally ordered by key. A Body may have multiple constituent transaction heads;
 concurrent writes are retained rather than collapsed into a single transport
 winner. Same-coordinate equivocation rejects.
 
@@ -93,6 +115,34 @@ Remote work may reference a verified historical or concurrent parent rather
 than the receiver's current root. That exact parent's authenticated snapshot
 must be reconstructable. Missing material returns a retryable
 `ParentManifestUnavailable`; current state is never substituted.
+
+A Manifest root is a fixed-size record. It carries the Space, the Replica
+frontier, a body index root with its count, a content index root with its
+count, the signer, and the authority frontier the signature is evaluated at. It
+does not carry, and must never carry, a list of Bodies: an advertisement whose
+size grows with the store is how a Space stops being able to announce itself.
+
+A Body entry names its concurrent heads and the `ContentRef`s that Body
+references. Content references are Manifest data — they must survive a restart
+and reach every participant — while the bytes they name are not.
+
+An advertisement carries **both** indexes or it is refused. A `ContentRef` is a
+name; asking for the bytes behind it needs the geometry, the epoch, and the
+Merkle root, and those live only in the descriptor. A root that declares content
+its content index does not carry names bytes the receiver could never ask
+anyone for, so a receiver rejects it whole rather than adopting a declaration it
+cannot resolve. Already holding the descriptor satisfies the rule as well as
+receiving it does: convergence is incremental, and a comment on an issue must
+not re-resolve that issue's attachment.
+
+The content index advertises what live Bodies reach, and only that. A descriptor
+awaiting its holder's own sweep is that holder's garbage; pushing it at a peer
+would grow the peer's catalog from ours, and the peer's own sweep would then
+have to undo it.
+
+An observer keeps a bounded number of roots per signer and evicts the oldest
+rather than refusing new ones; a peer that publishes quickly must not be able to
+exhaust a watcher's memory, and must not be able to silence itself either.
 
 ## 5. Protected and opaque Bodies
 
@@ -112,7 +162,71 @@ Opaque retention does not grant authority and cannot bypass historical receipt
 validation. Becoming interpretable later requires validation through the normal
 Replica path.
 
-## 6. Fabric representations
+## 6. Content plane
+
+Content is bulk immutable bytes referenced by a Body: attachments, images, and
+files. It is a separate plane from Body payloads because it has a different
+completeness contract. A Replica is **descriptor-complete** — it holds every
+`ContentDescriptor` its Manifest references, and that is required for the root
+to reconstruct. It is not byte-complete: chunks are fetched, cached, and
+forgotten locally without changing a single committed root.
+
+A descriptor is the whole identity of one ingest:
+
+```text
+format_version, space, content_nonce, plaintext_len,
+chunk_plaintext_len, chunk_count, ciphertext_merkle_root, epoch
+```
+
+`content_nonce` is random per ingest, so two ingests of identical bytes are
+different content. That is deliberate: convergent encryption would make
+identical plaintext detectable across Spaces by anyone who can guess it.
+
+The Merkle tree is built over **ciphertext** leaves. A peer serving a chunk to
+someone who cannot decrypt it still proves the bytes are the right bytes, and a
+provider needs no key to be useful. Chunk plaintext is a fixed 256 KiB except
+the last; an odd node is promoted rather than duplicated, so no two distinct
+chunk sequences share a root.
+
+Each chunk is sealed independently under associated data binding the Space, the
+content nonce, and the chunk index — and deliberately *not* the chunk count or
+plaintext length, both of which the Merkle root already commits. Omitting them
+is what lets a sender seal chunk `n` before it knows how many there will be.
+
+A chunk is only servable when its ciphertext **and** a validated proof sidecar
+are both resident locally. Residency, leases, and pins are local state (§13) and
+never appear in a Manifest.
+
+A fetched chunk and its validated proof sidecar are **cache state held under a
+lease**, not required objects. They live in the resident cache, not the journal's
+object store, and reaching them is a different call on purpose: a caller cannot
+satisfy a required-object reference out of the cache, and a cache miss is
+`NotResident` rather than an integrity error. Bytes and sidecar are one entry
+published by one rename, so there is no window in which a proof exists and its
+chunk does not — a half-existing entry is the one state this cache must not be
+able to reach. Evicting an entry changes no root: the descriptor stays, the
+Replica is still descriptor-complete, and what was lost is refetchable.
+
+Between committing a descriptor and committing the Body that names it, nothing
+declares the content — so by the reachability rule it is already collectable,
+and the rule is not wrong: nothing on disk distinguishes an upload awaiting an
+attach from an upload nobody ever attached. A **hold** distinguishes them. It is
+in-memory and carries a deadline, and both properties are load-bearing: a hold
+is a claim about an operation this process is running, so a restart correctly
+ends it, and a deadline is what stops an upload nobody attaches from becoming
+permanent disk.
+
+A hold answers "may I delete this" and not "may I show this to a peer". Held
+content is kept locally and never advertised — a peer receiving a descriptor no
+Body names would adopt catalog it has no reason to keep, and its own sweep would
+have to undo it.
+
+Content reachability is derived, never counted. A stored count would be a second
+source of truth that can disagree with the Bodies; what is authoritative is the
+set of `ContentRef`s the committed Manifest names, plus explicitly declared
+local intents. Sweeping removes only what neither reaches.
+
+## 7. Fabric representations
 
 Fabric exposes two Body representation classes:
 
@@ -138,7 +252,7 @@ product must preserve concurrent intent, require explicit predecessors,
 immutable records, or revision heads built from generic Bodies. Application code
 must not infer a different hidden winner after reading the merged primitive.
 
-## 7. World schemas and containment
+## 8. World schemas and containment
 
 Every operation identifies its target World, Body, schema, schema version, and
 mutation model. Runtime rejects:
@@ -159,12 +273,26 @@ The authority-approved `WorldImplementationId` pins the descriptor, policy
 table, schemas, and artifact identity that selected the demand. Remote adoption
 validates the bound identity without executing the World.
 
-## 8. IssuesWorld data
+## 9. IssuesWorld data
 
 IssuesWorld is the canonical first-party World, not a privileged lower layer.
 Its Catalog has one deterministic Body identity per `(SpaceId, WorldId)` and is
 created atomically by `InitializeTracker`. Missing, wrong, or duplicate semantic
 Catalog state is corruption; it is never synthesized during open.
+
+An issue attachment is a `ContentRef` and a size, not bytes. The record names
+content the content plane already holds, and the Body declares that reference —
+which is what makes reachability, prefetch, and progress attribution work
+without anything decoding product bytes. `size` means plaintext bytes in both
+record shapes.
+
+Records written before the cutover carry their payload inline as base64 and are
+**read forever**. They are in Bodies in the field; a reader that refused them
+would lose files rather than migrate them. Nothing writes that shape any more,
+and the only encoder for it is gone. A record carries one or the other, never
+both, and a record carrying neither is refused rather than defaulted — a missing
+payload silently read as empty produces a zero-byte file and a success message,
+which is worse than an error.
 
 Issue content currently uses one Body per issue. Product schema—not Fabric—defines
 the meaning of each field. The canonical conflict contract is:
@@ -200,7 +328,7 @@ idempotent and concurrent actors do not overwrite each other.
 These product rules must not introduce comment, issue, workflow, or project
 types into Mechanics, Fabric, Replica, Runtime, or Comms.
 
-## 9. Scoped authorization data
+## 10. Scoped authorization data
 
 Mechanics stores effective generic assignments over exact World resources and
 capabilities. IssuesWorld stores product role and workflow definitions and
@@ -215,10 +343,11 @@ Manifest, active World implementation, demand, policy witness, intent, complete
 operations, and transaction core. Substitution of any bound coordinate or
 digest rejects.
 
-## 10. Contact and convergence
+## 11. Contact and convergence
 
 Contact is a bounded framing protocol. It transfers signed Mechanics material,
-Manifest advertisements/pages, transactions, and protected Body material. A
+Manifest advertisements and index nodes, transactions, and protected Body
+material. A
 transfer acknowledgment proves only framing receipt.
 
 An initiator may declare the Body-head commitments it already holds. Holdings
@@ -239,7 +368,18 @@ Mechanics validates authority material
 A false holdings declaration can prevent its claimant from completing a root;
 it cannot cause partial or corrupt adoption.
 
-## 11. Projections and caches
+Equal Manifest roots prove equal *catalogs*, not equal readable material: a
+declaration deliberately omits opaque heads, so two peers can agree on a root
+and still owe each other bytes. Agreement on a root is therefore never a reason
+to skip serving.
+
+Where a catalog is large, peers may reconcile by descending the shared index
+instead of transferring it: matching subtree hashes are skipped whole, and only
+divergent spines are walked. The descent is bounded by depth and by the number
+of nodes a single reconciliation may request, and it changes only how a
+difference is *found* — adoption still runs the full validation path above.
+
+## 12. Projections and caches
 
 Projections are deterministic views of one committed Manifest and authority
 frontier. They are not replicated truth.
@@ -257,18 +397,143 @@ Projection distinguishes valid, absent, unavailable, and corrupt data. It must
 not turn an unavailable query into false zero counts or silently coerce malformed
 stored values into valid DTOs.
 
-## 12. Local-only state
+## 12.1 Transient and signal state
+
+Neither is durable, and neither is a partial delivery of something that will be.
+
+Transient state (cursors, presence, typing, residency hints) is local to a
+Station and expires on its own. It never enters the journal, never becomes an
+Observation, and is gone after a restart — which is correct rather than a
+limitation, because a cursor that survived the process holding it belongs to
+nobody.
+
+Reliable signals are delivered or they fail loudly, and they are durable in no
+other sense. `crates/runtime/src/signal.rs` may not name the Replica writer or
+the Observation ring, and a parser gate enforces that: privacy cannot, because
+`Broadcaster::publish` is `pub(crate)` and the signal module sits inside that
+crate, while `StationCore::with_replica` is outright `pub`. One line is the
+whole distance between the design and a violation — a `publish` from signal code
+would journal nothing and still emit an Observation, which `SpaceBridge::frame_for`
+turns into `activity_advanced` for anything carrying scopes.
+
+The parser gate is half of it. The other half runs: ten thousand delivered
+signals leave the frontier, every byte under the store directory, and the
+Observation sequence identical, and one ordinary commit in the same file moves
+all three. The negative control is not decoration — a run that passes because
+nothing was driven is indistinguishable from a run that passes because signals
+are not durable, unless something shows the observables moving when they should.
+The behavioural half also catches what the parser cannot: a handler reaching the
+Replica *indirectly*, through a World submit several calls away, on a path the
+parser reads as ordinary.
+
+**A delivered signal is an event, not a state.** A listener subscribes and hears
+what follows; it cannot re-read what it missed, and a restart delivers nothing
+that was signalled before it. That is the same shape as a person who was out of
+the room, and it is deliberate: a queue that survived would be a durable record
+of who was contacted, which is precisely what a signal must not leave behind.
+
+**A queued file offer is the one transient thing with no TTL.** It holds a
+sender, a content id, a length and a display name — never bytes. A cursor
+expires because a cursor that stopped moving is stale; an offer that has been
+waiting an hour is exactly as valid as when it arrived, so only a decision or a
+revocation removes one. It is still not durable: it lives in memory and a
+restart forgets it, and the file it names is unaffected either way.
+
+**What a Station publishes about itself is not in what it reads.** Two maps, not
+one. A viewer whose own presence appeared in the table it reads would draw itself
+beside everybody else, on every screen, for as long as it was looking.
+
+**A World's declared scopes and signals are enforced, not merely reviewed.** A
+scope naming a schema its World never declared is refused at subscription, before
+it occupies a slot; a signal past its World's declared ceiling is refused before
+its payload is acted on. Without that the descriptor's sections would move an
+implementation id — every peer seeing a different reviewed build — and buy
+nothing. A World that declares nothing keeps the id it had.
+
+**A display name from a peer is stored exactly as sent.** It is sanitised where
+it becomes a path and nowhere earlier. Rewriting on arrival would mean the name
+shown to a person is not the name that was sent, and would break the
+re-encode-equality rule every wire shape in the system rests on.
+
+## 13. Local-only state
 
 Device private keys, actor recovery material, custody shares, local petnames,
-configuration, route/backoff state, space navigation, and disposable projection
-caches are local state. They are not product Bodies and do not gain authority by
+configuration, route/backoff state, space navigation, disposable projection
+caches, resident content chunks and their proof sidecars, leases, pins, staging
+areas, transfer progress, provider-selection statistics, and delivery-plane
+session state are local state. They are not product Bodies and do not gain
+authority by
 being stored beside an Orbit.
+
+Residency is held by lease, and a lease is scoped to the operation that took
+it. Releasing an operation releases everything it held, including on the paths
+where the operation failed — a reader that dies must not pin bytes forever.
+Eviction under quota may remove anything unleased and unpinned; it may never
+remove a descriptor, because that would break Manifest reconstruction.
+
+Transfer progress is local state and nothing else. It is never a Body, an
+Observation, a journal entry, a frontier change, a Doorbell, a Beacon, or an
+activity item. It lives in `runtime::transfer::TransferRegistry`: one entry per
+in-flight operation, its own watch channel that a reader re-reads a snapshot
+from, and a 64-entry tail of finished transfers so a caller that asked a moment
+ago can learn how it went. Both halves are bounded — the active set by the
+ceiling on concurrent transfers, the completed tail by its fixed length. A
+registry that grew one entry per completed transfer would be a memory leak with a
+respectable name.
+
+It is deliberately not on the Observation ring. That ring's contract is that an
+entry corresponds to a durable commit; a progress frame corresponds to bytes
+arriving on a socket. Putting the second in the stream of the first would give a
+fact nobody agreed to a sequence number among facts everybody did, and would let
+a chatty transfer push real commits out of a slow consumer's window. A watcher
+that stalls on the progress channel falls behind on progress and on nothing else.
+Progress is monotone, so coalescing loses nothing: a state change publishes
+immediately, a moving byte count at most twice a second.
+
+No part of a transfer survives a restart. The ladder — queued, connecting,
+transferring, verifying, available, and the cancelled, failed, and evicted exits
+— describes this machine's disk and this machine's network, and a peer's opinion
+about it is not evidence. A transfer's lifetime is tied to a handle whose drop
+fails it and releases what it held, so a fetch that panics or returns early
+through a `?` cannot leave an operation lease pinning chunks nobody is fetching.
+
+Provider-selection statistics are local and are not replicated truth. Which peers
+answered `Have`, what they recently delivered, how often they refused or stalled,
+and any operator preference among them are one Station's opinion formed from its
+own measurements. They are never advertised, never committed, and never an input
+another peer can influence except by actually serving well or badly. Two Stations
+fetching the same content may choose different providers; neither is wrong, and
+neither is evidence about the other.
+
+The resident cache is an additive store-layout addition, not a journal change.
+`content-cache/` sits beside the journal inside the Orbit's directory and holds
+chunk entries, the tag directory recording leases and pins, and the staging area
+for partly arrived chunks. It is a sibling rather than a part for the reason §2
+gives: the journal fails closed on anything missing, and a chunk is allowed to be
+missing. No marker, root, or Manifest names it, and deleting the whole directory
+costs refetches and nothing else.
+
+Activation opens that cache and immediately reclaims every operation lease and
+every staging slot, because nothing was in flight before the Station existed —
+any lease or partial on disk belongs to a run that is over. Content leases are
+untouched: they belong to committed content and no restart makes them stale, so
+installed chunks survive and an interrupted fetch resumes at chunk granularity
+rather than from zero. One Station owns one cache over one directory; a second
+cache over the same directory would sweep the first's staging. Dormancy leaves
+the directory exactly as it is — the cache is durable local state, and the next
+activation reclaims whatever the last one abandoned. Deorbit removes it with the
+rest of the store, which is the only correct answer: the bytes were refetchable
+copies of content this device no longer participates in.
+
+A delivery-plane session id and epoch are local, per-connection, and randomly
+minted. They are not identity, they confer nothing, and they exist so that a
+replayed opening is recognisable as one.
 
 Secrets are written with restrictive permissions and atomic replacement. They
 must not appear in Debug output, logs, DTO examples, Fabric, Manifests, or Contact
 frames except for an explicitly authenticated encrypted custody package.
 
-## 13. Evolution
+## 14. Evolution
 
 - Store, wire, schema, and signed formats carry explicit versions and reject
   unknown incompatible input.
@@ -281,7 +546,7 @@ frames except for an explicitly authenticated encrypted custody package.
 - Backward compatibility exists only when explicitly specified; there is no
   legacy architecture fallback.
 
-## 14. Known limitations
+## 15. Known limitations
 
 - Lazy revocation cannot erase plaintext or keys previously copied by a removed
   participant.
