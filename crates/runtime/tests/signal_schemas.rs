@@ -110,3 +110,151 @@ fn every_failure_has_a_distinct_stable_code() {
         assert!(seen.insert(code), "{code} is used twice");
     }
 }
+
+/// The wire, and the one ordering decision that makes its bounds real.
+mod wire {
+    use runtime::planes::{bounds, InviteKind, PlaneWireError, Signal, MAX_SIGNAL_TEXT_BYTES};
+    use runtime::signal::{frame_signal, selector, SignalError};
+    use runtime::transient::TransientScope;
+
+    fn scope() -> TransientScope {
+        TransientScope::IssueView {
+            world: "com.example.notes".into(),
+            body: [3u8; 16],
+        }
+    }
+
+    #[test]
+    fn the_selector_precedes_the_length() {
+        // The whole reason the framing is shaped this way. A declaration's
+        // `max_bytes` is a pre-allocation ceiling only if it is known *before*
+        // the length is read — behind the length, the schema is known after a
+        // buffer already exists and the per-signal maximum is decoration.
+        let framed = frame_signal(&Signal::Ping { nonce: [1u8; 16] }).expect("framed");
+        assert_eq!(framed[0], runtime::planes::stream_kind::RELIABLE_SIGNAL);
+        let carried = u16::from_le_bytes([framed[1], framed[2]]);
+        assert_eq!(carried, selector::PING);
+        let len = u32::from_le_bytes([framed[3], framed[4], framed[5], framed[6]]) as usize;
+        assert_eq!(
+            len,
+            framed.len() - 7,
+            "the length describes what follows it"
+        );
+    }
+
+    #[test]
+    fn a_signal_past_its_own_declaration_is_refused_at_the_sender() {
+        // A `Result`, not a substituted refusal. `FreightFrame::encode_bounded`
+        // substitutes because the alternative there is telling a peer nothing;
+        // here the alternative is sending something other than what was asked
+        // for, which is worse than an error the caller can see.
+        let huge = Signal::WorldSignal {
+            world: "com.example.notes".into(),
+            schema: "note".into(),
+            payload: vec![0u8; bounds::MAX_SIGNAL_BYTES + 1],
+        };
+        assert_eq!(frame_signal(&huge), Err(SignalError::TooLarge));
+
+        // And an attention whose scope is fine still fits its tighter ceiling.
+        assert!(frame_signal(&Signal::Attention { scope: scope() }).is_ok());
+    }
+
+    #[test]
+    fn every_signal_round_trips_and_has_one_spelling() {
+        for signal in [
+            Signal::Ping { nonce: [1u8; 16] },
+            Signal::Acknowledge { nonce: [2u8; 16] },
+            Signal::Attention { scope: scope() },
+            Signal::SessionInvite {
+                kind: InviteKind::Collaborate,
+                scope: scope(),
+            },
+            Signal::FileOffer {
+                content: [5u8; 32],
+                plaintext_len: 4096,
+                display_name: "report.pdf".into(),
+                media_type: "application/pdf".into(),
+            },
+            Signal::WorldSignal {
+                world: "com.example.notes".into(),
+                schema: "note".into(),
+                payload: vec![1, 2, 3],
+            },
+        ] {
+            let bytes = signal.encode();
+            assert_eq!(Signal::decode_canonical(&bytes), Ok(signal.clone()));
+            // A trailing byte past a valid encoding is a second spelling.
+            let mut extra = bytes.clone();
+            extra.push(0);
+            assert!(Signal::decode_canonical(&extra).is_err(), "{signal:?}");
+        }
+    }
+
+    #[test]
+    fn a_display_name_is_sanitised_on_use_and_never_on_decode() {
+        // A decode-time rewrite makes `encode(decode(x)) == x` false, and
+        // canonical re-encode equality is what every shape on this plane rests
+        // on. So a traversal name decodes intact and is repaired where it is
+        // used as a path.
+        let offer = Signal::FileOffer {
+            content: [1u8; 32],
+            plaintext_len: 10,
+            display_name: "../../evil.txt".into(),
+            media_type: "text/plain".into(),
+        };
+        let decoded = Signal::decode_canonical(&offer.encode()).expect("decodes");
+        let Signal::FileOffer { display_name, .. } = &decoded else {
+            panic!("a file offer");
+        };
+        assert_eq!(display_name, "../../evil.txt", "decode did not rewrite it");
+        // Where it becomes a path — in `world-interface`, which this crate does
+        // not depend on — the shared sanitiser reduces it to one component.
+        // Asserted here as the property the decode deliberately does not have.
+        assert!(
+            display_name.contains(".."),
+            "and it is still hostile on the wire"
+        );
+    }
+
+    #[test]
+    fn a_name_that_could_split_a_header_is_refused_outright() {
+        // Not repaired here — refused. A control character in a name lands in a
+        // header, a filename or a terminal, and none of those are places a peer
+        // gets to choose what happens.
+        let hostile = Signal::FileOffer {
+            content: [1u8; 32],
+            plaintext_len: 10,
+            display_name: "report.pdf\r\nX-Evil: yes".into(),
+            media_type: "text/plain".into(),
+        };
+        assert_eq!(hostile.validate(), Err(PlaneWireError::NonCanonical));
+        assert_eq!(frame_signal(&hostile), Err(SignalError::Malformed));
+
+        let long = Signal::FileOffer {
+            content: [1u8; 32],
+            plaintext_len: 10,
+            display_name: "a".repeat(MAX_SIGNAL_TEXT_BYTES + 1),
+            media_type: "text/plain".into(),
+        };
+        assert_eq!(long.validate(), Err(PlaneWireError::Bounds));
+    }
+
+    #[test]
+    fn a_world_signal_is_checked_against_the_real_grammars() {
+        // Parsed rather than length-checked: a World id and a schema id have
+        // shapes, and something that is merely short is not therefore one.
+        let bad_world = Signal::WorldSignal {
+            world: "not a world id".into(),
+            schema: "note".into(),
+            payload: Vec::new(),
+        };
+        assert_eq!(bad_world.validate(), Err(PlaneWireError::NonCanonical));
+
+        let bad_schema = Signal::WorldSignal {
+            world: "com.example.notes".into(),
+            schema: "".into(),
+            payload: Vec::new(),
+        };
+        assert_eq!(bad_schema.validate(), Err(PlaneWireError::NonCanonical));
+    }
+}

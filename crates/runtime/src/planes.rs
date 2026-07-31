@@ -64,6 +64,143 @@ pub mod stream_kind {
     }
 }
 
+/// The longest human-readable text a signal may carry.
+///
+/// A display name or a media type, not a message. Both are shown to a person
+/// and neither is content — a signal that wanted to carry prose would be a
+/// signal carrying a Body's job.
+pub const MAX_SIGNAL_TEXT_BYTES: usize = 256;
+
+/// What a peer is invited to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum InviteKind {
+    Collaborate,
+}
+
+/// One reliable signal.
+///
+/// Bounded, one per stream, and never durable. The shapes are closed: a World
+/// that needs its own says so through `WorldSignal`, whose payload the
+/// substrate carries and does not interpret.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum Signal {
+    /// Are you there. The one signal that expects an answer.
+    Ping { nonce: [u8; 16] },
+    /// I am. Never itself acknowledged — that is how a ping becomes a loop.
+    Acknowledge { nonce: [u8; 16] },
+    /// Look at this.
+    Attention {
+        scope: crate::transient::TransientScope,
+    },
+    /// Come and work on this with me.
+    SessionInvite {
+        kind: InviteKind,
+        scope: crate::transient::TransientScope,
+    },
+    /// I have a file you may want.
+    ///
+    /// An offer, not a transfer. It names content the sender holds; whether the
+    /// receiver wants it is a decision a person makes afterwards, which is why
+    /// this expects no answer.
+    FileOffer {
+        content: [u8; 32],
+        plaintext_len: u64,
+        /// What to call it, as the sender sees it.
+        ///
+        /// Sanitised **on use**, never on decode. A decode-time rewrite makes
+        /// `encode(decode(x)) == x` false, and canonical re-encode equality is
+        /// what every shape on this plane rests on.
+        display_name: String,
+        media_type: String,
+    },
+    /// A World's own signal. Opaque here.
+    WorldSignal {
+        world: String,
+        schema: String,
+        payload: Vec<u8>,
+    },
+}
+
+impl Signal {
+    /// Which declaration governs this signal.
+    pub fn selector(&self) -> u16 {
+        use crate::signal::selector;
+        match self {
+            Self::Ping { .. } => selector::PING,
+            Self::Acknowledge { .. } => selector::ACKNOWLEDGE,
+            Self::Attention { .. } => selector::ATTENTION,
+            Self::SessionInvite { .. } => selector::SESSION_INVITE,
+            Self::FileOffer { .. } => selector::FILE_OFFER,
+            Self::WorldSignal { .. } => selector::WORLD,
+        }
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        postcard::to_stdvec(self).expect("postcard signal")
+    }
+
+    /// Decode one signal, in the order that makes each check protect the next.
+    ///
+    /// Deliberately no `encode_bounded`. A frame that is too large to send is a
+    /// caller's error and gets a `Result`; substituting a refusal — which is
+    /// right for `FreightFrame`, where the alternative is telling a peer
+    /// nothing — would silently send something other than what was asked for.
+    pub fn decode_canonical(bytes: &[u8]) -> Result<Self, PlaneWireError> {
+        if bytes.len() > bounds::MAX_SIGNAL_BYTES {
+            return Err(PlaneWireError::TooLarge);
+        }
+        let signal: Self = postcard::from_bytes(bytes).map_err(|_| PlaneWireError::NonCanonical)?;
+        if signal.encode() != bytes {
+            return Err(PlaneWireError::NonCanonical);
+        }
+        signal.validate()?;
+        Ok(signal)
+    }
+
+    pub fn validate(&self) -> Result<(), PlaneWireError> {
+        let text = |value: &str| {
+            if value.len() > MAX_SIGNAL_TEXT_BYTES {
+                return Err(PlaneWireError::Bounds);
+            }
+            // A control character in a name lands in a header, a filename, or a
+            // terminal. None of those are places a peer chooses what happens.
+            if value.chars().any(|c| c.is_control()) {
+                return Err(PlaneWireError::NonCanonical);
+            }
+            Ok(())
+        };
+        match self {
+            Self::Ping { .. } | Self::Acknowledge { .. } => Ok(()),
+            Self::Attention { scope } | Self::SessionInvite { scope, .. } => {
+                scope.validate_wire().map_err(|_| PlaneWireError::Bounds)
+            }
+            Self::FileOffer {
+                display_name,
+                media_type,
+                ..
+            } => {
+                text(display_name)?;
+                text(media_type)
+            }
+            Self::WorldSignal {
+                world,
+                schema,
+                payload,
+            } => {
+                // Parsed through the real grammars rather than a length check:
+                // a World id and a schema id have shapes, and something that is
+                // merely short is not therefore one.
+                replica::ids::WorldId::parse(world).ok_or(PlaneWireError::NonCanonical)?;
+                replica::ids::SchemaId::parse(schema).ok_or(PlaneWireError::NonCanonical)?;
+                if payload.len() > bounds::MAX_SIGNAL_BYTES {
+                    return Err(PlaneWireError::Bounds);
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
 /// Bounds that constrain each other, checked at compile time.
 ///
 /// Moved out of the fixtures for the reason clippy names: a comparison of two

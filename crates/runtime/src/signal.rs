@@ -185,3 +185,91 @@ pub fn declaration_for(selector: u16) -> Option<SignalDeclaration> {
         .into_iter()
         .find(|declaration| declaration.selector == selector)
 }
+
+/// Read one reliable signal off its flow.
+///
+/// The wire is `stream_kind | u16 selector | u32 length | canonical body`, and
+/// the **selector precedes the length** for one reason: a declaration's
+/// `max_bytes` is only a pre-allocation ceiling if it is known before the
+/// length is. Behind the length, the schema is known only after a buffer
+/// already exists, and the per-signal maximum becomes decoration.
+///
+/// `max_bytes` is floored against the plane's own ceiling, so a bad declaration
+/// table can lower the limit and never raise it.
+///
+/// The stream kind is read by the caller, which is what decides this is a
+/// signal flow at all.
+pub async fn read_signal(
+    flow: &mut dyn comms::RecvFlow,
+) -> Result<crate::planes::Signal, SignalError> {
+    let selector = flow
+        .read_exact(2)
+        .await
+        .map_err(|_| SignalError::Malformed)?;
+    let selector = u16::from_le_bytes(
+        <[u8; 2]>::try_from(selector.as_slice()).map_err(|_| SignalError::Malformed)?,
+    );
+    // Resolved before the length is read. An unknown selector is refused here,
+    // with nothing allocated and no length even consulted.
+    let declaration = declaration_for(selector).ok_or(SignalError::NotRegistered)?;
+    let ceiling = declaration
+        .max_bytes
+        .min(crate::planes::bounds::MAX_SIGNAL_BYTES);
+
+    let header = flow
+        .read_exact(4)
+        .await
+        .map_err(|_| SignalError::Malformed)?;
+    let len = u32::from_le_bytes(
+        <[u8; 4]>::try_from(header.as_slice()).map_err(|_| SignalError::Malformed)?,
+    ) as usize;
+    if len > ceiling {
+        // Refused by the declared length, before a buffer that size exists.
+        return Err(SignalError::TooLarge);
+    }
+    let body = flow
+        .read_exact(len)
+        .await
+        .map_err(|_| SignalError::Malformed)?;
+    let signal =
+        crate::planes::Signal::decode_canonical(&body).map_err(|_| SignalError::Malformed)?;
+    // The body decoded, and it has to be the signal the selector promised —
+    // otherwise a small declaration's ceiling could be used to smuggle a
+    // different, larger-bounded shape past it.
+    if signal.selector() != selector {
+        return Err(SignalError::Malformed);
+    }
+    Ok(signal)
+}
+
+/// Frame one signal for sending, or refuse.
+///
+/// A `Result` rather than a substituted refusal. `FreightFrame::encode_bounded`
+/// substitutes because the alternative there is telling a peer nothing at all;
+/// here the alternative is sending something other than what was asked for,
+/// which is worse than an error the caller can see.
+pub fn frame_signal(signal: &crate::planes::Signal) -> Result<Vec<u8>, SignalError> {
+    let selector = signal.selector();
+    let declaration = declaration_for(selector).ok_or(SignalError::NotRegistered)?;
+    // A bounds failure is a size failure and says so. Collapsing it into
+    // `Malformed` would tell a caller its signal was ill-formed when what it
+    // actually was is too big — two different things to do about it.
+    signal.validate().map_err(|error| match error {
+        crate::planes::PlaneWireError::Bounds => SignalError::TooLarge,
+        _ => SignalError::Malformed,
+    })?;
+    let body = signal.encode();
+    if body.len()
+        > declaration
+            .max_bytes
+            .min(crate::planes::bounds::MAX_SIGNAL_BYTES)
+    {
+        return Err(SignalError::TooLarge);
+    }
+    let mut out = Vec::with_capacity(1 + 2 + 4 + body.len());
+    out.push(crate::planes::stream_kind::RELIABLE_SIGNAL);
+    out.extend_from_slice(&selector.to_le_bytes());
+    out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    out.extend_from_slice(&body);
+    Ok(out)
+}

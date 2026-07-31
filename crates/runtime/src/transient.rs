@@ -100,6 +100,14 @@ impl TransientScope {
         }
     }
 
+    /// The same bounds, for a caller outside this module.
+    ///
+    /// A signal carries a scope and has to check it before anything acts on it,
+    /// and duplicating the rule would be two rules.
+    pub fn validate_wire(&self) -> Result<(), TransientError> {
+        self.validate()
+    }
+
     fn validate(&self) -> Result<(), TransientError> {
         let bounded = |value: &str| {
             if value.len() > MAX_SCOPE_FIELD_BYTES || value.is_empty() {
