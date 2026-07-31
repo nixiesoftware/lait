@@ -260,12 +260,25 @@ pub struct LiveHandle {
     signals: SignalSink,
     anchors: Option<std::sync::Arc<dyn AnchorSource>>,
     residency: std::sync::Arc<dyn ResidencyOracle>,
+    /// What this Station is currently doing, for peers to be told about.
+    ///
+    /// Separate from `table`, which holds what *others* are doing. One map for
+    /// both would make "who is here" a question whose answer includes us, and
+    /// every viewer would draw itself a second time.
+    local: std::sync::Mutex<LocalPresence>,
     /// Files somebody offered, waiting for a person.
     ///
     /// Beside the transient table rather than in it: a slot expires on a TTL
     /// because a cursor that stopped moving is stale, and an offer that has been
     /// sitting for an hour is exactly as valid as it was when it arrived.
     offers: std::sync::Mutex<crate::signal::OfferQueue>,
+}
+
+/// What this Station is doing, as the thing that decides it sees it.
+#[derive(Default)]
+struct LocalPresence {
+    scopes: Vec<TransientScope>,
+    generation: u64,
 }
 
 #[derive(Default)]
@@ -316,8 +329,42 @@ impl LiveHandle {
             signals: tokio::sync::broadcast::channel(SIGNAL_QUEUE).0,
             anchors,
             residency,
+            local: std::sync::Mutex::new(LocalPresence::default()),
             offers: std::sync::Mutex::new(crate::signal::OfferQueue::new()),
         }
+    }
+
+    /// Say what this Station is looking at.
+    ///
+    /// **Replace-all**, like a peer's `Subscribe` and for the same reason: this
+    /// is a snapshot of what somebody has open, and an incremental protocol
+    /// would let a client that navigates faster than its messages arrive end up
+    /// publishing a set neither side agrees on.
+    ///
+    /// Declaring is not sending. Each live session works out its own difference
+    /// against what *it* has published and mints its own items, because an item
+    /// carries the epoch of the connection it crosses and two sessions do not
+    /// share one.
+    pub fn declare_local(&self, scopes: Vec<TransientScope>) {
+        let mut local = self.local();
+        if local.scopes == scopes {
+            return;
+        }
+        local.scopes = scopes;
+        // A counter a session can compare against cheaply. Without it every
+        // session would clone and compare the whole set on every beat, at the
+        // beat rate, for a set that changes when somebody opens a tab.
+        local.generation = local.generation.wrapping_add(1);
+    }
+
+    /// What this Station is looking at, and a number that moves when it changes.
+    pub fn local_presence(&self) -> (u64, Vec<TransientScope>) {
+        let local = self.local();
+        (local.generation, local.scopes.clone())
+    }
+
+    fn local(&self) -> std::sync::MutexGuard<'_, LocalPresence> {
+        self.local.lock().unwrap_or_else(|p| p.into_inner())
     }
 
     /// Hold a file somebody offered.
@@ -792,6 +839,23 @@ pub async fn serve_session(
     let mut sweep_at = Instant::now();
     let mut revalidated_at = Instant::now();
 
+    // What this session has told its peer we are looking at, and the
+    // declaration generation it was built from.
+    //
+    // Per session rather than on the handle. Two sessions publish the same
+    // scopes at different sequence numbers under different epochs, so the
+    // difference between "what we are doing" and "what this peer has been told"
+    // is a fact about the connection and belongs with it.
+    let mut published: std::collections::BTreeSet<TransientScope> =
+        std::collections::BTreeSet::new();
+    let mut published_generation = u64::MAX;
+    let mut refreshed_at = Instant::now() - deadline::PRESENCE_REFRESH;
+    // While set, the declared scopes are re-published on a fast beat. See
+    // `deadline::PRESENCE_SETTLE` for why a one-shot publish is not enough.
+    let mut settle_until: Option<Instant> = None;
+    let mut settled_at = Instant::now();
+    let mut outbound_seq: u64 = 0;
+
     // Asked on the beat, and again on any frame that acquires something.
     // `admit_peer` is the same question the admission asked, and asking it again
     // is the whole mechanism: a membership that went away has no other way to
@@ -813,6 +877,90 @@ pub async fn serve_session(
         // somebody nobody can see.
         if last_seen.elapsed() > deadline::LIVE_IDLE {
             break;
+        }
+        // Told when it changes, and told again before it expires. The second
+        // half is not belt and braces: a slot dies on the *receiver's* clock, so
+        // a peer that heard once and never again watches everybody vanish after
+        // a minute and a half.
+        if let Some(handle) = &handle {
+            let (generation, want) = handle.local_presence();
+            let due = refreshed_at.elapsed() >= deadline::PRESENCE_REFRESH;
+            if generation != published_generation || due {
+                let want: std::collections::BTreeSet<_> = want.into_iter().collect();
+                if want != published {
+                    // The subscription *is* the declaration, and it has to go
+                    // first. A receiver drops a datagram for a scope this
+                    // connection never subscribed to — that is what stops a peer
+                    // making a Station hold state on its behalf — so presence
+                    // published without it is presence silently discarded.
+                    //
+                    // One set for both directions because on this plane they are
+                    // the same fact: having a document open is both "tell me
+                    // about this" and "I am here".
+                    subscribe_remotely(connection.as_ref(), &want).await;
+                }
+                for scope in want.difference(&published) {
+                    outbound_seq += 1;
+                    publish_presence(
+                        connection.as_ref(),
+                        scope,
+                        &epoch,
+                        outbound_seq,
+                        &mut session.borrow_mut().counters,
+                    );
+                }
+                if due {
+                    // A refresh re-sends what the peer already has, which is the
+                    // only way a slot's TTL is renewed — the receiver keys a
+                    // slot by scope and kind, so this replaces rather than
+                    // duplicates.
+                    for scope in want.intersection(&published) {
+                        outbound_seq += 1;
+                        publish_presence(
+                            connection.as_ref(),
+                            scope,
+                            &epoch,
+                            outbound_seq,
+                            &mut session.borrow_mut().counters,
+                        );
+                    }
+                    refreshed_at = Instant::now();
+                }
+                // What we stopped looking at. Retirement is an optimisation on
+                // top of expiry and never a prerequisite — the module doc is
+                // blunt that nothing has a goodbye — but the difference a
+                // person sees is a face vanishing when a tab closes rather than
+                // ninety seconds later.
+                let gone: Vec<_> = published.difference(&want).cloned().collect();
+                for scope in gone {
+                    outbound_seq += 1;
+                    retire_remotely(connection.as_ref(), &scope, outbound_seq).await;
+                }
+                published = want;
+                published_generation = generation;
+                if !published.is_empty() {
+                    settle_until = Some(Instant::now() + deadline::PRESENCE_SETTLE);
+                }
+            }
+
+            // The settle beat. Cheap, bounded, and the only thing standing
+            // between a lost race and a colleague who does not appear for
+            // twenty-five seconds.
+            if settle_until.is_some_and(|until| Instant::now() < until)
+                && settled_at.elapsed() >= deadline::TYPING_COALESCE
+            {
+                settled_at = Instant::now();
+                for scope in &published {
+                    outbound_seq += 1;
+                    publish_presence(
+                        connection.as_ref(),
+                        scope,
+                        &epoch,
+                        outbound_seq,
+                        &mut session.borrow_mut().counters,
+                    );
+                }
+            }
         }
         if revalidated_at.elapsed() > deadline::AUTHORITY_REVALIDATION {
             revalidated_at = Instant::now();
@@ -1125,6 +1273,87 @@ pub async fn serve_session(
             _ = tokio::time::sleep(deadline::DRIVER_POLL) => {}
         }
     }
+}
+
+/// Tell one peer which scopes this connection is about.
+///
+/// Replace-all, matching what the receiver does with it. Best effort: a
+/// subscription that does not arrive costs this Station's presence on that peer
+/// until the next declaration, which is the same failure mode as a lost
+/// presence datagram and is corrected the same way.
+async fn subscribe_remotely(
+    connection: &dyn comms::Connection,
+    scopes: &std::collections::BTreeSet<TransientScope>,
+) {
+    let Ok((mut send, _recv)) = connection.open_bi().await else {
+        return;
+    };
+    let body = LiveControl::Subscribe {
+        scopes: scopes.iter().cloned().collect(),
+    }
+    .encode();
+    let mut framed = Vec::with_capacity(1 + 4 + body.len());
+    framed.push(stream_kind::CONTROL);
+    framed.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    framed.extend_from_slice(&body);
+    if tokio::time::timeout(deadline::LIVE_FLOW_READ, send.write_all(&framed))
+        .await
+        .is_ok()
+    {
+        let _ = send.finish();
+    }
+}
+
+/// Tell one peer this Station has stopped looking at something.
+///
+/// Best effort, and silent when it fails. The peer's slot expires on its own
+/// clock either way, so a retirement that does not arrive costs a stale face
+/// for the rest of a TTL rather than a wrong one for ever — and a send that
+/// retried would be a queue on a plane whose whole contract is that it has none.
+///
+/// The sequence number is this session's current high-water, so a presence
+/// datagram already in flight cannot rebuild the slot behind the retirement.
+/// That race is the reason `Retire` carries a sequence at all.
+async fn retire_remotely(connection: &dyn comms::Connection, scope: &TransientScope, seq: u64) {
+    let Ok((mut send, _recv)) = connection.open_bi().await else {
+        return;
+    };
+    let body = LiveControl::Retire {
+        scope: scope.clone(),
+        seq,
+    }
+    .encode();
+    let mut framed = Vec::with_capacity(1 + 4 + body.len());
+    framed.push(stream_kind::CONTROL);
+    framed.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    framed.extend_from_slice(&body);
+    if tokio::time::timeout(deadline::LIVE_FLOW_READ, send.write_all(&framed))
+        .await
+        .is_ok()
+    {
+        let _ = send.finish();
+    }
+}
+
+/// Tell one peer this Station is looking at something.
+///
+/// A failure is not reported anywhere and that is deliberate: the item is
+/// presence, the next refresh carries it again, and a transient send that
+/// retried would be a transient send with a queue.
+fn publish_presence(
+    connection: &dyn comms::Connection,
+    scope: &TransientScope,
+    epoch: &[u8; 16],
+    seq: u64,
+    counters: &mut TransientCounters,
+) {
+    let item = TransientItem {
+        session_epoch: *epoch,
+        seq,
+        scope: scope.clone(),
+        payload: crate::transient::TransientPayload::Presence,
+    };
+    publish(connection, &item, counters);
 }
 
 /// Send one transient item, or drop it and say why.

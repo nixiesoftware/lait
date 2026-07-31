@@ -1127,6 +1127,30 @@ impl SpaceBridge {
         }
     }
 
+    /// Publish what this node is looking at, so peers can draw a face.
+    ///
+    /// The send side of the Live plane, and the only thing that puts this
+    /// Station *into* anybody else's transient table. Without it every viewer
+    /// renders other people and nobody renders this one.
+    ///
+    /// Replace-all: the declaration is what is on screen now, so a scope that
+    /// has left the set is retired on every peer rather than left to expire.
+    /// Unresolvable ids are dropped rather than refused — a viewer that named an
+    /// issue this node cannot parse is a viewer with a stale link, not a client
+    /// worth failing.
+    fn watching(&self, issues: &[String]) -> Response {
+        let world = crate::world::contract::world_id().as_str().to_string();
+        let scopes = issues
+            .iter()
+            .map(|doc| runtime::transient::TransientScope::IssueView {
+                world: world.clone(),
+                body: crate::world::contract::issue_body_id(doc).as_bytes(),
+            })
+            .collect();
+        self.station.live().declare_local(scopes);
+        Response::Ok { message: None }
+    }
+
     /// Connect/neighbor/Contact requests — served by the Station.
     fn dispatch_station(&self, req: Request) -> Response {
         match req {
@@ -1136,6 +1160,7 @@ impl SpaceBridge {
                 since_generation,
                 issue,
             } => self.live(since_generation, issue.as_deref()),
+            Request::Watching { issues } => self.watching(&issues),
             Request::Signals => self.drain_signals(),
             Request::Sync => self.sync(),
             other => unreachable!("misclassified station request: {other:?}"),

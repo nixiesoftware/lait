@@ -291,6 +291,30 @@ pub mod deadline {
     /// promptly is one whose cursors nobody is waiting for.
     pub const LIVE_DIAL: Duration = Duration::from_secs(5);
 
+    /// How long a fresh subscription keeps re-publishing its presence.
+    ///
+    /// A subscription rides a reliable flow and presence rides an unreliable
+    /// datagram, and **nothing orders the two**. A receiver drops a datagram for
+    /// a scope it has not been told about — that is the bound which stops a peer
+    /// making a Station hold state on its behalf — so a presence datagram that
+    /// overtakes its own subscription is discarded, and the next word that peer
+    /// hears is a full refresh interval away.
+    ///
+    /// Re-publishing for a few seconds after the set changes closes that window
+    /// at the cost of a handful of datagrams. It is not an acknowledgement
+    /// scheme: there is nothing to acknowledge with on this plane, and a face
+    /// appearing a second late is the worst outcome rather than a lost one.
+    pub const PRESENCE_SETTLE: Duration = Duration::from_secs(3);
+
+    /// How often this Station re-tells its peers what it is looking at.
+    ///
+    /// Comfortably inside `PRESENCE_TTL`, and that margin is the whole point: a
+    /// slot expires on the receiver's clock, so a publisher that refreshed at
+    /// exactly the TTL would have every viewer flicker as each slot expired a
+    /// beat before its replacement arrived. A third of the TTL survives losing
+    /// two refreshes in a row, which a datagram path does without apologising.
+    pub const PRESENCE_REFRESH: Duration = Duration::from_secs(25);
+
     /// How long a caret is held before it is sent.
     ///
     /// A caret moves as fast as a person types and is superseded by its own

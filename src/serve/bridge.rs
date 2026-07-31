@@ -567,8 +567,42 @@ async fn sweep(app: &App, held: &mut BTreeMap<Watch, u64>) {
         poll_live(app, question, held).await;
     }
     for space in spaces {
+        // Told once per space per tick, with that space's whole set. Sent even
+        // when nothing changed: the engine compares before it acts, and a pump
+        // that tried to remember what it had already said would be a second
+        // copy of state the engine already holds.
+        declare_watching(app, space, &watched).await;
         drain_signals(app, space).await;
     }
+}
+
+/// Tell the engine what this node is looking at, so peers can draw a face.
+///
+/// Derived from the same declarations the transient poll runs on rather than
+/// from a separate client verb. A tab that is asking about an issue *is*
+/// looking at it, so there is nothing for a browser to say twice and nothing
+/// for the two answers to disagree about.
+///
+/// A declaration with no issue is a tab saying which room it is in, and it
+/// publishes no presence: being in a Space is not being on a document, and
+/// treating it as one would put every open tab on every issue at once.
+async fn declare_watching(app: &App, space: &str, watched: &[Watch]) {
+    let Ok(resolved) = app.directory.resolve(space) else {
+        return;
+    };
+    let issues: Vec<String> = watched
+        .iter()
+        .filter(|question| question.space == space)
+        .filter_map(|question| question.issue.clone())
+        .collect();
+    let route = crate::control::station_route(resolved.address);
+    // Failure is not reported. The declaration is lossy by nature — the next
+    // tick carries the current set again — and a pump that logged every miss
+    // would say the same thing twice a second while a daemon restarted.
+    let _ = app
+        .daemon
+        .request(route, &Request::Watching { issues }, None)
+        .await;
 }
 
 async fn poll_live(app: &App, question: &Watch, held: &mut BTreeMap<Watch, u64>) {

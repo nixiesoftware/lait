@@ -358,6 +358,25 @@ pub enum Request {
     /// their reachability. This reports what is on screen right now: who is
     /// looking at an issue, where a caret is, who is typing. None of it is
     /// durable and none of it survives the session that published it.
+    /// Say what this node is looking at, so peers can be told.
+    ///
+    /// **Replace-all**, and the whole set every time: this is a snapshot of what
+    /// somebody has open, and an incremental form would let a client that
+    /// navigates faster than its messages arrive publish a set neither side
+    /// agrees on. An empty list is a node that is looking at nothing, which is
+    /// how presence stops.
+    ///
+    /// The counterpart of [`Request::Live`], which asks what *others* are doing.
+    /// Two verbs rather than one because they fail differently: this one is
+    /// lossy by nature — a declaration that does not arrive is corrected by the
+    /// next one — and a read that silently returned a stale table would not be.
+    Watching {
+        /// The `iss_` doc ids, never project aliases. The Body id is derived
+        /// from the string as given, so an alias publishes presence on a Body
+        /// nothing reads and nobody sees a face.
+        #[serde(default)]
+        issues: Vec<String>,
+    },
     Live {
         /// The generation the caller already holds. When it still stands the
         /// answer is [`Response::LiveUnchanged`], so a poll that finds nothing
@@ -743,6 +762,7 @@ pub fn classify(req: &Request) -> RequestOwner {
         | Request::Who
         | Request::Sync
         | Request::Live { .. }
+        | Request::Watching { .. }
         | Request::Signals => Station,
 
         // ---- Observation: generic status and subscription surfaces ----

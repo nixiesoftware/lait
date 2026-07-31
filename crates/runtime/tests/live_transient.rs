@@ -1229,3 +1229,226 @@ mod flooding {
         assert_eq!(evictions.charge(1), Verdict::Close);
     }
 }
+
+/// The send side: this Station telling peers what it is looking at.
+///
+/// Everything else on this plane is about what *others* say. Without these, a
+/// viewer renders every colleague and never itself, and the facepile on a
+/// two-person issue shows one face on each screen.
+mod publishing {
+    use super::*;
+    use runtime::live::LiveHandle;
+
+    fn scopes(bodies: &[u8]) -> Vec<TransientScope> {
+        bodies.iter().map(|b| issue_scope(*b)).collect()
+    }
+
+    #[test]
+    fn a_declaration_replaces_rather_than_accumulates() {
+        // A snapshot of what somebody has open. Incremental would let a client
+        // that navigates faster than its messages arrive publish a set neither
+        // side agrees on.
+        let handle = LiveHandle::new(None);
+        assert_eq!(handle.local_presence().1, Vec::new());
+
+        handle.declare_local(scopes(&[1, 2]));
+        let (first, held) = handle.local_presence();
+        assert_eq!(held, scopes(&[1, 2]));
+
+        handle.declare_local(scopes(&[3]));
+        let (second, held) = handle.local_presence();
+        assert_eq!(held, scopes(&[3]), "the old set is gone, not merged");
+        assert_ne!(first, second, "and a session can tell cheaply");
+    }
+
+    #[test]
+    fn declaring_what_is_already_declared_moves_nothing() {
+        // The pump re-sends the whole set every tick rather than remembering
+        // what it said, so this is the common case and it must not make every
+        // session republish twice a second.
+        let handle = LiveHandle::new(None);
+        handle.declare_local(scopes(&[1]));
+        let (generation, _) = handle.local_presence();
+        handle.declare_local(scopes(&[1]));
+        assert_eq!(handle.local_presence().0, generation);
+    }
+
+    #[test]
+    fn an_empty_declaration_is_how_presence_stops() {
+        // Not a no-op and not an error. A node looking at nothing is a real
+        // state — every tab closed — and it has to be expressible, or presence
+        // could only ever grow.
+        let handle = LiveHandle::new(None);
+        handle.declare_local(scopes(&[1]));
+        let (before, _) = handle.local_presence();
+        handle.declare_local(Vec::new());
+        let (after, held) = handle.local_presence();
+        assert!(held.is_empty());
+        assert_ne!(before, after);
+    }
+
+    #[test]
+    fn what_this_station_publishes_is_not_in_its_own_view() {
+        // Two maps rather than one, and this is why: a viewer whose own
+        // presence appeared in the table it reads would draw itself beside
+        // everybody else, on every screen, for ever.
+        let handle = LiveHandle::new(None);
+        let now = Instant::now();
+        handle.declare_local(scopes(&[1]));
+        assert!(
+            handle.view(None, now).entries.is_empty(),
+            "declaring is not recording"
+        );
+    }
+}
+
+/// Two Stations, and one of them looking at something.
+///
+/// The property the whole send side exists for: a declaration on one node
+/// becomes a face on the other. Driven through the shipped `serve_session` on
+/// both ends over a real connection, because the pieces agreeing in isolation is
+/// what the last version of this plane already had.
+mod two_node_presence {
+    use super::*;
+    use std::sync::atomic::AtomicBool;
+
+    use comms::mem::MemNet;
+    use comms::Transport;
+    use runtime::admission::AdmittedPeer;
+    use runtime::lifecycle::CancelToken;
+    use runtime::live::{serve_session, LiveHandle, SessionContext};
+
+    fn actor() -> mechanics::ids::ActorId {
+        mechanics::ids::ActorId::parse(&format!("act_{}", "cd".repeat(32))).expect("actor")
+    }
+
+    fn admitted(station: StationId) -> AdmittedPeer {
+        AdmittedPeer {
+            station,
+            actor: actor(),
+            authority_frontier: replica::frontier::AuthorityFrontier::from_canonical_bytes(vec![9]),
+            granted_lanes: vec![runtime::planes::stream_kind::CONTROL],
+            session_id: [2u8; 16],
+            session_epoch: [1u8; 16],
+            features: 0,
+        }
+    }
+
+    /// Run one end of a Live session on its own thread, the way the driver does.
+    fn serve(
+        connection: Arc<dyn comms::Connection>,
+        peer: AdmittedPeer,
+        handle: Arc<LiveHandle>,
+    ) -> (CancelToken, Arc<AtomicBool>) {
+        let cancel = CancelToken::new();
+        let ended = Arc::new(AtomicBool::new(false));
+        std::thread::spawn({
+            let cancel = cancel.clone();
+            let ended = ended.clone();
+            move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("runtime");
+                tokio::task::LocalSet::new().block_on(&runtime, async move {
+                    serve_session(
+                        connection,
+                        peer,
+                        cancel,
+                        SessionContext {
+                            handle: Some(handle),
+                            signals: None,
+                            authority: None,
+                        },
+                    )
+                    .await;
+                });
+                ended.store(true, Ordering::SeqCst);
+            }
+        });
+        (cancel, ended)
+    }
+
+    async fn wait_for(
+        handle: &LiveHandle,
+        within: Duration,
+        want: impl Fn(&runtime::live::LiveView) -> bool,
+    ) -> bool {
+        let deadline = Instant::now() + within;
+        while Instant::now() < deadline {
+            if want(&handle.view(None, Instant::now())) {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        false
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn declaring_an_issue_puts_this_station_in_the_other_ones_table() {
+        let net = MemNet::new();
+        let a_device = mechanics::crypto::device_from_seed(&[95u8; 32]);
+        let b_device = mechanics::crypto::device_from_seed(&[96u8; 32]);
+        let a: Arc<dyn Transport> = Arc::new(net.peer(a_device.clone()));
+        let b: Arc<dyn Transport> = Arc::new(net.peer(b_device.clone()));
+        let accepting = {
+            let b = b.clone();
+            tokio::spawn(async move { b.accept_connection().await })
+        };
+        let dialer = a
+            .connect_session(b.my_id(), b"lait/session/1")
+            .await
+            .expect("connect");
+        let incoming = accepting.await.expect("accept task").expect("incoming");
+        std::mem::forget((a, b));
+
+        let a_handle = Arc::new(LiveHandle::new(None));
+        let b_handle = Arc::new(LiveHandle::new(None));
+        let a_station = StationId::from_device(&a_device).expect("a");
+        let b_station = StationId::from_device(&b_device).expect("b");
+
+        let (a_cancel, _) = serve(Arc::from(dialer), admitted(b_station), a_handle.clone());
+        let (b_cancel, _) = serve(
+            Arc::from(incoming.connection),
+            admitted(a_station.clone()),
+            b_handle.clone(),
+        );
+
+        // A opens an issue.
+        a_handle.declare_local(vec![issue_scope(3)]);
+
+        assert!(
+            wait_for(&b_handle, Duration::from_secs(10), |view| {
+                view.entries.len() == 1
+            })
+            .await,
+            "B never saw A"
+        );
+        let seen = b_handle.view(None, Instant::now());
+        assert_eq!(seen.entries[0].station, a_station);
+        assert_eq!(seen.entries[0].scope, issue_scope(3));
+        assert_eq!(
+            seen.entries[0].kind,
+            runtime::transient::TransientKind::Presence
+        );
+
+        // And A does not see itself: two maps, so a viewer never draws its own
+        // face beside everybody else's.
+        assert!(a_handle.view(None, Instant::now()).entries.is_empty());
+
+        // A closes the tab. Retirement is an optimisation over expiry, and the
+        // difference a person sees is a face going now rather than in ninety
+        // seconds — so it is asserted well inside the TTL.
+        a_handle.declare_local(Vec::new());
+        assert!(
+            wait_for(&b_handle, Duration::from_secs(10), |view| view
+                .entries
+                .is_empty())
+            .await,
+            "A's face outlived the tab that held it"
+        );
+
+        a_cancel.cancel();
+        b_cancel.cancel();
+    }
+}
