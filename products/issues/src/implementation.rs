@@ -698,8 +698,27 @@ fn resolve_comment_anchor(
     dto(state)
 }
 
+/// Who a history row is attributed to.
+///
+/// `None` rather than the device it was committed on. An event written before
+/// events carried an actor has no honest name, and the viewer already draws that
+/// as no name — where a device id would be drawn as a name, in a colour derived
+/// from hashing hex, that nothing else on the screen agrees with.
+fn actor_of(event: &IssueEvent) -> Option<ActorId> {
+    ActorId::parse(&event.a)
+}
+
 /// Append one history event to an issue's `events` list.
 fn push_event(staging: &mut Staging, ctx: &WorldContext<'_>, doc: &str, event: &IssueEvent) {
+    // Stamped here rather than at each construction site, which is why the
+    // eleven of them and the intents carrying `device` are untouched. The actor
+    // is the Session's own, re-derived by the authority view at every submit —
+    // never a string the caller supplied, which is the whole reason it is worth
+    // showing.
+    let event = &IssueEvent {
+        a: ctx.principal().actor.as_str().to_string(),
+        ..event.clone()
+    };
     let key = issue_key(doc);
     let len = ctx
         .read_collaborative(&key)
@@ -823,6 +842,10 @@ fn event(kind: &str, device: &str, ts: u64) -> IssueEvent {
     IssueEvent {
         k: kind.into(),
         d: device.into(),
+        // Filled by `push_event` from the Session's own principal. Left empty
+        // here so no construction site can supply one: an actor a caller passed
+        // in is a claim, and the whole value of showing this is that it is not.
+        a: String::new(),
         t: ts,
         c: vec![],
         x: String::new(),
@@ -3098,7 +3121,7 @@ impl World for IssuesWorld {
                                 to: c.to.clone(),
                             })
                             .collect(),
-                        actor: crate::ids::DeviceId::parse(&e.d),
+                        actor: actor_of(e),
                         actor_nick: String::new(),
                         text: e.x.clone(),
                         ts: e.t,
@@ -3141,7 +3164,7 @@ impl World for IssuesWorld {
                                 to: c.to.clone(),
                             })
                             .collect(),
-                        actor: crate::ids::DeviceId::parse(&e.d),
+                        actor: actor_of(e),
                         actor_nick: String::new(),
                         text: e.x.clone(),
                         ts: e.t,

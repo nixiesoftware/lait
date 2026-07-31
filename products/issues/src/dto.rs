@@ -674,7 +674,16 @@ pub struct ActivityEvent {
     pub reff: String,
     pub kind: String,
     pub changes: Vec<FieldChange>,
-    pub actor: Option<DeviceId>,
+    /// Who did it, as an **actor** — which is what the field was always named
+    /// and, until this landed, never carried. It held the committing `DeviceId`,
+    /// so the member lookup that resolves a display name (keyed by actor) missed
+    /// on every row and every author was drawn as a hex prefix, coloured by
+    /// hashing that hex, in a colour nothing else on the screen agreed with.
+    ///
+    /// `None` for an event written before events carried one. That is the
+    /// honest answer and the viewer already draws it as no name rather than
+    /// inventing one.
+    pub actor: Option<ActorId>,
     pub actor_nick: String,
     pub text: String,
     pub ts: u64,

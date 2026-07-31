@@ -1146,7 +1146,24 @@ pub struct IssueEvent {
     /// The request kind (`created`, `edited`, `assigned`, …).
     pub k: String,
     /// The committing device (advisory attribution).
+    ///
+    /// Kept, and not what a reader is shown: `IssueQuery::Inbox` filters on it to
+    /// answer "what happened that was not me on this machine", which an actor
+    /// cannot answer because a person's other device is still them.
     pub d: String,
+    /// The acting actor.
+    ///
+    /// Absent-means-absent, so every event written before this field re-encodes
+    /// byte-identically and reads back as "no name" — which the viewer already
+    /// renders honestly rather than inventing one.
+    ///
+    /// This is what a person is shown. The device was, and a device id is not an
+    /// actor id: the lookup that resolves a display name is keyed by actor, so
+    /// it missed on every row and every author fell back to a hex prefix,
+    /// coloured by hashing that hex — a different colour from the same person's
+    /// roster chip.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub a: String,
     /// Unix seconds.
     pub t: u64,
     /// Field changes.
