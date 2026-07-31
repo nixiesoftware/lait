@@ -267,6 +267,65 @@ Repair is what the far end owes regardless of intake, because a Body reaching
 this machine through convergence never passed local intake at all. Intake bounds
 what this Space publishes; it is not a defense, and is not relied on as one.
 
+## Transient state and reliable signals
+
+The Live plane carries what people are doing and the signal lane carries
+one-message events. Neither is durable, and the interesting exposures are not
+about confidentiality of the payloads — a cursor position is not a secret — but
+about what a peer can *learn* or *make happen* by sending them.
+
+**A signal is authenticated by the connection and never signed.** It cannot be
+forwarded and cannot be retained as evidence: there is nothing to show a third
+party, and a Station repeating one is making a claim on its own authority. That
+is intentional. A signed signal would be a durable artefact by another name, and
+the whole contract here is that nothing is retained.
+
+**A World signal is trusted only when this build's reviewed implementation is
+active at the session's pinned frontier.** A World the Station does not host and
+a World whose implementation nobody approved get the same refusal, and neither
+reveals the other. Acting on a payload whose schema was never reviewed is the
+failure this prevents.
+
+**Delivery failure is not observable to the sender.** Zero local listeners, a
+lagged local ring, and a full offer queue all leave the wire outcome identical.
+Otherwise a peer could learn whether a viewer is open, or whether anyone is using
+a Station at all, by sending an attention signal and watching what comes back.
+
+**Residency hints answer in three states and never a chunk list.** A complete
+bitmap would let a peer reconstruct which parts of a file somebody had opened,
+which is a read-activity oracle over content the peer may legitimately hold. The
+hint is keyed by the full content id: a prefix would let a peer probe for
+holdings without knowing an id, which is weaker than Freight's exact
+availability question. A peer that did not negotiate the capability may neither
+receive hints nor publish them.
+
+**A peer-supplied anchor path reaches the collaborative document's container
+namespace.** It is bounded independently of the item, and it must equal the
+field the peer already subscribed to — so a peer can only ask about what it said
+it was watching. Without that binding, an anchor would let a peer name arbitrary
+root containers on a receiver. This is the sharpest edge on the plane, because
+it is the one place remote bytes reach a data structure rather than a decoder.
+
+**A file offer starts nothing.** Receiving one writes no byte and resolves no
+path, so a member cannot spend a Station's disk by sending a message. Automatic
+acceptance requires the sender to resolve to one of the receiving identity's own
+devices, an explicit local opt-in that defaults to off, and an explicitly
+resolvable destination. The first gate is not widened by the second: a Station
+that opted in still refuses a stranger.
+
+**A caret resolve takes the same lock a commit takes.** `RwLock` is not
+expressible here — the collaborative document underneath is not `Sync` — so
+concurrent readers do not exist for anchors or for anything else. What bounds
+the damage is the rate, not the access pattern: the per-connection datagram gate
+and the session ceiling together bound resolutions to a few thousand a second
+against a commit measured in milliseconds. That is a small duty cycle rather
+than a safe one, and it is the number to re-derive if either ceiling moves.
+
+**Awareness is allowed to be incomplete; durable convergence is not.** Over the
+session ceiling, or after a gate drop, the view reports itself partial. A
+surface that can be incomplete and does not say so is worse than one that is
+plainly unavailable.
+
 ## Local web surface
 
 `lait serve` binds to loopback and uses a per-run bearer capability with origin

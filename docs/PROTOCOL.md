@@ -480,13 +480,17 @@ router decoded. If the two disagree the connection is refused, because
 everything downstream trusts that parse and the more permissive reading is never
 the safe one.
 
-**Freight flows carry no stream-kind byte.** The ALPN types the connection. The
-stream-kind table above is scoped to `lait/session/1`, an opening's requested
-lanes are values from that table, and a Freight opening therefore names no lanes
-at all — an opening cannot name a Freight lane, and one that tries is refused
-before any admission question is asked. Freight's quarantine is not a lane
-filter but an ordering rule: no bidirectional flow is served before the accept
-has been written.
+**Freight flows carry no stream-kind byte.** The ALPN types the connection, and
+the stream-kind table above is scoped to `lait/session/1`. A Freight opening
+therefore names no lanes, and a well-behaved one carries an empty lane list.
+
+An opening that names lanes anyway is **not** refused for that alone, and this
+paragraph used to say it was. Refusing would be a wire-visible rule, and adding
+one costs a frozen encoding a regeneration for a case that harms nobody: a lane
+byte on a plane that serves no lanes is granted by nothing and reaches no
+handler. Freight's quarantine is not a lane filter but an ordering rule — no
+bidirectional flow is served before the accept has been written — and that rule
+is what the plane actually relies on.
 
 **One bidirectional flow per Freight request.** The flow is the correlator, so
 there is no request id, no table keyed by one, and nothing of that shape to
@@ -757,6 +761,155 @@ Resume is per immutable ciphertext chunk. A resumed request carries the leaf
 hash the partial transfer already validated, and a provider whose leaf differs
 is rejected before a byte is appended — so a resumed transfer cannot be steered
 onto different content.
+
+### 12.5 Live
+
+Freight moves bytes somebody asked for. Live moves what people are *doing* —
+where a cursor is, who is looking at an issue, who is typing, who holds part of
+a file — and the difference that decides every rule below is that none of it is
+worth retransmitting. A caret that arrives late is wrong, not delayed.
+
+**Transient items ride datagrams and are never retransmitted.** A lost one is
+repaired by the next one, or by a refresh, and never by a resend: the value it
+carried was superseded before the loss was noticed. A payload that does not fit
+the path's datagram capacity is dropped whole and counted. It is never
+truncated and never fragmented — half a transient payload arrives as corruption
+rather than as a gap, and there is no retransmit to correct it with.
+
+A peer that negotiated no datagram support at all gets nothing rather than a
+fragment, and the view says so through its partial flag.
+
+**Every item names a scope, and a scope names a Body by World and id.** An
+anchor that named only a Body would resolve against whichever World asked;
+operation ids collide across the documents of one activation, so that is not a
+lookup miss but a plausible and silently wrong answer.
+
+**A scope admits only the payload kinds it is for.** A view scope carries
+presence; a caret scope carries a caret or a selection; a typing scope carries
+typing; a residency scope carries residency. This table is what makes the
+per-connection slot ceiling arithmetic rather than an assertion — no scope
+admits more than two kinds.
+
+**An anchor's path must equal the scope's field.** The path becomes a container
+key inside the collaborative document, so an anchor free to name any path is a
+peer choosing which container a resolve touches on the receiver. Binding it to
+the subscribed scope means a peer can only ask about what it already said it
+was watching. The encoded anchor is bounded independently, before anything
+resolves it.
+
+**Session epochs are compared, never ordered.** An epoch is sixteen random bytes
+minted per reconnect. Two of them have no order, so "is this stale" can only be
+equality against the epoch the session was admitted at. Anything shaped like a
+comparison would be reading noise as sequence.
+
+**Nothing has a goodbye.** A tab closes, a laptop sleeps, a network drops, and
+none of those delivers a message. Every slot carries its own expiry and
+disappears without anyone saying so. Retirement is an optimisation on top of
+that and never a prerequisite — and a retirement records a high-water mark that
+outlives the slot, because a datagram already in flight when the retirement was
+written would otherwise rebuild the slot for a full TTL.
+
+**Subscriptions replace rather than accumulate.** A subscription is a snapshot
+of what a client is looking at. An incremental protocol would let a client that
+adds and removes views faster than its messages arrive end up subscribed to a
+set neither side agrees on.
+
+**Awareness may be partial and has to say when it is.** Over the session
+ceiling, or when a gate has dropped an item, the view reports itself
+incomplete. Durable convergence is unaffected — that is Contact's job and it
+does not ride this plane. A surface that can be incomplete and does not say so
+is telling a confident lie, and the cap exists precisely so that it can be
+reached.
+
+**Residency hints are a Live capability, negotiated per session.** A hint says
+who to ask first; it is not an inventory. It answers with one of three
+states — absent, partial, complete — and never a chunk list, because a complete
+bitmap would let a peer reconstruct which parts of a file somebody had opened.
+It is keyed by the full content id: a prefix would let a peer probe "do you hold
+anything under these bits" without knowing an id at all, which is weaker than
+Freight's exact availability question. A peer that did not negotiate the
+capability may neither receive hints nor publish them.
+
+**Revocation reaches a live session two ways, and both are needed.** The
+connection owner watches for authority to advance and closes a session whose
+peer no longer has standing; the session itself re-asks on a bounded interval
+and before adopting any subscription change. The first is edge-triggered and can
+be missed; the second is what stops a revoked peer acquiring new scopes in the
+window before the edge arrives. A revoked peer's slots disappear immediately
+rather than at their TTL.
+
+### 12.6 Reliable signals
+
+A signal is a thing that happened — somebody offered you a file, invited you to
+collaborate, asked for your attention. It is reliable in the sense that it is
+delivered or it fails loudly, and it is durable in **no** other sense: nothing
+journaled, nothing replayed after a restart, nothing that becomes activity.
+
+That negative is the whole contract. It is enforced structurally rather than by
+convention: the signal module may not name the Replica writer or the
+Observation ring, a source gate fails the build if it does, and a behavioural
+test asserts that driving signals moves neither the frontier, nor any byte under
+the store directory, nor the Observation sequence.
+
+**Framing: stream kind, then a `u16` selector, then a `u32` length, then a
+canonical body.** The selector precedes the length, and that ordering is the
+only reason a per-signal ceiling means anything. Behind the length, the schema
+is known only after a buffer already exists, and every per-schema maximum
+becomes decoration. Resolved first, an unknown selector is refused with nothing
+allocated and the length never consulted. The declared length is refused against
+the smaller of the schema's ceiling and the plane's, so a bad declaration table
+can lower the limit and never raise it.
+
+**One signal per flow.** The opener writes the stream kind; a response does not,
+because the flow's kind was fixed when it was opened. Writing it again shifts
+every field the reader is about to parse.
+
+**Refusal is the pair, always.** Stopping the read half *and* resetting the
+write half. A send-half reset alone does not stop an inbound writer: the peer
+keeps writing into a flow nobody reads, and a refused peer can still drain a
+full signal ceiling past a refusal that already happened. The refusal has to
+cost the refused rather than the refuser.
+
+**Every signal is declared, and an undeclared one is refused.** A declaration
+fixes the selector, the ceiling, what the sender must satisfy, and whether an
+answer is permitted. A signal nobody declared is one nothing knows how to bound.
+
+**The response policy lives on the declaration, not on the call.** A one-way
+signal opens a unidirectional flow and has no second deadline to budget; one
+that expects an answer opens a bidirectional flow and pays for the round trip. A
+caller cannot choose to wait for an answer to something nobody promised to
+answer. Only the liveness ping expects one, and its answer carries the same
+nonce — which is what makes it an answer to *that* ping rather than to any ping.
+The acknowledgement is itself one-way, which is how a ping does not become a
+loop.
+
+**A World signal is refused when this build cannot interpret it.** A World this
+Station does not host, and a World whose implementation is not active at the
+session's pinned frontier, get the same answer: not registered. Both mean this
+build cannot interpret that payload, and interpreting it anyway is how a schema
+nobody reviewed gets acted on. That is a different answer from denial, and
+neither reveals the other.
+
+**Acceptance is not a delivery receipt.** It says the bytes left, framed and
+bounded. It says nothing about whether a person saw them. Delivery failure is
+deliberately not observable to the sender: zero local listeners and a lagged
+local ring both leave the wire outcome unchanged, or a peer could learn whether
+a viewer is open by pinging with an attention signal.
+
+**A file offer is a message, not a transfer.** Receiving one queues a name and a
+content id. No fetch starts, no path is resolved, no byte is written. Whether
+the receiver wants a gigabyte is a decision a person makes, and starting the
+transfer on arrival would let any member spend a Station's disk by sending a
+message. The queue is bounded and refuses the newest when full rather than
+evicting the oldest — it is an inbox, and what is in it may be about to be acted
+on. A full queue is indistinguishable to any sender from an empty one.
+
+Automatic acceptance is gated three ways: the sender resolves to one of the
+receiving identity's own devices, the Station has explicitly opted in, and a
+destination is explicitly resolvable. The first is the strictest and is the
+reason automatic acceptance is defensible at all — a file that lands on disk
+without anyone clicking came from another machine belonging to the same person.
+Failing any gate leaves the offer queued. Opting in never widens the first gate.
 
 ## 13. Conformance
 

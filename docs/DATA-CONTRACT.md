@@ -416,6 +416,34 @@ whole distance between the design and a violation — a `publish` from signal co
 would journal nothing and still emit an Observation, which `SpaceBridge::frame_for`
 turns into `activity_advanced` for anything carrying scopes.
 
+The parser gate is half of it. The other half runs: ten thousand delivered
+signals leave the frontier, every byte under the store directory, and the
+Observation sequence identical, and one ordinary commit in the same file moves
+all three. The negative control is not decoration — a run that passes because
+nothing was driven is indistinguishable from a run that passes because signals
+are not durable, unless something shows the observables moving when they should.
+The behavioural half also catches what the parser cannot: a handler reaching the
+Replica *indirectly*, through a World submit several calls away, on a path the
+parser reads as ordinary.
+
+**A delivered signal is an event, not a state.** A listener subscribes and hears
+what follows; it cannot re-read what it missed, and a restart delivers nothing
+that was signalled before it. That is the same shape as a person who was out of
+the room, and it is deliberate: a queue that survived would be a durable record
+of who was contacted, which is precisely what a signal must not leave behind.
+
+**A queued file offer is the one transient thing with no TTL.** It holds a
+sender, a content id, a length and a display name — never bytes. A cursor
+expires because a cursor that stopped moving is stale; an offer that has been
+waiting an hour is exactly as valid as when it arrived, so only a decision or a
+revocation removes one. It is still not durable: it lives in memory and a
+restart forgets it, and the file it names is unaffected either way.
+
+**A display name from a peer is stored exactly as sent.** It is sanitised where
+it becomes a path and nowhere earlier. Rewriting on arrival would mean the name
+shown to a person is not the name that was sent, and would break the
+re-encode-equality rule every wire shape in the system rests on.
+
 ## 13. Local-only state
 
 Device private keys, actor recovery material, custody shares, local petnames,
