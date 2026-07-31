@@ -135,13 +135,23 @@ impl AnchorSource for ScriptedAnchors {
         })
     }
 
+    /// Answers the anchor's own offset when told to resolve, so a caller that
+    /// mixed up two anchors is caught rather than flattered. The first version
+    /// of this ignored its argument entirely, which made
+    /// `a_selection_resolves_both_ends` unable to tell the focus anchor from the
+    /// near anchor resolved twice.
     fn resolve_anchor(
         &self,
         _key: &BodyKey,
-        _anchor: &replica::FabricAnchor,
+        anchor: &replica::FabricAnchor,
     ) -> replica::AnchorResolution {
         self.resolves.fetch_add(1, Ordering::SeqCst);
-        *self.answer.lock().unwrap()
+        match *self.answer.lock().unwrap() {
+            replica::AnchorResolution::Resolved(_) => {
+                replica::AnchorResolution::Resolved(anchor.offset)
+            }
+            drifted => drifted,
+        }
     }
 }
 
@@ -164,10 +174,10 @@ fn a_caret_is_resolved_on_every_read_and_never_cached_in_a_slot() {
     assert_eq!(anchors.resolves(), 1);
 
     // The Body moves under the caret. Nothing is re-sent, nothing is
-    // re-recorded, and the next read tells the truth anyway.
-    anchors.set(replica::AnchorResolution::Resolved(40));
+    // re-recorded, and the next read asks again rather than remembering.
+    anchors.set(replica::AnchorResolution::Drifted);
     let second = handle.view(None, now);
-    assert_eq!(second.entries[0].caret, Some(CaretState::At(40)));
+    assert_eq!(second.entries[0].caret, Some(CaretState::Drifted));
     assert_eq!(anchors.resolves(), 2, "asked again, not remembered");
 
     // And the generation did not move: resolving is a read, not a change.
@@ -221,8 +231,11 @@ fn a_selection_resolves_both_ends() {
     );
 
     let view = handle.view(None, now);
+    // Two *different* positions. The mock answers each anchor's own offset, so
+    // resolving the near anchor twice would show 7 and 7 and pass a test that
+    // only counted calls.
     assert_eq!(view.entries[0].caret, Some(CaretState::At(7)));
-    assert_eq!(view.entries[0].focus, Some(CaretState::At(7)));
+    assert_eq!(view.entries[0].focus, Some(CaretState::At(19)));
     assert_eq!(anchors.resolves(), 2, "both ends, not just the near one");
 }
 
@@ -354,13 +367,33 @@ fn partial_says_so_and_is_not_a_diagnostic() {
     let now = Instant::now();
     assert!(!handle.view(None, now).partial);
 
-    handle.set_capped(true);
+    handle.set_accepting_capped(true);
     assert!(handle.view(None, now).partial);
 
     // Setting it to what it already is is not a change a reader should see.
     let generation = handle.generation();
-    handle.set_capped(true);
+    handle.set_accepting_capped(true);
     assert_eq!(handle.generation(), generation);
+}
+
+#[test]
+fn the_two_ceilings_do_not_overwrite_each_other() {
+    // Two owners compute `partial` from disjoint counts: the accept side from
+    // its session list, the dial side from its ledger. One flag meant each
+    // unconditionally clobbered the other, so a Station at its dial ceiling
+    // reported itself complete the moment any inbound session ended.
+    let handle = LiveHandle::new(None);
+    let now = Instant::now();
+
+    handle.set_dialling_capped(true);
+    assert!(handle.view(None, now).partial);
+
+    // The accept side saying "not capped" must not answer for the dial side.
+    handle.set_accepting_capped(false);
+    assert!(handle.view(None, now).partial, "the dialer is still capped");
+
+    handle.set_dialling_capped(false);
+    assert!(!handle.view(None, now).partial);
 }
 
 #[test]
@@ -382,7 +415,7 @@ fn a_gate_drop_makes_the_view_partial_and_then_stops() {
     assert!(!handle.view(None, later).partial);
 
     // And the cap does not decay: it is true until a session ends.
-    handle.set_capped(true);
+    handle.set_accepting_capped(true);
     assert!(handle.view(None, later).partial);
 }
 
@@ -789,16 +822,23 @@ mod dialling {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn a_dial_carries_the_lanes_and_offers_no_feature_this_build_lacks() {
-        // `feature::LOCAL_SUPPORTED` is zero, and offering a bit this build does
-        // not honour is a promise a peer would be right to be annoyed about.
-        // Freight's dialer still offers RESIDENCY_HINTS; that is a pre-existing
-        // dishonesty on the wrong plane, and this one does not inherit it.
+        // The offer is `feature::LOCAL_SUPPORTED` rather than a hand-picked
+        // list, so it moves with the build: a bit joins that constant in the
+        // same commit as the code that honours it. Asserted against the
+        // concrete bit below rather than against the constant, which would be
+        // the same tautology it is elsewhere.
         let net = MemNet::new();
         let local_device = mechanics::crypto::device_from_seed(&[81u8; 32]);
         let peer_device = mechanics::crypto::device_from_seed(&[82u8; 32]);
         let a: Arc<dyn Transport> = Arc::new(net.peer(local_device.clone()));
         let b: Arc<dyn Transport> = Arc::new(net.peer(peer_device.clone()));
 
+        // The responder's connection is returned rather than dropped when it is
+        // done, and that is not tidiness. Dropping a `MemConnection` closes it,
+        // and `accept_uni` on the other side resolves to `None` the moment the
+        // peer closes — whether or not a flow is already queued. A responder
+        // that answered and immediately hung up therefore raced the dialer's
+        // read and lost about a quarter of the time, reported as `Unreachable`.
         let responder = tokio::spawn({
             let b = b.clone();
             async move {
@@ -830,7 +870,7 @@ mod dialling {
                 let mut send = incoming.connection.open_uni().await.expect("open");
                 send.write_all(&accept.encode()).await.expect("write");
                 send.finish().expect("finish");
-                open
+                (open, incoming.connection)
             }
         });
 
@@ -845,7 +885,7 @@ mod dialling {
         .await
         .expect("dialled");
 
-        let open = responder.await.expect("responder");
+        let (open, _still_connected) = responder.await.expect("responder");
         assert_eq!(open.plane, Plane::Live);
         assert_eq!(
             open.features,
@@ -1044,10 +1084,12 @@ mod flooding {
     use runtime::transient::AdmitOutcome;
 
     #[test]
-    fn a_full_table_evicts_and_eight_evictions_close_the_connection() {
-        // The chain the docket asks for, driven end to end at a table size a
-        // test can fill. Every link is the shipped code: the store refuses when
-        // full, the session counts it, and the ledger closes at its ceiling.
+    fn a_full_table_evicts_and_the_session_counts_it() {
+        // The store's half of the chain. The ledger's half is
+        // `the_shipped_eviction_chain_closes_a_flooding_connection`, which
+        // drives a real session over a real connection — this used to claim
+        // "every link is the shipped code" while calling `evictions.charge`
+        // itself, which is the one link that mattered.
         let mut session = LiveSession::with_capacity(station(1), 4);
         let epoch = [1u8; 16];
         let now = Instant::now();
@@ -1062,7 +1104,6 @@ mod flooding {
             );
         }
 
-        let mut evictions = Evictions::new(slots::MAX_EVICTIONS_PER_CONNECTION);
         for n in 0..slots::MAX_EVICTIONS_PER_CONNECTION {
             let scope = issue_scope(100 + n as u8);
             scopes.push(scope.clone());
@@ -1072,17 +1113,11 @@ mod flooding {
                 AdmitOutcome::Evicted,
                 "a full table refuses rather than displacing"
             );
-            let verdict = evictions.charge(1);
-            let last = n + 1 == slots::MAX_EVICTIONS_PER_CONNECTION;
-            assert_eq!(
-                verdict,
-                if last { Verdict::Close } else { Verdict::Allow },
-                "the connection survives until the ceiling and not past it"
-            );
         }
         assert_eq!(
             session.counters().evictions,
-            slots::MAX_EVICTIONS_PER_CONNECTION as u64
+            slots::MAX_EVICTIONS_PER_CONNECTION as u64,
+            "and every refusal is counted"
         );
     }
 

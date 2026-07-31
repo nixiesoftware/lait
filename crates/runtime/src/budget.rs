@@ -371,6 +371,19 @@ pub mod deadline {
     /// How often a driver re-examines whether its peers are still authorized.
     pub const AUTHORITY_REVALIDATION: Duration = Duration::from_secs(2);
 
+    /// How long one Live flow may take to say what it is and finish saying it.
+    ///
+    /// Load-bearing rather than tidy. The Live session serves flows *inline* in
+    /// its select loop — unlike Freight, which spawns per request — so a flow
+    /// that opens and then goes quiet parks the whole session: no datagram is
+    /// read, no sweep runs, `LIVE_IDLE` never fires because the loop never
+    /// reaches its own check, and the authority revalidation beat stops beating.
+    /// One stalled flow would otherwise wedge every bound the loop owns.
+    ///
+    /// Short, because a control frame is a subscription snapshot a client
+    /// already has in hand.
+    pub const LIVE_FLOW_READ: Duration = Duration::from_secs(5);
+
     /// A driver's poll interval, so cancellation is never missed while parked.
     pub const DRIVER_POLL: Duration = Duration::from_millis(25);
 }
@@ -643,6 +656,12 @@ pub mod slots {
     ///
     /// A signal is one bounded message on its own short stream, so this bounds
     /// how many a peer may have in flight rather than how many it may send.
+    ///
+    /// **Not the ceiling in force.** The signal lane is served inline on the
+    /// Live session's own flow permit, which is `bounds::MAX_STREAM_WORKERS`,
+    /// so this bounds nothing today. It is kept because the consistency
+    /// assertion below is what makes a future per-lane permit safe to add, and
+    /// deleting the constant would delete the assertion with it.
     pub const SIGNAL_LANE_WORKERS: usize = 4;
 
     /// Live sessions one Station will hold.
@@ -680,6 +699,16 @@ pub mod slots {
     /// (a text caret takes `Caret` or `Selection`; every other scope takes
     /// one). A connection cannot hold more slots than its scopes allow.
     pub const MAX_SLOTS_PER_CONNECTION: usize = MAX_SUBSCRIBED_SCOPES_PER_CONNECTION * 2;
+
+    /// Slots the shared publish table holds, across every session.
+    ///
+    /// The per-connection ceiling bounds one peer; this bounds the table they
+    /// all write into. Without it the shared table is bounded only by sessions
+    /// times per-session slots, which multiplies a bound rather than being one:
+    /// thirty-two sessions at a hundred and twenty-eight slots is four thousand
+    /// slots of somebody else's memory, and the number nobody chose is the one
+    /// that gets hit.
+    pub const MAX_PUBLISHED_SLOTS: usize = MAX_TRANSIENT_SLOTS;
 
     /// Evictions one connection may cause before it is closed.
     ///

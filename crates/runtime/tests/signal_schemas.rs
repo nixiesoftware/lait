@@ -543,19 +543,47 @@ mod delivery {
         });
     }
 
+    fn from(seed: u8) -> mechanics::ids::StationId {
+        mechanics::ids::StationId::from_device(&mechanics::crypto::device_from_seed(&[seed; 32]))
+            .expect("station")
+    }
+
+    fn delivered(signal: Signal) -> runtime::signal::DeliveredSignal {
+        runtime::signal::DeliveredSignal {
+            from: from(5),
+            session_id: [0u8; 16],
+            session_epoch: [0u8; 16],
+            signal,
+        }
+    }
+
     #[tokio::test]
     async fn a_subscriber_hears_what_follows_it_and_not_what_preceded_it() {
-        // A signal is an event, not a state anyone can re-read. Subscribing
-        // late means missing what already happened, which is the honest
-        // behaviour — the alternative is a Station holding events for readers
-        // that may never arrive.
+        // A signal is an event, not a state anyone can re-read. Subscribing late
+        // means missing what already happened, which is the honest behaviour —
+        // the alternative is a Station holding events for readers that may never
+        // arrive.
+        //
+        // Both halves are driven. The first version of this built a `Ping` and
+        // discarded it with `let _ =`, so it proved only that an empty channel
+        // is empty.
         let handle = handle();
+        handle.deliver(delivered(Signal::Ping { nonce: [1u8; 16] }));
+
         let mut listener = handle.signals();
         assert!(
             listener.try_recv().is_err(),
-            "nothing has happened yet, so there is nothing to hear"
+            "what happened before the subscription is gone"
         );
-        let _ = Signal::Ping { nonce: [1u8; 16] };
+
+        handle.deliver(delivered(Signal::Ping { nonce: [2u8; 16] }));
+        let heard = listener.try_recv().expect("what follows it arrives");
+        assert_eq!(heard.signal, Signal::Ping { nonce: [2u8; 16] });
+        assert_eq!(heard.from, from(5), "and it says who it came from");
+        assert!(
+            listener.try_recv().is_err(),
+            "and only what followed it, once"
+        );
     }
 }
 

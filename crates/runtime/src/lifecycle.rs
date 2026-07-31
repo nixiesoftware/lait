@@ -1032,7 +1032,6 @@ impl Station {
         ))
     }
 
-    /// The current committed Replica frontier (advances as Sessions submit).
     /// Where this Station's durable state lives.
     ///
     /// Exposed because "nothing was written" is a claim that has to be
@@ -1044,6 +1043,7 @@ impl Station {
         self.store.dir()
     }
 
+    /// The current committed Replica frontier (advances as Sessions submit).
     pub fn frontier(&self) -> replica::frontier::ReplicaFrontier {
         self.core.frontier()
     }

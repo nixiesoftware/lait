@@ -60,6 +60,11 @@ pub struct TransientCounters {
     /// arrives as corruption rather than as a gap.
     pub capacity_drops: u64,
     /// Items superseded before they were sent, which is coalescing working.
+    ///
+    /// Written by nothing yet: `Coalescer` keeps its own count, and the send
+    /// side that would join the two has no production caller. Kept here rather
+    /// than deleted because the field is where the number belongs the moment
+    /// something publishes, and its absence is recorded on `Coalescer` itself.
     pub supersessions: u64,
     /// Items from a session epoch this connection is not admitted at.
     pub wrong_epoch: u64,
@@ -83,7 +88,12 @@ pub struct LiveSession {
 
 impl LiveSession {
     pub fn new(peer: StationId) -> Self {
-        Self::with_capacity(peer, slots::MAX_TRANSIENT_SLOTS)
+        // The *per-connection* ceiling, which is what this table is. Sizing it
+        // at `MAX_TRANSIENT_SLOTS` — the Station-wide number — gave every
+        // connection the whole Station's budget and left
+        // `MAX_SLOTS_PER_CONNECTION` with no reader at all, so the bound whose
+        // derivation the legality table exists to justify bounded nothing.
+        Self::with_capacity(peer, slots::MAX_SLOTS_PER_CONNECTION)
     }
 
     /// A session whose table holds `capacity` slots.
@@ -261,9 +271,15 @@ pub struct LiveHandle {
 #[derive(Default)]
 struct PublishTable {
     generation: u64,
-    /// This Station is at its session ceiling. A standing condition: it stays
-    /// true until a session ends.
-    capped: bool,
+    /// At the inbound session ceiling. Owned by `LiveService`.
+    accepting_capped: bool,
+    /// At the outbound session ceiling. Owned by the dialer.
+    ///
+    /// Two flags rather than one, because they have two owners computing them
+    /// from disjoint counts. A single flag meant each side unconditionally
+    /// overwrote the other's answer, so a Station at its dial ceiling reported
+    /// itself complete the moment any inbound session ended.
+    dialling_capped: bool,
     /// Something was dropped at a gate, and this is when it stops mattering.
     ///
     /// A decaying cause rather than a standing one. A dropped datagram matters
@@ -280,7 +296,9 @@ struct PublishTable {
 
 impl PublishTable {
     fn partial(&self, now: Instant) -> bool {
-        self.capped || self.dropped_until.is_some_and(|until| now < until)
+        self.accepting_capped
+            || self.dialling_capped
+            || self.dropped_until.is_some_and(|until| now < until)
     }
 }
 
@@ -374,15 +392,27 @@ impl LiveHandle {
     /// After, not instead: the session store is what bounds a single connection,
     /// and this is what a reader sees. An item that failed the session's own
     /// ceilings never reaches here.
-    pub fn record(&self, station: &StationId, item: &TransientItem, now: Instant) {
+    /// Returns whether it was stored. `false` means the shared table is full.
+    pub fn record(&self, station: &StationId, item: &TransientItem, now: Instant) -> bool {
         let mut table = self.table();
+        let key = (
+            station.clone(),
+            item.scope.clone(),
+            item.payload.kind() as u8,
+        );
+        // Replacing an existing slot is always allowed; only a *new* one can
+        // grow the table. Refusing a replacement at the ceiling would freeze
+        // every cursor already in it at whatever position it happened to hold.
+        if !table.slots.contains_key(&key) && table.slots.len() >= slots::MAX_PUBLISHED_SLOTS {
+            // The reader is told the view is incomplete for as long as the
+            // refused item could still have been the reason something is
+            // missing, which is the same window a gate drop earns.
+            table.dropped_until = Some(now + deadline::CURSOR_TTL);
+            return false;
+        }
         table.generation = table.generation.wrapping_add(1);
         table.slots.insert(
-            (
-                station.clone(),
-                item.scope.clone(),
-                item.payload.kind() as u8,
-            ),
+            key,
             crate::transient::TransientSlot {
                 session_epoch: item.session_epoch,
                 seq: item.seq,
@@ -391,13 +421,37 @@ impl LiveHandle {
                 payload: item.payload.clone(),
             },
         );
+        true
     }
 
-    /// Drop everything one Station held.
+    /// Drop what one *session* held.
     ///
-    /// What a disconnect does, and what a revocation does. Immediate rather than
-    /// at TTL: a peer that lost standing keeps nothing, and a peer that hung up
-    /// is not "here for another ninety seconds".
+    /// Keyed by the session epoch as well as the Station, and that is not
+    /// fussiness: `MAX_LIVE_SESSIONS_PER_STATION` is two, so a peer with a
+    /// laptop and a phone has two sessions writing into slots keyed by Station
+    /// alone. Forgetting by Station meant the laptop closing deleted what the
+    /// phone was still saying.
+    ///
+    /// Slots stay keyed by Station, which is what makes a second tab supersede
+    /// the first rather than appear beside it. Only the *removal* is per
+    /// session.
+    pub fn forget_session(&self, station: &StationId, session_epoch: &[u8; 16]) -> usize {
+        let mut table = self.table();
+        let before = table.slots.len();
+        table
+            .slots
+            .retain(|(held, _, _), slot| held != station || &slot.session_epoch != session_epoch);
+        let dropped = before - table.slots.len();
+        if dropped > 0 {
+            table.generation = table.generation.wrapping_add(1);
+        }
+        dropped
+    }
+
+    /// Drop everything a Station held, whichever session put it there.
+    ///
+    /// What a revocation does. Standing is per peer, not per connection, so a
+    /// peer that lost it keeps nothing on any of its sessions.
     pub fn forget(&self, station: &StationId) -> usize {
         let mut table = self.table();
         let before = table.slots.len();
@@ -421,11 +475,20 @@ impl LiveHandle {
         }
     }
 
-    /// Say whether this Station is at its session ceiling.
-    pub fn set_capped(&self, capped: bool) {
+    /// Say whether this Station is at its ceiling for sessions it *accepts*.
+    pub fn set_accepting_capped(&self, capped: bool) {
         let mut table = self.table();
-        if table.capped != capped {
-            table.capped = capped;
+        if table.accepting_capped != capped {
+            table.accepting_capped = capped;
+            table.generation = table.generation.wrapping_add(1);
+        }
+    }
+
+    /// Say whether this Station is at its ceiling for sessions it *dials*.
+    pub fn set_dialling_capped(&self, capped: bool) {
+        let mut table = self.table();
+        if table.dialling_capped != capped {
+            table.dialling_capped = capped;
             table.generation = table.generation.wrapping_add(1);
         }
     }
@@ -649,6 +712,7 @@ pub async fn serve_session(
     // session ending *is* the goodbye.
     let leaving = Leaving {
         station: peer.station.clone(),
+        session_epoch: epoch,
         handle: handle.clone(),
     };
     let _leaving = leaving;
@@ -684,10 +748,10 @@ pub async fn serve_session(
     let mut sweep_at = Instant::now();
     let mut revalidated_at = Instant::now();
 
-    // Asked once here and then on the beat. `admit_peer` is the same question
-    // the admission asked, and asking it again is the whole mechanism: a
-    // membership that went away has no other way to reach a session that pinned
-    // the view it was admitted at.
+    // Asked on the beat, and again on any frame that acquires something.
+    // `admit_peer` is the same question the admission asked, and asking it again
+    // is the whole mechanism: a membership that went away has no other way to
+    // reach a session that pinned the view it was admitted at.
     let still_admitted = |authority: &Option<std::sync::Arc<dyn crate::world::AuthorityView>>| {
         authority
             .as_ref()
@@ -811,7 +875,14 @@ pub async fn serve_session(
                     // ceilings are what bound one peer, and an item that failed
                     // them must not appear to a reader as though it had not.
                     if let Some(handle) = &handle {
-                        handle.record(&peer.station, &item, now);
+                        // A full *shared* table is charged like a full session
+                        // one: it is the same displacement, one level up.
+                        if !handle.record(&peer.station, &item, now)
+                            && evictions.charge(1) == Verdict::Close
+                        {
+                            connection.close(REFUSED, b"");
+                            break;
+                        }
                     }
                 }
             }
@@ -837,16 +908,32 @@ pub async fn serve_session(
                     continue;
                 };
 
-                let kind = match read_stream_kind(recv.as_mut()).await {
-                    Ok(kind) => kind,
-                    // A reserved kind is a peer using a reservation we
-                    // published and have not built: the flow resets and the
-                    // connection stays up, because the peer is not wrong.
-                    Err(StreamError::ReservedKind(_)) | Err(StreamError::UnknownKind(_)) => {
+                // Deadlined, and this is the bound that keeps the session
+                // alive rather than a nicety. Flows are served *inline* in this
+                // loop — Freight spawns per request; this does not — so a peer
+                // that opens a flow and goes quiet would park every other arm:
+                // no datagram read, no sweep, no revalidation beat, and
+                // `LIVE_IDLE` never fires because the loop never reaches its own
+                // check.
+                let kind = match tokio::time::timeout(
+                    deadline::LIVE_FLOW_READ,
+                    read_stream_kind(recv.as_mut()),
+                )
+                .await
+                {
+                    Err(_) => {
                         drop(send);
                         continue;
                     }
-                    Err(_) => {
+                    Ok(Ok(kind)) => kind,
+                    // A reserved kind is a peer using a reservation we
+                    // published and have not built: the flow resets and the
+                    // connection stays up, because the peer is not wrong.
+                    Ok(Err(StreamError::ReservedKind(_))) | Ok(Err(StreamError::UnknownKind(_))) => {
+                        drop(send);
+                        continue;
+                    }
+                    Ok(Err(_)) => {
                         drop(send);
                         continue;
                     }
@@ -919,12 +1006,12 @@ pub async fn serve_session(
                     drop(send);
                     continue;
                 }
-
-                let Ok(body) = read_framed(recv.as_mut(), bounds::MAX_CONTROL_FRAME_BYTES).await
-                else {
-                    drop(send);
-                    continue;
-                };
+                // Before the body is read, not after. The module doc has always
+                // claimed "the gate before the message" and the control lane
+                // read the whole framed message first, so a peer over its
+                // control rate still made this Station buffer up to the frame
+                // ceiling before being refused. The byte gate necessarily comes
+                // after — it is about the size, which is not known until then.
                 match control_gate.check(Instant::now()) {
                     Verdict::Allow => {}
                     Verdict::Drop => {
@@ -936,6 +1023,16 @@ pub async fn serve_session(
                         break;
                     }
                 }
+
+                let Ok(Ok(body)) = tokio::time::timeout(
+                    deadline::LIVE_FLOW_READ,
+                    read_framed(recv.as_mut(), bounds::MAX_CONTROL_FRAME_BYTES),
+                )
+                .await
+                else {
+                    drop(send);
+                    continue;
+                };
                 if matches!(
                     control_bytes.check(Instant::now(), body.len()),
                     Verdict::Close
@@ -987,6 +1084,14 @@ pub async fn serve_session(
 }
 
 /// Send one transient item, or drop it and say why.
+///
+/// **No production caller.** Nothing in a shipped Station publishes its own
+/// cursor: the plane receives, stores and serves what peers say, and the local
+/// half — deciding what this Station is doing and when to say so — belongs to
+/// whatever drives a person's view, which is the browser bridge and is not this
+/// crate. Stated here because a reader finding `datagram_fits` and
+/// `TransientCounters::capacity_drops` should know they are exercised by tests
+/// and by nothing else, rather than assuming a path exists and looking for it.
 ///
 /// The answer is never "truncate". A transient payload has no retransmit, so
 /// half of one arrives as corruption rather than as a gap — and a peer that
@@ -1059,7 +1164,7 @@ impl crate::plane_driver::PlaneService for LiveService {
             // convergence is unaffected — that is Contact's job and it does not
             // ride this plane.
             self.handle
-                .set_capped(sessions.len() >= slots::MAX_LIVE_SESSIONS);
+                .set_accepting_capped(sessions.len() >= slots::MAX_LIVE_SESSIONS);
         }
         // A guard rather than the two lines this used to be after the await.
         // `run_driver` races `serve` against `watch_for_revocation`, so on a
@@ -1109,27 +1214,37 @@ struct Present<'a> {
 impl Drop for Present<'_> {
     fn drop(&mut self) {
         let mut sessions = self.sessions.borrow_mut();
-        sessions.retain(|held| held != &self.station);
+        // Exactly one entry, because `serve` pushes exactly one per connection.
+        // `retain` removed every entry for the peer, so the first of a peer's
+        // two sessions to end removed both and the second removed none —
+        // leaving `present()` and the cap wrong while a session was still open.
+        if let Some(at) = sessions.iter().position(|held| held == &self.station) {
+            sessions.remove(at);
+        }
         self.handle
-            .set_capped(sessions.len() >= slots::MAX_LIVE_SESSIONS);
+            .set_accepting_capped(sessions.len() >= slots::MAX_LIVE_SESSIONS);
     }
 }
 
 /// Drops one peer's slots when its session ends, however it ends.
 ///
 /// A guard rather than a line at the bottom of the loop: `serve_session` leaves
-/// through eight `break`s and a cancellation, and the one path that forgot to
-/// clean up would leave a cursor on screen belonging to somebody who closed
-/// their laptop.
+/// through more `break`s than anyone will keep counting, plus a cancellation and
+/// a dropped future, and the one path that forgot to clean up would leave a
+/// cursor on screen belonging to somebody who closed their laptop.
 struct Leaving {
     station: StationId,
+    session_epoch: [u8; 16],
     handle: Option<std::sync::Arc<LiveHandle>>,
 }
 
 impl Drop for Leaving {
     fn drop(&mut self) {
         if let Some(handle) = &self.handle {
-            handle.forget(&self.station);
+            // Per session, not per Station. A peer may hold two — a laptop and
+            // a phone — and forgetting by Station meant closing one deleted
+            // what the other was still saying.
+            handle.forget_session(&self.station, &self.session_epoch);
         }
     }
 }
@@ -1188,25 +1303,98 @@ mod tests {
         assert_eq!(session.counters().wrong_epoch, 1, "and only the wrong ones");
     }
 
+    /// A connection that reports a datagram capacity and refuses to send.
+    ///
+    /// Only the two methods `publish` touches do anything; the rest of the
+    /// trait is unreachable from it, and a stub that panicked would be a
+    /// stronger claim than this test can make.
+    struct Narrow(Option<usize>);
+
+    #[async_trait::async_trait]
+    impl comms::Connection for Narrow {
+        fn peer(&self) -> comms::PeerId {
+            mechanics::crypto::device_from_seed(&[1u8; 32])
+        }
+        fn alpn(&self) -> Vec<u8> {
+            b"lait/session/1".to_vec()
+        }
+        fn datagram_capacity(&self) -> Option<usize> {
+            self.0
+        }
+        fn send_datagram(&self, _payload: &[u8]) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn close(&self, _code: u32, _reason: &[u8]) {}
+        async fn open_bi(
+            &self,
+        ) -> anyhow::Result<(Box<dyn comms::SendFlow>, Box<dyn comms::RecvFlow>)> {
+            Err(anyhow::anyhow!("not used"))
+        }
+        async fn accept_bi(
+            &self,
+        ) -> anyhow::Result<Option<(Box<dyn comms::SendFlow>, Box<dyn comms::RecvFlow>)>> {
+            Ok(None)
+        }
+        async fn open_uni(&self) -> anyhow::Result<Box<dyn comms::SendFlow>> {
+            Err(anyhow::anyhow!("not used"))
+        }
+        async fn accept_uni(&self) -> anyhow::Result<Option<Box<dyn comms::RecvFlow>>> {
+            Ok(None)
+        }
+        async fn read_datagram(&self) -> anyhow::Result<Option<Vec<u8>>> {
+            Ok(None)
+        }
+        async fn closed(&self) {
+            std::future::pending().await
+        }
+    }
+
     #[test]
     fn a_payload_the_path_cannot_carry_is_dropped_rather_than_cut() {
         // The one thing that must never happen: a transient payload has no
         // retransmit, so half of one is corruption rather than a gap.
-        struct NoDatagrams;
-        impl NoDatagrams {
-            fn capacity(&self) -> Option<usize> {
-                None
-            }
-        }
+        //
+        // Driven through `publish` rather than by incrementing the counter this
+        // then asserts. The first version of this did the latter, which proves
+        // that `+= 1` makes a number one larger.
+        // A maximal residency hint: 256 chunk indices, each large enough to need
+        // a full varint, which is the largest thing this plane can legally
+        // produce and comfortably past a real path's measured capacity.
+        let item = TransientItem {
+            session_epoch: [1u8; 16],
+            seq: 1,
+            scope: TransientScope::ContentResidency { content: [4u8; 32] },
+            payload: TransientPayload::Residency {
+                chunks: (0..crate::transient::MAX_RESIDENCY_CHUNKS as u32)
+                    .map(|n| u32::MAX - n)
+                    .collect(),
+            },
+        };
+        let encoded = item.encode().len();
+        assert!(
+            encoded > 1_162,
+            "a payload larger than a measured real path, not {encoded} bytes"
+        );
+
+        // A peer that negotiated no datagram support at all gets nothing rather
+        // than a fragment.
         let mut counters = TransientCounters::default();
-        // A peer that negotiated no datagram support at all.
-        assert!(!datagram_fits(16, NoDatagrams.capacity()));
-        counters.capacity_drops += 1;
+        assert!(!publish(&Narrow(None), &item, &mut counters));
         assert_eq!(counters.capacity_drops, 1);
 
         // And a payload past what the measured path carries.
-        assert!(!datagram_fits(2_000, Some(1_162)));
-        assert!(datagram_fits(1_000, Some(1_162)));
+        assert!(!publish(&Narrow(Some(1_162)), &item, &mut counters));
+        assert_eq!(counters.capacity_drops, 2);
+
+        // Something that fits does leave, and costs no drop.
+        let small = TransientItem {
+            session_epoch: [1u8; 16],
+            seq: 2,
+            scope: scope(1),
+            payload: TransientPayload::Presence,
+        };
+        assert!(publish(&Narrow(Some(1_162)), &small, &mut counters));
+        assert_eq!(counters.capacity_drops, 2);
     }
 }
 
@@ -1321,10 +1509,14 @@ pub async fn dial(
                 granted_lanes: accept.granted_lanes,
                 session_id,
                 session_epoch: epoch,
-                // What the responder said it agreed to. The dialer's own offer
-                // was zero features, so this is what came back rather than what
-                // was hoped for.
-                features: accept.capability.features,
+                // Intersected locally, never taken on the peer's word. The
+                // accept is the peer telling us what *it* agreed to, and a peer
+                // is free to claim a bit this build does not implement — at
+                // which point this Station would honour residency hints it has
+                // no oracle behind. `judge` does this intersection on the
+                // inbound path; the outbound path has to do it too, or the same
+                // field means two different things depending on who dialled.
+                features: accept.capability.features & crate::planes::feature::LOCAL_SUPPORTED,
             },
         }),
         Err(_) => Err(
@@ -1495,7 +1687,7 @@ async fn dial_loop(context: DialContext) {
             last_round = Some(now);
             let mut led = ledger.borrow_mut();
             led.prune(now);
-            context.handle.set_capped(led.is_capped());
+            context.handle.set_dialling_capped(led.is_capped());
             let candidates = (context.candidates)();
             for peer in candidates {
                 if peer == context.local_station {
@@ -1600,7 +1792,7 @@ async fn dial_and_serve(task: DialTask, peer: StationId, session_id: [u8; 16]) {
 
     let mut ledger = task.ledger.borrow_mut();
     ledger.ended(&peer);
-    task.handle.set_capped(ledger.is_capped());
+    task.handle.set_dialling_capped(ledger.is_capped());
 }
 
 /// How much of a content this Station holds.
@@ -1724,6 +1916,9 @@ impl ResidencyOracle for NoResidency {
 }
 
 /// Send-side coalescing: hold a value briefly, and send the newest.
+///
+/// Like [`publish`], this has no production caller — the two are the send side,
+/// and the send side is driven from above this crate.
 ///
 /// A caret moves as fast as a person types and is superseded by its own next
 /// position, so sending each one spends a packet to deliver a number that is

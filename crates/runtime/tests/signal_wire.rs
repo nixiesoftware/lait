@@ -330,10 +330,10 @@ async fn a_world_signal_for_a_world_this_build_does_not_host_is_refused() {
             schema: "sch_nudge".into(),
             payload: vec![1, 2, 3],
         };
-        // Written by hand on a bidirectional flow rather than through
-        // `send_signal`, which would follow the declaration and open a
-        // unidirectional one. What is under test is the refusal, not the flow
-        // kind — and a uni flow would never reach this responder at all.
+        // Written by hand rather than through `send_signal`, so the frame can
+        // be exactly what a hostile peer would send: `send_signal` would refuse
+        // this locally at `frame_signal` if the World id did not parse, and what
+        // is under test is the *responder's* refusal.
         let (mut send, _recv) = pair.dialer.open_bi().await.expect("open");
         let _ = send
             .write_all(&frame_signal(&signal).expect("framed"))

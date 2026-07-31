@@ -124,9 +124,14 @@ fn a_capability_this_build_does_not_implement_is_not_echoed_back() {
     let Admission::Accept(accept, _) = outcome else {
         panic!("a member is admitted");
     };
+    // The concrete bit, not `LOCAL_SUPPORTED` — which is the constant the
+    // implementation intersects with, so asserting against it is the same
+    // tautology the test thirty lines above documents as forbidden. Written out
+    // here, this fails the day a bit joins that constant without an oracle
+    // behind it, which is the whole point of having the assertion.
     assert_eq!(
         accept.capability.features,
-        feature::LOCAL_SUPPORTED,
+        feature::RESIDENCY_HINTS,
         "everything offered, intersected down to what is actually implemented"
     );
     assert_eq!(accept.capability.features & feature::UNSOLICITED_PROVIDE, 0);

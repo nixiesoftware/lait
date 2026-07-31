@@ -109,6 +109,90 @@ fn options() -> ActivationOptions {
     }
 }
 
+struct AnySigner;
+impl replica::AuthoritySource for AnySigner {
+    fn signer_authorized(&self, _signer: &[u8; 32], _f: &AuthorityFrontier) -> bool {
+        true
+    }
+}
+
+#[derive(Default)]
+struct Accepting;
+impl replica::AuthorityIncorporator for Accepting {
+    fn incorporate_authority(
+        &mut self,
+        records: &[Vec<u8>],
+    ) -> Result<replica::AuthorityBatchReceipt, String> {
+        Ok(replica::AuthorityBatchReceipt {
+            space: mechanics::ids::SpaceId::from_digest([0u8; 16]),
+            prior_frontier: AuthorityFrontier::from_canonical_bytes(vec![]),
+            resulting_frontier: AuthorityFrontier::from_canonical_bytes(vec![1]),
+            batch_digest: *blake3::hash(&records.concat()).as_bytes(),
+        })
+    }
+}
+
+/// Activation options with a real transport, so the plane drivers and the
+/// dialer are actually spawned.
+///
+/// The offline options above mount nothing: `Orbit::activate` only reaches the
+/// driver block when `comms` is `Some`. A dormancy test against an offline
+/// Station therefore drains an empty task set, which is the shape of a test
+/// that passes for a reason unrelated to what it claims.
+fn options_with_comms(transport: Arc<dyn comms::Transport>, seed: [u8; 32]) -> ActivationOptions {
+    ActivationOptions {
+        planes: Default::default(),
+        content: Default::default(),
+        drain_deadline: Duration::from_secs(5),
+        comms: Some(runtime::CommsOptions {
+            transport,
+            station_seed: seed,
+            mechanics: runtime::ContactMechanics {
+                source: Arc::new(AnySigner),
+                incorporator: Arc::new(std::sync::Mutex::new(Accepting)),
+                export: Arc::new(Vec::new),
+                frontier: Arc::new(|| AuthorityFrontier::from_canonical_bytes(vec![1])),
+            },
+            gossip: None,
+            whole_deadline: Duration::from_secs(20),
+            progress_deadline: Duration::from_secs(5),
+            route_lease: Duration::from_secs(60),
+        }),
+        observation_capacity: 0,
+    }
+}
+
+fn station_with_comms(root: &std::path::Path, seed: [u8; 32]) -> Station {
+    let net = comms::mem::MemNet::new();
+    let transport: Arc<dyn comms::Transport> =
+        Arc::new(net.peer(mechanics::crypto::device_from_seed(&seed)));
+    let world = Empty::new();
+    let registration = WorldRegistration {
+        id: world.id(),
+        implementation_version: WorldVersion(1),
+        schemas: world.schemas().to_vec(),
+        limits: WorldLimits::default(),
+        scope_schemas: Vec::new(),
+        signal_schemas: Vec::new(),
+    };
+    let registry = RuntimeBuilder::new()
+        .register(registration, Arc::new(world))
+        .build()
+        .unwrap();
+    Runtime::open(
+        root.to_path_buf(),
+        registry,
+        Arc::new(Permissive),
+        Arc::new(replica::StaticBodyKeys::new(
+            AuthorizedBodyKey::for_authorized_epoch([1u8; 16], [2u8; 32]),
+        )),
+    )
+    .form_space(SpaceFormationOptions::default())
+    .unwrap()
+    .activate(options_with_comms(transport, seed))
+    .unwrap()
+}
+
 fn station_at(root: &std::path::Path) -> Station {
     let world = Empty::new();
     let registration = WorldRegistration {
@@ -292,13 +376,18 @@ fn a_second_tab_supersedes_the_first_with_no_wire_field_for_it() {
 }
 
 #[test]
-fn dormancy_leaves_no_live_state_behind() {
+fn dormancy_joins_the_drivers_it_started() {
     // Acceptance 9's Live leg, for the ordinary path. The drain joins tracked
-    // tasks on a deadline and then leaks by design, so what is asserted here is
-    // that a Station shutting down normally releases what it held — not that a
-    // rogue task can be stopped, which it cannot.
+    // tasks on a deadline and then leaks by design, so what is asserted is that
+    // a Station shutting down normally releases what it held — not that a rogue
+    // task can be stopped, which it cannot.
+    //
+    // **With a transport**, which the first version of this did not have.
+    // `Orbit::activate` only reaches the driver block when `comms` is `Some`, so
+    // against an offline Station `go_dormant` drained an empty task set and the
+    // test passed without either plane ever having run.
     let root = temp_root();
-    let station = station_at(&root);
+    let station = station_with_comms(&root, [51u8; 32]);
     let now = Instant::now();
     let live = station.live();
     for peer in 1..=5u8 {
@@ -310,11 +399,19 @@ fn dormancy_leaves_no_live_state_behind() {
     }
     assert_eq!(live.view(None, now).entries.len(), 5);
 
+    let started = std::time::Instant::now();
     let orbit = station.go_dormant().expect("drained inside the deadline");
-    // The handle outlives the Station because a caller may hold one. What must
-    // not outlive it is a driver thread, and `go_dormant` returning is the
-    // assertion: it joins every tracked task before releasing the store lock.
-    drop(orbit);
+    // Inside the deadline, not merely eventually. A drain that ran long would
+    // still return — it leaks rather than blocking — so the elapsed time is
+    // what distinguishes "joined" from "gave up and leaked".
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "the drivers were joined rather than abandoned to the deadline"
+    );
+    // Reactivating proves the store lock came back, which it does not if a
+    // driver thread is still holding the Station's directory.
+    let station = orbit.activate(options()).expect("the lock was released");
+    assert!(station.live().view(None, Instant::now()).entries.is_empty());
 }
 
 #[test]
@@ -324,8 +421,15 @@ fn an_offer_survives_a_disconnect_and_not_a_restart() {
     // there. It is also not written down, so a restart forgets it.
     let root = temp_root();
     let station = station_at(&root);
+    let offering = peer_station(41);
+
+    // Taken *before* the offer, so the comparison after it means something. The
+    // first version of this took one fingerprint afterwards and asserted only
+    // that it was not all-zeroes — true of any digest, including a digest over a
+    // store the offer had just been written into.
+    let before = fingerprint(station.store_dir());
     station.live().offer(runtime::signal::PendingOffer {
-        from: peer_station(41),
+        from: offering.clone(),
         session_epoch: [3u8; 16],
         content: [7u8; 32],
         plaintext_len: 1024,
@@ -333,19 +437,27 @@ fn an_offer_survives_a_disconnect_and_not_a_restart() {
         media_type: "text/plain".into(),
     });
     assert_eq!(station.live().pending_offers().len(), 1);
+    assert_eq!(
+        before,
+        fingerprint(station.store_dir()),
+        "holding an offer writes nothing"
+    );
 
-    let store = fingerprint(station.store_dir());
+    // A disconnect, which is what `forget` is — the half of this test's own name
+    // that the first version never exercised. The offer stays: the file is still
+    // there, and the peer whose laptop slept is still worth fetching from.
+    station.live().forget(&offering);
+    assert_eq!(
+        station.live().pending_offers().len(),
+        1,
+        "a disconnect drops presence, not offers"
+    );
+
     let orbit = station.go_dormant().expect("dormant");
     let station = orbit.activate(options()).expect("reactivated");
     assert!(
         station.live().pending_offers().is_empty(),
         "an offer is held in memory, and memory is what a restart discards"
-    );
-    // And holding it wrote nothing, which is what makes forgetting it correct
-    // rather than a loss of something we had promised to keep.
-    assert_ne!(
-        store, [0u8; 32],
-        "the fingerprint is a real digest, not a default"
     );
 }
 
