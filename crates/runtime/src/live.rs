@@ -1017,17 +1017,31 @@ pub async fn serve_session(
             let due = refreshed_at.elapsed() >= deadline::PRESENCE_REFRESH;
             if generation != published_generation || due {
                 let want: std::collections::BTreeSet<_> = want.into_iter().collect();
-                if want != published {
-                    // The subscription *is* the declaration, and it has to go
-                    // first. A receiver drops a datagram for a scope this
-                    // connection never subscribed to — that is what stops a peer
-                    // making a Station hold state on its behalf — so presence
-                    // published without it is presence silently discarded.
-                    //
-                    // One set for both directions because on this plane they are
-                    // the same fact: having a document open is both "tell me
-                    // about this" and "I am here".
-                    subscribe_remotely(connection.as_ref(), &want).await;
+                // The subscription *is* the declaration, and it has to go first.
+                // A receiver drops a datagram for a scope this connection never
+                // subscribed to — that is what stops a peer making a Station
+                // hold state on its behalf — so presence published without it is
+                // presence silently discarded.
+                //
+                // One set for both directions because on this plane they are the
+                // same fact: having a document open is both "tell me about this"
+                // and "I am here".
+                //
+                // Re-sent on every refresh as well as on every change, and that
+                // is not redundancy. A subscription this side believes it sent
+                // and the peer never received is otherwise permanent: presence
+                // keeps being published, keeps being dropped on arrival, and
+                // nothing ever re-states the subscription because from here
+                // nothing changed. Repeating it on the refresh beat bounds that
+                // to one interval.
+                // Nothing sent means nothing recorded as sent: leaving
+                // `published_generation` alone makes the next beat try again,
+                // rather than this session spending its life publishing into a
+                // subscription that was never made.
+                if (want != published || due)
+                    && !subscribe_remotely(connection.as_ref(), &want).await
+                {
+                    continue;
                 }
                 for scope in want.difference(&published) {
                     outbound_seq += 1;
@@ -1469,16 +1483,19 @@ fn admits_scope(
 
 /// Tell one peer which scopes this connection is about.
 ///
-/// Replace-all, matching what the receiver does with it. Best effort: a
-/// subscription that does not arrive costs this Station's presence on that peer
-/// until the next declaration, which is the same failure mode as a lost
-/// presence datagram and is corrected the same way.
+/// Replace-all, matching what the receiver does with it.
+///
+/// Returns whether it was written and finished. The caller must not record a
+/// subscription it could not send: presence published into a subscription the
+/// peer never received is dropped on arrival, silently, for as long as the
+/// declaration does not change — which on a document somebody leaves open is the
+/// whole session.
 async fn subscribe_remotely(
     connection: &dyn comms::Connection,
     scopes: &std::collections::BTreeSet<TransientScope>,
-) {
+) -> bool {
     let Ok((mut send, _recv)) = connection.open_bi().await else {
-        return;
+        return false;
     };
     let body = LiveControl::Subscribe {
         scopes: scopes.iter().cloned().collect(),
@@ -1492,8 +1509,9 @@ async fn subscribe_remotely(
         .await
         .is_ok()
     {
-        let _ = send.finish();
+        return send.finish().is_ok();
     }
+    false
 }
 
 /// Tell one peer this Station has stopped looking at something.
@@ -1813,6 +1831,22 @@ mod tests {
         async fn closed(&self) {
             std::future::pending().await
         }
+    }
+
+    #[tokio::test]
+    async fn a_subscription_that_could_not_be_sent_says_so() {
+        // The caller must not record a subscription it could not send. Presence
+        // published into a subscription the peer never received is dropped on
+        // arrival, silently, for as long as the declaration does not change —
+        // which on a document somebody leaves open is the whole session.
+        //
+        // This returned `()` before, so the caller had nothing to check and
+        // advanced its published set regardless.
+        let scopes = std::collections::BTreeSet::from([scope(1)]);
+        assert!(
+            !subscribe_remotely(&Narrow(Some(1_162)), &scopes).await,
+            "a connection that cannot open a flow has not subscribed"
+        );
     }
 
     #[test]
