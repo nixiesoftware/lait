@@ -25,7 +25,7 @@ use std::time::Instant;
 use mechanics::ids::StationId;
 
 use crate::admission::AdmittedPeer;
-use crate::budget::{deadline, gates, ByteGate, Gate, Verdict};
+use crate::budget::{deadline, gates, slots, ByteGate, Gate, Verdict};
 use crate::plane_stream::{read_framed, read_stream_kind, StreamError};
 use crate::planes::{bounds, datagram_fits, stream_kind};
 use crate::transient::{
@@ -241,11 +241,27 @@ pub struct LiveHandle {
 #[derive(Default)]
 struct PublishTable {
     generation: u64,
-    partial: bool,
+    /// This Station is at its session ceiling. A standing condition: it stays
+    /// true until a session ends.
+    capped: bool,
+    /// Something was dropped at a gate, and this is when it stops mattering.
+    ///
+    /// A decaying cause rather than a standing one. A dropped datagram matters
+    /// until the slot it would have written is either overwritten by a later
+    /// item or expires, and `CURSOR_TTL` is that bound — so the view says
+    /// "incomplete" for exactly as long as the drop could still be the reason
+    /// something is missing, and then stops.
+    dropped_until: Option<Instant>,
     slots: std::collections::BTreeMap<
         (StationId, TransientScope, u8),
         crate::transient::TransientSlot,
     >,
+}
+
+impl PublishTable {
+    fn partial(&self, now: Instant) -> bool {
+        self.capped || self.dropped_until.is_some_and(|until| now < until)
+    }
 }
 
 impl LiveHandle {
@@ -334,13 +350,28 @@ impl LiveHandle {
         }
     }
 
-    /// Say whether this Station is hearing from everyone it could be.
-    pub fn set_partial(&self, partial: bool) {
+    /// Say whether this Station is at its session ceiling.
+    pub fn set_capped(&self, capped: bool) {
         let mut table = self.table();
-        if table.partial != partial {
-            table.partial = partial;
+        if table.capped != capped {
+            table.capped = capped;
             table.generation = table.generation.wrapping_add(1);
         }
+    }
+
+    /// Record that something was refused at a gate.
+    ///
+    /// Called from the drop paths rather than inferred from a counter, because
+    /// the two questions are different: a counter says how much was dropped
+    /// ever, and this says whether what a reader is looking at right now might
+    /// be missing something. The reader needs the second one.
+    pub fn note_dropped(&self, now: Instant) {
+        let mut table = self.table();
+        let until = now + deadline::CURSOR_TTL;
+        if !table.partial(now) {
+            table.generation = table.generation.wrapping_add(1);
+        }
+        table.dropped_until = Some(until);
     }
 
     /// Drop what has expired. Nothing depends on when this runs.
@@ -405,7 +436,7 @@ impl LiveHandle {
                     (station.clone(), held_scope.clone(), slot.clone())
                 })
                 .collect();
-            (table.generation, table.partial, held)
+            (table.generation, table.partial(now), held)
         };
 
         let entries = held
@@ -629,7 +660,16 @@ pub async fn serve_session(
                 // anyone.
                 match datagram_gate.check(Instant::now()) {
                     Verdict::Allow => {}
-                    Verdict::Drop => continue,
+                    Verdict::Drop => {
+                        // Dropped, and the view says so. A gate refusing a
+                        // cursor is the plane working, but a reader shown four
+                        // of five people with no indication is being told a
+                        // confident lie.
+                        if let Some(handle) = &handle {
+                            handle.note_dropped(Instant::now());
+                        }
+                        continue;
+                    }
                     Verdict::Close => {
                         connection.close(REFUSED, b"");
                         break;
@@ -644,6 +684,9 @@ pub async fn serve_session(
                 }
                 if payload.len() > MAX_TRANSIENT_ITEM_BYTES {
                     session.borrow_mut().counters.oversize_items += 1;
+                    if let Some(handle) = &handle {
+                        handle.note_dropped(Instant::now());
+                    }
                     continue;
                 }
                 let Ok(item) = TransientItem::decode_canonical(&payload) else {
@@ -890,7 +933,7 @@ impl crate::plane_driver::PlaneService for LiveService {
             // convergence is unaffected — that is Contact's job and it does not
             // ride this plane.
             self.handle
-                .set_partial(sessions.len() > crate::budget::slots::MAX_LIVE_SESSIONS);
+                .set_capped(sessions.len() >= slots::MAX_LIVE_SESSIONS);
         }
         // A guard rather than the two lines this used to be after the await.
         // `run_driver` races `serve` against `watch_for_revocation`, so on a
@@ -942,7 +985,7 @@ impl Drop for Present<'_> {
         let mut sessions = self.sessions.borrow_mut();
         sessions.retain(|held| held != &self.station);
         self.handle
-            .set_partial(sessions.len() > crate::budget::slots::MAX_LIVE_SESSIONS);
+            .set_capped(sessions.len() >= slots::MAX_LIVE_SESSIONS);
     }
 }
 
@@ -1039,6 +1082,396 @@ mod tests {
         assert!(!datagram_fits(2_000, Some(1_162)));
         assert!(datagram_fits(1_000, Some(1_162)));
     }
+}
+
+/// Why a Live dial did not become a session.
+///
+/// A type rather than a log line, for the same reason `ProviderRefusal` is one:
+/// most refusals are coarse and mean "not now", but `UnsupportedVersion` is the
+/// one a peer can act on, and collapsing it into the rest is how a generation
+/// mismatch presents as an intermittent network problem for a week.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DialRefusal {
+    /// Never answered, or the transport said no.
+    Unreachable,
+    /// Answered with a refusal it could spell.
+    Refused(crate::planes::SessionRefusal),
+    /// Neither an accept nor a refusal. Our problem to explain rather than
+    /// theirs to have sent.
+    Unintelligible,
+    /// This Station does not consider the peer a member, so there is nothing to
+    /// dial about. Checked before the transport is touched.
+    NotAdmitted,
+}
+
+/// A dialled Live session, and what the responder granted it.
+pub struct LivePeer {
+    pub connection: std::sync::Arc<dyn comms::Connection>,
+    pub peer: AdmittedPeer,
+}
+
+/// Dial one peer on the Live plane.
+///
+/// Modelled on `fetch::connect_provider`, and different in three ways that
+/// matter. The plane is `Live`. The opening names lanes, because on this plane
+/// the ALPN does not type the conversation — Freight carries none. And it
+/// offers no features at all: `feature::LOCAL_SUPPORTED` is zero, and offering
+/// a bit this build does not honour is a promise a peer would be right to be
+/// annoyed about. The Freight dialer still offers `RESIDENCY_HINTS`; that is a
+/// pre-existing dishonesty on the wrong plane, and it is corrected where the
+/// oracle lands rather than copied here.
+///
+/// **The peer's identity is resolved locally, never taken from the accept.** The
+/// responder tells us which lanes it granted, and nothing else it says about who
+/// it is is load-bearing: the actor and the frontier come from this Station's own
+/// `AuthorityView`, keyed by the Station id the transport authenticated.
+pub async fn dial(
+    transport: &dyn comms::Transport,
+    authority: &dyn crate::world::AuthorityView,
+    space: &mechanics::ids::SpaceId,
+    local: &StationId,
+    peer: &StationId,
+    session_id: [u8; 16],
+) -> Result<LivePeer, DialRefusal> {
+    // Asked before the transport is touched. Dialling a peer we would refuse on
+    // arrival is a round trip spent to be told what we already knew.
+    let resolution = authority.admit_peer(peer).ok_or(DialRefusal::NotAdmitted)?;
+
+    let mut space_bytes = [0u8; crate::planes::SPACE_ID_LEN];
+    let raw = space.as_str().as_bytes();
+    if raw.len() != crate::planes::SPACE_ID_LEN {
+        return Err(DialRefusal::Unreachable);
+    }
+    space_bytes.copy_from_slice(raw);
+    let mut epoch = [0u8; 16];
+    getrandom::fill(&mut epoch).map_err(|_| DialRefusal::Unreachable)?;
+
+    let connection = tokio::time::timeout(
+        deadline::LIVE_DIAL,
+        transport.connect_session(peer.as_device(), crate::planes::LIVE_ALPN),
+    )
+    .await
+    .map_err(|_| DialRefusal::Unreachable)?
+    .map_err(|_| DialRefusal::Unreachable)?;
+
+    let open = crate::planes::SessionOpen {
+        plane: crate::planes::Plane::Live,
+        protocol_version: crate::planes::Plane::Live.protocol_version(),
+        features: crate::planes::feature::LOCAL_SUPPORTED,
+        space: space_bytes,
+        initiator_station: local.key_bytes(),
+        responder_station: peer.key_bytes(),
+        session_id,
+        session_epoch: epoch,
+        authority_frontier: Vec::new(),
+        requested_lanes: vec![stream_kind::CONTROL, stream_kind::RELIABLE_SIGNAL],
+    };
+
+    let mut flow = connection
+        .open_uni()
+        .await
+        .map_err(|_| DialRefusal::Unreachable)?;
+    flow.write_all(&open.encode())
+        .await
+        .map_err(|_| DialRefusal::Unreachable)?;
+    flow.finish().map_err(|_| DialRefusal::Unreachable)?;
+
+    let answer = tokio::time::timeout(deadline::LIVE_DIAL, async {
+        let mut recv = connection.accept_uni().await.ok()??;
+        recv.read_to_end(bounds::MAX_OPENING_BYTES).await.ok()
+    })
+    .await
+    .map_err(|_| DialRefusal::Unreachable)?
+    .ok_or(DialRefusal::Unreachable)?;
+
+    match crate::planes::SessionAccept::decode_canonical(&answer) {
+        Ok(accept) => Ok(LivePeer {
+            connection: std::sync::Arc::from(connection),
+            peer: AdmittedPeer {
+                station: peer.clone(),
+                actor: resolution.actor,
+                authority_frontier: resolution.authority_frontier,
+                // The one thing taken from the accept, because it is the one
+                // thing only the responder knows: what it is willing to serve.
+                granted_lanes: accept.granted_lanes,
+                session_id,
+                session_epoch: epoch,
+            },
+        }),
+        Err(_) => Err(
+            match crate::planes::SessionRefusal::decode_canonical(&answer) {
+                Ok(refusal) => DialRefusal::Refused(refusal),
+                Err(_) => DialRefusal::Unintelligible,
+            },
+        ),
+    }
+}
+
+/// Who may be dialled, how often, and how many at once.
+///
+/// Three separate ceilings because they answer three questions: how many
+/// sessions this Station will hold, how many of those any one peer may take, and
+/// how many dials may be outstanding while none of them has answered yet. The
+/// third is the one that is easy to forget and the one that matters under a
+/// partition, where every dial is in flight and none of them is a session.
+#[derive(Default)]
+pub struct DialLedger {
+    /// Per peer, the earliest next attempt, and how many attempts have failed.
+    ///
+    /// A Station sitting at its own ceiling refuses every dial with a bare
+    /// close, which reaches the dialer as an ordinary transport failure. Without
+    /// a cooldown that is a hot loop against a Station that is doing nothing
+    /// wrong.
+    cooldown: std::collections::BTreeMap<StationId, (Instant, u32)>,
+    in_flight: std::collections::BTreeSet<StationId>,
+    sessions: std::collections::BTreeMap<StationId, usize>,
+}
+
+impl DialLedger {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Whether to dial this peer now.
+    pub fn may_dial(&self, peer: &StationId, now: Instant) -> bool {
+        if self.in_flight.contains(peer) {
+            return false;
+        }
+        if self.in_flight.len() >= slots::MAX_LIVE_DIALS_IN_FLIGHT {
+            return false;
+        }
+        if self.total_sessions() >= slots::MAX_LIVE_SESSIONS {
+            return false;
+        }
+        if self.sessions.get(peer).copied().unwrap_or(0) >= slots::MAX_LIVE_SESSIONS_PER_STATION {
+            return false;
+        }
+        match self.cooldown.get(peer) {
+            Some((until, _)) => now >= *until,
+            None => true,
+        }
+    }
+
+    pub fn total_sessions(&self) -> usize {
+        self.sessions.values().sum()
+    }
+
+    pub fn dials_in_flight(&self) -> usize {
+        self.in_flight.len()
+    }
+
+    pub fn begin(&mut self, peer: &StationId) {
+        self.in_flight.insert(peer.clone());
+    }
+
+    /// A dial that became a session. The cooldown is cleared: what it was
+    /// protecting against is a peer that will not talk to us, and this one just
+    /// did.
+    pub fn established(&mut self, peer: &StationId) {
+        self.in_flight.remove(peer);
+        self.cooldown.remove(peer);
+        *self.sessions.entry(peer.clone()).or_insert(0) += 1;
+    }
+
+    /// A dial that did not.
+    ///
+    /// Backoff doubles from `LIVE_DIAL` and is capped at `PRESENCE_TTL`, both
+    /// named rather than invented: the floor is how long one dial is allowed to
+    /// take, and the ceiling is how long a peer can be silent before its
+    /// presence has expired anyway — past that, retrying faster buys nothing
+    /// anyone can see.
+    pub fn failed(&mut self, peer: &StationId, now: Instant) {
+        self.in_flight.remove(peer);
+        let entry = self.cooldown.entry(peer.clone()).or_insert((now, 0));
+        entry.1 = entry.1.saturating_add(1);
+        let doubled = deadline::LIVE_DIAL
+            .checked_mul(1u32 << entry.1.min(5))
+            .unwrap_or(deadline::PRESENCE_TTL);
+        entry.0 = now + doubled.min(deadline::PRESENCE_TTL);
+    }
+
+    /// A session that ended. Not a failure: it says nothing about whether the
+    /// peer would answer again, so it earns no cooldown.
+    pub fn ended(&mut self, peer: &StationId) {
+        if let Some(count) = self.sessions.get_mut(peer) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                self.sessions.remove(peer);
+            }
+        }
+    }
+
+    /// Whether this Station is at a ceiling, and therefore not hearing from
+    /// everyone it could be.
+    pub fn is_capped(&self) -> bool {
+        self.total_sessions() >= slots::MAX_LIVE_SESSIONS
+    }
+
+    /// Forget cooldowns that have elapsed, so the map does not grow with every
+    /// peer this Station has ever failed to reach.
+    pub fn prune(&mut self, now: Instant) {
+        self.cooldown.retain(|_, (until, _)| now < *until);
+    }
+}
+
+/// Everything the dial loop needs, and nothing that can commit.
+pub struct DialContext {
+    pub space: mechanics::ids::SpaceId,
+    pub local_station: StationId,
+    pub transport: std::sync::Arc<dyn comms::Transport>,
+    /// Who might be worth dialling, asked afresh every round.
+    ///
+    /// A closure rather than a snapshot taken once: a Neighbor learned a minute
+    /// after activation should be dialled a minute after activation, not at the
+    /// next restart.
+    pub candidates: std::sync::Arc<dyn Fn() -> Vec<StationId> + Send + Sync>,
+    pub handle: std::sync::Arc<LiveHandle>,
+    pub authority: std::sync::Arc<dyn crate::world::AuthorityView>,
+    pub worlds: crate::registry::WorldRegistry,
+    pub cancel: crate::lifecycle::CancelToken,
+}
+
+/// Dial peers on the Live plane until cancelled. Blocking; call it on its own
+/// thread.
+///
+/// Its own thread and its own current-thread runtime for the same reason
+/// `run_driver` has them: `serve_session` is not `Send`, and a dialled session
+/// is served by exactly the same function an accepted one is. There is no
+/// second implementation of a Live session and there must not be.
+pub fn run_dialer(context: DialContext) {
+    let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    else {
+        return;
+    };
+    let local = tokio::task::LocalSet::new();
+    local.block_on(&runtime, dial_loop(context));
+}
+
+async fn dial_loop(context: DialContext) {
+    let ledger = Rc::new(RefCell::new(DialLedger::new()));
+    let mut sessions = tokio::task::JoinSet::new();
+    // Zero, so the first round happens on entry rather than one interval later.
+    // A Station that has just come up is exactly when somebody is waiting to see
+    // whether anyone else is there.
+    let mut last_round: Option<Instant> = None;
+
+    loop {
+        if context.cancel.is_cancelled() {
+            break;
+        }
+        let now = Instant::now();
+        if last_round.is_none_or(|at| now.duration_since(at) >= deadline::LIVE_DIAL) {
+            last_round = Some(now);
+            let mut led = ledger.borrow_mut();
+            led.prune(now);
+            context.handle.set_capped(led.is_capped());
+            let candidates = (context.candidates)();
+            for peer in candidates {
+                if peer == context.local_station {
+                    // Dialling ourselves would be a session with our own
+                    // presence in it, which reads to a viewer as a second
+                    // person who agrees with everything you do.
+                    continue;
+                }
+                if !led.may_dial(&peer, now) {
+                    continue;
+                }
+                led.begin(&peer);
+                let mut session_id = [0u8; 16];
+                if getrandom::fill(&mut session_id).is_err() {
+                    led.failed(&peer, now);
+                    continue;
+                }
+                sessions.spawn_local(dial_and_serve(
+                    DialTask {
+                        transport: context.transport.clone(),
+                        authority: context.authority.clone(),
+                        worlds: context.worlds.clone(),
+                        handle: context.handle.clone(),
+                        cancel: context.cancel.clone(),
+                        space: context.space.clone(),
+                        local_station: context.local_station.clone(),
+                        ledger: ledger.clone(),
+                    },
+                    peer,
+                    session_id,
+                ));
+            }
+        }
+
+        // Reaped without waiting, so the set does not grow with the number of
+        // sessions this dialer has ever opened.
+        while sessions.try_join_next().is_some() {}
+        tokio::time::sleep(deadline::DRIVER_POLL).await;
+    }
+
+    // Every dialled session is cancelled with the Station, and joined rather
+    // than abandoned: a session outliving the drain holds a connection whose
+    // Station is already gone.
+    sessions.shutdown().await;
+}
+
+/// One dial's worth of shared state. A struct because eight positional
+/// arguments is where a call site stops being readable.
+struct DialTask {
+    transport: std::sync::Arc<dyn comms::Transport>,
+    authority: std::sync::Arc<dyn crate::world::AuthorityView>,
+    worlds: crate::registry::WorldRegistry,
+    handle: std::sync::Arc<LiveHandle>,
+    cancel: crate::lifecycle::CancelToken,
+    space: mechanics::ids::SpaceId,
+    local_station: StationId,
+    ledger: Rc<RefCell<DialLedger>>,
+}
+
+async fn dial_and_serve(task: DialTask, peer: StationId, session_id: [u8; 16]) {
+    let dialled = dial(
+        task.transport.as_ref(),
+        task.authority.as_ref(),
+        &task.space,
+        &task.local_station,
+        &peer,
+        session_id,
+    )
+    .await;
+
+    let live = match dialled {
+        Ok(live) => live,
+        Err(_) => {
+            // Every refusal earns the same cooldown. They differ in what an
+            // operator should be told and not in what the dialer should do:
+            // there is no refusal a dialer can fix by trying again sooner.
+            task.ledger.borrow_mut().failed(&peer, Instant::now());
+            return;
+        }
+    };
+
+    task.ledger.borrow_mut().established(&peer);
+    let signals = crate::signal::SignalPolicy {
+        peer: live.peer.station.clone(),
+        actor: live.peer.actor.clone(),
+        frontier: live.peer.authority_frontier.clone(),
+        granted_lanes: live.peer.granted_lanes.clone(),
+        authority: task.authority.clone(),
+        worlds: task.worlds.clone(),
+    };
+    serve_session(
+        live.connection,
+        live.peer,
+        task.cancel.clone(),
+        SessionContext {
+            handle: Some(task.handle.clone()),
+            signals: Some(signals),
+            authority: Some(task.authority.clone()),
+        },
+    )
+    .await;
+
+    let mut ledger = task.ledger.borrow_mut();
+    ledger.ended(&peer);
+    task.handle.set_capped(ledger.is_capped());
 }
 
 /// Send-side coalescing: hold a value briefly, and send the newest.

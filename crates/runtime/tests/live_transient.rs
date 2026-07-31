@@ -354,13 +354,36 @@ fn partial_says_so_and_is_not_a_diagnostic() {
     let now = Instant::now();
     assert!(!handle.view(None, now).partial);
 
-    handle.set_partial(true);
+    handle.set_capped(true);
     assert!(handle.view(None, now).partial);
 
     // Setting it to what it already is is not a change a reader should see.
     let generation = handle.generation();
-    handle.set_partial(true);
+    handle.set_capped(true);
     assert_eq!(handle.generation(), generation);
+}
+
+#[test]
+fn a_gate_drop_makes_the_view_partial_and_then_stops() {
+    // The two causes of `partial` behave differently and both are right. The
+    // session cap is a standing condition; a gate drop is an event, and it
+    // matters only for as long as it could still be the reason something is
+    // missing.
+    let handle = LiveHandle::new(None);
+    let now = Instant::now();
+    assert!(!handle.view(None, now).partial);
+
+    handle.note_dropped(now);
+    assert!(handle.view(None, now).partial);
+
+    // One cursor TTL later, whatever was dropped has either been superseded or
+    // expired. Saying "incomplete" past that is saying it forever.
+    let later = now + Duration::from_secs(45);
+    assert!(!handle.view(None, later).partial);
+
+    // And the cap does not decay: it is true until a session ends.
+    handle.set_capped(true);
+    assert!(handle.view(None, later).partial);
 }
 
 #[test]
@@ -642,5 +665,222 @@ mod revocation {
         );
         assert!(!ended.load(Ordering::SeqCst), "and it is still serving");
         cancel.cancel();
+    }
+}
+
+/// Dialling out on the Live plane.
+///
+/// The ledger is unit-tested here because every one of its rules is a bound
+/// somebody has to be able to read, and driving them through a real transport
+/// would prove the transport instead.
+mod dialling {
+    use super::*;
+
+    use comms::mem::MemNet;
+    use comms::Transport;
+    use runtime::live::{dial, DialLedger, DialRefusal};
+    use runtime::planes::{bounds, stream_kind, Plane, SessionAccept, SessionOpen};
+    use runtime::world::{AuthorityView, PrincipalResolution};
+
+    struct Everyone;
+    impl AuthorityView for Everyone {
+        fn resolve(&self, _device: &mechanics::ids::DeviceId) -> Option<PrincipalResolution> {
+            Some(PrincipalResolution {
+                actor: mechanics::ids::ActorId::parse(&format!("act_{}", "12".repeat(32)))
+                    .expect("actor"),
+                authority_frontier: replica::frontier::AuthorityFrontier::from_canonical_bytes(
+                    vec![9],
+                ),
+            })
+        }
+    }
+
+    struct Nobody;
+    impl AuthorityView for Nobody {
+        fn resolve(&self, _device: &mechanics::ids::DeviceId) -> Option<PrincipalResolution> {
+            None
+        }
+    }
+
+    fn space() -> mechanics::ids::SpaceId {
+        mechanics::ids::SpaceId::from_digest([44u8; 16])
+    }
+
+    #[test]
+    fn a_failed_dial_backs_off_and_a_successful_one_forgets() {
+        // A Station sitting at its own ceiling refuses every dial with a bare
+        // close, which reaches the dialer as an ordinary transport failure.
+        // Without a cooldown that is a hot loop against a Station doing nothing
+        // wrong.
+        let mut ledger = DialLedger::new();
+        let peer = station(1);
+        let now = Instant::now();
+        assert!(ledger.may_dial(&peer, now));
+
+        ledger.begin(&peer);
+        ledger.failed(&peer, now);
+        assert!(!ledger.may_dial(&peer, now), "not immediately");
+        assert!(ledger.may_dial(&peer, now + deadline::LIVE_DIAL * 2));
+
+        // And it doubles.
+        ledger.begin(&peer);
+        ledger.failed(&peer, now);
+        assert!(!ledger.may_dial(&peer, now + deadline::LIVE_DIAL * 2));
+
+        // Capped, so a peer that has been unreachable all day is still retried
+        // on the scale at which anyone would notice it come back.
+        for _ in 0..20 {
+            ledger.begin(&peer);
+            ledger.failed(&peer, now);
+        }
+        assert!(ledger.may_dial(&peer, now + deadline::PRESENCE_TTL));
+
+        // A peer that answers has answered. The cooldown was protecting against
+        // one that would not.
+        ledger.begin(&peer);
+        ledger.established(&peer);
+        ledger.ended(&peer);
+        assert!(ledger.may_dial(&peer, now));
+    }
+
+    #[test]
+    fn three_ceilings_answer_three_different_questions() {
+        let mut ledger = DialLedger::new();
+        let now = Instant::now();
+
+        // How many dials may be outstanding while none has answered. The one
+        // that is easy to forget, and the one that matters under a partition
+        // where every dial is in flight and none is a session.
+        for n in 0..runtime::budget::slots::MAX_LIVE_DIALS_IN_FLIGHT {
+            assert!(ledger.may_dial(&station(n as u8 + 10), now));
+            ledger.begin(&station(n as u8 + 10));
+        }
+        assert!(!ledger.may_dial(&station(99), now));
+        assert_eq!(
+            ledger.dials_in_flight(),
+            runtime::budget::slots::MAX_LIVE_DIALS_IN_FLIGHT
+        );
+
+        // How many of the Station's sessions any one peer may take.
+        let mut ledger = DialLedger::new();
+        let peer = station(2);
+        for _ in 0..runtime::budget::slots::MAX_LIVE_SESSIONS_PER_STATION {
+            assert!(ledger.may_dial(&peer, now));
+            ledger.begin(&peer);
+            ledger.established(&peer);
+        }
+        assert!(!ledger.may_dial(&peer, now), "one peer, bounded share");
+        assert!(ledger.may_dial(&station(3), now), "and others still may");
+    }
+
+    #[test]
+    fn a_peer_already_being_dialled_is_not_dialled_again() {
+        // Two dials to one peer would be two sessions carrying the same
+        // presence, and the second would evict the first at
+        // MAX_CONNECTIONS_PER_PEER_PLANE on the responder side — a race that
+        // costs a round trip to lose.
+        let mut ledger = DialLedger::new();
+        let peer = station(4);
+        let now = Instant::now();
+        ledger.begin(&peer);
+        assert!(!ledger.may_dial(&peer, now));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_dial_carries_the_lanes_and_offers_no_feature_this_build_lacks() {
+        // `feature::LOCAL_SUPPORTED` is zero, and offering a bit this build does
+        // not honour is a promise a peer would be right to be annoyed about.
+        // Freight's dialer still offers RESIDENCY_HINTS; that is a pre-existing
+        // dishonesty on the wrong plane, and this one does not inherit it.
+        let net = MemNet::new();
+        let local_device = mechanics::crypto::device_from_seed(&[81u8; 32]);
+        let peer_device = mechanics::crypto::device_from_seed(&[82u8; 32]);
+        let a: Arc<dyn Transport> = Arc::new(net.peer(local_device.clone()));
+        let b: Arc<dyn Transport> = Arc::new(net.peer(peer_device.clone()));
+
+        let responder = tokio::spawn({
+            let b = b.clone();
+            async move {
+                let incoming = b.accept_connection().await.expect("incoming");
+                let mut recv = incoming
+                    .connection
+                    .accept_uni()
+                    .await
+                    .expect("accept")
+                    .expect("a flow");
+                let raw = recv
+                    .read_to_end(bounds::MAX_OPENING_BYTES)
+                    .await
+                    .expect("opening");
+                let open = SessionOpen::decode_canonical(&raw).expect("canonical opening");
+                let accept = SessionAccept {
+                    session_id: open.session_id,
+                    session_epoch: open.session_epoch,
+                    capability: runtime::planes::ProtocolCapability {
+                        plane: Plane::Live,
+                        protocol_version: open.protocol_version,
+                        features: 0,
+                    },
+                    // Grant one of the two asked for, so the test can tell the
+                    // dialer reports what the *responder* said rather than what
+                    // it hoped for.
+                    granted_lanes: vec![stream_kind::CONTROL],
+                };
+                let mut send = incoming.connection.open_uni().await.expect("open");
+                send.write_all(&accept.encode()).await.expect("write");
+                send.finish().expect("finish");
+                open
+            }
+        });
+
+        let live = dial(
+            a.as_ref(),
+            &Everyone,
+            &space(),
+            &StationId::from_device(&local_device).expect("local"),
+            &StationId::from_device(&peer_device).expect("peer"),
+            [7u8; 16],
+        )
+        .await
+        .expect("dialled");
+
+        let open = responder.await.expect("responder");
+        assert_eq!(open.plane, Plane::Live);
+        assert_eq!(open.features, 0, "nothing this build does not implement");
+        assert_eq!(
+            open.requested_lanes,
+            vec![stream_kind::CONTROL, stream_kind::RELIABLE_SIGNAL],
+            "the ALPN does not type this plane, so the lanes are named"
+        );
+
+        // What the responder granted, not what the dialer asked for.
+        assert_eq!(live.peer.granted_lanes, vec![stream_kind::CONTROL]);
+        assert_eq!(live.peer.session_id, [7u8; 16]);
+        // And the identity is this Station's own resolution, never the packet's.
+        assert_eq!(live.peer.actor.as_str(), format!("act_{}", "12".repeat(32)));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_peer_we_would_refuse_on_arrival_is_not_dialled_at_all() {
+        // Asked before the transport is touched. Dialling a peer we would refuse
+        // when it answered is a round trip spent to be told what we already
+        // knew — and on a partitioned network it is a round trip that takes the
+        // full dial deadline.
+        let net = MemNet::new();
+        let local_device = mechanics::crypto::device_from_seed(&[85u8; 32]);
+        let peer_device = mechanics::crypto::device_from_seed(&[86u8; 32]);
+        let a: Arc<dyn Transport> = Arc::new(net.peer(local_device.clone()));
+        // Deliberately nothing accepting: reaching the transport at all would
+        // hang until the deadline, so a prompt answer *is* the assertion.
+        let refused = dial(
+            a.as_ref(),
+            &Nobody,
+            &space(),
+            &StationId::from_device(&local_device).expect("local"),
+            &StationId::from_device(&peer_device).expect("peer"),
+            [8u8; 16],
+        )
+        .await;
+        assert_eq!(refused.err(), Some(DialRefusal::NotAdmitted));
     }
 }

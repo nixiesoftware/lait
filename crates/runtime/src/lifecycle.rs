@@ -630,6 +630,7 @@ impl Orbit {
             // first: on one shared queue these two would take strictly
             // alternating connections and each refuse half of what it was
             // handed.
+            let dial_station = local_station.clone();
             if options.planes.live_enabled {
                 if let Some(queue) = plane_transport.take_session_queue(crate::planes::LIVE_ALPN) {
                     let context = crate::plane_driver::PlaneContext {
@@ -653,6 +654,39 @@ impl Orbit {
                         })
                         .expect("station is live at activation");
                 }
+
+                // And the outbound half, on its own thread for the same reason
+                // the driver has one: a dialled session is served by exactly the
+                // same `serve_session` an accepted one is, and that function is
+                // not `Send`. Two implementations of a Live session is the way
+                // the two quietly stop agreeing.
+                //
+                // Unconditional on `take_session_queue` succeeding: dialling out
+                // is not the same capability as accepting in, and a Station
+                // whose inbound queue was already claimed can still reach its
+                // neighbours.
+                let neighbors = station.neighbor_registry.clone();
+                let dial = crate::live::DialContext {
+                    space: station.store.space().clone(),
+                    local_station: dial_station,
+                    transport: plane_transport.clone(),
+                    candidates: Arc::new(move || {
+                        neighbors
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .snapshot()
+                            .into_iter()
+                            .map(|neighbor| neighbor.station)
+                            .collect()
+                    }),
+                    handle: station.live.clone(),
+                    authority: station.authority.clone(),
+                    worlds: station.registry.clone(),
+                    cancel: station.cancel.clone(),
+                };
+                station
+                    .spawn_tracked(move |_cancel| crate::live::run_dialer(dial))
+                    .expect("station is live at activation");
             }
         }
         Ok(station)
