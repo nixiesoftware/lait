@@ -10,7 +10,8 @@
 use issues::contract::{self, IssueIntent, IssueQuery, NewLabel, Pos, WorkAction};
 use issues::dto::{BoardView, GraphView, IssueView, LabelDto, ProjectDto, Row};
 use issues::ids::{DocId, LabelId, ProjectId, SystemUlidSource, UlidSource};
-use runtime::{Intent, Query, RequestId, Session, WorldError};
+use runtime::session::{Conflict as SessionConflict, Failure as SessionFailure};
+use runtime::{Intent, Query, Rejection, RequestId, Session};
 use serde::de::DeserializeOwned;
 use world_bridge::{
     WorldCall, WorldCallAccess, WorldCallContext, WorldCallError, WorldCallErrorCode,
@@ -358,7 +359,7 @@ impl<'a> IssueRouter<'a> {
         }
     }
 
-    fn submit(&self, intent: &IssueIntent) -> Result<contract::IssueEffect, WorldError> {
+    fn submit(&self, intent: &IssueIntent) -> Result<contract::IssueEffect, SessionFailure> {
         let action = self.identity.sign_action(
             self.session,
             RequestId::mint(),
@@ -407,7 +408,7 @@ impl<'a> IssueRouter<'a> {
         Some((doc, actors))
     }
 
-    fn query<T: DeserializeOwned>(&self, query: &IssueQuery) -> Result<T, WorldError> {
+    fn query<T: DeserializeOwned>(&self, query: &IssueQuery) -> Result<T, SessionFailure> {
         let bytes = self
             .session
             .query(Query {
@@ -416,7 +417,8 @@ impl<'a> IssueRouter<'a> {
                 payload: query.to_json(),
             })?
             .bytes;
-        serde_json::from_slice(&bytes).map_err(|_| WorldError::InvalidRequest)
+        serde_json::from_slice(&bytes)
+            .map_err(|_| SessionFailure::Rejected(Rejection::InvalidRequest))
     }
 
     /// The canonical reff for a DocId (from the current snapshot).
@@ -498,27 +500,38 @@ impl<'a> IssueRouter<'a> {
         })
     }
 
-    fn effect_err(e: WorldError) -> Response {
+    fn effect_err(e: SessionFailure) -> Response {
         match e {
-            WorldError::Denied => Response::denied(
+            SessionFailure::Rejected(Rejection::Denied) => Response::denied(
                 "you lack write standing in this space — a sponsored agent needs a \
                  human member to grant it write access (`lait agent add`), and a \
                  view-only member needs an admin to grant it; nothing was changed",
             ),
-            WorldError::Conflict => Response::err("that change conflicts with the current state"),
-            WorldError::RequestIdConflict => Response::err("duplicate request"),
-            WorldError::InvalidRequest | WorldError::ContractViolation => {
+            SessionFailure::Rejected(Rejection::Conflict)
+            | SessionFailure::Conflict(SessionConflict::Body) => {
+                Response::err("that change conflicts with the current state")
+            }
+            SessionFailure::Conflict(SessionConflict::Request) => {
+                Response::err("duplicate request")
+            }
+            SessionFailure::Rejected(Rejection::InvalidRequest | Rejection::ContractViolation) => {
                 Response::err("invalid request")
             }
-            WorldError::UnsupportedSchema | WorldError::UnsupportedSchemaVersion => {
-                Response::err("unsupported request")
+            SessionFailure::Rejected(
+                Rejection::UnsupportedSchema | Rejection::UnsupportedSchemaVersion,
+            ) => Response::err("unsupported request"),
+            SessionFailure::Rejected(Rejection::LimitExceeded) => {
+                Response::err("request exceeds a limit")
             }
-            WorldError::LimitExceeded => Response::err("request exceeds a limit"),
-            WorldError::AuthorityChanged => Response::retry("membership changed — retry"),
-            WorldError::StationDormant => Response::err("the space is shutting down"),
-            WorldError::Persistence | WorldError::WorldPanicked => Response::err("internal error"),
-            WorldError::ResetRequired => Response::err("state reset — re-query"),
-            WorldError::WorldStateCorrupt => Response::err(
+            SessionFailure::Conflict(SessionConflict::AuthorityChanged) => {
+                Response::retry("membership changed — retry")
+            }
+            SessionFailure::Interrupted => Response::err("the space is shutting down"),
+            SessionFailure::Persistence | SessionFailure::CallbackPanicked => {
+                Response::err("internal error")
+            }
+            SessionFailure::Reset => Response::err("state reset — re-query"),
+            SessionFailure::Rejected(Rejection::WorldStateCorrupt) => Response::err(
                 "the space's issue catalog is corrupt (missing, duplicated, or mis-bound) — \
                  this store needs operator attention; nothing was changed",
             ),
@@ -1115,7 +1128,8 @@ impl<'a> IssueRouter<'a> {
                     ts: facts.now,
                 })
                 .map_err(|e| match e {
-                    WorldError::Conflict => Response::err(
+                    SessionFailure::Rejected(Rejection::Conflict)
+                    | SessionFailure::Conflict(SessionConflict::Body) => Response::err(
                         "that project still has issues (live or deleted) — move them with \
                          `issue move`, or archive the project instead; only an empty project \
                          can be hard-deleted",
@@ -1527,7 +1541,8 @@ impl<'a> IssueRouter<'a> {
                         ts: facts.now,
                     })
                     .map_err(|e| match e {
-                        WorldError::Conflict => {
+                        SessionFailure::Rejected(Rejection::Conflict)
+                        | SessionFailure::Conflict(SessionConflict::Body) => {
                             Response::err("that triage item was already decided")
                         }
                         other => Self::effect_err(other),
@@ -1572,7 +1587,7 @@ impl<'a> IssueRouter<'a> {
                     // inline write path — the Station's `max_content_len` is
                     // what bounds a file now, and it refuses at upload, long
                     // before an intent is built.
-                    WorldError::LimitExceeded => Response::err(format!(
+                    SessionFailure::Rejected(Rejection::LimitExceeded) => Response::err(format!(
                         "attachment refused: at most {} files per issue",
                         contract::MAX_ATTACHMENTS_PER_ISSUE,
                     )),

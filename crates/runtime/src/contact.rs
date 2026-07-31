@@ -2,7 +2,7 @@
 //!
 //! Contact owns connection lifetime, framing, deadlines, transfer completion,
 //! and Neighbor attribution — **never** legitimacy: a completed Contact means
-//! frames moved, and [`crate::error::ContactError`]/Convergence classification
+//! frames moved, and [`Failure`]/Convergence classification
 //! stay separate. One Contact transfers initiator ← accepter; reverse progress
 //! uses another Contact.
 //!
@@ -32,6 +32,25 @@ use std::collections::BTreeMap;
 use crate::wire::length_framed;
 
 pub use crate::contact_driver::Authority;
+
+/// Why an explicitly requested Contact did not complete.
+///
+/// Contact is administrative orchestration; ordinary peer admission refusals
+/// remain [`crate::plane::Refusal`] and malformed frames remain [`wire::Invalid`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Failure {
+    UnknownNeighbor,
+    Unreachable,
+    Transfer(String),
+}
+
+impl std::fmt::Display for Failure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+
+impl std::error::Error for Failure {}
 
 /// The Contact ALPN.
 pub const CONTACT_ALPN: &[u8] = b"lait/contact/2";

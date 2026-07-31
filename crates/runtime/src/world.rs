@@ -23,6 +23,29 @@ use replica::ids::{BodyKey, SchemaId, WorldId};
 use replica::Schema;
 use serde::{Deserialize, Serialize};
 
+/// A World-owned semantic rejection. These values are deterministic decisions
+/// about a well-bounded request or the World's declared contract; Runtime
+/// persistence, shutdown, and callback containment failures do not belong here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Rejection {
+    InvalidRequest,
+    UnsupportedSchema,
+    UnsupportedSchemaVersion,
+    Denied,
+    Conflict,
+    LimitExceeded,
+    WorldStateCorrupt,
+    ContractViolation,
+}
+
+impl std::fmt::Display for Rejection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+
+impl std::error::Error for Rejection {}
+
 /// The facts Runtime derives for a docked principal. A World cannot assert or
 /// replace them; authorization and commit compare-and-swap the same
 /// `authority_frontier`. Constructed only inside Runtime
@@ -203,10 +226,10 @@ impl LocalIdentity {
         session: &crate::session::Session,
         request: crate::action::RequestId,
         intent: Intent,
-    ) -> Result<crate::action::SignedWorldAction, crate::error::WorldError> {
+    ) -> Result<crate::action::SignedWorldAction, crate::world::Rejection> {
         let resolution = session
             .resolve_for_signing(&self.device)
-            .ok_or(crate::error::WorldError::Denied)?;
+            .ok_or(crate::world::Rejection::Denied)?;
         let header = crate::action::WorldActionHeader {
             request,
             space: session.space_id().clone(),
@@ -642,12 +665,9 @@ pub trait World: Send + Sync + 'static {
         &self,
         ctx: &mut Context<'_>,
         intent: Intent,
-    ) -> Result<Effect, crate::error::WorldError>;
+    ) -> Result<Effect, crate::world::Rejection>;
 
     /// Decode a query and derive a Projection from the stable snapshot.
-    fn query(
-        &self,
-        ctx: &Context<'_>,
-        query: Query,
-    ) -> Result<Projection, crate::error::WorldError>;
+    fn query(&self, ctx: &Context<'_>, query: Query)
+        -> Result<Projection, crate::world::Rejection>;
 }

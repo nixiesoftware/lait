@@ -29,7 +29,6 @@ use mechanics::{
     station::{Epoch, Key},
 };
 
-use crate::error::{ContactError, DormancyError, LifecycleError, StationExit, StationExitReason};
 use crate::registry::{Registry, RuntimeBuilder};
 use crate::session::Session;
 use crate::store::{OrbitStore, StoreLock};
@@ -67,6 +66,60 @@ impl BodyKeySource for NoBodyKeys {
 
 /// The default deadline for draining tracked tasks during dormancy.
 pub const DEFAULT_DRAIN_DEADLINE: Duration = Duration::from_secs(10);
+
+/// A failure while creating, finding, opening, inspecting, or removing an
+/// Orbit. The operation's receiver supplies the missing context; this type is
+/// deliberately owned by the lifecycle namespace instead of a crate-wide
+/// error bag.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Failure {
+    OrbitNotFound(SpaceId),
+    ReplicaLocked(SpaceId),
+    UnsupportedCoordinatesVersion,
+    Integrity(String),
+    NoStoreRoot,
+    AlreadyExists(SpaceId),
+    EpochOverflow,
+    Store(String),
+    StationDormant,
+    PrincipalDenied,
+    UnknownWorld(WorldId),
+}
+
+/// A failure while a Station drains and returns its Orbit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Interruption {
+    DrainTimeout,
+    Checkpoint(String),
+    Transport(String),
+}
+
+/// Why an activation ended without an orderly vacate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExitReason {
+    TaskFailed(String),
+    Vacate(Interruption),
+}
+
+/// The stopped Station's recoverable Orbit and any abnormal exit reason.
+#[derive(Debug)]
+pub struct Exit {
+    pub orbit: Orbit,
+    pub reason: Option<ExitReason>,
+}
+
+macro_rules! lifecycle_error {
+    ($($ty:ty),+ $(,)?) => {$(
+        impl std::fmt::Display for $ty {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "{self:?}")
+            }
+        }
+        impl std::error::Error for $ty {}
+    )+ };
+}
+
+lifecycle_error!(Failure, Interruption, ExitReason);
 
 /// Where the resident cache lives, under the Orbit store directory.
 ///
@@ -284,8 +337,8 @@ impl Runtime {
         &self.registry
     }
 
-    fn root(&self) -> Result<&PathBuf, LifecycleError> {
-        self.root.as_ref().ok_or(LifecycleError::NoStoreRoot)
+    fn root(&self) -> Result<&PathBuf, Failure> {
+        self.root.as_ref().ok_or(Failure::NoStoreRoot)
     }
 
     /// Form a new Space and its founding Orbit: mint a fresh SpaceId, create the
@@ -293,10 +346,10 @@ impl Runtime {
     /// mechanics founding proof and Coordinates minting arrive with the product
     /// cutover (completion package C5); the durable Orbit and its lock are real
     /// here.
-    pub fn create(&self) -> Result<Orbit, LifecycleError> {
+    pub fn create(&self) -> Result<Orbit, Failure> {
         let root = self.root()?;
         let mut digest = [0u8; 16];
-        getrandom::fill(&mut digest).map_err(|e| LifecycleError::StoreIo(e.to_string()))?;
+        getrandom::fill(&mut digest).map_err(|e| Failure::Store(e.to_string()))?;
         let space = SpaceId::from_digest(digest);
         let store = OrbitStore::create(root, &space)?;
         let lock = store.acquire_lock()?;
@@ -314,23 +367,23 @@ impl Runtime {
     /// Materialize this device's Orbit from Coordinates. The Coordinates are
     /// fully verified (version, founding self-proof, approach-Station signature,
     /// admission structure); pre-carve invitation bytes fail with
-    /// [`LifecycleError::UnsupportedCoordinatesVersion`]. The store is created if
+    /// [`Failure::UnsupportedCoordinatesVersion`]. The store is created if
     /// absent and locked. Admission redemption and initial authority/Replica
     /// import arrive with the product cutover (completion package C5).
     pub fn materialize(
         &self,
         coordinates: &crate::coordinates::SignedCoordinates,
-    ) -> Result<Orbit, LifecycleError> {
+    ) -> Result<Orbit, Failure> {
         let root = self.root()?;
         let verified = coordinates.verify().map_err(|e| match e {
             crate::coordinates::CoordinatesError::UnsupportedVersion(_) => {
-                LifecycleError::UnsupportedCoordinatesVersion
+                Failure::UnsupportedCoordinatesVersion
             }
-            other => LifecycleError::IntegrityFailure(other.to_string()),
+            other => Failure::Integrity(other.to_string()),
         })?;
         let store = match OrbitStore::open(root, &verified.space) {
             Ok(store) => store,
-            Err(LifecycleError::OrbitNotFound(_)) => OrbitStore::create(root, &verified.space)?,
+            Err(Failure::OrbitNotFound(_)) => OrbitStore::create(root, &verified.space)?,
             Err(e) => return Err(e),
         };
         let lock = store.acquire_lock()?;
@@ -348,8 +401,8 @@ impl Runtime {
     /// Acquire an existing local Orbit for operational ownership. Revalidates the
     /// store marker/version and takes the exclusive lock (a second acquisition
     /// while a live Station holds it fails with
-    /// [`LifecycleError::ReplicaLocked`]).
-    pub fn acquire(&self, space: &SpaceId) -> Result<Orbit, LifecycleError> {
+    /// [`Failure::ReplicaLocked`]).
+    pub fn acquire(&self, space: &SpaceId) -> Result<Orbit, Failure> {
         let root = self.root()?;
         let store = OrbitStore::open(root, space)?;
         let lock = store.acquire_lock()?;
@@ -366,7 +419,7 @@ impl Runtime {
 
     /// Advisory, read-only observation of a local Orbit. Never takes the lock and
     /// never grants control.
-    pub fn inspect(&self, space: &SpaceId) -> Result<OrbitStatus, LifecycleError> {
+    pub fn inspect(&self, space: &SpaceId) -> Result<OrbitStatus, Failure> {
         let root = self.root()?;
         let store = OrbitStore::open(root, space)?;
         Ok(OrbitStatus {
@@ -442,7 +495,7 @@ impl Orbit {
     /// closed on overflow), then transfers the store lock into the live Station.
     /// The durable Orbit remains the same participation. Valid offline; grants
     /// no new Space authority.
-    fn open_station(self, options: ActivationOptions) -> Result<Station, LifecycleError> {
+    fn open_station(self, options: ActivationOptions) -> Result<Station, Failure> {
         let drain_deadline = if options.drain_deadline.is_zero() {
             DEFAULT_DRAIN_DEADLINE
         } else {
@@ -456,8 +509,8 @@ impl Orbit {
         // `wait` exit after an acknowledged commit loses nothing.
         let mut replica = replica::Replica::open_journaled(self.store.dir(), self.keys.clone())
             .map_err(|e| match e {
-                replica::ReplicaCommitError::Integrity(m) => LifecycleError::IntegrityFailure(m),
-                other => LifecycleError::StoreIo(other.to_string()),
+                replica::ReplicaCommitError::Integrity(m) => Failure::Integrity(m),
+                other => Failure::Store(other.to_string()),
             })?;
         // Declare the registry's schemas so Convergence can classify remote
         // material as interpretable versus opaque.
@@ -484,7 +537,7 @@ impl Orbit {
         replica.set_supported(supported);
         let neighbor_registry = Arc::new(Mutex::new(
             crate::neighbors::NeighborRegistry::load(self.store.dir(), self.store.space())
-                .map_err(|e| LifecycleError::IntegrityFailure(e.to_string()))?,
+                .map_err(|e| Failure::Integrity(e.to_string()))?,
         ));
         let capacity = if options.observation_capacity == 0 {
             crate::session::DEFAULT_OBSERVATION_CAPACITY
@@ -502,7 +555,7 @@ impl Orbit {
                 self.store.dir().join(CACHE_DIR),
                 options.content.cache_quota_bytes,
             )
-            .map_err(|e| LifecycleError::StoreIo(e.to_string()))?,
+            .map_err(|e| Failure::Store(e.to_string()))?,
         );
         // Nothing was in flight before this Station existed, so every operation
         // lease and every staging slot on disk belongs to a run that is over.
@@ -510,10 +563,10 @@ impl Orbit {
         // keeps a killed transfer from holding its chunks resident forever.
         cache
             .sweep_leases(&std::collections::BTreeSet::new())
-            .map_err(|e| LifecycleError::StoreIo(e.to_string()))?;
+            .map_err(|e| Failure::Store(e.to_string()))?;
         cache
             .sweep_staging(&std::collections::BTreeSet::new())
-            .map_err(|e| LifecycleError::StoreIo(e.to_string()))?;
+            .map_err(|e| Failure::Store(e.to_string()))?;
         let content = Arc::new(crate::content_host::ContentHost::new(core.clone(), cache));
         // The oracle over this Station's own content host. Built here rather
         // than inside the plane because a `ContentPolicy` names the Space, the
@@ -566,10 +619,10 @@ impl Orbit {
             let station_seed = comms.station_seed;
             let space = station.store.space().clone();
             let space_bytes = <[u8; 29]>::try_from(space.as_str().as_bytes())
-                .map_err(|_| LifecycleError::IntegrityFailure("space id shape".into()))?;
+                .map_err(|_| Failure::Integrity("space id shape".into()))?;
             let station_key = mechanics::crypto::device_from_seed(&comms.station_seed)
                 .key_bytes()
-                .ok_or_else(|| LifecycleError::IntegrityFailure("station seed key".into()))?;
+                .ok_or_else(|| Failure::Integrity("station seed key".into()))?;
             let (tx, rx) = std::sync::mpsc::channel();
             let ctx = crate::contact_driver::DriverContext {
                 space,
@@ -603,7 +656,7 @@ impl Orbit {
             // the same plane gets `None` rather than a second reader.
             let local_station =
                 Key::from_device(&mechanics::crypto::device_from_seed(&station_seed))
-                    .ok_or_else(|| LifecycleError::IntegrityFailure("station id".into()))?;
+                    .ok_or_else(|| Failure::Integrity("station id".into()))?;
             if options.planes.freight_enabled {
                 if let Some(queue) = plane_transport.take_session_queue(crate::plane::FREIGHT_ALPN)
                 {
@@ -709,15 +762,15 @@ impl Orbit {
     }
 
     #[doc(hidden)]
-    pub fn open(self, options: ActivationOptions) -> Result<Station, LifecycleError> {
+    pub fn open(self, options: ActivationOptions) -> Result<Station, Failure> {
         Station::open(self, options)
     }
 
     /// Destructively remove this local Orbit, consuming it (and its lock). The
     /// confirmation must name this exact Space.
-    pub fn remove(self, confirmation: RemovalConfirmation) -> Result<(), LifecycleError> {
+    pub fn remove(self, confirmation: RemovalConfirmation) -> Result<(), Failure> {
         if confirmation.space() != self.store.space() {
-            return Err(LifecycleError::IntegrityFailure(
+            return Err(Failure::Integrity(
                 "remove confirmation names a different Space".into(),
             ));
         }
@@ -793,7 +846,7 @@ impl std::fmt::Debug for Station {
 
 impl Station {
     /// Open one activation of a vacant Orbit, consuming its operational lease.
-    pub fn open(orbit: Orbit, options: ActivationOptions) -> Result<Self, LifecycleError> {
+    pub fn open(orbit: Orbit, options: ActivationOptions) -> Result<Self, Failure> {
         orbit.open_station(options)
     }
 
@@ -972,12 +1025,12 @@ impl Station {
     /// promptly once it is cancelled. Dormancy drains every tracked task within
     /// the activation's deadline. Refused (with the closure returned) if the
     /// Station is already going dormant.
-    pub fn spawn_tracked<F>(&self, f: F) -> Result<(), LifecycleError>
+    pub fn spawn_tracked<F>(&self, f: F) -> Result<(), Failure>
     where
         F: FnOnce(CancelToken) + Send + 'static,
     {
         if !self.alive.load(Ordering::SeqCst) {
-            return Err(LifecycleError::StationDormant);
+            return Err(Failure::StationDormant);
         }
         let token = self.cancel.clone();
         let handle = std::thread::spawn(move || f(token));
@@ -997,19 +1050,15 @@ impl Station {
     /// The `station` fact is currently the docking device viewed as a Station id
     /// (local in-process sessions); plumbing the Station's own device identity
     /// through activation arrives with the daemon integration.
-    pub fn dock(
-        &self,
-        world_id: &WorldId,
-        identity: &LocalIdentity,
-    ) -> Result<Session, LifecycleError> {
+    pub fn dock(&self, world_id: &WorldId, identity: &LocalIdentity) -> Result<Session, Failure> {
         if !self.alive.load(Ordering::SeqCst) {
-            return Err(LifecycleError::StationDormant);
+            return Err(Failure::StationDormant);
         }
         let resolution = self
             .authority
             .resolve(identity.device())
-            .ok_or(LifecycleError::PrincipalDenied)?;
-        let station = Key::from_device(identity.device()).ok_or(LifecycleError::PrincipalDenied)?;
+            .ok_or(Failure::PrincipalDenied)?;
+        let station = Key::from_device(identity.device()).ok_or(Failure::PrincipalDenied)?;
         let principal = PrincipalFacts {
             actor: resolution.actor,
             device: identity.device().clone(),
@@ -1020,11 +1069,11 @@ impl Station {
         let world = self
             .registry
             .world(world_id)
-            .ok_or_else(|| LifecycleError::UnknownWorld(world_id.clone()))?;
+            .ok_or_else(|| Failure::UnknownWorld(world_id.clone()))?;
         let registration = self
             .registry
             .descriptor(world_id)
-            .ok_or_else(|| LifecycleError::UnknownWorld(world_id.clone()))?;
+            .ok_or_else(|| Failure::UnknownWorld(world_id.clone()))?;
         Ok(Session::new(
             self.store.space().clone(),
             world_id.clone(),
@@ -1104,24 +1153,24 @@ impl Station {
     /// initiator exchange, validate, and durably incorporate. Not exposed on
     /// ordinary Session handles; refused once the Station is going dormant or
     /// when no transport was activated.
-    pub fn contact(&self, neighbor: &Key) -> Result<ContactOutcome, ContactError> {
+    pub fn contact(&self, neighbor: &Key) -> Result<ContactOutcome, crate::contact::Failure> {
         if !self.alive.load(Ordering::SeqCst) {
-            return Err(ContactError::Transfer("station dormant".into()));
+            return Err(crate::contact::Failure::Transfer("station dormant".into()));
         }
         let driver = self.driver.lock().expect("driver slot");
         let Some(tx) = driver.as_ref() else {
-            return Err(ContactError::Unreachable);
+            return Err(crate::contact::Failure::Unreachable);
         };
         let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(1);
         tx.send(crate::contact_driver::DriverCmd::Contact {
             station: neighbor.clone(),
             reply: reply_tx,
         })
-        .map_err(|_| ContactError::Unreachable)?;
+        .map_err(|_| crate::contact::Failure::Unreachable)?;
         drop(driver);
         reply_rx
             .recv_timeout(self.contact_deadline + Duration::from_secs(5))
-            .map_err(|_| ContactError::Unreachable)?
+            .map_err(|_| crate::contact::Failure::Unreachable)?
     }
 
     /// Drain the tracked task set within `deadline`. Returns the join results of
@@ -1154,7 +1203,7 @@ impl Station {
     /// drain tracked tasks within the deadline, checkpoint, and release the store
     /// lock **last**. On a drain timeout the lock is still released and the
     /// durable Orbit remains recoverable via [`Runtime::orbit`].
-    pub fn vacate(mut self) -> Result<Orbit, DormancyError> {
+    pub fn vacate(mut self) -> Result<Orbit, Interruption> {
         // 1) reject new docks + terminate Sessions.
         self.alive.store(false, Ordering::SeqCst);
         // 2) stop scheduling / signal cancellation.
@@ -1173,7 +1222,7 @@ impl Station {
         if timed_out {
             // The lock releases here; the store persists and is re-acquirable.
             drop(lock);
-            return Err(DormancyError::DrainTimeout);
+            return Err(Interruption::DrainTimeout);
         }
         Ok(Orbit::new(
             self.store,
@@ -1186,25 +1235,23 @@ impl Station {
     }
 
     /// Park until every tracked task exits, consuming the Station and returning a
-    /// recoverable [`StationExit`]. A task panic is reported as the exit reason;
+    /// recoverable [`Exit`]. A task panic is reported as the exit reason;
     /// the durable Orbit is recovered either way and the lock is released last.
     /// No commit is lost on this path: every acknowledged commit was already
     /// durably written by the per-commit sink, and the core is closed (under the
     /// writer mutex) before the Orbit is returned.
-    pub fn wait(mut self) -> StationExit {
+    pub fn wait(mut self) -> Exit {
         let handles = std::mem::take(&mut *self.handles.lock().expect("task set"));
         let mut reason = None;
         for h in handles {
             if h.join().is_err() {
-                reason = Some(StationExitReason::TaskFailed(
-                    "a tracked task panicked".into(),
-                ));
+                reason = Some(ExitReason::TaskFailed("a tracked task panicked".into()));
             }
         }
         self.alive.store(false, Ordering::SeqCst);
         self.core.close();
         let lock = self.lock.take().expect("station holds its lock");
-        StationExit {
+        Exit {
             orbit: Orbit::new(
                 self.store,
                 self.registry,
@@ -1331,10 +1378,7 @@ mod tests {
         let space = orbit.space_id().clone();
         let station = orbit.open(ActivationOptions::default()).unwrap();
         // While the Station holds the lock, a second acquisition is refused.
-        assert!(matches!(
-            rt.acquire(&space),
-            Err(LifecycleError::ReplicaLocked(_))
-        ));
+        assert!(matches!(rt.acquire(&space), Err(Failure::ReplicaLocked(_))));
         drop(station);
     }
 
@@ -1380,7 +1424,7 @@ mod tests {
                 }
             })
             .unwrap();
-        assert!(matches!(station.vacate(), Err(DormancyError::DrainTimeout)));
+        assert!(matches!(station.vacate(), Err(Interruption::DrainTimeout)));
         // Despite the timeout, the store lock was released and the Orbit is
         // recoverable.
         assert!(rt.acquire(&space).is_ok());
@@ -1396,10 +1440,7 @@ mod tests {
         orbit
             .remove(RemovalConfirmation::for_space(space.clone()))
             .unwrap();
-        assert!(matches!(
-            rt.acquire(&space),
-            Err(LifecycleError::OrbitNotFound(_))
-        ));
+        assert!(matches!(rt.acquire(&space), Err(Failure::OrbitNotFound(_))));
     }
 
     #[test]
@@ -1411,10 +1452,7 @@ mod tests {
         // A confirmation for a *different* Space is refused, and the store is
         // left intact (the confirmation binds removal to an exact Space).
         let wrong = RemovalConfirmation::for_space(SpaceId::from_digest([0xEE; 16]));
-        assert!(matches!(
-            orbit.remove(wrong),
-            Err(LifecycleError::IntegrityFailure(_))
-        ));
+        assert!(matches!(orbit.remove(wrong), Err(Failure::Integrity(_))));
         assert!(
             rt.acquire(&space).is_ok(),
             "store survived the refused remove"
@@ -1438,7 +1476,7 @@ mod tests {
     #[test]
     fn a_runtime_without_a_root_cannot_form() {
         let rt = Runtime::from_registry(RuntimeBuilder::new().build().unwrap());
-        assert!(matches!(rt.create(), Err(LifecycleError::NoStoreRoot)));
+        assert!(matches!(rt.create(), Err(Failure::NoStoreRoot)));
         assert!(rt.list().is_empty());
     }
 }

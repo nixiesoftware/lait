@@ -27,10 +27,11 @@ fn any_demand() -> Vec<u8> {
     .encode_canonical()
     .expect("canonical demand")
 }
+use runtime::session::Failure as SessionFailure;
 use runtime::{
     ActivationOptions, Context, Descriptor, Effect, Intent, Limits, LocalIdentity,
-    ObservationCursor, ObservationStreamError, Projection, Query, RequestId, Runtime,
-    RuntimeBuilder, Session, Station, Version, World, WorldError,
+    ObservationCursor, ObservationStreamError, Projection, Query, Rejection, RequestId, Runtime,
+    RuntimeBuilder, Session, Station, Version, World,
 };
 
 const WRITER_SEED: [u8; 32] = [55u8; 32];
@@ -79,9 +80,9 @@ impl World for KvWorld {
     fn schemas(&self) -> &[Schema] {
         &self.schemas
     }
-    fn submit(&self, _ctx: &mut Context<'_>, intent: Intent) -> Result<Effect, WorldError> {
-        let text = String::from_utf8(intent.payload).map_err(|_| WorldError::InvalidRequest)?;
-        let (key, value) = text.split_once('=').ok_or(WorldError::InvalidRequest)?;
+    fn submit(&self, _ctx: &mut Context<'_>, intent: Intent) -> Result<Effect, Rejection> {
+        let text = String::from_utf8(intent.payload).map_err(|_| Rejection::InvalidRequest)?;
+        let (key, value) = text.split_once('=').ok_or(Rejection::InvalidRequest)?;
         let body = self.body(key);
         Ok(Effect {
             content_refs: Vec::new(),
@@ -97,8 +98,8 @@ impl World for KvWorld {
             declarations: vec![],
         })
     }
-    fn query(&self, ctx: &Context<'_>, query: Query) -> Result<Projection, WorldError> {
-        let key = String::from_utf8(query.payload).map_err(|_| WorldError::InvalidRequest)?;
+    fn query(&self, ctx: &Context<'_>, query: Query) -> Result<Projection, Rejection> {
+        let key = String::from_utf8(query.payload).map_err(|_| Rejection::InvalidRequest)?;
         Ok(Projection {
             demand: any_demand(),
             schema: SchemaId::parse("entry").unwrap(),
@@ -256,7 +257,7 @@ fn first_use_resets_then_each_durable_commit_publishes_exactly_once() {
     let world_id = WorldId::parse("dev.example.kv").unwrap();
     let denied_session = station.dock(&world_id, &reader).unwrap();
     let denied = denied_session.submit(action(&denied_session, &reader, RequestId::mint(), "x=y"));
-    assert_eq!(denied, Err(WorldError::Denied));
+    assert_eq!(denied, Err(SessionFailure::Rejected(Rejection::Denied)));
     assert!(stream.try_next().unwrap().is_none());
 
     // An idempotent replay publishes nothing either.

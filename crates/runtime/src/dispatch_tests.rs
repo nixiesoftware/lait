@@ -8,10 +8,10 @@ use std::sync::Arc;
 
 use mechanics::ids::{ActorId, DeviceId};
 
-use crate::error::WorldError;
 use crate::lifecycle::{ActivationOptions, Runtime};
 use crate::registry::RuntimeBuilder;
-use crate::session::ObservationCursor;
+use crate::session::{Conflict, Failure as SessionFailure, ObservationCursor};
+use crate::world::Rejection;
 use crate::world::{
     AuthorityView, Context, Descriptor, Effect, Intent, Limits, LocalIdentity, PrincipalResolution,
     Projection, Query, Version, World,
@@ -112,7 +112,7 @@ fn submit_as(
     session: &crate::session::Session,
     identity: &LocalIdentity,
     intent: Intent,
-) -> Result<crate::session::CommittedEffect, WorldError> {
+) -> Result<crate::session::CommittedEffect, SessionFailure> {
     session.submit(identity.sign_action(session, crate::action::RequestId::mint(), intent)?)
 }
 
@@ -146,9 +146,9 @@ impl World for NoteWorld {
     fn schemas(&self) -> &[Schema] {
         &self.schemas
     }
-    fn submit(&self, _ctx: &mut Context<'_>, intent: Intent) -> Result<Effect, WorldError> {
+    fn submit(&self, _ctx: &mut Context<'_>, intent: Intent) -> Result<Effect, Rejection> {
         if intent.schema.as_str() != "note" {
-            return Err(WorldError::UnsupportedSchema);
+            return Err(Rejection::UnsupportedSchema);
         }
         // Deterministic body key: same World, a fixed body for this test.
         let key = BodyKey::new(self.id.clone(), BodyId::from_bytes([0u8; 16]));
@@ -166,15 +166,15 @@ impl World for NoteWorld {
             declarations: vec![],
         })
     }
-    fn query(&self, ctx: &Context<'_>, query: Query) -> Result<Projection, WorldError> {
+    fn query(&self, ctx: &Context<'_>, query: Query) -> Result<Projection, Rejection> {
         if query.schema.as_str() != "note" {
-            return Err(WorldError::UnsupportedSchema);
+            return Err(Rejection::UnsupportedSchema);
         }
         // Read the committed Body from the stable snapshot and uppercase it. An
         // absent Body reads as empty.
         let key = BodyKey::new(self.id.clone(), BodyId::from_bytes([0u8; 16]));
         let committed = ctx.read_body(&key).unwrap_or_default();
-        let text = String::from_utf8(committed).map_err(|_| WorldError::InvalidRequest)?;
+        let text = String::from_utf8(committed).map_err(|_| Rejection::InvalidRequest)?;
         Ok(Projection {
             demand: any_demand(),
             schema: SchemaId::parse("note").unwrap(),
@@ -224,11 +224,11 @@ impl World for DescribedWorld {
         self.inner.signal_schemas()
     }
 
-    fn submit(&self, ctx: &mut Context<'_>, intent: Intent) -> Result<Effect, WorldError> {
+    fn submit(&self, ctx: &mut Context<'_>, intent: Intent) -> Result<Effect, Rejection> {
         self.inner.submit(ctx, intent)
     }
 
-    fn query(&self, ctx: &Context<'_>, query: Query) -> Result<Projection, WorldError> {
+    fn query(&self, ctx: &Context<'_>, query: Query) -> Result<Projection, Rejection> {
         self.inner.query(ctx, query)
     }
 }
@@ -322,7 +322,7 @@ fn authorization_is_checked_per_request() {
             payload: b"x".to_vec(),
         },
     );
-    assert_eq!(denied, Err(WorldError::Denied));
+    assert_eq!(denied, Err(SessionFailure::Rejected(Rejection::Denied)));
 }
 
 #[test]
@@ -358,7 +358,7 @@ fn dormancy_terminates_sessions() {
             schema_version: 1,
             payload: b"x".to_vec(),
         }),
-        Err(WorldError::StationDormant)
+        Err(SessionFailure::Interrupted)
     );
 }
 
@@ -383,7 +383,7 @@ fn a_session_cannot_stop_the_station() {
     let exit = station.wait();
     assert!(matches!(
         exit.reason,
-        Some(crate::error::StationExitReason::TaskFailed(_))
+        Some(crate::lifecycle::ExitReason::TaskFailed(_))
     ));
 }
 
@@ -399,11 +399,11 @@ impl World for PanicWorld {
     fn schemas(&self) -> &[Schema] {
         &self.schemas
     }
-    fn submit(&self, _ctx: &mut Context<'_>, _intent: Intent) -> Result<Effect, WorldError> {
+    fn submit(&self, _ctx: &mut Context<'_>, _intent: Intent) -> Result<Effect, Rejection> {
         panic!("world callback panics")
     }
-    fn query(&self, _ctx: &Context<'_>, _query: Query) -> Result<Projection, WorldError> {
-        Err(WorldError::InvalidRequest)
+    fn query(&self, _ctx: &Context<'_>, _query: Query) -> Result<Projection, Rejection> {
+        Err(Rejection::InvalidRequest)
     }
 }
 
@@ -440,7 +440,7 @@ fn a_world_panic_is_contained_and_does_not_end_the_station() {
             payload: b"x".to_vec(),
         },
     );
-    assert_eq!(r, Err(WorldError::WorldPanicked));
+    assert_eq!(r, Err(SessionFailure::CallbackPanicked));
     // The Station survives the panic and can still go dormant cleanly.
     assert!(station.vacate().is_ok());
 }
@@ -463,7 +463,7 @@ fn payload_over_the_declared_limit_is_rejected_before_the_callback() {
             payload: b"toolong".to_vec(),
         },
     );
-    assert_eq!(r, Err(WorldError::LimitExceeded));
+    assert_eq!(r, Err(SessionFailure::Rejected(Rejection::LimitExceeded)));
 }
 
 #[test]
@@ -482,7 +482,7 @@ fn unregistered_schema_and_version_are_rejected() {
                 payload: b"x".to_vec(),
             }
         ),
-        Err(WorldError::UnsupportedSchema)
+        Err(SessionFailure::Rejected(Rejection::UnsupportedSchema))
     );
     // Known schema, unknown version.
     assert_eq!(
@@ -495,7 +495,9 @@ fn unregistered_schema_and_version_are_rejected() {
                 payload: b"x".to_vec(),
             }
         ),
-        Err(WorldError::UnsupportedSchemaVersion)
+        Err(SessionFailure::Rejected(
+            Rejection::UnsupportedSchemaVersion
+        ))
     );
 }
 
@@ -647,7 +649,7 @@ impl World for RogueWorld {
     fn schemas(&self) -> &[Schema] {
         &self.schemas
     }
-    fn submit(&self, _ctx: &mut Context<'_>, intent: Intent) -> Result<Effect, WorldError> {
+    fn submit(&self, _ctx: &mut Context<'_>, intent: Intent) -> Result<Effect, Rejection> {
         // Attempt to overwrite a Body belonging to com.example.notes.
         let foreign = BodyKey::new(
             WorldId::parse("com.example.notes").unwrap(),
@@ -667,8 +669,8 @@ impl World for RogueWorld {
             declarations: vec![],
         })
     }
-    fn query(&self, _ctx: &Context<'_>, _query: Query) -> Result<Projection, WorldError> {
-        Err(WorldError::InvalidRequest)
+    fn query(&self, _ctx: &Context<'_>, _query: Query) -> Result<Projection, Rejection> {
+        Err(Rejection::InvalidRequest)
     }
 }
 
@@ -706,7 +708,10 @@ fn a_world_cannot_write_outside_its_namespace() {
             payload: b"overwrite you".to_vec(),
         },
     );
-    assert_eq!(r, Err(WorldError::ContractViolation));
+    assert_eq!(
+        r,
+        Err(SessionFailure::Rejected(Rejection::ContractViolation))
+    );
     // Nothing was committed.
     assert_eq!(station.frontier(), before);
 }
@@ -742,11 +747,11 @@ fn a_changed_authority_frontier_refuses_the_commit() {
         fn schemas(&self) -> &[Schema] {
             self.inner.schemas()
         }
-        fn submit(&self, ctx: &mut Context<'_>, intent: Intent) -> Result<Effect, WorldError> {
+        fn submit(&self, ctx: &mut Context<'_>, intent: Intent) -> Result<Effect, Rejection> {
             *self.authority.frontier.lock().unwrap() = vec![9, 9];
             self.inner.submit(ctx, intent)
         }
-        fn query(&self, ctx: &Context<'_>, query: Query) -> Result<Projection, WorldError> {
+        fn query(&self, ctx: &Context<'_>, query: Query) -> Result<Projection, Rejection> {
             self.inner.query(ctx, query)
         }
     }
@@ -786,7 +791,7 @@ fn a_changed_authority_frontier_refuses_the_commit() {
             payload: b"x".to_vec(),
         },
     );
-    assert_eq!(r, Err(WorldError::AuthorityChanged));
+    assert_eq!(r, Err(SessionFailure::Conflict(Conflict::AuthorityChanged)));
     assert_eq!(station.frontier(), before, "nothing committed");
 }
 
@@ -852,7 +857,7 @@ impl World for BoardWorld {
     fn schemas(&self) -> &[Schema] {
         &self.schemas
     }
-    fn submit(&self, ctx: &mut Context<'_>, intent: Intent) -> Result<Effect, WorldError> {
+    fn submit(&self, ctx: &mut Context<'_>, intent: Intent) -> Result<Effect, Rejection> {
         let key = self.body();
         Ok(Effect {
             content_refs: Vec::new(),
@@ -882,7 +887,7 @@ impl World for BoardWorld {
             declarations: vec![],
         })
     }
-    fn query(&self, ctx: &Context<'_>, _query: Query) -> Result<Projection, WorldError> {
+    fn query(&self, ctx: &Context<'_>, _query: Query) -> Result<Projection, Rejection> {
         let view = ctx.read_collaborative(&self.body()).unwrap_or_default();
         let comments: Vec<String> = view
             .lists
@@ -968,7 +973,7 @@ impl World for MixedWorld {
     fn schemas(&self) -> &[Schema] {
         &self.schemas
     }
-    fn submit(&self, _ctx: &mut Context<'_>, _intent: Intent) -> Result<Effect, WorldError> {
+    fn submit(&self, _ctx: &mut Context<'_>, _intent: Intent) -> Result<Effect, Rejection> {
         // Regardless of which schema the intent named, stage a collaborative op.
         let key = BodyKey::new(self.id.clone(), BodyId::from_bytes([5u8; 16]));
         Ok(Effect {
@@ -986,8 +991,8 @@ impl World for MixedWorld {
             declarations: vec![],
         })
     }
-    fn query(&self, _ctx: &Context<'_>, _query: Query) -> Result<Projection, WorldError> {
-        Err(WorldError::InvalidRequest)
+    fn query(&self, _ctx: &Context<'_>, _query: Query) -> Result<Projection, Rejection> {
+        Err(Rejection::InvalidRequest)
     }
 }
 
@@ -1036,7 +1041,10 @@ fn containment_is_bound_to_the_intent_schema_not_the_world() {
             payload: vec![],
         },
     );
-    assert_eq!(r, Err(WorldError::ContractViolation));
+    assert_eq!(
+        r,
+        Err(SessionFailure::Rejected(Rejection::ContractViolation))
+    );
     assert_eq!(station.frontier(), before, "nothing committed");
     // The SAME staged ops under the collaborative schema are legal.
     submit_as(
@@ -1130,7 +1138,7 @@ fn reusing_a_request_id_with_a_different_payload_is_a_typed_conflict() {
                 .unwrap(),
         )
         .unwrap_err();
-    assert_eq!(err, WorldError::RequestIdConflict);
+    assert_eq!(err, SessionFailure::Conflict(Conflict::Request));
     assert_eq!(station.frontier(), after_first, "nothing committed");
 }
 
@@ -1156,12 +1164,18 @@ fn an_action_for_another_space_or_world_is_refused() {
     header.space = mechanics::ids::SpaceId::from_digest([0xAB; 16]);
     let foreign =
         crate::action::SignedWorldAction::sign(header, good.payload.clone(), &WRITER_SEED);
-    assert_eq!(session.submit(foreign), Err(WorldError::InvalidRequest));
+    assert_eq!(
+        session.submit(foreign),
+        Err(SessionFailure::Rejected(Rejection::InvalidRequest))
+    );
     // A tampered (unsigned) mutation of the same header fails signature
     // verification outright.
     let mut tampered = good.clone();
     tampered.header.world = WorldId::parse("com.example.other").unwrap();
-    assert_eq!(session.submit(tampered), Err(WorldError::InvalidRequest));
+    assert_eq!(
+        session.submit(tampered),
+        Err(SessionFailure::Rejected(Rejection::InvalidRequest))
+    );
 }
 
 #[test]

@@ -20,14 +20,14 @@ use fs2::FileExt;
 use mechanics::ids::SpaceId;
 use replica::marker::{MarkerError, StoreMarker};
 
-use crate::error::LifecycleError;
+use crate::lifecycle::Failure;
 
 const MARKER_FILE: &str = "marker";
 const EPOCH_FILE: &str = "epoch";
 const LOCK_FILE: &str = "lock";
 
-fn io_err(e: std::io::Error) -> LifecycleError {
-    LifecycleError::StoreIo(e.to_string())
+fn io_err(e: std::io::Error) -> Failure {
+    Failure::Store(e.to_string())
 }
 
 /// A test seam mirroring the Engine journal's: called with a named fault point
@@ -63,15 +63,14 @@ impl OrbitStore {
     /// Form a fresh store for `space`: create the directory, write the marker,
     /// and initialize the epoch counter to zero. Fails if a store already
     /// exists there.
-    pub fn create(root: &Path, space: &SpaceId) -> Result<Self, LifecycleError> {
+    pub fn create(root: &Path, space: &SpaceId) -> Result<Self, Failure> {
         let dir = Self::dir_for(root, space);
         if dir.join(MARKER_FILE).exists() {
-            return Err(LifecycleError::AlreadyExists(space.clone()));
+            return Err(Failure::AlreadyExists(space.clone()));
         }
         std::fs::create_dir_all(&dir).map_err(io_err)?;
-        let marker = StoreMarker::new(space).ok_or(LifecycleError::IntegrityFailure(
-            "space id is not renderable".into(),
-        ))?;
+        let marker = StoreMarker::new(space)
+            .ok_or(Failure::Integrity("space id is not renderable".into()))?;
         write_sync(&dir.join(MARKER_FILE), &marker.encode())?;
         write_sync(&dir.join(EPOCH_FILE), &0u64.to_le_bytes())?;
         // Make the new directory entries themselves durable — a formation whose
@@ -86,18 +85,18 @@ impl OrbitStore {
     }
 
     /// Open an existing store, validating its marker against `space`.
-    pub fn open(root: &Path, space: &SpaceId) -> Result<Self, LifecycleError> {
+    pub fn open(root: &Path, space: &SpaceId) -> Result<Self, Failure> {
         let dir = Self::dir_for(root, space);
         let marker_bytes = match std::fs::read(dir.join(MARKER_FILE)) {
             Ok(b) => b,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Err(LifecycleError::OrbitNotFound(space.clone()))
+                return Err(Failure::OrbitNotFound(space.clone()))
             }
             Err(e) => return Err(io_err(e)),
         };
         let marker = StoreMarker::classify(&marker_bytes).map_err(marker_err)?;
         if marker.space().as_ref() != Some(space) {
-            return Err(LifecycleError::IntegrityFailure(
+            return Err(Failure::Integrity(
                 "store marker names a different Space".into(),
             ));
         }
@@ -114,10 +113,10 @@ impl OrbitStore {
         self
     }
 
-    fn point(&self, name: &str) -> Result<(), LifecycleError> {
+    fn point(&self, name: &str) -> Result<(), Failure> {
         if let Some(injector) = &self.injector {
             if injector(name) {
-                return Err(LifecycleError::StoreIo(format!("injected fault at {name}")));
+                return Err(Failure::Store(format!("injected fault at {name}")));
             }
         }
         Ok(())
@@ -128,7 +127,7 @@ impl OrbitStore {
     }
 
     /// The current durable epoch (zero if never activated).
-    pub fn read_epoch(&self) -> Result<u64, LifecycleError> {
+    pub fn read_epoch(&self) -> Result<u64, Failure> {
         // `create` writes the epoch and every later write is an atomic replace,
         // so a missing or short epoch file is corruption — never "zero". Reading
         // it as zero would reuse committed epochs, which activation must never
@@ -136,7 +135,7 @@ impl OrbitStore {
         let mut f = match File::open(self.dir.join(EPOCH_FILE)) {
             Ok(f) => f,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Err(LifecycleError::IntegrityFailure(
+                return Err(Failure::Integrity(
                     "epoch file missing — the store is corrupt; a committed epoch \
                      cannot be safely reused"
                         .into(),
@@ -146,7 +145,7 @@ impl OrbitStore {
         };
         let mut buf = [0u8; 8];
         f.read_exact(&mut buf).map_err(|_| {
-            LifecycleError::IntegrityFailure("epoch file truncated — the store is corrupt".into())
+            Failure::Integrity("epoch file truncated — the store is corrupt".into())
         })?;
         Ok(u64::from_le_bytes(buf))
     }
@@ -160,11 +159,11 @@ impl OrbitStore {
     /// because Beacon freshness depends on never reusing an epoch a live
     /// Station acted under. A failure aborts activation; the un-acknowledged
     /// epoch was never used, so re-deriving it later is safe.
-    pub fn bump_epoch(&self) -> Result<u64, LifecycleError> {
+    pub fn bump_epoch(&self) -> Result<u64, Failure> {
         let next = self
             .read_epoch()?
             .checked_add(1)
-            .ok_or(LifecycleError::EpochOverflow)?;
+            .ok_or(Failure::EpochOverflow)?;
         let tmp = self.dir.join(format!("{EPOCH_FILE}.tmp"));
         self.point("epoch-temp")?;
         write_sync(&tmp, &next.to_le_bytes())?;
@@ -176,9 +175,9 @@ impl OrbitStore {
     }
 
     /// Acquire the exclusive store lock (the operational-ownership / double-lock
-    /// guard). Returns [`LifecycleError::ReplicaLocked`] if another owner holds
+    /// guard). Returns [`Failure::ReplicaLocked`] if another owner holds
     /// it.
-    pub fn acquire_lock(&self) -> Result<StoreLock, LifecycleError> {
+    pub fn acquire_lock(&self) -> Result<StoreLock, Failure> {
         let file = OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -188,7 +187,7 @@ impl OrbitStore {
             .map_err(io_err)?;
         match file.try_lock_exclusive() {
             Ok(()) => Ok(StoreLock { file: Some(file) }),
-            Err(_) => Err(LifecycleError::ReplicaLocked(self.space.clone())),
+            Err(_) => Err(Failure::ReplicaLocked(self.space.clone())),
         }
     }
 
@@ -225,7 +224,7 @@ impl OrbitStore {
     /// Destroy the store directory. The caller must hold the lock (i.e. be the
     /// operational owner) so a live Station's store is never removed underneath
     /// it.
-    pub fn remove(&self) -> Result<(), LifecycleError> {
+    pub fn remove(&self) -> Result<(), Failure> {
         std::fs::remove_dir_all(&self.dir).map_err(io_err)
     }
 
@@ -277,7 +276,7 @@ impl Drop for StoreLock {
     }
 }
 
-fn write_sync(path: &Path, bytes: &[u8]) -> Result<(), LifecycleError> {
+fn write_sync(path: &Path, bytes: &[u8]) -> Result<(), Failure> {
     let mut f = OpenOptions::new()
         .create(true)
         .write(true)
@@ -346,21 +345,17 @@ fn sync_dir(dir: &Path) -> std::io::Result<()> {
     }
 }
 
-fn marker_err(e: MarkerError) -> LifecycleError {
+fn marker_err(e: MarkerError) -> Failure {
     match e {
-        MarkerError::NotAReplicaStore => {
-            LifecycleError::IntegrityFailure("not a Replica store".into())
-        }
+        MarkerError::NotAReplicaStore => Failure::Integrity("not a Replica store".into()),
         MarkerError::UnsupportedStoreVersion { found } => {
-            LifecycleError::IntegrityFailure(format!("unsupported store version {found}"))
+            Failure::Integrity(format!("unsupported store version {found}"))
         }
-        MarkerError::CorruptStoreMarker => {
-            LifecycleError::IntegrityFailure("corrupt store marker".into())
-        }
+        MarkerError::CorruptStoreMarker => Failure::Integrity("corrupt store marker".into()),
         MarkerError::ReplicaIntegrityFailure => {
-            LifecycleError::IntegrityFailure("replica integrity failure".into())
+            Failure::Integrity("replica integrity failure".into())
         }
-        MarkerError::ReplicaLocked => LifecycleError::IntegrityFailure("replica locked".into()),
+        MarkerError::ReplicaLocked => Failure::Integrity("replica locked".into()),
     }
 }
 
@@ -398,7 +393,7 @@ mod tests {
             }));
             let err = faulty.bump_epoch().unwrap_err();
             assert!(
-                matches!(err, LifecycleError::StoreIo(_)),
+                matches!(err, Failure::Store(_)),
                 "fault at {point} must abort the bump"
             );
             // The store is intact: the epoch reads as a complete value and the

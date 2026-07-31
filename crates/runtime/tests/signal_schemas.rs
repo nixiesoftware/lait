@@ -277,8 +277,8 @@ mod declarations {
     use runtime::transient::MAX_SCOPE_FIELD_BYTES;
     use runtime::world::{ScopeSchema, SignalSchema};
     use runtime::{
-        Context, Descriptor, Effect, Intent, Limits, Projection, Query, RuntimeBuilder, Version,
-        World, WorldError,
+        Context, Descriptor, Effect, Intent, Limits, Projection, Query, Rejection, RuntimeBuilder,
+        Version, World,
     };
 
     const WORLD: &str = "com.example.notes";
@@ -301,11 +301,11 @@ mod declarations {
         fn signal_schemas(&self) -> &[SignalSchema] {
             &self.signals
         }
-        fn submit(&self, _ctx: &mut Context<'_>, _intent: Intent) -> Result<Effect, WorldError> {
-            Err(WorldError::InvalidRequest)
+        fn submit(&self, _ctx: &mut Context<'_>, _intent: Intent) -> Result<Effect, Rejection> {
+            Err(Rejection::InvalidRequest)
         }
-        fn query(&self, _ctx: &Context<'_>, _query: Query) -> Result<Projection, WorldError> {
-            Err(WorldError::InvalidRequest)
+        fn query(&self, _ctx: &Context<'_>, _query: Query) -> Result<Projection, Rejection> {
+            Err(Rejection::InvalidRequest)
         }
     }
 

@@ -26,8 +26,8 @@ use replica::ids::{EncodingId, SchemaId, WorldId};
 use runtime::live::LiveHandle;
 use runtime::transient::{Target, TransientItem, TransientPayload};
 use runtime::{
-    ActivationOptions, Context, Descriptor, Effect, Intent, Limits, Projection, Query, Runtime,
-    RuntimeBuilder, Station, Version, World, WorldError,
+    ActivationOptions, Context, Descriptor, Effect, Intent, Limits, Projection, Query, Rejection,
+    Runtime, RuntimeBuilder, Station, Version, World,
 };
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -69,10 +69,10 @@ impl World for Empty {
     fn schemas(&self) -> &[Schema] {
         &self.schemas
     }
-    fn submit(&self, _ctx: &mut Context<'_>, _intent: Intent) -> Result<Effect, WorldError> {
-        Err(WorldError::InvalidRequest)
+    fn submit(&self, _ctx: &mut Context<'_>, _intent: Intent) -> Result<Effect, Rejection> {
+        Err(Rejection::InvalidRequest)
     }
-    fn query(&self, _ctx: &Context<'_>, _query: Query) -> Result<Projection, WorldError> {
+    fn query(&self, _ctx: &Context<'_>, _query: Query) -> Result<Projection, Rejection> {
         Ok(Projection {
             demand: Vec::new(),
             schema: SchemaId::parse("entry").unwrap(),

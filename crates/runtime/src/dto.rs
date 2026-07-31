@@ -342,8 +342,8 @@ impl ErrorDto {
     }
 
     /// The stable code for a public World error.
-    pub fn code_for(error: &crate::error::WorldError) -> &'static str {
-        use crate::error::WorldError as E;
+    pub fn code_for(error: &crate::world::Rejection) -> &'static str {
+        use crate::world::Rejection as E;
         match error {
             E::InvalidRequest => "invalid-request",
             E::UnsupportedSchema => "unsupported-schema",
@@ -351,12 +351,6 @@ impl ErrorDto {
             E::Denied => "denied",
             E::Conflict => "conflict",
             E::LimitExceeded => "limit-exceeded",
-            E::AuthorityChanged => "authority-changed",
-            E::RequestIdConflict => "request-id-conflict",
-            E::StationDormant => "station-dormant",
-            E::Persistence => "persistence",
-            E::ResetRequired => "reset-required",
-            E::WorldPanicked => "world-panicked",
             E::WorldStateCorrupt => "world-state-corrupt",
             E::ContractViolation => "contract-violation",
         }

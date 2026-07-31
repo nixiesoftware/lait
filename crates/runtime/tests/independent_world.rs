@@ -33,10 +33,11 @@ fn any_demand() -> Vec<u8> {
     .encode_canonical()
     .expect("canonical demand")
 }
+use runtime::session::{Conflict, Failure as SessionFailure};
 use runtime::{
     ActivationOptions, Authority, CommsOptions, Context, Descriptor, Effect, Intent, Limits,
-    LocalIdentity, ObservationCursor, ObservationStreamError, Projection, Query, RequestId,
-    Runtime, RuntimeBuilder, Session, SignedCoordinates, Version, World, WorldError,
+    LocalIdentity, ObservationCursor, ObservationStreamError, Projection, Query, Rejection,
+    RequestId, Runtime, RuntimeBuilder, Session, SignedCoordinates, Version, World,
 };
 
 const FOUNDER_SEED: [u8; 32] = [7u8; 32];
@@ -132,10 +133,10 @@ impl World for MultiWorld {
     fn schemas(&self) -> &[Schema] {
         &self.schemas
     }
-    fn submit(&self, ctx: &mut Context<'_>, intent: Intent) -> Result<Effect, WorldError> {
+    fn submit(&self, ctx: &mut Context<'_>, intent: Intent) -> Result<Effect, Rejection> {
         let v: serde_json::Value =
-            serde_json::from_slice(&intent.payload).map_err(|_| WorldError::InvalidRequest)?;
-        let op = v["op"].as_str().ok_or(WorldError::InvalidRequest)?;
+            serde_json::from_slice(&intent.payload).map_err(|_| Rejection::InvalidRequest)?;
+        let op = v["op"].as_str().ok_or(Rejection::InvalidRequest)?;
         let mut operations = Vec::new();
         let mut declarations = Vec::new();
         let mut scopes = Vec::new();
@@ -150,7 +151,7 @@ impl World for MultiWorld {
         };
         match op {
             "set" => {
-                let key = self.entry_key(v["k"].as_str().ok_or(WorldError::InvalidRequest)?);
+                let key = self.entry_key(v["k"].as_str().ok_or(Rejection::InvalidRequest)?);
                 declare(
                     &key,
                     "entry",
@@ -181,7 +182,7 @@ impl World for MultiWorld {
                 );
             }
             "both" => {
-                let key = self.entry_key(v["k"].as_str().ok_or(WorldError::InvalidRequest)?);
+                let key = self.entry_key(v["k"].as_str().ok_or(Rejection::InvalidRequest)?);
                 declare(
                     &key,
                     "entry",
@@ -226,7 +227,7 @@ impl World for MultiWorld {
                     },
                 );
             }
-            _ => return Err(WorldError::InvalidRequest),
+            _ => return Err(Rejection::InvalidRequest),
         }
         Ok(Effect {
             content_refs: Vec::new(),
@@ -237,9 +238,9 @@ impl World for MultiWorld {
             declarations,
         })
     }
-    fn query(&self, ctx: &Context<'_>, query: Query) -> Result<Projection, WorldError> {
+    fn query(&self, ctx: &Context<'_>, query: Query) -> Result<Projection, Rejection> {
         let v: serde_json::Value =
-            serde_json::from_slice(&query.payload).map_err(|_| WorldError::InvalidRequest)?;
+            serde_json::from_slice(&query.payload).map_err(|_| Rejection::InvalidRequest)?;
         let bytes = match v["q"].as_str() {
             Some("entry") => ctx
                 .read_body(&self.entry_key(v["k"].as_str().unwrap_or_default()))
@@ -250,7 +251,7 @@ impl World for MultiWorld {
                 .and_then(|p| p.texts.get("body").cloned())
                 .unwrap_or_default()
                 .into_bytes(),
-            _ => return Err(WorldError::InvalidRequest),
+            _ => return Err(Rejection::InvalidRequest),
         };
         Ok(Projection {
             demand: any_demand(),
@@ -408,7 +409,7 @@ fn submit_json(
     request: RequestId,
     schema: &str,
     value: serde_json::Value,
-) -> Result<runtime::CommittedEffect, WorldError> {
+) -> Result<runtime::CommittedEffect, SessionFailure> {
     let action = identity.sign_action(
         session,
         request,
@@ -482,7 +483,7 @@ fn bodies_authority_restart_idempotency_and_observation() {
         serde_json::json!({"op":"bad_both"}),
     )
     .unwrap_err();
-    assert_eq!(err, WorldError::InvalidRequest);
+    assert_eq!(err, SessionFailure::Rejected(Rejection::InvalidRequest));
     assert_eq!(station.frontier(), before);
     assert_eq!(
         query_json(&session, serde_json::json!({"q":"entry","k":"poisoned"})),
@@ -501,7 +502,7 @@ fn bodies_authority_restart_idempotency_and_observation() {
             "entry",
             serde_json::json!({"op":"set","k":"x","v":"y"}),
         ),
-        Err(WorldError::Denied)
+        Err(SessionFailure::Rejected(Rejection::Denied))
     );
 
     // Authority change between signing and submit commits nothing.
@@ -518,7 +519,10 @@ fn bodies_authority_restart_idempotency_and_observation() {
         )
         .unwrap();
     *auth.frontier.lock().unwrap() = vec![7, 7];
-    assert_eq!(session.submit(stale), Err(WorldError::AuthorityChanged));
+    assert_eq!(
+        session.submit(stale),
+        Err(SessionFailure::Conflict(Conflict::AuthorityChanged))
+    );
     *auth.frontier.lock().unwrap() = vec![6];
 
     // Observation backpressure: capacity 1, three commits — an old cursor

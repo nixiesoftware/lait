@@ -110,7 +110,7 @@ fn submit(
     session: &Session,
     seed: &[u8; 32],
     intent: &IssueIntent,
-) -> Result<(), runtime::WorldError> {
+) -> Result<(), runtime::session::Failure> {
     let identity = Runtime::identity_from_seed(seed);
     let action = identity.sign_action(
         session,

@@ -34,8 +34,8 @@ fn any_demand() -> Vec<u8> {
 }
 use runtime::{
     ActivationOptions, Authority, CommsOptions, Context, Descriptor, Effect, GossipOptions, Intent,
-    Limits, Projection, Query, RequestId, Runtime, RuntimeBuilder, SignedCoordinates, Station,
-    Version, World, WorldError,
+    Limits, Projection, Query, Rejection, RequestId, Runtime, RuntimeBuilder, SignedCoordinates,
+    Station, Version, World,
 };
 
 const FOUNDER_SEED: [u8; 32] = [7u8; 32];
@@ -119,9 +119,9 @@ impl World for KvWorld {
     fn schemas(&self) -> &[Schema] {
         &self.schemas
     }
-    fn submit(&self, _ctx: &mut Context<'_>, intent: Intent) -> Result<Effect, WorldError> {
-        let text = String::from_utf8(intent.payload).map_err(|_| WorldError::InvalidRequest)?;
-        let (key, value) = text.split_once('=').ok_or(WorldError::InvalidRequest)?;
+    fn submit(&self, _ctx: &mut Context<'_>, intent: Intent) -> Result<Effect, Rejection> {
+        let text = String::from_utf8(intent.payload).map_err(|_| Rejection::InvalidRequest)?;
+        let (key, value) = text.split_once('=').ok_or(Rejection::InvalidRequest)?;
         let body = self.body(key);
         Ok(Effect {
             content_refs: Vec::new(),
@@ -137,8 +137,8 @@ impl World for KvWorld {
             declarations: vec![],
         })
     }
-    fn query(&self, ctx: &Context<'_>, query: Query) -> Result<Projection, WorldError> {
-        let key = String::from_utf8(query.payload).map_err(|_| WorldError::InvalidRequest)?;
+    fn query(&self, ctx: &Context<'_>, query: Query) -> Result<Projection, Rejection> {
+        let key = String::from_utf8(query.payload).map_err(|_| Rejection::InvalidRequest)?;
         Ok(Projection {
             demand: any_demand(),
             schema: SchemaId::parse("entry").unwrap(),
@@ -464,7 +464,7 @@ fn an_unknown_neighbor_is_unreachable_and_dormancy_refuses_contact() {
     let station_b = orbit.open(ActivationOptions::offline()).unwrap();
     assert!(matches!(
         station_b.contact(&ghost),
-        Err(runtime::ContactError::Unreachable)
+        Err(runtime::contact::Failure::Unreachable)
     ));
     let _ = station_b.vacate().unwrap();
     let _ = std::fs::remove_dir_all(&root_b);

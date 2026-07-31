@@ -1529,7 +1529,7 @@ mod declared_scopes {
     use runtime::transient::TransientError;
     use runtime::world::ScopeSchema;
     use runtime::{
-        Context, Descriptor, Effect, Intent, Limits, Projection, Query, Version, World, WorldError,
+        Context, Descriptor, Effect, Intent, Limits, Projection, Query, Rejection, Version, World,
     };
 
     const PAD: &str = "dev.example.pad";
@@ -1546,11 +1546,11 @@ mod declared_scopes {
         fn scope_schemas(&self) -> &[ScopeSchema] {
             &self.1
         }
-        fn submit(&self, _ctx: &mut Context<'_>, _intent: Intent) -> Result<Effect, WorldError> {
-            Err(WorldError::InvalidRequest)
+        fn submit(&self, _ctx: &mut Context<'_>, _intent: Intent) -> Result<Effect, Rejection> {
+            Err(Rejection::InvalidRequest)
         }
-        fn query(&self, _ctx: &Context<'_>, _query: Query) -> Result<Projection, WorldError> {
-            Err(WorldError::InvalidRequest)
+        fn query(&self, _ctx: &Context<'_>, _query: Query) -> Result<Projection, Rejection> {
+            Err(Rejection::InvalidRequest)
         }
     }
 

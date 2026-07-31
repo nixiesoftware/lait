@@ -14,7 +14,7 @@ use lait::orbital::{open_orbital_runtime, orbital_store_root, WorldPackages};
 use mechanics::ids::{ActorId, DeviceId};
 use runtime::{
     ActivationOptions, AuthorityView, Context, Descriptor, Effect, Intent, Limits,
-    PrincipalResolution, Projection, Query, Runtime, RuntimeBuilder, Version, World, WorldError,
+    PrincipalResolution, Projection, Query, Rejection, Runtime, RuntimeBuilder, Version, World,
 };
 
 use ::replica::body::{MutationModel, Op, Schema};
@@ -100,7 +100,7 @@ impl World for TallyWorld {
     fn schemas(&self) -> &[Schema] {
         &self.schemas
     }
-    fn submit(&self, ctx: &mut Context<'_>, intent: Intent) -> Result<Effect, WorldError> {
+    fn submit(&self, ctx: &mut Context<'_>, intent: Intent) -> Result<Effect, Rejection> {
         let next = self.current(ctx) + intent.payload.len() as u64;
         let key = self.body();
         Ok(Effect {
@@ -117,7 +117,7 @@ impl World for TallyWorld {
             declarations: vec![],
         })
     }
-    fn query(&self, ctx: &Context<'_>, _query: Query) -> Result<Projection, WorldError> {
+    fn query(&self, ctx: &Context<'_>, _query: Query) -> Result<Projection, Rejection> {
         Ok(Projection {
             demand: any_demand(),
             schema: SchemaId::parse("tally").unwrap(),
@@ -144,7 +144,7 @@ fn submit_as(
     session: &runtime::Session,
     identity: &runtime::LocalIdentity,
     intent: Intent,
-) -> Result<runtime::CommittedEffect, WorldError> {
+) -> Result<runtime::CommittedEffect, runtime::session::Failure> {
     session.submit(identity.sign_action(session, runtime::RequestId::mint(), intent)?)
 }
 

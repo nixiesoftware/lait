@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use lait::orbital::{read_bootstrap_record, BootstrapFault, BootstrapPhase, SpaceAuthority};
 use lait::world::contract;
-use runtime::{Context, Query, World, WorldError};
+use runtime::{Context, Query, Rejection, World};
 
 const FOUNDER_SEED: [u8; 32] = [71u8; 32];
 
@@ -198,7 +198,7 @@ fn principal(space: &mechanics::ids::SpaceId) -> runtime::PrincipalFacts {
     }
 }
 
-fn snapshot_query(world: &lait::world::IssuesWorld, ctx: &Context<'_>) -> Result<(), WorldError> {
+fn snapshot_query(world: &lait::world::IssuesWorld, ctx: &Context<'_>) -> Result<(), Rejection> {
     world
         .query(
             ctx,
@@ -234,7 +234,7 @@ fn misplaced_and_duplicate_catalogs_are_typed_corrupt_never_repaired() {
     assert!(
         matches!(
             snapshot_query(&world, &ctx),
-            Err(WorldError::WorldStateCorrupt)
+            Err(Rejection::WorldStateCorrupt)
         ),
         "a misplaced catalog is never chosen"
     );
@@ -254,7 +254,7 @@ fn misplaced_and_duplicate_catalogs_are_typed_corrupt_never_repaired() {
     assert!(
         matches!(
             snapshot_query(&world, &ctx),
-            Err(WorldError::WorldStateCorrupt)
+            Err(Rejection::WorldStateCorrupt)
         ),
         "a duplicate catalog is never merged"
     );
@@ -269,7 +269,7 @@ fn misplaced_and_duplicate_catalogs_are_typed_corrupt_never_repaired() {
     assert!(
         matches!(
             snapshot_query(&world, &ctx),
-            Err(WorldError::WorldStateCorrupt)
+            Err(Rejection::WorldStateCorrupt)
         ),
         "a wrong-model catalog is corrupt"
     );

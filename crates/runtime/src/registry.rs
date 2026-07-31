@@ -282,7 +282,7 @@ impl RuntimeBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::error::WorldError;
+    use crate::world::Rejection;
     use crate::world::{
         Context, Effect, Intent, Projection, Query, ScopeSchema, SignalSchema, World,
     };
@@ -311,11 +311,11 @@ mod tests {
         fn signal_schemas(&self) -> &[SignalSchema] {
             &self.signal_schemas
         }
-        fn submit(&self, _ctx: &mut Context<'_>, _intent: Intent) -> Result<Effect, WorldError> {
-            Err(WorldError::InvalidRequest)
+        fn submit(&self, _ctx: &mut Context<'_>, _intent: Intent) -> Result<Effect, Rejection> {
+            Err(Rejection::InvalidRequest)
         }
-        fn query(&self, _ctx: &Context<'_>, _query: Query) -> Result<Projection, WorldError> {
-            Err(WorldError::InvalidRequest)
+        fn query(&self, _ctx: &Context<'_>, _query: Query) -> Result<Projection, Rejection> {
+            Err(Rejection::InvalidRequest)
         }
     }
 

@@ -21,8 +21,8 @@ use lait::world::IssuesWorld;
 use mechanics::crypto::AuthorizedBodyKey;
 use replica::frontier::AuthorityFrontier;
 use runtime::{
-    ActivationOptions, Authority, CommsOptions, Intent, LocalIdentity, Query, RequestId, Runtime,
-    RuntimeBuilder, Session, Station, WorldError,
+    ActivationOptions, Authority, CommsOptions, Intent, LocalIdentity, Query, Rejection, RequestId,
+    Runtime, RuntimeBuilder, Session, Station,
 };
 
 const FOUNDER_SEED: [u8; 32] = [37u8; 32];
@@ -156,7 +156,10 @@ impl Driver {
         self.now
     }
 
-    fn submit(&self, intent: &IssueIntent) -> Result<contract::IssueEffect, WorldError> {
+    fn submit(
+        &self,
+        intent: &IssueIntent,
+    ) -> Result<contract::IssueEffect, runtime::session::Failure> {
         let signed = self
             .writer
             .sign_action(
@@ -231,7 +234,7 @@ impl Driver {
         field: &str,
         start: u64,
         end: Option<u64>,
-    ) -> Result<String, WorldError> {
+    ) -> Result<String, runtime::session::Failure> {
         let id = lait::ids::mint_comment_id(&SystemUlidSource);
         let ts = self.ts();
         self.submit(&IssueIntent::CommentAt {
@@ -454,11 +457,21 @@ fn an_atomic_field_cannot_carry_a_span() {
     let doc = driver.seed();
 
     let refused = driver.comment_at(&doc, "the title is wrong", "title", 0, Some(3));
-    assert!(matches!(refused, Err(WorldError::InvalidRequest)));
+    assert!(matches!(
+        refused,
+        Err(runtime::session::Failure::Rejected(
+            Rejection::InvalidRequest
+        ))
+    ));
 
     // A field no operation writes at all is refused for the same reason.
     let refused = driver.comment_at(&doc, "nowhere", "notes", 0, Some(1));
-    assert!(matches!(refused, Err(WorldError::InvalidRequest)));
+    assert!(matches!(
+        refused,
+        Err(runtime::session::Failure::Rejected(
+            Rejection::InvalidRequest
+        ))
+    ));
 
     // Refused means nothing was written: no comment, no anchor.
     assert!(driver.view(&doc).comments.is_empty());
@@ -484,7 +497,12 @@ fn a_span_outside_the_material_is_refused() {
     ] {
         let refused = driver.comment_at(&doc, "out of range", "description", start, end);
         assert!(
-            matches!(refused, Err(WorldError::InvalidRequest)),
+            matches!(
+                refused,
+                Err(runtime::session::Failure::Rejected(
+                    Rejection::InvalidRequest
+                ))
+            ),
             "span {start}..{end:?} of a {length}-character text must be refused"
         );
     }
@@ -493,7 +511,12 @@ fn a_span_outside_the_material_is_refused() {
     // nothing, and the anchor the algebra returns binds nothing.
     driver.describe(&doc, "");
     let refused = driver.comment_at(&doc, "on nothing", "description", 0, None);
-    assert!(matches!(refused, Err(WorldError::InvalidRequest)));
+    assert!(matches!(
+        refused,
+        Err(runtime::session::Failure::Rejected(
+            Rejection::InvalidRequest
+        ))
+    ));
 
     assert!(driver.view(&doc).comments.is_empty());
 
@@ -736,7 +759,12 @@ fn spans_are_counted_in_unicode_scalars_and_not_in_bytes() {
 
     let refused = driver.comment_at(&doc, "past the end", "description", 12, Some(13));
     assert!(
-        matches!(refused, Err(WorldError::InvalidRequest)),
+        matches!(
+            refused,
+            Err(runtime::session::Failure::Rejected(
+                Rejection::InvalidRequest
+            ))
+        ),
         "12..13 is inside the byte length and past the scalar length"
     );
 

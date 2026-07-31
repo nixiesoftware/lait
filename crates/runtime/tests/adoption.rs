@@ -25,10 +25,11 @@ fn any_demand() -> Vec<u8> {
     .encode_canonical()
     .expect("canonical demand")
 }
+use runtime::lifecycle::Failure;
 use runtime::{
-    ActivationOptions, AuthorityView, Context, Descriptor, Effect, Intent, LifecycleError, Limits,
-    LocalIdentity, PrincipalResolution, Projection, Query, RemovalConfirmation, Runtime,
-    RuntimeBuilder, Version, World, WorldError,
+    ActivationOptions, AuthorityView, Context, Descriptor, Effect, Intent, Limits, LocalIdentity,
+    PrincipalResolution, Projection, Query, Rejection, RemovalConfirmation, Runtime,
+    RuntimeBuilder, Version, World,
 };
 
 /// The consumer's writing device; a second device resolves with no grants.
@@ -113,7 +114,7 @@ fn submit_as(
     session: &runtime::Session,
     identity: &LocalIdentity,
     intent: Intent,
-) -> Result<runtime::CommittedEffect, WorldError> {
+) -> Result<runtime::CommittedEffect, runtime::session::Failure> {
     session.submit(identity.sign_action(session, runtime::RequestId::mint(), intent)?)
 }
 
@@ -164,9 +165,9 @@ impl World for KvWorld {
     fn schemas(&self) -> &[Schema] {
         &self.schemas
     }
-    fn submit(&self, _ctx: &mut Context<'_>, intent: Intent) -> Result<Effect, WorldError> {
-        let text = String::from_utf8(intent.payload).map_err(|_| WorldError::InvalidRequest)?;
-        let (key, value) = text.split_once('=').ok_or(WorldError::InvalidRequest)?;
+    fn submit(&self, _ctx: &mut Context<'_>, intent: Intent) -> Result<Effect, Rejection> {
+        let text = String::from_utf8(intent.payload).map_err(|_| Rejection::InvalidRequest)?;
+        let (key, value) = text.split_once('=').ok_or(Rejection::InvalidRequest)?;
         let body = self.body(key);
         Ok(Effect {
             content_refs: Vec::new(),
@@ -182,8 +183,8 @@ impl World for KvWorld {
             declarations: vec![],
         })
     }
-    fn query(&self, ctx: &Context<'_>, query: Query) -> Result<Projection, WorldError> {
-        let key = String::from_utf8(query.payload).map_err(|_| WorldError::InvalidRequest)?;
+    fn query(&self, ctx: &Context<'_>, query: Query) -> Result<Projection, Rejection> {
+        let key = String::from_utf8(query.payload).map_err(|_| Rejection::InvalidRequest)?;
         let value = ctx.read_body(&self.body(&key)).unwrap_or_default();
         Ok(Projection {
             demand: any_demand(),
@@ -290,10 +291,7 @@ fn a_consumer_drives_the_whole_lifecycle_through_the_public_api() {
     assert_eq!(read(&session, "farewell"), b"bye");
 
     // A double acquisition while the Station is live is refused.
-    assert!(matches!(
-        rt.acquire(&space),
-        Err(LifecycleError::ReplicaLocked(_))
-    ));
+    assert!(matches!(rt.acquire(&space), Err(Failure::ReplicaLocked(_))));
 
     // Per-request authorization: a read-only principal cannot write.
     let readonly = station.dock(&world_id(), &reader()).unwrap();
@@ -307,7 +305,7 @@ fn a_consumer_drives_the_whole_lifecycle_through_the_public_api() {
                 payload: b"x=y".to_vec(),
             }
         ),
-        Err(WorldError::Denied)
+        Err(runtime::session::Failure::Rejected(Rejection::Denied))
     );
 
     // remove destroys the Space.
@@ -315,10 +313,7 @@ fn a_consumer_drives_the_whole_lifecycle_through_the_public_api() {
     orbit
         .remove(RemovalConfirmation::for_space(space.clone()))
         .unwrap();
-    assert!(matches!(
-        rt.acquire(&space),
-        Err(LifecycleError::OrbitNotFound(_))
-    ));
+    assert!(matches!(rt.acquire(&space), Err(Failure::OrbitNotFound(_))));
 }
 
 #[test]

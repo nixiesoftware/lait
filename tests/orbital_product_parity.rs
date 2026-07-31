@@ -22,8 +22,8 @@ use lait::world::IssuesWorld;
 use mechanics::crypto::AuthorizedBodyKey;
 use replica::frontier::AuthorityFrontier;
 use runtime::{
-    ActivationOptions, Authority, CommsOptions, Intent, LocalIdentity, Query, RequestId, Runtime,
-    RuntimeBuilder, Session, SignedWorldAction, Station, WorldError,
+    ActivationOptions, Authority, CommsOptions, Intent, LocalIdentity, Query, Rejection, RequestId,
+    Runtime, RuntimeBuilder, Session, SignedWorldAction, Station,
 };
 
 const FOUNDER_SEED: [u8; 32] = [7u8; 32];
@@ -165,7 +165,10 @@ impl Driver {
             .unwrap()
     }
 
-    fn submit(&self, intent: &IssueIntent) -> Result<contract::IssueEffect, WorldError> {
+    fn submit(
+        &self,
+        intent: &IssueIntent,
+    ) -> Result<contract::IssueEffect, runtime::session::Failure> {
         let committed = self.session.submit(self.signed(intent))?;
         Ok(contract::IssueEffect::from_json(&committed.effect).unwrap())
     }
@@ -431,7 +434,9 @@ fn the_full_issue_surface_round_trips_with_legacy_shapes() {
             device: my_device().as_str().to_string(),
             ts,
         }),
-        Err(WorldError::InvalidRequest)
+        Err(runtime::session::Failure::Rejected(
+            Rejection::InvalidRequest
+        ))
     );
 
     // Parent hierarchy with ancestor-cycle refusal.
@@ -452,7 +457,7 @@ fn the_full_issue_surface_round_trips_with_legacy_shapes() {
             device: my_device().as_str().to_string(),
             ts,
         }),
-        Err(WorldError::Conflict)
+        Err(runtime::session::Failure::Rejected(Rejection::Conflict))
     );
 
     // Work state: done moves off the board; an idempotent repeat stages
@@ -587,7 +592,9 @@ fn a_denied_or_invalid_request_commits_and_publishes_nothing() {
             device: my_device().as_str().to_string(),
             ts,
         }),
-        Err(WorldError::InvalidRequest)
+        Err(runtime::session::Failure::Rejected(
+            Rejection::InvalidRequest
+        ))
     );
     let ts = driver.ts();
     assert_eq!(
@@ -602,7 +609,9 @@ fn a_denied_or_invalid_request_commits_and_publishes_nothing() {
             device: my_device().as_str().to_string(),
             ts,
         }),
-        Err(WorldError::InvalidRequest)
+        Err(runtime::session::Failure::Rejected(
+            Rejection::InvalidRequest
+        ))
     );
     assert_eq!(station.frontier(), frontier, "nothing committed");
     let _ = station.vacate();
@@ -794,7 +803,12 @@ fn due_dates_estimates_and_comment_reactions_round_trip() {
         device: my_device().as_str().to_string(),
         ts,
     });
-    assert!(matches!(refused, Err(WorldError::InvalidRequest)));
+    assert!(matches!(
+        refused,
+        Err(runtime::session::Failure::Rejected(
+            Rejection::InvalidRequest
+        ))
+    ));
 
     // ---- comment identity, replies, reactions ----
     let cid = lait::ids::mint_comment_id(&SystemUlidSource);
@@ -821,7 +835,12 @@ fn due_dates_estimates_and_comment_reactions_round_trip() {
         device: my_device().as_str().to_string(),
         ts,
     });
-    assert!(matches!(refused, Err(WorldError::InvalidRequest)));
+    assert!(matches!(
+        refused,
+        Err(runtime::session::Failure::Rejected(
+            Rejection::InvalidRequest
+        ))
+    ));
 
     let reply = lait::ids::mint_comment_id(&SystemUlidSource);
     let ts = driver.ts();
@@ -847,7 +866,12 @@ fn due_dates_estimates_and_comment_reactions_round_trip() {
         device: my_device().as_str().to_string(),
         ts,
     });
-    assert!(matches!(refused, Err(WorldError::InvalidRequest)));
+    assert!(matches!(
+        refused,
+        Err(runtime::session::Failure::Rejected(
+            Rejection::InvalidRequest
+        ))
+    ));
 
     let ts = driver.ts();
     driver
@@ -915,5 +939,10 @@ fn due_dates_estimates_and_comment_reactions_round_trip() {
         device: my_device().as_str().to_string(),
         ts,
     });
-    assert!(matches!(refused, Err(WorldError::InvalidRequest)));
+    assert!(matches!(
+        refused,
+        Err(runtime::session::Failure::Rejected(
+            Rejection::InvalidRequest
+        ))
+    ));
 }

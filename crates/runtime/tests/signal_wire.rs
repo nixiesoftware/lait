@@ -414,7 +414,7 @@ mod declared_schemas {
     use replica::ids::{EncodingId, SchemaId, WorldId};
     use runtime::world::SignalSchema;
     use runtime::{
-        Context, Descriptor, Effect, Intent, Limits, Projection, Query, Version, World, WorldError,
+        Context, Descriptor, Effect, Intent, Limits, Projection, Query, Rejection, Version, World,
     };
 
     const WORLD: &str = "dev.example.pad";
@@ -431,11 +431,11 @@ mod declared_schemas {
         fn signal_schemas(&self) -> &[SignalSchema] {
             &self.1
         }
-        fn submit(&self, _ctx: &mut Context<'_>, _intent: Intent) -> Result<Effect, WorldError> {
-            Err(WorldError::InvalidRequest)
+        fn submit(&self, _ctx: &mut Context<'_>, _intent: Intent) -> Result<Effect, Rejection> {
+            Err(Rejection::InvalidRequest)
         }
-        fn query(&self, _ctx: &Context<'_>, _query: Query) -> Result<Projection, WorldError> {
-            Err(WorldError::InvalidRequest)
+        fn query(&self, _ctx: &Context<'_>, _query: Query) -> Result<Projection, Rejection> {
+            Err(Rejection::InvalidRequest)
         }
     }
 

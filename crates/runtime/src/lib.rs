@@ -39,7 +39,6 @@ pub mod coordinates;
 #[cfg(test)]
 mod dispatch_tests;
 pub mod dto;
-pub mod error;
 pub mod fetch;
 pub mod freight;
 pub mod implementation;
@@ -71,7 +70,6 @@ pub use coordinates::{
     canonical_routes, AdmissionCapability, ApproachRoute, CoordinatesAdmission, CoordinatesError,
     CoordinatesPayload, SignedCoordinates, VerifiedCoordinates,
 };
-pub use error::{ContactError, DormancyError, LifecycleError, StationExit, WorldError};
 pub use lifecycle::{
     ActivationOptions, CancelToken, ContactOutcome, Neighbor, Orbit, OrbitStatus, Reachability,
     RemovalConfirmation, Runtime, Station,
@@ -87,5 +85,6 @@ pub use session::{
 };
 pub use world::{
     AuthorityView, BodyDeclaration, BodyReader, Context, Descriptor, Effect, Intent, Limits,
-    LocalIdentity, PrincipalFacts, PrincipalResolution, Projection, Query, Version, World,
+    LocalIdentity, PrincipalFacts, PrincipalResolution, Projection, Query, Rejection, Version,
+    World,
 };

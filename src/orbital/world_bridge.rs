@@ -15,8 +15,9 @@ use std::sync::{Arc, Mutex};
 
 use mechanics::ids::DeviceId;
 use replica::ids::WorldId;
+use runtime::lifecycle::Failure;
 use runtime::registry::RegistrationError;
-use runtime::{LifecycleError, LocalIdentity, Registry, RuntimeBuilder, Session, Station, World};
+use runtime::{LocalIdentity, Registry, RuntimeBuilder, Session, Station, World};
 
 pub use ::world_bridge::{
     WorldCall, WorldCallAccess, WorldCallContext, WorldCallError, WorldCallErrorCode,
@@ -213,7 +214,7 @@ impl WorldHost {
         &self,
         station: &Station,
         identity: &LocalIdentity,
-    ) -> Result<(), LifecycleError> {
+    ) -> Result<(), Failure> {
         let mut session = self.primary_session.lock().expect("World Session lock");
         if session.is_none() {
             *session = Some(station.dock(&self.world, identity)?);
@@ -232,7 +233,7 @@ impl WorldHost {
         station: &Station,
         identity: &LocalIdentity,
         f: impl FnOnce(&Session) -> R,
-    ) -> Result<R, LifecycleError> {
+    ) -> Result<R, Failure> {
         let mut sessions = self
             .agent_sessions
             .lock()
@@ -286,9 +287,9 @@ impl WorldRouter {
         station: &Station,
         world: &WorldId,
         identity: &LocalIdentity,
-    ) -> Result<(), LifecycleError> {
+    ) -> Result<(), Failure> {
         self.bridge(world)
-            .ok_or_else(|| LifecycleError::UnknownWorld(world.clone()))?
+            .ok_or_else(|| Failure::UnknownWorld(world.clone()))?
             .ensure_primary(station, identity)
     }
 
@@ -316,9 +317,9 @@ impl WorldRouter {
         world: &WorldId,
         identity: &LocalIdentity,
         f: impl FnOnce(&Session) -> R,
-    ) -> Result<R, LifecycleError> {
+    ) -> Result<R, Failure> {
         self.bridge(world)
-            .ok_or_else(|| LifecycleError::UnknownWorld(world.clone()))?
+            .ok_or_else(|| Failure::UnknownWorld(world.clone()))?
             .with_agent(station, identity, f)
     }
 }
@@ -366,7 +367,7 @@ mod tests {
             &self,
             _ctx: &mut Context<'_>,
             _intent: Intent,
-        ) -> Result<Effect, runtime::WorldError> {
+        ) -> Result<Effect, runtime::Rejection> {
             unreachable!("registry tests never execute the World")
         }
 
@@ -374,7 +375,7 @@ mod tests {
             &self,
             _ctx: &Context<'_>,
             _query: Query,
-        ) -> Result<Projection, runtime::WorldError> {
+        ) -> Result<Projection, runtime::Rejection> {
             unreachable!("registry tests never execute the World")
         }
     }

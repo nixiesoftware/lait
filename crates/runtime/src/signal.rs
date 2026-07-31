@@ -54,7 +54,7 @@ impl SignalError {
     /// The stable kebab-case code, for a client that needs to branch.
     ///
     /// A second function rather than an arm on `ErrorDto::code_for`, which is
-    /// monomorphic on `WorldError` — a signal failure is not a World failure and
+    /// monomorphic on `Rejection` — a signal failure is not a World failure and
     /// widening that function would make it one.
     pub fn code(&self) -> &'static str {
         match self {
