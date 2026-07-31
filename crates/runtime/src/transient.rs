@@ -109,6 +109,9 @@ impl TransientScope {
     }
 
     fn validate(&self) -> Result<(), TransientError> {
+        // A field path is a name inside a Body's collaborative schema, so it has
+        // no grammar of its own here — only a bound, which is load-bearing
+        // because the path reaches loro's container namespace.
         let bounded = |value: &str| {
             if value.len() > MAX_SCOPE_FIELD_BYTES || value.is_empty() {
                 Err(TransientError::Bounds)
@@ -116,18 +119,31 @@ impl TransientScope {
                 Ok(())
             }
         };
+        // Parsed through the real grammar rather than measured, which is what
+        // `Signal::WorldSignal` already does and what this used to skip. Its
+        // comment states the rule both shapes now follow: a World id has a
+        // shape, and something that is merely short is not therefore one. The
+        // two World-facing shapes disagreeing about what a World id *is* is how
+        // a scope and a signal about the same World stop matching.
+        let world_id =
+            |value: &str| replica::ids::WorldId::parse(value).ok_or(TransientError::Malformed);
         match self {
-            Self::IssueView { world, .. } | Self::DocumentView { world, .. } => bounded(world),
+            Self::IssueView { world, .. } | Self::DocumentView { world, .. } => {
+                world_id(world)?;
+                Ok(())
+            }
             Self::TextCaret { world, field, .. } | Self::Typing { world, field, .. } => {
-                bounded(world)?;
+                world_id(world)?;
                 bounded(field)
             }
             Self::ContentResidency { .. } => Ok(()),
-            Self::CustomWorld {
-                world, schema, key, ..
-            } => {
-                bounded(world)?;
-                bounded(schema)?;
+            Self::CustomWorld { world, schema, key } => {
+                world_id(world)?;
+                replica::ids::SchemaId::parse(schema).ok_or(TransientError::Malformed)?;
+                // The key is the World's own, so it gets a bound and no grammar
+                // — the substrate has no opinion about what a World calls its
+                // rows. What the World itself declared is enforced above this,
+                // where the registry is in scope.
                 bounded(key)
             }
         }
@@ -299,6 +315,13 @@ pub enum TransientError {
     IllegalForScope,
     /// The anchor names a path the subscribed scope does not.
     AnchorOutsideScope,
+    /// A World's own scope naming a schema that World never declared.
+    ///
+    /// Distinct from `Malformed`, which is about shape. This one parsed and is
+    /// simply not a thing the World in question said it has — the same answer a
+    /// `WorldSignal` for an undeclared schema gets, and for the same reason:
+    /// acting on it would be acting on a schema nobody reviewed.
+    NotDeclared,
 }
 
 impl std::fmt::Display for TransientError {

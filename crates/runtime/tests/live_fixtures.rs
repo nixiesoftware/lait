@@ -431,25 +431,57 @@ fn a_subscription_cannot_name_more_scopes_than_the_connection_may_hold() {
 }
 
 #[test]
-fn a_scope_with_an_empty_or_oversize_name_is_refused() {
+fn a_world_a_scope_names_is_parsed_rather_than_measured() {
+    // A World id has a shape, and something that is merely short is not
+    // therefore one. `Signal::WorldSignal` has always parsed; a scope used to
+    // measure, which meant the two World-facing shapes disagreed about what a
+    // World id *is* — so a scope and a signal about the same World could stop
+    // matching.
     let mut store = TransientStore::new();
     let now = Instant::now();
-    let empty = TransientScope::IssueView {
-        world: String::new(),
-        body: [1u8; 16],
-    };
-    assert_eq!(
-        store.admit(&item(empty, TransientPayload::Presence, 1), &EPOCH, now),
-        AdmitOutcome::Refused(TransientError::Bounds)
-    );
-    let long = TransientScope::IssueView {
-        world: "w".repeat(MAX_SCOPE_FIELD_BYTES + 1),
-        body: [1u8; 16],
-    };
-    assert_eq!(
-        store.admit(&item(long, TransientPayload::Presence, 1), &EPOCH, now),
-        AdmitOutcome::Refused(TransientError::Bounds)
-    );
+    for bad in [
+        String::new(),
+        // No dot-separated labels: long enough, and not a World id.
+        "w".repeat(MAX_SCOPE_FIELD_BYTES + 1),
+        "wwwwwwww".into(),
+        // Past the grammar's own 63-byte ceiling, well inside the scope bound
+        // that used to be the only check.
+        format!("com.example.{}", "a".repeat(60)),
+        "-com.example".into(),
+    ] {
+        let scope = TransientScope::IssueView {
+            world: bad.clone(),
+            body: [1u8; 16],
+        };
+        assert_eq!(
+            store.admit(&item(scope, TransientPayload::Presence, 1), &EPOCH, now),
+            AdmitOutcome::Refused(TransientError::Malformed),
+            "{bad:?} is not a World id"
+        );
+    }
+}
+
+#[test]
+fn a_field_path_is_bounded_rather_than_parsed() {
+    // The other half, and the reason both rules exist. A field is a name inside
+    // a Body's collaborative schema — the substrate has no grammar for it — but
+    // the bound is load-bearing, because the path reaches loro's container
+    // namespace on the receiver.
+    let mut store = TransientStore::new();
+    let now = Instant::now();
+    for bad in [String::new(), "f".repeat(MAX_SCOPE_FIELD_BYTES + 1)] {
+        let scope = TransientScope::TextCaret {
+            world: "com.example.notes".into(),
+            body: [1u8; 16],
+            field: bad.clone(),
+        };
+        assert_eq!(
+            store.admit(&item(scope, TransientPayload::Presence, 1), &EPOCH, now),
+            AdmitOutcome::Refused(TransientError::Bounds),
+            "{} is not a field path",
+            bad.len()
+        );
+    }
 }
 
 /// A dialer that can tell "another generation" from "not there".

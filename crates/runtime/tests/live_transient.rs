@@ -658,6 +658,7 @@ mod revocation {
                         SessionContext {
                             handle: Some(handle),
                             signals: None,
+                            worlds: None,
                             authority,
                         },
                     )
@@ -1358,6 +1359,7 @@ mod two_node_presence {
                         SessionContext {
                             handle: Some(handle),
                             signals: None,
+                            worlds: None,
                             authority: None,
                         },
                     )
@@ -1450,5 +1452,162 @@ mod two_node_presence {
 
         a_cancel.cancel();
         b_cancel.cancel();
+    }
+}
+
+/// A World's own scope, checked against what that World declared.
+///
+/// The scope half of what `SignalPolicy::admits_contents` does for signals.
+/// Without it, declaring a scope moves the implementation id — every peer sees a
+/// different reviewed build — and buys no enforcement at all.
+mod declared_scopes {
+    use super::*;
+    use replica::body::{BodySchema, MutationModel};
+    use replica::ids::{EncodingId, SchemaId, WorldId};
+    use runtime::live::admits_scope_for_test as admits;
+    use runtime::registry::RuntimeBuilder;
+    use runtime::transient::TransientError;
+    use runtime::world::ScopeSchema;
+    use runtime::{
+        World, WorldContext, WorldEffect, WorldError, WorldIntent, WorldLimits, WorldProjection,
+        WorldQuery, WorldRegistration, WorldVersion,
+    };
+
+    const PAD: &str = "dev.example.pad";
+
+    struct Pad(Vec<BodySchema>, Vec<ScopeSchema>);
+
+    impl World for Pad {
+        fn id(&self) -> WorldId {
+            WorldId::parse(PAD).unwrap()
+        }
+        fn schemas(&self) -> &[BodySchema] {
+            &self.0
+        }
+        fn scope_schemas(&self) -> &[ScopeSchema] {
+            &self.1
+        }
+        fn submit(
+            &self,
+            _ctx: &mut WorldContext<'_>,
+            _intent: WorldIntent,
+        ) -> Result<WorldEffect, WorldError> {
+            Err(WorldError::InvalidRequest)
+        }
+        fn query(
+            &self,
+            _ctx: &WorldContext<'_>,
+            _query: WorldQuery,
+        ) -> Result<WorldProjection, WorldError> {
+            Err(WorldError::InvalidRequest)
+        }
+    }
+
+    fn hosting(scopes: Vec<ScopeSchema>) -> runtime::registry::WorldRegistry {
+        let schemas = vec![BodySchema {
+            id: SchemaId::parse("entry").unwrap(),
+            version: 1,
+            encoding: EncodingId::parse("bytes").unwrap(),
+            mutation: MutationModel::Atomic,
+            readable_predecessors: vec![],
+        }];
+        let world = Pad(schemas.clone(), scopes.clone());
+        RuntimeBuilder::new()
+            .register(
+                WorldRegistration {
+                    id: world.id(),
+                    implementation_version: WorldVersion(1),
+                    schemas,
+                    limits: WorldLimits::default(),
+                    scope_schemas: scopes,
+                    signal_schemas: Vec::new(),
+                },
+                Arc::new(world),
+            )
+            .build()
+            .expect("registry")
+    }
+
+    fn custom(schema: &str, key: &str) -> TransientScope {
+        TransientScope::CustomWorld {
+            world: PAD.into(),
+            schema: schema.into(),
+            key: key.into(),
+        }
+    }
+
+    fn dragging(max_key_bytes: u32) -> Vec<ScopeSchema> {
+        vec![ScopeSchema {
+            name: SchemaId::parse("dragging").unwrap(),
+            max_key_bytes,
+        }]
+    }
+
+    #[test]
+    fn a_key_past_the_worlds_own_ceiling_is_refused() {
+        // The substrate's bound is 128 bytes and the World said 8. A
+        // declaration may only tighten, and the tighter number is the one that
+        // has to bite — otherwise `max_key_bytes` is a number read at
+        // registration and nowhere else.
+        let worlds = Some(hosting(dragging(8)));
+        assert_eq!(admits(&worlds, &custom("dragging", "12345678")), Ok(()));
+        assert_eq!(
+            admits(&worlds, &custom("dragging", "123456789")),
+            Err(TransientError::Bounds)
+        );
+    }
+
+    #[test]
+    fn a_schema_the_world_never_declared_is_not_declared() {
+        // `NotDeclared` and not `Malformed`: it parsed, it is simply not a thing
+        // this World says it has. Acting on it would be acting on a schema
+        // nobody reviewed.
+        let worlds = Some(hosting(dragging(64)));
+        assert_eq!(
+            admits(&worlds, &custom("resizing", "x")),
+            Err(TransientError::NotDeclared)
+        );
+    }
+
+    #[test]
+    fn a_world_this_build_does_not_host_declares_nothing() {
+        let worlds = Some(hosting(dragging(64)));
+        let elsewhere = TransientScope::CustomWorld {
+            world: "com.example.other".into(),
+            schema: "dragging".into(),
+            key: "x".into(),
+        };
+        assert_eq!(
+            admits(&worlds, &elsewhere),
+            Err(TransientError::NotDeclared)
+        );
+    }
+
+    #[test]
+    fn a_world_that_declares_no_scopes_admits_none() {
+        // Hosting a World is not hosting its scopes. A World that declared
+        // nothing has nothing this plane may carry for it.
+        let worlds = Some(hosting(Vec::new()));
+        assert_eq!(
+            admits(&worlds, &custom("dragging", "x")),
+            Err(TransientError::NotDeclared)
+        );
+    }
+
+    #[test]
+    fn the_substrates_own_scopes_are_not_a_worlds_to_declare() {
+        // A World does not get to widen or narrow what `IssueView` means. Those
+        // are the substrate's shapes, bounded by the substrate's numbers.
+        let worlds = Some(hosting(Vec::new()));
+        assert_eq!(admits(&worlds, &issue_scope(1)), Ok(()));
+        assert_eq!(admits(&worlds, &caret_scope(1)), Ok(()));
+    }
+
+    #[test]
+    fn no_registry_checks_nothing_and_is_not_a_licence() {
+        // The shape a MemNet harness with no Space behind it runs in. A Station
+        // always has a registry, so the permissive case never reaches
+        // production — asserted here so that stays a deliberate choice.
+        assert_eq!(admits(&None, &custom("anything", "at-all")), Ok(()));
     }
 }

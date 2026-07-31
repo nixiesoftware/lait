@@ -775,6 +775,13 @@ pub struct SessionContext {
     /// is not serving the lane here, and a signal flow is refused rather than
     /// ignored.
     pub signals: Option<crate::signal::SignalPolicy>,
+    /// The Worlds this build hosts, for checking a `CustomWorld` scope against
+    /// what its World actually declared.
+    ///
+    /// `None` means no check, which is the shape a MemNet harness with no Space
+    /// behind it runs in. It is not a licence: a Station always has a registry,
+    /// so the permissive case never reaches production.
+    pub worlds: Option<crate::registry::WorldRegistry>,
     /// Re-asked on a beat and before every subscription change.
     ///
     /// A session pins the authority view it was admitted at, which is what makes
@@ -794,6 +801,7 @@ pub async fn serve_session(
     let SessionContext {
         handle,
         signals,
+        worlds,
         authority,
     } = context;
     let session = Rc::new(RefCell::new(LiveSession::new(peer.station.clone())));
@@ -1037,6 +1045,9 @@ pub async fn serve_session(
                 if !session.is_watching(&item.scope) {
                     continue;
                 }
+                if admits_scope(&worlds, &item.scope).is_err() {
+                    continue;
+                }
                 if matches!(item.scope, TransientScope::ContentResidency { .. })
                     && peer.features & crate::planes::feature::RESIDENCY_HINTS == 0
                 {
@@ -1248,7 +1259,15 @@ pub async fn serve_session(
                             connection.close(REFUSED, b"");
                             break;
                         }
-                        session.subscribe(scopes)
+                        // A scope its World never declared is refused here
+                        // rather than at publish time, so it never occupies one
+                        // of this connection's subscription slots.
+                        session.subscribe(
+                            scopes
+                                .into_iter()
+                                .filter(|scope| admits_scope(&worlds, scope).is_ok())
+                                .collect(),
+                        )
                     }
                     LiveControl::Retire { scope, seq } => {
                         // Retirement covers every kind that scope admits: a
@@ -1273,6 +1292,57 @@ pub async fn serve_session(
             _ = tokio::time::sleep(deadline::DRIVER_POLL) => {}
         }
     }
+}
+
+/// `admits_scope`, for the fixtures that pin its rules.
+///
+/// A thin re-export rather than making the function public: the check belongs to
+/// the session that runs it, and a caller outside this module reaching for it
+/// would be a second place deciding what a World declared.
+pub fn admits_scope_for_test(
+    worlds: &Option<crate::registry::WorldRegistry>,
+    scope: &TransientScope,
+) -> Result<(), crate::transient::TransientError> {
+    admits_scope(worlds, scope)
+}
+
+/// Whether a World's own scope is one that World declared.
+///
+/// The scope half of what `SignalPolicy::admits_contents` does for signals, and
+/// it exists for the same reason: without it a declaration moves the
+/// implementation id — every peer sees a different reviewed build — and buys no
+/// enforcement at all. A World could declare a 32-byte board key and a peer
+/// could publish a 128-byte one under a schema that World never named.
+///
+/// Only `CustomWorld` is checked. Every other scope is the substrate's own
+/// shape, bounded by the substrate's own numbers, and a World does not get to
+/// widen or narrow what `IssueView` means.
+fn admits_scope(
+    worlds: &Option<crate::registry::WorldRegistry>,
+    scope: &TransientScope,
+) -> Result<(), crate::transient::TransientError> {
+    let TransientScope::CustomWorld { world, schema, key } = scope else {
+        return Ok(());
+    };
+    let Some(worlds) = worlds else {
+        return Ok(());
+    };
+    let world =
+        replica::ids::WorldId::parse(world).ok_or(crate::transient::TransientError::Malformed)?;
+    let schema =
+        replica::ids::SchemaId::parse(schema).ok_or(crate::transient::TransientError::Malformed)?;
+    let registration = worlds
+        .registration(&world)
+        .ok_or(crate::transient::TransientError::NotDeclared)?;
+    let declared = registration
+        .scope_schemas
+        .iter()
+        .find(|candidate| candidate.name == schema)
+        .ok_or(crate::transient::TransientError::NotDeclared)?;
+    if key.len() > declared.max_key_bytes as usize {
+        return Err(crate::transient::TransientError::Bounds);
+    }
+    Ok(())
 }
 
 /// Tell one peer which scopes this connection is about.
@@ -1467,6 +1537,7 @@ impl crate::plane_driver::PlaneService for LiveService {
             SessionContext {
                 handle: Some(self.handle.clone()),
                 signals: Some(signals),
+                worlds: Some(self.worlds.clone()),
                 authority: Some(self.authority.clone()),
             },
         )
@@ -2058,6 +2129,7 @@ async fn dial_and_serve(task: DialTask, peer: StationId, session_id: [u8; 16]) {
         SessionContext {
             handle: Some(task.handle.clone()),
             signals: Some(signals),
+            worlds: Some(task.worlds.clone()),
             authority: Some(task.authority.clone()),
         },
     )
