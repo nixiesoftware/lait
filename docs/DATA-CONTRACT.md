@@ -439,6 +439,17 @@ waiting an hour is exactly as valid as when it arrived, so only a decision or a
 revocation removes one. It is still not durable: it lives in memory and a
 restart forgets it, and the file it names is unaffected either way.
 
+**What a Station publishes about itself is not in what it reads.** Two maps, not
+one. A viewer whose own presence appeared in the table it reads would draw itself
+beside everybody else, on every screen, for as long as it was looking.
+
+**A World's declared scopes and signals are enforced, not merely reviewed.** A
+scope naming a schema its World never declared is refused at subscription, before
+it occupies a slot; a signal past its World's declared ceiling is refused before
+its payload is acted on. Without that the descriptor's sections would move an
+implementation id — every peer seeing a different reviewed build — and buy
+nothing. A World that declares nothing keeps the id it had.
+
 **A display name from a peer is stored exactly as sent.** It is sanitised where
 it becomes a path and nowhere earlier. Rewriting on arrival would mean the name
 shown to a person is not the name that was sent, and would break the

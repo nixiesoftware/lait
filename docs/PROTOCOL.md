@@ -814,6 +814,33 @@ of what a client is looking at. An incremental protocol would let a client that
 adds and removes views faster than its messages arrive end up subscribed to a
 set neither side agrees on.
 
+**A subscription is also a declaration, and it goes first.** On this plane the
+two are one fact: having a document open is both "tell me about this" and "I am
+here". A receiver drops a datagram for a scope the connection never subscribed
+to — that bound is what stops a peer making a Station hold state on its behalf —
+so presence published without a subscription is presence silently discarded.
+
+**Nothing orders a reliable flow against an unreliable datagram**, and the
+subscription rides the first while presence rides the second. A presence datagram
+that overtakes its own subscription is therefore dropped, and the next word that
+peer would hear is a full refresh interval away. A publisher re-sends the declared
+set on a fast beat for a few seconds after it changes, which closes that window at
+the cost of a handful of datagrams. It is not an acknowledgement scheme — there is
+nothing to acknowledge with here — and a face appearing a second late is the worst
+outcome rather than a lost one.
+
+**Presence is re-sent before it expires, not only when it changes.** A slot dies
+on the *receiver's* clock, so a publisher that spoke once and never again watches
+everybody vanish after a minute and a half. The refresh interval sits comfortably
+inside the presence TTL so that losing two refreshes in a row is survivable, which
+a datagram path does without apologising.
+
+**A departure is retired rather than left to expire.** Retirement is an
+optimisation on top of expiry and never a prerequisite, but the difference a
+person sees is a face vanishing when a tab closes rather than ninety seconds
+later. The retirement carries the publisher's current sequence number, so a
+presence datagram already in flight cannot rebuild the slot behind it.
+
 **Awareness may be partial and has to say when it is.** Over the session
 ceiling, or when a gate has dropped an item, the view reports itself
 incomplete. Durable convergence is unaffected — that is Contact's job and it
@@ -902,6 +929,32 @@ bounded. It says nothing about whether a person saw them. Delivery failure is
 deliberately not observable to the sender: zero local listeners and a lagged
 local ring both leave the wire outcome unchanged, or a peer could learn whether
 a viewer is open by pinging with an attention signal.
+
+**Presence decides delivery, and nothing is held for the absent.** A signal
+reaches a peer that currently holds a session; a peer with none is not queued for
+and not retried. That is not a limitation being apologised for — the durable
+record behind every signal is already committed and already converging, and it is
+the absent peer's path. Holding signals for later would make this plane a
+mailbox, which is the one thing a plane that keeps nothing must not become.
+
+Choosing by presence rather than by a stored preference is the whole reason the
+two planes are worth having together: presence is what is true now, and a
+preference is what somebody configured once.
+
+**A World says who and what; the host says whether they are reachable.** A World
+that could see who is connected would be a World holding a delivery plane, and a
+host that knew what a product's verbs mean would be a host holding product rules.
+Neither happens: a World answers with an actor and a declared schema, and the host
+turns that into a signal only for the peers it can actually reach.
+
+**Nobody is told about their own action.** The acting identity is filtered out of
+every fan-out. A person notified of everything they did stops reading
+notifications, which costs the notifications that matter.
+
+**An outbox refuses the newest rather than evicting the oldest.** Both are facts,
+and evicting trades one for another of exactly equal standing — the rule a cursor
+stream wants and a signal does not. The refusal reaches no sender: telling one
+would be telling it about the receiver's queue.
 
 **A file offer is a message, not a transfer.** Receiving one queues a name and a
 content id. No fetch starts, no path is resolved, no byte is written. Whether

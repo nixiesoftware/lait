@@ -321,6 +321,27 @@ and the session ceiling together bound resolutions to a few thousand a second
 against a commit measured in milliseconds. That is a small duty cycle rather
 than a safe one, and it is the number to re-derive if either ceiling moves.
 
+**Presence is a gate on delivery, which makes it worth lying about.** A signal
+goes to a peer that currently holds a session, so a peer that could fake presence
+could pull other people's nudges toward itself. It cannot: presence for delivery
+is the set of Stations this node holds a session with, established by the
+transport's own authentication and the admission that followed it, and never a
+claim carried in a message. A peer that says it is somebody else is refused before
+it has a session at all.
+
+**A nudge names durable material and never carries it.** Losing one costs
+timeliness. That is deliberate — an alert that carried the fact would be a second
+copy of it on a plane that keeps nothing, and would then have to be as trustworthy
+as the record, which nothing here signs.
+
+**A World's declared surface is enforced at delivery, not only reviewed at
+registration.** A scope naming an undeclared schema is refused before it takes a
+slot, and a signal past its World's declared ceiling is refused before its payload
+reaches the World. Reviewing a declaration and then not enforcing it is the shape
+of a reviewed identity that means nothing — the descriptor would move an
+implementation id, every peer would see a different build, and a peer could still
+send whatever it liked.
+
 **Awareness is allowed to be incomplete; durable convergence is not.** Over the
 session ceiling, or after a gate drop, the view reports itself partial. A
 surface that can be incomplete and does not say so is worse than one that is
