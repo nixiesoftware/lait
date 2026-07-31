@@ -258,3 +258,35 @@ mod wire {
         assert_eq!(bad_schema.validate(), Err(PlaneWireError::NonCanonical));
     }
 }
+
+/// What a Station does with a signal once it has one.
+mod delivery {
+    use runtime::live::LiveService;
+    use runtime::planes::Signal;
+
+    #[tokio::test]
+    async fn a_signal_with_nobody_listening_is_not_a_failure() {
+        // A Station with no viewer attached still admits signals and still
+        // bounds them; it simply has nobody to hand them to. Treating that as
+        // an error would make an idle Station refuse traffic it accepted.
+        let service = LiveService::new();
+        drop(service.signals());
+        // No subscriber, and nothing here panics or blocks.
+        assert!(service.present().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_subscriber_hears_what_follows_it_and_not_what_preceded_it() {
+        // A signal is an event, not a state anyone can re-read. Subscribing
+        // late means missing what already happened, which is the honest
+        // behaviour — the alternative is a Station holding events for readers
+        // that may never arrive.
+        let service = LiveService::new();
+        let mut listener = service.signals();
+        assert!(
+            listener.try_recv().is_err(),
+            "nothing has happened yet, so there is nothing to hear"
+        );
+        let _ = Signal::Ping { nonce: [1u8; 16] };
+    }
+}

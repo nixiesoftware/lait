@@ -139,6 +139,22 @@ impl LiveSession {
     }
 }
 
+/// Where a received signal goes.
+///
+/// A broadcast rather than a callback, because a signal has no single owner: a
+/// file offer is for a person, an invite may be for a viewer and a log, and the
+/// plane should not have to know which. Lagging is fine and does not need
+/// reporting — a subscriber that fell behind on invitations missed
+/// invitations, which is a thing that happens to people too.
+pub type SignalSink = tokio::sync::broadcast::Sender<(StationId, crate::planes::Signal)>;
+
+/// How many received signals are held for a subscriber that is not reading.
+///
+/// Small. Signals are person-scale and rate-limited at four a second per
+/// connection, so a subscriber this far behind is not going to catch up by
+/// being given more room.
+const SIGNAL_QUEUE: usize = 32;
+
 /// Serve one admitted Live connection until it ends or the driver stops.
 ///
 /// Everything here is `Rc`/`RefCell` and never a lock: `run_driver` is a
@@ -148,6 +164,7 @@ pub async fn serve_session(
     connection: std::sync::Arc<dyn comms::Connection>,
     peer: AdmittedPeer,
     cancel: crate::lifecycle::CancelToken,
+    signals: Option<SignalSink>,
 ) {
     let session = Rc::new(RefCell::new(LiveSession::new(peer.station.clone())));
     let epoch = peer.session_epoch;
@@ -160,6 +177,10 @@ pub async fn serve_session(
     let mut datagram_gate = Gate::from_spec(Instant::now(), gates::LIVE_DATAGRAMS);
     let mut datagram_bytes = ByteGate::from_spec(Instant::now(), gates::LIVE_DATAGRAM_BYTES);
     let mut accept_gate = Gate::from_spec(Instant::now(), gates::STREAM_ACCEPT);
+    // Signals get their own pair. A person-scale event arrives four a second at
+    // most, and a peer sending them faster than that is not a person.
+    let mut signal_gate = Gate::from_spec(Instant::now(), gates::SIGNAL_RATE);
+    let mut signal_bytes = ByteGate::from_spec(Instant::now(), gates::SIGNAL_BYTES);
 
     // The permit before the stream kind is read, mirroring Freight: a peer that
     // opens flows faster than they are served queues on a semaphore rather than
@@ -265,6 +286,44 @@ pub async fn serve_session(
                         continue;
                     }
                 };
+                if kind == stream_kind::RELIABLE_SIGNAL {
+                    match signal_gate.check(Instant::now()) {
+                        Verdict::Allow => {}
+                        Verdict::Drop => {
+                            drop(send);
+                            continue;
+                        }
+                        Verdict::Close => {
+                            connection.close(REFUSED, b"");
+                            break;
+                        }
+                    }
+                    // One bounded message per stream, read under the
+                    // declaration's own ceiling — resolved from the selector
+                    // before the length is consulted, which is what makes that
+                    // ceiling a pre-allocation bound rather than a comment.
+                    let received = tokio::time::timeout(
+                        deadline::SIGNAL_READ,
+                        crate::signal::read_signal(recv.as_mut()),
+                    )
+                    .await;
+                    drop(send);
+                    let Ok(Ok(signal)) = received else { continue };
+                    if matches!(
+                        signal_bytes.check(Instant::now(), signal.encode().len()),
+                        Verdict::Close
+                    ) {
+                        connection.close(REFUSED, b"");
+                        break;
+                    }
+                    if let Some(sink) = &signals {
+                        // Nobody listening is not a failure. A Station with no
+                        // viewer attached still admits signals and still bounds
+                        // them; it simply has nobody to hand them to.
+                        let _ = sink.send((peer.station.clone(), signal));
+                    }
+                    continue;
+                }
                 if kind != stream_kind::CONTROL {
                     drop(send);
                     continue;
@@ -349,13 +408,24 @@ pub fn publish(
 /// function, and this is it.
 pub struct LiveService {
     sessions: std::cell::RefCell<Vec<StationId>>,
+    signals: SignalSink,
 }
 
 impl LiveService {
     pub fn new() -> Self {
         Self {
             sessions: std::cell::RefCell::new(Vec::new()),
+            signals: tokio::sync::broadcast::channel(SIGNAL_QUEUE).0,
         }
+    }
+
+    /// Listen for signals this Station receives.
+    ///
+    /// Subscribing before anything arrives is the only way to hear anything:
+    /// a broadcast delivers what follows the subscription, and a signal is an
+    /// event rather than a state anyone can re-read.
+    pub fn signals(&self) -> tokio::sync::broadcast::Receiver<(StationId, crate::planes::Signal)> {
+        self.signals.subscribe()
     }
 
     /// Which peers currently hold a session. A Station-local answer, and not a
@@ -380,7 +450,7 @@ impl crate::plane_driver::PlaneService for LiveService {
     ) {
         let station = peer.station.clone();
         self.sessions.borrow_mut().push(station.clone());
-        serve_session(connection, peer, cancel).await;
+        serve_session(connection, peer, cancel, Some(self.signals.clone())).await;
         // Removed on the way out, whatever ended it. Presence has no goodbye it
         // can rely on, so the session ending *is* the goodbye — and a peer left
         // in this list after its connection closed is a ghost that no TTL
