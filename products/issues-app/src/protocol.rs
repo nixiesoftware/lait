@@ -123,6 +123,27 @@ pub enum IssuesRequest {
         #[serde(default)]
         reply_to: Option<String>,
     },
+    /// Comment on a span of an issue's collaborative text.
+    ///
+    /// A separate verb from [`IssuesRequest::Comment`] for the same reason
+    /// `IssueIntent::CommentAt` is separate from `IssueIntent::Comment`: the
+    /// span carries preconditions a plain comment has none of, and `comment`'s
+    /// field set is the wire form clients already write.
+    CommentAt {
+        reff: String,
+        body: String,
+        /// The collaborative text field the span lies in — `description`.
+        field: String,
+        /// The span's start, in Unicode scalar offsets. A browser client
+        /// counts a `string` in UTF-16 code units and must convert; the two
+        /// disagree on every astral character.
+        start: u64,
+        /// The span's end. Absent names a position rather than a span.
+        #[serde(default)]
+        end: Option<u64>,
+        #[serde(default)]
+        reply_to: Option<String>,
+    },
     React {
         reff: String,
         comment: String,
@@ -576,6 +597,7 @@ impl IssuesRequest {
             | Assign { .. }
             | Label { .. }
             | Comment { .. }
+            | CommentAt { .. }
             | React { .. }
             | IssueDelete { .. }
             | IssueRestore { .. }

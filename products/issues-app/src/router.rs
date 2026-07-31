@@ -137,7 +137,9 @@ impl WorldCallHandler for IssuesCallHandler {
         };
         let (reff, schema) = match &request {
             Request::Assign { reff, .. } => (reff, contract::signal::ASSIGNED),
-            Request::Comment { reff, .. } => (reff, contract::signal::COMMENTED),
+            Request::Comment { reff, .. } | Request::CommentAt { reff, .. } => {
+                (reff, contract::signal::COMMENTED)
+            }
             _ => return Vec::new(),
         };
         static CLOCK: std::sync::OnceLock<SystemUlidSource> = std::sync::OnceLock::new();
@@ -536,6 +538,7 @@ impl<'a> IssueRouter<'a> {
                 | Request::Assign { .. }
                 | Request::Label { .. }
                 | Request::Comment { .. }
+                | Request::CommentAt { .. }
                 | Request::React { .. }
                 | Request::IssueDelete { .. }
                 | Request::IssueRestore { .. }
@@ -798,6 +801,34 @@ impl<'a> IssueRouter<'a> {
                     // The adapter mints the id (lowercase — it doubles as a
                     // Body path segment); the World re-validates it.
                     id: Some(issues::ids::mint_comment_id(self.clock)),
+                    parent: reply_to,
+                    actor: facts.actor.clone(),
+                    device: facts.device.clone(),
+                    ts: facts.now,
+                })
+                .map_err(Self::effect_err)?;
+                Ok((self.ref_response(&doc), true))
+            }
+            Request::CommentAt {
+                reff,
+                body,
+                field,
+                start,
+                end,
+                reply_to,
+            } => {
+                let doc = self.resolve(&snapshot, &reff)?;
+                self.submit(&IssueIntent::CommentAt {
+                    doc: doc.clone(),
+                    body,
+                    field,
+                    start,
+                    end,
+                    // The adapter mints the id (lowercase — it doubles as a
+                    // Body path segment); the World re-validates it. Required
+                    // rather than optional here: a span with no comment id
+                    // behind it is a span no reader can name.
+                    id: issues::ids::mint_comment_id(self.clock),
                     parent: reply_to,
                     actor: facts.actor.clone(),
                     device: facts.device.clone(),

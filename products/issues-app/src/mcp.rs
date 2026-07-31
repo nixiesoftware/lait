@@ -93,6 +93,23 @@ struct CommentArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+struct CommentAtArgs {
+    reff: String,
+    body: String,
+    /// The collaborative text field the span lies in — `description`.
+    field: String,
+    /// The span's start, counted in Unicode scalars. An agent reading the issue
+    /// as JSON counts the same way; a browser client counts UTF-16 code units
+    /// and must convert.
+    start: u64,
+    /// The span's end. Absent names a position rather than a span.
+    #[serde(default)]
+    end: Option<u64>,
+    #[serde(default)]
+    reply_to: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 struct ReactArgs {
     reff: String,
     comment: String,
@@ -264,6 +281,11 @@ pub fn tools() -> Vec<McpTool> {
         tool::<AssignArgs>("assign", "Add or remove issue assignees.", assign),
         tool::<LabelArgs>("label", "Add or remove labels on an issue.", label),
         tool::<CommentArgs>("comment", "Append an immutable comment.", comment),
+        tool::<CommentAtArgs>(
+            "comment_at",
+            "Comment on a span of an issue's description.",
+            comment_at,
+        ),
         tool::<ReactArgs>("react", "Toggle a reaction on a comment.", react),
         tool::<RefArgs>("delete", "Tombstone an issue.", issue_delete),
         tool::<RefArgs>("restore", "Restore a deleted issue.", issue_restore),
@@ -425,6 +447,18 @@ fn comment(input: Value) -> Result<CliInvocation, InterfaceError> {
     world(IssuesRequest::Comment {
         reff: a.reff,
         body: a.body,
+        reply_to: a.reply_to,
+    })
+}
+
+fn comment_at(input: Value) -> Result<CliInvocation, InterfaceError> {
+    let a: CommentAtArgs = args(input)?;
+    world(IssuesRequest::CommentAt {
+        reff: a.reff,
+        body: a.body,
+        field: a.field,
+        start: a.start,
+        end: a.end,
         reply_to: a.reply_to,
     })
 }
@@ -658,10 +692,146 @@ fn parse_position(value: &str) -> Option<BoardPos> {
 mod tests {
     use super::*;
 
+    /// The command tags the wire protocol defines, read out of the type rather
+    /// than out of a list beside it.
+    fn protocol_command_tags() -> Vec<String> {
+        let schema = serde_json::to_value(schemars::schema_for!(IssuesRequest))
+            .expect("the request schema is JSON serializable");
+        schema["oneOf"]
+            .as_array()
+            .expect("an internally tagged enum schemas as a oneOf")
+            .iter()
+            .map(|variant| {
+                variant["properties"]["cmd"]["const"]
+                    .as_str()
+                    .expect("every variant pins its own cmd tag")
+                    .to_string()
+            })
+            .collect()
+    }
+
+    /// The smallest instance a schema's own required fields accept.
+    fn minimal_instance(schema: &Value) -> Value {
+        let properties = &schema["properties"];
+        let required = schema["required"].as_array().cloned().unwrap_or_default();
+        let object = required
+            .iter()
+            .filter_map(Value::as_str)
+            .map(|name| {
+                let property = &properties[name];
+                let value = match property["type"].as_str() {
+                    Some("string") => json!("x"),
+                    Some("integer" | "number") => json!(0),
+                    Some("boolean") => json!(false),
+                    Some("array") => json!([]),
+                    other => panic!("no placeholder for a required `{name}` of type {other:?}"),
+                };
+                (name.to_string(), value)
+            })
+            .collect();
+        Value::Object(object)
+    }
+
+    /// The command tag every tool actually emits, taken from the call it makes.
+    fn tags_reachable_through_tools() -> std::collections::BTreeSet<String> {
+        let mut tags = std::collections::BTreeSet::new();
+        for tool in tools() {
+            let invocation = tool
+                .call(minimal_instance(&tool.schema()))
+                .unwrap_or_else(|error| {
+                    panic!("tool `{}` rejects its own schema: {error}", tool.name())
+                });
+            if let world_interface::ClientInvocationKind::World(call) = invocation.into_kind() {
+                let request = crate::decode_call(&call).expect("a tool emits its own protocol");
+                let encoded = serde_json::to_value(&request).expect("request json");
+                tags.insert(
+                    encoded["cmd"]
+                        .as_str()
+                        .expect("a request carries its cmd tag")
+                        .to_string(),
+                );
+            }
+        }
+        tags
+    }
+
+    /// The commands no tool emits, as of this build.
+    ///
+    /// Two kinds, and both are named one by one rather than skipped by shape.
+    /// `inbox` and `access_plan` are driven through a LOCAL invocation, so the
+    /// World call a tool ends up making is not the one it returns. The rest have
+    /// no agent surface at all: they shipped on the CLI and the web client and
+    /// were never given a tool.
+    ///
+    /// Writing them out is what makes the guard work. A command added after this
+    /// list is not on it, so it must arrive with a tool or fail the build — and
+    /// a tool added for one of these forces its removal from the list.
+    const WITHOUT_A_TOOL: &[&str] = &[
+        "access_plan",
+        "attach",
+        "attachment_get",
+        "cycle_list",
+        "cycle_set",
+        "detach",
+        "follow",
+        "inbox",
+        "initiative_list",
+        "initiative_set",
+        "issue_cycle",
+        "issue_milestone",
+        "label_delete",
+        "label_edit",
+        "milestone_list",
+        "milestone_set",
+        "project_delete",
+        "project_edit",
+        "project_update_post",
+        "project_updates",
+        "space_describe",
+        "space_rename",
+        "team_list",
+        "team_set",
+        "triage_decide",
+        "triage_list",
+        "triage_submit",
+    ];
+
+    /// Every command on the wire protocol is reachable through a tool, or is
+    /// written down as one that is not.
+    ///
+    /// Derived from [`IssuesRequest`] itself. A list of expected command names
+    /// kept beside the enum cannot fail when a variant is added, which is the
+    /// one event a parity guard exists for — so the tags come out of the type's
+    /// own schema, and every tool is called to see which tag it really emits.
+    #[test]
+    fn every_protocol_command_is_reachable_through_a_tool() {
+        let reachable = tags_reachable_through_tools();
+        let defined = protocol_command_tags();
+        let missing: Vec<&String> = defined
+            .iter()
+            .filter(|tag| !reachable.contains(*tag) && !WITHOUT_A_TOOL.contains(&tag.as_str()))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "these commands are on the wire protocol with no MCP tool behind them — the \
+             agent surface drifted from the command surface: {missing:?}"
+        );
+        for tag in WITHOUT_A_TOOL {
+            assert!(
+                defined.iter().any(|command| command == tag),
+                "`{tag}` is listed as having no tool but is not a command"
+            );
+            assert!(
+                !reachable.contains(*tag),
+                "`{tag}` has a tool now and must come off the list"
+            );
+        }
+    }
+
     #[test]
     fn tools_are_package_local_and_emit_world_calls() {
         let tools = tools();
-        assert_eq!(tools.len(), 38);
+        assert_eq!(tools.len(), 39);
         assert!(tools.iter().all(|tool| !tool.name().starts_with("issues_")));
         let invocation = tools
             .iter()

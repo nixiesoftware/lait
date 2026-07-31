@@ -558,6 +558,42 @@ pub enum IssueIntent {
         device: String,
         ts: u64,
     },
+    /// Comment on a span of an issue's collaborative text.
+    ///
+    /// Its own verb rather than an optional field on [`IssueIntent::Comment`]:
+    /// it carries preconditions a plain comment has none of — the field must be
+    /// collaborative text and the span must lie inside material that exists —
+    /// and `Comment`'s field set is the wire form clients already write.
+    ///
+    /// The span arrives as offsets and NEVER as an encoded anchor. The World
+    /// mints the anchor itself, which is what makes the stored anchor sound:
+    /// `FabricAnchor::decode_canonical` bounds neither `path` nor `offset`, and
+    /// the `body` digest a correct anchor needs is computed by a substrate
+    /// function no product can call — so a wire-supplied anchor is either
+    /// unbounded or permanently drifted, and there is no third case.
+    CommentAt {
+        doc: String,
+        body: String,
+        /// The collaborative text path the span lies in.
+        field: String,
+        /// The span's start, in Unicode scalar offsets into `field` — the
+        /// coordinates the convergence engine validates text ops in.
+        start: u64,
+        /// The span's end. Absent names a position rather than a span.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        end: Option<u64>,
+        /// Required here, unlike on [`IssueIntent::Comment`]. Reactions and
+        /// replies already refuse to attach to an id-less comment; a span is
+        /// the third thing a comment cannot carry without an identity of its
+        /// own, because a reader that cannot name the comment cannot tell a
+        /// caller which span moved.
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent: Option<String>,
+        actor: String,
+        device: String,
+        ts: u64,
+    },
     /// Toggle one actor's emoji reaction on one comment. Deliberately writes
     /// **no history event**: a reaction is a social signal, not a change of
     /// record, and history rows for every 👍 would bury the changes that are.
@@ -1132,11 +1168,12 @@ pub struct EventChange {
 
 /// A stored comment list element.
 ///
-/// `id`/`parent` arrived after v0.6 comments shipped, so both are optional
-/// with absent-means-absent serialization: pre-existing comments keep their
-/// exact stored bytes, and older builds deserialize enriched comments
-/// unchanged (serde ignores unknown fields). A comment without an `id`
-/// predates identity and simply cannot anchor reactions or replies.
+/// `id`/`parent` arrived after v0.6 comments shipped, and `at` after them, so
+/// all three are optional with absent-means-absent serialization: pre-existing
+/// comments keep their exact stored bytes, and older builds deserialize
+/// enriched comments unchanged (serde ignores unknown fields). A comment
+/// without an `id` predates identity and simply cannot anchor reactions or
+/// replies.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredComment {
     pub a: String,
@@ -1149,6 +1186,34 @@ pub struct StoredComment {
     /// the same root).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<String>,
+    /// Where in the issue's collaborative text this comment is attached.
+    /// Absent on an ordinary comment, which is most of them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<StoredAnchor>,
+}
+
+/// A comment's durable attachment to a span of collaborative text.
+///
+/// What is stored is the ANCHOR, never a resolved offset. An offset is true of
+/// one version of the Body and of no other; the anchors are the only form that
+/// survives the edits made after the comment. See
+/// [`crate::dto::CommentAnchorState`] for the read half of that rule.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredAnchor {
+    /// The collaborative text path the span lies in — see
+    /// [`crate::views::IssueState::anchorable_text`], which is the list of
+    /// paths this build will anchor into and the reason there is a list.
+    pub field: String,
+    /// The span's start, a hex-encoded [`replica::FabricAnchor`].
+    ///
+    /// Hex rather than the raw bytes because the record is JSON and
+    /// `serde_json` writes a `Vec<u8>` as a decimal array — about four bytes of
+    /// record per byte of anchor.
+    pub start: String,
+    /// The span's end. Absent means the comment names a position rather than a
+    /// span.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end: Option<String>,
 }
 
 /// The default workflow, exactly the legacy seed.
@@ -1207,5 +1272,52 @@ mod ring_digest_tests {
     fn an_unknown_plane_fails_the_decode() {
         let json = br#"{"planes":[{"plane":{"scope":"from_the_future"},"digest":"x"}],"docs":[]}"#;
         assert!(serde_json::from_slice::<RingDigestView>(json).is_err());
+    }
+}
+
+#[cfg(test)]
+mod stored_comment_tests {
+    use super::*;
+
+    /// A comment written before spans existed decodes unchanged, and re-encodes
+    /// to the same bytes.
+    ///
+    /// This is what "additive" has to mean for a record that is already in
+    /// Bodies in the field: absent `at` is absent, not `null`, so a peer running
+    /// this build and a peer running the previous one agree byte for byte about
+    /// every comment neither of them attached to anything.
+    #[test]
+    fn a_comment_written_before_spans_existed_is_byte_neutral() {
+        let stored = br#"{"a":"act_1","t":7,"b":"hello","id":"cmt_1"}"#;
+        let comment: StoredComment = serde_json::from_slice(stored).expect("decode");
+        assert!(comment.at.is_none());
+        assert_eq!(serde_json::to_vec(&comment).expect("encode"), stored);
+    }
+
+    /// A point attachment does not serialize an `end`, so the two forms stay
+    /// distinguishable on the wire.
+    #[test]
+    fn a_point_attachment_omits_the_end() {
+        let comment = StoredComment {
+            a: "act_1".into(),
+            t: 7,
+            b: "hello".into(),
+            id: Some("cmt_1".into()),
+            parent: None,
+            at: Some(StoredAnchor {
+                field: "description".into(),
+                start: "ab".into(),
+                end: None,
+            }),
+        };
+        let json = serde_json::to_string(&comment).expect("encode");
+        assert_eq!(
+            json,
+            r#"{"a":"act_1","t":7,"b":"hello","id":"cmt_1","at":{"field":"description","start":"ab"}}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<StoredComment>(&json).expect("decode"),
+            comment
+        );
     }
 }

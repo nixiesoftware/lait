@@ -492,6 +492,212 @@ fn issue_state(ctx: &WorldContext<'_>, doc: &str) -> Option<IssueState> {
         .map(|v| IssueState::from_view(&v))
 }
 
+/// The preconditions both comment verbs share, and the issue they hold for.
+///
+/// The daemon mints the id; the World re-validates it — including uniqueness,
+/// because a duplicated id would fuse two comments' reactions, replies and
+/// spans.
+fn check_comment(
+    ctx: &WorldContext<'_>,
+    doc: &str,
+    body: &str,
+    actor: &str,
+    id: Option<&str>,
+    parent: Option<&str>,
+) -> Result<IssueState, WorldError> {
+    if body.is_empty() || ActorId::parse(actor).is_none() {
+        return Err(WorldError::InvalidRequest);
+    }
+    let issue = issue_state(ctx, doc).ok_or(WorldError::InvalidRequest)?;
+    if let Some(id) = id {
+        if !contract::is_comment_id(id)
+            || issue.comments.iter().any(|c| c.id.as_deref() == Some(id))
+        {
+            return Err(WorldError::InvalidRequest);
+        }
+    }
+    if let Some(parent) = parent {
+        // A reply needs an addressable target: an existing comment that carries
+        // an id (pre-identity comments cannot anchor threads) and is itself a
+        // root — one level, no ladders.
+        let target = issue
+            .comments
+            .iter()
+            .find(|c| c.id.as_deref() == Some(parent))
+            .ok_or(WorldError::InvalidRequest)?;
+        if id.is_none() || target.parent.is_some() {
+            return Err(WorldError::InvalidRequest);
+        }
+    }
+    Ok(issue)
+}
+
+/// Append a comment record and its history event.
+fn stage_comment(
+    staging: &mut Staging,
+    ctx: &WorldContext<'_>,
+    doc: &str,
+    issue: &IssueState,
+    record: StoredComment,
+    device: &str,
+    ts: u64,
+) {
+    let mut ev = event("commented", device, ts);
+    ev.x = record.b.clone();
+    staging.issue(
+        &issue_key(doc),
+        BodyOp::ListInsert {
+            path: "comments".into(),
+            index: issue.comments.len() as u64,
+            value: serde_json::to_vec(&record).expect("comment json"),
+        },
+    );
+    push_event(staging, ctx, doc, &ev);
+}
+
+/// Mint the durable anchors for a range-attached comment, or refuse.
+///
+/// Every refusal here has the same shape: the alternative is storing an anchor
+/// nothing can resolve, which reads back as a confident position that was never
+/// true.
+///
+/// - A field this build does not write with a text operation. See
+///   [`IssueState::anchorable_text`] — `anchor_in_body` answers `Some` for any
+///   path, so an anchor into a register is minted happily and then answers
+///   position zero forever.
+/// - A field with no material yet. A span of an empty text names nothing; the
+///   anchor the algebra returns for it binds to no operation and can therefore
+///   never report drift.
+/// - A span running backwards or past the end of what it names.
+/// - A Body the algebra will not anchor in at all — absent, or not
+///   collaborative. `anchor_in_body` returning `None` is the substrate saying
+///   there is no position here, and the World does not invent one.
+///
+/// A span with material binds its head to the first character INSIDE it rather
+/// than to the character in front of it. `BodyReader::anchor_in_body` binds
+/// position `p` to whatever wrote character `p - 1`, so minting the head at
+/// `start` would tie the comment to a character nobody marked: deleting the
+/// space in front of a marked word would then report the word as gone. Minting
+/// the head at `start + 1` binds it to the word's own first character, and the
+/// read half subtracts the one back. An empty span has no first character to
+/// bind to, so it is stored as the caret it is — `end` absent — and keeps the
+/// character-in-front binding, which is the only one a caret at the very end of
+/// a text can have.
+fn mint_comment_anchor(
+    ctx: &WorldContext<'_>,
+    doc: &str,
+    issue: &IssueState,
+    field: &str,
+    start: u64,
+    end: Option<u64>,
+) -> Result<contract::StoredAnchor, WorldError> {
+    let text = issue
+        .anchorable_text(field)
+        .ok_or(WorldError::InvalidRequest)?;
+    // Unicode scalars: the coordinate system `BodyOp::TextSplice` is validated
+    // in, so a span counted any other way would name a different place.
+    let length = text.chars().count() as u64;
+    let last = end.unwrap_or(start);
+    if length == 0 || start > last || last > length {
+        return Err(WorldError::InvalidRequest);
+    }
+    let key = issue_key(doc);
+    let mint = |position: u64| -> Result<String, WorldError> {
+        ctx.anchor(&key, field, position)
+            .map(|anchor| data_encoding::HEXLOWER.encode(&anchor.encode()))
+            .ok_or(WorldError::InvalidRequest)
+    };
+    let span = start < last;
+    Ok(contract::StoredAnchor {
+        field: field.to_string(),
+        start: mint(if span { start + 1 } else { start })?,
+        end: span.then(|| mint(last)).transpose()?,
+    })
+}
+
+/// Resolve one stored comment's span against the snapshot THIS query is pinned
+/// to.
+///
+/// Called per read and never memoized. The parsed [`IssueState`] is cached
+/// under a Body version stamp, so a resolution placed in it would be served
+/// against a Body it was never true of — the stale index the algebra exists to
+/// prevent. What is cached is the anchor; what is computed is the position.
+///
+/// The two preconditions [`mint_comment_anchor`] refuses on are checked again
+/// here, against the record instead of the request. A comment is a list element
+/// of a shared Body, so a record arrives over Contact from peers running builds
+/// this one does not control; `anchor_in_body` validates no path, and an anchor
+/// naming a register resolves to a confident position zero that can never
+/// drift. Refusing that only at the write seam would leave the read seam
+/// affirming the exact lie the write seam exists to stop.
+fn resolve_comment_anchor(
+    ctx: &WorldContext<'_>,
+    doc: &str,
+    issue: &IssueState,
+    comment: &StoredComment,
+) -> Option<crate::dto::CommentAnchorDto> {
+    use crate::dto::CommentAnchorState;
+    let at = comment.at.as_ref()?;
+    let dto = |state| {
+        Some(crate::dto::CommentAnchorDto {
+            field: at.field.clone(),
+            state,
+        })
+    };
+    match issue.anchorable_text(&at.field) {
+        // A field with no text in it has no positions for the algebra to move.
+        // That is not a lost position — this reader has no answer at all, and
+        // `Drifted` would assert one.
+        None => return dto(CommentAnchorState::Unresolved),
+        // The mint side's rule, applied to the material as it stands rather
+        // than as it stood: a span of an empty text names nothing.
+        Some("") => return dto(CommentAnchorState::Drifted),
+        Some(_) => {}
+    }
+    let key = issue_key(doc);
+    let one = |hex: &str| -> Option<replica::AnchorResolution> {
+        let raw = data_encoding::HEXLOWER.decode(hex.as_bytes()).ok()?;
+        let anchor = replica::FabricAnchor::decode_canonical(&raw).ok()?;
+        // The record names a field and so does the anchor inside it. This
+        // build writes them together and they always agree; a record from
+        // anywhere else that disagrees cannot say which one its writer meant,
+        // and resolving the anchor while reporting the record's field would
+        // hand back the right offset of the wrong value.
+        (anchor.path == at.field).then_some(())?;
+        Some(ctx.resolve_anchor(&key, &anchor))
+    };
+    let Some(head) = one(&at.start) else {
+        return dto(CommentAnchorState::Unresolved);
+    };
+    let tail = match &at.end {
+        None => Some(head),
+        Some(hex) => one(hex),
+    };
+    let state = match (head, tail) {
+        (replica::AnchorResolution::Resolved(h), Some(replica::AnchorResolution::Resolved(t))) => {
+            // A resolved anchor sits one past the character it bound to. For a
+            // span that character is the first one inside it, so the span's
+            // start is one back; a caret bound to the character in front of it
+            // already resolves to itself.
+            let start = if at.end.is_some() {
+                h.saturating_sub(1)
+            } else {
+                h
+            };
+            // Out of order is no longer a span, and half a span is the guess
+            // the algebra forbids.
+            if t >= start {
+                CommentAnchorState::At { start, end: t }
+            } else {
+                CommentAnchorState::Drifted
+            }
+        }
+        (_, Some(_)) => CommentAnchorState::Drifted,
+        (_, None) => CommentAnchorState::Unresolved,
+    };
+    dto(state)
+}
+
 /// Append one history event to an issue's `events` list.
 fn push_event(staging: &mut Staging, ctx: &WorldContext<'_>, doc: &str, event: &IssueEvent) {
     let key = issue_key(doc);
@@ -1298,52 +1504,56 @@ impl World for IssuesWorld {
                 device,
                 ts,
             } => {
-                if body.is_empty() || ActorId::parse(&actor).is_none() {
-                    return Err(WorldError::InvalidRequest);
-                }
-                let issue = issue_state(ctx, &doc).ok_or(WorldError::InvalidRequest)?;
-                if let Some(id) = &id {
-                    // The daemon mints; the World re-validates — including
-                    // uniqueness, because a duplicated id would fuse two
-                    // comments' reactions and replies.
-                    if !contract::is_comment_id(id)
-                        || issue.comments.iter().any(|c| c.id.as_deref() == Some(id))
-                    {
-                        return Err(WorldError::InvalidRequest);
-                    }
-                }
-                if let Some(parent) = &parent {
-                    // A reply needs an addressable target: an existing comment
-                    // that carries an id (pre-identity comments cannot anchor
-                    // threads) and is itself a root — one level, no ladders.
-                    let target = issue
-                        .comments
-                        .iter()
-                        .find(|c| c.id.as_deref() == Some(parent.as_str()))
-                        .ok_or(WorldError::InvalidRequest)?;
-                    if id.is_none() || target.parent.is_some() {
-                        return Err(WorldError::InvalidRequest);
-                    }
-                }
-                let key = issue_key(&doc);
-                staging.issue(
-                    &key,
-                    BodyOp::ListInsert {
-                        path: "comments".into(),
-                        index: issue.comments.len() as u64,
-                        value: serde_json::to_vec(&StoredComment {
-                            a: actor,
-                            t: ts,
-                            b: body.clone(),
-                            id,
-                            parent,
-                        })
-                        .expect("comment json"),
+                let issue =
+                    check_comment(ctx, &doc, &body, &actor, id.as_deref(), parent.as_deref())?;
+                stage_comment(
+                    &mut staging,
+                    ctx,
+                    &doc,
+                    &issue,
+                    StoredComment {
+                        a: actor,
+                        t: ts,
+                        b: body,
+                        id,
+                        parent,
+                        at: None,
                     },
+                    &device,
+                    ts,
                 );
-                let mut ev = event("commented", &device, ts);
-                ev.x = body;
-                push_event(&mut staging, ctx, &doc, &ev);
+                Ok(staging.into_effect(Some(doc)))
+            }
+            IssueIntent::CommentAt {
+                doc,
+                body,
+                field,
+                start,
+                end,
+                id,
+                parent,
+                actor,
+                device,
+                ts,
+            } => {
+                let issue = check_comment(ctx, &doc, &body, &actor, Some(&id), parent.as_deref())?;
+                let at = mint_comment_anchor(ctx, &doc, &issue, &field, start, end)?;
+                stage_comment(
+                    &mut staging,
+                    ctx,
+                    &doc,
+                    &issue,
+                    StoredComment {
+                        a: actor,
+                        t: ts,
+                        b: body,
+                        id: Some(id),
+                        parent,
+                        at: Some(at),
+                    },
+                    &device,
+                    ts,
+                );
                 Ok(staging.into_effect(Some(doc)))
             }
             IssueIntent::React {
@@ -2773,7 +2983,17 @@ impl World for IssuesWorld {
                         // World does not know it — stamp a placeholder the
                         // daemon replaces? No: the daemon supplies it in the
                         // query. Provisional views come from the row path.
-                        issue_view(catalog, aliases, &space_placeholder(), &doc, issue)
+                        let resolve = |comment: &StoredComment| {
+                            resolve_comment_anchor(ctx, &doc, issue, comment)
+                        };
+                        issue_view(
+                            catalog,
+                            aliases,
+                            &space_placeholder(),
+                            &doc,
+                            issue,
+                            &resolve,
+                        )
                     }
                     None => provisional_view(catalog, aliases, &doc),
                 };
@@ -3584,5 +3804,327 @@ mod milestone_order_tests {
             milestone("mls_a", "First", "5", None),
         ];
         assert_eq!(order(list), ["First", "Second"]);
+    }
+}
+
+#[cfg(test)]
+mod comment_anchor_tests {
+    use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+    use crate::dto::CommentAnchorState;
+
+    /// A reader that answers a scripted resolution per anchor offset, and
+    /// counts how often it was asked.
+    ///
+    /// [`WorldContext::new`] carries no reader and answers `Drifted` for every
+    /// anchor, which puts the resolved arms of [`resolve_comment_anchor`] out
+    /// of reach — a module built on it passes unchanged when the resolver is
+    /// replaced by a constant. The offsets of a stored span's two ends differ,
+    /// so a script keyed on them drives each arm, including the ones a live
+    /// replica reaches only after one specific edit. The count is what proves
+    /// the guards ahead of the reader stop before it.
+    #[derive(Default)]
+    struct ScriptedReader {
+        by_offset: BTreeMap<u64, replica::AnchorResolution>,
+        asked: AtomicUsize,
+    }
+
+    impl runtime::BodyReader for ScriptedReader {
+        fn read_body(&self, _key: &replica::ids::BodyKey) -> Option<Vec<u8>> {
+            None
+        }
+        fn read_collaborative_body(
+            &self,
+            _key: &replica::ids::BodyKey,
+        ) -> Result<replica::CollaborativeView, replica::ProjectionError> {
+            Err(replica::ProjectionError::NotCollaborative)
+        }
+        fn bodies_with_schema(
+            &self,
+            _world: &replica::ids::WorldId,
+            _schema: &replica::ids::SchemaId,
+        ) -> Vec<replica::ids::BodyKey> {
+            Vec::new()
+        }
+        fn body_version(&self, _key: &replica::ids::BodyKey) -> Option<replica::FabricVersion> {
+            None
+        }
+        fn anchor_in_body(
+            &self,
+            _key: &replica::ids::BodyKey,
+            _path: &str,
+            _position: u64,
+        ) -> Option<replica::FabricAnchor> {
+            None
+        }
+        fn resolve_anchor(
+            &self,
+            _key: &replica::ids::BodyKey,
+            anchor: &replica::FabricAnchor,
+        ) -> replica::AnchorResolution {
+            self.asked.fetch_add(1, Ordering::SeqCst);
+            self.by_offset
+                .get(&anchor.offset)
+                .copied()
+                .unwrap_or(replica::AnchorResolution::Drifted)
+        }
+        fn content_status(
+            &self,
+            _content: &replica::ContentRef,
+        ) -> Option<runtime::world::WorldContentStatus> {
+            None
+        }
+    }
+
+    fn scripted<const N: usize>(script: [(u64, replica::AnchorResolution); N]) -> ScriptedReader {
+        ScriptedReader {
+            by_offset: script.into_iter().collect(),
+            asked: AtomicUsize::new(0),
+        }
+    }
+
+    fn facts() -> runtime::PrincipalFacts {
+        let device = mechanics::crypto::device_from_seed(&[3u8; 32]);
+        runtime::PrincipalFacts {
+            actor: ActorId::from_incept_hash(&"cd".repeat(32)),
+            station: mechanics::ids::StationId::from_device(&device).unwrap(),
+            device,
+            space: mechanics::ids::SpaceId::from_digest([5u8; 16]),
+            authority_frontier: replica::frontier::AuthorityFrontier::from_canonical_bytes(vec![]),
+        }
+    }
+
+    fn issue(description: &str) -> IssueState {
+        IssueState {
+            description: description.into(),
+            ..Default::default()
+        }
+    }
+
+    fn comment(at: Option<contract::StoredAnchor>) -> StoredComment {
+        StoredComment {
+            a: ActorId::from_incept_hash(&"cd".repeat(32)).as_str().into(),
+            t: 1,
+            b: "body".into(),
+            id: Some("cmt_00000000000000000000000000".into()),
+            parent: None,
+            at,
+        }
+    }
+
+    /// Bytes with the shape a real stored anchor has: canonical, naming a path,
+    /// and carrying the offset the script keys on.
+    fn anchor_hex(path: &str, offset: u64) -> String {
+        let anchor = replica::FabricAnchor {
+            format_version: replica::CAUSAL_FORMAT_VERSION,
+            body: [9u8; 32],
+            path: path.into(),
+            anchored_to: None,
+            offset,
+            after: true,
+            taken_at: replica::FabricVersion::empty(),
+        };
+        data_encoding::HEXLOWER.encode(&anchor.encode())
+    }
+
+    /// A stored attachment whose ends the script addresses by `head`/`tail`.
+    fn stored(field: &str, head: u64, tail: Option<u64>) -> contract::StoredAnchor {
+        contract::StoredAnchor {
+            field: field.into(),
+            start: anchor_hex(field, head),
+            end: tail.map(|t| anchor_hex(field, t)),
+        }
+    }
+
+    fn resolve(
+        reader: &ScriptedReader,
+        issue: &IssueState,
+        at: Option<contract::StoredAnchor>,
+    ) -> Option<crate::dto::CommentAnchorDto> {
+        let facts = facts();
+        let ctx = WorldContext::with_reads(&facts, reader, [0u8; 32]);
+        resolve_comment_anchor(&ctx, "iss_x", issue, &comment(at))
+    }
+
+    /// An unattached comment has no anchor to report, which is not a state of
+    /// an anchor.
+    #[test]
+    fn an_unattached_comment_resolves_to_nothing() {
+        let reader = ScriptedReader::default();
+        assert!(resolve(&reader, &issue("the quick brown fox"), None).is_none());
+    }
+
+    /// A span's ends resolve one past the characters they bound to, and the
+    /// head's one is taken back off.
+    ///
+    /// The only test in this module that reaches the reader's answer, and the
+    /// one that fails if [`resolve_comment_anchor`] stops resolving: the script
+    /// answers with positions eight characters along from where the anchors
+    /// were taken, as an insertion in front of the span would.
+    #[test]
+    fn a_resolved_span_reports_the_material_its_ends_bound_to() {
+        let reader = scripted([
+            (5, replica::AnchorResolution::Resolved(13)),
+            (9, replica::AnchorResolution::Resolved(17)),
+        ]);
+        let resolved = resolve(
+            &reader,
+            &issue("PRE ther quick brown fox"),
+            Some(stored("description", 5, Some(9))),
+        )
+        .unwrap();
+        assert_eq!(resolved.field, "description");
+        assert_eq!(
+            resolved.state,
+            CommentAnchorState::At { start: 12, end: 17 },
+            "the head bound to the span's first character, so the span starts one back"
+        );
+    }
+
+    /// A caret bound to the character in front of it already resolves to
+    /// itself, so nothing is taken off.
+    #[test]
+    fn a_resolved_caret_reports_the_position_it_bound_to() {
+        let reader = scripted([(4, replica::AnchorResolution::Resolved(12))]);
+        let resolved = resolve(
+            &reader,
+            &issue("PRE the quick brown fox"),
+            Some(stored("description", 4, None)),
+        )
+        .unwrap();
+        assert_eq!(
+            resolved.state,
+            CommentAnchorState::At { start: 12, end: 12 }
+        );
+    }
+
+    /// Either end lost is a lost span. Half a span is the guess the algebra
+    /// forbids.
+    #[test]
+    fn either_end_lost_drifts_the_whole_span() {
+        for script in [
+            [
+                (5, replica::AnchorResolution::Drifted),
+                (9, replica::AnchorResolution::Resolved(17)),
+            ],
+            [
+                (5, replica::AnchorResolution::Resolved(13)),
+                (9, replica::AnchorResolution::Drifted),
+            ],
+        ] {
+            let reader = scripted(script);
+            let resolved = resolve(
+                &reader,
+                &issue("the quick brown fox"),
+                Some(stored("description", 5, Some(9))),
+            )
+            .unwrap();
+            assert_eq!(resolved.state, CommentAnchorState::Drifted);
+        }
+    }
+
+    /// Ends that resolve out of order no longer describe a span.
+    #[test]
+    fn ends_that_resolve_out_of_order_are_not_a_span() {
+        let reader = scripted([
+            (5, replica::AnchorResolution::Resolved(13)),
+            (9, replica::AnchorResolution::Resolved(3)),
+        ]);
+        let resolved = resolve(
+            &reader,
+            &issue("the quick brown fox"),
+            Some(stored("description", 5, Some(9))),
+        )
+        .unwrap();
+        assert_eq!(resolved.state, CommentAnchorState::Drifted);
+    }
+
+    /// Stored bytes that are not a canonical anchor are `Unresolved`, never
+    /// `Drifted`.
+    ///
+    /// The distinction is the whole reason both states exist: `Drifted` says
+    /// the span has no place in the text, and telling someone that because a
+    /// decode failed would be a claim about their document made from a bug in
+    /// ours.
+    #[test]
+    fn undecodable_bytes_are_unresolved_and_not_drifted() {
+        let reader = scripted([(4, replica::AnchorResolution::Resolved(4))]);
+        for bad in ["", "zz", "00"] {
+            let at = contract::StoredAnchor {
+                field: "description".into(),
+                start: bad.into(),
+                end: None,
+            };
+            let resolved = resolve(&reader, &issue("the quick brown fox"), Some(at)).unwrap();
+            assert_eq!(
+                resolved.state,
+                CommentAnchorState::Unresolved,
+                "`{bad}` is not an anchor, so there is no answer — not a lost one"
+            );
+        }
+
+        // One end decodable and the other not is still no answer.
+        let at = contract::StoredAnchor {
+            field: "description".into(),
+            start: anchor_hex("description", 4),
+            end: Some("zz".into()),
+        };
+        let resolved = resolve(&reader, &issue("the quick brown fox"), Some(at)).unwrap();
+        assert_eq!(resolved.state, CommentAnchorState::Unresolved);
+    }
+
+    /// A record whose field disagrees with its own anchor's path resolves to
+    /// nothing, without asking the reader.
+    ///
+    /// Both name the value the span is inside. Trusting either one over the
+    /// other would report a position in a field the writer may not have meant,
+    /// which is a wrong index wearing the right shape.
+    #[test]
+    fn a_record_that_disagrees_with_its_own_anchor_is_unresolved() {
+        let reader = scripted([(4, replica::AnchorResolution::Resolved(4))]);
+        let at = contract::StoredAnchor {
+            field: "description".into(),
+            start: anchor_hex("title", 4),
+            end: None,
+        };
+        let resolved = resolve(&reader, &issue("the quick brown fox"), Some(at)).unwrap();
+        assert_eq!(resolved.state, CommentAnchorState::Unresolved);
+        assert_eq!(reader.asked.load(Ordering::SeqCst), 0);
+    }
+
+    /// A record naming a field with no positions in it is `Unresolved`, and the
+    /// reader is never asked.
+    ///
+    /// The write seam refuses to mint such a record; a peer on another build
+    /// can still put one in the shared Body, and `anchor_in_body` validates no
+    /// path — so the reader would answer position zero, forever, for a register.
+    /// [`IssueState::anchorable_text`] is the list, and it binds both seams.
+    #[test]
+    fn a_record_naming_a_field_with_no_positions_is_unresolved() {
+        let reader = scripted([(4, replica::AnchorResolution::Resolved(4))]);
+        let resolved = resolve(
+            &reader,
+            &issue("the quick brown fox"),
+            Some(stored("title", 4, None)),
+        )
+        .unwrap();
+        assert_eq!(resolved.field, "title");
+        assert_eq!(resolved.state, CommentAnchorState::Unresolved);
+        assert_eq!(reader.asked.load(Ordering::SeqCst), 0);
+    }
+
+    /// A field that has been emptied has drifted, whatever the reader says.
+    ///
+    /// An anchor at offset zero binds to no operation, so the algebra keeps
+    /// answering zero for it after the last character is deleted. Zero is a
+    /// position, and there are no positions in an empty text.
+    #[test]
+    fn a_record_in_an_emptied_field_has_drifted() {
+        let reader = scripted([(0, replica::AnchorResolution::Resolved(0))]);
+        let resolved = resolve(&reader, &issue(""), Some(stored("description", 0, None))).unwrap();
+        assert_eq!(resolved.state, CommentAnchorState::Drifted);
+        assert_eq!(reader.asked.load(Ordering::SeqCst), 0);
     }
 }

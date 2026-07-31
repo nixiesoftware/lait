@@ -424,11 +424,37 @@ fn parse_comment(m: &ArgMatches) -> Result<IssuesRequest, InterfaceError> {
             "no comment body; pass it as an argument or pipe it on stdin",
         ));
     }
-    Ok(IssuesRequest::Comment {
+    let Some(at) = opt(m, "at") else {
+        return Ok(IssuesRequest::Comment {
+            reff,
+            body,
+            reply_to: opt(m, "reply_to"),
+        });
+    };
+    let (start, end) = parse_span(&at)?;
+    Ok(IssuesRequest::CommentAt {
         reff,
         body,
+        field: opt(m, "on").unwrap_or_else(|| "description".to_string()),
+        start,
+        end,
         reply_to: opt(m, "reply_to"),
     })
+}
+
+/// `START..END`, or a bare `START` naming a position rather than a span.
+///
+/// Unicode scalars, because that is what the World validates the span in. A
+/// terminal caller counting characters is already counting the right thing.
+fn parse_span(at: &str) -> Result<(u64, Option<u64>), InterfaceError> {
+    let refuse = || InterfaceError::new(format!("--at wants `START..END` or `START`, got `{at}`"));
+    match at.split_once("..") {
+        None => Ok((at.parse().map_err(|_| refuse())?, None)),
+        Some((start, end)) => Ok((
+            start.parse().map_err(|_| refuse())?,
+            Some(end.parse().map_err(|_| refuse())?),
+        )),
+    }
 }
 
 fn parse_milestone(verb: &str, m: &ArgMatches) -> Result<IssuesRequest, InterfaceError> {
@@ -769,6 +795,11 @@ fn comment_command() -> Command {
         ))
         .arg(pos_opt("body", "Comment body (omit to read stdin)."))
         .arg(option("reply_to", "Reply to a comment.").long("reply-to"))
+        .arg(option(
+            "at",
+            "Attach to a span: START..END, or START for a position (Unicode scalars).",
+        ))
+        .arg(option("on", "Text field the span lies in (default: description).").requires("at"))
 }
 
 fn ref_command(name: &'static str, about: &'static str) -> Command {
@@ -1308,6 +1339,32 @@ mod tests {
                 ..
             } if reff == "ENG-2"
         ));
+    }
+
+    /// `--at` is what tells a plain comment from a range-attached one, and the
+    /// span it names is parsed here rather than by the World.
+    #[test]
+    fn a_comment_with_a_span_is_a_different_command() {
+        assert!(matches!(
+            request(&["issues", "comment", "ENG-1", "wrong word"]),
+            IssuesRequest::Comment { .. }
+        ));
+        assert!(matches!(
+            request(&["issues", "comment", "ENG-1", "wrong word", "--at", "4..9"]),
+            IssuesRequest::CommentAt { field, start: 4, end: Some(9), .. }
+                if field == "description"
+        ));
+        // A bare offset is a position, not a zero-width span.
+        assert!(matches!(
+            request(&["issues", "comment", "ENG-1", "add a word", "--at", "4"]),
+            IssuesRequest::CommentAt {
+                start: 4,
+                end: None,
+                ..
+            }
+        ));
+        assert!(parse_span("4..").is_err());
+        assert!(parse_span("quick").is_err());
     }
 
     #[test]
