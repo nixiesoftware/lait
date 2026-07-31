@@ -77,6 +77,25 @@ slow-timeout = { period = "120s", terminate-after = 5 }
 filter = 'binary(issues_reference_perf)'
 slow-timeout = { period = "120s", terminate-after = 5 }
 
+# Plan 13's commit-cost baseline builds a durable Replica corpus at each small
+# scale and measures a single-Body edit against it. Like the two gates above, it
+# is CPU- and fsync-bound rather than waiting on anything, so it does not trip
+# the default budget on a dev box and does on a shared 2-core runner.
+#
+# Measured evidence: 44.7 s for both tests on a 12-core Windows dev box, dev
+# profile with dependencies optimized. GitHub's windows-latest ran it to 90 s
+# and terminated — and the same commit passed in a parallel run, which is the
+# signature of a test sitting on the boundary rather than one that regressed.
+# 5 × 120 s gives the slowest supported runner ~13× the measured time while
+# still surfacing a genuine wedge inside ten minutes.
+#
+# The `FULL` corpus (50k and 100k Bodies) never runs here; it is opt-in through
+# `LAIT_COMMIT_BASELINE_FULL` and belongs to the perf workflow, which sets its
+# own budget.
+[[profile.default.overrides]]
+filter = 'binary(commit_cost_baseline)'
+slow-timeout = { period = "120s", terminate-after = 5 }
+
 [[profile.default.overrides]]
 filter = '''
     binary(orbital_join_iroh)
