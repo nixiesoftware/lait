@@ -265,12 +265,21 @@ impl LiveHandle {
     ///
     /// Subscribing before anything arrives is the only way to hear anything: a
     /// signal is an event rather than a state anyone can re-read.
-    pub fn signals(&self) -> tokio::sync::broadcast::Receiver<(StationId, crate::planes::Signal)> {
+    pub fn signals(&self) -> tokio::sync::broadcast::Receiver<crate::signal::DeliveredSignal> {
         self.signals.subscribe()
     }
 
-    pub(crate) fn sink(&self) -> SignalSink {
-        self.signals.clone()
+    /// Hand a received signal to whoever is listening.
+    ///
+    /// Nobody listening is not a failure, and neither is a subscriber that fell
+    /// behind. Both are local facts, and if either changed the wire outcome a
+    /// peer could learn whether a viewer is open by pinging with an `Attention`.
+    ///
+    /// Public, and it takes a whole `DeliveredSignal`: provenance is a required
+    /// field rather than something the plane fills in, so nothing can hand a
+    /// listener a signal without saying who it came from.
+    pub fn deliver(&self, delivered: crate::signal::DeliveredSignal) {
+        let _ = self.signals.send(delivered);
     }
 
     /// Record one item a peer sent, after the per-session store admitted it.
@@ -489,7 +498,7 @@ fn body_key(world: &str, body: [u8; 16]) -> Option<replica::ids::BodyKey> {
 /// plane should not have to know which. Lagging is fine and does not need
 /// reporting — a subscriber that fell behind on invitations missed
 /// invitations, which is a thing that happens to people too.
-pub type SignalSink = tokio::sync::broadcast::Sender<(StationId, crate::planes::Signal)>;
+pub type SignalSink = tokio::sync::broadcast::Sender<crate::signal::DeliveredSignal>;
 
 /// How many received signals are held for a subscriber that is not reading.
 ///
@@ -508,6 +517,7 @@ pub async fn serve_session(
     peer: AdmittedPeer,
     cancel: crate::lifecycle::CancelToken,
     handle: Option<std::sync::Arc<LiveHandle>>,
+    signals: Option<crate::signal::SignalPolicy>,
 ) {
     let session = Rc::new(RefCell::new(LiveSession::new(peer.station.clone())));
     let epoch = peer.session_epoch;
@@ -615,7 +625,7 @@ pub async fn serve_session(
             }
 
             accepted = connection.accept_bi() => {
-                let Ok(Some((send, mut recv))) = accepted else { break };
+                let Ok(Some((mut send, mut recv))) = accepted else { break };
                 last_seen = Instant::now();
                 match accept_gate.check(Instant::now()) {
                     Verdict::Allow => {}
@@ -661,17 +671,21 @@ pub async fn serve_session(
                             break;
                         }
                     }
-                    // One bounded message per stream, read under the
+                    // One bounded message per stream, served under the
                     // declaration's own ceiling — resolved from the selector
                     // before the length is consulted, which is what makes that
                     // ceiling a pre-allocation bound rather than a comment.
-                    let received = tokio::time::timeout(
-                        deadline::SIGNAL_READ,
-                        crate::signal::read_signal(recv.as_mut()),
-                    )
-                    .await;
-                    drop(send);
-                    let Ok(Ok(signal)) = received else { continue };
+                    let Some(policy) = &signals else {
+                        // No policy means this build is not serving the lane on
+                        // this connection. The flow is refused on both halves,
+                        // not merely dropped: a dropped send half leaves the
+                        // peer writing into something nobody reads.
+                        crate::signal::refuse_flow(send.as_mut(), recv.as_mut());
+                        continue;
+                    };
+                    let served =
+                        crate::signal::serve_signal(send.as_mut(), recv.as_mut(), policy).await;
+                    let Ok(signal) = served else { continue };
                     if matches!(
                         signal_bytes.check(Instant::now(), signal.encode().len()),
                         Verdict::Close
@@ -680,10 +694,12 @@ pub async fn serve_session(
                         break;
                     }
                     if let Some(handle) = &handle {
-                        // Nobody listening is not a failure. A Station with no
-                        // viewer attached still admits signals and still bounds
-                        // them; it simply has nobody to hand them to.
-                        let _ = handle.sink().send((peer.station.clone(), signal));
+                        handle.deliver(crate::signal::DeliveredSignal {
+                            from: peer.station.clone(),
+                            session_id: peer.session_id,
+                            session_epoch: peer.session_epoch,
+                            signal,
+                        });
                     }
                     continue;
                 }
@@ -775,13 +791,26 @@ pub fn publish(
 pub struct LiveService {
     sessions: std::cell::RefCell<Vec<StationId>>,
     handle: std::sync::Arc<LiveHandle>,
+    /// What a signal is asked about, and never anything that can commit.
+    ///
+    /// Held here rather than on the handle because these are the driver's, not
+    /// the reader's: a browser looking at who is present has no business
+    /// holding an authority view.
+    authority: std::sync::Arc<dyn crate::world::AuthorityView>,
+    worlds: crate::registry::WorldRegistry,
 }
 
 impl LiveService {
-    pub fn new(handle: std::sync::Arc<LiveHandle>) -> Self {
+    pub fn new(
+        handle: std::sync::Arc<LiveHandle>,
+        authority: std::sync::Arc<dyn crate::world::AuthorityView>,
+        worlds: crate::registry::WorldRegistry,
+    ) -> Self {
         Self {
             sessions: std::cell::RefCell::new(Vec::new()),
             handle,
+            authority,
+            worlds,
         }
     }
 
@@ -809,7 +838,25 @@ impl crate::plane_driver::PlaneService for LiveService {
             self.handle
                 .set_partial(sessions.len() > crate::budget::slots::MAX_LIVE_SESSIONS);
         }
-        serve_session(connection, peer, cancel, Some(self.handle.clone())).await;
+        // Built per connection, from what the admission decided. The frontier
+        // is the pinned one, so every question this connection asks is answered
+        // against the view it was admitted at.
+        let signals = crate::signal::SignalPolicy {
+            peer: peer.station.clone(),
+            actor: peer.actor.clone(),
+            frontier: peer.authority_frontier.clone(),
+            granted_lanes: peer.granted_lanes.clone(),
+            authority: self.authority.clone(),
+            worlds: self.worlds.clone(),
+        };
+        serve_session(
+            connection,
+            peer,
+            cancel,
+            Some(self.handle.clone()),
+            Some(signals),
+        )
+        .await;
         // Removed on the way out, whatever ended it. A peer left in this list
         // after its connection closed is a ghost that no TTL reaches, because
         // the TTLs are on slots rather than on sessions.

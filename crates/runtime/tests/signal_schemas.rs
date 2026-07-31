@@ -261,7 +261,7 @@ mod wire {
 
 /// What a Station does with a signal once it has one.
 mod delivery {
-    use runtime::live::{LiveHandle, LiveService};
+    use runtime::live::LiveHandle;
     use runtime::planes::Signal;
     use std::sync::Arc;
 
@@ -278,10 +278,19 @@ mod delivery {
         // bounds them; it simply has nobody to hand them to. Treating that as
         // an error would make an idle Station refuse traffic it accepted.
         let handle = handle();
-        let service = LiveService::new(handle.clone());
+        // The only listener goes away, and the sink survives it: a broadcast
+        // send with no receivers is an `Err` that is deliberately discarded,
+        // never a refusal that reaches the peer.
         drop(handle.signals());
-        // No subscriber, and nothing here panics or blocks.
-        assert!(service.present().is_empty());
+        handle.deliver(runtime::signal::DeliveredSignal {
+            from: mechanics::ids::StationId::from_device(&mechanics::crypto::device_from_seed(
+                &[5u8; 32],
+            ))
+            .expect("station"),
+            session_id: [0u8; 16],
+            session_epoch: [0u8; 16],
+            signal: Signal::Ping { nonce: [3u8; 16] },
+        });
     }
 
     #[tokio::test]

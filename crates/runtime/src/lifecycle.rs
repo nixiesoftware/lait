@@ -642,7 +642,11 @@ impl Orbit {
                         drain_deadline,
                         authority_tick: Some(station.core.authority_tick()),
                     };
-                    let service = crate::live::LiveService::new(station.live.clone());
+                    let service = crate::live::LiveService::new(
+                        station.live.clone(),
+                        station.authority.clone(),
+                        station.registry.clone(),
+                    );
                     station
                         .spawn_tracked(move |_cancel| {
                             crate::plane_driver::run_driver(context, queue, service)
@@ -757,9 +761,7 @@ impl Station {
     /// Subscribe before anything arrives. A signal is an event, not a state
     /// anyone can re-read, so a listener that attaches late missed what it
     /// missed — the same way a person who was out of the room did.
-    pub fn signals(
-        &self,
-    ) -> tokio::sync::broadcast::Receiver<(mechanics::ids::StationId, crate::planes::Signal)> {
+    pub fn signals(&self) -> tokio::sync::broadcast::Receiver<crate::signal::DeliveredSignal> {
         self.live.signals()
     }
 

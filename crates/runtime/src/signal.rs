@@ -21,6 +21,8 @@
 
 use replica::ids::WorldId;
 
+use crate::budget::deadline;
+
 /// Why a signal did not happen.
 ///
 /// Local diagnostics, in this module rather than a shared error type — the same
@@ -272,4 +274,281 @@ pub fn frame_signal(signal: &crate::planes::Signal) -> Result<Vec<u8>, SignalErr
     out.extend_from_slice(&(body.len() as u32).to_le_bytes());
     out.extend_from_slice(&body);
     Ok(out)
+}
+
+/// Frame one signal *without* the leading stream kind.
+///
+/// What an answer looks like. The kind byte declares what a flow is, and a flow
+/// is opened once — so the opener writes it and the responder does not. Writing
+/// it on the way back shifts every subsequent field by one and the selector is
+/// then read out of the kind byte and half of itself, which decodes as a
+/// plausible unregistered selector rather than as an error anyone can read.
+pub fn frame_answer(signal: &crate::planes::Signal) -> Result<Vec<u8>, SignalError> {
+    let mut framed = frame_signal(signal)?;
+    framed.remove(0);
+    Ok(framed)
+}
+
+/// The coarse close code every signal refusal uses.
+///
+/// One code for every reason, like the rest of the delivery planes: a peer
+/// learns it was refused, never which check refused it. `SignalError` is the
+/// local diagnosis and stays local.
+const REFUSED: u32 = 1;
+
+/// Refuse a flow, on both halves.
+///
+/// **The pair is the point.** Resetting the send half alone does not stop an
+/// inbound writer: the peer keeps writing into a flow nobody is reading, and a
+/// refused peer can still drain a full `MAX_SIGNAL_BYTES` past a refusal that
+/// already happened. `stop` is what tells the sender to stop sending, so the
+/// refusal costs the refused rather than the refuser.
+pub fn refuse_flow(send: &mut dyn comms::SendFlow, recv: &mut dyn comms::RecvFlow) {
+    recv.stop(REFUSED);
+    send.reset(REFUSED);
+}
+
+/// One delivered signal, as a listener sees it.
+///
+/// Carries the session it arrived on. A listener that reconnected between
+/// hearing about a thing and acting on it can tell — two epochs are compared,
+/// never ordered, so the only answerable question is whether this is the
+/// session that is still open.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeliveredSignal {
+    pub from: mechanics::ids::StationId,
+    pub session_id: [u8; 16],
+    pub session_epoch: [u8; 16],
+    pub signal: crate::planes::Signal,
+}
+
+/// What a peer may say on this connection's signal lane, and who is asking.
+///
+/// Owned and cloneable rather than borrowed, with no lifetime parameter, so it
+/// survives being handed to a per-flow task.
+///
+/// **It holds an `Arc<dyn AuthorityView>` and nothing that can commit.** Every
+/// authority question a signal asks already exists on that trait, so there is
+/// no reason to reach further — and reaching further is precisely what
+/// `tests/signal_is_not_durable.rs` fails the build over.
+#[derive(Clone)]
+pub struct SignalPolicy {
+    pub peer: mechanics::ids::StationId,
+    pub actor: mechanics::ids::ActorId,
+    /// The frontier this session was admitted at. Pinned, so every question on
+    /// this connection is answered against one view.
+    pub frontier: replica::frontier::AuthorityFrontier,
+    pub granted_lanes: Vec<u8>,
+    pub authority: std::sync::Arc<dyn crate::world::AuthorityView>,
+    pub worlds: crate::registry::WorldRegistry,
+}
+
+impl SignalPolicy {
+    /// Whether this connection holds the signal lane at all.
+    pub fn holds_lane(&self) -> bool {
+        self.granted_lanes
+            .contains(&crate::planes::stream_kind::RELIABLE_SIGNAL)
+    }
+
+    /// Whether this peer may send this signal.
+    ///
+    /// A `Session` demand is satisfied by being here: the connection was
+    /// admitted, and a liveness ping says nothing about any particular thing. A
+    /// `World` demand is evaluated by Mechanics at the pinned frontier, which is
+    /// the same evaluation a read of that World would get.
+    pub fn permits(&self, declaration: &SignalDeclaration) -> Result<(), SignalError> {
+        match &declaration.demand {
+            SignalDemand::Session => Ok(()),
+            SignalDemand::World { world, demand } => {
+                self.world_is_live(world)?;
+                if self
+                    .authority
+                    .evaluate_read(&self.actor, &self.frontier, demand)
+                {
+                    Ok(())
+                } else {
+                    Err(SignalError::Denied)
+                }
+            }
+        }
+    }
+
+    /// Whether this build can interpret a signal's own contents.
+    ///
+    /// Distinct from `permits`, which asks about the declaration. A
+    /// `WorldSignal` names its World inside the payload, so the check can only
+    /// happen after the body is decoded.
+    pub fn admits_contents(&self, signal: &crate::planes::Signal) -> Result<(), SignalError> {
+        let crate::planes::Signal::WorldSignal { world, .. } = signal else {
+            return Ok(());
+        };
+        let world = replica::ids::WorldId::parse(world).ok_or(SignalError::Malformed)?;
+        self.world_is_live(&world)
+    }
+
+    /// A World this build hosts, with an implementation active at the pinned
+    /// frontier.
+    ///
+    /// Both halves, and both are `NotRegistered` rather than `Denied`. A World
+    /// we do not host and one whose implementation nobody approved are the same
+    /// answer to a peer: this build cannot interpret that, and interpreting it
+    /// anyway is how a schema nobody reviewed gets acted on.
+    fn world_is_live(&self, world: &replica::ids::WorldId) -> Result<(), SignalError> {
+        if !self.worlds.contains(world) {
+            return Err(SignalError::NotRegistered);
+        }
+        if self
+            .authority
+            .active_implementation(world, &self.frontier)
+            .is_none()
+        {
+            return Err(SignalError::NotRegistered);
+        }
+        Ok(())
+    }
+}
+
+/// What happened to a signal this Station sent.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SignalOutcome {
+    /// The plane took it: framed, bounded, written and finished.
+    ///
+    /// **Not a delivery receipt.** It says the bytes left; it says nothing
+    /// about whether a person saw them, and a caller that treats it as
+    /// confirmation is building a read receipt out of a transport ack.
+    Accepted,
+    /// The peer answered, for a declaration whose response policy allows one.
+    Answered(crate::planes::Signal),
+}
+
+/// Send one signal on its own flow.
+///
+/// The flow kind follows the declaration, which is the whole reason
+/// `ResponsePolicy` lives on the declaration rather than being decided per
+/// call: a `Forbidden` signal opens a unidirectional flow and has no second
+/// deadline to budget, while an `Acknowledge` opens a bidirectional one and
+/// pays for the round trip. A caller cannot choose to wait for an answer to
+/// something nobody promised to answer.
+pub async fn send_signal(
+    connection: &dyn comms::Connection,
+    signal: &crate::planes::Signal,
+) -> Result<SignalOutcome, SignalError> {
+    let framed = frame_signal(signal)?;
+    let declaration = declaration_for(signal.selector()).ok_or(SignalError::NotRegistered)?;
+
+    match declaration.response {
+        ResponsePolicy::Forbidden => {
+            let mut send = tokio::time::timeout(deadline::SIGNAL_OPEN, connection.open_uni())
+                .await
+                .map_err(|_| SignalError::Deadline)?
+                .map_err(|_| SignalError::PeerRefused)?;
+            write_and_finish(send.as_mut(), &framed).await?;
+            Ok(SignalOutcome::Accepted)
+        }
+        ResponsePolicy::Acknowledge => {
+            let (mut send, mut recv) =
+                tokio::time::timeout(deadline::SIGNAL_OPEN, connection.open_bi())
+                    .await
+                    .map_err(|_| SignalError::Deadline)?
+                    .map_err(|_| SignalError::PeerRefused)?;
+            // Written and finished before the answer is read. A flow does not
+            // exist for the peer until the opener writes to it, so accepting
+            // first and waiting is a hang on both transports rather than a
+            // failed assertion.
+            write_and_finish(send.as_mut(), &framed).await?;
+            let answered =
+                tokio::time::timeout(deadline::SIGNAL_RESPONSE, read_signal(recv.as_mut()))
+                    .await
+                    .map_err(|_| SignalError::Deadline)?;
+            match answered {
+                Ok(answer) => Ok(SignalOutcome::Answered(answer)),
+                Err(error) => {
+                    recv.stop(REFUSED);
+                    Err(error)
+                }
+            }
+        }
+    }
+}
+
+async fn write_and_finish(
+    send: &mut dyn comms::SendFlow,
+    framed: &[u8],
+) -> Result<(), SignalError> {
+    tokio::time::timeout(deadline::SIGNAL_WRITE, send.write_all(framed))
+        .await
+        .map_err(|_| SignalError::Deadline)?
+        .map_err(|_| SignalError::PeerRefused)?;
+    send.finish().map_err(|_| SignalError::PeerRefused)
+}
+
+/// Serve one inbound signal flow, from the stream kind onwards.
+///
+/// The caller has read the kind byte and decided this is a signal flow. What is
+/// left is the lane, the declaration, the body, and whether this peer may have
+/// sent it — in that order, because each one bounds the next.
+pub async fn serve_signal(
+    send: &mut dyn comms::SendFlow,
+    recv: &mut dyn comms::RecvFlow,
+    policy: &SignalPolicy,
+) -> Result<crate::planes::Signal, SignalError> {
+    if !policy.holds_lane() {
+        refuse_flow(send, recv);
+        return Err(SignalError::LaneNotGranted);
+    }
+    let signal = match tokio::time::timeout(deadline::SIGNAL_READ, read_signal(recv)).await {
+        Ok(Ok(signal)) => signal,
+        Ok(Err(error)) => {
+            refuse_flow(send, recv);
+            return Err(error);
+        }
+        Err(_) => {
+            refuse_flow(send, recv);
+            return Err(SignalError::Deadline);
+        }
+    };
+
+    let declaration = declaration_for(signal.selector()).ok_or(SignalError::NotRegistered)?;
+    if let Err(error) = policy.permits(&declaration) {
+        refuse_flow(send, recv);
+        return Err(error);
+    }
+    if let Err(error) = policy.admits_contents(&signal) {
+        refuse_flow(send, recv);
+        return Err(error);
+    }
+
+    match declaration.response {
+        ResponsePolicy::Forbidden => {
+            // Nothing to say back. Finished rather than reset: a reset after a
+            // successful read tells a peer its signal failed.
+            let _ = send.finish();
+        }
+        // `frame_answer`, not `frame_signal`: the flow's kind was fixed when
+        // the opener wrote it, and repeating it here would shift every field
+        // the reader is about to parse.
+        ResponsePolicy::Acknowledge => match acknowledgement(&signal).as_ref().map(frame_answer) {
+            Some(Ok(framed)) => {
+                let _ = write_and_finish(send, &framed).await;
+            }
+            _ => {
+                let _ = send.finish();
+            }
+        },
+    }
+    Ok(signal)
+}
+
+/// The answer to a signal that expects one.
+///
+/// Only `Ping` does, and the nonce comes back unchanged: that is what makes the
+/// answer an answer to *this* ping rather than to any ping. `Acknowledge` is
+/// itself `Forbidden`, which is how a ping does not become a loop.
+fn acknowledgement(signal: &crate::planes::Signal) -> Option<crate::planes::Signal> {
+    match signal {
+        crate::planes::Signal::Ping { nonce } => {
+            Some(crate::planes::Signal::Acknowledge { nonce: *nonce })
+        }
+        _ => None,
+    }
 }
