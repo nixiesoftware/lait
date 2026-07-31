@@ -555,9 +555,18 @@ impl LiveHandle {
 
     /// Everything currently believed, resolved against the Bodies as they stand.
     ///
-    /// `scope` narrows it; `None` is the whole table. Resolution happens here,
-    /// per read, and the answer is never written back into a slot.
+    /// `scope` narrows to that **exact** scope, which is rarely what a reader
+    /// looking at a document wants — see [`LiveNarrow`]. Kept because a caller
+    /// that genuinely wants one kind should not have to say so twice.
     pub fn view(&self, scope: Option<&TransientScope>, now: Instant) -> LiveView {
+        self.view_narrowed(scope.map_or(LiveNarrow::Everything, LiveNarrow::Scope), now)
+    }
+
+    /// Everything currently believed about what a reader asked for.
+    ///
+    /// Resolution happens here, per read, and the answer is never written back
+    /// into a slot.
+    pub fn view_narrowed(&self, narrow: LiveNarrow<'_>, now: Instant) -> LiveView {
         // Snapshotted, then the lock is released. Resolving under it would take
         // the commit lock while holding a lock the browser can take.
         let (generation, partial, held) = {
@@ -565,7 +574,7 @@ impl LiveHandle {
             let held: Vec<_> = table
                 .slots
                 .iter()
-                .filter(|((_, held_scope, _), _)| scope.is_none_or(|want| held_scope == want))
+                .filter(|((_, held_scope, _), _)| narrow.admits(held_scope))
                 .map(|((station, held_scope, _), slot)| {
                     (station.clone(), held_scope.clone(), slot.clone())
                 })
@@ -646,6 +655,35 @@ fn scope_body(scope: &TransientScope) -> Option<(String, [u8; 16])> {
         | TransientScope::TextCaret { world, body, .. }
         | TransientScope::Typing { world, body, .. } => Some((world.clone(), *body)),
         _ => None,
+    }
+}
+
+/// What a reader is asking about.
+///
+/// The distinction that matters is `Body` versus `Scope`, and getting it wrong
+/// is silent. A viewer looking at an issue wants everything about that Body —
+/// who is present, where their carets are, who is typing — and those live under
+/// three *different* scopes. Narrowing by scope equality answers with presence
+/// alone and looks exactly like a document nobody has a cursor in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LiveNarrow<'a> {
+    /// Everything this Station believes.
+    Everything,
+    /// Everything about one Body, whatever scope carries it.
+    Body { world: &'a str, body: [u8; 16] },
+    /// One exact scope, for a reader that genuinely wants one kind.
+    Scope(&'a TransientScope),
+}
+
+impl LiveNarrow<'_> {
+    fn admits(&self, scope: &TransientScope) -> bool {
+        match self {
+            Self::Everything => true,
+            Self::Scope(want) => &scope == want,
+            Self::Body { world, body } => {
+                scope_body(scope).is_some_and(|(w, b)| w == *world && b == *body)
+            }
+        }
     }
 }
 

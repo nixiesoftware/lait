@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use mechanics::ids::StationId;
 use replica::ids::BodyKey;
 use runtime::budget::deadline;
-use runtime::live::{AnchorSource, CaretState, LiveHandle};
+use runtime::live::{AnchorSource, CaretState, LiveHandle, LiveNarrow};
 use runtime::transient::{TransientItem, TransientPayload, TransientScope};
 
 const WORLD: &str = "com.example.notes";
@@ -315,6 +315,86 @@ fn a_scope_narrows_the_view_to_itself() {
     assert_eq!(narrowed.entries.len(), 1);
     assert_eq!(narrowed.entries[0].scope, issue_scope(1));
     assert_eq!(handle.view(None, now).entries.len(), 2);
+}
+
+#[test]
+fn narrowing_to_a_body_gathers_every_scope_that_names_it() {
+    // The distinction that matters, and getting it wrong is silent. Somebody
+    // looking at an issue wants who is present, where their carets are, and who
+    // is typing — three *different* scopes over one Body. Narrowing by scope
+    // equality answers with presence alone, which looks exactly like a document
+    // nobody has a cursor in.
+    let handle = LiveHandle::new(None);
+    let now = Instant::now();
+    handle.record(&station(1), &presence_item(issue_scope(1), 1), now);
+    handle.record(&station(1), &caret_item(caret_scope(1), 1, 3), now);
+    handle.record(
+        &station(2),
+        &TransientItem {
+            session_epoch: [1u8; 16],
+            seq: 1,
+            scope: TransientScope::Typing {
+                world: WORLD.into(),
+                body: [1u8; 16],
+                field: "text".into(),
+            },
+            payload: TransientPayload::Typing,
+        },
+        now,
+    );
+    // A different Body, which must not be gathered.
+    handle.record(&station(1), &presence_item(issue_scope(9), 1), now);
+
+    let exact = handle.view(Some(&issue_scope(1)), now);
+    assert_eq!(exact.entries.len(), 1, "scope equality sees presence only");
+
+    let about = handle.view_narrowed(
+        LiveNarrow::Body {
+            world: WORLD,
+            body: [1u8; 16],
+        },
+        now,
+    );
+    assert_eq!(about.entries.len(), 3, "presence, caret and typing");
+    assert!(about
+        .entries
+        .iter()
+        .all(|entry| entry.scope != issue_scope(9)));
+}
+
+#[test]
+fn a_scope_that_names_no_body_is_reachable_only_exactly() {
+    // Residency is about a content, not a Body, so `Body` narrowing must not
+    // sweep it in — a reader asking about a document is not asking who holds
+    // which chunks of an unrelated file.
+    let handle = LiveHandle::new(None);
+    let now = Instant::now();
+    let residency = TransientScope::ContentResidency { content: [4u8; 32] };
+    handle.record(
+        &station(1),
+        &TransientItem {
+            session_epoch: [1u8; 16],
+            seq: 1,
+            scope: residency.clone(),
+            payload: TransientPayload::Residency { chunks: vec![0, 1] },
+        },
+        now,
+    );
+
+    assert_eq!(
+        handle
+            .view_narrowed(
+                LiveNarrow::Body {
+                    world: WORLD,
+                    body: [1u8; 16]
+                },
+                now
+            )
+            .entries
+            .len(),
+        0
+    );
+    assert_eq!(handle.view(Some(&residency), now).entries.len(), 1);
 }
 
 #[test]
