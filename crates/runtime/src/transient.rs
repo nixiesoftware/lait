@@ -155,7 +155,7 @@ pub enum TransientPayload {
 /// Derived from the payload and never sent — a kind on the wire would be a
 /// second source of truth about what a payload is, and the two would eventually
 /// disagree in a way only an attacker would notice.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TransientKind {
     Presence,
     Caret,

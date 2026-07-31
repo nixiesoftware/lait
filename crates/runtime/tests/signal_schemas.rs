@@ -261,16 +261,25 @@ mod wire {
 
 /// What a Station does with a signal once it has one.
 mod delivery {
-    use runtime::live::LiveService;
+    use runtime::live::{LiveHandle, LiveService};
     use runtime::planes::Signal;
+    use std::sync::Arc;
+
+    fn handle() -> Arc<LiveHandle> {
+        // No anchor source: this Station has no Replica behind it, which is
+        // exactly the shape a signal must work in — signals are not about
+        // Bodies.
+        Arc::new(LiveHandle::new(None))
+    }
 
     #[tokio::test]
     async fn a_signal_with_nobody_listening_is_not_a_failure() {
         // A Station with no viewer attached still admits signals and still
         // bounds them; it simply has nobody to hand them to. Treating that as
         // an error would make an idle Station refuse traffic it accepted.
-        let service = LiveService::new();
-        drop(service.signals());
+        let handle = handle();
+        let service = LiveService::new(handle.clone());
+        drop(handle.signals());
         // No subscriber, and nothing here panics or blocks.
         assert!(service.present().is_empty());
     }
@@ -281,8 +290,8 @@ mod delivery {
         // late means missing what already happened, which is the honest
         // behaviour — the alternative is a Station holding events for readers
         // that may never arrive.
-        let service = LiveService::new();
-        let mut listener = service.signals();
+        let handle = handle();
+        let mut listener = handle.signals();
         assert!(
             listener.try_recv().is_err(),
             "nothing has happened yet, so there is nothing to hear"

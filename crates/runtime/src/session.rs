@@ -436,6 +436,39 @@ impl replica::TransactionAuthorizer for SessionAuthorizer<'_> {
     }
 }
 
+/// The Live plane's caret reads, at the price `with_replica` documents.
+///
+/// Implemented here rather than in `live.rs` because this is the type that owns
+/// the lock: a caller reading these two methods sees `with_replica` one line
+/// away and the paragraph explaining why it is exclusive one line after that.
+impl crate::live::AnchorSource for StationCore {
+    fn anchor_in_body(
+        &self,
+        key: &BodyKey,
+        path: &str,
+        position: u64,
+    ) -> Option<replica::FabricAnchor> {
+        // A dormant core answers `None`, which is the same answer a position
+        // the algebra cannot bind gets. Both mean there is no anchor to send,
+        // and a caller has nothing different to do about them.
+        self.with_replica(|replica| Ok(replica.anchor(key, path, position)))
+            .ok()
+            .flatten()
+    }
+
+    fn resolve_anchor(
+        &self,
+        key: &BodyKey,
+        anchor: &replica::FabricAnchor,
+    ) -> replica::AnchorResolution {
+        // Total, so a dormant core is `Drifted` rather than an error — the
+        // renderer's contract is that this never fails and never lies, not that
+        // it always knows.
+        self.with_replica(|replica| Ok(replica.resolve_anchor(key, anchor)))
+            .unwrap_or(replica::AnchorResolution::Drifted)
+    }
+}
+
 /// A [`BodyReader`] over a locked Replica, handed to a World during a query.
 struct ReplicaReader<'a>(&'a replica::Replica);
 

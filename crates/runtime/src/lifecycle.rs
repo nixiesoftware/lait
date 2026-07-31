@@ -519,6 +519,7 @@ impl Orbit {
             .sweep_staging(&std::collections::BTreeSet::new())
             .map_err(|e| LifecycleError::StoreIo(e.to_string()))?;
         let content = Arc::new(crate::content_host::ContentHost::new(core.clone(), cache));
+        let live = Arc::new(crate::live::LiveHandle::new(Some(core.clone())));
 
         let station = Station {
             store: self.store,
@@ -540,6 +541,7 @@ impl Orbit {
                 .map(|c| c.whole_deadline)
                 .unwrap_or(Duration::from_secs(60)),
             content,
+            live,
             max_content_len: options.content.max_content_len,
         };
         if let Some(comms) = options.comms {
@@ -640,7 +642,7 @@ impl Orbit {
                         drain_deadline,
                         authority_tick: Some(station.core.authority_tick()),
                     };
-                    let service = crate::live::LiveService::new();
+                    let service = crate::live::LiveService::new(station.live.clone());
                     station
                         .spawn_tracked(move |_cancel| {
                             crate::plane_driver::run_driver(context, queue, service)
@@ -709,6 +711,12 @@ pub struct Station {
     /// Station that can name content and cannot hold any is a Station whose
     /// content surface is unreachable.
     content: Arc<crate::content_host::ContentHost>,
+    /// The Live plane's shared view.
+    ///
+    /// Held whether or not a driver was mounted. A Station with no transport
+    /// still answers "who is here" — with nobody — and a caller that had to
+    /// branch on whether the plane exists would write that branch everywhere.
+    live: Arc<crate::live::LiveHandle>,
     /// The largest single content this Station will ingest, from operator
     /// policy. Kept here because every local content call has to enforce it and
     /// the options struct does not outlive activation.
@@ -735,6 +743,26 @@ impl Station {
     /// One per Station and opened at activation, so a caller never constructs
     /// a second cache over the same directory — two caches over one directory
     /// would sweep each other's staging.
+    /// What this Station currently believes about who is doing what.
+    ///
+    /// Never durable and never authoritative: a Station with no Live driver
+    /// answers with an empty view rather than an error, because "nobody is
+    /// here" is the truth about a Station nobody is connected to.
+    pub fn live(&self) -> Arc<crate::live::LiveHandle> {
+        self.live.clone()
+    }
+
+    /// Listen for reliable signals this Station receives.
+    ///
+    /// Subscribe before anything arrives. A signal is an event, not a state
+    /// anyone can re-read, so a listener that attaches late missed what it
+    /// missed — the same way a person who was out of the room did.
+    pub fn signals(
+        &self,
+    ) -> tokio::sync::broadcast::Receiver<(mechanics::ids::StationId, crate::planes::Signal)> {
+        self.live.signals()
+    }
+
     pub fn content(&self) -> Arc<crate::content_host::ContentHost> {
         self.content.clone()
     }

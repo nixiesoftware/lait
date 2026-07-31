@@ -139,6 +139,349 @@ impl LiveSession {
     }
 }
 
+/// The Replica read a caret needs, and nothing else.
+///
+/// Narrow on purpose. The Live plane could hold an `Arc<StationCore>` and reach
+/// everything, and then the cost of every caret would be invisible at the seam
+/// that pays it. Two methods make the price legible: both take the exclusive
+/// commit lock, which is not a choice — `RwLock<T>: Sync` requires `T: Sync`
+/// and the Replica holds a `dyn Fabric + Send` that is not. `with_replica`
+/// records the arithmetic that bounds it.
+pub trait AnchorSource: Send + Sync {
+    /// Mint an anchor at a position, so a browser that can only send an offset
+    /// has something that survives concurrent edits.
+    fn anchor_in_body(
+        &self,
+        key: &replica::ids::BodyKey,
+        path: &str,
+        position: u64,
+    ) -> Option<replica::FabricAnchor>;
+
+    /// Where that position is now. Total: never an error, never a mutation,
+    /// and never a silently wrong index.
+    fn resolve_anchor(
+        &self,
+        key: &replica::ids::BodyKey,
+        anchor: &replica::FabricAnchor,
+    ) -> replica::AnchorResolution;
+}
+
+/// Where a peer's position is, as of this read.
+///
+/// Computed on every read and never stored in a slot. A resolution is only true
+/// against the Body as it stands, and a cached one is a number that was right
+/// once — which is exactly the silently-wrong index the algebra exists to
+/// prevent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum CaretState {
+    /// A position in the Body as it stands now.
+    At(u64),
+    /// The material this position was attached to is gone, or the anchor
+    /// predates what this Replica retains.
+    Drifted,
+    /// Nothing was available to resolve against.
+    ///
+    /// Distinct from `Drifted`, which is an answer. This is the absence of one,
+    /// and a renderer that conflated them would show a live caret as lost.
+    Unresolved,
+}
+
+/// One thing a peer is currently doing, resolved for a reader.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct LiveEntry {
+    pub station: StationId,
+    pub scope: TransientScope,
+    pub kind: crate::transient::TransientKind,
+    /// How long ago this Station saw it. Ours, not theirs — a peer's clock is a
+    /// peer's claim.
+    pub age_ms: u64,
+    /// Past `CARET_GRACE`. Still shown, and shown as uncertain: a caret whose
+    /// Body has moved under it since it arrived is not wrong yet, but it is no
+    /// longer known to be right.
+    pub uncertain: bool,
+    pub caret: Option<CaretState>,
+    /// A selection's far end.
+    pub focus: Option<CaretState>,
+}
+
+/// What a Station currently believes about who is doing what.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct LiveView {
+    /// Bumped on every change. A reader that sees the same number saw the same
+    /// view, and does not have to diff to find that out.
+    pub generation: u64,
+    /// This Station is not hearing from everyone it could be — over the session
+    /// cap, or dropping scopes at a gate.
+    ///
+    /// Load-bearing rather than diagnostic. Awareness is allowed to be
+    /// incomplete and durable convergence is not, so the surface that can be
+    /// partial has to say when it is; a viewer showing three of five people
+    /// with no indication is telling a confident lie.
+    pub partial: bool,
+    pub entries: Vec<LiveEntry>,
+}
+
+/// The cross-thread half of the Live plane.
+///
+/// The driver writes it from its own thread; the daemon and the browser bridge
+/// read it from theirs. Everything in it is plain data — scopes, sequence
+/// numbers, encoded anchors — so a `Mutex` here is a `Mutex` over bytes and
+/// never over a collaborative document.
+///
+/// **Lock order: this table is never held across a Replica read.** `view`
+/// snapshots under the lock, releases it, and only then resolves anchors. Doing
+/// it the other way would put the commit lock underneath a lock the browser can
+/// take, which is a deadlock waiting for a busy afternoon.
+pub struct LiveHandle {
+    table: std::sync::Mutex<PublishTable>,
+    signals: SignalSink,
+    anchors: Option<std::sync::Arc<dyn AnchorSource>>,
+}
+
+#[derive(Default)]
+struct PublishTable {
+    generation: u64,
+    partial: bool,
+    slots: std::collections::BTreeMap<
+        (StationId, TransientScope, u8),
+        crate::transient::TransientSlot,
+    >,
+}
+
+impl LiveHandle {
+    pub fn new(anchors: Option<std::sync::Arc<dyn AnchorSource>>) -> Self {
+        Self {
+            table: std::sync::Mutex::new(PublishTable::default()),
+            signals: tokio::sync::broadcast::channel(SIGNAL_QUEUE).0,
+            anchors,
+        }
+    }
+
+    fn table(&self) -> std::sync::MutexGuard<'_, PublishTable> {
+        self.table.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Listen for signals this Station receives.
+    ///
+    /// Subscribing before anything arrives is the only way to hear anything: a
+    /// signal is an event rather than a state anyone can re-read.
+    pub fn signals(&self) -> tokio::sync::broadcast::Receiver<(StationId, crate::planes::Signal)> {
+        self.signals.subscribe()
+    }
+
+    pub(crate) fn sink(&self) -> SignalSink {
+        self.signals.clone()
+    }
+
+    /// Record one item a peer sent, after the per-session store admitted it.
+    ///
+    /// After, not instead: the session store is what bounds a single connection,
+    /// and this is what a reader sees. An item that failed the session's own
+    /// ceilings never reaches here.
+    pub fn record(&self, station: &StationId, item: &TransientItem, now: Instant) {
+        let mut table = self.table();
+        table.generation = table.generation.wrapping_add(1);
+        table.slots.insert(
+            (
+                station.clone(),
+                item.scope.clone(),
+                item.payload.kind() as u8,
+            ),
+            crate::transient::TransientSlot {
+                session_epoch: item.session_epoch,
+                seq: item.seq,
+                arrived_at: now,
+                retired_at: None,
+                payload: item.payload.clone(),
+            },
+        );
+    }
+
+    /// Drop everything one Station held.
+    ///
+    /// What a disconnect does, and what a revocation does. Immediate rather than
+    /// at TTL: a peer that lost standing keeps nothing, and a peer that hung up
+    /// is not "here for another ninety seconds".
+    pub fn forget(&self, station: &StationId) -> usize {
+        let mut table = self.table();
+        let before = table.slots.len();
+        table.slots.retain(|(held, _, _), _| held != station);
+        let dropped = before - table.slots.len();
+        if dropped > 0 {
+            table.generation = table.generation.wrapping_add(1);
+        }
+        dropped
+    }
+
+    /// Drop one peer's slots for one scope.
+    pub fn retire(&self, station: &StationId, scope: &TransientScope) {
+        let mut table = self.table();
+        let before = table.slots.len();
+        table
+            .slots
+            .retain(|(held, held_scope, _), _| held != station || held_scope != scope);
+        if table.slots.len() != before {
+            table.generation = table.generation.wrapping_add(1);
+        }
+    }
+
+    /// Say whether this Station is hearing from everyone it could be.
+    pub fn set_partial(&self, partial: bool) {
+        let mut table = self.table();
+        if table.partial != partial {
+            table.partial = partial;
+            table.generation = table.generation.wrapping_add(1);
+        }
+    }
+
+    /// Drop what has expired. Nothing depends on when this runs.
+    pub fn sweep(&self, now: Instant) -> usize {
+        let mut table = self.table();
+        let before = table.slots.len();
+        table.slots.retain(|(_, scope, _), slot| {
+            let ttl = match scope {
+                TransientScope::IssueView { .. }
+                | TransientScope::DocumentView { .. }
+                | TransientScope::CustomWorld { .. } => deadline::PRESENCE_TTL,
+                _ => deadline::CURSOR_TTL,
+            };
+            now.duration_since(slot.arrived_at) < ttl
+        });
+        let dropped = before - table.slots.len();
+        if dropped > 0 {
+            table.generation = table.generation.wrapping_add(1);
+        }
+        dropped
+    }
+
+    /// The generation alone, for a reader deciding whether to build a view.
+    pub fn generation(&self) -> u64 {
+        self.table().generation
+    }
+
+    /// Mint an anchor at a position inside a Body.
+    ///
+    /// `None` when the World id does not parse, when there is no Replica, or
+    /// when the position names nothing the algebra can bind — all three are the
+    /// same answer to a caller: there is no anchor to send.
+    pub fn anchor(
+        &self,
+        world: &str,
+        body: [u8; 16],
+        field: &str,
+        position: u64,
+    ) -> Option<Vec<u8>> {
+        let key = body_key(world, body)?;
+        let anchor = self
+            .anchors
+            .as_ref()?
+            .anchor_in_body(&key, field, position)?;
+        Some(anchor.encode())
+    }
+
+    /// Everything currently believed, resolved against the Bodies as they stand.
+    ///
+    /// `scope` narrows it; `None` is the whole table. Resolution happens here,
+    /// per read, and the answer is never written back into a slot.
+    pub fn view(&self, scope: Option<&TransientScope>, now: Instant) -> LiveView {
+        // Snapshotted, then the lock is released. Resolving under it would take
+        // the commit lock while holding a lock the browser can take.
+        let (generation, partial, held) = {
+            let table = self.table();
+            let held: Vec<_> = table
+                .slots
+                .iter()
+                .filter(|((_, held_scope, _), _)| scope.is_none_or(|want| held_scope == want))
+                .map(|((station, held_scope, _), slot)| {
+                    (station.clone(), held_scope.clone(), slot.clone())
+                })
+                .collect();
+            (table.generation, table.partial, held)
+        };
+
+        let entries = held
+            .into_iter()
+            .map(|(station, scope, slot)| {
+                let age = now.saturating_duration_since(slot.arrived_at);
+                let (caret, focus) = self.resolve(&scope, &slot.payload);
+                LiveEntry {
+                    station,
+                    kind: slot.payload.kind(),
+                    scope,
+                    age_ms: age.as_millis() as u64,
+                    uncertain: age > deadline::CARET_GRACE,
+                    caret,
+                    focus,
+                }
+            })
+            .collect();
+        LiveView {
+            generation,
+            partial,
+            entries,
+        }
+    }
+
+    fn resolve(
+        &self,
+        scope: &TransientScope,
+        payload: &crate::transient::TransientPayload,
+    ) -> (Option<CaretState>, Option<CaretState>) {
+        use crate::transient::TransientPayload;
+        let (anchor, focus) = match payload {
+            TransientPayload::Caret { anchor } => (Some(anchor), None),
+            TransientPayload::Selection { anchor, focus } => (Some(anchor), Some(focus)),
+            _ => return (None, None),
+        };
+        let Some((world, body)) = scope_body(scope) else {
+            return (
+                Some(CaretState::Unresolved),
+                focus.map(|_| CaretState::Unresolved),
+            );
+        };
+        let Some(key) = body_key(&world, body) else {
+            return (
+                Some(CaretState::Unresolved),
+                focus.map(|_| CaretState::Unresolved),
+            );
+        };
+        let one = |raw: &Vec<u8>| -> CaretState {
+            let Some(source) = self.anchors.as_ref() else {
+                return CaretState::Unresolved;
+            };
+            // A stored anchor was validated on the way in, so a decode failure
+            // here is this Station's bug rather than a peer's — and the honest
+            // answer is still "no position", never a guess.
+            let Ok(decoded) = replica::FabricAnchor::decode_canonical(raw) else {
+                return CaretState::Unresolved;
+            };
+            match source.resolve_anchor(&key, &decoded) {
+                replica::AnchorResolution::Resolved(at) => CaretState::At(at),
+                replica::AnchorResolution::Drifted => CaretState::Drifted,
+            }
+        };
+        (anchor.map(&one), focus.map(&one))
+    }
+}
+
+/// The Body a scope names, when it names one.
+fn scope_body(scope: &TransientScope) -> Option<(String, [u8; 16])> {
+    match scope {
+        TransientScope::IssueView { world, body }
+        | TransientScope::DocumentView { world, body }
+        | TransientScope::TextCaret { world, body, .. }
+        | TransientScope::Typing { world, body, .. } => Some((world.clone(), *body)),
+        _ => None,
+    }
+}
+
+fn body_key(world: &str, body: [u8; 16]) -> Option<replica::ids::BodyKey> {
+    Some(replica::ids::BodyKey::new(
+        replica::ids::WorldId::parse(world)?,
+        replica::ids::BodyId::from_bytes(body),
+    ))
+}
+
 /// Where a received signal goes.
 ///
 /// A broadcast rather than a callback, because a signal has no single owner: a
@@ -164,10 +507,18 @@ pub async fn serve_session(
     connection: std::sync::Arc<dyn comms::Connection>,
     peer: AdmittedPeer,
     cancel: crate::lifecycle::CancelToken,
-    signals: Option<SignalSink>,
+    handle: Option<std::sync::Arc<LiveHandle>>,
 ) {
     let session = Rc::new(RefCell::new(LiveSession::new(peer.station.clone())));
     let epoch = peer.session_epoch;
+    // Whatever ends this connection — idle, cancel, a gate, a peer hanging up —
+    // the slots go with it. Presence has no goodbye it can rely on, so the
+    // session ending *is* the goodbye.
+    let leaving = Leaving {
+        station: peer.station.clone(),
+        handle: handle.clone(),
+    };
+    let _leaving = leaving;
 
     // Three gates: control messages, datagrams, and new flows. Separate because
     // a peer that opens flows and sends nothing on them never reaches the
@@ -207,7 +558,11 @@ pub async fn serve_session(
         }
         if sweep_at.elapsed() > deadline::CURSOR_COALESCE {
             sweep_at = Instant::now();
-            session.borrow_mut().sweep(Instant::now());
+            let now = Instant::now();
+            session.borrow_mut().sweep(now);
+            if let Some(handle) = &handle {
+                handle.sweep(now);
+            }
         }
 
         tokio::select! {
@@ -248,7 +603,15 @@ pub async fn serve_session(
                 if !session.is_watching(&item.scope) {
                     continue;
                 }
-                session.admit(&item, &epoch, Instant::now());
+                let now = Instant::now();
+                if session.admit(&item, &epoch, now) == AdmitOutcome::Stored {
+                    // Only what the session store took. The per-connection
+                    // ceilings are what bound one peer, and an item that failed
+                    // them must not appear to a reader as though it had not.
+                    if let Some(handle) = &handle {
+                        handle.record(&peer.station, &item, now);
+                    }
+                }
             }
 
             accepted = connection.accept_bi() => {
@@ -316,11 +679,11 @@ pub async fn serve_session(
                         connection.close(REFUSED, b"");
                         break;
                     }
-                    if let Some(sink) = &signals {
+                    if let Some(handle) = &handle {
                         // Nobody listening is not a failure. A Station with no
                         // viewer attached still admits signals and still bounds
                         // them; it simply has nobody to hand them to.
-                        let _ = sink.send((peer.station.clone(), signal));
+                        let _ = handle.sink().send((peer.station.clone(), signal));
                     }
                     continue;
                 }
@@ -372,6 +735,9 @@ pub async fn serve_session(
                         ] {
                             session.store.retire(&scope, kind, epoch, seq, Instant::now());
                         }
+                        if let Some(handle) = &handle {
+                            handle.retire(&peer.station, &scope);
+                        }
                     }
                 }
             }
@@ -408,36 +774,21 @@ pub fn publish(
 /// function, and this is it.
 pub struct LiveService {
     sessions: std::cell::RefCell<Vec<StationId>>,
-    signals: SignalSink,
+    handle: std::sync::Arc<LiveHandle>,
 }
 
 impl LiveService {
-    pub fn new() -> Self {
+    pub fn new(handle: std::sync::Arc<LiveHandle>) -> Self {
         Self {
             sessions: std::cell::RefCell::new(Vec::new()),
-            signals: tokio::sync::broadcast::channel(SIGNAL_QUEUE).0,
+            handle,
         }
-    }
-
-    /// Listen for signals this Station receives.
-    ///
-    /// Subscribing before anything arrives is the only way to hear anything:
-    /// a broadcast delivers what follows the subscription, and a signal is an
-    /// event rather than a state anyone can re-read.
-    pub fn signals(&self) -> tokio::sync::broadcast::Receiver<(StationId, crate::planes::Signal)> {
-        self.signals.subscribe()
     }
 
     /// Which peers currently hold a session. A Station-local answer, and not a
     /// membership claim — a member with nothing open is not here.
     pub fn present(&self) -> Vec<StationId> {
         self.sessions.borrow().clone()
-    }
-}
-
-impl Default for LiveService {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -449,13 +800,42 @@ impl crate::plane_driver::PlaneService for LiveService {
         cancel: crate::lifecycle::CancelToken,
     ) {
         let station = peer.station.clone();
-        self.sessions.borrow_mut().push(station.clone());
-        serve_session(connection, peer, cancel, Some(self.signals.clone())).await;
-        // Removed on the way out, whatever ended it. Presence has no goodbye it
-        // can rely on, so the session ending *is* the goodbye — and a peer left
-        // in this list after its connection closed is a ghost that no TTL
-        // reaches, because the TTLs are on slots rather than on sessions.
-        self.sessions.borrow_mut().retain(|held| held != &station);
+        {
+            let mut sessions = self.sessions.borrow_mut();
+            sessions.push(station.clone());
+            // Over the cap, awareness is incomplete and says so. Durable
+            // convergence is unaffected — that is Contact's job and it does not
+            // ride this plane.
+            self.handle
+                .set_partial(sessions.len() > crate::budget::slots::MAX_LIVE_SESSIONS);
+        }
+        serve_session(connection, peer, cancel, Some(self.handle.clone())).await;
+        // Removed on the way out, whatever ended it. A peer left in this list
+        // after its connection closed is a ghost that no TTL reaches, because
+        // the TTLs are on slots rather than on sessions.
+        let mut sessions = self.sessions.borrow_mut();
+        sessions.retain(|held| held != &station);
+        self.handle
+            .set_partial(sessions.len() > crate::budget::slots::MAX_LIVE_SESSIONS);
+    }
+}
+
+/// Drops one peer's slots when its session ends, however it ends.
+///
+/// A guard rather than a line at the bottom of the loop: `serve_session` leaves
+/// through eight `break`s and a cancellation, and the one path that forgot to
+/// clean up would leave a cursor on screen belonging to somebody who closed
+/// their laptop.
+struct Leaving {
+    station: StationId,
+    handle: Option<std::sync::Arc<LiveHandle>>,
+}
+
+impl Drop for Leaving {
+    fn drop(&mut self) {
+        if let Some(handle) = &self.handle {
+            handle.forget(&self.station);
+        }
     }
 }
 
