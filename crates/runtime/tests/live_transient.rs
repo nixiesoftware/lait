@@ -1035,3 +1035,82 @@ mod offers_on_the_plane {
         assert!(handle.take_offer(&station(1), &[7u8; 32]).is_none());
     }
 }
+
+/// A scope flood, and the ledger that ends it.
+mod flooding {
+    use super::*;
+    use runtime::budget::{slots, Evictions, Verdict};
+    use runtime::live::LiveSession;
+    use runtime::transient::AdmitOutcome;
+
+    #[test]
+    fn a_full_table_evicts_and_eight_evictions_close_the_connection() {
+        // The chain the docket asks for, driven end to end at a table size a
+        // test can fill. Every link is the shipped code: the store refuses when
+        // full, the session counts it, and the ledger closes at its ceiling.
+        let mut session = LiveSession::with_capacity(station(1), 4);
+        let epoch = [1u8; 16];
+        let now = Instant::now();
+        let mut scopes = Vec::new();
+        for n in 0..4u8 {
+            let scope = issue_scope(n);
+            scopes.push(scope.clone());
+            session.subscribe(scopes.clone());
+            assert_eq!(
+                session.admit(&presence_item(scope, 1), &epoch, now),
+                AdmitOutcome::Stored
+            );
+        }
+
+        let mut evictions = Evictions::new(slots::MAX_EVICTIONS_PER_CONNECTION);
+        for n in 0..slots::MAX_EVICTIONS_PER_CONNECTION {
+            let scope = issue_scope(100 + n as u8);
+            scopes.push(scope.clone());
+            session.subscribe(scopes.clone());
+            assert_eq!(
+                session.admit(&presence_item(scope, 1), &epoch, now),
+                AdmitOutcome::Evicted,
+                "a full table refuses rather than displacing"
+            );
+            let verdict = evictions.charge(1);
+            let last = n + 1 == slots::MAX_EVICTIONS_PER_CONNECTION;
+            assert_eq!(
+                verdict,
+                if last { Verdict::Close } else { Verdict::Allow },
+                "the connection survives until the ceiling and not past it"
+            );
+        }
+        assert_eq!(
+            session.counters().evictions,
+            slots::MAX_EVICTIONS_PER_CONNECTION as u64
+        );
+    }
+
+    #[test]
+    fn honest_traffic_never_pays_an_eviction_back() {
+        // Why this is its own ledger and not a `Gate` used carefully. A gate
+        // decrements its strike counter on every admitted item, so a peer
+        // alternating one eviction with eight honest datagrams would sit at zero
+        // forever while steadily displacing everybody else.
+        let mut evictions = Evictions::new(slots::MAX_EVICTIONS_PER_CONNECTION);
+        for _ in 0..(slots::MAX_EVICTIONS_PER_CONNECTION - 1) {
+            assert_eq!(evictions.charge(1), Verdict::Allow);
+        }
+        let charged = evictions.charged();
+
+        let mut session = LiveSession::with_capacity(station(1), 16);
+        session.subscribe(vec![issue_scope(1)]);
+        let epoch = [1u8; 16];
+        let now = Instant::now();
+        for seq in 1..=64 {
+            session.admit(&presence_item(issue_scope(1), seq), &epoch, now);
+        }
+
+        assert_eq!(
+            evictions.charged(),
+            charged,
+            "sixty-four admitted items paid nothing back"
+        );
+        assert_eq!(evictions.charge(1), Verdict::Close);
+    }
+}

@@ -681,6 +681,15 @@ pub mod slots {
     /// one). A connection cannot hold more slots than its scopes allow.
     pub const MAX_SLOTS_PER_CONNECTION: usize = MAX_SUBSCRIBED_SCOPES_PER_CONNECTION * 2;
 
+    /// Evictions one connection may cause before it is closed.
+    ///
+    /// Small, and deliberately not derived from the table size. A peer causing
+    /// eight evictions has displaced eight other people's state from a shared
+    /// table, and the ninth is not a busier peer — it is a peer whose traffic
+    /// pattern only makes sense as displacement. The first eviction is nobody's
+    /// fault; the eighth is nobody else's.
+    pub const MAX_EVICTIONS_PER_CONNECTION: u32 = 8;
+
     /// Chunks in flight to one provider. Four 256 KiB chunks keeps an ~80 Mbit/s
     /// path busy at 100 ms of round trip; more is buffer, not throughput.
     pub const MAX_INFLIGHT_CHUNKS_PER_PROVIDER: usize = 4;

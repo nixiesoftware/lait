@@ -80,9 +80,19 @@ pub struct LiveSession {
 
 impl LiveSession {
     pub fn new(peer: StationId) -> Self {
+        Self::with_capacity(peer, slots::MAX_TRANSIENT_SLOTS)
+    }
+
+    /// A session whose table holds `capacity` slots.
+    ///
+    /// Exposed so a flood can be driven against a table small enough to fill.
+    /// Proving the eviction escalation at the shipped ceiling means sending four
+    /// thousand distinct scopes through a real connection, and a bound nobody
+    /// can afford to test is a bound nobody tests.
+    pub fn with_capacity(peer: StationId, capacity: usize) -> Self {
         Self {
             peer,
-            store: TransientStore::new(),
+            store: TransientStore::with_capacity(capacity),
             counters: TransientCounters::default(),
             subscriptions: Vec::new(),
         }
@@ -648,6 +658,12 @@ pub async fn serve_session(
     let mut datagram_gate = Gate::from_spec(Instant::now(), gates::LIVE_DATAGRAMS);
     let mut datagram_bytes = ByteGate::from_spec(Instant::now(), gates::LIVE_DATAGRAM_BYTES);
     let mut accept_gate = Gate::from_spec(Instant::now(), gates::STREAM_ACCEPT);
+    // Evictions are charged on their own ledger, which never decays. A `Gate`
+    // would be wrong here and subtly so: `Gate::check` decrements the same
+    // strike counter `penalise` adds to, so a peer alternating one eviction with
+    // eight honest datagrams sits at zero strikes forever while steadily
+    // displacing everybody else from a bounded table.
+    let mut evictions = crate::budget::Evictions::new(slots::MAX_EVICTIONS_PER_CONNECTION);
     // Signals get their own pair. A person-scale event arrives four a second at
     // most, and a peer sending them faster than that is not a person.
     let mut signal_gate = Gate::from_spec(Instant::now(), gates::SIGNAL_RATE);
@@ -774,7 +790,20 @@ pub async fn serve_session(
                     continue;
                 }
                 let now = Instant::now();
-                if session.admit(&item, &epoch, now) == AdmitOutcome::Stored {
+                let outcome = session.admit(&item, &epoch, now);
+                if outcome == AdmitOutcome::Evicted {
+                    // A full table is not this peer's fault once; it is this
+                    // peer's fault repeatedly. Charged rather than merely
+                    // counted, because the table is shared and displacement is
+                    // what a scope flood is *for*.
+                    drop(session);
+                    if evictions.charge(1) == Verdict::Close {
+                        connection.close(REFUSED, b"");
+                        break;
+                    }
+                    continue;
+                }
+                if outcome == AdmitOutcome::Stored {
                     // Only what the session store took. The per-connection
                     // ceilings are what bound one peer, and an item that failed
                     // them must not appear to a reader as though it had not.
