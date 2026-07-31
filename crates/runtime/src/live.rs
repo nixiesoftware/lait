@@ -340,6 +340,55 @@ pub fn publish(
     connection.send_datagram(&encoded).is_ok()
 }
 
+/// The Live plane's half of the driver contract.
+///
+/// Thin on purpose. `run_driver` already owns accept, the slot ceilings, the
+/// opening read, replay through `AcceptedOpenings`, the judgement, the accept
+/// write, the revocation race and the shutdown ladder — all of it plane-neutral
+/// and all of it already proven by Freight. What is genuinely Live is one
+/// function, and this is it.
+pub struct LiveService {
+    sessions: std::cell::RefCell<Vec<StationId>>,
+}
+
+impl LiveService {
+    pub fn new() -> Self {
+        Self {
+            sessions: std::cell::RefCell::new(Vec::new()),
+        }
+    }
+
+    /// Which peers currently hold a session. A Station-local answer, and not a
+    /// membership claim — a member with nothing open is not here.
+    pub fn present(&self) -> Vec<StationId> {
+        self.sessions.borrow().clone()
+    }
+}
+
+impl Default for LiveService {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl crate::plane_driver::PlaneService for LiveService {
+    async fn serve(
+        &self,
+        connection: std::sync::Arc<dyn comms::Connection>,
+        peer: AdmittedPeer,
+        cancel: crate::lifecycle::CancelToken,
+    ) {
+        let station = peer.station.clone();
+        self.sessions.borrow_mut().push(station.clone());
+        serve_session(connection, peer, cancel).await;
+        // Removed on the way out, whatever ended it. Presence has no goodbye it
+        // can rely on, so the session ending *is* the goodbye — and a peer left
+        // in this list after its connection closed is a ghost that no TTL
+        // reaches, because the TTLs are on slots rather than on sessions.
+        self.sessions.borrow_mut().retain(|held| held != &station);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

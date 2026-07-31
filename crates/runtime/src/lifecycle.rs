@@ -592,7 +592,7 @@ impl Orbit {
                     let context = crate::plane_driver::PlaneContext {
                         plane: crate::planes::Plane::Freight,
                         space: station.store.space().clone(),
-                        local_station,
+                        local_station: local_station.clone(),
                         authority: station.authority.clone(),
                         policy: options.planes.policy(),
                         cancel: station.cancel.clone(),
@@ -616,6 +616,31 @@ impl Orbit {
                     // Spawned tracked, so `drain_tasks` joins it rather than
                     // leaving a thread holding a queue after the Station is
                     // gone.
+                    station
+                        .spawn_tracked(move |_cancel| {
+                            crate::plane_driver::run_driver(context, queue, service)
+                        })
+                        .expect("station is live at activation");
+                }
+            }
+
+            // The second driver, and the reason the queue split had to land
+            // first: on one shared queue these two would take strictly
+            // alternating connections and each refuse half of what it was
+            // handed.
+            if options.planes.live_enabled {
+                if let Some(queue) = plane_transport.take_session_queue(crate::planes::LIVE_ALPN) {
+                    let context = crate::plane_driver::PlaneContext {
+                        plane: crate::planes::Plane::Live,
+                        space: station.store.space().clone(),
+                        local_station,
+                        authority: station.authority.clone(),
+                        policy: options.planes.policy(),
+                        cancel: station.cancel.clone(),
+                        drain_deadline,
+                        authority_tick: Some(station.core.authority_tick()),
+                    };
+                    let service = crate::live::LiveService::new();
                     station
                         .spawn_tracked(move |_cancel| {
                             crate::plane_driver::run_driver(context, queue, service)
