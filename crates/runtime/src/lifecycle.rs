@@ -113,6 +113,8 @@ pub struct ActivationOptions {
     /// The content plane's local policy: how much disk it may hold, and how
     /// large a single content this Station will accept.
     pub content: ContentOptions,
+    /// Which delivery planes this Station answers on.
+    pub planes: PlaneOptions,
     /// The Station's Contact plane: transport, station identity, mechanics
     /// seams, and gossip. `None` activates an offline Station (valid; grants
     /// no new authority; `neighbors` still serves the persisted registry).
@@ -128,6 +130,7 @@ impl ActivationOptions {
         Self {
             drain_deadline: DEFAULT_DRAIN_DEADLINE,
             content: ContentOptions::default(),
+            planes: PlaneOptions::default(),
             comms: None,
             observation_capacity: 0,
         }
@@ -158,6 +161,39 @@ impl Default for ContentOptions {
         Self {
             cache_quota_bytes: 4 * 1024 * 1024 * 1024,
             max_content_len: 256 * 1024 * 1024,
+        }
+    }
+}
+
+/// Local policy for the delivery planes.
+///
+/// Hand-written `Default` for the same reason [`ContentOptions`] has one: a
+/// derived `Default` would leave every plane off, and a caller that says
+/// nothing should get a Station that works rather than one that is silently
+/// deaf. Turning a plane off is a thing an operator does on purpose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaneOptions {
+    /// Whether this Station serves and fetches content over Freight.
+    pub freight_enabled: bool,
+    /// Whether this Station answers on the Live plane.
+    pub live_enabled: bool,
+}
+
+impl Default for PlaneOptions {
+    fn default() -> Self {
+        Self {
+            freight_enabled: true,
+            live_enabled: true,
+        }
+    }
+}
+
+impl PlaneOptions {
+    fn policy(self) -> crate::admission::PlanePolicy {
+        crate::admission::PlanePolicy {
+            serve_enabled: self.freight_enabled,
+            fetch_enabled: self.freight_enabled,
+            live_enabled: self.live_enabled,
         }
     }
 }
@@ -507,6 +543,12 @@ impl Orbit {
             max_content_len: options.content.max_content_len,
         };
         if let Some(comms) = options.comms {
+            // Held before `comms` moves into the Contact driver's context: the
+            // plane driver needs the same transport and the same identity, and
+            // taking them afterwards would mean cloning the whole options
+            // struct for two fields.
+            let plane_transport = comms.transport.clone();
+            let station_seed = comms.station_seed;
             let space = station.store.space().clone();
             let space_bytes = <[u8; 29]>::try_from(space.as_str().as_bytes())
                 .map_err(|_| LifecycleError::IntegrityFailure("space id shape".into()))?;
@@ -529,6 +571,58 @@ impl Orbit {
                 .spawn_tracked(move |_cancel| crate::contact_driver::run_driver(ctx))
                 .expect("station is live at activation");
             *station.driver.lock().expect("driver slot") = Some(tx);
+
+            // The first plane driver in a shipped Station.
+            //
+            // `lait/freight/1` has had a service since S2 and no mount, so a
+            // peer that dialled it completed a handshake and was turned away by
+            // the hub — the ALPN was advertised and the plane was not served.
+            // Mounting Freight first is deliberate: it proves the wiring where
+            // a service already exists and is already tested, so when Live's
+            // driver arrives the only new thing is Live.
+            //
+            // Taking the queue is what makes this exclusive. A second mount for
+            // the same plane gets `None` rather than a second reader.
+            let local_station =
+                StationId::from_device(&mechanics::crypto::device_from_seed(&station_seed))
+                    .ok_or_else(|| LifecycleError::IntegrityFailure("station id".into()))?;
+            if options.planes.freight_enabled {
+                if let Some(queue) = plane_transport.take_session_queue(crate::planes::FREIGHT_ALPN)
+                {
+                    let context = crate::plane_driver::PlaneContext {
+                        plane: crate::planes::Plane::Freight,
+                        space: station.store.space().clone(),
+                        local_station,
+                        authority: station.authority.clone(),
+                        policy: options.planes.policy(),
+                        cancel: station.cancel.clone(),
+                        drain_deadline,
+                        // A real tick, for the first time. `watch_for_revocation`
+                        // has had a live branch since S2 and nothing to watch —
+                        // this is rung by every authority advance, so a revoked
+                        // peer's session now closes on the change rather than
+                        // whenever it happens to disconnect.
+                        authority_tick: Some(station.core.authority_tick()),
+                    };
+                    let service = crate::freight::FreightService::new(
+                        station.content.clone(),
+                        Arc::new(crate::transfer::TransferRegistry::new()),
+                        Arc::new(crate::content_host::StationContentKeys::new(
+                            station.keys.clone(),
+                        )),
+                        station.store.space().clone(),
+                        options.content.max_content_len,
+                    );
+                    // Spawned tracked, so `drain_tasks` joins it rather than
+                    // leaving a thread holding a queue after the Station is
+                    // gone.
+                    station
+                        .spawn_tracked(move |_cancel| {
+                            crate::plane_driver::run_driver(context, queue, service)
+                        })
+                        .expect("station is live at activation");
+                }
+            }
         }
         Ok(station)
     }

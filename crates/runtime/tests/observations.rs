@@ -202,6 +202,7 @@ fn station_with_capacity(root: &std::path::Path, capacity: usize) -> Station {
         .form_space(SpaceFormationOptions::default())
         .unwrap()
         .activate(ActivationOptions {
+            planes: Default::default(),
             content: Default::default(),
             drain_deadline: Duration::from_secs(5),
             comms: None,

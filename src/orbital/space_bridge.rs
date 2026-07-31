@@ -374,6 +374,11 @@ impl SpaceBridge {
             .map_err(|e| anyhow!("acquire orbit: {e:?}"))?
             .activate(ActivationOptions {
                 content: Default::default(),
+                // Both planes on, which is what `lait/freight/1` being
+                // advertised has always implied and, until now, has not meant:
+                // the ALPN was registered and no driver owned it, so a peer
+                // that dialled completed a handshake and was turned away.
+                planes: Default::default(),
                 drain_deadline: Duration::from_secs(5),
                 comms: Some(comms_options(
                     transport,
