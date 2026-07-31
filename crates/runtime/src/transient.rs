@@ -171,6 +171,11 @@ impl TransientPayload {
         // The legality table. It is what makes `MAX_SLOTS_PER_CONNECTION =
         // MAX_SUBSCRIBED_SCOPES_PER_CONNECTION * 2` a fact rather than a hope:
         // no scope admits more than two kinds.
+        // Written as a table rather than a `matches!` because the pairs are
+        // the specification: one line per legal combination, so adding a scope
+        // without deciding what it may carry is visible here rather than
+        // implied by an absence.
+        #[allow(clippy::match_like_matches_macro)]
         let legal = match (scope, self.kind()) {
             (TransientScope::IssueView { .. }, TransientKind::Presence) => true,
             (TransientScope::DocumentView { .. }, TransientKind::Presence) => true,

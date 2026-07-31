@@ -11,7 +11,7 @@
 //! test uses one large enough that those bytes matter, and checks the digest
 //! rather than the length.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};

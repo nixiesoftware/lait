@@ -9,7 +9,7 @@
 //!
 //! Storage is the axis that has no natural ceiling, so it needs the test.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use mechanics::crypto::AuthorizedBodyKey;
@@ -123,7 +123,7 @@ fn edit(r: &mut Replica, n: u16, key: &BodyKey) {
     .expect("commit");
 }
 
-fn object_count(dir: &PathBuf) -> usize {
+fn object_count(dir: &Path) -> usize {
     std::fs::read_dir(dir.join("objects")).unwrap().count()
 }
 

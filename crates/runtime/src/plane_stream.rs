@@ -125,7 +125,6 @@ mod tests {
         // than the protocol permits is asking for something no peer may send.
         // Intersecting rather than replacing is what keeps the ceiling a
         // property of the plane rather than of whoever called last.
-        assert!(bounds::MAX_CONTROL_FRAME_BYTES < usize::MAX);
         let generous = usize::MAX;
         assert_eq!(
             generous.min(bounds::MAX_CONTROL_FRAME_BYTES),

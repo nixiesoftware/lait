@@ -424,7 +424,7 @@ fn finishing_one_staged_part_leaves_the_others_alone() {
     let op = operation(3);
     for part in 0..4u32 {
         cache
-            .append_staged(&op, part, 0, &vec![part as u8; 100])
+            .append_staged(&op, part, 0, &[part as u8; 100])
             .unwrap();
     }
     assert_eq!(cache.staged_bytes(), 400);

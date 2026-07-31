@@ -33,12 +33,6 @@ use crate::planes::{bounds, FreightFrame};
 
 /// Length prefix for one framed message on a Freight flow.
 ///
-/// The request needs no delimiter — one request per flow, and finishing says
-/// where it ends. A response does: a chunk answer is a header followed by raw
-/// ciphertext, and the reader has to know where one stops and the other starts
-/// without trusting a length the header itself declares.
-const FRAME_PREFIX: usize = 4;
-
 /// Encode one frame with its length prefix, refusing rather than overflowing.
 pub fn frame(message: &FreightFrame) -> Vec<u8> {
     crate::plane_stream::frame(&message.encode_bounded())

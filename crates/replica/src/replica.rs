@@ -2501,7 +2501,7 @@ impl Replica {
                 units,
                 &staged_material,
                 &final_records,
-                &bundle_declared,
+                bundle_declared,
                 bundle_descriptors,
                 next_frontier,
             )?)

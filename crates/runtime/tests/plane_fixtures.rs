@@ -280,7 +280,6 @@ fn the_datagram_ceiling_is_advisory_and_the_path_can_be_smaller() {
     // Measured: two runs of comms::transport_capabilities on one machine and a
     // direct path reported 1382 then 1162. The second is below this constant,
     // so a sender that trusted the constant alone would have been refused.
-    assert!(bounds::MAX_DATAGRAM_BYTES <= 1_200);
     assert!(datagram_fits(1_200, Some(1_382)));
     assert!(
         !datagram_fits(1_200, Some(1_162)),
@@ -296,7 +295,6 @@ fn the_datagram_ceiling_is_advisory_and_the_path_can_be_smaller() {
 #[test]
 fn a_signal_cannot_exceed_its_hard_ceiling() {
     assert_eq!(bounds::MAX_SIGNAL_BYTES, 16 * 1024);
-    assert!(bounds::MAX_SIGNAL_BYTES < bounds::MAX_CONTROL_FRAME_BYTES);
 }
 
 // ---------------------------------------------------------------------------

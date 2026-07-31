@@ -64,6 +64,25 @@ pub mod stream_kind {
     }
 }
 
+/// Bounds that constrain each other, checked at compile time.
+///
+/// Moved out of the fixtures for the reason clippy names: a comparison of two
+/// constants is decided when this file compiles, so making it a test defers a
+/// build error into a test run. Here it stops the build at the file the numbers
+/// live in.
+mod bound_consistency {
+    use super::bounds;
+
+    const _: () = assert!(
+        bounds::MAX_DATAGRAM_BYTES <= 1_200,
+        "a datagram must fit the smallest path anyone measures, not the largest"
+    );
+    const _: () = assert!(
+        bounds::MAX_SIGNAL_BYTES < bounds::MAX_CONTROL_FRAME_BYTES,
+        "one signal must fit inside a control frame, or it can never be sent"
+    );
+}
+
 /// Which plane an opening is for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Plane {

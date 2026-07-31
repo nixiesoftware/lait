@@ -220,59 +220,18 @@ fn a_dial_deadline_never_outlives_the_drain_it_would_be_joined_by() {
 
 #[test]
 fn the_slot_ceilings_are_consistent_with_each_other() {
-    assert!(
-        slots::MAX_SPACE_CONNECTIONS <= slots::MAX_ENDPOINT_CONNECTIONS,
-        "a Space cannot be allowed more than the endpoint holds"
-    );
-    assert!(
-        slots::MAX_CONNECTIONS_PER_PEER_PLANE * 4 <= slots::MAX_SPACE_CONNECTIONS,
-        "no single peer may plausibly consume a Space's allowance"
-    );
-    assert!(
-        slots::MAX_INFLIGHT_CHUNKS_PER_PROVIDER <= slots::MAX_INFLIGHT_CHUNKS_PER_TRANSFER,
-        "a transfer's ceiling has to admit at least one full provider window"
-    );
-    // Staged bytes must admit every transfer's in-flight window at once, or a
-    // transfer can be starved by its own siblings rather than by a budget.
+    // The relationships between the ceilings themselves are compile-time now —
+    // see `budget::consistency`, where a bad number stops the build at the file
+    // it lives in. What is left here is the one that is not a comparison of
+    // constants: the worst in-flight window depends on the content plane's
+    // chunk size, which belongs to another crate.
     let worst_in_flight = (slots::MAX_FETCH_TRANSFERS * slots::MAX_INFLIGHT_CHUNKS_PER_TRANSFER)
         as u64
         * replica::content::CHUNK_PLAINTEXT_LEN as u64;
     assert!(
         slots::MAX_STAGED_BYTES >= worst_in_flight,
-        "staged bytes ({}) must cover the worst in-flight window ({worst_in_flight})",
+        "staged bytes ({}) must cover the worst in-flight window ({worst_in_flight}), or a          transfer is starved by its own siblings rather than by a budget",
         slots::MAX_STAGED_BYTES
-    );
-
-    // Live's ceilings, and the one relationship between them that is a fact
-    // rather than a choice: the scope-to-kind legality table admits at most two
-    // payload kinds for any scope, so a connection cannot hold more slots than
-    // twice its scopes. Written as an equality because if the table ever admits
-    // a third, this is where that shows up.
-    assert_eq!(
-        slots::MAX_SLOTS_PER_CONNECTION,
-        slots::MAX_SUBSCRIBED_SCOPES_PER_CONNECTION * 2,
-        "slots per connection is derived from the legality table, not chosen"
-    );
-    assert!(
-        slots::MAX_LIVE_SESSIONS <= slots::MAX_SPACE_CONNECTIONS,
-        "a Space cannot hold more Live sessions than it holds connections"
-    );
-    assert!(
-        slots::MAX_LIVE_SESSIONS_PER_STATION * 4 <= slots::MAX_LIVE_SESSIONS,
-        "no single Station may plausibly consume the Space's Live allowance"
-    );
-    // The transient table has to hold what the sessions it admits can fill, or
-    // an honest Station evicts honest peers under no load at all.
-    assert!(
-        slots::SIGNAL_LANE_WORKERS * slots::MAX_CONNECTIONS_PER_PEER_PLANE
-            <= runtime::planes::bounds::MAX_STREAM_WORKERS,
-        "one peer's signal lanes must fit inside the per-connection stream budget"
-    );
-    assert!(
-        slots::MAX_TRANSIENT_SLOTS >= slots::MAX_LIVE_SESSIONS * slots::MAX_SLOTS_PER_CONNECTION,
-        "the transient table ({}) must cover every admitted session's slots ({})",
-        slots::MAX_TRANSIENT_SLOTS,
-        slots::MAX_LIVE_SESSIONS * slots::MAX_SLOTS_PER_CONNECTION
     );
 }
 

@@ -559,6 +559,53 @@ impl Evictions {
     }
 }
 
+/// The relationships between the slot ceilings, checked when this file is
+/// compiled rather than when a test is run.
+///
+/// These were fixtures. They are stronger here: a ceiling changed to something
+/// inconsistent stops the build, and stops it at the file where the number
+/// lives, instead of failing a test somebody has to go and read. Each carries
+/// the sentence that says what the relationship is *for* — which is the part a
+/// bare comparison would lose.
+mod consistency {
+    use super::slots;
+
+    const _: () = assert!(
+        slots::MAX_SPACE_CONNECTIONS <= slots::MAX_ENDPOINT_CONNECTIONS,
+        "a Space cannot be allowed more than the endpoint holds"
+    );
+    const _: () = assert!(
+        slots::MAX_CONNECTIONS_PER_PEER_PLANE * 4 <= slots::MAX_SPACE_CONNECTIONS,
+        "no single peer may plausibly consume a Space's whole allowance"
+    );
+    const _: () = assert!(
+        slots::MAX_INFLIGHT_CHUNKS_PER_PROVIDER <= slots::MAX_INFLIGHT_CHUNKS_PER_TRANSFER,
+        "a transfer's ceiling has to admit at least one full provider window"
+    );
+    const _: () = assert!(
+        slots::MAX_LIVE_SESSIONS <= slots::MAX_SPACE_CONNECTIONS,
+        "a Space cannot hold more Live sessions than it holds connections"
+    );
+    const _: () = assert!(
+        slots::MAX_LIVE_SESSIONS_PER_STATION * 4 <= slots::MAX_LIVE_SESSIONS,
+        "no single Station may plausibly consume the Space's Live allowance"
+    );
+    const _: () = assert!(
+        slots::MAX_SLOTS_PER_CONNECTION == slots::MAX_SUBSCRIBED_SCOPES_PER_CONNECTION * 2,
+        "slots per connection is derived from the legality table, not chosen:          no scope admits more than two payload kinds"
+    );
+    const _: () = assert!(
+        slots::MAX_TRANSIENT_SLOTS
+            >= slots::MAX_LIVE_SESSIONS * slots::MAX_SLOTS_PER_CONNECTION,
+        "the transient table must cover every admitted session's slots, or an          honest Station evicts honest peers under no load at all"
+    );
+    const _: () = assert!(
+        slots::SIGNAL_LANE_WORKERS * slots::MAX_CONNECTIONS_PER_PEER_PLANE
+            <= crate::planes::bounds::MAX_STREAM_WORKERS,
+        "one peer's signal lanes must fit inside the per-connection stream budget"
+    );
+}
+
 /// Counting permits and slot ceilings.
 ///
 /// These are concurrency bounds, not rates: a permit is held while work is in

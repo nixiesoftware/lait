@@ -178,6 +178,12 @@ impl BridgeHub {
 
     /// Announce where a transfer has got to. Never blocks and never fails: with
     /// no browser attached there is nobody to tell, and that is not an error.
+    ///
+    /// No producer yet — the content routes will call it when a transfer
+    /// reports progress. Kept rather than deferred so the fan-out shape is
+    /// fixed before something needs it, which is the same reason the Control
+    /// lane exists and carries nothing.
+    #[allow(dead_code)]
     pub fn note(&self, progress: TransferProgress) {
         let _ = self.progress.send(progress);
     }

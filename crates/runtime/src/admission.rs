@@ -223,10 +223,17 @@ pub const MAX_ACCEPTED_OPENINGS: usize = 2048;
 /// recognisable without any other state — a reconnect mints a new epoch and is
 /// therefore a new session, which is the distinction that matters.
 ///
+/// What identifies one opening: the peer, the session, and which reconnect.
+///
+/// A named tuple because it is the replay key — all three together, because a
+/// peer that reconnects mints a new epoch and must not be answered from the
+/// previous session's accept.
+type OpeningKey = ([u8; 32], [u8; 16], [u8; 16]);
+
 /// Bounded and swept, because it is a table keyed by remote input.
 #[derive(Debug, Default)]
 pub struct AcceptedOpenings {
-    seen: BTreeMap<([u8; 32], [u8; 16], [u8; 16]), (SessionAccept, Instant)>,
+    seen: BTreeMap<OpeningKey, (SessionAccept, Instant)>,
 }
 
 /// What the ledger says about an opening.
