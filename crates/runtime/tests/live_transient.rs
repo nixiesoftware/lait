@@ -1453,6 +1453,80 @@ mod two_node_presence {
         a_cancel.cancel();
         b_cancel.cancel();
     }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_session_that_ends_stops_counting_as_here() {
+        // The test that was missing, and its absence was not neutral. Every
+        // proof that presence gates delivery called `departed` by hand — the one
+        // call no session made — so `present_stations()` meant "who has ever
+        // been here", signals queued for people who had gone home, and the next
+        // session that peer opened replayed the backlog. Driving a real teardown
+        // is the only thing that could have caught it.
+        let net = MemNet::new();
+        let a_device = mechanics::crypto::device_from_seed(&[97u8; 32]);
+        let b_device = mechanics::crypto::device_from_seed(&[98u8; 32]);
+        let a: Arc<dyn Transport> = Arc::new(net.peer(a_device.clone()));
+        let b: Arc<dyn Transport> = Arc::new(net.peer(b_device.clone()));
+        let accepting = {
+            let b = b.clone();
+            tokio::spawn(async move { b.accept_connection().await })
+        };
+        let dialer = a
+            .connect_session(b.my_id(), b"lait/session/1")
+            .await
+            .expect("connect");
+        let incoming = accepting.await.expect("accept task").expect("incoming");
+        std::mem::forget((a, b));
+
+        let handle = Arc::new(LiveHandle::new(None));
+        let peer = StationId::from_device(&a_device).expect("a");
+        let (cancel, ended) = serve(
+            Arc::from(incoming.connection),
+            admitted(peer.clone()),
+            handle.clone(),
+        );
+        // Kept alive: dropping it closes the connection, which would end the
+        // session for a reason other than the one under test.
+        let _dialer: Arc<dyn comms::Connection> = Arc::from(dialer);
+
+        let here = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < here && handle.present_stations().is_empty() {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert_eq!(
+            handle.present_stations(),
+            vec![peer.clone()],
+            "a served session is a peer that is here"
+        );
+
+        // A signal for somebody who is about to leave.
+        // An `Attention`, not a `Ping`. A ping expects an acknowledgement, and
+        // the outbox refuses one for the reason the first version of this test
+        // demonstrated: draining it parks the session for a full response
+        // deadline waiting on a peer that is on its way out.
+        assert!(handle.nudge(
+            &peer,
+            runtime::planes::Signal::Attention {
+                scope: issue_scope(1)
+            }
+        ));
+
+        cancel.cancel();
+        let gone = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < gone && !ended.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(ended.load(Ordering::SeqCst), "the session ended");
+
+        assert!(
+            handle.present_stations().is_empty(),
+            "and a peer that left is not here"
+        );
+        assert!(
+            handle.take_outbound_for_test(&peer).is_empty(),
+            "what was queued for them went with them — a queue nothing drains is              the mailbox this plane must not become, and the next session that              peer opened would have replayed it"
+        );
+    }
 }
 
 /// A World's own scope, checked against what that World declared.
@@ -1662,6 +1736,32 @@ mod nudging {
     }
 
     #[test]
+    fn a_signal_that_expects_an_answer_is_not_queueable() {
+        // An outbox is one-way. The queue is drained by a session beat, so a
+        // signal waiting on a round trip parks that session for a full response
+        // deadline — no datagram read, no presence published, no revalidation —
+        // on behalf of a caller that has already returned.
+        //
+        // Found by a test that queued a `Ping` and then waited ten seconds for a
+        // session to notice it had been cancelled.
+        let handle = LiveHandle::new(None);
+        assert!(
+            !handle.nudge(&station(1), Signal::Ping { nonce: [1u8; 16] }),
+            "a ping expects an acknowledgement"
+        );
+        assert!(
+            handle.nudge(
+                &station(1),
+                Signal::Attention {
+                    scope: issue_scope(1)
+                }
+            ),
+            "an attention expects nothing"
+        );
+        assert_eq!(handle.take_outbound_for_test(&station(1)).len(), 1);
+    }
+
+    #[test]
     fn a_full_outbox_refuses_the_newest_rather_than_dropping_the_oldest() {
         // Both are facts. Evicting the oldest to keep the newest loses the older
         // one to make room for a thing of exactly equal standing, which is the
@@ -1688,10 +1788,21 @@ mod nudging {
         assert_eq!(handle.take_outbound_for_test(&station(1)).len(), 1);
         assert!(handle.take_outbound_for_test(&station(1)).is_empty());
 
-        // A peer that disconnects mid-fanout leaves nothing behind. Held rather
-        // than dropped, the map grows with every peer that ever went away.
+        // A peer that disconnects mid-fanout leaves nothing behind, and the
+        // clearing rides `departed` rather than a second call somebody has to
+        // remember — which is what it was, and what nothing ever called.
+        handle.arrived(&station(2));
         handle.nudge(&station(2), nudge(2));
-        handle.forget_outbound(&station(2));
+        handle.departed(&station(2));
         assert!(handle.take_outbound_for_test(&station(2)).is_empty());
+
+        // And a peer holding two sessions keeps its queue until the second ends.
+        // Clearing on the first would drop a notification because somebody shut
+        // one of two laptops.
+        handle.arrived(&station(3));
+        handle.arrived(&station(3));
+        handle.nudge(&station(3), nudge(3));
+        handle.departed(&station(3));
+        assert_eq!(handle.take_outbound_for_test(&station(3)).len(), 1);
     }
 }

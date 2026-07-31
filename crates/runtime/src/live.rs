@@ -395,13 +395,35 @@ impl LiveHandle {
     }
 
     /// A session for this peer ended.
+    ///
+    /// **Clears the outbox when the last one goes**, in the same place rather
+    /// than in a second call somebody has to remember. A queue for a peer with
+    /// no session is store-and-forward: nothing drains it, it fills to its
+    /// ceiling and starts refusing real nudges, and the next session that peer
+    /// opens delivers the backlog — which is the mailbox this plane must not
+    /// become. Keeping the two in one method is what stops the invariant being
+    /// half-maintained, which is exactly how it was.
     pub fn departed(&self, peer: &StationId) {
-        let mut connected = self.connected.lock().unwrap_or_else(|p| p.into_inner());
-        if let Some(count) = connected.get_mut(peer) {
-            *count = count.saturating_sub(1);
-            if *count == 0 {
-                connected.remove(peer);
+        let gone = {
+            let mut connected = self.connected.lock().unwrap_or_else(|p| p.into_inner());
+            match connected.get_mut(peer) {
+                Some(count) => {
+                    *count = count.saturating_sub(1);
+                    if *count == 0 {
+                        connected.remove(peer);
+                        true
+                    } else {
+                        false
+                    }
+                }
+                None => false,
             }
+        };
+        if gone {
+            self.outbox
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .remove(peer);
         }
     }
 
@@ -431,6 +453,20 @@ impl LiveHandle {
     /// holding signals for them would make this a mailbox, which is the one
     /// thing a plane that keeps nothing must not become.
     pub fn nudge(&self, peer: &StationId, signal: crate::planes::Signal) -> bool {
+        // An outbox is one-way by construction, and a signal that expects an
+        // answer has nobody here to give it one: the queue is drained by a
+        // session beat, so waiting on a round trip would park that session for a
+        // full response deadline — no datagram read, no presence published, no
+        // revalidation — on behalf of a caller that has already returned.
+        //
+        // Every signal a World produces is one-way, so this refuses nothing that
+        // is sent today. It is here because the queue accepts a `Signal` and the
+        // next person to reach for it should not have to discover this.
+        if crate::signal::declaration_for(signal.selector()).is_none_or(|declaration| {
+            declaration.response != crate::signal::ResponsePolicy::Forbidden
+        }) {
+            return false;
+        }
         let mut outbox = self.outbox.lock().unwrap_or_else(|p| p.into_inner());
         let queued = outbox.entry(peer.clone()).or_default();
         if queued.len() >= MAX_OUTBOUND_SIGNALS {
@@ -453,18 +489,6 @@ impl LiveHandle {
     fn take_outbound(&self, peer: &StationId) -> Vec<crate::planes::Signal> {
         let mut outbox = self.outbox.lock().unwrap_or_else(|p| p.into_inner());
         outbox.remove(peer).unwrap_or_default()
-    }
-
-    /// Drop what is queued for a peer nothing can reach.
-    ///
-    /// Called when a session ends. Without it a peer that disconnects mid-fanout
-    /// leaves its signals in the map for as long as the process runs, and the
-    /// map grows with every peer that ever went away.
-    pub fn forget_outbound(&self, peer: &StationId) {
-        self.outbox
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .remove(peer);
     }
 
     /// Hold a file somebody offered.
@@ -1729,6 +1753,11 @@ impl Drop for Leaving {
             // a phone — and forgetting by Station meant closing one deleted
             // what the other was still saying.
             handle.forget_session(&self.station, &self.session_epoch);
+            // The other half, and it was missing. `serve_session` counts a peer
+            // in on the way past; nothing counted it out, so "who is here"
+            // meant "who has ever been here" and signals queued for people who
+            // had gone home.
+            handle.departed(&self.station);
         }
     }
 }
