@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 
 use mechanics::ids::StationId;
 use replica::ids::BodyKey;
+use runtime::budget::deadline;
 use runtime::live::{AnchorSource, CaretState, LiveHandle};
 use runtime::transient::{TransientItem, TransientPayload, TransientScope};
 
@@ -399,4 +400,247 @@ fn a_minted_anchor_is_what_a_payload_carries() {
     // And it survives the wire, which is where the canonical rule bites.
     let bytes = item.encode();
     assert_eq!(TransientItem::decode_canonical(&bytes), Ok(item));
+}
+
+/// Revocation on the Live plane, over a real connection.
+///
+/// Two mechanisms have to agree and it is easy to build so that only one works:
+/// the driver races `serve` against an authority tick and drops the serve
+/// future, and the session itself re-asks on a beat. These drive
+/// `serve_session` directly, so what they prove is the *inside* half — the one
+/// that has to hold when the tick has not fired.
+mod revocation {
+    use super::*;
+    use std::sync::atomic::AtomicBool;
+
+    use comms::mem::MemNet;
+    use comms::Transport;
+    use runtime::admission::AdmittedPeer;
+    use runtime::lifecycle::CancelToken;
+    use runtime::live::{serve_session, SessionContext};
+    use runtime::transient::LiveControl;
+    use runtime::world::{AuthorityView, PrincipalResolution};
+
+    /// A membership that can be taken away.
+    struct Revocable {
+        admitted: AtomicBool,
+    }
+
+    impl AuthorityView for Revocable {
+        fn resolve(&self, _device: &mechanics::ids::DeviceId) -> Option<PrincipalResolution> {
+            if !self.admitted.load(Ordering::SeqCst) {
+                return None;
+            }
+            Some(PrincipalResolution {
+                actor: peer_actor(),
+                authority_frontier: frontier(),
+            })
+        }
+    }
+
+    fn peer_actor() -> mechanics::ids::ActorId {
+        mechanics::ids::ActorId::parse(&format!("act_{}", "ef".repeat(32))).expect("actor")
+    }
+
+    fn frontier() -> replica::frontier::AuthorityFrontier {
+        replica::frontier::AuthorityFrontier::from_canonical_bytes(vec![9])
+    }
+
+    fn admitted(station: StationId) -> AdmittedPeer {
+        AdmittedPeer {
+            station,
+            actor: peer_actor(),
+            authority_frontier: frontier(),
+            granted_lanes: vec![runtime::planes::stream_kind::CONTROL],
+            session_id: [2u8; 16],
+            session_epoch: [1u8; 16],
+        }
+    }
+
+    /// A connected pair, and the Station the server side believes it is serving.
+    async fn pair(
+        seed: u8,
+    ) -> (
+        Arc<dyn comms::Connection>,
+        Arc<dyn comms::Connection>,
+        StationId,
+    ) {
+        let net = MemNet::new();
+        let client_device = mechanics::crypto::device_from_seed(&[seed; 32]);
+        let a: Arc<dyn Transport> = Arc::new(net.peer(client_device.clone()));
+        let b: Arc<dyn Transport> =
+            Arc::new(net.peer(mechanics::crypto::device_from_seed(&[seed + 1; 32])));
+        let accepting = {
+            let b = b.clone();
+            tokio::spawn(async move { b.accept_connection().await })
+        };
+        let dialer = a
+            .connect_session(b.my_id(), b"lait/session/1")
+            .await
+            .expect("connect");
+        let incoming = accepting.await.expect("accept task").expect("incoming");
+        // Kept alive for the whole test: dropping a transport tears its
+        // endpoint down, and these have to outlive the connections they minted.
+        std::mem::forget((a, b));
+        (
+            Arc::from(dialer),
+            Arc::from(incoming.connection),
+            StationId::from_device(&client_device).expect("station"),
+        )
+    }
+
+    /// Run one Live session the way `run_driver` does.
+    ///
+    /// `serve_session` is deliberately not `Send` — `Rc`/`RefCell`, one owner,
+    /// no locking on the hot path — so it cannot be `tokio::spawn`ed. A
+    /// current-thread runtime plus a `LocalSet` on its own thread is the shape
+    /// the driver uses, and a test that reached for `spawn` would be exercising
+    /// a session the plane never runs.
+    fn serve_on_thread(
+        connection: Arc<dyn comms::Connection>,
+        peer: AdmittedPeer,
+        handle: Arc<LiveHandle>,
+        authority: Option<Arc<dyn AuthorityView>>,
+    ) -> (Arc<AtomicBool>, CancelToken) {
+        let ended = Arc::new(AtomicBool::new(false));
+        let cancel = CancelToken::new();
+        std::thread::spawn({
+            let ended = ended.clone();
+            let cancel = cancel.clone();
+            move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("runtime");
+                let local = tokio::task::LocalSet::new();
+                local.block_on(&runtime, async move {
+                    serve_session(
+                        connection,
+                        peer,
+                        cancel,
+                        SessionContext {
+                            handle: Some(handle),
+                            signals: None,
+                            authority,
+                        },
+                    )
+                    .await;
+                });
+                ended.store(true, Ordering::SeqCst);
+            }
+        });
+        (ended, cancel)
+    }
+
+    async fn subscribe(connection: &dyn comms::Connection, scopes: Vec<TransientScope>) {
+        let (mut send, _recv) = connection.open_bi().await.expect("open");
+        let body = LiveControl::Subscribe { scopes }.encode();
+        let mut framed = vec![runtime::planes::stream_kind::CONTROL];
+        framed.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        framed.extend_from_slice(&body);
+        send.write_all(&framed).await.expect("write");
+        send.finish().expect("finish");
+    }
+
+    /// Publish until it lands, or give up. Datagrams are unreliable by
+    /// definition, and the session may not have adopted the subscription yet.
+    async fn publish_until_seen(
+        connection: &dyn comms::Connection,
+        handle: &LiveHandle,
+        item: &TransientItem,
+    ) -> bool {
+        for _ in 0..80 {
+            let _ = connection.send_datagram(&item.encode());
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            if !handle.view(None, Instant::now()).entries.is_empty() {
+                return true;
+            }
+        }
+        false
+    }
+
+    async fn wait_for(flag: &AtomicBool, within: Duration) -> bool {
+        let deadline = Instant::now() + within;
+        while Instant::now() < deadline {
+            if flag.load(Ordering::SeqCst) {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        flag.load(Ordering::SeqCst)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_revoked_peer_loses_its_live_session_and_its_slots_go_with_it() {
+        let (client, server, peer) = pair(71).await;
+        let authority = Arc::new(Revocable {
+            admitted: AtomicBool::new(true),
+        });
+        let handle = Arc::new(LiveHandle::new(None));
+        let (ended, _cancel) = serve_on_thread(
+            server,
+            admitted(peer),
+            handle.clone(),
+            Some(authority.clone()),
+        );
+
+        subscribe(client.as_ref(), vec![issue_scope(1)]).await;
+        assert!(
+            publish_until_seen(client.as_ref(), &handle, &presence_item(issue_scope(1), 1)).await,
+            "the peer is here before it is removed"
+        );
+
+        // Membership goes away. Nothing tells the session; it has to ask.
+        authority.admitted.store(false, Ordering::SeqCst);
+        assert!(
+            wait_for(&ended, deadline::AUTHORITY_REVALIDATION * 4).await,
+            "the session ended on its own beat"
+        );
+
+        // Immediately, not at TTL. A cursor lingering for thirty seconds after a
+        // removal is a person still visibly in a room they were asked to leave.
+        assert!(
+            handle.view(None, Instant::now()).entries.is_empty(),
+            "and it took what it was holding with it"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_revoked_peer_cannot_buy_a_subscription_between_beats() {
+        // Why the check is inline as well as on a beat. `Subscribe` is the frame
+        // that *acquires* something, and waiting a full revalidation interval to
+        // refuse one is a window a revoked peer walks through.
+        let (client, server, peer) = pair(73).await;
+        let authority = Arc::new(Revocable {
+            admitted: AtomicBool::new(false),
+        });
+        let handle = Arc::new(LiveHandle::new(None));
+        let (ended, _cancel) =
+            serve_on_thread(server, admitted(peer), handle.clone(), Some(authority));
+
+        subscribe(client.as_ref(), vec![issue_scope(1)]).await;
+        // Well inside `AUTHORITY_REVALIDATION`, so the beat has not run.
+        assert!(
+            wait_for(&ended, Duration::from_millis(1_200)).await,
+            "refused on the frame, not on the timer"
+        );
+        assert!(handle.view(None, Instant::now()).entries.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_session_with_no_authority_view_serves_normally() {
+        // The plane has to work without one. `serve_session` is driven directly
+        // by MemNet harnesses that have no Space behind them, and an absent view
+        // must mean "not our question here" rather than "refuse everyone".
+        let (client, server, peer) = pair(75).await;
+        let handle = Arc::new(LiveHandle::new(None));
+        let (ended, cancel) = serve_on_thread(server, admitted(peer), handle.clone(), None);
+
+        subscribe(client.as_ref(), vec![issue_scope(1)]).await;
+        assert!(
+            publish_until_seen(client.as_ref(), &handle, &presence_item(issue_scope(1), 1)).await
+        );
+        assert!(!ended.load(Ordering::SeqCst), "and it is still serving");
+        cancel.cancel();
+    }
 }

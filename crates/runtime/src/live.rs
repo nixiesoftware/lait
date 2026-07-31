@@ -512,13 +512,34 @@ const SIGNAL_QUEUE: usize = 32;
 /// Everything here is `Rc`/`RefCell` and never a lock: `run_driver` is a
 /// current-thread runtime with a `LocalSet`, so per-session state has one
 /// owner and contention is not a thing that can happen.
+pub struct SessionContext {
+    /// Where what this peer says becomes readable to anyone else.
+    pub handle: Option<std::sync::Arc<LiveHandle>>,
+    /// What this connection may say on the signal lane. `None` means this build
+    /// is not serving the lane here, and a signal flow is refused rather than
+    /// ignored.
+    pub signals: Option<crate::signal::SignalPolicy>,
+    /// Re-asked on a beat and before every subscription change.
+    ///
+    /// A session pins the authority view it was admitted at, which is what makes
+    /// every later question on it answerable consistently — and also what makes
+    /// a revocation invisible to it. The driver closes the connection when the
+    /// tick fires; this is the same question asked from inside, so a revocation
+    /// that arrives between ticks cannot buy a subscription.
+    pub authority: Option<std::sync::Arc<dyn crate::world::AuthorityView>>,
+}
+
 pub async fn serve_session(
     connection: std::sync::Arc<dyn comms::Connection>,
     peer: AdmittedPeer,
     cancel: crate::lifecycle::CancelToken,
-    handle: Option<std::sync::Arc<LiveHandle>>,
-    signals: Option<crate::signal::SignalPolicy>,
+    context: SessionContext,
 ) {
+    let SessionContext {
+        handle,
+        signals,
+        authority,
+    } = context;
     let session = Rc::new(RefCell::new(LiveSession::new(peer.station.clone())));
     let epoch = peer.session_epoch;
     // Whatever ends this connection — idle, cancel, a gate, a peer hanging up —
@@ -553,6 +574,17 @@ pub async fn serve_session(
 
     let mut last_seen = Instant::now();
     let mut sweep_at = Instant::now();
+    let mut revalidated_at = Instant::now();
+
+    // Asked once here and then on the beat. `admit_peer` is the same question
+    // the admission asked, and asking it again is the whole mechanism: a
+    // membership that went away has no other way to reach a session that pinned
+    // the view it was admitted at.
+    let still_admitted = |authority: &Option<std::sync::Arc<dyn crate::world::AuthorityView>>| {
+        authority
+            .as_ref()
+            .is_none_or(|view| view.admit_peer(&peer.station).is_some())
+    };
 
     loop {
         if cancel.is_cancelled() {
@@ -565,6 +597,17 @@ pub async fn serve_session(
         // somebody nobody can see.
         if last_seen.elapsed() > deadline::LIVE_IDLE {
             break;
+        }
+        if revalidated_at.elapsed() > deadline::AUTHORITY_REVALIDATION {
+            revalidated_at = Instant::now();
+            if !still_admitted(&authority) {
+                // Immediately, not at TTL. A peer that lost standing keeps
+                // nothing, and a cursor lingering for thirty seconds after a
+                // removal is a person still visibly in a room they were asked
+                // to leave.
+                connection.close(REFUSED, b"");
+                break;
+            }
         }
         if sweep_at.elapsed() > deadline::CURSOR_COALESCE {
             sweep_at = Instant::now();
@@ -737,7 +780,18 @@ pub async fn serve_session(
                 };
                 let mut session = session.borrow_mut();
                 match control {
-                    LiveControl::Subscribe { scopes } => session.subscribe(scopes),
+                    LiveControl::Subscribe { scopes } => {
+                        // Checked here as well as on the beat, because this is
+                        // the frame that *acquires* something. Waiting up to a
+                        // full revalidation interval to refuse a subscription is
+                        // a window in which a revoked peer picks up new scopes.
+                        if !still_admitted(&authority) {
+                            drop(session);
+                            connection.close(REFUSED, b"");
+                            break;
+                        }
+                        session.subscribe(scopes)
+                    }
                     LiveControl::Retire { scope, seq } => {
                         // Retirement covers every kind that scope admits: a
                         // peer saying it is done with a caret means the caret
@@ -838,6 +892,16 @@ impl crate::plane_driver::PlaneService for LiveService {
             self.handle
                 .set_partial(sessions.len() > crate::budget::slots::MAX_LIVE_SESSIONS);
         }
+        // A guard rather than the two lines this used to be after the await.
+        // `run_driver` races `serve` against `watch_for_revocation`, so on a
+        // revocation the serve future is *dropped* and nothing after the await
+        // runs — which left the revoked peer in this list forever and the
+        // partial flag computed from a count that only ever grew.
+        let _present = Present {
+            station: station.clone(),
+            sessions: &self.sessions,
+            handle: &self.handle,
+        };
         // Built per connection, from what the admission decided. The frontier
         // is the pinned one, so every question this connection asks is answered
         // against the view it was admitted at.
@@ -853,15 +917,30 @@ impl crate::plane_driver::PlaneService for LiveService {
             connection,
             peer,
             cancel,
-            Some(self.handle.clone()),
-            Some(signals),
+            SessionContext {
+                handle: Some(self.handle.clone()),
+                signals: Some(signals),
+                authority: Some(self.authority.clone()),
+            },
         )
         .await;
-        // Removed on the way out, whatever ended it. A peer left in this list
-        // after its connection closed is a ghost that no TTL reaches, because
-        // the TTLs are on slots rather than on sessions.
+    }
+}
+
+/// Removes a peer from the present list when its session ends, however it ends.
+///
+/// Borrowed rather than cloned because `LiveService` outlives every session it
+/// serves and both fields live on it.
+struct Present<'a> {
+    station: StationId,
+    sessions: &'a std::cell::RefCell<Vec<StationId>>,
+    handle: &'a std::sync::Arc<LiveHandle>,
+}
+
+impl Drop for Present<'_> {
+    fn drop(&mut self) {
         let mut sessions = self.sessions.borrow_mut();
-        sessions.retain(|held| held != &station);
+        sessions.retain(|held| held != &self.station);
         self.handle
             .set_partial(sessions.len() > crate::budget::slots::MAX_LIVE_SESSIONS);
     }

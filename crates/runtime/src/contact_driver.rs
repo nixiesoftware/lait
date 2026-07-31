@@ -586,6 +586,17 @@ async fn contact_neighbor(
             .broadcaster
             .publish(scopes, body_frontier, authority_advanced);
     }
+    if authority_advanced {
+        // Rung here as well as on a local write, and this is the half that
+        // matters most. A revocation is almost always somebody *else's*
+        // decision: it is signed elsewhere, reaches this Station over Contact,
+        // and lands in the ledger without any local authority write. Without
+        // this line the delivery drivers never wake for it, and the peer who
+        // was just removed keeps its session until it happens to disconnect —
+        // which is the exact bound `watch_for_revocation` exists to provide,
+        // silently absent in the case it was built for.
+        ctx.core.note_authority_advanced();
+    }
     let convergence = attempted?;
     Ok(ContactOutcome {
         bytes_moved,

@@ -742,11 +742,6 @@ impl Station {
         self.epoch
     }
 
-    /// The content plane.
-    ///
-    /// One per Station and opened at activation, so a caller never constructs
-    /// a second cache over the same directory — two caches over one directory
-    /// would sweep each other's staging.
     /// What this Station currently believes about who is doing what.
     ///
     /// Never durable and never authoritative: a Station with no Live driver
@@ -765,6 +760,11 @@ impl Station {
         self.live.signals()
     }
 
+    /// The content plane.
+    ///
+    /// One per Station and opened at activation, so a caller never constructs
+    /// a second cache over the same directory — two caches over one directory
+    /// would sweep each other's staging.
     pub fn content(&self) -> Arc<crate::content_host::ContentHost> {
         self.content.clone()
     }
