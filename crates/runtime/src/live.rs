@@ -464,3 +464,169 @@ mod tests {
         assert!(datagram_fits(1_000, Some(1_162)));
     }
 }
+
+/// Send-side coalescing: hold a value briefly, and send the newest.
+///
+/// A caret moves as fast as a person types and is superseded by its own next
+/// position, so sending each one spends a packet to deliver a number that is
+/// already wrong. Holding for a coalescing window and sending the last one is
+/// not a loss — the intermediate positions were never the answer to anything.
+///
+/// Keyed by scope and kind, because two scopes coalescing into one another
+/// would be a cursor in one document overwriting a cursor in another.
+pub struct Coalescer {
+    pending: std::collections::BTreeMap<(TransientScope, u8), (TransientItem, Instant)>,
+    superseded: u64,
+}
+
+impl Coalescer {
+    pub fn new() -> Self {
+        Self {
+            pending: std::collections::BTreeMap::new(),
+            superseded: 0,
+        }
+    }
+
+    /// Offer an item. It replaces whatever is waiting for the same slot.
+    pub fn offer(&mut self, item: TransientItem, now: Instant) {
+        let key = (item.scope.clone(), item.payload.kind() as u8);
+        if self.pending.contains_key(&key) {
+            self.superseded += 1;
+        }
+        self.pending.insert(key, (item, now));
+    }
+
+    /// Everything whose window has elapsed.
+    ///
+    /// Presence and typing wait longer than a caret, because "somebody is
+    /// typing" has no intermediate values worth sending and a caret does.
+    pub fn due(&mut self, now: Instant) -> Vec<TransientItem> {
+        let ready: Vec<_> = self
+            .pending
+            .iter()
+            .filter(|(_, (item, at))| {
+                let window = match item.payload.kind() {
+                    crate::transient::TransientKind::Typing => deadline::TYPING_COALESCE,
+                    _ => deadline::CURSOR_COALESCE,
+                };
+                now.duration_since(*at) >= window
+            })
+            .map(|(key, _)| key.clone())
+            .collect();
+        ready
+            .into_iter()
+            .filter_map(|key| self.pending.remove(&key).map(|(item, _)| item))
+            .collect()
+    }
+
+    /// How many were replaced before they were sent. Coalescing working, not a
+    /// loss — but the number an operator wants when a link looks busier than
+    /// the people on it.
+    pub fn superseded(&self) -> u64 {
+        self.superseded
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.pending.is_empty()
+    }
+}
+
+impl Default for Coalescer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod coalescing {
+    use super::*;
+    use crate::transient::{TransientKind, TransientPayload};
+    use std::time::Duration;
+
+    fn scope(n: u8) -> TransientScope {
+        TransientScope::IssueView {
+            world: "com.example.notes".into(),
+            body: [n; 16],
+        }
+    }
+
+    fn item(scope: TransientScope, seq: u64) -> TransientItem {
+        TransientItem {
+            session_epoch: [1u8; 16],
+            seq,
+            scope,
+            payload: TransientPayload::Presence,
+        }
+    }
+
+    #[test]
+    fn the_newest_value_replaces_the_one_waiting() {
+        // Not a loss: the intermediate positions were never the answer to
+        // anything, and sending each one spends a packet to deliver a number
+        // that is already wrong.
+        let mut coalescer = Coalescer::new();
+        let now = Instant::now();
+        for seq in 1..=5 {
+            coalescer.offer(item(scope(1), seq), now);
+        }
+        assert_eq!(coalescer.superseded(), 4);
+
+        let due = coalescer.due(now + deadline::CURSOR_COALESCE + Duration::from_millis(1));
+        assert_eq!(due.len(), 1, "one slot, one send");
+        assert_eq!(due[0].seq, 5, "and it is the newest");
+        assert!(coalescer.is_empty());
+    }
+
+    #[test]
+    fn two_scopes_do_not_coalesce_into_each_other() {
+        // A cursor in one document overwriting a cursor in another would be
+        // the obvious bug in a single-slot coalescer.
+        let mut coalescer = Coalescer::new();
+        let now = Instant::now();
+        coalescer.offer(item(scope(1), 1), now);
+        coalescer.offer(item(scope(2), 1), now);
+        assert_eq!(coalescer.superseded(), 0);
+        let due = coalescer.due(now + deadline::CURSOR_COALESCE + Duration::from_millis(1));
+        assert_eq!(due.len(), 2);
+    }
+
+    #[test]
+    fn nothing_leaves_before_its_window_elapses() {
+        let mut coalescer = Coalescer::new();
+        let now = Instant::now();
+        coalescer.offer(item(scope(1), 1), now);
+        assert!(coalescer.due(now).is_empty(), "sent immediately");
+        assert!(!coalescer.is_empty());
+    }
+
+    #[test]
+    fn typing_waits_longer_than_a_caret() {
+        // "Somebody is typing" has no intermediate values worth sending; a
+        // caret does. Same mechanism, two windows.
+        let mut coalescer = Coalescer::new();
+        let now = Instant::now();
+        coalescer.offer(
+            TransientItem {
+                session_epoch: [1u8; 16],
+                seq: 1,
+                scope: TransientScope::Typing {
+                    world: "com.example.notes".into(),
+                    body: [1u8; 16],
+                    field: "text".into(),
+                },
+                payload: TransientPayload::Typing,
+            },
+            now,
+        );
+        coalescer.offer(item(scope(2), 1), now);
+
+        // A caret's window elapses first, and only the caret leaves.
+        let due = coalescer.due(now + deadline::CURSOR_COALESCE + Duration::from_millis(1));
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].payload.kind(), TransientKind::Presence);
+
+        let due = coalescer.due(now + deadline::TYPING_COALESCE + Duration::from_millis(1));
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].payload.kind(), TransientKind::Typing);
+    }
+}
