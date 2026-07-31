@@ -19,16 +19,11 @@ pub use issues::{
 ///
 /// Keeping semantic implementation, reviewed identity, and application control
 /// adapter in one value makes this module the product composition root. The
-/// daemon and SpaceBridge receive packages by injection and do not construct or
+/// daemon and StationHost receive packages by injection and do not construct or
 /// name IssuesWorld themselves.
 pub fn package() -> WorldPackage {
     let control = Arc::new(issues_app::IssuesCallHandler);
-    WorldPackage::new(
-        IssuesWorld::registration(),
-        Arc::new(IssuesWorld::new()),
-        implementation_id(),
-    )
-    .with_control(control)
+    WorldPackage::new(Arc::new(IssuesWorld::new()), implementation_id()).with_control(control)
 }
 
 /// Every product World bundled by the issue-tracker application.

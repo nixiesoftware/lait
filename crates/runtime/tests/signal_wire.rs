@@ -20,8 +20,8 @@ use comms::mem::MemNet;
 use comms::policy::Network;
 use comms::{Alpn, Connection, DefaultTransport, Protocols, Transport};
 use mechanics::crypto::device_from_seed;
-use mechanics::ids::{ActorId, StationId};
-use runtime::planes::{stream_kind, Signal};
+use mechanics::{ids::ActorId, station::Key};
+use runtime::plane::{stream_kind, Signal};
 use runtime::registry::RuntimeBuilder;
 use runtime::signal::{
     frame_signal, send_signal, serve_signal, SignalError, SignalOutcome, SignalPolicy,
@@ -139,8 +139,8 @@ fn actor() -> ActorId {
     ActorId::parse(&format!("act_{}", "ab".repeat(32))).expect("actor")
 }
 
-fn station(seed: u8) -> StationId {
-    StationId::from_device(&device_from_seed(&[seed; 32])).expect("station")
+fn station(seed: u8) -> Key {
+    Key::from_device(&device_from_seed(&[seed; 32])).expect("station")
 }
 
 /// A policy holding every lane this build serves.
@@ -168,7 +168,7 @@ async fn serve_one(
         .expect("accept")
         .expect("a flow");
     // The caller of `serve_signal` owns the stream-kind byte, exactly as
-    // `LiveSession` does.
+    // `Connection` does.
     let kind = recv.read_exact(1).await.expect("kind byte");
     assert_eq!(kind[0], stream_kind::RELIABLE_SIGNAL);
     serve_signal(send.as_mut(), recv.as_mut(), policy).await
@@ -217,7 +217,7 @@ async fn a_one_way_signal_is_accepted_and_that_is_not_a_delivery_receipt() {
         });
 
         let attention = Signal::Attention {
-            scope: runtime::transient::TransientScope::IssueView {
+            scope: runtime::transient::Target::Body {
                 world: "com.example.notes".into(),
                 body: [4u8; 16],
             },
@@ -410,46 +410,37 @@ async fn a_file_offer_crosses_intact_and_triggers_nothing() {
 /// membership alone.
 mod declared_schemas {
     use super::*;
-    use replica::body::{BodySchema, MutationModel};
+    use replica::body::{MutationModel, Schema};
     use replica::ids::{EncodingId, SchemaId, WorldId};
     use runtime::world::SignalSchema;
     use runtime::{
-        World, WorldContext, WorldEffect, WorldError, WorldIntent, WorldLimits, WorldProjection,
-        WorldQuery, WorldRegistration, WorldVersion,
+        Context, Descriptor, Effect, Intent, Limits, Projection, Query, Version, World, WorldError,
     };
 
     const WORLD: &str = "dev.example.pad";
 
-    struct Pad(Vec<BodySchema>, Vec<SignalSchema>);
+    struct Pad(Vec<Schema>, Vec<SignalSchema>);
 
     impl World for Pad {
         fn id(&self) -> WorldId {
             WorldId::parse(WORLD).unwrap()
         }
-        fn schemas(&self) -> &[BodySchema] {
+        fn schemas(&self) -> &[Schema] {
             &self.0
         }
         fn signal_schemas(&self) -> &[SignalSchema] {
             &self.1
         }
-        fn submit(
-            &self,
-            _ctx: &mut WorldContext<'_>,
-            _intent: WorldIntent,
-        ) -> Result<WorldEffect, WorldError> {
+        fn submit(&self, _ctx: &mut Context<'_>, _intent: Intent) -> Result<Effect, WorldError> {
             Err(WorldError::InvalidRequest)
         }
-        fn query(
-            &self,
-            _ctx: &WorldContext<'_>,
-            _query: WorldQuery,
-        ) -> Result<WorldProjection, WorldError> {
+        fn query(&self, _ctx: &Context<'_>, _query: Query) -> Result<Projection, WorldError> {
             Err(WorldError::InvalidRequest)
         }
     }
 
     fn hosting(signals: Vec<SignalSchema>) -> SignalPolicy {
-        let schemas = vec![BodySchema {
+        let schemas = vec![Schema {
             id: SchemaId::parse("entry").unwrap(),
             version: 1,
             encoding: EncodingId::parse("bytes").unwrap(),
@@ -457,16 +448,8 @@ mod declared_schemas {
             readable_predecessors: vec![],
         }];
         let world = Pad(schemas.clone(), signals.clone());
-        let registration = WorldRegistration {
-            id: world.id(),
-            implementation_version: WorldVersion(1),
-            schemas,
-            limits: WorldLimits::default(),
-            scope_schemas: Vec::new(),
-            signal_schemas: signals,
-        };
         let worlds = RuntimeBuilder::new()
-            .register(registration, Arc::new(world))
+            .register(Arc::new(world))
             .build()
             .expect("registry");
         SignalPolicy {
@@ -483,7 +466,7 @@ mod declared_schemas {
     fn some_demand() -> Vec<u8> {
         mechanics::demand::AuthorizationDemand::require(
             mechanics::demand::PolicyCapability::new("pad", "nudge"),
-            mechanics::demand::PolicyResource::space("pad"),
+            mechanics::demand::Resource::root("pad"),
         )
         .encode_canonical()
         .expect("canonical demand")
@@ -551,7 +534,7 @@ mod declared_schemas {
         // Registration refuses an empty demand, which is why the delivery path
         // has no fallback for one. A signal a World declined to describe is a
         // signal nobody can decide about.
-        let schemas = vec![BodySchema {
+        let schemas = vec![Schema {
             id: SchemaId::parse("entry").unwrap(),
             version: 1,
             encoding: EncodingId::parse("bytes").unwrap(),
@@ -564,16 +547,8 @@ mod declared_schemas {
             demand: Vec::new(),
         }];
         let world = Pad(schemas.clone(), signals.clone());
-        let registration = WorldRegistration {
-            id: world.id(),
-            implementation_version: WorldVersion(1),
-            schemas,
-            limits: WorldLimits::default(),
-            scope_schemas: Vec::new(),
-            signal_schemas: signals,
-        };
         assert!(RuntimeBuilder::new()
-            .register(registration, Arc::new(world))
+            .register(Arc::new(world))
             .build()
             .is_err());
     }

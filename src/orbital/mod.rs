@@ -2,7 +2,7 @@
 //!
 //! It fixes where the application keeps orbital stores, supplies the Mechanics
 //! composition over signed Space material, and defines the product-neutral
-//! [`WorldPackage`] / [`WorldBridge`] boundary used by SpaceBridge. Concrete
+//! [`WorldPackage`] / [`WorldHost`] boundary used by StationHost. Concrete
 //! packages are created by the application composition root and injected
 //! through LaitDaemon; this module does not construct or select IssuesWorld.
 
@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use replica::BodyKeySource;
-use runtime::{AuthorityView, Runtime, WorldRegistry};
+use runtime::{AuthorityView, Registry, Runtime};
 
 /// Where the application keeps its orbital stores, under the local home.
 pub fn orbital_store_root(home: &Path) -> PathBuf {
@@ -86,7 +86,7 @@ pub fn unsupported_store_at(home: &Path) -> Option<UnsupportedStoreVersion> {
 /// Open the generic Runtime at the application's orbital store convention.
 pub fn open_orbital_runtime(
     home: &Path,
-    registry: WorldRegistry,
+    registry: Registry,
     authority: Arc<dyn AuthorityView>,
     keys: Arc<dyn BodyKeySource>,
 ) -> Result<Runtime, UnsupportedStoreVersion> {
@@ -106,14 +106,13 @@ pub mod mechanics;
 pub mod space_bridge;
 pub mod world_bridge;
 
-pub use mechanics::{AuthorityRecord, OrbitalMechanics};
+pub use mechanics::{AuthorityRecord, SpaceAuthority};
 pub use space_bridge::{
-    run_space_bridge, run_space_bridge_with, run_space_bridge_with_packages, SpaceBridge,
+    run_space_bridge, run_space_bridge_with, run_space_bridge_with_packages, StationHost,
 };
 pub use world_bridge::{
-    WorldBridge, WorldBridgeRegistry, WorldBridgesBuilder, WorldCall, WorldCallAccess,
-    WorldCallContext, WorldCallError, WorldCallErrorCode, WorldCallHandler, WorldNudge,
-    WorldPackage, WorldPackages, WorldReply,
+    WorldCall, WorldCallAccess, WorldCallContext, WorldCallError, WorldCallErrorCode,
+    WorldCallHandler, WorldHost, WorldNudge, WorldPackage, WorldPackages, WorldReply, WorldRouter,
 };
 
 // Compatibility exports for callers that reached the issue tracker's outer

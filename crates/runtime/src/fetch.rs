@@ -20,13 +20,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use mechanics::ids::{SpaceId, StationId};
+use mechanics::{ids::SpaceId, station::Key};
 use replica::content::{ChunkProof, ContentDescriptor, ContentRef};
 
 use crate::budget::{deadline, slots};
 use crate::content_host::{ContentAction, ContentHost, ContentKeys, ContentPolicy};
 use crate::freight::{frame, read_frame};
-use crate::planes::{bounds, FreightFrame, Plane, SessionAccept, SessionOpen, SPACE_ID_LEN};
+use crate::plane::{bounds, Accept, FreightFrame, Open, Plane, SPACE_ID_LEN};
 use crate::transfer::{TransferHandle, TransferRegistry, TransferState};
 
 /// Why a fetch did not complete.
@@ -66,12 +66,12 @@ const PROBATION: Duration = Duration::from_secs(30);
 
 /// A connected, admitted provider.
 pub struct Provider {
-    station: StationId,
+    station: Key,
     connection: Box<dyn comms::Connection>,
 }
 
 impl Provider {
-    pub fn station(&self) -> &StationId {
+    pub fn station(&self) -> &Key {
         &self.station
     }
 
@@ -172,13 +172,13 @@ impl Provider {
 pub async fn connect_provider(
     transport: &dyn comms::Transport,
     space: &SpaceId,
-    local: &StationId,
-    peer: &StationId,
-    session_id: [u8; 16],
+    local: &Key,
+    peer: &Key,
+    connection_id: [u8; 16],
 ) -> Result<Provider, ProviderRefusal> {
     let unreachable = || ProviderRefusal::Unreachable;
     let connection = transport
-        .connect_session(peer.as_device(), crate::planes::FREIGHT_ALPN)
+        .connect_session(peer.as_device(), crate::plane::FREIGHT_ALPN)
         .await
         .map_err(|_| unreachable())?;
 
@@ -191,7 +191,7 @@ pub async fn connect_provider(
     let mut epoch = [0u8; 16];
     getrandom::fill(&mut epoch).map_err(|_| unreachable())?;
 
-    let open = SessionOpen {
+    let open = Open {
         plane: Plane::Freight,
         protocol_version: Plane::Freight.protocol_version(),
         // None. Residency hints are a Live-plane capability answered by a
@@ -201,8 +201,8 @@ pub async fn connect_provider(
         space: space_bytes,
         initiator_station: local.key_bytes(),
         responder_station: peer.key_bytes(),
-        session_id,
-        session_epoch: epoch,
+        connection_id,
+        connection_epoch: epoch,
         authority_frontier: Vec::new(),
         // Freight carries no lanes: the ALPN types the connection, and a lane
         // byte belongs to the live plane.
@@ -223,7 +223,7 @@ pub async fn connect_provider(
     .await
     .map_err(|_| unreachable())?
     .ok_or_else(unreachable)?;
-    if SessionAccept::decode_canonical(&answer).is_ok() {
+    if Accept::decode_canonical(&answer).is_ok() {
         return Ok(Provider {
             station: peer.clone(),
             connection,
@@ -238,15 +238,13 @@ pub async fn connect_provider(
     // Reported and not returned: a fetcher's caller has no version to change.
     // What it needs is for the operator to be able to find out why every peer
     // is suddenly unavailable, which a log line answers and a `None` does not.
-    Err(
-        match crate::planes::SessionRefusal::decode_canonical(&answer) {
-            Ok(refusal) => ProviderRefusal::Refused(refusal),
-            // Neither an accept nor a refusal: a truncated stream, or something that
-            // is not this protocol at all. Distinct from a refusal because it is our
-            // problem to explain rather than theirs to have sent.
-            Err(_) => ProviderRefusal::Unintelligible,
-        },
-    )
+    Err(match crate::plane::Refusal::decode_canonical(&answer) {
+        Ok(refusal) => ProviderRefusal::Refused(refusal),
+        // Neither an accept nor a refusal: a truncated stream, or something that
+        // is not this protocol at all. Distinct from a refusal because it is our
+        // problem to explain rather than theirs to have sent.
+        Err(_) => ProviderRefusal::Unintelligible,
+    })
 }
 
 /// Why a provider did not become one.
@@ -261,7 +259,7 @@ pub enum ProviderRefusal {
     /// The dial, the opening, or the answer did not complete in time.
     Unreachable,
     /// The peer said no, in its own words.
-    Refused(crate::planes::SessionRefusal),
+    Refused(crate::plane::Refusal),
     /// The peer answered with something that is neither an accept nor a
     /// refusal.
     Unintelligible,
@@ -276,7 +274,7 @@ impl ProviderRefusal {
     pub fn is_actionable(&self) -> bool {
         matches!(
             self,
-            Self::Refused(crate::planes::SessionRefusal::UnsupportedVersion { .. })
+            Self::Refused(crate::plane::Refusal::UnsupportedVersion { .. })
         )
     }
 }
@@ -345,8 +343,8 @@ impl Fetcher {
         // Who can serve what. Asked once per provider about the whole gap,
         // rather than per chunk: a provider's answer is cheap and asking again
         // for every chunk would turn one question into thousands.
-        let mut offers: BTreeMap<StationId, BTreeSet<u32>> = BTreeMap::new();
-        let mut scores: BTreeMap<StationId, ProviderScore> = BTreeMap::new();
+        let mut offers: BTreeMap<Key, BTreeSet<u32>> = BTreeMap::new();
+        let mut scores: BTreeMap<Key, ProviderScore> = BTreeMap::new();
         for provider in providers {
             match provider.have(content, &missing).await {
                 Ok(chunks) if !chunks.is_empty() => {
@@ -547,12 +545,12 @@ impl Fetcher {
     /// blame it for being slow. Sampling breaks that herd.
     fn rank(
         &self,
-        offers: &BTreeMap<StationId, BTreeSet<u32>>,
-        scores: &BTreeMap<StationId, ProviderScore>,
+        offers: &BTreeMap<Key, BTreeSet<u32>>,
+        scores: &BTreeMap<Key, ProviderScore>,
         index: u32,
-    ) -> Vec<StationId> {
+    ) -> Vec<Key> {
         let now = Instant::now();
-        let mut able: Vec<&StationId> = offers
+        let mut able: Vec<&Key> = offers
             .iter()
             .filter(|(_, held)| held.contains(&index))
             .map(|(station, _)| station)

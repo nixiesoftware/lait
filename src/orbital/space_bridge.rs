@@ -1,8 +1,8 @@
 //! The Space bridge — the product/control entrance to one active Space.
 //!
-//! It composes [`OrbitalMechanics`] (authority/keys/membership over signed
+//! It composes [`SpaceAuthority`] (authority/keys/membership over signed
 //! material), a [`Runtime`] hosting the build's registered Worlds, and a
-//! [`Station`] with the comms Contact plane. [`WorldBridgeRegistry`] owns one
+//! [`Station`] with the comms Contact plane. [`WorldRouter`] owns one
 //! bridge per hosted World. The process adapter serves Space-owned
 //! `control::Request`/`Response` IPC and product-neutral [`WorldCall`] envelopes,
 //! while an owning LaitDaemon can invoke a World bridge directly in-process.
@@ -15,7 +15,7 @@
 //! Every control request has an explicit terminal owner (see
 //! `tests/control_classification.rs`): product intents/queries route to the
 //! World Session; membership, admission, device, key and the FROST
-//! recovery/elevation/custody ceremonies are served by [`OrbitalMechanics`]
+//! recovery/elevation/custody ceremonies are served by [`SpaceAuthority`]
 //! over the mechanics primitives; seeds, diagnose, and log are node-local
 //! lifecycle concerns. There is no catch-all refusal.
 
@@ -30,11 +30,11 @@ use interprocess::local_socket::{
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-use mechanics::ids::{SpaceId, StationId};
+use mechanics::{ids::SpaceId, station::Key};
 use replica::{AuthorityIncorporator, WorldId};
 use runtime::{
-    ActivationOptions, CommsOptions, ContactMechanics, ContactOptions, GossipOptions,
-    LocalIdentity, Runtime, Session, Station,
+    ActivationOptions, Authority, CommsOptions, GossipOptions, LocalIdentity, Runtime, Session,
+    Station,
 };
 
 use crate::config::{acquire_daemon_lock, load_or_create_identity, DaemonLock};
@@ -44,8 +44,8 @@ use crate::control::{
 };
 use crate::daemon::OrbitAddress;
 use crate::orbital::{
-    orbital_store_root, unsupported_store_at, OrbitalMechanics, WorldBridgeRegistry, WorldCall,
-    WorldCallAccess, WorldCallContext, WorldCallErrorCode, WorldPackages, WorldReply,
+    orbital_store_root, unsupported_store_at, SpaceAuthority, WorldCall, WorldCallAccess,
+    WorldCallContext, WorldCallErrorCode, WorldPackages, WorldReply, WorldRouter,
 };
 use crate::transport::{Transport, TransportFactory};
 
@@ -75,10 +75,10 @@ fn discover_space(home: &Path) -> Result<SpaceId> {
 /// This is a logical boundary, not an OS-process claim. The current
 /// [`run_space_bridge`] adapter gives it a per-home control listener; a general
 /// Lait daemon can instead hold several instances and route by Space id.
-pub struct SpaceBridge {
+pub struct StationHost {
     /// The durable local Orbit occupied by this bridge's Station.
     address: OrbitAddress,
-    mechanics: OrbitalMechanics,
+    mechanics: SpaceAuthority,
     station: Station,
     /// The canonical [`ApproachRoute`]s this Station advertises, resolved from
     /// the retained transport handle at activation (an Isolated endpoint's own
@@ -95,7 +95,7 @@ pub struct SpaceBridge {
     /// An un-admitted joiner still serves control and drives Contact before it
     /// can dock. Once standing lands, each World docks independently under the
     /// correct local identity.
-    worlds: WorldBridgeRegistry,
+    worlds: WorldRouter,
     identity: LocalIdentity,
     device_seed: [u8; 32],
     home: PathBuf,
@@ -167,9 +167,9 @@ fn response_message(response: Response) -> String {
     }
 }
 
-struct SpaceBridgeActivity<'a>(&'a SpaceBridge);
+struct StationHostActivity<'a>(&'a StationHost);
 
-impl Drop for SpaceBridgeActivity<'_> {
+impl Drop for StationHostActivity<'_> {
     fn drop(&mut self) {
         use std::sync::atomic::Ordering;
         self.0.active_conns.fetch_sub(1, Ordering::SeqCst);
@@ -179,27 +179,27 @@ impl Drop for SpaceBridgeActivity<'_> {
     }
 }
 
-/// An owned in-process SpaceBridge lifecycle.
+/// An owned in-process StationHost lifecycle.
 ///
 /// The runner holds the per-home daemon lock from before activation until after
 /// the Station has gone dormant. It is joinable by its host; dropping or
 /// aborting the task is not a successful shutdown path.
-pub(crate) struct SpaceBridgeRunner {
+pub(crate) struct StationHostRunner {
     home: PathBuf,
-    bridge: Arc<SpaceBridge>,
+    bridge: Arc<StationHost>,
     _lock: DaemonLock,
 }
 
-/// A non-owning signal for an in-process SpaceBridge runner.
+/// A non-owning signal for an in-process StationHost runner.
 ///
 /// Weak by design: retaining a stop handle must not keep the bridge alive while
 /// the runner waits for every control/session owner to drain.
 #[derive(Clone)]
-pub(crate) struct SpaceBridgeStop {
-    bridge: std::sync::Weak<SpaceBridge>,
+pub(crate) struct StationHostStop {
+    bridge: std::sync::Weak<StationHost>,
 }
 
-impl SpaceBridgeStop {
+impl StationHostStop {
     pub(crate) fn stop(&self) {
         if let Some(bridge) = self.bridge.upgrade() {
             bridge.begin_stop();
@@ -207,7 +207,7 @@ impl SpaceBridgeStop {
     }
 }
 
-impl SpaceBridgeRunner {
+impl StationHostRunner {
     /// Acquire the Orbit's process-wide lease and activate its Station.
     pub(crate) async fn start(
         home: PathBuf,
@@ -216,7 +216,7 @@ impl SpaceBridgeRunner {
         packages: WorldPackages,
     ) -> Result<Self> {
         let lock = acquire_daemon_lock(&home)?;
-        let bridge = Arc::new(SpaceBridge::open(&home, device_seed, factory, packages).await?);
+        let bridge = Arc::new(StationHost::open(&home, device_seed, factory, packages).await?);
         Ok(Self {
             home,
             bridge,
@@ -224,13 +224,13 @@ impl SpaceBridgeRunner {
         })
     }
 
-    pub(crate) fn stop_handle(&self) -> SpaceBridgeStop {
-        SpaceBridgeStop {
+    pub(crate) fn stop_handle(&self) -> StationHostStop {
+        StationHostStop {
             bridge: Arc::downgrade(&self.bridge),
         }
     }
 
-    pub(crate) fn bridge_handle(&self) -> std::sync::Weak<SpaceBridge> {
+    pub(crate) fn bridge_handle(&self) -> std::sync::Weak<StationHost> {
         Arc::downgrade(&self.bridge)
     }
 
@@ -248,7 +248,7 @@ impl SpaceBridgeRunner {
         .await
         .map_err(|_| {
             anyhow!(
-                "SpaceBridge clients did not drain during shutdown ({} owners remain)",
+                "StationHost clients did not drain during shutdown ({} owners remain)",
                 Arc::strong_count(&self.bridge).saturating_sub(1)
             )
         })?;
@@ -259,8 +259,8 @@ impl SpaceBridgeRunner {
             _lock,
         } = self;
         let bridge = Arc::try_unwrap(bridge)
-            .map_err(|_| anyhow!("SpaceBridge still shared after client drain"))?;
-        let dormancy_result = bridge.go_dormant();
+            .map_err(|_| anyhow!("StationHost still shared after client drain"))?;
+        let dormancy_result = bridge.vacate();
 
         serve_result?;
         dormancy_result?;
@@ -273,7 +273,7 @@ impl SpaceBridgeRunner {
     }
 }
 
-impl SpaceBridge {
+impl StationHost {
     /// Open and activate the orbital stack for a home, then dock the routing
     /// Session. Refuses a pre-orbital home.
     pub async fn open(
@@ -286,7 +286,7 @@ impl SpaceBridge {
             return Err(anyhow!("{err}"));
         }
         let space = discover_space(home)?;
-        let mechanics = OrbitalMechanics::open(&orbital_store_root(home), &space, &device_seed)?;
+        let mechanics = SpaceAuthority::open(&orbital_store_root(home), &space, &device_seed)?;
 
         let (registry, worlds) = packages
             .build()
@@ -305,7 +305,7 @@ impl SpaceBridge {
                 &network,
                 comms::Protocols {
                     framed: &[runtime::contact::CONTACT_ALPN, runtime::PRESENCE_ALPN],
-                    session: &[runtime::planes::FREIGHT_ALPN, runtime::planes::LIVE_ALPN],
+                    session: &[runtime::plane::FREIGHT_ALPN, runtime::plane::LIVE_ALPN],
                 },
                 &space,
             )
@@ -384,9 +384,9 @@ impl SpaceBridge {
         advertise.dedup();
         advertise.truncate(runtime::beacon::MAX_ROUTE_HINTS);
         let station = rt
-            .orbit(&space)
+            .acquire(&space)
             .map_err(|e| anyhow!("acquire orbit: {e:?}"))?
-            .activate(ActivationOptions {
+            .open(ActivationOptions {
                 content: Default::default(),
                 // Both planes on, which is what `lait/freight/1` being
                 // advertised has always implied and, until now, has not meant:
@@ -474,10 +474,10 @@ impl SpaceBridge {
             .is_ok()
     }
 
-    fn track_activity(&self) -> SpaceBridgeActivity<'_> {
+    fn track_activity(&self) -> StationHostActivity<'_> {
         use std::sync::atomic::Ordering;
         self.active_conns.fetch_add(1, Ordering::SeqCst);
-        SpaceBridgeActivity(self)
+        StationHostActivity(self)
     }
 
     /// Direct host-local entry for a versioned product call.
@@ -791,7 +791,7 @@ impl SpaceBridge {
     ///
     /// Pulled out of `deliver_nudges` because this is the whole policy and the rest
     /// is plumbing: given who is here and who a World named, decide what goes where.
-    /// A method on `SpaceBridge` would need a Station, a transport and a docked
+    /// A method on `StationHost` would need a Station, a transport and a docked
     /// Session to test three rules that need none of them.
     ///
     /// Actor equality and nothing looser. A nudge names one actor, and the only
@@ -799,12 +799,9 @@ impl SpaceBridge {
     /// two devices is two Stations under one actor and hears once per device, which
     /// is what having two devices means.
     fn reachable<'a>(
-        here: &'a [(mechanics::ids::StationId, String)],
+        here: &'a [(mechanics::station::Key, String)],
         nudges: &'a [crate::orbital::WorldNudge],
-    ) -> Vec<(
-        &'a mechanics::ids::StationId,
-        &'a crate::orbital::WorldNudge,
-    )> {
+    ) -> Vec<(&'a mechanics::station::Key, &'a crate::orbital::WorldNudge)> {
         nudges
             .iter()
             .flat_map(|nudge| {
@@ -823,7 +820,7 @@ impl SpaceBridge {
     /// ceiling its own registration declared, and neither is caught by anything
     /// between it and the wire.
     fn declares(&self, world: &replica::ids::WorldId, nudge: &crate::orbital::WorldNudge) -> bool {
-        let Some(registration) = self.station.registration(world) else {
+        let Some(registration) = self.station.descriptor(world) else {
             return false;
         };
         let Some(schema) = replica::ids::SchemaId::parse(&nudge.schema) else {
@@ -858,7 +855,7 @@ impl SpaceBridge {
         //
         // A Station that does not resolve is dropped rather than delivered to
         // under an invented identity — the same rule the live view follows.
-        let here: Vec<(mechanics::ids::StationId, String)> = live
+        let here: Vec<(mechanics::station::Key, String)> = live
             .present_stations()
             .into_iter()
             .filter_map(|station| {
@@ -878,7 +875,7 @@ impl SpaceBridge {
                 // them on every call.
                 continue;
             }
-            let signal = runtime::planes::Signal::WorldSignal {
+            let signal = runtime::plane::Signal::WorldSignal {
                 world: world.clone(),
                 schema: nudge.schema.clone(),
                 payload: nudge.payload.clone(),
@@ -958,7 +955,7 @@ impl SpaceBridge {
 
     /// Validate the explicit broker path before any terminal owner sees the
     /// request. A missing route remains valid for Space-owned requests accepted
-    /// directly by a SpaceBridge.
+    /// directly by a StationHost.
     fn validate_route(
         &self,
         route: Option<&ControlRoute>,
@@ -981,9 +978,9 @@ impl SpaceBridge {
         };
         match route {
             ControlRoute::Daemon => {
-                Err(Response::err("daemon-scoped request reached a SpaceBridge"))
+                Err(Response::err("daemon-scoped request reached a StationHost"))
             }
-            ControlRoute::Space { address } => {
+            ControlRoute::Orbit { address } => {
                 if address.orbit != self.address.orbit {
                     return Err(wrong_orbit(address));
                 }
@@ -1008,7 +1005,7 @@ impl SpaceBridge {
                     )));
                 }
                 Err(Response::err(
-                    "control requests cannot be sent through a WorldBridge; \
+                    "control requests cannot be sent through a WorldHost; \
                      send a versioned World call",
                 ))
             }
@@ -1031,7 +1028,7 @@ impl SpaceBridge {
     }
 
     /// Membership, admission, device, key, ceremony and custody requests —
-    /// served by [`OrbitalMechanics`] over the mechanics primitives.
+    /// served by [`SpaceAuthority`] over the mechanics primitives.
     fn dispatch_mechanics(&self, req: Request, act_as: Option<&str>) -> Response {
         match req {
             Request::Members => self.members(),
@@ -1202,7 +1199,7 @@ impl SpaceBridge {
                                 &assignment.world,
                                 &assignment.capability,
                             ),
-                            mechanics::demand::PolicyResource {
+                            mechanics::demand::Resource {
                                 world: assignment.world,
                                 segments: assignment.resource,
                             },
@@ -1267,7 +1264,7 @@ impl SpaceBridge {
         let scopes = issues
             .iter()
             .take(runtime::budget::slots::MAX_SUBSCRIBED_SCOPES_PER_CONNECTION)
-            .map(|doc| runtime::transient::TransientScope::IssueView {
+            .map(|doc| runtime::transient::Target::Body {
                 world: world.clone(),
                 body: crate::world::contract::issue_body_id(doc).as_bytes(),
             })
@@ -1462,7 +1459,7 @@ impl SpaceBridge {
     /// `MemberDto.key` is an actor; the viewer colours an avatar by hashing
     /// whatever string it is handed, so one person on two devices would arrive
     /// as two people in two colours.
-    fn actor_for(&self, station: &StationId) -> Option<String> {
+    fn actor_for(&self, station: &Key) -> Option<String> {
         use runtime::AuthorityView;
         self.mechanics
             .admit_peer(station)
@@ -1486,8 +1483,8 @@ impl SpaceBridge {
             )
         });
         // `LiveNarrow::Body` and never a scope. Scope narrowing is *equality*,
-        // and an issue's caret and typing rows are `TextCaret` and `Typing` over
-        // the same Body — so asking for `IssueView` returns the presence rows
+        // and an issue's caret and typing rows are `Field` and `Typing` over
+        // the same Body — so asking for `Body` returns the presence rows
         // and silently drops the two a caret surface exists to draw.
         let narrow = match &want {
             Some((world, body)) => runtime::live::LiveNarrow::Body { world, body: *body },
@@ -1555,8 +1552,9 @@ impl SpaceBridge {
                     };
                     signals.push(crate::control::SignalEntry {
                         actor,
-                        session_id: data_encoding::HEXLOWER.encode(&delivered.session_id),
-                        session_epoch: data_encoding::HEXLOWER.encode(&delivered.session_epoch),
+                        connection_id: data_encoding::HEXLOWER.encode(&delivered.connection_id),
+                        connection_epoch: data_encoding::HEXLOWER
+                            .encode(&delivered.connection_epoch),
                         signal: signal_body(&delivered.signal),
                     });
                 }
@@ -1597,7 +1595,7 @@ impl SpaceBridge {
             Request::Stop => Response::Ok {
                 message: Some("stopping".into()),
             },
-            // The SpaceBridge has no legacy in-memory event ring — live
+            // The StationHost has no legacy in-memory event ring — live
             // clients observe the Station's doorbell stream (`Subscribe`)
             // instead — so the polling log is empty by construction.
             Request::Log { since } => Response::Events {
@@ -2074,22 +2072,21 @@ impl SpaceBridge {
         // peer's addresses changed. Coordinates *entry* (store bootstrap)
         // stays `lait join`'s job.
         let link = link.trim();
-        let station =
-            match crate::ids::DeviceId::parse(link).and_then(|d| StationId::from_device(&d)) {
-                Some(station) => Some(station),
-                None => runtime::SignedCoordinates::parse_link(link)
-                    .ok()
-                    .and_then(|c| c.verify().ok())
-                    .and_then(|v| {
-                        if !v.approach_routes.is_empty() {
-                            self.transport
-                                .learn(v.approach_station.clone(), &v.approach_routes);
-                        }
-                        StationId::from_device(&v.approach_station)
-                    }),
-            };
+        let station = match crate::ids::DeviceId::parse(link).and_then(|d| Key::from_device(&d)) {
+            Some(station) => Some(station),
+            None => runtime::SignedCoordinates::parse_link(link)
+                .ok()
+                .and_then(|c| c.verify().ok())
+                .and_then(|v| {
+                    if !v.approach_routes.is_empty() {
+                        self.transport
+                            .learn(v.approach_station.clone(), &v.approach_routes);
+                    }
+                    Key::from_device(&v.approach_station)
+                }),
+        };
         match station {
-            Some(station) => match self.station.contact(&station, ContactOptions) {
+            Some(station) => match self.station.contact(&station) {
                 Ok(outcome) => Response::Ok {
                     message: Some(format!(
                         "contacted — {} bytes moved{}",
@@ -2134,7 +2131,7 @@ impl SpaceBridge {
                     // loudly instead.
                     if !self.store_dir().is_dir() {
                         tracing::error!(
-                            "orbital store at {} is gone — the SpaceBridge will not \
+                            "orbital store at {} is gone — the StationHost will not \
                              outlive its store; stopping",
                             self.store_dir().display()
                         );
@@ -2177,7 +2174,7 @@ impl SpaceBridge {
         .await
         .map_err(|_| {
             anyhow!(
-                "SpaceBridge control connections did not drain during shutdown ({} remain)",
+                "StationHost control connections did not drain during shutdown ({} remain)",
                 connections.len()
             )
         })?;
@@ -2185,8 +2182,8 @@ impl SpaceBridge {
         if let Some(pump) = pump {
             tokio::time::timeout(Duration::from_secs(5), pump)
                 .await
-                .map_err(|_| anyhow!("SpaceBridge Observation pump did not drain during shutdown"))?
-                .map_err(|error| anyhow!("SpaceBridge Observation pump failed: {error}"))?;
+                .map_err(|_| anyhow!("StationHost Observation pump did not drain during shutdown"))?
+                .map_err(|error| anyhow!("StationHost Observation pump failed: {error}"))?;
         }
         Ok(())
     }
@@ -2195,15 +2192,15 @@ impl SpaceBridge {
     ///
     /// World Sessions are dropped first so dormancy can reject all future
     /// callbacks, drain Station tasks, and release the store lock last.
-    pub fn go_dormant(self) -> Result<()> {
+    pub fn vacate(self) -> Result<()> {
         let Self {
             station, worlds, ..
         } = self;
         drop(worlds);
         station
-            .go_dormant()
+            .vacate()
             .map(|_| ())
-            .map_err(|e| anyhow!("SpaceBridge dormancy failed: {e:?}"))
+            .map_err(|e| anyhow!("StationHost dormancy failed: {e:?}"))
     }
 
     /// This Space's on-disk store directory (the watchdog's liveness probe).
@@ -2268,7 +2265,7 @@ impl SpaceBridge {
             return;
         }
         let address = match &request.route {
-            ControlRoute::Space { address } | ControlRoute::World { address, .. } => {
+            ControlRoute::Orbit { address } | ControlRoute::World { address, .. } => {
                 address.clone()
             }
             ControlRoute::Daemon => {
@@ -2697,32 +2694,32 @@ fn render_body(body: &[u8; 16]) -> String {
     replica::ids::BodyId::from_bytes(*body).render()
 }
 
-fn live_scope(scope: &runtime::transient::TransientScope) -> crate::control::LiveScope {
+fn live_scope(scope: &runtime::transient::Target) -> crate::control::LiveScope {
     use crate::control::LiveScope;
-    use runtime::transient::TransientScope;
+    use runtime::transient::Target;
     match scope {
-        TransientScope::IssueView { world, body } => LiveScope::IssueView {
+        Target::Body { world, body } => LiveScope::Body {
             world: world.clone(),
             body: render_body(body),
         },
-        TransientScope::DocumentView { world, body } => LiveScope::DocumentView {
+        Target::Material { world, body } => LiveScope::Material {
             world: world.clone(),
             body: render_body(body),
         },
-        TransientScope::TextCaret { world, body, field } => LiveScope::TextCaret {
-            world: world.clone(),
-            body: render_body(body),
-            field: field.clone(),
-        },
-        TransientScope::Typing { world, body, field } => LiveScope::Typing {
+        Target::Field { world, body, field } => LiveScope::Field {
             world: world.clone(),
             body: render_body(body),
             field: field.clone(),
         },
-        TransientScope::ContentResidency { content } => LiveScope::ContentResidency {
+        Target::Typing { world, body, field } => LiveScope::Typing {
+            world: world.clone(),
+            body: render_body(body),
+            field: field.clone(),
+        },
+        Target::Content { content } => LiveScope::Content {
             content: data_encoding::HEXLOWER.encode(content),
         },
-        TransientScope::CustomWorld { world, schema, key } => LiveScope::CustomWorld {
+        Target::World { world, schema, key } => LiveScope::World {
             world: world.clone(),
             schema: schema.clone(),
             key: key.clone(),
@@ -2751,9 +2748,9 @@ fn transient_kind(kind: runtime::transient::TransientKind) -> &'static str {
     }
 }
 
-fn signal_body(signal: &runtime::planes::Signal) -> crate::control::SignalBody {
+fn signal_body(signal: &runtime::plane::Signal) -> crate::control::SignalBody {
     use crate::control::SignalBody;
-    use runtime::planes::{InviteKind, Signal};
+    use runtime::plane::{InviteKind, Signal};
     match signal {
         Signal::Ping { nonce } => SignalBody::Ping {
             nonce: data_encoding::HEXLOWER.encode(nonce),
@@ -2854,7 +2851,7 @@ fn idle_window_from_env() -> Duration {
 fn comms_options(
     transport: Arc<dyn Transport>,
     seed: [u8; 32],
-    mechanics: &OrbitalMechanics,
+    mechanics: &SpaceAuthority,
     bootstrap: Vec<crate::ids::DeviceId>,
     advertise: Vec<runtime::beacon::RouteHint>,
 ) -> CommsOptions {
@@ -2863,7 +2860,7 @@ fn comms_options(
     CommsOptions {
         transport,
         station_seed: seed,
-        mechanics: ContactMechanics {
+        authority: Authority {
             source: Arc::new(mechanics.clone()),
             incorporator: Arc::new(Mutex::new(mechanics.clone()))
                 as Arc<Mutex<dyn AuthorityIncorporator + Send>>,
@@ -3043,7 +3040,7 @@ fn write_alias(home: &Path, who: &str, name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Run one process-backed SpaceBridge on `home`, holding the per-home lock for
+/// Run one process-backed StationHost on `home`, holding the per-home lock for
 /// its lifetime. Identity is the process-global one.
 pub async fn run_space_bridge(home: PathBuf, factory: &dyn TransportFactory) -> Result<()> {
     let device_seed = load_or_create_identity(&crate::config::identity_dir()?)?;
@@ -3061,7 +3058,7 @@ pub async fn run_space_bridge_with(
     run_space_bridge_with_packages(home, device_seed, factory, crate::world::packages()).await
 }
 
-/// Run a SpaceBridge with an explicitly supplied compile-time World package
+/// Run a StationHost with an explicitly supplied compile-time World package
 /// set. This is the product-neutral composition seam used by LaitDaemon; the
 /// convenience wrappers above preserve the issue tracker's existing entry
 /// points.
@@ -3071,7 +3068,7 @@ pub async fn run_space_bridge_with_packages(
     factory: &dyn TransportFactory,
     packages: WorldPackages,
 ) -> Result<()> {
-    SpaceBridgeRunner::start(home, device_seed, factory, packages)
+    StationHostRunner::start(home, device_seed, factory, packages)
         .await?
         .run()
         .await
@@ -3080,7 +3077,7 @@ pub async fn run_space_bridge_with_packages(
 #[cfg(test)]
 mod tests {
     use runtime::live::LiveNarrow;
-    use runtime::transient::TransientScope;
+    use runtime::transient::Target;
 
     const BODY: [u8; 16] = [7u8; 16];
     const OTHER: [u8; 16] = [8u8; 16];
@@ -3094,20 +3091,20 @@ mod tests {
         // silently drop the two a caret surface exists to draw.
         let world = crate::world::contract::world_id().as_str().to_string();
         let over_the_body = [
-            TransientScope::IssueView {
+            Target::Body {
                 world: world.clone(),
                 body: BODY,
             },
-            TransientScope::DocumentView {
+            Target::Material {
                 world: world.clone(),
                 body: BODY,
             },
-            TransientScope::TextCaret {
+            Target::Field {
                 world: world.clone(),
                 body: BODY,
                 field: "description".into(),
             },
-            TransientScope::Typing {
+            Target::Typing {
                 world: world.clone(),
                 body: BODY,
                 field: "title".into(),
@@ -3132,17 +3129,17 @@ mod tests {
         // documents of one activation, so a match on the id alone is not a
         // lookup miss, it is a plausible and silently wrong answer.
         let elsewhere = [
-            TransientScope::IssueView {
+            Target::Body {
                 world: world.clone(),
                 body: OTHER,
             },
-            TransientScope::TextCaret {
+            Target::Field {
                 world: "com.example.other".into(),
                 body: BODY,
                 field: "description".into(),
             },
-            TransientScope::ContentResidency { content: [0u8; 32] },
-            TransientScope::CustomWorld {
+            Target::Content { content: [0u8; 32] },
+            Target::World {
                 world: world.clone(),
                 schema: "s".into(),
                 key: "k".into(),
@@ -3176,10 +3173,10 @@ mod tests {
 /// Who a World's nudges actually reach.
 mod nudge_delivery {
     use crate::orbital::WorldNudge;
-    use mechanics::ids::StationId;
+    use mechanics::station::Key;
 
-    fn station(seed: u8) -> StationId {
-        StationId::from_device(&mechanics::crypto::device_from_seed(&[seed; 32])).expect("station")
+    fn station(seed: u8) -> Key {
+        Key::from_device(&mechanics::crypto::device_from_seed(&[seed; 32])).expect("station")
     }
 
     fn nudge(actor: &str) -> WorldNudge {
@@ -3193,10 +3190,10 @@ mod nudge_delivery {
     /// The same helper the delivery path uses. Free rather than a method so it
     /// can be exercised without a Station, a transport and a docked Session.
     fn reachable<'a>(
-        here: &'a [(StationId, String)],
+        here: &'a [(Key, String)],
         nudges: &'a [WorldNudge],
-    ) -> Vec<(&'a StationId, &'a WorldNudge)> {
-        super::SpaceBridge::reachable(here, nudges)
+    ) -> Vec<(&'a Key, &'a WorldNudge)> {
+        super::StationHost::reachable(here, nudges)
     }
 
     #[test]

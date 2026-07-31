@@ -12,14 +12,13 @@
 //! the completion work implements the pinned shape rather than inventing one.
 
 use runtime::{
-    ActivationOptions, CommittedEffect, ContactError, ContactOptions, ContactOutcome,
-    DeorbitConfirmation, DormancyError, EnterOptions, LifecycleError, LocalIdentity, Neighbor,
-    ObservationCursor, Orbit, OrbitObservation, RequestId, Runtime, Session, SignedWorldAction,
-    SpaceFormationOptions, Station, StationExit, WorldError, WorldIntent, WorldProjection,
-    WorldQuery,
+    ActivationOptions, CommittedEffect, ContactError, ContactOutcome, DormancyError, Intent,
+    LifecycleError, LocalIdentity, Neighbor, ObservationCursor, Orbit, OrbitStatus, Projection,
+    Query, RemovalConfirmation, RequestId, Runtime, Session, SignedWorldAction, Station,
+    StationExit, WorldError,
 };
 
-use mechanics::ids::{SpaceId, StationId};
+use mechanics::{ids::SpaceId, station::Key};
 use replica::ids::WorldId;
 
 /// The frozen lifecycle surface. Each `let _: fn(..) -> ..` binding is a
@@ -27,30 +26,24 @@ use replica::ids::WorldId;
 #[test]
 fn the_target_lifecycle_methods_have_their_frozen_signatures() {
     // Runtime
-    let _: fn(&Runtime, SpaceFormationOptions) -> Result<Orbit, LifecycleError> =
-        Runtime::form_space;
-    let _: fn(
-        &Runtime,
-        &runtime::SignedCoordinates,
-        EnterOptions,
-    ) -> Result<Orbit, LifecycleError> = Runtime::enter_orbit;
-    let _: fn(&Runtime, &SpaceId) -> Result<Orbit, LifecycleError> = Runtime::orbit;
-    let _: fn(&Runtime, &SpaceId) -> Result<OrbitObservation, LifecycleError> =
-        Runtime::observe_orbit;
-    let _: fn(&Runtime) -> Vec<OrbitObservation> = Runtime::observe_orbits;
+    let _: fn(&Runtime) -> Result<Orbit, LifecycleError> = Runtime::create;
+    let _: fn(&Runtime, &runtime::SignedCoordinates) -> Result<Orbit, LifecycleError> =
+        Runtime::materialize;
+    let _: fn(&Runtime, &SpaceId) -> Result<Orbit, LifecycleError> = Runtime::acquire;
+    let _: fn(&Runtime, &SpaceId) -> Result<OrbitStatus, LifecycleError> = Runtime::inspect;
+    let _: fn(&Runtime) -> Vec<OrbitStatus> = Runtime::list;
     let _: fn(&[u8; 32]) -> LocalIdentity = Runtime::identity_from_seed;
 
     // Orbit
-    let _: fn(Orbit, ActivationOptions) -> Result<Station, LifecycleError> = Orbit::activate;
-    let _: fn(Orbit, DeorbitConfirmation) -> Result<(), LifecycleError> = Orbit::deorbit;
+    let _: fn(Orbit, ActivationOptions) -> Result<Station, LifecycleError> = Station::open;
+    let _: fn(Orbit, RemovalConfirmation) -> Result<(), LifecycleError> = Orbit::remove;
 
     // Station
     let _: fn(&Station, &WorldId, &LocalIdentity) -> Result<Session, LifecycleError> =
         Station::dock;
     let _: fn(&Station) -> Vec<Neighbor> = Station::neighbors;
-    let _: fn(&Station, &StationId, ContactOptions) -> Result<ContactOutcome, ContactError> =
-        Station::contact;
-    let _: fn(Station) -> Result<Orbit, DormancyError> = Station::go_dormant;
+    let _: fn(&Station, &Key) -> Result<ContactOutcome, ContactError> = Station::contact;
+    let _: fn(Station) -> Result<Orbit, DormancyError> = Station::vacate;
     let _: fn(Station) -> StationExit = Station::wait;
 
     // Action signing + Session
@@ -59,12 +52,12 @@ fn the_target_lifecycle_methods_have_their_frozen_signatures() {
         &LocalIdentity,
         &Session,
         RequestId,
-        WorldIntent,
+        Intent,
     ) -> Result<SignedWorldAction, WorldError> = LocalIdentity::sign_action;
     let _: fn(&Session, SignedWorldAction) -> Result<CommittedEffect, WorldError> = Session::submit;
-    let _: fn(&Session, WorldQuery) -> Result<WorldProjection, WorldError> = Session::query;
+    let _: fn(&Session, Query) -> Result<Projection, WorldError> = Session::query;
     let _: fn(&Session, Option<ObservationCursor>) -> runtime::ObservationStream = Session::observe;
-    let _: fn(Session) = Session::undock;
+    let _: fn(Session) = Session::close;
 }
 
 /// The stable error taxonomies backing those results are public, cloneable,

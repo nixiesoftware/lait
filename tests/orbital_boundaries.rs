@@ -100,7 +100,7 @@ fn issues_semantics_and_client_application_are_separate_packages() {
     ] {
         assert!(
             !space_bridge.contains(product_projection),
-            "Issues projection detail `{product_projection}` leaked into SpaceBridge"
+            "Issues projection detail `{product_projection}` leaked into StationHost"
         );
     }
 }
@@ -130,7 +130,7 @@ fn rust_sources_under(root: &Path) -> Vec<PathBuf> {
 }
 
 // ---------------------------------------------------------------------------
-// G2 — only Fabric names Loro; only comms names iroh.
+// G2 — only fabric names Loro; only comms names iroh.
 // ---------------------------------------------------------------------------
 
 #[test]

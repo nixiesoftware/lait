@@ -10,7 +10,7 @@
 use issues::contract::{self, IssueIntent, IssueQuery, NewLabel, Pos, WorkAction};
 use issues::dto::{BoardView, GraphView, IssueView, LabelDto, ProjectDto, Row};
 use issues::ids::{DocId, LabelId, ProjectId, SystemUlidSource, UlidSource};
-use runtime::{RequestId, Session, WorldError, WorldIntent, WorldQuery};
+use runtime::{Intent, Query, RequestId, Session, WorldError};
 use serde::de::DeserializeOwned;
 use world_bridge::{
     WorldCall, WorldCallAccess, WorldCallContext, WorldCallError, WorldCallErrorCode,
@@ -343,7 +343,7 @@ impl<'a> IssueRouter<'a> {
     fn snapshot(&self) -> Snapshot {
         let bytes = self
             .session
-            .query(WorldQuery {
+            .query(Query {
                 schema: contract::issue_schema(),
                 schema_version: contract::ISSUE_SCHEMA_VERSION,
                 payload: IssueQuery::Snapshot.to_json(),
@@ -362,7 +362,7 @@ impl<'a> IssueRouter<'a> {
         let action = self.identity.sign_action(
             self.session,
             RequestId::mint(),
-            WorldIntent {
+            Intent {
                 schema: contract::issue_schema(),
                 schema_version: contract::ISSUE_SCHEMA_VERSION,
                 payload: intent.to_json(),
@@ -410,7 +410,7 @@ impl<'a> IssueRouter<'a> {
     fn query<T: DeserializeOwned>(&self, query: &IssueQuery) -> Result<T, WorldError> {
         let bytes = self
             .session
-            .query(WorldQuery {
+            .query(Query {
                 schema: contract::issue_schema(),
                 schema_version: contract::ISSUE_SCHEMA_VERSION,
                 payload: query.to_json(),

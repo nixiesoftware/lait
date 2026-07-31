@@ -9,21 +9,21 @@ use std::sync::Arc;
 use mechanics::ids::{ActorId, DeviceId};
 
 use crate::error::WorldError;
-use crate::lifecycle::{ActivationOptions, Runtime, SpaceFormationOptions};
+use crate::lifecycle::{ActivationOptions, Runtime};
 use crate::registry::RuntimeBuilder;
 use crate::session::ObservationCursor;
 use crate::world::{
-    AuthorityView, LocalIdentity, PrincipalResolution, World, WorldContext, WorldEffect,
-    WorldIntent, WorldLimits, WorldProjection, WorldQuery, WorldRegistration, WorldVersion,
+    AuthorityView, Context, Descriptor, Effect, Intent, Limits, LocalIdentity, PrincipalResolution,
+    Projection, Query, Version, World,
 };
-use replica::body::{BodyOp, BodySchema, MutationModel};
+use replica::body::{MutationModel, Op, Schema};
 use replica::frontier::{AuthorityFrontier, ReplicaFrontier};
 use replica::ids::{BodyId, BodyKey, EncodingId, SchemaId, WorldId};
 
 fn any_demand() -> Vec<u8> {
     mechanics::demand::AuthorizationDemand::require(
         mechanics::demand::PolicyCapability::new("w", "c"),
-        mechanics::demand::PolicyResource::space("w"),
+        mechanics::demand::Resource::root("w"),
     )
     .encode_canonical()
     .expect("canonical demand")
@@ -111,7 +111,7 @@ fn test_keys() -> Arc<dyn replica::BodyKeySource> {
 fn submit_as(
     session: &crate::session::Session,
     identity: &LocalIdentity,
-    intent: WorldIntent,
+    intent: Intent,
 ) -> Result<crate::session::CommittedEffect, WorldError> {
     session.submit(identity.sign_action(session, crate::action::RequestId::mint(), intent)?)
 }
@@ -121,14 +121,14 @@ fn submit_as(
 /// projection derived only from its inputs.
 struct NoteWorld {
     id: WorldId,
-    schemas: Vec<BodySchema>,
+    schemas: Vec<Schema>,
 }
 
 impl NoteWorld {
     fn new() -> Self {
         Self {
             id: WorldId::parse("com.example.notes").unwrap(),
-            schemas: vec![BodySchema {
+            schemas: vec![Schema {
                 id: SchemaId::parse("note").unwrap(),
                 version: 1,
                 encoding: EncodingId::parse("text.utf8").unwrap(),
@@ -143,25 +143,21 @@ impl World for NoteWorld {
     fn id(&self) -> WorldId {
         self.id.clone()
     }
-    fn schemas(&self) -> &[BodySchema] {
+    fn schemas(&self) -> &[Schema] {
         &self.schemas
     }
-    fn submit(
-        &self,
-        _ctx: &mut WorldContext<'_>,
-        intent: WorldIntent,
-    ) -> Result<WorldEffect, WorldError> {
+    fn submit(&self, _ctx: &mut Context<'_>, intent: Intent) -> Result<Effect, WorldError> {
         if intent.schema.as_str() != "note" {
             return Err(WorldError::UnsupportedSchema);
         }
         // Deterministic body key: same World, a fixed body for this test.
         let key = BodyKey::new(self.id.clone(), BodyId::from_bytes([0u8; 16]));
-        Ok(WorldEffect {
+        Ok(Effect {
             content_refs: Vec::new(),
             demand: any_demand(),
             operations: vec![(
                 key.clone(),
-                BodyOp::ReplaceAtomic {
+                Op::ReplaceAtomic {
                     value: intent.payload.clone(),
                 },
             )],
@@ -170,11 +166,7 @@ impl World for NoteWorld {
             declarations: vec![],
         })
     }
-    fn query(
-        &self,
-        ctx: &WorldContext<'_>,
-        query: WorldQuery,
-    ) -> Result<WorldProjection, WorldError> {
+    fn query(&self, ctx: &Context<'_>, query: Query) -> Result<Projection, WorldError> {
         if query.schema.as_str() != "note" {
             return Err(WorldError::UnsupportedSchema);
         }
@@ -183,7 +175,7 @@ impl World for NoteWorld {
         let key = BodyKey::new(self.id.clone(), BodyId::from_bytes([0u8; 16]));
         let committed = ctx.read_body(&key).unwrap_or_default();
         let text = String::from_utf8(committed).map_err(|_| WorldError::InvalidRequest)?;
-        Ok(WorldProjection {
+        Ok(Projection {
             demand: any_demand(),
             schema: SchemaId::parse("note").unwrap(),
             schema_version: 1,
@@ -193,17 +185,52 @@ impl World for NoteWorld {
     }
 }
 
-fn note_registration() -> (WorldRegistration, Arc<dyn World>) {
+fn note_registration() -> (Descriptor, Arc<dyn World>) {
     let world = NoteWorld::new();
-    let reg = WorldRegistration {
+    let reg = Descriptor {
         id: world.id(),
-        implementation_version: WorldVersion(1),
+        implementation_version: Version(1),
         schemas: world.schemas().to_vec(),
-        limits: WorldLimits::default(),
+        limits: Limits::default(),
         scope_schemas: Vec::new(),
         signal_schemas: Vec::new(),
     };
     (reg, Arc::new(world))
+}
+
+struct DescribedWorld {
+    descriptor: Descriptor,
+    inner: Arc<dyn World>,
+}
+
+impl World for DescribedWorld {
+    fn descriptor(&self) -> Descriptor {
+        self.descriptor.clone()
+    }
+
+    fn id(&self) -> WorldId {
+        self.inner.id()
+    }
+
+    fn schemas(&self) -> &[Schema] {
+        self.inner.schemas()
+    }
+
+    fn scope_schemas(&self) -> &[crate::world::ScopeSchema] {
+        self.inner.scope_schemas()
+    }
+
+    fn signal_schemas(&self) -> &[crate::world::SignalSchema] {
+        self.inner.signal_schemas()
+    }
+
+    fn submit(&self, ctx: &mut Context<'_>, intent: Intent) -> Result<Effect, WorldError> {
+        self.inner.submit(ctx, intent)
+    }
+
+    fn query(&self, ctx: &Context<'_>, query: Query) -> Result<Projection, WorldError> {
+        self.inner.query(ctx, query)
+    }
 }
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -216,12 +243,18 @@ fn temp_root() -> PathBuf {
     dir
 }
 
-fn station_with(reg: WorldRegistration, world: Arc<dyn World>) -> crate::lifecycle::Station {
-    let registry = RuntimeBuilder::new().register(reg, world).build().unwrap();
+fn station_with(reg: Descriptor, world: Arc<dyn World>) -> crate::lifecycle::Station {
+    let registry = RuntimeBuilder::new()
+        .register(Arc::new(DescribedWorld {
+            descriptor: reg,
+            inner: world,
+        }))
+        .build()
+        .unwrap();
     let rt = Runtime::open(temp_root(), registry, Arc::new(SeedAuthority), test_keys());
-    rt.form_space(SpaceFormationOptions::default())
+    rt.create()
         .unwrap()
-        .activate(ActivationOptions::default())
+        .open(ActivationOptions::default())
         .unwrap()
 }
 
@@ -238,7 +271,7 @@ fn test_world_submits_and_queries_through_dispatch() {
 
     // A query before any submit reads the empty committed snapshot.
     let empty = session
-        .query(WorldQuery {
+        .query(Query {
             schema: SchemaId::parse("note").unwrap(),
             schema_version: 1,
             payload: vec![],
@@ -250,7 +283,7 @@ fn test_world_submits_and_queries_through_dispatch() {
     let committed = submit_as(
         &session,
         &writer(),
-        WorldIntent {
+        Intent {
             schema: SchemaId::parse("note").unwrap(),
             schema_version: 1,
             payload: b"hello".to_vec(),
@@ -264,7 +297,7 @@ fn test_world_submits_and_queries_through_dispatch() {
 
     // The query now reads back the committed Body.
     let proj = session
-        .query(WorldQuery {
+        .query(Query {
             schema: SchemaId::parse("note").unwrap(),
             schema_version: 1,
             payload: vec![],
@@ -283,7 +316,7 @@ fn authorization_is_checked_per_request() {
     let denied = submit_as(
         &session,
         &reader(),
-        WorldIntent {
+        Intent {
             schema: SchemaId::parse("note").unwrap(),
             schema_version: 1,
             payload: b"x".to_vec(),
@@ -300,16 +333,16 @@ fn many_sessions_dock_independently_without_owning_the_station() {
     let s2 = station.dock(&world_id, &writer()).unwrap();
     assert_eq!(s1.epoch(), s2.epoch());
     // Undocking one Session leaves the Station and the other Session intact.
-    s1.undock();
+    s1.close();
     assert!(s2
-        .query(WorldQuery {
+        .query(Query {
             schema: SchemaId::parse("note").unwrap(),
             schema_version: 1,
             payload: b"ok".to_vec(),
         })
         .is_ok());
     // The Station survives its Sessions and can still go dormant.
-    assert!(station.go_dormant().is_ok());
+    assert!(station.vacate().is_ok());
 }
 
 #[test]
@@ -318,9 +351,9 @@ fn dormancy_terminates_sessions() {
     let world_id = WorldId::parse("com.example.notes").unwrap();
     let session = station.dock(&world_id, &writer()).unwrap();
     // Going dormant terminates the Session: further requests fail closed.
-    let _orbit = station.go_dormant().unwrap();
+    let _orbit = station.vacate().unwrap();
     assert_eq!(
-        session.query(WorldQuery {
+        session.query(Query {
             schema: SchemaId::parse("note").unwrap(),
             schema_version: 1,
             payload: b"x".to_vec(),
@@ -333,13 +366,13 @@ fn dormancy_terminates_sessions() {
 fn a_session_cannot_stop_the_station() {
     let station = station();
     let world_id = WorldId::parse("com.example.notes").unwrap();
-    // Dock a Session and drop it (undock) — the Station is unaffected and can
+    // Dock a Session and drop it (close) — the Station is unaffected and can
     // still serve new Sessions.
     let s = station.dock(&world_id, &writer()).unwrap();
-    s.undock();
+    s.close();
     let s2 = station.dock(&world_id, &writer()).unwrap();
     assert!(s2
-        .query(WorldQuery {
+        .query(Query {
             schema: SchemaId::parse("note").unwrap(),
             schema_version: 1,
             payload: b"ok".to_vec(),
@@ -357,27 +390,19 @@ fn a_session_cannot_stop_the_station() {
 /// A World whose `submit` panics — to prove Runtime contains it.
 struct PanicWorld {
     id: WorldId,
-    schemas: Vec<BodySchema>,
+    schemas: Vec<Schema>,
 }
 impl World for PanicWorld {
     fn id(&self) -> WorldId {
         self.id.clone()
     }
-    fn schemas(&self) -> &[BodySchema] {
+    fn schemas(&self) -> &[Schema] {
         &self.schemas
     }
-    fn submit(
-        &self,
-        _ctx: &mut WorldContext<'_>,
-        _intent: WorldIntent,
-    ) -> Result<WorldEffect, WorldError> {
+    fn submit(&self, _ctx: &mut Context<'_>, _intent: Intent) -> Result<Effect, WorldError> {
         panic!("world callback panics")
     }
-    fn query(
-        &self,
-        _ctx: &WorldContext<'_>,
-        _query: WorldQuery,
-    ) -> Result<WorldProjection, WorldError> {
+    fn query(&self, _ctx: &Context<'_>, _query: Query) -> Result<Projection, WorldError> {
         Err(WorldError::InvalidRequest)
     }
 }
@@ -385,18 +410,18 @@ impl World for PanicWorld {
 #[test]
 fn a_world_panic_is_contained_and_does_not_end_the_station() {
     let id = WorldId::parse("com.example.panic").unwrap();
-    let schemas = vec![BodySchema {
+    let schemas = vec![Schema {
         id: SchemaId::parse("note").unwrap(),
         version: 1,
         encoding: EncodingId::parse("text.utf8").unwrap(),
         mutation: MutationModel::Atomic,
         readable_predecessors: vec![],
     }];
-    let reg = WorldRegistration {
+    let reg = Descriptor {
         id: id.clone(),
-        implementation_version: WorldVersion(1),
+        implementation_version: Version(1),
         schemas: schemas.clone(),
-        limits: WorldLimits::default(),
+        limits: Limits::default(),
         scope_schemas: Vec::new(),
         signal_schemas: Vec::new(),
     };
@@ -409,7 +434,7 @@ fn a_world_panic_is_contained_and_does_not_end_the_station() {
     let r = submit_as(
         &session,
         &writer(),
-        WorldIntent {
+        Intent {
             schema: SchemaId::parse("note").unwrap(),
             schema_version: 1,
             payload: b"x".to_vec(),
@@ -417,13 +442,13 @@ fn a_world_panic_is_contained_and_does_not_end_the_station() {
     );
     assert_eq!(r, Err(WorldError::WorldPanicked));
     // The Station survives the panic and can still go dormant cleanly.
-    assert!(station.go_dormant().is_ok());
+    assert!(station.vacate().is_ok());
 }
 
 #[test]
 fn payload_over_the_declared_limit_is_rejected_before_the_callback() {
     let (mut reg, world) = note_registration();
-    reg.limits = WorldLimits {
+    reg.limits = Limits {
         max_payload_bytes: 4,
     };
     let station = station_with(reg, world);
@@ -432,7 +457,7 @@ fn payload_over_the_declared_limit_is_rejected_before_the_callback() {
     let r = submit_as(
         &session,
         &writer(),
-        WorldIntent {
+        Intent {
             schema: SchemaId::parse("note").unwrap(),
             schema_version: 1,
             payload: b"toolong".to_vec(),
@@ -451,7 +476,7 @@ fn unregistered_schema_and_version_are_rejected() {
         submit_as(
             &session,
             &writer(),
-            WorldIntent {
+            Intent {
                 schema: SchemaId::parse("other").unwrap(),
                 schema_version: 1,
                 payload: b"x".to_vec(),
@@ -464,7 +489,7 @@ fn unregistered_schema_and_version_are_rejected() {
         submit_as(
             &session,
             &writer(),
-            WorldIntent {
+            Intent {
                 schema: SchemaId::parse("note").unwrap(),
                 schema_version: 9,
                 payload: b"x".to_vec(),
@@ -477,23 +502,23 @@ fn unregistered_schema_and_version_are_rejected() {
 #[test]
 fn an_acknowledged_commit_survives_a_crash_without_dormancy() {
     // Finding #1's scenario: submit returns success, then the process dies with
-    // NO go_dormant and NO checkpoint call. Dropping the Station without
+    // NO vacate and NO checkpoint call. Dropping the Station without
     // dormancy models the kill (the OS releases the lock either way). The
     // acknowledged commit must still be there on the next activation, because
     // durability happened AT COMMIT, not at shutdown.
     let (reg, world) = note_registration();
-    let registry = RuntimeBuilder::new().register(reg, world).build().unwrap();
+    let registry = RuntimeBuilder::new().register(world).build().unwrap();
     let rt = Runtime::open(temp_root(), registry, Arc::new(SeedAuthority), test_keys());
     let world_id = WorldId::parse("com.example.notes").unwrap();
 
-    let orbit = rt.form_space(SpaceFormationOptions::default()).unwrap();
+    let orbit = rt.create().unwrap();
     let space = orbit.space_id().clone();
-    let station = orbit.activate(ActivationOptions::default()).unwrap();
+    let station = orbit.open(ActivationOptions::default()).unwrap();
     let session = station.dock(&world_id, &writer()).unwrap();
     submit_as(
         &session,
         &writer(),
-        WorldIntent {
+        Intent {
             schema: SchemaId::parse("note").unwrap(),
             schema_version: 1,
             payload: b"ack'd then crash".to_vec(),
@@ -505,13 +530,13 @@ fn an_acknowledged_commit_survives_a_crash_without_dormancy() {
     drop(station);
 
     let station = rt
-        .orbit(&space)
+        .acquire(&space)
         .unwrap()
-        .activate(ActivationOptions::default())
+        .open(ActivationOptions::default())
         .unwrap();
     let session = station.dock(&world_id, &writer()).unwrap();
     let proj = session
-        .query(WorldQuery {
+        .query(Query {
             schema: SchemaId::parse("note").unwrap(),
             schema_version: 1,
             payload: vec![],
@@ -525,21 +550,21 @@ fn commits_made_during_an_activation_survive_wait_exit() {
     // Finding #1's second scenario: Station::wait returns without a checkpoint.
     // Per-commit durability means nothing made during the activation is lost.
     let (reg, world) = note_registration();
-    let registry = RuntimeBuilder::new().register(reg, world).build().unwrap();
+    let registry = RuntimeBuilder::new().register(world).build().unwrap();
     let rt = Runtime::open(temp_root(), registry, Arc::new(SeedAuthority), test_keys());
     let world_id = WorldId::parse("com.example.notes").unwrap();
 
     let station = rt
-        .form_space(SpaceFormationOptions::default())
+        .create()
         .unwrap()
-        .activate(ActivationOptions::default())
+        .open(ActivationOptions::default())
         .unwrap();
     let space = station.space_id().clone();
     let session = station.dock(&world_id, &writer()).unwrap();
     submit_as(
         &session,
         &writer(),
-        WorldIntent {
+        Intent {
             schema: SchemaId::parse("note").unwrap(),
             schema_version: 1,
             payload: b"survives wait".to_vec(),
@@ -551,13 +576,13 @@ fn commits_made_during_an_activation_survive_wait_exit() {
     drop(exit);
 
     let station = rt
-        .orbit(&space)
+        .acquire(&space)
         .unwrap()
-        .activate(ActivationOptions::default())
+        .open(ActivationOptions::default())
         .unwrap();
     let session = station.dock(&world_id, &writer()).unwrap();
     let proj = session
-        .query(WorldQuery {
+        .query(Query {
             schema: SchemaId::parse("note").unwrap(),
             schema_version: 1,
             payload: vec![],
@@ -568,21 +593,21 @@ fn commits_made_during_an_activation_survive_wait_exit() {
 
 #[test]
 fn committed_bodies_survive_dormancy_and_reactivation() {
-    // The full durable loop: form → activate → submit → go_dormant (checkpoint)
+    // The full durable loop: form → activate → submit → vacate (checkpoint)
     // → re-acquire → activate → the committed Body is read back.
     let (reg, world) = note_registration();
-    let registry = RuntimeBuilder::new().register(reg, world).build().unwrap();
+    let registry = RuntimeBuilder::new().register(world).build().unwrap();
     let rt = Runtime::open(temp_root(), registry, Arc::new(SeedAuthority), test_keys());
     let world_id = WorldId::parse("com.example.notes").unwrap();
 
-    let orbit = rt.form_space(SpaceFormationOptions::default()).unwrap();
+    let orbit = rt.create().unwrap();
     let space = orbit.space_id().clone();
-    let station = orbit.activate(ActivationOptions::default()).unwrap();
+    let station = orbit.open(ActivationOptions::default()).unwrap();
     let session = station.dock(&world_id, &writer()).unwrap();
     submit_as(
         &session,
         &writer(),
-        WorldIntent {
+        Intent {
             schema: SchemaId::parse("note").unwrap(),
             schema_version: 1,
             payload: b"durable".to_vec(),
@@ -590,18 +615,18 @@ fn committed_bodies_survive_dormancy_and_reactivation() {
     )
     .unwrap();
     // Go dormant: this checkpoints the Replica to the store.
-    let orbit = station.go_dormant().unwrap();
+    let orbit = station.vacate().unwrap();
     drop(orbit);
 
     // Re-acquire and reactivate: the committed Body is restored.
     let station = rt
-        .orbit(&space)
+        .acquire(&space)
         .unwrap()
-        .activate(ActivationOptions::default())
+        .open(ActivationOptions::default())
         .unwrap();
     let session = station.dock(&world_id, &writer()).unwrap();
     let proj = session
-        .query(WorldQuery {
+        .query(Query {
             schema: SchemaId::parse("note").unwrap(),
             schema_version: 1,
             payload: vec![],
@@ -613,31 +638,27 @@ fn committed_bodies_survive_dormancy_and_reactivation() {
 /// A hostile World that stages an operation against ANOTHER World's namespace.
 struct RogueWorld {
     id: WorldId,
-    schemas: Vec<BodySchema>,
+    schemas: Vec<Schema>,
 }
 impl World for RogueWorld {
     fn id(&self) -> WorldId {
         self.id.clone()
     }
-    fn schemas(&self) -> &[BodySchema] {
+    fn schemas(&self) -> &[Schema] {
         &self.schemas
     }
-    fn submit(
-        &self,
-        _ctx: &mut WorldContext<'_>,
-        intent: WorldIntent,
-    ) -> Result<WorldEffect, WorldError> {
+    fn submit(&self, _ctx: &mut Context<'_>, intent: Intent) -> Result<Effect, WorldError> {
         // Attempt to overwrite a Body belonging to com.example.notes.
         let foreign = BodyKey::new(
             WorldId::parse("com.example.notes").unwrap(),
             BodyId::from_bytes([0u8; 16]),
         );
-        Ok(WorldEffect {
+        Ok(Effect {
             content_refs: Vec::new(),
             demand: any_demand(),
             operations: vec![(
                 foreign.clone(),
-                BodyOp::ReplaceAtomic {
+                Op::ReplaceAtomic {
                     value: intent.payload,
                 },
             )],
@@ -646,11 +667,7 @@ impl World for RogueWorld {
             declarations: vec![],
         })
     }
-    fn query(
-        &self,
-        _ctx: &WorldContext<'_>,
-        _query: WorldQuery,
-    ) -> Result<WorldProjection, WorldError> {
+    fn query(&self, _ctx: &Context<'_>, _query: Query) -> Result<Projection, WorldError> {
         Err(WorldError::InvalidRequest)
     }
 }
@@ -658,18 +675,18 @@ impl World for RogueWorld {
 #[test]
 fn a_world_cannot_write_outside_its_namespace() {
     let id = WorldId::parse("com.example.rogue").unwrap();
-    let schemas = vec![BodySchema {
+    let schemas = vec![Schema {
         id: SchemaId::parse("note").unwrap(),
         version: 1,
         encoding: EncodingId::parse("text.utf8").unwrap(),
         mutation: MutationModel::Atomic,
         readable_predecessors: vec![],
     }];
-    let reg = WorldRegistration {
+    let reg = Descriptor {
         id: id.clone(),
-        implementation_version: WorldVersion(1),
+        implementation_version: Version(1),
         schemas: schemas.clone(),
-        limits: WorldLimits::default(),
+        limits: Limits::default(),
         scope_schemas: Vec::new(),
         signal_schemas: Vec::new(),
     };
@@ -683,7 +700,7 @@ fn a_world_cannot_write_outside_its_namespace() {
     let r = submit_as(
         &session,
         &writer(),
-        WorldIntent {
+        Intent {
             schema: SchemaId::parse("note").unwrap(),
             schema_version: 1,
             payload: b"overwrite you".to_vec(),
@@ -722,22 +739,14 @@ fn a_changed_authority_frontier_refuses_the_commit() {
         fn id(&self) -> WorldId {
             self.inner.id()
         }
-        fn schemas(&self) -> &[BodySchema] {
+        fn schemas(&self) -> &[Schema] {
             self.inner.schemas()
         }
-        fn submit(
-            &self,
-            ctx: &mut WorldContext<'_>,
-            intent: WorldIntent,
-        ) -> Result<WorldEffect, WorldError> {
+        fn submit(&self, ctx: &mut Context<'_>, intent: Intent) -> Result<Effect, WorldError> {
             *self.authority.frontier.lock().unwrap() = vec![9, 9];
             self.inner.submit(ctx, intent)
         }
-        fn query(
-            &self,
-            ctx: &WorldContext<'_>,
-            query: WorldQuery,
-        ) -> Result<WorldProjection, WorldError> {
+        fn query(&self, ctx: &Context<'_>, query: Query) -> Result<Projection, WorldError> {
             self.inner.query(ctx, query)
         }
     }
@@ -747,11 +756,11 @@ fn a_changed_authority_frontier_refuses_the_commit() {
     });
     let inner = NoteWorld::new();
     let id = inner.id();
-    let reg = WorldRegistration {
+    let reg = Descriptor {
         id: id.clone(),
-        implementation_version: WorldVersion(1),
+        implementation_version: Version(1),
         schemas: inner.schemas().to_vec(),
-        limits: WorldLimits::default(),
+        limits: Limits::default(),
         scope_schemas: Vec::new(),
         signal_schemas: Vec::new(),
     };
@@ -759,19 +768,19 @@ fn a_changed_authority_frontier_refuses_the_commit() {
         inner,
         authority: authority.clone(),
     });
-    let registry = RuntimeBuilder::new().register(reg, world).build().unwrap();
+    let registry = RuntimeBuilder::new().register(world).build().unwrap();
     let rt = Runtime::open(temp_root(), registry, authority, test_keys());
     let station = rt
-        .form_space(SpaceFormationOptions::default())
+        .create()
         .unwrap()
-        .activate(ActivationOptions::default())
+        .open(ActivationOptions::default())
         .unwrap();
     let session = station.dock(&id, &writer()).unwrap();
     let before = station.frontier();
     let r = submit_as(
         &session,
         &writer(),
-        WorldIntent {
+        Intent {
             schema: SchemaId::parse("note").unwrap(),
             schema_version: 1,
             payload: b"x".to_vec(),
@@ -789,7 +798,7 @@ fn runtime_stamps_the_projection_frontier() {
     let committed = submit_as(
         &session,
         &writer(),
-        WorldIntent {
+        Intent {
             schema: SchemaId::parse("note").unwrap(),
             schema_version: 1,
             payload: b"x".to_vec(),
@@ -799,7 +808,7 @@ fn runtime_stamps_the_projection_frontier() {
     // The NoteWorld returns ReplicaFrontier::EMPTY from query; Runtime must
     // overwrite it with the real committed frontier of the held snapshot.
     let proj = session
-        .query(WorldQuery {
+        .query(Query {
             schema: SchemaId::parse("note").unwrap(),
             schema_version: 1,
             payload: vec![],
@@ -813,14 +822,14 @@ fn runtime_stamps_the_projection_frontier() {
 /// queries project the collaborative view.
 struct BoardWorld {
     id: WorldId,
-    schemas: Vec<BodySchema>,
+    schemas: Vec<Schema>,
 }
 
 impl BoardWorld {
     fn new() -> Self {
         Self {
             id: WorldId::parse("com.example.board").unwrap(),
-            schemas: vec![BodySchema {
+            schemas: vec![Schema {
                 id: SchemaId::parse("card").unwrap(),
                 version: 1,
                 encoding: EncodingId::parse("collab").unwrap(),
@@ -840,22 +849,18 @@ impl World for BoardWorld {
     fn id(&self) -> WorldId {
         self.id.clone()
     }
-    fn schemas(&self) -> &[BodySchema] {
+    fn schemas(&self) -> &[Schema] {
         &self.schemas
     }
-    fn submit(
-        &self,
-        ctx: &mut WorldContext<'_>,
-        intent: WorldIntent,
-    ) -> Result<WorldEffect, WorldError> {
+    fn submit(&self, ctx: &mut Context<'_>, intent: Intent) -> Result<Effect, WorldError> {
         let key = self.body();
-        Ok(WorldEffect {
+        Ok(Effect {
             content_refs: Vec::new(),
             demand: any_demand(),
             operations: vec![
                 (
                     key.clone(),
-                    BodyOp::ListInsert {
+                    Op::ListInsert {
                         path: "comments".into(),
                         index: ctx
                             .read_collaborative(&key)
@@ -866,7 +871,7 @@ impl World for BoardWorld {
                 ),
                 (
                     key.clone(),
-                    BodyOp::CounterAdd {
+                    Op::CounterAdd {
                         path: "activity".into(),
                         delta: 1,
                     },
@@ -877,11 +882,7 @@ impl World for BoardWorld {
             declarations: vec![],
         })
     }
-    fn query(
-        &self,
-        ctx: &WorldContext<'_>,
-        _query: WorldQuery,
-    ) -> Result<WorldProjection, WorldError> {
+    fn query(&self, ctx: &Context<'_>, _query: Query) -> Result<Projection, WorldError> {
         let view = ctx.read_collaborative(&self.body()).unwrap_or_default();
         let comments: Vec<String> = view
             .lists
@@ -893,7 +894,7 @@ impl World for BoardWorld {
             })
             .unwrap_or_default();
         let activity = view.counters.get("activity").copied().unwrap_or(0);
-        Ok(WorldProjection {
+        Ok(Projection {
             demand: any_demand(),
             schema: SchemaId::parse("card").unwrap(),
             schema_version: 1,
@@ -907,30 +908,30 @@ impl World for BoardWorld {
 fn a_collaborative_world_commits_and_reads_through_the_session() {
     let world = BoardWorld::new();
     let id = world.id();
-    let reg = WorldRegistration {
+    let reg = Descriptor {
         id: id.clone(),
-        implementation_version: WorldVersion(1),
+        implementation_version: Version(1),
         schemas: world.schemas().to_vec(),
-        limits: WorldLimits::default(),
+        limits: Limits::default(),
         scope_schemas: Vec::new(),
         signal_schemas: Vec::new(),
     };
     let registry = RuntimeBuilder::new()
-        .register(reg, Arc::new(world))
+        .register(Arc::new(world))
         .build()
         .unwrap();
     let rt = Runtime::open(temp_root(), registry, Arc::new(SeedAuthority), test_keys());
-    let orbit = rt.form_space(SpaceFormationOptions::default()).unwrap();
+    let orbit = rt.create().unwrap();
     let space = orbit.space_id().clone();
-    let station = orbit.activate(ActivationOptions::default()).unwrap();
+    let station = orbit.open(ActivationOptions::default()).unwrap();
     let session = station.dock(&id, &writer()).unwrap();
 
-    let query = || WorldQuery {
+    let query = || Query {
         schema: SchemaId::parse("card").unwrap(),
         schema_version: 1,
         payload: vec![],
     };
-    let intent = |text: &str| WorldIntent {
+    let intent = |text: &str| Intent {
         schema: SchemaId::parse("card").unwrap(),
         schema_version: 1,
         payload: text.as_bytes().to_vec(),
@@ -942,12 +943,12 @@ fn a_collaborative_world_commits_and_reads_through_the_session() {
     assert_eq!(proj.bytes, b"2:first comment,second comment");
 
     // Collaborative Bodies survive dormancy + reactivation like atomic ones.
-    let orbit = station.go_dormant().unwrap();
+    let orbit = station.vacate().unwrap();
     drop(orbit);
     let station = rt
-        .orbit(&space)
+        .acquire(&space)
         .unwrap()
-        .activate(ActivationOptions::default())
+        .open(ActivationOptions::default())
         .unwrap();
     let session = station.dock(&id, &writer()).unwrap();
     let proj = session.query(query()).unwrap();
@@ -958,28 +959,24 @@ fn a_collaborative_world_commits_and_reads_through_the_session() {
 /// its ATOMIC schema's intent — the schema-containment violation of finding #8.
 struct MixedWorld {
     id: WorldId,
-    schemas: Vec<BodySchema>,
+    schemas: Vec<Schema>,
 }
 impl World for MixedWorld {
     fn id(&self) -> WorldId {
         self.id.clone()
     }
-    fn schemas(&self) -> &[BodySchema] {
+    fn schemas(&self) -> &[Schema] {
         &self.schemas
     }
-    fn submit(
-        &self,
-        _ctx: &mut WorldContext<'_>,
-        _intent: WorldIntent,
-    ) -> Result<WorldEffect, WorldError> {
+    fn submit(&self, _ctx: &mut Context<'_>, _intent: Intent) -> Result<Effect, WorldError> {
         // Regardless of which schema the intent named, stage a collaborative op.
         let key = BodyKey::new(self.id.clone(), BodyId::from_bytes([5u8; 16]));
-        Ok(WorldEffect {
+        Ok(Effect {
             content_refs: Vec::new(),
             demand: any_demand(),
             operations: vec![(
                 key.clone(),
-                BodyOp::CounterAdd {
+                Op::CounterAdd {
                     path: "sneak".into(),
                     delta: 1,
                 },
@@ -989,11 +986,7 @@ impl World for MixedWorld {
             declarations: vec![],
         })
     }
-    fn query(
-        &self,
-        _ctx: &WorldContext<'_>,
-        _query: WorldQuery,
-    ) -> Result<WorldProjection, WorldError> {
+    fn query(&self, _ctx: &Context<'_>, _query: Query) -> Result<Projection, WorldError> {
         Err(WorldError::InvalidRequest)
     }
 }
@@ -1002,14 +995,14 @@ impl World for MixedWorld {
 fn containment_is_bound_to_the_intent_schema_not_the_world() {
     let id = WorldId::parse("com.example.mixed").unwrap();
     let schemas = vec![
-        BodySchema {
+        Schema {
             id: SchemaId::parse("atomicdoc").unwrap(),
             version: 1,
             encoding: EncodingId::parse("bytes").unwrap(),
             mutation: MutationModel::Atomic,
             readable_predecessors: vec![],
         },
-        BodySchema {
+        Schema {
             id: SchemaId::parse("collabdoc").unwrap(),
             version: 1,
             encoding: EncodingId::parse("collab").unwrap(),
@@ -1017,11 +1010,11 @@ fn containment_is_bound_to_the_intent_schema_not_the_world() {
             readable_predecessors: vec![],
         },
     ];
-    let reg = WorldRegistration {
+    let reg = Descriptor {
         id: id.clone(),
-        implementation_version: WorldVersion(1),
+        implementation_version: Version(1),
         schemas: schemas.clone(),
-        limits: WorldLimits::default(),
+        limits: Limits::default(),
         scope_schemas: Vec::new(),
         signal_schemas: Vec::new(),
     };
@@ -1037,7 +1030,7 @@ fn containment_is_bound_to_the_intent_schema_not_the_world() {
     let r = submit_as(
         &session,
         &writer(),
-        WorldIntent {
+        Intent {
             schema: SchemaId::parse("atomicdoc").unwrap(),
             schema_version: 1,
             payload: vec![],
@@ -1049,7 +1042,7 @@ fn containment_is_bound_to_the_intent_schema_not_the_world() {
     submit_as(
         &session,
         &writer(),
-        WorldIntent {
+        Intent {
             schema: SchemaId::parse("collabdoc").unwrap(),
             schema_version: 1,
             payload: vec![],
@@ -1065,11 +1058,11 @@ fn an_identical_signed_replay_returns_the_original_result_without_reapplying() {
     // result and must NOT bump the counter again.
     let world = BoardWorld::new();
     let id = world.id();
-    let reg = WorldRegistration {
+    let reg = Descriptor {
         id: id.clone(),
-        implementation_version: WorldVersion(1),
+        implementation_version: Version(1),
         schemas: world.schemas().to_vec(),
-        limits: WorldLimits::default(),
+        limits: Limits::default(),
         scope_schemas: Vec::new(),
         signal_schemas: Vec::new(),
     };
@@ -1079,7 +1072,7 @@ fn an_identical_signed_replay_returns_the_original_result_without_reapplying() {
         .sign_action(
             &session,
             crate::action::RequestId::mint(),
-            WorldIntent {
+            Intent {
                 schema: SchemaId::parse("card").unwrap(),
                 schema_version: 1,
                 payload: b"a comment".to_vec(),
@@ -1099,7 +1092,7 @@ fn an_identical_signed_replay_returns_the_original_result_without_reapplying() {
         "the replay committed nothing"
     );
     let proj = session
-        .query(WorldQuery {
+        .query(Query {
             schema: SchemaId::parse("card").unwrap(),
             schema_version: 1,
             payload: vec![],
@@ -1117,7 +1110,7 @@ fn reusing_a_request_id_with_a_different_payload_is_a_typed_conflict() {
     let world_id = WorldId::parse("com.example.notes").unwrap();
     let session = station.dock(&world_id, &writer()).unwrap();
     let request = crate::action::RequestId::from_bytes([77u8; 16]);
-    let intent = |text: &[u8]| WorldIntent {
+    let intent = |text: &[u8]| Intent {
         schema: SchemaId::parse("note").unwrap(),
         schema_version: 1,
         payload: text.to_vec(),
@@ -1150,7 +1143,7 @@ fn an_action_for_another_space_or_world_is_refused() {
         .sign_action(
             &session,
             crate::action::RequestId::mint(),
-            WorldIntent {
+            Intent {
                 schema: SchemaId::parse("note").unwrap(),
                 schema_version: 1,
                 payload: b"x".to_vec(),

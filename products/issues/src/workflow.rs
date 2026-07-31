@@ -12,7 +12,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::contract::PRODUCT_WORLD;
-use mechanics::demand::{AuthorizationDemand, PolicyCapability, PolicyResource};
+use mechanics::demand::{AuthorizationDemand, PolicyCapability, Resource};
 
 /// The BLAKE3 derive-key context for a workflow revision id.
 const WORKFLOW_REVISION_CONTEXT: &str = "lait.issues.workflow-revision.v1";
@@ -71,8 +71,9 @@ impl DemandTemplate {
                 resource,
             } => {
                 let res = match resource {
-                    ResourceTemplate::Space => PolicyResource::space(PRODUCT_WORLD),
-                    ResourceTemplate::Project => PolicyResource::project(PRODUCT_WORLD, project_id),
+                    ResourceTemplate::Space => Resource::root(PRODUCT_WORLD),
+                    ResourceTemplate::Project => Resource::segments(PRODUCT_WORLD, [project_id])
+                        .expect("validated project resource"),
                 };
                 AuthorizationDemand::require(PolicyCapability::new(PRODUCT_WORLD, capability), res)
             }

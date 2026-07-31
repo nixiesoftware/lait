@@ -1,7 +1,7 @@
 //! The identity-scoped Lait daemon and its single local control endpoint.
 //!
 //! The host owns no Space state directly. It owns one [`ControlRouter`], which
-//! lazily places Stations into addressed Orbits and keeps their SpaceBridges
+//! lazily places Stations into addressed Orbits and keeps their StationHosts
 //! inside this process. Historical per-home control sockets remain behind those
 //! bridges as compatibility adapters, but new CLI, MCP, and web requests enter
 //! through this endpoint first.
@@ -439,7 +439,7 @@ impl LaitDaemon {
         if if_running {
             let response = match (&route, &request) {
                 (
-                    ControlRoute::Space { .. },
+                    ControlRoute::Orbit { .. },
                     Request::Status | Request::Id | Request::ConfigReload,
                 ) => self
                     .router
@@ -476,7 +476,7 @@ impl LaitDaemon {
                 )
                 .await;
             }
-            (route @ ControlRoute::Space { .. }, Request::Subscribe { since }) => {
+            (route @ ControlRoute::Orbit { .. }, Request::Subscribe { since }) => {
                 self.stream_space(write_half, route, since).await;
             }
             (ControlRoute::World { .. }, Request::Subscribe { .. }) => {
@@ -534,7 +534,7 @@ impl LaitDaemon {
         route: ControlRoute,
         since: u64,
     ) {
-        let ControlRoute::Space { address } = &route else {
+        let ControlRoute::Orbit { address } = &route else {
             return;
         };
         let resolved = match self.router.place_address(address).await {
@@ -842,7 +842,7 @@ mod tests {
 
     use super::*;
     use crate::net::Network;
-    use crate::spaces::{Origin, SpaceEntry};
+    use crate::orbits::{Entry, Origin};
     use crate::transport::mem::MemNet;
     use crate::transport::Transport;
 
@@ -891,7 +891,7 @@ mod tests {
             home.clone(),
             home.join("agents"),
             false,
-            vec![SpaceEntry {
+            vec![Entry {
                 space: mechanics.space().as_str().to_string(),
                 name: "Host Test".into(),
                 path: home.to_string_lossy().to_string(),
@@ -1008,7 +1008,7 @@ mod tests {
 
         let response = client
             .request(
-                ControlRoute::Space {
+                ControlRoute::Orbit {
                     address: resolved.address,
                 },
                 &Request::Status,

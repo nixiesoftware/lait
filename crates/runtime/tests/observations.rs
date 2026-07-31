@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use mechanics::crypto::AuthorizedBodyKey;
 use mechanics::ids::{ActorId, DeviceId};
-use replica::body::{BodyOp, BodySchema, MutationModel};
+use replica::body::{MutationModel, Op, Schema};
 use replica::frontier::{AuthorityFrontier, ReplicaFrontier};
 use replica::ids::{BodyId, BodyKey, EncodingId, SchemaId, WorldId};
 
@@ -22,16 +22,15 @@ use replica::ids::{BodyId, BodyKey, EncodingId, SchemaId, WorldId};
 fn any_demand() -> Vec<u8> {
     mechanics::demand::AuthorizationDemand::require(
         mechanics::demand::PolicyCapability::new("w", "c"),
-        mechanics::demand::PolicyResource::space("w"),
+        mechanics::demand::Resource::root("w"),
     )
     .encode_canonical()
     .expect("canonical demand")
 }
 use runtime::{
-    ActivationOptions, LocalIdentity, ObservationCursor, ObservationStreamError, RequestId,
-    Runtime, RuntimeBuilder, Session, SpaceFormationOptions, Station, World, WorldContext,
-    WorldEffect, WorldError, WorldIntent, WorldLimits, WorldProjection, WorldQuery,
-    WorldRegistration, WorldVersion,
+    ActivationOptions, Context, Descriptor, Effect, Intent, Limits, LocalIdentity,
+    ObservationCursor, ObservationStreamError, Projection, Query, RequestId, Runtime,
+    RuntimeBuilder, Session, Station, Version, World, WorldError,
 };
 
 const WRITER_SEED: [u8; 32] = [55u8; 32];
@@ -49,14 +48,14 @@ fn temp_root() -> std::path::PathBuf {
 
 struct KvWorld {
     id: WorldId,
-    schemas: Vec<BodySchema>,
+    schemas: Vec<Schema>,
 }
 
 impl KvWorld {
     fn new() -> Self {
         Self {
             id: WorldId::parse("dev.example.kv").unwrap(),
-            schemas: vec![BodySchema {
+            schemas: vec![Schema {
                 id: SchemaId::parse("entry").unwrap(),
                 version: 1,
                 encoding: EncodingId::parse("bytes").unwrap(),
@@ -77,23 +76,19 @@ impl World for KvWorld {
     fn id(&self) -> WorldId {
         self.id.clone()
     }
-    fn schemas(&self) -> &[BodySchema] {
+    fn schemas(&self) -> &[Schema] {
         &self.schemas
     }
-    fn submit(
-        &self,
-        _ctx: &mut WorldContext<'_>,
-        intent: WorldIntent,
-    ) -> Result<WorldEffect, WorldError> {
+    fn submit(&self, _ctx: &mut Context<'_>, intent: Intent) -> Result<Effect, WorldError> {
         let text = String::from_utf8(intent.payload).map_err(|_| WorldError::InvalidRequest)?;
         let (key, value) = text.split_once('=').ok_or(WorldError::InvalidRequest)?;
         let body = self.body(key);
-        Ok(WorldEffect {
+        Ok(Effect {
             content_refs: Vec::new(),
             demand: any_demand(),
             operations: vec![(
                 body.clone(),
-                BodyOp::ReplaceAtomic {
+                Op::ReplaceAtomic {
                     value: value.as_bytes().to_vec(),
                 },
             )],
@@ -102,13 +97,9 @@ impl World for KvWorld {
             declarations: vec![],
         })
     }
-    fn query(
-        &self,
-        ctx: &WorldContext<'_>,
-        query: WorldQuery,
-    ) -> Result<WorldProjection, WorldError> {
+    fn query(&self, ctx: &Context<'_>, query: Query) -> Result<Projection, WorldError> {
         let key = String::from_utf8(query.payload).map_err(|_| WorldError::InvalidRequest)?;
-        Ok(WorldProjection {
+        Ok(Projection {
             demand: any_demand(),
             schema: SchemaId::parse("entry").unwrap(),
             schema_version: 1,
@@ -177,16 +168,16 @@ impl runtime::AuthorityView for WriterOnly {
 
 fn runtime_at(root: &std::path::Path) -> Runtime {
     let world = KvWorld::new();
-    let reg = WorldRegistration {
+    let reg = Descriptor {
         id: world.id(),
-        implementation_version: WorldVersion(1),
+        implementation_version: Version(1),
         schemas: world.schemas().to_vec(),
-        limits: WorldLimits::default(),
+        limits: Limits::default(),
         scope_schemas: Vec::new(),
         signal_schemas: Vec::new(),
     };
     let registry = RuntimeBuilder::new()
-        .register(reg, Arc::new(world))
+        .register(Arc::new(world))
         .build()
         .unwrap();
     Runtime::open(
@@ -201,9 +192,9 @@ fn runtime_at(root: &std::path::Path) -> Runtime {
 
 fn station_with_capacity(root: &std::path::Path, capacity: usize) -> Station {
     runtime_at(root)
-        .form_space(SpaceFormationOptions::default())
+        .create()
         .unwrap()
-        .activate(ActivationOptions {
+        .open(ActivationOptions {
             planes: Default::default(),
             content: Default::default(),
             drain_deadline: Duration::from_secs(5),
@@ -230,7 +221,7 @@ fn action(
         .sign_action(
             session,
             request,
-            WorldIntent {
+            Intent {
                 schema: SchemaId::parse("entry").unwrap(),
                 schema_version: 1,
                 payload: entry.as_bytes().to_vec(),
@@ -359,9 +350,9 @@ fn restart_and_cross_epoch_cursors_reset() {
     let root = temp_root();
     let rt = runtime_at(&root);
     let station = rt
-        .form_space(SpaceFormationOptions::default())
+        .create()
         .unwrap()
-        .activate(ActivationOptions::offline())
+        .open(ActivationOptions::offline())
         .unwrap();
     let space = station.space_id().clone();
     let (session, writer) = dock(&station);
@@ -372,12 +363,12 @@ fn restart_and_cross_epoch_cursors_reset() {
 
     // Crash after durability, before any consumer observed: recovery is reset
     // + re-query, never a durable outbox.
-    let orbit = station.go_dormant().unwrap();
+    let orbit = station.vacate().unwrap();
     drop(orbit);
     let station = rt
-        .orbit(&space)
+        .acquire(&space)
         .unwrap()
-        .activate(ActivationOptions::offline())
+        .open(ActivationOptions::offline())
         .unwrap();
     let (session, _) = dock(&station);
     let mut stream = session.observe(Some(ObservationCursor {
@@ -388,7 +379,7 @@ fn restart_and_cross_epoch_cursors_reset() {
     assert!(record.reset, "a cursor from another epoch resets");
     // The committed state is re-queried, not replayed.
     let projection = session
-        .query(WorldQuery {
+        .query(Query {
             schema: SchemaId::parse("entry").unwrap(),
             schema_version: 1,
             payload: b"a".to_vec(),
@@ -414,7 +405,7 @@ fn dormancy_terminates_streams_typed_and_concurrent_sessions_both_receive() {
     assert!(stream1.try_next().unwrap().unwrap().sequence >= 1);
     assert!(stream2.try_next().unwrap().unwrap().sequence >= 1);
 
-    let _ = station.go_dormant().unwrap();
+    let _ = station.vacate().unwrap();
     assert_eq!(
         stream1.next_timeout(Duration::from_secs(1)),
         Err(ObservationStreamError::StationDormant)
@@ -438,9 +429,9 @@ fn a_live_station_can_hold_content_and_reclaims_a_dead_run_at_activation() {
     let root = temp_root();
     let rt = runtime_at(&root);
     let station = rt
-        .form_space(SpaceFormationOptions::default())
+        .create()
         .unwrap()
-        .activate(ActivationOptions::offline())
+        .open(ActivationOptions::offline())
         .unwrap();
 
     // Leave behind exactly what a killed run leaves: a staging slot and an
@@ -457,13 +448,13 @@ fn a_live_station_can_hold_content_and_reclaims_a_dead_run_at_activation() {
     assert!(cache.staged_bytes() > 0);
     assert!(cache.is_held(&orphan).unwrap());
     let space_id = station.space_id().clone();
-    station.go_dormant().expect("dormant");
+    station.vacate().expect("dormant");
 
     // Reactivating is what says the operation is over.
     let station = rt
-        .orbit(&space_id)
+        .acquire(&space_id)
         .unwrap()
-        .activate(ActivationOptions::offline())
+        .open(ActivationOptions::offline())
         .unwrap();
     let host = station.content();
     let cache = host.cache();

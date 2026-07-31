@@ -16,13 +16,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use lait::dto::IssueView;
-use lait::orbital::OrbitalMechanics;
+use lait::orbital::SpaceAuthority;
 use lait::world::contract::{self, IssueIntent, IssueQuery};
 use lait::world::IssuesWorld;
 use replica::AuthorityIncorporator;
 use runtime::{
-    ActivationOptions, CommsOptions, ContactMechanics, ContactOptions, EnterOptions, GossipOptions,
-    RequestId, Runtime, RuntimeBuilder, Session, Station, WorldIntent, WorldQuery,
+    ActivationOptions, Authority, CommsOptions, GossipOptions, Intent, Query, RequestId, Runtime,
+    RuntimeBuilder, Session, Station,
 };
 
 const FOUNDER_SEED: [u8; 32] = [91u8; 32];
@@ -38,9 +38,9 @@ fn temp_root(tag: &str) -> std::path::PathBuf {
     dir
 }
 
-fn registry() -> runtime::WorldRegistry {
+fn registry() -> runtime::Registry {
     RuntimeBuilder::new()
-        .register(IssuesWorld::registration(), Arc::new(IssuesWorld::new()))
+        .register(Arc::new(IssuesWorld::new()))
         .build()
         .unwrap()
 }
@@ -48,7 +48,7 @@ fn registry() -> runtime::WorldRegistry {
 fn comms_for(
     transport: Arc<dyn comms::Transport>,
     seed: [u8; 32],
-    mech: &OrbitalMechanics,
+    mech: &SpaceAuthority,
     bootstrap: Vec<comms::PeerId>,
 ) -> CommsOptions {
     let export_mech = mech.clone();
@@ -56,7 +56,7 @@ fn comms_for(
     CommsOptions {
         transport,
         station_seed: seed,
-        mechanics: ContactMechanics {
+        authority: Authority {
             source: Arc::new(mech.clone()),
             incorporator: Arc::new(Mutex::new(mech.clone()))
                 as Arc<Mutex<dyn AuthorityIncorporator + Send>>,
@@ -80,7 +80,7 @@ fn comms_for(
 fn activate(
     root: &std::path::Path,
     seed: [u8; 32],
-    mech: &OrbitalMechanics,
+    mech: &SpaceAuthority,
     coords: &runtime::SignedCoordinates,
     transport: Arc<dyn comms::Transport>,
     bootstrap: Vec<comms::PeerId>,
@@ -92,9 +92,9 @@ fn activate(
         Arc::new(mech.clone()),
     );
     let station = rt
-        .enter_orbit(coords, EnterOptions)
+        .materialize(coords)
         .unwrap()
-        .activate(ActivationOptions {
+        .open(ActivationOptions {
             planes: Default::default(),
             content: Default::default(),
             drain_deadline: Duration::from_secs(5),
@@ -119,7 +119,7 @@ fn submit(
     let action = identity.sign_action(
         session,
         RequestId::mint(),
-        WorldIntent {
+        Intent {
             schema: contract::issue_schema(),
             schema_version: contract::ISSUE_SCHEMA_VERSION,
             payload: intent.to_json(),
@@ -130,7 +130,7 @@ fn submit(
 
 fn query<T: serde::de::DeserializeOwned>(session: &Session, q: &IssueQuery) -> T {
     let bytes = session
-        .query(WorldQuery {
+        .query(Query {
             schema: contract::issue_schema(),
             schema_version: contract::ISSUE_SCHEMA_VERSION,
             payload: q.to_json(),
@@ -140,15 +140,15 @@ fn query<T: serde::de::DeserializeOwned>(session: &Session, q: &IssueQuery) -> T
     serde_json::from_slice(&bytes).unwrap()
 }
 
-fn station_id(seed: &[u8; 32]) -> mechanics::ids::StationId {
-    mechanics::ids::StationId::from_device(&mechanics::crypto::device_from_seed(seed)).unwrap()
+fn station_id(seed: &[u8; 32]) -> mechanics::station::Key {
+    mechanics::station::Key::from_device(&mechanics::crypto::device_from_seed(seed)).unwrap()
 }
 
 /// Retry a Contact until it converges (over real iroh, path establishment and
 /// gossip route learning are asynchronous). Bounded; panics on exhaustion.
-fn contact_until<F: Fn() -> bool>(station: &Station, peer: &mechanics::ids::StationId, done: F) {
+fn contact_until<F: Fn() -> bool>(station: &Station, peer: &mechanics::station::Key, done: F) {
     for _ in 0..40 {
-        let _ = station.contact(peer, ContactOptions);
+        let _ = station.contact(peer);
         if done() {
             return;
         }
@@ -187,7 +187,7 @@ fn coordinates_only_two_endpoint_bootstrap_over_real_iroh() {
     // 1. Founder forms and seeds product policy.
     let root_f = temp_root("founder");
     let (mech_f, _coords) =
-        OrbitalMechanics::form(root_f.as_path(), &FOUNDER_SEED, "Iroh Space", vec![]).unwrap();
+        SpaceAuthority::form(root_f.as_path(), &FOUNDER_SEED, "Iroh Space", vec![]).unwrap();
     lait::orbital::seed_founder_policy(&mech_f).unwrap();
     let coords_f = mech_f
         .mint_coordinates(&FOUNDER_SEED, "Iroh Space", vec![], None)
@@ -240,7 +240,7 @@ fn coordinates_only_two_endpoint_bootstrap_over_real_iroh() {
     //    founder's SIGNED routes (verified from the Coordinates) — no manual
     //    cross-learn, no shared registry.
     let root_j = temp_root("joiner");
-    let mech_j = OrbitalMechanics::enter(root_j.as_path(), &JOINER_SEED, &invite).unwrap();
+    let mech_j = SpaceAuthority::enter(root_j.as_path(), &JOINER_SEED, &invite).unwrap();
     let verified = invite.verify().unwrap();
     t_joiner.learn(verified.approach_station.clone(), &verified.approach_routes);
     let (_rt_j, station_j) = activate(
@@ -287,7 +287,7 @@ fn coordinates_only_two_endpoint_bootstrap_over_real_iroh() {
     // The founder created the default project via SpaceInit; the joiner reads it.
     let snapshot: serde_json::Value = {
         let bytes = session_j
-            .query(WorldQuery {
+            .query(Query {
                 schema: contract::issue_schema(),
                 schema_version: contract::ISSUE_SCHEMA_VERSION,
                 payload: IssueQuery::Snapshot.to_json(),
@@ -353,10 +353,10 @@ fn coordinates_only_two_endpoint_bootstrap_over_real_iroh() {
     // 9. Restart both endpoints/stores; recontact; the issue is still readable.
     drop(session_f);
     drop(session_j);
-    let _ = station_j.go_dormant();
-    let _ = station_f.go_dormant();
+    let _ = station_j.vacate();
+    let _ = station_f.vacate();
 
-    let mech_f2 = OrbitalMechanics::open(root_f.as_path(), &mech_f.space(), &FOUNDER_SEED).unwrap();
+    let mech_f2 = SpaceAuthority::open(root_f.as_path(), &mech_f.space(), &FOUNDER_SEED).unwrap();
     let (_rt_f2, station_f2) = activate(
         root_f.as_path(),
         FOUNDER_SEED,
@@ -368,7 +368,7 @@ fn coordinates_only_two_endpoint_bootstrap_over_real_iroh() {
     let session_f2 = dock(&station_f2, &FOUNDER_SEED);
     let view: IssueView = query(&session_f2, &IssueQuery::View { doc, me: None });
     assert_eq!(view.title, "From the joiner", "the issue survives restart");
-    let _ = station_f2.go_dormant();
+    let _ = station_f2.vacate();
     rt.block_on(async {
         t_founder.shutdown().await;
         t_joiner.shutdown().await;

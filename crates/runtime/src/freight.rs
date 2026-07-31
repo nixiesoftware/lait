@@ -29,7 +29,7 @@ use crate::admission::AdmittedPeer;
 use crate::budget::{deadline, gates, slots, ByteGate, Gate, Verdict};
 use crate::content_host::{ContentHost, ContentHostError, ContentPolicy};
 use crate::lifecycle::CancelToken;
-use crate::planes::{bounds, FreightFrame};
+use crate::plane::{bounds, FreightFrame};
 
 /// Length prefix for one framed message on a Freight flow.
 ///

@@ -1,9 +1,9 @@
 //! Guided-join verifier + directory-trap fix, end to end (see `docs/UI.md`,
-//! joining) — over process-backed **SpaceBridges**.
+//! joining) — over process-backed **StationHosts**.
 //!
 //! The `Diagnose` verb is a keystone onboarding feature: it projects live daemon
 //! state into the ordered gate list so a stalled joiner gets one legible blocker
-//! instead of a blank board. Here two in-process SpaceBridges (in-memory
+//! instead of a blank board. Here two in-process StationHosts (in-memory
 //! transport) walk the join lifecycle: a fresh joiner blocks on `membership`
 //! while un-admitted, then — driven only by accepting the invite and Contact
 //! (orbital's automatic admission, no manual approve) — flips to all-pass. A
@@ -24,7 +24,7 @@ use lait::control::{request, Request, Response};
 use lait::diagnose::{DiagnosisView, GateState};
 use lait::net::Network;
 use lait::orbital::run_space_bridge_with;
-use lait::spaces::{Origin, SpaceEntry};
+use lait::orbits::{Entry, Origin};
 use lait::transport::mem::MemNet;
 use lait::transport::{Transport, TransportFactory};
 
@@ -105,7 +105,7 @@ fn wait_online(rt: &tokio::runtime::Runtime, home: &Path) {
     });
     assert!(
         online.is_some(),
-        "SpaceBridge at {} never came online",
+        "StationHost at {} never came online",
         home.display()
     );
 }
@@ -321,7 +321,7 @@ fn read_command_in_empty_dir_refuses_to_create_a_decoy_store() {
     let cwd = unique("guard-cwd");
 
     // Seed the registry with a space the user "joined" elsewhere.
-    let entry = SpaceEntry {
+    let entry = Entry {
         space: "ws_01JGUARDTESTSPACEIDXXX".into(),
         name: "guardws".into(),
         path: "/some/other/place/.lait".into(),

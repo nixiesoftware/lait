@@ -1,4 +1,4 @@
-//! Seed-registry end-to-end over a process-backed **SpaceBridge** (in-process, in-memory
+//! Seed-registry end-to-end over a process-backed **StationHost** (in-process, in-memory
 //! transport). A node pins an always-on bootstrap seed — by device id or by an
 //! orbital Coordinates link — into its node-local `seeds.json`, and that pin
 //! (1) surfaces in a structured `Seeds` DTO with live reachability, and
@@ -87,7 +87,7 @@ fn wait_online(rt: &tokio::runtime::Runtime, home: &Path) {
     });
     assert!(
         online.is_some(),
-        "SpaceBridge at {} never came online",
+        "StationHost at {} never came online",
         home.display()
     );
 }

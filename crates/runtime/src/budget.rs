@@ -1,6 +1,6 @@
 //! Paces, gates, and the deadlines the delivery planes run against.
 //!
-//! Deliberately not in [`crate::planes::bounds`], whose contract is one thing:
+//! Deliberately not in [`crate::plane::bounds`], whose contract is one thing:
 //! a pre-allocation ceiling, checked against a declared length before a buffer
 //! is reserved. A rate is a different kind of number — it bounds behaviour over
 //! time rather than one allocation — and mixing them would make "is this
@@ -639,7 +639,7 @@ mod consistency {
     );
     const _: () = assert!(
         slots::SIGNAL_LANE_WORKERS * slots::MAX_CONNECTIONS_PER_PEER_PLANE
-            <= crate::planes::bounds::MAX_STREAM_WORKERS,
+            <= crate::plane::bounds::MAX_STREAM_WORKERS,
         "one peer's signal lanes must fit inside the per-connection stream budget"
     );
 }

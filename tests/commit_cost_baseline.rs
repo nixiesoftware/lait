@@ -36,7 +36,7 @@ use mechanics::crypto::AuthorizedBodyKey;
 use mechanics::ids::SpaceId;
 use replica::frontier::AuthorityFrontier;
 use replica::{
-    BodyBinding, BodyId, BodyKey, BodyOp, CommitAuthorization, CommitContext, EncodingId, Replica,
+    BodyBinding, BodyId, BodyKey, CommitAuthorization, CommitContext, EncodingId, Op, Replica,
     SchemaId, SeedSigner, StaticBodyKeys, SupportedSchemas, WorldId, MUTATION_ATOMIC,
 };
 
@@ -94,10 +94,10 @@ fn supported() -> SupportedSchemas {
 }
 
 fn demand() -> Vec<u8> {
-    use mechanics::demand::{AuthorizationDemand, PolicyCapability, PolicyResource};
+    use mechanics::demand::{AuthorizationDemand, PolicyCapability, Resource};
     AuthorizationDemand::require(
         PolicyCapability::new("com.example.notes", "write"),
-        PolicyResource::space("com.example.notes"),
+        Resource::root("com.example.notes"),
     )
     .encode_canonical()
     .expect("canonical demand")
@@ -118,7 +118,7 @@ fn request(n: u64) -> [u8; 16] {
 
 /// One durable commit of `ops` through the public signed path. The measured
 /// operation always passes a single op; corpus construction passes many.
-fn commit(replica: &mut Replica, seq: u64, ops: &[(BodyKey, BodyOp)]) {
+fn commit(replica: &mut Replica, seq: u64, ops: &[(BodyKey, Op)]) {
     let space = space();
     let signer = SeedSigner(&WRITER_SEED);
     let ctx = CommitContext {
@@ -155,10 +155,10 @@ fn commit(replica: &mut Replica, seq: u64, ops: &[(BodyKey, BodyOp)]) {
         .expect("durable commit");
 }
 
-fn replace(key: &BodyKey, value: &[u8]) -> (BodyKey, BodyOp) {
+fn replace(key: &BodyKey, value: &[u8]) -> (BodyKey, Op) {
     (
         key.clone(),
-        BodyOp::ReplaceAtomic {
+        Op::ReplaceAtomic {
             value: value.to_vec(),
         },
     )
@@ -272,7 +272,7 @@ fn measure(bodies: u64, samples: usize) -> Measurement {
     let mut seq = 0u64;
     while created < bodies {
         let batch = CORPUS_BATCH.min(bodies - created);
-        let ops: Vec<(BodyKey, BodyOp)> = (created..created + batch)
+        let ops: Vec<(BodyKey, Op)> = (created..created + batch)
             .map(|n| replace(&body(n), &payload))
             .collect();
         commit(&mut replica, seq, &ops);

@@ -1,13 +1,13 @@
 //! Product-side bridges into the Worlds hosted by one active Space.
 //!
-//! [`runtime::WorldRegistry`] owns the immutable semantic implementations used
+//! [`runtime::Registry`] owns the immutable semantic implementations used
 //! by a Station. This module owns the application-side half of that boundary:
-//! a compile-time [`WorldPackage`] for each product, and one [`WorldBridge`] per
+//! a compile-time [`WorldPackage`] for each product, and one [`WorldHost`] per
 //! package inside an active Space. A package carries the reviewed semantic
 //! implementation plus its optional product-neutral call handler; orbital code
 //! never needs to name the product behind either one.
 //!
-//! A [`WorldBridgeRegistry`] belongs to one Space bridge. It is not a process,
+//! A [`WorldRouter`] belongs to one Space bridge. It is not a process,
 //! does not own a listener, and has no autonomous background loop.
 
 use std::collections::{BTreeMap, HashMap};
@@ -16,10 +16,7 @@ use std::sync::{Arc, Mutex};
 use mechanics::ids::DeviceId;
 use replica::ids::WorldId;
 use runtime::registry::RegistrationError;
-use runtime::{
-    LifecycleError, LocalIdentity, RuntimeBuilder, Session, Station, World, WorldRegistration,
-    WorldRegistry,
-};
+use runtime::{LifecycleError, LocalIdentity, Registry, RuntimeBuilder, Session, Station, World};
 
 pub use ::world_bridge::{
     WorldCall, WorldCallAccess, WorldCallContext, WorldCallError, WorldCallErrorCode,
@@ -29,7 +26,7 @@ pub use ::world_bridge::{
 /// One product package available to the application build.
 #[derive(Clone)]
 pub struct WorldPackage {
-    registration: WorldRegistration,
+    world: WorldId,
     implementation: Arc<dyn World>,
     reviewed_implementation: [u8; 32],
     control: Option<Arc<dyn WorldCallHandler>>,
@@ -38,7 +35,7 @@ pub struct WorldPackage {
 impl std::fmt::Debug for WorldPackage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("WorldPackage")
-            .field("world", &self.registration.id)
+            .field("world", &self.world)
             .field(
                 "reviewed_implementation",
                 &data_encoding::HEXLOWER.encode(&self.reviewed_implementation[..8]),
@@ -49,13 +46,10 @@ impl std::fmt::Debug for WorldPackage {
 }
 
 impl WorldPackage {
-    pub fn new(
-        registration: WorldRegistration,
-        implementation: Arc<dyn World>,
-        reviewed_implementation: [u8; 32],
-    ) -> Self {
+    pub fn new(implementation: Arc<dyn World>, reviewed_implementation: [u8; 32]) -> Self {
+        let world = implementation.descriptor().id;
         Self {
-            registration,
+            world,
             implementation,
             reviewed_implementation,
             control: None,
@@ -68,14 +62,14 @@ impl WorldPackage {
     }
 
     pub fn world_id(&self) -> &WorldId {
-        &self.registration.id
+        &self.world
     }
 }
 
 /// Compile-time composition of the Worlds bundled by one application build.
 ///
 /// The package set is cloned down the LaitDaemon → Station placement →
-/// SpaceBridge call stack. Each Space freezes its own Runtime registry and
+/// StationHost call stack. Each Space freezes its own Runtime registry and
 /// bridge objects from the same reviewed set.
 #[derive(Clone, Default)]
 pub struct WorldPackages {
@@ -101,15 +95,10 @@ impl WorldPackages {
     /// need no application control adapter.
     pub fn register(
         self,
-        registration: WorldRegistration,
         implementation: Arc<dyn World>,
         reviewed_implementation: [u8; 32],
     ) -> Self {
-        self.with_package(WorldPackage::new(
-            registration,
-            implementation,
-            reviewed_implementation,
-        ))
+        self.with_package(WorldPackage::new(implementation, reviewed_implementation))
     }
 
     pub fn world_ids(&self) -> impl Iterator<Item = &WorldId> {
@@ -143,26 +132,25 @@ impl WorldPackages {
 
     /// Freeze the semantic registry and create one application bridge per
     /// registered World.
-    pub fn build(&self) -> Result<(WorldRegistry, WorldBridgeRegistry), RegistrationError> {
+    pub fn build(&self) -> Result<(Registry, WorldRouter), RegistrationError> {
         let mut runtime = RuntimeBuilder::new();
         let mut bridges = Vec::with_capacity(self.packages.len());
         for package in &self.packages {
             bridges.push((
-                package.registration.id.clone(),
+                package.world.clone(),
                 package.reviewed_implementation,
                 package.control.clone(),
             ));
-            runtime =
-                runtime.register(package.registration.clone(), package.implementation.clone());
+            runtime = runtime.register(package.implementation.clone());
         }
         let registry = runtime.build()?;
         Ok((
             registry,
-            WorldBridgeRegistry::new(
+            WorldRouter::new(
                 bridges
                     .into_iter()
                     .map(|(world, reviewed, control)| {
-                        (world.clone(), WorldBridge::new(world, reviewed, control))
+                        (world.clone(), WorldHost::new(world, reviewed, control))
                     })
                     .collect(),
             ),
@@ -170,15 +158,11 @@ impl WorldPackages {
     }
 }
 
-/// Compatibility name for downstream code that built semantic-only World
-/// registries before packages also carried application control adapters.
-pub type WorldBridgesBuilder = WorldPackages;
-
 /// The sole product-side entrance to one World in one active Space.
 ///
 /// Primary and sponsored-agent Sessions cannot be reused across Worlds because
 /// each bridge owns only the Sessions docked to its own [`WorldId`].
-pub struct WorldBridge {
+pub struct WorldHost {
     world: WorldId,
     reviewed_implementation: [u8; 32],
     control: Option<Arc<dyn WorldCallHandler>>,
@@ -186,15 +170,15 @@ pub struct WorldBridge {
     agent_sessions: Mutex<HashMap<DeviceId, Session>>,
 }
 
-impl std::fmt::Debug for WorldBridge {
+impl std::fmt::Debug for WorldHost {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("WorldBridge")
+        f.debug_struct("WorldHost")
             .field("world", &self.world)
             .finish_non_exhaustive()
     }
 }
 
-impl WorldBridge {
+impl WorldHost {
     fn new(
         world: WorldId,
         reviewed_implementation: [u8; 32],
@@ -223,7 +207,7 @@ impl WorldBridge {
 
     /// Ensure the Space's primary identity has a Session for this World.
     ///
-    /// Docking remains lazy: an unadmitted joiner can keep its SpaceBridge
+    /// Docking remains lazy: an unadmitted joiner can keep its StationHost
     /// active to drive Contact before Mechanics grants it standing.
     pub fn ensure_primary(
         &self,
@@ -261,21 +245,21 @@ impl WorldBridge {
     }
 }
 
-/// The World bridges enabled inside one active SpaceBridge.
-pub struct WorldBridgeRegistry {
-    bridges: BTreeMap<WorldId, WorldBridge>,
+/// The World bridges enabled inside one active StationHost.
+pub struct WorldRouter {
+    bridges: BTreeMap<WorldId, WorldHost>,
 }
 
-impl std::fmt::Debug for WorldBridgeRegistry {
+impl std::fmt::Debug for WorldRouter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("WorldBridgeRegistry")
+        f.debug_struct("WorldRouter")
             .field("worlds", &self.bridges.keys().collect::<Vec<_>>())
             .finish_non_exhaustive()
     }
 }
 
-impl WorldBridgeRegistry {
-    fn new(bridges: BTreeMap<WorldId, WorldBridge>) -> Self {
+impl WorldRouter {
+    fn new(bridges: BTreeMap<WorldId, WorldHost>) -> Self {
         Self { bridges }
     }
 
@@ -287,7 +271,7 @@ impl WorldBridgeRegistry {
         self.bridges.contains_key(world)
     }
 
-    pub fn bridge(&self, world: &WorldId) -> Option<&WorldBridge> {
+    pub fn bridge(&self, world: &WorldId) -> Option<&WorldHost> {
         self.bridges.get(world)
     }
 
@@ -342,15 +326,12 @@ impl WorldBridgeRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use replica::{BodySchema, WorldId};
-    use runtime::{
-        WorldContext, WorldEffect, WorldIntent, WorldLimits, WorldProjection, WorldQuery,
-        WorldVersion,
-    };
+    use replica::{Schema, WorldId};
+    use runtime::{Context, Effect, Intent, Projection, Query};
 
     struct NoopWorld {
         id: WorldId,
-        schemas: Vec<BodySchema>,
+        schemas: Vec<Schema>,
     }
 
     struct ProjectControl;
@@ -377,42 +358,31 @@ mod tests {
             self.id.clone()
         }
 
-        fn schemas(&self) -> &[BodySchema] {
+        fn schemas(&self) -> &[Schema] {
             &self.schemas
         }
 
         fn submit(
             &self,
-            _ctx: &mut WorldContext<'_>,
-            _intent: WorldIntent,
-        ) -> Result<WorldEffect, runtime::WorldError> {
+            _ctx: &mut Context<'_>,
+            _intent: Intent,
+        ) -> Result<Effect, runtime::WorldError> {
             unreachable!("registry tests never execute the World")
         }
 
         fn query(
             &self,
-            _ctx: &WorldContext<'_>,
-            _query: WorldQuery,
-        ) -> Result<WorldProjection, runtime::WorldError> {
+            _ctx: &Context<'_>,
+            _query: Query,
+        ) -> Result<Projection, runtime::WorldError> {
             unreachable!("registry tests never execute the World")
         }
     }
 
-    fn package(id: &str, marker: u8) -> (WorldRegistration, Arc<dyn World>, [u8; 32]) {
+    fn package(id: &str, marker: u8) -> (Arc<dyn World>, [u8; 32]) {
         let id = WorldId::parse(id).expect("test World id");
         let schemas = Vec::new();
-        (
-            WorldRegistration {
-                id: id.clone(),
-                implementation_version: WorldVersion(1),
-                schemas: schemas.clone(),
-                limits: WorldLimits::default(),
-                scope_schemas: Vec::new(),
-                signal_schemas: Vec::new(),
-            },
-            Arc::new(NoopWorld { id, schemas }),
-            [marker; 32],
-        )
+        (Arc::new(NoopWorld { id, schemas }), [marker; 32])
     }
 
     #[test]
@@ -420,8 +390,8 @@ mod tests {
         let a = package("com.example.files", 1);
         let b = package("com.example.notes", 2);
         let (registry, bridges) = WorldPackages::new()
-            .with_package(WorldPackage::new(a.0, a.1, a.2))
-            .with_package(WorldPackage::new(b.0, b.1, b.2))
+            .with_package(WorldPackage::new(a.0, a.1))
+            .with_package(WorldPackage::new(b.0, b.1))
             .build()
             .unwrap();
 
@@ -438,10 +408,10 @@ mod tests {
         assert_ne!(
             bridges
                 .bridge(&WorldId::parse("com.example.files").unwrap())
-                .unwrap() as *const WorldBridge,
+                .unwrap() as *const WorldHost,
             bridges
                 .bridge(&WorldId::parse("com.example.notes").unwrap())
-                .unwrap() as *const WorldBridge,
+                .unwrap() as *const WorldHost,
             "each World must have a distinct bridge object"
         );
     }
@@ -451,8 +421,8 @@ mod tests {
         let a = package("com.example.files", 1);
         let b = package("com.example.files", 2);
         let err = WorldPackages::new()
-            .with_package(WorldPackage::new(a.0, a.1, a.2))
-            .with_package(WorldPackage::new(b.0, b.1, b.2))
+            .with_package(WorldPackage::new(a.0, a.1))
+            .with_package(WorldPackage::new(b.0, b.1))
             .build()
             .unwrap_err();
         assert_eq!(
@@ -469,8 +439,8 @@ mod tests {
         let notes = package("com.example.notes", 2);
         let control = Arc::new(ProjectControl);
         let packages = WorldPackages::new()
-            .with_package(WorldPackage::new(files.0, files.1, files.2))
-            .with_package(WorldPackage::new(notes.0, notes.1, notes.2).with_control(control));
+            .with_package(WorldPackage::new(files.0, files.1))
+            .with_package(WorldPackage::new(notes.0, notes.1).with_control(control));
         let files = WorldId::parse("com.example.files").unwrap();
         let notes = WorldId::parse("com.example.notes").unwrap();
 

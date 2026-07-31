@@ -131,7 +131,7 @@ except as the namespace move above.
   topic differs.
 - **Control routes name both local Orbit and expected Space.** Two local
   participations in the same Space remain independently addressable, and a stale
-  or confused route fails before it reaches Mechanics, Station, or a WorldBridge.
+  or confused route fails before it reaches Mechanics, Station, or a WorldHost.
 - **One identity-scoped Lait daemon supervises every local Orbit.** Opening thirty
   Spaces does not start thirty always-on World processes; Stations are placed on
   demand and share the identity transport hub.

@@ -1,4 +1,4 @@
-//! Multi-writer catalog convergence through two process-backed SpaceBridges: the JOINER
+//! Multi-writer catalog convergence through two process-backed StationHosts: the JOINER
 //! creates issues (a concurrent catalog write — the founder is also
 //! registering issues), and the founder's product views must converge to the
 //! union. This is the daemon-level pin for the constituent-head model

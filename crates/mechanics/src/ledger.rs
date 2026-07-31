@@ -32,7 +32,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::acl::{self, AclState, ReplayCheckpoint, SignedOp};
-use crate::actor::{self, ActorPlane, SignedEvent};
+use crate::actor::{self, Directory, SignedEvent};
 use crate::genesis::Genesis;
 use crate::ids::{ActorId, DeviceId, SpaceId};
 use crate::space::SignedSpaceEvent;
@@ -535,7 +535,7 @@ struct LedgerMeta {
 #[derive(Clone)]
 pub struct StateView {
     pub acl: AclState,
-    pub plane: ActorPlane,
+    pub plane: Directory,
     pub frontier: Vec<u8>,
 }
 
@@ -1111,7 +1111,7 @@ impl AuthorityLedger {
     }
 
     /// The current actor plane (over all held actor events).
-    pub fn actor_plane(&self) -> ActorPlane {
+    pub fn actor_plane(&self) -> Directory {
         actor::replay(&self.genesis.space_id, &self.actor_events())
     }
 
@@ -1715,7 +1715,7 @@ impl AuthorityLedger {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::acl::{AclAction, AclOp, Grant};
+    use crate::acl::{AclAction, AclOp, Standing};
     use crate::ids::SystemUlidSource;
 
     fn seed(n: u8) -> [u8; 32] {
@@ -1754,7 +1754,7 @@ mod tests {
         parents: Vec<String>,
         actor_asof: Vec<String>,
         target: &ActorId,
-        grants: Vec<Grant>,
+        grants: Vec<Standing>,
     ) -> SignedOp {
         acl::sign_op(
             &fx.founder_seed,
@@ -1841,7 +1841,7 @@ mod tests {
             ledger.acl_heads(),
             ledger.actor_heads(&fx.founder_actor),
             &actor2,
-            vec![Grant::Write],
+            vec![Standing::Write],
         );
         ledger
             .commit_batch(&[LedgerEffect::Acl(add).encode()], &[])
@@ -1904,7 +1904,7 @@ mod tests {
             ledger.acl_heads(),
             ledger.actor_heads(&fx.founder_actor),
             &actor2,
-            vec![Grant::Write],
+            vec![Standing::Write],
         );
         ledger
             .commit_batch(&[LedgerEffect::Acl(add).encode()], &[])
@@ -2004,7 +2004,7 @@ mod tests {
                 ledger.acl_heads(),
                 ledger.actor_heads(&fx.founder_actor),
                 target,
-                vec![Grant::Write],
+                vec![Standing::Write],
             );
             ledger
                 .commit_batch(&[LedgerEffect::Acl(add).encode()], &[])

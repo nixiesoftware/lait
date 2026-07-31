@@ -6,10 +6,10 @@
 //!
 //! The dispatch seam: `submit`/`query` **validate the request against the
 //! World's registration, contain a World panic, and build a bounded**
-//! [`WorldContext`](crate::world::WorldContext) over the principal before routing
+//! [`Context`](crate::world::Context) over the principal before routing
 //! to the World implementation. Before the World is called the Session
 //! enforces: the Station is live; the payload is within
-//! [`WorldLimits`](crate::world::WorldLimits); the intent/query names a declared
+//! [`Limits`](crate::world::Limits); the intent/query names a declared
 //! schema+version (a query may also read a declared readable predecessor); and
 //! the principal's standing is **re-resolved through the mechanics
 //! [`AuthorityView`](crate::world::AuthorityView)** for this request. A panic in
@@ -25,29 +25,28 @@
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
-use mechanics::ids::StationEpoch;
-use replica::body::{BodyOp, BodySchema, MutationModel};
+use mechanics::station::Epoch;
+use replica::body::{MutationModel, Op, Schema};
 use replica::frontier::ReplicaFrontier;
 use replica::ids::{BodyKey, SchemaId, WorldId};
 use serde::{Deserialize, Serialize};
 
 use crate::error::WorldError;
 use crate::world::{
-    AuthorityView, PrincipalFacts, World, WorldContext, WorldEffect, WorldIntent, WorldLimits,
-    WorldProjection, WorldQuery,
+    AuthorityView, Context, Effect, Intent, Limits, PrincipalFacts, Projection, Query, World,
 };
 
 /// A resumable Observation position. First observation, restart, cursor overrun,
 /// schema migration, or lost continuity forces a reset/rebaseline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObservationCursor {
-    pub epoch: StationEpoch,
+    pub epoch: Epoch,
     pub sequence: u64,
 }
 
 impl ObservationCursor {
     /// The starting cursor — its first delivery always resets.
-    pub fn start(epoch: StationEpoch) -> Self {
+    pub fn start(epoch: Epoch) -> Self {
         Self { epoch, sequence: 0 }
     }
 }
@@ -57,7 +56,7 @@ impl ObservationCursor {
 /// rebaselines rather than buffering without bound.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Observation {
-    pub epoch: StationEpoch,
+    pub epoch: Epoch,
     pub sequence: u64,
     /// Set on first observation, restart, cursor overrun, migration, or lost
     /// continuity — the consumer must rebaseline.
@@ -81,7 +80,7 @@ pub struct Observation {
 /// The result of a durable [`Session::submit`]: the application-defined effect
 /// bytes, the **committed** Replica frontier the change advanced to, and the
 /// Observation scopes it touched. A `CommittedEffect` is proof of durability —
-/// it is returned only after the Replica advanced from a real Fabric receipt.
+/// it is returned only after the Replica advanced from a real Engine receipt.
 /// An identical replay of the same request returns the identical
 /// `CommittedEffect` without reapplying anything; invalidation delivery is the
 /// job of [`Session::observe`], not of this return value.
@@ -128,7 +127,7 @@ impl std::error::Error for ObservationStreamError {}
 pub(crate) struct Broadcaster {
     state: std::sync::Mutex<BroadcastState>,
     wake: std::sync::Condvar,
-    epoch: StationEpoch,
+    epoch: Epoch,
 }
 
 struct BroadcastState {
@@ -140,7 +139,7 @@ struct BroadcastState {
 }
 
 impl Broadcaster {
-    fn new(epoch: StationEpoch, capacity: usize, frontier: ReplicaFrontier) -> Self {
+    fn new(epoch: Epoch, capacity: usize, frontier: ReplicaFrontier) -> Self {
         Self {
             state: std::sync::Mutex::new(BroadcastState {
                 next_seq: 1,
@@ -317,11 +316,11 @@ impl StationCore {
     /// built over one without standing up a Station.
     #[doc(hidden)]
     pub fn for_test(replica: replica::Replica) -> Self {
-        Self::new(StationEpoch::ZERO, DEFAULT_OBSERVATION_CAPACITY, replica)
+        Self::new(Epoch::ZERO, DEFAULT_OBSERVATION_CAPACITY, replica)
     }
 
     pub(crate) fn new(
-        epoch: StationEpoch,
+        epoch: Epoch,
         observation_capacity: usize,
         replica: replica::Replica,
     ) -> Self {
@@ -368,7 +367,7 @@ impl StationCore {
     /// that read-only questions — resolving a caret anchor, reading a
     /// projection — stop queueing behind commits. It does not compile:
     /// `RwLock<T>: Sync` requires `T: Sync`, and `CoreInner` holds a Replica
-    /// holding `dyn Fabric + Send`, which is not `Sync` because the underlying
+    /// holding `dyn Engine + Send`, which is not `Sync` because the underlying
     /// collaborative document is not. Concurrent readers are not expressible
     /// at all, whatever the access pattern.
     ///
@@ -419,7 +418,7 @@ struct SessionAuthorizer<'a> {
 }
 
 impl replica::TransactionAuthorizer for SessionAuthorizer<'_> {
-    fn authorize(&self, core: &replica::BodyTransactionCore) -> Result<Vec<u8>, String> {
+    fn authorize(&self, core: &replica::Core) -> Result<Vec<u8>, String> {
         self.authority.authorize_mutation(
             self.space,
             self.world,
@@ -442,12 +441,7 @@ impl replica::TransactionAuthorizer for SessionAuthorizer<'_> {
 /// the lock: a caller reading these two methods sees `with_replica` one line
 /// away and the paragraph explaining why it is exclusive one line after that.
 impl crate::live::AnchorSource for StationCore {
-    fn anchor_in_body(
-        &self,
-        key: &BodyKey,
-        path: &str,
-        position: u64,
-    ) -> Option<replica::FabricAnchor> {
+    fn anchor_in_body(&self, key: &BodyKey, path: &str, position: u64) -> Option<replica::Anchor> {
         // A dormant core answers `None`, which is the same answer a position
         // the algebra cannot bind gets. Both mean there is no anchor to send,
         // and a caller has nothing different to do about them.
@@ -456,11 +450,7 @@ impl crate::live::AnchorSource for StationCore {
             .flatten()
     }
 
-    fn resolve_anchor(
-        &self,
-        key: &BodyKey,
-        anchor: &replica::FabricAnchor,
-    ) -> replica::AnchorResolution {
+    fn resolve_anchor(&self, key: &BodyKey, anchor: &replica::Anchor) -> replica::AnchorResolution {
         // Total, so a dormant core is `Drifted` rather than an error — the
         // renderer's contract is that this never fails and never lies, not that
         // it always knows.
@@ -482,35 +472,23 @@ impl crate::world::BodyReader for ReplicaReader<'_> {
     ) -> Result<replica::CollaborativeView, replica::ProjectionError> {
         self.0.read_collaborative(key)
     }
-    fn body_version(&self, key: &BodyKey) -> Option<replica::FabricVersion> {
+    fn body_version(&self, key: &BodyKey) -> Option<replica::Version> {
         self.0.body_version(key)
     }
-    fn anchor_in_body(
-        &self,
-        key: &BodyKey,
-        path: &str,
-        position: u64,
-    ) -> Option<replica::FabricAnchor> {
+    fn anchor_in_body(&self, key: &BodyKey, path: &str, position: u64) -> Option<replica::Anchor> {
         self.0.anchor(key, path, position)
     }
-    fn resolve_anchor(
-        &self,
-        key: &BodyKey,
-        anchor: &replica::FabricAnchor,
-    ) -> replica::AnchorResolution {
+    fn resolve_anchor(&self, key: &BodyKey, anchor: &replica::Anchor) -> replica::AnchorResolution {
         self.0.resolve_anchor(key, anchor)
     }
-    fn content_status(
-        &self,
-        content: &replica::ContentRef,
-    ) -> Option<crate::world::WorldContentStatus> {
+    fn content_status(&self, content: &replica::ContentRef) -> Option<crate::world::ContentStatus> {
         // Residency is the host's question, not the Replica's, so a World
         // reading through a committed snapshot sees geometry with zero
         // residency. The host surface is where "how much is here" is answered,
         // because that is where the cache is.
         self.0
             .content_descriptor(content)
-            .map(|d| crate::world::WorldContentStatus {
+            .map(|d| crate::world::ContentStatus {
                 plaintext_len: d.plaintext_len,
                 chunk_count: d.chunk_count,
                 resident_chunks: 0,
@@ -536,11 +514,11 @@ pub struct Session {
     /// The docked identity: signs this Session's durable Body transactions.
     identity: crate::world::LocalIdentity,
     principal: PrincipalFacts,
-    epoch: StationEpoch,
+    epoch: Epoch,
     /// The World's declared limits, enforced before the callback runs.
-    limits: WorldLimits,
+    limits: Limits,
     /// The World's declared schemas, checked against each request.
-    schemas: Vec<BodySchema>,
+    schemas: Vec<Schema>,
     /// A shared flag: `false` once the Station is going dormant or has exited.
     /// A Session only *reads* it — it can never stop the Station.
     alive: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -559,9 +537,9 @@ impl Session {
         world: Arc<dyn World>,
         identity: crate::world::LocalIdentity,
         principal: PrincipalFacts,
-        epoch: StationEpoch,
-        limits: WorldLimits,
-        schemas: Vec<BodySchema>,
+        epoch: Epoch,
+        limits: Limits,
+        schemas: Vec<Schema>,
         alive: std::sync::Arc<std::sync::atomic::AtomicBool>,
         core: Arc<StationCore>,
         authority: Arc<dyn AuthorityView>,
@@ -627,7 +605,7 @@ impl Session {
     fn contain_effect(
         &self,
         replica: &replica::Replica,
-        effect: &WorldEffect,
+        effect: &Effect,
         intent_schema: &SchemaId,
     ) -> Result<Vec<(BodyKey, replica::BodyBinding)>, WorldError> {
         if effect.operations.len() > replica::algebra::MAX_OPS_PER_TRANSACTION {
@@ -660,9 +638,9 @@ impl Session {
                 .ok_or(WorldError::ContractViolation)?;
             let collaborative = matches!(schema.mutation, MutationModel::Collaborative(_));
             let permitted = match op {
-                BodyOp::ReplaceAtomic { .. } => !collaborative,
-                BodyOp::Create => collaborative,
-                BodyOp::Tombstone => true,
+                Op::ReplaceAtomic { .. } => !collaborative,
+                Op::Create => collaborative,
+                Op::Tombstone => true,
                 _ => collaborative,
             };
             if !permitted {
@@ -755,7 +733,7 @@ impl Session {
     }
 
     /// The Station activation epoch this Session is bound to.
-    pub fn epoch(&self) -> StationEpoch {
+    pub fn epoch(&self) -> Epoch {
         self.epoch
     }
 
@@ -787,7 +765,7 @@ impl Session {
         if action.header.space != self.space || action.header.world != self.world_id {
             return Err(WorldError::InvalidRequest);
         }
-        let intent = WorldIntent {
+        let intent = Intent {
             schema: action.header.intent_schema.clone(),
             schema_version: action.header.intent_version,
             payload: action.payload,
@@ -845,12 +823,12 @@ impl Session {
         if action.header.authority_frontier != principal.authority_frontier {
             return Err(WorldError::AuthorityChanged);
         }
-        let effect: WorldEffect = {
+        let effect: Effect = {
             let reader = ReplicaReader(&inner.replica);
             let parent_root = inner.replica.manifest_root();
             let principal = &principal;
             std::panic::catch_unwind(AssertUnwindSafe(|| {
-                let mut ctx = WorldContext::with_reads(principal, &reader, parent_root);
+                let mut ctx = Context::with_reads(principal, &reader, parent_root);
                 world.submit(&mut ctx, intent)
             }))
             .unwrap_or(Err(WorldError::WorldPanicked))?
@@ -938,7 +916,7 @@ impl Session {
                 // Illegitimate is an incorporation-path error; a local commit
                 // never produces it, but the match stays exhaustive.
                 replica::ReplicaCommitError::Illegitimate(_)
-                | replica::ReplicaCommitError::Fabric(_)
+                | replica::ReplicaCommitError::Engine(_)
                 | replica::ReplicaCommitError::Integrity(_)
                 | replica::ReplicaCommitError::BodyKeyUnavailable
                 | replica::ReplicaCommitError::Durability(_)
@@ -969,7 +947,7 @@ impl Session {
     /// committed Bodies through the bounded context; the snapshot is held for the
     /// duration of the call so the projection is derived from one consistent
     /// frontier.
-    pub fn query(&self, query: WorldQuery) -> Result<WorldProjection, WorldError> {
+    pub fn query(&self, query: Query) -> Result<Projection, WorldError> {
         self.ensure_live()?;
         self.ensure_within_limit(query.payload.len())?;
         self.ensure_readable_schema(&query.schema, query.schema_version)?;
@@ -985,7 +963,7 @@ impl Session {
         let mut projection = {
             let principal = &principal;
             std::panic::catch_unwind(AssertUnwindSafe(|| {
-                let ctx = WorldContext::with_reads(principal, &reader, snapshot_root);
+                let ctx = Context::with_reads(principal, &reader, snapshot_root);
                 world.query(&ctx, query)
             }))
             .unwrap_or(Err(WorldError::WorldPanicked))?
@@ -1055,5 +1033,5 @@ impl Session {
     }
 
     /// Close this Session, consuming it. Never affects the Station.
-    pub fn undock(self) {}
+    pub fn close(self) {}
 }

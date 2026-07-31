@@ -20,7 +20,7 @@ use crate::{
     control::{self, request, ControlRoute, ErrorKind, Event, EventKind, Request, Response},
     daemon::{ClientScope, LocalOrbitId, OrbitAddress},
     diagnose::{DiagnosisView, GateState},
-    spaces::{self, SpaceEntry, StorePresence},
+    orbits::{self, Entry, Presence},
 };
 
 /// Output mode threaded from the global `--json` / `--no-color` / `--yes` flags.
@@ -580,7 +580,7 @@ pub fn orbit_address_for_home(home: &Path) -> Result<OrbitAddress> {
 /// Send through a caller scope derived by a trusted client adapter.
 ///
 /// The allowed set never rides on the wire: authorizing locally chooses an
-/// explicit Orbit route, and the receiving SpaceBridge independently validates
+/// explicit Orbit route, and the receiving StationHost independently validates
 /// that it occupies the named Orbit and Space.
 pub async fn client_as_scoped(
     home: &Path,
@@ -1157,7 +1157,7 @@ pub async fn print_context(home: Option<PathBuf>, source: &str, out: Out) -> Res
                     },
                     "orbit": orbit,
                     "worlds": worlds,
-                    "known_orbits": spaces::list().len(),
+                    "known_orbits": orbits::list().len(),
                 }
             }))
             .unwrap_or_else(|_| "{}".into())
@@ -1185,7 +1185,7 @@ pub async fn print_context(home: Option<PathBuf>, source: &str, out: Out) -> Res
         }
     );
     if source == "none" {
-        let known = spaces::list().len();
+        let known = orbits::list().len();
         if known == 0 {
             println!();
             println!("found a Space with `lait init`, or enter one with `lait join <link>`.");
@@ -1228,8 +1228,8 @@ pub fn print_worlds(out: Out) {
 /// Live status of one registry entry: `missing` (store gone from disk), `up`
 /// (a daemon answers on its control channel), or `idle` (store present, no
 /// daemon). The probe is a short-deadline `Status` round-trip — never a spawn.
-async fn orbit_status(e: &SpaceEntry) -> &'static str {
-    if spaces::presence(e) == StorePresence::Missing {
+async fn orbit_status(e: &Entry) -> &'static str {
+    if orbits::presence(e) == Presence::Missing {
         return "missing";
     }
     let up = tokio::time::timeout(
@@ -1248,7 +1248,7 @@ async fn orbit_status(e: &SpaceEntry) -> &'static str {
 
 /// `lait orbits`: every durable local participation known on this machine.
 pub async fn print_orbits(out: Out) {
-    let entries = spaces::list();
+    let entries = orbits::list();
     let mut statuses = Vec::with_capacity(entries.len());
     for e in &entries {
         statuses.push(orbit_status(e).await);
@@ -1325,7 +1325,7 @@ pub async fn print_orbits(out: Out) {
 /// minted decoy store. Points at the creation verbs and every known space.
 pub fn err_no_store_here(out: Out) {
     eprintln!("no lait space in this directory (nothing is created implicitly).");
-    let known = spaces::list();
+    let known = orbits::list();
     if !known.is_empty() {
         eprintln!();
         eprintln!("local Orbits on this machine:");
@@ -2001,7 +2001,7 @@ pub async fn watch(
     let scope = scope_for_home(home);
     let address = orbit_address_for_home(home)?;
     scope.authorize(&address)?;
-    let space_route = ControlRoute::Space {
+    let space_route = ControlRoute::Orbit {
         address: address.clone(),
     };
     ensure_daemon(home).await?;

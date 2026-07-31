@@ -25,15 +25,14 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Instant;
 
-use mechanics::ids::StationId;
+use mechanics::station::Key;
 
 use crate::admission::AdmittedPeer;
 use crate::budget::{deadline, gates, slots, ByteGate, Gate, Verdict};
+use crate::plane::{bounds, datagram_fits, stream_kind};
 use crate::plane_stream::{read_framed, read_stream_kind, StreamError};
-use crate::planes::{bounds, datagram_fits, stream_kind};
 use crate::transient::{
-    AdmitOutcome, LiveControl, TransientItem, TransientScope, TransientStore,
-    MAX_TRANSIENT_ITEM_BYTES,
+    AdmitOutcome, LiveControl, Target, TransientItem, TransientStore, MAX_TRANSIENT_ITEM_BYTES,
 };
 
 /// The close code every Live refusal uses. Coarse on purpose: a peer learns it
@@ -73,8 +72,8 @@ pub struct TransientCounters {
 }
 
 /// What one peer is currently telling this Station.
-pub struct LiveSession {
-    peer: StationId,
+pub struct Connection {
+    peer: Key,
     store: TransientStore,
     counters: TransientCounters,
     /// The scopes this connection asked to hear about.
@@ -83,11 +82,11 @@ pub struct LiveSession {
     /// what a client is looking at, and a client that adds and removes views
     /// faster than its messages arrive would otherwise end up subscribed to a
     /// set neither side agrees on.
-    subscriptions: Vec<TransientScope>,
+    subscriptions: Vec<Target>,
 }
 
-impl LiveSession {
-    pub fn new(peer: StationId) -> Self {
+impl Connection {
+    pub fn new(peer: Key) -> Self {
         // The *per-connection* ceiling, which is what this table is. Sizing it
         // at `MAX_TRANSIENT_SLOTS` — the Station-wide number — gave every
         // connection the whole Station's budget and left
@@ -102,7 +101,7 @@ impl LiveSession {
     /// Proving the eviction escalation at the shipped ceiling means sending four
     /// thousand distinct scopes through a real connection, and a bound nobody
     /// can afford to test is a bound nobody tests.
-    pub fn with_capacity(peer: StationId, capacity: usize) -> Self {
+    pub fn with_capacity(peer: Key, capacity: usize) -> Self {
         Self {
             peer,
             store: TransientStore::with_capacity(capacity),
@@ -111,7 +110,7 @@ impl LiveSession {
         }
     }
 
-    pub fn peer(&self) -> &StationId {
+    pub fn peer(&self) -> &Key {
         &self.peer
     }
 
@@ -119,12 +118,12 @@ impl LiveSession {
         &self.counters
     }
 
-    pub fn subscriptions(&self) -> &[TransientScope] {
+    pub fn subscriptions(&self) -> &[Target] {
         &self.subscriptions
     }
 
     /// Adopt a subscription snapshot.
-    pub fn subscribe(&mut self, scopes: Vec<TransientScope>) {
+    pub fn subscribe(&mut self, scopes: Vec<Target>) {
         self.subscriptions = scopes;
     }
 
@@ -134,7 +133,7 @@ impl LiveSession {
     /// store alone: a peer that stopped watching something must stop hearing
     /// about it, and a store lookup that ignored the subscription would keep
     /// delivering.
-    pub fn is_watching(&self, scope: &TransientScope) -> bool {
+    pub fn is_watching(&self, scope: &Target) -> bool {
         self.subscriptions.contains(scope)
     }
 
@@ -168,7 +167,7 @@ impl LiveSession {
 /// everything, and then the cost of every caret would be invisible at the seam
 /// that pays it. Two methods make the price legible: both take the exclusive
 /// commit lock, which is not a choice — `RwLock<T>: Sync` requires `T: Sync`
-/// and the Replica holds a `dyn Fabric + Send` that is not. `with_replica`
+/// and the Replica holds a `dyn Engine + Send` that is not. `with_replica`
 /// records the arithmetic that bounds it.
 pub trait AnchorSource: Send + Sync {
     /// Mint an anchor at a position, so a browser that can only send an offset
@@ -178,14 +177,14 @@ pub trait AnchorSource: Send + Sync {
         key: &replica::ids::BodyKey,
         path: &str,
         position: u64,
-    ) -> Option<replica::FabricAnchor>;
+    ) -> Option<replica::Anchor>;
 
     /// Where that position is now. Total: never an error, never a mutation,
     /// and never a silently wrong index.
     fn resolve_anchor(
         &self,
         key: &replica::ids::BodyKey,
-        anchor: &replica::FabricAnchor,
+        anchor: &replica::Anchor,
     ) -> replica::AnchorResolution;
 }
 
@@ -212,8 +211,8 @@ pub enum CaretState {
 /// One thing a peer is currently doing, resolved for a reader.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct LiveEntry {
-    pub station: StationId,
-    pub scope: TransientScope,
+    pub station: Key,
+    pub scope: Target,
     pub kind: crate::transient::TransientKind,
     /// How long ago this Station saw it. Ours, not theirs — a peer's clock is a
     /// peer's claim.
@@ -273,14 +272,14 @@ pub struct LiveHandle {
     /// left. On the handle rather than on the service because both the accepting
     /// and the dialling path make sessions, and a reader asking "who is here"
     /// must not get a different answer depending on who dialled.
-    connected: std::sync::Mutex<std::collections::BTreeMap<StationId, usize>>,
+    connected: std::sync::Mutex<std::collections::BTreeMap<Key, usize>>,
     /// Signals waiting for the session that can carry them.
     ///
     /// Addressed by Station, because a signal is for a person and a person is
     /// reachable only through the connections they hold. A signal for a peer
     /// with no session is not queued for later: presence is the whole gate, and
     /// somebody who is not here has the durable record as their path.
-    outbox: std::sync::Mutex<std::collections::BTreeMap<StationId, Vec<crate::planes::Signal>>>,
+    outbox: std::sync::Mutex<std::collections::BTreeMap<Key, Vec<crate::plane::Signal>>>,
     /// Files somebody offered, waiting for a person.
     ///
     /// Beside the transient table rather than in it: a slot expires on a TTL
@@ -292,7 +291,7 @@ pub struct LiveHandle {
 /// What this Station is doing, as the thing that decides it sees it.
 #[derive(Default)]
 struct LocalPresence {
-    scopes: Vec<TransientScope>,
+    scopes: Vec<Target>,
     generation: u64,
 }
 
@@ -316,10 +315,7 @@ struct PublishTable {
     /// "incomplete" for exactly as long as the drop could still be the reason
     /// something is missing, and then stops.
     dropped_until: Option<Instant>,
-    slots: std::collections::BTreeMap<
-        (StationId, TransientScope, u8),
-        crate::transient::TransientSlot,
-    >,
+    slots: std::collections::BTreeMap<(Key, Target, u8), crate::transient::TransientSlot>,
 }
 
 impl PublishTable {
@@ -362,7 +358,7 @@ impl LiveHandle {
     /// against what *it* has published and mints its own items, because an item
     /// carries the epoch of the connection it crosses and two sessions do not
     /// share one.
-    pub fn declare_local(&self, scopes: Vec<TransientScope>) {
+    pub fn declare_local(&self, scopes: Vec<Target>) {
         let mut local = self.local();
         if local.scopes == scopes {
             return;
@@ -385,7 +381,7 @@ impl LiveHandle {
     }
 
     /// What this Station is looking at.
-    pub fn declared(&self) -> Vec<TransientScope> {
+    pub fn declared(&self) -> Vec<Target> {
         self.local().scopes.clone()
     }
 
@@ -394,7 +390,7 @@ impl LiveHandle {
     }
 
     /// A session for this peer opened.
-    pub fn arrived(&self, peer: &StationId) {
+    pub fn arrived(&self, peer: &Key) {
         *self
             .connected
             .lock()
@@ -412,7 +408,7 @@ impl LiveHandle {
     /// opens delivers the backlog — which is the mailbox this plane must not
     /// become. Keeping the two in one method is what stops the invariant being
     /// half-maintained, which is exactly how it was.
-    pub fn departed(&self, peer: &StationId) {
+    pub fn departed(&self, peer: &Key) {
         let gone = {
             let mut connected = self.connected.lock().unwrap_or_else(|p| p.into_inner());
             match connected.get_mut(peer) {
@@ -441,7 +437,7 @@ impl LiveHandle {
     /// Not "who is a member" and not "who has said something" — who this Station
     /// currently holds a session with. That is the only set a signal can be
     /// delivered to, and the reason presence can gate delivery at all.
-    pub fn present_stations(&self) -> Vec<StationId> {
+    pub fn present_stations(&self) -> Vec<Key> {
         self.connected
             .lock()
             .unwrap_or_else(|p| p.into_inner())
@@ -464,7 +460,7 @@ impl LiveHandle {
     ///
     /// The check is here and not only at the call site, because this is where the
     /// queue is. The doc said this for a while before the code did.
-    pub fn nudge(&self, peer: &StationId, signal: crate::planes::Signal) -> bool {
+    pub fn nudge(&self, peer: &Key, signal: crate::plane::Signal) -> bool {
         if !self
             .connected
             .lock()
@@ -501,7 +497,7 @@ impl LiveHandle {
     /// The real one is private because draining belongs to the session that can
     /// carry what it drains — a second caller would take signals nothing then
     /// sends.
-    pub fn take_outbound_for_test(&self, peer: &StationId) -> Vec<crate::planes::Signal> {
+    pub fn take_outbound_for_test(&self, peer: &Key) -> Vec<crate::plane::Signal> {
         self.take_outbound(peer, MAX_OUTBOUND_SIGNALS)
     }
 
@@ -515,7 +511,7 @@ impl LiveHandle {
     /// revalidates no authority.
     ///
     /// Oldest first, and what is not taken stays queued for the next beat.
-    fn take_outbound(&self, peer: &StationId, max: usize) -> Vec<crate::planes::Signal> {
+    fn take_outbound(&self, peer: &Key, max: usize) -> Vec<crate::plane::Signal> {
         let mut outbox = self.outbox.lock().unwrap_or_else(|p| p.into_inner());
         let Some(queued) = outbox.get_mut(peer) else {
             return Vec::new();
@@ -543,7 +539,7 @@ impl LiveHandle {
 
     pub fn take_offer(
         &self,
-        from: &StationId,
+        from: &Key,
         content: &[u8; 32],
     ) -> Option<crate::signal::PendingOffer> {
         self.offers().take(from, content)
@@ -552,7 +548,7 @@ impl LiveHandle {
     /// Drop everything one peer offered. What a revocation does — and only a
     /// revocation: a peer whose laptop slept is still somebody whose file offer
     /// is worth keeping.
-    pub fn forget_offers(&self, from: &StationId) -> usize {
+    pub fn forget_offers(&self, from: &Key) -> usize {
         self.offers().forget(from)
     }
 
@@ -600,7 +596,7 @@ impl LiveHandle {
     /// and this is what a reader sees. An item that failed the session's own
     /// ceilings never reaches here.
     /// Returns whether it was stored. `false` means the shared table is full.
-    pub fn record(&self, station: &StationId, item: &TransientItem, now: Instant) -> bool {
+    pub fn record(&self, station: &Key, item: &TransientItem, now: Instant) -> bool {
         let mut table = self.table();
         let key = (
             station.clone(),
@@ -621,7 +617,7 @@ impl LiveHandle {
         table.slots.insert(
             key,
             crate::transient::TransientSlot {
-                session_epoch: item.session_epoch,
+                connection_epoch: item.connection_epoch,
                 seq: item.seq,
                 arrived_at: now,
                 retired_at: None,
@@ -642,12 +638,12 @@ impl LiveHandle {
     /// Slots stay keyed by Station, which is what makes a second tab supersede
     /// the first rather than appear beside it. Only the *removal* is per
     /// session.
-    pub fn forget_session(&self, station: &StationId, session_epoch: &[u8; 16]) -> usize {
+    pub fn forget_session(&self, station: &Key, connection_epoch: &[u8; 16]) -> usize {
         let mut table = self.table();
         let before = table.slots.len();
-        table
-            .slots
-            .retain(|(held, _, _), slot| held != station || &slot.session_epoch != session_epoch);
+        table.slots.retain(|(held, _, _), slot| {
+            held != station || &slot.connection_epoch != connection_epoch
+        });
         let dropped = before - table.slots.len();
         if dropped > 0 {
             table.generation = table.generation.wrapping_add(1);
@@ -659,7 +655,7 @@ impl LiveHandle {
     ///
     /// What a revocation does. Membership is per peer rather than per
     /// connection, so a peer that lost it keeps nothing on any of its sessions.
-    pub fn forget(&self, station: &StationId) -> usize {
+    pub fn forget(&self, station: &Key) -> usize {
         let mut table = self.table();
         let before = table.slots.len();
         table.slots.retain(|(held, _, _), _| held != station);
@@ -671,7 +667,7 @@ impl LiveHandle {
     }
 
     /// Drop one peer's slots for one scope.
-    pub fn retire(&self, station: &StationId, scope: &TransientScope) {
+    pub fn retire(&self, station: &Key, scope: &Target) {
         let mut table = self.table();
         let before = table.slots.len();
         table
@@ -721,9 +717,9 @@ impl LiveHandle {
         let before = table.slots.len();
         table.slots.retain(|(_, scope, _), slot| {
             let ttl = match scope {
-                TransientScope::IssueView { .. }
-                | TransientScope::DocumentView { .. }
-                | TransientScope::CustomWorld { .. } => deadline::PRESENCE_TTL,
+                Target::Body { .. } | Target::Material { .. } | Target::World { .. } => {
+                    deadline::PRESENCE_TTL
+                }
                 _ => deadline::CURSOR_TTL,
             };
             now.duration_since(slot.arrived_at) < ttl
@@ -765,7 +761,7 @@ impl LiveHandle {
     /// `scope` narrows to that **exact** scope, which is rarely what a reader
     /// looking at a document wants — see [`LiveNarrow`]. Kept because a caller
     /// that genuinely wants one kind should not have to say so twice.
-    pub fn view(&self, scope: Option<&TransientScope>, now: Instant) -> LiveView {
+    pub fn view(&self, scope: Option<&Target>, now: Instant) -> LiveView {
         self.view_narrowed(scope.map_or(LiveNarrow::Everything, LiveNarrow::Scope), now)
     }
 
@@ -814,7 +810,7 @@ impl LiveHandle {
 
     fn resolve(
         &self,
-        scope: &TransientScope,
+        scope: &Target,
         payload: &crate::transient::TransientPayload,
     ) -> (Option<CaretState>, Option<CaretState>) {
         use crate::transient::TransientPayload;
@@ -842,7 +838,7 @@ impl LiveHandle {
             // A stored anchor was validated on the way in, so a decode failure
             // here is this Station's bug rather than a peer's — and the honest
             // answer is still "no position", never a guess.
-            let Ok(decoded) = replica::FabricAnchor::decode_canonical(raw) else {
+            let Ok(decoded) = replica::Anchor::decode_canonical(raw) else {
                 return CaretState::Unresolved;
             };
             match source.resolve_anchor(&key, &decoded) {
@@ -855,12 +851,12 @@ impl LiveHandle {
 }
 
 /// The Body a scope names, when it names one.
-fn scope_body(scope: &TransientScope) -> Option<(String, [u8; 16])> {
+fn scope_body(scope: &Target) -> Option<(String, [u8; 16])> {
     match scope {
-        TransientScope::IssueView { world, body }
-        | TransientScope::DocumentView { world, body }
-        | TransientScope::TextCaret { world, body, .. }
-        | TransientScope::Typing { world, body, .. } => Some((world.clone(), *body)),
+        Target::Body { world, body }
+        | Target::Material { world, body }
+        | Target::Field { world, body, .. }
+        | Target::Typing { world, body, .. } => Some((world.clone(), *body)),
         _ => None,
     }
 }
@@ -879,7 +875,7 @@ pub enum LiveNarrow<'a> {
     /// Everything about one Body, whatever scope carries it.
     Body { world: &'a str, body: [u8; 16] },
     /// One exact scope, for a reader that genuinely wants one kind.
-    Scope(&'a TransientScope),
+    Scope(&'a Target),
 }
 
 impl LiveNarrow<'_> {
@@ -889,7 +885,7 @@ impl LiveNarrow<'_> {
     /// tests it there. Two implementations of "is this scope about that Body"
     /// is how the browser and the plane come to disagree about which document
     /// somebody is looking at.
-    pub fn admits(&self, scope: &TransientScope) -> bool {
+    pub fn admits(&self, scope: &Target) -> bool {
         match self {
             Self::Everything => true,
             Self::Scope(want) => &scope == want,
@@ -943,20 +939,20 @@ const SIGNAL_QUEUE: usize = 32;
 /// Everything here is `Rc`/`RefCell` and never a lock: `run_driver` is a
 /// current-thread runtime with a `LocalSet`, so per-session state has one
 /// owner and contention is not a thing that can happen.
-pub struct SessionContext {
+pub struct Context {
     /// Where what this peer says becomes readable to anyone else.
     pub handle: Option<std::sync::Arc<LiveHandle>>,
     /// What this connection may say on the signal lane. `None` means this build
     /// is not serving the lane here, and a signal flow is refused rather than
     /// ignored.
     pub signals: Option<crate::signal::SignalPolicy>,
-    /// The Worlds this build hosts, for checking a `CustomWorld` scope against
+    /// The Worlds this build hosts, for checking a `World` scope against
     /// what its World actually declared.
     ///
     /// `None` means no check, which is the shape a MemNet harness with no Space
     /// behind it runs in. It is not a licence: a Station always has a registry,
     /// so the permissive case never reaches production.
-    pub worlds: Option<crate::registry::WorldRegistry>,
+    pub worlds: Option<crate::registry::Registry>,
     /// Re-asked on a beat and before every subscription change.
     ///
     /// A session pins the authority view it was admitted at, which is what makes
@@ -971,16 +967,16 @@ pub async fn serve_session(
     connection: std::sync::Arc<dyn comms::Connection>,
     peer: AdmittedPeer,
     cancel: crate::lifecycle::CancelToken,
-    context: SessionContext,
+    context: Context,
 ) {
-    let SessionContext {
+    let Context {
         handle,
         signals,
         worlds,
         authority,
     } = context;
-    let session = Rc::new(RefCell::new(LiveSession::new(peer.station.clone())));
-    let epoch = peer.session_epoch;
+    let session = Rc::new(RefCell::new(Connection::new(peer.station.clone())));
+    let epoch = peer.connection_epoch;
     // Whatever ends this connection — idle, cancel, a gate, a peer hanging up —
     // the slots go with it. Presence has no goodbye it can rely on, so the
     // session ending *is* the goodbye.
@@ -989,7 +985,7 @@ pub async fn serve_session(
     }
     let leaving = Leaving {
         station: peer.station.clone(),
-        session_epoch: epoch,
+        connection_epoch: epoch,
         handle: handle.clone(),
     };
     let _leaving = leaving;
@@ -1032,8 +1028,7 @@ pub async fn serve_session(
     // scopes at different sequence numbers under different epochs, so the
     // difference between "what we are doing" and "what this peer has been told"
     // is a fact about the connection and belongs with it.
-    let mut published: std::collections::BTreeSet<TransientScope> =
-        std::collections::BTreeSet::new();
+    let mut published: std::collections::BTreeSet<Target> = std::collections::BTreeSet::new();
     let mut published_generation = u64::MAX;
     // `Instant::now() - PRESENCE_REFRESH` panics when the machine has been up for
     // less than the refresh interval, which is a real state on a freshly booted
@@ -1262,8 +1257,8 @@ pub async fn serve_session(
                 if admits_scope(&worlds, &item.scope).is_err() {
                     continue;
                 }
-                if matches!(item.scope, TransientScope::ContentResidency { .. })
-                    && peer.features & crate::planes::feature::RESIDENCY_HINTS == 0
+                if matches!(item.scope, Target::Content { .. })
+                    && peer.features & crate::plane::feature::RESIDENCY_HINTS == 0
                 {
                     // Negotiated or not carried. A peer that did not offer the
                     // bit cannot be sent hints it has no way to read, and it
@@ -1390,7 +1385,7 @@ pub async fn serve_session(
                         break;
                     }
                     if let Some(handle) = &handle {
-                        if let crate::planes::Signal::FileOffer {
+                        if let crate::plane::Signal::FileOffer {
                             content,
                             plaintext_len,
                             display_name,
@@ -1403,7 +1398,7 @@ pub async fn serve_session(
                             // sending a message.
                             handle.offer(crate::signal::PendingOffer {
                                 from: peer.station.clone(),
-                                session_epoch: peer.session_epoch,
+                                connection_epoch: peer.connection_epoch,
                                 content: *content,
                                 plaintext_len: *plaintext_len,
                                 display_name: display_name.clone(),
@@ -1412,8 +1407,8 @@ pub async fn serve_session(
                         }
                         handle.deliver(crate::signal::DeliveredSignal {
                             from: peer.station.clone(),
-                            session_id: peer.session_id,
-                            session_epoch: peer.session_epoch,
+                            connection_id: peer.connection_id,
+                            connection_epoch: peer.connection_epoch,
                             signal,
                         });
                     }
@@ -1514,8 +1509,8 @@ pub async fn serve_session(
 /// the session that runs it, and a caller outside this module reaching for it
 /// would be a second place deciding what a World declared.
 pub fn admits_scope_for_test(
-    worlds: &Option<crate::registry::WorldRegistry>,
-    scope: &TransientScope,
+    worlds: &Option<crate::registry::Registry>,
+    scope: &Target,
 ) -> Result<(), crate::transient::TransientError> {
     admits_scope(worlds, scope)
 }
@@ -1528,14 +1523,14 @@ pub fn admits_scope_for_test(
 /// enforcement at all. A World could declare a 32-byte board key and a peer
 /// could publish a 128-byte one under a schema that World never named.
 ///
-/// Only `CustomWorld` is checked. Every other scope is the substrate's own
+/// Only `World` is checked. Every other scope is the substrate's own
 /// shape, bounded by the substrate's own numbers, and a World does not get to
-/// widen or narrow what `IssueView` means.
+/// widen or narrow what `Body` means.
 fn admits_scope(
-    worlds: &Option<crate::registry::WorldRegistry>,
-    scope: &TransientScope,
+    worlds: &Option<crate::registry::Registry>,
+    scope: &Target,
 ) -> Result<(), crate::transient::TransientError> {
-    let TransientScope::CustomWorld { world, schema, key } = scope else {
+    let Target::World { world, schema, key } = scope else {
         return Ok(());
     };
     let Some(worlds) = worlds else {
@@ -1546,7 +1541,7 @@ fn admits_scope(
     let schema =
         replica::ids::SchemaId::parse(schema).ok_or(crate::transient::TransientError::Malformed)?;
     let registration = worlds
-        .registration(&world)
+        .descriptor(&world)
         .ok_or(crate::transient::TransientError::NotDeclared)?;
     let declared = registration
         .scope_schemas
@@ -1570,7 +1565,7 @@ fn admits_scope(
 /// whole session.
 async fn subscribe_remotely(
     connection: &dyn comms::Connection,
-    scopes: &std::collections::BTreeSet<TransientScope>,
+    scopes: &std::collections::BTreeSet<Target>,
 ) -> bool {
     // Deadlined like every other flow this loop touches. Opening is local
     // bookkeeping on both contractors today, but a transport that made it wait
@@ -1609,7 +1604,7 @@ async fn subscribe_remotely(
 /// The sequence number is this session's current high-water, so a presence
 /// datagram already in flight cannot rebuild the slot behind the retirement.
 /// That race is the reason `Retire` carries a sequence at all.
-async fn retire_remotely(connection: &dyn comms::Connection, scope: &TransientScope, seq: u64) {
+async fn retire_remotely(connection: &dyn comms::Connection, scope: &Target, seq: u64) {
     let Ok(Ok((mut send, _recv))) =
         tokio::time::timeout(deadline::LIVE_FLOW_READ, connection.open_bi()).await
     else {
@@ -1639,13 +1634,13 @@ async fn retire_remotely(connection: &dyn comms::Connection, scope: &TransientSc
 /// retried would be a transient send with a queue.
 fn publish_presence(
     connection: &dyn comms::Connection,
-    scope: &TransientScope,
+    scope: &Target,
     epoch: &[u8; 16],
     seq: u64,
     counters: &mut TransientCounters,
 ) {
     let item = TransientItem {
-        session_epoch: *epoch,
+        connection_epoch: *epoch,
         seq,
         scope: scope.clone(),
         payload: crate::transient::TransientPayload::Presence,
@@ -1686,7 +1681,7 @@ pub fn publish(
 /// and all of it already proven by Freight. What is genuinely Live is one
 /// function, and this is it.
 pub struct LiveService {
-    sessions: std::cell::RefCell<Vec<StationId>>,
+    sessions: std::cell::RefCell<Vec<Key>>,
     handle: std::sync::Arc<LiveHandle>,
     /// What a signal is asked about, and never anything that can commit.
     ///
@@ -1694,14 +1689,14 @@ pub struct LiveService {
     /// the reader's: a browser looking at who is present has no business
     /// holding an authority view.
     authority: std::sync::Arc<dyn crate::world::AuthorityView>,
-    worlds: crate::registry::WorldRegistry,
+    worlds: crate::registry::Registry,
 }
 
 impl LiveService {
     pub fn new(
         handle: std::sync::Arc<LiveHandle>,
         authority: std::sync::Arc<dyn crate::world::AuthorityView>,
-        worlds: crate::registry::WorldRegistry,
+        worlds: crate::registry::Registry,
     ) -> Self {
         Self {
             sessions: std::cell::RefCell::new(Vec::new()),
@@ -1713,7 +1708,7 @@ impl LiveService {
 
     /// Which peers currently hold a session. A Station-local answer, and not a
     /// membership claim — a member with nothing open is not here.
-    pub fn present(&self) -> Vec<StationId> {
+    pub fn present(&self) -> Vec<Key> {
         self.sessions.borrow().clone()
     }
 }
@@ -1760,7 +1755,7 @@ impl crate::plane_driver::PlaneService for LiveService {
             connection,
             peer,
             cancel,
-            SessionContext {
+            Context {
                 handle: Some(self.handle.clone()),
                 signals: Some(signals),
                 worlds: Some(self.worlds.clone()),
@@ -1776,8 +1771,8 @@ impl crate::plane_driver::PlaneService for LiveService {
 /// Borrowed rather than cloned because `LiveService` outlives every session it
 /// serves and both fields live on it.
 struct Present<'a> {
-    station: StationId,
-    sessions: &'a std::cell::RefCell<Vec<StationId>>,
+    station: Key,
+    sessions: &'a std::cell::RefCell<Vec<Key>>,
     handle: &'a std::sync::Arc<LiveHandle>,
 }
 
@@ -1803,8 +1798,8 @@ impl Drop for Present<'_> {
 /// a dropped future, and the one path that forgot to clean up would leave a
 /// cursor on screen belonging to somebody who closed their laptop.
 struct Leaving {
-    station: StationId,
-    session_epoch: [u8; 16],
+    station: Key,
+    connection_epoch: [u8; 16],
     handle: Option<std::sync::Arc<LiveHandle>>,
 }
 
@@ -1814,7 +1809,7 @@ impl Drop for Leaving {
             // Per session, not per Station. A peer may hold two — a laptop and
             // a phone — and forgetting by Station meant closing one deleted
             // what the other was still saying.
-            handle.forget_session(&self.station, &self.session_epoch);
+            handle.forget_session(&self.station, &self.connection_epoch);
             // The other half, and it was missing. `serve_session` counts a peer
             // in on the way past; nothing counted it out, so "who is here"
             // meant "who has ever been here" and signals queued for people who
@@ -1829,12 +1824,12 @@ mod tests {
     use super::*;
     use crate::transient::TransientPayload;
 
-    fn station() -> StationId {
-        StationId::from_device(&mechanics::crypto::device_from_seed(&[9u8; 32])).expect("station")
+    fn station() -> Key {
+        Key::from_device(&mechanics::crypto::device_from_seed(&[9u8; 32])).expect("station")
     }
 
-    fn scope(n: u8) -> TransientScope {
-        TransientScope::IssueView {
+    fn scope(n: u8) -> Target {
+        Target::Body {
             world: "com.example.notes".into(),
             body: [n; 16],
         }
@@ -1845,7 +1840,7 @@ mod tests {
         // A subscription is a snapshot of what a client is looking at. A store
         // lookup that ignored it would keep delivering to a peer that stopped
         // watching, which is both a leak and a waste.
-        let mut session = LiveSession::new(station());
+        let mut session = Connection::new(station());
         assert!(!session.is_watching(&scope(1)));
         session.subscribe(vec![scope(1), scope(2)]);
         assert!(session.is_watching(&scope(1)));
@@ -1860,12 +1855,12 @@ mod tests {
 
     #[test]
     fn every_drop_is_counted_because_dropped_and_counted_needs_a_reader() {
-        let mut session = LiveSession::new(station());
+        let mut session = Connection::new(station());
         let epoch = [7u8; 16];
         let now = Instant::now();
 
         let mut stray = TransientItem {
-            session_epoch: [8u8; 16],
+            connection_epoch: [8u8; 16],
             seq: 1,
             scope: scope(1),
             payload: TransientPayload::Presence,
@@ -1873,7 +1868,7 @@ mod tests {
         session.admit(&stray, &epoch, now);
         assert_eq!(session.counters().wrong_epoch, 1);
 
-        stray.session_epoch = epoch;
+        stray.connection_epoch = epoch;
         session.admit(&stray, &epoch, now);
         assert_eq!(session.counters().wrong_epoch, 1, "and only the wrong ones");
     }
@@ -1952,9 +1947,9 @@ mod tests {
         // a full varint, which is the largest thing this plane can legally
         // produce and comfortably past a real path's measured capacity.
         let item = TransientItem {
-            session_epoch: [1u8; 16],
+            connection_epoch: [1u8; 16],
             seq: 1,
-            scope: TransientScope::ContentResidency { content: [4u8; 32] },
+            scope: Target::Content { content: [4u8; 32] },
             payload: TransientPayload::Residency {
                 chunks: (0..crate::transient::MAX_RESIDENCY_CHUNKS as u32)
                     .map(|n| u32::MAX - n)
@@ -1979,7 +1974,7 @@ mod tests {
 
         // Something that fits does leave, and costs no drop.
         let small = TransientItem {
-            session_epoch: [1u8; 16],
+            connection_epoch: [1u8; 16],
             seq: 2,
             scope: scope(1),
             payload: TransientPayload::Presence,
@@ -2000,7 +1995,7 @@ pub enum DialRefusal {
     /// Never answered, or the transport said no.
     Unreachable,
     /// Answered with a refusal it could spell.
-    Refused(crate::planes::SessionRefusal),
+    Refused(crate::plane::Refusal),
     /// Neither an accept nor a refusal. Our problem to explain rather than
     /// theirs to have sent.
     Unintelligible,
@@ -2033,17 +2028,17 @@ pub async fn dial(
     transport: &dyn comms::Transport,
     authority: &dyn crate::world::AuthorityView,
     space: &mechanics::ids::SpaceId,
-    local: &StationId,
-    peer: &StationId,
-    session_id: [u8; 16],
+    local: &Key,
+    peer: &Key,
+    connection_id: [u8; 16],
 ) -> Result<LivePeer, DialRefusal> {
     // Asked before the transport is touched. Dialling a peer we would refuse on
     // arrival is a round trip spent to be told what we already knew.
     let resolution = authority.admit_peer(peer).ok_or(DialRefusal::NotAdmitted)?;
 
-    let mut space_bytes = [0u8; crate::planes::SPACE_ID_LEN];
+    let mut space_bytes = [0u8; crate::plane::SPACE_ID_LEN];
     let raw = space.as_str().as_bytes();
-    if raw.len() != crate::planes::SPACE_ID_LEN {
+    if raw.len() != crate::plane::SPACE_ID_LEN {
         return Err(DialRefusal::Unreachable);
     }
     space_bytes.copy_from_slice(raw);
@@ -2052,21 +2047,21 @@ pub async fn dial(
 
     let connection = tokio::time::timeout(
         deadline::LIVE_DIAL,
-        transport.connect_session(peer.as_device(), crate::planes::LIVE_ALPN),
+        transport.connect_session(peer.as_device(), crate::plane::LIVE_ALPN),
     )
     .await
     .map_err(|_| DialRefusal::Unreachable)?
     .map_err(|_| DialRefusal::Unreachable)?;
 
-    let open = crate::planes::SessionOpen {
-        plane: crate::planes::Plane::Live,
-        protocol_version: crate::planes::Plane::Live.protocol_version(),
-        features: crate::planes::feature::LOCAL_SUPPORTED,
+    let open = crate::plane::Open {
+        plane: crate::plane::Plane::Live,
+        protocol_version: crate::plane::Plane::Live.protocol_version(),
+        features: crate::plane::feature::LOCAL_SUPPORTED,
         space: space_bytes,
         initiator_station: local.key_bytes(),
         responder_station: peer.key_bytes(),
-        session_id,
-        session_epoch: epoch,
+        connection_id,
+        connection_epoch: epoch,
         authority_frontier: Vec::new(),
         requested_lanes: vec![stream_kind::CONTROL, stream_kind::RELIABLE_SIGNAL],
     };
@@ -2088,7 +2083,7 @@ pub async fn dial(
     .map_err(|_| DialRefusal::Unreachable)?
     .ok_or(DialRefusal::Unreachable)?;
 
-    match crate::planes::SessionAccept::decode_canonical(&answer) {
+    match crate::plane::Accept::decode_canonical(&answer) {
         Ok(accept) => Ok(LivePeer {
             connection: std::sync::Arc::from(connection),
             peer: AdmittedPeer {
@@ -2098,8 +2093,8 @@ pub async fn dial(
                 // The one thing taken from the accept, because it is the one
                 // thing only the responder knows: what it is willing to serve.
                 granted_lanes: accept.granted_lanes,
-                session_id,
-                session_epoch: epoch,
+                connection_id,
+                connection_epoch: epoch,
                 // Intersected locally, never taken on the peer's word. The
                 // accept is the peer telling us what *it* agreed to, and a peer
                 // is free to claim a bit this build does not implement — at
@@ -2107,15 +2102,13 @@ pub async fn dial(
                 // no oracle behind. `judge` does this intersection on the
                 // inbound path; the outbound path has to do it too, or the same
                 // field means two different things depending on who dialled.
-                features: accept.capability.features & crate::planes::feature::LOCAL_SUPPORTED,
+                features: accept.capability.features & crate::plane::feature::LOCAL_SUPPORTED,
             },
         }),
-        Err(_) => Err(
-            match crate::planes::SessionRefusal::decode_canonical(&answer) {
-                Ok(refusal) => DialRefusal::Refused(refusal),
-                Err(_) => DialRefusal::Unintelligible,
-            },
-        ),
+        Err(_) => Err(match crate::plane::Refusal::decode_canonical(&answer) {
+            Ok(refusal) => DialRefusal::Refused(refusal),
+            Err(_) => DialRefusal::Unintelligible,
+        }),
     }
 }
 
@@ -2134,9 +2127,9 @@ pub struct DialLedger {
     /// close, which reaches the dialer as an ordinary transport failure. Without
     /// a cooldown that is a hot loop against a Station that is doing nothing
     /// wrong.
-    cooldown: std::collections::BTreeMap<StationId, (Instant, u32)>,
-    in_flight: std::collections::BTreeSet<StationId>,
-    sessions: std::collections::BTreeMap<StationId, usize>,
+    cooldown: std::collections::BTreeMap<Key, (Instant, u32)>,
+    in_flight: std::collections::BTreeSet<Key>,
+    sessions: std::collections::BTreeMap<Key, usize>,
 }
 
 impl DialLedger {
@@ -2145,7 +2138,7 @@ impl DialLedger {
     }
 
     /// Whether to dial this peer now.
-    pub fn may_dial(&self, peer: &StationId, now: Instant) -> bool {
+    pub fn may_dial(&self, peer: &Key, now: Instant) -> bool {
         if self.in_flight.contains(peer) {
             return false;
         }
@@ -2172,14 +2165,14 @@ impl DialLedger {
         self.in_flight.len()
     }
 
-    pub fn begin(&mut self, peer: &StationId) {
+    pub fn begin(&mut self, peer: &Key) {
         self.in_flight.insert(peer.clone());
     }
 
     /// A dial that became a session. The cooldown is cleared: what it was
     /// protecting against is a peer that will not talk to us, and this one just
     /// did.
-    pub fn established(&mut self, peer: &StationId) {
+    pub fn established(&mut self, peer: &Key) {
         self.in_flight.remove(peer);
         self.cooldown.remove(peer);
         *self.sessions.entry(peer.clone()).or_insert(0) += 1;
@@ -2192,7 +2185,7 @@ impl DialLedger {
     /// take, and the ceiling is how long a peer can be silent before its
     /// presence has expired anyway — past that, retrying faster buys nothing
     /// anyone can see.
-    pub fn failed(&mut self, peer: &StationId, now: Instant) {
+    pub fn failed(&mut self, peer: &Key, now: Instant) {
         self.in_flight.remove(peer);
         let entry = self.cooldown.entry(peer.clone()).or_insert((now, 0));
         entry.1 = entry.1.saturating_add(1);
@@ -2204,7 +2197,7 @@ impl DialLedger {
 
     /// A session that ended. Not a failure: it says nothing about whether the
     /// peer would answer again, so it earns no cooldown.
-    pub fn ended(&mut self, peer: &StationId) {
+    pub fn ended(&mut self, peer: &Key) {
         if let Some(count) = self.sessions.get_mut(peer) {
             *count = count.saturating_sub(1);
             if *count == 0 {
@@ -2229,17 +2222,17 @@ impl DialLedger {
 /// Everything the dial loop needs, and nothing that can commit.
 pub struct DialContext {
     pub space: mechanics::ids::SpaceId,
-    pub local_station: StationId,
+    pub local_station: Key,
     pub transport: std::sync::Arc<dyn comms::Transport>,
     /// Who might be worth dialling, asked afresh every round.
     ///
     /// A closure rather than a snapshot taken once: a Neighbor learned a minute
     /// after activation should be dialled a minute after activation, not at the
     /// next restart.
-    pub candidates: std::sync::Arc<dyn Fn() -> Vec<StationId> + Send + Sync>,
+    pub candidates: std::sync::Arc<dyn Fn() -> Vec<Key> + Send + Sync>,
     pub handle: std::sync::Arc<LiveHandle>,
     pub authority: std::sync::Arc<dyn crate::world::AuthorityView>,
-    pub worlds: crate::registry::WorldRegistry,
+    pub worlds: crate::registry::Registry,
     pub cancel: crate::lifecycle::CancelToken,
 }
 
@@ -2291,8 +2284,8 @@ async fn dial_loop(context: DialContext) {
                     continue;
                 }
                 led.begin(&peer);
-                let mut session_id = [0u8; 16];
-                if getrandom::fill(&mut session_id).is_err() {
+                let mut connection_id = [0u8; 16];
+                if getrandom::fill(&mut connection_id).is_err() {
                     led.failed(&peer, now);
                     continue;
                 }
@@ -2308,7 +2301,7 @@ async fn dial_loop(context: DialContext) {
                         ledger: ledger.clone(),
                     },
                     peer,
-                    session_id,
+                    connection_id,
                 ));
             }
         }
@@ -2330,22 +2323,22 @@ async fn dial_loop(context: DialContext) {
 struct DialTask {
     transport: std::sync::Arc<dyn comms::Transport>,
     authority: std::sync::Arc<dyn crate::world::AuthorityView>,
-    worlds: crate::registry::WorldRegistry,
+    worlds: crate::registry::Registry,
     handle: std::sync::Arc<LiveHandle>,
     cancel: crate::lifecycle::CancelToken,
     space: mechanics::ids::SpaceId,
-    local_station: StationId,
+    local_station: Key,
     ledger: Rc<RefCell<DialLedger>>,
 }
 
-async fn dial_and_serve(task: DialTask, peer: StationId, session_id: [u8; 16]) {
+async fn dial_and_serve(task: DialTask, peer: Key, connection_id: [u8; 16]) {
     let dialled = dial(
         task.transport.as_ref(),
         task.authority.as_ref(),
         &task.space,
         &task.local_station,
         &peer,
-        session_id,
+        connection_id,
     )
     .await;
 
@@ -2373,7 +2366,7 @@ async fn dial_and_serve(task: DialTask, peer: StationId, session_id: [u8; 16]) {
         live.connection,
         live.peer,
         task.cancel.clone(),
-        SessionContext {
+        Context {
             handle: Some(task.handle.clone()),
             signals: Some(signals),
             worlds: Some(task.worlds.clone()),
@@ -2523,7 +2516,7 @@ impl ResidencyOracle for NoResidency {
 /// Keyed by scope and kind, because two scopes coalescing into one another
 /// would be a cursor in one document overwriting a cursor in another.
 pub struct Coalescer {
-    pending: std::collections::BTreeMap<(TransientScope, u8), (TransientItem, Instant)>,
+    pending: std::collections::BTreeMap<(Target, u8), (TransientItem, Instant)>,
     superseded: u64,
 }
 
@@ -2591,16 +2584,16 @@ mod coalescing {
     use crate::transient::{TransientKind, TransientPayload};
     use std::time::Duration;
 
-    fn scope(n: u8) -> TransientScope {
-        TransientScope::IssueView {
+    fn scope(n: u8) -> Target {
+        Target::Body {
             world: "com.example.notes".into(),
             body: [n; 16],
         }
     }
 
-    fn item(scope: TransientScope, seq: u64) -> TransientItem {
+    fn item(scope: Target, seq: u64) -> TransientItem {
         TransientItem {
-            session_epoch: [1u8; 16],
+            connection_epoch: [1u8; 16],
             seq,
             scope,
             payload: TransientPayload::Presence,
@@ -2655,9 +2648,9 @@ mod coalescing {
         let now = Instant::now();
         coalescer.offer(
             TransientItem {
-                session_epoch: [1u8; 16],
+                connection_epoch: [1u8; 16],
                 seq: 1,
-                scope: TransientScope::Typing {
+                scope: Target::Typing {
                     world: "com.example.notes".into(),
                     body: [1u8; 16],
                     field: "text".into(),

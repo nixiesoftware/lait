@@ -1,6 +1,6 @@
 //! C5 — real mechanics formation, invitation, entry, admission redemption,
 //! and E2EE convergence over the orbital plane. No fixture authorities: every
-//! seam is `OrbitalMechanics` over real signed membership material.
+//! seam is `SpaceAuthority` over real signed membership material.
 //!
 //! The flow proven here is the product's guided-join heir:
 //! 1. the founder FORMS a Space (genesis, founding inception, epoch-0 sealed
@@ -20,13 +20,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use lait::dto::IssueView;
-use lait::orbital::OrbitalMechanics;
+use lait::orbital::SpaceAuthority;
 use lait::world::contract::{self, IssueIntent, IssueQuery};
 use lait::world::IssuesWorld;
 use replica::AuthorityIncorporator;
 use runtime::{
-    ActivationOptions, CommsOptions, ContactMechanics, ContactOptions, EnterOptions, RequestId,
-    Runtime, RuntimeBuilder, Session, Station, WorldIntent, WorldQuery,
+    ActivationOptions, Authority, CommsOptions, Intent, Query, RequestId, Runtime, RuntimeBuilder,
+    Session, Station,
 };
 
 const FOUNDER_SEED: [u8; 32] = [81u8; 32];
@@ -43,9 +43,9 @@ fn temp_root(tag: &str) -> std::path::PathBuf {
     dir
 }
 
-fn registry() -> runtime::WorldRegistry {
+fn registry() -> runtime::Registry {
     RuntimeBuilder::new()
-        .register(IssuesWorld::registration(), Arc::new(IssuesWorld::new()))
+        .register(Arc::new(IssuesWorld::new()))
         .build()
         .unwrap()
 }
@@ -53,14 +53,14 @@ fn registry() -> runtime::WorldRegistry {
 fn comms_for(
     transport: Arc<dyn comms::Transport>,
     seed: [u8; 32],
-    mech: &OrbitalMechanics,
+    mech: &SpaceAuthority,
 ) -> CommsOptions {
     let export_mech = mech.clone();
     let frontier_mech = mech.clone();
     CommsOptions {
         transport,
         station_seed: seed,
-        mechanics: ContactMechanics {
+        authority: Authority {
             source: Arc::new(mech.clone()),
             incorporator: Arc::new(Mutex::new(mech.clone()))
                 as Arc<Mutex<dyn AuthorityIncorporator + Send>>,
@@ -77,7 +77,7 @@ fn comms_for(
 fn activate(
     root: &std::path::Path,
     seed: [u8; 32],
-    mech: &OrbitalMechanics,
+    mech: &SpaceAuthority,
     coords: &runtime::SignedCoordinates,
     transport: Arc<dyn comms::Transport>,
 ) -> (Runtime, Station) {
@@ -88,9 +88,9 @@ fn activate(
         Arc::new(mech.clone()),
     );
     let station = rt
-        .enter_orbit(coords, EnterOptions)
+        .materialize(coords)
         .unwrap()
-        .activate(ActivationOptions {
+        .open(ActivationOptions {
             planes: Default::default(),
             content: Default::default(),
             drain_deadline: Duration::from_secs(5),
@@ -115,7 +115,7 @@ fn submit(
     let action = identity.sign_action(
         session,
         RequestId::mint(),
-        WorldIntent {
+        Intent {
             schema: contract::issue_schema(),
             schema_version: contract::ISSUE_SCHEMA_VERSION,
             payload: intent.to_json(),
@@ -126,7 +126,7 @@ fn submit(
 
 fn query<T: serde::de::DeserializeOwned>(session: &Session, q: &IssueQuery) -> T {
     let bytes = session
-        .query(WorldQuery {
+        .query(Query {
             schema: contract::issue_schema(),
             schema_version: contract::ISSUE_SCHEMA_VERSION,
             payload: q.to_json(),
@@ -136,8 +136,8 @@ fn query<T: serde::de::DeserializeOwned>(session: &Session, q: &IssueQuery) -> T
     serde_json::from_slice(&bytes).unwrap()
 }
 
-fn station_id(seed: &[u8; 32]) -> mechanics::ids::StationId {
-    mechanics::ids::StationId::from_device(&mechanics::crypto::device_from_seed(seed)).unwrap()
+fn station_id(seed: &[u8; 32]) -> mechanics::station::Key {
+    mechanics::station::Key::from_device(&mechanics::crypto::device_from_seed(seed)).unwrap()
 }
 
 #[test]
@@ -153,7 +153,7 @@ fn form_invite_join_autoapprove_and_e2ee_convergence() {
     // 1. Formation: real genesis + founding inception + epoch-0.
     let root_f = temp_root("founder");
     let (mech_f, coords) =
-        OrbitalMechanics::form(&root_f, &FOUNDER_SEED, "Joined Space", vec![]).unwrap();
+        SpaceAuthority::form(&root_f, &FOUNDER_SEED, "Joined Space", vec![]).unwrap();
     // The founder product-authority bootstrap the CLI composition root runs:
     // activate the IssuesWorld implementation + grant the founder Space caps,
     // so its own admin/contributor submits are authorized.
@@ -215,12 +215,10 @@ fn form_invite_join_autoapprove_and_e2ee_convergence() {
     // 2. An UNINVITED entrant converges the founder's material but can read
     //    nothing: no admission, no epoch key — every Body stays opaque.
     let root_s = temp_root("stranger");
-    let mech_s = OrbitalMechanics::enter(&root_s, &STRANGER_SEED, &coords).unwrap();
+    let mech_s = SpaceAuthority::enter(&root_s, &STRANGER_SEED, &coords).unwrap();
     assert!(!mech_s.am_i_member());
     let (_rt_s, station_s) = activate(&root_s, STRANGER_SEED, &mech_s, &coords, t_stranger);
-    let outcome = station_s
-        .contact(&station_id(&FOUNDER_SEED), ContactOptions)
-        .unwrap();
+    let outcome = station_s.contact(&station_id(&FOUNDER_SEED)).unwrap();
     assert!(
         outcome.convergence.unsupported_retained >= 1,
         "material is retained opaquely, not read"
@@ -247,19 +245,15 @@ fn form_invite_join_autoapprove_and_e2ee_convergence() {
     // 4. The joiner enters with the invite; its FIRST pull (before admission)
     //    retains the founder's Bodies opaquely.
     let root_j = temp_root("joiner");
-    let mech_j = OrbitalMechanics::enter(&root_j, &JOINER_SEED, &invite).unwrap();
+    let mech_j = SpaceAuthority::enter(&root_j, &JOINER_SEED, &invite).unwrap();
     assert!(!mech_j.am_i_member());
     let (_rt_j, station_j) = activate(&root_j, JOINER_SEED, &mech_j, &invite, t_joiner);
-    let before = station_j
-        .contact(&station_id(&FOUNDER_SEED), ContactOptions)
-        .unwrap();
+    let before = station_j.contact(&station_id(&FOUNDER_SEED)).unwrap();
     assert!(before.convergence.unsupported_retained >= 1);
 
     // 5. The founder pulls the joiner: the admission redemption rides the
     //    authority records and auto-approves (AddMember + epoch sealing).
-    let outcome = station_f
-        .contact(&station_id(&JOINER_SEED), ContactOptions)
-        .unwrap();
+    let outcome = station_f.contact(&station_id(&JOINER_SEED)).unwrap();
     let _ = outcome;
     // The founder's replay now admits the joiner's actor.
     {
@@ -275,9 +269,7 @@ fn form_invite_join_autoapprove_and_e2ee_convergence() {
     // 6. The joiner pulls again: membership + sealed keys arrive FIRST (the
     //    authority-first phase), and the SAME pass upgrades the previously
     //    opaque Bodies into interpreted product state.
-    let after = station_j
-        .contact(&station_id(&FOUNDER_SEED), ContactOptions)
-        .unwrap();
+    let after = station_j.contact(&station_id(&FOUNDER_SEED)).unwrap();
     assert!(
         after.convergence.accepted >= 1,
         "opaque material upgraded to interpreted once the keys arrived"
@@ -318,9 +310,7 @@ fn form_invite_join_autoapprove_and_e2ee_convergence() {
         },
     )
     .unwrap();
-    station_f
-        .contact(&station_id(&JOINER_SEED), ContactOptions)
-        .unwrap();
+    station_f.contact(&station_id(&JOINER_SEED)).unwrap();
     let view: IssueView = query(
         &session_f,
         &IssueQuery::View {
@@ -331,9 +321,9 @@ fn form_invite_join_autoapprove_and_e2ee_convergence() {
     assert_eq!(view.comments.len(), 1);
     assert_eq!(view.comments[0].body, "joined and commenting");
 
-    let _ = station_f.go_dormant();
-    let _ = station_j.go_dormant();
-    let _ = station_s.go_dormant();
+    let _ = station_f.vacate();
+    let _ = station_j.vacate();
+    let _ = station_s.vacate();
     let _ = std::fs::remove_dir_all(&root_f);
     let _ = std::fs::remove_dir_all(&root_j);
     let _ = std::fs::remove_dir_all(&root_s);

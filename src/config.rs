@@ -212,7 +212,7 @@ pub fn identity_dir() -> Result<PathBuf> {
 ///
 /// Kept below the identity directory, but distinct from every Orbit home: the
 /// host process owns the catalog-wide control socket and process lock while
-/// each active [`crate::orbital::SpaceBridge`] independently holds its Orbit
+/// each active [`crate::orbital::StationHost`] independently holds its Orbit
 /// lease. A self-contained `$LAIT_HOME` therefore still gets one daemon without
 /// colliding with the Station occupying that same directory.
 pub fn lait_daemon_home() -> Result<PathBuf> {
@@ -310,7 +310,7 @@ pub struct DaemonLock {
 
 /// Acquire the exclusive operational lock for a home.
 ///
-/// A Lait daemon uses this for its process home; a SpaceBridge runner uses it
+/// A Lait daemon uses this for its process home; a StationHost runner uses it
 /// for an Orbit home. In both cases there is at most one live owner for that
 /// exact resource.
 pub fn acquire_daemon_lock(home: &Path) -> Result<DaemonLock> {

@@ -9,28 +9,28 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use mechanics::ids::StationId;
+use mechanics::station::Key;
 use replica::ids::BodyKey;
 use runtime::budget::deadline;
 use runtime::live::{AnchorSource, CaretState, LiveHandle, LiveNarrow};
-use runtime::transient::{TransientItem, TransientPayload, TransientScope};
+use runtime::transient::{Target, TransientItem, TransientPayload};
 
 const WORLD: &str = "com.example.notes";
 
-fn station(seed: u8) -> StationId {
-    StationId::from_device(&mechanics::crypto::device_from_seed(&[seed; 32])).expect("station")
+fn station(seed: u8) -> Key {
+    Key::from_device(&mechanics::crypto::device_from_seed(&[seed; 32])).expect("station")
 }
 
-fn caret_scope(body: u8) -> TransientScope {
-    TransientScope::TextCaret {
+fn caret_scope(body: u8) -> Target {
+    Target::Field {
         world: WORLD.into(),
         body: [body; 16],
         field: "text".into(),
     }
 }
 
-fn issue_scope(body: u8) -> TransientScope {
-    TransientScope::IssueView {
+fn issue_scope(body: u8) -> Target {
+    Target::Body {
         world: WORLD.into(),
         body: [body; 16],
     }
@@ -38,11 +38,11 @@ fn issue_scope(body: u8) -> TransientScope {
 
 /// An empty version, spelled canonically.
 ///
-/// `FabricVersion::default()` is *not* it: `Default` gives `format_version: 0`
+/// `Version::default()` is *not* it: `Default` gives `format_version: 0`
 /// and `validate` requires the real one, so a hand-built anchor carrying the
 /// default is refused as non-canonical before anything looks at its position.
-fn version() -> replica::FabricVersion {
-    replica::FabricVersion {
+fn version() -> replica::Version {
+    replica::Version {
         format_version: replica::CAUSAL_FORMAT_VERSION,
         heads: Vec::new(),
     }
@@ -50,7 +50,7 @@ fn version() -> replica::FabricVersion {
 
 /// An anchor at `offset` in `field`, encoded the way a payload carries one.
 fn anchor_bytes(field: &str, offset: u64) -> Vec<u8> {
-    replica::FabricAnchor {
+    replica::Anchor {
         format_version: 1,
         body: [3u8; 32],
         path: field.into(),
@@ -62,13 +62,13 @@ fn anchor_bytes(field: &str, offset: u64) -> Vec<u8> {
     .encode()
 }
 
-fn caret_item(scope: TransientScope, seq: u64, offset: u64) -> TransientItem {
+fn caret_item(scope: Target, seq: u64, offset: u64) -> TransientItem {
     let field = scope
         .field()
         .expect("a caret scope names a field")
         .to_string();
     TransientItem {
-        session_epoch: [1u8; 16],
+        connection_epoch: [1u8; 16],
         seq,
         scope,
         payload: TransientPayload::Caret {
@@ -77,9 +77,9 @@ fn caret_item(scope: TransientScope, seq: u64, offset: u64) -> TransientItem {
     }
 }
 
-fn presence_item(scope: TransientScope, seq: u64) -> TransientItem {
+fn presence_item(scope: Target, seq: u64) -> TransientItem {
     TransientItem {
-        session_epoch: [1u8; 16],
+        connection_epoch: [1u8; 16],
         seq,
         scope,
         payload: TransientPayload::Presence,
@@ -91,7 +91,7 @@ fn presence_item(scope: TransientScope, seq: u64) -> TransientItem {
 ///
 /// Deliberately not a real Station. What is under test is the handle's contract
 /// — resolve per read, never cache, never mutate — and a real Replica would
-/// prove `fabric`'s algebra instead, which `fabric` already proves.
+/// prove `Engine`'s algebra instead, which `Engine` already proves.
 struct ScriptedAnchors {
     answer: std::sync::Mutex<replica::AnchorResolution>,
     resolves: AtomicUsize,
@@ -117,14 +117,9 @@ impl ScriptedAnchors {
 }
 
 impl AnchorSource for ScriptedAnchors {
-    fn anchor_in_body(
-        &self,
-        _key: &BodyKey,
-        path: &str,
-        position: u64,
-    ) -> Option<replica::FabricAnchor> {
+    fn anchor_in_body(&self, _key: &BodyKey, path: &str, position: u64) -> Option<replica::Anchor> {
         self.mints.fetch_add(1, Ordering::SeqCst);
-        Some(replica::FabricAnchor {
+        Some(replica::Anchor {
             format_version: 1,
             body: [3u8; 32],
             path: path.into(),
@@ -143,7 +138,7 @@ impl AnchorSource for ScriptedAnchors {
     fn resolve_anchor(
         &self,
         _key: &BodyKey,
-        anchor: &replica::FabricAnchor,
+        anchor: &replica::Anchor,
     ) -> replica::AnchorResolution {
         self.resolves.fetch_add(1, Ordering::SeqCst);
         match *self.answer.lock().unwrap() {
@@ -219,7 +214,7 @@ fn a_selection_resolves_both_ends() {
     handle.record(
         &station(1),
         &TransientItem {
-            session_epoch: [1u8; 16],
+            connection_epoch: [1u8; 16],
             seq: 1,
             scope: caret_scope(1),
             payload: TransientPayload::Selection {
@@ -288,7 +283,7 @@ fn retiring_a_scope_drops_every_kind_it_admits() {
     handle.record(
         &station(1),
         &TransientItem {
-            session_epoch: [1u8; 16],
+            connection_epoch: [1u8; 16],
             seq: 2,
             scope: caret_scope(1),
             payload: TransientPayload::Selection {
@@ -331,9 +326,9 @@ fn narrowing_to_a_body_gathers_every_scope_that_names_it() {
     handle.record(
         &station(2),
         &TransientItem {
-            session_epoch: [1u8; 16],
+            connection_epoch: [1u8; 16],
             seq: 1,
-            scope: TransientScope::Typing {
+            scope: Target::Typing {
                 world: WORLD.into(),
                 body: [1u8; 16],
                 field: "text".into(),
@@ -369,11 +364,11 @@ fn a_scope_that_names_no_body_is_reachable_only_exactly() {
     // which chunks of an unrelated file.
     let handle = LiveHandle::new(None);
     let now = Instant::now();
-    let residency = TransientScope::ContentResidency { content: [4u8; 32] };
+    let residency = Target::Content { content: [4u8; 32] };
     handle.record(
         &station(1),
         &TransientItem {
-            session_epoch: [1u8; 16],
+            connection_epoch: [1u8; 16],
             seq: 1,
             scope: residency.clone(),
             payload: TransientPayload::Residency { chunks: vec![0, 1] },
@@ -526,7 +521,7 @@ fn a_minted_anchor_is_what_a_payload_carries() {
     let encoded = handle.anchor(WORLD, [1u8; 16], "text", 4).expect("minted");
 
     let item = TransientItem {
-        session_epoch: [1u8; 16],
+        connection_epoch: [1u8; 16],
         seq: 1,
         scope: caret_scope(1),
         payload: TransientPayload::Caret { anchor: encoded },
@@ -553,7 +548,7 @@ mod revocation {
     use comms::Transport;
     use runtime::admission::AdmittedPeer;
     use runtime::lifecycle::CancelToken;
-    use runtime::live::{serve_session, SessionContext};
+    use runtime::live::{serve_session, Context};
     use runtime::transient::LiveControl;
     use runtime::world::{AuthorityView, PrincipalResolution};
 
@@ -582,26 +577,20 @@ mod revocation {
         replica::frontier::AuthorityFrontier::from_canonical_bytes(vec![9])
     }
 
-    fn admitted(station: StationId) -> AdmittedPeer {
+    fn admitted(station: Key) -> AdmittedPeer {
         AdmittedPeer {
             station,
             actor: peer_actor(),
             authority_frontier: frontier(),
-            granted_lanes: vec![runtime::planes::stream_kind::CONTROL],
-            session_id: [2u8; 16],
-            session_epoch: [1u8; 16],
+            granted_lanes: vec![runtime::plane::stream_kind::CONTROL],
+            connection_id: [2u8; 16],
+            connection_epoch: [1u8; 16],
             features: 0,
         }
     }
 
     /// A connected pair, and the Station the server side believes it is serving.
-    async fn pair(
-        seed: u8,
-    ) -> (
-        Arc<dyn comms::Connection>,
-        Arc<dyn comms::Connection>,
-        StationId,
-    ) {
+    async fn pair(seed: u8) -> (Arc<dyn comms::Connection>, Arc<dyn comms::Connection>, Key) {
         let net = MemNet::new();
         let client_device = mechanics::crypto::device_from_seed(&[seed; 32]);
         let a: Arc<dyn Transport> = Arc::new(net.peer(client_device.clone()));
@@ -622,7 +611,7 @@ mod revocation {
         (
             Arc::from(dialer),
             Arc::from(incoming.connection),
-            StationId::from_device(&client_device).expect("station"),
+            Key::from_device(&client_device).expect("station"),
         )
     }
 
@@ -655,7 +644,7 @@ mod revocation {
                         connection,
                         peer,
                         cancel,
-                        SessionContext {
+                        Context {
                             handle: Some(handle),
                             signals: None,
                             worlds: None,
@@ -670,10 +659,10 @@ mod revocation {
         (ended, cancel)
     }
 
-    async fn subscribe(connection: &dyn comms::Connection, scopes: Vec<TransientScope>) {
+    async fn subscribe(connection: &dyn comms::Connection, scopes: Vec<Target>) {
         let (mut send, _recv) = connection.open_bi().await.expect("open");
         let body = LiveControl::Subscribe { scopes }.encode();
-        let mut framed = vec![runtime::planes::stream_kind::CONTROL];
+        let mut framed = vec![runtime::plane::stream_kind::CONTROL];
         framed.extend_from_slice(&(body.len() as u32).to_le_bytes());
         framed.extend_from_slice(&body);
         send.write_all(&framed).await.expect("write");
@@ -794,7 +783,7 @@ mod dialling {
     use comms::mem::MemNet;
     use comms::Transport;
     use runtime::live::{dial, DialLedger, DialRefusal};
-    use runtime::planes::{bounds, stream_kind, Plane, SessionAccept, SessionOpen};
+    use runtime::plane::{bounds, stream_kind, Accept, Open, Plane};
     use runtime::world::{AuthorityView, PrincipalResolution};
 
     struct Everyone;
@@ -934,14 +923,14 @@ mod dialling {
                     .read_to_end(bounds::MAX_OPENING_BYTES)
                     .await
                     .expect("opening");
-                let open = SessionOpen::decode_canonical(&raw).expect("canonical opening");
-                let accept = SessionAccept {
-                    session_id: open.session_id,
-                    session_epoch: open.session_epoch,
-                    capability: runtime::planes::ProtocolCapability {
+                let open = Open::decode_canonical(&raw).expect("canonical opening");
+                let accept = Accept {
+                    connection_id: open.connection_id,
+                    connection_epoch: open.connection_epoch,
+                    capability: runtime::plane::Capability {
                         plane: Plane::Live,
                         protocol_version: open.protocol_version,
-                        features: open.features & runtime::planes::feature::LOCAL_SUPPORTED,
+                        features: open.features & runtime::plane::feature::LOCAL_SUPPORTED,
                     },
                     // Grant one of the two asked for, so the test can tell the
                     // dialer reports what the *responder* said rather than what
@@ -959,8 +948,8 @@ mod dialling {
             a.as_ref(),
             &Everyone,
             &space(),
-            &StationId::from_device(&local_device).expect("local"),
-            &StationId::from_device(&peer_device).expect("peer"),
+            &Key::from_device(&local_device).expect("local"),
+            &Key::from_device(&peer_device).expect("peer"),
             [7u8; 16],
         )
         .await
@@ -970,11 +959,11 @@ mod dialling {
         assert_eq!(open.plane, Plane::Live);
         assert_eq!(
             open.features,
-            runtime::planes::feature::LOCAL_SUPPORTED,
+            runtime::plane::feature::LOCAL_SUPPORTED,
             "what this build implements, and nothing it merely has a name for"
         );
         assert_eq!(
-            open.features & runtime::planes::feature::UNSOLICITED_PROVIDE,
+            open.features & runtime::plane::feature::UNSOLICITED_PROVIDE,
             0,
             "nothing serves a chunk without being asked, so it is not offered"
         );
@@ -986,12 +975,9 @@ mod dialling {
 
         // What the responder granted, not what the dialer asked for.
         assert_eq!(live.peer.granted_lanes, vec![stream_kind::CONTROL]);
-        assert_eq!(live.peer.session_id, [7u8; 16]);
+        assert_eq!(live.peer.connection_id, [7u8; 16]);
         // And the negotiated intersection reaches the plane that honours it.
-        assert_eq!(
-            live.peer.features,
-            runtime::planes::feature::RESIDENCY_HINTS
-        );
+        assert_eq!(live.peer.features, runtime::plane::feature::RESIDENCY_HINTS);
         // And the identity is this Station's own resolution, never the packet's.
         assert_eq!(live.peer.actor.as_str(), format!("act_{}", "12".repeat(32)));
     }
@@ -1012,8 +998,8 @@ mod dialling {
             a.as_ref(),
             &Nobody,
             &space(),
-            &StationId::from_device(&local_device).expect("local"),
-            &StationId::from_device(&peer_device).expect("peer"),
+            &Key::from_device(&local_device).expect("local"),
+            &Key::from_device(&peer_device).expect("peer"),
             [8u8; 16],
         )
         .await;
@@ -1096,7 +1082,7 @@ mod offers_on_the_plane {
     fn offer(from: u8, content: u8) -> PendingOffer {
         PendingOffer {
             from: station(from),
-            session_epoch: [2u8; 16],
+            connection_epoch: [2u8; 16],
             content: [content; 32],
             plaintext_len: 1_073_741_824,
             display_name: "big.iso".into(),
@@ -1161,7 +1147,7 @@ mod offers_on_the_plane {
 mod flooding {
     use super::*;
     use runtime::budget::{slots, Evictions, Verdict};
-    use runtime::live::LiveSession;
+    use runtime::live::Connection;
     use runtime::transient::AdmitOutcome;
 
     #[test]
@@ -1171,7 +1157,7 @@ mod flooding {
         // drives a real session over a real connection — this used to claim
         // "every link is the shipped code" while calling `evictions.charge`
         // itself, which is the one link that mattered.
-        let mut session = LiveSession::with_capacity(station(1), 4);
+        let mut session = Connection::with_capacity(station(1), 4);
         let epoch = [1u8; 16];
         let now = Instant::now();
         let mut scopes = Vec::new();
@@ -1214,7 +1200,7 @@ mod flooding {
         }
         let charged = evictions.charged();
 
-        let mut session = LiveSession::with_capacity(station(1), 16);
+        let mut session = Connection::with_capacity(station(1), 16);
         session.subscribe(vec![issue_scope(1)]);
         let epoch = [1u8; 16];
         let now = Instant::now();
@@ -1240,7 +1226,7 @@ mod publishing {
     use super::*;
     use runtime::live::LiveHandle;
 
-    fn scopes(bodies: &[u8]) -> Vec<TransientScope> {
+    fn scopes(bodies: &[u8]) -> Vec<Target> {
         bodies.iter().map(|b| issue_scope(*b)).collect()
     }
 
@@ -1317,20 +1303,20 @@ mod two_node_presence {
     use comms::Transport;
     use runtime::admission::AdmittedPeer;
     use runtime::lifecycle::CancelToken;
-    use runtime::live::{serve_session, LiveHandle, SessionContext};
+    use runtime::live::{serve_session, Context, LiveHandle};
 
     fn actor() -> mechanics::ids::ActorId {
         mechanics::ids::ActorId::parse(&format!("act_{}", "cd".repeat(32))).expect("actor")
     }
 
-    fn admitted(station: StationId) -> AdmittedPeer {
+    fn admitted(station: Key) -> AdmittedPeer {
         AdmittedPeer {
             station,
             actor: actor(),
             authority_frontier: replica::frontier::AuthorityFrontier::from_canonical_bytes(vec![9]),
-            granted_lanes: vec![runtime::planes::stream_kind::CONTROL],
-            session_id: [2u8; 16],
-            session_epoch: [1u8; 16],
+            granted_lanes: vec![runtime::plane::stream_kind::CONTROL],
+            connection_id: [2u8; 16],
+            connection_epoch: [1u8; 16],
             features: 0,
         }
     }
@@ -1356,7 +1342,7 @@ mod two_node_presence {
                         connection,
                         peer,
                         cancel,
-                        SessionContext {
+                        Context {
                             handle: Some(handle),
                             signals: None,
                             worlds: None,
@@ -1406,8 +1392,8 @@ mod two_node_presence {
 
         let a_handle = Arc::new(LiveHandle::new(None));
         let b_handle = Arc::new(LiveHandle::new(None));
-        let a_station = StationId::from_device(&a_device).expect("a");
-        let b_station = StationId::from_device(&b_device).expect("b");
+        let a_station = Key::from_device(&a_device).expect("a");
+        let b_station = Key::from_device(&b_device).expect("b");
 
         let (a_cancel, _) = serve(Arc::from(dialer), admitted(b_station), a_handle.clone());
         let (b_cancel, _) = serve(
@@ -1479,7 +1465,7 @@ mod two_node_presence {
         std::mem::forget((a, b));
 
         let handle = Arc::new(LiveHandle::new(None));
-        let peer = StationId::from_device(&a_device).expect("a");
+        let peer = Key::from_device(&a_device).expect("a");
         let (cancel, ended) = serve(
             Arc::from(incoming.connection),
             admitted(peer.clone()),
@@ -1506,7 +1492,7 @@ mod two_node_presence {
         // deadline waiting on a peer that is on its way out.
         assert!(handle.nudge(
             &peer,
-            runtime::planes::Signal::Attention {
+            runtime::plane::Signal::Attention {
                 scope: issue_scope(1)
             }
         ));
@@ -1536,49 +1522,40 @@ mod two_node_presence {
 /// different reviewed build — and buys no enforcement at all.
 mod declared_scopes {
     use super::*;
-    use replica::body::{BodySchema, MutationModel};
+    use replica::body::{MutationModel, Schema};
     use replica::ids::{EncodingId, SchemaId, WorldId};
     use runtime::live::admits_scope_for_test as admits;
     use runtime::registry::RuntimeBuilder;
     use runtime::transient::TransientError;
     use runtime::world::ScopeSchema;
     use runtime::{
-        World, WorldContext, WorldEffect, WorldError, WorldIntent, WorldLimits, WorldProjection,
-        WorldQuery, WorldRegistration, WorldVersion,
+        Context, Descriptor, Effect, Intent, Limits, Projection, Query, Version, World, WorldError,
     };
 
     const PAD: &str = "dev.example.pad";
 
-    struct Pad(Vec<BodySchema>, Vec<ScopeSchema>);
+    struct Pad(Vec<Schema>, Vec<ScopeSchema>);
 
     impl World for Pad {
         fn id(&self) -> WorldId {
             WorldId::parse(PAD).unwrap()
         }
-        fn schemas(&self) -> &[BodySchema] {
+        fn schemas(&self) -> &[Schema] {
             &self.0
         }
         fn scope_schemas(&self) -> &[ScopeSchema] {
             &self.1
         }
-        fn submit(
-            &self,
-            _ctx: &mut WorldContext<'_>,
-            _intent: WorldIntent,
-        ) -> Result<WorldEffect, WorldError> {
+        fn submit(&self, _ctx: &mut Context<'_>, _intent: Intent) -> Result<Effect, WorldError> {
             Err(WorldError::InvalidRequest)
         }
-        fn query(
-            &self,
-            _ctx: &WorldContext<'_>,
-            _query: WorldQuery,
-        ) -> Result<WorldProjection, WorldError> {
+        fn query(&self, _ctx: &Context<'_>, _query: Query) -> Result<Projection, WorldError> {
             Err(WorldError::InvalidRequest)
         }
     }
 
-    fn hosting(scopes: Vec<ScopeSchema>) -> runtime::registry::WorldRegistry {
-        let schemas = vec![BodySchema {
+    fn hosting(scopes: Vec<ScopeSchema>) -> runtime::registry::Registry {
+        let schemas = vec![Schema {
             id: SchemaId::parse("entry").unwrap(),
             version: 1,
             encoding: EncodingId::parse("bytes").unwrap(),
@@ -1587,23 +1564,13 @@ mod declared_scopes {
         }];
         let world = Pad(schemas.clone(), scopes.clone());
         RuntimeBuilder::new()
-            .register(
-                WorldRegistration {
-                    id: world.id(),
-                    implementation_version: WorldVersion(1),
-                    schemas,
-                    limits: WorldLimits::default(),
-                    scope_schemas: scopes,
-                    signal_schemas: Vec::new(),
-                },
-                Arc::new(world),
-            )
+            .register(Arc::new(world))
             .build()
             .expect("registry")
     }
 
-    fn custom(schema: &str, key: &str) -> TransientScope {
-        TransientScope::CustomWorld {
+    fn custom(schema: &str, key: &str) -> Target {
+        Target::World {
             world: PAD.into(),
             schema: schema.into(),
             key: key.into(),
@@ -1646,7 +1613,7 @@ mod declared_scopes {
     #[test]
     fn a_world_this_build_does_not_host_declares_nothing() {
         let worlds = Some(hosting(dragging(64)));
-        let elsewhere = TransientScope::CustomWorld {
+        let elsewhere = Target::World {
             world: "com.example.other".into(),
             schema: "dragging".into(),
             key: "x".into(),
@@ -1670,7 +1637,7 @@ mod declared_scopes {
 
     #[test]
     fn the_substrates_own_scopes_are_not_a_worlds_to_declare() {
-        // A World does not get to widen or narrow what `IssueView` means. Those
+        // A World does not get to widen or narrow what `Body` means. Those
         // are the substrate's shapes, bounded by the substrate's numbers.
         let worlds = Some(hosting(Vec::new()));
         assert_eq!(admits(&worlds, &issue_scope(1)), Ok(()));
@@ -1690,7 +1657,7 @@ mod declared_scopes {
 mod nudging {
     use super::*;
     use runtime::live::LiveHandle;
-    use runtime::planes::Signal;
+    use runtime::plane::Signal;
 
     fn nudge(n: u8) -> Signal {
         Signal::WorldSignal {

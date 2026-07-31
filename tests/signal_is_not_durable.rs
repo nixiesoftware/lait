@@ -5,7 +5,7 @@
 //! becomes activity. Two of those three are the same mechanism seen twice —
 //! `StationCore::with_replica` is the only route to the Replica writer, and
 //! `Broadcaster::publish` is the only route to the Observation ring, which
-//! `SpaceBridge::frame_for` turns into `activity_advanced` for any Observation
+//! `StationHost::frame_for` turns into `activity_advanced` for any Observation
 //! carrying scopes. The third, surviving a restart, is a consequence rather
 //! than a mechanism: `Orbit::activate` builds a fresh `StationCore` and reads
 //! nothing signal-shaped from disk.
@@ -182,16 +182,18 @@ mod behaviour {
     use std::time::Duration;
 
     use mechanics::crypto::AuthorizedBodyKey;
-    use mechanics::ids::{ActorId, DeviceId, StationId};
-    use replica::body::{BodyOp, BodySchema, MutationModel};
+    use mechanics::{
+        ids::{ActorId, DeviceId},
+        station::Key,
+    };
+    use replica::body::{MutationModel, Op, Schema};
     use replica::frontier::{AuthorityFrontier, ReplicaFrontier};
     use replica::ids::{BodyId, BodyKey, EncodingId, SchemaId, WorldId};
-    use runtime::planes::Signal;
+    use runtime::plane::Signal;
     use runtime::signal::DeliveredSignal;
     use runtime::{
-        ActivationOptions, LocalIdentity, RequestId, Runtime, RuntimeBuilder, Session,
-        SpaceFormationOptions, Station, World, WorldContext, WorldEffect, WorldError, WorldIntent,
-        WorldLimits, WorldProjection, WorldQuery, WorldRegistration, WorldVersion,
+        ActivationOptions, Context, Descriptor, Effect, Intent, Limits, LocalIdentity, Projection,
+        Query, RequestId, Runtime, RuntimeBuilder, Session, Station, Version, World, WorldError,
     };
 
     const WRITER_SEED: [u8; 32] = [55u8; 32];
@@ -208,7 +210,7 @@ mod behaviour {
     fn demand() -> Vec<u8> {
         mechanics::demand::AuthorizationDemand::require(
             mechanics::demand::PolicyCapability::new("w", "c"),
-            mechanics::demand::PolicyResource::space("w"),
+            mechanics::demand::Resource::root("w"),
         )
         .encode_canonical()
         .expect("canonical demand")
@@ -216,14 +218,14 @@ mod behaviour {
 
     struct KvWorld {
         id: WorldId,
-        schemas: Vec<BodySchema>,
+        schemas: Vec<Schema>,
     }
 
     impl KvWorld {
         fn new() -> Self {
             Self {
                 id: WorldId::parse("dev.example.kv").unwrap(),
-                schemas: vec![BodySchema {
+                schemas: vec![Schema {
                     id: SchemaId::parse("entry").unwrap(),
                     version: 1,
                     encoding: EncodingId::parse("bytes").unwrap(),
@@ -244,23 +246,19 @@ mod behaviour {
         fn id(&self) -> WorldId {
             self.id.clone()
         }
-        fn schemas(&self) -> &[BodySchema] {
+        fn schemas(&self) -> &[Schema] {
             &self.schemas
         }
-        fn submit(
-            &self,
-            _ctx: &mut WorldContext<'_>,
-            intent: WorldIntent,
-        ) -> Result<WorldEffect, WorldError> {
+        fn submit(&self, _ctx: &mut Context<'_>, intent: Intent) -> Result<Effect, WorldError> {
             let text = String::from_utf8(intent.payload).map_err(|_| WorldError::InvalidRequest)?;
             let (key, value) = text.split_once('=').ok_or(WorldError::InvalidRequest)?;
             let body = self.body(key);
-            Ok(WorldEffect {
+            Ok(Effect {
                 content_refs: Vec::new(),
                 demand: demand(),
                 operations: vec![(
                     body.clone(),
-                    BodyOp::ReplaceAtomic {
+                    Op::ReplaceAtomic {
                         value: value.as_bytes().to_vec(),
                     },
                 )],
@@ -269,13 +267,9 @@ mod behaviour {
                 declarations: vec![],
             })
         }
-        fn query(
-            &self,
-            ctx: &WorldContext<'_>,
-            query: WorldQuery,
-        ) -> Result<WorldProjection, WorldError> {
+        fn query(&self, ctx: &Context<'_>, query: Query) -> Result<Projection, WorldError> {
             let key = String::from_utf8(query.payload).map_err(|_| WorldError::InvalidRequest)?;
-            Ok(WorldProjection {
+            Ok(Projection {
                 demand: demand(),
                 schema: SchemaId::parse("entry").unwrap(),
                 schema_version: 1,
@@ -297,16 +291,16 @@ mod behaviour {
 
     fn runtime_at(root: &std::path::Path) -> Runtime {
         let world = KvWorld::new();
-        let registration = WorldRegistration {
+        let registration = Descriptor {
             id: world.id(),
-            implementation_version: WorldVersion(1),
+            implementation_version: Version(1),
             schemas: world.schemas().to_vec(),
-            limits: WorldLimits::default(),
+            limits: Limits::default(),
             scope_schemas: Vec::new(),
             signal_schemas: Vec::new(),
         };
         let registry = RuntimeBuilder::new()
-            .register(registration, Arc::new(world))
+            .register(Arc::new(world))
             .build()
             .unwrap();
         Runtime::open(
@@ -320,11 +314,7 @@ mod behaviour {
     }
 
     fn station_at(root: &std::path::Path) -> Station {
-        runtime_at(root)
-            .form_space(SpaceFormationOptions::default())
-            .unwrap()
-            .activate(options())
-            .unwrap()
+        runtime_at(root).create().unwrap().open(options()).unwrap()
     }
 
     fn options() -> ActivationOptions {
@@ -435,7 +425,7 @@ mod behaviour {
             Signal::Ping { nonce: [1u8; 16] },
             Signal::Acknowledge { nonce: [1u8; 16] },
             Signal::Attention {
-                scope: runtime::transient::TransientScope::IssueView {
+                scope: runtime::transient::Target::Body {
                     world: "dev.example.kv".into(),
                     body: [2u8; 16],
                 },
@@ -450,15 +440,15 @@ mod behaviour {
     }
 
     fn drive(station: &Station, rounds: usize) {
-        let from = StationId::from_device(&mechanics::crypto::device_from_seed(&[91u8; 32]))
-            .expect("station");
+        let from =
+            Key::from_device(&mechanics::crypto::device_from_seed(&[91u8; 32])).expect("station");
         let live = station.live();
         for round in 0..rounds {
             for signal in signals() {
                 live.deliver(DeliveredSignal {
                     from: from.clone(),
-                    session_id: [(round % 251) as u8; 16],
-                    session_epoch: [(round % 249) as u8; 16],
+                    connection_id: [(round % 251) as u8; 16],
+                    connection_epoch: [(round % 249) as u8; 16],
                     signal,
                 });
             }
@@ -491,7 +481,7 @@ mod behaviour {
             drain(&mut stream),
             0,
             "and no Observation was published, which is the whole of 'not activity': \
-             SpaceBridge derives activity_advanced from an Observation's scopes, and \
+             StationHost derives activity_advanced from an Observation's scopes, and \
              there is no other route in"
         );
     }
@@ -514,7 +504,7 @@ mod behaviour {
             .sign_action(
                 &session,
                 RequestId::from_bytes([9u8; 16]),
-                WorldIntent {
+                Intent {
                     schema: SchemaId::parse("entry").unwrap(),
                     schema_version: 1,
                     payload: b"k=v".to_vec(),
@@ -548,8 +538,8 @@ mod behaviour {
         drive(&station, 100);
         let durable_before = durable_fingerprint(station.store_dir());
 
-        let orbit = station.go_dormant().expect("dormant");
-        let station = orbit.activate(options()).expect("reactivated");
+        let orbit = station.vacate().expect("dormant");
+        let station = orbit.open(options()).expect("reactivated");
 
         let mut listener = station.signals();
         assert!(

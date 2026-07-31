@@ -1,5 +1,5 @@
 //! `orbital_ceremonies` (M3) — the mechanics ceremony/device/custody surface,
-//! driven end-to-end over the real `OrbitalMechanics` on **three independent
+//! driven end-to-end over the real `SpaceAuthority` on **three independent
 //! nodes** exchanging authority material exactly as Contact does (each node's
 //! `export_records` fed to the others' `incorporate_authority`). No fixtures,
 //! no legacy Replica.
@@ -14,7 +14,7 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use lait::orbital::OrbitalMechanics;
+use lait::orbital::SpaceAuthority;
 use replica::AuthorityIncorporator;
 
 const FOUNDER_SEED: [u8; 32] = [11u8; 32];
@@ -47,16 +47,16 @@ fn device_of(seed: &[u8; 32]) -> String {
 }
 
 /// A founder with product policy seeded.
-fn founder(tag: &str) -> (PathBuf, OrbitalMechanics) {
+fn founder(tag: &str) -> (PathBuf, SpaceAuthority) {
     let root = temp_root(tag);
-    let (mech, _c) = OrbitalMechanics::form(&root, &FOUNDER_SEED, "Cer", vec![]).unwrap();
+    let (mech, _c) = SpaceAuthority::form(&root, &FOUNDER_SEED, "Cer", vec![]).unwrap();
     lait::orbital::seed_founder_policy(&mech).unwrap();
     (root, mech)
 }
 
 /// Admit a fresh member under the founder via the real acceptance→redemption
 /// path, returning the member's own mechanics handle.
-fn admit(founder: &OrbitalMechanics, seed: &[u8; 32], tag: &str) -> (PathBuf, OrbitalMechanics) {
+fn admit(founder: &SpaceAuthority, seed: &[u8; 32], tag: &str) -> (PathBuf, SpaceAuthority) {
     let admission = founder
         .mint_admission(
             &FOUNDER_SEED,
@@ -71,7 +71,7 @@ fn admit(founder: &OrbitalMechanics, seed: &[u8; 32], tag: &str) -> (PathBuf, Or
         .mint_coordinates(&FOUNDER_SEED, "Cer", vec![], Some(admission))
         .unwrap();
     let root = temp_root(tag);
-    let mech = OrbitalMechanics::enter(&root, seed, &invite).unwrap();
+    let mech = SpaceAuthority::enter(&root, seed, &invite).unwrap();
     // Founder pulls the joiner's material: automatic admission over Contact.
     let mut f = founder.clone();
     f.incorporate_authority(&mech.export_records()).unwrap();
@@ -82,14 +82,14 @@ fn admit(founder: &OrbitalMechanics, seed: &[u8; 32], tag: &str) -> (PathBuf, Or
 }
 
 /// One directional authority push: `to` incorporates everything `from` serves.
-fn push(from: &OrbitalMechanics, to: &OrbitalMechanics) {
+fn push(from: &SpaceAuthority, to: &SpaceAuthority) {
     let mut t = to.clone();
     let _ = t.incorporate_authority(&from.export_records());
 }
 
 /// Full mesh gossip + a ceremony advance on every node, repeated until the
 /// authority stops moving — the deterministic stand-in for many Contact rounds.
-fn converge(nodes: &[&OrbitalMechanics]) {
+fn converge(nodes: &[&SpaceAuthority]) {
     for _ in 0..24 {
         for a in nodes {
             for b in nodes {
@@ -325,7 +325,7 @@ fn threshold_recovery_installs_the_exact_root_and_fences_the_old_epoch() {
     // Durable restart result: reopen c1's store cold; the exact terminal
     // state — root, generation, effect count — survives.
     let space = c1.1.space();
-    let reopened = OrbitalMechanics::open(&c1.0, &space, &C1_SEED).unwrap();
+    let reopened = SpaceAuthority::open(&c1.0, &space, &C1_SEED).unwrap();
     let (state, terminal) = reopened.space_root_state();
     assert_eq!((state.gen, terminal), (2, 2));
     assert_eq!(state.root, vec![c1_actor]);
@@ -506,16 +506,16 @@ fn a_cold_restart_mid_ceremony_resumes_without_regenerating_material() {
     }
     let space = f.space();
     drop(f);
-    let f = OrbitalMechanics::open(&rf, &space, &FOUNDER_SEED).unwrap();
+    let f = SpaceAuthority::open(&rf, &space, &FOUNDER_SEED).unwrap();
     let c1m = {
         let (root, m) = c1;
         drop(m);
-        OrbitalMechanics::open(&root, &space, &C1_SEED).unwrap()
+        SpaceAuthority::open(&root, &space, &C1_SEED).unwrap()
     };
     let c2m = {
         let (root, m) = c2;
         drop(m);
-        OrbitalMechanics::open(&root, &space, &C2_SEED).unwrap()
+        SpaceAuthority::open(&root, &space, &C2_SEED).unwrap()
     };
     converge(&[&f, &c1m, &c2m]);
     let after = f.recovery_status();

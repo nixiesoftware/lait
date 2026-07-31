@@ -14,12 +14,9 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use replica::body::{BodyOp, BodySchema, CollaborativeSchema, MutationModel};
+use replica::body::{CollaborativeSchema, MutationModel, Op, Schema};
 use replica::ids::BodyKey;
-use runtime::{
-    BodyDeclaration, World, WorldContext, WorldEffect, WorldError, WorldIntent, WorldProjection,
-    WorldQuery,
-};
+use runtime::{BodyDeclaration, Context, Effect, Intent, Projection, Query, World, WorldError};
 
 use crate::dto::{ActivityEvent, CatalogScope, FieldChange, Priority, StatusCategory};
 use crate::ids::{ActorId, DocId};
@@ -91,7 +88,7 @@ fn place(ordered: &[Milestone], id: &str, pos: &Pos) -> Option<String> {
 /// The registered product World.
 pub struct IssuesWorld {
     id: replica::ids::WorldId,
-    schemas: Vec<BodySchema>,
+    schemas: Vec<Schema>,
     /// Owned rather than built on demand, because the trait hands back a slice
     /// and the registry compares it against the registration byte for byte —
     /// two constructions of "the same" list is how they come to differ.
@@ -134,7 +131,7 @@ impl IssuesWorld {
     /// (reusing per-issue parses whose reader stamp is unchanged) and cached
     /// under the root. A zero root (fixture contexts without a snapshot
     /// identity) is never cached.
-    fn derived_snapshot(&self, ctx: &WorldContext<'_>) -> Result<Arc<DerivedSnapshot>, WorldError> {
+    fn derived_snapshot(&self, ctx: &Context<'_>) -> Result<Arc<DerivedSnapshot>, WorldError> {
         let root = ctx.manifest_root();
         let identified = root != [0u8; 32];
         if identified {
@@ -197,14 +194,14 @@ impl IssuesWorld {
             cache: std::sync::Mutex::new(RootKeyedCache::default()),
             signal_schemas: contract::signal_schemas(),
             schemas: vec![
-                BodySchema {
+                Schema {
                     id: contract::issue_schema(),
                     version: contract::ISSUE_SCHEMA_VERSION,
                     encoding: contract::issue_encoding(),
                     mutation: MutationModel::Collaborative(CollaborativeSchema::default()),
                     readable_predecessors: vec![],
                 },
-                BodySchema {
+                Schema {
                     id: contract::catalog_schema(),
                     version: contract::CATALOG_SCHEMA_VERSION,
                     encoding: contract::catalog_encoding(),
@@ -215,32 +212,13 @@ impl IssuesWorld {
         }
     }
 
-    /// The registration the composition root hands to `RuntimeBuilder`.
-    pub fn registration() -> runtime::WorldRegistration {
-        let world = Self::new();
-        runtime::WorldRegistration {
-            id: world.id.clone(),
-            implementation_version: runtime::WorldVersion(1),
-            schemas: world.schemas.clone(),
-            limits: runtime::WorldLimits::default(),
-            // No scopes. Presence, carets and typing on an issue are the
-            // substrate's own shapes over a Body — `IssueView`, `TextCaret`,
-            // `Typing` — and this World gets them without declaring anything. A
-            // declaration is for a scope the substrate has no name for, and
-            // Issues has none yet.
-            scope_schemas: Vec::new(),
-            signal_schemas: world.signal_schemas.clone(),
-        }
-    }
-
     /// The reviewed implementation descriptor this build ships. Its canonical
     /// id is the authority identity the founder activates and every product
-    /// transaction pins. `policy_protocol`/`implementation_version` are 1; the
-    /// policy-table commitment and artifact identity are build-embedded
-    /// release ids (fixed here until a versioned policy table lands).
+    /// transaction pins.
     pub fn implementation_descriptor() -> runtime::implementation::WorldImplementationDescriptor {
+        let world = Self::new();
         runtime::implementation::WorldImplementationDescriptor::from_registration(
-            &Self::registration(),
+            &world.descriptor(),
             1,
             *blake3::hash(b"lait.issues.policy-table.v1").as_bytes(),
             *blake3::hash(b"lait.issues.artifact.v1").as_bytes(),
@@ -253,7 +231,7 @@ struct Staging {
     /// The Space the transaction commits in — the deterministic Catalog's
     /// identity input.
     space: mechanics::ids::SpaceId,
-    ops: Vec<(BodyKey, BodyOp)>,
+    ops: Vec<(BodyKey, Op)>,
     scopes: Vec<BodyKey>,
     declarations: Vec<BodyDeclaration>,
     /// The complete content set for each Body this transaction declares one for.
@@ -319,8 +297,8 @@ impl Staging {
         }
     }
 
-    fn issue(&mut self, key: &BodyKey, op: BodyOp) {
-        if matches!(op, BodyOp::Create) {
+    fn issue(&mut self, key: &BodyKey, op: Op) {
+        if matches!(op, Op::Create) {
             self.declare_issue(key);
         }
         if !self.scopes.contains(key) {
@@ -329,7 +307,7 @@ impl Staging {
         self.ops.push((key.clone(), op));
     }
 
-    fn catalog(&mut self, op: BodyOp) {
+    fn catalog(&mut self, op: Op) {
         if self.declare_catalog_on_use {
             self.declare_catalog();
         }
@@ -357,9 +335,9 @@ impl Staging {
         self.declared.insert(key.clone(), refs);
     }
 
-    fn into_effect(self, doc: Option<String>) -> WorldEffect {
+    fn into_effect(self, doc: Option<String>) -> Effect {
         let demand = self.demand.unwrap_or_else(contract::demand_contributor);
-        WorldEffect {
+        Effect {
             content_refs: self.declared.into_iter().collect(),
             operations: self.ops,
             scopes: self.scopes,
@@ -389,7 +367,7 @@ fn parse_content_ref(raw: &str) -> Option<replica::ContentRef> {
 /// that does not count toward the cap, cannot be detached, and — worst — is
 /// missing from a declaration that is supposed to name everything this Body
 /// references.
-fn raw_attachments(ctx: &WorldContext<'_>, doc: &str) -> BTreeMap<String, Vec<u8>> {
+fn raw_attachments(ctx: &Context<'_>, doc: &str) -> BTreeMap<String, Vec<u8>> {
     ctx.read_collaborative(&issue_key(doc))
         .ok()
         .and_then(|view| view.maps.get("attachments").cloned())
@@ -422,23 +400,23 @@ fn content_of(records: &BTreeMap<String, Vec<u8>>) -> Result<Vec<replica::Conten
     Ok(refs)
 }
 
-fn reg(path: &str, value: impl Into<Vec<u8>>) -> BodyOp {
-    BodyOp::RegisterSet {
+fn reg(path: &str, value: impl Into<Vec<u8>>) -> Op {
+    Op::RegisterSet {
         path: path.into(),
         value: value.into(),
     }
 }
 
-fn map_set(path: &str, key: impl Into<String>, value: impl Into<Vec<u8>>) -> BodyOp {
-    BodyOp::MapSet {
+fn map_set(path: &str, key: impl Into<String>, value: impl Into<Vec<u8>>) -> Op {
+    Op::MapSet {
         path: path.into(),
         key: key.into(),
         value: value.into(),
     }
 }
 
-fn unchanged_effect(doc: Option<String>) -> WorldEffect {
-    WorldEffect {
+fn unchanged_effect(doc: Option<String>) -> Effect {
+    Effect {
         // A no-op declares nothing, which is not the same as declaring nothing
         // *for* a Body: an empty list here means no key is named at all, so no
         // Body's existing declaration is touched.
@@ -464,7 +442,7 @@ fn unchanged_effect(doc: Option<String>) -> WorldEffect {
 /// [`WorldError::WorldStateCorrupt`]; the World never selects among, merges,
 /// repairs, or silently recreates Catalogs.
 fn checked_catalog_view(
-    ctx: &WorldContext<'_>,
+    ctx: &Context<'_>,
 ) -> Result<Option<replica::CollaborativeView>, WorldError> {
     let expected = catalog_key(&ctx.principal().space);
     let catalogs = ctx.bodies_with_schema(&contract::world_id(), &contract::catalog_schema());
@@ -482,11 +460,11 @@ fn checked_catalog_view(
 }
 
 /// Load the catalog state from the committed snapshot (integrity-checked).
-fn catalog_state(ctx: &WorldContext<'_>) -> Result<CatalogState, WorldError> {
+fn catalog_state(ctx: &Context<'_>) -> Result<CatalogState, WorldError> {
     Ok(CatalogState::from_view(checked_catalog_view(ctx)?.as_ref()))
 }
 
-fn issue_state(ctx: &WorldContext<'_>, doc: &str) -> Option<IssueState> {
+fn issue_state(ctx: &Context<'_>, doc: &str) -> Option<IssueState> {
     ctx.read_collaborative(&issue_key(doc))
         .ok()
         .map(|v| IssueState::from_view(&v))
@@ -498,7 +476,7 @@ fn issue_state(ctx: &WorldContext<'_>, doc: &str) -> Option<IssueState> {
 /// because a duplicated id would fuse two comments' reactions, replies and
 /// spans.
 fn check_comment(
-    ctx: &WorldContext<'_>,
+    ctx: &Context<'_>,
     doc: &str,
     body: &str,
     actor: &str,
@@ -535,7 +513,7 @@ fn check_comment(
 /// Append a comment record and its history event.
 fn stage_comment(
     staging: &mut Staging,
-    ctx: &WorldContext<'_>,
+    ctx: &Context<'_>,
     doc: &str,
     issue: &IssueState,
     record: StoredComment,
@@ -546,7 +524,7 @@ fn stage_comment(
     ev.x = record.b.clone();
     staging.issue(
         &issue_key(doc),
-        BodyOp::ListInsert {
+        Op::ListInsert {
             path: "comments".into(),
             index: issue.comments.len() as u64,
             value: serde_json::to_vec(&record).expect("comment json"),
@@ -584,7 +562,7 @@ fn stage_comment(
 /// character-in-front binding, which is the only one a caret at the very end of
 /// a text can have.
 fn mint_comment_anchor(
-    ctx: &WorldContext<'_>,
+    ctx: &Context<'_>,
     doc: &str,
     issue: &IssueState,
     field: &str,
@@ -594,7 +572,7 @@ fn mint_comment_anchor(
     let text = issue
         .anchorable_text(field)
         .ok_or(WorldError::InvalidRequest)?;
-    // Unicode scalars: the coordinate system `BodyOp::TextSplice` is validated
+    // Unicode scalars: the coordinate system `Op::TextSplice` is validated
     // in, so a span counted any other way would name a different place.
     let length = text.chars().count() as u64;
     let last = end.unwrap_or(start);
@@ -631,7 +609,7 @@ fn mint_comment_anchor(
 /// drift. Refusing that only at the write seam would leave the read seam
 /// affirming the exact lie the write seam exists to stop.
 fn resolve_comment_anchor(
-    ctx: &WorldContext<'_>,
+    ctx: &Context<'_>,
     doc: &str,
     issue: &IssueState,
     comment: &StoredComment,
@@ -657,7 +635,7 @@ fn resolve_comment_anchor(
     let key = issue_key(doc);
     let one = |hex: &str| -> Option<replica::AnchorResolution> {
         let raw = data_encoding::HEXLOWER.decode(hex.as_bytes()).ok()?;
-        let anchor = replica::FabricAnchor::decode_canonical(&raw).ok()?;
+        let anchor = replica::Anchor::decode_canonical(&raw).ok()?;
         // The record names a field and so does the anchor inside it. This
         // build writes them together and they always agree; a record from
         // anywhere else that disagrees cannot say which one its writer meant,
@@ -709,7 +687,7 @@ fn actor_of(event: &IssueEvent) -> Option<ActorId> {
 }
 
 /// Append one history event to an issue's `events` list.
-fn push_event(staging: &mut Staging, ctx: &WorldContext<'_>, doc: &str, event: &IssueEvent) {
+fn push_event(staging: &mut Staging, ctx: &Context<'_>, doc: &str, event: &IssueEvent) {
     // Stamped here rather than at each construction site, which is why the
     // eleven of them and the intents carrying `device` are untouched. The actor
     // is the Session's own, re-derived by the authority view at every submit —
@@ -727,7 +705,7 @@ fn push_event(staging: &mut Staging, ctx: &WorldContext<'_>, doc: &str, event: &
         .unwrap_or(0);
     staging.issue(
         &key,
-        BodyOp::ListInsert {
+        Op::ListInsert {
             path: "events".into(),
             index: len,
             value: serde_json::to_vec(event).expect("event json"),
@@ -864,7 +842,7 @@ fn board_insert_top(staging: &mut Staging, catalog: &CatalogState, project: &str
     {
         return;
     }
-    staging.catalog(BodyOp::ListInsert {
+    staging.catalog(Op::ListInsert {
         path: board_path(project),
         index: 0,
         value: doc.as_bytes().to_vec(),
@@ -876,7 +854,7 @@ fn board_remove(staging: &mut Staging, catalog: &CatalogState, project: &str, do
         .into_iter()
         .find(|(_, d)| d == doc)
     {
-        staging.catalog(BodyOp::ListRemove {
+        staging.catalog(Op::ListRemove {
             path: board_path(project),
             element,
         });
@@ -917,7 +895,7 @@ fn board_move(
                 }
             };
             let to = to.min(len.saturating_sub(1));
-            staging.catalog(BodyOp::ListMove {
+            staging.catalog(Op::ListMove {
                 path: board_path(project),
                 element: entries[from].0.clone(),
                 index: to as u64,
@@ -925,7 +903,7 @@ fn board_move(
         }
         (None, Some(a)) => {
             let at = if after { a + 1 } else { a }.min(len);
-            staging.catalog(BodyOp::ListInsert {
+            staging.catalog(Op::ListInsert {
                 path: board_path(project),
                 index: at as u64,
                 value: doc.as_bytes().to_vec(),
@@ -933,7 +911,7 @@ fn board_move(
         }
         (Some(from), None) => {
             if len > 0 {
-                staging.catalog(BodyOp::ListMove {
+                staging.catalog(Op::ListMove {
                     path: board_path(project),
                     element: entries[from].0.clone(),
                     index: (len - 1) as u64,
@@ -941,7 +919,7 @@ fn board_move(
             }
         }
         (None, None) => {
-            staging.catalog(BodyOp::ListInsert {
+            staging.catalog(Op::ListInsert {
                 path: board_path(project),
                 index: len as u64,
                 value: doc.as_bytes().to_vec(),
@@ -995,11 +973,22 @@ fn is_ancestor(catalog: &CatalogState, start: &str, needle: &str) -> bool {
 }
 
 impl World for IssuesWorld {
+    fn descriptor(&self) -> runtime::Descriptor {
+        runtime::Descriptor {
+            id: self.id.clone(),
+            implementation_version: runtime::Version(1),
+            schemas: self.schemas.clone(),
+            limits: runtime::Limits::default(),
+            scope_schemas: Vec::new(),
+            signal_schemas: self.signal_schemas.clone(),
+        }
+    }
+
     fn id(&self) -> replica::ids::WorldId {
         self.id.clone()
     }
 
-    fn schemas(&self) -> &[BodySchema] {
+    fn schemas(&self) -> &[Schema] {
         &self.schemas
     }
 
@@ -1007,11 +996,7 @@ impl World for IssuesWorld {
         &self.signal_schemas
     }
 
-    fn submit(
-        &self,
-        ctx: &mut WorldContext<'_>,
-        intent: WorldIntent,
-    ) -> Result<WorldEffect, WorldError> {
+    fn submit(&self, ctx: &mut Context<'_>, intent: Intent) -> Result<Effect, WorldError> {
         let intent = IssueIntent::from_json(&intent.payload).ok_or(WorldError::InvalidRequest)?;
         let catalog_view = checked_catalog_view(ctx)?;
         let catalog = CatalogState::from_view(catalog_view.as_ref());
@@ -1087,7 +1072,7 @@ impl World for IssuesWorld {
                     registry_hex.clone().into_bytes(),
                 ));
                 for (i, state) in contract::default_workflow().into_iter().enumerate() {
-                    staging.catalog(BodyOp::ListInsert {
+                    staging.catalog(Op::ListInsert {
                         path: "workflow".into(),
                         index: i as u64,
                         value: serde_json::to_vec(&state).expect("workflow json"),
@@ -1161,7 +1146,7 @@ impl World for IssuesWorld {
                     return Err(WorldError::InvalidRequest);
                 }
                 let key = issue_key(&doc);
-                staging.issue(&key, BodyOp::Create);
+                staging.issue(&key, Op::Create);
                 staging.issue(&key, reg("projectid", project.as_bytes().to_vec()));
                 staging.issue(&key, reg("title", title.as_bytes().to_vec()));
                 staging.issue(&key, reg("status", DEFAULT_STATUS.as_bytes().to_vec()));
@@ -1177,7 +1162,7 @@ impl World for IssuesWorld {
                 if let Some(body) = body.filter(|b| !b.is_empty()) {
                     staging.issue(
                         &key,
-                        BodyOp::TextSplice {
+                        Op::TextSplice {
                             path: "description".into(),
                             index: 0,
                             delete: 0,
@@ -1188,7 +1173,7 @@ impl World for IssuesWorld {
                 for who in &assignees {
                     staging.issue(
                         &key,
-                        BodyOp::SetAdd {
+                        Op::SetAdd {
                             path: "assignees".into(),
                             value: who.as_bytes().to_vec(),
                         },
@@ -1208,7 +1193,7 @@ impl World for IssuesWorld {
                 for label in labels.iter().chain(new_labels.iter().map(|l| &l.id)) {
                     staging.issue(
                         &key,
-                        BodyOp::SetAdd {
+                        Op::SetAdd {
                             path: "labels".into(),
                             value: label.as_bytes().to_vec(),
                         },
@@ -1310,7 +1295,7 @@ impl World for IssuesWorld {
                     {
                         staging.issue(
                             &key,
-                            BodyOp::TextSplice {
+                            Op::TextSplice {
                                 path: "description".into(),
                                 index,
                                 delete,
@@ -1337,7 +1322,7 @@ impl World for IssuesWorld {
                             }
                             None => staging.issue(
                                 &key,
-                                BodyOp::RegisterClear {
+                                Op::RegisterClear {
                                     path: "duedate".into(),
                                 },
                             ),
@@ -1356,7 +1341,7 @@ impl World for IssuesWorld {
                                 .issue(&key, reg("estimate", points.to_string().into_bytes())),
                             None => staging.issue(
                                 &key,
-                                BodyOp::RegisterClear {
+                                Op::RegisterClear {
                                     path: "estimate".into(),
                                 },
                             ),
@@ -1409,7 +1394,7 @@ impl World for IssuesWorld {
                             .iter()
                             .filter(|(_, d)| d != &doc)
                             .count();
-                        staging.catalog(BodyOp::ListInsert {
+                        staging.catalog(Op::ListInsert {
                             path: board_path(&effective),
                             index: len as u64,
                             value: doc.as_bytes().to_vec(),
@@ -1442,12 +1427,12 @@ impl World for IssuesWorld {
                         return Err(WorldError::InvalidRequest);
                     }
                     let op = if add {
-                        BodyOp::SetAdd {
+                        Op::SetAdd {
                             path: "assignees".into(),
                             value: actor.as_bytes().to_vec(),
                         }
                     } else {
-                        BodyOp::SetRemove {
+                        Op::SetRemove {
                             path: "assignees".into(),
                             value: actor.as_bytes().to_vec(),
                         }
@@ -1500,7 +1485,7 @@ impl World for IssuesWorld {
                 for label in add.iter().chain(new_labels.iter().map(|l| &l.id)) {
                     staging.issue(
                         &key,
-                        BodyOp::SetAdd {
+                        Op::SetAdd {
                             path: "labels".into(),
                             value: label.as_bytes().to_vec(),
                         },
@@ -1509,7 +1494,7 @@ impl World for IssuesWorld {
                 for label in &remove {
                     staging.issue(
                         &key,
-                        BodyOp::SetRemove {
+                        Op::SetRemove {
                             path: "labels".into(),
                             value: label.as_bytes().to_vec(),
                         },
@@ -1607,9 +1592,9 @@ impl World for IssuesWorld {
                 staging.issue(
                     &issue_key(&doc),
                     if on {
-                        BodyOp::SetAdd { path, value }
+                        Op::SetAdd { path, value }
                     } else {
-                        BodyOp::SetRemove { path, value }
+                        Op::SetRemove { path, value }
                     },
                 );
                 // No history event, deliberately — see the intent's contract
@@ -1671,7 +1656,7 @@ impl World for IssuesWorld {
                     {
                         return Err(WorldError::InvalidRequest);
                     }
-                    staging.catalog(BodyOp::MapRemove {
+                    staging.catalog(Op::MapRemove {
                         path: "edges".into(),
                         key: edge,
                     });
@@ -1762,7 +1747,7 @@ impl World for IssuesWorld {
                         });
                         staging.issue(
                             &key,
-                            BodyOp::SetAdd {
+                            Op::SetAdd {
                                 path: "assignees".into(),
                                 value: actor.as_bytes().to_vec(),
                             },
@@ -1776,7 +1761,7 @@ impl World for IssuesWorld {
                         });
                         staging.issue(
                             &key,
-                            BodyOp::SetRemove {
+                            Op::SetRemove {
                                 path: "assignees".into(),
                                 value: actor.as_bytes().to_vec(),
                             },
@@ -2014,7 +1999,7 @@ impl World for IssuesWorld {
                 if !catalog.labels.contains_key(&id) {
                     return Err(WorldError::InvalidRequest);
                 }
-                staging.catalog(BodyOp::MapRemove {
+                staging.catalog(Op::MapRemove {
                     path: "labels".into(),
                     key: id,
                 });
@@ -2247,7 +2232,7 @@ impl World for IssuesWorld {
                 if referenced {
                     return Err(WorldError::Conflict);
                 }
-                let map_remove = |path: &str, key: String| BodyOp::MapRemove {
+                let map_remove = |path: &str, key: String| Op::MapRemove {
                     path: path.into(),
                     key,
                 };
@@ -2305,12 +2290,12 @@ impl World for IssuesWorld {
                 staging.issue(
                     &issue_key(&doc),
                     if on {
-                        BodyOp::SetAdd {
+                        Op::SetAdd {
                             path: "followers".into(),
                             value,
                         }
                     } else {
-                        BodyOp::SetRemove {
+                        Op::SetRemove {
                             path: "followers".into(),
                             value,
                         }
@@ -2458,7 +2443,7 @@ impl World for IssuesWorld {
                     None => {
                         staging.issue(
                             &issue_key(&doc),
-                            BodyOp::RegisterClear {
+                            Op::RegisterClear {
                                 path: "milestone".into(),
                             },
                         );
@@ -2560,7 +2545,7 @@ impl World for IssuesWorld {
                     None => {
                         staging.issue(
                             &issue_key(&doc),
-                            BodyOp::RegisterClear {
+                            Op::RegisterClear {
                                 path: "cycle".into(),
                             },
                         );
@@ -2806,7 +2791,7 @@ impl World for IssuesWorld {
                             return Err(WorldError::InvalidRequest);
                         }
                         let key = issue_key(&doc);
-                        staging.issue(&key, BodyOp::Create);
+                        staging.issue(&key, Op::Create);
                         staging.issue(&key, reg("projectid", project.as_bytes().to_vec()));
                         staging.issue(&key, reg("title", item.title.as_bytes().to_vec()));
                         staging.issue(&key, reg("status", DEFAULT_STATUS.as_bytes().to_vec()));
@@ -2819,7 +2804,7 @@ impl World for IssuesWorld {
                         if !item.body.is_empty() {
                             staging.issue(
                                 &key,
-                                BodyOp::TextSplice {
+                                Op::TextSplice {
                                     path: "description".into(),
                                     index: 0,
                                     delete: 0,
@@ -2916,7 +2901,7 @@ impl World for IssuesWorld {
                 let key = issue_key(&doc);
                 staging.issue(
                     &key,
-                    BodyOp::MapSet {
+                    Op::MapSet {
                         path: "attachments".into(),
                         key: id.clone(),
                         value: serde_json::to_vec(&record).expect("attachment json"),
@@ -2954,7 +2939,7 @@ impl World for IssuesWorld {
                 let name = meta.name.clone();
                 staging.issue(
                     &issue_key(&doc),
-                    BodyOp::MapRemove {
+                    Op::MapRemove {
                         path: "attachments".into(),
                         key: id,
                     },
@@ -2967,18 +2952,14 @@ impl World for IssuesWorld {
         }
     }
 
-    fn query(
-        &self,
-        ctx: &WorldContext<'_>,
-        query: WorldQuery,
-    ) -> Result<WorldProjection, WorldError> {
+    fn query(&self, ctx: &Context<'_>, query: Query) -> Result<Projection, WorldError> {
         let query = IssueQuery::from_json(&query.payload).ok_or(WorldError::InvalidRequest)?;
         // ONE derived read model per Manifest root; every arm below reads the
         // same immutable snapshot (see [`IssuesWorld::derived_snapshot`]).
         let snap = self.derived_snapshot(ctx)?;
         let catalog: &CatalogState = &snap.catalog;
         let aliases: &DerivedAliases = &snap.aliases;
-        let projection = |bytes: Vec<u8>| WorldProjection {
+        let projection = |bytes: Vec<u8>| Projection {
             schema: contract::issue_schema(),
             schema_version: contract::ISSUE_SCHEMA_VERSION,
             bytes,
@@ -3841,7 +3822,7 @@ mod comment_anchor_tests {
     /// A reader that answers a scripted resolution per anchor offset, and
     /// counts how often it was asked.
     ///
-    /// [`WorldContext::new`] carries no reader and answers `Drifted` for every
+    /// [`Context::new`] carries no reader and answers `Drifted` for every
     /// anchor, which puts the resolved arms of [`resolve_comment_anchor`] out
     /// of reach — a module built on it passes unchanged when the resolver is
     /// replaced by a constant. The offsets of a stored span's two ends differ,
@@ -3871,7 +3852,7 @@ mod comment_anchor_tests {
         ) -> Vec<replica::ids::BodyKey> {
             Vec::new()
         }
-        fn body_version(&self, _key: &replica::ids::BodyKey) -> Option<replica::FabricVersion> {
+        fn body_version(&self, _key: &replica::ids::BodyKey) -> Option<replica::Version> {
             None
         }
         fn anchor_in_body(
@@ -3879,13 +3860,13 @@ mod comment_anchor_tests {
             _key: &replica::ids::BodyKey,
             _path: &str,
             _position: u64,
-        ) -> Option<replica::FabricAnchor> {
+        ) -> Option<replica::Anchor> {
             None
         }
         fn resolve_anchor(
             &self,
             _key: &replica::ids::BodyKey,
-            anchor: &replica::FabricAnchor,
+            anchor: &replica::Anchor,
         ) -> replica::AnchorResolution {
             self.asked.fetch_add(1, Ordering::SeqCst);
             self.by_offset
@@ -3896,7 +3877,7 @@ mod comment_anchor_tests {
         fn content_status(
             &self,
             _content: &replica::ContentRef,
-        ) -> Option<runtime::world::WorldContentStatus> {
+        ) -> Option<runtime::world::ContentStatus> {
             None
         }
     }
@@ -3912,7 +3893,7 @@ mod comment_anchor_tests {
         let device = mechanics::crypto::device_from_seed(&[3u8; 32]);
         runtime::PrincipalFacts {
             actor: ActorId::from_incept_hash(&"cd".repeat(32)),
-            station: mechanics::ids::StationId::from_device(&device).unwrap(),
+            station: mechanics::station::Key::from_device(&device).unwrap(),
             device,
             space: mechanics::ids::SpaceId::from_digest([5u8; 16]),
             authority_frontier: replica::frontier::AuthorityFrontier::from_canonical_bytes(vec![]),
@@ -3940,14 +3921,14 @@ mod comment_anchor_tests {
     /// Bytes with the shape a real stored anchor has: canonical, naming a path,
     /// and carrying the offset the script keys on.
     fn anchor_hex(path: &str, offset: u64) -> String {
-        let anchor = replica::FabricAnchor {
+        let anchor = replica::Anchor {
             format_version: replica::CAUSAL_FORMAT_VERSION,
             body: [9u8; 32],
             path: path.into(),
             anchored_to: None,
             offset,
             after: true,
-            taken_at: replica::FabricVersion::empty(),
+            taken_at: replica::Version::empty(),
         };
         data_encoding::HEXLOWER.encode(&anchor.encode())
     }
@@ -3967,7 +3948,7 @@ mod comment_anchor_tests {
         at: Option<contract::StoredAnchor>,
     ) -> Option<crate::dto::CommentAnchorDto> {
         let facts = facts();
-        let ctx = WorldContext::with_reads(&facts, reader, [0u8; 32]);
+        let ctx = Context::with_reads(&facts, reader, [0u8; 32]);
         resolve_comment_anchor(&ctx, "iss_x", issue, &comment(at))
     }
 

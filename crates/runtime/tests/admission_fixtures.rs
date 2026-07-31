@@ -7,20 +7,23 @@
 
 use std::time::{Duration, Instant};
 
-use mechanics::ids::{ActorId, DeviceId, SpaceId, StationId};
+use mechanics::{
+    ids::{ActorId, DeviceId, SpaceId},
+    station::Key,
+};
 use replica::frontier::AuthorityFrontier;
 use runtime::admission::{
     judge, AcceptedOpenings, Admission, OpeningContext, PlanePolicy, Replay, MAX_ACCEPTED_OPENINGS,
 };
-use runtime::planes::{feature, stream_kind, Plane, SessionOpen, SessionRefusal, SPACE_ID_LEN};
+use runtime::plane::{feature, stream_kind, Open, Plane, Refusal, SPACE_ID_LEN};
 use runtime::world::{AuthorityView, PrincipalResolution};
 
 const PEER_SEED: [u8; 32] = [11u8; 32];
 const LOCAL_SEED: [u8; 32] = [12u8; 32];
 const STRANGER_SEED: [u8; 32] = [13u8; 32];
 
-fn station(seed: &[u8; 32]) -> StationId {
-    StationId::from_device(&mechanics::crypto::device_from_seed(seed)).expect("station id")
+fn station(seed: &[u8; 32]) -> Key {
+    Key::from_device(&mechanics::crypto::device_from_seed(seed)).expect("station id")
 }
 
 fn space() -> SpaceId {
@@ -48,18 +51,18 @@ fn context<'a>(space: &'a SpaceId, plane: Plane) -> OpeningContext<'a> {
     }
 }
 
-fn opening(space: &SpaceId, plane: Plane) -> SessionOpen {
+fn opening(space: &SpaceId, plane: Plane) -> Open {
     let mut bytes = [0u8; SPACE_ID_LEN];
     bytes.copy_from_slice(space.as_str().as_bytes());
-    SessionOpen {
+    Open {
         plane,
         protocol_version: plane.protocol_version(),
         features: feature::RESIDENCY_HINTS,
         space: bytes,
         initiator_station: station(&PEER_SEED).key_bytes(),
         responder_station: station(&LOCAL_SEED).key_bytes(),
-        session_id: [3u8; 16],
-        session_epoch: [4u8; 16],
+        connection_id: [3u8; 16],
+        connection_epoch: [4u8; 16],
         authority_frontier: vec![9],
         requested_lanes: vec![stream_kind::CONTROL],
     }
@@ -150,7 +153,7 @@ fn a_stranger_who_completed_a_handshake_is_still_not_a_member() {
 
     assert_eq!(
         judge(&open, &context, &member(), &PlanePolicy::default()),
-        Admission::Refuse(SessionRefusal::Refused)
+        Admission::Refuse(Refusal::Refused)
     );
 }
 
@@ -169,7 +172,7 @@ fn a_claim_that_does_not_match_the_negotiated_peer_is_malformed_not_refused() {
             &member(),
             &PlanePolicy::default()
         ),
-        Admission::Refuse(SessionRefusal::Malformed)
+        Admission::Refuse(Refusal::Malformed)
     );
 
     let mut open = opening(&space, Plane::Freight);
@@ -181,7 +184,7 @@ fn a_claim_that_does_not_match_the_negotiated_peer_is_malformed_not_refused() {
             &member(),
             &PlanePolicy::default()
         ),
-        Admission::Refuse(SessionRefusal::Malformed),
+        Admission::Refuse(Refusal::Malformed),
         "an opening addressed to another Station is not ours to accept"
     );
 }
@@ -200,7 +203,7 @@ fn an_opening_for_another_space_is_refused_however_well_formed() {
             &member(),
             &PlanePolicy::default()
         ),
-        Admission::Refuse(SessionRefusal::Malformed)
+        Admission::Refuse(Refusal::Malformed)
     );
 }
 
@@ -217,7 +220,7 @@ fn an_opening_that_disagrees_with_its_own_alpn_is_malformed() {
             &member(),
             &PlanePolicy::default()
         ),
-        Admission::Refuse(SessionRefusal::Malformed)
+        Admission::Refuse(Refusal::Malformed)
     );
 }
 
@@ -234,7 +237,7 @@ fn an_unsupported_generation_is_the_one_refusal_that_says_why() {
             &member(),
             &PlanePolicy::default()
         ),
-        Admission::Refuse(SessionRefusal::UnsupportedVersion { supported: 1 })
+        Admission::Refuse(Refusal::UnsupportedVersion { supported: 1 })
     );
 }
 
@@ -257,7 +260,7 @@ fn operator_policy_and_membership_answer_different_questions() {
             &member(),
             &off
         ),
-        Admission::Refuse(SessionRefusal::Refused),
+        Admission::Refuse(Refusal::Refused),
         "and the refusal is the same coarse one, so it leaks nothing"
     );
     // Every plane gets its own switch, and each is answerable alone. A Station
@@ -270,7 +273,7 @@ fn operator_policy_and_membership_answer_different_questions() {
             &member(),
             &off
         ),
-        Admission::Refuse(SessionRefusal::Refused),
+        Admission::Refuse(Refusal::Refused),
     );
     let files_only = PlanePolicy {
         auto_accept_offers: false,
@@ -285,7 +288,7 @@ fn operator_policy_and_membership_answer_different_questions() {
             &member(),
             &files_only
         ),
-        Admission::Refuse(SessionRefusal::Refused),
+        Admission::Refuse(Refusal::Refused),
         "declining Live must not require declining Freight"
     );
     assert!(
@@ -320,13 +323,13 @@ fn the_admitted_peer_carries_the_session_the_accept_names() {
     ) else {
         panic!("a member is admitted");
     };
-    assert_eq!(peer.session_id, open.session_id);
-    assert_eq!(peer.session_epoch, open.session_epoch);
+    assert_eq!(peer.connection_id, open.connection_id);
+    assert_eq!(peer.connection_epoch, open.connection_epoch);
     assert_eq!(
-        accept.session_id, open.session_id,
+        accept.connection_id, open.connection_id,
         "and the accept names the same session the peer proposed"
     );
-    assert_eq!(accept.session_epoch, open.session_epoch);
+    assert_eq!(accept.connection_epoch, open.connection_epoch);
 }
 
 #[test]
@@ -368,7 +371,7 @@ fn a_reconnect_mints_a_new_epoch_and_is_a_new_session() {
     let space = space();
     let first = opening(&space, Plane::Freight);
     let mut reconnect = first.clone();
-    reconnect.session_epoch = [5u8; 16];
+    reconnect.connection_epoch = [5u8; 16];
 
     let mut ledger = AcceptedOpenings::default();
     let now = Instant::now();
@@ -404,7 +407,7 @@ fn the_replay_ledger_is_bounded_and_forgets_rather_than_refuses() {
 
     for n in 0..(MAX_ACCEPTED_OPENINGS + 64) {
         let mut open = base.clone();
-        open.session_id = (n as u128).to_be_bytes();
+        open.connection_id = (n as u128).to_be_bytes();
         ledger.remember(&open, &accept, now + Duration::from_millis(n as u64));
     }
     assert!(ledger.len() <= MAX_ACCEPTED_OPENINGS);
@@ -462,7 +465,7 @@ fn a_lane_this_build_cannot_serve_is_dropped_from_the_grant_not_the_opening() {
             &member(),
             &PlanePolicy::default()
         ),
-        Admission::Refuse(SessionRefusal::Refused)
+        Admission::Refuse(Refusal::Refused)
     );
 }
 
@@ -509,6 +512,6 @@ fn asking_for_only_unservable_lanes_is_still_a_refusal_where_lanes_exist() {
             &member(),
             &PlanePolicy::default()
         ),
-        Admission::Refuse(SessionRefusal::Refused)
+        Admission::Refuse(Refusal::Refused)
     );
 }

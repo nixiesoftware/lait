@@ -3,7 +3,7 @@
 //! This crate knows only immutable content-addressed objects, object
 //! references, an atomically swapped manifest with opaque caller metadata,
 //! fsync/directory-sync discipline, fault injection, and recovery. It knows
-//! nothing about Bodies, authority, Worlds, or any product — both the Fabric
+//! nothing about Bodies, authority, Worlds, or any product — both the Engine
 //! Body store and the mechanics authority ledger commit through it.
 //!
 //! Layout, under one store root (which may also hold caller-owned lifecycle

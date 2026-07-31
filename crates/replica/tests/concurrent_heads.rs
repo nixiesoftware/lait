@@ -23,7 +23,7 @@ use mechanics::ids::SpaceId;
 use replica::frontier::AuthorityFrontier;
 use replica::{
     ActionOutcome, AuthorityBatchReceipt, AuthorityIncorporator, BodyBinding, BodyId, BodyKey,
-    BodyOp, CommitAuthorization, CommitContext, Replica, ReplicaCommitError, SchemaId, SeedSigner,
+    CommitAuthorization, CommitContext, Op, Replica, ReplicaCommitError, SchemaId, SeedSigner,
     StagedContactMaterial, StaticBodyKeys, SupportedSchemas, WorldId, MUTATION_COLLABORATIVE,
 };
 
@@ -65,10 +65,10 @@ fn test_auth() -> replica::StaticAuthorizer {
 }
 
 fn test_demand() -> Vec<u8> {
-    use mechanics::demand::{AuthorizationDemand, PolicyCapability, PolicyResource};
+    use mechanics::demand::{AuthorizationDemand, PolicyCapability, Resource};
     AuthorizationDemand::require(
         PolicyCapability::new("com.example.notes", "write"),
-        PolicyResource::space("com.example.notes"),
+        Resource::root("com.example.notes"),
     )
     .encode_canonical()
     .expect("canonical demand")
@@ -184,7 +184,7 @@ fn commit_register(
         "note",
         &[(
             shared_body(),
-            BodyOp::RegisterSet {
+            Op::RegisterSet {
                 path: path.into(),
                 value: value.as_bytes().to_vec(),
             },
@@ -416,7 +416,7 @@ fn a_delta_pull_ships_only_missing_heads_and_converges() {
         "note",
         &[(
             second_body(),
-            BodyOp::RegisterSet {
+            Op::RegisterSet {
                 path: "fresh".into(),
                 value: b"new-body".to_vec(),
             },

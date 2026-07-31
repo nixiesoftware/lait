@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, Mutex, RwLock};
 
 use crate::control::{self, ControlRoute, Doorbell, Request, Response};
-use crate::orbital::space_bridge::{SpaceBridgeRunner, SpaceBridgeStop};
+use crate::orbital::space_bridge::{StationHostRunner, StationHostStop};
 use crate::orbital::{WorldCall, WorldCallErrorCode, WorldPackages, WorldReply};
 use crate::transport::{DefaultFactory, TransportFactory};
 
@@ -69,7 +69,7 @@ pub struct StationPlacement {
 /// returning one answer for both would have to materialise the body.
 pub enum ContentPlacement {
     InProcess {
-        bridge: Arc<crate::orbital::space_bridge::SpaceBridge>,
+        bridge: Arc<crate::orbital::space_bridge::StationHost>,
         address: OrbitAddress,
     },
     Attached {
@@ -79,8 +79,8 @@ pub enum ContentPlacement {
 
 enum PlacementMode {
     Owned {
-        bridge: std::sync::Weak<crate::orbital::space_bridge::SpaceBridge>,
-        stop: SpaceBridgeStop,
+        bridge: std::sync::Weak<crate::orbital::space_bridge::StationHost>,
+        stop: StationHostStop,
         completion: StdMutex<Option<tokio::task::JoinHandle<Result<()>>>>,
     },
     Attached,
@@ -185,7 +185,7 @@ impl StationPlacement {
         }
         let seed = crate::config::load_or_create_identity(&resolved.identity_dir)?;
         let runner =
-            SpaceBridgeRunner::start(resolved.home.clone(), seed, factory, packages).await?;
+            StationHostRunner::start(resolved.home.clone(), seed, factory, packages).await?;
         let bridge = runner.bridge_handle();
         let stop = runner.stop_handle();
         let mut completion = tokio::spawn(runner.run());
@@ -195,7 +195,7 @@ impl StationPlacement {
             return match tokio::time::timeout(Duration::from_secs(15), completion).await {
                 Ok(Ok(Err(run_error))) => Err(run_error),
                 Ok(Err(join_error)) => {
-                    Err(anyhow!("in-process SpaceBridge task failed: {join_error}"))
+                    Err(anyhow!("in-process StationHost task failed: {join_error}"))
                 }
                 _ => Err(readiness_error),
             };
@@ -216,7 +216,7 @@ impl StationPlacement {
         let orbit = resolved.address.orbit.clone();
         let orbit_for_pump = orbit.clone();
         let pump_home = resolved.home.clone();
-        let route = Some(ControlRoute::Space {
+        let route = Some(ControlRoute::Orbit {
             address: resolved.address.clone(),
         });
         let alive = Arc::new(AtomicBool::new(true));
@@ -296,9 +296,9 @@ impl StationPlacement {
         };
         match tokio::time::timeout(Duration::from_secs(10), task).await {
             Ok(Ok(result)) => result,
-            Ok(Err(error)) => Err(anyhow!("in-process SpaceBridge task failed: {error}")),
+            Ok(Err(error)) => Err(anyhow!("in-process StationHost task failed: {error}")),
             Err(_) => Err(anyhow!(
-                "in-process SpaceBridge did not finish dormancy within 10s; it remains draining"
+                "in-process StationHost did not finish dormancy within 10s; it remains draining"
             )),
         }
     }
@@ -327,13 +327,13 @@ async fn wait_until_control_ready(
     resolved: &ResolvedOrbit,
     completion: &mut tokio::task::JoinHandle<Result<()>>,
 ) -> Result<()> {
-    let route = ControlRoute::Space {
+    let route = ControlRoute::Orbit {
         address: resolved.address.clone(),
     };
     for _ in 0..100 {
         if completion.is_finished() {
             return Err(anyhow!(
-                "in-process SpaceBridge exited before its control channel became ready"
+                "in-process StationHost exited before its control channel became ready"
             ));
         }
         let response = tokio::time::timeout(
@@ -347,7 +347,7 @@ async fn wait_until_control_ready(
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     Err(anyhow!(
-        "in-process SpaceBridge did not open its control channel within 15s"
+        "in-process StationHost did not open its control channel within 15s"
     ))
 }
 
@@ -423,7 +423,7 @@ impl<T> OrbitOccupancy<T> {
 /// The daemon's control-plane router.
 ///
 /// It owns placement policy, not Station internals. Runtime owns activation and
-/// dormancy; SpaceBridge owns product adaptation; this router owns only the
+/// dormancy; StationHost owns product adaptation; this router owns only the
 /// decision to reuse or establish the host through which an Orbit is reached.
 pub struct ControlRouter {
     directory: OrbitDirectory,
@@ -504,7 +504,7 @@ impl ControlRouter {
     }
 
     /// Place an explicitly addressed Orbit and reject a stale Space
-    /// expectation before the request reaches its SpaceBridge.
+    /// expectation before the request reaches its StationHost.
     pub async fn place_address(&self, address: &OrbitAddress) -> Result<ResolvedOrbit> {
         self.place_address_with_host(address)
             .await
@@ -560,7 +560,7 @@ impl ControlRouter {
         route: &control::ControlRoute,
     ) -> Result<ContentPlacement> {
         let address = match route {
-            control::ControlRoute::Space { address }
+            control::ControlRoute::Orbit { address }
             | control::ControlRoute::World { address, .. } => address,
             control::ControlRoute::Daemon => {
                 return Err(anyhow!("a content call requires an explicit Space route"))
@@ -571,7 +571,7 @@ impl ControlRouter {
             PlacementMode::Owned { bridge, .. } => {
                 let bridge = bridge
                     .upgrade()
-                    .ok_or_else(|| anyhow!("owned SpaceBridge is draining"))?;
+                    .ok_or_else(|| anyhow!("owned StationHost is draining"))?;
                 Ok(ContentPlacement::InProcess {
                     bridge,
                     address: resolved.address.clone(),
@@ -586,7 +586,7 @@ impl ControlRouter {
     /// Dispatch one product-neutral call to its explicitly addressed World.
     ///
     /// Owned placements are invoked directly in-process. An attached
-    /// SpaceBridge receives the same opaque envelope over its per-Orbit socket;
+    /// StationHost receives the same opaque envelope over its per-Orbit socket;
     /// the router never decodes or translates product payloads.
     pub async fn call_world(
         &self,
@@ -624,7 +624,7 @@ impl ControlRouter {
                     return Ok(WorldReply::error(
                         call,
                         WorldCallErrorCode::Unavailable,
-                        "owned SpaceBridge is draining",
+                        "owned StationHost is draining",
                     ));
                 };
                 Ok(bridge.call_world(address, call, act_as))
@@ -704,7 +704,7 @@ fn routed_address(route: &ControlRoute) -> Result<&OrbitAddress> {
         ControlRoute::Daemon => Err(anyhow!(
             "daemon-scoped request cannot be dispatched to a Station"
         )),
-        ControlRoute::Space { address } => Ok(address),
+        ControlRoute::Orbit { address } => Ok(address),
         ControlRoute::World { .. } => Err(anyhow!(
             "typed product requests were retired in control protocol v5; \
              send a versioned World call"
@@ -720,7 +720,7 @@ mod tests {
 
     use super::*;
     use crate::net::Network;
-    use crate::spaces::{Origin, SpaceEntry};
+    use crate::orbits::{Entry, Origin};
     use crate::transport::mem::MemNet;
     use crate::transport::Transport;
 
@@ -766,7 +766,7 @@ mod tests {
             home.clone(),
             home.join("agents"),
             false,
-            vec![SpaceEntry {
+            vec![Entry {
                 space: mechanics.space().as_str().to_string(),
                 name: "Router Test".into(),
                 path: home.to_string_lossy().to_string(),
@@ -951,7 +951,7 @@ mod tests {
         let seed = [202; 32];
         let (home, directory, id) = formed_directory("attached", &seed);
         let net = MemNet::new();
-        let runner = SpaceBridgeRunner::start(
+        let runner = StationHostRunner::start(
             home.clone(),
             seed,
             &MemFactory(net.clone()),

@@ -1,7 +1,7 @@
 //! Plan 13 F0 item 3 — one collaborative Body at growing history and state.
 //!
 //! §2.2's failure is that `export_body` has one collaborative mode, a full
-//! snapshot, and `ProtectedBodyPayload::seal` caps the envelope at 64 MiB. Once
+//! snapshot, and `Material::seal` caps the envelope at 64 MiB. Once
 //! a Body's snapshot crosses that cap every later edit fails. §5.3's fix splits
 //! *active state size* from *retained history*, and picks checkpoint thresholds
 //! from encoded sizes. This measures the four export shapes those thresholds

@@ -42,10 +42,10 @@
 //! record was derived under, and moving it invalidates all of them at once
 //! (`docs/COMPATIBILITY.md` §1, "A hash domain").
 
-use replica::body::{BodySchema, MutationModel};
+use replica::body::{MutationModel, Schema};
 use replica::ids::{SchemaId, WorldId};
 
-use crate::world::{ScopeSchema, SignalSchema, WorldRegistration};
+use crate::world::{Descriptor, ScopeSchema, SignalSchema};
 
 /// BLAKE3 derive-key context for the implementation id.
 const IMPLEMENTATION_CONTEXT: &str = "lait.world-implementation.v1";
@@ -331,7 +331,7 @@ impl<'a> SectionReader<'a> {
 /// `u16`+SchemaId bytes, `u32` version (BE), `u16`+EncodingId bytes, one
 /// mutation-model tag byte, `u16` readable-predecessor count followed by each
 /// `u32` (BE, sorted ascending).
-pub fn canonical_schema_bytes(schema: &BodySchema) -> Vec<u8> {
+pub fn canonical_schema_bytes(schema: &Schema) -> Vec<u8> {
     let mut out = Vec::new();
     let id = schema.id.as_str().as_bytes();
     out.extend_from_slice(&(id.len() as u16).to_be_bytes());
@@ -373,7 +373,7 @@ impl WorldImplementationDescriptor {
     /// again, removing the second source of truth a caller could disagree with
     /// itself about.
     pub fn from_registration(
-        registration: &WorldRegistration,
+        registration: &Descriptor,
         policy_protocol: u32,
         policy_table_commitment: [u8; 32],
         artifact_identity: [u8; 32],
@@ -563,8 +563,8 @@ mod tests {
     use super::*;
     use replica::ids::{EncodingId, SchemaId};
 
-    fn schema(name: &str, version: u32) -> BodySchema {
-        BodySchema {
+    fn schema(name: &str, version: u32) -> Schema {
+        Schema {
             id: SchemaId::parse(name).unwrap(),
             version,
             encoding: EncodingId::parse("json").unwrap(),
@@ -573,18 +573,18 @@ mod tests {
         }
     }
 
-    fn registration(schemas: &[BodySchema]) -> WorldRegistration {
-        WorldRegistration {
+    fn registration(schemas: &[Schema]) -> Descriptor {
+        Descriptor {
             id: WorldId::parse("com.example.notes").unwrap(),
-            implementation_version: crate::world::WorldVersion(7),
+            implementation_version: crate::world::Version(7),
             schemas: schemas.to_vec(),
-            limits: crate::world::WorldLimits::default(),
+            limits: crate::world::Limits::default(),
             scope_schemas: Vec::new(),
             signal_schemas: Vec::new(),
         }
     }
 
-    fn descriptor(schemas: &[BodySchema]) -> WorldImplementationDescriptor {
+    fn descriptor(schemas: &[Schema]) -> WorldImplementationDescriptor {
         WorldImplementationDescriptor::from_registration(
             &registration(schemas),
             1,

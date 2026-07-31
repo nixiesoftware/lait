@@ -23,7 +23,7 @@ use crate::{
     config::{self, load_or_create_identity},
     control::{Request, Response},
     install::{self, Client, Scope},
-    mcp, spaces,
+    mcp, orbits,
 };
 
 fn now_secs() -> u64 {
@@ -56,7 +56,7 @@ fn resolve_orbit_selector(sel: &str) -> Result<std::path::PathBuf> {
         };
         return Ok(store);
     }
-    let entries = spaces::list();
+    let entries = orbits::list();
     let matches: Vec<_> = if sel.starts_with("orb_") {
         entries
             .iter()
@@ -80,7 +80,7 @@ fn resolve_orbit_selector(sel: &str) -> Result<std::path::PathBuf> {
     match matches.len() {
         1 => {
             let e = matches[0];
-            if spaces::presence(e) == spaces::StorePresence::Missing {
+            if orbits::presence(e) == orbits::Presence::Missing {
                 return Err(anyhow!(
                     "Orbit '{}' is registered at {} but the store is gone — run `lait orbits prune`",
                     sel,
@@ -340,7 +340,7 @@ async fn dispatch(specs: &[cmdspec::Spec], matches: &ArgMatches, out: Out) -> Re
         }
         Dispatch::Special(Special::OrbitsForget) => {
             let sel = m.get_one::<String>("sel").cloned().unwrap_or_default();
-            let removed = spaces::forget(&sel)?;
+            let removed = orbits::forget(&sel)?;
             if removed.is_empty() {
                 eprintln!("nothing in the registry matches '{sel}'");
                 std::process::exit(2);
@@ -354,7 +354,7 @@ async fn dispatch(specs: &[cmdspec::Spec], matches: &ArgMatches, out: Out) -> Re
             return Ok(());
         }
         Dispatch::Special(Special::OrbitsPrune) => {
-            let removed = spaces::prune()?;
+            let removed = orbits::prune()?;
             crate::cli::emit_ok(
                 &format!(
                     "pruned {} missing entr{}",
@@ -604,11 +604,11 @@ async fn run_init(m: &ArgMatches, out: Out) -> Result<()> {
     // default project, so `lait issues new` works on the next command.
     let (ws, project) = crate::orbital::found_space_cli(&home, &seed, &name)?;
     // Register the founder — this is what makes `lait orbits` complete.
-    if let Err(e) = spaces::upsert(spaces::SpaceEntry {
+    if let Err(e) = orbits::upsert(orbits::Entry {
         space: ws.to_string(),
         name: name.clone(),
         path: home.display().to_string(),
-        origin: spaces::Origin::Founded,
+        origin: orbits::Origin::Founded,
         host_nick: String::new(),
         last_opened: now_secs(),
         projects: vec![project.clone()],
@@ -689,7 +689,7 @@ fn dir_display_name(home: &std::path::Path) -> String {
 
 /// `lait join <coordinates>`: the orbital join path. Bootstrap the joiner's
 /// orbital store from the invite link (`orbital::enter_space`), ask the Lait
-/// daemon to place its SpaceBridge, then drive Contact to the invite's approach
+/// daemon to place its StationHost, then drive Contact to the invite's approach
 /// Station until
 /// admission lands. The joiner's Contact registers it as a pending Neighbor on
 /// the inviter, whose driver reciprocally dials back to redeem the admission —
@@ -763,11 +763,11 @@ async fn run_join_orbital(m: &ArgMatches, link: &str, out: Out) -> Result<()> {
     }
 
     // Register the joiner store pre-daemon so `lait orbits` sees it.
-    if let Err(e) = spaces::upsert(spaces::SpaceEntry {
+    if let Err(e) = orbits::upsert(orbits::Entry {
         space: space.clone(),
         name: verified.approach_nick_hint.clone(),
         path: target.display().to_string(),
-        origin: spaces::Origin::Joined,
+        origin: orbits::Origin::Joined,
         host_nick: verified.approach_nick_hint.clone(),
         last_opened: now_secs(),
         projects: vec![],

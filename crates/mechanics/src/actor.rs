@@ -340,11 +340,11 @@ pub struct ActorState {
 /// The materialized actor plane: every validly-incepted actor and its current
 /// device set. Pure function of `(space id, event set)`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ActorPlane {
+pub struct Directory {
     actors: BTreeMap<ActorId, ActorState>,
 }
 
-impl ActorPlane {
+impl Directory {
     pub fn state(&self, actor: &ActorId) -> Option<&ActorState> {
         self.actors.get(actor)
     }
@@ -385,7 +385,7 @@ impl ActorPlane {
 }
 
 /// Replay the full event set. See module docs for the two-pass rules.
-pub fn replay(space_id: &SpaceId, events: &[SignedEvent]) -> ActorPlane {
+pub fn replay(space_id: &SpaceId, events: &[SignedEvent]) -> Directory {
     replay_inner(space_id, events, None)
 }
 
@@ -396,9 +396,9 @@ pub fn replay(space_id: &SpaceId, events: &[SignedEvent]) -> ActorPlane {
 /// hold the frontier resolve identically regardless of what else they hold.
 /// An oversized frontier (> [`MAX_ACTOR_ASOF`]) resolves to nothing — a
 /// malformed claim never authorizes.
-pub fn replay_at(space_id: &SpaceId, events: &[SignedEvent], frontier: &[String]) -> ActorPlane {
+pub fn replay_at(space_id: &SpaceId, events: &[SignedEvent], frontier: &[String]) -> Directory {
     if frontier.len() > MAX_ACTOR_ASOF {
-        return ActorPlane::default();
+        return Directory::default();
     }
     replay_inner(space_id, events, Some(frontier))
 }
@@ -407,7 +407,7 @@ fn replay_inner(
     space_id: &SpaceId,
     events: &[SignedEvent],
     frontier: Option<&[String]>,
-) -> ActorPlane {
+) -> Directory {
     let ws = space_id.as_str();
 
     // Index signature-valid events by hash; undecodable ops stay as opaque DAG
@@ -698,7 +698,7 @@ fn replay_inner(
         }
     }
 
-    ActorPlane { actors: states }
+    Directory { actors: states }
 }
 
 #[cfg(test)]

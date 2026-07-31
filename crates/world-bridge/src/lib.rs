@@ -341,7 +341,7 @@ impl WorldReply {
 
 /// Principal facts supplied to a World's application handler.
 ///
-/// This is deliberately smaller than [`runtime::WorldContext`]. The handler
+/// This is deliberately smaller than [`runtime::Context`]. The handler
 /// can resolve user-facing input and sign through the supplied Session, but it
 /// receives no Mechanics, Replica, transport, or storage handle.
 pub struct WorldCallContext<'a> {

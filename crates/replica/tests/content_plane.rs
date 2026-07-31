@@ -24,9 +24,9 @@ use replica::content::{
 };
 use replica::frontier::AuthorityFrontier;
 use replica::{
-    AuthorityBatchReceipt, AuthorityIncorporator, BodyBinding, BodyId, BodyKey, BodyOp,
-    CommitAuthorization, CommitContext, EncodingId, ManifestRoot, Replica, SchemaId, SeedSigner,
-    StagedContactMaterial, StaticBodyKeys, SupportedSchemas, WorldId, MUTATION_ATOMIC,
+    AuthorityBatchReceipt, AuthorityIncorporator, BodyBinding, BodyId, BodyKey,
+    CommitAuthorization, CommitContext, EncodingId, ManifestRoot, Op, Replica, SchemaId,
+    SeedSigner, StagedContactMaterial, StaticBodyKeys, SupportedSchemas, WorldId, MUTATION_ATOMIC,
 };
 
 const WRITER_SEED: [u8; 32] = [61u8; 32];
@@ -86,10 +86,10 @@ fn binding() -> BodyBinding {
 }
 
 fn demand() -> Vec<u8> {
-    use mechanics::demand::{AuthorizationDemand, PolicyCapability, PolicyResource};
+    use mechanics::demand::{AuthorizationDemand, PolicyCapability, Resource};
     AuthorizationDemand::require(
         PolicyCapability::new("com.example.notes", "write"),
-        PolicyResource::space("com.example.notes"),
+        Resource::root("com.example.notes"),
     )
     .encode_canonical()
     .expect("canonical demand")
@@ -149,7 +149,7 @@ fn commit_body(replica: &mut Replica, seq: u8, key: &BodyKey, value: &[u8]) {
             "plane",
             &[(
                 key.clone(),
-                BodyOp::ReplaceAtomic {
+                Op::ReplaceAtomic {
                     value: value.to_vec(),
                 },
             )],

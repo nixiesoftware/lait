@@ -18,7 +18,7 @@
 //! An Orbit is the durable relationship and persists while vacant or occupied.
 //! The Rust handles encode its exclusive operational lease:
 //! [`Orbit::activate`] consumes the vacant Orbit handle and returns a
-//! [`Station`]; [`Station::go_dormant`] consumes the active Station handle and
+//! [`Station`]; [`Station::vacate`] consumes the active Station handle and
 //! returns a vacant Orbit handle. Those ownership transfers are not an
 //! ontological conversion between Orbit and Station.
 //!
@@ -47,9 +47,10 @@ pub mod lifecycle;
 pub mod live;
 pub mod neighbor_presence;
 pub mod neighbors;
+#[path = "planes.rs"]
+pub mod plane;
 pub mod plane_driver;
 pub mod plane_stream;
-pub mod planes;
 pub mod registry;
 pub mod session;
 pub mod signal;
@@ -62,31 +63,29 @@ pub mod world;
 pub use action::{ActionError, IdempotencyKey, RequestId, SignedWorldAction, WorldActionHeader};
 pub use beacon::{BeaconError, RouteHint, SignedBeacon, VerifiedBeacon};
 pub use contact::{
-    AccepterEvent, AccepterValidator, ContactFrame, ContactHello, ContactHelloAck, ContactId,
-    ContactWireError, InitiatorReceiver, InitiatorState, Progress, ReceivedMaterial,
+    AccepterEvent, AccepterValidator, ContactFrame, ContactId, ContactWireError, InitiatorReceiver,
+    InitiatorState, Offer, Progress, Proof, ReceivedMaterial,
 };
-pub use contact_driver::{CommsOptions, ContactMechanics, GossipOptions, MAX_CONTACTS_IN_FLIGHT};
+pub use contact_driver::{Authority, CommsOptions, GossipOptions, MAX_CONTACTS_IN_FLIGHT};
 pub use coordinates::{
     canonical_routes, AdmissionCapability, ApproachRoute, CoordinatesAdmission, CoordinatesError,
     CoordinatesPayload, SignedCoordinates, VerifiedCoordinates,
 };
 pub use error::{ContactError, DormancyError, LifecycleError, StationExit, WorldError};
 pub use lifecycle::{
-    ActivationOptions, CancelToken, ContactOptions, ContactOutcome, DeorbitConfirmation,
-    EnterOptions, Neighbor, Orbit, OrbitObservation, Reachability, Runtime, SpaceFormationOptions,
-    Station,
+    ActivationOptions, CancelToken, ContactOutcome, Neighbor, Orbit, OrbitStatus, Reachability,
+    RemovalConfirmation, Runtime, Station,
 };
 pub use neighbor_presence::{
     PresenceAck, PresenceError, PresenceProbe, PRESENCE_ALPN, PRESENCE_PROTOCOL,
 };
 pub use neighbors::{NeighborRecord, NeighborRegistry, RegistryError, StoredRoute};
-pub use registry::{RuntimeBuilder, WorldRegistry};
+pub use registry::{Registry, RuntimeBuilder};
 pub use session::{
     CommittedEffect, Observation, ObservationCursor, ObservationStream, ObservationStreamError,
     Session, DEFAULT_OBSERVATION_CAPACITY, MAX_OBSERVATION_CAPACITY,
 };
 pub use world::{
-    AuthorityView, BodyDeclaration, BodyReader, LocalIdentity, PrincipalFacts, PrincipalResolution,
-    World, WorldContext, WorldEffect, WorldIntent, WorldLimits, WorldProjection, WorldQuery,
-    WorldRegistration, WorldVersion,
+    AuthorityView, BodyDeclaration, BodyReader, Context, Descriptor, Effect, Intent, Limits,
+    LocalIdentity, PrincipalFacts, PrincipalResolution, Projection, Query, Version, World,
 };

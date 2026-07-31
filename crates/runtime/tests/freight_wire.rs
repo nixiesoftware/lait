@@ -12,14 +12,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use mechanics::crypto::AuthorizedBodyKey;
-use mechanics::ids::{SpaceId, StationId};
+use mechanics::{ids::SpaceId, station::Key};
 use replica::content::ContentRef;
 use replica::journal::cache::ResidentCache;
 use runtime::admission::PlanePolicy;
 use runtime::content_host::{ContentAction, ContentHost, ContentKeys, ContentPolicy};
 use runtime::freight::{frame, read_frame, FreightService};
+use runtime::plane::{bounds, feature, FreightFrame, Open, Plane, SPACE_ID_LEN};
 use runtime::plane_driver::{run_driver, PlaneContext};
-use runtime::planes::{bounds, feature, FreightFrame, Plane, SessionOpen, SPACE_ID_LEN};
 use runtime::world::{AuthorityView, PrincipalResolution};
 
 const PROVIDER_SEED: [u8; 32] = [21u8; 32];
@@ -56,8 +56,8 @@ fn space() -> SpaceId {
     SpaceId::from_digest([31u8; 16])
 }
 
-fn station(seed: &[u8; 32]) -> StationId {
-    StationId::from_device(&mechanics::crypto::device_from_seed(seed)).expect("station")
+fn station(seed: &[u8; 32]) -> Key {
+    Key::from_device(&mechanics::crypto::device_from_seed(seed)).expect("station")
 }
 
 fn filler(seed: u64, len: usize) -> Vec<u8> {
@@ -72,18 +72,18 @@ fn filler(seed: u64, len: usize) -> Vec<u8> {
         .collect()
 }
 
-fn opening(space: &SpaceId) -> SessionOpen {
+fn opening(space: &SpaceId) -> Open {
     let mut bytes = [0u8; SPACE_ID_LEN];
     bytes.copy_from_slice(space.as_str().as_bytes());
-    SessionOpen {
+    Open {
         plane: Plane::Freight,
         protocol_version: Plane::Freight.protocol_version(),
         features: feature::RESIDENCY_HINTS,
         space: bytes,
         initiator_station: station(&CLIENT_SEED).key_bytes(),
         responder_station: station(&PROVIDER_SEED).key_bytes(),
-        session_id: [3u8; 16],
-        session_epoch: [4u8; 16],
+        connection_id: [3u8; 16],
+        connection_epoch: [4u8; 16],
         authority_frontier: vec![9],
         requested_lanes: Vec::new(),
     }
@@ -199,7 +199,7 @@ async fn wire(tag: &str, plaintext: Vec<u8>) -> Wire {
     };
 
     let client = client_transport
-        .connect_session(provider_transport.my_id(), runtime::planes::FREIGHT_ALPN)
+        .connect_session(provider_transport.my_id(), runtime::plane::FREIGHT_ALPN)
         .await
         .expect("dial");
 

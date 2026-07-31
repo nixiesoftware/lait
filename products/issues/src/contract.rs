@@ -79,11 +79,11 @@ pub fn world_id() -> WorldId {
 // query; Mechanics evaluates it at the pinned authority frontier. These are
 // the frozen constructors from plan 04's routing table.
 
-use mechanics::demand::{AuthorizationDemand, PolicyCapability, PolicyResource};
+use mechanics::demand::{AuthorizationDemand, PolicyCapability, Resource};
 
 /// The Space-level resource of the Issues World.
-fn space_resource() -> PolicyResource {
-    PolicyResource::space(PRODUCT_WORLD)
+fn space_resource() -> Resource {
+    Resource::root(PRODUCT_WORLD)
 }
 
 /// A Space-scoped capability of the Issues World.
@@ -127,7 +127,7 @@ pub fn demand_project_any(capability: &str, project: &str) -> Vec<u8> {
     AuthorizationDemand::Any(vec![
         AuthorizationDemand::require(
             space_cap(capability),
-            PolicyResource::project(PRODUCT_WORLD, project),
+            Resource::segments(PRODUCT_WORLD, [project]).expect("validated project resource"),
         ),
         AuthorizationDemand::require(space_cap("space.admin"), space_resource()),
     ])
@@ -215,7 +215,7 @@ pub fn signal_schemas() -> Vec<runtime::world::SignalSchema> {
 
 /// The full Space capability set the founder is granted at formation:
 /// `(capability, resource)` pairs, plus the Mechanics meta policy-admin grant.
-pub fn founder_capabilities() -> Vec<(PolicyCapability, PolicyResource)> {
+pub fn founder_capabilities() -> Vec<(PolicyCapability, Resource)> {
     ["space.admin", "space.contributor", "space.issue.read"]
         .into_iter()
         .map(|c| (space_cap(c), space_resource()))
@@ -567,7 +567,7 @@ pub enum IssueIntent {
     ///
     /// The span arrives as offsets and NEVER as an encoded anchor. The World
     /// mints the anchor itself, which is what makes the stored anchor sound:
-    /// `FabricAnchor::decode_canonical` bounds neither `path` nor `offset`, and
+    /// `Anchor::decode_canonical` bounds neither `path` nor `offset`, and
     /// the `body` digest a correct anchor needs is computed by a substrate
     /// function no product can call — so a wire-supplied anchor is either
     /// unbounded or permanently drifted, and there is no third case.
@@ -1221,7 +1221,7 @@ pub struct StoredAnchor {
     /// [`crate::views::IssueState::anchorable_text`], which is the list of
     /// paths this build will anchor into and the reason there is a list.
     pub field: String,
-    /// The span's start, a hex-encoded [`replica::FabricAnchor`].
+    /// The span's start, a hex-encoded [`replica::Anchor`].
     ///
     /// Hex rather than the raw bytes because the record is JSON and
     /// `serde_json` writes a `Vec<u8>` as a decimal array — about four bytes of

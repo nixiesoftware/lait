@@ -16,7 +16,7 @@ use mechanics::crypto::AuthorizedBodyKey;
 use mechanics::ids::SpaceId;
 use replica::frontier::AuthorityFrontier;
 use replica::{
-    BodyBinding, BodyId, BodyKey, BodyOp, CommitAuthorization, CommitContext, EncodingId, Replica,
+    BodyBinding, BodyId, BodyKey, CommitAuthorization, CommitContext, EncodingId, Op, Replica,
     SchemaId, SeedSigner, StaticBodyKeys, SupportedSchemas, WorldId, MUTATION_COLLABORATIVE,
 };
 
@@ -48,10 +48,10 @@ fn test_auth() -> replica::StaticAuthorizer {
     }
 }
 fn test_demand() -> Vec<u8> {
-    use mechanics::demand::{AuthorizationDemand, PolicyCapability, PolicyResource};
+    use mechanics::demand::{AuthorizationDemand, PolicyCapability, Resource};
     AuthorizationDemand::require(
         PolicyCapability::new("com.example.notes", "write"),
-        PolicyResource::space("com.example.notes"),
+        Resource::root("com.example.notes"),
     )
     .encode_canonical()
     .expect("canonical demand")
@@ -110,7 +110,7 @@ fn edit(r: &mut Replica, n: u16, key: &BodyKey) {
         "op",
         &[(
             key.clone(),
-            BodyOp::TextSplice {
+            Op::TextSplice {
                 path: "body".into(),
                 index: 0,
                 delete: 0,

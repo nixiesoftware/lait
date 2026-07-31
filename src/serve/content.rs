@@ -760,11 +760,11 @@ mod end_to_end {
         }
 
         let orbit = LocalOrbitId::for_store(&dir);
-        let entry = crate::spaces::SpaceEntry {
+        let entry = crate::orbits::Entry {
             space: space.as_str().to_string(),
             name: "Serve Content".into(),
             path: dir.to_string_lossy().into_owned(),
-            origin: crate::spaces::Origin::default(),
+            origin: crate::orbits::Origin::default(),
             host_nick: String::new(),
             last_opened: 0,
             projects: Vec::new(),

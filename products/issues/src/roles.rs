@@ -17,7 +17,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::contract::PRODUCT_WORLD;
-use mechanics::demand::{PolicyCapability, PolicyResource};
+use mechanics::demand::{PolicyCapability, Resource};
 
 /// The BLAKE3 derive-key context for a role revision id.
 const ROLE_REVISION_CONTEXT: &str = "lait.issues.role-revision.v1";
@@ -211,8 +211,8 @@ pub fn role_admission_evidence(
     revision: &RoleRevision,
     parent_manifest_root: [u8; 32],
 ) -> mechanics::demand::WorldAssignmentEvidence {
-    let res = PolicyResource::space(PRODUCT_WORLD);
-    let mut assignments: Vec<(PolicyCapability, PolicyResource)> = revision
+    let res = Resource::root(PRODUCT_WORLD);
+    let mut assignments: Vec<(PolicyCapability, Resource)> = revision
         .body
         .capabilities
         .iter()

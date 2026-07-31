@@ -3,7 +3,7 @@
 //! One binary, four roles:
 //!   * `lait daemon` is the identity-scoped host: one local process endpoint,
 //!     an Orbit directory/router, identity-keyed transport hubs, and zero or
-//!     more in-process SpaceBridges.
+//!     more in-process StationHosts.
 //!   * `lait <cmd>` is the cwd-scoped navigation client, selecting an Orbit and
 //!     driving the daemon or one installed World over an explicit route.
 //!   * `lait serve` binds that same façade to loopback HTTP + SSE so a browser
@@ -43,9 +43,10 @@ pub mod members_ui;
 /// The product's adoption of the orbital lifecycle (hosts a World, drives
 /// Sessions through the public `runtime` API).
 pub mod orbital;
+#[path = "spaces.rs"]
+pub mod orbits;
 pub mod registry;
 pub mod serve;
-pub mod spaces;
 /// The composition adapter for independently packaged Worlds.
 pub mod world;
 

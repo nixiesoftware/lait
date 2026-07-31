@@ -96,7 +96,7 @@ fn poll_until<T>(timeout: Duration, mut check: impl FnMut() -> Option<T>) -> Opt
     }
 }
 
-/// Spawn a process-backed SpaceBridge for `home` on its own OS thread + runtime, with an
+/// Spawn a process-backed StationHost for `home` on its own OS thread + runtime, with an
 /// explicit device seed (the injectable multi-node contract — no shared global
 /// identity between the two daemons).
 fn spawn_daemon(home: PathBuf, seed: [u8; 32], net: MemNet) -> std::thread::JoinHandle<()> {

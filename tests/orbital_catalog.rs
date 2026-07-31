@@ -7,9 +7,9 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use lait::orbital::{read_bootstrap_record, BootstrapFault, BootstrapPhase, OrbitalMechanics};
+use lait::orbital::{read_bootstrap_record, BootstrapFault, BootstrapPhase, SpaceAuthority};
 use lait::world::contract;
-use runtime::{World, WorldContext, WorldError, WorldQuery};
+use runtime::{Context, Query, World, WorldError};
 
 const FOUNDER_SEED: [u8; 32] = [71u8; 32];
 
@@ -24,28 +24,25 @@ fn temp_home(tag: &str) -> PathBuf {
 }
 
 /// Query the formed space's snapshot through a real docked Session.
-fn snapshot_projects(home: &std::path::Path, mech: &OrbitalMechanics) -> usize {
+fn snapshot_projects(home: &std::path::Path, mech: &SpaceAuthority) -> usize {
     let rt = runtime::Runtime::open(
         lait::orbital::orbital_store_root(home),
         runtime::RuntimeBuilder::new()
-            .register(
-                lait::world::IssuesWorld::registration(),
-                std::sync::Arc::new(lait::world::IssuesWorld::new()),
-            )
+            .register(std::sync::Arc::new(lait::world::IssuesWorld::new()))
             .build()
             .unwrap(),
         std::sync::Arc::new(mech.clone()),
         std::sync::Arc::new(mech.clone()),
     );
     let station = rt
-        .orbit(&mech.space())
+        .acquire(&mech.space())
         .unwrap()
-        .activate(runtime::ActivationOptions::offline())
+        .open(runtime::ActivationOptions::offline())
         .unwrap();
     let identity = runtime::Runtime::identity_from_seed(&FOUNDER_SEED);
     let session = station.dock(&contract::world_id(), &identity).unwrap();
     let projection = session
-        .query(runtime::WorldQuery {
+        .query(runtime::Query {
             schema: contract::issue_schema(),
             schema_version: contract::ISSUE_SCHEMA_VERSION,
             payload: contract::IssueQuery::Snapshot.to_json(),
@@ -53,7 +50,7 @@ fn snapshot_projects(home: &std::path::Path, mech: &OrbitalMechanics) -> usize {
         .unwrap();
     let v: serde_json::Value = serde_json::from_slice(&projection.bytes).unwrap();
     let n = v["catalog"]["projects"].as_object().map(|m| m.len());
-    let _ = station.go_dormant();
+    let _ = station.vacate();
     n.unwrap_or(0)
 }
 
@@ -156,7 +153,7 @@ impl runtime::BodyReader for StubReader {
             .cloned()
             .ok_or(replica::ProjectionError::NotCollaborative)
     }
-    fn body_version(&self, _key: &replica::ids::BodyKey) -> Option<replica::FabricVersion> {
+    fn body_version(&self, _key: &replica::ids::BodyKey) -> Option<replica::Version> {
         None
     }
     fn anchor_in_body(
@@ -164,20 +161,20 @@ impl runtime::BodyReader for StubReader {
         _key: &replica::ids::BodyKey,
         _path: &str,
         _position: u64,
-    ) -> Option<replica::FabricAnchor> {
+    ) -> Option<replica::Anchor> {
         None
     }
     fn resolve_anchor(
         &self,
         _key: &replica::ids::BodyKey,
-        _anchor: &replica::FabricAnchor,
+        _anchor: &replica::Anchor,
     ) -> replica::AnchorResolution {
         replica::AnchorResolution::Drifted
     }
     fn content_status(
         &self,
         _content: &replica::ContentRef,
-    ) -> Option<runtime::world::WorldContentStatus> {
+    ) -> Option<runtime::world::ContentStatus> {
         None
     }
 
@@ -194,21 +191,18 @@ fn principal(space: &mechanics::ids::SpaceId) -> runtime::PrincipalFacts {
     let device = mechanics::crypto::device_from_seed(&FOUNDER_SEED);
     runtime::PrincipalFacts {
         actor: mechanics::ids::ActorId::from_incept_hash(&"ab".repeat(32)),
-        station: mechanics::ids::StationId::from_device(&device).unwrap(),
+        station: mechanics::station::Key::from_device(&device).unwrap(),
         device,
         space: space.clone(),
         authority_frontier: replica::frontier::AuthorityFrontier::from_canonical_bytes(vec![]),
     }
 }
 
-fn snapshot_query(
-    world: &lait::world::IssuesWorld,
-    ctx: &WorldContext<'_>,
-) -> Result<(), WorldError> {
+fn snapshot_query(world: &lait::world::IssuesWorld, ctx: &Context<'_>) -> Result<(), WorldError> {
     world
         .query(
             ctx,
-            WorldQuery {
+            Query {
                 schema: contract::issue_schema(),
                 schema_version: contract::ISSUE_SCHEMA_VERSION,
                 payload: contract::IssueQuery::Snapshot.to_json(),
@@ -236,7 +230,7 @@ fn misplaced_and_duplicate_catalogs_are_typed_corrupt_never_repaired() {
     reader
         .views
         .insert(wrong.clone(), replica::CollaborativeView::default());
-    let ctx = WorldContext::with_reads(&facts, &reader, [0u8; 32]);
+    let ctx = Context::with_reads(&facts, &reader, [0u8; 32]);
     assert!(
         matches!(
             snapshot_query(&world, &ctx),
@@ -256,7 +250,7 @@ fn misplaced_and_duplicate_catalogs_are_typed_corrupt_never_repaired() {
     reader
         .views
         .insert(wrong, replica::CollaborativeView::default());
-    let ctx = WorldContext::with_reads(&facts, &reader, [0u8; 32]);
+    let ctx = Context::with_reads(&facts, &reader, [0u8; 32]);
     assert!(
         matches!(
             snapshot_query(&world, &ctx),
@@ -271,7 +265,7 @@ fn misplaced_and_duplicate_catalogs_are_typed_corrupt_never_repaired() {
         catalog_bodies: vec![right.clone()],
         ..Default::default()
     };
-    let ctx = WorldContext::with_reads(&facts, &reader, [0u8; 32]);
+    let ctx = Context::with_reads(&facts, &reader, [0u8; 32]);
     assert!(
         matches!(
             snapshot_query(&world, &ctx),
@@ -283,6 +277,6 @@ fn misplaced_and_duplicate_catalogs_are_typed_corrupt_never_repaired() {
     // No catalog at all: legitimate pre-adoption state, NOT corrupt (a joiner
     // adopts through Manifest synchronization).
     let reader = StubReader::default();
-    let ctx = WorldContext::with_reads(&facts, &reader, [0u8; 32]);
+    let ctx = Context::with_reads(&facts, &reader, [0u8; 32]);
     assert!(snapshot_query(&world, &ctx).is_ok());
 }

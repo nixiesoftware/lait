@@ -22,9 +22,8 @@ use lait::world::IssuesWorld;
 use mechanics::crypto::AuthorizedBodyKey;
 use replica::frontier::AuthorityFrontier;
 use runtime::{
-    ActivationOptions, CommsOptions, ContactMechanics, ContactOptions, EnterOptions, LocalIdentity,
-    RequestId, Runtime, RuntimeBuilder, Session, SignedWorldAction, Station, WorldError,
-    WorldIntent, WorldQuery,
+    ActivationOptions, Authority, CommsOptions, Intent, LocalIdentity, Query, RequestId, Runtime,
+    RuntimeBuilder, Session, SignedWorldAction, Station, WorldError,
 };
 
 const FOUNDER_SEED: [u8; 32] = [7u8; 32];
@@ -116,7 +115,7 @@ fn my_device() -> DeviceId {
 
 fn product_runtime(root: &std::path::Path) -> Runtime {
     let registry = RuntimeBuilder::new()
-        .register(IssuesWorld::registration(), Arc::new(IssuesWorld::new()))
+        .register(Arc::new(IssuesWorld::new()))
         .build()
         .unwrap();
     Runtime::open(
@@ -157,7 +156,7 @@ impl Driver {
             .sign_action(
                 &self.session,
                 RequestId::mint(),
-                WorldIntent {
+                Intent {
                     schema: contract::issue_schema(),
                     schema_version: contract::ISSUE_SCHEMA_VERSION,
                     payload: intent.to_json(),
@@ -173,7 +172,7 @@ impl Driver {
 
     fn query_raw(&self, query: &IssueQuery) -> Vec<u8> {
         self.session
-            .query(WorldQuery {
+            .query(Query {
                 schema: contract::issue_schema(),
                 schema_version: contract::ISSUE_SCHEMA_VERSION,
                 payload: query.to_json(),
@@ -214,9 +213,9 @@ impl Driver {
 fn setup(root: &std::path::Path) -> (Runtime, Station) {
     let rt = product_runtime(root);
     let station = rt
-        .form_space(runtime::SpaceFormationOptions::default())
+        .create()
         .unwrap()
-        .activate(ActivationOptions::offline())
+        .open(ActivationOptions::offline())
         .unwrap();
     (rt, station)
 }
@@ -542,13 +541,13 @@ fn the_full_issue_surface_round_trips_with_legacy_shapes() {
 
     // Restart durability: everything above survives a cold reactivation.
     let space = station.space_id().clone();
-    let orbit = station.go_dormant().unwrap();
+    let orbit = station.vacate().unwrap();
     drop(orbit);
     let rt = product_runtime(&root);
     let station = rt
-        .orbit(&space)
+        .acquire(&space)
         .unwrap()
-        .activate(ActivationOptions::offline())
+        .open(ActivationOptions::offline())
         .unwrap();
     let driver = Driver::dock(&station);
     let view: IssueView = driver.query(&IssueQuery::View {
@@ -558,7 +557,7 @@ fn the_full_issue_surface_round_trips_with_legacy_shapes() {
     assert_eq!(view.title, "First issue");
     assert_eq!(view.comments.len(), 1);
     assert_eq!(driver.resolve("ENG-2").as_deref(), Some(doc2.as_str()));
-    let _ = station.go_dormant();
+    let _ = station.vacate();
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -606,7 +605,7 @@ fn a_denied_or_invalid_request_commits_and_publishes_nothing() {
         Err(WorldError::InvalidRequest)
     );
     assert_eq!(station.frontier(), frontier, "nothing committed");
-    let _ = station.go_dormant();
+    let _ = station.vacate();
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -621,7 +620,7 @@ fn two_stations_converge_product_issues_over_the_contact_plane() {
     let comms_options = |transport: Arc<dyn comms::Transport>, seed: [u8; 32]| CommsOptions {
         transport,
         station_seed: seed,
-        mechanics: ContactMechanics {
+        authority: Authority {
             source: Arc::new(AnyKnownSigner),
             incorporator: Arc::new(Mutex::new(AcceptingIncorporator)),
             export: Arc::new(Vec::new),
@@ -636,9 +635,9 @@ fn two_stations_converge_product_issues_over_the_contact_plane() {
     let root_a = temp_root("conv-a");
     let root_b = temp_root("conv-b");
     let station_a = product_runtime(&root_a)
-        .enter_orbit(&coords, EnterOptions)
+        .materialize(&coords)
         .unwrap()
-        .activate(ActivationOptions {
+        .open(ActivationOptions {
             planes: Default::default(),
             content: Default::default(),
             drain_deadline: Duration::from_secs(5),
@@ -650,9 +649,9 @@ fn two_stations_converge_product_issues_over_the_contact_plane() {
     let (project, doc, _alias) = seed_space(&mut driver_a);
 
     let station_b = product_runtime(&root_b)
-        .enter_orbit(&coords, EnterOptions)
+        .materialize(&coords)
         .unwrap()
-        .activate(ActivationOptions {
+        .open(ActivationOptions {
             planes: Default::default(),
             content: Default::default(),
             drain_deadline: Duration::from_secs(5),
@@ -660,11 +659,10 @@ fn two_stations_converge_product_issues_over_the_contact_plane() {
             observation_capacity: 0,
         })
         .unwrap();
-    let a_station_id = mechanics::ids::StationId::from_device(
-        &mechanics::crypto::device_from_seed(&STATION_A_SEED),
-    )
-    .unwrap();
-    let outcome = station_b.contact(&a_station_id, ContactOptions).unwrap();
+    let a_station_id =
+        mechanics::station::Key::from_device(&mechanics::crypto::device_from_seed(&STATION_A_SEED))
+            .unwrap();
+    let outcome = station_b.contact(&a_station_id).unwrap();
     assert!(outcome.convergence.accepted >= 1);
 
     // B sees A's product state through the SAME World adapter.
@@ -694,11 +692,10 @@ fn two_stations_converge_product_issues_over_the_contact_plane() {
             ts,
         })
         .unwrap();
-    let b_station_id = mechanics::ids::StationId::from_device(
-        &mechanics::crypto::device_from_seed(&STATION_B_SEED),
-    )
-    .unwrap();
-    let outcome = station_a.contact(&b_station_id, ContactOptions).unwrap();
+    let b_station_id =
+        mechanics::station::Key::from_device(&mechanics::crypto::device_from_seed(&STATION_B_SEED))
+            .unwrap();
+    let outcome = station_a.contact(&b_station_id).unwrap();
     assert!(outcome.convergence.accepted >= 1);
     let view: IssueView = driver_a.query(&IssueQuery::View {
         doc: doc.clone(),
@@ -714,8 +711,8 @@ fn two_stations_converge_product_issues_over_the_contact_plane() {
     });
     assert_eq!(board.columns[0].rows.len(), 1);
 
-    let _ = station_a.go_dormant();
-    let _ = station_b.go_dormant();
+    let _ = station_a.vacate();
+    let _ = station_b.vacate();
     let _ = std::fs::remove_dir_all(&root_a);
     let _ = std::fs::remove_dir_all(&root_b);
     let _ = BTreeMap::<String, String>::new();

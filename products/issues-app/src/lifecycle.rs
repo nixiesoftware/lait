@@ -10,12 +10,12 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Result};
 use issues::ids::{ProjectId, SpaceId, SystemUlidSource};
-use runtime::{LocalIdentity, RequestId, Session, SignedWorldAction, WorldIntent};
+use runtime::{Intent, LocalIdentity, RequestId, Session, SignedWorldAction};
 
 /// One deterministic founder grant supplied to the generic authority host.
 pub struct FounderGrant {
     pub capability: mechanics::demand::PolicyCapability,
-    pub resource: mechanics::demand::PolicyResource,
+    pub resource: mechanics::demand::Resource,
     pub salt: [u8; 16],
 }
 
@@ -191,7 +191,7 @@ pub fn bootstrap_tracker(
                 .sign_action(
                     session,
                     request_id,
-                    WorldIntent {
+                    Intent {
                         schema: issues::contract::issue_schema(),
                         schema_version: issues::contract::ISSUE_SCHEMA_VERSION,
                         payload: intent_payload.clone(),

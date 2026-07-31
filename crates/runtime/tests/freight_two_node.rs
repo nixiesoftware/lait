@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use mechanics::crypto::AuthorizedBodyKey;
-use mechanics::ids::{SpaceId, StationId};
+use mechanics::{ids::SpaceId, station::Key};
 use replica::content::ContentRef;
 use replica::journal::cache::ResidentCache;
 use runtime::admission::PlanePolicy;
@@ -23,8 +23,8 @@ use runtime::content_host::{ContentAction, ContentHost, ContentKeys, ContentPoli
 use runtime::fetch::{connect_provider, FetchError, Fetcher};
 use runtime::freight::FreightService;
 use runtime::lifecycle::CancelToken;
+use runtime::plane::Plane;
 use runtime::plane_driver::{run_driver, PlaneContext};
-use runtime::planes::Plane;
 use runtime::transfer::{TransferHandle, TransferRegistry, TransferState};
 use runtime::world::{AuthorityView, PrincipalResolution};
 
@@ -74,7 +74,7 @@ fn filler(seed: u64, len: usize) -> Vec<u8> {
 struct Node {
     host: Arc<ContentHost>,
     core: Arc<runtime::session::StationCore>,
-    station: StationId,
+    station: Key,
     transport: Arc<dyn comms::Transport>,
     cancel: CancelToken,
     driver: Option<std::thread::JoinHandle<()>>,
@@ -156,7 +156,7 @@ fn node(net: &comms::mem::MemNet, tag: &str, seed: [u8; 32], serving: bool) -> N
     let cache = Arc::new(ResidentCache::open(dir.join("cache"), 1 << 30).unwrap());
     let host = Arc::new(ContentHost::new(core.clone(), cache));
     let device = mechanics::crypto::device_from_seed(&seed);
-    let station = StationId::from_device(&device).expect("station");
+    let station = Key::from_device(&device).expect("station");
     let transport: Arc<dyn comms::Transport> = Arc::new(net.peer(device));
     let cancel = CancelToken::new();
 
@@ -248,10 +248,10 @@ fn supported() -> replica::SupportedSchemas {
 }
 
 fn demand() -> Vec<u8> {
-    use mechanics::demand::{AuthorizationDemand, PolicyCapability, PolicyResource};
+    use mechanics::demand::{AuthorizationDemand, PolicyCapability, Resource};
     AuthorizationDemand::require(
         PolicyCapability::new("com.example.notes", "write"),
-        PolicyResource::space("com.example.notes"),
+        Resource::root("com.example.notes"),
     )
     .encode_canonical()
     .expect("canonical demand")
@@ -329,7 +329,7 @@ fn commit_declaring_body(node: &Node, seq: u8) {
                 "author",
                 &[(
                     body_key(seq),
-                    replica::BodyOp::ReplaceAtomic {
+                    replica::Op::ReplaceAtomic {
                         value: b"an issue with a file".to_vec(),
                     },
                 )],

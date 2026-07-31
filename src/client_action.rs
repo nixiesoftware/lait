@@ -89,7 +89,7 @@ impl ClientAction {
     pub fn route(&self, address: OrbitAddress) -> ControlRoute {
         match &self.target {
             ClientTarget::Daemon => ControlRoute::Daemon,
-            ClientTarget::Space => ControlRoute::Space { address },
+            ClientTarget::Space => ControlRoute::Orbit { address },
             ClientTarget::World { world } => ControlRoute::World {
                 address,
                 world: world.clone(),

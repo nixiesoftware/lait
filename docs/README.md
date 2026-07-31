@@ -28,8 +28,8 @@ The normal product model is deliberately small:
 - `lait serve` is a client adapter exposing the same daemon contract over a
   loopback-only HTTP/SSE surface.
 - `lait mcp` exposes the same command contract to agents.
-- The LaitDaemon places a Station-backed SpaceBridge in each addressed local
-  Orbit. Each WorldBridge owns that World's docked Sessions. Clients submit
+- The LaitDaemon places a Station-backed StationHost in each addressed local
+  Orbit. Each WorldHost owns that World's docked Sessions. Clients submit
   intents and re-read Manifest-pinned projections after Observation
   notifications.
 

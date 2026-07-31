@@ -4,59 +4,59 @@
 //! sets, summed counters, no lost list inserts, preserved concurrent text, and
 //! an agreed LWW register winner.
 
-use fabric::{CrdtFabric, Fabric, FabricKey, FabricOp, FabricTransactionRequest};
+use fabric::{Engine, Key, MemoryEngine, Op, Transaction};
 
-fn key() -> FabricKey {
-    FabricKey::from_bytes(b"body/collab".to_vec())
+fn key() -> Key {
+    Key::from_bytes(b"body/collab".to_vec())
 }
 
-fn req(ops: Vec<FabricOp>) -> FabricTransactionRequest {
-    FabricTransactionRequest::new("test", ops)
+fn req(ops: Vec<Op>) -> Transaction {
+    Transaction::new("test", ops)
 }
 
 /// A common ancestor with every path initialized (the documented discipline:
 /// paths are created in the Body's creating transaction, before concurrent
 /// editing), then forked into two engines.
-fn forked_pair() -> (CrdtFabric, CrdtFabric) {
-    let mut a = CrdtFabric::new();
+fn forked_pair() -> (MemoryEngine, MemoryEngine) {
+    let mut a = MemoryEngine::new();
     a.commit(req(vec![
-        FabricOp::CreateBody { key: key() },
-        FabricOp::RegisterSet {
+        Op::CreateBody { key: key() },
+        Op::RegisterSet {
             key: key(),
             path: "title".into(),
             value: b"base".to_vec(),
         },
-        FabricOp::MapSet {
+        Op::MapSet {
             key: key(),
             path: "fields".into(),
             entry: "seed".into(),
             value: b"1".to_vec(),
         },
-        FabricOp::ListInsert {
+        Op::ListInsert {
             key: key(),
             path: "items".into(),
             index: 0,
             value: b"first".to_vec(),
         },
-        FabricOp::ListInsert {
+        Op::ListInsert {
             key: key(),
             path: "items".into(),
             index: 1,
             value: b"second".to_vec(),
         },
-        FabricOp::TextSplice {
+        Op::TextSplice {
             key: key(),
             path: "notes".into(),
             index: 0,
             delete: 0,
             insert: "hello".into(),
         },
-        FabricOp::SetAdd {
+        Op::SetAdd {
             key: key(),
             path: "tags".into(),
             value: b"keep".to_vec(),
         },
-        FabricOp::CounterAdd {
+        Op::CounterAdd {
             key: key(),
             path: "votes".into(),
             delta: 1,
@@ -65,13 +65,13 @@ fn forked_pair() -> (CrdtFabric, CrdtFabric) {
     .unwrap();
     // Fork by cloning the single Body's canonical per-Body export into b.
     let export = a.export_body(&key()).unwrap();
-    let mut b = CrdtFabric::new();
+    let mut b = MemoryEngine::new();
     b.import_body(&key(), &export).unwrap();
     (a, b)
 }
 
 /// Cross-merge both engines (per-Body) and assert their views are identical.
-fn converge(a: &mut CrdtFabric, b: &mut CrdtFabric) -> fabric::CollaborativeView {
+fn converge(a: &mut MemoryEngine, b: &mut MemoryEngine) -> fabric::CollaborativeView {
     let ea = a.export_body(&key()).unwrap();
     let eb = b.export_body(&key()).unwrap();
     a.import_body(&key(), &eb).unwrap();
@@ -85,13 +85,13 @@ fn converge(a: &mut CrdtFabric, b: &mut CrdtFabric) -> fabric::CollaborativeView
 #[test]
 fn concurrent_counter_increments_sum() {
     let (mut a, mut b) = forked_pair();
-    a.commit(req(vec![FabricOp::CounterAdd {
+    a.commit(req(vec![Op::CounterAdd {
         key: key(),
         path: "votes".into(),
         delta: 5,
     }]))
     .unwrap();
-    b.commit(req(vec![FabricOp::CounterAdd {
+    b.commit(req(vec![Op::CounterAdd {
         key: key(),
         path: "votes".into(),
         delta: 3,
@@ -106,13 +106,13 @@ fn concurrent_counter_increments_sum() {
 fn a_concurrent_add_survives_a_remove_add_wins() {
     let (mut a, mut b) = forked_pair();
     // A removes the common member while B concurrently re-adds it.
-    a.commit(req(vec![FabricOp::SetRemove {
+    a.commit(req(vec![Op::SetRemove {
         key: key(),
         path: "tags".into(),
         value: b"keep".to_vec(),
     }]))
     .unwrap();
-    b.commit(req(vec![FabricOp::SetAdd {
+    b.commit(req(vec![Op::SetAdd {
         key: key(),
         path: "tags".into(),
         value: b"keep".to_vec(),
@@ -126,14 +126,14 @@ fn a_concurrent_add_survives_a_remove_add_wins() {
 #[test]
 fn no_list_insert_is_lost() {
     let (mut a, mut b) = forked_pair();
-    a.commit(req(vec![FabricOp::ListInsert {
+    a.commit(req(vec![Op::ListInsert {
         key: key(),
         path: "items".into(),
         index: 2,
         value: b"from-a".to_vec(),
     }]))
     .unwrap();
-    b.commit(req(vec![FabricOp::ListInsert {
+    b.commit(req(vec![Op::ListInsert {
         key: key(),
         path: "items".into(),
         index: 2,
@@ -161,14 +161,14 @@ fn stable_element_identity_survives_sync() {
     let second = vb.lists["items"][1].element.clone();
     // A concurrently inserts at the front — shifting every index — while B
     // removes "second" BY ID. The remove targets the right element regardless.
-    a.commit(req(vec![FabricOp::ListInsert {
+    a.commit(req(vec![Op::ListInsert {
         key: key(),
         path: "items".into(),
         index: 0,
         value: b"shifter".to_vec(),
     }]))
     .unwrap();
-    b.commit(req(vec![FabricOp::ListRemove {
+    b.commit(req(vec![Op::ListRemove {
         key: key(),
         path: "items".into(),
         element: second,
@@ -189,7 +189,7 @@ fn stable_element_identity_survives_sync() {
 fn concurrent_text_splices_both_survive() {
     let (mut a, mut b) = forked_pair();
     // Ancestor text is "hello". A prepends, B appends.
-    a.commit(req(vec![FabricOp::TextSplice {
+    a.commit(req(vec![Op::TextSplice {
         key: key(),
         path: "notes".into(),
         index: 0,
@@ -197,7 +197,7 @@ fn concurrent_text_splices_both_survive() {
         insert: "A:".into(),
     }]))
     .unwrap();
-    b.commit(req(vec![FabricOp::TextSplice {
+    b.commit(req(vec![Op::TextSplice {
         key: key(),
         path: "notes".into(),
         index: 5,
@@ -215,13 +215,13 @@ fn concurrent_text_splices_both_survive() {
 #[test]
 fn concurrent_register_sets_agree_on_one_winner() {
     let (mut a, mut b) = forked_pair();
-    a.commit(req(vec![FabricOp::RegisterSet {
+    a.commit(req(vec![Op::RegisterSet {
         key: key(),
         path: "title".into(),
         value: b"from-a".to_vec(),
     }]))
     .unwrap();
-    b.commit(req(vec![FabricOp::RegisterSet {
+    b.commit(req(vec![Op::RegisterSet {
         key: key(),
         path: "title".into(),
         value: b"from-b".to_vec(),
@@ -239,13 +239,13 @@ fn concurrent_register_sets_agree_on_one_winner() {
 fn concurrent_map_entries_merge_disjoint_and_lww_same_key() {
     let (mut a, mut b) = forked_pair();
     a.commit(req(vec![
-        FabricOp::MapSet {
+        Op::MapSet {
             key: key(),
             path: "fields".into(),
             entry: "only_a".into(),
             value: b"a".to_vec(),
         },
-        FabricOp::MapSet {
+        Op::MapSet {
             key: key(),
             path: "fields".into(),
             entry: "shared".into(),
@@ -254,13 +254,13 @@ fn concurrent_map_entries_merge_disjoint_and_lww_same_key() {
     ]))
     .unwrap();
     b.commit(req(vec![
-        FabricOp::MapSet {
+        Op::MapSet {
             key: key(),
             path: "fields".into(),
             entry: "only_b".into(),
             value: b"b".to_vec(),
         },
-        FabricOp::MapSet {
+        Op::MapSet {
             key: key(),
             path: "fields".into(),
             entry: "shared".into(),

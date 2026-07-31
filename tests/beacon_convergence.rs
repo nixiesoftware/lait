@@ -1,6 +1,6 @@
 //! W4 — the Beacon initiative's acceptance harness (docket 06).
 //!
-//! Real process-backed SpaceBridges over their control sockets on an in-memory transport,
+//! Real process-backed StationHosts over their control sockets on an in-memory transport,
 //! proving the plane the initiative exists for:
 //!
 //! 1. **Steady-state convergence without re-join** (exit criterion 1 /

@@ -11,9 +11,9 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use mechanics::acl::{self, AclAction, AclOp, Grant};
+use mechanics::acl::{self, AclAction, AclOp, Standing};
 use mechanics::actor;
-use mechanics::demand::{AuthorizationDemand, PolicyCapability, PolicyResource};
+use mechanics::demand::{AuthorizationDemand, PolicyCapability, Resource};
 use mechanics::genesis::Genesis;
 use mechanics::ids::{ActorId, SpaceId, SystemUlidSource};
 use mechanics::ledger::{
@@ -66,11 +66,11 @@ fn fx(others: &[u8]) -> Fx {
 fn cap(name: &str) -> PolicyCapability {
     PolicyCapability::new(WORLD, name)
 }
-fn space_res() -> PolicyResource {
-    PolicyResource::space(WORLD)
+fn space_res() -> Resource {
+    Resource::root(WORLD)
 }
-fn project_res(p: &str) -> PolicyResource {
-    PolicyResource {
+fn project_res(p: &str) -> Resource {
+    Resource {
         world: WORLD.into(),
         segments: vec!["project".into(), p.into()],
     }
@@ -122,7 +122,7 @@ fn grant(
     ledger: &AuthorityLedger,
     actor: &ActorId,
     c: &PolicyCapability,
-    r: &PolicyResource,
+    r: &Resource,
     s: u8,
 ) -> LedgerEffect {
     let grant_id = acl::capability_grant_id(actor, c, r, &salt(s)).unwrap();
@@ -180,7 +180,7 @@ fn require_all_any_witness_selection_and_historical_evaluation() {
                 &ledger,
                 AclAction::AddMember {
                     actor: member.clone(),
-                    grants: vec![Grant::Write],
+                    grants: vec![Standing::Write],
                 },
             )
             .encode()],
@@ -188,7 +188,7 @@ fn require_all_any_witness_selection_and_historical_evaluation() {
         )
         .unwrap();
 
-    // Grant the member two capabilities: contributor (Space) and issue.edit
+    // Standing the member two capabilities: contributor (Space) and issue.edit
     // (project p1). Then the contributor demand and an Any/All demand resolve.
     ledger
         .commit_batch(
@@ -308,7 +308,7 @@ fn historical_grant_then_removal_evaluated_at_each_frontier() {
                 &ledger,
                 AclAction::AddMember {
                     actor: member.clone(),
-                    grants: vec![Grant::Write],
+                    grants: vec![Standing::Write],
                 },
             )
             .encode()],
@@ -440,7 +440,7 @@ fn receipt_verifies_and_every_substitution_is_caught() {
                 &ledger,
                 AclAction::AddMember {
                     actor: member.clone(),
-                    grants: vec![Grant::Write],
+                    grants: vec![Standing::Write],
                 },
             )
             .encode()],
@@ -539,7 +539,7 @@ fn delegation_permits_granting_but_not_meta_capability() {
                     &ledger,
                     AclAction::AddMember {
                         actor: a.clone(),
-                        grants: vec![Grant::Write],
+                        grants: vec![Standing::Write],
                     },
                 )
                 .encode()],

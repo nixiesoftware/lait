@@ -1,15 +1,18 @@
 //! Body schemas, operations, and descriptors.
 //!
 //! A Body is a durable addressable World entity. A World declares its
-//! [`BodySchema`]s and stages [`BodyOp`]s; Replica validates them, mechanics
-//! adjudicates authority, and Fabric makes them durable. The operation algebra
+//! [`Schema`]s and stages [`Op`]s; Replica validates them, mechanics
+//! adjudicates authority, and Engine makes them durable. The operation algebra
 //! is LAIT semantics — **not** a copy of the CRDT engine's API — and is frozen as an S1
-//! fixture and implemented through Fabric in S5. This module defines the sealed
+//! fixture and implemented through Engine in S5. This module defines the sealed
 //! contract shapes; S0 introduces no production routing.
 
 use serde::{Deserialize, Serialize};
 
 use crate::ids::{EncodingId, SchemaId};
+
+pub use crate::protected::Material;
+pub use crate::transaction::Descriptor;
 
 /// Domain separator for the ciphertext-only content commitment.
 pub const BODY_CONTENT_DOMAIN: &[u8] = b"lait/body-content/1";
@@ -61,7 +64,7 @@ pub struct CollaborativeSchema {
 
 /// A World's declaration of one Body schema it supports.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BodySchema {
+pub struct Schema {
     pub id: SchemaId,
     pub version: u32,
     pub encoding: EncodingId,
@@ -75,9 +78,9 @@ pub struct BodySchema {
 /// raw CRDT updates or container ids. Stable element ids, paths, concurrency,
 /// idempotency, limits, and errors are LAIT semantics. This enum is the sealed
 /// S0 shape; the exact path grammar and element-identity rules are frozen as an
-/// S1 fixture and implemented through Fabric in S5.
+/// S1 fixture and implemented through Engine in S5.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum BodyOp {
+pub enum Op {
     /// Atomic replacement of a Body's canonical value.
     ReplaceAtomic {
         value: Vec<u8>,
@@ -158,17 +161,17 @@ mod tests {
 
     #[test]
     fn body_op_and_schema_roundtrip_postcard() {
-        let op = BodyOp::TextSplice {
+        let op = Op::TextSplice {
             path: "body".into(),
             index: 3,
             delete: 1,
             insert: "hi".into(),
         };
         let bytes = postcard::to_stdvec(&op).unwrap();
-        let back: BodyOp = postcard::from_bytes(&bytes).unwrap();
+        let back: Op = postcard::from_bytes(&bytes).unwrap();
         assert_eq!(op, back);
 
-        let schema = BodySchema {
+        let schema = Schema {
             id: SchemaId::parse("issue").unwrap(),
             version: 1,
             encoding: EncodingId::parse("lait.body.v1").unwrap(),
@@ -176,7 +179,7 @@ mod tests {
             readable_predecessors: vec![],
         };
         let sb = postcard::to_stdvec(&schema).unwrap();
-        let sback: BodySchema = postcard::from_bytes(&sb).unwrap();
+        let sback: Schema = postcard::from_bytes(&sb).unwrap();
         assert_eq!(schema, sback);
     }
 }

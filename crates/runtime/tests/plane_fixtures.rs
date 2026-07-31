@@ -9,22 +9,22 @@
 //! definition, and the property that matters is not "we reject bad frames" but
 //! "we reject them *before* we allocate for them".
 
-use runtime::planes::{
-    bounds, datagram_fits, feature, stream_kind, FreightFrame, Plane, PlaneWireError,
-    ProtocolCapability, SessionAccept, SessionOpen, FREIGHT_ALPN, FREIGHT_PROTOCOL_VERSION,
-    LIVE_ALPN, LIVE_PROTOCOL_VERSION, MAX_PROOF_BYTES, MAX_WANTED_CHUNKS, SPACE_ID_LEN,
+use runtime::plane::{
+    bounds, datagram_fits, feature, stream_kind, Accept, Capability, FreightFrame, Open, Plane,
+    WireError, FREIGHT_ALPN, FREIGHT_PROTOCOL_VERSION, LIVE_ALPN, LIVE_PROTOCOL_VERSION,
+    MAX_PROOF_BYTES, MAX_WANTED_CHUNKS, SPACE_ID_LEN,
 };
 
-fn opening(plane: Plane) -> SessionOpen {
-    SessionOpen {
+fn opening(plane: Plane) -> Open {
+    Open {
         plane,
         protocol_version: plane.protocol_version(),
         features: feature::RESIDENCY_HINTS,
         space: [7u8; SPACE_ID_LEN],
         initiator_station: [1u8; 32],
         responder_station: [2u8; 32],
-        session_id: [3u8; 16],
-        session_epoch: [4u8; 16],
+        connection_id: [3u8; 16],
+        connection_epoch: [4u8; 16],
         authority_frontier: vec![9],
         requested_lanes: vec![stream_kind::CONTROL],
     }
@@ -50,17 +50,17 @@ fn an_opening_roundtrips_canonically() {
     for plane in [Plane::Freight, Plane::Live] {
         let open = opening(plane);
         let encoded = open.encode();
-        assert_eq!(SessionOpen::decode_canonical(&encoded).unwrap(), open);
+        assert_eq!(Open::decode_canonical(&encoded).unwrap(), open);
 
         let mut extended = encoded.clone();
         extended.push(0);
         assert_eq!(
-            SessionOpen::decode_canonical(&extended),
-            Err(PlaneWireError::NonCanonical)
+            Open::decode_canonical(&extended),
+            Err(WireError::NonCanonical)
         );
         assert_eq!(
-            SessionOpen::decode_canonical(&encoded[..encoded.len() - 1]),
-            Err(PlaneWireError::NonCanonical)
+            Open::decode_canonical(&encoded[..encoded.len() - 1]),
+            Err(WireError::NonCanonical)
         );
     }
 }
@@ -70,14 +70,11 @@ fn an_oversized_opening_is_refused_by_length_before_it_is_decoded() {
     // The ordering that matters: a peer must not be able to make us allocate a
     // decode buffer by declaring one.
     let huge = vec![0u8; bounds::MAX_OPENING_BYTES + 1];
-    assert_eq!(
-        SessionOpen::decode_canonical(&huge),
-        Err(PlaneWireError::TooLarge)
-    );
+    assert_eq!(Open::decode_canonical(&huge), Err(WireError::TooLarge));
     let huge_accept = vec![0u8; bounds::MAX_OPENING_BYTES + 1];
     assert_eq!(
-        SessionAccept::decode_canonical(&huge_accept),
-        Err(PlaneWireError::TooLarge)
+        Accept::decode_canonical(&huge_accept),
+        Err(WireError::TooLarge)
     );
 }
 
@@ -86,8 +83,8 @@ fn a_generation_this_build_does_not_speak_is_named() {
     let mut open = opening(Plane::Freight);
     open.protocol_version = 99;
     assert_eq!(
-        SessionOpen::decode_canonical(&open.encode()),
-        Err(PlaneWireError::UnsupportedVersion(99))
+        Open::decode_canonical(&open.encode()),
+        Err(WireError::UnsupportedVersion(99))
     );
 }
 
@@ -124,7 +121,7 @@ fn an_opening_may_name_a_lane_this_build_does_not_implement() {
     // cost is a reset rather than a connection.
     let mut open = opening(Plane::Live);
     open.requested_lanes = vec![stream_kind::CONTROL, stream_kind::RESERVED_MEDIA_FRAME];
-    let decoded = SessionOpen::decode_canonical(&open.encode()).expect("it decodes");
+    let decoded = Open::decode_canonical(&open.encode()).expect("it decodes");
     assert_eq!(
         decoded.requested_lanes.len(),
         2,
@@ -135,8 +132,8 @@ fn an_opening_may_name_a_lane_this_build_does_not_implement() {
     let mut greedy = opening(Plane::Live);
     greedy.requested_lanes = vec![stream_kind::CONTROL; bounds::MAX_LANES + 1];
     assert_eq!(
-        SessionOpen::decode_canonical(&greedy.encode()),
-        Err(PlaneWireError::Bounds)
+        Open::decode_canonical(&greedy.encode()),
+        Err(WireError::Bounds)
     );
 }
 
@@ -145,8 +142,8 @@ fn lane_and_frontier_counts_are_bounded() {
     let mut open = opening(Plane::Live);
     open.requested_lanes = vec![stream_kind::CONTROL; bounds::MAX_LANES + 1];
     assert_eq!(
-        SessionOpen::decode_canonical(&open.encode()),
-        Err(PlaneWireError::Bounds)
+        Open::decode_canonical(&open.encode()),
+        Err(WireError::Bounds)
     );
 
     let mut open = opening(Plane::Live);
@@ -154,8 +151,8 @@ fn lane_and_frontier_counts_are_bounded() {
     // Too large to even be an opening, so the length gate fires first — which
     // is the correct order.
     assert_eq!(
-        SessionOpen::decode_canonical(&open.encode()),
-        Err(PlaneWireError::TooLarge)
+        Open::decode_canonical(&open.encode()),
+        Err(WireError::TooLarge)
     );
 }
 
@@ -169,14 +166,14 @@ fn a_replay_is_recognisable_from_the_opening_alone() {
     assert!(first.is_replay_of(&replay));
 
     let mut reconnect = first.clone();
-    reconnect.session_epoch = [5u8; 16];
+    reconnect.connection_epoch = [5u8; 16];
     assert!(
         !first.is_replay_of(&reconnect),
         "a reconnect mints a new epoch and is a new session"
     );
 
     let mut other = first.clone();
-    other.session_id = [6u8; 16];
+    other.connection_id = [6u8; 16];
     assert!(!first.is_replay_of(&other));
 }
 
@@ -186,13 +183,13 @@ fn absent_features_decode_to_none_rather_than_failing() {
     // the other side set it, so "no bits" must be a valid answer and not a
     // parse error — otherwise every additive capability would need an ALPN
     // bump, which is exactly what feature bits exist to avoid.
-    let capability = ProtocolCapability {
+    let capability = Capability {
         plane: Plane::Freight,
         protocol_version: FREIGHT_PROTOCOL_VERSION,
         features: 0,
     };
     let encoded = postcard::to_stdvec(&capability).unwrap();
-    let back: ProtocolCapability = postcard::from_bytes(&encoded).unwrap();
+    let back: Capability = postcard::from_bytes(&encoded).unwrap();
     assert_eq!(back.features, 0);
     assert_eq!(back, capability);
     assert_ne!(feature::UNSOLICITED_PROVIDE, feature::RESIDENCY_HINTS);
@@ -218,7 +215,7 @@ fn freight_requests_are_exact_and_bounded() {
     };
     assert_eq!(
         FreightFrame::decode_canonical(&overlong.encode()),
-        Err(PlaneWireError::Bounds)
+        Err(WireError::Bounds)
     );
 
     let greedy = FreightFrame::Have {
@@ -227,7 +224,7 @@ fn freight_requests_are_exact_and_bounded() {
     };
     assert_eq!(
         FreightFrame::decode_canonical(&greedy.encode()),
-        Err(PlaneWireError::Bounds),
+        Err(WireError::Bounds),
         "a request naming more chunks than any content has is refused by count"
     );
 
@@ -239,7 +236,7 @@ fn freight_requests_are_exact_and_bounded() {
     };
     assert_eq!(
         FreightFrame::decode_canonical(&fat_proof.encode()),
-        Err(PlaneWireError::Bounds)
+        Err(WireError::Bounds)
     );
 }
 
@@ -312,22 +309,22 @@ fn every_plane_shape_has_a_frozen_encoding() {
     // which generation a shape belongs to. These bytes are that record. A
     // refactor that changes an encoding without changing an ALPN is the failure
     // this catches, and it is silent by construction otherwise.
-    let open = SessionOpen {
+    let open = Open {
         plane: Plane::Freight,
         protocol_version: FREIGHT_PROTOCOL_VERSION,
         features: feature::UNSOLICITED_PROVIDE | feature::RESIDENCY_HINTS,
         space: [7u8; SPACE_ID_LEN],
         initiator_station: [1u8; 32],
         responder_station: [2u8; 32],
-        session_id: [3u8; 16],
-        session_epoch: [4u8; 16],
+        connection_id: [3u8; 16],
+        connection_epoch: [4u8; 16],
         authority_frontier: vec![9, 8, 7],
         requested_lanes: vec![stream_kind::CONTROL, stream_kind::RELIABLE_SIGNAL],
     };
-    let accept = SessionAccept {
-        session_id: [3u8; 16],
-        session_epoch: [4u8; 16],
-        capability: ProtocolCapability {
+    let accept = Accept {
+        connection_id: [3u8; 16],
+        connection_epoch: [4u8; 16],
+        capability: Capability {
             plane: Plane::Freight,
             protocol_version: FREIGHT_PROTOCOL_VERSION,
             features: feature::RESIDENCY_HINTS,
@@ -336,8 +333,8 @@ fn every_plane_shape_has_a_frozen_encoding() {
     };
 
     let goldens: Vec<(&str, Vec<u8>)> = vec![
-        ("SessionOpen", open.encode()),
-        ("SessionAccept", accept.encode()),
+        ("Open", open.encode()),
+        ("Accept", accept.encode()),
         (
             "Have",
             FreightFrame::Have {
@@ -402,11 +399,8 @@ fn every_plane_shape_has_a_frozen_encoding() {
     assert_eq!(rendered, frozen, "an encoded plane shape moved");
 
     // And every golden still decodes to what produced it.
-    assert_eq!(SessionOpen::decode_canonical(&open.encode()).unwrap(), open);
-    assert_eq!(
-        SessionAccept::decode_canonical(&accept.encode()).unwrap(),
-        accept
-    );
+    assert_eq!(Open::decode_canonical(&open.encode()).unwrap(), open);
+    assert_eq!(Accept::decode_canonical(&accept.encode()).unwrap(), accept);
     for (_, bytes) in goldens.iter().skip(2) {
         FreightFrame::decode_canonical(bytes).expect("a golden frame decodes");
     }
@@ -440,13 +434,13 @@ fn the_openings_inner_bound_is_one_that_can_actually_fire() {
     let mut open = opening(Plane::Live);
     open.authority_frontier = vec![0u8; bounds::MAX_OPENING_BYTES / 2 + 1];
     assert_eq!(
-        SessionOpen::decode_canonical(&open.encode()),
-        Err(PlaneWireError::Bounds),
+        Open::decode_canonical(&open.encode()),
+        Err(WireError::Bounds),
         "the inner bound fires before the outer one"
     );
     let mut open = opening(Plane::Live);
     open.authority_frontier = vec![0u8; bounds::MAX_OPENING_BYTES / 2 - 64];
-    assert!(SessionOpen::decode_canonical(&open.encode()).is_ok());
+    assert!(Open::decode_canonical(&open.encode()).is_ok());
 }
 
 #[test]
@@ -479,20 +473,20 @@ fn the_wire_bounds_agree_with_the_geometry_and_the_store() {
 /// than no message.
 #[cfg(test)]
 mod refusals {
-    use runtime::planes::{bounds, PlaneWireError, SessionRefusal};
+    use runtime::plane::{bounds, Refusal, WireError};
 
     #[test]
     fn every_refusal_round_trips_and_has_exactly_one_spelling() {
         for refusal in [
-            SessionRefusal::Malformed,
-            SessionRefusal::Refused,
-            SessionRefusal::UnsupportedVersion { supported: 1 },
-            SessionRefusal::UnsupportedVersion {
+            Refusal::Malformed,
+            Refusal::Refused,
+            Refusal::UnsupportedVersion { supported: 1 },
+            Refusal::UnsupportedVersion {
                 supported: u16::MAX,
             },
         ] {
             let bytes = refusal.encode();
-            assert_eq!(SessionRefusal::decode_canonical(&bytes), Ok(refusal));
+            assert_eq!(Refusal::decode_canonical(&bytes), Ok(refusal));
             assert!(
                 bytes.len() < 16,
                 "a refusal is small: {} bytes",
@@ -504,8 +498,8 @@ mod refusals {
     #[test]
     fn a_refusal_is_refused_before_it_is_allocated_for() {
         assert_eq!(
-            SessionRefusal::decode_canonical(&vec![0u8; bounds::MAX_OPENING_BYTES + 1]),
-            Err(PlaneWireError::TooLarge)
+            Refusal::decode_canonical(&vec![0u8; bounds::MAX_OPENING_BYTES + 1]),
+            Err(WireError::TooLarge)
         );
     }
 
@@ -522,10 +516,10 @@ mod refusals {
             &b"not a refusal"[..],
             // A trailing byte past a valid encoding. Re-encode equality is what
             // catches this, and it is why the check exists.
-            &[SessionRefusal::Refused.encode(), vec![0u8]].concat()[..],
+            &[Refusal::Refused.encode(), vec![0u8]].concat()[..],
         ] {
             assert!(
-                SessionRefusal::decode_canonical(corpus).is_err(),
+                Refusal::decode_canonical(corpus).is_err(),
                 "{corpus:?} decoded as a refusal"
             );
         }

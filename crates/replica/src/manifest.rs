@@ -51,7 +51,7 @@ pub const MAX_HEADS_PER_BODY: usize = 1024;
 pub const SPACE_ID_LEN: usize = 29;
 
 /// One advertised head: the hash of its public descriptor and the commitment to
-/// its signed BodyTransaction.
+/// its signed Transaction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ManifestHead {
     pub descriptor_hash: [u8; 32],
@@ -251,7 +251,7 @@ impl ManifestRoot {
         body_index_root: Option<ChildRef>,
         content_index_root: Option<ChildRef>,
         authority_frontier: AuthorityFrontier,
-        signer: &dyn crate::transaction::TransactionSigner,
+        signer: &dyn crate::transaction::Signer,
     ) -> Option<Self> {
         let mut root = Self {
             format_version: MANIFEST_FORMAT_VERSION,

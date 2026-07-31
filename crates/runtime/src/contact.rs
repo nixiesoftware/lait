@@ -1,4 +1,4 @@
-//! Contact v1 — the bounded direct material exchange (`lait/contact/1`).
+//! Contact v2 — the bounded direct material exchange (`lait/contact/2`).
 //!
 //! Contact owns connection lifetime, framing, deadlines, transfer completion,
 //! and Neighbor attribution — **never** legitimacy: a completed Contact means
@@ -23,7 +23,7 @@
 //! area. Exact duplicate chunks are idempotent. `TransferAck` acknowledges
 //! framing/receipt only, never durable Convergence.
 
-use mechanics::ids::StationId;
+use mechanics::station::Key;
 use replica::body::ContentCommitment;
 use replica::ids::BodyKey;
 use serde::{Deserialize, Serialize};
@@ -31,12 +31,14 @@ use std::collections::BTreeMap;
 
 use crate::wire::length_framed;
 
+pub use crate::contact_driver::Authority;
+
 /// The Contact ALPN.
-pub const CONTACT_ALPN: &[u8] = b"lait/contact/1";
+pub const CONTACT_ALPN: &[u8] = b"lait/contact/2";
 /// The only Contact protocol version this build speaks. There is no
 /// mixed-version window: an unknown version is refused by name, never
 /// negotiated (clean-break formats).
-pub const CONTACT_PROTOCOL: u16 = 2;
+pub const CONTACT_PROTOCOL: u16 = 3;
 
 /// Maximum catalog nodes one descending peer may request across a Contact.
 ///
@@ -58,7 +60,7 @@ pub const MAX_DESCENT_REQUEST: usize = 256;
 
 /// Domain for the initiator's holdings declaration digest (bound into the
 /// SIGNED hello, so the declaration cannot be altered in transit).
-const HOLDINGS_DOMAIN: &[u8] = b"lait/contact-holdings/1";
+const HOLDINGS_DOMAIN: &[u8] = b"lait/contact-holdings/2";
 
 /// Hard bound on a streamed holdings encoding.
 ///
@@ -71,9 +73,9 @@ const HOLDINGS_DOMAIN: &[u8] = b"lait/contact-holdings/1";
 /// transfer loop rather than a frame change.
 pub const MAX_HOLDINGS_BYTES: usize = 64 * 1024 * 1024;
 /// Hello signing domain.
-pub const HELLO_DOMAIN: &[u8] = b"lait/contact/1/hello";
+pub const OFFER_DOMAIN: &[u8] = b"lait/contact/2/offer";
 /// HelloAck signing domain.
-pub const HELLO_ACK_DOMAIN: &[u8] = b"lait/contact/1/ack";
+pub const PROOF_DOMAIN: &[u8] = b"lait/contact/2/proof";
 /// Ed25519 algorithm tag.
 pub const SIG_ALG_ED25519: u8 = 1;
 
@@ -130,17 +132,17 @@ pub const MAX_MANIFEST_NODES: usize = 8192;
 // receiver cannot tell which is which until the root tells it.
 
 /// Domain for the running transcript hash (over every raw frame, in order).
-const TRANSCRIPT_DOMAIN: &[u8] = b"lait/contact/1/transcript";
+const TRANSCRIPT_DOMAIN: &[u8] = b"lait/contact/2/transcript";
 /// Domain for one authority record's hash.
-const RECORD_DOMAIN: &[u8] = b"lait/contact/1/authority-record";
+const RECORD_DOMAIN: &[u8] = b"lait/contact/2/authority-record";
 /// Domain for the authority set hash (over the ordered record hashes).
-const AUTHORITY_SET_DOMAIN: &[u8] = b"lait/contact/1/authority-set";
+const AUTHORITY_SET_DOMAIN: &[u8] = b"lait/contact/2/authority-set";
 /// Domain for the manifest-root reference hash (over the canonical root bytes).
-const ROOT_REF_DOMAIN: &[u8] = b"lait/contact/1/manifest-root";
+const ROOT_REF_DOMAIN: &[u8] = b"lait/contact/2/manifest-root";
 /// Domain for one manifest index node's hash.
-const MANIFEST_NODE_DOMAIN: &[u8] = b"lait/contact/1/manifest-node";
+const MANIFEST_NODE_DOMAIN: &[u8] = b"lait/contact/2/manifest-node";
 /// Domain for one body chunk's hash.
-const CHUNK_DOMAIN: &[u8] = b"lait/contact/1/body-chunk";
+const CHUNK_DOMAIN: &[u8] = b"lait/contact/2/body-chunk";
 
 /// Abort codes (no remote prose crosses the wire).
 pub mod abort {
@@ -223,7 +225,8 @@ impl ContactId {
 
 /// The initiator's signed opening of a Contact.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ContactHello {
+pub struct Offer {
+    pub opening_hash: [u8; 32],
     pub protocol: u16,
     pub space: [u8; 29],
     pub initiator_station: [u8; 32],
@@ -259,8 +262,8 @@ pub struct ContactHello {
 
 /// The accepter's signed answer, binding the exact Hello.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ContactHelloAck {
-    pub hello_hash: [u8; 32],
+pub struct Proof {
+    pub offer_hash: [u8; 32],
     pub responder_transport: [u8; 32],
     pub nonce: [u8; 32],
     pub signature_algorithm: u8,
@@ -302,9 +305,10 @@ where
     Ok(value)
 }
 
-impl ContactHello {
+impl Offer {
     #[allow(clippy::too_many_arguments)]
     fn preimage(
+        opening_hash: &[u8; 32],
         protocol: u16,
         space: &[u8; 29],
         initiator_station: &[u8; 32],
@@ -317,6 +321,7 @@ impl ContactHello {
         holdings_digest: &[u8; 32],
     ) -> Vec<u8> {
         let body = postcard::to_stdvec(&(
+            opening_hash,
             protocol,
             space,
             initiator_station,
@@ -329,13 +334,14 @@ impl ContactHello {
             holdings_digest,
         ))
         .expect("postcard hello body");
-        length_framed(HELLO_DOMAIN, &body)
+        length_framed(OFFER_DOMAIN, &body)
     }
 
     /// Sign a Hello from the initiator's device seed (the seed's key is both
     /// the Station and transport identity — a peer is its key).
     #[allow(clippy::too_many_arguments)]
     pub fn sign(
+        opening_hash: [u8; 32],
         protocol: u16,
         space: [u8; 29],
         responder_station: [u8; 32],
@@ -348,6 +354,7 @@ impl ContactHello {
     ) -> Option<Self> {
         let station = mechanics::crypto::device_from_seed(initiator_seed).key_bytes()?;
         let preimage = Self::preimage(
+            &opening_hash,
             protocol,
             &space,
             &station,
@@ -361,6 +368,7 @@ impl ContactHello {
         );
         let signature = mechanics::crypto::sign_detached(initiator_seed, &preimage);
         Some(Self {
+            opening_hash,
             protocol,
             space,
             initiator_station: station,
@@ -387,8 +395,9 @@ impl ContactHello {
     /// A commitment to the exact signed Hello.
     pub fn hash(&self) -> [u8; 32] {
         domain_hash(
-            HELLO_DOMAIN,
+            OFFER_DOMAIN,
             &Self::preimage(
+                &self.opening_hash,
                 self.protocol,
                 &self.space,
                 &self.initiator_station,
@@ -406,11 +415,15 @@ impl ContactHello {
     /// Verify against the expected Space and the negotiated connection peer.
     pub fn verify(
         &self,
+        expected_opening_hash: &[u8; 32],
         expected_space: &[u8; 29],
-        transport_peer: &StationId,
+        transport_peer: &Key,
     ) -> Result<(), ContactWireError> {
         if self.protocol != CONTACT_PROTOCOL {
             return Err(ContactWireError::UnsupportedProtocol(self.protocol));
+        }
+        if &self.opening_hash != expected_opening_hash {
+            return Err(ContactWireError::ChallengeMismatch);
         }
         if self.signature_algorithm != SIG_ALG_ED25519 {
             return Err(ContactWireError::UnsupportedSignatureAlgorithm(
@@ -426,6 +439,7 @@ impl ContactHello {
             return Err(ContactWireError::IdentityMismatch);
         }
         let preimage = Self::preimage(
+            &self.opening_hash,
             self.protocol,
             &self.space,
             &self.initiator_station,
@@ -445,25 +459,25 @@ impl ContactHello {
     }
 }
 
-impl ContactHelloAck {
+impl Proof {
     fn preimage(
-        hello_hash: &[u8; 32],
+        offer_hash: &[u8; 32],
         responder_transport: &[u8; 32],
         nonce: &[u8; 32],
     ) -> Vec<u8> {
-        let body = postcard::to_stdvec(&(hello_hash, responder_transport, nonce))
+        let body = postcard::to_stdvec(&(offer_hash, responder_transport, nonce))
             .expect("postcard hello-ack body");
-        length_framed(HELLO_ACK_DOMAIN, &body)
+        length_framed(PROOF_DOMAIN, &body)
     }
 
     /// Sign an ack answering `hello` from the responder's device seed.
-    pub fn sign(hello: &ContactHello, nonce: [u8; 32], responder_seed: &[u8; 32]) -> Option<Self> {
+    pub fn sign(hello: &Offer, nonce: [u8; 32], responder_seed: &[u8; 32]) -> Option<Self> {
         let responder = mechanics::crypto::device_from_seed(responder_seed).key_bytes()?;
-        let hello_hash = hello.hash();
-        let preimage = Self::preimage(&hello_hash, &responder, &nonce);
+        let offer_hash = hello.hash();
+        let preimage = Self::preimage(&offer_hash, &responder, &nonce);
         let signature = mechanics::crypto::sign_detached(responder_seed, &preimage);
         Some(Self {
-            hello_hash,
+            offer_hash,
             responder_transport: responder,
             nonce,
             signature_algorithm: SIG_ALG_ED25519,
@@ -480,17 +494,13 @@ impl ContactHelloAck {
     }
 
     /// Verify against the Hello it answers and the negotiated connection peer.
-    pub fn verify(
-        &self,
-        hello: &ContactHello,
-        transport_peer: &StationId,
-    ) -> Result<(), ContactWireError> {
+    pub fn verify(&self, hello: &Offer, transport_peer: &Key) -> Result<(), ContactWireError> {
         if self.signature_algorithm != SIG_ALG_ED25519 {
             return Err(ContactWireError::UnsupportedSignatureAlgorithm(
                 self.signature_algorithm,
             ));
         }
-        if self.hello_hash != hello.hash() {
+        if self.offer_hash != hello.hash() {
             return Err(ContactWireError::ChallengeMismatch);
         }
         if self.nonce == hello.nonce {
@@ -501,7 +511,7 @@ impl ContactHelloAck {
         {
             return Err(ContactWireError::IdentityMismatch);
         }
-        let preimage = Self::preimage(&self.hello_hash, &self.responder_transport, &self.nonce);
+        let preimage = Self::preimage(&self.offer_hash, &self.responder_transport, &self.nonce);
         if !mechanics::crypto::verify_detached(&hello.responder_station, &preimage, &self.signature)
         {
             return Err(ContactWireError::BadSignature);
@@ -1106,7 +1116,7 @@ impl InitiatorReceiver {
 pub struct OutboundTransfer {
     pub authority_frontier: Vec<u8>,
     /// Canonical authority-section records (mechanics material and signed
-    /// `BodyTransaction` records), byte-exact.
+    /// `Transaction` records), byte-exact.
     pub authority_records: Vec<Vec<u8>>,
     pub manifest_root_bytes: Vec<u8>,
     /// Canonical node bytes of the manifest's Body index, in any order — they

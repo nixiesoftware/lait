@@ -8,7 +8,7 @@
 //!
 //! That negative is the whole contract, and it is easy to break by accident.
 //! One line — a `with_replica` here, a `publish` there — would journal nothing
-//! and still emit an Observation, and `SpaceBridge::frame_for` turns any
+//! and still emit an Observation, and `StationHost::frame_for` turns any
 //! Observation carrying scopes into `activity_advanced`. So the enforcement is
 //! structural: **this module may not name the Replica writer or the Observation
 //! ring**, and `tests/signal_is_not_durable.rs` parses this file and fails if it
@@ -173,7 +173,7 @@ pub fn core_declarations() -> Vec<SignalDeclaration> {
         },
         SignalDeclaration {
             selector: selector::WORLD,
-            max_bytes: crate::planes::bounds::MAX_SIGNAL_BYTES,
+            max_bytes: crate::plane::bounds::MAX_SIGNAL_BYTES,
             demand: SignalDemand::Session,
             response: ResponsePolicy::Forbidden,
         },
@@ -203,7 +203,7 @@ pub fn declaration_for(selector: u16) -> Option<SignalDeclaration> {
 /// signal flow at all.
 pub async fn read_signal(
     flow: &mut dyn comms::RecvFlow,
-) -> Result<crate::planes::Signal, SignalError> {
+) -> Result<crate::plane::Signal, SignalError> {
     let selector = flow
         .read_exact(2)
         .await
@@ -216,7 +216,7 @@ pub async fn read_signal(
     let declaration = declaration_for(selector).ok_or(SignalError::NotRegistered)?;
     let ceiling = declaration
         .max_bytes
-        .min(crate::planes::bounds::MAX_SIGNAL_BYTES);
+        .min(crate::plane::bounds::MAX_SIGNAL_BYTES);
 
     let header = flow
         .read_exact(4)
@@ -234,7 +234,7 @@ pub async fn read_signal(
         .await
         .map_err(|_| SignalError::Malformed)?;
     let signal =
-        crate::planes::Signal::decode_canonical(&body).map_err(|_| SignalError::Malformed)?;
+        crate::plane::Signal::decode_canonical(&body).map_err(|_| SignalError::Malformed)?;
     // The body decoded, and it has to be the signal the selector promised —
     // otherwise a small declaration's ceiling could be used to smuggle a
     // different, larger-bounded shape past it.
@@ -250,26 +250,26 @@ pub async fn read_signal(
 /// substitutes because the alternative there is telling a peer nothing at all;
 /// here the alternative is sending something other than what was asked for,
 /// which is worse than an error the caller can see.
-pub fn frame_signal(signal: &crate::planes::Signal) -> Result<Vec<u8>, SignalError> {
+pub fn frame_signal(signal: &crate::plane::Signal) -> Result<Vec<u8>, SignalError> {
     let selector = signal.selector();
     let declaration = declaration_for(selector).ok_or(SignalError::NotRegistered)?;
     // A bounds failure is a size failure and says so. Collapsing it into
     // `Malformed` would tell a caller its signal was ill-formed when what it
     // actually was is too big — two different things to do about it.
     signal.validate().map_err(|error| match error {
-        crate::planes::PlaneWireError::Bounds => SignalError::TooLarge,
+        crate::plane::WireError::Bounds => SignalError::TooLarge,
         _ => SignalError::Malformed,
     })?;
     let body = signal.encode();
     if body.len()
         > declaration
             .max_bytes
-            .min(crate::planes::bounds::MAX_SIGNAL_BYTES)
+            .min(crate::plane::bounds::MAX_SIGNAL_BYTES)
     {
         return Err(SignalError::TooLarge);
     }
     let mut out = Vec::with_capacity(1 + 2 + 4 + body.len());
-    out.push(crate::planes::stream_kind::RELIABLE_SIGNAL);
+    out.push(crate::plane::stream_kind::RELIABLE_SIGNAL);
     out.extend_from_slice(&selector.to_le_bytes());
     out.extend_from_slice(&(body.len() as u32).to_le_bytes());
     out.extend_from_slice(&body);
@@ -283,7 +283,7 @@ pub fn frame_signal(signal: &crate::planes::Signal) -> Result<Vec<u8>, SignalErr
 /// it on the way back shifts every subsequent field by one and the selector is
 /// then read out of the kind byte and half of itself, which decodes as a
 /// plausible unregistered selector rather than as an error anyone can read.
-pub fn frame_answer(signal: &crate::planes::Signal) -> Result<Vec<u8>, SignalError> {
+pub fn frame_answer(signal: &crate::plane::Signal) -> Result<Vec<u8>, SignalError> {
     let mut framed = frame_signal(signal)?;
     framed.remove(0);
     Ok(framed)
@@ -316,10 +316,10 @@ pub fn refuse_flow(send: &mut dyn comms::SendFlow, recv: &mut dyn comms::RecvFlo
 /// session that is still open.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeliveredSignal {
-    pub from: mechanics::ids::StationId,
-    pub session_id: [u8; 16],
-    pub session_epoch: [u8; 16],
-    pub signal: crate::planes::Signal,
+    pub from: mechanics::station::Key,
+    pub connection_id: [u8; 16],
+    pub connection_epoch: [u8; 16],
+    pub signal: crate::plane::Signal,
 }
 
 /// What a peer may say on this connection's signal lane, and who is asking.
@@ -333,21 +333,21 @@ pub struct DeliveredSignal {
 /// `tests/signal_is_not_durable.rs` fails the build over.
 #[derive(Clone)]
 pub struct SignalPolicy {
-    pub peer: mechanics::ids::StationId,
+    pub peer: mechanics::station::Key,
     pub actor: mechanics::ids::ActorId,
     /// The frontier this session was admitted at. Pinned, so every question on
     /// this connection is answered against one view.
     pub frontier: replica::frontier::AuthorityFrontier,
     pub granted_lanes: Vec<u8>,
     pub authority: std::sync::Arc<dyn crate::world::AuthorityView>,
-    pub worlds: crate::registry::WorldRegistry,
+    pub worlds: crate::registry::Registry,
 }
 
 impl SignalPolicy {
     /// Whether this connection holds the signal lane at all.
     pub fn holds_lane(&self) -> bool {
         self.granted_lanes
-            .contains(&crate::planes::stream_kind::RELIABLE_SIGNAL)
+            .contains(&crate::plane::stream_kind::RELIABLE_SIGNAL)
     }
 
     /// Whether this peer may send this signal.
@@ -386,8 +386,8 @@ impl SignalPolicy {
     /// Without this the descriptor's signal section would be decoration: a
     /// World could declare a 64-byte nudge requiring a capability, and a peer
     /// could send sixteen kilobytes of it with nothing but session membership.
-    pub fn admits_contents(&self, signal: &crate::planes::Signal) -> Result<(), SignalError> {
-        let crate::planes::Signal::WorldSignal {
+    pub fn admits_contents(&self, signal: &crate::plane::Signal) -> Result<(), SignalError> {
+        let crate::plane::Signal::WorldSignal {
             world,
             schema,
             payload,
@@ -401,7 +401,7 @@ impl SignalPolicy {
         let schema = replica::ids::SchemaId::parse(schema).ok_or(SignalError::Malformed)?;
         let registration = self
             .worlds
-            .registration(&world_id)
+            .descriptor(&world_id)
             .ok_or(SignalError::NotRegistered)?;
         // A schema this World never declared is not registered, whatever the
         // World would do with it. Reaching a World's `submit` with an
@@ -466,7 +466,7 @@ pub enum SignalOutcome {
     /// confirmation is building a read receipt out of a transport ack.
     Accepted,
     /// The peer answered, for a declaration whose response policy allows one.
-    Answered(crate::planes::Signal),
+    Answered(crate::plane::Signal),
 }
 
 /// Send one signal on its own flow.
@@ -487,7 +487,7 @@ pub enum SignalOutcome {
 /// promised to answer.
 pub async fn send_signal(
     connection: &dyn comms::Connection,
-    signal: &crate::planes::Signal,
+    signal: &crate::plane::Signal,
 ) -> Result<SignalOutcome, SignalError> {
     let framed = frame_signal(signal)?;
     let declaration = declaration_for(signal.selector()).ok_or(SignalError::NotRegistered)?;
@@ -545,7 +545,7 @@ pub async fn serve_signal(
     send: &mut dyn comms::SendFlow,
     recv: &mut dyn comms::RecvFlow,
     policy: &SignalPolicy,
-) -> Result<crate::planes::Signal, SignalError> {
+) -> Result<crate::plane::Signal, SignalError> {
     if !policy.holds_lane() {
         refuse_flow(send, recv);
         return Err(SignalError::LaneNotGranted);
@@ -598,10 +598,10 @@ pub async fn serve_signal(
 /// Only `Ping` does, and the nonce comes back unchanged: that is what makes the
 /// answer an answer to *this* ping rather than to any ping. `Acknowledge` is
 /// itself `Forbidden`, which is how a ping does not become a loop.
-fn acknowledgement(signal: &crate::planes::Signal) -> Option<crate::planes::Signal> {
+fn acknowledgement(signal: &crate::plane::Signal) -> Option<crate::plane::Signal> {
     match signal {
-        crate::planes::Signal::Ping { nonce } => {
-            Some(crate::planes::Signal::Acknowledge { nonce: *nonce })
+        crate::plane::Signal::Ping { nonce } => {
+            Some(crate::plane::Signal::Acknowledge { nonce: *nonce })
         }
         _ => None,
     }
@@ -622,12 +622,12 @@ pub const MAX_PENDING_OFFERS: usize = 32;
 /// protocol answer due inside a deadline.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingOffer {
-    pub from: mechanics::ids::StationId,
+    pub from: mechanics::station::Key,
     /// The session it arrived on. An offer from a session that has since
     /// reconnected is not stale — the file is still there — but a caller
     /// answering it has to dial again rather than reply on a connection that is
     /// gone.
-    pub session_epoch: [u8; 16],
+    pub connection_epoch: [u8; 16],
     pub content: [u8; 32],
     pub plaintext_len: u64,
     /// What the sender calls it. Peer-supplied, never sanitised here: a name is
@@ -697,7 +697,7 @@ impl OfferQueue {
     /// Take one offer out, by content and sender.
     pub fn take(
         &mut self,
-        from: &mechanics::ids::StationId,
+        from: &mechanics::station::Key,
         content: &[u8; 32],
     ) -> Option<PendingOffer> {
         let at = self
@@ -710,7 +710,7 @@ impl OfferQueue {
     /// Drop everything one peer offered. What a revocation does — a file offered
     /// by somebody who is no longer a member is not an offer anyone should be
     /// shown a button for.
-    pub fn forget(&mut self, from: &mechanics::ids::StationId) -> usize {
+    pub fn forget(&mut self, from: &mechanics::station::Key) -> usize {
         let before = self.pending.len();
         self.pending.retain(|held| &held.from != from);
         before - self.pending.len()

@@ -89,13 +89,11 @@ pub enum Signal {
     /// I am. Never itself acknowledged — that is how a ping becomes a loop.
     Acknowledge { nonce: [u8; 16] },
     /// Look at this.
-    Attention {
-        scope: crate::transient::TransientScope,
-    },
+    Attention { scope: crate::transient::Target },
     /// Come and work on this with me.
     SessionInvite {
         kind: InviteKind,
-        scope: crate::transient::TransientScope,
+        scope: crate::transient::Target,
     },
     /// I have a file you may want.
     ///
@@ -145,34 +143,34 @@ impl Signal {
     /// caller's error and gets a `Result`; substituting a refusal — which is
     /// right for `FreightFrame`, where the alternative is telling a peer
     /// nothing — would silently send something other than what was asked for.
-    pub fn decode_canonical(bytes: &[u8]) -> Result<Self, PlaneWireError> {
+    pub fn decode_canonical(bytes: &[u8]) -> Result<Self, WireError> {
         if bytes.len() > bounds::MAX_SIGNAL_BYTES {
-            return Err(PlaneWireError::TooLarge);
+            return Err(WireError::TooLarge);
         }
-        let signal: Self = postcard::from_bytes(bytes).map_err(|_| PlaneWireError::NonCanonical)?;
+        let signal: Self = postcard::from_bytes(bytes).map_err(|_| WireError::NonCanonical)?;
         if signal.encode() != bytes {
-            return Err(PlaneWireError::NonCanonical);
+            return Err(WireError::NonCanonical);
         }
         signal.validate()?;
         Ok(signal)
     }
 
-    pub fn validate(&self) -> Result<(), PlaneWireError> {
+    pub fn validate(&self) -> Result<(), WireError> {
         let text = |value: &str| {
             if value.len() > MAX_SIGNAL_TEXT_BYTES {
-                return Err(PlaneWireError::Bounds);
+                return Err(WireError::Bounds);
             }
             // A control character in a name lands in a header, a filename, or a
             // terminal. None of those are places a peer chooses what happens.
             if value.chars().any(|c| c.is_control()) {
-                return Err(PlaneWireError::NonCanonical);
+                return Err(WireError::NonCanonical);
             }
             Ok(())
         };
         match self {
             Self::Ping { .. } | Self::Acknowledge { .. } => Ok(()),
             Self::Attention { scope } | Self::SessionInvite { scope, .. } => {
-                scope.validate_wire().map_err(|_| PlaneWireError::Bounds)
+                scope.validate_wire().map_err(|_| WireError::Bounds)
             }
             Self::FileOffer {
                 display_name,
@@ -190,10 +188,10 @@ impl Signal {
                 // Parsed through the real grammars rather than a length check:
                 // a World id and a schema id have shapes, and something that is
                 // merely short is not therefore one.
-                replica::ids::WorldId::parse(world).ok_or(PlaneWireError::NonCanonical)?;
-                replica::ids::SchemaId::parse(schema).ok_or(PlaneWireError::NonCanonical)?;
+                replica::ids::WorldId::parse(world).ok_or(WireError::NonCanonical)?;
+                replica::ids::SchemaId::parse(schema).ok_or(WireError::NonCanonical)?;
                 if payload.len() > bounds::MAX_SIGNAL_BYTES {
-                    return Err(PlaneWireError::Bounds);
+                    return Err(WireError::Bounds);
                 }
                 Ok(())
             }
@@ -225,6 +223,7 @@ mod bound_consistency {
 pub enum Plane {
     Freight,
     Live,
+    Contact,
 }
 
 impl Plane {
@@ -237,6 +236,7 @@ impl Plane {
         match self {
             Self::Freight => false,
             Self::Live => true,
+            Self::Contact => false,
         }
     }
 
@@ -244,6 +244,7 @@ impl Plane {
         match self {
             Plane::Freight => FREIGHT_ALPN,
             Plane::Live => LIVE_ALPN,
+            Plane::Contact => b"lait/contact/2",
         }
     }
 
@@ -251,6 +252,7 @@ impl Plane {
         match self {
             Plane::Freight => FREIGHT_PROTOCOL_VERSION,
             Plane::Live => LIVE_PROTOCOL_VERSION,
+            Plane::Contact => 3,
         }
     }
 }
@@ -282,7 +284,7 @@ pub mod feature {
 
 /// What a peer advertises about a plane it speaks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProtocolCapability {
+pub struct Capability {
     pub plane: Plane,
     pub protocol_version: u16,
     #[serde(default)]
@@ -295,32 +297,32 @@ pub struct ProtocolCapability {
 /// the handshake, and the client's initial bytes can be replayed by an attacker
 /// who intercepts handshake packets. So accepting an opening must be idempotent:
 /// a replay may not allocate a second session, consume a budget twice, or mint
-/// state the first opening already minted. `session_id` and `session_epoch`
+/// state the first opening already minted. `connection_id` and `connection_epoch`
 /// together are what make a replay recognisable, and no lane whose demand has
 /// an effect may dispatch on 0.5-RTT data.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionOpen {
+pub struct Open {
     pub plane: Plane,
     pub protocol_version: u16,
     pub features: u64,
     pub space: [u8; SPACE_ID_LEN],
     pub initiator_station: [u8; 32],
     pub responder_station: [u8; 32],
-    /// Random per session. With `session_epoch`, what identifies a replay.
-    pub session_id: [u8; 16],
+    /// Random per session. With `connection_epoch`, what identifies a replay.
+    pub connection_id: [u8; 16],
     /// Random per reconnect, so packets from an old session cannot outrank a
     /// new one.
-    pub session_epoch: [u8; 16],
+    pub connection_epoch: [u8; 16],
     pub authority_frontier: Vec<u8>,
     pub requested_lanes: Vec<u8>,
 }
 
 /// The accepting side's answer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionAccept {
-    pub session_id: [u8; 16],
-    pub session_epoch: [u8; 16],
-    pub capability: ProtocolCapability,
+pub struct Accept {
+    pub connection_id: [u8; 16],
+    pub connection_epoch: [u8; 16],
+    pub capability: Capability,
     pub granted_lanes: Vec<u8>,
 }
 
@@ -330,7 +332,7 @@ pub struct SessionAccept {
 /// authorized for this lane" from "over budget" would tell an unadmitted peer
 /// more about the Space than it should learn from being turned away.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum SessionRefusal {
+pub enum Refusal {
     /// The opening did not parse, did not bind to this peer, or named another
     /// Space.
     Malformed,
@@ -341,7 +343,7 @@ pub enum SessionRefusal {
     UnsupportedVersion { supported: u16 },
 }
 
-impl SessionRefusal {
+impl Refusal {
     pub fn encode(&self) -> Vec<u8> {
         postcard::to_stdvec(self).expect("postcard session refusal")
     }
@@ -355,14 +357,13 @@ impl SessionRefusal {
     /// something else entirely — and a decoder that guessed would turn "this
     /// peer is on another generation" into "this peer is unavailable", which is
     /// the difference between a fix and a mystery.
-    pub fn decode_canonical(bytes: &[u8]) -> Result<Self, PlaneWireError> {
+    pub fn decode_canonical(bytes: &[u8]) -> Result<Self, WireError> {
         if bytes.len() > bounds::MAX_OPENING_BYTES {
-            return Err(PlaneWireError::TooLarge);
+            return Err(WireError::TooLarge);
         }
-        let refusal: Self =
-            postcard::from_bytes(bytes).map_err(|_| PlaneWireError::NonCanonical)?;
+        let refusal: Self = postcard::from_bytes(bytes).map_err(|_| WireError::NonCanonical)?;
         if refusal.encode() != bytes {
-            return Err(PlaneWireError::NonCanonical);
+            return Err(WireError::NonCanonical);
         }
         Ok(refusal)
     }
@@ -425,7 +426,7 @@ pub fn datagram_fits(payload_len: usize, path_capacity: Option<usize>) -> bool {
 
 /// Why a frame was refused before it was trusted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PlaneWireError {
+pub enum WireError {
     /// Longer than its pre-allocation ceiling.
     TooLarge,
     /// Did not decode, or re-encoding did not reproduce the input.
@@ -438,16 +439,24 @@ pub enum PlaneWireError {
     Bounds,
 }
 
-impl std::fmt::Display for PlaneWireError {
+impl std::fmt::Display for WireError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{self:?}")
     }
 }
-impl std::error::Error for PlaneWireError {}
+impl std::error::Error for WireError {}
 
-impl SessionOpen {
+impl Open {
     pub fn encode(&self) -> Vec<u8> {
         postcard::to_stdvec(self).expect("postcard session open")
+    }
+
+    /// Domain-separated commitment used by post-acceptance plane protocols.
+    pub fn hash(&self) -> [u8; 32] {
+        let mut hash = blake3::Hasher::new();
+        hash.update(b"lait/plane/open/1");
+        hash.update(&self.encode());
+        *hash.finalize().as_bytes()
     }
 
     /// Decode an opening from a peer.
@@ -456,16 +465,16 @@ impl SessionOpen {
     /// interpretation, version before anything semantic. Nothing here allocates
     /// past the ceiling, and nothing here trusts a field before the frame that
     /// carried it has been proven whole.
-    pub fn decode_canonical(bytes: &[u8]) -> Result<Self, PlaneWireError> {
+    pub fn decode_canonical(bytes: &[u8]) -> Result<Self, WireError> {
         if bytes.len() > bounds::MAX_OPENING_BYTES {
-            return Err(PlaneWireError::TooLarge);
+            return Err(WireError::TooLarge);
         }
-        let open: Self = postcard::from_bytes(bytes).map_err(|_| PlaneWireError::NonCanonical)?;
+        let open: Self = postcard::from_bytes(bytes).map_err(|_| WireError::NonCanonical)?;
         if open.encode() != bytes {
-            return Err(PlaneWireError::NonCanonical);
+            return Err(WireError::NonCanonical);
         }
         if open.protocol_version != open.plane.protocol_version() {
-            return Err(PlaneWireError::UnsupportedVersion(open.protocol_version));
+            return Err(WireError::UnsupportedVersion(open.protocol_version));
         }
         // Half an opening, not a control frame. The outer length gate already
         // refuses anything past MAX_OPENING_BYTES, so a 64 KiB inner check could
@@ -474,7 +483,7 @@ impl SessionOpen {
         if open.requested_lanes.len() > bounds::MAX_LANES
             || open.authority_frontier.len() > bounds::MAX_OPENING_BYTES / 2
         {
-            return Err(PlaneWireError::Bounds);
+            return Err(WireError::Bounds);
         }
         // Deliberately *not* refused here. Rejecting an opening that names a
         // lane this build has not implemented would break the one thing feature
@@ -488,25 +497,25 @@ impl SessionOpen {
 
     /// Whether `other` is a replay of this opening rather than a new session.
     pub fn is_replay_of(&self, other: &Self) -> bool {
-        self.session_id == other.session_id && self.session_epoch == other.session_epoch
+        self.connection_id == other.connection_id && self.connection_epoch == other.connection_epoch
     }
 }
 
-impl SessionAccept {
+impl Accept {
     pub fn encode(&self) -> Vec<u8> {
         postcard::to_stdvec(self).expect("postcard session accept")
     }
 
-    pub fn decode_canonical(bytes: &[u8]) -> Result<Self, PlaneWireError> {
+    pub fn decode_canonical(bytes: &[u8]) -> Result<Self, WireError> {
         if bytes.len() > bounds::MAX_OPENING_BYTES {
-            return Err(PlaneWireError::TooLarge);
+            return Err(WireError::TooLarge);
         }
-        let accept: Self = postcard::from_bytes(bytes).map_err(|_| PlaneWireError::NonCanonical)?;
+        let accept: Self = postcard::from_bytes(bytes).map_err(|_| WireError::NonCanonical)?;
         if accept.encode() != bytes {
-            return Err(PlaneWireError::NonCanonical);
+            return Err(WireError::NonCanonical);
         }
         if accept.granted_lanes.len() > bounds::MAX_LANES {
-            return Err(PlaneWireError::Bounds);
+            return Err(WireError::Bounds);
         }
         Ok(accept)
     }
@@ -575,33 +584,33 @@ impl FreightFrame {
         bytes
     }
 
-    pub fn decode_canonical(bytes: &[u8]) -> Result<Self, PlaneWireError> {
+    pub fn decode_canonical(bytes: &[u8]) -> Result<Self, WireError> {
         if bytes.len() > bounds::MAX_CONTROL_FRAME_BYTES {
-            return Err(PlaneWireError::TooLarge);
+            return Err(WireError::TooLarge);
         }
-        let frame: Self = postcard::from_bytes(bytes).map_err(|_| PlaneWireError::NonCanonical)?;
+        let frame: Self = postcard::from_bytes(bytes).map_err(|_| WireError::NonCanonical)?;
         if frame.encode() != bytes {
-            return Err(PlaneWireError::NonCanonical);
+            return Err(WireError::NonCanonical);
         }
         frame.validate()?;
         Ok(frame)
     }
 
-    pub fn validate(&self) -> Result<(), PlaneWireError> {
+    pub fn validate(&self) -> Result<(), WireError> {
         match self {
             FreightFrame::Have { wanted, .. } => {
                 if wanted.len() > MAX_WANTED_CHUNKS {
-                    return Err(PlaneWireError::Bounds);
+                    return Err(WireError::Bounds);
                 }
             }
             FreightFrame::Available { chunks, .. } => {
                 if chunks.len() > MAX_WANTED_CHUNKS {
-                    return Err(PlaneWireError::Bounds);
+                    return Err(WireError::Bounds);
                 }
             }
             FreightFrame::GetChunk { max_len, .. } => {
                 if *max_len as usize > bounds::MAX_CHUNK_FRAME_BYTES {
-                    return Err(PlaneWireError::Bounds);
+                    return Err(WireError::Bounds);
                 }
             }
             FreightFrame::ChunkHeader {
@@ -610,7 +619,7 @@ impl FreightFrame {
                 if proof.len() > MAX_PROOF_BYTES
                     || *total_len as usize > bounds::MAX_CHUNK_FRAME_BYTES
                 {
-                    return Err(PlaneWireError::Bounds);
+                    return Err(WireError::Bounds);
                 }
             }
             FreightFrame::Refused => {}

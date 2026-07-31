@@ -909,8 +909,8 @@ mod tests {
         Response::Signals {
             signals: vec![crate::control::SignalEntry {
                 actor: "act_a".into(),
-                session_id: "0".repeat(32),
-                session_epoch: "1".repeat(32),
+                connection_id: "0".repeat(32),
+                connection_epoch: "1".repeat(32),
                 signal: crate::control::SignalBody::Ping {
                     nonce: nonce.into(),
                 },
@@ -1355,8 +1355,8 @@ mod tests {
         // would be the same outcome.
         let fat = |n: usize| crate::control::SignalEntry {
             actor: "act_a".into(),
-            session_id: "0".repeat(32),
-            session_epoch: "1".repeat(32),
+            connection_id: "0".repeat(32),
+            connection_epoch: "1".repeat(32),
             signal: crate::control::SignalBody::Ping {
                 nonce: format!("{n:04}").repeat(4_000),
             },
@@ -1391,8 +1391,8 @@ mod tests {
         let enormous = Response::Signals {
             signals: vec![crate::control::SignalEntry {
                 actor: "act_a".into(),
-                session_id: "0".repeat(32),
-                session_epoch: "1".repeat(32),
+                connection_id: "0".repeat(32),
+                connection_epoch: "1".repeat(32),
                 signal: crate::control::SignalBody::Ping {
                     nonce: "x".repeat(MAX_BRIDGE_FRAME_BYTES * 2),
                 },

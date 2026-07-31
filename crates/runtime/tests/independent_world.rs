@@ -15,8 +15,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use mechanics::crypto::AuthorizedBodyKey;
-use mechanics::ids::{ActorId, DeviceId, SpaceId, StationId};
-use replica::body::{BodyOp, BodySchema, CollaborativeSchema, MutationModel};
+use mechanics::{
+    ids::{ActorId, DeviceId, SpaceId},
+    station::Key,
+};
+use replica::body::{CollaborativeSchema, MutationModel, Op, Schema};
 use replica::frontier::{AuthorityFrontier, ReplicaFrontier};
 use replica::ids::{BodyId, BodyKey, EncodingId, SchemaId, WorldId};
 use runtime::coordinates::{ApproachRoute, CoordinatesAdmission, CoordinatesPayload};
@@ -25,16 +28,15 @@ use runtime::coordinates::{ApproachRoute, CoordinatesAdmission, CoordinatesPaylo
 fn any_demand() -> Vec<u8> {
     mechanics::demand::AuthorizationDemand::require(
         mechanics::demand::PolicyCapability::new("w", "c"),
-        mechanics::demand::PolicyResource::space("w"),
+        mechanics::demand::Resource::root("w"),
     )
     .encode_canonical()
     .expect("canonical demand")
 }
 use runtime::{
-    ActivationOptions, CommsOptions, ContactMechanics, ContactOptions, EnterOptions, LocalIdentity,
-    ObservationCursor, ObservationStreamError, RequestId, Runtime, RuntimeBuilder, Session,
-    SignedCoordinates, World, WorldContext, WorldEffect, WorldError, WorldIntent, WorldLimits,
-    WorldProjection, WorldQuery, WorldRegistration, WorldVersion,
+    ActivationOptions, Authority, CommsOptions, Context, Descriptor, Effect, Intent, Limits,
+    LocalIdentity, ObservationCursor, ObservationStreamError, Projection, Query, RequestId,
+    Runtime, RuntimeBuilder, Session, SignedCoordinates, Version, World, WorldError,
 };
 
 const FOUNDER_SEED: [u8; 32] = [7u8; 32];
@@ -87,7 +89,7 @@ fn coordinates() -> (SpaceId, SignedCoordinates) {
 /// The multi-schema independent World.
 struct MultiWorld {
     id: WorldId,
-    schemas: Vec<BodySchema>,
+    schemas: Vec<Schema>,
 }
 
 impl MultiWorld {
@@ -95,14 +97,14 @@ impl MultiWorld {
         Self {
             id: WorldId::parse("dev.example.multi").unwrap(),
             schemas: vec![
-                BodySchema {
+                Schema {
                     id: SchemaId::parse("entry").unwrap(),
                     version: 1,
                     encoding: EncodingId::parse("bytes").unwrap(),
                     mutation: MutationModel::Atomic,
                     readable_predecessors: vec![],
                 },
-                BodySchema {
+                Schema {
                     id: SchemaId::parse("pad").unwrap(),
                     version: 1,
                     encoding: EncodingId::parse("collab").unwrap(),
@@ -127,21 +129,17 @@ impl World for MultiWorld {
     fn id(&self) -> WorldId {
         self.id.clone()
     }
-    fn schemas(&self) -> &[BodySchema] {
+    fn schemas(&self) -> &[Schema] {
         &self.schemas
     }
-    fn submit(
-        &self,
-        ctx: &mut WorldContext<'_>,
-        intent: WorldIntent,
-    ) -> Result<WorldEffect, WorldError> {
+    fn submit(&self, ctx: &mut Context<'_>, intent: Intent) -> Result<Effect, WorldError> {
         let v: serde_json::Value =
             serde_json::from_slice(&intent.payload).map_err(|_| WorldError::InvalidRequest)?;
         let op = v["op"].as_str().ok_or(WorldError::InvalidRequest)?;
         let mut operations = Vec::new();
         let mut declarations = Vec::new();
         let mut scopes = Vec::new();
-        let mut declare = |key: &BodyKey, schema: &str, ops: &mut Vec<_>, op: BodyOp| {
+        let mut declare = |key: &BodyKey, schema: &str, ops: &mut Vec<_>, op: Op| {
             declarations.push(runtime::BodyDeclaration {
                 key: key.clone(),
                 schema: SchemaId::parse(schema).unwrap(),
@@ -157,7 +155,7 @@ impl World for MultiWorld {
                     &key,
                     "entry",
                     &mut operations,
-                    BodyOp::ReplaceAtomic {
+                    Op::ReplaceAtomic {
                         value: v["v"].as_str().unwrap_or_default().as_bytes().to_vec(),
                     },
                 );
@@ -174,7 +172,7 @@ impl World for MultiWorld {
                     &key,
                     "pad",
                     &mut operations,
-                    BodyOp::TextSplice {
+                    Op::TextSplice {
                         path: "body".into(),
                         index: at,
                         delete: 0,
@@ -188,7 +186,7 @@ impl World for MultiWorld {
                     &key,
                     "entry",
                     &mut operations,
-                    BodyOp::ReplaceAtomic {
+                    Op::ReplaceAtomic {
                         value: v["v"].as_str().unwrap_or_default().as_bytes().to_vec(),
                     },
                 );
@@ -197,7 +195,7 @@ impl World for MultiWorld {
                     &pad,
                     "pad",
                     &mut operations,
-                    BodyOp::TextSplice {
+                    Op::TextSplice {
                         path: "body".into(),
                         index: 0,
                         delete: 0,
@@ -213,7 +211,7 @@ impl World for MultiWorld {
                     &key,
                     "entry",
                     &mut operations,
-                    BodyOp::ReplaceAtomic {
+                    Op::ReplaceAtomic {
                         value: b"must not survive".to_vec(),
                     },
                 );
@@ -222,7 +220,7 @@ impl World for MultiWorld {
                     &pad,
                     "pad",
                     &mut operations,
-                    BodyOp::ListRemove {
+                    Op::ListRemove {
                         path: "items".into(),
                         element: "0".repeat(32),
                     },
@@ -230,7 +228,7 @@ impl World for MultiWorld {
             }
             _ => return Err(WorldError::InvalidRequest),
         }
-        Ok(WorldEffect {
+        Ok(Effect {
             content_refs: Vec::new(),
             demand: any_demand(),
             operations,
@@ -239,11 +237,7 @@ impl World for MultiWorld {
             declarations,
         })
     }
-    fn query(
-        &self,
-        ctx: &WorldContext<'_>,
-        query: WorldQuery,
-    ) -> Result<WorldProjection, WorldError> {
+    fn query(&self, ctx: &Context<'_>, query: Query) -> Result<Projection, WorldError> {
         let v: serde_json::Value =
             serde_json::from_slice(&query.payload).map_err(|_| WorldError::InvalidRequest)?;
         let bytes = match v["q"].as_str() {
@@ -258,7 +252,7 @@ impl World for MultiWorld {
                 .into_bytes(),
             _ => return Err(WorldError::InvalidRequest),
         };
-        Ok(WorldProjection {
+        Ok(Projection {
             demand: any_demand(),
             schema: SchemaId::parse("entry").unwrap(),
             schema_version: 1,
@@ -360,19 +354,19 @@ fn test_keys() -> Arc<dyn replica::BodyKeySource> {
     ))
 }
 
-fn registry(with_world: bool) -> runtime::WorldRegistry {
+fn registry(with_world: bool) -> runtime::Registry {
     let mut builder = RuntimeBuilder::new();
     if with_world {
         let world = MultiWorld::new();
-        let reg = WorldRegistration {
+        let reg = Descriptor {
             id: world.id(),
-            implementation_version: WorldVersion(1),
+            implementation_version: Version(1),
             schemas: world.schemas().to_vec(),
-            limits: WorldLimits::default(),
+            limits: Limits::default(),
             scope_schemas: Vec::new(),
             signal_schemas: Vec::new(),
         };
-        builder = builder.register(reg, Arc::new(world));
+        builder = builder.register(Arc::new(world));
     }
     builder.build().unwrap()
 }
@@ -387,7 +381,7 @@ fn comms_options(transport: Arc<dyn comms::Transport>, seed: [u8; 32]) -> CommsO
     CommsOptions {
         transport,
         station_seed: seed,
-        mechanics: ContactMechanics {
+        authority: Authority {
             source: Arc::new(AnyKnownSigner),
             incorporator: Arc::new(Mutex::new(AcceptingIncorporator)),
             export: Arc::new(Vec::new),
@@ -418,7 +412,7 @@ fn submit_json(
     let action = identity.sign_action(
         session,
         request,
-        WorldIntent {
+        Intent {
             schema: SchemaId::parse(schema).unwrap(),
             schema_version: 1,
             payload: serde_json::to_vec(&value).unwrap(),
@@ -429,7 +423,7 @@ fn submit_json(
 
 fn query_json(session: &Session, value: serde_json::Value) -> Vec<u8> {
     session
-        .query(WorldQuery {
+        .query(Query {
             schema: SchemaId::parse("entry").unwrap(),
             schema_version: 1,
             payload: serde_json::to_vec(&value).unwrap(),
@@ -444,9 +438,9 @@ fn bodies_authority_restart_idempotency_and_observation() {
     let auth = authority();
     let rt = Runtime::open(root.clone(), registry(true), auth.clone(), test_keys());
     let station = rt
-        .form_space(runtime::SpaceFormationOptions::default())
+        .create()
         .unwrap()
-        .activate(ActivationOptions {
+        .open(ActivationOptions {
             planes: Default::default(),
             content: Default::default(),
             drain_deadline: Duration::from_secs(5),
@@ -515,7 +509,7 @@ fn bodies_authority_restart_idempotency_and_observation() {
         .sign_action(
             &session,
             RequestId::mint(),
-            WorldIntent {
+            Intent {
                 schema: SchemaId::parse("entry").unwrap(),
                 schema_version: 1,
                 payload: serde_json::to_vec(&serde_json::json!({"op":"set","k":"stale","v":"no"}))
@@ -552,7 +546,7 @@ fn bodies_authority_restart_idempotency_and_observation() {
         .sign_action(
             &session,
             request,
-            WorldIntent {
+            Intent {
                 schema: SchemaId::parse("pad").unwrap(),
                 schema_version: 1,
                 payload: serde_json::to_vec(&serde_json::json!({"op":"pad","text":"-again"}))
@@ -570,9 +564,9 @@ fn bodies_authority_restart_idempotency_and_observation() {
     // Offline restart: acknowledged state is immediately queryable, streams
     // rebaseline, and the identical retry replays.
     let station = rt
-        .orbit(&space)
+        .acquire(&space)
         .unwrap()
-        .activate(ActivationOptions::offline())
+        .open(ActivationOptions::offline())
         .unwrap();
     let session = station.dock(&world_id(), &writer()).unwrap();
     assert_eq!(
@@ -591,7 +585,7 @@ fn bodies_authority_restart_idempotency_and_observation() {
     // Dormancy terminates streams typed and refuses new work.
     let mut stream = session.observe(None);
     let _ = stream.try_next();
-    let _ = station.go_dormant().unwrap();
+    let _ = station.vacate().unwrap();
     assert_eq!(
         stream.next_timeout(Duration::from_millis(200)),
         Err(ObservationStreamError::StationDormant)
@@ -620,9 +614,9 @@ fn beacons_contact_and_opaque_forwarding_across_three_stations() {
     let rt_c = Runtime::open(root_c.clone(), registry(true), authority(), test_keys());
 
     let station_a = rt_a
-        .enter_orbit(&coords, EnterOptions)
+        .materialize(&coords)
         .unwrap()
-        .activate(ActivationOptions {
+        .open(ActivationOptions {
             planes: Default::default(),
             content: Default::default(),
             drain_deadline: Duration::from_secs(5),
@@ -641,9 +635,9 @@ fn beacons_contact_and_opaque_forwarding_across_three_stations() {
     .unwrap();
 
     let station_b = rt_b
-        .enter_orbit(&coords, EnterOptions)
+        .materialize(&coords)
         .unwrap()
-        .activate(ActivationOptions {
+        .open(ActivationOptions {
             planes: Default::default(),
             content: Default::default(),
             drain_deadline: Duration::from_secs(5),
@@ -654,10 +648,7 @@ fn beacons_contact_and_opaque_forwarding_across_three_stations() {
     // B pulls A: the material is legitimate but its World is unavailable —
     // retained opaquely, never interpreted.
     let outcome = station_b
-        .contact(
-            &StationId::from_device(&mechanics::crypto::device_from_seed(&STATION_A_SEED)).unwrap(),
-            ContactOptions,
-        )
+        .contact(&Key::from_device(&mechanics::crypto::device_from_seed(&STATION_A_SEED)).unwrap())
         .unwrap();
     assert!(outcome.convergence.unsupported_retained >= 1);
     assert_eq!(outcome.convergence.accepted, 0);
@@ -665,9 +656,9 @@ fn beacons_contact_and_opaque_forwarding_across_three_stations() {
     // A Beacon from B queues C's scheduler: fully automatic convergence of
     // the forwarded (still-opaque-at-B) material into C, which CAN interpret.
     let station_c = rt_c
-        .enter_orbit(&coords, EnterOptions)
+        .materialize(&coords)
         .unwrap()
-        .activate(ActivationOptions {
+        .open(ActivationOptions {
             planes: Default::default(),
             content: Default::default(),
             drain_deadline: Duration::from_secs(5),
@@ -691,7 +682,7 @@ fn beacons_contact_and_opaque_forwarding_across_three_stations() {
     // Beacon ingestion rides the Station driver: poll (bounded) for the
     // registry to reflect it.
     let b_station =
-        StationId::from_device(&mechanics::crypto::device_from_seed(&STATION_B_SEED)).unwrap();
+        Key::from_device(&mechanics::crypto::device_from_seed(&STATION_B_SEED)).unwrap();
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {
         if station_c.neighbors().iter().any(|n| n.station == b_station) {
@@ -719,9 +710,9 @@ fn beacons_contact_and_opaque_forwarding_across_three_stations() {
         std::thread::sleep(Duration::from_millis(25));
     }
 
-    let _ = station_a.go_dormant();
-    let _ = station_b.go_dormant();
-    let _ = station_c.go_dormant();
+    let _ = station_a.vacate();
+    let _ = station_b.vacate();
+    let _ = station_c.vacate();
     let _ = std::fs::remove_dir_all(&root_a);
     let _ = std::fs::remove_dir_all(&root_b);
     let _ = std::fs::remove_dir_all(&root_c);
@@ -739,9 +730,9 @@ fn the_eclipse_fence_quarantines_unadmitted_beacon_emitters() {
     let root_c = temp_root("fence-c");
     let rt_c = Runtime::open(root_c.clone(), registry(true), authority(), test_keys());
     let station_c = rt_c
-        .enter_orbit(&coords, EnterOptions)
+        .materialize(&coords)
         .unwrap()
-        .activate(ActivationOptions {
+        .open(ActivationOptions {
             planes: Default::default(),
             content: Default::default(),
             drain_deadline: Duration::from_secs(5),
@@ -782,9 +773,9 @@ fn the_eclipse_fence_quarantines_unadmitted_beacon_emitters() {
     .unwrap();
     station_c.observe_beacon(&admitted_beacon.encode());
     let b_station =
-        StationId::from_device(&mechanics::crypto::device_from_seed(&STATION_B_SEED)).unwrap();
+        Key::from_device(&mechanics::crypto::device_from_seed(&STATION_B_SEED)).unwrap();
     let stranger_station =
-        StationId::from_device(&mechanics::crypto::device_from_seed(&STRANGER_SEED)).unwrap();
+        Key::from_device(&mechanics::crypto::device_from_seed(&STRANGER_SEED)).unwrap();
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {
         let neighbors = station_c.neighbors();
@@ -810,6 +801,6 @@ fn the_eclipse_fence_quarantines_unadmitted_beacon_emitters() {
         "the stranger appeared after the admitted beacon"
     );
 
-    let _ = station_c.go_dormant();
+    let _ = station_c.vacate();
     let _ = std::fs::remove_dir_all(&root_c);
 }

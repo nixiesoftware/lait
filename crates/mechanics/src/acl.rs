@@ -16,7 +16,7 @@
 //! frontier it cannot resolve.
 //!
 //! **Grants, not roles.** Standing is an extensible capability set
-//! ([`Grant`]): `Admin` (membership authority) and `Write` (content
+//! ([`Standing`]): `Admin` (membership authority) and `Write` (content
 //! authority). A member with **no grants is view-only** — sealed the key,
 //! zero write standing. A **sponsored** member (an agent) is not a separate
 //! kind of actor: it holds the *same* grant set as any member (default
@@ -40,7 +40,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use serde::{Deserialize, Serialize};
 
-use crate::actor::{self, ActorPlane, SignedEvent};
+use crate::actor::{self, Directory, SignedEvent};
 use crate::genesis::Genesis;
 use crate::ids::{ActorId, DeviceId, SpaceId};
 use crate::sigdag::{self, SignedNode};
@@ -55,7 +55,7 @@ pub type SignedOp = SignedNode;
 /// scopes, service grants) without changing the operation shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum Grant {
+pub enum Standing {
     /// Membership authority: add/remove members, set grants, rotate the key.
     Admin,
     /// Content authority: author high-consequence content ops.
@@ -65,49 +65,49 @@ pub enum Grant {
 /// The coarse membership grant set an admission's generic capability names
 /// resolve to (space.admin ⇒ full membership authority, space.contributor ⇒
 /// content authorship, anything else ⇒ read-only membership).
-pub fn grants_for_capability_names(caps: &[&str]) -> Vec<Grant> {
+pub fn grants_for_capability_names(caps: &[&str]) -> Vec<Standing> {
     if caps.contains(&"space.admin") {
-        vec![Grant::Admin, Grant::Write]
+        vec![Standing::Admin, Standing::Write]
     } else if caps.contains(&"space.contributor") {
-        vec![Grant::Write]
+        vec![Standing::Write]
     } else {
         vec![]
     }
 }
 
 /// The coarse membership grant set for a direct member-add (admin or not).
-pub fn membership_grants(admin: bool) -> Vec<Grant> {
+pub fn membership_grants(admin: bool) -> Vec<Standing> {
     if admin {
-        vec![Grant::Admin, Grant::Write]
+        vec![Standing::Admin, Standing::Write]
     } else {
-        vec![Grant::Write]
+        vec![Standing::Write]
     }
 }
 
 /// The default grant set a sponsored agent is minted with: content authority,
 /// never membership authority. A colleague, not a spectator (the linchpin of
 /// the Agent Experience initiative) and not an admin. Callers outside the
-/// kernel reach for this instead of naming [`Grant::Write`] directly, so the
-/// `world-flat-standing` clean-break gate (which forbids `Grant::` literals in
+/// kernel reach for this instead of naming [`Standing::Write`] directly, so the
+/// `world-flat-standing` clean-break gate (which forbids `Standing::` literals in
 /// `src/orbital/`, `src/world/`, `crates/runtime/`) stays satisfied and the
 /// "agents get content authority only" policy lives in exactly one place.
-pub fn sponsored_agent_grants() -> Vec<Grant> {
-    vec![Grant::Write]
+pub fn sponsored_agent_grants() -> Vec<Standing> {
+    vec![Standing::Write]
 }
 
 /// Whether a grant set is a legal *sponsored-agent* grant set: any content
-/// grants are fine, but [`Grant::Admin`] (membership authority) is not. The
+/// grants are fine, but [`Standing::Admin`] (membership authority) is not. The
 /// authorization fence for [`AclAction::AddAgent`] enforces this at replay, so
 /// no synced op can smuggle admin standing onto a sponsored identity.
-pub fn is_sponsorable_grant_set(grants: &[Grant]) -> bool {
-    !grants.contains(&Grant::Admin)
+pub fn is_sponsorable_grant_set(grants: &[Standing]) -> bool {
+    !grants.contains(&Standing::Admin)
 }
 
 /// Render a grant set as the product's coarse role label.
-pub fn role_label(grants: &[Grant]) -> &'static str {
-    if grants.contains(&Grant::Admin) {
+pub fn role_label(grants: &[Standing]) -> &'static str {
+    if grants.contains(&Standing::Admin) {
         "admin"
-    } else if grants.contains(&Grant::Write) {
+    } else if grants.contains(&Standing::Write) {
         "member"
     } else {
         "viewer"
@@ -119,20 +119,20 @@ pub fn role_label(grants: &[Grant]) -> &'static str {
 pub enum AclAction {
     AddMember {
         actor: ActorId,
-        grants: Vec<Grant>,
+        grants: Vec<Standing>,
     },
     RemoveMember {
         actor: ActorId,
     },
     SetGrants {
         actor: ActorId,
-        grants: Vec<Grant>,
+        grants: Vec<Standing>,
     },
     /// Sponsor an agent actor with a grant set. The sponsor is the op's `by`
     /// actor; the agent's membership is derived, and dies, with them — but the
-    /// agent holds real **content** authority through the *same* [`Grant`] set
-    /// any member carries (default [`Grant::Write`]). `grants` may **never**
-    /// include [`Grant::Admin`]: sponsorship confers content authority, never
+    /// agent holds real **content** authority through the *same* [`Standing`] set
+    /// any member carries (default [`Standing::Write`]). `grants` may **never**
+    /// include [`Standing::Admin`]: sponsorship confers content authority, never
     /// membership authority (an agent still authors no ACL op — the blanket
     /// agent-author ban in `judge_op` stands). This is "add a member on my
     /// sponsorship," parallel to [`AclAction::AddMember`], not a separate
@@ -140,7 +140,7 @@ pub enum AclAction {
     /// grant set on `AddMember`.
     AddAgent {
         actor: ActorId,
-        grants: Vec<Grant>,
+        grants: Vec<Standing>,
     },
     /// Mint a space key epoch. **Signed, and authorized only when its
     /// author holds admin standing** — re-keying decides who reads future content
@@ -168,7 +168,7 @@ pub enum AclAction {
     RevokeInvite {
         nonce: [u8; 16],
     },
-    /// Grant one exact scoped capability to an actor. `grant_id` commits the
+    /// Standing one exact scoped capability to an actor. `grant_id` commits the
     /// canonical grant bytes plus `salt` ([`capability_grant_id`]); a mismatch
     /// is unauthorized. Requires the author to hold the Mechanics-owned
     /// policy-admin meta-capability, or an effective [`AclAction::GrantDelegation`]
@@ -181,7 +181,7 @@ pub enum AclAction {
         grant_id: [u8; 32],
         actor: ActorId,
         capability: crate::demand::PolicyCapability,
-        resource: crate::demand::PolicyResource,
+        resource: crate::demand::Resource,
         salt: [u8; 16],
     },
     /// Revoke a capability grant by id. Requires policy-admin, or an effective
@@ -189,7 +189,7 @@ pub enum AclAction {
     RevokeCapability {
         grant_id: [u8; 32],
     },
-    /// Grant delegation authority for one exact capability/resource: the
+    /// Standing delegation authority for one exact capability/resource: the
     /// holder may grant/revoke ordinary grants of it but cannot manage
     /// delegation. Policy-admin only. `delegation_id` commits the canonical
     /// bytes plus `salt` ([`capability_delegation_id`]).
@@ -197,7 +197,7 @@ pub enum AclAction {
         delegation_id: [u8; 32],
         actor: ActorId,
         capability: crate::demand::PolicyCapability,
-        resource: crate::demand::PolicyResource,
+        resource: crate::demand::Resource,
         salt: [u8; 16],
     },
     /// Revoke a delegation by id. Policy-admin only.
@@ -224,16 +224,16 @@ pub fn policy_admin_capability() -> crate::demand::PolicyCapability {
 }
 
 /// The Space-level resource the meta-capability is granted on.
-pub fn policy_admin_resource() -> crate::demand::PolicyResource {
-    crate::demand::PolicyResource::space("lait")
+pub fn policy_admin_resource() -> crate::demand::Resource {
+    crate::demand::Resource::root("lait")
 }
 
 /// One effective scoped assignment: subject, capability, exact resource.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PolicyGrant {
+pub struct Assignment {
     pub actor: ActorId,
     pub capability: crate::demand::PolicyCapability,
-    pub resource: crate::demand::PolicyResource,
+    pub resource: crate::demand::Resource,
 }
 
 /// The pass-1 policy state: authorized grants/delegations/revocations and the
@@ -241,9 +241,9 @@ pub struct PolicyGrant {
 /// in the [`ReplayCheckpoint`] for the strict-descendant continuation.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PolicyPass {
-    pub grants: BTreeMap<[u8; 32], PolicyGrant>,
+    pub grants: BTreeMap<[u8; 32], Assignment>,
     pub revoked_grants: BTreeSet<[u8; 32]>,
-    pub delegations: BTreeMap<[u8; 32], PolicyGrant>,
+    pub delegations: BTreeMap<[u8; 32], Assignment>,
     pub revoked_delegations: BTreeSet<[u8; 32]>,
     pub implementations: BTreeMap<String, [u8; 32]>,
 }
@@ -268,7 +268,7 @@ impl PolicyPass {
         &self,
         actor: &ActorId,
         capability: &crate::demand::PolicyCapability,
-        resource: &crate::demand::PolicyResource,
+        resource: &crate::demand::Resource,
     ) -> bool {
         self.delegations.iter().any(|(id, d)| {
             !self.revoked_delegations.contains(id)
@@ -284,7 +284,7 @@ impl PolicyPass {
 pub fn capability_grant_id(
     actor: &ActorId,
     capability: &crate::demand::PolicyCapability,
-    resource: &crate::demand::PolicyResource,
+    resource: &crate::demand::Resource,
     salt: &[u8; 16],
 ) -> Option<[u8; 32]> {
     grant_commitment(
@@ -300,7 +300,7 @@ pub fn capability_grant_id(
 pub fn capability_delegation_id(
     actor: &ActorId,
     capability: &crate::demand::PolicyCapability,
-    resource: &crate::demand::PolicyResource,
+    resource: &crate::demand::Resource,
     salt: &[u8; 16],
 ) -> Option<[u8; 32]> {
     grant_commitment(
@@ -316,7 +316,7 @@ fn grant_commitment(
     context: &str,
     actor: &ActorId,
     capability: &crate::demand::PolicyCapability,
-    resource: &crate::demand::PolicyResource,
+    resource: &crate::demand::Resource,
     salt: &[u8; 16],
 ) -> Option<[u8; 32]> {
     let canonical =
@@ -464,7 +464,7 @@ pub struct AclState {
     /// their grants. A sponsored (agent) member carries a real grant set too
     /// (default `Write`) — sponsorship lives in `agents`, orthogonal to the
     /// grant, never in an empty grant set.
-    members: BTreeMap<ActorId, BTreeSet<Grant>>,
+    members: BTreeMap<ActorId, BTreeSet<Standing>>,
     /// agent actor → sponsoring actor. Every key here is also in `members`;
     /// an agent's presence — and its grants — are derived from, and die with,
     /// its sponsor. The grant set says what it may do; this map says whose
@@ -537,14 +537,14 @@ impl AclState {
     pub fn is_admin(&self, a: &ActorId) -> bool {
         self.members
             .get(a)
-            .is_some_and(|g| g.contains(&Grant::Admin))
+            .is_some_and(|g| g.contains(&Standing::Admin))
     }
     /// Content-write authority: `Admin` or `Write`. An empty grant set is a
     /// view-only member.
     pub fn can_write(&self, a: &ActorId) -> bool {
         self.members
             .get(a)
-            .is_some_and(|g| g.contains(&Grant::Admin) || g.contains(&Grant::Write))
+            .is_some_and(|g| g.contains(&Standing::Admin) || g.contains(&Standing::Write))
     }
     /// Whether `a` is an agent principal.
     pub fn is_agent(&self, a: &ActorId) -> bool {
@@ -559,7 +559,7 @@ impl AclState {
     pub fn is_human_member(&self, a: &ActorId) -> bool {
         self.is_member(a) && !self.is_agent(a)
     }
-    pub fn grants(&self, a: &ActorId) -> Vec<Grant> {
+    pub fn grants(&self, a: &ActorId) -> Vec<Standing> {
         self.members
             .get(a)
             .map(|g| g.iter().copied().collect())
@@ -571,9 +571,9 @@ impl AclState {
             return Some("agent");
         }
         let g = self.members.get(a)?;
-        Some(if g.contains(&Grant::Admin) {
+        Some(if g.contains(&Standing::Admin) {
             "admin"
-        } else if g.contains(&Grant::Write) {
+        } else if g.contains(&Standing::Write) {
             "member"
         } else {
             "viewer"
@@ -581,7 +581,7 @@ impl AclState {
     }
     /// All current members, sorted by actor (includes agents — the actor-level
     /// sealing set; fan out to devices via the actor plane).
-    pub fn members(&self) -> Vec<(ActorId, Vec<Grant>)> {
+    pub fn members(&self) -> Vec<(ActorId, Vec<Standing>)> {
         self.members
             .iter()
             .map(|(k, v)| (k.clone(), v.iter().copied().collect()))
@@ -616,7 +616,7 @@ impl AclState {
         &self,
         a: &ActorId,
         capability: &crate::demand::PolicyCapability,
-        resource: &crate::demand::PolicyResource,
+        resource: &crate::demand::Resource,
     ) -> Vec<[u8; 32]> {
         if !self.members.contains_key(a) {
             return Vec::new();
@@ -639,7 +639,7 @@ impl AclState {
         &self,
         a: &ActorId,
         capability: &crate::demand::PolicyCapability,
-        resource: &crate::demand::PolicyResource,
+        resource: &crate::demand::Resource,
     ) -> bool {
         !self
             .effective_capability_grants(a, capability, resource)
@@ -652,7 +652,7 @@ impl AclState {
         &self,
         a: &ActorId,
         capability: &crate::demand::PolicyCapability,
-        resource: &crate::demand::PolicyResource,
+        resource: &crate::demand::Resource,
     ) -> bool {
         self.members.contains_key(a)
             && self.policy.delegations.iter().any(|(id, d)| {
@@ -671,7 +671,7 @@ impl AclState {
         &self,
         a: &ActorId,
         capability: &crate::demand::PolicyCapability,
-        resource: &crate::demand::PolicyResource,
+        resource: &crate::demand::Resource,
     ) -> bool {
         if capability == &policy_admin_capability() && resource == &policy_admin_resource() {
             return self.is_policy_admin(a);
@@ -686,7 +686,7 @@ impl AclState {
 
     /// Every effective assignment of `a` (audit/projection surface): sorted by
     /// grant id.
-    pub fn effective_assignments(&self, a: &ActorId) -> Vec<([u8; 32], PolicyGrant)> {
+    pub fn effective_assignments(&self, a: &ActorId) -> Vec<([u8; 32], Assignment)> {
         if !self.members.contains_key(a) {
             return Vec::new();
         }
@@ -769,7 +769,7 @@ pub struct AuditEntry {
     pub kind: &'static str,
     /// The subject actor (absent for undecodable ops).
     pub subject: Option<ActorId>,
-    pub grants: Option<Vec<Grant>>,
+    pub grants: Option<Vec<Standing>>,
     /// Whether replay honored the op (false = unauthorized or undecodable).
     pub authorized: bool,
 }
@@ -825,7 +825,7 @@ pub fn replay_checkpointed(
 
     // Memoized at-frontier actor resolution: the same (device, actor, asof)
     // claim resolves identically everywhere, so cache by (actor, sorted asof).
-    let mut planes: HashMap<Vec<String>, ActorPlane> = HashMap::new();
+    let mut planes: HashMap<Vec<String>, Directory> = HashMap::new();
     let mut device_speaks_for = |device: &DeviceId, by: &ActorId, asof: &[String]| -> bool {
         let mut key: Vec<String> = asof.to_vec();
         key.sort();
@@ -1057,10 +1057,7 @@ fn judge_op(
             AclAction::RevokeDelegation { .. } => is_policy_admin(by),
             // Implementation activation is an explicit authority operation.
             AclAction::ActivateWorldImplementation { world, .. } => {
-                crate::demand::PolicyResource::space(world)
-                    .validate()
-                    .is_ok()
-                    && is_policy_admin(by)
+                crate::demand::Resource::root(world).validate().is_ok() && is_policy_admin(by)
             }
         }
 }
@@ -1080,7 +1077,7 @@ fn apply_authorized(
         AclAction::AddMember { actor, grants } | AclAction::SetGrants { actor, grants } => {
             humans.insert(actor.clone());
             agents_now.remove(actor);
-            if grants.contains(&Grant::Admin) {
+            if grants.contains(&Standing::Admin) {
                 admins.insert(actor.clone());
             } else {
                 admins.remove(actor);
@@ -1118,7 +1115,7 @@ fn apply_authorized(
         } => {
             policy.grants.insert(
                 *grant_id,
-                PolicyGrant {
+                Assignment {
                     actor: actor.clone(),
                     capability: capability.clone(),
                     resource: resource.clone(),
@@ -1137,7 +1134,7 @@ fn apply_authorized(
         } => {
             policy.delegations.insert(
                 *delegation_id,
-                PolicyGrant {
+                Assignment {
                     actor: actor.clone(),
                     capability: capability.clone(),
                     resource: resource.clone(),
@@ -1292,7 +1289,7 @@ pub fn replay_continue(
     let suffix_order = sigdag::topo_order(&suffix);
 
     // Resume pass 1 from the checkpointed continuation state.
-    let mut planes: HashMap<Vec<String>, ActorPlane> = HashMap::new();
+    let mut planes: HashMap<Vec<String>, Directory> = HashMap::new();
     let mut device_speaks_for = |device: &DeviceId, by: &ActorId, asof: &[String]| -> bool {
         let mut key: Vec<String> = asof.to_vec();
         key.sort();
@@ -1400,8 +1397,8 @@ fn materialize_authorized(
     ancestors: &HashMap<String, std::collections::HashSet<String>>,
     authorized: &[String],
 ) -> AclState {
-    let founding: BTreeSet<Grant> = [Grant::Admin, Grant::Write].into();
-    let mut members: BTreeMap<ActorId, BTreeSet<Grant>> = genesis
+    let founding: BTreeSet<Standing> = [Standing::Admin, Standing::Write].into();
+    let mut members: BTreeMap<ActorId, BTreeSet<Standing>> = genesis
         .founding_actors
         .iter()
         .map(|a| (a.clone(), founding.clone()))
@@ -1471,7 +1468,7 @@ fn materialize_authorized(
             } => {
                 policy.grants.insert(
                     *grant_id,
-                    PolicyGrant {
+                    Assignment {
                         actor: actor.clone(),
                         capability: capability.clone(),
                         resource: resource.clone(),
@@ -1490,7 +1487,7 @@ fn materialize_authorized(
             } => {
                 policy.delegations.insert(
                     *delegation_id,
-                    PolicyGrant {
+                    Assignment {
                         actor: actor.clone(),
                         capability: capability.clone(),
                         resource: resource.clone(),
@@ -1897,7 +1894,7 @@ mod tests {
             1,
             AclAction::AddMember {
                 actor: f.a(2).clone(),
-                grants: vec![Grant::Write],
+                grants: vec![Standing::Write],
             },
             vec![],
         );
@@ -1937,7 +1934,7 @@ mod tests {
             2,
             AclAction::AddMember {
                 actor: f.a(3).clone(),
-                grants: vec![Grant::Admin],
+                grants: vec![Standing::Admin],
             },
             vec![],
         );
@@ -1957,7 +1954,7 @@ mod tests {
             1,
             AclAction::AddMember {
                 actor: f.a(2).clone(),
-                grants: vec![Grant::Admin],
+                grants: vec![Standing::Admin],
             },
             vec![],
         );
@@ -1996,7 +1993,7 @@ mod tests {
             &AclOp {
                 action: AclAction::AddMember {
                     actor: f.a(2).clone(),
-                    grants: vec![Grant::Write],
+                    grants: vec![Standing::Write],
                 },
                 by: f.a(1).clone(),
                 actor_asof: vec![add_dev.hash()],
@@ -2026,7 +2023,7 @@ mod tests {
             1,
             AclAction::AddMember {
                 actor: f.a(2).clone(),
-                grants: vec![Grant::Admin, Grant::Write],
+                grants: vec![Standing::Admin, Standing::Write],
             },
             vec![],
         );
@@ -2036,7 +2033,7 @@ mod tests {
             2,
             AclAction::AddMember {
                 actor: f.a(3).clone(),
-                grants: vec![Grant::Write],
+                grants: vec![Standing::Write],
             },
             vec![add2.hash()],
         );
@@ -2063,7 +2060,7 @@ mod tests {
             1,
             AclAction::AddMember {
                 actor: f.a(2).clone(),
-                grants: vec![Grant::Write],
+                grants: vec![Standing::Write],
             },
             vec![],
         );
@@ -2080,7 +2077,7 @@ mod tests {
             1,
             AclAction::AddMember {
                 actor: f.a(2).clone(),
-                grants: vec![Grant::Write],
+                grants: vec![Standing::Write],
             },
             vec![rm.hash()],
         );
@@ -2096,7 +2093,7 @@ mod tests {
             1,
             AclAction::AddMember {
                 actor: f.a(2).clone(),
-                grants: vec![Grant::Write],
+                grants: vec![Standing::Write],
             },
             vec![],
         );
@@ -2130,7 +2127,7 @@ mod tests {
             7,
             AclAction::AddMember {
                 actor: f.a(7).clone(),
-                grants: vec![Grant::Admin],
+                grants: vec![Standing::Admin],
             },
             vec![sponsor.hash()],
         );
@@ -2171,7 +2168,7 @@ mod tests {
             1,
             AclAction::AddMember {
                 actor: f.a(2).clone(),
-                grants: vec![Grant::Write],
+                grants: vec![Standing::Write],
             },
             vec![],
         );
@@ -2180,7 +2177,7 @@ mod tests {
             2,
             AclAction::AddAgent {
                 actor: f.a(7).clone(),
-                grants: vec![Grant::Admin, Grant::Write],
+                grants: vec![Standing::Admin, Standing::Write],
             },
             vec![add2.hash()],
         );
@@ -2201,7 +2198,7 @@ mod tests {
             1,
             AclAction::AddMember {
                 actor: f.a(2).clone(),
-                grants: vec![Grant::Write],
+                grants: vec![Standing::Write],
             },
             vec![],
         );
@@ -2218,7 +2215,7 @@ mod tests {
             1,
             AclAction::AddMember {
                 actor: f.a(2).clone(),
-                grants: vec![Grant::Admin, Grant::Write],
+                grants: vec![Standing::Admin, Standing::Write],
             },
             vec![],
         );
@@ -2236,7 +2233,7 @@ mod tests {
             2,
             AclAction::AddMember {
                 actor: f.a(2).clone(),
-                grants: vec![Grant::Admin],
+                grants: vec![Standing::Admin],
             },
             vec![rm2.hash()],
         );
@@ -2260,7 +2257,7 @@ mod tests {
             1,
             AclAction::AddMember {
                 actor: f.a(2).clone(),
-                grants: vec![Grant::Write],
+                grants: vec![Standing::Write],
             },
             n,
             vec![],
@@ -2270,7 +2267,7 @@ mod tests {
             1,
             AclAction::AddMember {
                 actor: f.a(3).clone(),
-                grants: vec![Grant::Write],
+                grants: vec![Standing::Write],
             },
             n,
             vec![],
@@ -2282,7 +2279,7 @@ mod tests {
             1,
             AclAction::AddMember {
                 actor: f.a(2).clone(),
-                grants: vec![Grant::Write],
+                grants: vec![Standing::Write],
             },
             vec![],
         );
@@ -2291,7 +2288,7 @@ mod tests {
             1,
             AclAction::AddMember {
                 actor: f.a(3).clone(),
-                grants: vec![Grant::Write],
+                grants: vec![Standing::Write],
             },
             vec![],
         );
@@ -2309,7 +2306,7 @@ mod tests {
             1,
             AclAction::AddMember {
                 actor: g.a(4).clone(),
-                grants: vec![Grant::Write],
+                grants: vec![Standing::Write],
             },
             m,
             vec![],
@@ -2319,7 +2316,7 @@ mod tests {
             1,
             AclAction::AddMember {
                 actor: g.a(5).clone(),
-                grants: vec![Grant::Write],
+                grants: vec![Standing::Write],
             },
             m,
             vec![],
@@ -2347,7 +2344,7 @@ mod tests {
                 1,
                 AclAction::AddMember {
                     actor: f.a(2).clone(),
-                    grants: vec![Grant::Write],
+                    grants: vec![Standing::Write],
                 },
                 n,
                 vec![],
@@ -2357,7 +2354,7 @@ mod tests {
                 1,
                 AclAction::AddMember {
                     actor: f.a(3).clone(),
-                    grants: vec![Grant::Write],
+                    grants: vec![Standing::Write],
                 },
                 n,
                 vec![],
@@ -2405,7 +2402,7 @@ mod tests {
                 1,
                 AclAction::AddMember {
                     actor: f.a(rival).clone(),
-                    grants: vec![Grant::Write],
+                    grants: vec![Standing::Write],
                 },
                 nonce,
                 vec![],
@@ -2415,7 +2412,7 @@ mod tests {
                 1,
                 AclAction::AddMember {
                     actor: f.a(4).clone(),
-                    grants: vec![Grant::Write],
+                    grants: vec![Standing::Write],
                 },
                 nonce,
                 vec![],
@@ -2457,7 +2454,7 @@ mod tests {
             1,
             AclAction::AddMember {
                 actor: f.a(2).clone(),
-                grants: vec![Grant::Write], // writer, not admin
+                grants: vec![Standing::Write], // writer, not admin
             },
             vec![],
         );
@@ -2561,7 +2558,7 @@ mod tests {
             1,
             AclAction::AddMember {
                 actor: f.a(2).clone(),
-                grants: vec![Grant::Write],
+                grants: vec![Standing::Write],
             },
             vec![],
         );
@@ -2605,7 +2602,7 @@ mod tests {
             1,
             AclAction::AddMember {
                 actor: f.a(2).clone(),
-                grants: vec![Grant::Admin],
+                grants: vec![Standing::Admin],
             },
             vec![],
         );
@@ -2624,7 +2621,7 @@ mod tests {
             2,
             AclAction::AddMember {
                 actor: f.a(3).clone(),
-                grants: vec![Grant::Write],
+                grants: vec![Standing::Write],
             },
             nonce,
             vec![add_admin.hash()],
@@ -2650,7 +2647,7 @@ mod tests {
             1,
             AclAction::AddMember {
                 actor: f.a(2).clone(),
-                grants: vec![Grant::Admin],
+                grants: vec![Standing::Admin],
             },
             vec![],
         );
@@ -2666,7 +2663,7 @@ mod tests {
             2,
             AclAction::AddMember {
                 actor: f.a(3).clone(),
-                grants: vec![Grant::Write],
+                grants: vec![Standing::Write],
             },
             nonce,
             vec![add_admin.hash()],
@@ -2693,7 +2690,7 @@ mod tests {
             1,
             AclAction::AddMember {
                 actor: f.a(2).clone(),
-                grants: vec![Grant::Admin],
+                grants: vec![Standing::Admin],
             },
             vec![],
         );
@@ -2709,7 +2706,7 @@ mod tests {
             2,
             AclAction::AddMember {
                 actor: f.a(3).clone(),
-                grants: vec![Grant::Write],
+                grants: vec![Standing::Write],
             },
             nonce,
             vec![add_admin.hash()],
@@ -2770,7 +2767,7 @@ mod tests {
             1,
             AclAction::AddMember {
                 actor: f.a(2).clone(),
-                grants: vec![Grant::Admin],
+                grants: vec![Standing::Admin],
             },
             vec![],
         );
@@ -2786,7 +2783,7 @@ mod tests {
             2,
             AclAction::AddMember {
                 actor: f.a(3).clone(),
-                grants: vec![Grant::Write],
+                grants: vec![Standing::Write],
             },
             nonce,
             vec![add_admin.hash()],
@@ -2797,7 +2794,7 @@ mod tests {
             1,
             AclAction::AddMember {
                 actor: f.a(3).clone(),
-                grants: vec![Grant::Write],
+                grants: vec![Standing::Write],
             },
             vec![revoke.hash()],
         );
@@ -2824,7 +2821,7 @@ mod tests {
             1,
             AclAction::AddMember {
                 actor: f.a(2).clone(),
-                grants: vec![Grant::Admin],
+                grants: vec![Standing::Admin],
             },
             vec![],
         );
@@ -2840,7 +2837,7 @@ mod tests {
             2,
             AclAction::AddMember {
                 actor: f.a(3).clone(),
-                grants: vec![Grant::Write],
+                grants: vec![Standing::Write],
             },
             nonce,
             vec![add_admin.hash()],
@@ -2898,7 +2895,7 @@ mod tests {
             1,
             AclAction::AddMember {
                 actor: f.a(2).clone(),
-                grants: vec![Grant::Write],
+                grants: vec![Standing::Write],
             },
             nonce,
             vec![],

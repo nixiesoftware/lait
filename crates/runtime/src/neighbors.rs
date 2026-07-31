@@ -1,6 +1,6 @@
 //! The persistent Neighbor registry (v1) — C2.1.
 //!
-//! Keyed by `(SpaceId, StationId)`: verified Beacon high-water
+//! Keyed by `(SpaceId, Key)`: verified Beacon high-water
 //! `(epoch, sequence)` persisted across restart, verified route hints with
 //! receiver-local lease expiry, advisory reachability, and Orbit-local Contact
 //! retry state. Reachability is advisory and never standing. The registry file
@@ -11,7 +11,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use mechanics::ids::{SpaceId, StationId};
+use mechanics::{ids::SpaceId, station::Key};
 use serde::{Deserialize, Serialize};
 
 use crate::beacon::VerifiedBeacon;
@@ -65,7 +65,7 @@ pub struct StoredRoute {
 /// One Neighbor's persistent record.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NeighborRecord {
-    pub station: StationId,
+    pub station: Key,
     /// Verified Beacon high-water: forward-only per Station, fails closed on
     /// u64 overflow.
     pub epoch: u64,
@@ -94,7 +94,7 @@ pub struct NeighborRecord {
 /// registry file in place.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PriorNeighborRecord {
-    station: StationId,
+    station: Key,
     epoch: u64,
     sequence: u64,
     frontier_root: [u8; 32],
@@ -149,7 +149,7 @@ struct PriorRegistryFile {
 pub struct NeighborRegistry {
     path: PathBuf,
     space: SpaceId,
-    entries: BTreeMap<StationId, NeighborRecord>,
+    entries: BTreeMap<Key, NeighborRecord>,
     /// Unpersisted freshness-only changes.
     dirty: bool,
     last_persist_ms: u64,
@@ -179,7 +179,7 @@ impl NeighborRegistry {
     fn decode_entries(
         bytes: &[u8],
         space: &SpaceId,
-    ) -> Result<BTreeMap<StationId, NeighborRecord>, RegistryError> {
+    ) -> Result<BTreeMap<Key, NeighborRecord>, RegistryError> {
         // Postcard tolerates trailing bytes, so each shape must round-trip
         // exactly before it is believed — a v1 file can never half-decode as
         // v2 (or vice versa) and produce garbled records.
@@ -391,7 +391,7 @@ impl NeighborRegistry {
     /// Neighbors are touched: a bare overlay event can never create an entry.
     pub fn note_swarm(
         &mut self,
-        station: &StationId,
+        station: &Key,
         up: bool,
         now_ms: u64,
     ) -> Result<bool, RegistryError> {
@@ -430,10 +430,7 @@ impl NeighborRegistry {
 
     /// The Stations worth bootstrapping the gossip swarm from: entries holding
     /// an unexpired route lease, with those routes (W0-S1(c)).
-    pub fn bootstrap_candidates(
-        &self,
-        now_ms: u64,
-    ) -> Vec<(StationId, Vec<crate::beacon::RouteHint>)> {
+    pub fn bootstrap_candidates(&self, now_ms: u64) -> Vec<(Key, Vec<crate::beacon::RouteHint>)> {
         self.entries
             .values()
             .filter_map(|e| {
@@ -452,12 +449,12 @@ impl NeighborRegistry {
     /// dials it **back** to complete the bidirectional exchange (the responder
     /// side only served material; a reciprocal pull is what redeems a joiner's
     /// admission and converges the responder). Marks the entry pending with a
-    /// direct, leased route toward the peer — dialing resolves by StationId, so
+    /// direct, leased route toward the peer — dialing resolves by Key, so
     /// the route only needs to be present and unexpired to pass eligibility.
     /// Never overwrites a fresher Beacon-derived frontier/coordinate.
     pub fn note_reciprocable(
         &mut self,
-        station: &StationId,
+        station: &Key,
         now_ms: u64,
         route_lease_ms: u64,
     ) -> Result<(), RegistryError> {
@@ -492,7 +489,7 @@ impl NeighborRegistry {
         entry.pending = true;
         entry.last_seen_ms = now_ms;
         // A direct route toward the inbound peer (scheme 0, no address bytes):
-        // the transport dials by StationId, so this only keeps eligibility open.
+        // the transport dials by Key, so this only keeps eligibility open.
         let expires_at_ms = now_ms.saturating_add(route_lease_ms);
         let direct = crate::beacon::RouteHint {
             scheme: 0,
@@ -511,9 +508,9 @@ impl NeighborRegistry {
 
     /// The Neighbors eligible for a Contact attempt now: pending, past their
     /// backoff, and holding an unexpired route lease (route expiry suppresses
-    /// dialing). Fair order: sorted by `next_attempt_ms` then StationId.
-    pub fn eligible(&self, now_ms: u64) -> Vec<StationId> {
-        let mut due: Vec<(&NeighborRecord, &StationId)> = self
+    /// dialing). Fair order: sorted by `next_attempt_ms` then Key.
+    pub fn eligible(&self, now_ms: u64) -> Vec<Key> {
+        let mut due: Vec<(&NeighborRecord, &Key)> = self
             .entries
             .iter()
             .filter(|(_, e)| {
@@ -533,11 +530,7 @@ impl NeighborRegistry {
 
     /// Record a successful Contact: backoff resets, the pending mark clears,
     /// reachability turns advisory-reachable.
-    pub fn record_success(
-        &mut self,
-        station: &StationId,
-        now_ms: u64,
-    ) -> Result<(), RegistryError> {
+    pub fn record_success(&mut self, station: &Key, now_ms: u64) -> Result<(), RegistryError> {
         if let Some(e) = self.entries.get_mut(station) {
             e.failures = 0;
             e.pending = false;
@@ -551,11 +544,7 @@ impl NeighborRegistry {
 
     /// Record a failed Contact attempt: exponential backoff from 1 s to 5 min
     /// with deterministic per-Station jitter; the Neighbor stays pending.
-    pub fn record_failure(
-        &mut self,
-        station: &StationId,
-        now_ms: u64,
-    ) -> Result<(), RegistryError> {
+    pub fn record_failure(&mut self, station: &Key, now_ms: u64) -> Result<(), RegistryError> {
         if let Some(e) = self.entries.get_mut(station) {
             e.failures = e.failures.saturating_add(1);
             e.reachability = REACH_UNREACHABLE;
@@ -579,12 +568,12 @@ impl NeighborRegistry {
     }
 
     /// Whether a Neighbor is currently marked pending.
-    pub fn is_pending(&self, station: &StationId) -> bool {
+    pub fn is_pending(&self, station: &Key) -> bool {
         self.entries.get(station).is_some_and(|e| e.pending)
     }
 
     /// The persisted high-water for a Station (`None` if unknown).
-    pub fn high_water(&self, station: &StationId) -> Option<(u64, u64)> {
+    pub fn high_water(&self, station: &Key) -> Option<(u64, u64)> {
         self.entries.get(station).map(|e| (e.epoch, e.sequence))
     }
 
@@ -605,7 +594,7 @@ impl NeighborRegistry {
     }
 
     /// The freshest route hints for a Station (unexpired only).
-    pub fn routes(&self, station: &StationId, now_ms: u64) -> Vec<crate::beacon::RouteHint> {
+    pub fn routes(&self, station: &Key, now_ms: u64) -> Vec<crate::beacon::RouteHint> {
         self.entries
             .get(station)
             .map(|e| {
@@ -623,7 +612,7 @@ impl NeighborRegistry {
 mod tests {
     use super::*;
     use crate::beacon::SignedBeacon;
-    use mechanics::ids::StationEpoch;
+    use mechanics::station::Epoch;
 
     const SEED: [u8; 32] = [77u8; 32];
 
@@ -652,7 +641,7 @@ mod tests {
         SignedBeacon::emit(
             crate::beacon::BEACON_PROTOCOL,
             &space(),
-            StationEpoch::from_u64(epoch),
+            Epoch::from_u64(epoch),
             sequence,
             root,
             count,
@@ -688,7 +677,7 @@ mod tests {
         drop(reg);
         let mut reg = NeighborRegistry::load(&dir, &space()).unwrap();
         let station = mechanics::crypto::device_from_seed(&SEED);
-        let station = StationId::from_device(&station).unwrap();
+        let station = Key::from_device(&station).unwrap();
         assert_eq!(reg.high_water(&station), Some((2, 5)));
         assert!(!reg
             .observe_beacon(&beacon(2, 4, [9u8; 32]), (&local, 0), 2_000, 60_000)
@@ -806,7 +795,7 @@ mod tests {
     fn swarm_events_touch_only_known_neighbors() {
         let dir = temp_dir("swarm");
         let mut reg = NeighborRegistry::load(&dir, &space()).unwrap();
-        let stranger = StationId::from_key_bytes([3u8; 32]);
+        let stranger = Key::from_key_bytes([3u8; 32]);
         // A bare overlay event can never create an entry (eclipse fence).
         assert!(!reg.note_swarm(&stranger, true, 1_000).unwrap());
         assert!(reg.snapshot().is_empty());
@@ -858,7 +847,7 @@ mod tests {
             let mut key = [0u8; 32];
             key[..8].copy_from_slice(&(i as u64).to_le_bytes());
             key[31] = 1;
-            let station = StationId::from_key_bytes(key);
+            let station = Key::from_key_bytes(key);
             reg.note_reciprocable(&station, 1_000 + i as u64, 600_000)
                 .unwrap();
         }
@@ -873,7 +862,7 @@ mod tests {
     #[test]
     fn a_v1_registry_file_migrates_in_place() {
         let dir = temp_dir("migrate");
-        let station = StationId::from_key_bytes([5u8; 32]);
+        let station = Key::from_key_bytes([5u8; 32]);
         let v1 = PriorRegistryFile {
             version: 1,
             space: space(),

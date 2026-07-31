@@ -15,7 +15,7 @@ use mechanics::ceremony::{
 };
 use mechanics::ledger::AuthorityLedger;
 
-use super::mechanics::{fence_epoch, Inner, OrbitalMechanics};
+use super::mechanics::{fence_epoch, Inner, SpaceAuthority};
 
 impl Inner {
     /// Run one ceremony-engine operation over this Space's ledger, with the
@@ -38,7 +38,7 @@ impl Inner {
     }
 }
 
-impl OrbitalMechanics {
+impl SpaceAuthority {
     /// Break-glass space recovery: re-root the space to this device (solo key
     /// or FROST group signature).
     pub fn space_recover(&self) -> Result<SpaceRecovery> {

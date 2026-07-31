@@ -9,23 +9,23 @@ use std::time::{Duration, Instant};
 
 use runtime::budget::{deadline, slots};
 use runtime::transient::{
-    AdmitOutcome, LiveControl, TransientError, TransientItem, TransientKind, TransientPayload,
-    TransientScope, TransientStore, MAX_ANCHOR_BYTES, MAX_SCOPE_FIELD_BYTES,
+    AdmitOutcome, LiveControl, Target, TransientError, TransientItem, TransientKind,
+    TransientPayload, TransientStore, MAX_ANCHOR_BYTES, MAX_SCOPE_FIELD_BYTES,
     MAX_TRANSIENT_ITEM_BYTES,
 };
 
 const EPOCH: [u8; 16] = [7u8; 16];
 const OTHER_EPOCH: [u8; 16] = [9u8; 16];
 
-fn issue_scope() -> TransientScope {
-    TransientScope::IssueView {
+fn issue_scope() -> Target {
+    Target::Body {
         world: "com.example.notes".into(),
         body: [1u8; 16],
     }
 }
 
-fn caret_scope(field: &str) -> TransientScope {
-    TransientScope::TextCaret {
+fn caret_scope(field: &str) -> Target {
+    Target::Field {
         world: "com.example.notes".into(),
         body: [1u8; 16],
         field: field.into(),
@@ -35,21 +35,21 @@ fn caret_scope(field: &str) -> TransientScope {
 /// An encoded anchor naming `path`, built the way a real one is so the decode
 /// inside `validate` sees the real shape.
 fn anchor(path: &str) -> Vec<u8> {
-    replica::FabricAnchor {
+    replica::Anchor {
         format_version: 1,
         body: [1u8; 32],
         path: path.into(),
         anchored_to: None,
         offset: 0,
         after: false,
-        taken_at: replica::FabricVersion::empty(),
+        taken_at: replica::Version::empty(),
     }
     .encode()
 }
 
-fn item(scope: TransientScope, payload: TransientPayload, seq: u64) -> TransientItem {
+fn item(scope: Target, payload: TransientPayload, seq: u64) -> TransientItem {
     TransientItem {
-        session_epoch: EPOCH,
+        connection_epoch: EPOCH,
         seq,
         scope,
         payload,
@@ -64,7 +64,7 @@ fn an_epoch_is_compared_and_never_ordered() {
     let mut store = TransientStore::new();
     let now = Instant::now();
     let mut stray = item(issue_scope(), TransientPayload::Presence, 1);
-    stray.session_epoch = OTHER_EPOCH;
+    stray.connection_epoch = OTHER_EPOCH;
     assert_eq!(store.admit(&stray, &EPOCH, now), AdmitOutcome::WrongEpoch);
     assert!(store.is_empty(), "and nothing was stored on the way to no");
 
@@ -123,7 +123,7 @@ fn a_payload_a_scope_cannot_carry_is_refused() {
         (caret_scope("text"), TransientPayload::Presence),
         (caret_scope("text"), TransientPayload::Typing),
         (
-            TransientScope::Typing {
+            Target::Typing {
                 world: "com.example.notes".into(),
                 body: [1u8; 16],
                 field: "text".into(),
@@ -131,7 +131,7 @@ fn a_payload_a_scope_cannot_carry_is_refused() {
             TransientPayload::Presence,
         ),
         (
-            TransientScope::ContentResidency { content: [3u8; 32] },
+            Target::Content { content: [3u8; 32] },
             TransientPayload::Presence,
         ),
     ];
@@ -315,7 +315,7 @@ fn a_full_table_evicts_rather_than_growing() {
     let mut store = TransientStore::with_capacity(2);
     let now = Instant::now();
     for n in 0..2u8 {
-        let scope = TransientScope::IssueView {
+        let scope = Target::Body {
             world: "com.example.notes".into(),
             body: [n; 16],
         };
@@ -324,7 +324,7 @@ fn a_full_table_evicts_rather_than_growing() {
             AdmitOutcome::Stored
         );
     }
-    let overflow = TransientScope::IssueView {
+    let overflow = Target::Body {
         world: "com.example.notes".into(),
         body: [99u8; 16],
     };
@@ -338,7 +338,7 @@ fn a_full_table_evicts_rather_than_growing() {
     assert_eq!(
         store.admit(
             &item(
-                TransientScope::IssueView {
+                Target::Body {
                     world: "com.example.notes".into(),
                     body: [0u8; 16],
                 },
@@ -405,8 +405,8 @@ fn a_maximal_selection_fits_the_item_ceiling() {
 
 #[test]
 fn a_subscription_cannot_name_more_scopes_than_the_connection_may_hold() {
-    let scopes: Vec<TransientScope> = (0..=slots::MAX_SUBSCRIBED_SCOPES_PER_CONNECTION)
-        .map(|n| TransientScope::IssueView {
+    let scopes: Vec<Target> = (0..=slots::MAX_SUBSCRIBED_SCOPES_PER_CONNECTION)
+        .map(|n| Target::Body {
             world: "com.example.notes".into(),
             body: [n as u8; 16],
         })
@@ -416,8 +416,8 @@ fn a_subscription_cannot_name_more_scopes_than_the_connection_may_hold() {
         Err(TransientError::Bounds)
     );
 
-    let fits: Vec<TransientScope> = (0..slots::MAX_SUBSCRIBED_SCOPES_PER_CONNECTION)
-        .map(|n| TransientScope::IssueView {
+    let fits: Vec<Target> = (0..slots::MAX_SUBSCRIBED_SCOPES_PER_CONNECTION)
+        .map(|n| Target::Body {
             world: "com.example.notes".into(),
             body: [n as u8; 16],
         })
@@ -449,7 +449,7 @@ fn a_world_a_scope_names_is_parsed_rather_than_measured() {
         format!("com.example.{}", "a".repeat(60)),
         "-com.example".into(),
     ] {
-        let scope = TransientScope::IssueView {
+        let scope = Target::Body {
             world: bad.clone(),
             body: [1u8; 16],
         };
@@ -470,7 +470,7 @@ fn a_field_path_is_bounded_rather_than_parsed() {
     let mut store = TransientStore::new();
     let now = Instant::now();
     for bad in [String::new(), "f".repeat(MAX_SCOPE_FIELD_BYTES + 1)] {
-        let scope = TransientScope::TextCaret {
+        let scope = Target::Field {
             world: "com.example.notes".into(),
             body: [1u8; 16],
             field: bad.clone(),
@@ -488,7 +488,7 @@ fn a_field_path_is_bounded_rather_than_parsed() {
 #[cfg(test)]
 mod provider_refusals {
     use runtime::fetch::ProviderRefusal;
-    use runtime::planes::SessionRefusal;
+    use runtime::plane::Refusal;
 
     #[test]
     fn exactly_one_refusal_is_worth_telling_someone_about() {
@@ -498,13 +498,12 @@ mod provider_refusals {
         // the one that, collapsed into "unavailable", presents as an
         // intermittent network fault for a week.
         assert!(
-            ProviderRefusal::Refused(SessionRefusal::UnsupportedVersion { supported: 2 })
-                .is_actionable()
+            ProviderRefusal::Refused(Refusal::UnsupportedVersion { supported: 2 }).is_actionable()
         );
         for quiet in [
             ProviderRefusal::Unreachable,
-            ProviderRefusal::Refused(SessionRefusal::Refused),
-            ProviderRefusal::Refused(SessionRefusal::Malformed),
+            ProviderRefusal::Refused(Refusal::Refused),
+            ProviderRefusal::Refused(Refusal::Malformed),
             ProviderRefusal::Unintelligible,
         ] {
             assert!(!quiet.is_actionable(), "{quiet:?}");
@@ -518,7 +517,7 @@ mod provider_refusals {
         // failure to the peer's policy.
         assert_ne!(
             ProviderRefusal::Unintelligible,
-            ProviderRefusal::Refused(SessionRefusal::Refused)
+            ProviderRefusal::Refused(Refusal::Refused)
         );
         assert_ne!(
             ProviderRefusal::Unintelligible,

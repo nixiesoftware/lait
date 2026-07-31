@@ -22,6 +22,35 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::config_root;
 
+/// The local Orbit navigation catalog.
+///
+/// Its durable encoding remains `spaces.json`; this type only gives the source
+/// model the role name used by orchestration.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Catalog;
+
+impl Catalog {
+    pub fn list(self) -> Vec<Entry> {
+        list()
+    }
+
+    pub fn presence(self, entry: &Entry) -> Presence {
+        presence(entry)
+    }
+
+    pub fn upsert(self, entry: Entry) -> Result<()> {
+        upsert(entry)
+    }
+
+    pub fn forget(self, selector: &str) -> Result<Vec<Entry>> {
+        forget(selector)
+    }
+
+    pub fn prune(self) -> Result<Vec<Entry>> {
+        prune()
+    }
+}
+
 /// Where a store's space came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -52,7 +81,7 @@ pub struct ProjectBrief {
 
 /// One registered store: a path on this machine and the space it holds.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SpaceEntry {
+pub struct Entry {
     /// The space id (`ws_…`) bound in this store.
     pub space: String,
     /// The space display name at last open (advisory; may lag a rename).
@@ -78,7 +107,7 @@ pub struct SpaceEntry {
 /// Filesystem-level status of a registered entry. Whether a daemon is *up* is
 /// a live control-channel probe, done by the CLI layer (it needs async).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StorePresence {
+pub enum Presence {
     /// The path holds a formed/entered Space store.
     Present,
     /// The path is gone or no longer holds a Space store.
@@ -87,12 +116,12 @@ pub enum StorePresence {
 
 /// Check whether an entry's path still holds a Space store, without opening
 /// (or creating) anything.
-pub fn presence(entry: &SpaceEntry) -> StorePresence {
+pub fn presence(entry: &Entry) -> Presence {
     let path = Path::new(&entry.path);
     if crate::orbital::space_store_present(path) {
-        StorePresence::Present
+        Presence::Present
     } else {
-        StorePresence::Missing
+        Presence::Missing
     }
 }
 
@@ -103,11 +132,11 @@ pub fn registry_file() -> Result<PathBuf> {
 
 /// Read the registry, newest-first. Best-effort: a missing or corrupt file
 /// yields an empty list rather than an error (navigation state, never a gate).
-pub fn list() -> Vec<SpaceEntry> {
+pub fn list() -> Vec<Entry> {
     let Ok(path) = registry_file() else {
         return Vec::new();
     };
-    let mut entries: Vec<SpaceEntry> = std::fs::read_to_string(&path)
+    let mut entries: Vec<Entry> = std::fs::read_to_string(&path)
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default();
@@ -115,7 +144,7 @@ pub fn list() -> Vec<SpaceEntry> {
     entries
 }
 
-fn save(entries: &[SpaceEntry]) -> Result<()> {
+fn save(entries: &[Entry]) -> Result<()> {
     let path = registry_file()?;
     let json = serde_json::to_string_pretty(entries).context("encode space registry")?;
     // Write atomically (temp file + rename) so a concurrent reader never
@@ -134,7 +163,7 @@ fn save(entries: &[SpaceEntry]) -> Result<()> {
 /// `origin` sticks once founded (a daemon-open upsert must not relabel a founder
 /// as joined). Best-effort persistence; callers treat failure as non-fatal (the
 /// registry is a convenience, not a source of truth).
-pub fn upsert(mut entry: SpaceEntry) -> Result<()> {
+pub fn upsert(mut entry: Entry) -> Result<()> {
     let mut entries = list();
     if let Some(old) = entries.iter().find(|e| e.path == entry.path) {
         // Same store re-registered: merge, don't blank.
@@ -164,9 +193,9 @@ pub fn upsert(mut entry: SpaceEntry) -> Result<()> {
 /// **unique** space-id prefix — an ambiguous prefix removes nothing, so a
 /// stray `forget ws_` can never wipe the registry). Never touches the store on
 /// disk. Returns the removed entries.
-pub fn forget(sel: &str) -> Result<Vec<SpaceEntry>> {
+pub fn forget(sel: &str) -> Result<Vec<Entry>> {
     let entries = list();
-    let exact = |e: &SpaceEntry| e.path == sel || e.space == sel;
+    let exact = |e: &Entry| e.path == sel || e.space == sel;
     let matches_exact = entries.iter().filter(|e| exact(e)).count();
     let prefix_hits = entries
         .iter()
@@ -183,11 +212,11 @@ pub fn forget(sel: &str) -> Result<Vec<SpaceEntry>> {
 
 /// Drop every entry whose path no longer holds an initialized store. Returns
 /// the removed entries.
-pub fn prune() -> Result<Vec<SpaceEntry>> {
+pub fn prune() -> Result<Vec<Entry>> {
     let entries = list();
     let (removed, kept): (Vec<_>, Vec<_>) = entries
         .into_iter()
-        .partition(|e| presence(e) == StorePresence::Missing);
+        .partition(|e| presence(e) == Presence::Missing);
     if !removed.is_empty() {
         save(&kept)?;
     }
@@ -228,8 +257,8 @@ mod tests {
         }
     }
 
-    fn entry(space: &str, path: &str, last_opened: u64) -> SpaceEntry {
-        SpaceEntry {
+    fn entry(space: &str, path: &str, last_opened: u64) -> Entry {
+        Entry {
             space: space.into(),
             name: "demo".into(),
             path: path.into(),
@@ -272,7 +301,7 @@ mod tests {
         upsert(founded).unwrap();
         // A later daemon-open upsert that didn't recompute name/projects and
         // defaulted origin must keep the founded origin and the old snapshots.
-        upsert(SpaceEntry {
+        upsert(Entry {
             space: "ws_A".into(),
             name: String::new(),
             path: "/tmp/a".into(),

@@ -118,7 +118,7 @@ pub enum WorldError {
     RequestIdConflict,
     /// The Session's Station has gone dormant or exited.
     StationDormant,
-    /// The Replica/Fabric persistence layer failed durably.
+    /// The Replica/Engine persistence layer failed durably.
     Persistence,
     /// Continuity was lost; the caller must reset/re-query.
     ResetRequired,

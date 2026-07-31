@@ -5,7 +5,7 @@
 //! are easy to break by adding a seventh declaration and only checking the one
 //! you added.
 
-use runtime::planes::bounds;
+use runtime::plane::bounds;
 use runtime::signal::{core_declarations, declaration_for, selector, ResponsePolicy, SignalError};
 
 #[test]
@@ -113,12 +113,12 @@ fn every_failure_has_a_distinct_stable_code() {
 
 /// The wire, and the one ordering decision that makes its bounds real.
 mod wire {
-    use runtime::planes::{bounds, InviteKind, PlaneWireError, Signal, MAX_SIGNAL_TEXT_BYTES};
+    use runtime::plane::{bounds, InviteKind, Signal, WireError, MAX_SIGNAL_TEXT_BYTES};
     use runtime::signal::{frame_signal, selector, SignalError};
-    use runtime::transient::TransientScope;
+    use runtime::transient::Target;
 
-    fn scope() -> TransientScope {
-        TransientScope::IssueView {
+    fn scope() -> Target {
+        Target::Body {
             world: "com.example.notes".into(),
             body: [3u8; 16],
         }
@@ -131,7 +131,7 @@ mod wire {
         // the length is read — behind the length, the schema is known after a
         // buffer already exists and the per-signal maximum is decoration.
         let framed = frame_signal(&Signal::Ping { nonce: [1u8; 16] }).expect("framed");
-        assert_eq!(framed[0], runtime::planes::stream_kind::RELIABLE_SIGNAL);
+        assert_eq!(framed[0], runtime::plane::stream_kind::RELIABLE_SIGNAL);
         let carried = u16::from_le_bytes([framed[1], framed[2]]);
         assert_eq!(carried, selector::PING);
         let len = u32::from_le_bytes([framed[3], framed[4], framed[5], framed[6]]) as usize;
@@ -227,7 +227,7 @@ mod wire {
             display_name: "report.pdf\r\nX-Evil: yes".into(),
             media_type: "text/plain".into(),
         };
-        assert_eq!(hostile.validate(), Err(PlaneWireError::NonCanonical));
+        assert_eq!(hostile.validate(), Err(WireError::NonCanonical));
         assert_eq!(frame_signal(&hostile), Err(SignalError::Malformed));
 
         let long = Signal::FileOffer {
@@ -236,7 +236,7 @@ mod wire {
             display_name: "a".repeat(MAX_SIGNAL_TEXT_BYTES + 1),
             media_type: "text/plain".into(),
         };
-        assert_eq!(long.validate(), Err(PlaneWireError::Bounds));
+        assert_eq!(long.validate(), Err(WireError::Bounds));
     }
 
     #[test]
@@ -248,14 +248,14 @@ mod wire {
             schema: "note".into(),
             payload: Vec::new(),
         };
-        assert_eq!(bad_world.validate(), Err(PlaneWireError::NonCanonical));
+        assert_eq!(bad_world.validate(), Err(WireError::NonCanonical));
 
         let bad_schema = Signal::WorldSignal {
             world: "com.example.notes".into(),
             schema: "".into(),
             payload: Vec::new(),
         };
-        assert_eq!(bad_schema.validate(), Err(PlaneWireError::NonCanonical));
+        assert_eq!(bad_schema.validate(), Err(WireError::NonCanonical));
     }
 }
 
@@ -269,16 +269,16 @@ mod wire {
 mod declarations {
     use std::sync::Arc;
 
-    use mechanics::demand::{AuthorizationDemand, PolicyCapability, PolicyResource};
-    use replica::body::BodySchema;
+    use mechanics::demand::{AuthorizationDemand, PolicyCapability, Resource};
+    use replica::body::Schema;
     use replica::ids::{SchemaId, WorldId};
-    use runtime::planes::bounds;
+    use runtime::plane::bounds;
     use runtime::registry::{DeclarationKind, RegistrationError};
     use runtime::transient::MAX_SCOPE_FIELD_BYTES;
     use runtime::world::{ScopeSchema, SignalSchema};
     use runtime::{
-        RuntimeBuilder, World, WorldContext, WorldEffect, WorldError, WorldIntent, WorldLimits,
-        WorldProjection, WorldQuery, WorldRegistration, WorldVersion,
+        Context, Descriptor, Effect, Intent, Limits, Projection, Query, RuntimeBuilder, Version,
+        World, WorldError,
     };
 
     const WORLD: &str = "com.example.notes";
@@ -292,7 +292,7 @@ mod declarations {
         fn id(&self) -> WorldId {
             WorldId::parse(WORLD).expect("world id")
         }
-        fn schemas(&self) -> &[BodySchema] {
+        fn schemas(&self) -> &[Schema] {
             &[]
         }
         fn scope_schemas(&self) -> &[ScopeSchema] {
@@ -301,18 +301,10 @@ mod declarations {
         fn signal_schemas(&self) -> &[SignalSchema] {
             &self.signals
         }
-        fn submit(
-            &self,
-            _ctx: &mut WorldContext<'_>,
-            _intent: WorldIntent,
-        ) -> Result<WorldEffect, WorldError> {
+        fn submit(&self, _ctx: &mut Context<'_>, _intent: Intent) -> Result<Effect, WorldError> {
             Err(WorldError::InvalidRequest)
         }
-        fn query(
-            &self,
-            _ctx: &WorldContext<'_>,
-            _query: WorldQuery,
-        ) -> Result<WorldProjection, WorldError> {
+        fn query(&self, _ctx: &Context<'_>, _query: Query) -> Result<Projection, WorldError> {
             Err(WorldError::InvalidRequest)
         }
     }
@@ -320,7 +312,7 @@ mod declarations {
     fn demand() -> Vec<u8> {
         AuthorizationDemand::require(
             PolicyCapability::new(WORLD, "signal"),
-            PolicyResource::space(WORLD),
+            Resource::root(WORLD),
         )
         .encode_canonical()
         .expect("canonical demand")
@@ -350,67 +342,10 @@ mod declarations {
             scopes: scopes.clone(),
             signals: signals.clone(),
         };
-        let registration = WorldRegistration {
-            id: world.id(),
-            implementation_version: WorldVersion(1),
-            schemas: Vec::new(),
-            limits: WorldLimits::default(),
-            scope_schemas: scopes,
-            signal_schemas: signals,
-        };
         RuntimeBuilder::new()
-            .register(registration, Arc::new(world))
+            .register(Arc::new(world))
             .build()
             .map(|_| ())
-    }
-
-    #[test]
-    fn a_registration_that_disagrees_with_the_world_is_refused() {
-        // The declaration lists are what the implementation descriptor is built
-        // from, so a registration the running code does not stand behind is a
-        // reviewed identity describing something else. Comparing them is what
-        // makes "reviewed" enforced rather than asserted.
-        let world = DeclaringWorld {
-            scopes: Vec::new(),
-            signals: vec![signal("note", 1024)],
-        };
-        let registration = WorldRegistration {
-            id: world.id(),
-            implementation_version: WorldVersion(1),
-            schemas: Vec::new(),
-            limits: WorldLimits::default(),
-            scope_schemas: Vec::new(),
-            signal_schemas: Vec::new(),
-        };
-        let err = RuntimeBuilder::new()
-            .register(registration, Arc::new(world))
-            .build()
-            .expect_err("the World declares a signal its registration does not");
-        assert_eq!(
-            err,
-            RegistrationError::RegistrationMismatch(WorldId::parse(WORLD).unwrap())
-        );
-
-        // And the scope list is compared by the same rule, so neither is the
-        // one somebody remembered to check.
-        let world = DeclaringWorld {
-            scopes: vec![scope("board", 64)],
-            signals: Vec::new(),
-        };
-        let registration = WorldRegistration {
-            id: world.id(),
-            implementation_version: WorldVersion(1),
-            schemas: Vec::new(),
-            limits: WorldLimits::default(),
-            scope_schemas: Vec::new(),
-            signal_schemas: Vec::new(),
-        };
-        assert!(matches!(
-            RuntimeBuilder::new()
-                .register(registration, Arc::new(world))
-                .build(),
-            Err(RegistrationError::RegistrationMismatch(_))
-        ));
     }
 
     #[test]
@@ -512,7 +447,7 @@ mod declarations {
 /// What a Station does with a signal once it has one.
 mod delivery {
     use runtime::live::LiveHandle;
-    use runtime::planes::Signal;
+    use runtime::plane::Signal;
     use std::sync::Arc;
 
     fn handle() -> Arc<LiveHandle> {
@@ -533,26 +468,26 @@ mod delivery {
         // never a refusal that reaches the peer.
         drop(handle.signals());
         handle.deliver(runtime::signal::DeliveredSignal {
-            from: mechanics::ids::StationId::from_device(&mechanics::crypto::device_from_seed(
+            from: mechanics::station::Key::from_device(&mechanics::crypto::device_from_seed(
                 &[5u8; 32],
             ))
             .expect("station"),
-            session_id: [0u8; 16],
-            session_epoch: [0u8; 16],
+            connection_id: [0u8; 16],
+            connection_epoch: [0u8; 16],
             signal: Signal::Ping { nonce: [3u8; 16] },
         });
     }
 
-    fn from(seed: u8) -> mechanics::ids::StationId {
-        mechanics::ids::StationId::from_device(&mechanics::crypto::device_from_seed(&[seed; 32]))
+    fn from(seed: u8) -> mechanics::station::Key {
+        mechanics::station::Key::from_device(&mechanics::crypto::device_from_seed(&[seed; 32]))
             .expect("station")
     }
 
     fn delivered(signal: Signal) -> runtime::signal::DeliveredSignal {
         runtime::signal::DeliveredSignal {
             from: from(5),
-            session_id: [0u8; 16],
-            session_epoch: [0u8; 16],
+            connection_id: [0u8; 16],
+            connection_epoch: [0u8; 16],
             signal,
         }
     }
@@ -603,8 +538,8 @@ mod offers {
         mechanics::ids::ActorId::parse(&format!("act_{}", tag.repeat(32))).expect("actor")
     }
 
-    fn station(seed: u8) -> mechanics::ids::StationId {
-        mechanics::ids::StationId::from_device(&mechanics::crypto::device_from_seed(&[seed; 32]))
+    fn station(seed: u8) -> mechanics::station::Key {
+        mechanics::station::Key::from_device(&mechanics::crypto::device_from_seed(&[seed; 32]))
             .expect("station")
     }
 
@@ -613,9 +548,9 @@ mod offers {
             station: station(seed),
             actor: who,
             authority_frontier: replica::frontier::AuthorityFrontier::from_canonical_bytes(vec![9]),
-            granted_lanes: vec![runtime::planes::stream_kind::RELIABLE_SIGNAL],
-            session_id: [1u8; 16],
-            session_epoch: [2u8; 16],
+            granted_lanes: vec![runtime::plane::stream_kind::RELIABLE_SIGNAL],
+            connection_id: [1u8; 16],
+            connection_epoch: [2u8; 16],
             features: 0,
         }
     }
@@ -623,7 +558,7 @@ mod offers {
     fn offer(from: u8, content: u8) -> PendingOffer {
         PendingOffer {
             from: station(from),
-            session_epoch: [2u8; 16],
+            connection_epoch: [2u8; 16],
             content: [content; 32],
             plaintext_len: 1_048_576,
             display_name: "notes.txt".into(),

@@ -57,7 +57,7 @@ fn device() -> String {
 
 fn station() -> (Runtime, Station) {
     let registry = RuntimeBuilder::new()
-        .register(IssuesWorld::registration(), Arc::new(IssuesWorld::new()))
+        .register(Arc::new(IssuesWorld::new()))
         .build()
         .unwrap();
     let rt = Runtime::open(
@@ -69,9 +69,9 @@ fn station() -> (Runtime, Station) {
         )),
     );
     let station = rt
-        .form_space(runtime::SpaceFormationOptions::default())
+        .create()
         .unwrap()
-        .activate(ActivationOptions::offline())
+        .open(ActivationOptions::offline())
         .unwrap();
     (rt, station)
 }

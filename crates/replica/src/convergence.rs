@@ -1,7 +1,7 @@
 //! Convergence outcomes.
 //!
 //! Contact reports transfer separately from Convergence. Convergence classifies
-//! legitimacy, incorporates material through Fabric, advances the semantic
+//! legitimacy, incorporates material through Engine, advances the semantic
 //! frontier, and reports what changed. Outcomes report bytes moved separately
 //! from accepted, unchanged, rejected, and retryable material — a World never
 //! overrides Space legitimacy, and unknown-World material stays opaque and
@@ -155,7 +155,7 @@ pub struct ValidatedContactBundle {
 
 /// The bundle's validated transactions with their per-Body payloads.
 pub(crate) type BundleUnits = Vec<(
-    crate::transaction::BodyTransaction,
+    crate::transaction::Transaction,
     Vec<(crate::ids::BodyKey, Vec<u8>)>,
 )>;
 

@@ -5,7 +5,7 @@
 //! and that it is a Replica store at all), an `epoch` counter durably
 //! incremented before each activation, and a `lock` file carrying the OS
 //! advisory exclusive lock that is the typed double-lock — only one
-//! operational owner at a time. The Fabric journaled store's files (`counter`,
+//! operational owner at a time. The Engine journaled store's files (`counter`,
 //! `current-manifest`, `objects/`, `journal/`) live alongside these in the
 //! same directory; the two touch disjoint names.
 //!
@@ -30,7 +30,7 @@ fn io_err(e: std::io::Error) -> LifecycleError {
     LifecycleError::StoreIo(e.to_string())
 }
 
-/// A test seam mirroring the Fabric journal's: called with a named fault point
+/// A test seam mirroring the Engine journal's: called with a named fault point
 /// *before* the named operation executes; returning `true` makes the operation
 /// fail there, modelling a crash or an I/O failure.
 pub type StoreFaultInjector = std::sync::Arc<dyn Fn(&str) -> bool + Send + Sync>;
@@ -214,7 +214,7 @@ impl OrbitStore {
         }
     }
 
-    /// The store directory. The Fabric journaled store (`counter`,
+    /// The store directory. The Engine journaled store (`counter`,
     /// `current-manifest`, `objects/`, `journal/`) lives inside it, alongside
     /// the runtime-owned lifecycle files (`marker`, `epoch`, `lock`) — the two
     /// touch disjoint names.
@@ -317,7 +317,7 @@ fn atomic_replace(tmp: &Path, dst: &Path) -> std::io::Result<()> {
 /// platform does not expose directory sync and NTFS's metadata journaling is
 /// the documented durability contract — but a handle that opens and then fails
 /// to flush is a real error and fails the phase. (The same contract as the
-/// Fabric journal's directory sync.)
+/// Engine journal's directory sync.)
 #[cfg(unix)]
 fn sync_dir(dir: &Path) -> std::io::Result<()> {
     File::open(dir).and_then(|d| d.sync_all())

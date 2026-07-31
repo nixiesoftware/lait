@@ -10,7 +10,7 @@ use issues::contract::{self, IssueQuery, RingDigestView};
 use issues::dto::{CatalogScope, DirtyProject, InboxEntry, ProjectRef};
 use issues::ids::SpaceId;
 use replica::ids::{BodyId, BodyKey};
-use runtime::{Session, WorldQuery};
+use runtime::{Query, Session};
 
 /// The Issues portion of a host status response.
 pub struct StatusProjection {
@@ -105,7 +105,7 @@ pub fn inbox(
 /// Query one Issues projection as JSON through a pinned Session.
 pub fn query_json(session: &Session, query: IssueQuery) -> Option<serde_json::Value> {
     let bytes = session
-        .query(WorldQuery {
+        .query(Query {
             schema: contract::issue_schema(),
             schema_version: contract::ISSUE_SCHEMA_VERSION,
             payload: query.to_json(),

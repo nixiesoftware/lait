@@ -16,13 +16,13 @@
 //! and rules in something better: Bodies converge by exchanging
 //! content-addressed artifacts, imported in any order, with causally incomplete
 //! ones held pending until their dependencies arrive. No causal summary crosses
-//! the wire at all. [`FabricVersion`] exists for ordering, anchors, and
+//! the wire at all. [`Version`] exists for ordering, anchors, and
 //! staleness — never as the thing a peer is asked to interpret.
 
 use loro::{Frontiers, LoroDoc, ID};
 use serde::{Deserialize, Serialize};
 
-/// Maximum heads in one [`FabricVersion`]. A head set is one entry per
+/// Maximum heads in one [`Version`]. A head set is one entry per
 /// concurrent writer at a moment; this is the protocol's refusal point, far
 /// above any real concurrency and far below anything that could exhaust a
 /// receiver.
@@ -44,7 +44,7 @@ pub struct OpHead {
 /// Canonical — sorted and deduplicated — so two replicas at the same position
 /// encode identical bytes.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FabricVersion {
+pub struct Version {
     pub format_version: u8,
     pub heads: Vec<OpHead>,
 }
@@ -82,7 +82,7 @@ pub enum CausalError {
     /// what happened, and recovery is to rebuild from the archive taken before
     /// the trim, or to re-bootstrap. §5.2's outcome 2 is only acceptable
     /// because the refusal is typed, attributable, and recoverable.
-    BeforeRetentionFrontier { frontier: FabricVersion },
+    BeforeRetentionFrontier { frontier: Version },
     /// The engine refused an operation.
     Engine(String),
 }
@@ -101,7 +101,7 @@ impl std::fmt::Display for CausalError {
 }
 impl std::error::Error for CausalError {}
 
-impl FabricVersion {
+impl Version {
     pub(crate) fn from_frontiers(frontiers: &Frontiers) -> Self {
         let mut heads: Vec<OpHead> = frontiers
             .iter()
@@ -139,7 +139,7 @@ impl FabricVersion {
     }
 
     pub fn encode(&self) -> Vec<u8> {
-        postcard::to_stdvec(self).expect("postcard fabric version")
+        postcard::to_stdvec(self).expect("postcard Engine version")
     }
 
     pub fn decode_canonical(bytes: &[u8]) -> Result<Self, CausalError> {
@@ -174,20 +174,20 @@ impl FabricVersion {
 /// incomplete work pending rather than rejecting it — which is what lets
 /// convergence be a presence question rather than a causal negotiation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum FabricArtifact {
+pub enum Artifact {
     /// Operations after some base. What an ordinary edit produces.
     Delta {
         format_version: u8,
-        base: FabricVersion,
-        result: FabricVersion,
+        base: Version,
+        result: Version,
         bytes: Vec<u8>,
     },
     /// Current state with history trimmed at a retention frontier. What
     /// reconstructs a Body without replaying it.
     Checkpoint {
         format_version: u8,
-        retention_frontier: FabricVersion,
-        result: FabricVersion,
+        retention_frontier: Version,
+        result: Version,
         bytes: Vec<u8>,
     },
     /// The complete history as it stood immediately before a trim.
@@ -198,7 +198,7 @@ pub enum FabricArtifact {
     /// have to reconstruct the same thing to get the same property.
     Archive {
         format_version: u8,
-        result: FabricVersion,
+        result: Version,
         bytes: Vec<u8>,
     },
     /// An atomic Body's replacement value. Atomic Bodies implement the same
@@ -206,9 +206,9 @@ pub enum FabricArtifact {
     Replace { format_version: u8, bytes: Vec<u8> },
 }
 
-impl FabricArtifact {
+impl Artifact {
     pub fn encode(&self) -> Vec<u8> {
-        postcard::to_stdvec(self).expect("postcard fabric artifact")
+        postcard::to_stdvec(self).expect("postcard Engine artifact")
     }
 
     pub fn decode_canonical(bytes: &[u8]) -> Result<Self, CausalError> {
@@ -220,12 +220,12 @@ impl FabricArtifact {
     }
 
     /// The version this artifact leaves a replica at, if it names one.
-    pub fn result(&self) -> Option<&FabricVersion> {
+    pub fn result(&self) -> Option<&Version> {
         match self {
-            FabricArtifact::Delta { result, .. }
-            | FabricArtifact::Checkpoint { result, .. }
-            | FabricArtifact::Archive { result, .. } => Some(result),
-            FabricArtifact::Replace { .. } => None,
+            Artifact::Delta { result, .. }
+            | Artifact::Checkpoint { result, .. }
+            | Artifact::Archive { result, .. } => Some(result),
+            Artifact::Replace { .. } => None,
         }
     }
 
@@ -233,10 +233,10 @@ impl FabricArtifact {
     /// transaction is applied rather than after.
     pub fn payload_len(&self) -> usize {
         match self {
-            FabricArtifact::Delta { bytes, .. }
-            | FabricArtifact::Checkpoint { bytes, .. }
-            | FabricArtifact::Archive { bytes, .. }
-            | FabricArtifact::Replace { bytes, .. } => bytes.len(),
+            Artifact::Delta { bytes, .. }
+            | Artifact::Checkpoint { bytes, .. }
+            | Artifact::Archive { bytes, .. }
+            | Artifact::Replace { bytes, .. } => bytes.len(),
         }
     }
 }
@@ -265,7 +265,7 @@ pub struct ImportStatus {
 /// Body; the substrate neither roots them nor promises an old one stays
 /// resolvable.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FabricAnchor {
+pub struct Anchor {
     pub format_version: u8,
     /// Which Body this position is inside.
     ///
@@ -285,7 +285,7 @@ pub struct FabricAnchor {
     /// Which side of `anchored_to` the position sits on. An insertion exactly
     /// at a caret has to go somewhere, and this is what decides.
     pub after: bool,
-    pub taken_at: FabricVersion,
+    pub taken_at: Version,
 }
 
 /// The result of resolving an anchor.
@@ -302,9 +302,9 @@ pub enum AnchorResolution {
     Drifted,
 }
 
-impl FabricAnchor {
+impl Anchor {
     pub fn encode(&self) -> Vec<u8> {
-        postcard::to_stdvec(self).expect("postcard fabric anchor")
+        postcard::to_stdvec(self).expect("postcard Engine anchor")
     }
 
     pub fn decode_canonical(bytes: &[u8]) -> Result<Self, CausalError> {
@@ -318,7 +318,7 @@ impl FabricAnchor {
 }
 
 /// Compare two positions in one replica's history.
-pub(crate) fn relation(doc: &LoroDoc, a: &FabricVersion, b: &FabricVersion) -> CausalRelation {
+pub(crate) fn relation(doc: &LoroDoc, a: &Version, b: &Version) -> CausalRelation {
     if a == b {
         return CausalRelation::Equal;
     }
@@ -389,7 +389,7 @@ pub struct ArtifactRef {
 /// reachable through an index root rather than listed — so the descriptor stays
 /// the same size however long the Body lives.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BodyMaterial {
+pub struct Material {
     pub format_version: u8,
     /// Reconstructs current state on its own.
     pub checkpoint: ArtifactRef,
@@ -400,10 +400,10 @@ pub struct BodyMaterial {
     /// list, so the descriptor does not grow with retained history.
     pub history_root: Option<[u8; 32]>,
     pub history_count: u64,
-    pub version: FabricVersion,
+    pub version: Version,
 }
 
-impl BodyMaterial {
+impl Material {
     pub fn encode(&self) -> Vec<u8> {
         postcard::to_stdvec(self).expect("postcard body material")
     }

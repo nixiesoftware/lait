@@ -106,12 +106,12 @@ impl SessionMap {
         Self { path, map }
     }
 
-    pub fn get(&self, session_id: &str) -> Option<&str> {
-        self.map.get(session_id).map(|s| s.as_str())
+    pub fn get(&self, connection_id: &str) -> Option<&str> {
+        self.map.get(connection_id).map(|s| s.as_str())
     }
 
-    pub fn set(&mut self, session_id: &str, name: &str) -> std::io::Result<()> {
-        self.map.insert(session_id.to_string(), name.to_string());
+    pub fn set(&mut self, connection_id: &str, name: &str) -> std::io::Result<()> {
+        self.map.insert(connection_id.to_string(), name.to_string());
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }

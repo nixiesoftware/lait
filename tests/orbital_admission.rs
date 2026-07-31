@@ -3,7 +3,7 @@
 //! Accepting valid Coordinates is the only approval: the candidate signs an
 //! acceptance proof binding it to the exact capability + Coordinates, persists
 //! it before any dial, and the founder redeems it automatically over Contact.
-//! This gate drives the real `OrbitalMechanics` redemption path (no fixtures)
+//! This gate drives the real `SpaceAuthority` redemption path (no fixtures)
 //! and proves: automatic redemption, the acceptance proof binding, exactly-once
 //! admission, single-use cap, expiry/window rejection, revocation, cross-Space
 //! and substituted-proof rejection, and persistence-before-dial idempotency.
@@ -11,7 +11,7 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use lait::orbital::{AuthorityRecord, OrbitalMechanics};
+use lait::orbital::{AuthorityRecord, SpaceAuthority};
 use replica::AuthorityIncorporator;
 use runtime::AuthorityView;
 
@@ -30,9 +30,9 @@ fn temp_root(tag: &str) -> PathBuf {
 }
 
 /// A founder with product policy seeded.
-fn founder(tag: &str) -> (PathBuf, OrbitalMechanics) {
+fn founder(tag: &str) -> (PathBuf, SpaceAuthority) {
     let root = temp_root(tag);
-    let (mech, _c) = OrbitalMechanics::form(&root, &FOUNDER_SEED, "Adm", vec![]).unwrap();
+    let (mech, _c) = SpaceAuthority::form(&root, &FOUNDER_SEED, "Adm", vec![]).unwrap();
     lait::orbital::seed_founder_policy(&mech).unwrap();
     (root, mech)
 }
@@ -43,9 +43,9 @@ fn joiner_admission(
     invite: &runtime::SignedCoordinates,
     seed: &[u8; 32],
     tag: &str,
-) -> (PathBuf, OrbitalMechanics, Vec<u8>) {
+) -> (PathBuf, SpaceAuthority, Vec<u8>) {
     let root = temp_root(tag);
-    let mech = OrbitalMechanics::enter(&root, seed, invite).unwrap();
+    let mech = SpaceAuthority::enter(&root, seed, invite).unwrap();
     let admission_record = mech
         .export_records()
         .into_iter()
@@ -61,12 +61,12 @@ fn joiner_admission(
 
 /// Feed the joiner's authority records (its effects + admission) to the
 /// founder's incorporator — the founder's Contact-pull redemption.
-fn redeem_at_founder(founder: &OrbitalMechanics, joiner: &OrbitalMechanics) {
+fn redeem_at_founder(founder: &SpaceAuthority, joiner: &SpaceAuthority) {
     let mut f = founder.clone();
     f.incorporate_authority(&joiner.export_records()).unwrap();
 }
 
-fn joiner_actor(mech: &OrbitalMechanics, seed: &[u8; 32]) -> Option<mechanics::ids::ActorId> {
+fn joiner_actor(mech: &SpaceAuthority, seed: &[u8; 32]) -> Option<mechanics::ids::ActorId> {
     mech.resolve(&mechanics::crypto::device_from_seed(seed))
         .map(|r| r.actor)
 }
@@ -264,10 +264,10 @@ fn persistence_before_dial_survives_a_restart() {
     let space = mech_f.space();
     // Enter (persists the acceptance proof), then reopen — the served record
     // is byte-identical (the proof is reused, not re-signed).
-    let mech_j = OrbitalMechanics::enter(&root_j, &JOINER_SEED, &invite).unwrap();
+    let mech_j = SpaceAuthority::enter(&root_j, &JOINER_SEED, &invite).unwrap();
     let before = admission_record_of(&mech_j);
     drop(mech_j);
-    let mech_j2 = OrbitalMechanics::open(&root_j, &space, &JOINER_SEED).unwrap();
+    let mech_j2 = SpaceAuthority::open(&root_j, &space, &JOINER_SEED).unwrap();
     let after = admission_record_of(&mech_j2);
     assert_eq!(
         before, after,
@@ -279,7 +279,7 @@ fn persistence_before_dial_survives_a_restart() {
         .is_some_and(|a| mech_f.members().iter().any(|m| m.key == a.as_str())));
 }
 
-fn admission_record_of(mech: &OrbitalMechanics) -> Vec<u8> {
+fn admission_record_of(mech: &SpaceAuthority) -> Vec<u8> {
     mech.export_records()
         .into_iter()
         .find(|r| {
@@ -487,7 +487,7 @@ fn tampered_role_evidence_breaks_the_capability_signature() {
     // Escalate the evidence post-hoc: append the admin capability.
     admission.evidence.assignments.push((
         mechanics::demand::PolicyCapability::new("com.lait.issues", "space.admin"),
-        mechanics::demand::PolicyResource::space("com.lait.issues"),
+        mechanics::demand::Resource::root("com.lait.issues"),
     ));
     let space = mech_f.space();
     assert!(

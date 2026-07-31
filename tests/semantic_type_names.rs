@@ -126,11 +126,13 @@ fn test_gated(attrs: &[syn::Attribute]) -> bool {
 #[derive(Default)]
 struct Declarations {
     found: BTreeSet<String>,
+    all: BTreeSet<String>,
 }
 
 impl Declarations {
     fn note(&mut self, ident: &syn::Ident) {
         let name = ident.to_string();
+        self.all.insert(name.clone());
         if versioned_ident(&name) {
             self.found.insert(name);
         }
@@ -269,6 +271,104 @@ fn versioned_declarations(text: &str) -> Vec<String> {
     declarations.found.into_iter().collect()
 }
 
+fn declared_identifiers(text: &str) -> Vec<String> {
+    let Ok(file) = syn::parse_file(text) else {
+        return Vec::new();
+    };
+    let mut declarations = Declarations::default();
+    declarations.visit_file(&file);
+    declarations.all.into_iter().collect()
+}
+
+const RETIRED: &[&str] = &[
+    "StationId",
+    "StationEpoch",
+    "SpaceFormationOptions",
+    "EnterOptions",
+    "ContactOptions",
+    "OrbitObservation",
+    "SessionOpen",
+    "SessionAccept",
+    "SessionRefusal",
+    "ProtocolCapability",
+    "PlaneWireError",
+    "LiveSession",
+    "SessionContext",
+    "SessionQueue",
+    "Fabric",
+    "FabricKey",
+    "FabricOp",
+    "FabricTransactionRequest",
+    "FabricCommitReceipt",
+    "BodySchema",
+    "BodyOp",
+    "BodyDescriptor",
+    "BodyTransaction",
+    "TransactionSigner",
+    "ActorPlane",
+    "ContactMechanics",
+    "PolicyGrant",
+    "WorldRegistration",
+    "TransientScope",
+    "SpaceBridge",
+    "WorldBridge",
+    "WorldBridgeRegistry",
+    "WorldBridgesBuilder",
+    "OrbitalMechanics",
+];
+
+#[test]
+fn retired_declarations_and_module_prefix_stutter_are_absent() {
+    let root = workspace_root();
+    let mut found = Vec::new();
+    for file in production_sources() {
+        let rel = file
+            .strip_prefix(&root)
+            .unwrap_or(&file)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let text = std::fs::read_to_string(&file).unwrap_or_default();
+        let stem = file
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or("");
+        let prefix = match stem {
+            "fabric" => Some("Fabric"),
+            "body" => Some("Body"),
+            "transaction" => Some("Transaction"),
+            "world" => Some("World"),
+            "station" => Some("Station"),
+            "plane" | "planes" => Some("Plane"),
+            _ => None,
+        };
+        for name in declared_identifiers(&text) {
+            if RETIRED.contains(&name.as_str()) {
+                found.push(format!("{rel}: retired `{name}`"));
+            }
+            if let Some(prefix) = prefix {
+                if name.starts_with(prefix) && name != prefix {
+                    found.push(format!("{rel}: module-prefix stutter `{name}`"));
+                }
+            }
+            let product_issue = name == "Issue"
+                || name
+                    .strip_prefix("Issue")
+                    .and_then(|tail| tail.chars().next())
+                    .is_some_and(char::is_uppercase);
+            if (rel.starts_with("crates/runtime/src/") || rel.starts_with("crates/replica/src/"))
+                && product_issue
+            {
+                found.push(format!("{rel}: product vocabulary `{name}`"));
+            }
+        }
+    }
+    assert!(
+        found.is_empty(),
+        "retired or non-semantic production declarations:\n  {}",
+        found.join("\n  ")
+    );
+}
+
 /// Deliberate exemptions, as `path<TAB>identifier<TAB>justification`. An entry
 /// that no longer matches anything is itself a failure: a stale exemption reads
 /// as coverage it no longer provides.
@@ -403,12 +503,12 @@ fn the_detector_has_teeth() {
     }
     // Semantic names, IP families, and versioned *string contents* are fine.
     for sample in [
-        "pub struct BodyTransaction { format_version: u8 }",
+        "pub struct Transaction { format_version: u8 }",
         "pub struct SignedCoordinates;",
         "pub struct Ipv4Header { ipv6: u8 }",
         "fn f() { use std::net::Ipv6Addr; }",
         "const DOMAIN: &str = \"lait.coordinates.v1\";",
-        "fn f() { let alpn = b\"lait/contact/1\"; }",
+        "fn f() { let alpn = b\"lait/contact/2\"; }",
         "fn f(protocol_version: u32) {}",
         "pub const CONTENT_FORMAT_VERSION: u8 = 1;",
         // Inline test modules inside src/ are tests, not production names.

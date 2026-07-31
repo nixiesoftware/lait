@@ -51,7 +51,7 @@ use crate::orbital::{WorldCall, WorldReply};
 /// **v4:** product calls use a versioned opaque [`WorldCall`] envelope at the
 /// identity-scoped daemon.
 ///
-/// **v5:** attached SpaceBridge processes accept that same opaque envelope
+/// **v5:** attached StationHost processes accept that same opaque envelope
 /// directly. Typed product requests and the root-owned compatibility codec are
 /// retired, so v4 processes cannot remain attached across this boundary.
 ///
@@ -71,7 +71,7 @@ pub const CONTROL_PROTOCOL_VERSION: u32 = 7;
 /// version; the gap to [`CONTROL_PROTOCOL_VERSION`] is the mixed-version window.
 ///
 /// Protocol v7 is a deliberate compatibility cutoff. A v6 process attached as a
-/// SpaceBridge would accept a content request's header line and then read the
+/// StationHost would accept a content request's header line and then read the
 /// raw body as a second request, so leaving the minimum at 6 would let
 /// `StationPlacement::establish` attach a process that cannot frame content and
 /// will desynchronise the channel the first time someone uploads.
@@ -450,7 +450,8 @@ pub enum ControlRoute {
     /// Address the process-level Orbit directory/control router.
     Daemon,
     /// Address Space mechanics, Station, observations, or Space lifecycle.
-    Space {
+    #[serde(rename = "space")]
+    Orbit {
         #[serde(flatten)]
         address: OrbitAddress,
     },
@@ -532,7 +533,7 @@ impl ClientRequest {
 /// Product-neutral request sent to the identity-scoped daemon.
 ///
 /// The identity daemon forwards this same envelope unchanged to an attached
-/// SpaceBridge. Its explicit `call` field keeps every routing layer independent
+/// StationHost. Its explicit `call` field keeps every routing layer independent
 /// of the product payload and protocol.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorldClientRequest {
@@ -787,7 +788,7 @@ pub fn classify(req: &Request) -> RequestOwner {
 /// client surface itself; this helper covers requests whose owner lives behind
 /// a Station.
 pub fn station_route(address: OrbitAddress) -> ControlRoute {
-    ControlRoute::Space { address }
+    ControlRoute::Orbit { address }
 }
 
 /// One representative instance per `Request` variant — the enumeration the
@@ -1134,7 +1135,7 @@ pub struct PresenceEntry {
 }
 
 /// What a transient item is about — the wire mirror of
-/// `runtime::transient::TransientScope`.
+/// `runtime::transient::Target`.
 ///
 /// Ids are rendered, not raw. This channel is JSON, where a `[u8; 16]` arrives
 /// as a list of sixteen numbers; a Body takes the lowercase base32 the rest of
@@ -1143,12 +1144,15 @@ pub struct PresenceEntry {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "scope", rename_all = "snake_case")]
 pub enum LiveScope {
-    /// Somebody is looking at this issue.
-    IssueView { world: String, body: String },
-    /// Somebody is looking at this document.
-    DocumentView { world: String, body: String },
+    /// Somebody is looking at this Body.
+    #[serde(rename = "issue_view")]
+    Body { world: String, body: String },
+    /// Somebody is looking at this materialized Body.
+    #[serde(rename = "document_view")]
+    Material { world: String, body: String },
     /// Somebody's cursor is in this field of this Body.
-    TextCaret {
+    #[serde(rename = "text_caret")]
+    Field {
         world: String,
         body: String,
         field: String,
@@ -1161,9 +1165,11 @@ pub enum LiveScope {
     },
     /// How much of this content a peer holds. A hint about who to ask first,
     /// never a promise.
-    ContentResidency { content: String },
+    #[serde(rename = "content_residency")]
+    Content { content: String },
     /// A World's own scope, uninterpreted here.
-    CustomWorld {
+    #[serde(rename = "custom_world")]
+    World {
         world: String,
         schema: String,
         key: String,
@@ -1214,7 +1220,7 @@ pub struct LiveEntry {
     pub focus: Option<CaretPosition>,
 }
 
-/// What a signal says — the wire mirror of `runtime::planes::Signal`.
+/// What a signal says — the wire mirror of `runtime::plane::Signal`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "signal", rename_all = "snake_case")]
 pub enum SignalBody {
@@ -1257,8 +1263,8 @@ pub struct SignalEntry {
     /// The session it arrived on, 32-hex. Two of these are compared and never
     /// ordered — the only answerable question is whether this is still the open
     /// one.
-    pub session_id: String,
-    pub session_epoch: String,
+    pub connection_id: String,
+    pub connection_epoch: String,
     pub signal: SignalBody,
 }
 
@@ -1945,7 +1951,7 @@ mod tests {
             Request::Status,
             Request::Whoami,
         ] {
-            let route = ControlRoute::Space {
+            let route = ControlRoute::Orbit {
                 address: OrbitAddress::for_store(
                     Path::new("/tmp/test-orbit"),
                     crate::ids::SpaceId::from_digest([4; 16]),
@@ -1986,7 +1992,7 @@ mod tests {
 
     #[test]
     fn passive_dispatch_intent_is_explicit_and_round_trips() {
-        let route = ControlRoute::Space {
+        let route = ControlRoute::Orbit {
             address: OrbitAddress::for_store(
                 Path::new("/tmp/passive-orbit"),
                 crate::ids::SpaceId::from_digest([5; 16]),
@@ -2145,7 +2151,7 @@ mod tests {
     fn live_rows_name_an_actor_and_tag_every_nested_union() {
         let entry = LiveEntry {
             actor: "act_ab".into(),
-            scope: LiveScope::TextCaret {
+            scope: LiveScope::Field {
                 world: "com.lait.issues".into(),
                 body: "aaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
                 field: "description".into(),
@@ -2178,8 +2184,8 @@ mod tests {
         let json = serde_json::to_value(Response::Signals {
             signals: vec![SignalEntry {
                 actor: "act_ab".into(),
-                session_id: "00".repeat(16),
-                session_epoch: "11".repeat(16),
+                connection_id: "00".repeat(16),
+                connection_epoch: "11".repeat(16),
                 signal: SignalBody::FileOffer {
                     content: "22".repeat(32),
                     plaintext_len: 9,

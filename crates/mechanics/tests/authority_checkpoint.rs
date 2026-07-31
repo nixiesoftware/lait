@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use mechanics::acl::{self, AclAction, AclOp, Grant};
+use mechanics::acl::{self, AclAction, AclOp, Standing};
 use mechanics::actor;
 use mechanics::genesis::Genesis;
 use mechanics::ids::{ActorId, SpaceId, SystemUlidSource};
@@ -59,7 +59,7 @@ fn add_op(
     fx: &Fx,
     ledger: &AuthorityLedger,
     target: &ActorId,
-    grants: Vec<Grant>,
+    grants: Vec<Standing>,
 ) -> acl::SignedOp {
     acl::sign_op(
         &seed(1),
@@ -115,11 +115,13 @@ fn faults_at_every_journal_boundary_expose_old_or_complete_new() {
         {
             let ledger = AuthorityLedger::open(&dir).unwrap();
             baseline_frontier = ledger.frontier();
-            batch =
-                vec![
-                    LedgerEffect::Acl(add_op(&fx, &ledger, &fx.actors[&2].1, vec![Grant::Write]))
-                        .encode(),
-                ];
+            batch = vec![LedgerEffect::Acl(add_op(
+                &fx,
+                &ledger,
+                &fx.actors[&2].1,
+                vec![Standing::Write],
+            ))
+            .encode()];
             let armed = Arc::new(AtomicUsize::new(0));
             let armed2 = armed.clone();
             let target = point.to_string();
@@ -178,7 +180,7 @@ fn branch_merge_and_arrival_permutation_match_complete_replay() {
         &AclOp {
             action: AclAction::AddMember {
                 actor: fx.actors[&2].1.clone(),
-                grants: vec![Grant::Write],
+                grants: vec![Standing::Write],
             },
             by: fx.founder_actor.clone(),
             actor_asof: vec![fx.founder_incept.hash()],
@@ -192,7 +194,7 @@ fn branch_merge_and_arrival_permutation_match_complete_replay() {
         &AclOp {
             action: AclAction::AddMember {
                 actor: fx.actors[&3].1.clone(),
-                grants: vec![Grant::Admin, Grant::Write],
+                grants: vec![Standing::Admin, Standing::Write],
             },
             by: fx.founder_actor.clone(),
             actor_asof: vec![fx.founder_incept.hash()],
@@ -245,7 +247,7 @@ fn strict_descendant_continuation_is_equivalent_to_complete_replay() {
         &AclOp {
             action: AclAction::AddMember {
                 actor: fx.actors[&2].1.clone(),
-                grants: vec![Grant::Write],
+                grants: vec![Standing::Write],
             },
             by: fx.founder_actor.clone(),
             actor_asof: vec![fx.founder_incept.hash()],
@@ -265,7 +267,7 @@ fn strict_descendant_continuation_is_equivalent_to_complete_replay() {
         &AclOp {
             action: AclAction::AddMember {
                 actor: fx.actors[&3].1.clone(),
-                grants: vec![Grant::Write],
+                grants: vec![Standing::Write],
             },
             by: fx.founder_actor.clone(),
             actor_asof: vec![fx.founder_incept.hash()],
@@ -381,7 +383,7 @@ fn semantics_version_bump_rebuilds_from_signed_effects() {
                 &[],
             )
             .unwrap();
-        let add = add_op(&fx, &ledger, &fx.actors[&2].1, vec![Grant::Write]);
+        let add = add_op(&fx, &ledger, &fx.actors[&2].1, vec![Standing::Write]);
         ledger
             .commit_batch(&[LedgerEffect::Acl(add).encode()], &[])
             .unwrap();
@@ -409,7 +411,7 @@ fn ten_thousand_reads_write_nothing() {
             &[],
         )
         .unwrap();
-    let add = add_op(&fx, &ledger, &fx.actors[&2].1, vec![Grant::Write]);
+    let add = add_op(&fx, &ledger, &fx.actors[&2].1, vec![Standing::Write]);
     ledger
         .commit_batch(&[LedgerEffect::Acl(add).encode()], &[])
         .unwrap();

@@ -17,7 +17,7 @@ use anyhow::{anyhow, Result};
 use serde::Serialize;
 
 use crate::ids::SpaceId;
-use crate::spaces::{self, SpaceEntry};
+use crate::orbits::{self, Entry};
 
 use super::{ClientScope, LocalOrbitId, OrbitAddress};
 
@@ -37,7 +37,7 @@ pub enum StationIdentity {
 /// One visible durable Orbit binding from the local registry.
 #[derive(Debug, Clone)]
 pub struct OrbitBinding {
-    pub entry: SpaceEntry,
+    pub entry: Entry,
     pub identity: StationIdentity,
 }
 
@@ -59,7 +59,7 @@ pub struct OrbitDirectory {
     identity: PathBuf,
     agents_base: PathBuf,
     self_contained: bool,
-    load_bindings: Arc<dyn Fn() -> Vec<SpaceEntry> + Send + Sync>,
+    load_bindings: Arc<dyn Fn() -> Vec<Entry> + Send + Sync>,
 }
 
 impl OrbitDirectory {
@@ -68,7 +68,7 @@ impl OrbitDirectory {
             identity,
             agents_base,
             self_contained,
-            Arc::new(spaces::list),
+            Arc::new(orbits::list),
         )
     }
 
@@ -76,7 +76,7 @@ impl OrbitDirectory {
         identity: PathBuf,
         agents_base: PathBuf,
         self_contained: bool,
-        load_bindings: Arc<dyn Fn() -> Vec<SpaceEntry> + Send + Sync>,
+        load_bindings: Arc<dyn Fn() -> Vec<Entry> + Send + Sync>,
     ) -> Self {
         Self {
             identity,
@@ -91,7 +91,7 @@ impl OrbitDirectory {
         identity: PathBuf,
         agents_base: PathBuf,
         self_contained: bool,
-        entries: Vec<SpaceEntry>,
+        entries: Vec<Entry>,
     ) -> Self {
         Self::with_loader(
             identity,
@@ -151,7 +151,7 @@ impl OrbitDirectory {
 }
 
 fn visible_bindings(
-    entries: Vec<SpaceEntry>,
+    entries: Vec<Entry>,
     identity: &Path,
     agents_base: &Path,
     self_contained: bool,
@@ -211,12 +211,12 @@ fn normalize(path: &Path) -> String {
 mod tests {
     use super::*;
 
-    fn entry(path: &str) -> SpaceEntry {
-        SpaceEntry {
+    fn entry(path: &str) -> Entry {
+        Entry {
             space: "ws_test".into(),
             name: "Test".into(),
             path: path.into(),
-            origin: spaces::Origin::Founded,
+            origin: orbits::Origin::Founded,
             host_nick: String::new(),
             last_opened: 0,
             projects: Vec::new(),

@@ -1,4 +1,4 @@
-//! Document-level commit configuration shared by every fabric constructor.
+//! Document-level commit configuration shared by every Engine constructor.
 //!
 //! The crate pins Loro 1.13.6, whose configuration makes these details
 //! load-bearing:
@@ -25,7 +25,7 @@
 //! the document must keep knowing the trimmed operations are included.
 //!
 //! What makes the cost affordable is that the vector never leaves the process.
-//! `FabricVersion` — the only causal value that is committed, framed, or
+//! `Version` — the only causal value that is committed, framed, or
 //! advertised — is a *head set*, which is sized by concurrency and stayed at
 //! one entry across all 128 activations. Local memory grows slowly; nothing
 //! replicated grows at all.

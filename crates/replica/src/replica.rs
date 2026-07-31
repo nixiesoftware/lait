@@ -1,15 +1,15 @@
-//! [`Replica`] — the committing semantic layer over a Fabric engine and the
+//! [`Replica`] — the committing semantic layer over a Engine engine and the
 //! canonical durable Body store.
 //!
-//! Replica translates a validated set of staged [`BodyOp`]s into semantic
-//! [`FabricOp`]s, submits them to a Fabric engine for an atomic apply, and
-//! advances its semantic frontier **only** from the returned Fabric receipt.
+//! Replica translates a validated set of staged [`Op`]s into semantic
+//! [`Op`]s, submits them to a Engine engine for an atomic apply, and
+//! advances its semantic frontier **only** from the returned Engine receipt.
 //! It never authors a raw document delta and never fabricates a receipt.
 //!
-//! **The canonical store.** A durable Replica persists — through the Fabric
+//! **The canonical store.** A durable Replica persists — through the Engine
 //! journal's six-step commit protocol, at one linearization point per
-//! transaction — the canonical signed [`BodyTransaction`] record, one sealed
-//! [`ProtectedBodyPayload`] object per changed Body (`epoch_id[16] ||
+//! transaction — the canonical signed [`Transaction`] record, one sealed
+//! [`Material`] object per changed Body (`epoch_id[16] ||
 //! nonce[12] || ciphertext_and_tag`; no plaintext Body payload is ever at
 //! rest), the [`RequestReceipt`] idempotency record, and the signed Manifest
 //! root over the full Body set. Recovery reopens exactly that graph: a
@@ -19,12 +19,12 @@
 //! key legitimately arrives.
 //!
 //! **Convergence.** [`Replica::incorporate`] accepts only a signed
-//! [`BodyTransaction`] plus the exact descriptor-bound protected payloads:
+//! [`Transaction`] plus the exact descriptor-bound protected payloads:
 //! mechanics validates the signer's standing at the transaction's referenced
 //! authority frontier, every payload must match its descriptor's ciphertext
 //! commitment, and only then does material reach the engine — per Body, via
-//! [`fabric::Fabric::import_body`], never as a raw engine snapshot. Supported
-//! material becomes exact per-Body Fabric changes; unsupported-but-legitimate
+//! [`fabric::fabric::import_body`], never as a raw engine snapshot. Supported
+//! material becomes exact per-Body Engine changes; unsupported-but-legitimate
 //! material (unknown World/schema, or no local key) is retained opaquely and
 //! forwarded byte-identically. Body-level tombstones are local retirement:
 //! cross-replica deletion is application state inside a Body, so a tombstoned
@@ -33,28 +33,22 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use fabric::{
-    journal::ObjectRef, BodyExport, CrdtFabric, Fabric, FabricError, FabricKey, FabricOp,
-    FabricTransactionRequest, JournaledStore,
-};
+use fabric::{journal::ObjectRef, BodyExport, Engine, Error, JournaledStore, Key, MemoryEngine};
 use mechanics::crypto::BODY_EPOCH_ID_LEN;
 use mechanics::ids::SpaceId;
 use serde::{Deserialize, Serialize};
 
 use crate::algebra;
-use crate::body::{BodyOp, ContentCommitment};
+use crate::body::{ContentCommitment, Op};
 use crate::convergence::ConvergenceOutcome;
 use crate::frontier::{AuthorityFrontier, ReplicaFrontier};
 use crate::ids::{BodyKey, EncodingId, SchemaId, WorldId};
 use crate::manifest::{body_index_key, ManifestEntry, ManifestHead, ManifestRoot};
-use crate::protected::{BodyKeySource, ProtectedBodyPayload, ProtectedError, MAX_BODY_BYTES};
+use crate::protected::{BodyKeySource, Material, ProtectedError, MAX_BODY_BYTES};
 use crate::receipt::RequestReceipt;
-use crate::transaction::{
-    AuthoritySource, BodyDescriptor, BodyTransaction, BodyTransactionCore, TransactionSignRequest,
-    TransactionSigner,
-};
+use crate::transaction::{AuthoritySource, Core, Descriptor, SignRequest, Signer, Transaction};
 
-/// Domain separator for deriving a Fabric key from a Body key.
+/// Domain separator for deriving a Engine key from a Body key.
 const BODY_KEY_DOMAIN: &[u8] = b"lait/fabric-key/1";
 /// Domain separator for advancing the semantic frontier from a commit receipt.
 const FRONTIER_DOMAIN: &[u8] = b"lait/replica-frontier/1";
@@ -97,8 +91,8 @@ pub enum ReplicaCommitError {
     /// The durable store failed integrity validation on open — never repaired
     /// heuristically; recreation guidance is the caller's.
     Integrity(String),
-    /// The Fabric engine failed to apply the transaction.
-    Fabric(String),
+    /// The Engine engine failed to apply the transaction.
+    Engine(String),
     /// No authorized key material is held for sealing new local material.
     /// Nothing was committed.
     BodyKeyUnavailable,
@@ -168,12 +162,12 @@ pub struct BodyBinding {
     pub mutation_model: u8,
 }
 
-type IncorporationUnit = (BodyTransaction, Vec<(BodyKey, Vec<u8>)>);
+type IncorporationUnit = (Transaction, Vec<(BodyKey, Vec<u8>)>);
 
 /// One exported unit per retained transaction: the signed record plus its
 /// per-Body sealed payload bytes, byte-identical to what was committed or
 /// incorporated.
-pub type ExportedMaterial = Vec<(BodyTransaction, Vec<(BodyKey, Vec<u8>)>)>;
+pub type ExportedMaterial = Vec<(Transaction, Vec<(BodyKey, Vec<u8>)>)>;
 
 /// The Space material quotas, enforced transactionally under the Replica
 /// writer. The ledger counts canonical material bytes — protected Body
@@ -232,7 +226,7 @@ impl QuotaConfig {
 /// request was authorized at.
 pub struct CommitContext<'a> {
     pub space: &'a SpaceId,
-    pub signer: &'a dyn TransactionSigner,
+    pub signer: &'a dyn Signer,
     pub authority_frontier: AuthorityFrontier,
 }
 
@@ -258,7 +252,7 @@ pub struct CommitAuthorization<'a> {
 /// commitment, policy evidence). The composition root implements it over the
 /// authority ledger; a denial is a typed `Err`, never a receipt.
 pub trait TransactionAuthorizer {
-    fn authorize(&self, core: &BodyTransactionCore) -> Result<Vec<u8>, String>;
+    fn authorize(&self, core: &Core) -> Result<Vec<u8>, String>;
 }
 
 /// A self-contained [`TransactionAuthorizer`] that builds a structurally-valid
@@ -272,7 +266,7 @@ pub struct StaticAuthorizer {
 }
 
 impl TransactionAuthorizer for StaticAuthorizer {
-    fn authorize(&self, core: &BodyTransactionCore) -> Result<Vec<u8>, String> {
+    fn authorize(&self, core: &Core) -> Result<Vec<u8>, String> {
         let space = std::str::from_utf8(&core.space)
             .map_err(|_| "space id".to_string())?
             .to_string();
@@ -451,9 +445,9 @@ fn receipt_index_key(scope: &[u8]) -> [u8; 32] {
     *h.finalize().as_bytes()
 }
 
-/// The Orbit's durable local materialization, over a Fabric engine.
+/// The Orbit's durable local materialization, over a Engine engine.
 pub struct Replica {
-    fabric: Box<dyn Fabric + Send>,
+    fabric: Box<dyn Engine + Send>,
     frontier: ReplicaFrontier,
     durable: Option<JournaledStore>,
     poisoned: bool,
@@ -513,14 +507,14 @@ type RetainedHead = ([u8; 32], Vec<u8>, Vec<u8>);
 /// advertises for it.
 pub type DivergentBody = (BodyKey, Vec<[u8; 32]>);
 
-/// The canonical Fabric key for a Body: `BLAKE3(domain || world || 0x00 || body)`.
-fn fabric_key(key: &BodyKey) -> FabricKey {
+/// The canonical Engine key for a Body: `BLAKE3(domain || world || 0x00 || body)`.
+fn fabric_key(key: &BodyKey) -> Key {
     let mut h = blake3::Hasher::new();
     h.update(BODY_KEY_DOMAIN);
     h.update(key.world.as_bytes());
     h.update(&[0x00]);
     h.update(&key.body.as_bytes());
-    FabricKey::from_bytes(h.finalize().as_bytes().to_vec())
+    Key::from_bytes(h.finalize().as_bytes().to_vec())
 }
 
 /// Advance the Replica frontier from a commit's causal evidence.
@@ -593,7 +587,7 @@ fn space_bytes(space: &SpaceId) -> Option<[u8; 29]> {
     <[u8; 29]>::try_from(space.as_str().as_bytes()).ok()
 }
 
-fn descriptor_hash(d: &BodyDescriptor) -> [u8; 32] {
+fn descriptor_hash(d: &Descriptor) -> [u8; 32] {
     let bytes = postcard::to_stdvec(d).expect("postcard descriptor");
     *blake3::hash(&bytes).as_bytes()
 }
@@ -604,14 +598,14 @@ fn tx_commitment(bytes: &[u8]) -> [u8; 32] {
 
 /// The public accessor for [`operations_digest`] — the committing layer
 /// computes the same digest to bind into its authorization request.
-pub fn operations_digest_of(ops: &[(BodyKey, BodyOp)]) -> [u8; 32] {
+pub fn operations_digest_of(ops: &[(BodyKey, Op)]) -> [u8; 32] {
     operations_digest(ops)
 }
 
 /// The canonical digest of a transaction's staged operation set — the value
 /// the authorization receipt binds as `effect_operations_digest`. Order-stable
 /// (operations sort by `(BodyKey, canonical op bytes)`).
-fn operations_digest(ops: &[(BodyKey, BodyOp)]) -> [u8; 32] {
+fn operations_digest(ops: &[(BodyKey, Op)]) -> [u8; 32] {
     let mut items: Vec<Vec<u8>> = ops
         .iter()
         .map(|(k, op)| postcard::to_stdvec(&(k, op)).expect("postcard op"))
@@ -628,8 +622,8 @@ fn operations_digest(ops: &[(BodyKey, BodyOp)]) -> [u8; 32] {
 }
 
 impl Replica {
-    /// Build a Replica over a given Fabric engine (no durability, no keys).
-    pub fn new(fabric: Box<dyn Fabric + Send>) -> Self {
+    /// Build a Replica over a given Engine engine (no durability, no keys).
+    pub fn new(fabric: Box<dyn Engine + Send>) -> Self {
         Self {
             fabric,
             frontier: ReplicaFrontier::EMPTY,
@@ -653,9 +647,9 @@ impl Replica {
         }
     }
 
-    /// Build a fabric-backed Replica with **no** durable store (tests/scratch).
+    /// Build a Engine-backed Replica with **no** durable store (tests/scratch).
     pub fn loro() -> Self {
-        Self::new(Box::new(CrdtFabric::new()))
+        Self::new(Box::new(MemoryEngine::new()))
     }
 
     /// Attach a mechanics-owned key source (required to seal local commits and
@@ -732,7 +726,7 @@ impl Replica {
             }
             Err(e) => return Err(ReplicaCommitError::Durability(e.to_string())),
         };
-        let mut replica = Self::new(Box::new(CrdtFabric::new())).with_keys(keys.clone());
+        let mut replica = Self::new(Box::new(MemoryEngine::new())).with_keys(keys.clone());
         let Some(meta_bytes) = store
             .caller_meta()
             .map_err(|e| ReplicaCommitError::Integrity(e.to_string()))?
@@ -759,7 +753,7 @@ impl Replica {
         replica.manifest_root_object = meta.manifest_root;
 
         // Stream the catalogs rather than decoding one giant vector. The engine
-        // still materialises every Body — Fabric holds a document per Body — so
+        // still materialises every Body — Engine holds a document per Body — so
         // opening remains proportional to the store. What changed is that the
         // commit point no longer is.
         let mut indexed_bodies: Vec<IndexedBody> = Vec::new();
@@ -813,7 +807,7 @@ impl Replica {
                 let tx_bytes = store
                     .read_object(&tx_ref)
                     .map_err(|e| ReplicaCommitError::Integrity(e.to_string()))?;
-                let tx = BodyTransaction::decode_canonical(&tx_bytes)
+                let tx = Transaction::decode_canonical(&tx_bytes)
                     .map_err(|e| ReplicaCommitError::Integrity(format!("transaction: {e}")))?;
                 tx.verify()
                     .map_err(|e| ReplicaCommitError::Integrity(format!("transaction: {e}")))?;
@@ -838,10 +832,9 @@ impl Replica {
                     })?;
                     match keys.opening_key(&epoch) {
                         Some(key_cap) => {
-                            let payload =
-                                ProtectedBodyPayload::open(&key_cap, envelope).map_err(|e| {
-                                    ReplicaCommitError::Integrity(format!("protected: {e}"))
-                                })?;
+                            let payload = Material::open(&key_cap, envelope).map_err(|e| {
+                                ReplicaCommitError::Integrity(format!("protected: {e}"))
+                            })?;
                             replica
                                 .fabric
                                 .import_body(&fabric_key(&key), &payload.payload)
@@ -1023,7 +1016,7 @@ impl Replica {
                     };
                     Some(
                         postcard::to_stdvec(&entry)
-                            .map_err(|e| ReplicaCommitError::Fabric(e.to_string()))?,
+                            .map_err(|e| ReplicaCommitError::Engine(e.to_string()))?,
                     )
                 }
             };
@@ -1095,7 +1088,7 @@ impl Replica {
                 object: reference,
             };
             let value = postcard::to_stdvec(&entry)
-                .map_err(|e| ReplicaCommitError::Fabric(e.to_string()))?;
+                .map_err(|e| ReplicaCommitError::Engine(e.to_string()))?;
             let nodes = self.durable.as_ref().expect("durable path").nodes();
             receipt_index_root = index::apply(
                 &nodes,
@@ -1148,7 +1141,7 @@ impl Replica {
             manifest_root: manifest_root_object,
         };
         let meta_bytes =
-            postcard::to_stdvec(&meta).map_err(|e| ReplicaCommitError::Fabric(e.to_string()))?;
+            postcard::to_stdvec(&meta).map_err(|e| ReplicaCommitError::Engine(e.to_string()))?;
 
         // Index nodes are handed over separately, not folded into `added`. An
         // entry in the required set is a promise that never expires, so a node
@@ -1329,12 +1322,12 @@ impl Replica {
     }
 
     /// A Body's causal position, in lait's own head-set terms.
-    pub fn body_version(&self, key: &BodyKey) -> Option<fabric::FabricVersion> {
+    pub fn body_version(&self, key: &BodyKey) -> Option<fabric::Version> {
         self.fabric.version(&fabric_key(key)).ok()
     }
 
     /// Take an anchor at a position inside a collaborative value.
-    pub fn anchor(&self, key: &BodyKey, path: &str, position: u64) -> Option<fabric::FabricAnchor> {
+    pub fn anchor(&self, key: &BodyKey, path: &str, position: u64) -> Option<fabric::Anchor> {
         self.fabric.anchor(&fabric_key(key), path, position).ok()
     }
 
@@ -1342,7 +1335,7 @@ impl Replica {
     pub fn resolve_anchor(
         &self,
         key: &BodyKey,
-        anchor: &fabric::FabricAnchor,
+        anchor: &fabric::Anchor,
     ) -> fabric::AnchorResolution {
         self.fabric.resolve(&fabric_key(key), anchor)
     }
@@ -1519,7 +1512,7 @@ impl Replica {
             manifest_root: Some(root_ref),
         };
         let meta_bytes =
-            postcard::to_stdvec(&meta).map_err(|e| ReplicaCommitError::Fabric(e.to_string()))?;
+            postcard::to_stdvec(&meta).map_err(|e| ReplicaCommitError::Engine(e.to_string()))?;
         let added = vec![root_bytes];
         let index_nodes = sink.written;
         let roots: Vec<IndexRef> = self
@@ -1647,7 +1640,7 @@ impl Replica {
     pub fn commit(
         &mut self,
         request_label: &str,
-        ops: &[(BodyKey, BodyOp)],
+        ops: &[(BodyKey, Op)],
     ) -> Result<ReplicaFrontier, ReplicaCommitError> {
         if self.durable.is_some() {
             return Err(ReplicaCommitError::Illegitimate(
@@ -1683,7 +1676,7 @@ impl Replica {
         effect: Vec<u8>,
         scopes: Vec<BodyKey>,
         request_label: &str,
-        ops: &[(BodyKey, BodyOp)],
+        ops: &[(BodyKey, Op)],
         bindings: &[(BodyKey, BodyBinding)],
         content_refs: &[(BodyKey, Vec<crate::content::ContentRef>)],
     ) -> Result<ActionOutcome, ReplicaCommitError> {
@@ -1794,7 +1787,7 @@ impl Replica {
 
         // Build per-Body chain advances and records for every touched Body.
         let mut new_records: BTreeMap<BodyKey, Option<BodyRecord>> = BTreeMap::new();
-        let mut sealed: Vec<(BodyKey, Vec<u8>, ProtectedBodyPayload)> = Vec::new();
+        let mut sealed: Vec<(BodyKey, Vec<u8>, Material)> = Vec::new();
         for key in &touched {
             let export = self.fabric.export_body(&fabric_key(key));
             match export {
@@ -1817,13 +1810,13 @@ impl Replica {
                             .map(|r| r.binding.clone())
                             .expect("validated above"),
                     };
-                    let payload = ProtectedBodyPayload::new(export, base, chain);
+                    let payload = Material::new(export, base, chain);
                     let envelope = match &sealing {
                         Some(sealing) => payload.seal(sealing).map_err(|e| {
                             self.poisoned = true;
                             match e {
                                 ProtectedError::BodyTooLarge => ReplicaCommitError::OpLimit,
-                                _ => ReplicaCommitError::Fabric(e.to_string()),
+                                _ => ReplicaCommitError::Engine(e.to_string()),
                             }
                         })?,
                         None => Vec::new(),
@@ -1855,13 +1848,13 @@ impl Replica {
         // Durable path: build the signed transaction + manifest and run the
         // journal protocol at one linearization point.
         let durable_result = if sealing.is_some() {
-            let mut descriptors: Vec<BodyDescriptor> = Vec::new();
+            let mut descriptors: Vec<Descriptor> = Vec::new();
             for (key, envelope, _) in &sealed {
                 let record = new_records
                     .get(key)
                     .and_then(|r| r.as_ref())
                     .expect("sealed bodies have records");
-                descriptors.push(BodyDescriptor {
+                descriptors.push(Descriptor {
                     world: key.world.clone(),
                     body: key.body.clone(),
                     schema: record.binding.schema.clone(),
@@ -1873,8 +1866,8 @@ impl Replica {
             }
             descriptors.sort_by_key(|d| d.key());
             let operations_digest = operations_digest(ops);
-            let tx = BodyTransaction::sign_with(
-                TransactionSignRequest {
+            let tx = Transaction::sign_with(
+                SignRequest {
                     space: ctx.space,
                     parent_manifest_root: auth.parent_manifest_root,
                     replica_frontier: next_frontier,
@@ -2004,18 +1997,18 @@ impl Replica {
     }
 
     /// Incorporate remote material through the Convergence pipeline. The signed
-    /// [`BodyTransaction`] is verified — structure, signature, **and signer
+    /// [`Transaction`] is verified — structure, signature, **and signer
     /// standing at its referenced authority frontier through mechanics** — and
     /// every provided payload must match its descriptor's ciphertext
     /// commitment **before** any byte reaches the engine. Supported, openable
-    /// material becomes exact per-Body Fabric changes; unsupported-but-
+    /// material becomes exact per-Body Engine changes; unsupported-but-
     /// legitimate material is retained opaquely, byte-identically. Never
     /// reachable from a World or an ordinary Session. Durability before
     /// acknowledgment applies exactly as for a local commit.
     pub fn incorporate(
         &mut self,
         ctx: &CommitContext<'_>,
-        tx: &BodyTransaction,
+        tx: &Transaction,
         payloads: &[(BodyKey, Vec<u8>)],
         authority: &dyn AuthoritySource,
     ) -> Result<ConvergenceOutcome, ReplicaCommitError> {
@@ -2079,7 +2072,7 @@ impl Replica {
         }
 
         // ---- Phase 2: resolve payloads to descriptors; bounds; commitments. --
-        let mut resolved: Vec<(usize, &BodyDescriptor, &[u8])> = Vec::new();
+        let mut resolved: Vec<(usize, &Descriptor, &[u8])> = Vec::new();
         for (idx, (tx, payloads)) in units.iter().enumerate() {
             for (key, payload) in payloads {
                 if payload.len() > MAX_BODY_BYTES {
@@ -2116,7 +2109,7 @@ impl Replica {
             envelope: Vec<u8>,
             /// `Some` when the payload opens and is locally interpreted;
             /// `None` for the opaque branch.
-            payload: Option<ProtectedBodyPayload>,
+            payload: Option<Material>,
             record: BodyRecord,
             /// A concurrent collaborative merge: the staged head JOINS the
             /// existing record's head set (the union is the state) instead of
@@ -2177,7 +2170,7 @@ impl Replica {
                         outcome.unchanged += 1;
                         continue;
                     }
-                    let payload = match ProtectedBodyPayload::open(&open_key, envelope) {
+                    let payload = match Material::open(&open_key, envelope) {
                         Ok(p) => p,
                         Err(_) => {
                             // InvalidProtectedBody: authenticated rejection.
@@ -2416,12 +2409,12 @@ impl Replica {
                                 merge_append: change.merge_append,
                             });
                         }
-                        Err(FabricError::TypeConflict) => {
+                        Err(Error::TypeConflict) => {
                             outcome.rejected += 1;
                         }
                         Err(e) => {
                             self.poisoned = true;
-                            return Err(ReplicaCommitError::Fabric(e.to_string()));
+                            return Err(ReplicaCommitError::Engine(e.to_string()));
                         }
                     }
                 }
@@ -2637,10 +2630,10 @@ impl Replica {
     ) -> Result<crate::convergence::ValidatedContactBundle, ReplicaCommitError> {
         let illegit = |m: String| ReplicaCommitError::Illegitimate(m);
         // 1. Split the authority section.
-        let mut transactions: Vec<(BodyTransaction, Vec<u8>)> = Vec::new();
+        let mut transactions: Vec<(Transaction, Vec<u8>)> = Vec::new();
         let mut authority_material: Vec<Vec<u8>> = Vec::new();
         for record in &staged.authority_records {
-            match BodyTransaction::decode_canonical(record) {
+            match Transaction::decode_canonical(record) {
                 Ok(tx) => {
                     // A duplicated transaction id under different bytes is an
                     // equivocation attempt — reject the whole staging rather
@@ -2740,7 +2733,7 @@ impl Replica {
             }
         }
         // 6. Every received Body payload resolves through the verified graph.
-        type Units = BTreeMap<[u8; 32], (BodyTransaction, Vec<(BodyKey, Vec<u8>)>)>;
+        type Units = BTreeMap<[u8; 32], (Transaction, Vec<(BodyKey, Vec<u8>)>)>;
         let mut units: Units = BTreeMap::new();
         for (tx_id, key, envelope) in &staged.bodies {
             if envelope.len() > MAX_BODY_BYTES {
@@ -3171,7 +3164,7 @@ impl Replica {
         &self,
         held: &std::collections::BTreeSet<(BodyKey, [u8; 32])>,
     ) -> Result<ExportedMaterial, ReplicaCommitError> {
-        type Grouped = BTreeMap<[u8; 32], (BodyTransaction, Vec<(BodyKey, Vec<u8>)>)>;
+        type Grouped = BTreeMap<[u8; 32], (Transaction, Vec<(BodyKey, Vec<u8>)>)>;
         let mut by_tx: Grouped = BTreeMap::new();
         for (key, record) in &self.bodies {
             // A Body the manifest advertises MUST be fully exportable — every
@@ -3215,7 +3208,7 @@ impl Replica {
                         )));
                     }
                 };
-                let tx = BodyTransaction::decode_canonical(&tx_bytes)
+                let tx = Transaction::decode_canonical(&tx_bytes)
                     .map_err(|e| ReplicaCommitError::Integrity(e.to_string()))?;
                 let entry = by_tx.entry(head.tx).or_insert_with(|| (tx, Vec::new()));
                 entry.1.push((key.clone(), envelope));
@@ -3228,26 +3221,26 @@ impl Replica {
     fn apply_ops(
         &mut self,
         request_label: &str,
-        ops: &[(BodyKey, BodyOp)],
-    ) -> Result<fabric::FabricCommitReceipt, ReplicaCommitError> {
+        ops: &[(BodyKey, Op)],
+    ) -> Result<fabric::Receipt, ReplicaCommitError> {
         let mut fabric_ops = Vec::with_capacity(ops.len());
         for (key, op) in ops {
             fabric_ops.push(translate(fabric_key(key), op)?);
         }
         match self
             .fabric
-            .commit(FabricTransactionRequest::new(request_label, fabric_ops))
+            .commit(fabric::Transaction::new(request_label, fabric_ops))
         {
             Ok(r) => Ok(r),
-            Err(FabricError::Unsupported) => Err(ReplicaCommitError::UnsupportedOp),
-            Err(FabricError::TypeConflict) => Err(ReplicaCommitError::TypeConflict),
-            Err(FabricError::InvalidOp(m)) => Err(ReplicaCommitError::InvalidOp(m)),
-            Err(FabricError::Integrity(m)) => Err(ReplicaCommitError::Integrity(m)),
-            Err(FabricError::OutcomeUnknown) => {
+            Err(Error::Unsupported) => Err(ReplicaCommitError::UnsupportedOp),
+            Err(Error::TypeConflict) => Err(ReplicaCommitError::TypeConflict),
+            Err(Error::InvalidOp(m)) => Err(ReplicaCommitError::InvalidOp(m)),
+            Err(Error::Integrity(m)) => Err(ReplicaCommitError::Integrity(m)),
+            Err(Error::OutcomeUnknown) => {
                 self.poisoned = true;
                 Err(ReplicaCommitError::OutcomeUnknown)
             }
-            Err(FabricError::Durability(m)) => {
+            Err(Error::Durability(m)) => {
                 self.poisoned = true;
                 Err(ReplicaCommitError::Durability(m))
             }
@@ -3256,7 +3249,7 @@ impl Replica {
 
     /// Track records for an unattributed (non-durable) commit so bindings and
     /// reads stay consistent in tests.
-    fn update_records_unattributed(&mut self, ops: &[(BodyKey, BodyOp)]) {
+    fn update_records_unattributed(&mut self, ops: &[(BodyKey, Op)]) {
         let seed = mint_chain_seed();
         let mut tx = [0u8; 32];
         tx[..16].copy_from_slice(&seed);
@@ -3312,8 +3305,8 @@ impl Replica {
     fn persist_transaction(
         &mut self,
         ctx: &CommitContext<'_>,
-        tx: &BodyTransaction,
-        sealed: &[(BodyKey, Vec<u8>, ProtectedBodyPayload)],
+        tx: &Transaction,
+        sealed: &[(BodyKey, Vec<u8>, Material)],
         new_records: &mut BTreeMap<BodyKey, Option<BodyRecord>>,
         receipt: Option<RequestReceipt>,
         next_frontier: ReplicaFrontier,
@@ -3365,7 +3358,7 @@ impl Replica {
     fn persist_graph(
         &mut self,
         ctx: &CommitContext<'_>,
-        tx: &BodyTransaction,
+        tx: &Transaction,
         sealed: &[(BodyKey, Vec<u8>, ())],
         new_records: &mut BTreeMap<BodyKey, Option<BodyRecord>>,
         receipt: Option<&RequestReceipt>,
@@ -3475,10 +3468,10 @@ fn object_ref(bytes: &[u8]) -> ObjectRef {
 }
 
 /// Validate one staged Body operation against the frozen algebra (path grammar
-/// and limits) and translate it into its Fabric operation. Replica owns this
-/// translation; a World never authors Fabric operations, and Fabric never sees
+/// and limits) and translate it into its Engine operation. Replica owns this
+/// translation; a World never authors Engine operations, and Engine never sees
 /// an op Replica has not validated.
-fn translate(key: FabricKey, op: &BodyOp) -> Result<FabricOp, ReplicaCommitError> {
+fn translate(key: Key, op: &Op) -> Result<fabric::Op, ReplicaCommitError> {
     let path_ok = |p: &str| {
         algebra::valid_path(p)
             .then_some(())
@@ -3490,29 +3483,29 @@ fn translate(key: FabricKey, op: &BodyOp) -> Result<FabricOp, ReplicaCommitError
             .ok_or(ReplicaCommitError::OpLimit)
     };
     Ok(match op {
-        BodyOp::ReplaceAtomic { value } => FabricOp::PutCanonical {
+        Op::ReplaceAtomic { value } => fabric::Op::PutCanonical {
             key,
             value: value.clone(),
         },
-        BodyOp::Create => FabricOp::CreateBody { key },
-        BodyOp::Tombstone => FabricOp::Remove { key },
-        BodyOp::RegisterSet { path, value } => {
+        Op::Create => fabric::Op::CreateBody { key },
+        Op::Tombstone => fabric::Op::Remove { key },
+        Op::RegisterSet { path, value } => {
             path_ok(path)?;
             value_ok(value)?;
-            FabricOp::RegisterSet {
+            fabric::Op::RegisterSet {
                 key,
                 path: path.clone(),
                 value: value.clone(),
             }
         }
-        BodyOp::RegisterClear { path } => {
+        Op::RegisterClear { path } => {
             path_ok(path)?;
-            FabricOp::RegisterClear {
+            fabric::Op::RegisterClear {
                 key,
                 path: path.clone(),
             }
         }
-        BodyOp::MapSet {
+        Op::MapSet {
             path,
             key: entry,
             value,
@@ -3522,53 +3515,53 @@ fn translate(key: FabricKey, op: &BodyOp) -> Result<FabricOp, ReplicaCommitError
             if entry.len() > algebra::MAX_MAP_KEY_BYTES {
                 return Err(ReplicaCommitError::OpLimit);
             }
-            FabricOp::MapSet {
+            fabric::Op::MapSet {
                 key,
                 path: path.clone(),
                 entry: entry.clone(),
                 value: value.clone(),
             }
         }
-        BodyOp::MapRemove { path, key: entry } => {
+        Op::MapRemove { path, key: entry } => {
             path_ok(path)?;
-            FabricOp::MapRemove {
+            fabric::Op::MapRemove {
                 key,
                 path: path.clone(),
                 entry: entry.clone(),
             }
         }
-        BodyOp::ListInsert { path, index, value } => {
+        Op::ListInsert { path, index, value } => {
             path_ok(path)?;
             value_ok(value)?;
-            FabricOp::ListInsert {
+            fabric::Op::ListInsert {
                 key,
                 path: path.clone(),
                 index: *index,
                 value: value.clone(),
             }
         }
-        BodyOp::ListRemove { path, element } => {
+        Op::ListRemove { path, element } => {
             path_ok(path)?;
-            FabricOp::ListRemove {
+            fabric::Op::ListRemove {
                 key,
                 path: path.clone(),
                 element: element.clone(),
             }
         }
-        BodyOp::ListMove {
+        Op::ListMove {
             path,
             element,
             index,
         } => {
             path_ok(path)?;
-            FabricOp::ListMove {
+            fabric::Op::ListMove {
                 key,
                 path: path.clone(),
                 element: element.clone(),
                 index: *index,
             }
         }
-        BodyOp::TextSplice {
+        Op::TextSplice {
             path,
             index,
             delete,
@@ -3578,7 +3571,7 @@ fn translate(key: FabricKey, op: &BodyOp) -> Result<FabricOp, ReplicaCommitError
             if insert.len() > algebra::MAX_TEXT_INSERT_BYTES {
                 return Err(ReplicaCommitError::OpLimit);
             }
-            FabricOp::TextSplice {
+            fabric::Op::TextSplice {
                 key,
                 path: path.clone(),
                 index: *index,
@@ -3586,27 +3579,27 @@ fn translate(key: FabricKey, op: &BodyOp) -> Result<FabricOp, ReplicaCommitError
                 insert: insert.clone(),
             }
         }
-        BodyOp::SetAdd { path, value } => {
+        Op::SetAdd { path, value } => {
             path_ok(path)?;
             value_ok(value)?;
-            FabricOp::SetAdd {
+            fabric::Op::SetAdd {
                 key,
                 path: path.clone(),
                 value: value.clone(),
             }
         }
-        BodyOp::SetRemove { path, value } => {
+        Op::SetRemove { path, value } => {
             path_ok(path)?;
             value_ok(value)?;
-            FabricOp::SetRemove {
+            fabric::Op::SetRemove {
                 key,
                 path: path.clone(),
                 value: value.clone(),
             }
         }
-        BodyOp::CounterAdd { path, delta } => {
+        Op::CounterAdd { path, delta } => {
             path_ok(path)?;
-            FabricOp::CounterAdd {
+            fabric::Op::CounterAdd {
                 key,
                 path: path.clone(),
                 delta: *delta,

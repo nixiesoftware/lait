@@ -13,13 +13,13 @@
 //! but no caller is ever handed a view that looks complete and is not.
 
 use fabric::{
-    is_implemented_type_tag, is_reserved_type_tag, BodyExport, CrdtFabric, Fabric, FabricKey,
-    FabricOp, FabricTransactionRequest, ProjectionError,
+    is_implemented_type_tag, is_reserved_type_tag, BodyExport, Engine, Key, MemoryEngine, Op,
+    ProjectionError, Transaction,
 };
 use loro::{ExportMode, LoroDoc};
 
-fn key() -> FabricKey {
-    FabricKey::from_bytes(b"body-under-test".to_vec())
+fn key() -> Key {
+    Key::from_bytes(b"body-under-test".to_vec())
 }
 
 /// A Body as a peer on a later build would write it: ordinary text, plus a root
@@ -39,12 +39,12 @@ fn body_binding_type(tag: &str) -> BodyExport {
     BodyExport::Collaborative(doc.export(ExportMode::Snapshot).expect("export"))
 }
 
-fn engine_with_text() -> CrdtFabric {
-    let mut fabric = CrdtFabric::new();
+fn engine_with_text() -> MemoryEngine {
+    let mut fabric = MemoryEngine::new();
     fabric
-        .commit(FabricTransactionRequest {
+        .commit(Transaction {
             request: "seed".into(),
-            ops: vec![FabricOp::TextSplice {
+            ops: vec![Op::TextSplice {
                 key: key(),
                 path: "body".into(),
                 index: 0,
@@ -87,7 +87,7 @@ fn tag_space_is_reserved_for_the_types_the_product_is_working_around() {
 fn a_reserved_tag_refuses_the_projection_rather_than_omitting_it() {
     // A peer on a later build writes a Body binding a reserved type. This
     // replica stores and converges it, and must refuse to project it.
-    let mut fabric = CrdtFabric::new();
+    let mut fabric = MemoryEngine::new();
     fabric
         .import_body(&key(), &body_binding_type("tree"))
         .expect("a Body we cannot project still imports");
@@ -100,7 +100,7 @@ fn a_reserved_tag_refuses_the_projection_rather_than_omitting_it() {
 
 #[test]
 fn an_unknown_tag_refuses_the_projection() {
-    let mut fabric = CrdtFabric::new();
+    let mut fabric = MemoryEngine::new();
     fabric
         .import_body(&key(), &body_binding_type("quaternion"))
         .expect("import");
@@ -116,7 +116,7 @@ fn an_unprojectable_body_still_exports_and_converges() {
     // The half that makes refusal acceptable. A replica must be able to carry
     // material it cannot interpret, or byte-completeness is a lie and the
     // network partitions on version skew.
-    let mut ahead = CrdtFabric::new();
+    let mut ahead = MemoryEngine::new();
     ahead
         .import_body(&key(), &body_binding_type("tree"))
         .expect("import");
@@ -124,7 +124,7 @@ fn an_unprojectable_body_still_exports_and_converges() {
         .export_body(&key())
         .expect("a Body we cannot project still exports");
 
-    let mut behind = CrdtFabric::new();
+    let mut behind = MemoryEngine::new();
     behind
         .import_body(&key(), &export)
         .expect("import succeeds")

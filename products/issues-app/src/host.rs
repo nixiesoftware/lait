@@ -938,7 +938,7 @@ pub fn plan_access_grant(
     let scope_kind = body["scope_kind"].as_str().unwrap_or("space");
     let world = issues::contract::PRODUCT_WORLD;
     let resource = match (scope_kind, project) {
-        ("space", None) => mechanics::demand::PolicyResource::space(world),
+        ("space", None) => mechanics::demand::Resource::root(world),
         ("space", Some(_)) => {
             return Err(AccessPlanError::Invalid(
                 "that is a Space role — it takes no --project".into(),
@@ -968,7 +968,8 @@ pub fn plan_access_grant(
                     "no project matches '{selector}'"
                 )));
             };
-            mechanics::demand::PolicyResource::project(world, &id)
+            mechanics::demand::Resource::segments(world, [&id])
+                .map_err(|error| AccessPlanError::Invalid(error.to_string()))?
         }
         ("project", None) => {
             return Err(AccessPlanError::Invalid(

@@ -5,11 +5,11 @@
 //! The exchange proves a Neighbor is reachable *now* without conferring any
 //! standing: it carries no frontier, routes, standing, or authority material.
 //! Both messages are signed (`.../probe`, `.../ack`); each signature key must
-//! match its StationId, and the StationId must equal the negotiated transport
+//! match its Key, and the Key must equal the negotiated transport
 //! identity (in LAIT a peer *is* its device key). Nonces come from the OS
 //! CSPRNG; challenges are single-use for one exchange.
 
-use mechanics::ids::StationId;
+use mechanics::station::Key;
 use serde::{Deserialize, Serialize};
 
 use crate::wire::length_framed;
@@ -61,7 +61,7 @@ pub enum PresenceError {
     UnsupportedProtocol(u16),
     UnsupportedSignatureAlgorithm(u8),
     NonCanonical,
-    /// A signer/StationId/transport identity did not agree.
+    /// A signer/Key/transport identity did not agree.
     IdentityMismatch,
     /// The Space did not match the expected exchange Space (cross-Space replay).
     SpaceMismatch,
@@ -166,12 +166,12 @@ impl PresenceProbe {
     }
 
     /// Verify the probe: algorithm, the expected exchange Space (rejecting a
-    /// cross-Space replay), the initiator's signature, and that its StationId
+    /// cross-Space replay), the initiator's signature, and that its Key
     /// equals its transport identity and the connection peer.
     pub fn verify(
         &self,
         expected_space: &[u8; 29],
-        transport_peer: &StationId,
+        transport_peer: &Key,
     ) -> Result<(), PresenceError> {
         if self.protocol != PRESENCE_PROTOCOL {
             return Err(PresenceError::UnsupportedProtocol(self.protocol));
@@ -242,11 +242,7 @@ impl PresenceAck {
     /// Verify the ack against the probe it answers and the responder's
     /// negotiated transport identity. Rejects reflection (echoing the probe's
     /// nonce), commitment mismatch, and identity/signature substitution.
-    pub fn verify(
-        &self,
-        probe: &PresenceProbe,
-        transport_peer: &StationId,
-    ) -> Result<(), PresenceError> {
+    pub fn verify(&self, probe: &PresenceProbe, transport_peer: &Key) -> Result<(), PresenceError> {
         if self.signature_algorithm != SIG_ALG_ED25519 {
             return Err(PresenceError::UnsupportedSignatureAlgorithm(
                 self.signature_algorithm,

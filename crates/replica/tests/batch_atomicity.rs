@@ -1,6 +1,6 @@
 //! Batch atomicity through the real durable Replica path.
 //!
-//! Fabric's own tests cover the in-memory half. What this file adds is the
+//! Engine's own tests cover the in-memory half. What this file adds is the
 //! part that cannot be faked: that a failed batch leaves nothing behind in the
 //! store either, that a *later* successful commit does not seal the damage in,
 //! and that a reopen agrees with what the live Replica said.
@@ -17,7 +17,7 @@ use mechanics::crypto::AuthorizedBodyKey;
 use mechanics::ids::SpaceId;
 use replica::frontier::AuthorityFrontier;
 use replica::{
-    BodyBinding, BodyId, BodyKey, BodyOp, CommitAuthorization, CommitContext, EncodingId, Replica,
+    BodyBinding, BodyId, BodyKey, CommitAuthorization, CommitContext, EncodingId, Op, Replica,
     SchemaId, SeedSigner, StaticBodyKeys, SupportedSchemas, WorldId, MUTATION_COLLABORATIVE,
 };
 
@@ -50,10 +50,10 @@ fn test_auth() -> replica::StaticAuthorizer {
     }
 }
 fn test_demand() -> Vec<u8> {
-    use mechanics::demand::{AuthorizationDemand, PolicyCapability, PolicyResource};
+    use mechanics::demand::{AuthorizationDemand, PolicyCapability, Resource};
     AuthorizationDemand::require(
         PolicyCapability::new("com.example.notes", "write"),
-        PolicyResource::space("com.example.notes"),
+        Resource::root("com.example.notes"),
     )
     .encode_canonical()
     .expect("canonical demand")
@@ -88,7 +88,7 @@ fn try_commit(
     r: &mut Replica,
     n: u8,
     bindings: &[(BodyKey, BodyBinding)],
-    ops: &[(BodyKey, BodyOp)],
+    ops: &[(BodyKey, Op)],
 ) -> Result<(), replica::ReplicaCommitError> {
     let space = space();
     let signer = SeedSigner(&WRITER_SEED);
@@ -139,7 +139,7 @@ fn a_failed_batch_that_tombstoned_a_body_leaves_it_intact_on_disk() {
         &[(body(1), collab_binding())],
         &[(
             body(1),
-            BodyOp::TextSplice {
+            Op::TextSplice {
                 path: "body".into(),
                 index: 0,
                 delete: 0,
@@ -156,10 +156,10 @@ fn a_failed_batch_that_tombstoned_a_body_leaves_it_intact_on_disk() {
         2,
         &[(body(1), collab_binding()), (body(2), collab_binding())],
         &[
-            (body(1), BodyOp::Tombstone),
+            (body(1), Op::Tombstone),
             (
                 body(2),
-                BodyOp::TextSplice {
+                Op::TextSplice {
                     path: "body".into(),
                     index: 999_999,
                     delete: 0,
@@ -183,7 +183,7 @@ fn a_failed_batch_that_tombstoned_a_body_leaves_it_intact_on_disk() {
         &[(body(1), collab_binding())],
         &[(
             body(1),
-            BodyOp::TextSplice {
+            Op::TextSplice {
                 path: "body".into(),
                 index: 0,
                 delete: 0,
@@ -218,7 +218,7 @@ fn a_failed_batch_survives_a_reopen_with_no_follow_on_edit() {
         &[(body(1), collab_binding())],
         &[(
             body(1),
-            BodyOp::TextSplice {
+            Op::TextSplice {
                 path: "body".into(),
                 index: 0,
                 delete: 0,
@@ -232,10 +232,10 @@ fn a_failed_batch_survives_a_reopen_with_no_follow_on_edit() {
         2,
         &[(body(1), collab_binding()), (body(2), collab_binding())],
         &[
-            (body(1), BodyOp::Tombstone),
+            (body(1), Op::Tombstone),
             (
                 body(2),
-                BodyOp::TextSplice {
+                Op::TextSplice {
                     path: "body".into(),
                     index: 999_999,
                     delete: 0,
@@ -251,7 +251,7 @@ fn a_failed_batch_survives_a_reopen_with_no_follow_on_edit() {
         &[(body(3), collab_binding())],
         &[(
             body(3),
-            BodyOp::TextSplice {
+            Op::TextSplice {
                 path: "body".into(),
                 index: 0,
                 delete: 0,

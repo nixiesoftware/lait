@@ -9,7 +9,10 @@
 //! counter overflow. Route hints never override verified transport/Station
 //! identity; they are advisory and receiver-leased.
 
-use mechanics::ids::{SpaceId, StationEpoch, StationId};
+use mechanics::{
+    ids::SpaceId,
+    station::{Epoch, Key},
+};
 use serde::{Deserialize, Serialize};
 
 use crate::wire::length_framed;
@@ -105,7 +108,7 @@ impl SignedBeacon {
     pub fn emit(
         protocol: u16,
         space: &SpaceId,
-        epoch: StationEpoch,
+        epoch: Epoch,
         sequence: u64,
         frontier_root: [u8; 32],
         frontier_count: u64,
@@ -190,7 +193,7 @@ impl SignedBeacon {
         }
         Ok(VerifiedBeacon {
             space,
-            station: StationId::from_key_bytes(self.body.station),
+            station: Key::from_key_bytes(self.body.station),
             epoch: self.body.epoch,
             sequence: self.body.sequence,
             frontier_root: self.body.frontier_root,
@@ -208,7 +211,7 @@ impl SignedBeacon {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedBeacon {
     space: SpaceId,
-    station: StationId,
+    station: Key,
     epoch: u64,
     sequence: u64,
     frontier_root: [u8; 32],
@@ -221,7 +224,7 @@ impl VerifiedBeacon {
     pub fn space(&self) -> &SpaceId {
         &self.space
     }
-    pub fn station(&self) -> &StationId {
+    pub fn station(&self) -> &Key {
         &self.station
     }
     /// The freshness coordinate `(epoch, sequence)`.

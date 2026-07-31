@@ -1,5 +1,5 @@
 //! Two-node convergence, end to end: one Replica exports its **retained signed
-//! material** (the canonical BodyTransaction records plus their sealed,
+//! material** (the canonical Transaction records plus their sealed,
 //! descriptor-bound protected payloads), the material is framed as a Contact
 //! transfer and driven through the real initiator/accepter state machines, the
 //! received bytes are handed to mechanics-validated `Replica::incorporate`,
@@ -17,9 +17,9 @@ use std::sync::Arc;
 use mechanics::crypto::AuthorizedBodyKey;
 use mechanics::ids::SpaceId;
 use replica::frontier::AuthorityFrontier;
-use replica::transaction::{AuthoritySource, BodyTransaction, NO_PARENT_ROOT};
+use replica::transaction::{AuthoritySource, Transaction, NO_PARENT_ROOT};
 use replica::{
-    BodyBinding, BodyId, BodyKey, BodyOp, CommitContext, EncodingId, Replica, SchemaId, SeedSigner,
+    BodyBinding, BodyId, BodyKey, CommitContext, EncodingId, Op, Replica, SchemaId, SeedSigner,
     StaticBodyKeys, SupportedSchemas, WorldId, MUTATION_COLLABORATIVE,
 };
 use replica::{CommitAuthorization, StaticAuthorizer};
@@ -106,7 +106,7 @@ fn commit_votes(r: &mut Replica, request: [u8; 16], delta: i64) {
     };
     let demand = mechanics::demand::AuthorizationDemand::require(
         mechanics::demand::PolicyCapability::new(note_key().world.as_str(), "write"),
-        mechanics::demand::PolicyResource::space(note_key().world.as_str()),
+        mechanics::demand::Resource::root(note_key().world.as_str()),
     )
     .encode_canonical()
     .unwrap();
@@ -127,10 +127,10 @@ fn commit_votes(r: &mut Replica, request: [u8; 16], delta: i64) {
         vec![],
         "bump",
         &[
-            (note_key(), BodyOp::Create),
+            (note_key(), Op::Create),
             (
                 note_key(),
-                BodyOp::CounterAdd {
+                Op::CounterAdd {
                     path: "votes".into(),
                     delta,
                 },
@@ -143,9 +143,9 @@ fn commit_votes(r: &mut Replica, request: [u8; 16], delta: i64) {
 }
 
 /// Frame the exported material as a complete Contact transfer: the signed
-/// BodyTransaction is the single authority record; its bound protected
+/// Transaction is the single authority record; its bound protected
 /// payload is the single body. Returns every raw frame in send order.
-fn frame_transfer(contact: &ContactId, tx: &BodyTransaction, payload: &[u8]) -> Vec<Vec<u8>> {
+fn frame_transfer(contact: &ContactId, tx: &Transaction, payload: &[u8]) -> Vec<Vec<u8>> {
     let record = tx.encode();
     let record_hashes = vec![authority_record_hash(&record)];
     let set_hash = authority_set_hash(&record_hashes);
@@ -196,7 +196,7 @@ fn frame_transfer(contact: &ContactId, tx: &BodyTransaction, payload: &[u8]) -> 
 
     let mut raw: Vec<Vec<u8>> = frames.drain(..).map(|f| f.encode(contact)).collect();
     let mut t = blake3::Hasher::new();
-    t.update(b"lait/contact/1/transcript");
+    t.update(b"lait/contact/2/transcript");
     for r in &raw {
         t.update(r);
     }
@@ -248,7 +248,7 @@ fn a_signed_export_converges_across_a_contact_transfer() {
     // the signed transaction + payload from the received material.
     let received = receive(contact, &frames);
     assert_eq!(received.authority_records.len(), 1);
-    let received_tx = BodyTransaction::decode_canonical(&received.authority_records[0]).unwrap();
+    let received_tx = Transaction::decode_canonical(&received.authority_records[0]).unwrap();
     let received_payload = received
         .bodies
         .get(&(tx.id(), note_key()))
@@ -294,7 +294,7 @@ fn a_tampered_transfer_never_reaches_the_engine() {
     let contact = ContactId::from_bytes([6u8; 16]);
     let frames = frame_transfer(&contact, tx, payload);
     let received = receive(contact, &frames);
-    let received_tx = BodyTransaction::decode_canonical(&received.authority_records[0]).unwrap();
+    let received_tx = Transaction::decode_canonical(&received.authority_records[0]).unwrap();
     let received_payload = received.bodies.get(&(tx.id(), note_key())).unwrap();
 
     // An importer whose mechanics view does not authorize the exporter refuses

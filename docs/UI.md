@@ -2,7 +2,7 @@
 
 lait has three product surfaces: CLI, local web, and MCP. They are clients of
 the same daemon and use the same command and projection contract. No surface
-opens Replica or Fabric independently; product work reaches a World through a
+opens Replica or Engine independently; product work reaches a World through a
 docked Session.
 
 ## 1. Product model

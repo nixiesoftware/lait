@@ -12,7 +12,7 @@
 use std::collections::BTreeMap;
 
 use lait::world::contract::{self, IssueQuery};
-use runtime::{World, WorldContext, WorldQuery};
+use runtime::{Context, Query, World};
 
 const FOUNDER_SEED: [u8; 32] = [151u8; 32];
 
@@ -36,7 +36,7 @@ impl runtime::BodyReader for StubReader {
             .cloned()
             .ok_or(replica::ProjectionError::NotCollaborative)
     }
-    fn body_version(&self, _key: &replica::ids::BodyKey) -> Option<replica::FabricVersion> {
+    fn body_version(&self, _key: &replica::ids::BodyKey) -> Option<replica::Version> {
         None
     }
     fn anchor_in_body(
@@ -44,20 +44,20 @@ impl runtime::BodyReader for StubReader {
         _key: &replica::ids::BodyKey,
         _path: &str,
         _position: u64,
-    ) -> Option<replica::FabricAnchor> {
+    ) -> Option<replica::Anchor> {
         None
     }
     fn resolve_anchor(
         &self,
         _key: &replica::ids::BodyKey,
-        _anchor: &replica::FabricAnchor,
+        _anchor: &replica::Anchor,
     ) -> replica::AnchorResolution {
         replica::AnchorResolution::Drifted
     }
     fn content_status(
         &self,
         _content: &replica::ContentRef,
-    ) -> Option<runtime::world::WorldContentStatus> {
+    ) -> Option<runtime::world::ContentStatus> {
         None
     }
 
@@ -77,7 +77,7 @@ fn facts(space: &mechanics::ids::SpaceId) -> runtime::PrincipalFacts {
     let device = mechanics::crypto::device_from_seed(&FOUNDER_SEED);
     runtime::PrincipalFacts {
         actor: mechanics::ids::ActorId::from_incept_hash(&"ab".repeat(32)),
-        station: mechanics::ids::StationId::from_device(&device).unwrap(),
+        station: mechanics::station::Key::from_device(&device).unwrap(),
         device,
         space: space.clone(),
         authority_frontier: replica::frontier::AuthorityFrontier::from_canonical_bytes(vec![]),
@@ -127,11 +127,11 @@ fn reader(title: &str, stamp: Option<&[u8]>, space: &mechanics::ids::SpaceId) ->
     r
 }
 
-fn list_titles(world: &lait::world::IssuesWorld, ctx: &WorldContext<'_>) -> Vec<String> {
+fn list_titles(world: &lait::world::IssuesWorld, ctx: &Context<'_>) -> Vec<String> {
     let projection = world
         .query(
             ctx,
-            WorldQuery {
+            Query {
                 schema: contract::issue_schema(),
                 schema_version: contract::ISSUE_SCHEMA_VERSION,
                 payload: IssueQuery::List {
@@ -166,14 +166,14 @@ fn the_issues_world_cache_never_serves_across_roots() {
     // Root A: the doc is titled "at-root-a". Ask twice (the second answer is
     // the cache hit) — both must be A's content.
     let ra = reader("at-root-a", None, &space);
-    let ctx_a = WorldContext::with_reads(&facts, &ra, root_a);
+    let ctx_a = Context::with_reads(&facts, &ra, root_a);
     assert_eq!(list_titles(&world, &ctx_a), vec!["at-root-a"]);
     assert_eq!(list_titles(&world, &ctx_a), vec!["at-root-a"]);
 
     // Root B on the SAME World instance: the same doc reads differently. A
     // lookup pinned to B must never surface A's cached derivation.
     let rb = reader("at-root-b", None, &space);
-    let ctx_b = WorldContext::with_reads(&facts, &rb, root_b);
+    let ctx_b = Context::with_reads(&facts, &rb, root_b);
     assert_eq!(list_titles(&world, &ctx_b), vec!["at-root-b"]);
 
     // And back: A's root still serves A's content (both roots stay warm).
@@ -188,19 +188,19 @@ fn the_per_issue_memo_honors_the_version_stamp() {
 
     // Root A parses the issue under stamp s1.
     let ra = reader("stamped-one", Some(b"s1"), &space);
-    let ctx_a = WorldContext::with_reads(&facts, &ra, [3u8; 32]);
+    let ctx_a = Context::with_reads(&facts, &ra, [3u8; 32]);
     assert_eq!(list_titles(&world, &ctx_a), vec!["stamped-one"]);
 
     // Root B changes the body AND its stamp: the memo entry must not be
     // reused — the new content is served.
     let rb = reader("stamped-two", Some(b"s2"), &space);
-    let ctx_b = WorldContext::with_reads(&facts, &rb, [4u8; 32]);
+    let ctx_b = Context::with_reads(&facts, &rb, [4u8; 32]);
     assert_eq!(list_titles(&world, &ctx_b), vec!["stamped-two"]);
 
     // Root C keeps stamp s2: reuse is allowed precisely because the reader
     // vouches byte-equivalence — the answer is still B/C's content.
     let rc = reader("stamped-two", Some(b"s2"), &space);
-    let ctx_c = WorldContext::with_reads(&facts, &rc, [5u8; 32]);
+    let ctx_c = Context::with_reads(&facts, &rc, [5u8; 32]);
     assert_eq!(list_titles(&world, &ctx_c), vec!["stamped-two"]);
 }
 
@@ -213,9 +213,9 @@ fn a_zero_root_context_is_never_cached() {
     let world = lait::world::IssuesWorld::new();
     let facts = facts(&space);
     let ra = reader("zero-one", None, &space);
-    let ctx_a = WorldContext::with_reads(&facts, &ra, [0u8; 32]);
+    let ctx_a = Context::with_reads(&facts, &ra, [0u8; 32]);
     assert_eq!(list_titles(&world, &ctx_a), vec!["zero-one"]);
     let rb = reader("zero-two", None, &space);
-    let ctx_b = WorldContext::with_reads(&facts, &rb, [0u8; 32]);
+    let ctx_b = Context::with_reads(&facts, &rb, [0u8; 32]);
     assert_eq!(list_titles(&world, &ctx_b), vec!["zero-two"]);
 }

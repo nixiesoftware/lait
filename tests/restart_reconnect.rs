@@ -1,4 +1,4 @@
-//! Restart durability over a process-backed **SpaceBridge** (in-process, in-memory
+//! Restart durability over a process-backed **StationHost** (in-process, in-memory
 //! transport): a joiner that is admitted and converged, then has its bridge
 //! killed and restarted on the SAME home, must come back holding its persisted
 //! membership and reconverge with a peer that files new content while it was
@@ -115,7 +115,7 @@ fn wait_online(rt: &tokio::runtime::Runtime, home: &Path) {
     });
     assert!(
         online.is_some(),
-        "SpaceBridge at {} never came online",
+        "StationHost at {} never came online",
         home.display()
     );
 }

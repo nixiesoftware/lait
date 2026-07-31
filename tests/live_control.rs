@@ -2,7 +2,7 @@
 //!
 //! This exists for one reason the compiler cannot cover. Classifying a request
 //! is compile-enforced — `control::classify` has no wildcard arm — but
-//! *handling* it is not: every `dispatch_*` in the SpaceBridge ends in
+//! *handling* it is not: every `dispatch_*` in the StationHost ends in
 //! `unreachable!("misclassified …")`, so a variant that is classified and never
 //! dispatched panics the connection task the first time anybody sends it. The
 //! client sees a closed socket and no reason. Both new verbs are answered here,
@@ -103,7 +103,7 @@ fn the_live_view_and_the_signal_drain_are_served_rather_than_unreachable() {
     let online = poll_until(Duration::from_secs(20), || {
         matches!(req(&client, &home, Request::Status), Response::Status(_)).then_some(())
     });
-    assert!(online.is_some(), "the SpaceBridge never answered Status");
+    assert!(online.is_some(), "the StationHost never answered Status");
 
     // A first read carries no generation, so it always gets the table — even
     // when the table is empty and the daemon's counter is still at zero.

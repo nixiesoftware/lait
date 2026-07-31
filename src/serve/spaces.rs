@@ -14,7 +14,7 @@ use crate::daemon::{
     LaitDaemonClient, LocalOrbitId, OrbitAddress, OrbitDirectory, StationIdentity,
 };
 use crate::ids::SpaceId;
-use crate::spaces::{self, SpaceEntry, StorePresence};
+use crate::orbits::{self, Entry, Presence};
 
 /// One row of the browser's Orbit picker.
 #[derive(Debug, Clone, Serialize)]
@@ -31,21 +31,21 @@ pub struct SpaceRow {
     /// `up` | `idle` | `missing`, exactly as `lait orbits` reports it.
     pub status: &'static str,
     pub identity: StationIdentity,
-    pub projects: Vec<spaces::ProjectBrief>,
+    pub projects: Vec<orbits::ProjectBrief>,
 }
 
 /// Probe one Orbit's compatibility control adapter without activating it.
 ///
 /// Listing must remain passive: opening the picker cannot wake every registered
 /// Orbit. The authoritative Space name is used when a live Station answers.
-async fn status(daemon: &LaitDaemonClient, entry: &SpaceEntry) -> (&'static str, Option<String>) {
-    if spaces::presence(entry) == StorePresence::Missing {
+async fn status(daemon: &LaitDaemonClient, entry: &Entry) -> (&'static str, Option<String>) {
+    if orbits::presence(entry) == Presence::Missing {
         return ("missing", None);
     }
     let Some(space) = SpaceId::parse(&entry.space) else {
         return ("idle", None);
     };
-    let route = ControlRoute::Space {
+    let route = ControlRoute::Orbit {
         address: OrbitAddress::for_store(Path::new(&entry.path), space),
     };
     let reply = tokio::time::timeout(

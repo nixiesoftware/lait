@@ -48,5 +48,6 @@ pub mod reshare;
 pub mod secretfs;
 pub mod sigdag;
 pub mod space;
+pub mod station;
 pub mod status;
 pub mod transition;

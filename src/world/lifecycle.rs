@@ -8,15 +8,13 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::Result;
-use runtime::{ActivationOptions, EnterOptions, Runtime, WorldRegistry};
+use runtime::{ActivationOptions, Registry, Runtime};
 
-use crate::orbital::{
-    discover_space_id, orbital_store_root, unsupported_store_at, OrbitalMechanics,
-};
+use crate::orbital::{discover_space_id, orbital_store_root, unsupported_store_at, SpaceAuthority};
 
 pub use issues_app::lifecycle::{BootstrapFault, BootstrapPhase, IssuesBootstrapRecord};
 
-fn issues_registry() -> Result<WorldRegistry> {
+fn issues_registry() -> Result<Registry> {
     crate::world::packages()
         .build()
         .map(|(registry, _)| registry)
@@ -29,7 +27,7 @@ pub fn issues_implementation_id() -> [u8; 32] {
 
 /// Apply the product-supplied founder policy through the generic Mechanics
 /// authority host.
-pub fn seed_founder_policy(mechanics: &OrbitalMechanics) -> Result<()> {
+pub fn seed_founder_policy(mechanics: &SpaceAuthority) -> Result<()> {
     let policy = issues_app::lifecycle::founder_policy();
     mechanics.activate_implementation(policy.world, policy.implementation)?;
     for grant in policy.grants {
@@ -49,7 +47,7 @@ pub fn form_space(
     home: &Path,
     device_seed: &[u8; 32],
     display_name: &str,
-) -> Result<(OrbitalMechanics, runtime::SignedCoordinates)> {
+) -> Result<(SpaceAuthority, runtime::SignedCoordinates)> {
     form_space_with_fault(home, device_seed, display_name, None, None)
 }
 
@@ -62,19 +60,19 @@ pub fn form_space_with_fault(
     display_name: &str,
     project: Option<(String, String)>,
     fault: Option<BootstrapFault>,
-) -> Result<(OrbitalMechanics, runtime::SignedCoordinates)> {
+) -> Result<(SpaceAuthority, runtime::SignedCoordinates)> {
     if let Some(error) = unsupported_store_at(home) {
         return Err(anyhow::anyhow!("{error}"));
     }
     let root = orbital_store_root(home);
     let (mechanics, coordinates) = match discover_space_id(home) {
         Some(space) => {
-            let mechanics = OrbitalMechanics::open(&root, &space, device_seed)?;
+            let mechanics = SpaceAuthority::open(&root, &space, device_seed)?;
             let coordinates =
                 mechanics.mint_coordinates(device_seed, display_name, vec![], None)?;
             (mechanics, coordinates)
         }
-        None => OrbitalMechanics::form(&root, device_seed, display_name, vec![])?,
+        None => SpaceAuthority::form(&root, device_seed, display_name, vec![])?,
     };
 
     seed_founder_policy(&mechanics)?;
@@ -86,10 +84,10 @@ pub fn form_space_with_fault(
         Arc::new(mechanics.clone()),
     );
     let orbit = runtime
-        .enter_orbit(&coordinates, EnterOptions)
+        .materialize(&coordinates)
         .map_err(|error| anyhow::anyhow!("materialize orbit: {error:?}"))?;
     let station = orbit
-        .activate(ActivationOptions::offline())
+        .open(ActivationOptions::offline())
         .map_err(|error| anyhow::anyhow!("activate: {error:?}"))?;
     let identity = Runtime::identity_from_seed(device_seed);
     let session = station
@@ -107,7 +105,7 @@ pub fn form_space_with_fault(
         initial_project,
         fault,
     );
-    let _ = station.go_dormant();
+    let _ = station.vacate();
     bootstrap?;
     Ok((mechanics, coordinates))
 }
@@ -116,7 +114,7 @@ pub fn found_space_cli(
     home: &Path,
     device_seed: &[u8; 32],
     display_name: &str,
-) -> Result<(crate::ids::SpaceId, crate::spaces::ProjectBrief)> {
+) -> Result<(crate::ids::SpaceId, crate::orbits::ProjectBrief)> {
     let project = issues_app::lifecycle::InitialProject::for_space(display_name);
     let (mechanics, _) = form_space_with_fault(
         home,
@@ -127,7 +125,7 @@ pub fn found_space_cli(
     )?;
     Ok((
         mechanics.space(),
-        crate::spaces::ProjectBrief {
+        crate::orbits::ProjectBrief {
             key: project.key,
             name: project.name,
         },
@@ -140,14 +138,14 @@ pub fn enter_space(
     home: &Path,
     device_seed: &[u8; 32],
     invite_link: &str,
-) -> Result<(OrbitalMechanics, runtime::SignedCoordinates)> {
+) -> Result<(SpaceAuthority, runtime::SignedCoordinates)> {
     if let Some(error) = unsupported_store_at(home) {
         return Err(anyhow::anyhow!("{error}"));
     }
     let coordinates = runtime::SignedCoordinates::parse_link(invite_link.trim())
         .map_err(|error| anyhow::anyhow!("invalid invite link: {error}"))?;
     let root = orbital_store_root(home);
-    let mechanics = OrbitalMechanics::enter(&root, device_seed, &coordinates)?;
+    let mechanics = SpaceAuthority::enter(&root, device_seed, &coordinates)?;
     let runtime = Runtime::open(
         root,
         issues_registry()?,
@@ -155,7 +153,7 @@ pub fn enter_space(
         Arc::new(mechanics.clone()),
     );
     runtime
-        .enter_orbit(&coordinates, EnterOptions)
+        .materialize(&coordinates)
         .map_err(|error| anyhow::anyhow!("materialize orbit: {error:?}"))?;
     Ok((mechanics, coordinates))
 }

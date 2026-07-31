@@ -116,7 +116,7 @@ pub fn sign_detached(seed: &[u8; 32], preimage: &[u8]) -> [u8; 64] {
 }
 
 /// Verify a detached Ed25519 signature over a preimage against a 32-byte public
-/// key (the raw bytes a [`DeviceId`]/`StationId` *is*). Never panics on a
+/// key (the raw bytes a [`DeviceId`]/`Key` *is*). Never panics on a
 /// malformed key or signature — a bad input is a failed verification, not a
 /// crash.
 pub fn verify_detached(public_key: &[u8; 32], preimage: &[u8], signature: &[u8; 64]) -> bool {
@@ -247,7 +247,7 @@ pub const BODY_ENVELOPE_OVERHEAD: usize = BODY_EPOCH_ID_LEN + NONCE_LEN + 16;
 /// one approved key epoch: the authorized epoch id plus its current key
 /// material. Mechanics-side policy (the composition root, reading the
 /// authorized epoch set) mints it; Replica selects it under Space policy and
-/// passes it only to Fabric seal/open. Fabric never decides epoch legitimacy —
+/// passes it only to Engine seal/open. Engine never decides epoch legitimacy —
 /// holding this capability *is* the legitimacy decision, made upstream. The
 /// key material has no accessor, no serialization, and no `Debug` leak.
 #[derive(Clone)]

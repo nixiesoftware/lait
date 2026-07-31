@@ -21,21 +21,21 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
 
-use mechanics::ids::{SpaceId, StationId};
+use mechanics::{ids::SpaceId, station::Key};
 
 use crate::admission::{
     judge, AcceptedOpenings, Admission, AdmittedPeer, OpeningContext, PlanePolicy, Replay,
 };
 use crate::budget::{deadline, slots};
 use crate::lifecycle::CancelToken;
-use crate::planes::{Plane, SessionOpen, SessionRefusal};
+use crate::plane::{Open, Plane, Refusal};
 use crate::world::AuthorityView;
 
 /// Everything a driver needs that is not about which plane it is.
 pub struct PlaneContext {
     pub plane: Plane,
     pub space: SpaceId,
-    pub local_station: StationId,
+    pub local_station: Key,
     pub authority: Arc<dyn AuthorityView>,
     pub policy: PlanePolicy,
     pub cancel: CancelToken,
@@ -92,7 +92,7 @@ pub trait PlaneService {
 /// `mpsc::Receiver::recv` takes `&mut self`; and it is the honest shape — a
 /// driver owns one plane's inbound connections, not an endpoint. Everything a
 /// plane dials *out* on, it gets from elsewhere.
-pub fn run_driver<S>(context: PlaneContext, queue: comms::SessionQueue, service: S)
+pub fn run_driver<S>(context: PlaneContext, queue: comms::ConnectionQueue, service: S)
 where
     S: PlaneService + 'static,
 {
@@ -106,7 +106,7 @@ where
     local.block_on(&runtime, drive(context, queue, service));
 }
 
-async fn drive<S>(context: PlaneContext, mut queue: comms::SessionQueue, service: S)
+async fn drive<S>(context: PlaneContext, mut queue: comms::ConnectionQueue, service: S)
 where
     S: PlaneService + 'static,
 {
@@ -120,7 +120,7 @@ where
     // Without the second, one peer's reconnect storm is indistinguishable from
     // the Space being busy.
     let held = Rc::new(std::cell::RefCell::new(std::collections::BTreeMap::<
-        StationId,
+        Key,
         usize,
     >::new()));
 
@@ -154,7 +154,7 @@ where
             break;
         }
 
-        let Some(peer) = StationId::from_device(&incoming.from) else {
+        let Some(peer) = Key::from_device(&incoming.from) else {
             incoming.connection.close(REFUSED, b"");
             continue;
         };
@@ -224,10 +224,10 @@ async fn serve_connection<S>(
         // The ALPN is the version gate and it also fixes the plane, so a
         // connection routed here under another one is a routing bug on our side
         // or an attempt on theirs. Either way this driver is not its owner.
-        refuse(connection.as_ref(), Some(SessionRefusal::Malformed)).await;
+        refuse(connection.as_ref(), Some(Refusal::Malformed)).await;
         return;
     }
-    let Some(peer_station) = StationId::from_device(&incoming.from) else {
+    let Some(peer_station) = Key::from_device(&incoming.from) else {
         refuse(connection.as_ref(), None).await;
         return;
     };
@@ -242,18 +242,18 @@ async fn serve_connection<S>(
         {
             Ok(Some(bytes)) => bytes,
             _ => {
-                refuse(connection.as_ref(), Some(SessionRefusal::Malformed)).await;
+                refuse(connection.as_ref(), Some(Refusal::Malformed)).await;
                 return;
             }
         }
     } else {
         incoming.opening
     };
-    let Ok(open) = SessionOpen::decode_canonical(&raw) else {
+    let Ok(open) = Open::decode_canonical(&raw) else {
         // When a router did parse this to route it, a failure here means the
         // two of us disagree — worth refusing rather than papering over,
         // because everything downstream trusts this parse.
-        refuse(connection.as_ref(), Some(SessionRefusal::Malformed)).await;
+        refuse(connection.as_ref(), Some(Refusal::Malformed)).await;
         return;
     };
 
@@ -320,7 +320,7 @@ async fn serve_connection<S>(
 /// Parks forever when nothing publishes an authority tick, which is the honest
 /// answer for a driver with no authority source: it never spuriously closes a
 /// session it has no reason to doubt.
-async fn watch_for_revocation(context: &PlaneContext, station: StationId) {
+async fn watch_for_revocation(context: &PlaneContext, station: Key) {
     let Some(mut tick) = context.authority_tick.clone() else {
         std::future::pending::<()>().await;
         return;
@@ -342,7 +342,7 @@ async fn watch_for_revocation(context: &PlaneContext, station: StationId) {
 /// is allocated for it.
 async fn read_opening(connection: &dyn comms::Connection) -> Option<Vec<u8>> {
     let mut flow = connection.accept_uni().await.ok()??;
-    flow.read_to_end(crate::planes::bounds::MAX_OPENING_BYTES)
+    flow.read_to_end(crate::plane::bounds::MAX_OPENING_BYTES)
         .await
         .ok()
 }
@@ -367,8 +367,8 @@ async fn answer(connection: &dyn comms::Connection, bytes: &[u8]) -> bool {
 /// peer as a transport error it will retry, which is the opposite of a refusal.
 /// Every reason shares one answer, except an unsupported generation — the one a
 /// peer can actually act on.
-async fn refuse(connection: &dyn comms::Connection, refusal: Option<SessionRefusal>) {
-    let refusal = refusal.unwrap_or(SessionRefusal::Refused);
+async fn refuse(connection: &dyn comms::Connection, refusal: Option<Refusal>) {
+    let refusal = refusal.unwrap_or(Refusal::Refused);
     // `unwrap_or_default` here would have written an empty vector on an encode
     // failure, which the peer reads as a closed stream — a silence where a
     // refusal was meant. The encode cannot fail for this shape, and saying so

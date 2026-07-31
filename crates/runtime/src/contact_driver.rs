@@ -2,7 +2,7 @@
 //!
 //! One tracked driver thread runs a current-thread tokio runtime hosting:
 //!
-//! - the **accept loop**: inbound `lait/contact/1` connections are answered by
+//! - the **accept loop**: inbound `lait/contact/2` connections are answered by
 //!   serving a snapshot of the Replica's retained material (signed Hello/PresenceAck
 //!   handshake binding Space, Stations, transport identity, and nonces; then
 //!   the canonical frame sequence; then the `TransferAck`, `finish`,
@@ -27,20 +27,22 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
-use mechanics::ids::{SpaceId, StationId};
+use mechanics::{ids::SpaceId, station::Key};
 use replica::{AuthorityIncorporator, AuthoritySource, StagedContactMaterial};
 
+use crate::admission::{judge, AcceptedOpenings, Admission, OpeningContext, PlanePolicy, Replay};
 use crate::beacon::{RouteHint, SignedBeacon, BEACON_FLAG_DORMANT, BEACON_PROTOCOL};
 use crate::contact::{
-    build_transfer_frames, AccepterEvent, AccepterValidator, ContactFrame, ContactHello,
-    ContactHelloAck, ContactId, InitiatorReceiver, OutboundTransfer, Progress, ReceivedMaterial,
-    CONTACT_ALPN, CONTACT_PROTOCOL, MAX_FRAME,
+    build_transfer_frames, AccepterEvent, AccepterValidator, ContactFrame, ContactId,
+    InitiatorReceiver, Offer, OutboundTransfer, Progress, Proof, ReceivedMaterial, CONTACT_ALPN,
+    CONTACT_PROTOCOL, MAX_FRAME,
 };
 use crate::error::ContactError;
 use crate::lifecycle::CancelToken;
 use crate::lifecycle::ContactOutcome;
 use crate::neighbor_presence::{PresenceAck, PresenceProbe, PRESENCE_ALPN};
 use crate::neighbors::NeighborRegistry;
+use crate::plane::{Accept, Open, Plane, Refusal};
 use crate::session::StationCore;
 
 /// The Contact scheduler's global in-flight bound.
@@ -66,7 +68,7 @@ pub(crate) fn now_ms() -> u64 {
 /// The mechanics seam the Contact plane needs, supplied at activation by the
 /// composition root. Everything here is mechanics-owned policy; the Station
 /// only orchestrates.
-pub struct ContactMechanics {
+pub struct Authority {
     /// Validates signer standing at referenced authority frontiers.
     pub source: Arc<dyn AuthoritySource + Send + Sync>,
     /// Durably, idempotently commits received authority batches (the explicit
@@ -122,7 +124,7 @@ pub struct CommsOptions {
     /// The Station's own device seed: signs Hello/PresenceAck, Beacons, manifests,
     /// and attributes incorporations.
     pub station_seed: [u8; 32],
-    pub mechanics: ContactMechanics,
+    pub authority: Authority,
     pub gossip: Option<GossipOptions>,
     /// The whole-contact deadline.
     pub whole_deadline: Duration,
@@ -143,7 +145,7 @@ pub(crate) enum DriverCmd {
     /// Administrative/test Contact to a Neighbor, bypassing the backoff (but
     /// not the in-flight bounds).
     Contact {
-        station: StationId,
+        station: Key,
         reply: std::sync::mpsc::SyncSender<Result<ContactOutcome, ContactError>>,
     },
     /// Ingest raw (gossip-received) Beacon bytes.
@@ -158,6 +160,9 @@ pub(crate) struct DriverContext {
     pub epoch: u64,
     pub core: Arc<StationCore>,
     pub registry: Arc<Mutex<NeighborRegistry>>,
+    pub authority: Arc<dyn crate::world::AuthorityView>,
+    pub policy: PlanePolicy,
+    pub accepted: Mutex<AcceptedOpenings>,
     pub options: CommsOptions,
     pub commands: std::sync::mpsc::Receiver<DriverCmd>,
     pub cancel: CancelToken,
@@ -208,14 +213,14 @@ async fn drive(ctx: DriverContext) {
                         }
                         comms::GossipEvent::NeighborUp(peer) => {
                             emit2.greet.set(true);
-                            if let Some(station) = StationId::from_device(&peer) {
+                            if let Some(station) = Key::from_device(&peer) {
                                 let mut registry =
                                     ctx2.registry.lock().unwrap_or_else(|p| p.into_inner());
                                 let _ = registry.note_swarm(&station, true, now_ms());
                             }
                         }
                         comms::GossipEvent::NeighborDown(peer) => {
-                            if let Some(station) = StationId::from_device(&peer) {
+                            if let Some(station) = Key::from_device(&peer) {
                                 let mut registry =
                                     ctx2.registry.lock().unwrap_or_else(|p| p.into_inner());
                                 let _ = registry.note_swarm(&station, false, now_ms());
@@ -256,7 +261,7 @@ async fn drive(ctx: DriverContext) {
 
     // The scheduler tick: service commands, emit beacons, dial eligible
     // Neighbors under the in-flight bounds.
-    let in_flight: std::rc::Rc<std::cell::RefCell<std::collections::BTreeSet<StationId>>> =
+    let in_flight: std::rc::Rc<std::cell::RefCell<std::collections::BTreeSet<Key>>> =
         Default::default();
     let mut last_beacon = Instant::now() - Duration::from_secs(3600);
     // The state vector last carried by an emission; `None` forces the
@@ -324,7 +329,7 @@ async fn drive(ctx: DriverContext) {
                 if let Some(beacon) = SignedBeacon::emit(
                     BEACON_PROTOCOL,
                     &ctx.space,
-                    mechanics::ids::StationEpoch::from_u64(ctx.epoch),
+                    mechanics::station::Epoch::from_u64(ctx.epoch),
                     sequence,
                     frontier.root,
                     frontier.transaction_count,
@@ -383,7 +388,7 @@ async fn drive(ctx: DriverContext) {
         if let Some(beacon) = SignedBeacon::emit(
             BEACON_PROTOCOL,
             &ctx.space,
-            mechanics::ids::StationEpoch::from_u64(ctx.epoch),
+            mechanics::station::Epoch::from_u64(ctx.epoch),
             sequence,
             frontier.root,
             frontier.transaction_count,
@@ -429,10 +434,10 @@ fn ingest_beacon(ctx: &DriverContext, emit: &EmitState, bytes: &[u8]) {
     // frontier — a self-signed Beacon proves control of a key, not admission.
     // Everything else sits in a bounded, in-memory quarantine until authority
     // recognition (its next Beacon then passes this gate on its own).
-    let authority = (ctx.options.mechanics.frontier)();
+    let authority = (ctx.options.authority.frontier)();
     let admitted = ctx
         .options
-        .mechanics
+        .authority
         .source
         .signer_authorized(&station_key, &authority);
     if !admitted {
@@ -486,7 +491,7 @@ fn ingest_beacon(ctx: &DriverContext, emit: &EmitState, bytes: &[u8]) {
 
 fn record_result(
     ctx: &DriverContext,
-    station: &StationId,
+    station: &Key,
     result: &Result<ContactOutcome, ContactError>,
 ) {
     let mut registry = ctx.registry.lock().unwrap_or_else(|p| p.into_inner());
@@ -503,7 +508,7 @@ fn record_result(
 /// Dial a Neighbor, run the initiator side, validate, and incorporate.
 async fn contact_neighbor(
     ctx: &DriverContext,
-    station: &StationId,
+    station: &Key,
 ) -> Result<ContactOutcome, ContactError> {
     let peer = station.as_device();
     let deadline = Instant::now() + ctx.options.whole_deadline;
@@ -533,11 +538,11 @@ async fn contact_neighbor(
             .collect(),
     };
     let signer = crate::world::LocalIdentity::from_seed(&ctx.options.station_seed);
-    let frontier = (ctx.options.mechanics.frontier)();
+    let frontier = (ctx.options.authority.frontier)();
     let attempted = {
         let mut incorporator = ctx
             .options
-            .mechanics
+            .authority
             .incorporator
             .lock()
             .unwrap_or_else(|p| p.into_inner());
@@ -550,13 +555,13 @@ async fn contact_neighbor(
                 };
                 let bundle = replica.validate_contact(
                     &staged,
-                    ctx.options.mechanics.source.as_ref(),
+                    ctx.options.authority.source.as_ref(),
                     &mut *incorporator,
                 )?;
                 replica.incorporate_bundle(
                     &commit_ctx,
                     bundle,
-                    ctx.options.mechanics.source.as_ref(),
+                    ctx.options.authority.source.as_ref(),
                 )
             })
             .map_err(|e| ContactError::Transfer(e.to_string()))
@@ -573,7 +578,7 @@ async fn contact_neighbor(
     // way it went. The unit is the semantic change, not the durability phase
     // that produced it — a consumer should never have to reassemble one Contact
     // from an authority record plus a Body record.
-    let authority_advanced = (ctx.options.mechanics.frontier)() != frontier;
+    let authority_advanced = (ctx.options.authority.frontier)() != frontier;
     let (scopes, body_frontier) = match &attempted {
         Ok(convergence) if convergence.advanced() => {
             (convergence.scopes.clone(), convergence.current)
@@ -623,13 +628,50 @@ async fn step<F: std::future::Future>(
 async fn initiate(
     ctx: &DriverContext,
     stream: &mut dyn comms::Stream,
-    responder: &StationId,
+    responder: &Key,
     deadline: Instant,
 ) -> Result<(ReceivedMaterial, u64), ContactError> {
     let progress = ctx.options.progress_deadline;
     let contact = ContactId::mint();
+    let connection_id = contact.as_bytes();
+    let mut connection_epoch = [0u8; 16];
+    getrandom::fill(&mut connection_epoch).map_err(|e| ContactError::Transfer(e.to_string()))?;
     let mut nonce = [0u8; 32];
     getrandom::fill(&mut nonce).map_err(|e| ContactError::Transfer(e.to_string()))?;
+    let opening = Open {
+        plane: Plane::Contact,
+        protocol_version: CONTACT_PROTOCOL,
+        features: 0,
+        space: ctx.space_bytes,
+        initiator_station: ctx.station_key,
+        responder_station: responder.key_bytes(),
+        connection_id,
+        connection_epoch,
+        authority_frontier: (ctx.options.authority.frontier)().as_bytes().to_vec(),
+        requested_lanes: Vec::new(),
+    };
+    step(deadline, progress, stream.send(&opening.encode()))
+        .await
+        .map_err(|_| ContactError::Unreachable)?
+        .map_err(|e| ContactError::Transfer(e.to_string()))?;
+    let admission_bytes = step(deadline, progress, stream.recv())
+        .await
+        .map_err(|_| ContactError::Unreachable)?
+        .map_err(|e| ContactError::Transfer(e.to_string()))?
+        .ok_or(ContactError::Unreachable)?;
+    let accept = Accept::decode_canonical(&admission_bytes).map_err(|_| {
+        let refusal = Refusal::decode_canonical(&admission_bytes)
+            .map(|value| format!("{value:?}"))
+            .unwrap_or_else(|_| "malformed admission answer".into());
+        ContactError::Transfer(refusal)
+    })?;
+    if accept.connection_id != connection_id
+        || accept.connection_epoch != connection_epoch
+        || accept.capability.plane != Plane::Contact
+        || accept.capability.protocol_version != CONTACT_PROTOCOL
+    {
+        return Err(ContactError::Transfer("contact acceptance mismatch".into()));
+    }
     // The declaration is a root. It used to be every head this replica holds,
     // streamed as chunked frames after the hello; a root is 40 bytes whatever
     // the catalog contains, and equal roots prove equal catalogs outright
@@ -662,7 +704,8 @@ async fn initiate(
     } else {
         crate::contact::holdings_digest(&holdings_bytes)
     };
-    let hello = ContactHello::sign(
+    let hello = Offer::sign(
+        opening.hash(),
         CONTACT_PROTOCOL,
         ctx.space_bytes,
         responder.key_bytes(),
@@ -709,8 +752,7 @@ async fn initiate(
         .map_err(|_| ContactError::Unreachable)?
         .map_err(|e| ContactError::Transfer(e.to_string()))?
         .ok_or(ContactError::Unreachable)?;
-    let ack =
-        ContactHelloAck::decode(&ack_bytes).map_err(|e| ContactError::Transfer(e.to_string()))?;
+    let ack = Proof::decode(&ack_bytes).map_err(|e| ContactError::Transfer(e.to_string()))?;
     // Bind the negotiated transport peer to the signed Station identity
     // BEFORE any staging is allocated.
     ack.verify(&hello, responder)
@@ -761,18 +803,60 @@ async fn serve_contact(
 ) -> Result<(), ContactError> {
     let deadline = Instant::now() + ctx.options.whole_deadline;
     let progress = ctx.options.progress_deadline;
+    let opening_bytes = step(deadline, progress, stream.recv())
+        .await
+        .map_err(|_| ContactError::Unreachable)?
+        .map_err(|e| ContactError::Transfer(e.to_string()))?
+        .ok_or(ContactError::Unreachable)?;
+    let transport_peer = Key::from_device(&from).ok_or(ContactError::UnknownNeighbor)?;
+    let opening = Open::decode_canonical(&opening_bytes)
+        .map_err(|e| ContactError::Transfer(e.to_string()))?;
+    let opening_context = OpeningContext {
+        space: &ctx.space,
+        local_station: Key::from_key_bytes(ctx.station_key),
+        peer: transport_peer.clone(),
+        plane: Plane::Contact,
+    };
+    let accept = {
+        let mut accepted = ctx.accepted.lock().unwrap_or_else(|p| p.into_inner());
+        match accepted.lookup(&opening, Instant::now()) {
+            Replay::Repeat(accept) => *accept,
+            Replay::Fresh => match judge(
+                &opening,
+                &opening_context,
+                ctx.authority.as_ref(),
+                &ctx.policy,
+            ) {
+                Admission::Accept(accept, _) => {
+                    accepted.remember(&opening, &accept, Instant::now());
+                    *accept
+                }
+                Admission::Refuse(refusal) => {
+                    let _ = step(deadline, progress, stream.send(&refusal.encode())).await;
+                    return Err(ContactError::Transfer(format!(
+                        "contact refused: {refusal:?}"
+                    )));
+                }
+            },
+        }
+    };
+    step(deadline, progress, stream.send(&accept.encode()))
+        .await
+        .map_err(|_| ContactError::Unreachable)?
+        .map_err(|e| ContactError::Transfer(e.to_string()))?;
     let hello_bytes = step(deadline, progress, stream.recv())
         .await
         .map_err(|_| ContactError::Unreachable)?
         .map_err(|e| ContactError::Transfer(e.to_string()))?
         .ok_or(ContactError::Unreachable)?;
-    let hello =
-        ContactHello::decode(&hello_bytes).map_err(|e| ContactError::Transfer(e.to_string()))?;
+    let hello = Offer::decode(&hello_bytes).map_err(|e| ContactError::Transfer(e.to_string()))?;
+    if hello.contact.as_bytes() != opening.connection_id {
+        return Err(ContactError::Transfer("offer connection mismatch".into()));
+    }
     // Bind the transport peer to the signed initiator identity BEFORE
     // allocating anything.
-    let transport_peer = StationId::from_device(&from).ok_or(ContactError::UnknownNeighbor)?;
     hello
-        .verify(&ctx.space_bytes, &transport_peer)
+        .verify(&opening.hash(), &ctx.space_bytes, &transport_peer)
         .map_err(|e| ContactError::Transfer(e.to_string()))?;
     if hello.responder_station != ctx.station_key {
         return Err(ContactError::Transfer("hello for another Station".into()));
@@ -851,7 +935,7 @@ async fn serve_contact(
     }
     let mut nonce = [0u8; 32];
     getrandom::fill(&mut nonce).map_err(|e| ContactError::Transfer(e.to_string()))?;
-    let ack = ContactHelloAck::sign(&hello, nonce, &ctx.options.station_seed)
+    let ack = Proof::sign(&hello, nonce, &ctx.options.station_seed)
         .ok_or_else(|| ContactError::Transfer("sign ack".into()))?;
     step(deadline, progress, stream.send(&ack.encode()))
         .await
@@ -864,10 +948,10 @@ async fn serve_contact(
     // it serves an **authority-only** Contact: its mechanics records (its
     // admission request rides there), an empty Manifest root, and no Bodies.
     let signer = crate::world::LocalIdentity::from_seed(&ctx.options.station_seed);
-    let frontier = (ctx.options.mechanics.frontier)();
+    let frontier = (ctx.options.authority.frontier)();
     let advertise = ctx
         .options
-        .mechanics
+        .authority
         .source
         .signer_authorized(&ctx.station_key, &frontier);
     let (material, manifest) = if advertise {
@@ -886,7 +970,7 @@ async fn serve_contact(
     } else {
         (Vec::new(), (Vec::new(), Vec::new()))
     };
-    let mut authority_records = (ctx.options.mechanics.export)();
+    let mut authority_records = (ctx.options.authority.export)();
     let mut bodies = Vec::new();
     for (tx, payloads) in &material {
         authority_records.push(tx.encode());
@@ -954,7 +1038,7 @@ async fn serve_presence(
         .ok_or(ContactError::Unreachable)?;
     let probe =
         PresenceProbe::decode(&probe_bytes).map_err(|e| ContactError::Transfer(e.to_string()))?;
-    let prober = StationId::from_device(&from).ok_or(ContactError::UnknownNeighbor)?;
+    let prober = Key::from_device(&from).ok_or(ContactError::UnknownNeighbor)?;
     probe
         .verify(&ctx.space_bytes, &prober)
         .map_err(|e| ContactError::Transfer(e.to_string()))?;

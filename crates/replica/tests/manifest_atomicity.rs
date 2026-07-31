@@ -18,9 +18,9 @@ use mechanics::ids::SpaceId;
 use replica::frontier::AuthorityFrontier;
 use replica::{
     ActionOutcome, AuthorityBatchReceipt, AuthorityIncorporator, BodyBinding, BodyId, BodyKey,
-    BodyOp, CommitAuthorization, CommitContext, EncodingId, QuotaConfig, Replica,
-    ReplicaCommitError, SchemaId, SeedSigner, StagedContactMaterial, StaticBodyKeys,
-    SupportedSchemas, WorldId, MUTATION_COLLABORATIVE,
+    CommitAuthorization, CommitContext, EncodingId, Op, QuotaConfig, Replica, ReplicaCommitError,
+    SchemaId, SeedSigner, StagedContactMaterial, StaticBodyKeys, SupportedSchemas, WorldId,
+    MUTATION_COLLABORATIVE,
 };
 
 const WRITER_SEED: [u8; 32] = [71u8; 32];
@@ -61,10 +61,10 @@ fn test_auth() -> replica::StaticAuthorizer {
 }
 
 fn test_demand() -> Vec<u8> {
-    use mechanics::demand::{AuthorizationDemand, PolicyCapability, PolicyResource};
+    use mechanics::demand::{AuthorizationDemand, PolicyCapability, Resource};
     AuthorizationDemand::require(
         PolicyCapability::new("com.example.notes", "write"),
-        PolicyResource::space("com.example.notes"),
+        Resource::root("com.example.notes"),
     )
     .encode_canonical()
     .expect("canonical demand")
@@ -166,7 +166,7 @@ fn commit_note(
         "note",
         &[(
             key.clone(),
-            BodyOp::RegisterSet {
+            Op::RegisterSet {
                 path: "text".into(),
                 value: text.as_bytes().to_vec(),
             },

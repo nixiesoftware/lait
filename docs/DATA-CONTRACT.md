@@ -41,7 +41,7 @@ manifest or the complete new manifest. Corruption, a lagging/missing counter, or
 an object whose bytes do not match its reference is an integrity error, never a
 cache miss or an invitation to reconstruct guesses.
 
-Mechanics and Fabric reuse the semantics-free journal mechanism but maintain
+Mechanics and Engine reuse the semantics-free journal mechanism but maintain
 separate semantic manifests. A journal is not replicated product state.
 
 Not everything under a store directory is journaled. An Orbit's directory also
@@ -155,7 +155,7 @@ A legitimate Body whose World, schema, or key is unavailable remains opaque:
 - retained byte-for-byte;
 - counted against quotas;
 - included in graph and Manifest completeness;
-- unavailable to Fabric and World callbacks;
+- unavailable to Engine and World callbacks;
 - forwardable to another legitimate participant.
 
 Opaque retention does not grant authority and cannot bypass historical receipt
@@ -226,13 +226,13 @@ source of truth that can disagree with the Bodies; what is authoritative is the
 set of `ContentRef`s the committed Manifest names, plus explicitly declared
 local intents. Sweeping removes only what neither reaches.
 
-## 7. Fabric representations
+## 7. Engine representations
 
-Fabric exposes two Body representation classes:
+Engine exposes two Body representation classes:
 
 - atomic Bodies contain canonical application bytes and use Replica's explicit
   concurrent-head policy;
-- collaborative Bodies use one Loro document per Body behind the generic Fabric
+- collaborative Bodies use one Loro document per Body behind the generic Engine
   interface.
 
 The collaborative algebra includes:
@@ -244,9 +244,9 @@ The collaborative algebra includes:
 - per-peer PN-counters.
 
 One path has one established type. Reusing it as another type is a transaction
-error and changes nothing. A multi-operation Fabric batch is atomic.
+error and changes nothing. A multi-operation Engine batch is atomic.
 
-Fabric convergence is mechanical, not semantic. A World selecting a register
+Engine convergence is mechanical, not semantic. A World selecting a register
 accepts that concurrent values collapse to one deterministic projection. If the
 product must preserve concurrent intent, require explicit predecessors,
 immutable records, or revision heads built from generic Bodies. Application code
@@ -294,7 +294,7 @@ both, and a record carrying neither is refused rather than defaulted — a missi
 payload silently read as empty produces a zero-byte file and a success message,
 which is worse than an error.
 
-Issue content currently uses one Body per issue. Product schema—not Fabric—defines
+Issue content currently uses one Body per issue. Product schema—not Engine—defines
 the meaning of each field. The canonical conflict contract is:
 
 - title and priority may use explicit deterministic scalar winner semantics;
@@ -326,7 +326,7 @@ Reaction membership is keyed by reaction and ActorId so a repeated reaction is
 idempotent and concurrent actors do not overwrite each other.
 
 These product rules must not introduce comment, issue, workflow, or project
-types into Mechanics, Fabric, Replica, Runtime, or Comms.
+types into Mechanics, Engine, Replica, Runtime, or Comms.
 
 ## 10. Scoped authorization data
 
@@ -413,7 +413,7 @@ the Observation ring, and a parser gate enforces that: privacy cannot, because
 `Broadcaster::publish` is `pub(crate)` and the signal module sits inside that
 crate, while `StationCore::with_replica` is outright `pub`. One line is the
 whole distance between the design and a violation — a `publish` from signal code
-would journal nothing and still emit an Observation, which `SpaceBridge::frame_for`
+would journal nothing and still emit an Observation, which `StationHost::frame_for`
 turns into `activity_advanced` for anything carrying scopes.
 
 The parser gate is half of it. The other half runs: ten thousand delivered
@@ -530,7 +530,7 @@ minted. They are not identity, they confer nothing, and they exist so that a
 replayed opening is recognisable as one.
 
 Secrets are written with restrictive permissions and atomic replacement. They
-must not appear in Debug output, logs, DTO examples, Fabric, Manifests, or Contact
+must not appear in Debug output, logs, DTO examples, Engine, Manifests, or Contact
 frames except for an explicitly authenticated encrypted custody package.
 
 ## 14. Evolution

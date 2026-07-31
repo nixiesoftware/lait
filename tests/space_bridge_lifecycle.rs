@@ -1,8 +1,8 @@
-//! The process-backed SpaceBridge serves the product control surface over the
+//! The process-backed StationHost serves the product control surface over the
 //! real IPC control socket through the orbital Runtime.
 //!
-//! Formation happens via `OrbitalMechanics::form` (the `lait init` heir); the
-//! SpaceBridge then serves `control::Request`/`Response` exactly as the CLI/
+//! Formation happens via `SpaceAuthority::form` (the `lait init` heir); the
+//! StationHost then serves `control::Request`/`Response` exactly as the CLI/
 //! serve/MCP clients speak it. This drives the issue family end to end
 //! (project/new/view/list/board/comment) plus status and invite over the wire,
 //! with an in-memory transport (no network sockets).
@@ -125,7 +125,7 @@ fn the_space_bridge_serves_the_issue_surface_over_the_control_socket() {
     let online = poll_until(Duration::from_secs(20), || {
         matches!(req(&client_rt, &home, Request::Status), Response::Status(_)).then_some(())
     });
-    assert!(online.is_some(), "the SpaceBridge never answered Status");
+    assert!(online.is_some(), "the StationHost never answered Status");
 
     // Status reports the founder as a member of the formed Space.
     let status = req(&client_rt, &home, Request::Status);

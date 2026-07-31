@@ -10,7 +10,7 @@
 //! before a buffer that size exists.** Reading first and checking after is not
 //! a bound, it is a bound-shaped comment on an allocation a peer already chose.
 //!
-//! The other half is `read_stream_kind`. `planes::stream_kind` distinguishes a
+//! The other half is `read_stream_kind`. `plane::stream_kind` distinguishes a
 //! kind this build does not implement *yet* from one it has never heard of, and
 //! that distinction had no reader. It matters: a reserved kind is a peer
 //! speaking a protocol we agreed to and have not finished, so the stream is
@@ -18,7 +18,7 @@
 //! something else, which is worth counting separately even though the immediate
 //! response is the same.
 
-use crate::planes::{bounds, stream_kind};
+use crate::plane::{bounds, stream_kind};
 
 /// The length prefix every framed message carries.
 ///
@@ -136,7 +136,7 @@ mod tests {
 
     #[test]
     fn a_reserved_kind_and_an_unknown_one_are_different_answers() {
-        // The distinction `planes::stream_kind` draws and nothing read until
+        // The distinction `plane::stream_kind` draws and nothing read until
         // now. A reserved kind is a peer using a reservation we published; an
         // unknown one is a peer speaking something else. Both reset the stream;
         // only one of them means a version skew.

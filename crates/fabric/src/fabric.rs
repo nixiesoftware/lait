@@ -1,21 +1,21 @@
-//! The Fabric operation surface and engine — the sealed contract Replica drives.
+//! The Engine operation surface and engine — the sealed contract Replica drives.
 //!
-//! Fabric is LAIT's canonical, sealed Loro component and the only crate that
+//! Engine is LAIT's canonical, sealed Loro component and the only crate that
 //! names Loro. It exposes **LAIT-owned** semantic operations and results, never
 //! raw documents, containers, or Loro frontier types. Replica validates and
-//! constructs a semantic transaction plan, submits it to a Fabric-owned
-//! [`Fabric`] engine, and advances its semantic frontier only from a durable
-//! [`FabricCommitReceipt`]. Fabric never imports Replica.
+//! constructs a semantic transaction plan, submits it to a Engine-owned
+//! [`Engine`] engine, and advances its semantic frontier only from a durable
+//! [`Receipt`]. Engine never imports Replica.
 //!
 //! **Ownership boundary (enforced, not just documented):**
-//! - Replica submits *semantic* [`FabricOp`]s — it never authors a Loro delta.
-//!   The concrete translation to Loro is Fabric-private.
-//! - [`FabricCommitReceipt`] and [`CausalToken`] can be constructed **only**
+//! - Replica submits *semantic* [`Op`]s — it never authors a Loro delta.
+//!   The concrete translation to Loro is Engine-private.
+//! - [`Receipt`] and [`CausalToken`] can be constructed **only**
 //!   inside this crate (their constructors are `pub(crate)`), so a receipt is
-//!   proof of a real Fabric commit — an outside crate cannot forge the token
+//!   proof of a real Engine commit — an outside crate cannot forge the token
 //!   Replica advances from.
 //!
-//! [`CrdtFabric`] is the sole engine: atomic Bodies plus the frozen
+//! [`MemoryEngine`] is the sole engine: atomic Bodies plus the frozen
 //! collaborative algebra (register/map/list/text/set/counter with stable
 //! element identity) over real Loro containers — one Loro document per Body,
 //! so per-Body export/import carries exactly one Body's causal history — with
@@ -26,15 +26,15 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-/// An opaque commitment to Fabric's internal causal position (Loro frontier),
-/// carried as bytes. It rides inside [`FabricCommitReceipt`] and is never
-/// interpreted outside Fabric — no `loro::*` type crosses the boundary.
+/// An opaque commitment to Engine's internal causal position (Loro frontier),
+/// carried as bytes. It rides inside [`Receipt`] and is never
+/// interpreted outside Engine — no `loro::*` type crosses the boundary.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct CausalToken(Vec<u8>);
 
 impl CausalToken {
-    /// Construct a causal token. **Crate-private**: only the Fabric engine mints
-    /// one, so a token always denotes a real Fabric position.
+    /// Construct a causal token. **Crate-private**: only the Engine engine mints
+    /// one, so a token always denotes a real Engine position.
     pub(crate) fn from_bytes(bytes: Vec<u8>) -> Self {
         Self(bytes)
     }
@@ -43,13 +43,13 @@ impl CausalToken {
     }
 }
 
-/// A key into the Fabric representation — an opaque handle Replica uses to
+/// A key into the Engine representation — an opaque handle Replica uses to
 /// address a durable object without naming a Loro container. Its concrete
-/// encoding is Fabric-private.
+/// encoding is Engine-private.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct FabricKey(Vec<u8>);
+pub struct Key(Vec<u8>);
 
-impl FabricKey {
+impl Key {
     pub fn from_bytes(bytes: Vec<u8>) -> Self {
         Self(bytes)
     }
@@ -58,69 +58,69 @@ impl FabricKey {
     }
 }
 
-/// A single Fabric-level **semantic** operation. Replica alone translates a
-/// semantic `BodyOp` into one of these; Fabric maps them canonically onto Loro.
+/// A single Engine-level **semantic** operation. Replica alone translates a
+/// semantic `Op` into one of these; Engine maps them canonically onto Loro.
 /// Replica never authors a raw Loro delta — that is the ownership boundary.
 ///
 /// The collaborative operations implement the frozen S1 algebra: each addresses
 /// a `path` inside one collaborative Body (`key`), a path is bound to exactly
 /// one collaborative type for the Body's lifetime (a second type at the same
-/// path is a [`FabricError::TypeConflict`]), list elements carry **stable
-/// element ids** minted by Fabric at insert time (never indices), sets are
+/// path is a [`Error::TypeConflict`]), list elements carry **stable
+/// element ids** minted by Engine at insert time (never indices), sets are
 /// add-wins (observed-remove), counters sum all increments, and text splices
 /// use Unicode-scalar coordinates.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum FabricOp {
+pub enum Op {
     /// Atomically replace the canonical bytes stored at a key.
-    PutCanonical { key: FabricKey, value: Vec<u8> },
+    PutCanonical { key: Key, value: Vec<u8> },
     /// Remove the object at a key (atomic value or whole collaborative Body).
-    Remove { key: FabricKey },
+    Remove { key: Key },
     /// Ensure a collaborative Body root exists at a key (Body create).
-    CreateBody { key: FabricKey },
+    CreateBody { key: Key },
     /// Last-writer-wins register set.
     RegisterSet {
-        key: FabricKey,
+        key: Key,
         path: String,
         value: Vec<u8>,
     },
     /// Clear a register.
-    RegisterClear { key: FabricKey, path: String },
+    RegisterClear { key: Key, path: String },
     /// Map entry set (LWW per entry).
     MapSet {
-        key: FabricKey,
+        key: Key,
         path: String,
         entry: String,
         value: Vec<u8>,
     },
     /// Map entry remove.
     MapRemove {
-        key: FabricKey,
+        key: Key,
         path: String,
         entry: String,
     },
-    /// Ordered-list insert at a position; Fabric mints the stable element id.
+    /// Ordered-list insert at a position; Engine mints the stable element id.
     ListInsert {
-        key: FabricKey,
+        key: Key,
         path: String,
         index: u64,
         value: Vec<u8>,
     },
     /// Ordered-list remove **by stable element id**.
     ListRemove {
-        key: FabricKey,
+        key: Key,
         path: String,
         element: String,
     },
     /// Ordered-list move **by stable element id** to a position.
     ListMove {
-        key: FabricKey,
+        key: Key,
         path: String,
         element: String,
         index: u64,
     },
     /// Text splice with Unicode-scalar coordinates.
     TextSplice {
-        key: FabricKey,
+        key: Key,
         path: String,
         index: u64,
         delete: u64,
@@ -128,36 +128,32 @@ pub enum FabricOp {
     },
     /// Add-wins set add.
     SetAdd {
-        key: FabricKey,
+        key: Key,
         path: String,
         value: Vec<u8>,
     },
     /// Set remove (removes the observed adds; a concurrent add survives).
     SetRemove {
-        key: FabricKey,
+        key: Key,
         path: String,
         value: Vec<u8>,
     },
     /// Commutative counter increment.
-    CounterAdd {
-        key: FabricKey,
-        path: String,
-        delta: i64,
-    },
+    CounterAdd { key: Key, path: String, delta: i64 },
 }
 
-/// A durable transaction request: an ordered batch of Fabric operations to apply
-/// atomically, carrying the request/commit metadata Fabric labels the change
+/// A durable transaction request: an ordered batch of Engine operations to apply
+/// atomically, carrying the request/commit metadata Engine labels the change
 /// with in the oplog.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FabricTransactionRequest {
+pub struct Transaction {
     /// The semantic request label (e.g. `"created"`) surfaced in the oplog.
     pub request: String,
-    pub ops: Vec<FabricOp>,
+    pub ops: Vec<Op>,
 }
 
-impl FabricTransactionRequest {
-    pub fn new(request: impl Into<String>, ops: Vec<FabricOp>) -> Self {
+impl Transaction {
+    pub fn new(request: impl Into<String>, ops: Vec<Op>) -> Self {
         Self {
             request: request.into(),
             ops,
@@ -165,17 +161,17 @@ impl FabricTransactionRequest {
     }
 }
 
-/// The receipt of a durable Fabric commit. Replica advances its semantic
+/// The receipt of a durable Engine commit. Replica advances its semantic
 /// frontier **only** from this. It carries the post-commit causal token and the
-/// count of changes applied. Constructed only by the Fabric engine.
+/// count of changes applied. Constructed only by the Engine engine.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FabricCommitReceipt {
+pub struct Receipt {
     causal: CausalToken,
     applied: u32,
 }
 
-impl FabricCommitReceipt {
-    /// **Crate-private**: only the Fabric engine issues a receipt.
+impl Receipt {
+    /// **Crate-private**: only the Engine engine issues a receipt.
     pub(crate) fn new(causal: CausalToken, applied: u32) -> Self {
         Self { causal, applied }
     }
@@ -187,9 +183,9 @@ impl FabricCommitReceipt {
     }
 }
 
-/// Why a Fabric commit failed.
+/// Why a Engine commit failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FabricError {
+pub enum Error {
     /// A durable write (or a rollback after a failed apply) failed. The engine
     /// state may have diverged from the store — the caller must fail stop.
     Durability(String),
@@ -216,7 +212,7 @@ pub enum FabricError {
 
 /// A canonical, Loro-free view of one collaborative Body, keyed by path. This
 /// is what a World reads back through the bounded context: list elements expose
-/// the **stable element ids** Fabric minted at insert (the handles `ListRemove`
+/// the **stable element ids** Engine minted at insert (the handles `ListRemove`
 /// / `ListMove` take), sets expose distinct member values, counters the summed
 /// total.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -230,45 +226,42 @@ pub struct CollaborativeView {
     pub counters: BTreeMap<String, i64>,
 }
 
-/// One ordered-list element: its stable Fabric-minted id and its value.
+/// One ordered-list element: its stable Engine-minted id and its value.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ListElement {
     pub element: String,
     pub value: Vec<u8>,
 }
 
-impl std::fmt::Display for FabricError {
+impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{self:?}")
     }
 }
-impl std::error::Error for FabricError {}
+impl std::error::Error for Error {}
 
-impl From<journal::JournalError> for FabricError {
+impl From<journal::JournalError> for Error {
     fn from(e: journal::JournalError) -> Self {
         match e {
-            journal::JournalError::Durability(m) => FabricError::Durability(m),
-            journal::JournalError::Integrity(m) => FabricError::Integrity(m),
-            journal::JournalError::OutcomeUnknown => FabricError::OutcomeUnknown,
+            journal::JournalError::Durability(m) => Error::Durability(m),
+            journal::JournalError::Integrity(m) => Error::Integrity(m),
+            journal::JournalError::OutcomeUnknown => Error::OutcomeUnknown,
         }
     }
 }
 
-/// The Fabric engine: the durable, canonical collaborative representation
+/// The Engine engine: the durable, canonical collaborative representation
 /// Replica drives. It accepts semantic operations and returns a receipt whose
-/// construction is Fabric-private, serves committed reads, and exports/imports
+/// construction is Engine-private, serves committed reads, and exports/imports
 /// **one Body at a time** — the canonical store persists per-Body protected
-/// objects, never a whole-engine snapshot. [`CrdtFabric`] is the only engine.
-pub trait Fabric {
+/// objects, never a whole-engine snapshot. [`MemoryEngine`] is the only engine.
+pub trait Engine {
     /// Durably apply a transaction and return a commit receipt. Atomic: either
     /// every op is applied and a receipt returned, or nothing changes.
-    fn commit(
-        &mut self,
-        request: FabricTransactionRequest,
-    ) -> Result<FabricCommitReceipt, FabricError>;
+    fn commit(&mut self, request: Transaction) -> Result<Receipt, Error>;
 
     /// Read the committed canonical bytes at a key, if present.
-    fn read(&self, key: &FabricKey) -> Option<Vec<u8>>;
+    fn read(&self, key: &Key) -> Option<Vec<u8>>;
 
     /// Project the committed collaborative view of a Body.
     ///
@@ -278,19 +271,16 @@ pub trait Fabric {
     /// not implement is [`ProjectionError::SchemaAhead`] — its bytes stay
     /// stored, forwarded, and converged, and no caller is handed a view that
     /// looks complete and is not.
-    fn read_collaborative(&self, key: &FabricKey) -> Result<CollaborativeView, ProjectionError>;
+    fn read_collaborative(&self, key: &Key) -> Result<CollaborativeView, ProjectionError>;
 
     /// Export **one Body's** canonical representation, if the Body exists. A
     /// collaborative export preserves causal history and stable element
     /// identity for exactly that Body — never a whole-engine or cross-Body
     /// snapshot. This is the payload the protected Body object seals.
-    fn export_body(&self, key: &FabricKey) -> Option<BodyExport>;
+    fn export_body(&self, key: &Key) -> Option<BodyExport>;
 
     /// This Body's current position in its collaborative history.
-    fn version(
-        &self,
-        key: &FabricKey,
-    ) -> Result<crate::causal::FabricVersion, crate::causal::CausalError>;
+    fn version(&self, key: &Key) -> Result<crate::causal::Version, crate::causal::CausalError>;
 
     /// Operations after `from`, as an independently importable artifact.
     ///
@@ -300,75 +290,68 @@ pub trait Fabric {
     /// artifacts rather than versions.
     fn export_delta(
         &self,
-        key: &FabricKey,
-        from: &crate::causal::FabricVersion,
-    ) -> Result<crate::causal::FabricArtifact, crate::causal::CausalError>;
+        key: &Key,
+        from: &crate::causal::Version,
+    ) -> Result<crate::causal::Artifact, crate::causal::CausalError>;
 
     /// Current state with history trimmed at `retention_frontier`.
     fn export_checkpoint(
         &self,
-        key: &FabricKey,
-        retention_frontier: &crate::causal::FabricVersion,
-    ) -> Result<crate::causal::FabricArtifact, crate::causal::CausalError>;
+        key: &Key,
+        retention_frontier: &crate::causal::Version,
+    ) -> Result<crate::causal::Artifact, crate::causal::CausalError>;
 
     /// The complete history as it stands now — taken immediately before a trim,
     /// so the work the trim will refuse can still be readmitted later.
     fn export_history(
         &self,
-        key: &FabricKey,
-    ) -> Result<crate::causal::FabricArtifact, crate::causal::CausalError>;
+        key: &Key,
+    ) -> Result<crate::causal::Artifact, crate::causal::CausalError>;
 
     /// Import one artifact. Order-independent: material whose dependencies have
     /// not arrived is held pending rather than refused.
     fn import_artifact(
         &mut self,
-        key: &FabricKey,
-        artifact: &crate::causal::FabricArtifact,
+        key: &Key,
+        artifact: &crate::causal::Artifact,
     ) -> Result<crate::causal::ImportStatus, crate::causal::CausalError>;
 
     /// How two positions in this Body's history relate.
     fn relation(
         &self,
-        key: &FabricKey,
-        a: &crate::causal::FabricVersion,
-        b: &crate::causal::FabricVersion,
+        key: &Key,
+        a: &crate::causal::Version,
+        b: &crate::causal::Version,
     ) -> crate::causal::CausalRelation;
 
     /// Take an anchor at a position in a collaborative value.
     fn anchor(
         &self,
-        key: &FabricKey,
+        key: &Key,
         path: &str,
         position: u64,
-    ) -> Result<crate::causal::FabricAnchor, crate::causal::CausalError>;
+    ) -> Result<crate::causal::Anchor, crate::causal::CausalError>;
 
     /// Resolve an anchor against the Body's current state.
     ///
     /// Total, and never mutates: a position that cannot be mapped is `Drifted`,
     /// so this is safe on a read-only replica and a renderer is never handed a
     /// silently wrong index.
-    fn resolve(
-        &self,
-        key: &FabricKey,
-        anchor: &crate::causal::FabricAnchor,
-    ) -> crate::causal::AnchorResolution;
+    fn resolve(&self, key: &Key, anchor: &crate::causal::Anchor)
+        -> crate::causal::AnchorResolution;
 
     /// Import one Body's canonical exported representation, addressed to
     /// exactly the given key. A collaborative import merges causally (already
     /// -known material returns `None`); an atomic import replaces the value
-    /// (`None` when byte-identical). Fabric applies the change as directed —
+    /// (`None` when byte-identical). Engine applies the change as directed —
     /// legitimacy, ordering, and conflict policy for atomic replacement are
     /// the caller's (Replica's) to decide **before** calling.
-    fn import_body(
-        &mut self,
-        key: &FabricKey,
-        export: &BodyExport,
-    ) -> Result<Option<FabricCommitReceipt>, FabricError>;
+    fn import_body(&mut self, key: &Key, export: &BodyExport) -> Result<Option<Receipt>, Error>;
 }
 
 /// The Body identity an anchor carries. A digest rather than the key itself so
 /// an anchor stays fixed-size whatever a caller names its Bodies.
-fn body_digest(key: &FabricKey) -> [u8; 32] {
+fn body_digest(key: &Key) -> [u8; 32] {
     let mut h = blake3::Hasher::new();
     h.update(b"lait/fabric-anchor-body/1");
     h.update(key.as_bytes());
@@ -376,7 +359,7 @@ fn body_digest(key: &FabricKey) -> [u8; 32] {
 }
 
 /// One Body's canonical exported representation: an atomic Body's canonical
-/// application bytes, or a collaborative Body's canonical per-Body Fabric
+/// application bytes, or a collaborative Body's canonical per-Body Engine
 /// export (causality and stable element identity preserved).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BodyExport {
@@ -388,7 +371,7 @@ pub enum BodyExport {
 /// reason this crate alone names Loro.
 ///
 /// **Layout — one Loro document per Body.** Each collaborative Body is its own
-/// `LoroDoc`, so its canonical export ([`Fabric::export_body`]) carries exactly
+/// `LoroDoc`, so its canonical export ([`fabric::export_body`]) carries exactly
 /// that Body's causal history and stable element identity — never a whole-
 /// engine or cross-Body snapshot. Inside a Body's doc, one root map (`body`)
 /// holds keys `"<type>:<path>"` — `reg:` LWW binary registers, `map:` child
@@ -416,14 +399,14 @@ pub enum BodyExport {
 /// merge — the child-container/LWW shadowing that op-identified containers
 /// suffer under concurrency cannot occur (the multi-writer reference corpus
 /// proved that shadowing fatal for a shared catalog).
-pub struct CrdtFabric {
+pub struct MemoryEngine {
     /// This activation's writer id, minted once and shared by every document
     /// this engine authors into. One id per activation rather than one per
     /// document keeps a Body's version vector growing with restarts rather than
     /// with Bodies, and never persisting it is what keeps a copied store from
     /// minting colliding operation ids.
     writer: u64,
-    bodies: BTreeMap<FabricKey, BodyState>,
+    bodies: BTreeMap<Key, BodyState>,
 }
 
 /// One Body's live state.
@@ -531,17 +514,17 @@ impl BodyState {
         }
     }
 
-    fn export(&self) -> Result<BodyExport, FabricError> {
+    fn export(&self) -> Result<BodyExport, Error> {
         match self {
             BodyState::Atomic(bytes) => Ok(BodyExport::Atomic(bytes.clone())),
             BodyState::Collab(doc) => doc
                 .export(loro::ExportMode::Snapshot)
                 .map(BodyExport::Collaborative)
-                .map_err(|e| FabricError::Durability(format!("export body: {e}"))),
+                .map_err(|e| Error::Durability(format!("export body: {e}"))),
         }
     }
 
-    fn from_export(export: &BodyExport) -> Result<Self, FabricError> {
+    fn from_export(export: &BodyExport) -> Result<Self, Error> {
         match export {
             BodyExport::Atomic(bytes) => Ok(BodyState::Atomic(bytes.clone())),
             BodyExport::Collaborative(snapshot) => {
@@ -550,14 +533,14 @@ impl BodyState {
                 // through `collab_doc`.
                 let doc = new_body_doc(None);
                 doc.import(snapshot)
-                    .map_err(|e| FabricError::InvalidOp(format!("import body: {e}")))?;
+                    .map_err(|e| Error::InvalidOp(format!("import body: {e}")))?;
                 Ok(BodyState::Collab(doc))
             }
         }
     }
 }
 
-impl CrdtFabric {
+impl MemoryEngine {
     /// A fresh, empty Loro-backed engine, minting this activation's writer id.
     pub fn new() -> Self {
         Self {
@@ -572,26 +555,22 @@ impl CrdtFabric {
     }
 
     /// The keys of every present Body.
-    pub fn body_keys(&self) -> Vec<FabricKey> {
+    pub fn body_keys(&self) -> Vec<Key> {
         self.bodies.keys().cloned().collect()
     }
 
-    fn loro_err(e: impl std::fmt::Display) -> FabricError {
-        FabricError::InvalidOp(e.to_string())
+    fn loro_err(e: impl std::fmt::Display) -> Error {
+        Error::InvalidOp(e.to_string())
     }
 
     /// The collaborative doc for a Body, creating it when `create`. An atomic
-    /// value at the key is a [`FabricError::TypeConflict`].
-    fn collab_doc(
-        &mut self,
-        key: &FabricKey,
-        create: bool,
-    ) -> Result<Option<&loro::LoroDoc>, FabricError> {
+    /// value at the key is a [`Error::TypeConflict`].
+    fn collab_doc(&mut self, key: &Key, create: bool) -> Result<Option<&loro::LoroDoc>, Error> {
         use std::collections::btree_map::Entry;
         match self.bodies.entry(key.clone()) {
             Entry::Occupied(e) => match e.into_mut() {
                 BodyState::Collab(doc) => Ok(Some(doc)),
-                BodyState::Atomic(_) => Err(FabricError::TypeConflict),
+                BodyState::Atomic(_) => Err(Error::TypeConflict),
             },
             Entry::Vacant(v) if create => {
                 let BodyState::Collab(doc) =
@@ -609,7 +588,7 @@ impl CrdtFabric {
     /// type tag may already hold state at this path. Containers live at doc
     /// ROOTS (name-identified — see the struct docs); a register is a key in
     /// the `body` root map.
-    fn check_path_type(doc: &loro::LoroDoc, tag: &str, path: &str) -> Result<(), FabricError> {
+    fn check_path_type(doc: &loro::LoroDoc, tag: &str, path: &str) -> Result<(), Error> {
         let body = doc.get_map(BODY_MAP);
         for other in TYPE_TAGS {
             if other == tag {
@@ -623,7 +602,7 @@ impl CrdtFabric {
                 _ => !doc.get_map(name.as_str()).is_empty(),
             };
             if bound {
-                return Err(FabricError::TypeConflict);
+                return Err(Error::TypeConflict);
             }
         }
         Ok(())
@@ -631,12 +610,7 @@ impl CrdtFabric {
 
     /// The Body's doc for a typed-path write, with the path-type binding
     /// enforced.
-    fn doc_for(
-        &mut self,
-        key: &FabricKey,
-        tag: &str,
-        path: &str,
-    ) -> Result<&loro::LoroDoc, FabricError> {
+    fn doc_for(&mut self, key: &Key, tag: &str, path: &str) -> Result<&loro::LoroDoc, Error> {
         let doc = self.collab_doc(key, true)?.expect("created on demand");
         Self::check_path_type(doc, tag, path)?;
         Ok(doc)
@@ -666,7 +640,7 @@ impl CrdtFabric {
     }
 
     /// The causal token digesting the touched Bodies' post-commit positions.
-    fn causal_for(&self, touched: &std::collections::BTreeSet<FabricKey>) -> CausalToken {
+    fn causal_for(&self, touched: &std::collections::BTreeSet<Key>) -> CausalToken {
         let mut h = blake3::Hasher::new();
         h.update(CAUSAL_DOMAIN);
         for key in touched {
@@ -688,33 +662,33 @@ impl CrdtFabric {
     }
 
     /// Apply one operation. Errors leave partially-applied state in the touched
-    /// Body; [`Fabric::commit`] rolls the whole batch back from its backups.
-    fn apply(&mut self, op: &FabricOp) -> Result<(), FabricError> {
+    /// Body; [`fabric::commit`] rolls the whole batch back from its backups.
+    fn apply(&mut self, op: &Op) -> Result<(), Error> {
         match op {
-            FabricOp::PutCanonical { key, value } => {
+            Op::PutCanonical { key, value } => {
                 if let Some(BodyState::Collab(_)) = self.bodies.get(key) {
                     // A collaborative Body cannot be silently flattened.
-                    return Err(FabricError::TypeConflict);
+                    return Err(Error::TypeConflict);
                 }
                 self.bodies
                     .insert(key.clone(), BodyState::Atomic(value.clone()));
                 Ok(())
             }
-            FabricOp::Remove { key } => {
+            Op::Remove { key } => {
                 self.bodies.remove(key);
                 Ok(())
             }
-            FabricOp::CreateBody { key } => {
+            Op::CreateBody { key } => {
                 self.collab_doc(key, true)?;
                 Ok(())
             }
-            FabricOp::RegisterSet { key, path, value } => {
+            Op::RegisterSet { key, path, value } => {
                 let doc = self.doc_for(key, "reg", path)?;
                 let body = doc.get_map(BODY_MAP);
                 body.insert(&typed_key("reg", path), value.as_slice())
                     .map_err(Self::loro_err)
             }
-            FabricOp::RegisterClear { key, path } => {
+            Op::RegisterClear { key, path } => {
                 let doc = self.doc_for(key, "reg", path)?;
                 let body = doc.get_map(BODY_MAP);
                 let k = typed_key("reg", path);
@@ -723,7 +697,7 @@ impl CrdtFabric {
                 }
                 Ok(())
             }
-            FabricOp::MapSet {
+            Op::MapSet {
                 key,
                 path,
                 entry,
@@ -733,7 +707,7 @@ impl CrdtFabric {
                 let m = doc.get_map(typed_key("map", path).as_str());
                 m.insert(entry, value.as_slice()).map_err(Self::loro_err)
             }
-            FabricOp::MapRemove { key, path, entry } => {
+            Op::MapRemove { key, path, entry } => {
                 let doc = self.doc_for(key, "map", path)?;
                 let m = doc.get_map(typed_key("map", path).as_str());
                 if m.get(entry).is_some() {
@@ -741,7 +715,7 @@ impl CrdtFabric {
                 }
                 Ok(())
             }
-            FabricOp::ListInsert {
+            Op::ListInsert {
                 key,
                 path,
                 index,
@@ -751,9 +725,9 @@ impl CrdtFabric {
                 let l = doc.get_movable_list(typed_key("list", path).as_str());
                 let index = *index as usize;
                 if index > l.len() {
-                    return Err(FabricError::InvalidOp("list index out of bounds".into()));
+                    return Err(Error::InvalidOp("list index out of bounds".into()));
                 }
-                // Fabric mints the stable element id and embeds it in the value,
+                // Engine mints the stable element id and embeds it in the value,
                 // so identity survives synchronization.
                 let id: [u8; ELEMENT_ID_LEN] = mint_bytes();
                 let mut blob = Vec::with_capacity(ELEMENT_ID_LEN + value.len());
@@ -761,18 +735,18 @@ impl CrdtFabric {
                 blob.extend_from_slice(value);
                 l.insert(index, blob.as_slice()).map_err(Self::loro_err)
             }
-            FabricOp::ListRemove { key, path, element } => {
+            Op::ListRemove { key, path, element } => {
                 let doc = self.doc_for(key, "list", path)?;
                 let l = doc.get_movable_list(typed_key("list", path).as_str());
                 let Some((i, _, _)) = Self::list_entries(&l)
                     .into_iter()
                     .find(|(_, id, _)| id == element)
                 else {
-                    return Err(FabricError::InvalidOp("unknown list element".into()));
+                    return Err(Error::InvalidOp("unknown list element".into()));
                 };
                 l.delete(i, 1).map_err(Self::loro_err)
             }
-            FabricOp::ListMove {
+            Op::ListMove {
                 key,
                 path,
                 element,
@@ -784,15 +758,15 @@ impl CrdtFabric {
                     .into_iter()
                     .find(|(_, id, _)| id == element)
                 else {
-                    return Err(FabricError::InvalidOp("unknown list element".into()));
+                    return Err(Error::InvalidOp("unknown list element".into()));
                 };
                 let to = *index as usize;
                 if to >= l.len() {
-                    return Err(FabricError::InvalidOp("list index out of bounds".into()));
+                    return Err(Error::InvalidOp("list index out of bounds".into()));
                 }
                 l.mov(from, to).map_err(Self::loro_err)
             }
-            FabricOp::TextSplice {
+            Op::TextSplice {
                 key,
                 path,
                 index,
@@ -805,7 +779,7 @@ impl CrdtFabric {
                 let index = *index as usize;
                 let delete = *delete as usize;
                 if index + delete > len {
-                    return Err(FabricError::InvalidOp("text splice out of bounds".into()));
+                    return Err(Error::InvalidOp("text splice out of bounds".into()));
                 }
                 if delete > 0 {
                     t.delete(index, delete).map_err(Self::loro_err)?;
@@ -815,7 +789,7 @@ impl CrdtFabric {
                 }
                 Ok(())
             }
-            FabricOp::SetAdd { key, path, value } => {
+            Op::SetAdd { key, path, value } => {
                 let doc = self.doc_for(key, "set", path)?;
                 let m = doc.get_map(typed_key("set", path).as_str());
                 // Observed-remove set: every add mints a fresh tag, so a remove
@@ -828,7 +802,7 @@ impl CrdtFabric {
                 );
                 m.insert(&member, value.as_slice()).map_err(Self::loro_err)
             }
-            FabricOp::SetRemove { key, path, value } => {
+            Op::SetRemove { key, path, value } => {
                 let doc = self.doc_for(key, "set", path)?;
                 let m = doc.get_map(typed_key("set", path).as_str());
                 let prefix = format!("{}:", set_member_prefix(value));
@@ -839,7 +813,7 @@ impl CrdtFabric {
                 }
                 Ok(())
             }
-            FabricOp::CounterAdd { key, path, delta } => {
+            Op::CounterAdd { key, path, delta } => {
                 let doc = self.doc_for(key, "cnt", path)?;
                 let peer = doc.peer_id();
                 let m = doc.get_map(typed_key("cnt", path).as_str());
@@ -849,47 +823,44 @@ impl CrdtFabric {
                 let current = crate::loro_ext::get_i64(&m, &me).unwrap_or(0);
                 let next = current
                     .checked_add(*delta)
-                    .ok_or_else(|| FabricError::InvalidOp("counter overflow".into()))?;
+                    .ok_or_else(|| Error::InvalidOp("counter overflow".into()))?;
                 m.insert(&me, next).map_err(Self::loro_err)
             }
         }
     }
 
     /// The key an operation touches.
-    fn op_key(op: &FabricOp) -> &FabricKey {
+    fn op_key(op: &Op) -> &Key {
         match op {
-            FabricOp::PutCanonical { key, .. }
-            | FabricOp::Remove { key }
-            | FabricOp::CreateBody { key }
-            | FabricOp::RegisterSet { key, .. }
-            | FabricOp::RegisterClear { key, .. }
-            | FabricOp::MapSet { key, .. }
-            | FabricOp::MapRemove { key, .. }
-            | FabricOp::ListInsert { key, .. }
-            | FabricOp::ListRemove { key, .. }
-            | FabricOp::ListMove { key, .. }
-            | FabricOp::TextSplice { key, .. }
-            | FabricOp::SetAdd { key, .. }
-            | FabricOp::SetRemove { key, .. }
-            | FabricOp::CounterAdd { key, .. } => key,
+            Op::PutCanonical { key, .. }
+            | Op::Remove { key }
+            | Op::CreateBody { key }
+            | Op::RegisterSet { key, .. }
+            | Op::RegisterClear { key, .. }
+            | Op::MapSet { key, .. }
+            | Op::MapRemove { key, .. }
+            | Op::ListInsert { key, .. }
+            | Op::ListRemove { key, .. }
+            | Op::ListMove { key, .. }
+            | Op::TextSplice { key, .. }
+            | Op::SetAdd { key, .. }
+            | Op::SetRemove { key, .. }
+            | Op::CounterAdd { key, .. } => key,
         }
     }
 }
 
-impl Default for CrdtFabric {
+impl Default for MemoryEngine {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl Fabric for CrdtFabric {
-    fn commit(
-        &mut self,
-        request: FabricTransactionRequest,
-    ) -> Result<FabricCommitReceipt, FabricError> {
+impl Engine for MemoryEngine {
+    fn commit(&mut self, request: Transaction) -> Result<Receipt, Error> {
         // Batch atomicity, bounded. This used to back every touched Body up by
         // full export before applying — a complete-history snapshot per
-        // ordinary edit, paid inside Fabric before anything was sealed, and no
+        // ordinary edit, paid inside Engine before anything was sealed, and no
         // amount of delta-shaped sealing downstream removed it.
         //
         // What replaces it is a *position*: one head set per touched Body,
@@ -902,7 +873,7 @@ impl Fabric for CrdtFabric {
         // cannot unsay an operation another replica may already hold. A failed
         // batch therefore costs a little history and no correctness, and a
         // checkpoint reclaims it.
-        let touched: std::collections::BTreeSet<FabricKey> = request
+        let touched: std::collections::BTreeSet<Key> = request
             .ops
             .iter()
             .map(|op| Self::op_key(op).clone())
@@ -915,7 +886,7 @@ impl Fabric for CrdtFabric {
         // a `LoroDoc` clone is a reference clone sharing one underlying
         // document, so putting the clone back restores the original Body
         // rather than a copy of it.
-        let prior: BTreeMap<FabricKey, Option<(BodyState, Option<loro::Frontiers>)>> = touched
+        let prior: BTreeMap<Key, Option<(BodyState, Option<loro::Frontiers>)>> = touched
             .iter()
             .map(|key| {
                 let snapshot = self.bodies.get(key).map(|state| match state {
@@ -960,7 +931,7 @@ impl Fabric for CrdtFabric {
                 }
             }
             if unrestored > 0 {
-                return Err(FabricError::Durability(format!(
+                return Err(Error::Durability(format!(
                     "rollback after failed apply did not restore {unrestored} bodies"
                 )));
             }
@@ -974,20 +945,20 @@ impl Fabric for CrdtFabric {
                 doc.commit();
             }
         }
-        Ok(FabricCommitReceipt::new(
+        Ok(Receipt::new(
             self.causal_for(&touched),
             request.ops.len() as u32,
         ))
     }
 
-    fn read(&self, key: &FabricKey) -> Option<Vec<u8>> {
+    fn read(&self, key: &Key) -> Option<Vec<u8>> {
         match self.bodies.get(key)? {
             BodyState::Atomic(bytes) => Some(bytes.clone()),
             BodyState::Collab(_) => None,
         }
     }
 
-    fn read_collaborative(&self, key: &FabricKey) -> Result<CollaborativeView, ProjectionError> {
+    fn read_collaborative(&self, key: &Key) -> Result<CollaborativeView, ProjectionError> {
         let Some(BodyState::Collab(doc)) = self.bodies.get(key) else {
             return Err(ProjectionError::NotCollaborative);
         };
@@ -1084,27 +1055,24 @@ impl Fabric for CrdtFabric {
         Ok(view)
     }
 
-    fn version(
-        &self,
-        key: &FabricKey,
-    ) -> Result<crate::causal::FabricVersion, crate::causal::CausalError> {
+    fn version(&self, key: &Key) -> Result<crate::causal::Version, crate::causal::CausalError> {
         match self.bodies.get(key) {
-            Some(BodyState::Collab(doc)) => Ok(crate::causal::FabricVersion::from_frontiers(
+            Some(BodyState::Collab(doc)) => Ok(crate::causal::Version::from_frontiers(
                 &doc.oplog_frontiers(),
             )),
             // An atomic Body has one writer at a time and no operation history,
             // so its position is the empty one. It still answers, because a
             // caller should not have to know which model a key holds to ask.
-            Some(BodyState::Atomic(_)) => Ok(crate::causal::FabricVersion::empty()),
+            Some(BodyState::Atomic(_)) => Ok(crate::causal::Version::empty()),
             None => Err(crate::causal::CausalError::NotCollaborative),
         }
     }
 
     fn export_delta(
         &self,
-        key: &FabricKey,
-        from: &crate::causal::FabricVersion,
-    ) -> Result<crate::causal::FabricArtifact, crate::causal::CausalError> {
+        key: &Key,
+        from: &crate::causal::Version,
+    ) -> Result<crate::causal::Artifact, crate::causal::CausalError> {
         from.validate()?;
         match self.bodies.get(key) {
             Some(BodyState::Collab(doc)) => {
@@ -1115,14 +1083,14 @@ impl Fabric for CrdtFabric {
                 let bytes = doc
                     .export(loro::ExportMode::updates(&vv))
                     .map_err(|e| crate::causal::CausalError::Engine(e.to_string()))?;
-                Ok(crate::causal::FabricArtifact::Delta {
+                Ok(crate::causal::Artifact::Delta {
                     format_version: crate::causal::CAUSAL_FORMAT_VERSION,
                     base: from.clone(),
-                    result: crate::causal::FabricVersion::from_frontiers(&doc.oplog_frontiers()),
+                    result: crate::causal::Version::from_frontiers(&doc.oplog_frontiers()),
                     bytes,
                 })
             }
-            Some(BodyState::Atomic(bytes)) => Ok(crate::causal::FabricArtifact::Replace {
+            Some(BodyState::Atomic(bytes)) => Ok(crate::causal::Artifact::Replace {
                 format_version: crate::causal::CAUSAL_FORMAT_VERSION,
                 bytes: bytes.clone(),
             }),
@@ -1132,9 +1100,9 @@ impl Fabric for CrdtFabric {
 
     fn export_checkpoint(
         &self,
-        key: &FabricKey,
-        retention_frontier: &crate::causal::FabricVersion,
-    ) -> Result<crate::causal::FabricArtifact, crate::causal::CausalError> {
+        key: &Key,
+        retention_frontier: &crate::causal::Version,
+    ) -> Result<crate::causal::Artifact, crate::causal::CausalError> {
         retention_frontier.validate()?;
         match self.bodies.get(key) {
             Some(BodyState::Collab(doc)) => {
@@ -1149,14 +1117,14 @@ impl Fabric for CrdtFabric {
                 let bytes = doc
                     .export(loro::ExportMode::shallow_snapshot(&frontier))
                     .map_err(|e| crate::causal::CausalError::Engine(e.to_string()))?;
-                Ok(crate::causal::FabricArtifact::Checkpoint {
+                Ok(crate::causal::Artifact::Checkpoint {
                     format_version: crate::causal::CAUSAL_FORMAT_VERSION,
-                    retention_frontier: crate::causal::FabricVersion::from_frontiers(&frontier),
-                    result: crate::causal::FabricVersion::from_frontiers(&doc.oplog_frontiers()),
+                    retention_frontier: crate::causal::Version::from_frontiers(&frontier),
+                    result: crate::causal::Version::from_frontiers(&doc.oplog_frontiers()),
                     bytes,
                 })
             }
-            Some(BodyState::Atomic(bytes)) => Ok(crate::causal::FabricArtifact::Replace {
+            Some(BodyState::Atomic(bytes)) => Ok(crate::causal::Artifact::Replace {
                 format_version: crate::causal::CAUSAL_FORMAT_VERSION,
                 bytes: bytes.clone(),
             }),
@@ -1166,20 +1134,20 @@ impl Fabric for CrdtFabric {
 
     fn export_history(
         &self,
-        key: &FabricKey,
-    ) -> Result<crate::causal::FabricArtifact, crate::causal::CausalError> {
+        key: &Key,
+    ) -> Result<crate::causal::Artifact, crate::causal::CausalError> {
         match self.bodies.get(key) {
             Some(BodyState::Collab(doc)) => {
                 let bytes = doc
                     .export(loro::ExportMode::Snapshot)
                     .map_err(|e| crate::causal::CausalError::Engine(e.to_string()))?;
-                Ok(crate::causal::FabricArtifact::Archive {
+                Ok(crate::causal::Artifact::Archive {
                     format_version: crate::causal::CAUSAL_FORMAT_VERSION,
-                    result: crate::causal::FabricVersion::from_frontiers(&doc.oplog_frontiers()),
+                    result: crate::causal::Version::from_frontiers(&doc.oplog_frontiers()),
                     bytes,
                 })
             }
-            Some(BodyState::Atomic(bytes)) => Ok(crate::causal::FabricArtifact::Replace {
+            Some(BodyState::Atomic(bytes)) => Ok(crate::causal::Artifact::Replace {
                 format_version: crate::causal::CAUSAL_FORMAT_VERSION,
                 bytes: bytes.clone(),
             }),
@@ -1189,12 +1157,12 @@ impl Fabric for CrdtFabric {
 
     fn import_artifact(
         &mut self,
-        key: &FabricKey,
-        artifact: &crate::causal::FabricArtifact,
+        key: &Key,
+        artifact: &crate::causal::Artifact,
     ) -> Result<crate::causal::ImportStatus, crate::causal::CausalError> {
-        use crate::causal::{CausalError, FabricArtifact, FabricVersion, ImportStatus};
+        use crate::causal::{Artifact, CausalError, ImportStatus, Version};
 
-        if let FabricArtifact::Replace { bytes, .. } = artifact {
+        if let Artifact::Replace { bytes, .. } = artifact {
             // A model mismatch is a conflict, not an overwrite. `import_body`
             // refuses the same pair, and the reverse direction — a delta onto
             // an atomic Body — is refused below; flattening a collaborative
@@ -1218,10 +1186,10 @@ impl Fabric for CrdtFabric {
         }
 
         let bytes = match artifact {
-            FabricArtifact::Delta { bytes, .. }
-            | FabricArtifact::Checkpoint { bytes, .. }
-            | FabricArtifact::Archive { bytes, .. } => bytes,
-            FabricArtifact::Replace { .. } => unreachable!("handled above"),
+            Artifact::Delta { bytes, .. }
+            | Artifact::Checkpoint { bytes, .. }
+            | Artifact::Archive { bytes, .. } => bytes,
+            Artifact::Replace { .. } => unreachable!("handled above"),
         };
 
         let writer = self.writer;
@@ -1241,7 +1209,7 @@ impl Fabric for CrdtFabric {
             let message = e.to_string();
             if message.contains("shallow") || message.contains("Shallow") {
                 CausalError::BeforeRetentionFrontier {
-                    frontier: FabricVersion::from_frontiers(&doc.shallow_since_frontiers()),
+                    frontier: Version::from_frontiers(&doc.shallow_since_frontiers()),
                 }
             } else {
                 CausalError::Engine(message)
@@ -1256,9 +1224,9 @@ impl Fabric for CrdtFabric {
 
     fn relation(
         &self,
-        key: &FabricKey,
-        a: &crate::causal::FabricVersion,
-        b: &crate::causal::FabricVersion,
+        key: &Key,
+        a: &crate::causal::Version,
+        b: &crate::causal::Version,
     ) -> crate::causal::CausalRelation {
         match self.bodies.get(key) {
             Some(BodyState::Collab(doc)) => crate::causal::relation(doc, a, b),
@@ -1268,10 +1236,10 @@ impl Fabric for CrdtFabric {
 
     fn anchor(
         &self,
-        key: &FabricKey,
+        key: &Key,
         path: &str,
         position: u64,
-    ) -> Result<crate::causal::FabricAnchor, crate::causal::CausalError> {
+    ) -> Result<crate::causal::Anchor, crate::causal::CausalError> {
         let Some(BodyState::Collab(doc)) = self.bodies.get(key) else {
             return Err(crate::causal::CausalError::NotCollaborative);
         };
@@ -1293,21 +1261,21 @@ impl Fabric for CrdtFabric {
                 sequence: id.counter,
             })
         };
-        Ok(crate::causal::FabricAnchor {
+        Ok(crate::causal::Anchor {
             format_version: crate::causal::CAUSAL_FORMAT_VERSION,
             body: body_digest(key),
             path: path.to_string(),
             anchored_to,
             offset: position,
             after: true,
-            taken_at: crate::causal::FabricVersion::from_frontiers(&doc.oplog_frontiers()),
+            taken_at: crate::causal::Version::from_frontiers(&doc.oplog_frontiers()),
         })
     }
 
     fn resolve(
         &self,
-        key: &FabricKey,
-        anchor: &crate::causal::FabricAnchor,
+        key: &Key,
+        anchor: &crate::causal::Anchor,
     ) -> crate::causal::AnchorResolution {
         use crate::causal::AnchorResolution;
         if anchor.body != body_digest(key) {
@@ -1357,15 +1325,11 @@ impl Fabric for CrdtFabric {
         }
     }
 
-    fn export_body(&self, key: &FabricKey) -> Option<BodyExport> {
+    fn export_body(&self, key: &Key) -> Option<BodyExport> {
         self.bodies.get(key).and_then(|s| s.export().ok())
     }
 
-    fn import_body(
-        &mut self,
-        key: &FabricKey,
-        export: &BodyExport,
-    ) -> Result<Option<FabricCommitReceipt>, FabricError> {
+    fn import_body(&mut self, key: &Key, export: &BodyExport) -> Result<Option<Receipt>, Error> {
         let changed = match (self.bodies.get(key), export) {
             // Atomic replacement — policy for concurrent atomic writes is
             // Replica's, decided before this call.
@@ -1387,7 +1351,7 @@ impl Fabric for CrdtFabric {
             (Some(BodyState::Collab(doc)), BodyExport::Collaborative(snapshot)) => {
                 let before = doc.oplog_frontiers().encode();
                 doc.import(snapshot)
-                    .map_err(|e| FabricError::InvalidOp(format!("merge import: {e}")))?;
+                    .map_err(|e| Error::InvalidOp(format!("merge import: {e}")))?;
                 doc.oplog_frontiers().encode() != before
             }
             (None, BodyExport::Collaborative(_)) => {
@@ -1398,7 +1362,7 @@ impl Fabric for CrdtFabric {
             // A model mismatch at the same key is a type conflict, refused.
             (Some(BodyState::Atomic(_)), BodyExport::Collaborative(_))
             | (Some(BodyState::Collab(_)), BodyExport::Atomic(_)) => {
-                return Err(FabricError::TypeConflict)
+                return Err(Error::TypeConflict)
             }
         };
         if !changed {
@@ -1406,7 +1370,7 @@ impl Fabric for CrdtFabric {
         }
         let mut touched = std::collections::BTreeSet::new();
         touched.insert(key.clone());
-        Ok(Some(FabricCommitReceipt::new(self.causal_for(&touched), 0)))
+        Ok(Some(Receipt::new(self.causal_for(&touched), 0)))
     }
 }
 
@@ -1418,18 +1382,18 @@ mod tests {
     fn a_body_export_carries_exactly_one_body() {
         // Two collaborative Bodies; exporting one and importing it elsewhere
         // must bring that Body only — never a cross-Body snapshot.
-        let mut a = CrdtFabric::new();
-        let k1 = FabricKey::from_bytes(b"body/1".to_vec());
-        let k2 = FabricKey::from_bytes(b"body/2".to_vec());
-        a.commit(FabricTransactionRequest::new(
+        let mut a = MemoryEngine::new();
+        let k1 = Key::from_bytes(b"body/1".to_vec());
+        let k2 = Key::from_bytes(b"body/2".to_vec());
+        a.commit(Transaction::new(
             "created",
             vec![
-                FabricOp::RegisterSet {
+                Op::RegisterSet {
                     key: k1.clone(),
                     path: "title".into(),
                     value: b"one".to_vec(),
                 },
-                FabricOp::RegisterSet {
+                Op::RegisterSet {
                     key: k2.clone(),
                     path: "title".into(),
                     value: b"two".to_vec(),
@@ -1440,7 +1404,7 @@ mod tests {
 
         let export = a.export_body(&k1).unwrap();
         assert!(matches!(export, BodyExport::Collaborative(_)));
-        let mut b = CrdtFabric::new();
+        let mut b = MemoryEngine::new();
         b.import_body(&k1, &export).unwrap().unwrap();
         assert_eq!(
             b.read_collaborative(&k1).unwrap().registers["title"],
@@ -1454,11 +1418,11 @@ mod tests {
 
     #[test]
     fn per_body_import_preserves_stable_element_identity() {
-        let mut a = CrdtFabric::new();
-        let k = FabricKey::from_bytes(b"body/ids".to_vec());
-        a.commit(FabricTransactionRequest::new(
+        let mut a = MemoryEngine::new();
+        let k = Key::from_bytes(b"body/ids".to_vec());
+        a.commit(Transaction::new(
             "created",
-            vec![FabricOp::ListInsert {
+            vec![Op::ListInsert {
                 key: k.clone(),
                 path: "items".into(),
                 index: 0,
@@ -1471,11 +1435,11 @@ mod tests {
             .clone();
 
         // B imports the Body and removes the element BY THE SAME STABLE ID.
-        let mut b = CrdtFabric::new();
+        let mut b = MemoryEngine::new();
         b.import_body(&k, &a.export_body(&k).unwrap()).unwrap();
-        b.commit(FabricTransactionRequest::new(
+        b.commit(Transaction::new(
             "removed",
-            vec![FabricOp::ListRemove {
+            vec![Op::ListRemove {
                 key: k.clone(),
                 path: "items".into(),
                 element,
@@ -1487,11 +1451,11 @@ mod tests {
 
     #[test]
     fn reimporting_known_material_is_unchanged() {
-        let mut a = CrdtFabric::new();
-        let k = FabricKey::from_bytes(b"body/known".to_vec());
-        a.commit(FabricTransactionRequest::new(
+        let mut a = MemoryEngine::new();
+        let k = Key::from_bytes(b"body/known".to_vec());
+        a.commit(Transaction::new(
             "created",
-            vec![FabricOp::CounterAdd {
+            vec![Op::CounterAdd {
                 key: k.clone(),
                 path: "votes".into(),
                 delta: 2,
@@ -1499,14 +1463,14 @@ mod tests {
         ))
         .unwrap();
         let export = a.export_body(&k).unwrap();
-        let mut b = CrdtFabric::new();
+        let mut b = MemoryEngine::new();
         assert!(b.import_body(&k, &export).unwrap().is_some(), "new");
         assert!(
             b.import_body(&k, &export).unwrap().is_none(),
             "already known — no receipt, nothing changed"
         );
         // Atomic idempotence too.
-        let ak = FabricKey::from_bytes(b"body/atomic".to_vec());
+        let ak = Key::from_bytes(b"body/atomic".to_vec());
         let atomic = BodyExport::Atomic(b"v1".to_vec());
         assert!(b.import_body(&ak, &atomic).unwrap().is_some());
         assert!(b.import_body(&ak, &atomic).unwrap().is_none());
@@ -1514,22 +1478,22 @@ mod tests {
 
     #[test]
     fn a_model_mismatch_at_the_same_key_is_a_type_conflict() {
-        let mut f = CrdtFabric::new();
-        let k = FabricKey::from_bytes(b"body/mismatch".to_vec());
-        f.commit(FabricTransactionRequest::new(
+        let mut f = MemoryEngine::new();
+        let k = Key::from_bytes(b"body/mismatch".to_vec());
+        f.commit(Transaction::new(
             "created",
-            vec![FabricOp::PutCanonical {
+            vec![Op::PutCanonical {
                 key: k.clone(),
                 value: b"atomic".to_vec(),
             }],
         ))
         .unwrap();
         // A collaborative export addressed at an atomic key is refused.
-        let mut other = CrdtFabric::new();
+        let mut other = MemoryEngine::new();
         other
-            .commit(FabricTransactionRequest::new(
+            .commit(Transaction::new(
                 "created",
-                vec![FabricOp::CounterAdd {
+                vec![Op::CounterAdd {
                     key: k.clone(),
                     path: "votes".into(),
                     delta: 1,
@@ -1537,40 +1501,37 @@ mod tests {
             ))
             .unwrap();
         let collab = other.export_body(&k).unwrap();
-        assert_eq!(
-            f.import_body(&k, &collab).unwrap_err(),
-            FabricError::TypeConflict
-        );
+        assert_eq!(f.import_body(&k, &collab).unwrap_err(), Error::TypeConflict);
         assert_eq!(f.read(&k).as_deref(), Some(&b"atomic"[..]), "unchanged");
     }
 
     #[test]
     fn transaction_request_roundtrips_postcard() {
-        let req = FabricTransactionRequest::new(
+        let req = Transaction::new(
             "created",
             vec![
-                FabricOp::PutCanonical {
-                    key: FabricKey::from_bytes(vec![1, 2, 3]),
+                Op::PutCanonical {
+                    key: Key::from_bytes(vec![1, 2, 3]),
                     value: vec![9],
                 },
-                FabricOp::Remove {
-                    key: FabricKey::from_bytes(vec![4]),
+                Op::Remove {
+                    key: Key::from_bytes(vec![4]),
                 },
             ],
         );
         let bytes = postcard::to_stdvec(&req).unwrap();
-        let back: FabricTransactionRequest = postcard::from_bytes(&bytes).unwrap();
+        let back: Transaction = postcard::from_bytes(&bytes).unwrap();
         assert_eq!(req, back);
     }
 
     #[test]
     fn atomic_bodies_commit_read_remove_and_advance_the_causal_token() {
-        let mut fabric = CrdtFabric::new();
-        let key = FabricKey::from_bytes(b"body/0".to_vec());
+        let mut fabric = MemoryEngine::new();
+        let key = Key::from_bytes(b"body/0".to_vec());
         let r1 = fabric
-            .commit(FabricTransactionRequest::new(
+            .commit(Transaction::new(
                 "created",
-                vec![FabricOp::PutCanonical {
+                vec![Op::PutCanonical {
                     key: key.clone(),
                     value: b"v1".to_vec(),
                 }],
@@ -1580,9 +1541,9 @@ mod tests {
         assert_eq!(fabric.read(&key).as_deref(), Some(&b"v1"[..]));
 
         let r2 = fabric
-            .commit(FabricTransactionRequest::new(
+            .commit(Transaction::new(
                 "removed",
-                vec![FabricOp::Remove { key: key.clone() }],
+                vec![Op::Remove { key: key.clone() }],
             ))
             .unwrap();
         // The causal token advances between commits.

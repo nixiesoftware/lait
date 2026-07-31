@@ -1,9 +1,9 @@
 //! End-to-end tests for control-plane dirty notifications and `Reset`
-//! recovery, driven through a process-backed **SpaceBridge** over its real IPC control
+//! recovery, driven through a process-backed **StationHost** over its real IPC control
 //! socket with an in-memory transport (no network sockets). See
 //! `docs/PROTOCOL.md`.
 //!
-//! Formation is `orbital::form_space` (the `lait init` heir); the SpaceBridge
+//! Formation is `orbital::form_space` (the `lait init` heir); the StationHost
 //! then serves `control::Request`/`Response` — including the `Subscribe`
 //! doorbell stream sourced from the Station's `ObservationStream` — exactly as
 //! the CLI/serve/MCP clients speak it. Two behaviors are proven: a wildly stale
@@ -129,7 +129,7 @@ fn wait_online(rt: &tokio::runtime::Runtime, home: &Path) {
     });
     assert!(
         online.is_some(),
-        "SpaceBridge at {} never came online",
+        "StationHost at {} never came online",
         home.display()
     );
 }
@@ -149,7 +149,7 @@ fn explicit_routes_cannot_cross_space_or_world_boundaries() {
         .block_on(request_routed(
             &home,
             &Request::Status,
-            ControlRoute::Space {
+            ControlRoute::Orbit {
                 address: address.clone(),
             },
         ))
@@ -160,7 +160,7 @@ fn explicit_routes_cannot_cross_space_or_world_boundaries() {
         .block_on(request_routed(
             &home,
             &Request::Status,
-            ControlRoute::Space {
+            ControlRoute::Orbit {
                 address: OrbitAddress {
                     orbit: address.orbit.clone(),
                     space: SpaceId::from_digest([0xEE; 16]),
@@ -177,7 +177,7 @@ fn explicit_routes_cannot_cross_space_or_world_boundaries() {
         .block_on(request_routed(
             &home,
             &Request::Status,
-            ControlRoute::Space {
+            ControlRoute::Orbit {
                 address: OrbitAddress::for_store(&home.with_extension("sibling"), space.clone()),
             },
         ))
@@ -214,7 +214,7 @@ fn explicit_routes_cannot_cross_space_or_world_boundaries() {
     let wrong_level = rt
         .block_on(lait::control::call_world(
             &home,
-            ControlRoute::Space {
+            ControlRoute::Orbit {
                 address: address.clone(),
             },
             issues_call,
@@ -230,7 +230,7 @@ fn explicit_routes_cannot_cross_space_or_world_boundaries() {
         .block_on(request_routed(
             &home,
             &Request::Stop,
-            ControlRoute::Space {
+            ControlRoute::Orbit {
                 address: OrbitAddress {
                     orbit: address.orbit.clone(),
                     space: SpaceId::from_digest([0xEF; 16]),
@@ -246,12 +246,12 @@ fn explicit_routes_cannot_cross_space_or_world_boundaries() {
         .block_on(request_routed(
             &home,
             &Request::Status,
-            ControlRoute::Space { address },
+            ControlRoute::Orbit { address },
         ))
         .unwrap();
     assert!(
         matches!(still_online, Response::Status(_)),
-        "a rejected Stop must leave the addressed SpaceBridge online"
+        "a rejected Stop must leave the addressed StationHost online"
     );
 
     rt.block_on(async {

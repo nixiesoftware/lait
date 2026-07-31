@@ -17,9 +17,9 @@ use mechanics::crypto::AuthorizedBodyKey;
 use mechanics::ids::SpaceId;
 use replica::frontier::AuthorityFrontier;
 use replica::{
-    ActionOutcome, BodyBinding, BodyId, BodyKey, BodyOp, BodyTransaction, CommitAuthorization,
-    CommitContext, EncodingId, Replica, ReplicaCommitError, SchemaId, SeedSigner, StaticBodyKeys,
-    SupportedSchemas, WorldId, MUTATION_ATOMIC, MUTATION_COLLABORATIVE,
+    ActionOutcome, BodyBinding, BodyId, BodyKey, CommitAuthorization, CommitContext, EncodingId,
+    Op, Replica, ReplicaCommitError, SchemaId, SeedSigner, StaticBodyKeys, SupportedSchemas,
+    Transaction, WorldId, MUTATION_ATOMIC, MUTATION_COLLABORATIVE,
 };
 
 const WRITER_SEED: [u8; 32] = [61u8; 32];
@@ -60,10 +60,10 @@ fn test_auth() -> replica::StaticAuthorizer {
 }
 
 fn test_demand() -> Vec<u8> {
-    use mechanics::demand::{AuthorizationDemand, PolicyCapability, PolicyResource};
+    use mechanics::demand::{AuthorizationDemand, PolicyCapability, Resource};
     AuthorizationDemand::require(
         PolicyCapability::new("com.example.notes", "write"),
-        PolicyResource::space("com.example.notes"),
+        Resource::root("com.example.notes"),
     )
     .encode_canonical()
     .expect("canonical demand")
@@ -130,7 +130,7 @@ fn commit(
     r: &mut Replica,
     request: [u8; 16],
     label: &str,
-    ops: &[(BodyKey, BodyOp)],
+    ops: &[(BodyKey, Op)],
     bindings: &[(BodyKey, BodyBinding)],
 ) -> Result<ActionOutcome, ReplicaCommitError> {
     let space = space();
@@ -168,10 +168,10 @@ fn open(dir: &PathBuf) -> Replica {
     r
 }
 
-fn counter_ops(key: &BodyKey, delta: i64) -> Vec<(BodyKey, BodyOp)> {
+fn counter_ops(key: &BodyKey, delta: i64) -> Vec<(BodyKey, Op)> {
     vec![(
         key.clone(),
-        BodyOp::CounterAdd {
+        Op::CounterAdd {
             path: "votes".into(),
             delta,
         },
@@ -260,7 +260,7 @@ fn the_store_addresses_canonical_objects_not_an_engine_snapshot() {
         "created",
         &[(
             body(2),
-            BodyOp::RegisterSet {
+            Op::RegisterSet {
                 path: "title".into(),
                 value: b"the plaintext title".to_vec(),
             },
@@ -284,7 +284,7 @@ fn the_store_addresses_canonical_objects_not_an_engine_snapshot() {
     let mut classified = 0;
     for obj in &required {
         let bytes = store.read_object(obj).unwrap();
-        let is_tx = replica::BodyTransaction::decode_canonical(&bytes).is_ok();
+        let is_tx = replica::Transaction::decode_canonical(&bytes).is_ok();
         let is_receipt = replica::RequestReceipt::decode_canonical(&bytes).is_ok();
         let is_root = replica::ManifestRoot::decode_canonical(&bytes).is_ok();
         let is_node = fabric::journal::index::IndexNode::decode_canonical(&bytes).is_ok();
@@ -558,7 +558,7 @@ fn concurrent_atomic_writes_resolve_to_one_deterministic_winner() {
         "write",
         &[(
             body(7),
-            BodyOp::ReplaceAtomic {
+            Op::ReplaceAtomic {
                 value: b"from-a".to_vec(),
             },
         )],
@@ -571,7 +571,7 @@ fn concurrent_atomic_writes_resolve_to_one_deterministic_winner() {
         "write",
         &[(
             body(7),
-            BodyOp::ReplaceAtomic {
+            Op::ReplaceAtomic {
                 value: b"from-b".to_vec(),
             },
         )],
@@ -683,7 +683,7 @@ fn the_engine_export_envelope_is_gone() {
     let _: fn(
         &mut Replica,
         &CommitContext<'_>,
-        &BodyTransaction,
+        &Transaction,
         &[(BodyKey, Vec<u8>)],
         &dyn replica::AuthoritySource,
     ) -> Result<replica::ConvergenceOutcome, ReplicaCommitError> = Replica::incorporate;

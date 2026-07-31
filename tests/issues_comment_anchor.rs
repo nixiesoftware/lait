@@ -21,8 +21,8 @@ use lait::world::IssuesWorld;
 use mechanics::crypto::AuthorizedBodyKey;
 use replica::frontier::AuthorityFrontier;
 use runtime::{
-    ActivationOptions, CommsOptions, ContactMechanics, ContactOptions, EnterOptions, LocalIdentity,
-    RequestId, Runtime, RuntimeBuilder, Session, Station, WorldError, WorldIntent, WorldQuery,
+    ActivationOptions, Authority, CommsOptions, Intent, LocalIdentity, Query, RequestId, Runtime,
+    RuntimeBuilder, Session, Station, WorldError,
 };
 
 const FOUNDER_SEED: [u8; 32] = [37u8; 32];
@@ -120,7 +120,7 @@ fn coordinates() -> runtime::SignedCoordinates {
 
 fn product_runtime(root: &std::path::Path) -> Runtime {
     let registry = RuntimeBuilder::new()
-        .register(IssuesWorld::registration(), Arc::new(IssuesWorld::new()))
+        .register(Arc::new(IssuesWorld::new()))
         .build()
         .unwrap();
     Runtime::open(
@@ -162,7 +162,7 @@ impl Driver {
             .sign_action(
                 &self.session,
                 RequestId::mint(),
-                WorldIntent {
+                Intent {
                     schema: contract::issue_schema(),
                     schema_version: contract::ISSUE_SCHEMA_VERSION,
                     payload: intent.to_json(),
@@ -176,7 +176,7 @@ impl Driver {
     fn view(&self, doc: &str) -> IssueView {
         let bytes = self
             .session
-            .query(WorldQuery {
+            .query(Query {
                 schema: contract::issue_schema(),
                 schema_version: contract::ISSUE_SCHEMA_VERSION,
                 payload: IssueQuery::View {
@@ -268,9 +268,9 @@ impl Driver {
 
 fn offline(root: &std::path::Path) -> Station {
     product_runtime(root)
-        .form_space(runtime::SpaceFormationOptions::default())
+        .create()
         .unwrap()
-        .activate(ActivationOptions::offline())
+        .open(ActivationOptions::offline())
         .unwrap()
 }
 
@@ -347,7 +347,7 @@ fn a_span_comment_reads_back_the_position_it_was_taken_at() {
         })
     );
 
-    let _ = station.go_dormant();
+    let _ = station.vacate();
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -402,7 +402,7 @@ fn an_insertion_before_the_span_moves_it_on_the_next_read() {
         "the span still names the same word"
     );
 
-    let _ = station.go_dormant();
+    let _ = station.vacate();
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -436,7 +436,7 @@ fn deleting_the_marked_text_drifts_the_span_and_keeps_the_comment() {
     assert_eq!(comment.body, "this word is wrong");
     assert_eq!(comment.author, my_actor());
 
-    let _ = station.go_dormant();
+    let _ = station.vacate();
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -463,7 +463,7 @@ fn an_atomic_field_cannot_carry_a_span() {
     // Refused means nothing was written: no comment, no anchor.
     assert!(driver.view(&doc).comments.is_empty());
 
-    let _ = station.go_dormant();
+    let _ = station.vacate();
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -497,7 +497,7 @@ fn a_span_outside_the_material_is_refused() {
 
     assert!(driver.view(&doc).comments.is_empty());
 
-    let _ = station.go_dormant();
+    let _ = station.vacate();
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -531,7 +531,7 @@ fn an_ordinary_comment_carries_no_anchor() {
         "an unattached comment must not grow an `anchor` key: {json}"
     );
 
-    let _ = station.go_dormant();
+    let _ = station.vacate();
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -557,7 +557,7 @@ fn a_point_attachment_resolves_to_a_zero_width_span() {
         CommentAnchorState::At { start: 8, end: 8 }
     );
 
-    let _ = station.go_dormant();
+    let _ = station.vacate();
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -585,7 +585,7 @@ fn a_span_starting_at_zero_moves_with_the_word_it_marks() {
     );
     assert_eq!(marked_text(&view, &id), "the");
 
-    let _ = station.go_dormant();
+    let _ = station.vacate();
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -613,7 +613,7 @@ fn a_caret_at_the_start_of_the_text_stays_at_the_start() {
         CommentAnchorState::At { start: 0, end: 0 }
     );
 
-    let _ = station.go_dormant();
+    let _ = station.vacate();
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -652,7 +652,7 @@ fn deleting_the_text_in_front_of_the_span_leaves_it_on_its_word() {
     );
     assert_eq!(marked_text(&view, &id), "quick");
 
-    let _ = station.go_dormant();
+    let _ = station.vacate();
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -680,7 +680,7 @@ fn deleting_the_sentence_in_front_of_the_span_leaves_it_on_its_word() {
     );
     assert_eq!(marked_text(&view, &id), "quick");
 
-    let _ = station.go_dormant();
+    let _ = station.vacate();
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -715,7 +715,7 @@ fn emptying_the_field_drifts_the_caret_it_carried() {
         "a drifted comment is still a comment"
     );
 
-    let _ = station.go_dormant();
+    let _ = station.vacate();
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -759,7 +759,7 @@ fn spans_are_counted_in_unicode_scalars_and_not_in_bytes() {
     );
     assert_eq!(marked_text(&view, &id), "wörld");
 
-    let _ = station.go_dormant();
+    let _ = station.vacate();
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -782,7 +782,7 @@ fn a_later_peers_edit_moves_the_span_and_never_invents_a_position() {
     let comms_options = |transport: Arc<dyn comms::Transport>, seed: [u8; 32]| CommsOptions {
         transport,
         station_seed: seed,
-        mechanics: ContactMechanics {
+        authority: Authority {
             source: Arc::new(AnyKnownSigner),
             incorporator: Arc::new(Mutex::new(AcceptingIncorporator)),
             export: Arc::new(Vec::new),
@@ -804,9 +804,9 @@ fn a_later_peers_edit_moves_the_span_and_never_invents_a_position() {
     let root_a = temp_root("peer-a");
     let root_b = temp_root("peer-b");
     let station_a = product_runtime(&root_a)
-        .enter_orbit(&coords, EnterOptions)
+        .materialize(&coords)
         .unwrap()
-        .activate(activation(ta, STATION_A_SEED))
+        .open(activation(ta, STATION_A_SEED))
         .unwrap();
     let mut driver_a = Driver::dock(&station_a);
     let doc = driver_a.seed();
@@ -821,26 +821,17 @@ fn a_later_peers_edit_moves_the_span_and_never_invents_a_position() {
         .unwrap();
 
     let station_b = product_runtime(&root_b)
-        .enter_orbit(&coords, EnterOptions)
+        .materialize(&coords)
         .unwrap()
-        .activate(activation(tb, STATION_B_SEED))
+        .open(activation(tb, STATION_B_SEED))
         .unwrap();
-    let a_station = mechanics::ids::StationId::from_device(&mechanics::crypto::device_from_seed(
-        &STATION_A_SEED,
-    ))
-    .unwrap();
-    let b_station = mechanics::ids::StationId::from_device(&mechanics::crypto::device_from_seed(
-        &STATION_B_SEED,
-    ))
-    .unwrap();
-    assert!(
-        station_b
-            .contact(&a_station, ContactOptions)
-            .unwrap()
-            .convergence
-            .accepted
-            >= 1
-    );
+    let a_station =
+        mechanics::station::Key::from_device(&mechanics::crypto::device_from_seed(&STATION_A_SEED))
+            .unwrap();
+    let b_station =
+        mechanics::station::Key::from_device(&mechanics::crypto::device_from_seed(&STATION_B_SEED))
+            .unwrap();
+    assert!(station_b.contact(&a_station).unwrap().convergence.accepted >= 1);
 
     // B holds A's comment, and resolves A's span against its own replica.
     let mut driver_b = Driver::dock(&station_b);
@@ -856,14 +847,7 @@ fn a_later_peers_edit_moves_the_span_and_never_invents_a_position() {
 
     // B inserts in front of the span and A converges: A's span moved.
     driver_b.describe(&doc, "PRE the quick brown fox");
-    assert!(
-        station_a
-            .contact(&b_station, ContactOptions)
-            .unwrap()
-            .convergence
-            .accepted
-            >= 1
-    );
+    assert!(station_a.contact(&b_station).unwrap().convergence.accepted >= 1);
     let view = driver_a.view(&doc);
     assert_eq!(view.description, "PRE the quick brown fox");
     assert_eq!(
@@ -878,22 +862,15 @@ fn a_later_peers_edit_moves_the_span_and_never_invents_a_position() {
     // B deletes the marked word and A converges: A's span drifts, and A still
     // has the comment.
     driver_b.describe(&doc, "PRE the brown fox");
-    assert!(
-        station_a
-            .contact(&b_station, ContactOptions)
-            .unwrap()
-            .convergence
-            .accepted
-            >= 1
-    );
+    assert!(station_a.contact(&b_station).unwrap().convergence.accepted >= 1);
     let view = driver_a.view(&doc);
     assert_eq!(view.description, "PRE the brown fox");
     assert_eq!(state_of(&view, &id), CommentAnchorState::Drifted);
     assert_eq!(view.comments.len(), 1);
     assert_eq!(view.comments[0].body, "this word is wrong");
 
-    let _ = station_a.go_dormant();
-    let _ = station_b.go_dormant();
+    let _ = station_a.vacate();
+    let _ = station_b.vacate();
     let _ = std::fs::remove_dir_all(&root_a);
     let _ = std::fs::remove_dir_all(&root_b);
 }

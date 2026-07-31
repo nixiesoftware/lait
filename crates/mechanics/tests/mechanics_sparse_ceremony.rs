@@ -7,9 +7,9 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use mechanics::acl::{self, AclAction, AclOp, Grant};
+use mechanics::acl::{self, AclAction, AclOp, Standing};
 use mechanics::actor;
-use mechanics::demand::{AuthorizationDemand, PolicyCapability, PolicyResource};
+use mechanics::demand::{AuthorizationDemand, PolicyCapability, Resource};
 use mechanics::genesis::Genesis;
 use mechanics::ids::{ActorId, SpaceId, SystemUlidSource};
 use mechanics::ledger::{AuthorityLedger, LedgerEffect};
@@ -57,7 +57,7 @@ fn ten_thousand_ordinary_operations_invoke_no_ceremony() {
         &AclOp {
             action: AclAction::AddMember {
                 actor: member.clone(),
-                grants: vec![Grant::Write],
+                grants: vec![Standing::Write],
             },
             by: founder.clone(),
             actor_asof: ledger.actor_heads(&founder),
@@ -70,7 +70,7 @@ fn ten_thousand_ordinary_operations_invoke_no_ceremony() {
         .commit_batch(&[LedgerEffect::Acl(add).encode()], &[])
         .unwrap();
 
-    let res = PolicyResource::space(WORLD);
+    let res = Resource::root(WORLD);
     let member_key = mechanics::crypto::device_from_seed(&seed(2))
         .key_bytes()
         .unwrap();

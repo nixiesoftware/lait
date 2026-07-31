@@ -1,6 +1,6 @@
 //! The product's mechanics composition for the orbital plane.
 //!
-//! `OrbitalMechanics` owns the Space's **signed authority material** through
+//! `SpaceAuthority` owns the Space's **signed authority material** through
 //! the mechanics [`AuthorityLedger`] — the journaled effect store persisted
 //! beside the orbital store — and implements every seam the runtime consumes:
 //!
@@ -156,7 +156,7 @@ impl Inner {
         self.ledger.acl_state().unwrap_or_default()
     }
 
-    pub(super) fn actor_plane(&self) -> actor::ActorPlane {
+    pub(super) fn actor_plane(&self) -> actor::Directory {
         self.ledger.actor_plane()
     }
 
@@ -664,7 +664,7 @@ fn inner_grant(
     inner: &mut Inner,
     actor: &ActorId,
     capability: mechanics::demand::PolicyCapability,
-    resource: mechanics::demand::PolicyResource,
+    resource: mechanics::demand::Resource,
     salt: [u8; 16],
 ) -> Result<()> {
     let grant_id = acl::capability_grant_id(actor, &capability, &resource, &salt)
@@ -686,11 +686,11 @@ fn inner_grant(
 /// The shared, thread-safe mechanics composition handle. Clone freely; every
 /// clone shares the same durable authority ledger.
 #[derive(Clone)]
-pub struct OrbitalMechanics {
+pub struct SpaceAuthority {
     inner: Arc<Mutex<Inner>>,
 }
 
-impl OrbitalMechanics {
+impl SpaceAuthority {
     pub(super) fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
         self.inner.lock().unwrap_or_else(|p| p.into_inner())
     }
@@ -1384,7 +1384,7 @@ impl OrbitalMechanics {
                 Vec::new()
             } else {
                 let space_res =
-                    mechanics::demand::PolicyResource::space(crate::world::contract::PRODUCT_WORLD);
+                    mechanics::demand::Resource::root(crate::world::contract::PRODUCT_WORLD);
                 let acl_state = inner.acl();
                 let mut ids = acl_state.effective_capability_grants(
                     &actor,
@@ -1684,7 +1684,7 @@ impl OrbitalMechanics {
         Ok(agent)
     }
 
-    /// Grant `actor` the built-in **contributor** role's scoped capabilities
+    /// Granting `actor` the built-in **contributor** role's scoped capabilities
     /// (`space.contributor` + the mandatory `space.issue.read` baseline) on the
     /// Space — so a sponsored member can actually read and write, not merely
     /// hold the ACL write grant. Idempotent (already-effective grants skip).
@@ -1837,7 +1837,7 @@ impl OrbitalMechanics {
         actor: &ActorId,
         assignments: &[(
             mechanics::demand::PolicyCapability,
-            mechanics::demand::PolicyResource,
+            mechanics::demand::Resource,
         )],
     ) -> Result<Vec<[u8; 32]>> {
         let mut inner = self.lock();
@@ -1949,13 +1949,13 @@ impl OrbitalMechanics {
         rows
     }
 
-    /// Grant one scoped capability to an actor — an admin/policy-admin authored
+    /// Granting one scoped capability to an actor — an admin/policy-admin authored
     /// authority effect (the IAM assignment seam). Idempotent by grant id.
     pub fn grant_actor_capability(
         &self,
         actor: &ActorId,
         capability: mechanics::demand::PolicyCapability,
-        resource: mechanics::demand::PolicyResource,
+        resource: mechanics::demand::Resource,
         salt: [u8; 16],
     ) -> Result<()> {
         let mut inner = self.lock();
@@ -1971,12 +1971,12 @@ impl OrbitalMechanics {
         inner_grant(&mut inner, actor, capability, resource, salt)
     }
 
-    /// Grant one scoped capability to this device's founding actor — the
+    /// Granting one scoped capability to this device's founding actor — the
     /// product-authority bootstrap seam (idempotent by grant id).
     pub fn grant_self_capability(
         &self,
         capability: mechanics::demand::PolicyCapability,
-        resource: mechanics::demand::PolicyResource,
+        resource: mechanics::demand::Resource,
         salt: [u8; 16],
     ) -> Result<()> {
         let mut inner = self.lock();
@@ -2008,7 +2008,7 @@ impl OrbitalMechanics {
     }
 }
 
-impl runtime::AuthorityView for OrbitalMechanics {
+impl runtime::AuthorityView for SpaceAuthority {
     fn resolve(&self, device: &DeviceId) -> Option<runtime::PrincipalResolution> {
         let mut inner = self.lock();
         let actor = inner.actor_plane().actor_of_device(device).cloned()?;
@@ -2018,6 +2018,26 @@ impl runtime::AuthorityView for OrbitalMechanics {
         }
         Some(runtime::PrincipalResolution {
             actor,
+            authority_frontier: inner.frontier(),
+        })
+    }
+
+    fn admit_contact_peer(
+        &self,
+        station: &mechanics::station::Key,
+    ) -> Option<runtime::PrincipalResolution> {
+        if let Some(member) = self.resolve(&station.as_device()) {
+            return Some(member);
+        }
+        // Contact is also the admission courier. Before redemption the
+        // approach Station cannot yet resolve the joiner's actor from standing
+        // it has not received; knowledge of this Space's approach coordinate
+        // is the bootstrap standing. The signed Offer still binds the exact
+        // device key, and incorporation decides whether its authority material
+        // is legitimate before membership changes.
+        let inner = self.lock();
+        Some(runtime::PrincipalResolution {
+            actor: ActorId::from_incept_hash(&data_encoding::HEXLOWER.encode(&station.key_bytes())),
             authority_frontier: inner.frontier(),
         })
     }
@@ -2087,7 +2107,7 @@ impl runtime::AuthorityView for OrbitalMechanics {
     }
 }
 
-impl replica::AuthoritySource for OrbitalMechanics {
+impl replica::AuthoritySource for SpaceAuthority {
     fn signer_authorized(&self, signer: &[u8; 32], frontier: &AuthorityFrontier) -> bool {
         // The Manifest-advertisement legitimacy check: standing is evaluated at
         // the **referenced** frontier — the exact effect closure its heads name
@@ -2098,7 +2118,7 @@ impl replica::AuthoritySource for OrbitalMechanics {
             .signer_authorized_at(signer, frontier.as_bytes())
     }
 
-    fn verify_transaction(&self, tx: &replica::BodyTransaction) -> Result<(), String> {
+    fn verify_transaction(&self, tx: &replica::Transaction) -> Result<(), String> {
         // Remote historical authorization: verify the transaction's
         // authorization receipt against signed mechanics history at its
         // referenced frontier. No World callback runs.
@@ -2122,7 +2142,7 @@ impl replica::AuthoritySource for OrbitalMechanics {
     }
 }
 
-impl replica::BodyKeySource for OrbitalMechanics {
+impl replica::BodyKeySource for SpaceAuthority {
     fn sealing_key(&self) -> Option<mechanics::crypto::AuthorizedBodyKey> {
         let mut inner = self.lock();
         let epoch = inner.active_epoch()?;
@@ -2142,7 +2162,7 @@ impl replica::BodyKeySource for OrbitalMechanics {
     }
 }
 
-impl replica::AuthorityIncorporator for OrbitalMechanics {
+impl replica::AuthorityIncorporator for SpaceAuthority {
     fn incorporate_authority(
         &mut self,
         records: &[Vec<u8>],

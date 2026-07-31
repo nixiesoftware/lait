@@ -1,5 +1,5 @@
 //! `issues_policy_designer` — role/access/workflow authoring parity over the
-//! real process-backed SpaceBridge control surface: built-in and custom roles,
+//! real process-backed StationHost control surface: built-in and custom roles,
 //! revision heads and expected-revision refusal, tombstones, exact-expansion
 //! assignment/revoke through Mechanics, deterministic workflow replacement,
 //! and gate enforcement — a transition whose template grants no admin

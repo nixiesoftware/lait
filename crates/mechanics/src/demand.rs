@@ -8,7 +8,7 @@
 //! algebra crosses the boundary.
 //!
 //! ```text
-//! PolicyResource { world, segments[] }
+//! Resource { world, segments[] }
 //! PolicyCapability { world, name }
 //! AuthorizationDemand = Require(capability, resource)
 //!                     | All(demands[])
@@ -91,7 +91,7 @@ fn valid_name(s: &str) -> bool {
 
 /// A bounded generic policy resource: a World plus exact opaque segments.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct PolicyResource {
+pub struct Resource {
     /// The World whose namespace the resource lives in (canonical WorldId
     /// text; opaque to Mechanics beyond the grammar).
     pub world: String,
@@ -99,22 +99,26 @@ pub struct PolicyResource {
     pub segments: Vec<String>,
 }
 
-impl PolicyResource {
-    /// The Space-level resource of a World (no segments).
-    pub fn space(world: &str) -> Self {
+impl Resource {
+    /// The root resource of a World (no opaque segments).
+    pub fn root(world: &str) -> Self {
         Self {
             world: world.to_string(),
             segments: Vec::new(),
         }
     }
 
-    /// A one-segment project-scoped resource of a World. The segment is the
-    /// World's opaque project identifier; matching stays byte-exact.
-    pub fn project(world: &str, project: &str) -> Self {
-        Self {
+    /// Construct a resource from validated opaque segments.
+    pub fn segments(
+        world: &str,
+        segments: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Result<Self, DemandError> {
+        let resource = Self {
             world: world.to_string(),
-            segments: vec![project.to_string()],
-        }
+            segments: segments.into_iter().map(Into::into).collect(),
+        };
+        resource.validate()?;
+        Ok(resource)
     }
 
     pub fn validate(&self) -> Result<(), DemandError> {
@@ -186,7 +190,7 @@ pub enum AuthorizationDemand {
     /// exactly this capability on exactly this resource.
     Require {
         capability: PolicyCapability,
-        resource: PolicyResource,
+        resource: Resource,
     },
     /// Every child must be satisfied.
     All(Vec<AuthorizationDemand>),
@@ -196,7 +200,7 @@ pub enum AuthorizationDemand {
 
 impl AuthorizationDemand {
     /// A single-requirement demand.
-    pub fn require(capability: PolicyCapability, resource: PolicyResource) -> Self {
+    pub fn require(capability: PolicyCapability, resource: Resource) -> Self {
         AuthorizationDemand::Require {
             capability,
             resource,
@@ -357,7 +361,7 @@ impl AuthorizationDemand {
                         world: world.clone(),
                         name,
                     },
-                    resource: PolicyResource { world, segments },
+                    resource: Resource { world, segments },
                 };
                 Ok((demand, pos))
             }
@@ -533,7 +537,7 @@ pub struct WorldAssignmentEvidence {
     /// The Manifest root the role definition was read from.
     pub parent_manifest_root: [u8; 32],
     /// The exact expanded effective assignments to install on redemption.
-    pub assignments: Vec<(PolicyCapability, PolicyResource)>,
+    pub assignments: Vec<(PolicyCapability, Resource)>,
 }
 
 impl WorldAssignmentEvidence {
@@ -635,11 +639,11 @@ mod tests {
     fn cap(name: &str) -> PolicyCapability {
         PolicyCapability::new("com.lait.issues", name)
     }
-    fn space() -> PolicyResource {
-        PolicyResource::space("com.lait.issues")
+    fn space() -> Resource {
+        Resource::root("com.lait.issues")
     }
-    fn project(p: &str) -> PolicyResource {
-        PolicyResource {
+    fn project(p: &str) -> Resource {
+        Resource {
             world: "com.lait.issues".into(),
             segments: vec!["project".into(), p.into()],
         }
@@ -729,7 +733,7 @@ mod tests {
             .collect();
         AuthorizationDemand::Any(many).encode_canonical().unwrap();
         // Exactly 8 segments of exactly 64 bytes each = 512 resource bytes.
-        let resource = PolicyResource {
+        let resource = Resource {
             world: "com.lait.issues".into(),
             segments: (0..8).map(|_| "a".repeat(64)).collect(),
         };
@@ -751,19 +755,19 @@ mod tests {
     #[test]
     fn resource_bounds_reject() {
         // 9 segments.
-        let r = PolicyResource {
+        let r = Resource {
             world: "w".into(),
             segments: (0..9).map(|i| format!("s{i}")).collect(),
         };
         assert!(r.validate().is_err());
         // A 65-byte segment.
-        let r = PolicyResource {
+        let r = Resource {
             world: "w".into(),
             segments: vec!["a".repeat(65)],
         };
         assert!(r.validate().is_err());
         // Wildcard.
-        let r = PolicyResource {
+        let r = Resource {
             world: "w".into(),
             segments: vec!["*".into()],
         };
@@ -771,7 +775,7 @@ mod tests {
         // Over 512 total bytes (8 segments of 64 = 512 ok; force overflow via
         // 8 segments of 64 + …: not representable; use 8x64 with one 65 —
         // already covered; validate the exact-limit pass instead).
-        let r = PolicyResource {
+        let r = Resource {
             world: "w".into(),
             segments: (0..8).map(|_| "a".repeat(64)).collect(),
         };
@@ -852,7 +856,7 @@ mod tests {
     fn cross_world_require_rejects() {
         let d = AuthorizationDemand::Require {
             capability: PolicyCapability::new("com.lait.issues", "x"),
-            resource: PolicyResource::space("com.other.world"),
+            resource: Resource::root("com.other.world"),
         };
         assert!(d.encode_canonical().is_err());
     }

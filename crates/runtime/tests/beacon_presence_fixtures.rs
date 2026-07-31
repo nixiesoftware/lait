@@ -1,7 +1,10 @@
 //! S4 canonical fixtures: Beacon v1 identity/freshness/route matrix and the
 //! Neighbor presence v1 challenge transcript matrix.
 
-use mechanics::ids::{SpaceId, StationEpoch, StationId};
+use mechanics::{
+    ids::SpaceId,
+    station::{Epoch, Key},
+};
 use runtime::beacon::{BeaconError, RouteHint, SignedBeacon, MAX_ROUTE_HINTS};
 use runtime::neighbor_presence::{PresenceAck, PresenceError, PresenceProbe};
 
@@ -19,7 +22,7 @@ fn beacon(epoch: u64, sequence: u64, routes: Vec<RouteHint>) -> SignedBeacon {
     SignedBeacon::emit(
         runtime::beacon::BEACON_PROTOCOL,
         &space(),
-        StationEpoch::from_u64(epoch),
+        Epoch::from_u64(epoch),
         sequence,
         [1u8; 32],
         3,
@@ -38,7 +41,7 @@ fn valid_beacon_verifies() {
     assert_eq!(v.space(), &space());
     assert_eq!(
         v.station(),
-        &StationId::from_device(&mechanics::crypto::device_from_seed(&STATION_SEED)).unwrap()
+        &Key::from_device(&mechanics::crypto::device_from_seed(&STATION_SEED)).unwrap()
     );
     assert_eq!(v.coordinate(), (2, 5));
 }
@@ -116,8 +119,8 @@ fn trailing_bytes_are_non_canonical() {
 const INITIATOR_SEED: [u8; 32] = [21u8; 32];
 const RESPONDER_SEED: [u8; 32] = [22u8; 32];
 
-fn station_of(seed: &[u8; 32]) -> StationId {
-    StationId::from_device(&mechanics::crypto::device_from_seed(seed)).unwrap()
+fn station_of(seed: &[u8; 32]) -> Key {
+    Key::from_device(&mechanics::crypto::device_from_seed(seed)).unwrap()
 }
 
 fn probe(nonce: [u8; 32]) -> PresenceProbe {
@@ -138,7 +141,7 @@ fn an_unsupported_protocol_version_is_refused_not_negotiated() {
     let b = SignedBeacon::emit(
         99,
         &space(),
-        StationEpoch::from_u64(1),
+        Epoch::from_u64(1),
         0,
         [1u8; 32],
         0,
