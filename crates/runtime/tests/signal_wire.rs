@@ -398,3 +398,196 @@ async fn a_file_offer_crosses_intact_and_triggers_nothing() {
     })
     .await;
 }
+
+/// A World's declared signal schema, enforced rather than merely reviewed.
+///
+/// The substrate's own declaration for `selector::WORLD` is deliberately
+/// permissive — it cannot be otherwise, because the World and the schema are
+/// named *inside* the payload. So a World's ceiling and demand are enforced
+/// after the body decodes, and without that the descriptor's signal section
+/// would be decoration: a World could declare a 64-byte nudge requiring a
+/// capability, and a peer could send sixteen kilobytes of it on session
+/// membership alone.
+mod declared_schemas {
+    use super::*;
+    use replica::body::{BodySchema, MutationModel};
+    use replica::ids::{EncodingId, SchemaId, WorldId};
+    use runtime::world::SignalSchema;
+    use runtime::{
+        World, WorldContext, WorldEffect, WorldError, WorldIntent, WorldLimits, WorldProjection,
+        WorldQuery, WorldRegistration, WorldVersion,
+    };
+
+    const WORLD: &str = "dev.example.pad";
+
+    struct Pad(Vec<BodySchema>, Vec<SignalSchema>);
+
+    impl World for Pad {
+        fn id(&self) -> WorldId {
+            WorldId::parse(WORLD).unwrap()
+        }
+        fn schemas(&self) -> &[BodySchema] {
+            &self.0
+        }
+        fn signal_schemas(&self) -> &[SignalSchema] {
+            &self.1
+        }
+        fn submit(
+            &self,
+            _ctx: &mut WorldContext<'_>,
+            _intent: WorldIntent,
+        ) -> Result<WorldEffect, WorldError> {
+            Err(WorldError::InvalidRequest)
+        }
+        fn query(
+            &self,
+            _ctx: &WorldContext<'_>,
+            _query: WorldQuery,
+        ) -> Result<WorldProjection, WorldError> {
+            Err(WorldError::InvalidRequest)
+        }
+    }
+
+    fn hosting(signals: Vec<SignalSchema>) -> SignalPolicy {
+        let schemas = vec![BodySchema {
+            id: SchemaId::parse("entry").unwrap(),
+            version: 1,
+            encoding: EncodingId::parse("bytes").unwrap(),
+            mutation: MutationModel::Atomic,
+            readable_predecessors: vec![],
+        }];
+        let world = Pad(schemas.clone(), signals.clone());
+        let registration = WorldRegistration {
+            id: world.id(),
+            implementation_version: WorldVersion(1),
+            schemas,
+            limits: WorldLimits::default(),
+            scope_schemas: Vec::new(),
+            signal_schemas: signals,
+        };
+        let worlds = RuntimeBuilder::new()
+            .register(registration, Arc::new(world))
+            .build()
+            .expect("registry");
+        SignalPolicy {
+            worlds,
+            ..policy(vec![stream_kind::RELIABLE_SIGNAL])
+        }
+    }
+
+    /// A demand every registered signal schema must carry.
+    ///
+    /// Not optional: `RuntimeBuilder::build` parses it through
+    /// `AuthorizationDemand::decode_canonical`, which refuses empty input — so a
+    /// World cannot register a signal it declines to say anything about.
+    fn some_demand() -> Vec<u8> {
+        mechanics::demand::AuthorizationDemand::require(
+            mechanics::demand::PolicyCapability::new("pad", "nudge"),
+            mechanics::demand::PolicyResource::space("pad"),
+        )
+        .encode_canonical()
+        .expect("canonical demand")
+    }
+
+    fn nudge(payload_len: usize) -> Signal {
+        Signal::WorldSignal {
+            world: WORLD.into(),
+            schema: "nudge".into(),
+            payload: vec![7u8; payload_len],
+        }
+    }
+
+    #[test]
+    fn a_payload_past_the_worlds_own_ceiling_is_refused() {
+        // The substrate's ceiling for `selector::WORLD` is the whole plane
+        // maximum, so this is the only place the World's own number is read on
+        // a delivery path.
+        let policy = hosting(vec![SignalSchema {
+            name: SchemaId::parse("nudge").unwrap(),
+            max_payload_bytes: 64,
+            demand: some_demand(),
+        }]);
+        assert_eq!(policy.admits_contents(&nudge(64)), Ok(()));
+        assert_eq!(
+            policy.admits_contents(&nudge(65)),
+            Err(SignalError::TooLarge)
+        );
+    }
+
+    #[test]
+    fn a_schema_the_world_never_declared_is_not_registered() {
+        // Reaching a World with an undeclared schema is exactly what a reviewed
+        // descriptor exists to prevent — and it is `NotRegistered` rather than
+        // `Denied`, because it is not a question about standing.
+        let policy = hosting(vec![SignalSchema {
+            name: SchemaId::parse("nudge").unwrap(),
+            max_payload_bytes: 64,
+            demand: some_demand(),
+        }]);
+        let other = Signal::WorldSignal {
+            world: WORLD.into(),
+            schema: "shout".into(),
+            payload: vec![1],
+        };
+        assert_eq!(
+            policy.admits_contents(&other),
+            Err(SignalError::NotRegistered)
+        );
+    }
+
+    #[test]
+    fn a_world_that_declares_no_signals_accepts_none() {
+        // Hosting a World is not the same as hosting its signals. A World that
+        // declared nothing has nothing this plane may deliver to it.
+        let policy = hosting(Vec::new());
+        assert_eq!(
+            policy.admits_contents(&nudge(1)),
+            Err(SignalError::NotRegistered)
+        );
+    }
+
+    #[test]
+    fn a_world_cannot_register_a_signal_it_says_nothing_about() {
+        // Registration refuses an empty demand, which is why the delivery path
+        // has no fallback for one. A signal a World declined to describe is a
+        // signal nobody can decide about.
+        let schemas = vec![BodySchema {
+            id: SchemaId::parse("entry").unwrap(),
+            version: 1,
+            encoding: EncodingId::parse("bytes").unwrap(),
+            mutation: MutationModel::Atomic,
+            readable_predecessors: vec![],
+        }];
+        let signals = vec![SignalSchema {
+            name: SchemaId::parse("nudge").unwrap(),
+            max_payload_bytes: 64,
+            demand: Vec::new(),
+        }];
+        let world = Pad(schemas.clone(), signals.clone());
+        let registration = WorldRegistration {
+            id: world.id(),
+            implementation_version: WorldVersion(1),
+            schemas,
+            limits: WorldLimits::default(),
+            scope_schemas: Vec::new(),
+            signal_schemas: signals,
+        };
+        assert!(RuntimeBuilder::new()
+            .register(registration, Arc::new(world))
+            .build()
+            .is_err());
+    }
+
+    #[test]
+    fn a_declared_demand_is_evaluated_at_the_pinned_frontier() {
+        // `Everyone` permits every read, so this asserts the demand reaches the
+        // authority view at all rather than being carried and ignored — which
+        // is what it was before this landed.
+        let policy = hosting(vec![SignalSchema {
+            name: SchemaId::parse("nudge").unwrap(),
+            max_payload_bytes: 64,
+            demand: some_demand(),
+        }]);
+        assert_eq!(policy.admits_contents(&nudge(8)), Ok(()));
+    }
+}

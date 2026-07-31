@@ -373,17 +373,65 @@ impl SignalPolicy {
         }
     }
 
-    /// Whether this build can interpret a signal's own contents.
+    /// Whether this build can interpret a signal's own contents, and whether
+    /// this peer may have sent them.
     ///
-    /// Distinct from `permits`, which asks about the declaration. A
-    /// `WorldSignal` names its World inside the payload, so the check can only
-    /// happen after the body is decoded.
+    /// Distinct from `permits`, which asks about the *substrate's* declaration.
+    /// A `WorldSignal` names its World and its schema inside the payload, so
+    /// neither the World's registered ceiling nor its demand can be consulted
+    /// until the body is decoded — which is why the substrate's own declaration
+    /// for `selector::WORLD` is deliberately permissive and this is where the
+    /// real bound lives.
+    ///
+    /// Without this the descriptor's signal section would be decoration: a
+    /// World could declare a 64-byte nudge requiring a capability, and a peer
+    /// could send sixteen kilobytes of it with nothing but session membership.
     pub fn admits_contents(&self, signal: &crate::planes::Signal) -> Result<(), SignalError> {
-        let crate::planes::Signal::WorldSignal { world, .. } = signal else {
+        let crate::planes::Signal::WorldSignal {
+            world,
+            schema,
+            payload,
+        } = signal
+        else {
             return Ok(());
         };
-        let world = replica::ids::WorldId::parse(world).ok_or(SignalError::Malformed)?;
-        self.world_is_live(&world)
+        let world_id = replica::ids::WorldId::parse(world).ok_or(SignalError::Malformed)?;
+        self.world_is_live(&world_id)?;
+
+        let schema = replica::ids::SchemaId::parse(schema).ok_or(SignalError::Malformed)?;
+        let registration = self
+            .worlds
+            .registration(&world_id)
+            .ok_or(SignalError::NotRegistered)?;
+        // A schema this World never declared is not registered, whatever the
+        // World would do with it. Reaching a World's `submit` with an
+        // undeclared schema is exactly what the reviewed descriptor exists to
+        // prevent.
+        let declared = registration
+            .signal_schemas
+            .iter()
+            .find(|candidate| candidate.name == schema)
+            .ok_or(SignalError::NotRegistered)?;
+
+        if payload.len() > declared.max_payload_bytes as usize {
+            return Err(SignalError::TooLarge);
+        }
+        // The World's own demand, evaluated by Mechanics at the pinned frontier
+        // — the same evaluation a read of that World would get.
+        //
+        // Not defended against being empty: `RuntimeBuilder::build` parses every
+        // declared demand through `AuthorizationDemand::decode_canonical`, which
+        // refuses empty input, so a registered signal schema always states one.
+        // A fallback here would be a second, more permissive answer to a
+        // question registration has already refused to leave open.
+        if self
+            .authority
+            .evaluate_read(&self.actor, &self.frontier, &declared.demand)
+        {
+            Ok(())
+        } else {
+            Err(SignalError::Denied)
+        }
     }
 
     /// A World this build hosts, with an implementation active at the pinned
