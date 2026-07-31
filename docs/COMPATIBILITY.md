@@ -153,7 +153,7 @@ old one.
 | `lait/contact/1` | Contact — authority, manifest nodes, Body payloads | implemented |
 | `lait/neighbor-presence/1` | liveness probe | implemented |
 | `lait/freight/1` | Freight — reliable exact-object request and response | implemented and **mounted** |
-| `lait/session/1` | Live — transient collaboration and reliable signals | implemented and **mounted**; the transient core and the signal wire are in, the session's own dial-out is not |
+| `lait/session/1` | Live — transient collaboration and reliable signals | implemented and **mounted**, inbound and outbound; carries the control lane and the reliable-signal lane |
 
 **What "implemented" means in this column.** It means a dial on that ALPN
 reaches a handler that reads the opening, judges it, and answers — not that
@@ -277,17 +277,33 @@ them: a peer meets one only as a refusal it already has to handle, which is
 precisely why an operator may raise or lower it without speaking a different
 protocol. `PROTOCOL.md` §12.2 lists the same ceilings from the peer's side.
 
-| Constant | Value | Operator-configurable today |
-|---|---|---|
-| `runtime::budget::slots::MAX_ENDPOINT_CONNECTIONS` | 128 inbound | no — compiled in |
-| `runtime::budget::slots::MAX_SPACE_CONNECTIONS` | 64 inbound | no — compiled in |
-| `runtime::budget::slots::MAX_STAGED_BYTES` | 64 MiB per Space | no — compiled in |
-| `runtime::lifecycle::ContentOptions::cache_quota_bytes` | 4 GiB | yes, per activation |
+| Constant | Value | Scope of the ceiling | Operator-configurable today |
+|---|---|---|---|
+| `runtime::budget::slots::MAX_SPACE_CONNECTIONS` | 64 inbound | **per driver**, so per plane | no — compiled in |
+| `runtime::budget::slots::MAX_CONNECTIONS_PER_PEER_PLANE` | 2 | per driver, per peer | no — compiled in |
+| `runtime::budget::slots::MAX_LIVE_SESSIONS` | 32 | the Live plane's own | no — compiled in |
+| `runtime::budget::slots::MAX_ENDPOINT_CONNECTIONS` | 128 inbound | **nothing enforces it** | no — compiled in |
+| `runtime::budget::slots::MAX_STAGED_BYTES` | 64 MiB per Space | per Space | no — compiled in |
+| `runtime::lifecycle::ContentOptions::cache_quota_bytes` | 4 GiB | per activation | yes, per activation |
 
-The cache quota is the shape the other three are headed for: a default on an
-options struct the composition root fills in, not a constant. Until they get
-there, this table is the whole defence — "128 inbound connections" is otherwise
-a sentence somebody quotes back as a rule of the protocol.
+Two rows say something this table used to imply the opposite of.
+
+`MAX_SPACE_CONNECTIONS` is enforced inside each driver's own ledger, so it is a
+ceiling **per plane** rather than per Space. Two drivers run now, so a Space's
+real inbound ceiling is twice the number in that row. That is deliberate —
+Freight and Live have separate queues and separate threads precisely so a
+saturated transfer cannot delay a cursor — but the number is not what a reader
+would have assumed.
+
+`MAX_ENDPOINT_CONNECTIONS` has no enforcement site at all. What actually bounds
+inbound sessions device-wide is `MAX_PENDING_OPENERS` (64) and the per-Space
+queue depth in the transport hub. The row stays because deleting it would be the
+third time somebody rediscovered that the constant is decorative.
+
+The cache quota is the shape the rest are headed for: a default on an options
+struct the composition root fills in, not a constant. Until they get there, this
+table is the whole defence — "128 inbound connections" is otherwise a sentence
+somebody quotes back as a rule of the protocol, which is exactly what it is not.
 
 `ContentOptions::max_content_len` (256 MiB) sits beside the quota and is *not*
 host-derived. It is an operator lowering plan 13's maximum, so it may only ever
