@@ -397,6 +397,25 @@ Projection distinguishes valid, absent, unavailable, and corrupt data. It must
 not turn an unavailable query into false zero counts or silently coerce malformed
 stored values into valid DTOs.
 
+## 12.1 Transient and signal state
+
+Neither is durable, and neither is a partial delivery of something that will be.
+
+Transient state (cursors, presence, typing, residency hints) is local to a
+Station and expires on its own. It never enters the journal, never becomes an
+Observation, and is gone after a restart — which is correct rather than a
+limitation, because a cursor that survived the process holding it belongs to
+nobody.
+
+Reliable signals are delivered or they fail loudly, and they are durable in no
+other sense. `crates/runtime/src/signal.rs` may not name the Replica writer or
+the Observation ring, and a parser gate enforces that: privacy cannot, because
+`Broadcaster::publish` is `pub(crate)` and the signal module sits inside that
+crate, while `StationCore::with_replica` is outright `pub`. One line is the
+whole distance between the design and a violation — a `publish` from signal code
+would journal nothing and still emit an Observation, which `SpaceBridge::frame_for`
+turns into `activity_advanced` for anything carrying scopes.
+
 ## 13. Local-only state
 
 Device private keys, actor recovery material, custody shares, local petnames,

@@ -124,8 +124,8 @@ old one.
 |---|---|---|
 | `lait/contact/1` | Contact — authority, manifest nodes, Body payloads | implemented |
 | `lait/neighbor-presence/1` | liveness probe | implemented |
-| `lait/freight/1` | reliable exact-object request and response | implemented — provider half; the fetcher lands in the same stage |
-| `lait/session/1` | long-lived realtime session | shapes frozen, routing pending |
+| `lait/freight/1` | Freight — reliable exact-object request and response | implemented and **mounted** |
+| `lait/session/1` | Live — transient collaboration and reliable signals | implemented and **mounted**; the transient core and the signal wire are in, the session's own dial-out is not |
 
 **What "implemented" means in this column.** It means a dial on that ALPN
 reaches a handler that reads the opening, judges it, and answers — not that
@@ -137,11 +137,19 @@ needs no wire change to arrive, which is why the status is recorded against the
 generation rather than against a feature — the frames, bounds, and refusal
 vocabulary a `1` peer must implement are already fixed by what serves them.
 
-Advertising an ALPN is not the same as serving it. The endpoint registers
-`lait/session/1` today and a peer that dials it completes a handshake, but no
-driver owns that plane yet, so the opening is turned away. This column tracks
-the service and not the registration: a successful handshake is not evidence a
-plane is live.
+Advertising an ALPN is not the same as serving it, and until this branch both of
+these were advertised and unserved: the endpoint registered them, a peer that
+dialled completed a handshake, and the hub turned the opening away because no
+driver owned the plane. `Orbit::activate` mounts both now.
+
+This column tracks the service and not the registration. A successful handshake
+was never evidence a plane was live, and for two releases it was evidence of the
+opposite.
+
+Each plane owns its own inbound queue. One queue for both would hand two drivers
+strictly alternating connections, each refusing half of what it was given as a
+foreign ALPN — so the split is what makes a second plane possible at all, rather
+than a tidiness.
 
 One detail reads like a contradiction and is not. The opening still carries
 `protocol_version` and the refusal vocabulary still has `UnsupportedVersion`,

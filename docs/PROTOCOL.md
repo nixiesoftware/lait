@@ -357,6 +357,59 @@ holding that writer on a runtime thread stalls the Contact driver too.
 One connection is one request. A content transfer gets its own connection, which
 is the grain this channel already had.
 
+### 10.2 Transient state, and reliable signals
+
+The Live plane carries two things that are not Bodies and never become them.
+
+**Transient state** — cursors, presence, typing, residency hints — is what a
+Station currently believes and will happily forget. It is never journaled, never
+an Observation, and never survives a restart: a caret that outlived the tab
+holding it is a ghost, and a presence that survived a crash is a lie about who
+is here. Three rules follow, and they shape everything else:
+
+- **Nothing has a goodbye.** A tab closing, a laptop sleeping and a network
+  dropping all deliver exactly nothing, so every slot carries its own expiry.
+  Retirement is an optimisation on top of that and never a prerequisite.
+- **Epochs are compared, never ordered.** A `session_epoch` is sixteen random
+  bytes minted per reconnect, so two of them have no order. The only answerable
+  question is whether an item's epoch is the one this session was admitted at.
+- **The table is bounded and everything in it is evictable**, because nothing in
+  it is correctness. A full table costs a stale cursor; an unbounded one is a
+  Station a Space can make allocate without ever committing anything.
+
+A payload that does not fit the path's datagram capacity is dropped and counted,
+never truncated. Transient payloads have no retransmit, so half of one arrives as
+corruption rather than as a gap.
+
+An item's anchor path must equal the field its scope names. That is a bound
+rather than a consistency check: the path becomes a container key inside the
+collaborative document, so an anchor free to name any path is a peer choosing
+which container a resolve touches.
+
+**Reliable signals** are bounded one-message events — an invitation, a file
+offer, an attention ping. Reliable means delivered or failed loudly; it does not
+mean durable. The wire is:
+
+```text
+stream_kind | u16 selector | u32 length | canonical body
+```
+
+The selector precedes the length, and that ordering is load-bearing: a
+declaration's `max_bytes` is a pre-allocation ceiling only if it is known before
+the length is read. Behind the length, the schema is known only after a buffer
+that size already exists, and the per-signal maximum is decoration. An unknown
+selector is refused with no length consulted, the ceiling is floored against the
+plane's own so a declaration table cannot raise the hard limit, and the decoded
+body must be the signal its selector promised — otherwise a small declaration's
+ceiling could be used to smuggle a larger-bounded shape past it.
+
+A signal's display name is sanitised **on use** and never on decode. A
+decode-time rewrite would make `encode(decode(x)) == x` false, and canonical
+re-encode equality is what every shape on this plane rests on. A control
+character is refused outright rather than repaired: it lands in a header, a
+filename or a terminal, and none of those are places a peer chooses what
+happens.
+
 ## 11. Failure and resource behavior
 
 Every protocol has explicit limits for frames, records, nodes, chunks, payloads,
