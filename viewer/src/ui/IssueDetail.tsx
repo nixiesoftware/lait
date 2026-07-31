@@ -45,6 +45,7 @@ import {
   type EventPhraseContext,
   type NameResolver,
 } from "../core/activity";
+import { codeUnitSpan } from "../core/anchor";
 import { caretPhrase, carets, typists, useLiveTable, watching } from "../live";
 import type { Field as PredictField } from "../core/overlay";
 import type { IssueField } from "../core/registry";
@@ -876,6 +877,7 @@ export function IssueDetail({
           key={reff}
           events={events}
           comments={issue.comments}
+          description={issue.description}
           memberOf={memberOf}
           states={states}
           graph={graph}
@@ -1853,6 +1855,7 @@ function Timeline({
   memberOf,
   states,
   graph,
+  description,
   readOnly,
   meKey,
   onReact,
@@ -1862,6 +1865,10 @@ function Timeline({
 }: {
   events: ActivityEvent[];
   comments: CommentDto[];
+  /** The description as it stands, so an anchored comment can quote the words
+   *  it is attached to. Passed down rather than re-fetched: it is the same text
+   *  the engine resolved the anchor against on this read. */
+  description: string;
   memberOf: (key: string) => MemberDto | undefined;
   /** The workflow, so a status change can say "Backlog", not "backlog". */
   states: WorkflowState[];
@@ -2011,6 +2018,7 @@ function Timeline({
             key={`c${entry.order}`}
             comment={entry.comment}
             replies={entry.comment.id ? (repliesByParent.get(entry.comment.id) ?? []) : []}
+            description={description}
             memberOf={memberOf}
             readOnly={readOnly}
             meKey={meKey}
@@ -2052,12 +2060,15 @@ function Comment({
   readOnly,
   meKey,
   onReact,
+  description,
   onReply,
   onCopyLink,
   onCreateFromComment,
 }: {
   comment: CommentDto;
   replies: CommentDto[];
+  /** The text an anchored comment marks, for quoting the words it is on. */
+  description: string;
   memberOf: (key: string) => MemberDto | undefined;
   readOnly: boolean;
   meKey: string | null;
@@ -2069,6 +2080,7 @@ function Comment({
   const block = (comment: CommentDto) => (
     <CommentBlock
       comment={comment}
+      description={description}
       memberOf={memberOf}
       readOnly={readOnly}
       meKey={meKey}
@@ -2095,10 +2107,57 @@ function Comment({
   );
 }
 
+/**
+ * Where an anchored comment is attached, above the comment itself.
+ *
+ * Three states and three renderings, because they are three different facts.
+ *
+ * A resolved span quotes the words it is on — which is the whole value of
+ * anchoring, and the only rendering that needs the text. `drifted` says the
+ * words are gone and shows no position: a stale offset drawn as a number is a
+ * highlight over the wrong words, which is worse than no highlight. The comment
+ * stays either way, because somebody wrote it and the text moving out from under
+ * it does not unwrite it.
+ *
+ * `unresolved` is not `drifted`. It says nobody worked out where this is, which
+ * is a fact about this node rather than about the text, and a reader who is told
+ * "the text is gone" when it is not would go looking for a deletion nobody made.
+ */
+function AnchorNote({
+  anchor,
+  description,
+}: {
+  anchor: CommentDto["anchor"];
+  description: string;
+}) {
+  if (!anchor) return null;
+  const state = anchor.state;
+  if (state.kind === "at") {
+    // Converted before slicing. The engine counts Unicode scalars and a JS
+    // string indexes UTF-16, so slicing the raw offsets is correct until
+    // somebody puts an emoji in the description and silently wrong after.
+    const span = codeUnitSpan(description, state.start, state.end);
+    const marked = description.slice(span.start, span.end);
+    return (
+      <p className="text-mute mt-1 truncate text-xs">
+        on <span className="text-default">{marked || "\u2014"}</span>
+      </p>
+    );
+  }
+  return (
+    <p className="text-mute mt-1 text-xs">
+      {state.kind === "drifted"
+        ? "the text this marked has changed"
+        : "this node cannot place this comment"}
+    </p>
+  );
+}
+
 /** A single comment inside the card: header (face, name, time, actions), body,
  *  reaction chips. Shared by the root comment and each reply. */
 function CommentBlock({
   comment: c,
+  description,
   memberOf,
   readOnly,
   meKey,
@@ -2107,6 +2166,7 @@ function CommentBlock({
   onCreateFromComment,
 }: {
   comment: CommentDto;
+  description: string;
   memberOf: (key: string) => MemberDto | undefined;
   readOnly: boolean;
   meKey: string | null;
@@ -2183,6 +2243,7 @@ function CommentBlock({
           </span>
         )}
       </div>
+      <AnchorNote anchor={c.anchor} description={description} />
       <Markdown text={c.body} density="tight" className="mt-1.5" />
       {(c.reactions?.length ?? 0) > 0 && (
         <div className="mt-1.5 flex flex-wrap items-center gap-1">

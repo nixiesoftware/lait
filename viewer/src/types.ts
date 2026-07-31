@@ -125,7 +125,32 @@ export interface CommentDto {
   parent?: string | null;
   /** Emoji reactions, grouped per emoji with the actors who reacted. */
   reactions?: ReactionDto[];
+  /** The span of the description this comment marks, if it marks one.
+   *
+   *  Absent is the ordinary case and most comments. Present is resolved by the
+   *  engine on every read — never stored resolved, because a stored position is
+   *  a number that was right once. */
+  anchor?: CommentAnchorDto | null;
 }
+
+/** Where a comment is attached, and what became of that place. */
+export interface CommentAnchorDto {
+  /** The collaborative field the span lies in. `description` today. */
+  field: string;
+  state: CommentAnchorState;
+}
+
+/** The three answers, and they are three different facts.
+ *
+ *  `at` is a position. `drifted` says the material this marked is gone — the
+ *  comment is still shown, because somebody wrote it and the text moving out
+ *  from under it does not unwrite it. `unresolved` says nobody worked out where
+ *  it is. Neither of the last two is a position and neither may render as one:
+ *  a stale offset drawn as a number is a highlight over the wrong words. */
+export type CommentAnchorState =
+  | { kind: "at"; start: number; end: number }
+  | { kind: "drifted" }
+  | { kind: "unresolved" };
 
 export interface ReactionDto {
   emoji: string;

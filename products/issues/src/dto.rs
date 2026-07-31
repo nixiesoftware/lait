@@ -14,7 +14,10 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::ids::{ActorId, DeviceId, DocId, LabelId, ProjectId, SpaceId};
+// No `DeviceId`. This layer had exactly one device-typed field and it was the
+// one named `actor` — every other identity a client is shown is an actor, which
+// is the shape the whole DTO surface already had and that one field did not.
+use crate::ids::{ActorId, DocId, LabelId, ProjectId, SpaceId};
 
 /// Generate the committed JSON Schema 2020-12 bundle for the product policy
 /// surface — every role/access/workflow definition shape plan 04 names —
