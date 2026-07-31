@@ -241,6 +241,71 @@ pub struct WorldLimits {
     pub max_payload_bytes: u32,
 }
 
+/// A transient scope a World declares under
+/// [`TransientScope::CustomWorld`](crate::transient::TransientScope).
+///
+/// A key ceiling and nothing else. A payload ceiling was considered and
+/// rejected: `CustomWorld` admits only `TransientKind::Presence`, which carries
+/// no bytes, so the number would bound nothing. A per-scope authorization
+/// demand is absent because nothing has decided what one would mean for a
+/// scope; carrying the field before its semantics exist is the wrong order.
+///
+/// The ceiling below is declared and reviewed — it is in the implementation id
+/// — and it is **not yet applied at delivery**. `transient.rs` bounds every
+/// scope field at
+/// [`MAX_SCOPE_FIELD_BYTES`](crate::transient::MAX_SCOPE_FIELD_BYTES) and
+/// consults no registered `ScopeSchema`, so a World declaring 8 still sees 128.
+/// Committing the number to the reviewed identity ahead of the check is
+/// deliberate: wiring it changes no descriptor bytes and therefore moves no id
+/// an authority has already activated.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScopeSchema {
+    pub name: SchemaId,
+    /// The World's declared ceiling on a scope field. Registration refuses one
+    /// that does not tighten the substrate's
+    /// [`MAX_SCOPE_FIELD_BYTES`](crate::transient::MAX_SCOPE_FIELD_BYTES),
+    /// which is the only place it is read today.
+    pub max_key_bytes: u32,
+}
+
+/// A World signal schema: what it is called, how large it may be, and what
+/// authority sending it demands.
+///
+/// The authority is canonical `mechanics::demand::AuthorizationDemand` bytes
+/// rather than a capability name, because that is the form
+/// [`SignalDemand::World`](crate::signal::SignalDemand) carries and policy
+/// evaluates; a name would need a translation to demand bytes that nobody has
+/// written.
+///
+/// Neither the ceiling nor the demand is applied at delivery yet. Every World
+/// signal rides `selector::WORLD`, whose core declaration carries
+/// `SignalDemand::Session` and
+/// [`MAX_SIGNAL_BYTES`](crate::planes::bounds::MAX_SIGNAL_BYTES), and the read
+/// path resolves its bound and its authority from that declaration without
+/// consulting the registered schema. Both numbers are declared, reviewed, and
+/// committed to the implementation id; what is missing is the resolution step
+/// that turns a `selector::WORLD` frame into its schema's declaration. Wiring
+/// it changes no descriptor bytes, so it moves no already-activated id.
+///
+/// There is deliberately no answer policy, and that omission is a different
+/// case from the two above. `selector::WORLD` declares
+/// `ResponsePolicy::Forbidden`, so a per-schema `Acknowledge` would be a
+/// declaration the substrate *contradicts* rather than one it has not started
+/// applying. If one ever becomes enforceable it is a new descriptor section
+/// tag, not an edit to this one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignalSchema {
+    pub name: SchemaId,
+    /// The World's declared ceiling. Registration refuses one that does not
+    /// tighten the plane's
+    /// [`MAX_SIGNAL_BYTES`](crate::planes::bounds::MAX_SIGNAL_BYTES), which is
+    /// the only place it is read today.
+    pub max_payload_bytes: u32,
+    /// Canonical [`mechanics::demand::AuthorizationDemand`] bytes. Parsed at
+    /// registration; not evaluated on any delivery path yet.
+    pub demand: Vec<u8>,
+}
+
 /// What a World supplies at registration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorldRegistration {
@@ -248,6 +313,11 @@ pub struct WorldRegistration {
     pub implementation_version: WorldVersion,
     pub schemas: Vec<BodySchema>,
     pub limits: WorldLimits,
+    /// Declared transient scopes. Empty is the ordinary case and costs nothing:
+    /// the implementation descriptor omits an empty section entirely.
+    pub scope_schemas: Vec<ScopeSchema>,
+    /// Declared World signals, under the same rule.
+    pub signal_schemas: Vec<SignalSchema>,
 }
 
 /// A decoded, authorized-by-Runtime application intent handed to a World. The
@@ -539,6 +609,22 @@ pub trait World: Send + Sync + 'static {
 
     /// The Body schemas this World supports.
     fn schemas(&self) -> &[BodySchema];
+
+    /// The transient scopes this World declares.
+    ///
+    /// Defaulted to none rather than made a required method: a World with
+    /// nothing to declare needs no edit, and because the descriptor omits an
+    /// empty section it also keeps the implementation id it already has.
+    /// `build()` refuses a World whose answer here disagrees with its
+    /// registration, so the default is a declaration and not a hole.
+    fn scope_schemas(&self) -> &[ScopeSchema] {
+        &[]
+    }
+
+    /// The World signals this World declares, under the same rule.
+    fn signal_schemas(&self) -> &[SignalSchema] {
+        &[]
+    }
 
     /// Decode, authorize, and stage Body operations for an application intent.
     fn submit(

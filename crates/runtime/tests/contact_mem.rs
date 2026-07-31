@@ -204,6 +204,8 @@ fn runtime_at(root: &std::path::Path) -> Runtime {
         implementation_version: WorldVersion(1),
         schemas: world.schemas().to_vec(),
         limits: WorldLimits::default(),
+        scope_schemas: Vec::new(),
+        signal_schemas: Vec::new(),
     };
     let registry = RuntimeBuilder::new()
         .register(reg, Arc::new(world))

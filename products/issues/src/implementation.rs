@@ -218,6 +218,8 @@ impl IssuesWorld {
             implementation_version: runtime::WorldVersion(1),
             schemas: world.schemas.clone(),
             limits: runtime::WorldLimits::default(),
+            scope_schemas: Vec::new(),
+            signal_schemas: Vec::new(),
         }
     }
 
@@ -227,12 +229,9 @@ impl IssuesWorld {
     /// policy-table commitment and artifact identity are build-embedded
     /// release ids (fixed here until a versioned policy table lands).
     pub fn implementation_descriptor() -> runtime::implementation::WorldImplementationDescriptor {
-        let world = Self::new();
-        runtime::implementation::WorldImplementationDescriptor::from_schemas(
-            world.id.clone(),
+        runtime::implementation::WorldImplementationDescriptor::from_registration(
+            &Self::registration(),
             1,
-            1,
-            &world.schemas,
             *blake3::hash(b"lait.issues.policy-table.v1").as_bytes(),
             *blake3::hash(b"lait.issues.artifact.v1").as_bytes(),
         )

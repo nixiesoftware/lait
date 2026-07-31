@@ -407,6 +407,8 @@ mod tests {
                 implementation_version: WorldVersion(1),
                 schemas: schemas.clone(),
                 limits: WorldLimits::default(),
+                scope_schemas: Vec::new(),
+                signal_schemas: Vec::new(),
             },
             Arc::new(NoopWorld { id, schemas }),
             [marker; 32],

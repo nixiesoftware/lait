@@ -4718,6 +4718,7 @@ name = "runtime"
 version = "0.6.1"
 dependencies = [
  "anyhow",
+ "async-trait",
  "blake3",
  "comms",
  "data-encoding",

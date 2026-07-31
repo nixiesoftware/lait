@@ -43,12 +43,40 @@ kind of bump and the one that needs feature bits to avoid.
 | Custody package | `mechanics::custody::PACKAGE_VERSION` | 1 | leading field |
 | Policy compiler | `mechanics::compile::COMPILER_VERSION` | 1 | leading field |
 | Ledger semantics | `mechanics::ledger::LEDGER_SEMANTICS_VERSION` | 1 | leading field |
+| World implementation descriptor | `runtime::implementation::DESCRIPTOR_VERSION_SECTIONED` | 2 | leading field |
 
 The marker and the store manifest version different things and move
 independently: the marker identifies the *store layout* — what files exist and
 where — while the manifest version identifies *what a commit records*. Replacing
 the paged manifest with an authenticated index changed the second and not the
 first.
+
+The descriptor is the only row whose version is chosen by the record's content
+rather than by the build that wrote it. A descriptor emits 1 when it declares no
+sections and 2 when it declares any, so the set of implementation ids this bump
+moves is the set of Worlds that declare a section — today, none. That is the
+whole reason the section table exists: adding a section kind must not move the
+id of a World that declares nothing of that kind, which two more fields in a
+fixed-order tuple would have done to every id in the system.
+
+The hash domain deliberately did not move with it. Ids stay derived under
+`lait.world-implementation.v1` even at encoding version 2, because the domain is
+what every shipped activation record was derived under and moving it invalidates
+all of them at once — the cost §1 records against the "hash domain" mechanism.
+An encoding version and a domain generation are separate numbers here precisely
+so that the cheap change can be made without paying for the expensive one.
+
+Within the table, an unknown section tag is refused rather than skipped. A
+skipped section would make the implementation id a digest over bytes the build
+did not interpret, which is the one thing a reviewed trust identity may not be.
+Forward tolerance is not what the tag buys; not moving unrelated ids is.
+
+Every count in the record is a `u16`, so 65535 schemas, and 65535 entries per
+section, is a limit of the format rather than a policy anyone tunes
+(`runtime::implementation::MAX_ENCODABLE_ENTRIES`). A longer list has no
+encoding, and `encode` refuses it instead of writing a count that describes
+fewer entries than follow it — which would derive an id over bytes `decode`
+rejects, an encoding that does not decode.
 
 A Manifest root's acceptance rule tightened without its version moving, which
 is worth stating plainly because the two usually move together. A root whose
