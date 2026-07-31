@@ -798,6 +798,34 @@ impl SpaceBridge {
     /// The World said who and what. This says whether they are reachable, which
     /// is the half a World must not know: one that could see who is connected
     /// would be a World holding a delivery plane.
+    /// Which present peers each nudge reaches.
+    ///
+    /// Pulled out of `deliver_nudges` because this is the whole policy and the rest
+    /// is plumbing: given who is here and who a World named, decide what goes where.
+    /// A method on `SpaceBridge` would need a Station, a transport and a docked
+    /// Session to test three rules that need none of them.
+    ///
+    /// Actor equality and nothing looser. A nudge names one actor, and the only
+    /// question is which of the sessions currently open belong to it — a peer with
+    /// two devices is two Stations under one actor and hears once per device, which
+    /// is what having two devices means.
+    fn reachable<'a>(
+        here: &'a [(mechanics::ids::StationId, String)],
+        nudges: &'a [crate::orbital::WorldNudge],
+    ) -> Vec<(
+        &'a mechanics::ids::StationId,
+        &'a crate::orbital::WorldNudge,
+    )> {
+        nudges
+            .iter()
+            .flat_map(|nudge| {
+                here.iter()
+                    .filter(move |(_, actor)| actor == &nudge.actor)
+                    .map(move |(station, _)| (station, nudge))
+            })
+            .collect()
+    }
+
     fn deliver_nudges(&self, nudges: Vec<crate::orbital::WorldNudge>) {
         if nudges.is_empty() {
             return;
@@ -806,6 +834,9 @@ impl SpaceBridge {
         // Resolved once. `actor_for` asks Mechanics per Station, and a fan-out
         // to a dozen followers would otherwise ask about the same peer a dozen
         // times.
+        //
+        // A Station that does not resolve is dropped rather than delivered to
+        // under an invented identity — the same rule the live view follows.
         let here: Vec<(mechanics::ids::StationId, String)> = live
             .present_stations()
             .into_iter()
@@ -815,19 +846,17 @@ impl SpaceBridge {
             })
             .collect();
         let world = crate::world::contract::world_id().as_str().to_string();
-        for nudge in nudges {
-            for (station, _) in here.iter().filter(|(_, a)| a == &nudge.actor) {
-                let signal = runtime::planes::Signal::WorldSignal {
-                    world: world.clone(),
-                    schema: nudge.schema.clone(),
-                    payload: nudge.payload.clone(),
-                };
-                // A full outbox is not reported to anyone. The record behind
-                // every nudge is durable, so a refused one costs timeliness and
-                // nothing else — and telling the *sender* would be telling them
-                // something about the receiver's queue.
-                live.nudge(station, signal);
-            }
+        for (station, nudge) in Self::reachable(&here, &nudges) {
+            let signal = runtime::planes::Signal::WorldSignal {
+                world: world.clone(),
+                schema: nudge.schema.clone(),
+                payload: nudge.payload.clone(),
+            };
+            // A full outbox is not reported to anyone. The record behind every
+            // nudge is durable, so a refused one costs timeliness and nothing
+            // else — and telling the *sender* would be telling them something
+            // about the receiver's queue.
+            live.nudge(station, signal);
         }
     }
 
@@ -3101,5 +3130,101 @@ mod tests {
             crate::world::contract::issue_body_id(doc).as_bytes(),
             crate::world::contract::issue_body_id("ENG-12").as_bytes()
         );
+    }
+}
+#[cfg(test)]
+/// Who a World's nudges actually reach.
+mod nudge_delivery {
+    use crate::orbital::WorldNudge;
+    use mechanics::ids::StationId;
+
+    fn station(seed: u8) -> StationId {
+        StationId::from_device(&mechanics::crypto::device_from_seed(&[seed; 32])).expect("station")
+    }
+
+    fn nudge(actor: &str) -> WorldNudge {
+        WorldNudge {
+            actor: actor.into(),
+            schema: "assigned".into(),
+            payload: vec![1, 2, 3],
+        }
+    }
+
+    /// The same helper the delivery path uses. Free rather than a method so it
+    /// can be exercised without a Station, a transport and a docked Session.
+    fn reachable<'a>(
+        here: &'a [(StationId, String)],
+        nudges: &'a [WorldNudge],
+    ) -> Vec<(&'a StationId, &'a WorldNudge)> {
+        super::SpaceBridge::reachable(here, nudges)
+    }
+
+    #[test]
+    fn a_nudge_reaches_only_sessions_belonging_to_the_actor_it_names() {
+        // Presence is the gate. Somebody who is not here is not queued for, and
+        // somebody who is here under a different actor is not somebody else's
+        // notification.
+        let here = vec![
+            (station(1), "act_alice".to_string()),
+            (station(2), "act_bob".to_string()),
+        ];
+        let nudges = vec![nudge("act_bob")];
+        let sent = reachable(&here, &nudges);
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].0, &station(2));
+    }
+
+    #[test]
+    fn an_actor_with_nobody_here_reaches_nobody_and_is_not_an_error() {
+        // The durable record is already committed and already converging, and it
+        // is the absent peer's path. Queueing here would make this a mailbox.
+        let here = vec![(station(1), "act_alice".to_string())];
+        assert!(reachable(&here, &[nudge("act_carol")]).is_empty());
+        assert!(reachable(&[], &[nudge("act_alice")]).is_empty());
+    }
+
+    #[test]
+    fn two_devices_of_one_person_each_hear_once() {
+        // Which is what having two devices means. The alternative — picking one
+        // — would mean the notification landed on whichever machine the fan-out
+        // happened to see first.
+        let here = vec![
+            (station(1), "act_alice".to_string()),
+            (station(2), "act_alice".to_string()),
+        ];
+        let nudges = [nudge("act_alice")];
+        let sent = reachable(&here, &nudges);
+        assert_eq!(sent.len(), 2);
+        assert_ne!(sent[0].0, sent[1].0);
+    }
+
+    #[test]
+    fn several_nudges_each_find_their_own_actor() {
+        // A comment on an issue with three people on it is three nudges, and
+        // each has to land on its own — a fan-out that matched the first actor
+        // and stopped would tell one person and silently drop the rest.
+        let here = vec![
+            (station(1), "act_alice".to_string()),
+            (station(2), "act_bob".to_string()),
+            (station(3), "act_carol".to_string()),
+        ];
+        let nudges = vec![nudge("act_alice"), nudge("act_carol")];
+        let sent = reachable(&here, &nudges);
+        assert_eq!(sent.len(), 2);
+        let reached: Vec<_> = sent.iter().map(|(s, _)| *s).collect();
+        assert!(reached.contains(&&station(1)));
+        assert!(reached.contains(&&station(3)));
+        assert!(!reached.contains(&&station(2)));
+    }
+
+    #[test]
+    fn actor_matching_is_equality_and_not_a_prefix() {
+        // An actor id is a canonical string. Anything looser here would deliver
+        // one person's notifications to another whose id happened to start the
+        // same way, which is a real shape for base32 identifiers.
+        let here = vec![(station(1), "act_alice".to_string())];
+        assert!(reachable(&here, &[nudge("act_ali")]).is_empty());
+        assert!(reachable(&here, &[nudge("act_alicexx")]).is_empty());
+        assert_eq!(reachable(&here, &[nudge("act_alice")]).len(), 1);
     }
 }
