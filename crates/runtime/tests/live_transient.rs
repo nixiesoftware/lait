@@ -477,6 +477,7 @@ mod revocation {
             granted_lanes: vec![runtime::planes::stream_kind::CONTROL],
             session_id: [2u8; 16],
             session_epoch: [1u8; 16],
+            features: 0,
         }
     }
 
@@ -819,7 +820,7 @@ mod dialling {
                     capability: runtime::planes::ProtocolCapability {
                         plane: Plane::Live,
                         protocol_version: open.protocol_version,
-                        features: 0,
+                        features: open.features & runtime::planes::feature::LOCAL_SUPPORTED,
                     },
                     // Grant one of the two asked for, so the test can tell the
                     // dialer reports what the *responder* said rather than what
@@ -846,7 +847,16 @@ mod dialling {
 
         let open = responder.await.expect("responder");
         assert_eq!(open.plane, Plane::Live);
-        assert_eq!(open.features, 0, "nothing this build does not implement");
+        assert_eq!(
+            open.features,
+            runtime::planes::feature::LOCAL_SUPPORTED,
+            "what this build implements, and nothing it merely has a name for"
+        );
+        assert_eq!(
+            open.features & runtime::planes::feature::UNSOLICITED_PROVIDE,
+            0,
+            "nothing serves a chunk without being asked, so it is not offered"
+        );
         assert_eq!(
             open.requested_lanes,
             vec![stream_kind::CONTROL, stream_kind::RELIABLE_SIGNAL],
@@ -856,6 +866,11 @@ mod dialling {
         // What the responder granted, not what the dialer asked for.
         assert_eq!(live.peer.granted_lanes, vec![stream_kind::CONTROL]);
         assert_eq!(live.peer.session_id, [7u8; 16]);
+        // And the negotiated intersection reaches the plane that honours it.
+        assert_eq!(
+            live.peer.features,
+            runtime::planes::feature::RESIDENCY_HINTS
+        );
         // And the identity is this Station's own resolution, never the packet's.
         assert_eq!(live.peer.actor.as_str(), format!("act_{}", "12".repeat(32)));
     }
@@ -882,5 +897,72 @@ mod dialling {
         )
         .await;
         assert_eq!(refused.err(), Some(DialRefusal::NotAdmitted));
+    }
+}
+
+/// Residency hints: who to ask first, and nothing more.
+mod residency {
+    use super::*;
+    use runtime::live::{LiveHandle, NoResidency, ResidencyOracle, ResidencyState};
+
+    /// An oracle that holds exactly the chunks it was given.
+    struct Holds(Vec<u32>);
+
+    impl ResidencyOracle for Holds {
+        fn residency(&self, _content: &[u8; 32], wanted: &[u32]) -> ResidencyState {
+            let held = wanted.iter().filter(|i| self.0.contains(i)).count();
+            if held == 0 {
+                ResidencyState::Absent
+            } else if held == wanted.len() {
+                ResidencyState::Complete
+            } else {
+                ResidencyState::Partial
+            }
+        }
+    }
+
+    #[test]
+    fn a_station_with_no_content_answers_absent_rather_than_failing() {
+        // `Absent` is the truth, not a placeholder. A Station holding no content
+        // holds none of this content either, and a hint saying so sends the
+        // asker to somebody who can help.
+        let handle = LiveHandle::new(None);
+        assert_eq!(
+            handle.residency(&[1u8; 32], &[0, 1, 2]),
+            ResidencyState::Absent
+        );
+        assert_eq!(
+            NoResidency.residency(&[1u8; 32], &[]),
+            ResidencyState::Absent
+        );
+    }
+
+    #[test]
+    fn three_states_and_no_bitmap() {
+        // Three states rather than a chunk list is the whole design. A peer that
+        // could read a complete bitmap off a hint could reconstruct which parts
+        // of a file somebody had opened.
+        let handle = LiveHandle::with_residency(None, Arc::new(Holds(vec![0, 2])));
+        assert_eq!(
+            handle.residency(&[1u8; 32], &[0, 2]),
+            ResidencyState::Complete
+        );
+        assert_eq!(
+            handle.residency(&[1u8; 32], &[0, 1]),
+            ResidencyState::Partial
+        );
+        assert_eq!(
+            handle.residency(&[1u8; 32], &[3, 4]),
+            ResidencyState::Absent
+        );
+    }
+
+    #[test]
+    fn asking_about_nothing_is_absent_and_costs_nothing() {
+        // An empty `wanted` must not read as "I hold everything you asked for",
+        // which is what a naive all-of-them-are-present check returns for an
+        // empty set.
+        let handle = LiveHandle::with_residency(None, Arc::new(Holds(vec![0, 1, 2])));
+        assert_eq!(handle.residency(&[1u8; 32], &[]), ResidencyState::Absent);
     }
 }

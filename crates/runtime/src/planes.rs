@@ -256,12 +256,16 @@ pub mod feature {
 
     /// What *this* build actually implements.
     ///
-    /// Zero, and that is the honest answer: both bits above are allocated and
-    /// neither has a consumer yet. Intersecting against this rather than
-    /// against "every bit we have a name for" is the difference between
-    /// advertising a capability and advertising a constant — a peer that acted
-    /// on a bit we echoed back but do not honour would be right to be annoyed.
-    pub const LOCAL_SUPPORTED: u64 = 0;
+    /// `RESIDENCY_HINTS` is here because there is now a `ResidencyOracle` that
+    /// answers them; `UNSOLICITED_PROVIDE` is not, because nothing serves a
+    /// chunk without being asked. Intersecting against this rather than against
+    /// "every bit we have a name for" is the difference between advertising a
+    /// capability and advertising a constant — a peer that acted on a bit we
+    /// echoed back but do not honour would be right to be annoyed.
+    ///
+    /// A bit joins this constant in the same commit as the code that honours
+    /// it, and never before.
+    pub const LOCAL_SUPPORTED: u64 = RESIDENCY_HINTS;
 }
 
 /// What a peer advertises about a plane it speaks.

@@ -236,6 +236,7 @@ pub struct LiveHandle {
     table: std::sync::Mutex<PublishTable>,
     signals: SignalSink,
     anchors: Option<std::sync::Arc<dyn AnchorSource>>,
+    residency: std::sync::Arc<dyn ResidencyOracle>,
 }
 
 #[derive(Default)]
@@ -266,11 +267,28 @@ impl PublishTable {
 
 impl LiveHandle {
     pub fn new(anchors: Option<std::sync::Arc<dyn AnchorSource>>) -> Self {
+        Self::with_residency(anchors, std::sync::Arc::new(NoResidency))
+    }
+
+    pub fn with_residency(
+        anchors: Option<std::sync::Arc<dyn AnchorSource>>,
+        residency: std::sync::Arc<dyn ResidencyOracle>,
+    ) -> Self {
         Self {
             table: std::sync::Mutex::new(PublishTable::default()),
             signals: tokio::sync::broadcast::channel(SIGNAL_QUEUE).0,
             anchors,
+            residency,
         }
+    }
+
+    /// How much of a content this Station holds, for a peer that asked.
+    ///
+    /// A hint, and the answer to an unknown content is indistinguishable from
+    /// the answer to one nobody here holds — otherwise this is an oracle for
+    /// what a Space contains, answerable by guessing content ids.
+    pub fn residency(&self, content: &[u8; 32], wanted: &[u32]) -> ResidencyState {
+        self.residency.residency(content, wanted)
     }
 
     fn table(&self) -> std::sync::MutexGuard<'_, PublishTable> {
@@ -699,6 +717,17 @@ pub async fn serve_session(
                 if !session.is_watching(&item.scope) {
                     continue;
                 }
+                if matches!(item.scope, TransientScope::ContentResidency { .. })
+                    && peer.features & crate::planes::feature::RESIDENCY_HINTS == 0
+                {
+                    // Negotiated or not carried. A peer that did not offer the
+                    // bit cannot be sent hints it has no way to read, and it
+                    // must not be able to publish them either — a capability is
+                    // a two-sided agreement, and honouring it in one direction
+                    // only is how one side ends up acting on state the other
+                    // never agreed to keep.
+                    continue;
+                }
                 let now = Instant::now();
                 if session.admit(&item, &epoch, now) == AdmitOutcome::Stored {
                     // Only what the session store took. The per-connection
@@ -1114,12 +1143,11 @@ pub struct LivePeer {
 ///
 /// Modelled on `fetch::connect_provider`, and different in three ways that
 /// matter. The plane is `Live`. The opening names lanes, because on this plane
-/// the ALPN does not type the conversation — Freight carries none. And it
-/// offers no features at all: `feature::LOCAL_SUPPORTED` is zero, and offering
-/// a bit this build does not honour is a promise a peer would be right to be
-/// annoyed about. The Freight dialer still offers `RESIDENCY_HINTS`; that is a
-/// pre-existing dishonesty on the wrong plane, and it is corrected where the
-/// oracle lands rather than copied here.
+/// the ALPN does not type the conversation — Freight carries none. And it offers
+/// `feature::LOCAL_SUPPORTED` rather than a hand-picked list, so the offer moves
+/// with the build: a bit joins that constant in the same commit as the code that
+/// honours it, and offering one that is not there is a promise a peer would be
+/// right to be annoyed about.
 ///
 /// **The peer's identity is resolved locally, never taken from the accept.** The
 /// responder tells us which lanes it granted, and nothing else it says about who
@@ -1196,6 +1224,10 @@ pub async fn dial(
                 granted_lanes: accept.granted_lanes,
                 session_id,
                 session_epoch: epoch,
+                // What the responder said it agreed to. The dialer's own offer
+                // was zero features, so this is what came back rather than what
+                // was hoped for.
+                features: accept.capability.features,
             },
         }),
         Err(_) => Err(
@@ -1472,6 +1504,126 @@ async fn dial_and_serve(task: DialTask, peer: StationId, session_id: [u8; 16]) {
     let mut ledger = task.ledger.borrow_mut();
     ledger.ended(&peer);
     task.handle.set_capped(ledger.is_capped());
+}
+
+/// How much of a content this Station holds.
+///
+/// Three states rather than a chunk bitmap, and that is the whole design. A hint
+/// says *who to ask first*; it is not an inventory, and a peer that could read
+/// a complete bitmap off a hint would be able to reconstruct which parts of a
+/// file somebody had opened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ResidencyState {
+    /// None of the chunks asked about are here.
+    ///
+    /// The same answer a content this Station has never heard of gets, because
+    /// `resident_among` returns an empty list for both — a caller that could
+    /// tell them apart would hold an oracle for what a Space contains,
+    /// answerable by guessing content ids.
+    Absent,
+    /// Some of them.
+    Partial,
+    /// All of them.
+    Complete,
+}
+
+/// Whether this Station holds parts of a content, for a peer that asked.
+///
+/// A trait rather than a direct `ContentHost` call, so the Live plane holds the
+/// question rather than the content plane's whole surface — and so a Station
+/// with no content host still compiles into a working Live plane, answering
+/// `Absent` because that is the truth.
+pub trait ResidencyOracle: Send + Sync {
+    /// Which of `wanted` are here.
+    ///
+    /// Keyed by the full 32-byte content id. A prefix would let a peer probe
+    /// "do you hold anything under these bits" without knowing a content id at
+    /// all, which is weaker than Freight's exact `Have` and strictly worse than
+    /// asking.
+    fn residency(&self, content: &[u8; 32], wanted: &[u32]) -> ResidencyState;
+}
+
+/// The oracle over a real content host.
+///
+/// Holds what a `ContentPolicy` needs, because that policy is not something the
+/// Live plane can invent: the space, the epoch key source and the operator
+/// ceiling all belong to the composition root, and a plane that constructed its
+/// own would be a plane deciding who may be served.
+pub struct HostResidency {
+    host: std::sync::Arc<crate::content_host::ContentHost>,
+    keys: std::sync::Arc<dyn crate::content_host::ContentKeys>,
+    space: mechanics::ids::SpaceId,
+    max_content_len: u64,
+}
+
+impl HostResidency {
+    pub fn new(
+        host: std::sync::Arc<crate::content_host::ContentHost>,
+        keys: std::sync::Arc<dyn crate::content_host::ContentKeys>,
+        space: mechanics::ids::SpaceId,
+        max_content_len: u64,
+    ) -> Self {
+        Self {
+            host,
+            keys,
+            space,
+            max_content_len,
+        }
+    }
+}
+
+impl ResidencyOracle for HostResidency {
+    fn residency(&self, content: &[u8; 32], wanted: &[u32]) -> ResidencyState {
+        if wanted.is_empty() {
+            return ResidencyState::Absent;
+        }
+        // `resident_among` and never `stat`. `stat` walks every chunk and its own
+        // comment forbids read-path use; this asks about the indices named and
+        // costs one existence check each, so a request cannot be turned into
+        // work by being about something large.
+        let authorize = |_action: crate::content_host::ContentAction| Ok(());
+        let policy = crate::content_host::ContentPolicy {
+            space: &self.space,
+            keys: self.keys.clone(),
+            authorize: &authorize,
+            max_content_len: self.max_content_len,
+        };
+        let held = match self.host.resident_among(
+            &policy,
+            &replica::content::ContentRef {
+                content_id: *content,
+            },
+            wanted,
+        ) {
+            Ok(held) => held,
+            // Our problem, not the asker's, and the honest hint is the one that
+            // sends them elsewhere.
+            Err(_) => return ResidencyState::Absent,
+        };
+        let mut asked: Vec<u32> = wanted.to_vec();
+        asked.sort_unstable();
+        asked.dedup();
+        if held.is_empty() {
+            ResidencyState::Absent
+        } else if held.len() == asked.len() {
+            ResidencyState::Complete
+        } else {
+            ResidencyState::Partial
+        }
+    }
+}
+
+/// A Station with nothing to answer from.
+///
+/// `Absent` is the truth here, not a placeholder: a Station holding no content
+/// holds none of this content either, and a hint saying so sends the asker to
+/// somebody who can help.
+pub struct NoResidency;
+
+impl ResidencyOracle for NoResidency {
+    fn residency(&self, _content: &[u8; 32], _wanted: &[u32]) -> ResidencyState {
+        ResidencyState::Absent
+    }
 }
 
 /// Send-side coalescing: hold a value briefly, and send the newest.

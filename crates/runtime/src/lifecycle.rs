@@ -519,7 +519,24 @@ impl Orbit {
             .sweep_staging(&std::collections::BTreeSet::new())
             .map_err(|e| LifecycleError::StoreIo(e.to_string()))?;
         let content = Arc::new(crate::content_host::ContentHost::new(core.clone(), cache));
-        let live = Arc::new(crate::live::LiveHandle::new(Some(core.clone())));
+        // The oracle over this Station's own content host. Built here rather
+        // than inside the plane because a `ContentPolicy` names the Space, the
+        // epoch key source and the operator ceiling — all of which belong to the
+        // composition root, and a plane that invented its own would be a plane
+        // deciding who may be served.
+        let residency: Arc<dyn crate::live::ResidencyOracle> =
+            Arc::new(crate::live::HostResidency::new(
+                content.clone(),
+                Arc::new(crate::content_host::StationContentKeys::new(
+                    self.keys.clone(),
+                )),
+                self.store.space().clone(),
+                options.content.max_content_len,
+            ));
+        let live = Arc::new(crate::live::LiveHandle::with_residency(
+            Some(core.clone()),
+            residency,
+        ));
 
         let station = Station {
             store: self.store,

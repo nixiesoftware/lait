@@ -26,9 +26,7 @@ use replica::content::{ChunkProof, ContentDescriptor, ContentRef};
 use crate::budget::{deadline, slots};
 use crate::content_host::{ContentAction, ContentHost, ContentKeys, ContentPolicy};
 use crate::freight::{frame, read_frame};
-use crate::planes::{
-    bounds, feature, FreightFrame, Plane, SessionAccept, SessionOpen, SPACE_ID_LEN,
-};
+use crate::planes::{bounds, FreightFrame, Plane, SessionAccept, SessionOpen, SPACE_ID_LEN};
 use crate::transfer::{TransferHandle, TransferRegistry, TransferState};
 
 /// Why a fetch did not complete.
@@ -196,7 +194,10 @@ pub async fn connect_provider(
     let open = SessionOpen {
         plane: Plane::Freight,
         protocol_version: Plane::Freight.protocol_version(),
-        features: feature::RESIDENCY_HINTS,
+        // None. Residency hints are a Live-plane capability answered by a
+        // `ResidencyOracle` on a Live session; offering them here asked a
+        // Freight provider about something Freight has no way to answer.
+        features: 0,
         space: space_bytes,
         initiator_station: local.key_bytes(),
         responder_station: peer.key_bytes(),

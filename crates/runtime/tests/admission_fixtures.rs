@@ -84,20 +84,49 @@ fn a_member_talking_to_the_right_station_about_the_right_space_is_admitted() {
     assert_eq!(accept.granted_lanes, vec![stream_kind::CONTROL]);
     assert_eq!(standing.station, station(&PEER_SEED));
     // The intersection of what the peer offered with what this build
-    // implements — currently nothing, and the assertion says so rather than
-    // papering over it. Echoing back a bit we merely have a name for would be
-    // advertising a constant, and a peer acting on it would be right to be
-    // annoyed.
+    // implements. Written as the concrete bit rather than as
+    // `RESIDENCY_HINTS & LOCAL_SUPPORTED`, which is what this used to say and
+    // which is a tautology: it compares the answer to the expression that
+    // produced it, so it passed when `LOCAL_SUPPORTED` was zero and passes now,
+    // and would keep passing whatever either constant became.
     assert_eq!(
         accept.capability.features,
-        feature::RESIDENCY_HINTS & feature::LOCAL_SUPPORTED,
-        "a capability is advertised only if both sides have it"
+        feature::RESIDENCY_HINTS,
+        "both sides have it, so it is advertised"
     );
     assert_eq!(
         accept.capability.features & feature::UNSOLICITED_PROVIDE,
         0,
         "a capability the peer did not offer is one it will not understand"
     );
+    // And the standing carries it, because the plane that has to honour a
+    // capability is the one that needs to know whether it was negotiated.
+    assert_eq!(standing.features, accept.capability.features);
+}
+
+#[test]
+fn a_capability_this_build_does_not_implement_is_not_echoed_back() {
+    // The direction that matters. A peer offering everything must not be told
+    // this build agreed to everything — the accept is a promise, and a peer
+    // acting on a bit we merely have a name for would be right to be annoyed.
+    let space = space();
+    let mut open = opening(&space, Plane::Freight);
+    open.features = u64::MAX;
+    let outcome = judge(
+        &open,
+        &context(&space, Plane::Freight),
+        &member(),
+        &PlanePolicy::default(),
+    );
+    let Admission::Accept(accept, _) = outcome else {
+        panic!("a member is admitted");
+    };
+    assert_eq!(
+        accept.capability.features,
+        feature::LOCAL_SUPPORTED,
+        "everything offered, intersected down to what is actually implemented"
+    );
+    assert_eq!(accept.capability.features & feature::UNSOLICITED_PROVIDE, 0);
 }
 
 #[test]

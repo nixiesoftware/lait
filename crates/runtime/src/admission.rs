@@ -65,6 +65,14 @@ pub struct AdmittedPeer {
     /// belonging to a session that has already reconnected.
     pub session_id: [u8; 16],
     pub session_epoch: [u8; 16],
+    /// What both sides agreed on: the peer's offer intersected with
+    /// `feature::LOCAL_SUPPORTED`.
+    ///
+    /// Carried rather than recomputed, because the intersection is the accept's
+    /// own answer and recomputing it somewhere else is two answers that can
+    /// disagree. A plane that honours a capability has to be able to tell
+    /// whether this peer negotiated it.
+    pub features: u64,
 }
 
 /// Local operator policy for a plane.
@@ -166,6 +174,7 @@ pub fn judge(
         return Admission::refuse();
     }
 
+    let accept_features = open.features & crate::planes::feature::LOCAL_SUPPORTED;
     let accept = SessionAccept {
         session_id: open.session_id,
         session_epoch: open.session_epoch,
@@ -176,7 +185,7 @@ pub fn judge(
             // what this build implements. Echoing back a capability we merely
             // have a name for would be advertising a constant, and a peer
             // acting on it would be right to be annoyed.
-            features: open.features & crate::planes::feature::LOCAL_SUPPORTED,
+            features: accept_features,
         },
         granted_lanes: granted.clone(),
     };
@@ -189,6 +198,7 @@ pub fn judge(
             granted_lanes: granted,
             session_id: open.session_id,
             session_epoch: open.session_epoch,
+            features: accept_features,
         }),
     )
 }
