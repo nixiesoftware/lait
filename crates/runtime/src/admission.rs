@@ -175,16 +175,30 @@ pub fn judge(
         return Admission::refuse();
     };
 
-    // A lane is granted only if this build implements it and the peer asked.
-    // Granting one nobody asked for would be a lane with no owner, and a peer
-    // that opens an ungranted flow is refused at the flow rather than here.
-    let granted: Vec<u8> = open
-        .requested_lanes
-        .iter()
-        .copied()
-        .filter(|lane| stream_kind::is_implemented(*lane))
-        .collect();
-    if granted.is_empty() && !open.requested_lanes.is_empty() {
+    // A lane is granted only if the plane serves lanes at all, this build
+    // implements it, and the peer asked. Granting one nobody asked for would be
+    // a lane with no owner; a peer that opens an ungranted flow is refused at
+    // the flow rather than here.
+    //
+    // The plane check is the part that is easy to leave out. Freight reads no
+    // stream-kind byte — the ALPN types the connection — so a granted lane there
+    // is a promise nothing can keep: a peer taking it at its word would write a
+    // kind byte that Freight's reader consumes as the first quarter of its
+    // length prefix, and the flow desynchronises on the first frame.
+    let granted: Vec<u8> = if context.plane.serves_lanes() {
+        open.requested_lanes
+            .iter()
+            .copied()
+            .filter(|lane| stream_kind::is_implemented(*lane))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    // Asking for lanes and getting none is a refusal — but only on a plane that
+    // has lanes to give. On Freight an empty grant is the correct answer to any
+    // request, and refusing there would turn a peer's harmless mistake into a
+    // failed connection.
+    if context.plane.serves_lanes() && granted.is_empty() && !open.requested_lanes.is_empty() {
         return Admission::refuse();
     }
 

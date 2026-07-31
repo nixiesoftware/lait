@@ -81,7 +81,10 @@ fn a_member_talking_to_the_right_station_about_the_right_space_is_admitted() {
     let Admission::Accept(accept, standing) = outcome else {
         panic!("a member is admitted: {outcome:?}");
     };
-    assert_eq!(accept.granted_lanes, vec![stream_kind::CONTROL]);
+    // Empty, on Freight, whatever was asked for. Freight reads no stream-kind
+    // byte — the ALPN types the connection — so a granted lane there is a
+    // promise nothing can keep.
+    assert!(accept.granted_lanes.is_empty());
     assert_eq!(standing.station, station(&PEER_SEED));
     // The intersection of what the peer offered with what this build
     // implements. Written as the concrete bit rather than as
@@ -450,6 +453,53 @@ fn a_lane_this_build_cannot_serve_is_dropped_from_the_grant_not_the_opening() {
     assert_eq!(
         judge(
             &hopeless,
+            &context(&space, Plane::Live),
+            &member(),
+            &PlanePolicy::default()
+        ),
+        Admission::Refuse(SessionRefusal::Refused)
+    );
+}
+
+#[test]
+fn a_freight_opening_that_names_lanes_is_granted_none_and_still_admitted() {
+    // Freight has no lanes to give. Granting one would be a promise nothing can
+    // keep: a peer taking it at its word writes a stream-kind byte, and
+    // Freight's reader consumes that as the first quarter of its length prefix,
+    // so the flow desynchronises on its first frame.
+    //
+    // And it is still admitted. Asking for a lane on a plane that has none is a
+    // harmless mistake, and turning it into a failed connection would be a wire
+    // rule this protocol deliberately does not have.
+    let space = space();
+    let mut open = opening(&space, Plane::Freight);
+    open.requested_lanes = vec![stream_kind::CONTROL, stream_kind::RELIABLE_SIGNAL];
+    let outcome = judge(
+        &open,
+        &context(&space, Plane::Freight),
+        &member(),
+        &PlanePolicy::default(),
+    );
+    let Admission::Accept(accept, peer) = outcome else {
+        panic!("a member is admitted: {outcome:?}");
+    };
+    assert!(accept.granted_lanes.is_empty());
+    assert!(peer.granted_lanes.is_empty());
+}
+
+#[test]
+fn asking_for_only_unservable_lanes_is_still_a_refusal_where_lanes_exist() {
+    // The rule above must not soften the one it sits beside. On Live, a peer
+    // that asked for only things this build cannot serve gets a refusal rather
+    // than an empty grant it would sit on waiting for.
+    let space = space();
+    let mut open = opening(&space, Plane::Live);
+    open.plane = Plane::Live;
+    open.protocol_version = Plane::Live.protocol_version();
+    open.requested_lanes = vec![stream_kind::RESERVED_MEDIA_FRAME];
+    assert_eq!(
+        judge(
+            &open,
             &context(&space, Plane::Live),
             &member(),
             &PlanePolicy::default()

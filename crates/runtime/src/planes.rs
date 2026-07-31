@@ -228,6 +228,18 @@ pub enum Plane {
 }
 
 impl Plane {
+    /// Whether one connection on this plane carries typed stream kinds.
+    ///
+    /// Freight does not: the ALPN types the connection and every flow is a
+    /// request. Live does, which is why its opening names the lanes it wants and
+    /// Freight's names none.
+    pub fn serves_lanes(self) -> bool {
+        match self {
+            Self::Freight => false,
+            Self::Live => true,
+        }
+    }
+
     pub fn alpn(self) -> &'static [u8] {
         match self {
             Plane::Freight => FREIGHT_ALPN,
