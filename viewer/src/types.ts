@@ -28,7 +28,7 @@ export type StatusCategory = "backlog" | "active" | "done";
 /** Priority order, low → high. Mirrors the Rust enum's `Ord`. */
 export const PRIORITY_ORDER: readonly Priority[] = ["none", "low", "medium", "high", "urgent"];
 
-/** UI.md §5.1 board badge: `·U/H/M/L·`. */
+/** Board badge: `·U/H/M/L·`. */
 export const PRIORITY_BADGE: Record<Priority, string> = {
   none: "-",
   low: "L",
@@ -70,7 +70,7 @@ export interface LabelDto {
 
 /**
  * One board/list row — the `DocMeta` cache, never the issue doc.
- * `provisional` means the row is known but its body hasn't arrived (UI.md §3.3).
+ * `provisional` means the row is known but its body hasn't arrived (UI.md §9).
  */
 export interface Row {
   reff: string;
@@ -247,7 +247,7 @@ export interface ActivityEvent {
   collision: boolean;
 }
 
-/** A ref that resolved to several issues (UI.md §3.2). A first-class outcome, not an error. */
+/** A ref that resolved to several issues (UI.md §2). A first-class outcome, not an error. */
 export interface Candidate {
   reff: string;
   key_alias: string | null;
@@ -348,6 +348,79 @@ export interface PresenceEntry {
   state: string;
   online: boolean;
   last_seen_secs: number;
+}
+
+/**
+ * `control.rs` `LiveScope` — what a transient item is about.
+ *
+ * `body` is lowercase base32 and `content` is hex, because the wire is JSON and
+ * the raw byte arrays would arrive as lists of numbers. The derivation from an
+ * issue's doc id to its Body id runs one way only, so a `body` here cannot be
+ * turned back into anything the viewer displays — which is why `live` takes an
+ * `issue` and narrows server-side rather than making the client match ids.
+ */
+export type LiveScope =
+  | { scope: "issue_view"; world: string; body: string }
+  | { scope: "document_view"; world: string; body: string }
+  | { scope: "text_caret"; world: string; body: string; field: string }
+  | { scope: "typing"; world: string; body: string; field: string }
+  | { scope: "content_residency"; content: string }
+  | { scope: "custom_world"; world: string; schema: string; key: string };
+
+/**
+ * `control.rs` `CaretPosition`.
+ *
+ * `drifted` is an answer — the material this position was attached to is gone.
+ * `unresolved` is the absence of one. Rendering them the same shows a live
+ * caret as lost.
+ */
+export type CaretPosition =
+  | { caret: "at"; position: number }
+  | { caret: "drifted" }
+  | { caret: "unresolved" };
+
+/**
+ * `control.rs` `LiveEntry` — one thing a peer is doing right now.
+ *
+ * `actor` is an actor id, resolved by the daemon, and never a device id: it is
+ * the same string space as `MemberDto.key`, so an avatar coloured from it
+ * matches the same person everywhere else on the page. `PresenceEntry.id` is
+ * the other thing and the two must not be mixed.
+ */
+export interface LiveEntry {
+  actor: string;
+  scope: LiveScope;
+  kind: "presence" | "caret" | "selection" | "typing" | "residency";
+  /** How long ago the daemon saw it — its clock, not the peer's. */
+  age_ms: number;
+  /** Past the caret grace window: still shown, no longer known to be right. */
+  uncertain: boolean;
+  caret: CaretPosition | null;
+  focus: CaretPosition | null;
+}
+
+/** `control.rs` `SignalBody` — what one delivered signal says. */
+export type SignalBody =
+  | { signal: "ping"; nonce: string }
+  | { signal: "acknowledge"; nonce: string }
+  | { signal: "attention"; scope: LiveScope }
+  | { signal: "session_invite"; invite: string; scope: LiveScope }
+  | {
+      signal: "file_offer";
+      content: string;
+      plaintext_len: number;
+      display_name: string;
+      media_type: string;
+    }
+  | { signal: "world_signal"; world: string; schema: string; payload_b64: string };
+
+/** `control.rs` `SignalEntry`. `actor` follows the same rule as `LiveEntry`. */
+export interface SignalEntry {
+  actor: string;
+  /** 32-hex. Compared for equality, never ordered. */
+  session_id: string;
+  session_epoch: string;
+  signal: SignalBody;
 }
 
 export interface Event {
@@ -485,7 +558,7 @@ export interface DirtyProject extends ProjectRef {
  * A dirty-set frame, tagged with the space it rang for.
  *
  * Never state: the client re-reads the authoritative projection and never patches
- * from the frame (UI.md §4.2). `reset` — or an `epoch` change, which is a daemon
+ * from the frame (UI.md §5). `reset` — or an `epoch` change, which is a daemon
  * restart — means rebaseline from scratch; `App` treats them identically.
  *
  * `activity_advanced` and `presence_advanced` are carried faithfully but not yet
@@ -524,7 +597,7 @@ export interface Filter {
   /** Milestone name or `mls_` id, resolved within `project` — which the daemon
    *  requires, because a milestone belongs to exactly one project. */
   milestone?: string | null;
-  /** Include done + tombstoned rows (UI.md §2.2). */
+  /** Include done + tombstoned rows. */
   all?: boolean;
 }
 
@@ -642,7 +715,16 @@ export type Request =
   | { cmd: "join"; ticket: string }
   | { cmd: "seed_list" }
   | { cmd: "log"; since: number }
-  | { cmd: "who" };
+  | { cmd: "who" }
+  /** Who is doing what right now. `since_generation` is the generation the
+   *  caller already holds — the reply is `live_unchanged` while it stands.
+   *  Omit it on the first read: generation starts at zero, so sending zero is
+   *  indistinguishable from holding an empty table. `issue` is an `iss_` doc
+   *  id and narrows to that issue's presence. */
+  | { cmd: "live"; since_generation?: number | null; issue?: string | null }
+  /** Drains. Every signal is answered once, so two callers on one space take
+   *  half each — a browser and an agent must not both poll it. */
+  | { cmd: "signals" };
 
 export type SpaceRequest = Extract<
   Request,
@@ -662,7 +744,9 @@ export type SpaceRequest = Extract<
       | "join"
       | "seed_list"
       | "log"
-      | "who";
+      | "who"
+      | "live"
+      | "signals";
   }
 >;
 
@@ -710,4 +794,15 @@ export type Response =
   | { kind: "text"; text: string }
   | { kind: "events"; events: Event[]; last: number }
   | { kind: "who"; peers: PresenceEntry[] }
+  /** `partial` means this node is not hearing from everyone it could be.
+   *  Carried rather than inferred: showing three of five people with no
+   *  indication is a confident lie. */
+  | { kind: "live"; generation: number; partial: boolean; entries: LiveEntry[] }
+  /** The generation the caller sent still stands. Its own tag rather than an
+   *  absent `entries`, so a client branches on `kind` like it does everywhere
+   *  else and an empty table does not look like an unchanged one. */
+  | { kind: "live_unchanged"; generation: number }
+  /** `dropped` counts what the daemon's queue lost for want of room, oldest
+   *  first — a signal is not superseded by the next one the way progress is. */
+  | { kind: "signals"; signals: SignalEntry[]; dropped: number }
   | { kind: "error"; message: string; error_kind: "error" | "not_found" };

@@ -676,7 +676,13 @@ pub enum LiveNarrow<'a> {
 }
 
 impl LiveNarrow<'_> {
-    fn admits(&self, scope: &TransientScope) -> bool {
+    /// Whether this narrowing gathers that scope.
+    ///
+    /// Public because the daemon narrows a browser's question the same way and
+    /// tests it there. Two implementations of "is this scope about that Body"
+    /// is how the browser and the plane come to disagree about which document
+    /// somebody is looking at.
+    pub fn admits(&self, scope: &TransientScope) -> bool {
         match self {
             Self::Everything => true,
             Self::Scope(want) => &scope == want,

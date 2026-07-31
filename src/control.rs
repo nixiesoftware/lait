@@ -351,6 +351,55 @@ pub enum Request {
         since: u64,
     },
     Who,
+    /// What this Station currently believes about who is doing what — the Live
+    /// plane's transient table, resolved to actors.
+    ///
+    /// Distinct from [`Request::Who`], which reports durable neighbours and
+    /// their reachability. This reports what is on screen right now: who is
+    /// looking at an issue, where a caret is, who is typing. None of it is
+    /// durable and none of it survives the session that published it.
+    Live {
+        /// The generation the caller already holds. When it still stands the
+        /// answer is [`Response::LiveUnchanged`], so a poll that finds nothing
+        /// new costs a `u64` comparison instead of a re-serialised table.
+        ///
+        /// `None` rather than a defaulted `0`: generation starts at zero, so a
+        /// caller that has never asked would otherwise be indistinguishable
+        /// from one holding an empty table, and its first read would answer
+        /// "unchanged" about a view it has never seen.
+        #[serde(default)]
+        since_generation: Option<u64>,
+        /// Narrow to one issue, by its `iss_` doc id.
+        ///
+        /// Every scope about that issue's Body and not the viewing one alone:
+        /// who is looking at it, where their carets are, who is typing. Those
+        /// are three scopes over one Body, and a caller that named the issue
+        /// asked about all three.
+        ///
+        /// A doc id, never a project alias. The Body id is derived from the
+        /// string as given, so `ENG-12` hashes to a Body nothing publishes
+        /// under and the answer is an empty table rather than an error.
+        ///
+        /// `None` is the whole table, which carries Body ids from every hosted
+        /// World. A browser cannot map those back to anything it displays — the
+        /// derivation runs one way — so the scoped form is the one a viewer
+        /// uses and the unscoped one is for an operator.
+        ///
+        /// It narrows the rows, not the generation: the counter belongs to the
+        /// whole table, so a caller watching one issue is told to re-read when
+        /// anything anywhere moves. That costs a wasted read and never a missed
+        /// one, which is the right way round for a surface about who is here.
+        #[serde(default)]
+        issue: Option<String>,
+    },
+    /// Take every signal delivered since the last call, and leave the queue
+    /// empty.
+    ///
+    /// A drain rather than a read. A signal is an event, not a state anyone can
+    /// re-read, so answering the same one twice would have a client act on it
+    /// twice — an invitation accepted, a file offered, a person's attention
+    /// asked for.
+    Signals,
     /// Re-read the layered local settings (`lait config set` sends this
     /// best-effort so a daemon-read key like `user.nick` applies live instead
     /// of silently waiting for a restart). Transport-plane like `Stop` — not
@@ -687,7 +736,14 @@ pub fn classify(req: &Request) -> RequestOwner {
         | Request::Whoami => Mechanics,
 
         // ---- Station: connect/neighbor/Contact ----
-        Request::Connect { .. } | Request::Who | Request::Sync => Station,
+        // Live and Signals sit here for the same reason Who does: both read
+        // state the Station's own delivery planes hold, and neither is a
+        // projection of anything durable.
+        Request::Connect { .. }
+        | Request::Who
+        | Request::Sync
+        | Request::Live { .. }
+        | Request::Signals => Station,
 
         // ---- Observation: generic status and subscription surfaces ----
         Request::Status | Request::Subscribe { .. } => Observation,
@@ -799,6 +855,11 @@ pub fn representative_requests() -> Vec<Request> {
         Request::SeedRemove { who: s() },
         Request::Log { since: 0 },
         Request::Who,
+        Request::Live {
+            since_generation: None,
+            issue: None,
+        },
+        Request::Signals,
         Request::ConfigReload,
         Request::Stop,
         Request::Hello {
@@ -876,6 +937,43 @@ pub enum Response {
     },
     Who {
         peers: Vec<PresenceEntry>,
+    },
+    /// The Live plane's transient table (reply to [`Request::Live`]).
+    Live {
+        /// Bumped on every change. A reader that sees the same number saw the
+        /// same view and does not have to diff to find that out. It wraps, so
+        /// equality is the only comparison it admits.
+        generation: u64,
+        /// This Station is not hearing from everyone it could be — over its
+        /// session cap, or dropping scopes at a gate.
+        ///
+        /// Carried rather than inferred. Awareness is allowed to be incomplete
+        /// and durable convergence is not, so the surface that can be partial
+        /// has to say when it is; a viewer showing three of five people with no
+        /// indication is telling a confident lie.
+        partial: bool,
+        entries: Vec<LiveEntry>,
+    },
+    /// The generation the caller already held still stands (reply to
+    /// [`Request::Live`]).
+    ///
+    /// Its own variant rather than an absent `entries` on [`Response::Live`].
+    /// This enum is tagged by `kind` and a client branches on that tag; "nothing
+    /// changed" spelled as a missing field is a thing a client has to remember
+    /// to notice, and an empty table and an unchanged one would then look alike.
+    LiveUnchanged {
+        generation: u64,
+    },
+    /// The signals drained by [`Request::Signals`], oldest first.
+    Signals {
+        signals: Vec<SignalEntry>,
+        /// How many were dropped for want of room, oldest first.
+        ///
+        /// A signal is not replaceable the way a caret is, so the queue does not
+        /// drop the newest the way the progress lane does: what has not been
+        /// seen yet is what somebody is about to act on. Reported rather than
+        /// swallowed — a client that lost an invitation can at least say so.
+        dropped: u64,
     },
     /// The one-shot identity + standing + view-completeness projection.
     Whoami(crate::dto::WhoamiDto),
@@ -1013,6 +1111,135 @@ pub struct PresenceEntry {
     pub state: String,
     pub online: bool,
     pub last_seen_secs: u64,
+}
+
+/// What a transient item is about — the wire mirror of
+/// `runtime::transient::TransientScope`.
+///
+/// Ids are rendered, not raw. This channel is JSON, where a `[u8; 16]` arrives
+/// as a list of sixteen numbers; a Body takes the lowercase base32 the rest of
+/// the tree renders Body ids in, and a content id takes hex like every other
+/// content id here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "scope", rename_all = "snake_case")]
+pub enum LiveScope {
+    /// Somebody is looking at this issue.
+    IssueView { world: String, body: String },
+    /// Somebody is looking at this document.
+    DocumentView { world: String, body: String },
+    /// Somebody's cursor is in this field of this Body.
+    TextCaret {
+        world: String,
+        body: String,
+        field: String,
+    },
+    /// Somebody is typing in this field.
+    Typing {
+        world: String,
+        body: String,
+        field: String,
+    },
+    /// How much of this content a peer holds. A hint about who to ask first,
+    /// never a promise.
+    ContentResidency { content: String },
+    /// A World's own scope, uninterpreted here.
+    CustomWorld {
+        world: String,
+        schema: String,
+        key: String,
+    },
+}
+
+/// Where a peer's cursor is, as of this read — the wire mirror of
+/// `runtime::live::CaretState`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "caret", rename_all = "snake_case")]
+pub enum CaretPosition {
+    /// A position in the Body as it stands now.
+    At { position: u64 },
+    /// The material this position was attached to is gone, or the anchor
+    /// predates what this node retains.
+    Drifted,
+    /// Nothing was available to resolve against. Distinct from `Drifted`, which
+    /// is an answer — this is the absence of one, and a renderer that conflated
+    /// them would draw a live caret as lost.
+    Unresolved,
+}
+
+/// One thing a peer is currently doing — the wire mirror of
+/// `runtime::live::LiveEntry`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LiveEntry {
+    /// The **actor**, resolved daemon-side through the Station's authority view.
+    ///
+    /// Never the device id the transient table is keyed by. [`PresenceEntry::id`]
+    /// is a device and `MemberDto.key` is an actor, and the viewer colours an
+    /// avatar by hashing whatever string it is handed — so a device id here
+    /// draws one person in two colours on one screen, on a surface whose whole
+    /// job is telling people apart. An entry whose Station does not resolve is
+    /// omitted rather than carried under an invented identity.
+    pub actor: String,
+    pub scope: LiveScope,
+    /// `presence` | `caret` | `selection` | `typing` | `residency`.
+    pub kind: String,
+    /// How long ago **this** Station saw it. Ours, not theirs — a peer's clock
+    /// is a peer's claim.
+    pub age_ms: u64,
+    /// Past the caret grace window. Still shown, and shown as uncertain: a caret
+    /// whose Body has moved under it is not wrong yet, but it is no longer known
+    /// to be right.
+    pub uncertain: bool,
+    pub caret: Option<CaretPosition>,
+    /// A selection's far end.
+    pub focus: Option<CaretPosition>,
+}
+
+/// What a signal says — the wire mirror of `runtime::planes::Signal`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "signal", rename_all = "snake_case")]
+pub enum SignalBody {
+    /// Are you there. The one signal that expects an answer.
+    Ping { nonce: String },
+    /// I am.
+    Acknowledge { nonce: String },
+    /// Look at this.
+    Attention { scope: LiveScope },
+    /// Come and work on this with me. `invite` is the kind of collaboration
+    /// offered.
+    SessionInvite { invite: String, scope: LiveScope },
+    /// I have a file you may want. An offer, not a transfer: nothing has moved
+    /// and nothing will until somebody decides.
+    FileOffer {
+        content: String,
+        plaintext_len: u64,
+        /// What the sender calls it. Peer-supplied and never sanitised here — a
+        /// name is sanitised at the point it becomes a path, and rewriting it in
+        /// flight would mean the thing shown to a person is not the thing sent.
+        display_name: String,
+        media_type: String,
+    },
+    /// A World's own signal. Opaque to the substrate, so it arrives base64
+    /// rather than as a shape this module pretends to understand.
+    WorldSignal {
+        world: String,
+        schema: String,
+        payload_b64: String,
+    },
+}
+
+/// One signal this Station received — the wire mirror of
+/// `runtime::signal::DeliveredSignal`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignalEntry {
+    /// The sender's **actor**, resolved daemon-side. Same rule as
+    /// [`LiveEntry::actor`]: unresolved is omitted, never invented.
+    pub actor: String,
+    /// The session it arrived on, 32-hex. Two of these are compared and never
+    /// ordered — the only answerable question is whether this is still the open
+    /// one.
+    pub session_id: String,
+    pub session_epoch: String,
+    pub signal: SignalBody,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1831,5 +2058,121 @@ mod tests {
                 serde_json::json!({"protocol_version": MIN_SUPPORTED_CONTROL_PROTOCOL - 1})
             ));
         }
+    }
+
+    /// The generation a caller does not have is absent, not zero.
+    ///
+    /// `Option<u64>` rather than a defaulted `u64` because the daemon's counter
+    /// starts at zero: a first read spelled `since_generation: 0` would be
+    /// answered `live_unchanged` about a view nobody has seen. Pinned on the
+    /// wire because that is where the distinction has to survive.
+    #[test]
+    fn a_first_live_read_carries_no_generation_at_all() {
+        let json = serde_json::to_value(Request::Live {
+            since_generation: None,
+            issue: None,
+        })
+        .unwrap();
+        assert_eq!(json["cmd"], "live");
+        assert!(json["since_generation"].is_null());
+
+        let held = serde_json::to_value(Request::Live {
+            since_generation: Some(0),
+            issue: Some("iss_01".into()),
+        })
+        .unwrap();
+        assert_eq!(held["since_generation"], 0);
+        assert_eq!(held["issue"], "iss_01");
+
+        // And absence decodes back to absence rather than to zero.
+        let decoded: Request = serde_json::from_value(serde_json::json!({"cmd": "live"})).unwrap();
+        match decoded {
+            Request::Live {
+                since_generation,
+                issue,
+            } => {
+                assert!(since_generation.is_none());
+                assert!(issue.is_none());
+            }
+            other => panic!("decoded as {other:?}"),
+        }
+    }
+
+    /// "Unchanged" is a tag, never a missing field.
+    ///
+    /// A client branches on `kind` everywhere else on this channel. Spelling
+    /// "nothing moved" as an absent `entries` would make an empty table and an
+    /// unchanged one arrive looking alike, and leave the difference to whether
+    /// somebody remembered to check.
+    #[test]
+    fn an_unchanged_live_view_is_its_own_kind() {
+        let unchanged = serde_json::to_value(Response::LiveUnchanged { generation: 9 }).unwrap();
+        assert_eq!(unchanged["kind"], "live_unchanged");
+        assert!(unchanged.get("entries").is_none());
+
+        let empty = serde_json::to_value(Response::Live {
+            generation: 9,
+            partial: false,
+            entries: vec![],
+        })
+        .unwrap();
+        assert_eq!(empty["kind"], "live");
+        assert_eq!(empty["entries"], serde_json::json!([]));
+    }
+
+    /// The shapes a browser branches on, pinned by their tags.
+    #[test]
+    fn live_rows_name_an_actor_and_tag_every_nested_union() {
+        let entry = LiveEntry {
+            actor: "act_ab".into(),
+            scope: LiveScope::TextCaret {
+                world: "com.lait.issues".into(),
+                body: "aaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+                field: "description".into(),
+            },
+            kind: "caret".into(),
+            age_ms: 40,
+            uncertain: false,
+            caret: Some(CaretPosition::At { position: 12 }),
+            focus: Some(CaretPosition::Drifted),
+        };
+        let json = serde_json::to_value(Response::Live {
+            generation: 1,
+            partial: true,
+            entries: vec![entry],
+        })
+        .unwrap();
+        let row = &json["entries"][0];
+        assert_eq!(row["actor"], "act_ab");
+        assert_eq!(row["scope"]["scope"], "text_caret");
+        assert_eq!(
+            row["caret"],
+            serde_json::json!({"caret": "at", "position": 12})
+        );
+        assert_eq!(row["focus"], serde_json::json!({"caret": "drifted"}));
+        assert_eq!(json["partial"], true);
+    }
+
+    #[test]
+    fn a_drained_signal_says_how_many_were_lost() {
+        let json = serde_json::to_value(Response::Signals {
+            signals: vec![SignalEntry {
+                actor: "act_ab".into(),
+                session_id: "00".repeat(16),
+                session_epoch: "11".repeat(16),
+                signal: SignalBody::FileOffer {
+                    content: "22".repeat(32),
+                    plaintext_len: 9,
+                    display_name: "notes.md".into(),
+                    media_type: "text/markdown".into(),
+                },
+            }],
+            dropped: 3,
+        })
+        .unwrap();
+        assert_eq!(json["kind"], "signals");
+        assert_eq!(json["signals"][0]["signal"]["signal"], "file_offer");
+        assert_eq!(json["signals"][0]["actor"], "act_ab");
+        assert_eq!(json["dropped"], 3);
     }
 }

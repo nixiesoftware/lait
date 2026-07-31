@@ -45,6 +45,7 @@ import {
   type EventPhraseContext,
   type NameResolver,
 } from "../core/activity";
+import { caretPhrase, carets, typists, useLiveTable, watching } from "../live";
 import type { Field as PredictField } from "../core/overlay";
 import type { IssueField } from "../core/registry";
 import { inverseWorkAction, workTarget } from "../core/workflow";
@@ -829,6 +830,13 @@ export function IssueDetail({
             />
           </RailRow>
           </RailSection>
+
+          <LiveRail
+            spaceId={spaceId}
+            docId={issue.doc_id}
+            members={members}
+            memberOf={memberOf}
+          />
         </div>
 
         <Description
@@ -1071,6 +1079,111 @@ function FollowToggle({
       {following ? "Following" : "Follow"}
       {others > 0 && <span className="text-mute">+{others}</span>}
     </Button>
+  );
+}
+
+/**
+ * Who else is on this issue, and where their carets are.
+ *
+ * In the rail rather than in `HeaderActions`. That slot is a portal into a node
+ * the shell only mounts when the detail pane is the full-width surface, so a
+ * facepile there would render nothing — silently, no warning — on every other
+ * layout, and it would be absent from this file's own test for the same reason.
+ *
+ * Nothing here rings a doorbell or bumps a revision. A face arriving is not a
+ * change to the issue, and routing it through the projection invalidation would
+ * make every glance somebody takes at a document cost every open tab a re-read.
+ */
+function LiveRail({
+  spaceId,
+  docId,
+  members,
+  memberOf,
+}: {
+  spaceId: string;
+  /**
+   * The `iss_` doc id, and not the `reff` every verb on this page takes.
+   *
+   * The Live plane keys its scopes by a Body id derived from the doc id, and
+   * that derivation is a hash of whatever string it is handed: a project alias
+   * hashes to a Body nothing publishes under, so the rail would answer an empty
+   * table for ever and draw nothing, on every issue, with nothing to say about it.
+   */
+  docId: string;
+  /** The ACL array itself, because `stackFor` caches its index on that identity. */
+  members: MemberDto[];
+  memberOf: (key: string) => MemberDto | undefined;
+}) {
+  const live = useLiveTable(spaceId, docId);
+  const here = watching(live.entries);
+  const marks = carets(live.entries);
+  const typing = typists(live.entries);
+
+  // The daemon cannot answer at all — an older build, or one with the Live plane
+  // off. Drawing "nobody is here" from that would be inventing an answer, and
+  // drawing an apology on every issue would be noise about a thing the reader
+  // cannot act on.
+  if (live.unavailable) return null;
+  if (here.length === 0 && marks.length === 0 && typing.length === 0 && !live.partial) return null;
+
+  const name = (actor: string) => nameOf(actor, memberOf(actor));
+  const present = here.filter((row) => !row.uncertain);
+  // Shown, and shown as a guess. Hiding them is how a collaborator who has gone
+  // quiet for a minute disappears from a room they are still in.
+  const unsure = here.filter((row) => row.uncertain);
+
+  return (
+    <RailSection title="Live">
+      {here.length > 0 && (
+        <RailRow label="Here now">
+          <span className="flex min-w-0 items-center gap-1.5">
+            <AvatarStack members={stackFor(present.map((row) => row.actor), members)} />
+            {unsure.length > 0 && (
+              <AvatarStack
+                members={stackFor(unsure.map((row) => row.actor), members)}
+                className="opacity-60"
+              />
+            )}
+            <span className="min-w-0 truncate">
+              {present.map((row) => name(row.actor)).join(", ")}
+              {unsure.length > 0 && (
+                <span className="text-mute">
+                  {present.length > 0 ? " · " : ""}
+                  {unsure.map((row) => name(row.actor)).join(", ")} may have left
+                </span>
+              )}
+            </span>
+          </span>
+        </RailRow>
+      )}
+
+      {typing.length > 0 && (
+        <RailRow label="Typing">
+          {/* The row's own label says "Typing", so the value is the names and
+              nothing else — a verb here would have to pick a number, and the
+              fact is coarse enough already. */}
+          <span className="text-mute min-w-0 truncate">{typing.map(name).join(", ")}</span>
+        </RailRow>
+      )}
+
+      {marks.map((mark) => (
+        <RailRow key={`${mark.actor} ${mark.field}`} label="Caret">
+          <span className={cn("min-w-0 truncate", mark.uncertain && "text-mute")}>
+            {name(mark.actor)} — {mark.field}, {caretPhrase(mark.position)}
+            {mark.uncertain && " (last known)"}
+          </span>
+        </RailRow>
+      ))}
+
+      {live.partial && (
+        <RailRow label="Awareness">
+          <span className="text-mute flex min-w-0 items-center gap-1.5">
+            <Info className="size-icon-sm shrink-0" />
+            <span className="min-w-0 truncate">This node is not hearing from everyone.</span>
+          </span>
+        </RailRow>
+      )}
+    </RailSection>
   );
 }
 

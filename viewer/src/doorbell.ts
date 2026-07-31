@@ -8,10 +8,10 @@ export type Liveness = "connecting" | "live" | "retrying";
  * The doorbell stream — one `EventSource` over every attached space.
  *
  * A frame is a **dirty flag, never state**: the client re-reads the authoritative
- * projection and never patches from the frame (UI.md §4.2). That is what keeps the
+ * projection and never patches from the frame (UI.md §5). That is what keeps the
  * browser honest about a CRDT it does not hold.
  *
- * Note what this client does *not* yet do. §4.2's contract is per-*scope* re-reads —
+ * Note what this client does *not* yet do. §5's contract is per-*scope* re-reads —
  * intersect `dirty_by_project` with what is on screen and fetch only that. We
  * re-read everything a ring could plausibly have touched: correct, and wasteful.
  * `dirty_by_project` is read only to decide which optimistic guesses to retire, and

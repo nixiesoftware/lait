@@ -1557,6 +1557,45 @@ pub fn print_response(resp: &Response, out: Out) -> i32 {
             }
             0
         }
+        Response::Live {
+            generation,
+            partial,
+            entries,
+        } => {
+            if entries.is_empty() {
+                println!("(nobody is doing anything here right now)");
+            }
+            for entry in entries {
+                let uncertain = if entry.uncertain { " (uncertain)" } else { "" };
+                println!(
+                    "{}  {}  {}ms{uncertain}",
+                    entry.actor, entry.kind, entry.age_ms
+                );
+            }
+            println!("generation {generation}");
+            if *partial {
+                // Loud, because an incomplete awareness surface that says
+                // nothing is a confident lie about who is here.
+                eprintln!("this node is not hearing from everyone it could be");
+            }
+            0
+        }
+        Response::LiveUnchanged { generation } => {
+            println!("unchanged at generation {generation}");
+            0
+        }
+        Response::Signals { signals, dropped } => {
+            if signals.is_empty() {
+                println!("(no signals)");
+            }
+            for entry in signals {
+                println!("{}  {:?}", entry.actor, entry.signal);
+            }
+            if *dropped > 0 {
+                eprintln!("{dropped} signal(s) were dropped for want of room");
+            }
+            0
+        }
         Response::Whoami(w) => {
             let none = "—".to_string();
             println!(

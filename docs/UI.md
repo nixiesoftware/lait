@@ -148,10 +148,115 @@ waiting from failure instead of presenting an empty board as success.
 Presence is online, away, or offline and is advisory. It reflects device
 reachability and recent local interaction, not actor authority.
 
+That is one presence and there are now two, and the word covers both. The
+durable one above is a **device**: reachable or not, recorded in the Neighbor
+registry, and outliving anybody's attention. The second is a **viewer
+indicator** — who has this issue open, where their caret is, who is typing —
+keyed by **actor**, held only for as long as the session that published it, and
+never journaled. Neither implies the other. A reachable device is not looking at
+anything, and a person reading an issue through a station this node cannot
+otherwise reach still belongs on the facepile. Both remain advisory, and neither
+is an input to an authorization decision.
+
+The viewer indicator carries an uncertainty the durable one does not, and a
+client has to draw it rather than resolve it. Past the caret grace window the
+daemon still reports the entry and marks it `uncertain`: it is shown, marked,
+not dropped — a collaborator who has gone quiet for a minute has not left the
+room, and a facepile that quietly omits them reports an emptier room than there
+is. A caret position is one of three answers that do not collapse into each
+other: a position, `drifted` — the material the offset was attached to is gone —
+and `unresolved`, which is the absence of an answer rather than one. A client
+that draws `drifted` as its last known offset points confidently at the wrong
+character, and one that draws `drifted` and `unresolved` the same way reports a
+live caret as lost.
+
 Network nicknames are self-asserted display data. Local petnames are preferred
 for familiar rendering, but security-sensitive selection and confirmation show
 stable identifiers. A name alone never selects a recovery target or grants
 membership.
+
+`who` and `live` report different things and are not interchangeable. `who`
+reports the durable Neighbor registry: which peers exist and whether they are
+reachable, keyed by **device**. `live` reports the transient table the Live
+plane holds — who is looking at an issue, where a caret is, who is typing —
+keyed by **actor**, and nothing in it is journaled, replayed, or survives the
+session that published it.
+
+Rows from `live` carry an actor id, resolved by the daemon through the Station's
+authority view. A row whose Station resolves to no actor is omitted rather than
+carried under its device id: a device id and an actor id are different strings
+for the same person, and a client colouring an avatar by hashing whichever it
+was handed would draw one human twice, in two colours, on the surface whose
+whole job is telling people apart.
+
+Every `live` reply carries a generation and a `partial` flag. A caller sends the
+generation it holds and is answered `live_unchanged` while it stands, so a poll
+that finds nothing new costs one comparison. `partial` means the node is not
+hearing from everyone it could be — over its session cap, or dropping scopes at
+a gate — and a client must show it. Awareness is allowed to be incomplete;
+drawing three of five people with no indication is a confident lie.
+
+The generation is not the whole story. A row's `uncertain` is derived per read
+from its age, and nothing moves the counter when one crosses the grace window,
+so the cheap answer is given only once every row is already uncertain and
+nothing more can flip. Otherwise a caller would go on drawing a caret as current
+until the slot expired half a minute later — the same confident lie, told about
+one person instead of the room.
+
+An unscoped `live` returns Body ids from every hosted World. The derivation from
+an issue's doc id to its Body id runs one way, so those ids name nothing a
+browser can display — which is why `live` takes an `issue` and narrows
+daemon-side.
+
+That narrowing is by **Body**, not by scope. Somebody reading an issue, a caret
+in its description and a typing flag in its title are three different scopes over
+one Body, and a caller that named the issue asked about all three. The `issue` is
+a doc id and never a project alias: the Body id is a hash of the string as given,
+so `ENG-12` names a Body nothing publishes under and is answered an empty table
+rather than an error.
+
+`signals` drains. A signal is an event and not a state anyone can re-read, so
+every one is answered exactly once and two callers on one space split the set
+between them. The daemon's queue is bounded, and a full one drops its **oldest**
+and says how many in the reply: a caret superseded by the next caret has lost
+nothing, while an invitation dropped to make room for a ping is gone. What has
+not been seen yet is what somebody is about to act on.
+
+A browser does not read either of them. `lait serve` reads them on the browser's
+behalf and pushes the answers down the `/api/session` WebSocket, which carries
+three lanes:
+
+- **transient** — the `live` reply for one declared question. Lossy on purpose:
+  the next view supersedes the one that was lost, so a slow tab falls behind in
+  staleness rather than in backlog.
+- **control** — the drained signals. Lossless on purpose: nothing supersedes a
+  signal, so a tab that stops reading is disconnected rather than served a
+  stream with a hole in it.
+- **progress** — a local transfer's byte count, which predates both.
+
+A socket declares one thing — a space, and optionally an issue — on the
+transient lane, and the server acts on every declaration once per tick for the
+whole server. Two tabs on one issue cost one read; a question nobody holds is
+never asked, which is what keeps an open browser from placing a Station for
+every Orbit on the machine. Because the drain empties the queue, the server is
+the only thing that may drain a space a browser is watching, and it skips an
+agent's space entirely: that space is observable through the browser and not
+operable, and taking an agent's signals out from under it because somebody left
+a tab open is the same write the RPC surface refuses at the door.
+
+The two lanes run off different halves of that declaration. `live` is polled per
+*question*, so a declaration naming no issue costs no read — it says which space
+the tab is in and nothing more. The drain runs per *space*, for a tab on a board
+as much as for one on an issue: the daemon's queue is bounded and overwrites its
+oldest, so gating a lane that may not drop on a lane that may would destroy
+invitations for want of a facepile nobody asked for. A client declares its space
+for as long as it is in it, and stops when it leaves.
+
+A drain delivered to a client is a drain the daemon no longer holds. A client
+that decodes one and does not keep it has destroyed it — for its own later reads,
+for `lait signals` at a terminal, and for every other reader there is. Holding it
+is not optional, and neither is bounding what is held: a client that has lost the
+oldest of them says how many, exactly as the daemon does.
 
 ## 9. Comments, workflow conflicts, and partial state
 

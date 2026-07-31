@@ -155,6 +155,11 @@ pub async fn run(port: u16, open: bool, json: bool) -> Result<()> {
     // reach *them* first.
     let mut tasks = tokio::task::JoinSet::new();
     tasks.spawn(pump_daemon_events(daemon, doorbells, stop.subscribe()));
+    // One reader of the transient view for the whole server, not one per tab:
+    // the hub fans each answer out, and a question nobody is holding is never
+    // asked. See [`bridge::pump_transient`] for why the socket has an inbound
+    // direction at all.
+    tasks.spawn(bridge::pump_transient(app.clone(), stop.subscribe()));
 
     let url = format!("http://127.0.0.1:{}/?token={}", bound.port(), token);
     if json {

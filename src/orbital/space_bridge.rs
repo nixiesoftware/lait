@@ -139,6 +139,20 @@ pub struct SpaceBridge {
     /// When the last control connection was accepted or completed — the idle
     /// clock's reference point.
     last_activity: Mutex<std::time::Instant>,
+    /// The undrained tail of the Live plane's signal broadcast.
+    ///
+    /// Subscribed once, at activation, rather than per request: a signal is an
+    /// event and not a state anyone can re-read, so a receiver created when
+    /// somebody asks would only ever see what arrived after the asking.
+    ///
+    /// This *is* the bounded queue, and there is deliberately no second one in
+    /// front of it. A tokio broadcast ring overwrites its **oldest** slot when
+    /// it is full and tells the lagging reader how many it lost — which is
+    /// exactly the rule a signal needs. A caret superseded by a newer caret has
+    /// lost nothing; an invitation superseded by a ping has lost the
+    /// invitation, so what goes is what somebody has had the longest chance to
+    /// act on rather than what they have not seen yet.
+    signals: Mutex<tokio::sync::broadcast::Receiver<runtime::signal::DeliveredSignal>>,
 }
 
 struct PrincipalFacts {
@@ -426,6 +440,10 @@ impl SpaceBridge {
             }
         }
 
+        // Before the Station moves into the struct, and before anything can be
+        // delivered: a receiver only holds what arrives after it exists.
+        let signals = Mutex::new(station.signals());
+
         Ok(Self {
             address: OrbitAddress::for_store(home, space),
             mechanics,
@@ -444,6 +462,7 @@ impl SpaceBridge {
             pump: tokio::sync::Mutex::new(None),
             active_conns: std::sync::atomic::AtomicU64::new(0),
             last_activity: Mutex::new(std::time::Instant::now()),
+            signals,
         })
     }
 
@@ -1113,6 +1132,11 @@ impl SpaceBridge {
         match req {
             Request::Connect { ticket } => self.connect(&ticket),
             Request::Who => Response::Who { peers: self.who() },
+            Request::Live {
+                since_generation,
+                issue,
+            } => self.live(since_generation, issue.as_deref()),
+            Request::Signals => self.drain_signals(),
             Request::Sync => self.sync(),
             other => unreachable!("misclassified station request: {other:?}"),
         }
@@ -1274,6 +1298,123 @@ impl SpaceBridge {
                 }
             })
             .collect()
+    }
+
+    /// The actor a Station speaks for, or `None`.
+    ///
+    /// The Station's own authority view answers it — the same question the Live
+    /// plane's admission asked before it accepted the session. A peer that lost
+    /// standing between admission and this read resolves to nothing and its row
+    /// disappears, which is the right outcome for a surface whose entire subject
+    /// is who is here right now.
+    ///
+    /// The device id is never a fallback. `PresenceEntry.id` is a device and
+    /// `MemberDto.key` is an actor; the viewer colours an avatar by hashing
+    /// whatever string it is handed, so one person on two devices would arrive
+    /// as two people in two colours.
+    fn actor_for(&self, station: &StationId) -> Option<String> {
+        use runtime::AuthorityView;
+        self.mechanics
+            .admit_peer(station)
+            .map(|resolution| resolution.actor.as_str().to_string())
+    }
+
+    /// What this Station currently believes about who is doing what.
+    ///
+    /// Modelled on [`Self::who`] and reporting a different truth: `who` is the
+    /// durable Neighbor registry's reachability, this is the Live plane's
+    /// transient table, which nothing journals and nothing replays.
+    fn live(&self, since_generation: Option<u64>, issue: Option<&str>) -> Response {
+        let handle = self.station.live();
+        // The issue's Body id, by the same one-way derivation the Issues World
+        // commits under. It only runs this direction, which is why an unscoped
+        // read hands back Body ids a browser cannot name.
+        let want = issue.map(|doc| {
+            (
+                crate::world::contract::world_id().as_str().to_string(),
+                crate::world::contract::issue_body_id(doc).as_bytes(),
+            )
+        });
+        // `LiveNarrow::Body` and never a scope. Scope narrowing is *equality*,
+        // and an issue's caret and typing rows are `TextCaret` and `Typing` over
+        // the same Body — so asking for `IssueView` returns the presence rows
+        // and silently drops the two a caret surface exists to draw.
+        let narrow = match &want {
+            Some((world, body)) => runtime::live::LiveNarrow::Body { world, body: *body },
+            None => runtime::live::LiveNarrow::Everything,
+        };
+        let view = handle.view_narrowed(narrow, std::time::Instant::now());
+        let entries: Vec<_> = view.entries.iter().collect();
+
+        // Equality and never an ordering: the counter wraps. It is also not the
+        // whole answer — `uncertain` is derived per read from a slot's age and
+        // nothing bumps the counter when one crosses the grace window, so a
+        // caller told "unchanged" would draw a caret as certain until the slot
+        // expired half a minute later. Once every row is already uncertain
+        // nothing more can flip, and the cheap answer is true again.
+        if since_generation == Some(view.generation) && entries.iter().all(|entry| entry.uncertain)
+        {
+            return Response::LiveUnchanged {
+                generation: view.generation,
+            };
+        }
+        Response::Live {
+            generation: view.generation,
+            partial: view.partial,
+            entries: entries
+                .into_iter()
+                .filter_map(|entry| self.live_entry(entry))
+                .collect(),
+        }
+    }
+
+    /// One transient row, or nothing when its Station names no actor here.
+    fn live_entry(&self, entry: &runtime::live::LiveEntry) -> Option<crate::control::LiveEntry> {
+        Some(crate::control::LiveEntry {
+            actor: self.actor_for(&entry.station)?,
+            scope: live_scope(&entry.scope),
+            kind: transient_kind(entry.kind).to_string(),
+            age_ms: entry.age_ms,
+            uncertain: entry.uncertain,
+            caret: entry.caret.map(caret_position),
+            focus: entry.focus.map(caret_position),
+        })
+    }
+
+    /// Take everything the signal queue holds and leave it empty.
+    ///
+    /// The loop does not stop at a lag. A full ring overwrote its oldest slots
+    /// and moved this reader past them; what follows is still there and still
+    /// worth handing over, so the count is accumulated and the drain continues.
+    fn drain_signals(&self) -> Response {
+        use tokio::sync::broadcast::error::TryRecvError;
+        let mut queue = self
+            .signals
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut signals = Vec::new();
+        let mut dropped = 0u64;
+        loop {
+            match queue.try_recv() {
+                Ok(delivered) => {
+                    let Some(actor) = self.actor_for(&delivered.from) else {
+                        // A signal attributed to nobody is one a person cannot
+                        // decide about, and a device id in the `actor` field is
+                        // worse than an absent row.
+                        continue;
+                    };
+                    signals.push(crate::control::SignalEntry {
+                        actor,
+                        session_id: data_encoding::HEXLOWER.encode(&delivered.session_id),
+                        session_epoch: data_encoding::HEXLOWER.encode(&delivered.session_epoch),
+                        signal: signal_body(&delivered.signal),
+                    });
+                }
+                Err(TryRecvError::Lagged(missed)) => dropped = dropped.saturating_add(missed),
+                Err(TryRecvError::Empty | TryRecvError::Closed) => break,
+            }
+        }
+        Response::Signals { signals, dropped }
     }
 
     /// The one number both `status` and `who` report as "online".
@@ -2397,6 +2538,111 @@ impl SpaceBridge {
     }
 }
 
+/// Render a Body id the way the rest of the tree renders one.
+///
+/// The raw 16 bytes would arrive over this channel as a JSON list of sixteen
+/// numbers, which is a shape nothing else here uses and nothing can compare
+/// against a Body id printed anywhere else.
+fn render_body(body: &[u8; 16]) -> String {
+    replica::ids::BodyId::from_bytes(*body).render()
+}
+
+fn live_scope(scope: &runtime::transient::TransientScope) -> crate::control::LiveScope {
+    use crate::control::LiveScope;
+    use runtime::transient::TransientScope;
+    match scope {
+        TransientScope::IssueView { world, body } => LiveScope::IssueView {
+            world: world.clone(),
+            body: render_body(body),
+        },
+        TransientScope::DocumentView { world, body } => LiveScope::DocumentView {
+            world: world.clone(),
+            body: render_body(body),
+        },
+        TransientScope::TextCaret { world, body, field } => LiveScope::TextCaret {
+            world: world.clone(),
+            body: render_body(body),
+            field: field.clone(),
+        },
+        TransientScope::Typing { world, body, field } => LiveScope::Typing {
+            world: world.clone(),
+            body: render_body(body),
+            field: field.clone(),
+        },
+        TransientScope::ContentResidency { content } => LiveScope::ContentResidency {
+            content: data_encoding::HEXLOWER.encode(content),
+        },
+        TransientScope::CustomWorld { world, schema, key } => LiveScope::CustomWorld {
+            world: world.clone(),
+            schema: schema.clone(),
+            key: key.clone(),
+        },
+    }
+}
+
+fn caret_position(state: runtime::live::CaretState) -> crate::control::CaretPosition {
+    use crate::control::CaretPosition;
+    use runtime::live::CaretState;
+    match state {
+        CaretState::At(position) => CaretPosition::At { position },
+        CaretState::Drifted => CaretPosition::Drifted,
+        CaretState::Unresolved => CaretPosition::Unresolved,
+    }
+}
+
+fn transient_kind(kind: runtime::transient::TransientKind) -> &'static str {
+    use runtime::transient::TransientKind;
+    match kind {
+        TransientKind::Presence => "presence",
+        TransientKind::Caret => "caret",
+        TransientKind::Selection => "selection",
+        TransientKind::Typing => "typing",
+        TransientKind::Residency => "residency",
+    }
+}
+
+fn signal_body(signal: &runtime::planes::Signal) -> crate::control::SignalBody {
+    use crate::control::SignalBody;
+    use runtime::planes::{InviteKind, Signal};
+    match signal {
+        Signal::Ping { nonce } => SignalBody::Ping {
+            nonce: data_encoding::HEXLOWER.encode(nonce),
+        },
+        Signal::Acknowledge { nonce } => SignalBody::Acknowledge {
+            nonce: data_encoding::HEXLOWER.encode(nonce),
+        },
+        Signal::Attention { scope } => SignalBody::Attention {
+            scope: live_scope(scope),
+        },
+        Signal::SessionInvite { kind, scope } => SignalBody::SessionInvite {
+            invite: match kind {
+                InviteKind::Collaborate => "collaborate".into(),
+            },
+            scope: live_scope(scope),
+        },
+        Signal::FileOffer {
+            content,
+            plaintext_len,
+            display_name,
+            media_type,
+        } => SignalBody::FileOffer {
+            content: data_encoding::HEXLOWER.encode(content),
+            plaintext_len: *plaintext_len,
+            display_name: display_name.clone(),
+            media_type: media_type.clone(),
+        },
+        Signal::WorldSignal {
+            world,
+            schema,
+            payload,
+        } => SignalBody::WorldSignal {
+            world: world.clone(),
+            schema: schema.clone(),
+            payload_b64: data_encoding::BASE64.encode(payload),
+        },
+    }
+}
+
 fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::SystemTime::UNIX_EPOCH)
@@ -2679,4 +2925,100 @@ pub async fn run_space_bridge_with_packages(
         .await?
         .run()
         .await
+}
+
+#[cfg(test)]
+mod tests {
+    use runtime::live::LiveNarrow;
+    use runtime::transient::TransientScope;
+
+    const BODY: [u8; 16] = [7u8; 16];
+    const OTHER: [u8; 16] = [8u8; 16];
+
+    #[test]
+    fn narrowing_to_an_issue_keeps_every_scope_over_its_body() {
+        // What a scoped read has to answer with. A person reading the issue, a
+        // caret in its description and a typing flag in its title are three
+        // different scopes over one Body, and matching by scope equality — as
+        // the transient table's own filter does — would hand back the first and
+        // silently drop the two a caret surface exists to draw.
+        let world = crate::world::contract::world_id().as_str().to_string();
+        let over_the_body = [
+            TransientScope::IssueView {
+                world: world.clone(),
+                body: BODY,
+            },
+            TransientScope::DocumentView {
+                world: world.clone(),
+                body: BODY,
+            },
+            TransientScope::TextCaret {
+                world: world.clone(),
+                body: BODY,
+                field: "description".into(),
+            },
+            TransientScope::Typing {
+                world: world.clone(),
+                body: BODY,
+                field: "title".into(),
+            },
+        ];
+        for scope in &over_the_body {
+            assert!(
+                LiveNarrow::Body {
+                    world: &world,
+                    body: BODY
+                }
+                .admits(scope),
+                "{scope:?} is about that Body and was dropped"
+            );
+        }
+    }
+
+    #[test]
+    fn narrowing_to_an_issue_admits_nothing_about_another_body() {
+        let world = crate::world::contract::world_id().as_str().to_string();
+        // A Body is addressed by World *and* id: operation ids collide across
+        // documents of one activation, so a match on the id alone is not a
+        // lookup miss, it is a plausible and silently wrong answer.
+        let elsewhere = [
+            TransientScope::IssueView {
+                world: world.clone(),
+                body: OTHER,
+            },
+            TransientScope::TextCaret {
+                world: "com.example.other".into(),
+                body: BODY,
+                field: "description".into(),
+            },
+            TransientScope::ContentResidency { content: [0u8; 32] },
+            TransientScope::CustomWorld {
+                world: world.clone(),
+                schema: "s".into(),
+                key: "k".into(),
+            },
+        ];
+        for scope in &elsewhere {
+            assert!(
+                !LiveNarrow::Body {
+                    world: &world,
+                    body: BODY
+                }
+                .admits(scope),
+                "{scope:?} is not about that Body and was kept"
+            );
+        }
+    }
+
+    #[test]
+    fn an_issue_is_named_by_its_doc_id_and_an_alias_names_nothing() {
+        // The derivation is a hash of the string as given. A viewer that sent
+        // `ENG-12` would ask about a Body nothing publishes under and be
+        // answered an empty table for ever, with nothing anywhere to say so.
+        let doc = "iss_01jz0000000000000000000000";
+        assert_ne!(
+            crate::world::contract::issue_body_id(doc).as_bytes(),
+            crate::world::contract::issue_body_id("ENG-12").as_bytes()
+        );
+    }
 }

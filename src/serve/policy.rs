@@ -28,6 +28,7 @@ pub fn is_read(req: &Request) -> bool {
         | Request::SeedList
         | Request::Log { .. }
         | Request::Who
+        | Request::Live { .. }
         | Request::AssignmentList { .. }
         | Request::Hello { .. } => true,
 
@@ -63,6 +64,10 @@ pub fn is_read(req: &Request) -> bool {
         | Request::AssignmentGrant { .. }
         | Request::AssignmentRevoke { .. }
         | Request::WorldActivate { .. }
+        // …draining signals, which empties a queue somebody else is waiting to
+        // act on — the signals are addressed to that identity, not to whoever
+        // has its space open in a browser…
+        | Request::Signals
         // …and node control.
         | Request::ConfigReload
         | Request::Stop => false,
