@@ -169,6 +169,51 @@ fn the_live_view_and_the_signal_drain_are_served_rather_than_unreachable() {
     assert!(signals.is_empty(), "nothing was sent: {signals:?}");
     assert_eq!(dropped, 0, "an empty queue has dropped nothing");
 
+    // Declaring what this node is looking at. The send side's entry point, and
+    // the reason a facepile on somebody else's screen has anything to draw.
+    //
+    // What this proves is that the verb is *served* rather than unreachable —
+    // which is this file's whole subject. It does not prove a peer sees the
+    // result: that needs two Stations and a connection between them, and it is
+    // `crates/runtime/tests/live_transient.rs::two_node_presence`, which is
+    // mutation-checked against a stubbed publisher.
+    let watching = req(
+        &client,
+        &home,
+        Request::Watching {
+            issues: vec!["iss_01jz0000000000000000000000".into()],
+        },
+    );
+    assert!(
+        matches!(watching, Response::Ok { .. }),
+        "expected the declaration to be served, got {watching:?}"
+    );
+
+    // An id this node cannot resolve is dropped rather than refused. A viewer
+    // holding a stale link is a viewer with a stale link, not a client worth
+    // failing — and refusing would let anyone probe for which issues exist by
+    // watching them.
+    let nonsense = req(
+        &client,
+        &home,
+        Request::Watching {
+            issues: vec!["not-a-doc-id".into(), String::new()],
+        },
+    );
+    assert!(
+        matches!(nonsense, Response::Ok { .. }),
+        "expected unresolvable ids to be dropped, got {nonsense:?}"
+    );
+
+    // The empty declaration, which is how presence stops. Not a no-op and not an
+    // error: a node looking at nothing is a real state — every tab closed — and
+    // it has to be expressible, or presence could only ever grow.
+    let nothing = req(&client, &home, Request::Watching { issues: Vec::new() });
+    assert!(
+        matches!(nothing, Response::Ok { .. }),
+        "expected an empty declaration to be served, got {nothing:?}"
+    );
+
     let _ = req(&client, &home, Request::Stop);
     let _ = handle.join();
 }
