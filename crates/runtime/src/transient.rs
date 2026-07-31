@@ -452,7 +452,20 @@ impl TransientStore {
         now: Instant,
     ) {
         let key = (scope.clone(), kind as u8);
-        self.slots.remove(&key);
+        // Only what the retirement actually covers. The watermark it records is
+        // `seq`, and `admit` refuses items at or below it — so removing a slot
+        // holding a *higher* sequence would delete something this retirement
+        // does not cover and which the watermark would then let straight back
+        // in. That is the same race the watermark exists for, seen from the
+        // other side: retirement and a datagram in flight are unordered, and
+        // whichever arrives second must not undo the newer of the two.
+        let covered = self
+            .slots
+            .get(&key)
+            .is_none_or(|slot| slot.session_epoch != session_epoch || slot.seq <= seq);
+        if covered {
+            self.slots.remove(&key);
+        }
         self.retired.insert(key, (session_epoch, seq, now));
     }
 

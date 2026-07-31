@@ -1250,14 +1250,14 @@ mod publishing {
         // that navigates faster than its messages arrive publish a set neither
         // side agrees on.
         let handle = LiveHandle::new(None);
-        assert_eq!(handle.local_presence().1, Vec::new());
+        assert_eq!(handle.declared(), Vec::new());
 
         handle.declare_local(scopes(&[1, 2]));
-        let (first, held) = handle.local_presence();
+        let (first, held) = (handle.local_generation(), handle.declared());
         assert_eq!(held, scopes(&[1, 2]));
 
         handle.declare_local(scopes(&[3]));
-        let (second, held) = handle.local_presence();
+        let (second, held) = (handle.local_generation(), handle.declared());
         assert_eq!(held, scopes(&[3]), "the old set is gone, not merged");
         assert_ne!(first, second, "and a session can tell cheaply");
     }
@@ -1269,9 +1269,9 @@ mod publishing {
         // session republish twice a second.
         let handle = LiveHandle::new(None);
         handle.declare_local(scopes(&[1]));
-        let (generation, _) = handle.local_presence();
+        let generation = handle.local_generation();
         handle.declare_local(scopes(&[1]));
-        assert_eq!(handle.local_presence().0, generation);
+        assert_eq!(handle.local_generation(), generation);
     }
 
     #[test]
@@ -1281,9 +1281,9 @@ mod publishing {
         // could only ever grow.
         let handle = LiveHandle::new(None);
         handle.declare_local(scopes(&[1]));
-        let (before, _) = handle.local_presence();
+        let before = handle.local_generation();
         handle.declare_local(Vec::new());
-        let (after, held) = handle.local_presence();
+        let (after, held) = (handle.local_generation(), handle.declared());
         assert!(held.is_empty());
         assert_ne!(before, after);
     }
@@ -1718,6 +1718,18 @@ mod nudging {
             handle.present_stations().is_empty(),
             "and leaving is leaving"
         );
+
+        // The gate itself, which nothing asserted before: a nudge for somebody
+        // who is not here is refused at the queue rather than held in it.
+        assert!(
+            !handle.nudge(&station(1), nudge(1)),
+            "a peer that left is not queued for"
+        );
+        assert!(
+            !handle.nudge(&station(9), nudge(1)),
+            "and neither is one that never arrived"
+        );
+        assert!(handle.take_outbound_for_test(&station(9)).is_empty());
     }
 
     #[test]
@@ -1745,6 +1757,7 @@ mod nudging {
         // Found by a test that queued a `Ping` and then waited ten seconds for a
         // session to notice it had been cancelled.
         let handle = LiveHandle::new(None);
+        handle.arrived(&station(1));
         assert!(
             !handle.nudge(&station(1), Signal::Ping { nonce: [1u8; 16] }),
             "a ping expects an acknowledgement"
@@ -1767,6 +1780,7 @@ mod nudging {
         // one to make room for a thing of exactly equal standing, which is the
         // rule a cursor stream wants and a signal does not.
         let handle = LiveHandle::new(None);
+        handle.arrived(&station(1));
         for n in 0..16u8 {
             assert!(handle.nudge(&station(1), nudge(n)), "{n} was refused early");
         }
@@ -1784,7 +1798,8 @@ mod nudging {
     #[test]
     fn taking_is_taking_and_a_session_that_ends_drops_what_it_held() {
         let handle = LiveHandle::new(None);
-        handle.nudge(&station(1), nudge(1));
+        handle.arrived(&station(1));
+        assert!(handle.nudge(&station(1), nudge(1)));
         assert_eq!(handle.take_outbound_for_test(&station(1)).len(), 1);
         assert!(handle.take_outbound_for_test(&station(1)).is_empty());
 
@@ -1792,7 +1807,7 @@ mod nudging {
         // clearing rides `departed` rather than a second call somebody has to
         // remember — which is what it was, and what nothing ever called.
         handle.arrived(&station(2));
-        handle.nudge(&station(2), nudge(2));
+        assert!(handle.nudge(&station(2), nudge(2)));
         handle.departed(&station(2));
         assert!(handle.take_outbound_for_test(&station(2)).is_empty());
 
@@ -1801,7 +1816,7 @@ mod nudging {
         // one of two laptops.
         handle.arrived(&station(3));
         handle.arrived(&station(3));
-        handle.nudge(&station(3), nudge(3));
+        assert!(handle.nudge(&station(3), nudge(3)));
         handle.departed(&station(3));
         assert_eq!(handle.take_outbound_for_test(&station(3)).len(), 1);
     }

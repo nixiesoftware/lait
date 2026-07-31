@@ -1218,15 +1218,24 @@ impl SpaceBridge {
     /// Station *into* anybody else's transient table. Without it every viewer
     /// renders other people and nobody renders this one.
     ///
-    /// Replace-all: the declaration is what is on screen now, so a scope that
-    /// has left the set is retired on every peer rather than left to expire.
-    /// Unresolvable ids are dropped rather than refused — a viewer that named an
-    /// issue this node cannot parse is a viewer with a stale link, not a client
-    /// worth failing.
+    /// Replace-all: the declaration is what is on screen now, so a scope that has
+    /// left the set is retired on every peer rather than left to expire.
+    ///
+    /// **Truncated at the subscription ceiling rather than sent whole.** A peer
+    /// refuses an entire `Subscribe` frame carrying more scopes than a connection
+    /// may hold, so one declaration past the cap does not lose the excess — it
+    /// loses *everything*, silently, on every peer, until the declaration
+    /// changes. Somebody with a hundred tabs open would simply stop existing.
+    ///
+    /// A doc id is not validated here and cannot be: the Body id is a hash of the
+    /// string as given, so every string is a legal input and an unresolvable one
+    /// names a Body nothing publishes under. That is an empty answer rather than
+    /// an error, and it is what a stale link should get.
     fn watching(&self, issues: &[String]) -> Response {
         let world = crate::world::contract::world_id().as_str().to_string();
         let scopes = issues
             .iter()
+            .take(runtime::budget::slots::MAX_SUBSCRIBED_SCOPES_PER_CONNECTION)
             .map(|doc| runtime::transient::TransientScope::IssueView {
                 world: world.clone(),
                 body: crate::world::contract::issue_body_id(doc).as_bytes(),
