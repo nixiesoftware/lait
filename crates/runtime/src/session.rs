@@ -362,6 +362,25 @@ impl StationCore {
 
     /// Run a closure against the exclusive Replica writer (the Contact plane's
     /// snapshot/incorporation entry). Refused once the core is closed.
+    ///
+    /// **Exclusive is not a choice here, and it is worth knowing why before
+    /// anyone tries to relax it.** The obvious improvement is a `RwLock`, so
+    /// that read-only questions — resolving a caret anchor, reading a
+    /// projection — stop queueing behind commits. It does not compile:
+    /// `RwLock<T>: Sync` requires `T: Sync`, and `CoreInner` holds a Replica
+    /// holding `dyn Fabric + Send`, which is not `Sync` because the underlying
+    /// collaborative document is not. Concurrent readers are not expressible
+    /// at all, whatever the access pattern.
+    ///
+    /// So a caret resolve takes the same lock a commit takes. What bounds the
+    /// damage is the rate: `gates::LIVE_DATAGRAMS` admits 64 items a second per
+    /// connection and `slots::MAX_LIVE_SESSIONS` is 32, so the worst honest
+    /// load is a few thousand microsecond-scale resolutions a second against a
+    /// commit measured in milliseconds. That is a small duty cycle rather than
+    /// a safe one, and it is the number to re-derive if either ceiling moves.
+    ///
+    /// The real fix, if it is ever needed, is a snapshot the reader owns — not
+    /// a second kind of borrow on state that cannot be shared.
     pub fn with_replica<T>(
         &self,
         f: impl FnOnce(&mut replica::Replica) -> Result<T, replica::ReplicaCommitError>,
