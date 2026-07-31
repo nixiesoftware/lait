@@ -450,8 +450,8 @@ impl LiveHandle {
 
     /// Drop everything a Station held, whichever session put it there.
     ///
-    /// What a revocation does. Standing is per peer, not per connection, so a
-    /// peer that lost it keeps nothing on any of its sessions.
+    /// What a revocation does. Membership is per peer rather than per
+    /// connection, so a peer that lost it keeps nothing on any of its sessions.
     pub fn forget(&self, station: &StationId) -> usize {
         let mut table = self.table();
         let before = table.slots.len();
