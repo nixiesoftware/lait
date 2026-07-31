@@ -54,10 +54,25 @@ first.
 The descriptor is the only row whose version is chosen by the record's content
 rather than by the build that wrote it. A descriptor emits 1 when it declares no
 sections and 2 when it declares any, so the set of implementation ids this bump
-moves is the set of Worlds that declare a section — today, none. That is the
-whole reason the section table exists: adding a section kind must not move the
-id of a World that declares nothing of that kind, which two more fields in a
-fixed-order tuple would have done to every id in the system.
+moves is exactly the set of Worlds that declare a section. That is the whole
+reason the section table exists: adding a section kind must not move the id of a
+World that declares nothing of that kind, which two more fields in a fixed-order
+tuple would have done to every id in the system.
+
+**`com.lait.issues` is in that set, and its id moved.** It declares three signal
+schemas — `assigned`, `mentioned`, `review-requested` — so its descriptor is
+version 2 and its identity is
+`96f4d2b2f94538d39cadbb104123667a0eed02205cbc5f499033e4478ca94aa1`, pinned by
+`products/issues/tests/package_boundary.rs`. A Space formed against an earlier
+build activated a different id and will see this one as an implementation it
+never approved until it is activated again. That is the mechanism working: a
+World whose declared signals changed is a World whose reviewed surface changed,
+and the identity is what says so. It is recorded here rather than left for
+somebody to meet in the field.
+
+Worlds that declare nothing keep the ids they had, which the same test asserts by
+construction — a zero-section descriptor is byte-identical to what shipped before
+sections existed.
 
 The hash domain deliberately did not move with it. Ids stay derived under
 `lait.world-implementation.v1` even at encoding version 2, because the domain is

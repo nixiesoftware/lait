@@ -92,6 +92,10 @@ fn place(ordered: &[Milestone], id: &str, pos: &Pos) -> Option<String> {
 pub struct IssuesWorld {
     id: replica::ids::WorldId,
     schemas: Vec<BodySchema>,
+    /// Owned rather than built on demand, because the trait hands back a slice
+    /// and the registry compares it against the registration byte for byte —
+    /// two constructions of "the same" list is how they come to differ.
+    signal_schemas: Vec<runtime::world::SignalSchema>,
     /// The derived read-model cache, keyed by the EXACT Manifest root each
     /// query is pinned to — registered in `tests/mixed_root_guard.rs` with its
     /// mixed-root rejection proof. A hit is only ever the same root, so output
@@ -191,6 +195,7 @@ impl IssuesWorld {
         Self {
             id: contract::world_id(),
             cache: std::sync::Mutex::new(RootKeyedCache::default()),
+            signal_schemas: contract::signal_schemas(),
             schemas: vec![
                 BodySchema {
                     id: contract::issue_schema(),
@@ -218,8 +223,13 @@ impl IssuesWorld {
             implementation_version: runtime::WorldVersion(1),
             schemas: world.schemas.clone(),
             limits: runtime::WorldLimits::default(),
+            // No scopes. Presence, carets and typing on an issue are the
+            // substrate's own shapes over a Body — `IssueView`, `TextCaret`,
+            // `Typing` — and this World gets them without declaring anything. A
+            // declaration is for a scope the substrate has no name for, and
+            // Issues has none yet.
             scope_schemas: Vec::new(),
-            signal_schemas: Vec::new(),
+            signal_schemas: world.signal_schemas.clone(),
         }
     }
 
@@ -762,6 +772,10 @@ impl World for IssuesWorld {
 
     fn schemas(&self) -> &[BodySchema] {
         &self.schemas
+    }
+
+    fn signal_schemas(&self) -> &[runtime::world::SignalSchema] {
+        &self.signal_schemas
     }
 
     fn submit(

@@ -142,6 +142,74 @@ pub fn demand_read() -> Vec<u8> {
         .expect("canonical read demand")
 }
 
+// ---- Reliable signals -----------------------------------------------------
+
+/// The signals this World declares, by name.
+///
+/// Each is a *nudge*: it says where to look and never what happened. That is not
+/// minimalism, it is the rule that makes a signal safe to lose. The durable
+/// record — the issue, its assignee, its comments — is already committed and
+/// already reaches everyone through convergence; a signal only makes it timely.
+/// A signal that carried the fact would be a second copy of it, on a plane whose
+/// whole contract is that it keeps nothing.
+pub mod signal {
+    pub const ASSIGNED: &str = "assigned";
+    pub const MENTIONED: &str = "mentioned";
+    pub const REVIEW_REQUESTED: &str = "review-requested";
+}
+
+/// What every Issues signal carries.
+///
+/// A doc id and nothing else. The receiver already has, or can converge, the
+/// issue itself — so the largest thing this ever needs to say is which one.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct IssueNudge {
+    /// The `iss_` doc id, never a project alias: an alias is a display form and
+    /// the receiver would have nothing to resolve it against.
+    pub issue: String,
+}
+
+impl IssueNudge {
+    pub fn encode(&self) -> Vec<u8> {
+        postcard::to_stdvec(self).expect("postcard issue nudge")
+    }
+
+    /// Decode one nudge, in the order every other shape in this tree uses:
+    /// postcard, then re-encode equality, so one value has one spelling.
+    pub fn decode_canonical(bytes: &[u8]) -> Option<Self> {
+        let nudge: Self = postcard::from_bytes(bytes).ok()?;
+        (nudge.encode() == bytes).then_some(nudge)
+    }
+}
+
+/// The ceiling every Issues signal declares.
+///
+/// A doc id is around thirty bytes and a nudge carries one. This is generous for
+/// what it holds and tight against anything that wanted to become a message —
+/// which is the point of a per-schema bound, since the plane's own ceiling is
+/// sixteen kilobytes.
+pub const MAX_NUDGE_BYTES: u32 = 128;
+
+/// The signal declarations this World registers.
+///
+/// Every one demands `space.issue.read`. Being told about an issue is a read of
+/// it: a signal naming something you may not open would tell you it exists, and
+/// its assignee, and when somebody touched it.
+pub fn signal_schemas() -> Vec<runtime::world::SignalSchema> {
+    [
+        signal::ASSIGNED,
+        signal::MENTIONED,
+        signal::REVIEW_REQUESTED,
+    ]
+    .into_iter()
+    .map(|name| runtime::world::SignalSchema {
+        name: SchemaId::parse(name).expect("declared signal name"),
+        max_payload_bytes: MAX_NUDGE_BYTES,
+        demand: demand_read(),
+    })
+    .collect()
+}
+
 /// The full Space capability set the founder is granted at formation:
 /// `(capability, resource)` pairs, plus the Mechanics meta policy-admin grant.
 pub fn founder_capabilities() -> Vec<(PolicyCapability, PolicyResource)> {
