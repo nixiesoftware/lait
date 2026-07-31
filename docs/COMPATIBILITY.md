@@ -59,10 +59,9 @@ reason the section table exists: adding a section kind must not move the id of a
 World that declares nothing of that kind, which two more fields in a fixed-order
 tuple would have done to every id in the system.
 
-**`com.lait.issues` is in that set, and its id moved.** It declares three signal
-schemas — `assigned`, `mentioned`, `review-requested` — so its descriptor is
-version 2 and its identity is
-`96f4d2b2f94538d39cadbb104123667a0eed02205cbc5f499033e4478ca94aa1`, pinned by
+**`com.lait.issues` is in that set, and its id moved.** It declares two signal
+schemas — `assigned` and `commented` — so its descriptor is version 2 and its identity is
+`142d7a76f8d7f1c559225004fe0e70c9e9cecf86b4a53d232604b6f42c0d344c`, pinned by
 `products/issues/tests/package_boundary.rs`. A Space formed against an earlier
 build activated a different id and will see this one as an implementation it
 never approved until it is activated again. That is the mechanism working: a

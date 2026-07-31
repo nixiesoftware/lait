@@ -266,6 +266,21 @@ pub struct LiveHandle {
     /// both would make "who is here" a question whose answer includes us, and
     /// every viewer would draw itself a second time.
     local: std::sync::Mutex<LocalPresence>,
+    /// Peers holding a session right now, refcounted.
+    ///
+    /// Refcounted because `MAX_LIVE_SESSIONS_PER_STATION` is two: a peer with a
+    /// laptop and a phone is here twice, and the first one to hang up has not
+    /// left. On the handle rather than on the service because both the accepting
+    /// and the dialling path make sessions, and a reader asking "who is here"
+    /// must not get a different answer depending on who dialled.
+    connected: std::sync::Mutex<std::collections::BTreeMap<StationId, usize>>,
+    /// Signals waiting for the session that can carry them.
+    ///
+    /// Addressed by Station, because a signal is for a person and a person is
+    /// reachable only through the connections they hold. A signal for a peer
+    /// with no session is not queued for later: presence is the whole gate, and
+    /// somebody who is not here has the durable record as their path.
+    outbox: std::sync::Mutex<std::collections::BTreeMap<StationId, Vec<crate::planes::Signal>>>,
     /// Files somebody offered, waiting for a person.
     ///
     /// Beside the transient table rather than in it: a slot expires on a TTL
@@ -330,6 +345,8 @@ impl LiveHandle {
             anchors,
             residency,
             local: std::sync::Mutex::new(LocalPresence::default()),
+            connected: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+            outbox: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             offers: std::sync::Mutex::new(crate::signal::OfferQueue::new()),
         }
     }
@@ -365,6 +382,89 @@ impl LiveHandle {
 
     fn local(&self) -> std::sync::MutexGuard<'_, LocalPresence> {
         self.local.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// A session for this peer opened.
+    pub fn arrived(&self, peer: &StationId) {
+        *self
+            .connected
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .entry(peer.clone())
+            .or_insert(0) += 1;
+    }
+
+    /// A session for this peer ended.
+    pub fn departed(&self, peer: &StationId) {
+        let mut connected = self.connected.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(count) = connected.get_mut(peer) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                connected.remove(peer);
+            }
+        }
+    }
+
+    /// Who is reachable right now.
+    ///
+    /// Not "who is a member" and not "who has said something" — who this Station
+    /// currently holds a session with. That is the only set a signal can be
+    /// delivered to, and the reason presence can gate delivery at all.
+    pub fn present_stations(&self) -> Vec<StationId> {
+        self.connected
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .keys()
+            .cloned()
+            .collect()
+    }
+
+    /// Hand a signal to whichever session reaches that peer.
+    ///
+    /// Returns whether it was taken. `false` is a full outbox, and the *newest*
+    /// is refused rather than the oldest evicted: an outbox is not a cursor
+    /// stream, and dropping what is already queued loses the older fact to keep
+    /// the newer one — which is backwards when both are facts.
+    ///
+    /// A peer with no session is not an error and not a queue. Presence is the
+    /// gate: somebody who is not here has the durable record as their path, and
+    /// holding signals for them would make this a mailbox, which is the one
+    /// thing a plane that keeps nothing must not become.
+    pub fn nudge(&self, peer: &StationId, signal: crate::planes::Signal) -> bool {
+        let mut outbox = self.outbox.lock().unwrap_or_else(|p| p.into_inner());
+        let queued = outbox.entry(peer.clone()).or_default();
+        if queued.len() >= MAX_OUTBOUND_SIGNALS {
+            return false;
+        }
+        queued.push(signal);
+        true
+    }
+
+    /// `take_outbound`, for the fixtures that pin the outbox rules.
+    ///
+    /// The real one is private because draining belongs to the session that can
+    /// carry what it drains — a second caller would take signals nothing then
+    /// sends.
+    pub fn take_outbound_for_test(&self, peer: &StationId) -> Vec<crate::planes::Signal> {
+        self.take_outbound(peer)
+    }
+
+    /// Take everything waiting for one peer.
+    fn take_outbound(&self, peer: &StationId) -> Vec<crate::planes::Signal> {
+        let mut outbox = self.outbox.lock().unwrap_or_else(|p| p.into_inner());
+        outbox.remove(peer).unwrap_or_default()
+    }
+
+    /// Drop what is queued for a peer nothing can reach.
+    ///
+    /// Called when a session ends. Without it a peer that disconnects mid-fanout
+    /// leaves its signals in the map for as long as the process runs, and the
+    /// map grows with every peer that ever went away.
+    pub fn forget_outbound(&self, peer: &StationId) {
+        self.outbox
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(peer);
     }
 
     /// Hold a file somebody offered.
@@ -756,6 +856,13 @@ fn body_key(world: &str, body: [u8; 16]) -> Option<replica::ids::BodyKey> {
 /// invitations, which is a thing that happens to people too.
 pub type SignalSink = tokio::sync::broadcast::Sender<crate::signal::DeliveredSignal>;
 
+/// How many signals wait for one peer before the newest are refused.
+///
+/// Small, because these are person-scale facts about one person and a peer that
+/// has fallen this far behind is not going to be caught up by a longer queue.
+/// The durable record behind each one is unaffected either way.
+const MAX_OUTBOUND_SIGNALS: usize = 16;
+
 /// How many received signals are held for a subscriber that is not reading.
 ///
 /// Small. Signals are person-scale and rate-limited at four a second per
@@ -809,6 +916,9 @@ pub async fn serve_session(
     // Whatever ends this connection — idle, cancel, a gate, a peer hanging up —
     // the slots go with it. Presence has no goodbye it can rely on, so the
     // session ending *is* the goodbye.
+    if let Some(handle) = &handle {
+        handle.arrived(&peer.station);
+    }
     let leaving = Leaving {
         station: peer.station.clone(),
         session_epoch: epoch,
@@ -885,6 +995,18 @@ pub async fn serve_session(
         // somebody nobody can see.
         if last_seen.elapsed() > deadline::LIVE_IDLE {
             break;
+        }
+        // Signals waiting for this peer. Sent before presence, because a signal
+        // is a fact somebody acts on and presence is a picture that the next
+        // beat redraws anyway.
+        if let Some(handle) = &handle {
+            for signal in handle.take_outbound(&peer.station) {
+                // A failure is not requeued. The durable record behind every
+                // signal is already committed and already converging, so a lost
+                // nudge costs timeliness and nothing else — and a retry queue
+                // here is the mailbox this plane must not become.
+                let _ = crate::signal::send_signal(connection.as_ref(), &signal).await;
+            }
         }
         // Told when it changes, and told again before it expires. The second
         // half is not belt and braces: a slot dies on the *receiver's* clock, so

@@ -302,6 +302,14 @@ impl WorldReply {
         }
     }
 
+    /// Whether this reply carries a payload rather than an error.
+    ///
+    /// Exposed so a host can ask "did anything happen" without consuming the
+    /// reply, which `into_result` would.
+    pub fn succeeded(&self) -> bool {
+        matches!(self.outcome, WorldReplyOutcome::Ok { .. })
+    }
+
     pub fn validate_for(&self, call: &WorldCall) -> Result<(), WorldCallError> {
         if self.world != call.world
             || self.operation != call.operation
@@ -343,6 +351,28 @@ pub struct WorldCallContext<'a> {
     pub device: &'a str,
 }
 
+/// Somebody a World thinks should be told about a call, and what to tell them.
+///
+/// The World answers **who and what**; the host answers **whether they are
+/// reachable and how**. That split is the whole point of the type. A World that
+/// knew who was connected would be a World holding a delivery plane, and a host
+/// that knew assigning means telling the assignee would be a host holding
+/// product rules.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorldNudge {
+    /// The actor to tell, canonical.
+    pub actor: String,
+    /// The signal schema, which must be one this World declared — the host
+    /// refuses an undeclared one rather than sending it.
+    pub schema: String,
+    /// The payload, bounded by the schema's own declared ceiling.
+    ///
+    /// A pointer to durable material and never the material itself: the record
+    /// is already committed and already converging, and a nudge that carried the
+    /// fact would be a second copy of it on a plane that keeps nothing.
+    pub payload: Vec<u8>,
+}
+
 /// The object-safe application handler bundled with a World implementation.
 pub trait WorldCallHandler: Send + Sync {
     /// Decode and classify a call. Hosts use this trusted classification for
@@ -351,6 +381,24 @@ pub trait WorldCallHandler: Send + Sync {
 
     /// Execute a validated product call through the World's docked Session.
     fn call(&self, call: &WorldCall, context: &WorldCallContext<'_>) -> WorldReply;
+
+    /// Who should be told about a call that succeeded, and what to tell them.
+    ///
+    /// Asked after the commit, so a World answers about work that actually
+    /// happened. The default is nobody, which is what a World with no signals
+    /// declared means.
+    ///
+    /// **The acting identity is not in the answer.** Nobody is told about their
+    /// own action — a World that returned the actor here would have every person
+    /// notified of everything they did.
+    fn nudges(
+        &self,
+        _call: &WorldCall,
+        _reply: &WorldReply,
+        _context: &WorldCallContext<'_>,
+    ) -> Vec<WorldNudge> {
+        Vec::new()
+    }
 }
 
 #[cfg(test)]

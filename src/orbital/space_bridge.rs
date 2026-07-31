@@ -770,8 +770,64 @@ impl SpaceBridge {
             },
         );
         match reply.validate_for(call) {
-            Ok(()) => reply,
+            Ok(()) => {
+                self.deliver_nudges(control.nudges(
+                    call,
+                    &reply,
+                    &WorldCallContext {
+                        session,
+                        identity,
+                        actor: &facts.actor,
+                        device: &facts.device,
+                    },
+                ));
+                reply
+            }
             Err(error) => WorldReply::error(call, error.code, error.message),
+        }
+    }
+
+    /// Hand a World's nudges to whichever peers are actually here.
+    ///
+    /// **Presence is the gate, and it is better information than a preference
+    /// pane.** Linear picks a channel from what a person configured months ago;
+    /// this picks from whether they are looking at the product right now. A peer
+    /// with no session is not queued for and not retried — the durable record is
+    /// already committed and already converging, and it is their path.
+    ///
+    /// The World said who and what. This says whether they are reachable, which
+    /// is the half a World must not know: one that could see who is connected
+    /// would be a World holding a delivery plane.
+    fn deliver_nudges(&self, nudges: Vec<crate::orbital::WorldNudge>) {
+        if nudges.is_empty() {
+            return;
+        }
+        let live = self.station.live();
+        // Resolved once. `actor_for` asks Mechanics per Station, and a fan-out
+        // to a dozen followers would otherwise ask about the same peer a dozen
+        // times.
+        let here: Vec<(mechanics::ids::StationId, String)> = live
+            .present_stations()
+            .into_iter()
+            .filter_map(|station| {
+                let actor = self.actor_for(&station)?;
+                Some((station, actor))
+            })
+            .collect();
+        let world = crate::world::contract::world_id().as_str().to_string();
+        for nudge in nudges {
+            for (station, _) in here.iter().filter(|(_, a)| a == &nudge.actor) {
+                let signal = runtime::planes::Signal::WorldSignal {
+                    world: world.clone(),
+                    schema: nudge.schema.clone(),
+                    payload: nudge.payload.clone(),
+                };
+                // A full outbox is not reported to anyone. The record behind
+                // every nudge is durable, so a refused one costs timeliness and
+                // nothing else — and telling the *sender* would be telling them
+                // something about the receiver's queue.
+                live.nudge(station, signal);
+            }
         }
     }
 

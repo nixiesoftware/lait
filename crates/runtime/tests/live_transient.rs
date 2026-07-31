@@ -1611,3 +1611,87 @@ mod declared_scopes {
         assert_eq!(admits(&None, &custom("anything", "at-all")), Ok(()));
     }
 }
+
+/// Signals queued for a peer, and the rules that decide whether they go.
+mod nudging {
+    use super::*;
+    use runtime::live::LiveHandle;
+    use runtime::planes::Signal;
+
+    fn nudge(n: u8) -> Signal {
+        Signal::WorldSignal {
+            world: "com.example.notes".into(),
+            schema: "assigned".into(),
+            payload: vec![n],
+        }
+    }
+
+    #[test]
+    fn presence_is_the_gate_and_nothing_is_held_for_the_absent() {
+        // The composition Linear cannot make: it picks a delivery channel from
+        // what somebody configured months ago, and this picks from whether they
+        // are here now. A peer with no session is not queued for — holding
+        // signals would make this a mailbox, which is the one thing a plane that
+        // keeps nothing must not become.
+        let handle = LiveHandle::new(None);
+        assert!(handle.present_stations().is_empty());
+
+        handle.arrived(&station(1));
+        assert_eq!(handle.present_stations(), vec![station(1)]);
+
+        handle.departed(&station(1));
+        assert!(
+            handle.present_stations().is_empty(),
+            "and leaving is leaving"
+        );
+    }
+
+    #[test]
+    fn a_peer_with_two_sessions_is_here_until_both_end() {
+        // `MAX_LIVE_SESSIONS_PER_STATION` is two, so a laptop and a phone are
+        // one peer twice. The first to hang up has not left, and a refcount is
+        // the difference between that and a person who vanishes when they close
+        // one of two tabs.
+        let handle = LiveHandle::new(None);
+        handle.arrived(&station(1));
+        handle.arrived(&station(1));
+        handle.departed(&station(1));
+        assert_eq!(handle.present_stations(), vec![station(1)]);
+        handle.departed(&station(1));
+        assert!(handle.present_stations().is_empty());
+    }
+
+    #[test]
+    fn a_full_outbox_refuses_the_newest_rather_than_dropping_the_oldest() {
+        // Both are facts. Evicting the oldest to keep the newest loses the older
+        // one to make room for a thing of exactly equal standing, which is the
+        // rule a cursor stream wants and a signal does not.
+        let handle = LiveHandle::new(None);
+        for n in 0..16u8 {
+            assert!(handle.nudge(&station(1), nudge(n)), "{n} was refused early");
+        }
+        assert!(!handle.nudge(&station(1), nudge(99)));
+
+        let taken = handle.take_outbound_for_test(&station(1));
+        assert_eq!(taken.len(), 16);
+        assert_eq!(
+            taken[0],
+            nudge(0),
+            "the oldest is still there, which is the point"
+        );
+    }
+
+    #[test]
+    fn taking_is_taking_and_a_session_that_ends_drops_what_it_held() {
+        let handle = LiveHandle::new(None);
+        handle.nudge(&station(1), nudge(1));
+        assert_eq!(handle.take_outbound_for_test(&station(1)).len(), 1);
+        assert!(handle.take_outbound_for_test(&station(1)).is_empty());
+
+        // A peer that disconnects mid-fanout leaves nothing behind. Held rather
+        // than dropped, the map grows with every peer that ever went away.
+        handle.nudge(&station(2), nudge(2));
+        handle.forget_outbound(&station(2));
+        assert!(handle.take_outbound_for_test(&station(2)).is_empty());
+    }
+}

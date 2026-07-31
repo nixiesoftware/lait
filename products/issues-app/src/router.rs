@@ -14,7 +14,7 @@ use runtime::{RequestId, Session, WorldError, WorldIntent, WorldQuery};
 use serde::de::DeserializeOwned;
 use world_bridge::{
     WorldCall, WorldCallAccess, WorldCallContext, WorldCallError, WorldCallErrorCode,
-    WorldCallHandler, WorldReply,
+    WorldCallHandler, WorldNudge, WorldReply,
 };
 
 use crate::{
@@ -109,6 +109,56 @@ impl WorldCallHandler for IssuesCallHandler {
                 format!("encode Issues response: {error}"),
             ),
         }
+    }
+
+    /// Who should hear about this, and which signal says so.
+    ///
+    /// Two calls answer at all. Assigning tells the people on the issue that it
+    /// moved to them; commenting tells them somebody said something. Everything
+    /// else changes durable state that converges on its own, and a signal for
+    /// each would be a notification for every field edit anybody makes.
+    ///
+    /// The acting identity is filtered out. Nobody is told about their own
+    /// action — Linear does not, and a person notified of everything they did
+    /// stops reading notifications.
+    fn nudges(
+        &self,
+        call: &WorldCall,
+        reply: &WorldReply,
+        context: &WorldCallContext<'_>,
+    ) -> Vec<WorldNudge> {
+        // Asked only about work that happened. A refused call changed nothing,
+        // and an idempotent replay changed nothing twice.
+        if !reply.succeeded() {
+            return Vec::new();
+        }
+        let Ok(request) = Self::decode_request(call) else {
+            return Vec::new();
+        };
+        let (reff, schema) = match &request {
+            Request::Assign { reff, .. } => (reff, contract::signal::ASSIGNED),
+            Request::Comment { reff, .. } => (reff, contract::signal::COMMENTED),
+            _ => return Vec::new(),
+        };
+        static CLOCK: std::sync::OnceLock<SystemUlidSource> = std::sync::OnceLock::new();
+        let router = IssueRouter::new(
+            context.session,
+            context.identity,
+            CLOCK.get_or_init(|| SystemUlidSource),
+        );
+        let Some((doc, actors)) = router.interested(reff) else {
+            return Vec::new();
+        };
+        let payload = contract::IssueNudge { issue: doc }.encode();
+        actors
+            .into_iter()
+            .filter(|actor| actor != context.actor)
+            .map(|actor| WorldNudge {
+                actor,
+                schema: schema.to_string(),
+                payload: payload.clone(),
+            })
+            .collect()
     }
 }
 
@@ -323,6 +373,36 @@ impl<'a> IssueRouter<'a> {
                 unchanged: false,
             }),
         )
+    }
+
+    /// Who is on this issue, and what it is called.
+    ///
+    /// Read *after* the commit, so the answer is the set as it now stands rather
+    /// than the set the caller named — assigning somebody tells them, and it
+    /// also tells whoever was already there.
+    ///
+    /// Assignees and followers together: Linear subscribes you on assignment and
+    /// keeps you subscribed after, and separating the two here would mean a
+    /// person who asked to follow an issue heard less about it than one who was
+    /// put on it and left.
+    pub fn interested(&self, reff: &str) -> Option<(String, Vec<String>)> {
+        let snapshot = self.snapshot();
+        let doc = self.resolve(&snapshot, reff).ok()?;
+        let view: IssueView = self
+            .query(&IssueQuery::View {
+                doc: doc.clone(),
+                me: None,
+            })
+            .ok()?;
+        let mut actors: Vec<String> = view
+            .assignees
+            .iter()
+            .chain(view.followers.iter())
+            .map(|actor| actor.as_str().to_string())
+            .collect();
+        actors.sort();
+        actors.dedup();
+        Some((doc, actors))
     }
 
     fn query<T: DeserializeOwned>(&self, query: &IssueQuery) -> Result<T, WorldError> {

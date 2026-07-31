@@ -152,10 +152,17 @@ pub fn demand_read() -> Vec<u8> {
 /// already reaches everyone through convergence; a signal only makes it timely.
 /// A signal that carried the fact would be a second copy of it, on a plane whose
 /// whole contract is that it keeps nothing.
+/// Two, and only because two are emitted. A declared signal nothing sends is a
+/// reviewed surface with nothing behind it — the same shape as a feature bit
+/// advertised by a build that does not honour it — and it moves this World's
+/// implementation id to say so. `mentioned` and `review-requested` were in the
+/// first version of this list and are not here now: nothing parses a mention and
+/// no verb requests a review, so both were promises.
 pub mod signal {
+    /// Somebody put an issue on you.
     pub const ASSIGNED: &str = "assigned";
-    pub const MENTIONED: &str = "mentioned";
-    pub const REVIEW_REQUESTED: &str = "review-requested";
+    /// Somebody said something on an issue you are on.
+    pub const COMMENTED: &str = "commented";
 }
 
 /// What every Issues signal carries.
@@ -196,18 +203,14 @@ pub const MAX_NUDGE_BYTES: u32 = 128;
 /// it: a signal naming something you may not open would tell you it exists, and
 /// its assignee, and when somebody touched it.
 pub fn signal_schemas() -> Vec<runtime::world::SignalSchema> {
-    [
-        signal::ASSIGNED,
-        signal::MENTIONED,
-        signal::REVIEW_REQUESTED,
-    ]
-    .into_iter()
-    .map(|name| runtime::world::SignalSchema {
-        name: SchemaId::parse(name).expect("declared signal name"),
-        max_payload_bytes: MAX_NUDGE_BYTES,
-        demand: demand_read(),
-    })
-    .collect()
+    [signal::ASSIGNED, signal::COMMENTED]
+        .into_iter()
+        .map(|name| runtime::world::SignalSchema {
+            name: SchemaId::parse(name).expect("declared signal name"),
+            max_payload_bytes: MAX_NUDGE_BYTES,
+            demand: demand_read(),
+        })
+        .collect()
 }
 
 /// The full Space capability set the founder is granted at formation:
