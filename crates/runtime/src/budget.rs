@@ -311,8 +311,9 @@ pub mod deadline {
     /// Comfortably inside `PRESENCE_TTL`, and that margin is the whole point: a
     /// slot expires on the receiver's clock, so a publisher that refreshed at
     /// exactly the TTL would have every viewer flicker as each slot expired a
-    /// beat before its replacement arrived. A third of the TTL survives losing
-    /// two refreshes in a row, which a datagram path does without apologising.
+    /// beat before its replacement arrived. Twenty-five seconds against a
+    /// ninety-second TTL survives losing two refreshes in a row and most of a
+    /// third, which a datagram path does without apologising.
     pub const PRESENCE_REFRESH: Duration = Duration::from_secs(25);
 
     /// How long a caret is held before it is sent.

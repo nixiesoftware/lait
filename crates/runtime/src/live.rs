@@ -1655,13 +1655,12 @@ fn publish_presence(
 
 /// Send one transient item, or drop it and say why.
 ///
-/// **No production caller.** Nothing in a shipped Station publishes its own
-/// cursor: the plane receives, stores and serves what peers say, and the local
-/// half — deciding what this Station is doing and when to say so — belongs to
-/// whatever drives a person's view, which is the browser bridge and is not this
-/// crate. Stated here because a reader finding `datagram_fits` and
-/// `TransientCounters::capacity_drops` should know they are exercised by tests
-/// and by nothing else, rather than assuming a path exists and looking for it.
+/// Called by `publish_presence` on the session beat, which is the plane's whole
+/// send side. What decides *what* to publish is not in this crate — it is the
+/// declaration a browser makes, carried down through `Request::Watching` — and
+/// that split is deliberate: the plane moves what it is told to move, and
+/// deciding what this Station is doing belongs to whatever drives a person's
+/// view.
 ///
 /// The answer is never "truncate". A transient payload has no retransmit, so
 /// half of one arrives as corruption rather than as a gap — and a peer that
@@ -2510,8 +2509,11 @@ impl ResidencyOracle for NoResidency {
 
 /// Send-side coalescing: hold a value briefly, and send the newest.
 ///
-/// Like [`publish`], this has no production caller — the two are the send side,
-/// and the send side is driven from above this crate.
+/// **No production caller.** [`publish`] has one now; this does not. Presence is
+/// republished on a fixed beat rather than coalesced, because a presence flag has
+/// no intermediate values to collapse — the coalescer is for carets, and nothing
+/// mints one yet. Stated so a reader does not assume a path exists and go looking
+/// for it.
 ///
 /// A caret moves as fast as a person types and is superseded by its own next
 /// position, so sending each one spends a packet to deliver a number that is

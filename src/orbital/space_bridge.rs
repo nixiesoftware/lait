@@ -787,17 +787,6 @@ impl SpaceBridge {
         }
     }
 
-    /// Hand a World's nudges to whichever peers are actually here.
-    ///
-    /// **Presence is the gate, and it is better information than a preference
-    /// pane.** Linear picks a channel from what a person configured months ago;
-    /// this picks from whether they are looking at the product right now. A peer
-    /// with no session is not queued for and not retried — the durable record is
-    /// already committed and already converging, and it is their path.
-    ///
-    /// The World said who and what. This says whether they are reachable, which
-    /// is the half a World must not know: one that could see who is connected
-    /// would be a World holding a delivery plane.
     /// Which present peers each nudge reaches.
     ///
     /// Pulled out of `deliver_nudges` because this is the whole policy and the rest
@@ -826,6 +815,38 @@ impl SpaceBridge {
             .collect()
     }
 
+    /// Whether a World actually declared what its handler asked to send.
+    ///
+    /// `WorldNudge`'s own doc states this as a fact about the host, and for a
+    /// while the host did not do it. A handler is ordinary product code: it can
+    /// name a schema that was never registered, or build a payload past the
+    /// ceiling its own registration declared, and neither is caught by anything
+    /// between it and the wire.
+    fn declares(&self, world: &replica::ids::WorldId, nudge: &crate::orbital::WorldNudge) -> bool {
+        let Some(registration) = self.station.registration(world) else {
+            return false;
+        };
+        let Some(schema) = replica::ids::SchemaId::parse(&nudge.schema) else {
+            return false;
+        };
+        registration
+            .signal_schemas
+            .iter()
+            .find(|declared| declared.name == schema)
+            .is_some_and(|declared| nudge.payload.len() <= declared.max_payload_bytes as usize)
+    }
+
+    /// Hand a World's nudges to whichever peers are actually here.
+    ///
+    /// **Presence is the gate, and it is better information than a preference
+    /// pane.** Linear picks a channel from what a person configured months ago;
+    /// this picks from whether they are looking at the product right now. A peer
+    /// with no session is not queued for and not retried — the durable record is
+    /// already committed and already converging, and it is their path.
+    ///
+    /// The World said who and what. This says whether they are reachable, which
+    /// is the half a World must not know: one that could see who is connected
+    /// would be a World holding a delivery plane.
     fn deliver_nudges(&self, nudges: Vec<crate::orbital::WorldNudge>) {
         if nudges.is_empty() {
             return;
@@ -845,8 +866,18 @@ impl SpaceBridge {
                 Some((station, actor))
             })
             .collect();
-        let world = crate::world::contract::world_id().as_str().to_string();
+        let world_id = crate::world::contract::world_id();
+        let world = world_id.as_str().to_string();
         for (station, nudge) in Self::reachable(&here, &nudges) {
+            if !self.declares(&world_id, nudge) {
+                // Refused here rather than sent for the peer to refuse. The
+                // receiver checks the same thing — a signal naming a schema its
+                // World never declared is one nobody reviewed — so sending it
+                // spends an outbox slot and a flow to be told what this side
+                // already knew, and a World whose handler is wrong would spend
+                // them on every call.
+                continue;
+            }
             let signal = runtime::planes::Signal::WorldSignal {
                 world: world.clone(),
                 schema: nudge.schema.clone(),

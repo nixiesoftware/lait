@@ -803,6 +803,16 @@ impl Station {
         self.epoch
     }
 
+    /// What a World declared at registration.
+    ///
+    /// Narrower than handing out the registry: a caller outside this crate needs
+    /// to check a declaration, not to enumerate or resolve Worlds. The registry
+    /// is how a Station dispatches, and that is not a composition root's
+    /// business.
+    pub fn registration(&self, world: &WorldId) -> Option<&crate::world::WorldRegistration> {
+        self.registry.registration(world)
+    }
+
     /// What this Station currently believes about who is doing what.
     ///
     /// Never durable and never authoritative: a Station with no Live driver

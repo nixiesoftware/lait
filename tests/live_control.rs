@@ -172,9 +172,15 @@ fn the_live_view_and_the_signal_drain_are_served_rather_than_unreachable() {
     // Declaring what this node is looking at. The send side's entry point, and
     // the reason a facepile on somebody else's screen has anything to draw.
     //
-    // What this proves is that the verb is *served* rather than unreachable —
-    // which is this file's whole subject. It does not prove a peer sees the
-    // result: that needs two Stations and a connection between them, and it is
+    // **What these three assertions prove is narrow, and worth stating exactly.**
+    // `watching` ends in an unconditional `Ok`, so `Ok` does not report that a
+    // declaration was understood — it reports that the verb was *routed*: decoded
+    // from the wire, classified to the Station owner, and dispatched to a handler
+    // rather than falling through to an unknown-variant error or a misclassified
+    // `unreachable!`. That is this file's subject and it is a real thing to break.
+    //
+    // They do not prove what the declaration did. The scope truncation is
+    // asserted where it is decided, and that a peer sees the result is
     // `crates/runtime/tests/live_transient.rs::two_node_presence`, which is
     // mutation-checked against a stubbed publisher.
     let watching = req(
@@ -189,10 +195,12 @@ fn the_live_view_and_the_signal_drain_are_served_rather_than_unreachable() {
         "expected the declaration to be served, got {watching:?}"
     );
 
-    // An id this node cannot resolve is dropped rather than refused. A viewer
-    // holding a stale link is a viewer with a stale link, not a client worth
-    // failing — and refusing would let anyone probe for which issues exist by
-    // watching them.
+    // A string this node cannot resolve is accepted rather than refused, and
+    // "resolve" is the wrong word for what happens: the Body id is a hash of the
+    // string as given, so every string is a legal input and a stale one names a
+    // Body nothing publishes under. Refusing would need a lookup this verb does
+    // not do — and a lookup that answered would let anyone probe for which
+    // issues exist by watching them.
     let nonsense = req(
         &client,
         &home,
