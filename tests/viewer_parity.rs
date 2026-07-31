@@ -27,9 +27,19 @@
 //! *names* — and nothing more. It does not check *Response* shapes, and it does not
 //! check the *semantics* of a field (what value the daemon puts there). That gap is
 //! not hypothetical: durable history changed `ActivityEvent.actor`/`actor_nick`
-//! semantics under the viewer and this test was blind to it. The behavioral pin for
-//! that class lives in `replica.rs::tests::history_is_the_contract_the_viewer_reads`
-//! — it drives a real replica and asserts the read-DTO values the client depends on.
+//! semantics under the viewer and this test was blind to it.
+//!
+//! **There is no behavioural pin for that class.** This comment used to name one —
+//! `replica.rs::tests::history_is_the_contract_the_viewer_reads` — and no such test
+//! exists anywhere in the tree; grepping the name finds this line and nothing else.
+//! A pointer to a guard that is not there is worse than no pointer, because it
+//! tells a reader the class is covered.
+//!
+//! What that leaves unguarded is live right now: `ActivityEvent.actor` is populated
+//! from the committing *device* while the viewer resolves display names by *actor*,
+//! so the lookup misses on every row and every author renders as a hex prefix in a
+//! colour derived from that hex — a different colour from the same person's roster
+//! chip. The field is named `actor` and does not carry one.
 
 use std::collections::{BTreeMap, BTreeSet};
 
