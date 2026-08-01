@@ -967,6 +967,58 @@ fn an_upload_nobody_attaches_is_collected_when_its_hold_lapses() {
 }
 
 #[test]
+fn a_hold_survives_its_deadline_exactly_and_not_a_moment_after() {
+    // The two tests above check the two states — a long hold is kept, an
+    // already-lapsed one is collected. Neither watches the SAME hold cross its
+    // own deadline, which is where the comparison actually lives:
+    // `retain(|_, until| *until > now)`. Whether that is `>` or `>=` decides
+    // what happens to a sweep landing on the exact instant a hold expires, and
+    // nothing distinguished the two.
+    //
+    // Reachable now because `sweep_unreferenced_content_at` takes the instant
+    // rather than minting it. Waiting for a real deadline to pass would make
+    // this a slow test with a race in it; supplying the instant makes it
+    // neither.
+    let mut fx = fixture("pending-boundary");
+    let space = space();
+    let signer = SeedSigner(&WRITER_SEED);
+
+    let out = ingest(&fx, 7, b"an upload watched across its own deadline");
+    fx.replica
+        .commit_content(&ctx(&signer, &space), std::slice::from_ref(&out.descriptor))
+        .unwrap();
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(600);
+    fx.replica.hold_content(&out.content_ref, deadline);
+
+    // One tick before: held.
+    let collected = fx
+        .replica
+        .sweep_unreferenced_content_at(
+            &ctx(&signer, &space),
+            Some(&fx.cache),
+            deadline - std::time::Duration::from_nanos(1),
+        )
+        .unwrap();
+    assert!(collected.is_empty(), "a hold is live up to its deadline");
+
+    // Exactly at the deadline: `until > now` is false, so the hold is over.
+    // Asserted rather than assumed — a hold that outlived its own stated
+    // deadline would be a window that never closes, which is the leak the
+    // deadline exists to prevent.
+    let collected = fx
+        .replica
+        .sweep_unreferenced_content_at(&ctx(&signer, &space), Some(&fx.cache), deadline)
+        .unwrap();
+    assert_eq!(
+        collected,
+        vec![out.content_ref],
+        "the deadline is the moment the hold stops holding"
+    );
+    assert!(fx.replica.content_descriptor(&out.content_ref).is_none());
+}
+
+#[test]
 fn a_held_descriptor_is_kept_here_and_shown_to_nobody() {
     // A hold answers "may I delete this", not "may I show this to a peer".
     // Advertising a descriptor no Body names would hand the peer catalog it has

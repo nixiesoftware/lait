@@ -6,16 +6,16 @@
 # reviewed like one, not discovered when a gate goes red on a refactor.
 
 [tiers]
-pr             1293
-pr-platform    965
-nightly        1322
+pr             1294
+pr-platform    966
+nightly        1323
 mutants        80
 
 [gates]
 orbital-boundaries           6
 orbital-clean-break          14
 orbital-authority            18
-orbital-formats              211
+orbital-formats              212
 core-fabric-foundations      52
 core-plane-shapes            75
 orbital-faults               27
@@ -859,6 +859,7 @@ replica content_plane_tests::a_descriptor_crosses_a_contact_with_the_declaration
 replica content_plane_tests::a_descriptor_is_the_same_size_whatever_it_describes
 replica content_plane_tests::a_descriptor_survives_reopen_while_its_bytes_need_not
 replica content_plane_tests::a_held_descriptor_is_kept_here_and_shown_to_nobody
+replica content_plane_tests::a_hold_survives_its_deadline_exactly_and_not_a_moment_after
 replica content_plane_tests::a_peer_that_already_holds_the_descriptor_needs_it_sent_only_once
 replica content_plane_tests::a_provider_holding_a_proper_subset_still_serves_what_it_has
 replica content_plane_tests::a_tombstoned_body_stops_holding_its_content

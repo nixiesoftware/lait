@@ -1484,9 +1484,27 @@ impl Replica {
         ctx: &CommitContext<'_>,
         cache: Option<&crate::cache::Residency>,
     ) -> Result<Vec<crate::content::ContentRef>, Failure> {
+        self.sweep_unreferenced_content_at(ctx, cache, std::time::Instant::now())
+    }
+
+    /// [`Self::sweep_unreferenced_content`], at a caller-supplied instant.
+    ///
+    /// A hold expires, and what happens when it does is a real question — the
+    /// hold exists to buy an upload a window before its Body arrives, so the
+    /// interesting case is the sweep that runs one moment after the window
+    /// closes. Reaching that case by waiting is not practical, and `Replica`
+    /// deliberately has no tokio dependency, so the clock arrives the way it
+    /// already does everywhere else in this crate: as a parameter.
+    /// `retained_content` has always taken one; this is the caller that used to
+    /// mint it privately.
+    pub fn sweep_unreferenced_content_at(
+        &mut self,
+        ctx: &CommitContext<'_>,
+        cache: Option<&crate::cache::Residency>,
+        now: std::time::Instant,
+    ) -> Result<Vec<crate::content::ContentRef>, Failure> {
         use crate::index::{self, IndexChange, NodeSink};
 
-        let now = std::time::Instant::now();
         self.pending_content.retain(|_, until| *until > now);
         let reachable = self.retained_content(now);
         let mut unreferenced: Vec<crate::content::ContentDescriptor> = Vec::new();
