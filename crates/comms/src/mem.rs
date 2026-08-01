@@ -17,7 +17,7 @@
 //! whenever the peer is *registered* on the switchboard; liveness is
 //! membership, so a "down" peer must have been [`Transport::shutdown`].
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex as StdMutex};
 
@@ -45,6 +45,16 @@ struct Inner {
     sessions: HashMap<PeerId, mpsc::UnboundedSender<IncomingConnection>>,
     /// One broadcast bus per gossip topic.
     topics: HashMap<Topic, broadcast::Sender<TopicMsg>>,
+    /// Delivery policy. `None` is a perfect network and costs nothing —
+    /// `MemNet::new` stays exactly what it was.
+    faults: Option<(Faults, Seeded)>,
+    /// Unordered peer pairs that cannot hear each other, held smallest-first
+    /// so a partition is symmetric by construction rather than by discipline.
+    /// `BTreeSet` rather than `HashSet` because this is iterated when healing,
+    /// and a hash order is one more thing that would vary between runs.
+    partitions: BTreeSet<(PeerId, PeerId)>,
+    /// Counters, for a simulation to assert it did what it says.
+    delivered: Delivered,
 }
 
 #[derive(Clone)]
@@ -53,9 +63,194 @@ enum TopicMsg {
     Data(PeerId, Vec<u8>),
 }
 
+/// How reliably this network delivers.
+///
+/// The default is a perfect network — every existing caller of [`MemNet::new`]
+/// gets exactly the behaviour it had before this existed, which is the point:
+/// a fault injector that changes the default silently rewrites thirty tests'
+/// meaning.
+///
+/// Faults are drawn from ONE seeded generator, so a run is reproducible from
+/// its seed. That is the whole reason this is here rather than in a test
+/// helper: a simulation whose faults come from `rand::thread_rng` finds bugs
+/// nobody can reproduce.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Faults {
+    /// Percent of deliveries silently lost. The sender believes it sent.
+    pub drop_percent: u8,
+    /// Percent of deliveries made twice. A receiver that is not idempotent
+    /// fails here rather than in production.
+    pub duplicate_percent: u8,
+}
+
+impl Faults {
+    /// Delivers everything, twice-delivers nothing.
+    pub const PERFECT: Self = Self {
+        drop_percent: 0,
+        duplicate_percent: 0,
+    };
+
+    /// A plausibly bad network: one delivery in eight lost, one in twenty
+    /// doubled. Chosen to be frequent enough that a short simulation actually
+    /// exercises loss, rather than realistic — a realistic rate would need a
+    /// very long run to find anything.
+    pub const LOSSY: Self = Self {
+        drop_percent: 12,
+        duplicate_percent: 5,
+    };
+}
+
+impl Default for Faults {
+    fn default() -> Self {
+        Self::PERFECT
+    }
+}
+
+/// splitmix64. Written out rather than taken as a dependency so this network's
+/// entropy has exactly one source: a crate that seeds itself, or a `HashMap`
+/// iteration order, silently reintroduces the nondeterminism a seed exists to
+/// remove — and the failure mode is a bug report nobody can replay.
+#[derive(Debug, Clone, Copy)]
+struct Seeded(u64);
+
+impl Seeded {
+    fn next(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    fn percent(&mut self, chance: u8) -> bool {
+        chance > 0 && self.next() % 100 < u64::from(chance)
+    }
+}
+
+/// What a run actually did. Asserting on these is how a simulation proves it
+/// injected the faults it claims to have injected — a "chaos" test that never
+/// dropped anything is a slow way of testing the happy path.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Delivered {
+    pub sent: u64,
+    pub dropped: u64,
+    pub duplicated: u64,
+    pub partitioned: u64,
+}
+
 impl MemNet {
+    /// A perfect network. Unchanged: every delivery lands, exactly once.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A network that loses and doubles deliveries, from a seed.
+    ///
+    /// The seed is the only entropy, so a failure reproduces exactly — print it
+    /// and the run can be replayed on any machine. That is the property the
+    /// whole technique rests on, and the reason faults live here rather than in
+    /// whatever test happens to want them.
+    pub fn seeded(seed: u64, faults: Faults) -> Self {
+        let net = Self::default();
+        net.with_inner(|inner| inner.faults = Some((faults, Seeded(seed))));
+        net
+    }
+
+    /// Cut `a` and `b` off from each other, in both directions.
+    ///
+    /// Symmetric because a real partition is: there is no link that carries
+    /// packets one way. Storing the pair smallest-first makes that a property
+    /// of the representation rather than of remembering to insert twice.
+    pub fn partition(&self, a: &PeerId, b: &PeerId) {
+        let pair = Self::pair(a, b);
+        self.with_inner(|inner| {
+            inner.partitions.insert(pair);
+        });
+    }
+
+    /// Reconnect everything. The simulation's healing phase.
+    pub fn heal(&self) {
+        self.with_inner(|inner| inner.partitions.clear());
+    }
+
+    /// What this network actually did.
+    pub fn delivered(&self) -> Delivered {
+        self.with_inner(|inner| inner.delivered)
+    }
+
+    fn pair(a: &PeerId, b: &PeerId) -> (PeerId, PeerId) {
+        if a <= b {
+            (a.clone(), b.clone())
+        } else {
+            (b.clone(), a.clone())
+        }
+    }
+
+    fn with_inner<T>(&self, f: impl FnOnce(&mut Inner) -> T) -> T {
+        let mut inner = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        f(&mut inner)
+    }
+
+    /// Whether `from` can currently reach `to`, and what the policy says about
+    /// this particular delivery. Counted as it decides, so the totals are what
+    /// happened rather than what was intended.
+    fn admit(&self, from: &PeerId, to: &PeerId) -> Verdict {
+        let pair = Self::pair(from, to);
+        self.with_inner(|inner| {
+            inner.delivered.sent = inner.delivered.sent.saturating_add(1);
+            if inner.partitions.contains(&pair) {
+                inner.delivered.partitioned = inner.delivered.partitioned.saturating_add(1);
+                return Verdict::Blocked;
+            }
+            let Some((faults, rng)) = inner.faults.as_mut() else {
+                return Verdict::Once;
+            };
+            if rng.percent(faults.drop_percent) {
+                inner.delivered.dropped = inner.delivered.dropped.saturating_add(1);
+                return Verdict::Blocked;
+            }
+            if rng.percent(faults.duplicate_percent) {
+                inner.delivered.duplicated = inner.delivered.duplicated.saturating_add(1);
+                return Verdict::Twice;
+            }
+            Verdict::Once
+        })
+    }
+
+    /// Whether a gossip frame from `from` reaches `me`.
+    ///
+    /// Gossip is decided at the RECEIVER, unlike a direct connection: a
+    /// broadcast goes to a bus rather than to a peer, so the sender does not
+    /// know who is listening. Filtering per subscriber is also the more
+    /// faithful model — a partition means each side independently stops
+    /// hearing the other, not that the message was never spoken.
+    fn gossip_reaches(&self, from: &PeerId, me: &PeerId) -> bool {
+        if from == me {
+            return true;
+        }
+        let pair = Self::pair(from, me);
+        self.with_inner(|inner| {
+            // Counted here, not at the sender: a broadcast has one send and N
+            // possible deliveries, and it is the deliveries that either happen
+            // or do not. Counting the broadcast instead would report `sent=1`
+            // beside `dropped=4`, which reads as a contradiction.
+            inner.delivered.sent = inner.delivered.sent.saturating_add(1);
+            if inner.partitions.contains(&pair) {
+                inner.delivered.partitioned = inner.delivered.partitioned.saturating_add(1);
+                return false;
+            }
+            let Some((faults, rng)) = inner.faults.as_mut() else {
+                return true;
+            };
+            if rng.percent(faults.drop_percent) {
+                inner.delivered.dropped = inner.delivered.dropped.saturating_add(1);
+                return false;
+            }
+            true
+        })
     }
 
     /// Attach a new peer `id` to this network and return its transport.
@@ -87,6 +282,16 @@ impl MemNet {
             .or_insert_with(|| broadcast::channel(256).0)
             .clone()
     }
+}
+
+/// What the policy decided about one delivery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Verdict {
+    /// Lost, or the pair is partitioned. The sender is told nothing — a real
+    /// dropped packet does not report itself.
+    Blocked,
+    Once,
+    Twice,
 }
 
 /// One peer's view of the in-memory network.
@@ -474,6 +679,13 @@ struct MemGossipSender {
 impl GossipSender for MemGossipSender {
     async fn broadcast(&self, bytes: Vec<u8>) -> Result<()> {
         // Delivery to zero subscribers is fine (a solo node broadcasting).
+        //
+        // No fault check here: gossip is filtered at the RECEIVER. A broadcast
+        // goes to a bus rather than to a peer, so the sender cannot know who
+        // would have heard it — and per-subscriber filtering is the more
+        // faithful model anyway, because a partition means each side
+        // independently stops hearing the other rather than the message never
+        // being spoken.
         let _ = self.bus.send(TopicMsg::Data(self.me.clone(), bytes));
         Ok(())
     }
@@ -482,6 +694,9 @@ impl GossipSender for MemGossipSender {
 /// The receive half: a subscriber on the topic's broadcast bus.
 struct MemGossipReceiver {
     me: PeerId,
+    /// Held so the receiver can ask the switchboard whether it should have
+    /// heard this frame — see `MemNet::gossip_reaches`.
+    net: MemNet,
     rx: broadcast::Receiver<TopicMsg>,
 }
 
@@ -491,9 +706,22 @@ impl GossipReceiver for MemGossipReceiver {
         loop {
             match self.rx.recv().await {
                 Ok(TopicMsg::Data(from, bytes)) if from != self.me => {
-                    return Some(GossipEvent::Received { from, bytes })
+                    // The policy decides here rather than at the sender: a
+                    // broadcast has no destination, so "did this reach me" is a
+                    // question only the receiver can answer.
+                    if !self.net.gossip_reaches(&from, &self.me) {
+                        continue;
+                    }
+                    return Some(GossipEvent::Received { from, bytes });
                 }
-                Ok(TopicMsg::Join(p)) if p != self.me => return Some(GossipEvent::NeighborUp(p)),
+                Ok(TopicMsg::Join(p)) if p != self.me => {
+                    // A neighbour announcement across a partition is exactly
+                    // the thing a partitioned peer must not learn.
+                    if !self.net.gossip_reaches(&p, &self.me) {
+                        continue;
+                    }
+                    return Some(GossipEvent::NeighborUp(p));
+                }
                 Ok(_) => continue, // our own frames
                 Err(broadcast::error::RecvError::Lagged(_)) => continue, // lossy by contract
                 Err(broadcast::error::RecvError::Closed) => return None,
@@ -526,6 +754,15 @@ impl Transport for MemTransport {
             .cloned()
             .ok_or_else(|| anyhow!("no such peer on the in-memory network"))?;
         let (mine, theirs) = duplex();
+        // A dropped dial returns a live handle that nobody is holding the other
+        // end of, which is what a real lost SYN looks like to the dialer: no
+        // error, no answer. Returning `Err` here would be the easier code and
+        // the wrong model — the caller would learn something the network never
+        // told it.
+        match self.net.admit(&self.id, &peer) {
+            Verdict::Blocked => return Ok(Box::new(mine)),
+            Verdict::Once | Verdict::Twice => {}
+        }
         inbox
             .send(Incoming {
                 from: self.id.clone(),
@@ -554,7 +791,13 @@ impl Transport for MemTransport {
             .get(&peer)
             .cloned()
             .ok_or_else(|| anyhow!("no such peer on the in-memory network"))?;
-        let (mine, theirs) = connection_pair(self.id.clone(), peer, alpn);
+        let verdict = self.net.admit(&self.id, &peer);
+        let (mine, theirs) = connection_pair(self.id.clone(), peer.clone(), alpn);
+        if verdict == Verdict::Blocked {
+            // As in `connect`: the dialer gets a handle nobody answers, which
+            // is what a lost connection attempt looks like from this side.
+            return Ok(Box::new(mine));
+        }
         inbox
             .send(IncomingConnection {
                 from: self.id.clone(),
@@ -563,6 +806,19 @@ impl Transport for MemTransport {
                 opening: Vec::new(),
             })
             .map_err(|_| anyhow!("peer is gone"))?;
+        if verdict == Verdict::Twice {
+            // A second, independent connection carrying the same opening — what
+            // a dialer that retried a request the accepter had already received
+            // produces. An accepter that is not idempotent about openings fails
+            // here rather than against a real peer.
+            let (_extra_mine, extra_theirs) = connection_pair(self.id.clone(), peer, alpn);
+            let _ = inbox.send(IncomingConnection {
+                from: self.id.clone(),
+                alpn: alpn.to_vec(),
+                connection: Box::new(extra_theirs),
+                opening: Vec::new(),
+            });
+        }
         Ok(Box::new(mine))
     }
 
@@ -590,6 +846,7 @@ impl Transport for MemTransport {
             }),
             Box::new(MemGossipReceiver {
                 me: self.id.clone(),
+                net: self.net.clone(),
                 rx,
             }),
         ))

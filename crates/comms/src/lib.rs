@@ -48,6 +48,8 @@
 mod flow;
 mod iroh;
 pub mod mem;
+#[cfg(test)]
+mod network_simulation_tests;
 pub mod policy;
 
 use anyhow::Result;

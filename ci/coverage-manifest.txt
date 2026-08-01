@@ -6,10 +6,10 @@
 # reviewed like one, not discovered when a gate goes red on a refactor.
 
 [tiers]
-pr             1294
-pr-platform    966
-nightly        1323
-mutants        80
+pr             1303
+pr-platform    975
+nightly        1332
+mutants        84
 
 [gates]
 orbital-boundaries           6
@@ -33,6 +33,11 @@ comms mem::tests::connect_fails_after_peer_shutdown
 comms mem::tests::finish_delivers_end_of_stream_after_drain
 comms mem::tests::two_mem_peers_gossip_and_dial
 comms mem::tests::wait_closed_parks_until_dialer_drops
+comms network_simulation_tests::a_different_seed_is_a_different_run
+comms network_simulation_tests::a_lossy_network_actually_loses
+comms network_simulation_tests::a_partition_is_symmetric_and_heals
+comms network_simulation_tests::the_default_network_loses_nothing
+comms network_simulation_tests::the_same_seed_replays_exactly
 comms policy::tests::from_env_default_is_public_and_trims
 comms policy::tests::peerbook_registers_under_local_and_noops_without_a_relay
 comms::it flows::a_bidirectional_flow_carries_bytes_both_ways
@@ -77,6 +82,10 @@ fabric fabric::tests::atomic_bodies_commit_read_remove_and_advance_the_causal_to
 fabric fabric::tests::per_body_import_preserves_stable_element_identity
 fabric fabric::tests::reimporting_known_material_is_unchanged
 fabric fabric::tests::transaction_request_roundtrips_postcard
+fabric op::fallback_tests::it_fills_every_length_its_callers_use
+fabric op::fallback_tests::the_fallback_never_yields_zero
+fabric op::fallback_tests::the_sequence_alone_separates_activations
+fabric op::fallback_tests::two_processes_do_not_collide
 fabric::it causal_contract::a_batch_that_creates_a_body_and_fails_leaves_no_body
 fabric::it causal_contract::a_checkpoint_reconstructs_state_without_the_history_behind_it
 fabric::it causal_contract::a_deleted_anchor_drifts_rather_than_landing_one_place_over
