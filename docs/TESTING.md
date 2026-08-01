@@ -124,11 +124,17 @@ replayable if it has exactly one source of entropy, and a crate that seeds
 itself from the OS — or a `HashMap` iteration order — silently reintroduces the
 nondeterminism the seed exists to remove.
 
-**Time is not simulated *here*.** The schedule is the order of operations, so
-there is nothing for a clock to perturb at this seam. Time-dependent behaviour
-lives in the plane driver above it — and that is now controllable in its own
-right; see "The clock seam" below. Joining the two, so a simulated schedule and
-a simulated clock advance together, is the next step and has not been taken.
+**Time is not simulated here, and does not need to be.** T3 drives
+`incorporate` and `export_material`; neither consults a clock, so there is
+nothing at this seam for a simulated one to advance. The schedule *is* the
+order of operations.
+
+Time-dependent behaviour lives in two other places, and both are covered
+separately: the plane driver, under a paused clock (see "The clock seam"), and
+content-hold expiry, which takes its instant as a parameter. The version of
+this that remains undone is a **driver-layer** simulation — a fault-injected
+schedule and a simulated clock advancing together — and what it needs is
+Station scaffolding, not more clock work.
 
 ```sh
 cargo test -p runtime --lib convergence_simulation      # 24 seeds
