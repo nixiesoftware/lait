@@ -28,7 +28,7 @@ pub const MAX_DTO_PAYLOAD: usize = 1024 * 1024;
 
 /// Why a DTO failed validation beyond JSON structure.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DtoError {
+pub enum Invalid {
     /// The bytes were not the expected JSON shape (or carried unknown fields).
     Malformed(String),
     /// `protocolVersion` was not [`DTO_PROTOCOL_VERSION`].
@@ -45,60 +45,60 @@ pub enum DtoError {
     BadIdentifier,
 }
 
-impl std::fmt::Display for DtoError {
+impl std::fmt::Display for Invalid {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{self:?}")
     }
 }
-impl std::error::Error for DtoError {}
+impl std::error::Error for Invalid {}
 
-fn check_len(s: &str) -> Result<(), DtoError> {
+fn check_len(s: &str) -> Result<(), Invalid> {
     (s.len() <= MAX_DTO_STRING)
         .then_some(())
-        .ok_or(DtoError::StringTooLong)
+        .ok_or(Invalid::StringTooLong)
 }
 
-fn check_b64_payload(s: &str) -> Result<(), DtoError> {
+fn check_b64_payload(s: &str) -> Result<(), Invalid> {
     let decoded = data_encoding::BASE64
         .decode(s.as_bytes())
-        .map_err(|_| DtoError::BadBase64)?;
+        .map_err(|_| Invalid::BadBase64)?;
     (decoded.len() <= MAX_DTO_PAYLOAD)
         .then_some(())
-        .ok_or(DtoError::PayloadTooLarge)
+        .ok_or(Invalid::PayloadTooLarge)
 }
 
-fn check_hex32(s: &str) -> Result<(), DtoError> {
+fn check_hex32(s: &str) -> Result<(), Invalid> {
     let decoded = data_encoding::HEXLOWER
         .decode(s.as_bytes())
-        .map_err(|_| DtoError::BadHex)?;
-    (decoded.len() == 32).then_some(()).ok_or(DtoError::BadHex)
+        .map_err(|_| Invalid::BadHex)?;
+    (decoded.len() == 32).then_some(()).ok_or(Invalid::BadHex)
 }
 
-fn check_hex16(s: &str) -> Result<(), DtoError> {
+fn check_hex16(s: &str) -> Result<(), Invalid> {
     let decoded = data_encoding::HEXLOWER
         .decode(s.as_bytes())
-        .map_err(|_| DtoError::BadHex)?;
-    (decoded.len() == 16).then_some(()).ok_or(DtoError::BadHex)
+        .map_err(|_| Invalid::BadHex)?;
+    (decoded.len() == 16).then_some(()).ok_or(Invalid::BadHex)
 }
 
-fn check_world(s: &str) -> Result<(), DtoError> {
+fn check_world(s: &str) -> Result<(), Invalid> {
     check_len(s)?;
     replica::ids::WorldId::parse(s)
         .map(|_| ())
-        .ok_or(DtoError::BadIdentifier)
+        .ok_or(Invalid::BadIdentifier)
 }
 
-fn check_schema_id(s: &str) -> Result<(), DtoError> {
+fn check_schema_id(s: &str) -> Result<(), Invalid> {
     check_len(s)?;
     replica::ids::SchemaId::parse(s)
         .map(|_| ())
-        .ok_or(DtoError::BadIdentifier)
+        .ok_or(Invalid::BadIdentifier)
 }
 
-fn check_version(v: u32) -> Result<(), DtoError> {
+fn check_version(v: u32) -> Result<(), Invalid> {
     (v == DTO_PROTOCOL_VERSION)
         .then_some(())
-        .ok_or(DtoError::UnsupportedProtocol(v))
+        .ok_or(Invalid::UnsupportedProtocol(v))
 }
 
 macro_rules! json_codec {
@@ -111,9 +111,9 @@ macro_rules! json_codec {
 
             /// Decode from JSON, rejecting unknown fields, foreign protocol
             /// versions, over-long strings, and malformed/over-long encodings.
-            pub fn from_json(bytes: &[u8]) -> Result<Self, DtoError> {
-                let dto: Self = serde_json::from_slice(bytes)
-                    .map_err(|e| DtoError::Malformed(e.to_string()))?;
+            pub fn from_json(bytes: &[u8]) -> Result<Self, Invalid> {
+                let dto: Self =
+                    serde_json::from_slice(bytes).map_err(|e| Invalid::Malformed(e.to_string()))?;
                 dto.validate()?;
                 Ok(dto)
             }
@@ -138,7 +138,7 @@ pub struct SubmitRequestDto {
 }
 
 impl SubmitRequestDto {
-    fn validate(&self) -> Result<(), DtoError> {
+    fn validate(&self) -> Result<(), Invalid> {
         check_version(self.protocol_version)?;
         check_world(&self.world)?;
         check_schema_id(&self.schema)?;
@@ -174,15 +174,15 @@ pub struct SignedSubmitDto {
 }
 
 impl SignedSubmitDto {
-    fn validate(&self) -> Result<(), DtoError> {
+    fn validate(&self) -> Result<(), Invalid> {
         check_version(self.protocol_version)?;
         check_len(&self.space_id)?;
-        mechanics::ids::SpaceId::parse(&self.space_id).ok_or(DtoError::BadIdentifier)?;
+        mechanics::ids::SpaceId::parse(&self.space_id).ok_or(Invalid::BadIdentifier)?;
         check_world(&self.world)?;
         check_len(&self.actor_id)?;
-        mechanics::ids::ActorId::parse(&self.actor_id).ok_or(DtoError::BadIdentifier)?;
+        mechanics::ids::ActorId::parse(&self.actor_id).ok_or(Invalid::BadIdentifier)?;
         check_len(&self.device_hex)?;
-        mechanics::ids::DeviceId::parse(&self.device_hex).ok_or(DtoError::BadIdentifier)?;
+        mechanics::ids::DeviceId::parse(&self.device_hex).ok_or(Invalid::BadIdentifier)?;
         check_len(&self.request_id_hex)?;
         check_hex16(&self.request_id_hex)?;
         check_b64_payload(&self.signed_action_b64)
@@ -202,7 +202,7 @@ pub struct QueryRequestDto {
 }
 
 impl QueryRequestDto {
-    fn validate(&self) -> Result<(), DtoError> {
+    fn validate(&self) -> Result<(), Invalid> {
         check_version(self.protocol_version)?;
         check_world(&self.world)?;
         check_schema_id(&self.schema)?;
@@ -227,7 +227,7 @@ pub struct CommittedEffectDto {
 }
 
 impl CommittedEffectDto {
-    fn validate(&self) -> Result<(), DtoError> {
+    fn validate(&self) -> Result<(), Invalid> {
         check_version(self.protocol_version)?;
         check_b64_payload(&self.effect_b64)?;
         check_len(&self.frontier_root_hex)?;
@@ -255,7 +255,7 @@ pub struct ProjectionDto {
 }
 
 impl ProjectionDto {
-    fn validate(&self) -> Result<(), DtoError> {
+    fn validate(&self) -> Result<(), Invalid> {
         check_version(self.protocol_version)?;
         check_schema_id(&self.schema)?;
         check_b64_payload(&self.bytes_b64)?;
@@ -276,7 +276,7 @@ pub struct ObservationCursorDto {
 }
 
 impl ObservationCursorDto {
-    fn validate(&self) -> Result<(), DtoError> {
+    fn validate(&self) -> Result<(), Invalid> {
         check_version(self.protocol_version)
     }
 }
@@ -299,7 +299,7 @@ pub struct ObservationDto {
 }
 
 impl ObservationDto {
-    fn validate(&self) -> Result<(), DtoError> {
+    fn validate(&self) -> Result<(), Invalid> {
         check_version(self.protocol_version)?;
         check_world(&self.world)?;
         for id in &self.scope_body_ids_hex {
@@ -327,7 +327,7 @@ pub struct ErrorDto {
 }
 
 impl ErrorDto {
-    fn validate(&self) -> Result<(), DtoError> {
+    fn validate(&self) -> Result<(), Invalid> {
         check_version(self.protocol_version)?;
         check_len(&self.code)?;
         if self.code.is_empty()
@@ -336,7 +336,7 @@ impl ErrorDto {
                 .bytes()
                 .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
         {
-            return Err(DtoError::BadIdentifier);
+            return Err(Invalid::BadIdentifier);
         }
         check_len(&self.message)
     }
@@ -478,7 +478,7 @@ mod tests {
         let json = br#"{"protocolVersion":1,"world":"w.x","schema":"s","schemaVersion":1,"requestIdHex":"0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a","payloadB64":"","surprise":true}"#;
         assert!(matches!(
             SubmitRequestDto::from_json(json),
-            Err(DtoError::Malformed(_))
+            Err(Invalid::Malformed(_))
         ));
     }
 
@@ -487,7 +487,7 @@ mod tests {
         let json = br#"{"protocolVersion":1,"world":"w.x","schema":"s","payloadB64":""}"#;
         assert!(matches!(
             SubmitRequestDto::from_json(json),
-            Err(DtoError::Malformed(_))
+            Err(Invalid::Malformed(_))
         ));
     }
 
@@ -497,7 +497,7 @@ mod tests {
         dto.protocol_version = 999;
         assert_eq!(
             SubmitRequestDto::from_json(&dto.to_json()),
-            Err(DtoError::UnsupportedProtocol(999))
+            Err(Invalid::UnsupportedProtocol(999))
         );
     }
 
@@ -507,7 +507,7 @@ mod tests {
         dto.world = "x".repeat(MAX_DTO_STRING + 1);
         assert_eq!(
             SubmitRequestDto::from_json(&dto.to_json()),
-            Err(DtoError::StringTooLong)
+            Err(Invalid::StringTooLong)
         );
     }
 
@@ -518,21 +518,21 @@ mod tests {
         dto.payload_b64 = "not base64!!".into();
         assert_eq!(
             SubmitRequestDto::from_json(&dto.to_json()),
-            Err(DtoError::BadBase64)
+            Err(Invalid::BadBase64)
         );
         // Valid base64 whose DECODED bytes exceed 1 MiB.
         let mut dto = sample();
         dto.payload_b64 = data_encoding::BASE64.encode(&vec![0u8; MAX_DTO_PAYLOAD + 1]);
         assert_eq!(
             SubmitRequestDto::from_json(&dto.to_json()),
-            Err(DtoError::PayloadTooLarge)
+            Err(Invalid::PayloadTooLarge)
         );
         // Hex with the wrong decoded length.
         let mut dto = sample();
         dto.request_id_hex = "0a".repeat(15);
         assert_eq!(
             SubmitRequestDto::from_json(&dto.to_json()),
-            Err(DtoError::BadHex)
+            Err(Invalid::BadHex)
         );
         // A frontier root that is not 32 decoded bytes.
         let e = CommittedEffectDto {
@@ -544,7 +544,7 @@ mod tests {
         };
         assert_eq!(
             CommittedEffectDto::from_json(&e.to_json()),
-            Err(DtoError::BadHex)
+            Err(Invalid::BadHex)
         );
     }
 
@@ -554,7 +554,7 @@ mod tests {
         dto.world = "NOT A WORLD".into();
         assert_eq!(
             SubmitRequestDto::from_json(&dto.to_json()),
-            Err(DtoError::BadIdentifier)
+            Err(Invalid::BadIdentifier)
         );
     }
 
@@ -607,7 +607,7 @@ mod tests {
         };
         assert_eq!(
             ErrorDto::from_json(&bad.to_json()),
-            Err(DtoError::BadIdentifier)
+            Err(Invalid::BadIdentifier)
         );
     }
 }

@@ -152,17 +152,17 @@ pub const MAX_OBSERVATION_CAPACITY: usize = 65_536;
 
 /// Why an Observation stream ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ObservationStreamError {
+pub enum Interruption {
     /// The Station has gone dormant or exited; re-dock after reactivation.
     StationDormant,
 }
 
-impl std::fmt::Display for ObservationStreamError {
+impl std::fmt::Display for Interruption {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{self:?}")
     }
 }
-impl std::error::Error for ObservationStreamError {}
+impl std::error::Error for Interruption {}
 
 /// The Station-owned Observation broadcaster: a bounded ring of published
 /// records plus the sequence source. Publication and cursor replay happen
@@ -240,7 +240,7 @@ impl Broadcaster {
 /// a cursor from another epoch, or a ring overrun delivers exactly one reset
 /// record (consumers re-query from the committed frontier); an in-window
 /// cursor replays retained records and then follows live delivery. Dormancy
-/// ends the stream with a typed [`ObservationStreamError::StationDormant`].
+/// ends the stream with a typed [`Interruption::StationDormant`].
 /// A stream is Station-wide, not World-scoped: it never filtered by World, and a
 /// record's own `scopes` name theirs. Carrying a World here would only have been
 /// able to imply a narrowing that does not happen.
@@ -287,17 +287,17 @@ impl ObservationStream {
     }
 
     /// The next record, waiting up to `timeout`. `Ok(None)` on timeout;
-    /// [`ObservationStreamError::StationDormant`] once the Station closed.
+    /// [`Interruption::StationDormant`] once the Station closed.
     pub fn next_timeout(
         &mut self,
         timeout: std::time::Duration,
-    ) -> Result<Option<Observation>, ObservationStreamError> {
+    ) -> Result<Option<Observation>, Interruption> {
         let deadline = std::time::Instant::now() + timeout;
         let broadcaster = self.broadcaster.clone();
         let mut state = broadcaster.state.lock().unwrap_or_else(|p| p.into_inner());
         loop {
             if state.closed {
-                return Err(ObservationStreamError::StationDormant);
+                return Err(Interruption::StationDormant);
             }
             if let Some(record) = self.pull(&state) {
                 self.position = Some(record.sequence);
@@ -317,7 +317,7 @@ impl ObservationStream {
             state = next;
             if timed_out.timed_out() {
                 if state.closed {
-                    return Err(ObservationStreamError::StationDormant);
+                    return Err(Interruption::StationDormant);
                 }
                 if let Some(record) = self.pull(&state) {
                     self.position = Some(record.sequence);
@@ -329,7 +329,7 @@ impl ObservationStream {
     }
 
     /// The next already-published record without waiting.
-    pub fn try_next(&mut self) -> Result<Option<Observation>, ObservationStreamError> {
+    pub fn try_next(&mut self) -> Result<Option<Observation>, Interruption> {
         self.next_timeout(std::time::Duration::ZERO)
     }
 }
@@ -426,11 +426,11 @@ impl StationCore {
     /// a second kind of borrow on state that cannot be shared.
     pub fn with_replica<T>(
         &self,
-        f: impl FnOnce(&mut replica::Replica) -> Result<T, replica::ReplicaCommitError>,
-    ) -> Result<T, replica::ReplicaCommitError> {
+        f: impl FnOnce(&mut replica::Replica) -> Result<T, replica::commit::Failure>,
+    ) -> Result<T, replica::commit::Failure> {
         let mut inner = self.lock();
         if inner.closed {
-            return Err(replica::ReplicaCommitError::Illegitimate(
+            return Err(replica::commit::Failure::Illegitimate(
                 "station dormant".into(),
             ));
         }
@@ -802,9 +802,7 @@ impl Session {
         // Opaque verification first: version, algorithm, bounds, payload hash,
         // signer identity, self-signature.
         action.verify_self().map_err(|e| match e {
-            crate::action::ActionError::PayloadTooLarge => {
-                Failure::Rejected(Rejection::LimitExceeded)
-            }
+            crate::action::Invalid::PayloadTooLarge => Failure::Rejected(Rejection::LimitExceeded),
             _ => Failure::Rejected(Rejection::InvalidRequest),
         })?;
         // The action must address exactly this Session.
@@ -859,7 +857,7 @@ impl Session {
                     scopes: receipt.scopes,
                 });
             }
-            Err(replica::ReplicaCommitError::RequestIdConflict) => {
+            Err(replica::commit::Failure::RequestIdConflict) => {
                 return Err(Failure::Conflict(Conflict::Request))
             }
             Err(_) => return Err(Failure::Persistence),
@@ -946,45 +944,40 @@ impl Session {
             )
             .map_err(|e| match e {
                 // A staged op the engine cannot express is a World bug.
-                replica::ReplicaCommitError::UnsupportedOp => {
+                replica::commit::Failure::UnsupportedOp => {
                     Failure::Rejected(Rejection::ContractViolation)
                 }
-                replica::ReplicaCommitError::PathInvalid
-                | replica::ReplicaCommitError::InvalidOp(_) => {
+                replica::commit::Failure::PathInvalid | replica::commit::Failure::InvalidOp(_) => {
                     Failure::Rejected(Rejection::InvalidRequest)
                 }
-                replica::ReplicaCommitError::OpLimit => Failure::Rejected(Rejection::LimitExceeded),
-                replica::ReplicaCommitError::EffectTooLarge => {
+                replica::commit::Failure::OpLimit => Failure::Rejected(Rejection::LimitExceeded),
+                replica::commit::Failure::EffectTooLarge => {
                     Failure::Rejected(Rejection::LimitExceeded)
                 }
-                replica::ReplicaCommitError::TypeConflict => Failure::Conflict(Conflict::Body),
-                replica::ReplicaCommitError::SchemaMismatch => {
+                replica::commit::Failure::TypeConflict => Failure::Conflict(Conflict::Body),
+                replica::commit::Failure::SchemaMismatch => {
                     Failure::Rejected(Rejection::ContractViolation)
                 }
-                replica::ReplicaCommitError::RequestIdConflict => {
-                    Failure::Conflict(Conflict::Request)
-                }
-                replica::ReplicaCommitError::QuotaExceeded
-                | replica::ReplicaCommitError::OpaqueQuotaExceeded => {
+                replica::commit::Failure::RequestIdConflict => Failure::Conflict(Conflict::Request),
+                replica::commit::Failure::QuotaExceeded
+                | replica::commit::Failure::OpaqueQuotaExceeded => {
                     Failure::Rejected(Rejection::LimitExceeded)
                 }
                 // The mechanics authorizer refused: the demand was unsatisfied
                 // at the pinned frontier (a real Denied, not a bug).
-                replica::ReplicaCommitError::Unauthorized(_) => {
-                    Failure::Rejected(Rejection::Denied)
-                }
-                replica::ReplicaCommitError::ParentManifestUnavailable => {
+                replica::commit::Failure::Unauthorized(_) => Failure::Rejected(Rejection::Denied),
+                replica::commit::Failure::ParentManifestUnavailable => {
                     Failure::Conflict(Conflict::Body)
                 }
                 // Illegitimate is an incorporation-path error; a local commit
                 // never produces it, but the match stays exhaustive.
-                replica::ReplicaCommitError::Illegitimate(_)
-                | replica::ReplicaCommitError::Engine(_)
-                | replica::ReplicaCommitError::Integrity(_)
-                | replica::ReplicaCommitError::BodyKeyUnavailable
-                | replica::ReplicaCommitError::Durability(_)
-                | replica::ReplicaCommitError::OutcomeUnknown
-                | replica::ReplicaCommitError::Poisoned => Failure::Persistence,
+                replica::commit::Failure::Illegitimate(_)
+                | replica::commit::Failure::Engine(_)
+                | replica::commit::Failure::Integrity(_)
+                | replica::commit::Failure::BodyKeyUnavailable
+                | replica::commit::Failure::Durability(_)
+                | replica::commit::Failure::OutcomeUnknown
+                | replica::commit::Failure::Poisoned => Failure::Persistence,
             })?;
         // Publish the Observation for a FRESH durable commit while still
         // holding the writer lock: publication order equals commit order, and

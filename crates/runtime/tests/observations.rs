@@ -27,11 +27,11 @@ fn any_demand() -> Vec<u8> {
     .encode_canonical()
     .expect("canonical demand")
 }
-use runtime::session::Failure as SessionFailure;
+use runtime::session::{Failure as SessionFailure, Interruption};
 use runtime::{
     ActivationOptions, Context, Descriptor, Effect, Intent, Limits, LocalIdentity,
-    ObservationCursor, ObservationStreamError, Projection, Query, Rejection, RequestId, Runtime,
-    RuntimeBuilder, Session, Station, Version, World,
+    ObservationCursor, Projection, Query, Rejection, RequestId, Runtime, RuntimeBuilder, Session,
+    Station, Version, World,
 };
 
 const WRITER_SEED: [u8; 32] = [55u8; 32];
@@ -409,12 +409,9 @@ fn dormancy_terminates_streams_typed_and_concurrent_sessions_both_receive() {
     let _ = station.vacate().unwrap();
     assert_eq!(
         stream1.next_timeout(Duration::from_secs(1)),
-        Err(ObservationStreamError::StationDormant)
+        Err(Interruption::StationDormant)
     );
-    assert_eq!(
-        stream2.try_next(),
-        Err(ObservationStreamError::StationDormant)
-    );
+    assert_eq!(stream2.try_next(), Err(Interruption::StationDormant));
     let _ = std::fs::remove_dir_all(&root);
 }
 

@@ -8,7 +8,7 @@ use mechanics::crypto::AuthorizedBodyKey;
 use mechanics::ids::SpaceId;
 use replica::content::{
     chunk_proof, expected_chunk_count, merkle_root, seal_content, ChunkLeaf, ChunkProof,
-    ContentDescriptor, ContentError, ProofStep, SealedContent, CHUNK_PLAINTEXT_LEN,
+    ContentDescriptor, Invalid, ProofStep, SealedContent, CHUNK_PLAINTEXT_LEN,
     CONTENT_FORMAT_VERSION, MAX_PROOF_BYTES, MAX_PROOF_DEPTH,
 };
 
@@ -159,13 +159,13 @@ fn a_truncated_or_corrupt_chunk_is_refused_before_decryption() {
     corrupt[last] ^= 0xFF;
     assert_eq!(
         descriptor.verify_chunk(&proofs[0], &corrupt),
-        Err(ContentError::ChunkMismatch)
+        Err(Invalid::ChunkMismatch)
     );
 
     let truncated = &ciphertexts[0][..ciphertexts[0].len() - 1];
     assert_eq!(
         descriptor.verify_chunk(&proofs[0], truncated),
-        Err(ContentError::ChunkMismatch)
+        Err(Invalid::ChunkMismatch)
     );
 }
 
@@ -188,12 +188,12 @@ fn a_proof_deeper_than_the_protocol_depth_is_refused_before_it_is_walked() {
     };
     assert_eq!(
         overlong.root(),
-        Err(ContentError::ProofMismatch),
+        Err(Invalid::ProofMismatch),
         "an overlong path is refused by its length, before any hashing"
     );
     assert_eq!(
         descriptor.verify_chunk(&overlong, &ciphertexts[0]),
-        Err(ContentError::ProofMismatch)
+        Err(Invalid::ProofMismatch)
     );
 }
 
@@ -272,22 +272,22 @@ fn a_declared_geometry_that_cannot_describe_content_is_refused() {
 
     let mut lying_count = descriptor.clone();
     lying_count.chunk_count += 1;
-    assert_eq!(lying_count.validate(), Err(ContentError::Geometry));
+    assert_eq!(lying_count.validate(), Err(Invalid::Geometry));
 
     let mut lying_chunk_size = descriptor.clone();
     lying_chunk_size.chunk_plaintext_len = 1024;
-    assert_eq!(lying_chunk_size.validate(), Err(ContentError::Geometry));
+    assert_eq!(lying_chunk_size.validate(), Err(Invalid::Geometry));
 
     let mut future = descriptor.clone();
     future.format_version = CONTENT_FORMAT_VERSION + 1;
     assert_eq!(
         future.validate(),
-        Err(ContentError::UnsupportedVersion(CONTENT_FORMAT_VERSION + 1))
+        Err(Invalid::UnsupportedVersion(CONTENT_FORMAT_VERSION + 1))
     );
 
     let mut foreign = descriptor.clone();
     foreign.space = "not-a-space".into();
-    assert_eq!(foreign.validate(), Err(ContentError::BadSpaceId));
+    assert_eq!(foreign.validate(), Err(Invalid::BadSpaceId));
 }
 
 #[test]
@@ -308,7 +308,7 @@ fn a_provider_verifies_without_holding_a_key() {
     assert!(descriptor.verify_chunk(&proofs[0], &ciphertexts[0]).is_ok());
     assert_eq!(
         descriptor.open_chunk(&stranger, &proofs[0], &ciphertexts[0]),
-        Err(ContentError::Unopenable)
+        Err(Invalid::Unopenable)
     );
 }
 
@@ -439,7 +439,7 @@ fn an_ingest_past_its_policy_maximum_is_refused_while_streaming() {
     assert!(ingest.push(&filler(1, 600)).is_ok());
     assert_eq!(
         ingest.push(&filler(2, 600)),
-        Err(ContentError::Geometry),
+        Err(Invalid::Geometry),
         "the limit fires on the piece that would cross it"
     );
 }
@@ -532,7 +532,7 @@ fn a_proof_of_the_wrong_depth_is_refused() {
     });
     assert_eq!(
         sealed.descriptor.verify_chunk(&proof, ciphertext),
-        Err(ContentError::ProofMismatch)
+        Err(Invalid::ProofMismatch)
     );
 }
 
@@ -555,7 +555,7 @@ fn a_leaf_can_be_judged_before_its_bytes_arrive() {
     let other = seal_content(&space(), &key(), [8u8; 16], &filler(2, 300_000)).expect("seal");
     assert_eq!(
         sealed.descriptor.verify_leaf(&other.proofs[0]),
-        Err(ContentError::ProofMismatch)
+        Err(Invalid::ProofMismatch)
     );
 
     // An index past the declared geometry is refused before the path is walked.
@@ -563,7 +563,7 @@ fn a_leaf_can_be_judged_before_its_bytes_arrive() {
     beyond.leaf.chunk_index = sealed.descriptor.chunk_count;
     assert_eq!(
         sealed.descriptor.verify_leaf(&beyond),
-        Err(ContentError::Geometry)
+        Err(Invalid::Geometry)
     );
 }
 
@@ -583,11 +583,11 @@ fn a_proof_from_a_peer_must_be_canonical_and_bounded() {
     trailing.push(0);
     assert_eq!(
         ChunkProof::decode_canonical(&trailing),
-        Err(ContentError::NonCanonical)
+        Err(Invalid::NonCanonical)
     );
     assert_eq!(
         ChunkProof::decode_canonical(&vec![0u8; MAX_PROOF_BYTES + 1]),
-        Err(ContentError::ProofMismatch),
+        Err(Invalid::ProofMismatch),
         "refused by length before it is decoded"
     );
 
@@ -601,6 +601,6 @@ fn a_proof_from_a_peer_must_be_canonical_and_bounded() {
         .collect();
     assert_eq!(
         ChunkProof::decode_canonical(&deep.encode()),
-        Err(ContentError::ProofMismatch)
+        Err(Invalid::ProofMismatch)
     );
 }

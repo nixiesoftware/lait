@@ -11,7 +11,7 @@ use replica::frontier::AuthorityFrontier as AF;
 use replica::frontier::{AuthorityFrontier, ReplicaFrontier};
 use replica::ids::{BodyId, BodyKey, WorldId};
 use replica::manifest::{
-    build_body_index, ManifestBook, ManifestEntry, ManifestError, ManifestHead, ManifestRoot,
+    build_body_index, Invalid, ManifestBook, ManifestEntry, ManifestHead, ManifestRoot,
     RootObservation,
 };
 use replica::transaction::{AuthoritySource, SeedSigner};
@@ -121,7 +121,7 @@ fn a_non_canonical_encoding_is_refused() {
     extended.push(0);
     assert_eq!(
         ManifestRoot::decode_canonical(&extended),
-        Err(ManifestError::NonCanonical)
+        Err(Invalid::NonCanonical)
     );
 }
 
@@ -147,7 +147,7 @@ fn a_count_that_disagrees_with_the_index_is_refused_before_the_signature() {
     // Cheap checks come first, so a malformed root costs no elliptic curve.
     let (mut root, _) = valid_manifest();
     root.body_count = 99;
-    assert_eq!(root.verify(), Err(ManifestError::CountMismatch));
+    assert_eq!(root.verify(), Err(Invalid::CountMismatch));
 }
 
 #[test]
@@ -172,10 +172,7 @@ fn a_substituted_entry_is_caught_by_its_placement() {
         }),
         ..root
     };
-    assert_eq!(
-        tampered.verify_index(&nodes),
-        Err(ManifestError::KeyMismatch)
-    );
+    assert_eq!(tampered.verify_index(&nodes), Err(Invalid::KeyMismatch));
 }
 
 #[test]
@@ -183,7 +180,7 @@ fn a_missing_node_fails_verification_rather_than_shrinking_the_catalog() {
     let (root, _) = valid_manifest();
     assert_eq!(
         root.verify_index(&Nodes::default()),
-        Err(ManifestError::IndexInvalid)
+        Err(Invalid::IndexInvalid)
     );
 }
 
@@ -191,7 +188,7 @@ fn a_missing_node_fails_verification_rather_than_shrinking_the_catalog() {
 fn a_body_with_no_heads_is_not_an_entry() {
     assert_eq!(
         ManifestEntry::new(body(1), Vec::new()),
-        Err(ManifestError::Bounds)
+        Err(Invalid::Bounds)
     );
 }
 
@@ -231,7 +228,7 @@ fn an_unsorted_entry_from_the_wire_is_refused() {
     };
     assert_eq!(
         ManifestEntry::decode_canonical(&postcard::to_stdvec(&bad).unwrap()),
-        Err(ManifestError::OrderViolation)
+        Err(Invalid::OrderViolation)
     );
 }
 
@@ -270,7 +267,7 @@ fn two_different_roots_at_one_coordinate_are_equivocation() {
         .unwrap();
     assert_eq!(
         book.observe(&second.verify_authorized(&BothSigners).unwrap()),
-        Err(ManifestError::Equivocation)
+        Err(Invalid::Equivocation)
     );
 }
 
@@ -285,7 +282,7 @@ fn an_unauthorized_signer_never_reaches_the_book() {
     let (root, _) = valid_manifest();
     assert_eq!(
         root.verify_authorized(&NobodyAuthorized).unwrap_err(),
-        ManifestError::AuthorityUnverified
+        Invalid::AuthorityUnverified
     );
 }
 
@@ -325,7 +322,7 @@ fn one_signer_cannot_evict_another() {
     let (forged, _) = signed(vec![entry(9)], 1, &OTHER_SEED);
     assert_eq!(
         book.observe(&forged.verify_authorized(&BothSigners).unwrap()),
-        Err(ManifestError::Equivocation)
+        Err(Invalid::Equivocation)
     );
 }
 
@@ -340,6 +337,6 @@ fn a_zero_limit_still_retains_something() {
     let (other, _) = signed(vec![entry(2)], 1, &SIGNER_SEED);
     assert_eq!(
         book.observe(&other.verify_authorized(&BothSigners).unwrap()),
-        Err(ManifestError::Equivocation)
+        Err(Invalid::Equivocation)
     );
 }

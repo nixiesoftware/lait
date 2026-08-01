@@ -23,8 +23,8 @@ use mechanics::ids::SpaceId;
 use replica::frontier::AuthorityFrontier;
 use replica::{
     ActionOutcome, AuthorityBatchReceipt, AuthorityIncorporator, BodyBinding, BodyId, BodyKey,
-    CommitAuthorization, CommitContext, Op, Replica, ReplicaCommitError, SchemaId, SeedSigner,
-    StagedContactMaterial, StaticBodyKeys, SupportedSchemas, WorldId, MUTATION_COLLABORATIVE,
+    CommitAuthorization, CommitContext, Op, Replica, SchemaId, SeedSigner, StagedContactMaterial,
+    StaticBodyKeys, SupportedSchemas, WorldId, MUTATION_COLLABORATIVE,
 };
 
 const SEED_A: [u8; 32] = [81u8; 32];
@@ -159,7 +159,7 @@ fn commit_register(
     request: [u8; 16],
     path: &str,
     value: &str,
-) -> Result<ActionOutcome, ReplicaCommitError> {
+) -> Result<ActionOutcome, replica::commit::Failure> {
     let (space, signer) = ctx_for(seed);
     let ctx = CommitContext {
         space: &space,
@@ -360,7 +360,7 @@ fn pull_staged(
     into: &mut Replica,
     into_seed: &'static [u8; 32],
     staged: &StagedContactMaterial,
-) -> Result<replica::ConvergenceOutcome, replica::ReplicaCommitError> {
+) -> Result<replica::ConvergenceOutcome, replica::commit::Failure> {
     let (space, signer) = ctx_for(into_seed);
     let ctx = CommitContext {
         space: &space,

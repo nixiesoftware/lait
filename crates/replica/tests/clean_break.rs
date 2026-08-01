@@ -14,7 +14,7 @@
 //! part that is easy to lose, which is *refusing without touching anything*.
 
 use mechanics::ids::SpaceId;
-use replica::marker::{MarkerError, StoreMarker, MAX_MARKER, STORE_MAGIC, STORE_VERSION};
+use replica::marker::{Invalid, StoreMarker, MAX_MARKER, STORE_MAGIC, STORE_VERSION};
 
 fn space() -> SpaceId {
     SpaceId::from_digest([31u8; 16])
@@ -34,7 +34,7 @@ fn a_store_from_another_generation_is_refused_by_version() {
     for version in [0u8, STORE_VERSION + 1, 7, 255] {
         assert_eq!(
             StoreMarker::classify(&marker_of_version(version)),
-            Err(MarkerError::UnsupportedStoreVersion { found: version }),
+            Err(Invalid::UnsupportedStoreVersion { found: version }),
             "version {version} must be refused as unsupported, not opened"
         );
     }
@@ -53,7 +53,7 @@ fn the_version_is_read_before_the_body_is_trusted() {
 
     assert_eq!(
         StoreMarker::classify(&bytes),
-        Err(MarkerError::UnsupportedStoreVersion {
+        Err(Invalid::UnsupportedStoreVersion {
             found: STORE_VERSION + 1
         }),
         "an unsupported version must be reported as such, not as corruption — \
@@ -68,15 +68,12 @@ fn a_foreign_directory_is_told_apart_from_an_old_store() {
     // single failure would make the guidance wrong half the time.
     assert_eq!(
         StoreMarker::classify(b"not lait at all"),
-        Err(MarkerError::NotAReplicaStore)
+        Err(Invalid::NotAReplicaStore)
     );
-    assert_eq!(
-        StoreMarker::classify(&[]),
-        Err(MarkerError::NotAReplicaStore)
-    );
+    assert_eq!(StoreMarker::classify(&[]), Err(Invalid::NotAReplicaStore));
     assert_eq!(
         StoreMarker::classify(&marker_of_version(STORE_VERSION + 1)),
-        Err(MarkerError::UnsupportedStoreVersion {
+        Err(Invalid::UnsupportedStoreVersion {
             found: STORE_VERSION + 1
         })
     );
@@ -90,7 +87,7 @@ fn a_corrupt_marker_of_the_current_version_is_neither() {
     bytes[last] ^= 0xFF;
     assert_eq!(
         StoreMarker::classify(&bytes),
-        Err(MarkerError::CorruptStoreMarker)
+        Err(Invalid::CorruptStoreMarker)
     );
 }
 
@@ -99,7 +96,7 @@ fn an_oversized_header_is_refused_before_it_is_parsed() {
     let bytes = vec![0u8; MAX_MARKER + 1];
     assert_eq!(
         StoreMarker::classify(&bytes),
-        Err(MarkerError::CorruptStoreMarker),
+        Err(Invalid::CorruptStoreMarker),
         "the size bound is checked before the magic, so a huge foreign file \
          cannot make us allocate on the way to rejecting it"
     );

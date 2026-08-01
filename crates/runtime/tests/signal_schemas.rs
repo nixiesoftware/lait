@@ -6,7 +6,7 @@
 //! you added.
 
 use runtime::plane::bounds;
-use runtime::signal::{core_declarations, declaration_for, selector, ResponsePolicy, SignalError};
+use runtime::signal::{core_declarations, declaration_for, selector, Refusal, ResponsePolicy};
 
 #[test]
 fn no_declaration_may_exceed_the_planes_own_ceiling() {
@@ -57,7 +57,7 @@ fn an_undeclared_selector_is_refused_rather_than_guessed() {
     // may send it. There is no safe default for either, so there is no default.
     assert_eq!(declaration_for(0xFFFF), None);
     assert_eq!(declaration_for(0x0000), None);
-    assert_eq!(SignalError::NotRegistered.code(), "signal-not-registered");
+    assert_eq!(Refusal::NotRegistered.code(), "signal-not-registered");
 }
 
 #[test]
@@ -94,14 +94,14 @@ fn every_failure_has_a_distinct_stable_code() {
     // client that cannot tell them apart, which defeats the point of typing
     // them at all.
     let errors = [
-        SignalError::NotRegistered,
-        SignalError::Denied,
-        SignalError::TooLarge,
-        SignalError::Malformed,
-        SignalError::Deadline,
-        SignalError::OverBudget,
-        SignalError::PeerRefused,
-        SignalError::LaneNotGranted,
+        Refusal::NotRegistered,
+        Refusal::Denied,
+        Refusal::TooLarge,
+        Refusal::Malformed,
+        Refusal::Deadline,
+        Refusal::OverBudget,
+        Refusal::PeerRefused,
+        Refusal::LaneNotGranted,
     ];
     let mut seen = std::collections::BTreeSet::new();
     for error in &errors {
@@ -114,7 +114,7 @@ fn every_failure_has_a_distinct_stable_code() {
 /// The wire, and the one ordering decision that makes its bounds real.
 mod wire {
     use runtime::plane::{bounds, InviteKind, Signal, WireError, MAX_SIGNAL_TEXT_BYTES};
-    use runtime::signal::{frame_signal, selector, SignalError};
+    use runtime::signal::{frame_signal, selector, Refusal};
     use runtime::transient::Target;
 
     fn scope() -> Target {
@@ -153,7 +153,7 @@ mod wire {
             schema: "note".into(),
             payload: vec![0u8; bounds::MAX_SIGNAL_BYTES + 1],
         };
-        assert_eq!(frame_signal(&huge), Err(SignalError::TooLarge));
+        assert_eq!(frame_signal(&huge), Err(Refusal::TooLarge));
 
         // And an attention whose scope is fine still fits its tighter ceiling.
         assert!(frame_signal(&Signal::Attention { scope: scope() }).is_ok());
@@ -228,7 +228,7 @@ mod wire {
             media_type: "text/plain".into(),
         };
         assert_eq!(hostile.validate(), Err(WireError::NonCanonical));
-        assert_eq!(frame_signal(&hostile), Err(SignalError::Malformed));
+        assert_eq!(frame_signal(&hostile), Err(Refusal::Malformed));
 
         let long = Signal::FileOffer {
             content: [1u8; 32],
@@ -273,7 +273,7 @@ mod declarations {
     use replica::body::Schema;
     use replica::ids::{SchemaId, WorldId};
     use runtime::plane::bounds;
-    use runtime::registry::{DeclarationKind, RegistrationError};
+    use runtime::registry::{DeclarationKind, Refusal};
     use runtime::transient::MAX_SCOPE_FIELD_BYTES;
     use runtime::world::{ScopeSchema, SignalSchema};
     use runtime::{
@@ -334,10 +334,7 @@ mod declarations {
     }
 
     /// Register a World whose registration says exactly what the World says.
-    fn build(
-        scopes: Vec<ScopeSchema>,
-        signals: Vec<SignalSchema>,
-    ) -> Result<(), RegistrationError> {
+    fn build(scopes: Vec<ScopeSchema>, signals: Vec<SignalSchema>) -> Result<(), Refusal> {
         let world = DeclaringWorld {
             scopes: scopes.clone(),
             signals: signals.clone(),
@@ -364,7 +361,7 @@ mod declarations {
                 Vec::new(),
                 vec![signal("note", bounds::MAX_SIGNAL_BYTES as u32 + 1)]
             ),
-            Err(RegistrationError::InvalidDeclaration {
+            Err(Refusal::InvalidDeclaration {
                 world: WorldId::parse(WORLD).unwrap(),
                 kind: DeclarationKind::Signal,
                 name: "note".into(),
@@ -373,7 +370,7 @@ mod declarations {
         // Zero is not "no limit". It is a signal nothing can satisfy.
         assert!(matches!(
             build(Vec::new(), vec![signal("note", 0)]),
-            Err(RegistrationError::InvalidDeclaration { .. })
+            Err(Refusal::InvalidDeclaration { .. })
         ));
 
         assert!(build(
@@ -386,7 +383,7 @@ mod declarations {
                 vec![scope("board", MAX_SCOPE_FIELD_BYTES as u32 + 1)],
                 Vec::new()
             ),
-            Err(RegistrationError::InvalidDeclaration {
+            Err(Refusal::InvalidDeclaration {
                 world: WorldId::parse(WORLD).unwrap(),
                 kind: DeclarationKind::Scope,
                 name: "board".into(),
@@ -394,7 +391,7 @@ mod declarations {
         );
         assert!(matches!(
             build(vec![scope("board", 0)], Vec::new()),
-            Err(RegistrationError::InvalidDeclaration { .. })
+            Err(Refusal::InvalidDeclaration { .. })
         ));
     }
 
@@ -407,14 +404,14 @@ mod declarations {
         broken.demand = vec![0xff, 0xff, 0xff];
         assert!(matches!(
             build(Vec::new(), vec![broken]),
-            Err(RegistrationError::InvalidDeclaration { .. })
+            Err(Refusal::InvalidDeclaration { .. })
         ));
 
         let mut absent = signal("note", 1024);
         absent.demand = Vec::new();
         assert!(matches!(
             build(Vec::new(), vec![absent]),
-            Err(RegistrationError::InvalidDeclaration { .. })
+            Err(Refusal::InvalidDeclaration { .. })
         ));
     }
 
@@ -425,7 +422,7 @@ mod declarations {
         // by name and must strictly ascend.
         assert_eq!(
             build(Vec::new(), vec![signal("note", 8), signal("note", 16)]),
-            Err(RegistrationError::DuplicateDeclaration {
+            Err(Refusal::DuplicateDeclaration {
                 world: WorldId::parse(WORLD).unwrap(),
                 kind: DeclarationKind::Signal,
                 name: "note".into(),
@@ -433,7 +430,7 @@ mod declarations {
         );
         assert_eq!(
             build(vec![scope("board", 8), scope("board", 16)], Vec::new()),
-            Err(RegistrationError::DuplicateDeclaration {
+            Err(Refusal::DuplicateDeclaration {
                 world: WorldId::parse(WORLD).unwrap(),
                 kind: DeclarationKind::Scope,
                 name: "board".into(),

@@ -5,8 +5,8 @@ use mechanics::{
     ids::SpaceId,
     station::{Epoch, Key},
 };
-use runtime::beacon::{BeaconError, RouteHint, SignedBeacon, MAX_ROUTE_HINTS};
-use runtime::neighbor_presence::{PresenceAck, PresenceError, PresenceProbe};
+use runtime::beacon::{Invalid as BeaconInvalid, RouteHint, SignedBeacon, MAX_ROUTE_HINTS};
+use runtime::neighbor_presence::{Invalid as PresenceInvalid, PresenceAck, PresenceProbe};
 
 const STATION_SEED: [u8; 32] = [11u8; 32];
 
@@ -50,12 +50,12 @@ fn valid_beacon_verifies() {
 fn unsupported_version_and_algorithm_are_rejected() {
     let mut b = beacon(1, 0, vec![]);
     b.version = 2;
-    assert_eq!(b.verify(), Err(BeaconError::UnsupportedVersion(2)));
+    assert_eq!(b.verify(), Err(BeaconInvalid::UnsupportedVersion(2)));
     let mut b = beacon(1, 0, vec![]);
     b.signature_algorithm = 2;
     assert_eq!(
         b.verify(),
-        Err(BeaconError::UnsupportedSignatureAlgorithm(2))
+        Err(BeaconInvalid::UnsupportedSignatureAlgorithm(2))
     );
 }
 
@@ -63,7 +63,7 @@ fn unsupported_version_and_algorithm_are_rejected() {
 fn tampered_beacon_body_breaks_the_signature() {
     let mut b = beacon(1, 0, vec![]);
     b.body.sequence = 99;
-    assert_eq!(b.verify(), Err(BeaconError::BadSignature));
+    assert_eq!(b.verify(), Err(BeaconInvalid::BadSignature));
 }
 
 #[test]
@@ -90,7 +90,7 @@ fn route_hints_bounds_and_ordering() {
     unsorted.body.routes.reverse();
     assert_eq!(
         unsorted.verify(),
-        Err(BeaconError::UnsortedOrDuplicateRoutes)
+        Err(BeaconInvalid::UnsortedOrDuplicateRoutes)
     );
 
     // Too many routes.
@@ -101,7 +101,7 @@ fn route_hints_bounds_and_ordering() {
         })
         .collect();
     let b = beacon(1, 0, many);
-    assert_eq!(b.verify(), Err(BeaconError::TooManyRoutes));
+    assert_eq!(b.verify(), Err(BeaconInvalid::TooManyRoutes));
 }
 
 #[test]
@@ -110,7 +110,7 @@ fn trailing_bytes_are_non_canonical() {
     bytes.push(0);
     assert_eq!(
         SignedBeacon::decode_canonical(&bytes),
-        Err(BeaconError::NonCanonical)
+        Err(BeaconInvalid::NonCanonical)
     );
 }
 
@@ -150,14 +150,14 @@ fn an_unsupported_protocol_version_is_refused_not_negotiated() {
         &STATION_SEED,
     )
     .unwrap();
-    assert_eq!(b.verify(), Err(BeaconError::UnsupportedProtocol(99)));
+    assert_eq!(b.verify(), Err(BeaconInvalid::UnsupportedProtocol(99)));
 
     // Presence probe: same rule.
     let responder = station_of(&RESPONDER_SEED).key_bytes();
     let p = PresenceProbe::sign(99, space_bytes(), responder, [1u8; 32], &INITIATOR_SEED).unwrap();
     assert_eq!(
         p.verify(&space_bytes(), &station_of(&INITIATOR_SEED)),
-        Err(PresenceError::UnsupportedProtocol(99))
+        Err(PresenceInvalid::UnsupportedProtocol(99))
     );
 }
 
@@ -177,7 +177,7 @@ fn a_reflected_nonce_is_rejected() {
     let a = PresenceAck::sign(&p, [1u8; 32], &RESPONDER_SEED).unwrap();
     assert_eq!(
         a.verify(&p, &station_of(&RESPONDER_SEED)),
-        Err(PresenceError::ChallengeMismatch)
+        Err(PresenceInvalid::ChallengeMismatch)
     );
 }
 
@@ -189,7 +189,7 @@ fn an_ack_for_another_probe_is_rejected() {
     // Presented against a different probe: commitment mismatch.
     assert_eq!(
         a.verify(&p2, &station_of(&RESPONDER_SEED)),
-        Err(PresenceError::ChallengeMismatch)
+        Err(PresenceInvalid::ChallengeMismatch)
     );
 }
 
@@ -200,7 +200,7 @@ fn cross_space_replay_is_rejected() {
         <[u8; 29]>::try_from(SpaceId::from_digest([7u8; 16]).as_str().as_bytes()).unwrap();
     assert_eq!(
         p.verify(&other_space, &station_of(&INITIATOR_SEED)),
-        Err(PresenceError::SpaceMismatch)
+        Err(PresenceInvalid::SpaceMismatch)
     );
 }
 
@@ -210,7 +210,7 @@ fn station_transport_substitution_is_rejected() {
     // The negotiated transport peer is not the signing Station.
     assert_eq!(
         p.verify(&space_bytes(), &station_of(&RESPONDER_SEED)),
-        Err(PresenceError::IdentityMismatch)
+        Err(PresenceInvalid::IdentityMismatch)
     );
 }
 
@@ -223,7 +223,7 @@ fn role_reversal_ack_signed_by_the_initiator_is_rejected() {
     a.responder_transport = station_of(&RESPONDER_SEED).key_bytes();
     assert_eq!(
         a.verify(&p, &station_of(&RESPONDER_SEED)),
-        Err(PresenceError::BadSignature)
+        Err(PresenceInvalid::BadSignature)
     );
 }
 
@@ -233,7 +233,7 @@ fn tampered_probe_signature_is_rejected() {
     p.signature[0] ^= 0xff;
     assert_eq!(
         p.verify(&space_bytes(), &station_of(&INITIATOR_SEED)),
-        Err(PresenceError::BadSignature)
+        Err(PresenceInvalid::BadSignature)
     );
 }
 
@@ -244,7 +244,7 @@ fn trailing_bytes_and_oversize_are_non_canonical() {
     bytes.push(0);
     assert_eq!(
         PresenceProbe::decode(&bytes),
-        Err(PresenceError::NonCanonical)
+        Err(PresenceInvalid::NonCanonical)
     );
 
     let a = PresenceAck::sign(&p, [2u8; 32], &RESPONDER_SEED).unwrap();
@@ -252,12 +252,12 @@ fn trailing_bytes_and_oversize_are_non_canonical() {
     abytes.push(0);
     assert_eq!(
         PresenceAck::decode(&abytes),
-        Err(PresenceError::NonCanonical)
+        Err(PresenceInvalid::NonCanonical)
     );
 
     assert_eq!(
         PresenceProbe::decode(&vec![0u8; 5000]),
-        Err(PresenceError::NonCanonical)
+        Err(PresenceInvalid::NonCanonical)
     );
 }
 

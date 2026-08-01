@@ -96,7 +96,7 @@ pub struct SignedWorldAction {
 
 /// Why a World action failed validation.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ActionError {
+pub enum Invalid {
     /// The bytes did not decode, or left trailing bytes, or were non-canonical
     /// (decode then re-encode was not byte-exact).
     NonCanonical,
@@ -114,12 +114,12 @@ pub enum ActionError {
     BadSignature,
 }
 
-impl std::fmt::Display for ActionError {
+impl std::fmt::Display for Invalid {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{self:?}")
     }
 }
-impl std::error::Error for ActionError {}
+impl std::error::Error for Invalid {}
 
 /// The payload commitment placed in the header.
 pub fn payload_hash(payload: &[u8]) -> [u8; 32] {
@@ -165,11 +165,11 @@ impl SignedWorldAction {
 
     /// Decode from canonical bytes, requiring exact decode/re-encode equality
     /// (no trailing bytes, minimal encoding).
-    pub fn decode_canonical(bytes: &[u8]) -> Result<Self, ActionError> {
-        let action: Self = postcard::from_bytes(bytes).map_err(|_| ActionError::NonCanonical)?;
-        let re = postcard::to_stdvec(&action).map_err(|_| ActionError::NonCanonical)?;
+    pub fn decode_canonical(bytes: &[u8]) -> Result<Self, Invalid> {
+        let action: Self = postcard::from_bytes(bytes).map_err(|_| Invalid::NonCanonical)?;
+        let re = postcard::to_stdvec(&action).map_err(|_| Invalid::NonCanonical)?;
         if re != bytes {
-            return Err(ActionError::NonCanonical);
+            return Err(Invalid::NonCanonical);
         }
         Ok(action)
     }
@@ -185,28 +185,28 @@ impl SignedWorldAction {
     ///
     /// The mechanics proof that `signer` belongs to `header.actor` and had
     /// standing at `header.authority_frontier` is a separate step wired in S5.
-    pub fn verify_self(&self) -> Result<IdempotencyKey, ActionError> {
+    pub fn verify_self(&self) -> Result<IdempotencyKey, Invalid> {
         if self.version != 1 {
-            return Err(ActionError::UnsupportedVersion(self.version));
+            return Err(Invalid::UnsupportedVersion(self.version));
         }
         if self.signature_algorithm != SIG_ALG_ED25519 {
-            return Err(ActionError::UnsupportedSignatureAlgorithm(
+            return Err(Invalid::UnsupportedSignatureAlgorithm(
                 self.signature_algorithm,
             ));
         }
         if self.payload.len() > MAX_PAYLOAD {
-            return Err(ActionError::PayloadTooLarge);
+            return Err(Invalid::PayloadTooLarge);
         }
         if self.header.payload_hash != payload_hash(&self.payload) {
-            return Err(ActionError::PayloadHashMismatch);
+            return Err(Invalid::PayloadHashMismatch);
         }
         if self.signer != self.header.device {
-            return Err(ActionError::SignerMismatch);
+            return Err(Invalid::SignerMismatch);
         }
-        let key = self.signer.key_bytes().ok_or(ActionError::SignerMismatch)?;
+        let key = self.signer.key_bytes().ok_or(Invalid::SignerMismatch)?;
         let preimage = action_preimage(self.version, &self.header, &self.payload, &self.signer);
         if !mechanics::crypto::verify_detached(&key, &preimage, &self.signature) {
-            return Err(ActionError::BadSignature);
+            return Err(Invalid::BadSignature);
         }
         Ok(IdempotencyKey {
             space: self.header.space.clone(),
@@ -255,14 +255,14 @@ mod tests {
     fn tampered_payload_fails_hash_binding() {
         let mut action = signed(&[7u8; 32]);
         action.payload = b"a different intent".to_vec();
-        assert_eq!(action.verify_self(), Err(ActionError::PayloadHashMismatch));
+        assert_eq!(action.verify_self(), Err(Invalid::PayloadHashMismatch));
     }
 
     #[test]
     fn tampered_signature_fails_verification() {
         let mut action = signed(&[7u8; 32]);
         action.signature[0] ^= 0xff;
-        assert_eq!(action.verify_self(), Err(ActionError::BadSignature));
+        assert_eq!(action.verify_self(), Err(Invalid::BadSignature));
     }
 
     #[test]
@@ -271,17 +271,14 @@ mod tests {
         let mut action = signed(&[7u8; 32]);
         action.signer = mechanics::crypto::device_from_seed(&[9u8; 32]);
         // signer no longer matches header.device
-        assert_eq!(action.verify_self(), Err(ActionError::SignerMismatch));
+        assert_eq!(action.verify_self(), Err(Invalid::SignerMismatch));
     }
 
     #[test]
     fn unsupported_version_is_rejected_not_negotiated() {
         let mut action = signed(&[7u8; 32]);
         action.version = 2;
-        assert_eq!(
-            action.verify_self(),
-            Err(ActionError::UnsupportedVersion(2))
-        );
+        assert_eq!(action.verify_self(), Err(Invalid::UnsupportedVersion(2)));
     }
 
     #[test]
@@ -290,7 +287,7 @@ mod tests {
         action.signature_algorithm = 2;
         assert_eq!(
             action.verify_self(),
-            Err(ActionError::UnsupportedSignatureAlgorithm(2))
+            Err(Invalid::UnsupportedSignatureAlgorithm(2))
         );
     }
 
@@ -301,7 +298,7 @@ mod tests {
         bytes.push(0x00);
         assert_eq!(
             SignedWorldAction::decode_canonical(&bytes),
-            Err(ActionError::NonCanonical)
+            Err(Invalid::NonCanonical)
         );
     }
 
@@ -311,7 +308,7 @@ mod tests {
         let device = mechanics::crypto::device_from_seed(&seed);
         let payload = vec![0u8; MAX_PAYLOAD + 1];
         let action = SignedWorldAction::sign(header(&payload, &device), payload, &seed);
-        assert_eq!(action.verify_self(), Err(ActionError::PayloadTooLarge));
+        assert_eq!(action.verify_self(), Err(Invalid::PayloadTooLarge));
     }
 
     #[test]

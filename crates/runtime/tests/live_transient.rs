@@ -1526,7 +1526,7 @@ mod declared_scopes {
     use replica::ids::{EncodingId, SchemaId, WorldId};
     use runtime::live::admits_scope_for_test as admits;
     use runtime::registry::RuntimeBuilder;
-    use runtime::transient::TransientError;
+    use runtime::transient::Invalid;
     use runtime::world::ScopeSchema;
     use runtime::{
         Context, Descriptor, Effect, Intent, Limits, Projection, Query, Rejection, Version, World,
@@ -1594,7 +1594,7 @@ mod declared_scopes {
         assert_eq!(admits(&worlds, &custom("dragging", "12345678")), Ok(()));
         assert_eq!(
             admits(&worlds, &custom("dragging", "123456789")),
-            Err(TransientError::Bounds)
+            Err(Invalid::Bounds)
         );
     }
 
@@ -1606,7 +1606,7 @@ mod declared_scopes {
         let worlds = Some(hosting(dragging(64)));
         assert_eq!(
             admits(&worlds, &custom("resizing", "x")),
-            Err(TransientError::NotDeclared)
+            Err(Invalid::NotDeclared)
         );
     }
 
@@ -1618,10 +1618,7 @@ mod declared_scopes {
             schema: "dragging".into(),
             key: "x".into(),
         };
-        assert_eq!(
-            admits(&worlds, &elsewhere),
-            Err(TransientError::NotDeclared)
-        );
+        assert_eq!(admits(&worlds, &elsewhere), Err(Invalid::NotDeclared));
     }
 
     #[test]
@@ -1631,7 +1628,7 @@ mod declared_scopes {
         let worlds = Some(hosting(Vec::new()));
         assert_eq!(
             admits(&worlds, &custom("dragging", "x")),
-            Err(TransientError::NotDeclared)
+            Err(Invalid::NotDeclared)
         );
     }
 

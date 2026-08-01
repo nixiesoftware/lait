@@ -20,7 +20,7 @@ use replica::content::ContentRef;
 use replica::journal::cache::ResidentCache;
 use runtime::admission::PlanePolicy;
 use runtime::content_host::{ContentAction, ContentHost, ContentKeys, ContentPolicy};
-use runtime::fetch::{connect_provider, FetchError, Fetcher};
+use runtime::fetch::{connect_provider, Failure, Fetcher};
 use runtime::freight::FreightService;
 use runtime::lifecycle::CancelToken;
 use runtime::plane::Plane;
@@ -585,7 +585,7 @@ async fn an_interrupted_transfer_resumes_and_installs_only_after_verification() 
                 .fetch(&content, [3u8; 16], std::slice::from_ref(&provider))
                 .await
         }
-        Err(_) => Err(FetchError::NoProvider),
+        Err(_) => Err(Failure::NoProvider),
     };
     assert!(outcome.is_err(), "a dead provider completes nothing");
     assert!(
@@ -734,7 +734,7 @@ async fn a_fetch_that_would_cross_the_quota_is_refused_before_anything_is_staged
         fetch
             .fetch(&content, [6u8; 16], std::slice::from_ref(&provider))
             .await,
-        Err(FetchError::OverQuota)
+        Err(Failure::OverQuota)
     );
     assert_eq!(
         seeker.host.cache().staged_bytes(),
@@ -760,7 +760,7 @@ async fn a_fetch_without_a_descriptor_cannot_start() {
                 &[]
             )
             .await,
-        Err(FetchError::UnknownContent)
+        Err(Failure::UnknownContent)
     );
     let _ = Duration::from_secs(0);
     let _ = TransferState::Queued;

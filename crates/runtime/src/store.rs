@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 use fs2::FileExt;
 use mechanics::ids::SpaceId;
-use replica::marker::{MarkerError, StoreMarker};
+use replica::marker::{Invalid as MarkerInvalid, StoreMarker};
 
 use crate::lifecycle::Failure;
 
@@ -345,17 +345,17 @@ fn sync_dir(dir: &Path) -> std::io::Result<()> {
     }
 }
 
-fn marker_err(e: MarkerError) -> Failure {
+fn marker_err(e: MarkerInvalid) -> Failure {
     match e {
-        MarkerError::NotAReplicaStore => Failure::Integrity("not a Replica store".into()),
-        MarkerError::UnsupportedStoreVersion { found } => {
+        MarkerInvalid::NotAReplicaStore => Failure::Integrity("not a Replica store".into()),
+        MarkerInvalid::UnsupportedStoreVersion { found } => {
             Failure::Integrity(format!("unsupported store version {found}"))
         }
-        MarkerError::CorruptStoreMarker => Failure::Integrity("corrupt store marker".into()),
-        MarkerError::ReplicaIntegrityFailure => {
+        MarkerInvalid::CorruptStoreMarker => Failure::Integrity("corrupt store marker".into()),
+        MarkerInvalid::ReplicaIntegrityFailure => {
             Failure::Integrity("replica integrity failure".into())
         }
-        MarkerError::ReplicaLocked => Failure::Integrity("replica locked".into()),
+        MarkerInvalid::ReplicaLocked => Failure::Integrity("replica locked".into()),
     }
 }
 

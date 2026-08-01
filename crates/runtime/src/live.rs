@@ -30,7 +30,7 @@ use mechanics::station::Key;
 use crate::admission::AdmittedPeer;
 use crate::budget::{deadline, gates, slots, ByteGate, Gate, Verdict};
 use crate::plane::{bounds, datagram_fits, stream_kind};
-use crate::plane_stream::{read_framed, read_stream_kind, StreamError};
+use crate::plane_stream::{read_framed, read_stream_kind, Invalid as StreamInvalid};
 use crate::transient::{
     AdmitOutcome, LiveControl, Target, TransientItem, TransientStore, MAX_TRANSIENT_ITEM_BYTES,
 };
@@ -144,7 +144,7 @@ impl Connection {
             AdmitOutcome::Evicted => self.counters.evictions += 1,
             AdmitOutcome::WrongEpoch => self.counters.wrong_epoch += 1,
             AdmitOutcome::Retired => self.counters.retired += 1,
-            AdmitOutcome::Refused(crate::transient::TransientError::Bounds) => {
+            AdmitOutcome::Refused(crate::transient::Invalid::Bounds) => {
                 self.counters.oversize_anchors += 1
             }
             _ => {}
@@ -1341,7 +1341,8 @@ pub async fn serve_session(
                     // A reserved kind is a peer using a reservation we
                     // published and have not built: the flow resets and the
                     // connection stays up, because the peer is not wrong.
-                    Ok(Err(StreamError::ReservedKind(_))) | Ok(Err(StreamError::UnknownKind(_))) => {
+                    Ok(Err(StreamInvalid::ReservedKind(_)))
+                    | Ok(Err(StreamInvalid::UnknownKind(_))) => {
                         drop(send);
                         continue;
                     }
@@ -1511,7 +1512,7 @@ pub async fn serve_session(
 pub fn admits_scope_for_test(
     worlds: &Option<crate::registry::Registry>,
     scope: &Target,
-) -> Result<(), crate::transient::TransientError> {
+) -> Result<(), crate::transient::Invalid> {
     admits_scope(worlds, scope)
 }
 
@@ -1529,27 +1530,26 @@ pub fn admits_scope_for_test(
 fn admits_scope(
     worlds: &Option<crate::registry::Registry>,
     scope: &Target,
-) -> Result<(), crate::transient::TransientError> {
+) -> Result<(), crate::transient::Invalid> {
     let Target::World { world, schema, key } = scope else {
         return Ok(());
     };
     let Some(worlds) = worlds else {
         return Ok(());
     };
-    let world =
-        replica::ids::WorldId::parse(world).ok_or(crate::transient::TransientError::Malformed)?;
+    let world = replica::ids::WorldId::parse(world).ok_or(crate::transient::Invalid::Malformed)?;
     let schema =
-        replica::ids::SchemaId::parse(schema).ok_or(crate::transient::TransientError::Malformed)?;
+        replica::ids::SchemaId::parse(schema).ok_or(crate::transient::Invalid::Malformed)?;
     let registration = worlds
         .descriptor(&world)
-        .ok_or(crate::transient::TransientError::NotDeclared)?;
+        .ok_or(crate::transient::Invalid::NotDeclared)?;
     let declared = registration
         .scope_schemas
         .iter()
         .find(|candidate| candidate.name == schema)
-        .ok_or(crate::transient::TransientError::NotDeclared)?;
+        .ok_or(crate::transient::Invalid::NotDeclared)?;
     if key.len() > declared.max_key_bytes as usize {
-        return Err(crate::transient::TransientError::Bounds);
+        return Err(crate::transient::Invalid::Bounds);
     }
     Ok(())
 }

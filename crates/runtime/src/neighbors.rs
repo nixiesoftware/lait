@@ -35,7 +35,7 @@ pub const PERSIST_MIN_INTERVAL_MS: u64 = 1_000;
 
 /// Why the registry failed to load. Corrupt state is surfaced, never deleted.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RegistryError {
+pub enum Failure {
     /// The registry file exists but does not decode canonically.
     CorruptRegistry,
     /// The registry names a version this build does not speak.
@@ -46,12 +46,12 @@ pub enum RegistryError {
     Io(String),
 }
 
-impl std::fmt::Display for RegistryError {
+impl std::fmt::Display for Failure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{self:?}")
     }
 }
-impl std::error::Error for RegistryError {}
+impl std::error::Error for Failure {}
 
 /// A verified route hint with its receiver-local lease expiry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -158,11 +158,11 @@ pub struct NeighborRegistry {
 impl NeighborRegistry {
     /// Load (or initialize empty) the registry for a Space from the Orbit
     /// store directory. Corrupt or foreign state is a typed error, untouched.
-    pub fn load(store_dir: &Path, space: &SpaceId) -> Result<Self, RegistryError> {
+    pub fn load(store_dir: &Path, space: &SpaceId) -> Result<Self, Failure> {
         let path = store_dir.join(NEIGHBORS_FILE);
         let entries = match std::fs::read(&path) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
-            Err(e) => return Err(RegistryError::Io(e.to_string())),
+            Err(e) => return Err(Failure::Io(e.to_string())),
             Ok(bytes) => Self::decode_entries(&bytes, space)?,
         };
         Ok(Self {
@@ -179,7 +179,7 @@ impl NeighborRegistry {
     fn decode_entries(
         bytes: &[u8],
         space: &SpaceId,
-    ) -> Result<BTreeMap<Key, NeighborRecord>, RegistryError> {
+    ) -> Result<BTreeMap<Key, NeighborRecord>, Failure> {
         // Postcard tolerates trailing bytes, so each shape must round-trip
         // exactly before it is believed — a v1 file can never half-decode as
         // v2 (or vice versa) and produce garbled records.
@@ -190,7 +190,7 @@ impl NeighborRegistry {
                     .unwrap_or(false)
             {
                 if &file.space != space {
-                    return Err(RegistryError::ForeignRegistry);
+                    return Err(Failure::ForeignRegistry);
                 }
                 return Ok(file
                     .entries
@@ -206,7 +206,7 @@ impl NeighborRegistry {
             {
                 if file.version == 1 {
                     if &file.space != space {
-                        return Err(RegistryError::ForeignRegistry);
+                        return Err(Failure::ForeignRegistry);
                     }
                     return Ok(file
                         .entries
@@ -216,22 +216,22 @@ impl NeighborRegistry {
                         .collect());
                 }
                 // A structurally sound file naming a version we do not speak.
-                return Err(RegistryError::UnsupportedRegistryVersion(file.version));
+                return Err(Failure::UnsupportedRegistryVersion(file.version));
             }
         }
-        Err(RegistryError::CorruptRegistry)
+        Err(Failure::CorruptRegistry)
     }
 
-    fn persist_now(&mut self, now_ms: u64) -> Result<(), RegistryError> {
+    fn persist_now(&mut self, now_ms: u64) -> Result<(), Failure> {
         let file = RegistryFile {
             version: REGISTRY_VERSION,
             space: self.space.clone(),
             entries: self.entries.values().cloned().collect(),
         };
-        let bytes = postcard::to_stdvec(&file).map_err(|e| RegistryError::Io(e.to_string()))?;
+        let bytes = postcard::to_stdvec(&file).map_err(|e| Failure::Io(e.to_string()))?;
         let tmp = self.path.with_extension("tmp");
-        std::fs::write(&tmp, &bytes).map_err(|e| RegistryError::Io(e.to_string()))?;
-        std::fs::rename(&tmp, &self.path).map_err(|e| RegistryError::Io(e.to_string()))?;
+        std::fs::write(&tmp, &bytes).map_err(|e| Failure::Io(e.to_string()))?;
+        std::fs::rename(&tmp, &self.path).map_err(|e| Failure::Io(e.to_string()))?;
         self.dirty = false;
         self.last_persist_ms = now_ms;
         Ok(())
@@ -239,7 +239,7 @@ impl NeighborRegistry {
 
     /// Record a freshness-only change: persist if the coalescing window has
     /// passed, otherwise leave it dirty for [`NeighborRegistry::flush`].
-    fn persist_soft(&mut self, now_ms: u64) -> Result<(), RegistryError> {
+    fn persist_soft(&mut self, now_ms: u64) -> Result<(), Failure> {
         self.dirty = true;
         if now_ms.saturating_sub(self.last_persist_ms) >= PERSIST_MIN_INTERVAL_MS {
             self.persist_now(now_ms)?;
@@ -249,7 +249,7 @@ impl NeighborRegistry {
 
     /// Drain coalesced freshness updates to disk once the window has passed.
     /// Cheap when clean; the driver calls it on its tick.
-    pub fn flush(&mut self, now_ms: u64) -> Result<(), RegistryError> {
+    pub fn flush(&mut self, now_ms: u64) -> Result<(), Failure> {
         if self.dirty && now_ms.saturating_sub(self.last_persist_ms) >= PERSIST_MIN_INTERVAL_MS {
             self.persist_now(now_ms)?;
         }
@@ -257,7 +257,7 @@ impl NeighborRegistry {
     }
 
     /// Drain any coalesced updates immediately (dormancy path).
-    pub fn flush_now(&mut self, now_ms: u64) -> Result<(), RegistryError> {
+    pub fn flush_now(&mut self, now_ms: u64) -> Result<(), Failure> {
         if self.dirty {
             self.persist_now(now_ms)?;
         }
@@ -291,7 +291,7 @@ impl NeighborRegistry {
         local_frontier: (&[u8; 32], u64),
         now_ms: u64,
         route_lease_ms: u64,
-    ) -> Result<bool, RegistryError> {
+    ) -> Result<bool, Failure> {
         if beacon.space() != &self.space {
             return Ok(false);
         }
@@ -389,12 +389,7 @@ impl NeighborRegistry {
     /// Feed a swarm membership event (advisory reachability, never standing,
     /// never routes — the eclipse fence still gates learning). Only known
     /// Neighbors are touched: a bare overlay event can never create an entry.
-    pub fn note_swarm(
-        &mut self,
-        station: &Key,
-        up: bool,
-        now_ms: u64,
-    ) -> Result<bool, RegistryError> {
+    pub fn note_swarm(&mut self, station: &Key, up: bool, now_ms: u64) -> Result<bool, Failure> {
         let Some(entry) = self.entries.get_mut(station) else {
             return Ok(false);
         };
@@ -414,7 +409,7 @@ impl NeighborRegistry {
     /// known Neighbor pending-Contact, so loopback-scale convergence never
     /// waits for the beacon floor. Eligibility still gates on backoff and an
     /// unexpired route lease.
-    pub fn mark_all_pending(&mut self, now_ms: u64) -> Result<usize, RegistryError> {
+    pub fn mark_all_pending(&mut self, now_ms: u64) -> Result<usize, Failure> {
         let mut flipped = 0;
         for entry in self.entries.values_mut() {
             if !entry.pending {
@@ -457,7 +452,7 @@ impl NeighborRegistry {
         station: &Key,
         now_ms: u64,
         route_lease_ms: u64,
-    ) -> Result<(), RegistryError> {
+    ) -> Result<(), Failure> {
         // Gate to first-contact: arm a reciprocal dial only for a peer we have
         // not yet successfully pulled (unknown reachability). Once the reciprocal
         // exchange succeeds (`record_success` → reachable), later inbound
@@ -530,7 +525,7 @@ impl NeighborRegistry {
 
     /// Record a successful Contact: backoff resets, the pending mark clears,
     /// reachability turns advisory-reachable.
-    pub fn record_success(&mut self, station: &Key, now_ms: u64) -> Result<(), RegistryError> {
+    pub fn record_success(&mut self, station: &Key, now_ms: u64) -> Result<(), Failure> {
         if let Some(e) = self.entries.get_mut(station) {
             e.failures = 0;
             e.pending = false;
@@ -544,7 +539,7 @@ impl NeighborRegistry {
 
     /// Record a failed Contact attempt: exponential backoff from 1 s to 5 min
     /// with deterministic per-Station jitter; the Neighbor stays pending.
-    pub fn record_failure(&mut self, station: &Key, now_ms: u64) -> Result<(), RegistryError> {
+    pub fn record_failure(&mut self, station: &Key, now_ms: u64) -> Result<(), Failure> {
         if let Some(e) = self.entries.get_mut(station) {
             e.failures = e.failures.saturating_add(1);
             e.reachability = REACH_UNREACHABLE;
@@ -893,7 +888,7 @@ mod tests {
         std::fs::write(dir.join(NEIGHBORS_FILE), b"garbage").unwrap();
         assert_eq!(
             NeighborRegistry::load(&dir, &space()).unwrap_err(),
-            RegistryError::CorruptRegistry
+            Failure::CorruptRegistry
         );
         assert!(dir.join(NEIGHBORS_FILE).exists(), "never deleted");
 
@@ -910,7 +905,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             NeighborRegistry::load(&dir, &space()).unwrap_err(),
-            RegistryError::UnsupportedRegistryVersion(9)
+            Failure::UnsupportedRegistryVersion(9)
         );
 
         // A registry for another Space is refused.
@@ -926,7 +921,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             NeighborRegistry::load(&dir, &space()).unwrap_err(),
-            RegistryError::ForeignRegistry
+            Failure::ForeignRegistry
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

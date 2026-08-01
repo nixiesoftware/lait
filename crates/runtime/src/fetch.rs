@@ -31,7 +31,7 @@ use crate::transfer::{TransferHandle, TransferRegistry, TransferState};
 
 /// Why a fetch did not complete.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FetchError {
+pub enum Failure {
     /// No committed descriptor. A fetch cannot start from a bare id: without
     /// the geometry there is nothing to verify an answer against.
     UnknownContent,
@@ -80,7 +80,7 @@ impl Provider {
     /// Bounded by what is asked, and the answer is bounded by what was asked.
     /// An empty answer means "none of these", which is deliberately the same
     /// thing a provider says about content it has never heard of.
-    pub async fn have(&self, content: &ContentRef, wanted: &[u32]) -> Result<Vec<u32>, FetchError> {
+    pub async fn have(&self, content: &ContentRef, wanted: &[u32]) -> Result<Vec<u32>, Failure> {
         let request = FreightFrame::Have {
             content_id: content.content_id,
             wanted: wanted.to_vec(),
@@ -88,7 +88,7 @@ impl Provider {
         let answer = self.ask(&request, deadline::HAVE_RESPONSE).await?;
         match answer {
             (FreightFrame::Available { chunks, .. }, _) => Ok(chunks),
-            _ => Err(FetchError::NoProvider),
+            _ => Err(Failure::NoProvider),
         }
     }
 
@@ -103,7 +103,7 @@ impl Provider {
         chunk_index: u32,
         offset: u64,
         resume_leaf: Option<[u8; 32]>,
-    ) -> Result<(ChunkProof, u32, Vec<u8>), FetchError> {
+    ) -> Result<(ChunkProof, u32, Vec<u8>), Failure> {
         let request = FreightFrame::GetChunk {
             content_id: content.content_id,
             chunk_index,
@@ -120,10 +120,10 @@ impl Provider {
                 ..
             } if answered == chunk_index => {
                 let proof =
-                    ChunkProof::decode_canonical(&proof).map_err(|_| FetchError::NoProvider)?;
+                    ChunkProof::decode_canonical(&proof).map_err(|_| Failure::NoProvider)?;
                 Ok((proof, total_len, body))
             }
-            _ => Err(FetchError::NoProvider),
+            _ => Err(Failure::NoProvider),
         }
     }
 
@@ -137,7 +137,7 @@ impl Provider {
         &self,
         request: &FreightFrame,
         budget: Duration,
-    ) -> Result<(FreightFrame, Vec<u8>), FetchError> {
+    ) -> Result<(FreightFrame, Vec<u8>), Failure> {
         let exchange = async {
             let (mut send, mut recv) = self.connection.open_bi().await.ok()?;
             send.write_all(&frame(request)).await.ok()?;
@@ -152,9 +152,9 @@ impl Provider {
             Some((header, body))
         };
         match tokio::time::timeout(budget, exchange).await {
-            Ok(Some((FreightFrame::Refused, _))) => Err(FetchError::NoProvider),
+            Ok(Some((FreightFrame::Refused, _))) => Err(Failure::NoProvider),
             Ok(Some(answer)) => Ok(answer),
-            _ => Err(FetchError::NoProvider),
+            _ => Err(Failure::NoProvider),
         }
     }
 }
@@ -311,13 +311,13 @@ impl Fetcher {
         content: &ContentRef,
         operation: [u8; 16],
         providers: &[Provider],
-    ) -> Result<(), FetchError> {
+    ) -> Result<(), Failure> {
         let allow = |_: ContentAction| Ok(());
         let policy = self.policy(&allow);
         let descriptor = self
             .host
             .descriptor_of(&policy, content)
-            .map_err(|_| FetchError::UnknownContent)?;
+            .map_err(|_| Failure::UnknownContent)?;
 
         let missing = self.missing_chunks(&policy, content, &descriptor);
         if missing.is_empty() {
@@ -327,7 +327,7 @@ impl Fetcher {
         }
         self.admit_by_quota(&descriptor)?;
         if providers.is_empty() {
-            return Err(FetchError::NoProvider);
+            return Err(Failure::NoProvider);
         }
 
         let handle = TransferHandle::new(
@@ -337,7 +337,7 @@ impl Fetcher {
             *content,
             Instant::now(),
         )
-        .map_err(|_| FetchError::Busy)?;
+        .map_err(|_| Failure::Busy)?;
         handle.advance(TransferState::Connecting, Instant::now());
 
         // Who can serve what. Asked once per provider about the whole gap,
@@ -362,7 +362,7 @@ impl Fetcher {
         }
         if offers.is_empty() {
             handle.finish(TransferState::Failed, Instant::now());
-            return Err(FetchError::NoProvider);
+            return Err(Failure::NoProvider);
         }
 
         let mut outstanding = missing.clone();
@@ -428,7 +428,7 @@ impl Fetcher {
             Ok(())
         } else {
             handle.finish(TransferState::Failed, Instant::now());
-            Err(FetchError::Incomplete {
+            Err(Failure::Incomplete {
                 missing: still_missing.len(),
             })
         }
@@ -526,14 +526,14 @@ impl Fetcher {
     }
 
     /// Refuse before staging rather than after moving bytes.
-    fn admit_by_quota(&self, descriptor: &ContentDescriptor) -> Result<(), FetchError> {
+    fn admit_by_quota(&self, descriptor: &ContentDescriptor) -> Result<(), Failure> {
         let cache = self.host.cache();
         let projected = cache
             .resident_bytes()
             .saturating_add(cache.staged_bytes())
             .saturating_add(descriptor.plaintext_len);
         if projected > self.cache_quota_bytes {
-            return Err(FetchError::OverQuota);
+            return Err(Failure::OverQuota);
         }
         Ok(())
     }

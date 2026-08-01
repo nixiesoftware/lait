@@ -61,7 +61,7 @@ pub struct TransferProgress {
 
 /// Why a transfer could not be registered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TransferError {
+pub enum Refusal {
     /// An operation by that id is already in flight. Two handles over one id
     /// would release each other's leases.
     DuplicateOperation,
@@ -154,13 +154,13 @@ impl TransferRegistry {
         operation: [u8; 16],
         content: ContentRef,
         now: Instant,
-    ) -> Result<(), TransferError> {
+    ) -> Result<(), Refusal> {
         let mut guard = self.lock();
         if guard.active.contains_key(&operation) {
-            return Err(TransferError::DuplicateOperation);
+            return Err(Refusal::DuplicateOperation);
         }
         if guard.active.len() >= MAX_ACTIVE {
-            return Err(TransferError::TooManyActive);
+            return Err(Refusal::TooManyActive);
         }
         guard.active.insert(
             operation,
@@ -297,7 +297,7 @@ impl TransferHandle {
         operation: [u8; 16],
         content: ContentRef,
         now: Instant,
-    ) -> Result<Self, TransferError> {
+    ) -> Result<Self, Refusal> {
         registry.begin(operation, content, now)?;
         Ok(Self {
             registry,

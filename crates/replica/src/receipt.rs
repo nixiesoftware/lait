@@ -52,7 +52,7 @@ pub struct RequestReceipt {
 
 /// Why a receipt failed to decode or validate.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ReceiptError {
+pub enum Invalid {
     /// The bytes did not decode, left trailing bytes, or were non-canonical.
     NonCanonical,
     /// `version` was not 1.
@@ -61,12 +61,12 @@ pub enum ReceiptError {
     EffectTooLarge,
 }
 
-impl std::fmt::Display for ReceiptError {
+impl std::fmt::Display for Invalid {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{self:?}")
     }
 }
-impl std::error::Error for ReceiptError {}
+impl std::error::Error for Invalid {}
 
 impl RequestReceipt {
     /// Encode to canonical bytes.
@@ -76,17 +76,17 @@ impl RequestReceipt {
 
     /// Decode from canonical bytes, requiring exact decode/re-encode equality
     /// and validating version and effect bound.
-    pub fn decode_canonical(bytes: &[u8]) -> Result<Self, ReceiptError> {
-        let receipt: Self = postcard::from_bytes(bytes).map_err(|_| ReceiptError::NonCanonical)?;
-        let re = postcard::to_stdvec(&receipt).map_err(|_| ReceiptError::NonCanonical)?;
+    pub fn decode_canonical(bytes: &[u8]) -> Result<Self, Invalid> {
+        let receipt: Self = postcard::from_bytes(bytes).map_err(|_| Invalid::NonCanonical)?;
+        let re = postcard::to_stdvec(&receipt).map_err(|_| Invalid::NonCanonical)?;
         if re != bytes {
-            return Err(ReceiptError::NonCanonical);
+            return Err(Invalid::NonCanonical);
         }
         if receipt.version != 1 {
-            return Err(ReceiptError::UnsupportedVersion(receipt.version));
+            return Err(Invalid::UnsupportedVersion(receipt.version));
         }
         if receipt.effect.len() > MAX_EFFECT_BYTES {
-            return Err(ReceiptError::EffectTooLarge);
+            return Err(Invalid::EffectTooLarge);
         }
         Ok(receipt)
     }
@@ -144,7 +144,7 @@ mod tests {
         bytes.push(0);
         assert_eq!(
             RequestReceipt::decode_canonical(&bytes),
-            Err(ReceiptError::NonCanonical)
+            Err(Invalid::NonCanonical)
         );
     }
 
@@ -154,7 +154,7 @@ mod tests {
         r.version = 2;
         assert_eq!(
             RequestReceipt::decode_canonical(&r.encode()),
-            Err(ReceiptError::UnsupportedVersion(2))
+            Err(Invalid::UnsupportedVersion(2))
         );
     }
 
@@ -166,7 +166,7 @@ mod tests {
         r.effect = vec![0u8; MAX_EFFECT_BYTES + 1];
         assert_eq!(
             RequestReceipt::decode_canonical(&r.encode()),
-            Err(ReceiptError::EffectTooLarge)
+            Err(Invalid::EffectTooLarge)
         );
     }
 

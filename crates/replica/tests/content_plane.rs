@@ -19,8 +19,8 @@ use fabric::journal::cache::ResidentCache;
 use mechanics::crypto::AuthorizedBodyKey;
 use mechanics::ids::SpaceId;
 use replica::content::{
-    open_resident_chunk, ContentDescriptor, ContentError, ContentIngest, ContentRef,
-    IngestedContent, CHUNK_PLAINTEXT_LEN,
+    open_resident_chunk, ContentDescriptor, ContentIngest, ContentRef, IngestedContent, Invalid,
+    CHUNK_PLAINTEXT_LEN,
 };
 use replica::frontier::AuthorityFrontier;
 use replica::{
@@ -249,7 +249,7 @@ fn a_descriptor_survives_reopen_while_its_bytes_need_not() {
     assert_eq!(descriptor.plaintext_len, plaintext.len() as u64);
     assert_eq!(
         open_resident_chunk(&descriptor, &key(), &evicted, &out.leases[0].entry),
-        Err(ContentError::NotResident),
+        Err(Invalid::NotResident),
         "and the bytes are honestly absent rather than an integrity failure"
     );
 }
@@ -269,7 +269,7 @@ fn a_corrupt_chunk_is_dropped_and_the_store_is_untouched() {
 
     assert!(matches!(
         open_resident_chunk(&out.descriptor, &key(), &fx.cache, &out.leases[0].entry),
-        Err(ContentError::ChunkMismatch | ContentError::NotResident)
+        Err(Invalid::ChunkMismatch | Invalid::NotResident)
     ));
     // Reopening the store proves the authoritative side never noticed.
     Replica::open_journaled(fx.dir.join("store"), keys())
@@ -299,7 +299,7 @@ fn a_provider_holding_a_proper_subset_still_serves_what_it_has() {
     assert!(open_resident_chunk(&out.descriptor, &key(), &partial, &out.leases[0].entry).is_ok());
     assert_eq!(
         open_resident_chunk(&out.descriptor, &key(), &partial, &out.leases[1].entry),
-        Err(ContentError::NotResident)
+        Err(Invalid::NotResident)
     );
     assert!(open_resident_chunk(&out.descriptor, &key(), &partial, &out.leases[2].entry).is_ok());
 }
@@ -325,7 +325,7 @@ fn losing_a_resident_chunk_costs_that_chunk_and_nothing_more() {
     assert!(!fx.cache.is_resident(&entry), "not advertisable without it");
     assert_eq!(
         open_resident_chunk(&out.descriptor, &key(), &fx.cache, &entry),
-        Err(ContentError::NotResident)
+        Err(Invalid::NotResident)
     );
 
     // Reconstructed by re-ingesting the same bytes: the descriptor is a pure
@@ -358,7 +358,7 @@ fn content_sealed_under_an_old_epoch_stays_readable_under_that_epoch() {
     // The current epoch's key opens nothing of it, and says so with one answer.
     assert_eq!(
         open_resident_chunk(&out.descriptor, &key(), &fx.cache, &out.leases[0].entry),
-        Err(ContentError::Unopenable)
+        Err(Invalid::Unopenable)
     );
 }
 

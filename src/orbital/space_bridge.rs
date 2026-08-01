@@ -2907,8 +2907,8 @@ fn invalid_content_id() -> ContentReply {
 /// `Unknown` deliberately says nothing about whether the content exists
 /// elsewhere: a caller that could tell "not here" from "never heard of it"
 /// would have an oracle for what a Space contains, answerable by guessing ids.
-fn content_refusal(error: &runtime::content_host::ContentHostError) -> ContentReply {
-    use runtime::content_host::ContentHostError as E;
+fn content_refusal(error: &runtime::content_host::Failure) -> ContentReply {
+    use runtime::content_host::Failure as E;
     let (code, message) = match error {
         E::Denied { demand } => (
             ContentErrorCode::Denied,

@@ -14,7 +14,7 @@ use mechanics::ids::SpaceId;
 use replica::content::CHUNK_PLAINTEXT_LEN;
 use replica::journal::cache::ResidentCache;
 use runtime::content_host::{
-    ContentAction, ContentHost, ContentHostError, ContentKeys, ContentPolicy, MAX_RANGE_BYTES,
+    ContentAction, ContentHost, ContentKeys, ContentPolicy, Failure, MAX_RANGE_BYTES,
 };
 
 const EPOCH: [u8; 16] = [3u8; 16];
@@ -217,25 +217,24 @@ fn every_operation_is_its_own_authorization_question() {
     let policy = policy(&space, &refuse);
     assert!(matches!(
         fx.host.stat(&policy, &content),
-        Err(ContentHostError::Denied { .. })
+        Err(Failure::Denied { .. })
     ));
     assert!(matches!(
         fx.host.read_range(&policy, &content, 0, 1),
-        Err(ContentHostError::Denied { .. })
+        Err(Failure::Denied { .. })
     ));
     assert!(matches!(
         fx.host.pin(&policy, &content),
-        Err(ContentHostError::Denied { .. })
+        Err(Failure::Denied { .. })
     ));
     assert!(matches!(
         fx.host.remove_local(&policy, &content),
-        Err(ContentHostError::Denied { .. })
+        Err(Failure::Denied { .. })
     ));
 
     // And a refusal says what would have been needed, so a caller can explain
     // rather than only report.
-    let Err(ContentHostError::Denied { demand }) = fx.host.read_range(&policy, &content, 0, 1)
-    else {
+    let Err(Failure::Denied { demand }) = fx.host.read_range(&policy, &content, 0, 1) else {
         panic!("expected a denial");
     };
     assert_eq!(demand, ContentAction::Read.capability().as_bytes());
@@ -261,7 +260,7 @@ fn a_range_larger_than_the_bound_is_refused_before_anything_is_read() {
     assert_eq!(
         fx.host
             .read_range(&policy, &content, 0, MAX_RANGE_BYTES + 1),
-        Err(ContentHostError::Bounds)
+        Err(Failure::Bounds)
     );
 }
 
@@ -317,7 +316,7 @@ fn removing_locally_keeps_the_name_and_drops_the_bytes() {
     assert_eq!(status.resident_chunks, 0, "and the bytes are gone");
     assert_eq!(
         fx.host.read_range(&policy, &content, 0, 10),
-        Err(ContentHostError::NotResident),
+        Err(Failure::NotResident),
         "reading says not-here rather than failing the store"
     );
 }
@@ -468,11 +467,11 @@ fn serving_a_chunk_is_authorized_and_costs_only_this_content() {
     };
     assert!(matches!(
         fx.host.chunk(&denied, &wanted, 0),
-        Err(ContentHostError::Denied { .. })
+        Err(Failure::Denied { .. })
     ));
     assert!(matches!(
         fx.host.resident_indices(&denied, &wanted),
-        Err(ContentHostError::Denied { .. })
+        Err(Failure::Denied { .. })
     ));
     // Reading locally still works, because that is a different permission.
     assert!(fx.host.stat(&denied, &wanted).is_ok());
@@ -601,7 +600,7 @@ fn a_ranged_chunk_carries_the_proof_for_the_whole_chunk() {
     assert!(matches!(
         fx.host
             .chunk_range(&policy, &content, 0, total as u64 + 1, 16),
-        Err(ContentHostError::Bounds)
+        Err(Failure::Bounds)
     ));
 }
 
@@ -785,7 +784,7 @@ fn a_hole_in_the_span_is_reported_before_any_chunk_is_opened() {
     assert!(
         !matches!(
             fx.host.read_range(&policy, &content, 0, 16),
-            Err(ContentHostError::NotResident)
+            Err(Failure::NotResident)
         ),
         "chunk 0 is resident, so its own failure must not be NotResident"
     );
@@ -794,7 +793,7 @@ fn a_hole_in_the_span_is_reported_before_any_chunk_is_opened() {
     assert!(
         matches!(
             fx.host.read_range(&policy, &content, 0, chunk * 3),
-            Err(ContentHostError::NotResident)
+            Err(Failure::NotResident)
         ),
         "the hole is the answer, and it arrives before chunk 0 is touched"
     );

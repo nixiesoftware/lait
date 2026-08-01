@@ -104,17 +104,17 @@ impl Target {
     ///
     /// A signal carries a scope and has to check it before anything acts on it,
     /// and duplicating the rule would be two rules.
-    pub fn validate_wire(&self) -> Result<(), TransientError> {
+    pub fn validate_wire(&self) -> Result<(), Invalid> {
         self.validate()
     }
 
-    fn validate(&self) -> Result<(), TransientError> {
+    fn validate(&self) -> Result<(), Invalid> {
         // A field path is a name inside a Body's collaborative schema, so it has
         // no grammar of its own here — only a bound, which is load-bearing
         // because the path reaches loro's container namespace.
         let bounded = |value: &str| {
             if value.len() > MAX_SCOPE_FIELD_BYTES || value.is_empty() {
-                Err(TransientError::Bounds)
+                Err(Invalid::Bounds)
             } else {
                 Ok(())
             }
@@ -125,8 +125,7 @@ impl Target {
         // shape, and something that is merely short is not therefore one. The
         // two World-facing shapes disagreeing about what a World id *is* is how
         // a scope and a signal about the same World stop matching.
-        let world_id =
-            |value: &str| replica::ids::WorldId::parse(value).ok_or(TransientError::Malformed);
+        let world_id = |value: &str| replica::ids::WorldId::parse(value).ok_or(Invalid::Malformed);
         match self {
             Self::Body { world, .. } | Self::Material { world, .. } => {
                 world_id(world)?;
@@ -139,7 +138,7 @@ impl Target {
             Self::Content { .. } => Ok(()),
             Self::World { world, schema, key } => {
                 world_id(world)?;
-                replica::ids::SchemaId::parse(schema).ok_or(TransientError::Malformed)?;
+                replica::ids::SchemaId::parse(schema).ok_or(Invalid::Malformed)?;
                 // The key is the World's own, so it gets a bound and no grammar
                 // — the substrate has no opinion about what a World calls its
                 // rows. What the World itself declared is enforced above this,
@@ -191,7 +190,7 @@ impl TransientPayload {
         }
     }
 
-    fn validate(&self, scope: &Target) -> Result<(), TransientError> {
+    fn validate(&self, scope: &Target) -> Result<(), Invalid> {
         // The legality table. It is what makes `MAX_SLOTS_PER_CONNECTION =
         // MAX_SUBSCRIBED_SCOPES_PER_CONNECTION * 2` a fact rather than a hope:
         // no scope admits more than two kinds.
@@ -211,11 +210,11 @@ impl TransientPayload {
             _ => false,
         };
         if !legal {
-            return Err(TransientError::IllegalForScope);
+            return Err(Invalid::IllegalForScope);
         }
         for anchor in self.anchors() {
             if anchor.len() > MAX_ANCHOR_BYTES {
-                return Err(TransientError::Bounds);
+                return Err(Invalid::Bounds);
             }
             // The path inside the anchor has to be the field the scope names.
             //
@@ -225,18 +224,18 @@ impl TransientPayload {
             // means a peer can only ask about what it already said it was
             // watching.
             let decoded =
-                replica::Anchor::decode_canonical(anchor).map_err(|_| TransientError::Malformed)?;
+                replica::Anchor::decode_canonical(anchor).map_err(|_| Invalid::Malformed)?;
             if decoded.path.len() > MAX_SCOPE_FIELD_BYTES {
-                return Err(TransientError::Bounds);
+                return Err(Invalid::Bounds);
             }
             match scope.field() {
                 Some(field) if decoded.path == field => {}
-                _ => return Err(TransientError::AnchorOutsideScope),
+                _ => return Err(Invalid::AnchorOutsideScope),
             }
         }
         if let Self::Residency { chunks } = self {
             if chunks.len() > MAX_RESIDENCY_CHUNKS {
-                return Err(TransientError::Bounds);
+                return Err(Invalid::Bounds);
             }
         }
         Ok(())
@@ -280,19 +279,19 @@ impl TransientItem {
     /// same reasons: the outer ceiling first so no allocation is sized by a
     /// peer, then postcard, then re-encode equality so one item has one
     /// spelling, then the semantic checks.
-    pub fn decode_canonical(bytes: &[u8]) -> Result<Self, TransientError> {
+    pub fn decode_canonical(bytes: &[u8]) -> Result<Self, Invalid> {
         if bytes.len() > MAX_TRANSIENT_ITEM_BYTES {
-            return Err(TransientError::TooLarge);
+            return Err(Invalid::TooLarge);
         }
-        let item: Self = postcard::from_bytes(bytes).map_err(|_| TransientError::Malformed)?;
+        let item: Self = postcard::from_bytes(bytes).map_err(|_| Invalid::Malformed)?;
         if item.encode() != bytes {
-            return Err(TransientError::NonCanonical);
+            return Err(Invalid::NonCanonical);
         }
         item.validate()?;
         Ok(item)
     }
 
-    pub fn validate(&self) -> Result<(), TransientError> {
+    pub fn validate(&self) -> Result<(), Invalid> {
         self.scope.validate()?;
         self.payload.validate(&self.scope)
     }
@@ -306,7 +305,7 @@ impl TransientItem {
 
 /// Why an item was refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TransientError {
+pub enum Invalid {
     TooLarge,
     Malformed,
     NonCanonical,
@@ -324,7 +323,7 @@ pub enum TransientError {
     NotDeclared,
 }
 
-impl std::fmt::Display for TransientError {
+impl std::fmt::Display for Invalid {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{self:?}")
     }
@@ -360,7 +359,7 @@ pub enum AdmitOutcome {
     Retired,
     /// The item is fine and there was no room. Costs a stale cursor.
     Evicted,
-    Refused(TransientError),
+    Refused(Invalid),
 }
 
 /// The bounded table of what peers currently believe.
@@ -522,23 +521,23 @@ impl LiveControl {
         postcard::to_stdvec(self).expect("postcard live control")
     }
 
-    pub fn decode_canonical(bytes: &[u8]) -> Result<Self, TransientError> {
+    pub fn decode_canonical(bytes: &[u8]) -> Result<Self, Invalid> {
         if bytes.len() > MAX_TRANSIENT_ITEM_BYTES * 8 {
-            return Err(TransientError::TooLarge);
+            return Err(Invalid::TooLarge);
         }
-        let control: Self = postcard::from_bytes(bytes).map_err(|_| TransientError::Malformed)?;
+        let control: Self = postcard::from_bytes(bytes).map_err(|_| Invalid::Malformed)?;
         if control.encode() != bytes {
-            return Err(TransientError::NonCanonical);
+            return Err(Invalid::NonCanonical);
         }
         control.validate()?;
         Ok(control)
     }
 
-    pub fn validate(&self) -> Result<(), TransientError> {
+    pub fn validate(&self) -> Result<(), Invalid> {
         match self {
             Self::Subscribe { scopes } => {
                 if scopes.len() > slots::MAX_SUBSCRIBED_SCOPES_PER_CONNECTION {
-                    return Err(TransientError::Bounds);
+                    return Err(Invalid::Bounds);
                 }
                 for scope in scopes {
                     scope.validate()?;

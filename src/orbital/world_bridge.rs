@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 use mechanics::ids::DeviceId;
 use replica::ids::WorldId;
 use runtime::lifecycle::Failure;
-use runtime::registry::RegistrationError;
+use runtime::registry::Refusal;
 use runtime::{LocalIdentity, Registry, RuntimeBuilder, Session, Station, World};
 
 pub use ::world_bridge::{
@@ -133,7 +133,7 @@ impl WorldPackages {
 
     /// Freeze the semantic registry and create one application bridge per
     /// registered World.
-    pub fn build(&self) -> Result<(Registry, WorldRouter), RegistrationError> {
+    pub fn build(&self) -> Result<(Registry, WorldRouter), Refusal> {
         let mut runtime = RuntimeBuilder::new();
         let mut bridges = Vec::with_capacity(self.packages.len());
         for package in &self.packages {
@@ -428,9 +428,7 @@ mod tests {
             .unwrap_err();
         assert_eq!(
             err,
-            RegistrationError::DuplicateWorld(
-                WorldId::parse("com.example.files").expect("test World id")
-            )
+            Refusal::DuplicateWorld(WorldId::parse("com.example.files").expect("test World id"))
         );
     }
 

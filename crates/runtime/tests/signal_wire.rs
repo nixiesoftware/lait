@@ -24,7 +24,7 @@ use mechanics::{ids::ActorId, station::Key};
 use runtime::plane::{stream_kind, Signal};
 use runtime::registry::RuntimeBuilder;
 use runtime::signal::{
-    frame_signal, send_signal, serve_signal, SignalError, SignalOutcome, SignalPolicy,
+    frame_signal, send_signal, serve_signal, Refusal, SignalOutcome, SignalPolicy,
 };
 use runtime::world::{AuthorityView, PrincipalResolution};
 
@@ -158,10 +158,7 @@ fn policy(lanes: Vec<u8>) -> SignalPolicy {
 }
 
 /// Accept one flow on the responder and serve it as a signal.
-async fn serve_one(
-    connection: &dyn Connection,
-    policy: &SignalPolicy,
-) -> Result<Signal, SignalError> {
+async fn serve_one(connection: &dyn Connection, policy: &SignalPolicy) -> Result<Signal, Refusal> {
     let (mut send, mut recv) = connection
         .accept_bi()
         .await
@@ -252,7 +249,7 @@ async fn an_ungranted_lane_is_refused_at_flow_open_and_the_connection_stays_up()
         let _ = send.finish();
 
         let refused = responder.await.expect("responder");
-        assert_eq!(refused, Err(SignalError::LaneNotGranted));
+        assert_eq!(refused, Err(Refusal::LaneNotGranted));
 
         // Refused at the flow, not at the connection: another flow still opens.
         assert!(pair.dialer.open_bi().await.is_ok());
@@ -281,7 +278,7 @@ async fn an_unknown_selector_is_refused_before_its_length_is_read() {
         let _ = send.finish();
 
         let refused = responder.await.expect("responder");
-        assert_eq!(refused, Err(SignalError::NotRegistered));
+        assert_eq!(refused, Err(Refusal::NotRegistered));
         assert!(pair.dialer.open_bi().await.is_ok(), "the connection stays");
     })
     .await;
@@ -307,7 +304,7 @@ async fn a_declared_length_over_the_schema_ceiling_is_refused_before_a_buffer_is
         let _ = send.finish();
 
         let refused = responder.await.expect("responder");
-        assert_eq!(refused, Err(SignalError::TooLarge));
+        assert_eq!(refused, Err(Refusal::TooLarge));
     })
     .await;
 }
@@ -341,7 +338,7 @@ async fn a_world_signal_for_a_world_this_build_does_not_host_is_refused() {
         let _ = send.finish();
 
         let refused = responder.await.expect("responder");
-        assert_eq!(refused, Err(SignalError::NotRegistered));
+        assert_eq!(refused, Err(Refusal::NotRegistered));
     })
     .await;
 }
@@ -364,7 +361,7 @@ async fn a_truncated_header_is_malformed_rather_than_a_hang() {
         let _ = send.finish();
 
         let refused = responder.await.expect("responder");
-        assert_eq!(refused, Err(SignalError::Malformed));
+        assert_eq!(refused, Err(Refusal::Malformed));
     })
     .await;
 }
@@ -491,10 +488,7 @@ mod declared_schemas {
             demand: some_demand(),
         }]);
         assert_eq!(policy.admits_contents(&nudge(64)), Ok(()));
-        assert_eq!(
-            policy.admits_contents(&nudge(65)),
-            Err(SignalError::TooLarge)
-        );
+        assert_eq!(policy.admits_contents(&nudge(65)), Err(Refusal::TooLarge));
     }
 
     #[test]
@@ -512,10 +506,7 @@ mod declared_schemas {
             schema: "shout".into(),
             payload: vec![1],
         };
-        assert_eq!(
-            policy.admits_contents(&other),
-            Err(SignalError::NotRegistered)
-        );
+        assert_eq!(policy.admits_contents(&other), Err(Refusal::NotRegistered));
     }
 
     #[test]
@@ -525,7 +516,7 @@ mod declared_schemas {
         let policy = hosting(Vec::new());
         assert_eq!(
             policy.admits_contents(&nudge(1)),
-            Err(SignalError::NotRegistered)
+            Err(Refusal::NotRegistered)
         );
     }
 

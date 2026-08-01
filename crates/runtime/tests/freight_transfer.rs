@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use replica::content::ContentRef;
 use replica::journal::cache::{Lease, ResidentCache};
 use runtime::transfer::{
-    TransferError, TransferHandle, TransferRegistry, TransferState, MAX_COMPLETED, PROGRESS_TICK,
+    Refusal, TransferHandle, TransferRegistry, TransferState, MAX_COMPLETED, PROGRESS_TICK,
 };
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -219,7 +219,7 @@ fn a_second_handle_for_a_live_operation_is_refused() {
 
     assert_eq!(
         TransferHandle::new(registry.clone(), cache.clone(), [4u8; 16], content(5), now).err(),
-        Some(TransferError::DuplicateOperation)
+        Some(Refusal::DuplicateOperation)
     );
 
     // And once the first is done, the id is free again.
@@ -248,7 +248,7 @@ fn the_active_set_is_bounded_because_a_cache_sweep_reads_it() {
     }
     assert_eq!(
         TransferHandle::new(registry.clone(), cache.clone(), [0xFF; 16], content(6), now).err(),
-        Some(TransferError::TooManyActive)
+        Some(Refusal::TooManyActive)
     );
     assert_eq!(
         registry.live_operations().len(),

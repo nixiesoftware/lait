@@ -8,8 +8,8 @@ use replica::body::ContentCommitment;
 use replica::ids::{BodyId, BodyKey, WorldId};
 use runtime::contact::{
     abort, authority_record_hash, authority_set_hash, body_chunk_hash, manifest_node_hash,
-    manifest_root_ref, AccepterEvent, AccepterValidator, ContactFrame, ContactId, ContactWireError,
-    InitiatorReceiver, InitiatorState, Offer, Progress, Proof, CONTACT_PROTOCOL,
+    manifest_root_ref, AccepterEvent, AccepterValidator, ContactFrame, ContactId,
+    InitiatorReceiver, InitiatorState, Invalid, Offer, Progress, Proof, CONTACT_PROTOCOL,
 };
 
 const INITIATOR_SEED: [u8; 32] = [71u8; 32];
@@ -80,7 +80,7 @@ fn an_unsupported_contact_protocol_is_refused() {
     .unwrap();
     assert_eq!(
         h.verify(&[0u8; 32], &space_bytes(), &station_of(&INITIATOR_SEED)),
-        Err(ContactWireError::UnsupportedProtocol(99))
+        Err(Invalid::UnsupportedProtocol(99))
     );
 }
 
@@ -91,19 +91,19 @@ fn hello_substitution_and_replay_are_rejected() {
     let other = <[u8; 29]>::try_from(SpaceId::from_digest([9u8; 16]).as_str().as_bytes()).unwrap();
     assert_eq!(
         h.verify(&[0u8; 32], &other, &station_of(&INITIATOR_SEED)),
-        Err(ContactWireError::SpaceMismatch)
+        Err(Invalid::SpaceMismatch)
     );
     // Transport substitution: the connection peer is not the signer.
     assert_eq!(
         h.verify(&[0u8; 32], &space_bytes(), &station_of(&RESPONDER_SEED)),
-        Err(ContactWireError::IdentityMismatch)
+        Err(Invalid::IdentityMismatch)
     );
     // Tampered signature.
     let mut bad = hello();
     bad.signature[0] ^= 0xff;
     assert_eq!(
         bad.verify(&[0u8; 32], &space_bytes(), &station_of(&INITIATOR_SEED)),
-        Err(ContactWireError::BadSignature)
+        Err(Invalid::BadSignature)
     );
 }
 
@@ -127,13 +127,13 @@ fn ack_binds_the_exact_hello_and_a_fresh_nonce() {
     // Presented against a different hello: commitment mismatch.
     assert_eq!(
         ack.verify(&h2, &station_of(&RESPONDER_SEED)),
-        Err(ContactWireError::ChallengeMismatch)
+        Err(Invalid::ChallengeMismatch)
     );
     // A reflected nonce is refused.
     let reflected = Proof::sign(&h1, h1.nonce, &RESPONDER_SEED).unwrap();
     assert_eq!(
         reflected.verify(&h1, &station_of(&RESPONDER_SEED)),
-        Err(ContactWireError::ChallengeMismatch)
+        Err(Invalid::ChallengeMismatch)
     );
 }
 
@@ -251,16 +251,10 @@ fn frame_tags_are_the_canonical_wire_values() {
 fn unknown_tags_and_trailing_bytes_are_rejected() {
     let mut raw = ContactFrame::Abort { code: 1 }.encode(&contact());
     raw[0] = 99;
-    assert_eq!(
-        ContactFrame::decode(&raw),
-        Err(ContactWireError::UnknownTag(99))
-    );
+    assert_eq!(ContactFrame::decode(&raw), Err(Invalid::UnknownTag(99)));
     let mut raw = ContactFrame::Abort { code: 1 }.encode(&contact());
     raw.push(0);
-    assert_eq!(
-        ContactFrame::decode(&raw),
-        Err(ContactWireError::NonCanonical)
-    );
+    assert_eq!(ContactFrame::decode(&raw), Err(Invalid::NonCanonical));
 }
 
 // ---------------------------------------------------------------------------
@@ -796,13 +790,13 @@ fn the_signed_hello_binds_the_holdings_declaration() {
     bad.holdings_count = 1;
     assert_eq!(
         bad.verify(&[0u8; 32], &space_bytes(), &station_of(&INITIATOR_SEED)),
-        Err(ContactWireError::BadSignature)
+        Err(Invalid::BadSignature)
     );
     let mut bad = h.clone();
     bad.holdings_digest[0] ^= 0xff;
     assert_eq!(
         bad.verify(&[0u8; 32], &space_bytes(), &station_of(&INITIATOR_SEED)),
-        Err(ContactWireError::BadSignature)
+        Err(Invalid::BadSignature)
     );
 }
 

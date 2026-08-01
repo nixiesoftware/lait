@@ -27,7 +27,7 @@ use replica::content::ContentRef;
 
 use crate::admission::AdmittedPeer;
 use crate::budget::{deadline, gates, slots, ByteGate, Gate, Verdict};
-use crate::content_host::{ContentHost, ContentHostError, ContentPolicy};
+use crate::content_host::{ContentHost, ContentPolicy, Failure as ContentFailure};
 use crate::lifecycle::CancelToken;
 use crate::plane::{bounds, FreightFrame};
 
@@ -48,21 +48,21 @@ pub fn frame(message: &FreightFrame) -> Vec<u8> {
 pub async fn read_frame(
     flow: &mut dyn comms::RecvFlow,
     max: usize,
-) -> Result<FreightFrame, FreightError> {
+) -> Result<FreightFrame, Failure> {
     let body = crate::plane_stream::read_framed(flow, max)
         .await
         .map_err(|error| match error {
-            crate::plane_stream::StreamError::TooLarge => FreightError::TooLarge,
-            _ => FreightError::Truncated,
+            crate::plane_stream::Invalid::TooLarge => Failure::TooLarge,
+            _ => Failure::Truncated,
         })?;
-    FreightFrame::decode_canonical(&body).map_err(|_| FreightError::Malformed)
+    FreightFrame::decode_canonical(&body).map_err(|_| Failure::Malformed)
 }
 
 /// Why a Freight exchange did not complete, locally.
 ///
 /// Local diagnostics. None of these ever reach a peer — a peer gets `Refused`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FreightError {
+pub enum Failure {
     /// The flow ended before the message did.
     Truncated,
     /// A declared length past what this side will allocate.
@@ -72,12 +72,12 @@ pub enum FreightError {
     /// The peer stopped talking within a deadline.
     TimedOut,
     /// The local content plane refused or could not answer.
-    Content(ContentHostError),
+    Content(ContentFailure),
 }
 
-impl From<ContentHostError> for FreightError {
-    fn from(e: ContentHostError) -> Self {
-        FreightError::Content(e)
+impl From<ContentFailure> for Failure {
+    fn from(e: ContentFailure) -> Self {
+        Failure::Content(e)
     }
 }
 

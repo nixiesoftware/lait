@@ -113,11 +113,11 @@ pub fn holdings_digest(bytes: &[u8]) -> [u8; 32] {
 }
 
 /// Decode a holdings declaration (canonical, bounded).
-pub fn decode_holdings(bytes: &[u8]) -> Result<Vec<(BodyKey, [u8; 32])>, ContactWireError> {
+pub fn decode_holdings(bytes: &[u8]) -> Result<Vec<(BodyKey, [u8; 32])>, Invalid> {
     if bytes.len() > MAX_HOLDINGS_BYTES {
-        return Err(ContactWireError::FrameTooLarge);
+        return Err(Invalid::FrameTooLarge);
     }
-    postcard::from_bytes(bytes).map_err(|_| ContactWireError::NonCanonical)
+    postcard::from_bytes(bytes).map_err(|_| Invalid::NonCanonical)
 }
 
 /// Maximum encoded frame size.
@@ -292,7 +292,7 @@ pub struct Proof {
 
 /// Why a Contact hello/frame failed validation before the state machine.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ContactWireError {
+pub enum Invalid {
     /// The signed protocol field names a version this build does not speak.
     UnsupportedProtocol(u16),
     UnsupportedSignatureAlgorithm(u8),
@@ -305,21 +305,21 @@ pub enum ContactWireError {
     FrameTooLarge,
 }
 
-impl std::fmt::Display for ContactWireError {
+impl std::fmt::Display for Invalid {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{self:?}")
     }
 }
-impl std::error::Error for ContactWireError {}
+impl std::error::Error for Invalid {}
 
-fn decode_canonical<T>(bytes: &[u8]) -> Result<T, ContactWireError>
+fn decode_canonical<T>(bytes: &[u8]) -> Result<T, Invalid>
 where
     T: serde::de::DeserializeOwned + Serialize,
 {
-    let value: T = postcard::from_bytes(bytes).map_err(|_| ContactWireError::NonCanonical)?;
-    let re = postcard::to_stdvec(&value).map_err(|_| ContactWireError::NonCanonical)?;
+    let value: T = postcard::from_bytes(bytes).map_err(|_| Invalid::NonCanonical)?;
+    let re = postcard::to_stdvec(&value).map_err(|_| Invalid::NonCanonical)?;
     if re != bytes {
-        return Err(ContactWireError::NonCanonical);
+        return Err(Invalid::NonCanonical);
     }
     Ok(value)
 }
@@ -407,7 +407,7 @@ impl Offer {
         postcard::to_stdvec(self).expect("postcard hello")
     }
 
-    pub fn decode(bytes: &[u8]) -> Result<Self, ContactWireError> {
+    pub fn decode(bytes: &[u8]) -> Result<Self, Invalid> {
         decode_canonical(bytes)
     }
 
@@ -437,25 +437,25 @@ impl Offer {
         expected_opening_hash: &[u8; 32],
         expected_space: &[u8; 29],
         transport_peer: &Key,
-    ) -> Result<(), ContactWireError> {
+    ) -> Result<(), Invalid> {
         if self.protocol != CONTACT_PROTOCOL {
-            return Err(ContactWireError::UnsupportedProtocol(self.protocol));
+            return Err(Invalid::UnsupportedProtocol(self.protocol));
         }
         if &self.opening_hash != expected_opening_hash {
-            return Err(ContactWireError::ChallengeMismatch);
+            return Err(Invalid::ChallengeMismatch);
         }
         if self.signature_algorithm != SIG_ALG_ED25519 {
-            return Err(ContactWireError::UnsupportedSignatureAlgorithm(
+            return Err(Invalid::UnsupportedSignatureAlgorithm(
                 self.signature_algorithm,
             ));
         }
         if &self.space != expected_space {
-            return Err(ContactWireError::SpaceMismatch);
+            return Err(Invalid::SpaceMismatch);
         }
         if self.initiator_station != self.initiator_transport
             || self.initiator_transport != transport_peer.key_bytes()
         {
-            return Err(ContactWireError::IdentityMismatch);
+            return Err(Invalid::IdentityMismatch);
         }
         let preimage = Self::preimage(
             &self.opening_hash,
@@ -472,7 +472,7 @@ impl Offer {
         );
         if !mechanics::crypto::verify_detached(&self.initiator_station, &preimage, &self.signature)
         {
-            return Err(ContactWireError::BadSignature);
+            return Err(Invalid::BadSignature);
         }
         Ok(())
     }
@@ -508,32 +508,32 @@ impl Proof {
         postcard::to_stdvec(self).expect("postcard hello-ack")
     }
 
-    pub fn decode(bytes: &[u8]) -> Result<Self, ContactWireError> {
+    pub fn decode(bytes: &[u8]) -> Result<Self, Invalid> {
         decode_canonical(bytes)
     }
 
     /// Verify against the Hello it answers and the negotiated connection peer.
-    pub fn verify(&self, hello: &Offer, transport_peer: &Key) -> Result<(), ContactWireError> {
+    pub fn verify(&self, hello: &Offer, transport_peer: &Key) -> Result<(), Invalid> {
         if self.signature_algorithm != SIG_ALG_ED25519 {
-            return Err(ContactWireError::UnsupportedSignatureAlgorithm(
+            return Err(Invalid::UnsupportedSignatureAlgorithm(
                 self.signature_algorithm,
             ));
         }
         if self.offer_hash != hello.hash() {
-            return Err(ContactWireError::ChallengeMismatch);
+            return Err(Invalid::ChallengeMismatch);
         }
         if self.nonce == hello.nonce {
-            return Err(ContactWireError::ChallengeMismatch);
+            return Err(Invalid::ChallengeMismatch);
         }
         if self.responder_transport != hello.responder_station
             || self.responder_transport != transport_peer.key_bytes()
         {
-            return Err(ContactWireError::IdentityMismatch);
+            return Err(Invalid::IdentityMismatch);
         }
         let preimage = Self::preimage(&self.offer_hash, &self.responder_transport, &self.nonce);
         if !mechanics::crypto::verify_detached(&hello.responder_station, &preimage, &self.signature)
         {
-            return Err(ContactWireError::BadSignature);
+            return Err(Invalid::BadSignature);
         }
         Ok(())
     }
@@ -671,16 +671,16 @@ impl ContactFrame {
 
     /// Decode `tag || contact_id || fields`, enforcing frame bounds, known
     /// tags, and canonical encoding.
-    pub fn decode(bytes: &[u8]) -> Result<(ContactId, ContactFrame), ContactWireError> {
+    pub fn decode(bytes: &[u8]) -> Result<(ContactId, ContactFrame), Invalid> {
         if bytes.len() > MAX_FRAME {
-            return Err(ContactWireError::FrameTooLarge);
+            return Err(Invalid::FrameTooLarge);
         }
         if bytes.len() < 1 + 16 {
-            return Err(ContactWireError::NonCanonical);
+            return Err(Invalid::NonCanonical);
         }
         let tag = bytes[0];
         if !(1..=14).contains(&tag) {
-            return Err(ContactWireError::UnknownTag(tag));
+            return Err(Invalid::UnknownTag(tag));
         }
         let contact = ContactId::from_bytes(bytes[1..17].try_into().expect("16 bytes"));
         // Reassemble the postcard enum encoding (variant index = tag-1).
@@ -828,8 +828,8 @@ impl InitiatorReceiver {
         }
         let (contact, frame) = match ContactFrame::decode(raw) {
             Ok(v) => v,
-            Err(ContactWireError::UnknownTag(_)) => return Err(self.abort(abort::UNKNOWN_TAG)),
-            Err(ContactWireError::FrameTooLarge) => return Err(self.abort(abort::LIMITS)),
+            Err(Invalid::UnknownTag(_)) => return Err(self.abort(abort::UNKNOWN_TAG)),
+            Err(Invalid::FrameTooLarge) => return Err(self.abort(abort::LIMITS)),
             Err(_) => return Err(self.abort(abort::MALFORMED)),
         };
         if contact != self.contact {
@@ -1309,8 +1309,8 @@ impl AccepterValidator {
     pub fn on_frame(&mut self, raw: &[u8]) -> Result<AccepterEvent, u16> {
         let (contact, frame) = match ContactFrame::decode(raw) {
             Ok(v) => v,
-            Err(ContactWireError::UnknownTag(_)) => return Err(abort::UNKNOWN_TAG),
-            Err(ContactWireError::FrameTooLarge) => return Err(abort::LIMITS),
+            Err(Invalid::UnknownTag(_)) => return Err(abort::UNKNOWN_TAG),
+            Err(Invalid::FrameTooLarge) => return Err(abort::LIMITS),
             Err(_) => return Err(abort::MALFORMED),
         };
         if contact != self.contact {

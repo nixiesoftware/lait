@@ -29,7 +29,7 @@ use crate::budget::deadline;
 /// shape `FreightError`, `FetchError`, `TransferError` and `ContentHostError`
 /// all take. What crosses to a peer is deliberately coarser.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SignalError {
+pub enum Refusal {
     /// No declaration for this selector. A signal nobody declared is one
     /// nothing knows how to bound, which is why it is refused rather than
     /// forwarded.
@@ -50,7 +50,7 @@ pub enum SignalError {
     LaneNotGranted,
 }
 
-impl SignalError {
+impl Refusal {
     /// The stable kebab-case code, for a client that needs to branch.
     ///
     /// A second function rather than an arm on `ErrorDto::code_for`, which is
@@ -70,13 +70,13 @@ impl SignalError {
     }
 }
 
-impl std::fmt::Display for SignalError {
+impl std::fmt::Display for Refusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.code())
     }
 }
 
-impl std::error::Error for SignalError {}
+impl std::error::Error for Refusal {}
 
 /// Whether a signal may be answered, and how.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -201,45 +201,33 @@ pub fn declaration_for(selector: u16) -> Option<SignalDeclaration> {
 ///
 /// The stream kind is read by the caller, which is what decides this is a
 /// signal flow at all.
-pub async fn read_signal(
-    flow: &mut dyn comms::RecvFlow,
-) -> Result<crate::plane::Signal, SignalError> {
-    let selector = flow
-        .read_exact(2)
-        .await
-        .map_err(|_| SignalError::Malformed)?;
+pub async fn read_signal(flow: &mut dyn comms::RecvFlow) -> Result<crate::plane::Signal, Refusal> {
+    let selector = flow.read_exact(2).await.map_err(|_| Refusal::Malformed)?;
     let selector = u16::from_le_bytes(
-        <[u8; 2]>::try_from(selector.as_slice()).map_err(|_| SignalError::Malformed)?,
+        <[u8; 2]>::try_from(selector.as_slice()).map_err(|_| Refusal::Malformed)?,
     );
     // Resolved before the length is read. An unknown selector is refused here,
     // with nothing allocated and no length even consulted.
-    let declaration = declaration_for(selector).ok_or(SignalError::NotRegistered)?;
+    let declaration = declaration_for(selector).ok_or(Refusal::NotRegistered)?;
     let ceiling = declaration
         .max_bytes
         .min(crate::plane::bounds::MAX_SIGNAL_BYTES);
 
-    let header = flow
-        .read_exact(4)
-        .await
-        .map_err(|_| SignalError::Malformed)?;
-    let len = u32::from_le_bytes(
-        <[u8; 4]>::try_from(header.as_slice()).map_err(|_| SignalError::Malformed)?,
-    ) as usize;
+    let header = flow.read_exact(4).await.map_err(|_| Refusal::Malformed)?;
+    let len =
+        u32::from_le_bytes(<[u8; 4]>::try_from(header.as_slice()).map_err(|_| Refusal::Malformed)?)
+            as usize;
     if len > ceiling {
         // Refused by the declared length, before a buffer that size exists.
-        return Err(SignalError::TooLarge);
+        return Err(Refusal::TooLarge);
     }
-    let body = flow
-        .read_exact(len)
-        .await
-        .map_err(|_| SignalError::Malformed)?;
-    let signal =
-        crate::plane::Signal::decode_canonical(&body).map_err(|_| SignalError::Malformed)?;
+    let body = flow.read_exact(len).await.map_err(|_| Refusal::Malformed)?;
+    let signal = crate::plane::Signal::decode_canonical(&body).map_err(|_| Refusal::Malformed)?;
     // The body decoded, and it has to be the signal the selector promised —
     // otherwise a small declaration's ceiling could be used to smuggle a
     // different, larger-bounded shape past it.
     if signal.selector() != selector {
-        return Err(SignalError::Malformed);
+        return Err(Refusal::Malformed);
     }
     Ok(signal)
 }
@@ -250,15 +238,15 @@ pub async fn read_signal(
 /// substitutes because the alternative there is telling a peer nothing at all;
 /// here the alternative is sending something other than what was asked for,
 /// which is worse than an error the caller can see.
-pub fn frame_signal(signal: &crate::plane::Signal) -> Result<Vec<u8>, SignalError> {
+pub fn frame_signal(signal: &crate::plane::Signal) -> Result<Vec<u8>, Refusal> {
     let selector = signal.selector();
-    let declaration = declaration_for(selector).ok_or(SignalError::NotRegistered)?;
+    let declaration = declaration_for(selector).ok_or(Refusal::NotRegistered)?;
     // A bounds failure is a size failure and says so. Collapsing it into
     // `Malformed` would tell a caller its signal was ill-formed when what it
     // actually was is too big — two different things to do about it.
     signal.validate().map_err(|error| match error {
-        crate::plane::WireError::Bounds => SignalError::TooLarge,
-        _ => SignalError::Malformed,
+        crate::plane::WireError::Bounds => Refusal::TooLarge,
+        _ => Refusal::Malformed,
     })?;
     let body = signal.encode();
     if body.len()
@@ -266,7 +254,7 @@ pub fn frame_signal(signal: &crate::plane::Signal) -> Result<Vec<u8>, SignalErro
             .max_bytes
             .min(crate::plane::bounds::MAX_SIGNAL_BYTES)
     {
-        return Err(SignalError::TooLarge);
+        return Err(Refusal::TooLarge);
     }
     let mut out = Vec::with_capacity(1 + 2 + 4 + body.len());
     out.push(crate::plane::stream_kind::RELIABLE_SIGNAL);
@@ -283,7 +271,7 @@ pub fn frame_signal(signal: &crate::plane::Signal) -> Result<Vec<u8>, SignalErro
 /// it on the way back shifts every subsequent field by one and the selector is
 /// then read out of the kind byte and half of itself, which decodes as a
 /// plausible unregistered selector rather than as an error anyone can read.
-pub fn frame_answer(signal: &crate::plane::Signal) -> Result<Vec<u8>, SignalError> {
+pub fn frame_answer(signal: &crate::plane::Signal) -> Result<Vec<u8>, Refusal> {
     let mut framed = frame_signal(signal)?;
     framed.remove(0);
     Ok(framed)
@@ -292,7 +280,7 @@ pub fn frame_answer(signal: &crate::plane::Signal) -> Result<Vec<u8>, SignalErro
 /// The coarse close code every signal refusal uses.
 ///
 /// One code for every reason, like the rest of the delivery planes: a peer
-/// learns it was refused, never which check refused it. `SignalError` is the
+/// learns it was refused, never which check refused it. `Refusal` is the
 /// local diagnosis and stays local.
 const REFUSED: u32 = 1;
 
@@ -356,7 +344,7 @@ impl SignalPolicy {
     /// admitted, and a liveness ping says nothing about any particular thing. A
     /// `World` demand is evaluated by Mechanics at the pinned frontier, which is
     /// the same evaluation a read of that World would get.
-    pub fn permits(&self, declaration: &SignalDeclaration) -> Result<(), SignalError> {
+    pub fn permits(&self, declaration: &SignalDeclaration) -> Result<(), Refusal> {
         match &declaration.demand {
             SignalDemand::Session => Ok(()),
             SignalDemand::World { world, demand } => {
@@ -367,7 +355,7 @@ impl SignalPolicy {
                 {
                     Ok(())
                 } else {
-                    Err(SignalError::Denied)
+                    Err(Refusal::Denied)
                 }
             }
         }
@@ -386,7 +374,7 @@ impl SignalPolicy {
     /// Without this the descriptor's signal section would be decoration: a
     /// World could declare a 64-byte nudge requiring a capability, and a peer
     /// could send sixteen kilobytes of it with nothing but session membership.
-    pub fn admits_contents(&self, signal: &crate::plane::Signal) -> Result<(), SignalError> {
+    pub fn admits_contents(&self, signal: &crate::plane::Signal) -> Result<(), Refusal> {
         let crate::plane::Signal::WorldSignal {
             world,
             schema,
@@ -395,14 +383,14 @@ impl SignalPolicy {
         else {
             return Ok(());
         };
-        let world_id = replica::ids::WorldId::parse(world).ok_or(SignalError::Malformed)?;
+        let world_id = replica::ids::WorldId::parse(world).ok_or(Refusal::Malformed)?;
         self.world_is_live(&world_id)?;
 
-        let schema = replica::ids::SchemaId::parse(schema).ok_or(SignalError::Malformed)?;
+        let schema = replica::ids::SchemaId::parse(schema).ok_or(Refusal::Malformed)?;
         let registration = self
             .worlds
             .descriptor(&world_id)
-            .ok_or(SignalError::NotRegistered)?;
+            .ok_or(Refusal::NotRegistered)?;
         // A schema this World never declared is not registered, whatever the
         // World would do with it. Reaching a World's `submit` with an
         // undeclared schema is exactly what the reviewed descriptor exists to
@@ -411,10 +399,10 @@ impl SignalPolicy {
             .signal_schemas
             .iter()
             .find(|candidate| candidate.name == schema)
-            .ok_or(SignalError::NotRegistered)?;
+            .ok_or(Refusal::NotRegistered)?;
 
         if payload.len() > declared.max_payload_bytes as usize {
-            return Err(SignalError::TooLarge);
+            return Err(Refusal::TooLarge);
         }
         // The World's own demand, evaluated by Mechanics at the pinned frontier
         // — the same evaluation a read of that World would get.
@@ -430,7 +418,7 @@ impl SignalPolicy {
         {
             Ok(())
         } else {
-            Err(SignalError::Denied)
+            Err(Refusal::Denied)
         }
     }
 
@@ -441,16 +429,16 @@ impl SignalPolicy {
     /// we do not host and one whose implementation nobody approved are the same
     /// answer to a peer: this build cannot interpret that, and interpreting it
     /// anyway is how a schema nobody reviewed gets acted on.
-    fn world_is_live(&self, world: &replica::ids::WorldId) -> Result<(), SignalError> {
+    fn world_is_live(&self, world: &replica::ids::WorldId) -> Result<(), Refusal> {
         if !self.worlds.contains(world) {
-            return Err(SignalError::NotRegistered);
+            return Err(Refusal::NotRegistered);
         }
         if self
             .authority
             .active_implementation(world, &self.frontier)
             .is_none()
         {
-            return Err(SignalError::NotRegistered);
+            return Err(Refusal::NotRegistered);
         }
         Ok(())
     }
@@ -488,14 +476,14 @@ pub enum SignalOutcome {
 pub async fn send_signal(
     connection: &dyn comms::Connection,
     signal: &crate::plane::Signal,
-) -> Result<SignalOutcome, SignalError> {
+) -> Result<SignalOutcome, Refusal> {
     let framed = frame_signal(signal)?;
-    let declaration = declaration_for(signal.selector()).ok_or(SignalError::NotRegistered)?;
+    let declaration = declaration_for(signal.selector()).ok_or(Refusal::NotRegistered)?;
 
     let (mut send, mut recv) = tokio::time::timeout(deadline::SIGNAL_OPEN, connection.open_bi())
         .await
-        .map_err(|_| SignalError::Deadline)?
-        .map_err(|_| SignalError::PeerRefused)?;
+        .map_err(|_| Refusal::Deadline)?
+        .map_err(|_| Refusal::PeerRefused)?;
     // Written and finished before anything is read. A flow does not exist for
     // the peer until the opener writes to it, so accepting first and waiting is
     // a hang on both transports rather than a failed assertion.
@@ -513,7 +501,7 @@ pub async fn send_signal(
             let answered =
                 tokio::time::timeout(deadline::SIGNAL_RESPONSE, read_signal(recv.as_mut()))
                     .await
-                    .map_err(|_| SignalError::Deadline)?;
+                    .map_err(|_| Refusal::Deadline)?;
             match answered {
                 Ok(answer) => Ok(SignalOutcome::Answered(answer)),
                 Err(error) => {
@@ -525,15 +513,12 @@ pub async fn send_signal(
     }
 }
 
-async fn write_and_finish(
-    send: &mut dyn comms::SendFlow,
-    framed: &[u8],
-) -> Result<(), SignalError> {
+async fn write_and_finish(send: &mut dyn comms::SendFlow, framed: &[u8]) -> Result<(), Refusal> {
     tokio::time::timeout(deadline::SIGNAL_WRITE, send.write_all(framed))
         .await
-        .map_err(|_| SignalError::Deadline)?
-        .map_err(|_| SignalError::PeerRefused)?;
-    send.finish().map_err(|_| SignalError::PeerRefused)
+        .map_err(|_| Refusal::Deadline)?
+        .map_err(|_| Refusal::PeerRefused)?;
+    send.finish().map_err(|_| Refusal::PeerRefused)
 }
 
 /// Serve one inbound signal flow, from the stream kind onwards.
@@ -545,10 +530,10 @@ pub async fn serve_signal(
     send: &mut dyn comms::SendFlow,
     recv: &mut dyn comms::RecvFlow,
     policy: &SignalPolicy,
-) -> Result<crate::plane::Signal, SignalError> {
+) -> Result<crate::plane::Signal, Refusal> {
     if !policy.holds_lane() {
         refuse_flow(send, recv);
-        return Err(SignalError::LaneNotGranted);
+        return Err(Refusal::LaneNotGranted);
     }
     let signal = match tokio::time::timeout(deadline::SIGNAL_READ, read_signal(recv)).await {
         Ok(Ok(signal)) => signal,
@@ -558,11 +543,11 @@ pub async fn serve_signal(
         }
         Err(_) => {
             refuse_flow(send, recv);
-            return Err(SignalError::Deadline);
+            return Err(Refusal::Deadline);
         }
     };
 
-    let declaration = declaration_for(signal.selector()).ok_or(SignalError::NotRegistered)?;
+    let declaration = declaration_for(signal.selector()).ok_or(Refusal::NotRegistered)?;
     if let Err(error) = policy.permits(&declaration) {
         refuse_flow(send, recv);
         return Err(error);

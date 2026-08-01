@@ -33,11 +33,11 @@ fn any_demand() -> Vec<u8> {
     .encode_canonical()
     .expect("canonical demand")
 }
-use runtime::session::{Conflict, Failure as SessionFailure};
+use runtime::session::{Conflict, Failure as SessionFailure, Interruption};
 use runtime::{
     ActivationOptions, Authority, CommsOptions, Context, Descriptor, Effect, Intent, Limits,
-    LocalIdentity, ObservationCursor, ObservationStreamError, Projection, Query, Rejection,
-    RequestId, Runtime, RuntimeBuilder, Session, SignedCoordinates, Version, World,
+    LocalIdentity, ObservationCursor, Projection, Query, Rejection, RequestId, Runtime,
+    RuntimeBuilder, Session, SignedCoordinates, Version, World,
 };
 
 const FOUNDER_SEED: [u8; 32] = [7u8; 32];
@@ -592,7 +592,7 @@ fn bodies_authority_restart_idempotency_and_observation() {
     let _ = station.vacate().unwrap();
     assert_eq!(
         stream.next_timeout(Duration::from_millis(200)),
-        Err(ObservationStreamError::StationDormant)
+        Err(Interruption::StationDormant)
     );
     let _ = std::fs::remove_dir_all(&root);
 }

@@ -21,7 +21,8 @@ use std::sync::Arc;
 use mechanics::crypto::AuthorizedBodyKey;
 use mechanics::ids::SpaceId;
 use replica::content::{
-    ChunkProof, ContentDescriptor, ContentError, ContentIngest, ContentRef, MAX_CONTENT_LEN,
+    ChunkProof, ContentDescriptor, ContentIngest, ContentRef, Invalid as ContentInvalid,
+    MAX_CONTENT_LEN,
 };
 
 use crate::session::StationCore;
@@ -32,7 +33,7 @@ const READ_BUFFER: usize = 64 * 1024;
 
 /// Why a content operation failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ContentHostError {
+pub enum Failure {
     /// Mechanics refused: this actor lacks the standing the operation needs.
     /// Carries what would have been required, so a caller can say how to get
     /// it rather than only that it failed.
@@ -47,27 +48,27 @@ pub enum ContentHostError {
     /// The store or cache refused.
     Storage(String),
     /// The material is here but did not verify or open.
-    Invalid(ContentError),
+    Invalid(ContentInvalid),
 }
 
-impl std::fmt::Display for ContentHostError {
+impl std::fmt::Display for Failure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ContentHostError::Denied { .. } => {
+            Failure::Denied { .. } => {
                 write!(f, "denied: this actor lacks the required standing")
             }
             other => write!(f, "{other:?}"),
         }
     }
 }
-impl std::error::Error for ContentHostError {}
+impl std::error::Error for Failure {}
 
-impl From<ContentError> for ContentHostError {
-    fn from(e: ContentError) -> Self {
+impl From<ContentInvalid> for Failure {
+    fn from(e: ContentInvalid) -> Self {
         match e {
-            ContentError::NotResident => ContentHostError::NotResident,
-            ContentError::Geometry => ContentHostError::Bounds,
-            other => ContentHostError::Invalid(other),
+            ContentInvalid::NotResident => Failure::NotResident,
+            ContentInvalid::Geometry => Failure::Bounds,
+            other => Failure::Invalid(other),
         }
     }
 }
@@ -210,13 +211,12 @@ impl ContentHost {
         operation: [u8; 16],
         reader: &mut dyn Read,
         ctx: &replica::CommitContext<'_>,
-    ) -> Result<ContentRef, ContentHostError> {
-        (policy.authorize)(ContentAction::Publish)
-            .map_err(|demand| ContentHostError::Denied { demand })?;
+    ) -> Result<ContentRef, Failure> {
+        (policy.authorize)(ContentAction::Publish).map_err(|demand| Failure::Denied { demand })?;
         let key = policy
             .keys
             .sealing_key()
-            .ok_or_else(|| ContentHostError::Storage("no authorized sealing key".into()))?;
+            .ok_or_else(|| Failure::Storage("no authorized sealing key".into()))?;
 
         let mut ingest = ContentIngest::begin(
             policy.space,
@@ -229,7 +229,7 @@ impl ContentHost {
         loop {
             let read = reader
                 .read(&mut buffer)
-                .map_err(|e| ContentHostError::Storage(e.to_string()))?;
+                .map_err(|e| Failure::Storage(e.to_string()))?;
             if read == 0 {
                 break;
             }
@@ -253,7 +253,7 @@ impl ContentHost {
             for (_, slot) in self.resident_entries(&ingested.descriptor) {
                 let _ = self.cache.evict(&slot);
             }
-            return Err(ContentHostError::Storage(e.to_string()));
+            return Err(Failure::Storage(e.to_string()));
         }
 
         // The descriptor is committed, so the ingest's own hold on the chunks
@@ -280,9 +280,8 @@ impl ContentHost {
         &self,
         policy: &ContentPolicy<'_>,
         content: &ContentRef,
-    ) -> Result<ContentStatus, ContentHostError> {
-        (policy.authorize)(ContentAction::Read)
-            .map_err(|demand| ContentHostError::Denied { demand })?;
+    ) -> Result<ContentStatus, Failure> {
+        (policy.authorize)(ContentAction::Read).map_err(|demand| Failure::Denied { demand })?;
         let descriptor = self.descriptor(content)?;
         // The one call that genuinely walks the whole content, because
         // "resident_chunks" is a question about all of them. Nothing on the
@@ -312,17 +311,16 @@ impl ContentHost {
         content: &ContentRef,
         offset: u64,
         len: usize,
-    ) -> Result<Vec<u8>, ContentHostError> {
-        (policy.authorize)(ContentAction::Read)
-            .map_err(|demand| ContentHostError::Denied { demand })?;
+    ) -> Result<Vec<u8>, Failure> {
+        (policy.authorize)(ContentAction::Read).map_err(|demand| Failure::Denied { demand })?;
         if len > MAX_RANGE_BYTES {
-            return Err(ContentHostError::Bounds);
+            return Err(Failure::Bounds);
         }
         let descriptor = self.descriptor(content)?;
         let key = policy
             .keys
             .opening_key(&descriptor.epoch)
-            .ok_or(ContentHostError::NotResident)?;
+            .ok_or(Failure::NotResident)?;
 
         let chunk_len = descriptor.chunk_plaintext_len as u64;
         let end = offset
@@ -362,7 +360,7 @@ impl ContentHost {
         for index in first..=last {
             let slot = replica::content::chunk_slot(&descriptor, index);
             if !self.cache.is_resident(&slot) {
-                return Err(ContentHostError::NotResident);
+                return Err(Failure::NotResident);
             }
             spanned.push(slot);
         }
@@ -386,34 +384,24 @@ impl ContentHost {
     }
 
     /// Hold this content against quota pressure until unpinned.
-    pub fn pin(
-        &self,
-        policy: &ContentPolicy<'_>,
-        content: &ContentRef,
-    ) -> Result<(), ContentHostError> {
-        (policy.authorize)(ContentAction::Pin)
-            .map_err(|demand| ContentHostError::Denied { demand })?;
+    pub fn pin(&self, policy: &ContentPolicy<'_>, content: &ContentRef) -> Result<(), Failure> {
+        (policy.authorize)(ContentAction::Pin).map_err(|demand| Failure::Denied { demand })?;
         let descriptor = self.descriptor(content)?;
         for (_, entry) in self.resident_entries(&descriptor) {
             self.cache
                 .pin(&entry)
-                .map_err(|e| ContentHostError::Storage(e.to_string()))?;
+                .map_err(|e| Failure::Storage(e.to_string()))?;
         }
         Ok(())
     }
 
-    pub fn unpin(
-        &self,
-        policy: &ContentPolicy<'_>,
-        content: &ContentRef,
-    ) -> Result<(), ContentHostError> {
-        (policy.authorize)(ContentAction::Pin)
-            .map_err(|demand| ContentHostError::Denied { demand })?;
+    pub fn unpin(&self, policy: &ContentPolicy<'_>, content: &ContentRef) -> Result<(), Failure> {
+        (policy.authorize)(ContentAction::Pin).map_err(|demand| Failure::Denied { demand })?;
         let descriptor = self.descriptor(content)?;
         for (_, entry) in self.resident_entries(&descriptor) {
             self.cache
                 .unpin(&entry)
-                .map_err(|e| ContentHostError::Storage(e.to_string()))?;
+                .map_err(|e| Failure::Storage(e.to_string()))?;
         }
         Ok(())
     }
@@ -425,14 +413,14 @@ impl ContentHost {
         &self,
         policy: &ContentPolicy<'_>,
         content: &ContentRef,
-    ) -> Result<(), ContentHostError> {
+    ) -> Result<(), Failure> {
         (policy.authorize)(ContentAction::RemoveLocal)
-            .map_err(|demand| ContentHostError::Denied { demand })?;
+            .map_err(|demand| Failure::Denied { demand })?;
         let descriptor = self.descriptor(content)?;
         let entries = self.resident_entries(&descriptor);
         self.cache
             .release_content(&descriptor.content_nonce)
-            .map_err(|e| ContentHostError::Storage(e.to_string()))?;
+            .map_err(|e| Failure::Storage(e.to_string()))?;
         for (_, entry) in entries {
             let _ = self.cache.unpin(&entry);
             // Evicted rather than swept: the caller asked for these bytes to
@@ -441,7 +429,7 @@ impl ContentHost {
             // "I want this gone" does not outrank "someone is reading it".
             self.cache
                 .evict(&entry)
-                .map_err(|e| ContentHostError::Storage(e.to_string()))?;
+                .map_err(|e| Failure::Storage(e.to_string()))?;
         }
         Ok(())
     }
@@ -458,9 +446,8 @@ impl ContentHost {
         &self,
         policy: &ContentPolicy<'_>,
         content: &ContentRef,
-    ) -> Result<ContentDescriptor, ContentHostError> {
-        (policy.authorize)(ContentAction::Read)
-            .map_err(|demand| ContentHostError::Denied { demand })?;
+    ) -> Result<ContentDescriptor, Failure> {
+        (policy.authorize)(ContentAction::Read).map_err(|demand| Failure::Denied { demand })?;
         self.descriptor(content)
     }
 
@@ -480,14 +467,13 @@ impl ContentHost {
         policy: &ContentPolicy<'_>,
         content: &ContentRef,
         wanted: &[u32],
-    ) -> Result<Vec<u32>, ContentHostError> {
-        (policy.authorize)(ContentAction::Serve)
-            .map_err(|demand| ContentHostError::Denied { demand })?;
+    ) -> Result<Vec<u32>, Failure> {
+        (policy.authorize)(ContentAction::Serve).map_err(|demand| Failure::Denied { demand })?;
         let descriptor = match self.descriptor(content) {
             Ok(descriptor) => descriptor,
             // Never heard of it — the same empty answer a known-but-absent
             // content gets, so the two are indistinguishable.
-            Err(ContentHostError::Unknown) => return Ok(Vec::new()),
+            Err(Failure::Unknown) => return Ok(Vec::new()),
             // Anything else is *our* problem, and reporting it as "I hold
             // nothing" would have a fetcher cache that answer and stop asking.
             Err(other) => return Err(other),
@@ -520,12 +506,12 @@ impl ContentHost {
         chunk_index: u32,
         offset: u64,
         max_len: usize,
-    ) -> Result<(Vec<u8>, ChunkProof, u32), ContentHostError> {
+    ) -> Result<(Vec<u8>, ChunkProof, u32), Failure> {
         let (bytes, proof) = self.chunk(policy, content, chunk_index)?;
-        let total = u32::try_from(bytes.len()).map_err(|_| ContentHostError::Bounds)?;
-        let start = usize::try_from(offset).map_err(|_| ContentHostError::Bounds)?;
+        let total = u32::try_from(bytes.len()).map_err(|_| Failure::Bounds)?;
+        let start = usize::try_from(offset).map_err(|_| Failure::Bounds)?;
         if start > bytes.len() {
-            return Err(ContentHostError::Bounds);
+            return Err(Failure::Bounds);
         }
         let end = start.saturating_add(max_len).min(bytes.len());
         Ok((bytes[start..end].to_vec(), proof, total))
@@ -547,9 +533,8 @@ impl ContentHost {
         operation: [u8; 16],
         part: u32,
         proof: &ChunkProof,
-    ) -> Result<(), ContentHostError> {
-        (policy.authorize)(ContentAction::Read)
-            .map_err(|demand| ContentHostError::Denied { demand })?;
+    ) -> Result<(), Failure> {
+        (policy.authorize)(ContentAction::Read).map_err(|demand| Failure::Denied { demand })?;
         // The proof's leaf length is authenticated — the caller verified it
         // against the committed root before staging a byte — so it is the right
         // ceiling for this read, and a slot holding anything else is already
@@ -557,23 +542,23 @@ impl ContentHost {
         let staged_len = self.cache.staged_len(&operation, part);
         if staged_len != proof.leaf.ciphertext_len as u64 {
             let _ = self.cache.discard_staged_part(&operation, part);
-            return Err(ContentHostError::Bounds);
+            return Err(Failure::Bounds);
         }
         let staged = self
             .cache
             .read_staged(&operation, part)
-            .map_err(|_| ContentHostError::NotResident)?;
+            .map_err(|_| Failure::NotResident)?;
 
         match self.install_chunk(policy, content, operation, proof, &staged) {
             Ok(()) => {
                 self.cache
                     .discard_staged_part(&operation, part)
-                    .map_err(|e| ContentHostError::Storage(e.to_string()))?;
+                    .map_err(|e| Failure::Storage(e.to_string()))?;
                 Ok(())
             }
             // Convicted: these bytes will never verify, so keeping them would
             // hold disk the quota check counts against the next fetch.
-            Err(e @ (ContentHostError::Invalid(_) | ContentHostError::Bounds)) => {
+            Err(e @ (Failure::Invalid(_) | Failure::Bounds)) => {
                 let _ = self.cache.discard_staged_part(&operation, part);
                 Err(e)
             }
@@ -593,24 +578,19 @@ impl ContentHost {
         policy: &ContentPolicy<'_>,
         content: &ContentRef,
         chunk_index: u32,
-    ) -> Result<(Vec<u8>, ChunkProof), ContentHostError> {
-        (policy.authorize)(ContentAction::Serve)
-            .map_err(|demand| ContentHostError::Denied { demand })?;
+    ) -> Result<(Vec<u8>, ChunkProof), Failure> {
+        (policy.authorize)(ContentAction::Serve).map_err(|demand| Failure::Denied { demand })?;
         let descriptor = self.descriptor(content)?;
         if chunk_index >= descriptor.chunk_count {
-            return Err(ContentHostError::Bounds);
+            return Err(Failure::Bounds);
         }
         // The slot is derived, so one chunk costs one lookup. Finding it by
         // scanning the whole content's residency would mean a one-byte request
         // buying a four-million-entry sweep — which is a peer choosing how much
         // work we do.
         let entry = replica::content::chunk_slot(&descriptor, chunk_index);
-        let (bytes, sidecar) = self
-            .cache
-            .read(&entry)
-            .map_err(|_| ContentHostError::NotResident)?;
-        let proof: ChunkProof =
-            postcard::from_bytes(&sidecar).map_err(|_| ContentHostError::NotResident)?;
+        let (bytes, sidecar) = self.cache.read(&entry).map_err(|_| Failure::NotResident)?;
+        let proof: ChunkProof = postcard::from_bytes(&sidecar).map_err(|_| Failure::NotResident)?;
         descriptor.verify_chunk(&proof, &bytes)?;
         Ok((bytes, proof))
     }
@@ -624,17 +604,15 @@ impl ContentHost {
         operation: [u8; 16],
         proof: &ChunkProof,
         ciphertext: &[u8],
-    ) -> Result<(), ContentHostError> {
-        (policy.authorize)(ContentAction::Read)
-            .map_err(|demand| ContentHostError::Denied { demand })?;
+    ) -> Result<(), Failure> {
+        (policy.authorize)(ContentAction::Read).map_err(|demand| Failure::Denied { demand })?;
         let descriptor = self.descriptor(content)?;
         descriptor.verify_chunk(proof, ciphertext)?;
         let entry = replica::content::chunk_slot(&descriptor, proof.leaf.chunk_index);
-        let sidecar =
-            postcard::to_stdvec(proof).map_err(|e| ContentHostError::Storage(e.to_string()))?;
+        let sidecar = postcard::to_stdvec(proof).map_err(|e| Failure::Storage(e.to_string()))?;
         self.cache
             .install(&entry, ciphertext, &sidecar)
-            .map_err(|e| ContentHostError::Storage(e.to_string()))?;
+            .map_err(|e| Failure::Storage(e.to_string()))?;
         // Both holds, as ingest takes them: the transfer's, and the content's.
         for hold in [
             replica::journal::cache::Lease::operation(operation, entry),
@@ -642,7 +620,7 @@ impl ContentHost {
         ] {
             self.cache
                 .lease(&hold)
-                .map_err(|e| ContentHostError::Storage(e.to_string()))?;
+                .map_err(|e| Failure::Storage(e.to_string()))?;
         }
         Ok(())
     }
@@ -652,9 +630,8 @@ impl ContentHost {
         &self,
         policy: &ContentPolicy<'_>,
         content: &ContentRef,
-    ) -> Result<Vec<u32>, ContentHostError> {
-        (policy.authorize)(ContentAction::Serve)
-            .map_err(|demand| ContentHostError::Denied { demand })?;
+    ) -> Result<Vec<u32>, Failure> {
+        (policy.authorize)(ContentAction::Serve).map_err(|demand| Failure::Denied { demand })?;
         let descriptor = self.descriptor(content)?;
         Ok(self
             .resident_entries(&descriptor)
@@ -663,11 +640,11 @@ impl ContentHost {
             .collect())
     }
 
-    fn descriptor(&self, content: &ContentRef) -> Result<ContentDescriptor, ContentHostError> {
+    fn descriptor(&self, content: &ContentRef) -> Result<ContentDescriptor, Failure> {
         self.core
             .with_replica(|replica| Ok(replica.content_descriptor(content)))
-            .map_err(|e| ContentHostError::Storage(e.to_string()))?
-            .ok_or(ContentHostError::Unknown)
+            .map_err(|e| Failure::Storage(e.to_string()))?
+            .ok_or(Failure::Unknown)
     }
 
     /// The resident chunks of one content, as `(index, cache slot)`.

@@ -73,7 +73,7 @@ pub struct SignedBeacon {
 
 /// Why a Beacon failed validation.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum BeaconError {
+pub enum Invalid {
     /// The signed protocol field names a version this build does not speak.
     UnsupportedProtocol(u16),
     UnsupportedVersion(u8),
@@ -86,12 +86,12 @@ pub enum BeaconError {
     BadSignature,
 }
 
-impl std::fmt::Display for BeaconError {
+impl std::fmt::Display for Invalid {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{self:?}")
     }
 }
-impl std::error::Error for BeaconError {}
+impl std::error::Error for Invalid {}
 
 fn space_bytes(space: &SpaceId) -> Option<[u8; 29]> {
     <[u8; 29]>::try_from(space.as_str().as_bytes()).ok()
@@ -142,13 +142,13 @@ impl SignedBeacon {
     }
 
     /// Decode canonical bytes: size-bounded, exact decode/re-encode equality.
-    pub fn decode_canonical(bytes: &[u8]) -> Result<Self, BeaconError> {
+    pub fn decode_canonical(bytes: &[u8]) -> Result<Self, Invalid> {
         if bytes.len() > MAX_BEACON {
-            return Err(BeaconError::NonCanonical);
+            return Err(Invalid::NonCanonical);
         }
-        let beacon: Self = postcard::from_bytes(bytes).map_err(|_| BeaconError::NonCanonical)?;
+        let beacon: Self = postcard::from_bytes(bytes).map_err(|_| Invalid::NonCanonical)?;
         if beacon.encode() != bytes {
-            return Err(BeaconError::NonCanonical);
+            return Err(Invalid::NonCanonical);
         }
         Ok(beacon)
     }
@@ -156,32 +156,32 @@ impl SignedBeacon {
     /// Verify structure + emitting-Station signature, yielding a
     /// [`VerifiedBeacon`]. This is the **only** way to obtain one, so freshness
     /// state can only ever be advanced by a beacon whose signature was checked.
-    pub fn verify(&self) -> Result<VerifiedBeacon, BeaconError> {
+    pub fn verify(&self) -> Result<VerifiedBeacon, Invalid> {
         if self.version != 1 {
-            return Err(BeaconError::UnsupportedVersion(self.version));
+            return Err(Invalid::UnsupportedVersion(self.version));
         }
         if self.signature_algorithm != SIG_ALG_ED25519 {
-            return Err(BeaconError::UnsupportedSignatureAlgorithm(
+            return Err(Invalid::UnsupportedSignatureAlgorithm(
                 self.signature_algorithm,
             ));
         }
         if self.body.protocol != BEACON_PROTOCOL {
-            return Err(BeaconError::UnsupportedProtocol(self.body.protocol));
+            return Err(Invalid::UnsupportedProtocol(self.body.protocol));
         }
         let space = std::str::from_utf8(&self.body.space)
             .ok()
             .and_then(SpaceId::parse)
-            .ok_or(BeaconError::BadSpaceId)?;
+            .ok_or(Invalid::BadSpaceId)?;
         if self.body.routes.len() > MAX_ROUTE_HINTS {
-            return Err(BeaconError::TooManyRoutes);
+            return Err(Invalid::TooManyRoutes);
         }
         let encoded_routes: usize = self.body.routes.iter().map(|r| 1 + r.bytes.len()).sum();
         if encoded_routes > MAX_ROUTE_HINT_BYTES {
-            return Err(BeaconError::RoutesTooLarge);
+            return Err(Invalid::RoutesTooLarge);
         }
         for w in self.body.routes.windows(2) {
             if w[0] >= w[1] {
-                return Err(BeaconError::UnsortedOrDuplicateRoutes);
+                return Err(Invalid::UnsortedOrDuplicateRoutes);
             }
         }
         if !mechanics::crypto::verify_detached(
@@ -189,7 +189,7 @@ impl SignedBeacon {
             &Self::preimage(&self.body),
             &self.signature,
         ) {
-            return Err(BeaconError::BadSignature);
+            return Err(Invalid::BadSignature);
         }
         Ok(VerifiedBeacon {
             space,

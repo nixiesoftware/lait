@@ -18,8 +18,8 @@ use mechanics::ids::SpaceId;
 use replica::frontier::AuthorityFrontier;
 use replica::{
     ActionOutcome, BodyBinding, BodyId, BodyKey, CommitAuthorization, CommitContext, EncodingId,
-    Op, Replica, ReplicaCommitError, SchemaId, SeedSigner, StaticBodyKeys, SupportedSchemas,
-    Transaction, WorldId, MUTATION_ATOMIC, MUTATION_COLLABORATIVE,
+    Op, Replica, SchemaId, SeedSigner, StaticBodyKeys, SupportedSchemas, Transaction, WorldId,
+    MUTATION_ATOMIC, MUTATION_COLLABORATIVE,
 };
 
 const WRITER_SEED: [u8; 32] = [61u8; 32];
@@ -132,7 +132,7 @@ fn commit(
     label: &str,
     ops: &[(BodyKey, Op)],
     bindings: &[(BodyKey, BodyBinding)],
-) -> Result<ActionOutcome, ReplicaCommitError> {
+) -> Result<ActionOutcome, replica::commit::Failure> {
     let space = space();
     let signer = SeedSigner(&WRITER_SEED);
     let ctx = CommitContext {
@@ -246,7 +246,7 @@ fn a_durable_commit_survives_cold_reopen_with_receipts_and_replay() {
             &[],
         )
         .unwrap_err();
-    assert_eq!(err, ReplicaCommitError::RequestIdConflict);
+    assert_eq!(err, replica::commit::Failure::RequestIdConflict);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -417,7 +417,7 @@ fn illegitimate_or_tampered_material_never_reaches_the_engine() {
     // Unauthorized signer: refused before the engine.
     assert!(matches!(
         b.incorporate(&ctx, tx, payloads, &DenyAll),
-        Err(ReplicaCommitError::Illegitimate(_))
+        Err(replica::commit::Failure::Illegitimate(_))
     ));
     assert!(b.read_collaborative(&body(4)).is_err());
 
@@ -426,7 +426,7 @@ fn illegitimate_or_tampered_material_never_reaches_the_engine() {
     tampered[0].1.push(0);
     assert!(matches!(
         b.incorporate(&ctx, tx, &tampered, &WriterAuthorized),
-        Err(ReplicaCommitError::Illegitimate(_))
+        Err(replica::commit::Failure::Illegitimate(_))
     ));
     assert!(b.read_collaborative(&body(4)).is_err());
 
@@ -434,7 +434,7 @@ fn illegitimate_or_tampered_material_never_reaches_the_engine() {
     let stray = vec![(body(9), payloads[0].1.clone())];
     assert!(matches!(
         b.incorporate(&ctx, tx, &stray, &WriterAuthorized),
-        Err(ReplicaCommitError::Illegitimate(_))
+        Err(replica::commit::Failure::Illegitimate(_))
     ));
 
     // The untampered material still incorporates.
@@ -609,7 +609,7 @@ fn a_durable_replica_refuses_unattributed_commits_and_missing_keys() {
     // The unattributed test-only commit path is refused on a durable store.
     assert!(matches!(
         r.commit("x", &counter_ops(&body(8), 1)),
-        Err(ReplicaCommitError::Illegitimate(_))
+        Err(replica::commit::Failure::Illegitimate(_))
     ));
     drop(r);
 
@@ -633,7 +633,7 @@ fn a_durable_replica_refuses_unattributed_commits_and_missing_keys() {
         &[(body(8), collab_binding())],
     )
     .unwrap_err();
-    assert_eq!(err, ReplicaCommitError::BodyKeyUnavailable);
+    assert_eq!(err, replica::commit::Failure::BodyKeyUnavailable);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -658,7 +658,7 @@ fn schema_bindings_are_immutable_across_writes() {
         &[(body(9), atomic_binding())],
     )
     .unwrap_err();
-    assert_eq!(err, ReplicaCommitError::SchemaMismatch);
+    assert_eq!(err, replica::commit::Failure::SchemaMismatch);
     // And an op with NO binding on a brand-new Body refuses (no declaration).
     let err = commit(
         &mut r,
@@ -668,7 +668,7 @@ fn schema_bindings_are_immutable_across_writes() {
         &[],
     )
     .unwrap_err();
-    assert_eq!(err, ReplicaCommitError::SchemaMismatch);
+    assert_eq!(err, replica::commit::Failure::SchemaMismatch);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -686,5 +686,5 @@ fn the_engine_export_envelope_is_gone() {
         &Transaction,
         &[(BodyKey, Vec<u8>)],
         &dyn replica::AuthoritySource,
-    ) -> Result<replica::ConvergenceOutcome, ReplicaCommitError> = Replica::incorporate;
+    ) -> Result<replica::ConvergenceOutcome, replica::commit::Failure> = Replica::incorporate;
 }

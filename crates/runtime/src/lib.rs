@@ -59,29 +59,27 @@ pub mod transient;
 pub(crate) mod wire;
 pub mod world;
 
-pub use action::{ActionError, IdempotencyKey, RequestId, SignedWorldAction, WorldActionHeader};
-pub use beacon::{BeaconError, RouteHint, SignedBeacon, VerifiedBeacon};
+pub use action::{IdempotencyKey, RequestId, SignedWorldAction, WorldActionHeader};
+pub use beacon::{RouteHint, SignedBeacon, VerifiedBeacon};
 pub use contact::{
-    AccepterEvent, AccepterValidator, ContactFrame, ContactId, ContactWireError, InitiatorReceiver,
-    InitiatorState, Offer, Progress, Proof, ReceivedMaterial,
+    AccepterEvent, AccepterValidator, ContactFrame, ContactId, InitiatorReceiver, InitiatorState,
+    Offer, Progress, Proof, ReceivedMaterial,
 };
 pub use contact_driver::{Authority, CommsOptions, GossipOptions, MAX_CONTACTS_IN_FLIGHT};
 pub use coordinates::{
-    canonical_routes, AdmissionCapability, ApproachRoute, CoordinatesAdmission, CoordinatesError,
-    CoordinatesPayload, SignedCoordinates, VerifiedCoordinates,
+    canonical_routes, AdmissionCapability, ApproachRoute, CoordinatesAdmission, CoordinatesPayload,
+    SignedCoordinates, VerifiedCoordinates,
 };
 pub use lifecycle::{
     ActivationOptions, CancelToken, ContactOutcome, Neighbor, Orbit, OrbitStatus, Reachability,
     RemovalConfirmation, Runtime, Station,
 };
-pub use neighbor_presence::{
-    PresenceAck, PresenceError, PresenceProbe, PRESENCE_ALPN, PRESENCE_PROTOCOL,
-};
-pub use neighbors::{NeighborRecord, NeighborRegistry, RegistryError, StoredRoute};
+pub use neighbor_presence::{PresenceAck, PresenceProbe, PRESENCE_ALPN, PRESENCE_PROTOCOL};
+pub use neighbors::{NeighborRecord, NeighborRegistry, StoredRoute};
 pub use registry::{Registry, RuntimeBuilder};
 pub use session::{
-    CommittedEffect, Observation, ObservationCursor, ObservationStream, ObservationStreamError,
-    Session, DEFAULT_OBSERVATION_CAPACITY, MAX_OBSERVATION_CAPACITY,
+    CommittedEffect, Observation, ObservationCursor, ObservationStream, Session,
+    DEFAULT_OBSERVATION_CAPACITY, MAX_OBSERVATION_CAPACITY,
 };
 pub use world::{
     AuthorityView, BodyDeclaration, BodyReader, Context, Descriptor, Effect, Intent, Limits,

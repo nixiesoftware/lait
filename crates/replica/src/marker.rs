@@ -44,7 +44,7 @@ pub struct StoreMarker {
 /// higher store-open logic, not the marker decoder, but share this taxonomy so
 /// callers render one consistent recreation message.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum MarkerError {
+pub enum Invalid {
     /// The bytes are not a Replica store marker at all (foreign directory): the
     /// fixed magic prefix does not match.
     NotAReplicaStore,
@@ -58,12 +58,12 @@ pub enum MarkerError {
     ReplicaLocked,
 }
 
-impl std::fmt::Display for MarkerError {
+impl std::fmt::Display for Invalid {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{self:?}")
     }
 }
-impl std::error::Error for MarkerError {}
+impl std::error::Error for Invalid {}
 
 fn checksum(version: u8, space: &[u8; SPACE_ID_LEN]) -> [u8; 32] {
     let mut h = blake3::Hasher::new();
@@ -101,25 +101,25 @@ impl StoreMarker {
     /// Classify raw marker bytes into an exact cause. The fixed prefix is matched
     /// before the postcard body is trusted, so foreign / unsupported / corrupt
     /// are distinguished.
-    pub fn classify(bytes: &[u8]) -> Result<Self, MarkerError> {
+    pub fn classify(bytes: &[u8]) -> Result<Self, Invalid> {
         if bytes.len() > MAX_MARKER {
-            return Err(MarkerError::CorruptStoreMarker);
+            return Err(Invalid::CorruptStoreMarker);
         }
         // Magic first: foreign vs ours, from a fixed independently-parsed prefix.
         let prefix_len = STORE_MAGIC.len() + 1;
         if bytes.len() < prefix_len || &bytes[..STORE_MAGIC.len()] != STORE_MAGIC {
-            return Err(MarkerError::NotAReplicaStore);
+            return Err(Invalid::NotAReplicaStore);
         }
         // Version: ours, but maybe unsupported.
         let version = bytes[STORE_MAGIC.len()];
         if version != STORE_VERSION {
-            return Err(MarkerError::UnsupportedStoreVersion { found: version });
+            return Err(Invalid::UnsupportedStoreVersion { found: version });
         }
         // Body: ours + supported, but maybe corrupt.
-        let body: MarkerBody = postcard::from_bytes(&bytes[prefix_len..])
-            .map_err(|_| MarkerError::CorruptStoreMarker)?;
+        let body: MarkerBody =
+            postcard::from_bytes(&bytes[prefix_len..]).map_err(|_| Invalid::CorruptStoreMarker)?;
         if body.checksum != checksum(version, &body.space) {
-            return Err(MarkerError::CorruptStoreMarker);
+            return Err(Invalid::CorruptStoreMarker);
         }
         Ok(Self {
             version,

@@ -185,7 +185,7 @@ fn signed_note_tx(
     actor: &str,
     frontier: replica::frontier::AuthorityFrontier,
     n: u8,
-) -> Result<SignedUnit, replica::ReplicaCommitError> {
+) -> Result<SignedUnit, replica::commit::Failure> {
     let space = mech.space();
     let mut r = Replica::loro().with_keys(Arc::new(mech.clone()));
     r.set_supported(supported());
@@ -262,7 +262,7 @@ fn historical_authorized_but_currently_removed_remains_legitimate() {
     // receipt: its demand is unsatisfied now that it is removed.
     let err = signed_note_tx(&mech, &JOINER_SEED, &joiner_actor, removed_frontier, 2).unwrap_err();
     assert!(
-        matches!(err, replica::ReplicaCommitError::Unauthorized(_)),
+        matches!(err, replica::commit::Failure::Unauthorized(_)),
         "a removed author cannot author at the removal frontier: {err:?}"
     );
 }
@@ -285,7 +285,7 @@ fn unauthorized_at_referenced_frontier_is_denied_at_signing() {
     let frontier = mech.current_frontier();
     let err = signed_note_tx(&mech, &JOINER_SEED, joiner_actor.as_str(), frontier, 1).unwrap_err();
     assert!(
-        matches!(err, replica::ReplicaCommitError::Unauthorized(_)),
+        matches!(err, replica::commit::Failure::Unauthorized(_)),
         "an unadmitted author is denied: {err:?}"
     );
 }

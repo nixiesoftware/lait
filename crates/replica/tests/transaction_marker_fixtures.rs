@@ -7,7 +7,7 @@ use replica::body::ContentCommitment;
 use replica::frontier::AuthorityFrontier as AF;
 use replica::frontier::{AuthorityFrontier, ReplicaFrontier};
 use replica::ids::{BodyId, EncodingId, SchemaId, WorldId};
-use replica::marker::{MarkerError, StoreMarker, STORE_MAGIC};
+use replica::marker::{Invalid, StoreMarker, STORE_MAGIC};
 use replica::transaction::{
     AuthoritySource, Descriptor, Error, SeedSigner, SignRequest, Transaction, NO_PARENT_ROOT,
 };
@@ -212,7 +212,7 @@ fn a_valid_marker_classifies_to_its_space() {
 fn a_foreign_directory_is_not_a_replica_store() {
     assert_eq!(
         StoreMarker::classify(b"some other file entirely"),
-        Err(MarkerError::NotAReplicaStore)
+        Err(Invalid::NotAReplicaStore)
     );
 }
 
@@ -224,7 +224,7 @@ fn an_unsupported_version_is_named() {
     let bytes = marker.encode();
     assert_eq!(
         StoreMarker::classify(&bytes),
-        Err(MarkerError::UnsupportedStoreVersion { found: 2 })
+        Err(Invalid::UnsupportedStoreVersion { found: 2 })
     );
 }
 
@@ -235,7 +235,7 @@ fn a_corrupt_marker_is_detected() {
     let bytes = marker.encode();
     assert_eq!(
         StoreMarker::classify(&bytes),
-        Err(MarkerError::CorruptStoreMarker)
+        Err(Invalid::CorruptStoreMarker)
     );
 }
 
@@ -248,7 +248,7 @@ fn a_corrupt_lait_marker_is_distinct_from_a_foreign_directory() {
     bytes.extend_from_slice(&[0x00, 0x01]); // a stub, not a full body
     assert_eq!(
         StoreMarker::classify(&bytes),
-        Err(MarkerError::CorruptStoreMarker)
+        Err(Invalid::CorruptStoreMarker)
     );
 }
 

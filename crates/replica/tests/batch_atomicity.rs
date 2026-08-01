@@ -89,7 +89,7 @@ fn try_commit(
     n: u8,
     bindings: &[(BodyKey, BodyBinding)],
     ops: &[(BodyKey, Op)],
-) -> Result<(), replica::ReplicaCommitError> {
+) -> Result<(), replica::commit::Failure> {
     let space = space();
     let signer = SeedSigner(&WRITER_SEED);
     let ctx = CommitContext {

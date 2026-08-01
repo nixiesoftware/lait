@@ -8,7 +8,7 @@
 //! for its stated reason.
 
 use runtime::dto::{
-    CommittedEffectDto, DtoError, ErrorDto, ObservationCursorDto, ObservationDto, ProjectionDto,
+    CommittedEffectDto, ErrorDto, Invalid, ObservationCursorDto, ObservationDto, ProjectionDto,
     QueryRequestDto, SignedSubmitDto, SubmitRequestDto, DTO_PROTOCOL_VERSION,
 };
 
@@ -264,21 +264,21 @@ fn a_signed_submit_dto_validates_every_spelled_coordinate() {
     bad.space_id = "ws_short".into();
     assert_eq!(
         SignedSubmitDto::from_json(&bad.to_json()),
-        Err(DtoError::BadIdentifier)
+        Err(Invalid::BadIdentifier)
     );
     // bad actor id
     let mut bad = signed_submit_example();
     bad.actor_id = "act_nothex".into();
     assert_eq!(
         SignedSubmitDto::from_json(&bad.to_json()),
-        Err(DtoError::BadIdentifier)
+        Err(Invalid::BadIdentifier)
     );
     // bad device key
     let mut bad = signed_submit_example();
     bad.device_hex = "z".repeat(64);
     assert_eq!(
         SignedSubmitDto::from_json(&bad.to_json()),
-        Err(DtoError::BadIdentifier)
+        Err(Invalid::BadIdentifier)
     );
     // oversize decoded signed action
     let mut bad = signed_submit_example();
@@ -286,12 +286,12 @@ fn a_signed_submit_dto_validates_every_spelled_coordinate() {
         data_encoding::BASE64.encode(&vec![0u8; runtime::dto::MAX_DTO_PAYLOAD + 1]);
     assert_eq!(
         SignedSubmitDto::from_json(&bad.to_json()),
-        Err(DtoError::PayloadTooLarge)
+        Err(Invalid::PayloadTooLarge)
     );
     // unknown field
     assert!(matches!(
         SignedSubmitDto::from_json(br#"{"protocolVersion":1,"surprise":true}"#),
-        Err(DtoError::Malformed(_))
+        Err(Invalid::Malformed(_))
     ));
 }
 
@@ -378,53 +378,53 @@ fn canonical_negative_examples_are_each_rejected_for_their_stated_reason() {
         SubmitRequestDto::from_json(
             br#"{"protocolVersion":1,"world":"w.x","schema":"s","schemaVersion":1,"requestIdHex":"00000000000000000000000000000000","payloadB64":"","extra":1}"#
         ),
-        Err(DtoError::Malformed(_))
+        Err(Invalid::Malformed(_))
     ));
     // missing mandatory field
     assert!(matches!(
         SubmitRequestDto::from_json(br#"{"protocolVersion":1,"world":"w.x"}"#),
-        Err(DtoError::Malformed(_))
+        Err(Invalid::Malformed(_))
     ));
     // invalid identifier
     let mut bad = submit_example();
     bad.world = "Not An Id".into();
     assert_eq!(
         SubmitRequestDto::from_json(&bad.to_json()),
-        Err(DtoError::BadIdentifier)
+        Err(Invalid::BadIdentifier)
     );
     // malformed base64
     let mut bad = submit_example();
     bad.payload_b64 = "%%%".into();
     assert_eq!(
         SubmitRequestDto::from_json(&bad.to_json()),
-        Err(DtoError::BadBase64)
+        Err(Invalid::BadBase64)
     );
     // excessive DECODED payload
     let mut bad = submit_example();
     bad.payload_b64 = data_encoding::BASE64.encode(&vec![0u8; runtime::dto::MAX_DTO_PAYLOAD + 1]);
     assert_eq!(
         SubmitRequestDto::from_json(&bad.to_json()),
-        Err(DtoError::PayloadTooLarge)
+        Err(Invalid::PayloadTooLarge)
     );
     // wrong decoded hex length
     let mut bad = submit_example();
     bad.request_id_hex = "0a".repeat(17);
     assert_eq!(
         SubmitRequestDto::from_json(&bad.to_json()),
-        Err(DtoError::BadHex)
+        Err(Invalid::BadHex)
     );
     // unsupported protocol version
     let mut bad = submit_example();
     bad.protocol_version = 2;
     assert_eq!(
         SubmitRequestDto::from_json(&bad.to_json()),
-        Err(DtoError::UnsupportedProtocol(2))
+        Err(Invalid::UnsupportedProtocol(2))
     );
     // numeric overflow: a schemaVersion beyond u32 is malformed JSON-side
     assert!(matches!(
         SubmitRequestDto::from_json(
             br#"{"protocolVersion":1,"world":"w.x","schema":"s","schemaVersion":4294967296,"requestIdHex":"00000000000000000000000000000000","payloadB64":""}"#
         ),
-        Err(DtoError::Malformed(_))
+        Err(Invalid::Malformed(_))
     ));
 }

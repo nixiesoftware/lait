@@ -9,9 +9,8 @@ use std::time::{Duration, Instant};
 
 use runtime::budget::{deadline, slots};
 use runtime::transient::{
-    AdmitOutcome, LiveControl, Target, TransientError, TransientItem, TransientKind,
-    TransientPayload, TransientStore, MAX_ANCHOR_BYTES, MAX_SCOPE_FIELD_BYTES,
-    MAX_TRANSIENT_ITEM_BYTES,
+    AdmitOutcome, Invalid, LiveControl, Target, TransientItem, TransientKind, TransientPayload,
+    TransientStore, MAX_ANCHOR_BYTES, MAX_SCOPE_FIELD_BYTES, MAX_TRANSIENT_ITEM_BYTES,
 };
 
 const EPOCH: [u8; 16] = [7u8; 16];
@@ -138,7 +137,7 @@ fn a_payload_a_scope_cannot_carry_is_refused() {
     for (scope, payload) in illegal {
         assert_eq!(
             store.admit(&item(scope.clone(), payload, 1), &EPOCH, now),
-            AdmitOutcome::Refused(TransientError::IllegalForScope),
+            AdmitOutcome::Refused(Invalid::IllegalForScope),
             "{scope:?}"
         );
     }
@@ -163,7 +162,7 @@ fn an_anchor_cannot_name_a_field_the_scope_did_not() {
     );
     assert_eq!(
         store.admit(&elsewhere, &EPOCH, now),
-        AdmitOutcome::Refused(TransientError::AnchorOutsideScope)
+        AdmitOutcome::Refused(Invalid::AnchorOutsideScope)
     );
 
     let matching = item(
@@ -189,7 +188,7 @@ fn an_oversize_anchor_is_refused_before_it_is_resolved() {
     );
     assert_eq!(
         store.admit(&huge, &EPOCH, now),
-        AdmitOutcome::Refused(TransientError::Bounds)
+        AdmitOutcome::Refused(Invalid::Bounds)
     );
 
     // And a path that is inside the anchor bound but past the field bound.
@@ -203,7 +202,7 @@ fn an_oversize_anchor_is_refused_before_it_is_resolved() {
     );
     assert_eq!(
         store.admit(&deep, &EPOCH, now),
-        AdmitOutcome::Refused(TransientError::Bounds)
+        AdmitOutcome::Refused(Invalid::Bounds)
     );
 }
 
@@ -359,7 +358,7 @@ fn a_malformed_item_is_refused_inside_its_own_ceiling() {
     // re-encode equality so one item has one spelling.
     assert_eq!(
         TransientItem::decode_canonical(&vec![0u8; MAX_TRANSIENT_ITEM_BYTES + 1]),
-        Err(TransientError::TooLarge)
+        Err(Invalid::TooLarge)
     );
     for corpus in [
         &b""[..],
@@ -413,7 +412,7 @@ fn a_subscription_cannot_name_more_scopes_than_the_connection_may_hold() {
         .collect();
     assert_eq!(
         LiveControl::Subscribe { scopes }.validate(),
-        Err(TransientError::Bounds)
+        Err(Invalid::Bounds)
     );
 
     let fits: Vec<Target> = (0..slots::MAX_SUBSCRIBED_SCOPES_PER_CONNECTION)
@@ -455,7 +454,7 @@ fn a_world_a_scope_names_is_parsed_rather_than_measured() {
         };
         assert_eq!(
             store.admit(&item(scope, TransientPayload::Presence, 1), &EPOCH, now),
-            AdmitOutcome::Refused(TransientError::Malformed),
+            AdmitOutcome::Refused(Invalid::Malformed),
             "{bad:?} is not a World id"
         );
     }
@@ -477,7 +476,7 @@ fn a_field_path_is_bounded_rather_than_parsed() {
         };
         assert_eq!(
             store.admit(&item(scope, TransientPayload::Presence, 1), &EPOCH, now),
-            AdmitOutcome::Refused(TransientError::Bounds),
+            AdmitOutcome::Refused(Invalid::Bounds),
             "{} is not a field path",
             bad.len()
         );

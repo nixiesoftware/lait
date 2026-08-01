@@ -18,9 +18,8 @@ use mechanics::ids::SpaceId;
 use replica::frontier::AuthorityFrontier;
 use replica::{
     ActionOutcome, AuthorityBatchReceipt, AuthorityIncorporator, BodyBinding, BodyId, BodyKey,
-    CommitAuthorization, CommitContext, EncodingId, Op, QuotaConfig, Replica, ReplicaCommitError,
-    SchemaId, SeedSigner, StagedContactMaterial, StaticBodyKeys, SupportedSchemas, WorldId,
-    MUTATION_COLLABORATIVE,
+    CommitAuthorization, CommitContext, EncodingId, Op, QuotaConfig, Replica, SchemaId, SeedSigner,
+    StagedContactMaterial, StaticBodyKeys, SupportedSchemas, WorldId, MUTATION_COLLABORATIVE,
 };
 
 const WRITER_SEED: [u8; 32] = [71u8; 32];
@@ -141,7 +140,7 @@ fn commit_note(
     request: [u8; 16],
     key: &BodyKey,
     text: &str,
-) -> Result<ActionOutcome, ReplicaCommitError> {
+) -> Result<ActionOutcome, replica::commit::Failure> {
     let (space, signer) = ctx_parts();
     let ctx = CommitContext {
         space: &space,
@@ -216,7 +215,7 @@ fn multi_tx_staging() -> (Replica, StagedContactMaterial) {
 fn incorporate_all(
     target: &mut Replica,
     staged: &StagedContactMaterial,
-) -> Result<replica::ConvergenceOutcome, ReplicaCommitError> {
+) -> Result<replica::ConvergenceOutcome, replica::commit::Failure> {
     let (space, signer) = ctx_parts();
     let ctx = CommitContext {
         space: &space,
@@ -250,7 +249,7 @@ fn a_second_transaction_failure_commits_nothing() {
     });
     let frontier_before = b.frontier();
     let err = incorporate_all(&mut b, &staged).unwrap_err();
-    assert_eq!(err, ReplicaCommitError::QuotaExceeded);
+    assert_eq!(err, replica::commit::Failure::QuotaExceeded);
     assert_eq!(b.frontier(), frontier_before, "no partial adoption");
     assert!(b.body_keys().is_empty(), "transaction one did not survive");
 }
@@ -316,7 +315,7 @@ fn duplicate_transaction_ids_with_different_bytes_reject() {
     let mut b = keyed_replica();
     let err = incorporate_all(&mut b, &staged).unwrap_err();
     match err {
-        ReplicaCommitError::Illegitimate(m) => {
+        replica::commit::Failure::Illegitimate(m) => {
             // Either the equivocation gate (same id, different bytes) or the
             // canonical decoder (the tampered record no longer decodes as a
             // transaction and lands in the authority lane, leaving a payload
@@ -339,7 +338,7 @@ fn manifest_entries_neither_held_nor_transferred_reject() {
     let mut b = keyed_replica();
     let err = incorporate_all(&mut b, &staged).unwrap_err();
     match err {
-        ReplicaCommitError::Illegitimate(m) => {
+        replica::commit::Failure::Illegitimate(m) => {
             assert!(
                 m.contains("neither held nor transferred"),
                 "unexpected refusal: {m}"
@@ -388,7 +387,7 @@ fn authority_bytes_cannot_ride_the_transaction_lane() {
     let mut c = keyed_replica();
     let err = incorporate_all(&mut c, &staged2).unwrap_err();
     match err {
-        ReplicaCommitError::Illegitimate(m) => {
+        replica::commit::Failure::Illegitimate(m) => {
             assert!(m.contains("without a provided transaction"), "{m}");
         }
         other => panic!("expected Illegitimate, got {other:?}"),

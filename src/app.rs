@@ -862,16 +862,16 @@ async fn run_join_cli(m: &ArgMatches, out: Out) -> Result<()> {
 
     // Orbital is the only join path: a Coordinates v1 link joins. Anything else
     // — a pre-carve join ticket, an older/newer link, malformed bytes — is
-    // refused with the typed [`CoordinatesError`] (a pre-carve ticket surfaces
+    // refused with the typed [`runtime::coordinates::Invalid`] (a pre-carve ticket surfaces
     // as `UnsupportedVersion`), never a fallback to a legacy code path.
     match runtime::SignedCoordinates::parse_link(ticket_str.trim()) {
         Ok(_) => run_join_orbital(m, &ticket_str, out).await,
-        Err(runtime::coordinates::CoordinatesError::UnsupportedVersion(v)) => Err(anyhow!(
+        Err(runtime::coordinates::Invalid::UnsupportedVersion(v)) => Err(anyhow!(
             "this invite is not a lait Coordinates link (version {v} — it looks like a \
              legacy space ticket from an older lait). Ask the inviter for a fresh \
              `lait invite` link."
         )),
-        Err(runtime::coordinates::CoordinatesError::BadLink) => Err(anyhow!(
+        Err(runtime::coordinates::Invalid::BadLink) => Err(anyhow!(
             "this invite does not decode as a lait Coordinates link: it contains \
              characters outside the ticket alphabet. Both the lait://join/<ticket> \
              form and the bare ticket work — the usual cause is a partial copy, so \

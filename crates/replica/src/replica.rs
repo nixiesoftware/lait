@@ -44,7 +44,7 @@ use crate::convergence::ConvergenceOutcome;
 use crate::frontier::{AuthorityFrontier, ReplicaFrontier};
 use crate::ids::{BodyKey, EncodingId, SchemaId, WorldId};
 use crate::manifest::{body_index_key, ManifestEntry, ManifestHead, ManifestRoot};
-use crate::protected::{BodyKeySource, Material, ProtectedError, MAX_BODY_BYTES};
+use crate::protected::{BodyKeySource, Invalid, Material, MAX_BODY_BYTES};
 use crate::receipt::RequestReceipt;
 use crate::transaction::{AuthoritySource, Core, Descriptor, SignRequest, Signer, Transaction};
 
@@ -60,7 +60,7 @@ pub use crate::protected::{MUTATION_ATOMIC, MUTATION_COLLABORATIVE};
 
 /// Why a Replica commit failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ReplicaCommitError {
+pub enum Failure {
     /// A staged operation is not supported by the current engine (the in-memory
     /// reference engine is atomic-only).
     UnsupportedOp,
@@ -124,12 +124,12 @@ pub enum ReplicaCommitError {
     OpaqueQuotaExceeded,
 }
 
-impl std::fmt::Display for ReplicaCommitError {
+impl std::fmt::Display for Failure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{self:?}")
     }
 }
-impl std::error::Error for ReplicaCommitError {}
+impl std::error::Error for Failure {}
 
 /// The outcome of committing a request through the persistent-idempotency
 /// scope: either a fresh commit or a replay of the original receipt.
@@ -718,26 +718,24 @@ impl Replica {
     pub fn open_journaled(
         root: impl Into<std::path::PathBuf>,
         keys: Arc<dyn BodyKeySource>,
-    ) -> Result<Self, ReplicaCommitError> {
+    ) -> Result<Self, Failure> {
         let store = match JournaledStore::open(root) {
             Ok(s) => s,
-            Err(fabric::journal::JournalError::Integrity(m)) => {
-                return Err(ReplicaCommitError::Integrity(m))
-            }
-            Err(e) => return Err(ReplicaCommitError::Durability(e.to_string())),
+            Err(fabric::journal::JournalError::Integrity(m)) => return Err(Failure::Integrity(m)),
+            Err(e) => return Err(Failure::Durability(e.to_string())),
         };
         let mut replica = Self::new(Box::new(MemoryEngine::new())).with_keys(keys.clone());
         let Some(meta_bytes) = store
             .caller_meta()
-            .map_err(|e| ReplicaCommitError::Integrity(e.to_string()))?
+            .map_err(|e| Failure::Integrity(e.to_string()))?
         else {
             replica.durable = Some(store);
             return Ok(replica);
         };
         let meta: StoreMeta = postcard::from_bytes(&meta_bytes)
-            .map_err(|e| ReplicaCommitError::Integrity(format!("store meta: {e}")))?;
+            .map_err(|e| Failure::Integrity(format!("store meta: {e}")))?;
         if meta.format_version != STORE_META_FORMAT_VERSION {
-            return Err(ReplicaCommitError::Integrity(format!(
+            return Err(Failure::Integrity(format!(
                 "unsupported store meta version {} — an older store is refused, \
                  never upgraded",
                 meta.format_version
@@ -767,9 +765,9 @@ impl Replica {
                 Err(e) => decode_failure = Some(format!("body entry: {e}")),
             }
         })
-        .map_err(|e| ReplicaCommitError::Integrity(format!("body index: {e}")))?;
+        .map_err(|e| Failure::Integrity(format!("body index: {e}")))?;
         if let Some(reason) = decode_failure {
-            return Err(ReplicaCommitError::Integrity(reason));
+            return Err(Failure::Integrity(reason));
         }
 
         let mut indexed_receipts: Vec<IndexedReceipt> = Vec::new();
@@ -783,37 +781,35 @@ impl Replica {
                 Err(e) => decode_failure = Some(format!("receipt entry: {e}")),
             }
         })
-        .map_err(|e| ReplicaCommitError::Integrity(format!("receipt index: {e}")))?;
+        .map_err(|e| Failure::Integrity(format!("receipt index: {e}")))?;
         if let Some(reason) = decode_failure {
-            return Err(ReplicaCommitError::Integrity(reason));
+            return Err(Failure::Integrity(reason));
         }
 
         for IndexedBody { key, mut record } in indexed_bodies {
             if record.heads.is_empty() {
-                return Err(ReplicaCommitError::Integrity(
-                    "body record without heads".into(),
-                ));
+                return Err(Failure::Integrity("body record without heads".into()));
             }
             // Load and verify EVERY constituent head; a multi-writer Body's
             // state is the engine merge of all of them, restored in order.
             let mut loaded: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
             for head in &record.heads {
                 let (Some(protected_ref), Some(tx_ref)) = (head.protected, head.transaction) else {
-                    return Err(ReplicaCommitError::Integrity(
+                    return Err(Failure::Integrity(
                         "body record without durable objects".into(),
                     ));
                 };
                 // The transaction record must decode and verify structurally.
                 let tx_bytes = store
                     .read_object(&tx_ref)
-                    .map_err(|e| ReplicaCommitError::Integrity(e.to_string()))?;
+                    .map_err(|e| Failure::Integrity(e.to_string()))?;
                 let tx = Transaction::decode_canonical(&tx_bytes)
-                    .map_err(|e| ReplicaCommitError::Integrity(format!("transaction: {e}")))?;
+                    .map_err(|e| Failure::Integrity(format!("transaction: {e}")))?;
                 tx.verify()
-                    .map_err(|e| ReplicaCommitError::Integrity(format!("transaction: {e}")))?;
+                    .map_err(|e| Failure::Integrity(format!("transaction: {e}")))?;
                 let envelope = store
                     .read_object(&protected_ref)
-                    .map_err(|e| ReplicaCommitError::Integrity(e.to_string()))?;
+                    .map_err(|e| Failure::Integrity(e.to_string()))?;
                 loaded.push((envelope, tx_bytes));
             }
             // A Body retained opaquely stays opaque at reopen: interpreting it
@@ -826,19 +822,16 @@ impl Replica {
             if record.interpreted {
                 for (envelope, _) in &loaded {
                     let epoch = mechanics::crypto::body_epoch_id(envelope).ok_or_else(|| {
-                        ReplicaCommitError::Integrity(
-                            "protected object without epoch prefix".into(),
-                        )
+                        Failure::Integrity("protected object without epoch prefix".into())
                     })?;
                     match keys.opening_key(&epoch) {
                         Some(key_cap) => {
-                            let payload = Material::open(&key_cap, envelope).map_err(|e| {
-                                ReplicaCommitError::Integrity(format!("protected: {e}"))
-                            })?;
+                            let payload = Material::open(&key_cap, envelope)
+                                .map_err(|e| Failure::Integrity(format!("protected: {e}")))?;
                             replica
                                 .fabric
                                 .import_body(&fabric_key(&key), &payload.payload)
-                                .map_err(|e| ReplicaCommitError::Integrity(e.to_string()))?;
+                                .map_err(|e| Failure::Integrity(e.to_string()))?;
                         }
                         None => {
                             degraded = true;
@@ -879,17 +872,17 @@ impl Replica {
                 Err(e) => declared_failure = Some(format!("published entry: {e}")),
             }
         })
-        .map_err(|e| ReplicaCommitError::Integrity(format!("published index: {e}")))?;
+        .map_err(|e| Failure::Integrity(format!("published index: {e}")))?;
         if let Some(reason) = declared_failure {
-            return Err(ReplicaCommitError::Integrity(reason));
+            return Err(Failure::Integrity(reason));
         }
 
         for IndexedReceipt { scope, object } in indexed_receipts {
             let bytes = store
                 .read_object(&object)
-                .map_err(|e| ReplicaCommitError::Integrity(e.to_string()))?;
+                .map_err(|e| Failure::Integrity(e.to_string()))?;
             let receipt = RequestReceipt::decode_canonical(&bytes)
-                .map_err(|e| ReplicaCommitError::Integrity(format!("receipt: {e}")))?;
+                .map_err(|e| Failure::Integrity(format!("receipt: {e}")))?;
             *replica.object_refs.entry(object.hash).or_insert(0) += 1;
             replica.receipts.insert(scope, (receipt, Some(object)));
         }
@@ -944,7 +937,7 @@ impl Replica {
         key: &BodyKey,
         record: &BodyRecord,
         content_refs: Vec<[u8; 32]>,
-    ) -> Result<ManifestEntry, ReplicaCommitError> {
+    ) -> Result<ManifestEntry, Failure> {
         ManifestEntry::declaring(
             key.clone(),
             record
@@ -957,7 +950,7 @@ impl Replica {
                 .collect(),
             content_refs,
         )
-        .map_err(|e| ReplicaCommitError::Integrity(format!("manifest entry for {key:?}: {e}")))
+        .map_err(|e| Failure::Integrity(format!("manifest entry for {key:?}: {e}")))
     }
 
     /// The single durable write.
@@ -977,7 +970,7 @@ impl Replica {
         new_receipt: Option<&RequestReceipt>,
         mut new_objects: Vec<Vec<u8>>,
         next_frontier: ReplicaFrontier,
-    ) -> Result<(), ReplicaCommitError> {
+    ) -> Result<(), Failure> {
         use fabric::journal::index::{self, IndexChange, NodeSink};
 
         let mut sink = NodeSink::default();
@@ -1014,10 +1007,7 @@ impl Replica {
                         key: key.clone(),
                         record: record.clone(),
                     };
-                    Some(
-                        postcard::to_stdvec(&entry)
-                            .map_err(|e| ReplicaCommitError::Engine(e.to_string()))?,
-                    )
+                    Some(postcard::to_stdvec(&entry).map_err(|e| Failure::Engine(e.to_string()))?)
                 }
             };
             body_changes.push(IndexChange {
@@ -1055,7 +1045,7 @@ impl Replica {
         for descriptor in descriptors {
             descriptor
                 .validate()
-                .map_err(|e| ReplicaCommitError::Illegitimate(format!("content: {e}")))?;
+                .map_err(|e| Failure::Illegitimate(format!("content: {e}")))?;
             content_changes.push(IndexChange {
                 key: crate::manifest::content_index_key(descriptor.content_ref().as_bytes()),
                 value: Some(descriptor.encode()),
@@ -1066,13 +1056,13 @@ impl Replica {
             let nodes = self.durable.as_ref().expect("durable path").nodes();
             let body_index_root =
                 index::apply(&nodes, self.body_index_root, body_changes, &mut sink)
-                    .map_err(|e| ReplicaCommitError::Integrity(format!("body index: {e}")))?;
+                    .map_err(|e| Failure::Integrity(format!("body index: {e}")))?;
             let manifest_body_root =
                 index::apply(&nodes, self.manifest_body_root, manifest_changes, &mut sink)
-                    .map_err(|e| ReplicaCommitError::Integrity(format!("manifest index: {e}")))?;
+                    .map_err(|e| Failure::Integrity(format!("manifest index: {e}")))?;
             let content_index_root =
                 index::apply(&nodes, self.content_index_root, content_changes, &mut sink)
-                    .map_err(|e| ReplicaCommitError::Integrity(format!("content index: {e}")))?;
+                    .map_err(|e| Failure::Integrity(format!("content index: {e}")))?;
             (body_index_root, manifest_body_root, content_index_root)
         };
 
@@ -1087,8 +1077,7 @@ impl Replica {
                 scope: receipt.scope_key(),
                 object: reference,
             };
-            let value = postcard::to_stdvec(&entry)
-                .map_err(|e| ReplicaCommitError::Engine(e.to_string()))?;
+            let value = postcard::to_stdvec(&entry).map_err(|e| Failure::Engine(e.to_string()))?;
             let nodes = self.durable.as_ref().expect("durable path").nodes();
             receipt_index_root = index::apply(
                 &nodes,
@@ -1099,7 +1088,7 @@ impl Replica {
                 }],
                 &mut sink,
             )
-            .map_err(|e| ReplicaCommitError::Integrity(format!("receipt index: {e}")))?;
+            .map_err(|e| Failure::Integrity(format!("receipt index: {e}")))?;
         }
 
         // 3. The signed root over the catalogs. A commit with no attribution
@@ -1115,7 +1104,7 @@ impl Replica {
                     ctx.authority_frontier.clone(),
                     ctx.signer,
                 )
-                .ok_or_else(|| ReplicaCommitError::Illegitimate("sign manifest root".into()))?;
+                .ok_or_else(|| Failure::Illegitimate("sign manifest root".into()))?;
                 let bytes = root.encode();
                 let reference = object_ref(&bytes);
                 new_objects.push(bytes);
@@ -1140,8 +1129,7 @@ impl Replica {
             receipt_index_root,
             manifest_root: manifest_root_object,
         };
-        let meta_bytes =
-            postcard::to_stdvec(&meta).map_err(|e| ReplicaCommitError::Engine(e.to_string()))?;
+        let meta_bytes = postcard::to_stdvec(&meta).map_err(|e| Failure::Engine(e.to_string()))?;
 
         // Index nodes are handed over separately, not folded into `added`. An
         // entry in the required set is a promise that never expires, so a node
@@ -1174,11 +1162,11 @@ impl Replica {
             Ok(_) => {}
             Err(fabric::journal::JournalError::OutcomeUnknown) => {
                 self.poisoned = true;
-                return Err(ReplicaCommitError::OutcomeUnknown);
+                return Err(Failure::OutcomeUnknown);
             }
             Err(e) => {
                 self.poisoned = true;
-                return Err(ReplicaCommitError::Durability(e.to_string()));
+                return Err(Failure::Durability(e.to_string()));
             }
         }
         self.body_index_root = body_index_root;
@@ -1198,9 +1186,9 @@ impl Replica {
         &mut self,
         ctx: &CommitContext<'_>,
         descriptors: &[crate::content::ContentDescriptor],
-    ) -> Result<Vec<crate::content::ContentRef>, ReplicaCommitError> {
+    ) -> Result<Vec<crate::content::ContentRef>, Failure> {
         if self.poisoned {
-            return Err(ReplicaCommitError::Poisoned);
+            return Err(Failure::Poisoned);
         }
         let mut causal = Vec::with_capacity(descriptors.len() * 32);
         for descriptor in descriptors {
@@ -1262,26 +1250,26 @@ impl Replica {
         &mut self,
         ctx: &CommitContext<'_>,
         declarations: BTreeMap<BodyKey, Vec<crate::content::ContentRef>>,
-    ) -> Result<(), ReplicaCommitError> {
+    ) -> Result<(), Failure> {
         if self.poisoned {
-            return Err(ReplicaCommitError::Poisoned);
+            return Err(Failure::Poisoned);
         }
         let mut declared: BTreeMap<BodyKey, Vec<[u8; 32]>> = BTreeMap::new();
         let mut changed: BTreeMap<BodyKey, Option<BodyRecord>> = BTreeMap::new();
         for (key, refs) in declarations {
             if refs.len() > crate::manifest::MAX_CONTENT_REFS_PER_BODY {
-                return Err(ReplicaCommitError::Illegitimate(
+                return Err(Failure::Illegitimate(
                     "declared content references exceed the per-Body bound".into(),
                 ));
             }
             let Some(record) = self.bodies.get(&key) else {
-                return Err(ReplicaCommitError::Illegitimate(
+                return Err(Failure::Illegitimate(
                     "a declaration names a Body this Replica does not hold".into(),
                 ));
             };
             for reference in &refs {
                 if self.content_descriptor(reference).is_none() {
-                    return Err(ReplicaCommitError::Illegitimate(
+                    return Err(Failure::Illegitimate(
                         "a declaration names content with no committed descriptor".into(),
                     ));
                 }
@@ -1427,7 +1415,7 @@ impl Replica {
         &mut self,
         ctx: &CommitContext<'_>,
         cache: Option<&fabric::journal::cache::ResidentCache>,
-    ) -> Result<Vec<crate::content::ContentRef>, ReplicaCommitError> {
+    ) -> Result<Vec<crate::content::ContentRef>, Failure> {
         use fabric::journal::index::{self, IndexChange, NodeSink};
 
         let now = std::time::Instant::now();
@@ -1450,9 +1438,9 @@ impl Replica {
                     Err(e) => failure = Some(format!("content entry: {e}")),
                 }
             })
-            .map_err(|e| ReplicaCommitError::Integrity(format!("content index: {e}")))?;
+            .map_err(|e| Failure::Integrity(format!("content index: {e}")))?;
             if let Some(reason) = failure {
-                return Err(ReplicaCommitError::Integrity(reason));
+                return Err(Failure::Integrity(reason));
             }
         }
         if unreferenced.is_empty() {
@@ -1470,7 +1458,7 @@ impl Replica {
         let content_index_root = {
             let store = self.durable.as_ref().expect("durable path");
             index::apply(&store.nodes(), self.content_index_root, changes, &mut sink)
-                .map_err(|e| ReplicaCommitError::Integrity(format!("content index: {e}")))?
+                .map_err(|e| Failure::Integrity(format!("content index: {e}")))?
         };
 
         // Republish under the shrunken catalog before touching residency, so a
@@ -1489,7 +1477,7 @@ impl Replica {
             ctx.authority_frontier.clone(),
             ctx.signer,
         )
-        .ok_or_else(|| ReplicaCommitError::Illegitimate("sign manifest root".into()))?;
+        .ok_or_else(|| Failure::Illegitimate("sign manifest root".into()))?;
         let root_bytes = root.encode();
         let root_ref = object_ref(&root_bytes);
         self.retain_object(root_ref.hash);
@@ -1511,8 +1499,7 @@ impl Replica {
             receipt_index_root: self.receipt_index_root,
             manifest_root: Some(root_ref),
         };
-        let meta_bytes =
-            postcard::to_stdvec(&meta).map_err(|e| ReplicaCommitError::Engine(e.to_string()))?;
+        let meta_bytes = postcard::to_stdvec(&meta).map_err(|e| Failure::Engine(e.to_string()))?;
         let added = vec![root_bytes];
         let index_nodes = sink.written;
         let roots: Vec<IndexRef> = self
@@ -1532,11 +1519,11 @@ impl Replica {
             Ok(_) => {}
             Err(fabric::journal::JournalError::OutcomeUnknown) => {
                 self.poisoned = true;
-                return Err(ReplicaCommitError::OutcomeUnknown);
+                return Err(Failure::OutcomeUnknown);
             }
             Err(e) => {
                 self.poisoned = true;
-                return Err(ReplicaCommitError::Durability(e.to_string()));
+                return Err(Failure::Durability(e.to_string()));
             }
         }
         self.content_index_root = content_index_root;
@@ -1624,12 +1611,12 @@ impl Replica {
         device: &mechanics::ids::DeviceId,
         request: &[u8; 16],
         payload_hash: &[u8; 32],
-    ) -> Result<Option<RequestReceipt>, ReplicaCommitError> {
+    ) -> Result<Option<RequestReceipt>, Failure> {
         let key = crate::receipt::scope_key(space, world, device, request);
         match self.receipts.get(&key) {
             None => Ok(None),
             Some((r, _)) if &r.payload_hash == payload_hash => Ok(Some(r.clone())),
-            Some(_) => Err(ReplicaCommitError::RequestIdConflict),
+            Some(_) => Err(Failure::RequestIdConflict),
         }
     }
 
@@ -1641,14 +1628,14 @@ impl Replica {
         &mut self,
         request_label: &str,
         ops: &[(BodyKey, Op)],
-    ) -> Result<ReplicaFrontier, ReplicaCommitError> {
+    ) -> Result<ReplicaFrontier, Failure> {
         if self.durable.is_some() {
-            return Err(ReplicaCommitError::Illegitimate(
+            return Err(Failure::Illegitimate(
                 "a durable Replica commits only signed, attributed transactions".into(),
             ));
         }
         if self.poisoned {
-            return Err(ReplicaCommitError::Poisoned);
+            return Err(Failure::Poisoned);
         }
         let receipt = self.apply_ops(request_label, ops)?;
         // Track minimal body records so bindings/tombstones behave uniformly.
@@ -1660,7 +1647,7 @@ impl Replica {
     /// Commit a request's staged operations under its persistent-idempotency
     /// scope, as one durable signed transaction. Identical replay returns the
     /// original receipt **without reapplying** a single operation; reuse with
-    /// a different payload hash is [`ReplicaCommitError::RequestIdConflict`];
+    /// a different payload hash is [`Failure::RequestIdConflict`];
     /// a fresh request commits durably — signed transaction record, sealed
     /// per-Body payloads, idempotency receipt, and manifest, at one journal
     /// linearization point — and records its receipt with the transaction.
@@ -1679,9 +1666,9 @@ impl Replica {
         ops: &[(BodyKey, Op)],
         bindings: &[(BodyKey, BodyBinding)],
         content_refs: &[(BodyKey, Vec<crate::content::ContentRef>)],
-    ) -> Result<ActionOutcome, ReplicaCommitError> {
+    ) -> Result<ActionOutcome, Failure> {
         if self.poisoned {
-            return Err(ReplicaCommitError::Poisoned);
+            return Err(Failure::Poisoned);
         }
         if let Some(receipt) =
             self.lookup_action(ctx.space, world, device, request, payload_hash)?
@@ -1689,7 +1676,7 @@ impl Replica {
             return Ok(ActionOutcome::Replayed(receipt));
         }
         if effect.len() > crate::receipt::MAX_EFFECT_BYTES {
-            return Err(ReplicaCommitError::EffectTooLarge);
+            return Err(Failure::EffectTooLarge);
         }
         // An idempotent no-op: no operations, nothing applied, the frontier
         // does not advance — but the receipt is still recorded durably so an
@@ -1719,7 +1706,7 @@ impl Replica {
             None => self.space = Some(ctx.space.clone()),
             Some(space) if space == ctx.space => {}
             Some(_) => {
-                return Err(ReplicaCommitError::Illegitimate(
+                return Err(Failure::Illegitimate(
                     "commit addressed to a different Space".into(),
                 ))
             }
@@ -1733,10 +1720,10 @@ impl Replica {
         for key in &touched {
             match (self.bodies.get(key), bindings.get(key)) {
                 (Some(record), Some(declared)) if &&record.binding != declared => {
-                    return Err(ReplicaCommitError::SchemaMismatch)
+                    return Err(Failure::SchemaMismatch)
                 }
                 (None, None) => {
-                    return Err(ReplicaCommitError::SchemaMismatch);
+                    return Err(Failure::SchemaMismatch);
                 }
                 _ => {}
             }
@@ -1749,11 +1736,11 @@ impl Replica {
         let mut declared: BTreeMap<BodyKey, Vec<[u8; 32]>> = BTreeMap::new();
         for (key, refs) in content_refs {
             if refs.len() > crate::manifest::MAX_CONTENT_REFS_PER_BODY {
-                return Err(ReplicaCommitError::QuotaExceeded);
+                return Err(Failure::QuotaExceeded);
             }
             for reference in refs {
                 if self.content_descriptor(reference).is_none() {
-                    return Err(ReplicaCommitError::Illegitimate(
+                    return Err(Failure::Illegitimate(
                         "a declaration names content with no committed descriptor".into(),
                     ));
                 }
@@ -1770,14 +1757,14 @@ impl Replica {
             .filter(|k| !self.bodies.contains_key(*k))
             .count() as u64;
         if (self.bodies.len() as u64).saturating_add(new_bodies) > self.quota.max_space_bodies {
-            return Err(ReplicaCommitError::QuotaExceeded);
+            return Err(Failure::QuotaExceeded);
         }
         // A durable commit needs sealing material before the engine moves; a
         // non-durable Replica with keys still seals (so its material can be
         // exported), and one without keys commits locally-only.
         let sealing = match self.keys.as_ref().and_then(|k| k.sealing_key()) {
             Some(key) => Some(key),
-            None if self.durable.is_some() => return Err(ReplicaCommitError::BodyKeyUnavailable),
+            None if self.durable.is_some() => return Err(Failure::BodyKeyUnavailable),
             None => None,
         };
 
@@ -1815,8 +1802,8 @@ impl Replica {
                         Some(sealing) => payload.seal(sealing).map_err(|e| {
                             self.poisoned = true;
                             match e {
-                                ProtectedError::BodyTooLarge => ReplicaCommitError::OpLimit,
-                                _ => ReplicaCommitError::Engine(e.to_string()),
+                                Invalid::BodyTooLarge => Failure::OpLimit,
+                                _ => Failure::Engine(e.to_string()),
                             }
                         })?,
                         None => Vec::new(),
@@ -1881,7 +1868,7 @@ impl Replica {
                 ctx.signer,
                 |core| auth.authorizer.authorize(core),
             )
-            .map_err(ReplicaCommitError::Unauthorized)?;
+            .map_err(Failure::Unauthorized)?;
             let tx_id = tx.id();
             // Stamp the resolved transaction id into every touched record.
             for key in &touched {
@@ -1910,7 +1897,7 @@ impl Replica {
             for (key, envelope, _) in &sealed {
                 if envelope.len() as u64 > self.quota.max_body_bytes {
                     self.poisoned = true;
-                    return Err(ReplicaCommitError::QuotaExceeded);
+                    return Err(Failure::QuotaExceeded);
                 }
                 projected = projected.saturating_add(envelope.len() as u64);
                 if let Some(old) = self.bodies.get(key) {
@@ -1921,7 +1908,7 @@ impl Replica {
             projected = projected.saturating_add(receipt_record.encode().len() as u64);
             if projected > self.quota.max_space_bytes {
                 self.poisoned = true;
-                return Err(ReplicaCommitError::QuotaExceeded);
+                return Err(Failure::QuotaExceeded);
             }
             if self.durable.is_some() {
                 Some(self.persist_transaction(
@@ -2011,7 +1998,7 @@ impl Replica {
         tx: &Transaction,
         payloads: &[(BodyKey, Vec<u8>)],
         authority: &dyn AuthoritySource,
-    ) -> Result<ConvergenceOutcome, ReplicaCommitError> {
+    ) -> Result<ConvergenceOutcome, Failure> {
         self.incorporate_units(
             ctx,
             &[(tx.clone(), payloads.to_vec())],
@@ -2037,9 +2024,9 @@ impl Replica {
         bundle_declared: &BTreeMap<BodyKey, Vec<[u8; 32]>>,
         bundle_descriptors: &[crate::content::ContentDescriptor],
         authority: &dyn AuthoritySource,
-    ) -> Result<ConvergenceOutcome, ReplicaCommitError> {
+    ) -> Result<ConvergenceOutcome, Failure> {
         if self.poisoned {
-            return Err(ReplicaCommitError::Poisoned);
+            return Err(Failure::Poisoned);
         }
         let previous = self.frontier;
         let mut outcome = ConvergenceOutcome::unchanged(previous);
@@ -2051,19 +2038,19 @@ impl Replica {
         let mut tx_space: Option<SpaceId> = None;
         for (tx, _) in units {
             tx.verify_authorized(authority)
-                .map_err(|e| ReplicaCommitError::Illegitimate(e.to_string()))?;
+                .map_err(|e| Failure::Illegitimate(e.to_string()))?;
             let space = std::str::from_utf8(&tx.core.space)
                 .ok()
                 .and_then(SpaceId::parse)
-                .ok_or_else(|| ReplicaCommitError::Illegitimate("space id".into()))?;
+                .ok_or_else(|| Failure::Illegitimate("space id".into()))?;
             match (&tx_space, &self.space) {
                 (Some(prev), _) if prev != &space => {
-                    return Err(ReplicaCommitError::Illegitimate(
+                    return Err(Failure::Illegitimate(
                         "transactions address different Spaces".into(),
                     ))
                 }
                 (_, Some(bound)) if bound != &space => {
-                    return Err(ReplicaCommitError::Illegitimate(
+                    return Err(Failure::Illegitimate(
                         "transaction addressed to a different Space".into(),
                     ))
                 }
@@ -2076,7 +2063,7 @@ impl Replica {
         for (idx, (tx, payloads)) in units.iter().enumerate() {
             for (key, payload) in payloads {
                 if payload.len() > MAX_BODY_BYTES {
-                    return Err(ReplicaCommitError::Illegitimate(
+                    return Err(Failure::Illegitimate(
                         "payload exceeds the Body maximum".into(),
                     ));
                 }
@@ -2086,12 +2073,10 @@ impl Replica {
                     .iter()
                     .find(|d| &d.key() == key)
                     .ok_or_else(|| {
-                        ReplicaCommitError::Illegitimate(
-                            "payload without a matching descriptor".into(),
-                        )
+                        Failure::Illegitimate("payload without a matching descriptor".into())
                     })?;
                 if !descriptor.commits_to(payload) {
-                    return Err(ReplicaCommitError::Illegitimate(
+                    return Err(Failure::Illegitimate(
                         "payload does not match the signed commitment".into(),
                     ));
                 }
@@ -2324,7 +2309,7 @@ impl Replica {
             let mut seen_key: BTreeSet<BodyKey> = BTreeSet::new();
             for change in &planned {
                 if change.envelope.len() as u64 > self.quota.max_body_bytes {
-                    return Err(ReplicaCommitError::QuotaExceeded);
+                    return Err(Failure::QuotaExceeded);
                 }
                 let old = self.bodies.get(&change.key);
                 projected_bytes = projected_bytes.saturating_add(change.envelope.len() as u64);
@@ -2356,14 +2341,14 @@ impl Replica {
             if projected_bytes > self.quota.max_space_bytes
                 || projected_bodies > self.quota.max_space_bodies
             {
-                return Err(ReplicaCommitError::QuotaExceeded);
+                return Err(Failure::QuotaExceeded);
             }
             for (world, (dbytes, dbodies)) in opaque_delta {
                 let (cur_bytes, cur_bodies) = self.opaque_usage(&world);
                 if cur_bytes.saturating_add(dbytes) > self.quota.max_unknown_world_bytes
                     || cur_bodies.saturating_add(dbodies) > self.quota.max_unknown_world_bodies
                 {
-                    return Err(ReplicaCommitError::OpaqueQuotaExceeded);
+                    return Err(Failure::OpaqueQuotaExceeded);
                 }
             }
         }
@@ -2414,7 +2399,7 @@ impl Replica {
                         }
                         Err(e) => {
                             self.poisoned = true;
-                            return Err(ReplicaCommitError::Engine(e.to_string()));
+                            return Err(Failure::Engine(e.to_string()));
                         }
                     }
                 }
@@ -2542,7 +2527,7 @@ impl Replica {
         declared: &BTreeMap<BodyKey, Vec<[u8; 32]>>,
         descriptors: &[crate::content::ContentDescriptor],
         next_frontier: ReplicaFrontier,
-    ) -> Result<BTreeMap<BodyKey, BodyRecord>, ReplicaCommitError> {
+    ) -> Result<BTreeMap<BodyKey, BodyRecord>, Failure> {
         // Fill object refs into a working copy of the final records: each
         // staged head gets refs to the objects written below; heads carried
         // over from the prior record keep the refs they already have.
@@ -2627,8 +2612,8 @@ impl Replica {
         staged: &crate::convergence::StagedContactMaterial,
         authority: &dyn AuthoritySource,
         incorporator: &mut dyn crate::convergence::AuthorityIncorporator,
-    ) -> Result<crate::convergence::ValidatedContactBundle, ReplicaCommitError> {
-        let illegit = |m: String| ReplicaCommitError::Illegitimate(m);
+    ) -> Result<crate::convergence::ValidatedContactBundle, Failure> {
+        let illegit = |m: String| Failure::Illegitimate(m);
         // 1. Split the authority section.
         let mut transactions: Vec<(Transaction, Vec<u8>)> = Vec::new();
         let mut authority_material: Vec<Vec<u8>> = Vec::new();
@@ -2868,7 +2853,7 @@ impl Replica {
         &self,
         nodes: &dyn fabric::journal::index::NodeSource,
         root: &ManifestRoot,
-    ) -> Result<BTreeMap<[u8; 32], crate::content::ContentDescriptor>, ReplicaCommitError> {
+    ) -> Result<BTreeMap<[u8; 32], crate::content::ContentDescriptor>, Failure> {
         let mut catalog = BTreeMap::new();
         let mut failure: Option<String> = None;
         fabric::journal::index::stream(nodes, root.content_index_root, &mut |entry| {
@@ -2882,9 +2867,9 @@ impl Replica {
                 Err(e) => failure = Some(format!("content entry: {e}")),
             }
         })
-        .map_err(|e| ReplicaCommitError::Illegitimate(format!("content index: {e}")))?;
+        .map_err(|e| Failure::Illegitimate(format!("content index: {e}")))?;
         match failure {
-            Some(reason) => Err(ReplicaCommitError::Illegitimate(reason)),
+            Some(reason) => Err(Failure::Illegitimate(reason)),
             None => Ok(catalog),
         }
     }
@@ -2899,7 +2884,7 @@ impl Replica {
         ctx: &CommitContext<'_>,
         bundle: crate::convergence::ValidatedContactBundle,
         authority: &dyn AuthoritySource,
-    ) -> Result<ConvergenceOutcome, ReplicaCommitError> {
+    ) -> Result<ConvergenceOutcome, Failure> {
         self.incorporate_units(
             ctx,
             &bundle.units,
@@ -2938,7 +2923,7 @@ impl Replica {
     pub fn export_manifest(
         &self,
         ctx: &CommitContext<'_>,
-    ) -> Result<(Vec<u8>, Vec<Vec<u8>>), ReplicaCommitError> {
+    ) -> Result<(Vec<u8>, Vec<Vec<u8>>), Failure> {
         use fabric::journal::index::NodeSink;
 
         let entries: Vec<ManifestEntry> = self
@@ -2954,10 +2939,10 @@ impl Replica {
             .collect::<Result<_, _>>()?;
         let mut sink = NodeSink::default();
         let body_root = crate::manifest::build_body_index(entries, &mut sink)
-            .map_err(|e| ReplicaCommitError::Illegitimate(format!("manifest index: {e}")))?;
+            .map_err(|e| Failure::Illegitimate(format!("manifest index: {e}")))?;
         let content_root =
             crate::manifest::build_content_index(self.advertised_descriptors()?, &mut sink)
-                .map_err(|e| ReplicaCommitError::Illegitimate(format!("content index: {e}")))?;
+                .map_err(|e| Failure::Illegitimate(format!("content index: {e}")))?;
         let root = ManifestRoot::sign_with(
             ctx.space,
             self.frontier,
@@ -2966,7 +2951,7 @@ impl Replica {
             ctx.authority_frontier.clone(),
             ctx.signer,
         )
-        .ok_or_else(|| ReplicaCommitError::Illegitimate("sign manifest root".into()))?;
+        .ok_or_else(|| Failure::Illegitimate("sign manifest root".into()))?;
         Ok((root.encode(), sink.written))
     }
 
@@ -2977,9 +2962,7 @@ impl Replica {
     /// because that is the same rule the sweep applies — a maintained set and a
     /// derived one would eventually disagree, and the disagreement would be
     /// invisible until a peer could not open an attachment.
-    fn advertised_descriptors(
-        &self,
-    ) -> Result<Vec<crate::content::ContentDescriptor>, ReplicaCommitError> {
+    fn advertised_descriptors(&self) -> Result<Vec<crate::content::ContentDescriptor>, Failure> {
         let Some(store) = self.durable.as_ref() else {
             return Ok(Vec::new());
         };
@@ -3002,9 +2985,9 @@ impl Replica {
                 Err(e) => failure = Some(format!("content entry: {e}")),
             }
         })
-        .map_err(|e| ReplicaCommitError::Integrity(format!("content index: {e}")))?;
+        .map_err(|e| Failure::Integrity(format!("content index: {e}")))?;
         match failure {
-            Some(reason) => Err(ReplicaCommitError::Integrity(reason)),
+            Some(reason) => Err(Failure::Integrity(reason)),
             None => Ok(descriptors),
         }
     }
@@ -3041,13 +3024,13 @@ impl Replica {
     /// Collect objects no root reaches. A maintenance beat, safe at any quiet
     /// moment — the store sweeps periodically on its own, and this lets a
     /// caller that knows it is idle pre-empt that.
-    pub fn collect_unreachable_objects(&self) -> Result<(), ReplicaCommitError> {
+    pub fn collect_unreachable_objects(&self) -> Result<(), Failure> {
         let Some(store) = self.durable.as_ref() else {
             return Ok(());
         };
         store
             .collect_unreachable()
-            .map_err(|e| ReplicaCommitError::Durability(e.to_string()))
+            .map_err(|e| Failure::Durability(e.to_string()))
     }
 
     /// Serve the requested published-catalog nodes to a descending peer.
@@ -3088,28 +3071,27 @@ impl Replica {
         &self,
         session: &mut fabric::journal::index::Reconciliation,
         nodes: &BTreeMap<[u8; 32], Vec<u8>>,
-    ) -> Result<(), ReplicaCommitError> {
+    ) -> Result<(), Failure> {
         let Some(store) = self.durable.as_ref() else {
-            return Err(ReplicaCommitError::Illegitimate(
+            return Err(Failure::Illegitimate(
                 "a non-durable Replica has no catalog to reconcile against".into(),
             ));
         };
         session
             .absorb(&store.nodes(), nodes)
-            .map_err(|e| ReplicaCommitError::Integrity(format!("reconciliation: {e}")))
+            .map_err(|e| Failure::Integrity(format!("reconciliation: {e}")))
     }
 
     /// Decode the divergent entries a completed reconciliation produced into
     /// the Bodies and heads this Replica should ask for.
     pub fn divergent_heads(
         entries: &[fabric::journal::index::IndexEntry],
-    ) -> Result<Vec<DivergentBody>, ReplicaCommitError> {
+    ) -> Result<Vec<DivergentBody>, Failure> {
         entries
             .iter()
             .map(|entry| {
-                let published = ManifestEntry::decode_canonical(&entry.value).map_err(|e| {
-                    ReplicaCommitError::Illegitimate(format!("published entry: {e}"))
-                })?;
+                let published = ManifestEntry::decode_canonical(&entry.value)
+                    .map_err(|e| Failure::Illegitimate(format!("published entry: {e}")))?;
                 let commitments = published
                     .heads
                     .iter()
@@ -3149,7 +3131,7 @@ impl Replica {
     /// **retained** signed transaction record and protected payload bytes —
     /// byte-identical to what was committed or incorporated, grouped by
     /// transaction. Opaque Bodies forward their retained bytes unchanged.
-    pub fn export_material(&self) -> Result<ExportedMaterial, ReplicaCommitError> {
+    pub fn export_material(&self) -> Result<ExportedMaterial, Failure> {
         self.export_material_excluding(&std::collections::BTreeSet::new())
     }
 
@@ -3163,7 +3145,7 @@ impl Replica {
     pub fn export_material_excluding(
         &self,
         held: &std::collections::BTreeSet<(BodyKey, [u8; 32])>,
-    ) -> Result<ExportedMaterial, ReplicaCommitError> {
+    ) -> Result<ExportedMaterial, Failure> {
         type Grouped = BTreeMap<[u8; 32], (Transaction, Vec<(BodyKey, Vec<u8>)>)>;
         let mut by_tx: Grouped = BTreeMap::new();
         for (key, record) in &self.bodies {
@@ -3186,7 +3168,7 @@ impl Replica {
                         let (Some(protected_ref), Some(tx_ref)) =
                             (head.protected, head.transaction)
                         else {
-                            return Err(ReplicaCommitError::Integrity(format!(
+                            return Err(Failure::Integrity(format!(
                                 "unexportable head (no refs, no raw material): {}/{}",
                                 key.world.as_str(),
                                 key.body
@@ -3194,14 +3176,14 @@ impl Replica {
                         };
                         let envelope = store
                             .read_object(&protected_ref)
-                            .map_err(|e| ReplicaCommitError::Integrity(e.to_string()))?;
+                            .map_err(|e| Failure::Integrity(e.to_string()))?;
                         let tx_bytes = store
                             .read_object(&tx_ref)
-                            .map_err(|e| ReplicaCommitError::Integrity(e.to_string()))?;
+                            .map_err(|e| Failure::Integrity(e.to_string()))?;
                         (envelope, tx_bytes)
                     }
                     (None, None) => {
-                        return Err(ReplicaCommitError::Integrity(format!(
+                        return Err(Failure::Integrity(format!(
                             "unexportable head (no store, no raw material): {}/{}",
                             key.world.as_str(),
                             key.body
@@ -3209,7 +3191,7 @@ impl Replica {
                     }
                 };
                 let tx = Transaction::decode_canonical(&tx_bytes)
-                    .map_err(|e| ReplicaCommitError::Integrity(e.to_string()))?;
+                    .map_err(|e| Failure::Integrity(e.to_string()))?;
                 let entry = by_tx.entry(head.tx).or_insert_with(|| (tx, Vec::new()));
                 entry.1.push((key.clone(), envelope));
             }
@@ -3222,7 +3204,7 @@ impl Replica {
         &mut self,
         request_label: &str,
         ops: &[(BodyKey, Op)],
-    ) -> Result<fabric::Receipt, ReplicaCommitError> {
+    ) -> Result<fabric::Receipt, Failure> {
         let mut fabric_ops = Vec::with_capacity(ops.len());
         for (key, op) in ops {
             fabric_ops.push(translate(fabric_key(key), op)?);
@@ -3232,17 +3214,17 @@ impl Replica {
             .commit(fabric::Transaction::new(request_label, fabric_ops))
         {
             Ok(r) => Ok(r),
-            Err(Error::Unsupported) => Err(ReplicaCommitError::UnsupportedOp),
-            Err(Error::TypeConflict) => Err(ReplicaCommitError::TypeConflict),
-            Err(Error::InvalidOp(m)) => Err(ReplicaCommitError::InvalidOp(m)),
-            Err(Error::Integrity(m)) => Err(ReplicaCommitError::Integrity(m)),
+            Err(Error::Unsupported) => Err(Failure::UnsupportedOp),
+            Err(Error::TypeConflict) => Err(Failure::TypeConflict),
+            Err(Error::InvalidOp(m)) => Err(Failure::InvalidOp(m)),
+            Err(Error::Integrity(m)) => Err(Failure::Integrity(m)),
             Err(Error::OutcomeUnknown) => {
                 self.poisoned = true;
-                Err(ReplicaCommitError::OutcomeUnknown)
+                Err(Failure::OutcomeUnknown)
             }
             Err(Error::Durability(m)) => {
                 self.poisoned = true;
-                Err(ReplicaCommitError::Durability(m))
+                Err(Failure::Durability(m))
             }
         }
     }
@@ -3311,7 +3293,7 @@ impl Replica {
         receipt: Option<RequestReceipt>,
         next_frontier: ReplicaFrontier,
         declared: &BTreeMap<BodyKey, Vec<[u8; 32]>>,
-    ) -> Result<RequestReceipt, ReplicaCommitError> {
+    ) -> Result<RequestReceipt, Failure> {
         let sealed: Vec<(BodyKey, Vec<u8>, ())> = sealed
             .iter()
             .map(|(k, e, _)| (k.clone(), e.clone(), ()))
@@ -3332,7 +3314,7 @@ impl Replica {
     /// Persist ONLY a new idempotency receipt. No Body changed and no manifest
     /// is republished, so this writes the receipt, one index path, and the
     /// commit point — and nothing else.
-    fn persist_receipt_only(&mut self, receipt: &RequestReceipt) -> Result<(), ReplicaCommitError> {
+    fn persist_receipt_only(&mut self, receipt: &RequestReceipt) -> Result<(), Failure> {
         let frontier = self.frontier;
         self.persist(
             None,
@@ -3364,7 +3346,7 @@ impl Replica {
         receipt: Option<&RequestReceipt>,
         next_frontier: ReplicaFrontier,
         declared: &BTreeMap<BodyKey, Vec<[u8; 32]>>,
-    ) -> Result<(), ReplicaCommitError> {
+    ) -> Result<(), Failure> {
         let tx_bytes = tx.encode();
         let tx_ref = object_ref(&tx_bytes);
         let commitment = tx_commitment(&tx_bytes);
@@ -3471,16 +3453,16 @@ fn object_ref(bytes: &[u8]) -> ObjectRef {
 /// and limits) and translate it into its Engine operation. Replica owns this
 /// translation; a World never authors Engine operations, and Engine never sees
 /// an op Replica has not validated.
-fn translate(key: Key, op: &Op) -> Result<fabric::Op, ReplicaCommitError> {
+fn translate(key: Key, op: &Op) -> Result<fabric::Op, Failure> {
     let path_ok = |p: &str| {
         algebra::valid_path(p)
             .then_some(())
-            .ok_or(ReplicaCommitError::PathInvalid)
+            .ok_or(Failure::PathInvalid)
     };
     let value_ok = |v: &[u8]| {
         (v.len() <= algebra::MAX_VALUE_BYTES)
             .then_some(())
-            .ok_or(ReplicaCommitError::OpLimit)
+            .ok_or(Failure::OpLimit)
     };
     Ok(match op {
         Op::ReplaceAtomic { value } => fabric::Op::PutCanonical {
@@ -3513,7 +3495,7 @@ fn translate(key: Key, op: &Op) -> Result<fabric::Op, ReplicaCommitError> {
             path_ok(path)?;
             value_ok(value)?;
             if entry.len() > algebra::MAX_MAP_KEY_BYTES {
-                return Err(ReplicaCommitError::OpLimit);
+                return Err(Failure::OpLimit);
             }
             fabric::Op::MapSet {
                 key,
@@ -3569,7 +3551,7 @@ fn translate(key: Key, op: &Op) -> Result<fabric::Op, ReplicaCommitError> {
         } => {
             path_ok(path)?;
             if insert.len() > algebra::MAX_TEXT_INSERT_BYTES {
-                return Err(ReplicaCommitError::OpLimit);
+                return Err(Failure::OpLimit);
             }
             fabric::Op::TextSplice {
                 key,

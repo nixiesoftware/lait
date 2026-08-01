@@ -36,12 +36,16 @@ pub mod manifest;
 pub mod marker;
 pub mod protected;
 pub mod receipt;
-pub mod replica;
+mod replica;
+/// Failures produced by Replica commit and incorporation operations.
+pub mod commit {
+    pub use crate::replica::Failure;
+}
 pub mod transaction;
 
 pub use body::{CollaborativeSchema, ContentCommitment, MutationModel, Op, Schema};
 pub use content::{
-    ChunkLeaf, ChunkProof, ContentDescriptor, ContentError, ContentRef, ProofStep, SealedContent,
+    ChunkLeaf, ChunkProof, ContentDescriptor, ContentRef, ProofStep, SealedContent,
     CHUNK_PLAINTEXT_LEN, CONTENT_FORMAT_VERSION, MAX_CONTENT_LEN, MAX_PROOF_DEPTH,
 };
 pub use convergence::{
@@ -55,18 +59,16 @@ pub use fabric::{
 pub use frontier::{AuthorityFrontier, ReplicaFrontier};
 pub use ids::{BodyId, BodyKey, EncodingId, SchemaId, WorldId};
 pub use manifest::{
-    AuthorizedRoot, ManifestBook, ManifestEntry, ManifestError, ManifestHead, ManifestRoot,
-    RootObservation,
+    AuthorizedRoot, ManifestBook, ManifestEntry, ManifestHead, ManifestRoot, RootObservation,
 };
-pub use marker::{MarkerError, StoreMarker};
+pub use marker::StoreMarker;
 pub use protected::{
-    BodyKeySource, Material, ProtectedError, StaticBodyKeys, MAX_BODY_BYTES,
-    MAX_PROTECTED_PLAINTEXT,
+    BodyKeySource, Material, StaticBodyKeys, MAX_BODY_BYTES, MAX_PROTECTED_PLAINTEXT,
 };
-pub use receipt::{ReceiptError, RequestReceipt, MAX_EFFECT_BYTES};
+pub use receipt::{RequestReceipt, MAX_EFFECT_BYTES};
 pub use replica::{
     operations_digest_of, ActionOutcome, BodyBinding, CommitAuthorization, CommitContext,
-    ExportedMaterial, QuotaConfig, Replica, ReplicaCommitError, StaticAuthorizer, SupportedSchemas,
+    ExportedMaterial, QuotaConfig, Replica, StaticAuthorizer, SupportedSchemas,
     TransactionAuthorizer, MUTATION_ATOMIC, MUTATION_COLLABORATIVE,
 };
 pub use transaction::{AuthoritySource, Core, Descriptor, Error, SeedSigner, Signer, Transaction};

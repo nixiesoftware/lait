@@ -28,7 +28,7 @@ pub enum DeclarationKind {
 
 /// Why registration was rejected at `build()`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RegistrationError {
+pub enum Refusal {
     /// Two Worlds registered the same [`WorldId`].
     DuplicateWorld(WorldId),
     /// A World declared the same `(schema id, version)` twice.
@@ -68,12 +68,12 @@ pub enum RegistrationError {
 /// implementation id over bytes nothing can decode.
 pub const MAX_DECLARATIONS_PER_SECTION: usize = u16::MAX as usize;
 
-impl std::fmt::Display for RegistrationError {
+impl std::fmt::Display for Refusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{self:?}")
     }
 }
-impl std::error::Error for RegistrationError {}
+impl std::error::Error for Refusal {}
 
 /// One hosted World: its descriptor and implementation.
 struct Hosted {
@@ -152,7 +152,7 @@ impl RuntimeBuilder {
     /// Validate and freeze the registry. Rejects duplicate Worlds/schema
     /// versions, registration/impl mismatch, invalid limits, contradictory
     /// upgrade claims, and invalid or duplicated scope/signal declarations.
-    pub fn build(self) -> Result<Registry, RegistrationError> {
+    pub fn build(self) -> Result<Registry, Refusal> {
         let mut worlds: BTreeMap<WorldId, Arc<Hosted>> = BTreeMap::new();
         for hosted in self.pending {
             let id = hosted.descriptor.id.clone();
@@ -168,7 +168,7 @@ impl RuntimeBuilder {
             for schema in &hosted.descriptor.schemas {
                 let key = (schema.id.as_str().to_string(), schema.version);
                 if !seen_versions.insert(key) {
-                    return Err(RegistrationError::DuplicateSchemaVersion {
+                    return Err(Refusal::DuplicateSchemaVersion {
                         world: id.clone(),
                         schema: schema.id.as_str().to_string(),
                         version: schema.version,
@@ -178,7 +178,7 @@ impl RuntimeBuilder {
                 let mut preds = std::collections::BTreeSet::new();
                 for &pred in &schema.readable_predecessors {
                     if pred >= schema.version || !preds.insert(pred) {
-                        return Err(RegistrationError::ContradictoryUpgrade {
+                        return Err(Refusal::ContradictoryUpgrade {
                             world: id.clone(),
                             schema: schema.id.as_str().to_string(),
                             version: schema.version,
@@ -211,7 +211,7 @@ impl RuntimeBuilder {
                 ),
             ] {
                 if count > MAX_DECLARATIONS_PER_SECTION {
-                    return Err(RegistrationError::InvalidDeclaration {
+                    return Err(Refusal::InvalidDeclaration {
                         world: id.clone(),
                         kind,
                         name: format!("{count} declarations"),
@@ -224,7 +224,7 @@ impl RuntimeBuilder {
             for scope in &hosted.descriptor.scope_schemas {
                 let name = scope.name.as_str().to_string();
                 if !seen_scopes.insert(name.clone()) {
-                    return Err(RegistrationError::DuplicateDeclaration {
+                    return Err(Refusal::DuplicateDeclaration {
                         world: id.clone(),
                         kind: DeclarationKind::Scope,
                         name,
@@ -233,7 +233,7 @@ impl RuntimeBuilder {
                 if scope.max_key_bytes == 0
                     || scope.max_key_bytes as usize > crate::transient::MAX_SCOPE_FIELD_BYTES
                 {
-                    return Err(RegistrationError::InvalidDeclaration {
+                    return Err(Refusal::InvalidDeclaration {
                         world: id.clone(),
                         kind: DeclarationKind::Scope,
                         name,
@@ -246,7 +246,7 @@ impl RuntimeBuilder {
             for signal in &hosted.descriptor.signal_schemas {
                 let name = signal.name.as_str().to_string();
                 if !seen_signals.insert(name.clone()) {
-                    return Err(RegistrationError::DuplicateDeclaration {
+                    return Err(Refusal::DuplicateDeclaration {
                         world: id.clone(),
                         kind: DeclarationKind::Signal,
                         name,
@@ -261,7 +261,7 @@ impl RuntimeBuilder {
                     mechanics::demand::AuthorizationDemand::decode_canonical(&signal.demand)
                         .is_ok();
                 if !bound_ok || !demand_ok {
-                    return Err(RegistrationError::InvalidDeclaration {
+                    return Err(Refusal::InvalidDeclaration {
                         world: id.clone(),
                         kind: DeclarationKind::Signal,
                         name,
@@ -270,7 +270,7 @@ impl RuntimeBuilder {
             }
 
             if worlds.insert(id.clone(), Arc::new(hosted)).is_some() {
-                return Err(RegistrationError::DuplicateWorld(id));
+                return Err(Refusal::DuplicateWorld(id));
             }
         }
         Ok(Registry {
@@ -360,7 +360,7 @@ mod tests {
             .unwrap_err();
         assert_eq!(
             err,
-            RegistrationError::DuplicateWorld(WorldId::parse("com.example.issues").unwrap())
+            Refusal::DuplicateWorld(WorldId::parse("com.example.issues").unwrap())
         );
     }
 
@@ -371,10 +371,7 @@ mod tests {
             vec![schema("issue", 1, vec![]), schema("issue", 1, vec![])],
         );
         let err = RuntimeBuilder::new().register(world).build().unwrap_err();
-        assert!(matches!(
-            err,
-            RegistrationError::DuplicateSchemaVersion { .. }
-        ));
+        assert!(matches!(err, Refusal::DuplicateSchemaVersion { .. }));
     }
 
     #[test]
@@ -382,10 +379,7 @@ mod tests {
         // A v1 schema cannot "read" predecessor v1 (not strictly older).
         let world = test_world("com.example.issues", vec![schema("issue", 1, vec![1])]);
         let err = RuntimeBuilder::new().register(world).build().unwrap_err();
-        assert!(matches!(
-            err,
-            RegistrationError::ContradictoryUpgrade { .. }
-        ));
+        assert!(matches!(err, Refusal::ContradictoryUpgrade { .. }));
 
         // A valid upgrade (v2 reads v1) is accepted.
         let world = test_world(

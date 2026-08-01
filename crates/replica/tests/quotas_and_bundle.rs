@@ -22,9 +22,8 @@ use mechanics::ids::SpaceId;
 use replica::frontier::AuthorityFrontier;
 use replica::{
     ActionOutcome, AuthorityBatchReceipt, AuthorityIncorporator, BodyBinding, BodyId, BodyKey,
-    CommitAuthorization, CommitContext, EncodingId, Op, QuotaConfig, Replica, ReplicaCommitError,
-    SchemaId, SeedSigner, StagedContactMaterial, StaticBodyKeys, SupportedSchemas, WorldId,
-    MUTATION_COLLABORATIVE,
+    CommitAuthorization, CommitContext, EncodingId, Op, QuotaConfig, Replica, SchemaId, SeedSigner,
+    StagedContactMaterial, StaticBodyKeys, SupportedSchemas, WorldId, MUTATION_COLLABORATIVE,
 };
 
 const WRITER_SEED: [u8; 32] = [71u8; 32];
@@ -123,7 +122,7 @@ fn commit_blob(
     request: [u8; 16],
     key: &BodyKey,
     bytes: &[u8],
-) -> Result<ActionOutcome, ReplicaCommitError> {
+) -> Result<ActionOutcome, replica::commit::Failure> {
     let (space, signer) = ctx_parts();
     let ctx = CommitContext {
         space: &space,
@@ -207,7 +206,7 @@ fn commit_note(
     request: [u8; 16],
     key: &BodyKey,
     text: &str,
-) -> Result<ActionOutcome, ReplicaCommitError> {
+) -> Result<ActionOutcome, replica::commit::Failure> {
     let (space, signer) = ctx_parts();
     let ctx = CommitContext {
         space: &space,
@@ -324,7 +323,7 @@ fn adversarial_stagings_are_rejected_whole() {
         .push((tx_id, body(9), stray.bodies[0].2.clone()));
     assert!(matches!(
         b.validate_contact(&stray, &WriterAuthorized, &mut incorporator),
-        Err(ReplicaCommitError::Illegitimate(_))
+        Err(replica::commit::Failure::Illegitimate(_))
     ));
 
     // An omitted manifest index node.
@@ -332,7 +331,7 @@ fn adversarial_stagings_are_rejected_whole() {
     omitted.manifest_nodes.clear();
     assert!(matches!(
         b.validate_contact(&omitted, &WriterAuthorized, &mut incorporator),
-        Err(ReplicaCommitError::Illegitimate(_))
+        Err(replica::commit::Failure::Illegitimate(_))
     ));
 
     // A tampered payload byte.
@@ -341,7 +340,7 @@ fn adversarial_stagings_are_rejected_whole() {
     tampered.bodies[0].2[last] ^= 0xff;
     assert!(matches!(
         b.validate_contact(&tampered, &WriterAuthorized, &mut incorporator),
-        Err(ReplicaCommitError::Illegitimate(_))
+        Err(replica::commit::Failure::Illegitimate(_))
     ));
 
     // An authority view that refuses the signer rejects root and transactions.
@@ -353,7 +352,7 @@ fn adversarial_stagings_are_rejected_whole() {
     }
     assert!(matches!(
         b.validate_contact(&staged, &DenyAll, &mut incorporator),
-        Err(ReplicaCommitError::Illegitimate(_))
+        Err(replica::commit::Failure::Illegitimate(_))
     ));
 
     // Nothing reached the engine through any of it.
@@ -394,7 +393,7 @@ fn body_count_quota_has_exact_boundaries() {
     // exact+1 refuses cleanly BEFORE anything applies…
     assert_eq!(
         commit_note(&mut r, [5u8; 16], &body(5), "three").unwrap_err(),
-        ReplicaCommitError::QuotaExceeded
+        replica::commit::Failure::QuotaExceeded
     );
     assert_eq!(r.frontier(), frontier, "no frontier change");
     // …and the handle still works: updating an EXISTING Body is fine.
@@ -437,7 +436,7 @@ fn space_byte_quota_has_exact_boundaries() {
     });
     assert_eq!(
         commit_blob(&mut r, [7u8; 16], &body(6), b"measured").unwrap_err(),
-        ReplicaCommitError::QuotaExceeded
+        replica::commit::Failure::QuotaExceeded
     );
     drop(r);
     let r = Replica::open_journaled(&dir, keys()).unwrap();
@@ -512,7 +511,7 @@ fn unknown_world_retention_subquota_evicts_nothing_and_stages_nothing() {
     assert_eq!(
         b.incorporate(&ctx, tx2, &second_payload, &WriterAuthorized)
             .unwrap_err(),
-        ReplicaCommitError::OpaqueQuotaExceeded
+        replica::commit::Failure::OpaqueQuotaExceeded
     );
     assert_eq!(b.frontier(), frontier);
     assert!(
@@ -570,7 +569,7 @@ fn configured_limits_persist_so_restart_cannot_raise_capacity() {
     assert_eq!(r.quota().max_space_bodies, 1);
     assert_eq!(
         commit_note(&mut r, [11u8; 16], &body(10), "more").unwrap_err(),
-        ReplicaCommitError::QuotaExceeded
+        replica::commit::Failure::QuotaExceeded
     );
     let _ = std::fs::remove_dir_all(&dir);
 }

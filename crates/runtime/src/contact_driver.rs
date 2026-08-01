@@ -671,7 +671,7 @@ async fn initiate(
     let published = ctx
         .core
         .with_replica(|replica| Ok(replica.published_root()))
-        .map_err(|e: replica::ReplicaCommitError| Failure::Transfer(e.to_string()))?;
+        .map_err(|e: replica::commit::Failure| Failure::Transfer(e.to_string()))?;
     let holdings_root = published.map(|r| r.hash).unwrap_or([0u8; 32]);
 
     // The declaration is sent whenever this replica holds anything, and equal
@@ -688,7 +688,7 @@ async fn initiate(
     let held = ctx
         .core
         .with_replica(|replica| Ok(replica.head_commitments()))
-        .map_err(|e: replica::ReplicaCommitError| Failure::Transfer(e.to_string()))?;
+        .map_err(|e: replica::commit::Failure| Failure::Transfer(e.to_string()))?;
     let holdings_bytes = crate::contact::encode_holdings(&held);
     let holdings_count = held.len() as u32;
     let holdings_digest = if held.is_empty() {
@@ -956,7 +956,7 @@ async fn serve_contact(
                 let manifest = replica.export_manifest(&commit_ctx)?;
                 Ok((material, manifest))
             })
-            .map_err(|e: replica::ReplicaCommitError| Failure::Transfer(e.to_string()))?
+            .map_err(|e: replica::commit::Failure| Failure::Transfer(e.to_string()))?
     } else {
         (Vec::new(), (Vec::new(), Vec::new()))
     };

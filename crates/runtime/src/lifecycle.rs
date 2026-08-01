@@ -376,7 +376,7 @@ impl Runtime {
     ) -> Result<Orbit, Failure> {
         let root = self.root()?;
         let verified = coordinates.verify().map_err(|e| match e {
-            crate::coordinates::CoordinatesError::UnsupportedVersion(_) => {
+            crate::coordinates::Invalid::UnsupportedVersion(_) => {
                 Failure::UnsupportedCoordinatesVersion
             }
             other => Failure::Integrity(other.to_string()),
@@ -509,7 +509,7 @@ impl Orbit {
         // `wait` exit after an acknowledged commit loses nothing.
         let mut replica = replica::Replica::open_journaled(self.store.dir(), self.keys.clone())
             .map_err(|e| match e {
-                replica::ReplicaCommitError::Integrity(m) => Failure::Integrity(m),
+                replica::commit::Failure::Integrity(m) => Failure::Integrity(m),
                 other => Failure::Store(other.to_string()),
             })?;
         // Declare the registry's schemas so Convergence can classify remote
@@ -902,7 +902,7 @@ impl Station {
         &self,
         identity: &crate::world::LocalIdentity,
         content: &replica::ContentRef,
-    ) -> Result<crate::content_host::ContentStatus, crate::content_host::ContentHostError> {
+    ) -> Result<crate::content_host::ContentStatus, crate::content_host::Failure> {
         let keys = self.content_keys();
         let allow = self.content_authorization(identity)?;
         self.content
@@ -916,7 +916,7 @@ impl Station {
         content: &replica::ContentRef,
         offset: u64,
         len: usize,
-    ) -> Result<Vec<u8>, crate::content_host::ContentHostError> {
+    ) -> Result<Vec<u8>, crate::content_host::Failure> {
         let keys = self.content_keys();
         let allow = self.content_authorization(identity)?;
         self.content
@@ -933,7 +933,7 @@ impl Station {
         identity: &crate::world::LocalIdentity,
         operation: [u8; 16],
         reader: &mut dyn std::io::Read,
-    ) -> Result<replica::ContentRef, crate::content_host::ContentHostError> {
+    ) -> Result<replica::ContentRef, crate::content_host::Failure> {
         let keys = self.content_keys();
         let allow = self.content_authorization(identity)?;
         let frontier = self.identity_frontier(identity)?;
@@ -951,7 +951,7 @@ impl Station {
         &self,
         identity: &crate::world::LocalIdentity,
         content: &replica::ContentRef,
-    ) -> Result<(), crate::content_host::ContentHostError> {
+    ) -> Result<(), crate::content_host::Failure> {
         let keys = self.content_keys();
         let allow = self.content_authorization(identity)?;
         self.content
@@ -981,11 +981,11 @@ impl Station {
     fn identity_frontier(
         &self,
         identity: &crate::world::LocalIdentity,
-    ) -> Result<replica::frontier::AuthorityFrontier, crate::content_host::ContentHostError> {
+    ) -> Result<replica::frontier::AuthorityFrontier, crate::content_host::Failure> {
         self.authority
             .resolve(identity.device())
             .map(|resolved| resolved.authority_frontier)
-            .ok_or_else(|| crate::content_host::ContentHostError::Denied {
+            .ok_or_else(|| crate::content_host::Failure::Denied {
                 demand: b"space.member".to_vec(),
             })
     }
@@ -1005,7 +1005,7 @@ impl Station {
         identity: &crate::world::LocalIdentity,
     ) -> Result<
         impl Fn(crate::content_host::ContentAction) -> Result<(), Vec<u8>>,
-        crate::content_host::ContentHostError,
+        crate::content_host::Failure,
     > {
         self.identity_frontier(identity)?;
         Ok(|_action| Ok(()))
