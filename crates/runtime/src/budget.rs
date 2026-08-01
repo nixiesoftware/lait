@@ -1,3 +1,8 @@
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    reason = "budget counters are clamped to declared protocol ceilings"
+)]
 //! Paces, gates, and the deadlines the delivery planes run against.
 //!
 //! Deliberately not in [`crate::plane::bounds`], whose contract is one thing:

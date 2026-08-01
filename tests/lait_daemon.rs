@@ -46,12 +46,12 @@ fn pid(path: &Path) -> u32 {
         .unwrap()
 }
 
-fn coordinates(output: std::process::Output) -> runtime::VerifiedCoordinates {
+fn coordinates(output: std::process::Output) -> runtime::coordinates::VerifiedCoordinates {
     assert!(output.status.success(), "invite failed: {output:?}");
     let value: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("invite emits JSON");
     let ticket = value["text"].as_str().expect("invite text DTO");
-    runtime::SignedCoordinates::parse_link(ticket)
+    runtime::coordinates::SignedCoordinates::parse_link(ticket)
         .expect("parse invite")
         .verify()
         .expect("verify invite")

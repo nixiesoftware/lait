@@ -1,3 +1,22 @@
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects,
+        clippy::unreachable,
+        clippy::unimplemented,
+        clippy::unchecked_time_subtraction,
+        clippy::todo,
+        clippy::string_slice,
+        clippy::panic_in_result_fn,
+        clippy::panic,
+        clippy::exit,
+        clippy::as_conversions
+    )
+)]
+
 //! The journaled durable store — the semantics-free on-disk commit protocol.
 //!
 //! This crate knows only immutable content-addressed objects, object
@@ -11,7 +30,7 @@
 //!
 //! ```text
 //! counter            // the local transaction counter (reserved + fsynced first)
-//! current-manifest   // postcard StoreManifest, atomically replaced
+//! current-manifest   // postcard Manifest, atomically replaced
 //! objects/<hex64>    // immutable content-addressed objects
 //! journal/active     // the active journal record, atomically replaced
 //! ```
@@ -38,7 +57,7 @@
 //! after recovery, when no journal is active.
 //!
 //! **The required set is an index, not a vector.** A manifest used to carry
-//! every required `ObjectRef` inline, so a commit re-encoded and fsynced the
+//! every required `Object` inline, so a commit re-encoded and fsynced the
 //! whole list to change one object — 28.8 MB at 100,000 Bodies, measured in
 //! `benchmarks/commit-cost-baseline.md`. It now carries a root hash into a
 //! canonical radix index (see [`index`]), and a commit rewrites only the paths
@@ -46,10 +65,20 @@
 //! by reachability from the root rather than by being entries in it.
 //!
 //! Every write/fsync/rename boundary carries a named fault-injection point so
-//! the crash matrix is testable; see [`JournaledStore::with_fault_injector`].
+//! the crash matrix is testable; see [`Store::with_fault_injector`].
 
-pub mod cache;
-pub mod index;
+mod index;
+
+#[cfg(test)]
+extern crate self as journal;
+#[cfg(test)]
+mod crash_tests;
+#[cfg(test)]
+mod fault_tests;
+#[cfg(test)]
+mod index_tests;
+#[cfg(test)]
+mod reconciliation_tests;
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
@@ -74,12 +103,11 @@ const MANIFEST_DOMAIN: &[u8] = b"lait/store-manifest/1";
 /// post-switch outcome.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Failure {
-    /// A durable write (open/write/fsync/rename) failed before the
-    /// authoritative manifest switch. The old state is still exposed.
-    Durability(String),
-    /// The store failed integrity validation (a manifest naming absent or
-    /// corrupt objects, a corrupt journal, a missing transaction counter).
-    Integrity(String),
+    Operation {
+        operation: Operation,
+        kind: IoKind,
+    },
+    Integrity(Defect),
     /// The authoritative switch happened but its durability confirmation
     /// failed: the commit may or may not survive power loss. Fail stop and
     /// reopen — recovery resolves the outcome deterministically from the
@@ -87,12 +115,44 @@ pub enum Failure {
     OutcomeUnknown,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Operation {
+    Open,
+    Read,
+    Write,
+    Sync,
+    Rename,
+    Remove,
+    Encode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IoKind {
+    NotFound,
+    PermissionDenied,
+    Interrupted,
+    InvalidData,
+    Other,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Defect {
+    MissingObject,
+    CorruptObject,
+    CorruptManifest,
+    CorruptJournal,
+    MissingCounter,
+    CorruptIndex,
+    UnsupportedFormat,
+    CounterOverflow,
+}
+
 impl std::fmt::Display for Failure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Failure::Durability(m) => write!(f, "durability: {m}"),
-            Failure::Integrity(m) => write!(f, "integrity: {m}"),
-            Failure::OutcomeUnknown => write!(f, "outcome unknown"),
+            Self::Operation { operation, kind } => write!(f, "{operation:?}: {kind:?}"),
+            Self::Integrity(defect) => write!(f, "integrity: {defect:?}"),
+            Self::OutcomeUnknown => write!(f, "outcome unknown"),
         }
     }
 }
@@ -100,7 +160,7 @@ impl std::error::Error for Failure {}
 
 /// One immutable object reference: content address and length.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ObjectRef {
+pub struct Object {
     pub hash: [u8; 32],
     pub len: u64,
 }
@@ -115,14 +175,14 @@ pub const STORE_FORMAT_VERSION: u8 = 2;
 /// roots without nodes name material the commit never wrote, and nodes without
 /// roots are unreachable the moment they land.
 #[derive(Debug, Clone, Copy)]
-pub struct CallerIndex<'a> {
+pub struct Index<'a> {
     /// The roots to record in the manifest. Replaces the previous set whole.
-    pub roots: &'a [index::ChildRef],
+    pub roots: &'a [([u8; 32], u64)],
     /// The nodes this commit produced. Written, never made required.
     pub nodes: &'a [Vec<u8>],
 }
 
-impl CallerIndex<'_> {
+impl Index<'_> {
     /// For a caller that keeps no index of its own.
     pub const NONE: Self = Self {
         roots: &[],
@@ -139,14 +199,14 @@ impl CallerIndex<'_> {
 /// semantics-free journal preserves a Replica's Body catalog without being able
 /// to read it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct StoreManifest {
+pub struct Manifest {
     pub format_version: u8,
     pub sequence: u64,
     /// Root of the index mapping required object hash to object length.
     /// `None` when nothing is required yet.
-    pub required_object_index_root: Option<index::ChildRef>,
+    pub required_object_index_root: Option<([u8; 32], u64)>,
     /// The caller's opaque metadata, as an object rather than inline.
-    pub caller_meta: Option<ObjectRef>,
+    pub caller_meta: Option<Object>,
     /// Index roots the caller owns, kept alive by reachability.
     ///
     /// A caller keeps its own large maps as indexes — the Replica's Body
@@ -157,7 +217,22 @@ pub struct StoreManifest {
     ///
     /// This does not make the journal semantic: it knows these are indexes in
     /// the format it defines, and nothing about what they hold.
-    pub caller_index_roots: Vec<index::ChildRef>,
+    pub caller_index_roots: Vec<([u8; 32], u64)>,
+}
+
+fn child(root: ([u8; 32], u64)) -> index::ChildRef {
+    index::ChildRef {
+        hash: root.0,
+        count: root.1,
+    }
+}
+
+fn coordinate(root: index::ChildRef) -> ([u8; 32], u64) {
+    (root.hash, root.count)
+}
+
+fn required_root(manifest: &Manifest) -> Option<index::ChildRef> {
+    manifest.required_object_index_root.map(child)
 }
 
 /// The journal phases. Each replaces `journal/active` atomically.
@@ -165,12 +240,12 @@ pub struct StoreManifest {
 enum JournalRecord {
     Prepared {
         sequence: u64,
-        new_objects: Vec<ObjectRef>,
+        new_objects: Vec<Object>,
         new_manifest_hash: [u8; 32],
     },
     MaterialReady {
         sequence: u64,
-        new_objects: Vec<ObjectRef>,
+        new_objects: Vec<Object>,
         new_manifest_hash: [u8; 32],
     },
     Committed {
@@ -179,11 +254,10 @@ enum JournalRecord {
     },
 }
 
-/// A test seam: called with a named crash point *before* the named operation
-/// executes; returning `true` makes the commit fail there, modelling a crash.
-pub type FaultInjector = Box<dyn Fn(&str) -> bool + Send>;
+type FaultInjector = Box<dyn Fn(&str) -> bool + Send>;
 
 /// The named fault points, in commit order (each fires before its operation).
+#[cfg(any(test, feature = "fault-injection"))]
 pub const FAULT_POINTS: [&str; 9] = [
     "counter",
     "journal-prepared",
@@ -197,9 +271,9 @@ pub const FAULT_POINTS: [&str; 9] = [
 ];
 
 /// The journaled store engine.
-pub struct JournaledStore {
+pub struct Store {
     root: PathBuf,
-    manifest: Option<StoreManifest>,
+    manifest: Option<Manifest>,
     injector: Option<FaultInjector>,
     commits_since_sweep: u32,
 }
@@ -213,9 +287,9 @@ pub struct JournaledStore {
 const COMMITS_PER_SWEEP: u32 = 256;
 
 // The injector closure is not `Debug`; show the root + current manifest.
-impl std::fmt::Debug for JournaledStore {
+impl std::fmt::Debug for Store {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("JournaledStore")
+        f.debug_struct("Store")
             .field("root", &self.root)
             .field("manifest", &self.manifest)
             .finish_non_exhaustive()
@@ -230,8 +304,9 @@ fn object_hash(bytes: &[u8]) -> [u8; 32] {
 }
 
 /// The content address the store gives a byte object — public so a caller can
-/// predict the [`ObjectRef`] of material it hands to [`JournaledStore::commit`]
+/// predict the [`Object`] of material it hands to [`Store::commit`]
 /// (e.g. a caller's meta index referencing the objects of the same commit).
+#[must_use]
 pub fn object_content_hash(bytes: &[u8]) -> [u8; 32] {
     object_hash(bytes)
 }
@@ -274,8 +349,16 @@ impl index::NodeSource for ObjectNodes<'_> {
     }
 }
 
-pub(crate) fn io_err(what: &str, e: std::io::Error) -> Failure {
-    Failure::Durability(format!("{what}: {e}"))
+pub(crate) fn io_err(operation: Operation, error: std::io::Error) -> Failure {
+    tracing::warn!(%error, ?operation, "journal operation failed");
+    let kind = match error.kind() {
+        std::io::ErrorKind::NotFound => IoKind::NotFound,
+        std::io::ErrorKind::PermissionDenied => IoKind::PermissionDenied,
+        std::io::ErrorKind::Interrupted => IoKind::Interrupted,
+        std::io::ErrorKind::InvalidData => IoKind::InvalidData,
+        _ => IoKind::Other,
+    };
+    Failure::Operation { operation, kind }
 }
 
 pub(crate) fn write_sync(path: &Path, bytes: &[u8]) -> Result<(), Failure> {
@@ -284,9 +367,10 @@ pub(crate) fn write_sync(path: &Path, bytes: &[u8]) -> Result<(), Failure> {
         .write(true)
         .truncate(true)
         .open(path)
-        .map_err(|e| io_err("open for write", e))?;
-    f.write_all(bytes).map_err(|e| io_err("write", e))?;
-    f.sync_all().map_err(|e| io_err("fsync", e))?;
+        .map_err(|e| io_err(Operation::Open, e))?;
+    f.write_all(bytes)
+        .map_err(|e| io_err(Operation::Write, e))?;
+    f.sync_all().map_err(|e| io_err(Operation::Sync, e))?;
     Ok(())
 }
 
@@ -304,7 +388,13 @@ pub(crate) fn atomic_replace(tmp: &Path, dst: &Path) -> Result<(), Failure> {
             }
         }
     }
-    Err(io_err("rename", last.expect("at least one attempt")))
+    match last {
+        Some(error) => Err(io_err(Operation::Rename, error)),
+        None => Err(Failure::Operation {
+            operation: Operation::Rename,
+            kind: IoKind::Other,
+        }),
+    }
 }
 
 /// Directory durability after a rename/create. On unix this is a real fsync of
@@ -318,7 +408,7 @@ pub(crate) fn atomic_replace(tmp: &Path, dst: &Path) -> Result<(), Failure> {
 pub(crate) fn sync_dir(dir: &Path) -> Result<(), Failure> {
     File::open(dir)
         .and_then(|d| d.sync_all())
-        .map_err(|e| io_err("fsync dir", e))
+        .map_err(|e| io_err(Operation::Sync, e))
 }
 
 #[cfg(windows)]
@@ -340,18 +430,18 @@ fn sync_dir(dir: &Path) -> Result<(), Failure> {
         // No directory handle at all: sync is unsupported here; NTFS metadata
         // journaling is the stated contract (documented, not silent).
         Err(_) => Ok(()),
-        Ok(d) => d.sync_all().map_err(|e| io_err("flush dir", e)),
+        Ok(d) => d.sync_all().map_err(|e| io_err(Operation::Sync, e)),
     }
 }
 
-impl JournaledStore {
+impl Store {
     /// Open a store root, running crash recovery, and return the store plus its
     /// current manifest (`None` for a fresh store). The exposed state is always
     /// the complete old or complete new one.
     pub fn open(root: impl Into<PathBuf>) -> Result<Self, Failure> {
         let root = root.into();
-        std::fs::create_dir_all(root.join(OBJECTS_DIR)).map_err(|e| io_err("objects dir", e))?;
-        std::fs::create_dir_all(root.join(JOURNAL_DIR)).map_err(|e| io_err("journal dir", e))?;
+        std::fs::create_dir_all(root.join(OBJECTS_DIR)).map_err(|e| io_err(Operation::Open, e))?;
+        std::fs::create_dir_all(root.join(JOURNAL_DIR)).map_err(|e| io_err(Operation::Open, e))?;
         let mut store = Self {
             root,
             manifest: None,
@@ -363,26 +453,24 @@ impl JournaledStore {
     }
 
     /// Attach a fault injector (test seam; see [`FAULT_POINTS`]).
-    pub fn with_fault_injector(mut self, injector: FaultInjector) -> Self {
+    #[must_use]
+    #[cfg(any(test, feature = "fault-injection"))]
+    pub fn with_fault_injector(mut self, injector: Box<dyn Fn(&str) -> bool + Send>) -> Self {
         self.injector = Some(injector);
         self
     }
 
     /// Attach a fault injector by reference (test seam for callers embedding
     /// the store; see [`FAULT_POINTS`]).
-    pub fn set_fault_injector(&mut self, injector: FaultInjector) {
+    #[cfg(any(test, feature = "fault-injection"))]
+    pub fn set_fault_injector(&mut self, injector: Box<dyn Fn(&str) -> bool + Send>) {
         self.injector = Some(injector);
     }
 
     /// The current manifest, if any commit has completed.
-    pub fn manifest(&self) -> Option<&StoreManifest> {
+    #[must_use]
+    pub const fn manifest(&self) -> Option<&Manifest> {
         self.manifest.as_ref()
-    }
-
-    /// A reader for index nodes held in this store, so a caller maintaining its
-    /// own index (see `caller_index_roots`) can descend it.
-    pub fn nodes(&self) -> impl index::NodeSource + '_ {
-        ObjectNodes { root: &self.root }
     }
 
     /// Every currently required object, in key order.
@@ -390,21 +478,21 @@ impl JournaledStore {
     /// O(total required) by construction, so it is a diagnostic and a test
     /// affordance rather than something a commit path should call. Ask
     /// [`Self::is_required`] about one object instead.
-    pub fn required_objects(&self) -> Result<Vec<ObjectRef>, Failure> {
+    pub fn required_objects(&self) -> Result<Vec<Object>, Failure> {
         let Some(manifest) = &self.manifest else {
             return Ok(Vec::new());
         };
         let source = ObjectNodes { root: &self.root };
         let mut out = Vec::new();
-        index::stream(&source, manifest.required_object_index_root, &mut |entry| {
+        index::stream(&source, required_root(manifest), &mut |entry| {
             if let Some(len) = decode_len(&entry.value) {
-                out.push(ObjectRef {
+                out.push(Object {
                     hash: entry.key,
                     len,
                 });
             }
         })
-        .map_err(|e| Failure::Integrity(format!("required index: {e}")))?;
+        .map_err(|_| Failure::Integrity(Defect::CorruptIndex))?;
         Ok(out)
     }
 
@@ -414,9 +502,9 @@ impl JournaledStore {
             return Ok(false);
         };
         let source = ObjectNodes { root: &self.root };
-        index::lookup(&source, manifest.required_object_index_root, hash)
+        index::lookup(&source, required_root(manifest), hash)
             .map(|v| v.is_some())
-            .map_err(|e| Failure::Integrity(format!("required index: {e}")))
+            .map_err(|_| Failure::Integrity(Defect::CorruptIndex))
     }
 
     /// The caller's opaque metadata from the current commit point. It lives as
@@ -430,16 +518,25 @@ impl JournaledStore {
     }
 
     /// Read an immutable object, verifying its content address.
-    pub fn read_object(&self, obj: &ObjectRef) -> Result<Vec<u8>, Failure> {
-        let path = self.object_path(&obj.hash);
-        let bytes = std::fs::read(&path).map_err(|e| {
-            Failure::Integrity(format!("object {} unreadable: {e}", hex(&obj.hash)))
+    pub fn read_object(&self, obj: &Object) -> Result<Vec<u8>, Failure> {
+        let bytes = self.read(&obj.hash)?;
+        let length =
+            u64::try_from(bytes.len()).map_err(|_| Failure::Integrity(Defect::CorruptObject))?;
+        if length != obj.len {
+            return Err(Failure::Integrity(Defect::CorruptObject));
+        }
+        Ok(bytes)
+    }
+
+    /// Read one immutable object by its content address.
+    pub fn read(&self, hash: &[u8; 32]) -> Result<Vec<u8>, Failure> {
+        let path = self.object_path(hash);
+        let bytes = std::fs::read(&path).map_err(|error| {
+            tracing::warn!(%error, object = %hex(hash), "journal object is absent");
+            Failure::Integrity(Defect::MissingObject)
         })?;
-        if bytes.len() as u64 != obj.len || object_hash(&bytes) != obj.hash {
-            return Err(Failure::Integrity(format!(
-                "object {} fails its content address",
-                hex(&obj.hash)
-            )));
+        if object_hash(&bytes) != *hash {
+            return Err(Failure::Integrity(Defect::CorruptObject));
         }
         Ok(bytes)
     }
@@ -455,15 +552,21 @@ impl JournaledStore {
     fn point(&self, name: &str) -> Result<(), Failure> {
         if let Some(injector) = &self.injector {
             if injector(name) {
-                return Err(Failure::Durability(format!("injected crash at {name}")));
+                tracing::warn!(point = name, "journal fault injected");
+                return Err(Failure::Operation {
+                    operation: Operation::Write,
+                    kind: IoKind::Interrupted,
+                });
             }
         }
         Ok(())
     }
 
     fn write_journal(&self, record: &JournalRecord) -> Result<(), Failure> {
-        let bytes = postcard::to_stdvec(record)
-            .map_err(|e| Failure::Durability(format!("encode journal: {e}")))?;
+        let bytes = postcard::to_stdvec(record).map_err(|_| Failure::Operation {
+            operation: Operation::Encode,
+            kind: IoKind::InvalidData,
+        })?;
         let dir = self.root.join(JOURNAL_DIR);
         let tmp = dir.join("active.tmp");
         write_sync(&tmp, &bytes)?;
@@ -478,9 +581,9 @@ impl JournaledStore {
                 .map(Some)
                 // An unreadable journal record is corruption we do not repair
                 // heuristically.
-                .map_err(|e| Failure::Integrity(format!("journal corrupt: {e}"))),
+                .map_err(|_| Failure::Integrity(Defect::CorruptJournal)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(io_err("read journal", e)),
+            Err(e) => Err(io_err(Operation::Read, e)),
         }
     }
 
@@ -488,28 +591,25 @@ impl JournaledStore {
         match std::fs::remove_file(self.journal_path()) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(io_err("remove journal", e)),
+            Err(e) => return Err(io_err(Operation::Remove, e)),
         }
         // Cleanup only: a lost removal is re-resolved by recovery.
         let _ = sync_dir(&self.root.join(JOURNAL_DIR));
         Ok(())
     }
 
-    fn read_manifest_file(&self) -> Result<Option<(StoreManifest, [u8; 32])>, Failure> {
+    fn read_manifest_file(&self) -> Result<Option<(Manifest, [u8; 32])>, Failure> {
         match std::fs::read(self.root.join(MANIFEST_FILE)) {
             Ok(bytes) => {
-                let manifest: StoreManifest = postcard::from_bytes(&bytes)
-                    .map_err(|e| Failure::Integrity(format!("manifest corrupt: {e}")))?;
+                let manifest: Manifest = postcard::from_bytes(&bytes)
+                    .map_err(|_| Failure::Integrity(Defect::CorruptManifest))?;
                 if manifest.format_version != STORE_FORMAT_VERSION {
-                    return Err(Failure::Integrity(format!(
-                        "unsupported store manifest version {} — this build                          reads only version {STORE_FORMAT_VERSION}, and an                          older store is refused rather than upgraded",
-                        manifest.format_version
-                    )));
+                    return Err(Failure::Integrity(Defect::UnsupportedFormat));
                 }
                 Ok(Some((manifest, manifest_hash(&bytes))))
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(io_err("read manifest", e)),
+            Err(e) => Err(io_err(Operation::Read, e)),
         }
     }
 
@@ -518,20 +618,18 @@ impl JournaledStore {
             Ok(mut f) => {
                 let mut buf = [0u8; 8];
                 f.read_exact(&mut buf)
-                    .map_err(|_| Failure::Integrity("transaction counter truncated".into()))?;
+                    .map_err(|_| Failure::Integrity(Defect::MissingCounter))?;
                 Ok(u64::from_le_bytes(buf))
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 // A fresh store has no counter — but a store with a manifest
                 // and no counter could reuse sequences: fail closed.
                 if self.root.join(MANIFEST_FILE).exists() {
-                    return Err(Failure::Integrity(
-                        "transaction counter missing from a committed store".into(),
-                    ));
+                    return Err(Failure::Integrity(Defect::MissingCounter));
                 }
                 Ok(0)
             }
-            Err(e) => Err(io_err("read counter", e)),
+            Err(e) => Err(io_err(Operation::Read, e)),
         }
     }
 
@@ -539,7 +637,7 @@ impl JournaledStore {
         let next = self
             .read_counter()?
             .checked_add(1)
-            .ok_or_else(|| Failure::Integrity("transaction counter overflow".into()))?;
+            .ok_or(Failure::Integrity(Defect::CounterOverflow))?;
         let tmp = self.root.join(format!("{COUNTER_FILE}.tmp"));
         write_sync(&tmp, &next.to_le_bytes())?;
         atomic_replace(&tmp, &self.root.join(COUNTER_FILE))?;
@@ -599,45 +697,41 @@ impl JournaledStore {
         // that true.
         if let Some((manifest, _)) = self.read_manifest_file()? {
             let source = ObjectNodes { root: &self.root };
-            index::validate(&source, manifest.required_object_index_root)
-                .map_err(|e| Failure::Integrity(format!("required index: {e}")))?;
+            index::validate(&source, required_root(&manifest))
+                .map_err(|_| Failure::Integrity(Defect::CorruptIndex))?;
             for caller_root in &manifest.caller_index_roots {
-                index::validate(&source, Some(*caller_root))
-                    .map_err(|e| Failure::Integrity(format!("caller index: {e}")))?;
+                index::validate(&source, Some(child(*caller_root)))
+                    .map_err(|_| Failure::Integrity(Defect::CorruptIndex))?;
             }
-            let mut bad: Option<String> = None;
-            index::stream(&source, manifest.required_object_index_root, &mut |entry| {
+            let mut bad: Option<Defect> = None;
+            index::stream(&source, required_root(&manifest), &mut |entry| {
                 if bad.is_some() {
                     return;
                 }
                 let Some(len) = decode_len(&entry.value) else {
-                    bad = Some(format!("required entry {} has no length", hex(&entry.key)));
+                    bad = Some(Defect::CorruptIndex);
                     return;
                 };
                 match std::fs::read(self.root.join(OBJECTS_DIR).join(hex(&entry.key))) {
-                    Ok(bytes) if bytes.len() as u64 == len && object_hash(&bytes) == entry.key => {}
+                    Ok(bytes)
+                        if u64::try_from(bytes.len()).ok() == Some(len)
+                            && object_hash(&bytes) == entry.key => {}
                     Ok(_) => {
-                        bad = Some(format!(
-                            "object {} fails its content address",
-                            hex(&entry.key)
-                        ));
+                        bad = Some(Defect::CorruptObject);
                     }
-                    Err(_) => bad = Some(format!("object {} is absent", hex(&entry.key))),
+                    Err(_) => bad = Some(Defect::MissingObject),
                 }
             })
-            .map_err(|e| Failure::Integrity(format!("required index: {e}")))?;
-            if let Some(reason) = bad {
-                return Err(Failure::Integrity(reason));
+            .map_err(|_| Failure::Integrity(Defect::CorruptIndex))?;
+            if let Some(defect) = bad {
+                return Err(Failure::Integrity(defect));
             }
             if let Some(meta) = &manifest.caller_meta {
                 self.read_object(meta)?;
             }
             let counter = self.read_counter()?;
             if counter < manifest.sequence {
-                return Err(Failure::Integrity(
-                    "transaction counter behind the committed manifest —                      sequence reuse is forbidden"
-                        .into(),
-                ));
+                return Err(Failure::Integrity(Defect::MissingCounter));
             }
             self.manifest = Some(manifest);
         }
@@ -678,13 +772,13 @@ impl JournaledStore {
             return Ok(());
         };
         let source = ObjectNodes { root: &self.root };
-        let root = manifest.required_object_index_root;
-        let mut spine = index::spine(&source, root)
-            .map_err(|e| Failure::Integrity(format!("required index: {e}")))?;
+        let root = required_root(&manifest);
+        let mut spine =
+            index::spine(&source, root).map_err(|_| Failure::Integrity(Defect::CorruptIndex))?;
         for caller_root in &manifest.caller_index_roots {
             spine.extend(
-                index::spine(&source, Some(*caller_root))
-                    .map_err(|e| Failure::Integrity(format!("caller index: {e}")))?,
+                index::spine(&source, Some(child(*caller_root)))
+                    .map_err(|_| Failure::Integrity(Defect::CorruptIndex))?,
             );
         }
 
@@ -705,7 +799,7 @@ impl JournaledStore {
                 continue;
             }
             let required = index::lookup(&source, root, &hash)
-                .map_err(|e| Failure::Integrity(format!("required index: {e}")))?;
+                .map_err(|_| Failure::Integrity(Defect::CorruptIndex))?;
             if required.is_none() {
                 let _ = std::fs::remove_file(entry.path());
             }
@@ -732,7 +826,7 @@ impl JournaledStore {
     pub fn commit_required_set(
         &mut self,
         added: &[Vec<u8>],
-        required: &[ObjectRef],
+        required: &[Object],
         meta: Vec<u8>,
     ) -> Result<u64, Failure> {
         // A named requirement must actually exist, or a "successful" commit
@@ -754,12 +848,12 @@ impl JournaledStore {
         let mut removed = Vec::new();
         if let Some(manifest) = &self.manifest {
             let source = ObjectNodes { root: &self.root };
-            index::stream(&source, manifest.required_object_index_root, &mut |entry| {
+            index::stream(&source, required_root(manifest), &mut |entry| {
                 if !desired.contains(&entry.key) {
                     removed.push(entry.key);
                 }
             })
-            .map_err(|e| Failure::Integrity(format!("required index: {e}")))?;
+            .map_err(|_| Failure::Integrity(Defect::CorruptIndex))?;
         }
         // A caller that keeps its own index cannot use this door: the whole-set
         // diff above would drop every caller root it did not name, and this
@@ -770,7 +864,7 @@ impl JournaledStore {
                 .is_none_or(|m| m.caller_index_roots.is_empty()),
             "commit_required_set would clear the caller index roots it cannot see"
         );
-        self.commit(added, &removed, CallerIndex::NONE, meta)
+        self.commit(added, &removed, Index::NONE, meta)
     }
 
     /// Execute one journaled commit.
@@ -809,7 +903,7 @@ impl JournaledStore {
         &mut self,
         added: &[Vec<u8>],
         removed: &[[u8; 32]],
-        caller_index: CallerIndex<'_>,
+        caller_index: Index<'_>,
         meta: Vec<u8>,
     ) -> Result<u64, Failure> {
         let caller_index_roots = caller_index.roots;
@@ -817,13 +911,18 @@ impl JournaledStore {
         self.point("counter")?;
         let sequence = self.reserve_sequence()?;
 
-        let added_refs: Vec<ObjectRef> = added
+        let added_refs: Vec<Object> = added
             .iter()
-            .map(|bytes| ObjectRef {
-                hash: object_hash(bytes),
-                len: bytes.len() as u64,
+            .map(|bytes| {
+                Ok(Object {
+                    hash: object_hash(bytes),
+                    len: u64::try_from(bytes.len()).map_err(|_| Failure::Operation {
+                        operation: Operation::Encode,
+                        kind: IoKind::InvalidData,
+                    })?,
+                })
             })
-            .collect();
+            .collect::<Result<_, Failure>>()?;
 
         // Only nodes already on disk are read: `index::apply` decides whether a
         // subtree merges before it descends, so it never needs a node written
@@ -852,23 +951,31 @@ impl JournaledStore {
             });
         }
 
-        let meta_ref = ObjectRef {
+        let meta_ref = Object {
             hash: object_hash(&meta),
-            len: meta.len() as u64,
+            len: u64::try_from(meta.len()).map_err(|_| Failure::Operation {
+                operation: Operation::Encode,
+                kind: IoKind::InvalidData,
+            })?,
         };
 
-        let prior_root = self
-            .manifest
-            .as_ref()
-            .and_then(|m| m.required_object_index_root);
+        let prior_root = self.manifest.as_ref().and_then(required_root);
         let mut sink = index::NodeSink::default();
         let new_root = index::apply(&source, prior_root, changes, &mut sink)
-            .map_err(|e| Failure::Integrity(format!("required index: {e}")))?;
+            .map_err(|_| Failure::Integrity(Defect::CorruptIndex))?;
 
         // Everything this commit must durably write: the caller's objects, the
         // metadata object, and the index nodes the update produced.
-        let mut write_set: Vec<Vec<u8>> =
-            Vec::with_capacity(added.len() + sink.written.len() + caller_index.nodes.len() + 1);
+        let write_capacity = added
+            .len()
+            .checked_add(sink.written.len())
+            .and_then(|total| total.checked_add(caller_index.nodes.len()))
+            .and_then(|total| total.checked_add(1))
+            .ok_or(Failure::Operation {
+                operation: Operation::Encode,
+                kind: IoKind::InvalidData,
+            })?;
+        let mut write_set: Vec<Vec<u8>> = Vec::with_capacity(write_capacity);
         write_set.extend_from_slice(added);
         write_set.push(meta);
         write_set.extend(sink.written);
@@ -876,23 +983,30 @@ impl JournaledStore {
         let mut seen = std::collections::BTreeSet::new();
         write_set.retain(|bytes| seen.insert(object_hash(bytes)));
 
-        let new_refs: Vec<ObjectRef> = write_set
+        let new_refs: Vec<Object> = write_set
             .iter()
-            .map(|bytes| ObjectRef {
-                hash: object_hash(bytes),
-                len: bytes.len() as u64,
+            .map(|bytes| {
+                Ok(Object {
+                    hash: object_hash(bytes),
+                    len: u64::try_from(bytes.len()).map_err(|_| Failure::Operation {
+                        operation: Operation::Encode,
+                        kind: IoKind::InvalidData,
+                    })?,
+                })
             })
-            .collect();
+            .collect::<Result<_, Failure>>()?;
 
-        let manifest = StoreManifest {
+        let manifest = Manifest {
             format_version: STORE_FORMAT_VERSION,
             sequence,
-            required_object_index_root: new_root,
+            required_object_index_root: new_root.map(coordinate),
             caller_meta: Some(meta_ref),
             caller_index_roots: caller_index_roots.to_vec(),
         };
-        let manifest_bytes = postcard::to_stdvec(&manifest)
-            .map_err(|e| Failure::Durability(format!("encode manifest: {e}")))?;
+        let manifest_bytes = postcard::to_stdvec(&manifest).map_err(|_| Failure::Operation {
+            operation: Operation::Encode,
+            kind: IoKind::InvalidData,
+        })?;
         let new_manifest_hash = manifest_hash(&manifest_bytes);
         let new_objects: &[Vec<u8>] = &write_set;
 
@@ -967,7 +1081,7 @@ impl JournaledStore {
         //    Amortised rather than per-commit because a sweep walks the object
         //    directory once. A caller with an idle beat should pre-empt this by
         //    calling [`Self::collect_unreachable`] when nothing is waiting.
-        self.commits_since_sweep += 1;
+        self.commits_since_sweep = self.commits_since_sweep.saturating_add(1);
         if self.commits_since_sweep >= COMMITS_PER_SWEEP {
             self.commits_since_sweep = 0;
             let _ = self.sweep();

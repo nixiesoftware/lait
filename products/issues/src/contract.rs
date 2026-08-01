@@ -1,3 +1,9 @@
+#![allow(
+    clippy::expect_used,
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    reason = "the bundled contract is assembled from compile-time validated identifiers and bounded canonical DTOs"
+)]
 //! The product World contract (C4.2) — the frozen Rust mirror of
 //! `docs/plans/04-product-world-contract.md`.
 //!
@@ -6,7 +12,7 @@
 //! Intents, queries, and effects are canonical JSON (the product's Layer-B
 //! convention). Membership authority is mechanics, never a product Body.
 
-use replica::ids::{BodyId, BodyKey, EncodingId, SchemaId, WorldId};
+use replica::body::{BodyId, BodyKey, EncodingId, SchemaId, WorldId};
 use serde::{Deserialize, Serialize};
 
 /// The product World id.
@@ -79,7 +85,7 @@ pub fn world_id() -> WorldId {
 // query; Mechanics evaluates it at the pinned authority frontier. These are
 // the frozen constructors from plan 04's routing table.
 
-use mechanics::demand::{AuthorizationDemand, PolicyCapability, Resource};
+use mechanics::authorization::{AuthorizationDemand, PolicyCapability, Resource};
 
 /// The Space-level resource of the Issues World.
 fn space_resource() -> Resource {
@@ -1221,7 +1227,7 @@ pub struct StoredAnchor {
     /// [`crate::views::IssueState::anchorable_text`], which is the list of
     /// paths this build will anchor into and the reason there is a list.
     pub field: String,
-    /// The span's start, a hex-encoded [`replica::Anchor`].
+    /// The span's start, a hex-encoded [`fabric::Anchor`].
     ///
     /// Hex rather than the raw bytes because the record is JSON and
     /// `serde_json` writes a `Vec<u8>` as a decimal array — about four bytes of

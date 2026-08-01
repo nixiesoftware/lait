@@ -1,3 +1,7 @@
+#![allow(
+    clippy::arithmetic_side_effects,
+    reason = "driver retry and task counters are bounded by lifecycle policy"
+)]
 //! The scaffolding both delivery planes run on: accept, judge, serve, stop.
 //!
 //! Parameterised rather than duplicated, because the parts that are easy to get

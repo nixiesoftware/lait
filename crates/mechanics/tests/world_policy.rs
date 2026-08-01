@@ -11,14 +11,14 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use mechanics::acl::{self, AclAction, AclOp, Standing};
 use mechanics::actor;
-use mechanics::demand::{AuthorizationDemand, PolicyCapability, Resource};
-use mechanics::genesis::Genesis;
-use mechanics::ids::{ActorId, SpaceId, SystemUlidSource};
-use mechanics::ledger::{
-    AuthorityLedger, AuthorizationRequest, Invalid, LedgerEffect, ReceiptExpectations, Refusal,
+use mechanics::authorization::{
+    AuthorizationDemand, AuthorizationRequest, PolicyCapability, ReceiptExpectations, Resource,
 };
+use mechanics::ids::{ActorId, SpaceId, SystemUlidSource};
+use mechanics::membership::{self as acl, AclAction, AclOp, Standing};
+use mechanics::space::Genesis;
+use mechanics::space::{Authority, Effect, Invalid, Refusal};
 
 const WORLD: &str = "com.lait.issues";
 static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -76,7 +76,7 @@ fn project_res(p: &str) -> Resource {
 }
 
 /// A founder-authored ACL op at the ledger's current heads.
-fn founder_op(fx: &Fx, ledger: &AuthorityLedger, action: AclAction) -> LedgerEffect {
+fn founder_op(fx: &Fx, ledger: &Authority, action: AclAction) -> Effect {
     let op = acl::sign_op(
         &seed(1),
         &AclOp {
@@ -88,7 +88,7 @@ fn founder_op(fx: &Fx, ledger: &AuthorityLedger, action: AclAction) -> LedgerEff
         ledger.acl_heads(),
         &fx.genesis.space_id,
     );
-    LedgerEffect::Acl(op)
+    Effect::Acl(op)
 }
 
 fn salt(n: u8) -> [u8; 16] {
@@ -96,11 +96,11 @@ fn salt(n: u8) -> [u8; 16] {
 }
 
 /// A ledger with founder + members incepted and the IssuesWorld impl active.
-fn ledger_with_impl(fx: &Fx, dir: &PathBuf, impl_id: [u8; 32]) -> AuthorityLedger {
-    let mut ledger = AuthorityLedger::create(dir, fx.genesis.clone()).unwrap();
-    let mut effects = vec![LedgerEffect::Actor(fx.founder_incept.clone()).encode()];
+fn ledger_with_impl(fx: &Fx, dir: &PathBuf, impl_id: [u8; 32]) -> Authority {
+    let mut ledger = Authority::create(dir, fx.genesis.clone()).unwrap();
+    let mut effects = vec![Effect::Actor(fx.founder_incept.clone()).encode()];
     for (incept, _) in &fx.others {
-        effects.push(LedgerEffect::Actor(incept.clone()).encode());
+        effects.push(Effect::Actor(incept.clone()).encode());
     }
     ledger.commit_batch(&effects, &[]).unwrap();
     // Activate the implementation (founder is a policy admin by genesis).
@@ -118,12 +118,12 @@ fn ledger_with_impl(fx: &Fx, dir: &PathBuf, impl_id: [u8; 32]) -> AuthorityLedge
 
 fn grant(
     fx: &Fx,
-    ledger: &AuthorityLedger,
+    ledger: &Authority,
     actor: &ActorId,
     c: &PolicyCapability,
     r: &Resource,
     s: u8,
-) -> LedgerEffect {
+) -> Effect {
     let grant_id = acl::capability_grant_id(actor, c, r, &salt(s)).unwrap();
     founder_op(
         fx,
@@ -168,7 +168,7 @@ fn require_all_any_witness_selection_and_historical_evaluation() {
     let impl_id = [7u8; 32];
     let mut ledger = ledger_with_impl(&fx, &dir, impl_id);
     let member = &fx.others[0].1;
-    let member_dev = mechanics::crypto::device_from_seed(&seed(2))
+    let member_dev = mechanics::actor::device_from_seed(&seed(2))
         .key_bytes()
         .unwrap();
     // A grant's subject must be an admitted member.
@@ -296,7 +296,7 @@ fn historical_grant_then_removal_evaluated_at_each_frontier() {
     let impl_id = [7u8; 32];
     let mut ledger = ledger_with_impl(&fx, &dir, impl_id);
     let member = &fx.others[0].1;
-    let member_dev = mechanics::crypto::device_from_seed(&seed(2))
+    let member_dev = mechanics::actor::device_from_seed(&seed(2))
         .key_bytes()
         .unwrap();
     // Admit the member so grants take effect (a grant's subject must be a member).
@@ -323,7 +323,7 @@ fn historical_grant_then_removal_evaluated_at_each_frontier() {
         20,
     );
     let grant_id = match &grant_effect {
-        LedgerEffect::Acl(op) => match postcard::from_bytes::<AclOp>(&op.op).unwrap().action {
+        Effect::Acl(op) => match postcard::from_bytes::<AclOp>(&op.op).unwrap().action {
             AclAction::GrantCapability { grant_id, .. } => grant_id,
             _ => unreachable!(),
         },
@@ -387,7 +387,7 @@ fn implementation_pin_refuses_unapproved_id() {
     let fx = fx(&[]);
     let impl_id = [7u8; 32];
     let mut ledger = ledger_with_impl(&fx, &dir, impl_id);
-    let founder_dev = mechanics::crypto::device_from_seed(&seed(1))
+    let founder_dev = mechanics::actor::device_from_seed(&seed(1))
         .key_bytes()
         .unwrap();
     let frontier = ledger.frontier();
@@ -429,7 +429,7 @@ fn receipt_verifies_and_every_substitution_is_caught() {
     let impl_id = [7u8; 32];
     let mut ledger = ledger_with_impl(&fx, &dir, impl_id);
     let member = &fx.others[0].1;
-    let member_dev = mechanics::crypto::device_from_seed(&seed(2))
+    let member_dev = mechanics::actor::device_from_seed(&seed(2))
         .key_bytes()
         .unwrap();
     ledger
@@ -496,7 +496,7 @@ fn receipt_verifies_and_every_substitution_is_caught() {
         .unwrap();
 
     // Substitute the device: refused.
-    let wrong_dev = mechanics::crypto::device_from_seed(&seed(9))
+    let wrong_dev = mechanics::actor::device_from_seed(&seed(9))
         .key_bytes()
         .unwrap();
     assert!(matches!(
@@ -589,9 +589,9 @@ fn delegation_permits_granting_but_not_meta_capability() {
         &fx.genesis.space_id,
     );
     ledger
-        .commit_batch(&[LedgerEffect::Acl(delegate_grant).encode()], &[])
+        .commit_batch(&[Effect::Acl(delegate_grant).encode()], &[])
         .unwrap();
-    let subject_dev = mechanics::crypto::device_from_seed(&seed(3))
+    let subject_dev = mechanics::actor::device_from_seed(&seed(3))
         .key_bytes()
         .unwrap();
     let frontier = ledger.frontier();
@@ -639,7 +639,7 @@ fn delegation_permits_granting_but_not_meta_capability() {
         &fx.genesis.space_id,
     );
     ledger
-        .commit_batch(&[LedgerEffect::Acl(bad).encode()], &[])
+        .commit_batch(&[Effect::Acl(bad).encode()], &[])
         .unwrap();
     // The meta grant was not authorized (the delegate is not a policy admin),
     // so the subject holds no policy-admin capability.

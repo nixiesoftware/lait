@@ -11,13 +11,13 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use async_trait::async_trait;
+use comms::mem::MemNet;
+use comms::policy::Network;
+use comms::{Transport, TransportFactory};
 use issues_app::IssuesResponse as IssueResponse;
+use lait::control::OrbitAddress;
 use lait::control::{request, ControlRoute, Request, Response};
-use lait::daemon::OrbitAddress;
-use lait::net::Network;
-use lait::orbital::run_space_bridge_with;
-use lait::transport::mem::MemNet;
-use lait::transport::{Transport, TransportFactory};
+use lait::orbital::run_station_process_with;
 
 const FOUNDER_SEED: [u8; 32] = [241u8; 32];
 const MEMBER_SEED: [u8; 32] = [242u8; 32];
@@ -35,7 +35,8 @@ impl TransportFactory for MemFactory {
         _protocols: comms::Protocols<'_>,
     ) -> Result<Arc<dyn Transport>> {
         Ok(Arc::new(
-            self.0.peer(lait::crypto::device_from_seed(identity_seed)),
+            self.0
+                .peer(mechanics::actor::device_from_seed(identity_seed)),
         ))
     }
 }
@@ -182,7 +183,7 @@ fn spawn_daemon(home: PathBuf, seed: [u8; 32], net: MemNet) -> std::thread::Join
     std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async move {
-            if let Err(e) = run_space_bridge_with(home, seed, &MemFactory(net)).await {
+            if let Err(e) = run_station_process_with(home, seed, &MemFactory(net)).await {
                 eprintln!("DAEMON ERR: {e:#}");
             }
         });
@@ -1005,7 +1006,7 @@ fn a_follower_hears_about_an_issue_they_are_not_assigned() {
     lait::orbital::enter_space(&member_home, &MEMBER_SEED, &invite).unwrap();
     let member_handle = spawn_daemon(member_home.clone(), MEMBER_SEED, net.clone());
     wait_online(&client, &member_home);
-    let founder_device = lait::crypto::device_from_seed(&FOUNDER_SEED).to_string();
+    let founder_device = mechanics::actor::device_from_seed(&FOUNDER_SEED).to_string();
     assert!(
         poll_until(Duration::from_secs(25), || {
             req(

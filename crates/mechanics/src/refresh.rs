@@ -1,3 +1,9 @@
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    clippy::indexing_slicing,
+    reason = "the private refresh backend runs only on ceremony-validated holder sets and finite-field values"
+)]
 //! Share refresh and repair, kept as two distinct protocols.
 //!
 //! - **Refresh** ([`refresh`]) replaces every share while keeping the public key
@@ -54,7 +60,7 @@ use curve25519_dalek::edwards::EdwardsPoint;
 use curve25519_dalek::scalar::Scalar;
 use curve25519_dalek::traits::Identity;
 
-use crate::authority::LeafId;
+use crate::authority::Holder;
 use crate::compile::StructurallyValidatedCompiledPolicy;
 use crate::gaccess::KeyShares;
 use crate::gdkg::GroupKey;
@@ -63,14 +69,14 @@ use crate::gdkg::GroupKey;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Failure {
     /// A contribution's commitment vector is not `d` long.
-    WrongDimension { dealer: LeafId },
+    WrongDimension { dealer: Holder },
     /// A contribution's `C_0` is not the identity — it does not share zero, so it
     /// would move the secret. A refresh must not change the key.
-    NonZeroSecret { dealer: LeafId },
+    NonZeroSecret { dealer: Holder },
     /// A dealt delta failed its Feldman check.
-    InconsistentDelta { dealer: LeafId, leaf: LeafId },
+    InconsistentDelta { dealer: Holder, leaf: Holder },
     /// Two contributions claim the same dealer — a replayed zero-sharing.
-    DuplicateDealer { dealer: LeafId },
+    DuplicateDealer { dealer: Holder },
     /// A stored point did not decode.
     BadPoint,
 }
@@ -78,13 +84,13 @@ pub enum Failure {
 /// One contributor's zero-sharing used to re-randomize the shares.
 #[derive(Debug, Clone)]
 pub struct RefreshContribution {
-    dealer: LeafId,
+    dealer: Holder,
     commitments: Vec<EdwardsPoint>,
-    deltas: BTreeMap<LeafId, Scalar>,
+    deltas: BTreeMap<Holder, Scalar>,
 }
 
 impl RefreshContribution {
-    pub fn dealer(&self) -> &LeafId {
+    pub fn dealer(&self) -> &Holder {
         &self.dealer
     }
 }
@@ -95,7 +101,7 @@ fn random_scalar() -> Scalar {
     Scalar::from_bytes_mod_order_wide(&wide)
 }
 
-fn row_of(compiled: &StructurallyValidatedCompiledPolicy, leaf: &LeafId) -> Option<Vec<Scalar>> {
+fn row_of(compiled: &StructurallyValidatedCompiledPolicy, leaf: &Holder) -> Option<Vec<Scalar>> {
     let idx = compiled.leaves().iter().position(|l| l == leaf)?;
     Some(
         compiled.inner().matrix.rows[idx]
@@ -113,7 +119,7 @@ fn decompress(bytes: &[u8; 32]) -> Option<EdwardsPoint> {
 /// `C_0 = identity`), and a delta for every leaf.
 pub fn refresh_contribution(
     compiled: &StructurallyValidatedCompiledPolicy,
-    dealer: LeafId,
+    dealer: Holder,
 ) -> RefreshContribution {
     let cols = compiled.cols();
     let mut rho = vec![Scalar::ZERO];
@@ -136,7 +142,7 @@ pub fn refresh_contribution(
 /// to `leaf` must open to.
 fn delta_point(
     compiled: &StructurallyValidatedCompiledPolicy,
-    leaf: &LeafId,
+    leaf: &Holder,
     commitments: &[EdwardsPoint],
 ) -> Option<EdwardsPoint> {
     let row = row_of(compiled, leaf)?;
@@ -182,7 +188,7 @@ pub fn refresh(
 ) -> Result<GroupKey, Failure> {
     // Contributor identity is a set: a replayed zero-sharing must not be applied
     // twice, which would double its delta and re-randomize past the agreed epoch.
-    let mut seen: BTreeSet<&LeafId> = BTreeSet::new();
+    let mut seen: BTreeSet<&Holder> = BTreeSet::new();
     for c in contributions {
         if !seen.insert(&c.dealer) {
             return Err(Failure::DuplicateDealer {
@@ -237,7 +243,7 @@ pub fn refresh(
 /// One helper's masked contribution toward repairing a lost share.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepairContribution {
-    pub helper: LeafId,
+    pub helper: Holder,
     pub masked: Scalar,
 }
 
@@ -253,8 +259,8 @@ pub struct RepairContribution {
 /// over an authenticated channel; here they are generated together to exercise
 /// the cancellation.
 pub fn masked_contributions(
-    coeffs: &[(LeafId, Scalar)],
-    shares: &BTreeMap<LeafId, Scalar>,
+    coeffs: &[(Holder, Scalar)],
+    shares: &BTreeMap<Holder, Scalar>,
 ) -> Option<Vec<RepairContribution>> {
     let n = coeffs.len();
     // Antisymmetric mask matrix: r[j][k] = -r[k][j], r[j][j] = 0. Indexing is the
@@ -293,21 +299,21 @@ pub fn recover(contributions: &[RepairContribution], lost_commitment: &[u8; 32])
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::authority::PrincipalId;
+    use crate::authority::Principal;
     use crate::compile::compile;
     use crate::expand::{expand, PrincipalCustody, PrincipalDescriptor};
     use crate::gaccess::{commit, sign_qualified, verify, KeyShares, Nonce};
     use crate::gdkg::{aggregate, contribute};
     use crate::policy::OwnershipPolicy;
 
-    fn prin(n: u8) -> PrincipalId {
-        PrincipalId::of_device(&crate::crypto::device_from_seed(&[n; 32]))
+    fn prin(n: u8) -> Principal {
+        Principal::of_device(&crate::crypto::device_from_seed(&[n; 32]))
     }
     fn key(n: u8) -> OwnershipPolicy {
         OwnershipPolicy::Key(prin(n))
     }
-    fn resolver() -> impl Fn(&PrincipalId) -> Option<PrincipalDescriptor> {
-        |p: &PrincipalId| {
+    fn resolver() -> impl Fn(&Principal) -> Option<PrincipalDescriptor> {
+        |p: &Principal| {
             Some(PrincipalDescriptor {
                 id: p.clone(),
                 custody: PrincipalCustody::Direct {
@@ -316,25 +322,25 @@ mod tests {
             })
         }
     }
-    fn compiled(o: OwnershipPolicy) -> (StructurallyValidatedCompiledPolicy, Vec<LeafId>) {
+    fn compiled(o: OwnershipPolicy) -> (StructurallyValidatedCompiledPolicy, Vec<Holder>) {
         let canon = o.canonicalize().unwrap();
         let exp = expand(&canon, &resolver()).unwrap();
         let c = compile(&exp).unwrap();
         let leaves = c.leaves().to_vec();
         (c, leaves)
     }
-    fn dkg(c: &StructurallyValidatedCompiledPolicy, leaves: &[LeafId]) -> GroupKey {
+    fn dkg(c: &StructurallyValidatedCompiledPolicy, leaves: &[Holder]) -> GroupKey {
         let contribs: Vec<_> = leaves.iter().map(|l| contribute(c, l.clone())).collect();
         aggregate(c, &contribs).expect("aggregate")
     }
     fn sign_with<K: KeyShares>(
         c: &StructurallyValidatedCompiledPolicy,
         km: &K,
-        signers: &[LeafId],
+        signers: &[Holder],
         msg: &[u8],
     ) -> bool {
         let witness = c.reconstruct(signers).expect("qualified");
-        let mut nonces: BTreeMap<LeafId, Nonce> = BTreeMap::new();
+        let mut nonces: BTreeMap<Holder, Nonce> = BTreeMap::new();
         let mut commitments = Vec::new();
         for leaf in &witness.leaves {
             let (n, com) = commit();
@@ -463,7 +469,7 @@ mod tests {
             .repair_coefficients(&helpers, &lost)
             .expect("helpers span the lost row");
         // Helper shares (each helper contributes only its own).
-        let shares: BTreeMap<LeafId, Scalar> = helpers
+        let shares: BTreeMap<Holder, Scalar> = helpers
             .iter()
             .map(|l| (l.clone(), group.share(l).unwrap()))
             .collect();
@@ -488,7 +494,7 @@ mod tests {
         let lost = leaves[0].clone();
         let helpers = vec![leaves[1].clone(), leaves[2].clone()];
         let coeffs = c.repair_coefficients(&helpers, &lost).unwrap();
-        let shares: BTreeMap<LeafId, Scalar> = helpers
+        let shares: BTreeMap<Holder, Scalar> = helpers
             .iter()
             .map(|l| (l.clone(), group.share(l).unwrap()))
             .collect();

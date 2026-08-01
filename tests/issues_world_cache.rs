@@ -12,70 +12,70 @@
 use std::collections::BTreeMap;
 
 use lait::world::contract::{self, IssueQuery};
-use runtime::{Context, Query, World};
+use runtime::{world::Context, world::Query, world::World};
 
 const FOUNDER_SEED: [u8; 32] = [151u8; 32];
 
 #[derive(Default)]
 struct StubReader {
-    views: BTreeMap<replica::ids::BodyKey, replica::CollaborativeView>,
-    stamps: BTreeMap<replica::ids::BodyKey, Vec<u8>>,
-    catalog_bodies: Vec<replica::ids::BodyKey>,
+    views: BTreeMap<replica::body::BodyKey, fabric::CollaborativeView>,
+    stamps: BTreeMap<replica::body::BodyKey, Vec<u8>>,
+    catalog_bodies: Vec<replica::body::BodyKey>,
 }
 
-impl runtime::BodyReader for StubReader {
-    fn read_body(&self, _key: &replica::ids::BodyKey) -> Option<Vec<u8>> {
+impl runtime::world::BodyReader for StubReader {
+    fn read_body(&self, _key: &replica::body::BodyKey) -> Option<Vec<u8>> {
         None
     }
     fn read_collaborative_body(
         &self,
-        key: &replica::ids::BodyKey,
-    ) -> Result<replica::CollaborativeView, replica::projection::Failure> {
+        key: &replica::body::BodyKey,
+    ) -> Result<fabric::CollaborativeView, fabric::projection::Failure> {
         self.views
             .get(key)
             .cloned()
-            .ok_or(replica::projection::Failure::NotCollaborative)
+            .ok_or(fabric::projection::Failure::NotCollaborative)
     }
-    fn body_version(&self, _key: &replica::ids::BodyKey) -> Option<replica::Version> {
+    fn body_version(&self, _key: &replica::body::BodyKey) -> Option<fabric::Version> {
         None
     }
     fn anchor_in_body(
         &self,
-        _key: &replica::ids::BodyKey,
+        _key: &replica::body::BodyKey,
         _path: &str,
         _position: u64,
-    ) -> Option<replica::Anchor> {
+    ) -> Option<fabric::Anchor> {
         None
     }
     fn resolve_anchor(
         &self,
-        _key: &replica::ids::BodyKey,
-        _anchor: &replica::Anchor,
-    ) -> replica::AnchorResolution {
-        replica::AnchorResolution::Drifted
+        _key: &replica::body::BodyKey,
+        _anchor: &fabric::Anchor,
+    ) -> fabric::AnchorResolution {
+        fabric::AnchorResolution::Drifted
     }
     fn content_status(
         &self,
-        _content: &replica::ContentRef,
+        _content: &replica::content::ContentRef,
     ) -> Option<runtime::world::ContentStatus> {
         None
     }
 
     fn bodies_with_schema(
         &self,
-        _world: &replica::ids::WorldId,
-        _schema: &replica::ids::SchemaId,
-    ) -> Vec<replica::ids::BodyKey> {
+        _world: &replica::body::WorldId,
+        _schema: &replica::body::SchemaId,
+    ) -> Vec<replica::body::BodyKey> {
         self.catalog_bodies.clone()
     }
-    fn body_stamp(&self, key: &replica::ids::BodyKey) -> Option<Vec<u8>> {
+    fn body_stamp(&self, key: &replica::body::BodyKey) -> Option<Vec<u8>> {
         self.stamps.get(key).cloned()
     }
 }
 
-fn facts(space: &mechanics::ids::SpaceId) -> runtime::PrincipalFacts {
-    let device = mechanics::crypto::device_from_seed(&FOUNDER_SEED);
-    runtime::PrincipalFacts {
+fn facts(space: &mechanics::ids::SpaceId) -> runtime::world::PrincipalFacts {
+    let device = mechanics::actor::device_from_seed(&FOUNDER_SEED);
+    runtime::world::PrincipalFacts {
         actor: mechanics::ids::ActorId::from_incept_hash(&"ab".repeat(32)),
         station: mechanics::station::Key::from_device(&device).unwrap(),
         device,
@@ -87,8 +87,8 @@ fn facts(space: &mechanics::ids::SpaceId) -> runtime::PrincipalFacts {
 const DOC: &str = "iss_00000000000000000000000001";
 
 /// A minimal valid catalog view registering `DOC` under one project.
-fn catalog_view() -> replica::CollaborativeView {
-    let mut v = replica::CollaborativeView::default();
+fn catalog_view() -> fabric::CollaborativeView {
+    let mut v = fabric::CollaborativeView::default();
     let mut seqs = BTreeMap::new();
     seqs.insert(DOC.to_string(), b"1".to_vec());
     v.maps.insert("seqs".into(), seqs);
@@ -102,8 +102,8 @@ fn catalog_view() -> replica::CollaborativeView {
 }
 
 /// An issue view whose title identifies the snapshot it belongs to.
-fn issue_view(title: &str) -> replica::CollaborativeView {
-    let mut v = replica::CollaborativeView::default();
+fn issue_view(title: &str) -> fabric::CollaborativeView {
+    let mut v = fabric::CollaborativeView::default();
     v.registers
         .insert("title".into(), title.as_bytes().to_vec());
     v.registers

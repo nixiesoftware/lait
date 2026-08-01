@@ -13,13 +13,13 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use mechanics::crypto::AuthorizedBodyKey;
+use mechanics::authorization::AuthorizedBodyKey;
 use mechanics::ids::SpaceId;
+use replica::body::{BodyBinding, Op, StaticBodyKeys, SupportedSchemas, MUTATION_COLLABORATIVE};
+use replica::body::{BodyId, BodyKey, EncodingId, SchemaId, WorldId};
 use replica::frontier::AuthorityFrontier;
-use replica::{
-    BodyBinding, BodyId, BodyKey, CommitAuthorization, CommitContext, EncodingId, Op, Replica,
-    SchemaId, SeedSigner, StaticBodyKeys, SupportedSchemas, WorldId, MUTATION_COLLABORATIVE,
-};
+use replica::transaction::{CommitAuthorization, CommitContext, SeedSigner};
+use replica::Replica;
 
 const WRITER_SEED: [u8; 32] = [62u8; 32];
 const EPOCH: [u8; 16] = [3u8; 16];
@@ -43,14 +43,14 @@ fn keys() -> Arc<StaticBodyKeys> {
 fn world() -> WorldId {
     WorldId::parse("com.example.notes").unwrap()
 }
-fn test_auth() -> replica::StaticAuthorizer {
-    replica::StaticAuthorizer {
+fn test_auth() -> replica::transaction::StaticAuthorizer {
+    replica::transaction::StaticAuthorizer {
         world: world(),
         implementation_id: [0u8; 32],
     }
 }
 fn test_demand() -> Vec<u8> {
-    use mechanics::demand::{AuthorizationDemand, PolicyCapability, Resource};
+    use mechanics::authorization::{AuthorizationDemand, PolicyCapability, Resource};
     AuthorizationDemand::require(
         PolicyCapability::new("com.example.notes", "write"),
         Resource::root("com.example.notes"),
@@ -81,7 +81,7 @@ fn supported() -> SupportedSchemas {
     s
 }
 fn device() -> mechanics::ids::DeviceId {
-    mechanics::crypto::device_from_seed(&WRITER_SEED)
+    mechanics::actor::device_from_seed(&WRITER_SEED)
 }
 
 fn try_commit(
@@ -89,7 +89,7 @@ fn try_commit(
     n: u8,
     bindings: &[(BodyKey, BodyBinding)],
     ops: &[(BodyKey, Op)],
-) -> Result<(), replica::commit::Failure> {
+) -> Result<(), replica::transaction::commit::Failure> {
     let space = space();
     let signer = SeedSigner(&WRITER_SEED);
     let ctx = CommitContext {
@@ -130,7 +130,7 @@ fn text_of(r: &Replica, key: &BodyKey) -> String {
 #[test]
 fn a_failed_batch_that_tombstoned_a_body_leaves_it_intact_on_disk() {
     let dir = temp_store("tombstone");
-    let mut r = Replica::open_journaled(&dir, keys()).unwrap();
+    let mut r = Replica::open(&dir, keys()).unwrap();
     r.set_supported(supported());
 
     try_commit(
@@ -195,7 +195,7 @@ fn a_failed_batch_that_tombstoned_a_body_leaves_it_intact_on_disk() {
     assert_eq!(text_of(&r, &body(1)), "still here: important content");
 
     drop(r);
-    let reopened = Replica::open_journaled(&dir, keys()).unwrap();
+    let reopened = Replica::open(&dir, keys()).unwrap();
     assert_eq!(reopened.body_keys().len(), 1);
     assert_eq!(
         text_of(&reopened, &body(1)),
@@ -210,7 +210,7 @@ fn a_failed_batch_survives_a_reopen_with_no_follow_on_edit() {
     // failed batch touches an unrelated Body, so what reopens is whatever the
     // rollback actually left.
     let dir = temp_store("tombstone-reopen");
-    let mut r = Replica::open_journaled(&dir, keys()).unwrap();
+    let mut r = Replica::open(&dir, keys()).unwrap();
     r.set_supported(supported());
     try_commit(
         &mut r,
@@ -263,7 +263,7 @@ fn a_failed_batch_survives_a_reopen_with_no_follow_on_edit() {
     assert_eq!(text_of(&r, &body(1)), "important content");
 
     drop(r);
-    let reopened = Replica::open_journaled(&dir, keys()).unwrap();
+    let reopened = Replica::open(&dir, keys()).unwrap();
     assert_eq!(reopened.body_keys().len(), 2);
     assert_eq!(text_of(&reopened, &body(1)), "important content");
     assert_eq!(text_of(&reopened, &body(3)), "unrelated");

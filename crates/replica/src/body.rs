@@ -9,10 +9,29 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::ids::{EncodingId, SchemaId};
+pub use crate::ids::{BodyId, BodyKey, EncodingId, SchemaId, WorldId};
+pub use crate::protected::{
+    BodyKeySource, Material, StaticBodyKeys, MAX_BODY_BYTES, MAX_PROTECTED_PLAINTEXT,
+    MUTATION_ATOMIC, MUTATION_COLLABORATIVE,
+};
+pub use crate::replica::{BodyBinding, QuotaConfig, SupportedSchemas};
 
-pub use crate::protected::Material;
 pub use crate::transaction::Descriptor;
+
+/// Why a Body-owned operation could not be completed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Failure {
+    /// The operating system could not provide entropy for a new Body identity.
+    Randomness,
+}
+
+impl std::fmt::Display for Failure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+
+impl std::error::Error for Failure {}
 
 /// Domain separator for the ciphertext-only content commitment.
 pub const BODY_CONTENT_DOMAIN: &[u8] = b"lait/body-content/1";

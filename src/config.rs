@@ -87,7 +87,7 @@ fn strip_extended_prefix(p: PathBuf) -> PathBuf {
     if let Some(rest) = s.strip_prefix(r"\\?\") {
         // Only unwrap plain `X:\…` drive paths, not `\\?\UNC\server\share`.
         let b = rest.as_bytes();
-        if b.len() >= 2 && b[1] == b':' {
+        if b.get(1) == Some(&b':') {
             return PathBuf::from(rest);
         }
     }
@@ -538,7 +538,7 @@ fn secret_key_path(home: &Path) -> PathBuf {
 ///
 /// lait's identity is the seed, not a transport keypair: it is stored as hex in
 /// `secret.key`, and the transport derives its own keypair from these bytes at
-/// its edge ([`crate::crypto::device_from_seed`] maps the same seed to the
+/// its edge ([`mechanics::actor::device_from_seed`] maps the same seed to the
 /// `DeviceId`). The on-disk format is unchanged — 64 hex chars of the 32-byte
 /// seed — so existing keys load as-is.
 pub fn load_or_create_identity(home: &Path) -> Result<[u8; 32]> {
@@ -552,7 +552,7 @@ pub fn load_or_create_identity(home: &Path) -> Result<[u8; 32]> {
             .try_into()
             .map_err(|_| anyhow::anyhow!("secret key must be 32 bytes"))
     } else {
-        let seed = crate::crypto::random_seed();
+        let seed = mechanics::actor::random_seed().context("generate secret key")?;
         let hex = data_encoding::HEXLOWER.encode(&seed);
         fs::write(&path, hex).context("write secret key")?;
         Ok(seed)

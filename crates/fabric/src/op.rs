@@ -31,6 +31,29 @@
 //! replicated grows at all.
 
 use loro::LoroDoc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static FALLBACK_ENTROPY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+/// Fill an internal identity buffer. OS entropy is preferred; the fallback
+/// combines process-local monotonic state with time and hashes it so an entropy
+/// outage cannot crash an activation or reuse the same value within a process.
+pub(crate) fn fill_identity(raw: &mut [u8]) {
+    if let Err(source) = getrandom::fill(raw) {
+        tracing::error!(error = %source, "OS entropy unavailable while minting Fabric identity");
+        let sequence = FALLBACK_ENTROPY_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let elapsed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        let mut hash = blake3::Hasher::new();
+        hash.update(b"lait.fabric.identity-fallback.v1\0");
+        hash.update(&std::process::id().to_le_bytes());
+        hash.update(&sequence.to_le_bytes());
+        hash.update(&elapsed.as_secs().to_le_bytes());
+        hash.update(&elapsed.subsec_nanos().to_le_bytes());
+        hash.finalize_xof().fill(raw);
+    }
+}
 
 /// Engine configuration applied before any op is written or imported.
 ///
@@ -54,7 +77,7 @@ pub(crate) fn configure(doc: &LoroDoc, peer: Option<u64>) {
 /// rather than a detected equivocation. Random is the choice that fails safely.
 pub fn mint_activation_peer() -> u64 {
     let mut raw = [0u8; 8];
-    getrandom::fill(&mut raw).expect("getrandom");
+    fill_identity(&mut raw);
     // Loro reserves u64::MAX as a sentinel.
     u64::from_le_bytes(raw) & (u64::MAX >> 1)
 }

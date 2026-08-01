@@ -15,19 +15,20 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use mechanics::crypto::AuthorizedBodyKey;
+use mechanics::authorization::AuthorizedBodyKey;
 use mechanics::{
     ids::{ActorId, DeviceId},
     station::Key,
 };
+use replica::body::{EncodingId, SchemaId, WorldId};
 use replica::body::{MutationModel, Schema};
 use replica::frontier::{AuthorityFrontier, ReplicaFrontier};
-use replica::ids::{EncodingId, SchemaId, WorldId};
-use runtime::live::LiveHandle;
+use runtime::plane::live::LiveHandle;
 use runtime::transient::{Target, TransientItem, TransientPayload};
 use runtime::{
-    ActivationOptions, Context, Descriptor, Effect, Intent, Limits, Projection, Query, Rejection,
-    Runtime, RuntimeBuilder, Station, Version, World,
+    plane::Activation, world::Builder, world::Context, world::Descriptor, world::Effect,
+    world::Intent, world::Limits, world::Projection, world::Query, world::Rejection,
+    world::Version, world::World, Runtime, Station,
 };
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -84,17 +85,17 @@ impl World for Empty {
 }
 
 struct Permissive;
-impl runtime::AuthorityView for Permissive {
-    fn resolve(&self, _device: &DeviceId) -> Option<runtime::PrincipalResolution> {
-        Some(runtime::PrincipalResolution {
+impl runtime::world::AuthorityView for Permissive {
+    fn resolve(&self, _device: &DeviceId) -> Option<runtime::world::PrincipalResolution> {
+        Some(runtime::world::PrincipalResolution {
             actor: ActorId::from_incept_hash(&"a".repeat(64)),
             authority_frontier: AuthorityFrontier::from_canonical_bytes(vec![1]),
         })
     }
 }
 
-fn options() -> ActivationOptions {
-    ActivationOptions {
+fn options() -> Activation {
+    Activation {
         planes: Default::default(),
         content: Default::default(),
         drain_deadline: Duration::from_secs(5),
@@ -104,7 +105,7 @@ fn options() -> ActivationOptions {
 }
 
 struct AnySigner;
-impl replica::AuthoritySource for AnySigner {
+impl replica::transaction::AuthoritySource for AnySigner {
     fn signer_authorized(&self, _signer: &[u8; 32], _f: &AuthorityFrontier) -> bool {
         true
     }
@@ -112,12 +113,12 @@ impl replica::AuthoritySource for AnySigner {
 
 #[derive(Default)]
 struct Accepting;
-impl replica::AuthorityIncorporator for Accepting {
+impl replica::convergence::AuthorityIncorporator for Accepting {
     fn incorporate_authority(
         &mut self,
         records: &[Vec<u8>],
-    ) -> Result<replica::AuthorityBatchReceipt, String> {
-        Ok(replica::AuthorityBatchReceipt {
+    ) -> Result<replica::convergence::AuthorityBatchReceipt, replica::convergence::Failure> {
+        Ok(replica::convergence::AuthorityBatchReceipt {
             space: mechanics::ids::SpaceId::from_digest([0u8; 16]),
             prior_frontier: AuthorityFrontier::from_canonical_bytes(vec![]),
             resulting_frontier: AuthorityFrontier::from_canonical_bytes(vec![1]),
@@ -133,15 +134,15 @@ impl replica::AuthorityIncorporator for Accepting {
 /// driver block when `comms` is `Some`. A dormancy test against an offline
 /// Station therefore drains an empty task set, which is the shape of a test
 /// that passes for a reason unrelated to what it claims.
-fn options_with_comms(transport: Arc<dyn comms::Transport>, seed: [u8; 32]) -> ActivationOptions {
-    ActivationOptions {
+fn options_with_comms(transport: Arc<dyn comms::Transport>, seed: [u8; 32]) -> Activation {
+    Activation {
         planes: Default::default(),
         content: Default::default(),
         drain_deadline: Duration::from_secs(5),
-        comms: Some(runtime::CommsOptions {
+        comms: Some(runtime::plane::CommsOptions {
             transport,
             station_seed: seed,
-            authority: runtime::Authority {
+            authority: runtime::plane::contact::Authority {
                 source: Arc::new(AnySigner),
                 incorporator: Arc::new(std::sync::Mutex::new(Accepting)),
                 export: Arc::new(Vec::new),
@@ -159,7 +160,7 @@ fn options_with_comms(transport: Arc<dyn comms::Transport>, seed: [u8; 32]) -> A
 fn station_with_comms(root: &std::path::Path, seed: [u8; 32]) -> Station {
     let net = comms::mem::MemNet::new();
     let transport: Arc<dyn comms::Transport> =
-        Arc::new(net.peer(mechanics::crypto::device_from_seed(&seed)));
+        Arc::new(net.peer(mechanics::actor::device_from_seed(&seed)));
     let world = Empty::new();
     let registration = Descriptor {
         id: world.id(),
@@ -169,15 +170,12 @@ fn station_with_comms(root: &std::path::Path, seed: [u8; 32]) -> Station {
         scope_schemas: Vec::new(),
         signal_schemas: Vec::new(),
     };
-    let registry = RuntimeBuilder::new()
-        .register(Arc::new(world))
-        .build()
-        .unwrap();
+    let registry = Builder::new().register(Arc::new(world)).build().unwrap();
     Runtime::open(
         root.to_path_buf(),
         registry,
         Arc::new(Permissive),
-        Arc::new(replica::StaticBodyKeys::new(
+        Arc::new(replica::body::StaticBodyKeys::new(
             AuthorizedBodyKey::for_authorized_epoch([1u8; 16], [2u8; 32]),
         )),
     )
@@ -197,15 +195,12 @@ fn station_at(root: &std::path::Path) -> Station {
         scope_schemas: Vec::new(),
         signal_schemas: Vec::new(),
     };
-    let registry = RuntimeBuilder::new()
-        .register(Arc::new(world))
-        .build()
-        .unwrap();
+    let registry = Builder::new().register(Arc::new(world)).build().unwrap();
     Runtime::open(
         root.to_path_buf(),
         registry,
         Arc::new(Permissive),
-        Arc::new(replica::StaticBodyKeys::new(
+        Arc::new(replica::body::StaticBodyKeys::new(
             AuthorizedBodyKey::for_authorized_epoch([1u8; 16], [2u8; 32]),
         )),
     )
@@ -252,7 +247,7 @@ fn fingerprint(dir: &std::path::Path) -> [u8; 32] {
 }
 
 fn peer_station(seed: u8) -> Key {
-    Key::from_device(&mechanics::crypto::device_from_seed(&[seed; 32])).expect("station")
+    Key::from_device(&mechanics::actor::device_from_seed(&[seed; 32])).expect("station")
 }
 
 fn caret_scope(body: u8) -> Target {

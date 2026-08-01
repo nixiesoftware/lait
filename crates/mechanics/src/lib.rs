@@ -1,3 +1,22 @@
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects,
+        clippy::unreachable,
+        clippy::unimplemented,
+        clippy::unchecked_time_subtraction,
+        clippy::todo,
+        clippy::string_slice,
+        clippy::panic_in_result_fn,
+        clippy::panic,
+        clippy::exit,
+        clippy::as_conversions
+    )
+)]
+
 //! **The lait kernel** — lait's roots, in the sense of a seed, not an OS core:
 //! the minimal set of commitments everything else is derived from, and against
 //! which every scaffold is replaceable.
@@ -25,29 +44,46 @@
 //! - [`dkg`] — the FROST threshold-recovery ceremony logic.
 //! - [`authz`] — authorization decisions over the replayed state.
 
-pub mod acl;
+mod acl;
 pub mod actor;
-pub mod authority;
-pub mod ceremony;
-pub mod compile;
-pub mod crypto;
-pub mod custody;
-pub mod demand;
+pub mod assignment;
+mod authority;
+pub mod authorization;
+mod ceremony;
+mod compile;
+mod crypto;
+mod custody;
+mod demand;
 
-pub mod dkg;
-pub mod expand;
-pub mod gaccess;
-pub mod gdkg;
-pub mod genesis;
-pub mod handover;
+mod dkg;
+mod expand;
+#[cfg(test)]
+mod gaccess;
+#[cfg(test)]
+mod gdkg;
+mod genesis;
+#[cfg(test)]
+mod handover;
 pub mod ids;
-pub mod ledger;
+mod ledger;
+pub mod membership;
 pub mod policy;
-pub mod refresh;
-pub mod reshare;
-pub mod secretfs;
-pub mod sigdag;
+pub mod recovery;
+#[cfg(test)]
+mod refresh;
+#[cfg(test)]
+mod reshare;
+mod secretfs;
+mod sigdag;
 pub mod space;
 pub mod station;
-pub mod status;
-pub mod transition;
+mod transition;
+
+#[cfg(test)]
+extern crate self as mechanics;
+#[cfg(test)]
+mod authority_checkpoint_tests;
+#[cfg(test)]
+mod frontier_isolation_tests;
+#[cfg(test)]
+mod sparse_ceremony_tests;

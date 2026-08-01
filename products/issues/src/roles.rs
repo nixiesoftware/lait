@@ -1,3 +1,8 @@
+#![allow(
+    clippy::expect_used,
+    clippy::as_conversions,
+    reason = "the bundled role catalog is made only from compile-time validated capability names and bounded encodings"
+)]
 //! IssuesWorld role definitions: canonical bodies, revision identity, and
 //! the built-in roles (plan 04).
 //!
@@ -17,7 +22,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::contract::PRODUCT_WORLD;
-use mechanics::demand::{PolicyCapability, Resource};
+use mechanics::authorization::{PolicyCapability, Resource};
 
 /// The BLAKE3 derive-key context for a role revision id.
 const ROLE_REVISION_CONTEXT: &str = "lait.issues.role-revision.v1";
@@ -210,7 +215,7 @@ pub fn provenance_ref(role_id: &str, revision_id: &[u8; 32]) -> Vec<u8> {
 pub fn role_admission_evidence(
     revision: &RoleRevision,
     parent_manifest_root: [u8; 32],
-) -> mechanics::demand::WorldAssignmentEvidence {
+) -> mechanics::authorization::WorldAssignmentEvidence {
     let res = Resource::root(PRODUCT_WORLD);
     let mut assignments: Vec<(PolicyCapability, Resource)> = revision
         .body
@@ -228,13 +233,13 @@ pub fn role_admission_evidence(
     // (policy administration), which only a policy admin may issue.
     if revision.body.role_id == "lait.administrator" {
         assignments.push((
-            mechanics::acl::policy_admin_capability(),
-            mechanics::acl::policy_admin_resource(),
+            mechanics::membership::policy_admin_capability(),
+            mechanics::membership::policy_admin_resource(),
         ));
     }
     assignments.sort();
     assignments.dedup();
-    mechanics::demand::WorldAssignmentEvidence {
+    mechanics::authorization::WorldAssignmentEvidence {
         world: PRODUCT_WORLD.to_string(),
         opaque_definition_ref: provenance_ref(&revision.body.role_id, &revision.revision_id),
         definition_digest: revision.body.definition_digest(),
@@ -340,7 +345,7 @@ mod tests {
         }
         // Only the administrator carries the meta-grant.
         let admin = role_admission_evidence(&built_in("lait.administrator").unwrap(), [0u8; 32]);
-        let meta = mechanics::acl::policy_admin_capability();
+        let meta = mechanics::membership::policy_admin_capability();
         assert!(admin.assignments.iter().any(|(c, _)| c == &meta));
         let viewer = role_admission_evidence(&built_in("lait.viewer").unwrap(), [0u8; 32]);
         assert!(!viewer.assignments.iter().any(|(c, _)| c == &meta));

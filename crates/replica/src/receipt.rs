@@ -6,7 +6,7 @@
 //! committed result **without reapplying** the operations; reusing the same
 //! request id with a different payload is a typed conflict. The receipt carries
 //! everything an identical replay must return: the application effect bytes,
-//! the Observation scopes, and the committed Replica frontier the transaction
+//! the Observation Bodies, and the committed Replica frontier the transaction
 //! advanced to.
 //!
 //! C0 freezes the canonical bytes, bounds, and lookup semantics. The durable
@@ -41,8 +41,8 @@ pub struct RequestReceipt {
     pub payload_hash: [u8; 32],
     /// The application-defined effect bytes the original commit returned.
     pub effect: Vec<u8>,
-    /// The Observation scopes the original commit touched.
-    pub scopes: Vec<BodyKey>,
+    /// The Observation Bodies the original commit touched.
+    pub bodies: Vec<BodyKey>,
     /// The committed Replica frontier the transaction advanced to.
     pub frontier: ReplicaFrontier,
     /// The committed transaction's id (the full signed-envelope digest);
@@ -71,6 +71,10 @@ impl std::error::Error for Invalid {}
 impl RequestReceipt {
     /// Encode to canonical bytes.
     pub fn encode(&self) -> Vec<u8> {
+        #[allow(
+            clippy::expect_used,
+            reason = "derived serialization of this bounded receipt is infallible"
+        )]
         postcard::to_stdvec(self).expect("postcard receipt")
     }
 
@@ -105,6 +109,10 @@ pub fn scope_key(
     device: &DeviceId,
     request: &[u8; 16],
 ) -> Vec<u8> {
+    #[allow(
+        clippy::expect_used,
+        reason = "derived serialization of this fixed idempotency key is infallible"
+    )]
     postcard::to_stdvec(&(space, world, device, request)).expect("postcard scope key")
 }
 
@@ -118,11 +126,11 @@ mod tests {
             version: 1,
             space: SpaceId::from_digest([2u8; 16]),
             world: WorldId::parse("com.example.notes").unwrap(),
-            device: mechanics::crypto::device_from_seed(&[5u8; 32]),
+            device: mechanics::actor::device_from_seed(&[5u8; 32]),
             request: [7u8; 16],
             payload_hash: [9u8; 32],
             effect: b"created".to_vec(),
-            scopes: vec![BodyKey::new(
+            bodies: vec![BodyKey::new(
                 WorldId::parse("com.example.notes").unwrap(),
                 BodyId::from_bytes([1u8; 16]),
             )],
@@ -177,7 +185,7 @@ mod tests {
         other.request = [8u8; 16];
         assert_ne!(base.scope_key(), other.scope_key());
         let mut other = base.clone();
-        other.device = mechanics::crypto::device_from_seed(&[6u8; 32]);
+        other.device = mechanics::actor::device_from_seed(&[6u8; 32]);
         assert_ne!(base.scope_key(), other.scope_key());
         let mut other = base.clone();
         other.world = WorldId::parse("com.example.other").unwrap();

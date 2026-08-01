@@ -1,3 +1,8 @@
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    reason = "signal frames and schema fields are bounded before fixed-width conversion"
+)]
 //! Reliable signals: bounded one-message events between peers.
 //!
 //! A signal is a thing that happened — somebody offered you a file, invited you
@@ -19,7 +24,7 @@
 //! The gate is what makes the rule real, which is why it lands before the code
 //! it guards.
 
-use replica::ids::WorldId;
+use replica::body::WorldId;
 
 use crate::budget::deadline;
 
@@ -328,7 +333,7 @@ pub struct SignalPolicy {
     pub frontier: replica::frontier::AuthorityFrontier,
     pub granted_lanes: Vec<u8>,
     pub authority: std::sync::Arc<dyn crate::world::AuthorityView>,
-    pub worlds: crate::registry::Registry,
+    pub worlds: crate::registry::Catalog,
 }
 
 impl SignalPolicy {
@@ -383,10 +388,10 @@ impl SignalPolicy {
         else {
             return Ok(());
         };
-        let world_id = replica::ids::WorldId::parse(world).ok_or(Refusal::Malformed)?;
+        let world_id = replica::body::WorldId::parse(world).ok_or(Refusal::Malformed)?;
         self.world_is_live(&world_id)?;
 
-        let schema = replica::ids::SchemaId::parse(schema).ok_or(Refusal::Malformed)?;
+        let schema = replica::body::SchemaId::parse(schema).ok_or(Refusal::Malformed)?;
         let registration = self
             .worlds
             .descriptor(&world_id)
@@ -407,7 +412,7 @@ impl SignalPolicy {
         // The World's own demand, evaluated by Mechanics at the pinned frontier
         // — the same evaluation a read of that World would get.
         //
-        // Not defended against being empty: `RuntimeBuilder::build` parses every
+        // Not defended against being empty: `Builder::build` parses every
         // declared demand through `AuthorizationDemand::decode_canonical`, which
         // refuses empty input, so a registered signal schema always states one.
         // A fallback here would be a second, more permissive answer to a
@@ -429,7 +434,7 @@ impl SignalPolicy {
     /// we do not host and one whose implementation nobody approved are the same
     /// answer to a peer: this build cannot interpret that, and interpreting it
     /// anyway is how a schema nobody reviewed gets acted on.
-    fn world_is_live(&self, world: &replica::ids::WorldId) -> Result<(), Refusal> {
+    fn world_is_live(&self, world: &replica::body::WorldId) -> Result<(), Refusal> {
         if !self.worlds.contains(world) {
             return Err(Refusal::NotRegistered);
         }

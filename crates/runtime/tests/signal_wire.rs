@@ -19,13 +19,13 @@ use std::time::Duration;
 use comms::mem::MemNet;
 use comms::policy::Network;
 use comms::{Alpn, Connection, DefaultTransport, Protocols, Transport};
-use mechanics::crypto::device_from_seed;
+use mechanics::actor::device_from_seed;
 use mechanics::{ids::ActorId, station::Key};
 use runtime::plane::{stream_kind, Signal};
-use runtime::registry::RuntimeBuilder;
 use runtime::signal::{
     frame_signal, send_signal, serve_signal, Refusal, SignalOutcome, SignalPolicy,
 };
+use runtime::world::Builder;
 use runtime::world::{AuthorityView, PrincipalResolution};
 
 const SESSION_ALPN: Alpn = b"lait/session/1";
@@ -153,7 +153,7 @@ fn policy(lanes: Vec<u8>) -> SignalPolicy {
         authority: Arc::new(Everyone),
         // No hosted Worlds. `WorldSignal` is refused on that basis below, which
         // is the honest shape: a build that hosts nothing can interpret nothing.
-        worlds: RuntimeBuilder::new().build().expect("empty registry"),
+        worlds: Builder::new().build().expect("empty registry"),
     }
 }
 
@@ -407,11 +407,12 @@ async fn a_file_offer_crosses_intact_and_triggers_nothing() {
 /// membership alone.
 mod declared_schemas {
     use super::*;
+    use replica::body::{EncodingId, SchemaId, WorldId};
     use replica::body::{MutationModel, Schema};
-    use replica::ids::{EncodingId, SchemaId, WorldId};
     use runtime::world::SignalSchema;
     use runtime::{
-        Context, Descriptor, Effect, Intent, Limits, Projection, Query, Rejection, Version, World,
+        world::Context, world::Descriptor, world::Effect, world::Intent, world::Limits,
+        world::Projection, world::Query, world::Rejection, world::Version, world::World,
     };
 
     const WORLD: &str = "dev.example.pad";
@@ -445,7 +446,7 @@ mod declared_schemas {
             readable_predecessors: vec![],
         }];
         let world = Pad(schemas.clone(), signals.clone());
-        let worlds = RuntimeBuilder::new()
+        let worlds = Builder::new()
             .register(Arc::new(world))
             .build()
             .expect("registry");
@@ -457,13 +458,13 @@ mod declared_schemas {
 
     /// A demand every registered signal schema must carry.
     ///
-    /// Not optional: `RuntimeBuilder::build` parses it through
+    /// Not optional: `Builder::build` parses it through
     /// `AuthorizationDemand::decode_canonical`, which refuses empty input — so a
     /// World cannot register a signal it declines to say anything about.
     fn some_demand() -> Vec<u8> {
-        mechanics::demand::AuthorizationDemand::require(
-            mechanics::demand::PolicyCapability::new("pad", "nudge"),
-            mechanics::demand::Resource::root("pad"),
+        mechanics::authorization::AuthorizationDemand::require(
+            mechanics::authorization::PolicyCapability::new("pad", "nudge"),
+            mechanics::authorization::Resource::root("pad"),
         )
         .encode_canonical()
         .expect("canonical demand")
@@ -538,10 +539,7 @@ mod declared_schemas {
             demand: Vec::new(),
         }];
         let world = Pad(schemas.clone(), signals.clone());
-        assert!(RuntimeBuilder::new()
-            .register(Arc::new(world))
-            .build()
-            .is_err());
+        assert!(Builder::new().register(Arc::new(world)).build().is_err());
     }
 
     #[test]

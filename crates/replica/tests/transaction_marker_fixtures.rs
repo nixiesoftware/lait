@@ -1,17 +1,16 @@
-//! Transaction envelope protection-boundary matrix and store-marker
-//! classification (the semantic-named transaction, `lait/body-transaction/2`).
+//! Transaction envelope protection-boundary matrix for the semantic-named
+//! transaction, `lait/body-transaction/2`.
 
-use mechanics::demand::{AuthorizationDemand, PolicyCapability, Resource};
+use mechanics::authorization::{AuthorizationDemand, PolicyCapability, Resource};
 use mechanics::ids::SpaceId;
 use replica::body::ContentCommitment;
+use replica::body::{BodyId, EncodingId, SchemaId, WorldId};
 use replica::frontier::AuthorityFrontier as AF;
 use replica::frontier::{AuthorityFrontier, ReplicaFrontier};
-use replica::ids::{BodyId, EncodingId, SchemaId, WorldId};
-use replica::marker::{Invalid, StoreMarker, STORE_MAGIC};
 use replica::transaction::{
     AuthoritySource, Descriptor, Error, SeedSigner, SignRequest, Transaction, NO_PARENT_ROOT,
 };
-use replica::{StaticAuthorizer, TransactionAuthorizer};
+use replica::transaction::{StaticAuthorizer, TransactionAuthorizer};
 
 const SIGNER_SEED: [u8; 32] = [12u8; 32];
 
@@ -22,7 +21,7 @@ fn world() -> WorldId {
     WorldId::parse("com.example.issues").unwrap()
 }
 fn signer_key() -> [u8; 32] {
-    mechanics::crypto::device_from_seed(&SIGNER_SEED)
+    mechanics::actor::device_from_seed(&SIGNER_SEED)
         .key_bytes()
         .unwrap()
 }
@@ -49,7 +48,7 @@ fn descriptor(body: [u8; 16], payload: &[u8]) -> Descriptor {
     }
 }
 
-fn sign(descriptors: Vec<Descriptor>) -> Result<Transaction, String> {
+fn sign(descriptors: Vec<Descriptor>) -> Result<Transaction, mechanics::authorization::Refusal> {
     let authorizer = StaticAuthorizer {
         world: world(),
         implementation_id: [0u8; 32],
@@ -139,7 +138,7 @@ fn a_tampered_receipt_binding_is_rejected() {
     // "transplanted descriptor" rule).
     let mut tx = valid_tx();
     let mut receipt =
-        mechanics::demand::AuthorizationReceipt::decode(&tx.authorization_receipt).unwrap();
+        mechanics::authorization::AuthorizationReceipt::decode(&tx.authorization_receipt).unwrap();
     receipt.body_transaction_core_digest[0] ^= 0xff;
     tx.authorization_receipt = receipt.encode();
     assert!(matches!(
@@ -196,63 +195,4 @@ fn trailing_bytes_are_non_canonical() {
         Transaction::decode_canonical(&bytes),
         Err(Error::NonCanonical)
     );
-}
-
-// ---- store marker ----
-
-#[test]
-fn a_valid_marker_classifies_to_its_space() {
-    let marker = StoreMarker::new(&space()).unwrap();
-    let bytes = marker.encode();
-    let back = StoreMarker::classify(&bytes).unwrap();
-    assert_eq!(back.space(), Some(space()));
-}
-
-#[test]
-fn a_foreign_directory_is_not_a_replica_store() {
-    assert_eq!(
-        StoreMarker::classify(b"some other file entirely"),
-        Err(Invalid::NotAReplicaStore)
-    );
-}
-
-#[test]
-fn an_unsupported_version_is_named() {
-    let mut marker = StoreMarker::new(&space()).unwrap();
-    marker.version = 2;
-    // Recompute checksum so it is the version, not the checksum, that trips.
-    let bytes = marker.encode();
-    assert_eq!(
-        StoreMarker::classify(&bytes),
-        Err(Invalid::UnsupportedStoreVersion { found: 2 })
-    );
-}
-
-#[test]
-fn a_corrupt_marker_is_detected() {
-    let mut marker = StoreMarker::new(&space()).unwrap();
-    marker.checksum[0] ^= 0xff;
-    let bytes = marker.encode();
-    assert_eq!(
-        StoreMarker::classify(&bytes),
-        Err(Invalid::CorruptStoreMarker)
-    );
-}
-
-#[test]
-fn a_corrupt_lait_marker_is_distinct_from_a_foreign_directory() {
-    // Magic + version present, but the postcard body is truncated: this is our
-    // marker gone bad, not someone else's file.
-    let mut bytes = STORE_MAGIC.to_vec();
-    bytes.push(1); // version
-    bytes.extend_from_slice(&[0x00, 0x01]); // a stub, not a full body
-    assert_eq!(
-        StoreMarker::classify(&bytes),
-        Err(Invalid::CorruptStoreMarker)
-    );
-}
-
-#[test]
-fn the_magic_is_the_canonical_store_string() {
-    assert_eq!(STORE_MAGIC, b"lait/replica/1");
 }

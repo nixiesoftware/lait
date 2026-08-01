@@ -9,7 +9,8 @@
 //! iroh changes its key encoding, THIS test breaks — not the kernel.
 
 use ed25519_dalek::SigningKey;
-use mechanics::crypto::{device_from_seed, open_sealed, random_key, seal_to};
+use mechanics::actor::device_from_seed;
+use mechanics::authorization::{open_sealed, random_key, seal_to};
 use mechanics::ids::DeviceId;
 
 #[test]
@@ -35,8 +36,10 @@ fn iroh_keypair_is_the_same_ed25519_pair_as_a_lait_seed() {
     assert_eq!(sk.to_bytes(), seed, "iroh's secret bytes must be the seed");
 
     // And a box sealed to that DeviceId opens for the holder of the seed.
-    let key = random_key();
-    let sealed = seal_to(&from_iroh, &key).expect("seal to iroh-derived device");
+    let key = random_key().expect("random key");
+    let sealed = seal_to(&from_iroh, &key)
+        .expect("encrypt")
+        .expect("seal to iroh-derived device");
     assert_eq!(
         open_sealed(&seed, &from_iroh, &sealed).as_deref(),
         Some(&key[..]),

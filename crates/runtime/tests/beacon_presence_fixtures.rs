@@ -6,7 +6,7 @@ use mechanics::{
     station::{Epoch, Key},
 };
 use runtime::beacon::{Invalid as BeaconInvalid, RouteHint, SignedBeacon, MAX_ROUTE_HINTS};
-use runtime::neighbor_presence::{Invalid as PresenceInvalid, PresenceAck, PresenceProbe};
+use runtime::neighbor::{Invalid as PresenceInvalid, PresenceAck, PresenceProbe};
 
 const STATION_SEED: [u8; 32] = [11u8; 32];
 
@@ -41,7 +41,7 @@ fn valid_beacon_verifies() {
     assert_eq!(v.space(), &space());
     assert_eq!(
         v.station(),
-        &Key::from_device(&mechanics::crypto::device_from_seed(&STATION_SEED)).unwrap()
+        &Key::from_device(&mechanics::actor::device_from_seed(&STATION_SEED)).unwrap()
     );
     assert_eq!(v.coordinate(), (2, 5));
 }
@@ -120,13 +120,13 @@ const INITIATOR_SEED: [u8; 32] = [21u8; 32];
 const RESPONDER_SEED: [u8; 32] = [22u8; 32];
 
 fn station_of(seed: &[u8; 32]) -> Key {
-    Key::from_device(&mechanics::crypto::device_from_seed(seed)).unwrap()
+    Key::from_device(&mechanics::actor::device_from_seed(seed)).unwrap()
 }
 
 fn probe(nonce: [u8; 32]) -> PresenceProbe {
     let responder = station_of(&RESPONDER_SEED).key_bytes();
     PresenceProbe::sign(
-        runtime::neighbor_presence::PRESENCE_PROTOCOL,
+        runtime::neighbor::PRESENCE_PROTOCOL,
         space_bytes(),
         responder,
         nonce,

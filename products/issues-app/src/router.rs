@@ -1,3 +1,10 @@
+#![allow(
+    clippy::expect_used,
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    clippy::indexing_slicing,
+    reason = "router handlers consume the validated CLI/MCP argument shapes and bounded product DTOs"
+)]
 //! The Issues application router (C4.3 / C5 step 5 routing).
 //!
 //! `IssueRouter` maps the product's [`IssuesRequest`] onto the semantic
@@ -10,13 +17,10 @@
 use issues::contract::{self, IssueIntent, IssueQuery, NewLabel, Pos, WorkAction};
 use issues::dto::{BoardView, GraphView, IssueView, LabelDto, ProjectDto, Row};
 use issues::ids::{DocId, LabelId, ProjectId, SystemUlidSource, UlidSource};
-use runtime::session::{Conflict as SessionConflict, Failure as SessionFailure};
-use runtime::{Intent, Query, Rejection, RequestId, Session};
+use runtime::world::call::{Access, Call, Code, Context, Failure, Handler, Nudge, Reply};
+use runtime::world::{Conflict as SessionConflict, Failure as SessionFailure};
+use runtime::{world::Intent, world::Query, world::Rejection, world::RequestId, Session};
 use serde::de::DeserializeOwned;
-use world_bridge::{
-    CallFailure, CallFailureCode, WorldCall, WorldCallAccess, WorldCallContext, WorldCallHandler,
-    WorldNudge, WorldReply,
-};
 
 use crate::{
     decode_call, encode_reply, BoardPos, IssuesRequest as Request, IssuesResponse as Response,
@@ -52,11 +56,11 @@ impl IssuesCallHandler {
     pub const OPERATION: &'static str = OPERATION;
     pub const VERSION: u32 = VERSION;
 
-    fn decode_request(call: &WorldCall) -> Result<Request, CallFailure> {
+    fn decode_request(call: &Call) -> Result<Request, Failure> {
         decode_call(call)
     }
 
-    fn route_request(&self, request: Request, context: &WorldCallContext<'_>) -> Response {
+    fn route_request(&self, request: Request, context: &Context<'_>) -> Response {
         static CLOCK: std::sync::OnceLock<SystemUlidSource> = std::sync::OnceLock::new();
 
         let router = IssueRouter::new(
@@ -90,23 +94,23 @@ impl IssuesCallHandler {
     }
 }
 
-impl WorldCallHandler for IssuesCallHandler {
-    fn access(&self, call: &WorldCall) -> Result<WorldCallAccess, CallFailure> {
+impl Handler for IssuesCallHandler {
+    fn access(&self, call: &Call) -> Result<Access, Failure> {
         let request = Self::decode_request(call)?;
         Ok(request.access())
     }
 
-    fn call(&self, call: &WorldCall, context: &WorldCallContext<'_>) -> WorldReply {
+    fn call(&self, call: &Call, context: &Context<'_>) -> Reply {
         let request = match Self::decode_request(call) {
             Ok(request) => request,
-            Err(error) => return WorldReply::error(call, error.code, error.message),
+            Err(error) => return Reply::error(call, error.code, error.message()),
         };
         let response = self.route_request(request, context);
         match serde_json::to_value(response) {
             Ok(response) => encode_reply(call, &response),
-            Err(error) => WorldReply::error(
+            Err(error) => Reply::error(
                 call,
-                CallFailureCode::Internal,
+                Code::Internal,
                 format!("encode Issues response: {error}"),
             ),
         }
@@ -122,12 +126,7 @@ impl WorldCallHandler for IssuesCallHandler {
     /// The acting identity is filtered out. Nobody is told about their own
     /// action — Linear does not, and a person notified of everything they did
     /// stops reading notifications.
-    fn nudges(
-        &self,
-        call: &WorldCall,
-        reply: &WorldReply,
-        context: &WorldCallContext<'_>,
-    ) -> Vec<WorldNudge> {
+    fn nudges(&self, call: &Call, reply: &Reply, context: &Context<'_>) -> Vec<Nudge> {
         // Asked only about work that happened. A refused call changed nothing,
         // and an idempotent replay changed nothing twice.
         if !reply.succeeded() {
@@ -156,7 +155,7 @@ impl WorldCallHandler for IssuesCallHandler {
         actors
             .into_iter()
             .filter(|actor| actor != context.actor)
-            .map(|actor| WorldNudge {
+            .map(|actor| Nudge {
                 actor,
                 schema: schema.to_string(),
                 payload: payload.clone(),
@@ -324,14 +323,14 @@ enum RefOutcome {
 /// The router.
 pub struct IssueRouter<'a> {
     session: &'a Session,
-    identity: &'a runtime::LocalIdentity,
+    identity: &'a runtime::world::LocalIdentity,
     clock: &'a dyn UlidSource,
 }
 
 impl<'a> IssueRouter<'a> {
     pub fn new(
         session: &'a Session,
-        identity: &'a runtime::LocalIdentity,
+        identity: &'a runtime::world::LocalIdentity,
         clock: &'a dyn UlidSource,
     ) -> Self {
         Self {

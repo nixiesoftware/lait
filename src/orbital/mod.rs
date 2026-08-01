@@ -4,13 +4,13 @@
 //! composition over signed Space material, and defines the product-neutral
 //! [`WorldPackage`] / [`WorldHost`] boundary used by StationHost. Concrete
 //! packages are created by the application composition root and injected
-//! through LaitDaemon; this module does not construct or select IssuesWorld.
+//! through Daemon; this module does not construct or select product Worlds.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use replica::BodyKeySource;
-use runtime::{AuthorityView, Registry, Runtime};
+use replica::body::BodyKeySource;
+use runtime::{world::AuthorityView, world::Catalog, Runtime};
 
 /// Where the application keeps its orbital stores, under the local home.
 pub fn orbital_store_root(home: &Path) -> PathBuf {
@@ -45,7 +45,7 @@ pub fn space_store_present(home: &Path) -> bool {
 }
 
 /// The single orbital Space id under `home`, if any.
-pub fn discover_space_id(home: &Path) -> Option<crate::ids::SpaceId> {
+pub fn discover_space_id(home: &Path) -> Option<issues::ids::SpaceId> {
     let root = orbital_store_root(home);
     let mut found = None;
     for entry in std::fs::read_dir(&root).ok()?.flatten() {
@@ -56,7 +56,7 @@ pub fn discover_space_id(home: &Path) -> Option<crate::ids::SpaceId> {
             .file_name()
             .to_str()
             .filter(|name| name.starts_with("ws_"))
-            .and_then(crate::ids::SpaceId::parse)
+            .and_then(issues::ids::SpaceId::parse)
         {
             if found.replace(space).is_some() {
                 return None;
@@ -86,7 +86,7 @@ pub fn unsupported_store_at(home: &Path) -> Option<UnsupportedStoreVersion> {
 /// Open the generic Runtime at the application's orbital store convention.
 pub fn open_orbital_runtime(
     home: &Path,
-    registry: Registry,
+    registry: Catalog,
     authority: Arc<dyn AuthorityView>,
     keys: Arc<dyn BodyKeySource>,
 ) -> Result<Runtime, UnsupportedStoreVersion> {
@@ -102,31 +102,28 @@ pub fn open_orbital_runtime(
 }
 
 pub mod ceremony;
+pub(crate) mod hosting;
 pub mod mechanics;
-pub mod space_bridge;
-pub mod world_bridge;
+mod worlds;
 
+pub use hosting::{
+    run_station_process, run_station_process_with, run_station_process_with_packages, StationHost,
+};
 pub use mechanics::{AuthorityRecord, SpaceAuthority};
-pub use space_bridge::{
-    run_space_bridge, run_space_bridge_with, run_space_bridge_with_packages, StationHost,
-};
-pub use world_bridge::{
-    CallFailure, CallFailureCode, WorldCall, WorldCallAccess, WorldCallContext, WorldCallHandler,
-    WorldHost, WorldNudge, WorldPackage, WorldPackages, WorldReply, WorldRouter,
+pub use worlds::{
+    Invalidation, ObservationProjector, StatusProjection, WorldHost, WorldPackage, WorldPackages,
+    WorldRouter,
 };
 
-// Compatibility exports for callers that reached the issue tracker's outer
-// lifecycle adapter through `lait::orbital` before product ownership was made
-// explicit.
 pub use crate::world::lifecycle::{
-    enter_space, form_space, form_space_with_fault, found_space_cli, issues_implementation_id,
-    read_bootstrap_record, seed_founder_policy, BootstrapFault, BootstrapPhase,
-    IssuesBootstrapRecord,
+    enter_space, form_space, found_space_cli, issues_implementation_id, read_bootstrap_record,
+    seed_founder_policy, BootstrapPhase, IssuesBootstrapRecord,
 };
 
 /// A random 16-byte value (salts, epoch ids, nonces).
-pub(crate) fn rand16() -> [u8; 16] {
+pub(crate) fn rand16() -> anyhow::Result<[u8; 16]> {
     let mut raw = [0u8; 16];
-    getrandom::fill(&mut raw).expect("getrandom");
-    raw
+    getrandom::fill(&mut raw)
+        .map_err(|error| anyhow::anyhow!("system entropy unavailable: {error}"))?;
+    Ok(raw)
 }

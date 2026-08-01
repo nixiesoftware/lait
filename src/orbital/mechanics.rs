@@ -1,19 +1,23 @@
+// Mechanics composition adapts validated durable counters and bounded ceremony
+// state into fixed-width semantic types without changing their encodings.
+#![allow(clippy::arithmetic_side_effects, clippy::as_conversions)]
+
 //! The product's mechanics composition for the orbital plane.
 //!
 //! `SpaceAuthority` owns the Space's **signed authority material** through
-//! the mechanics [`AuthorityLedger`] — the journaled effect store persisted
+//! the mechanics [`Authority`] — the journaled effect store persisted
 //! beside the orbital store — and implements every seam the runtime consumes:
 //!
-//! - [`runtime::AuthorityView`]: device → actor/standing/authority frontier,
+//! - [`runtime::world::AuthorityView`]: device → actor/standing/authority frontier,
 //!   resolved from the ledger's materialized checkpoint;
-//! - [`replica::AuthoritySource`]: signer standing **at the referenced
+//! - [`replica::transaction::AuthoritySource`]: signer standing **at the referenced
 //!   historical frontier** — the ledger resolves the exact effect closure the
 //!   frontier's heads name and evaluates standing there, never against
 //!   current state;
-//! - [`replica::BodyKeySource`]: authorized key epochs from the sealed
+//! - [`replica::body::BodyKeySource`]: authorized key epochs from the sealed
 //!   envelopes, opened with this device's seed, bound to the signed mint's
 //!   key commitment — the existing construction, no new cryptography;
-//! - [`replica::AuthorityIncorporator`] + the authority export: ledger
+//! - [`replica::convergence::AuthorityIncorporator`] + the authority export: ledger
 //!   effects and admission redemptions ride Contact's authority records —
 //!   the explicit first durable Convergence phase, committed **atomically**
 //!   (an invalid record refuses the whole batch; no prefix survives).
@@ -32,12 +36,14 @@ use std::sync::{Arc, Mutex};
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::acl::{self, AclAction, AclOp, AclState};
-use crate::actor;
-use crate::crypto::{self, SpaceKey};
-use crate::genesis::Genesis;
-use crate::ids::{ActorId, DeviceId, SpaceId};
-use mechanics::ledger::{AuthorityLedger, LedgerEffect, SealedKeyRecord};
+use issues::ids::{ActorId, DeviceId, SpaceId};
+use mechanics::actor;
+use mechanics::actor::device_from_seed;
+use mechanics::authorization::SealedKeyRecord;
+use mechanics::authorization::{self as crypto, SpaceKey};
+use mechanics::membership::{self as acl, AclAction, AclOp, AclState};
+use mechanics::space::Genesis;
+use mechanics::space::{Authority, Effect};
 use replica::frontier::AuthorityFrontier;
 use runtime::coordinates::AdmissionCapability;
 
@@ -61,7 +67,7 @@ const SPACE_RECOVERY_KEY_FILE: &str = "space-recovery.key";
 /// embedded admission capability) or a raw 32-hex string.
 fn parse_invite_nonce(input: &str) -> Option<[u8; 16]> {
     let s = input.trim();
-    if let Ok(coords) = runtime::SignedCoordinates::parse_link(s) {
+    if let Ok(coords) = runtime::coordinates::SignedCoordinates::parse_link(s) {
         if let runtime::coordinates::CoordinatesAdmission::Some(cap) = &coords.payload.admission {
             return Some(cap.nonce);
         }
@@ -74,25 +80,13 @@ fn parse_invite_nonce(input: &str) -> Option<[u8; 16]> {
 
 /// Read a hex-encoded 32-byte secret written by [`persist_hex_key`].
 fn read_hex_key(path: &Path) -> Option<[u8; 32]> {
-    let bytes = crate::secretfs::read_private(path).ok().flatten()?;
-    let hex = String::from_utf8(bytes).ok()?;
-    let raw = data_encoding::HEXLOWER_PERMISSIVE
-        .decode(hex.trim().as_bytes())
-        .ok()?;
-    raw.as_slice().try_into().ok()
+    mechanics::recovery::artifact::read(path).ok().flatten()
 }
 
 /// Escrow a 32-byte secret as owner-only, portable hex — never world-readable
 /// even briefly (create-new; a pre-existing file is left untouched).
 fn persist_hex_key(dir: &Path, file: &str, secret: &[u8; 32]) -> Result<()> {
-    crate::secretfs::create_private_dir(dir)?;
-    let hex = data_encoding::HEXLOWER.encode(secret);
-    crate::secretfs::write_private(
-        &dir.join(file),
-        hex.as_bytes(),
-        crate::secretfs::Create::New,
-        crate::secretfs::Wrap::Portable,
-    )
+    mechanics::recovery::artifact::install(dir, file, secret).map_err(anyhow::Error::new)
 }
 
 /// One authority-record unit riding Contact's authority section.
@@ -102,7 +96,7 @@ pub enum AuthorityRecord {
     /// SpaceAuthority event). Import validates the complete batch, then
     /// commits atomically.
     Effect(Vec<u8>),
-    /// One canonical [`mechanics::ledger::CeremonyMaterial`] record — ceremony
+    /// One canonical [`mechanics::recovery::CeremonyMaterial`] record — ceremony
     /// transcript traffic under its distinct material-class tag and signing
     /// domain. Rides the same mechanics channel but commits to the ledger's
     /// separate bounded ceremony log, never an authority frontier.
@@ -126,6 +120,10 @@ pub enum AuthorityRecord {
 }
 
 impl AuthorityRecord {
+    // Postcard serialization of this closed, allocation-backed enum has no
+    // data-dependent failure mode; changing this durable helper's shape would
+    // obscure the invariant at every caller.
+    #[allow(clippy::expect_used)]
     pub fn encode(&self) -> Vec<u8> {
         postcard::to_stdvec(self).expect("authority record")
     }
@@ -136,7 +134,7 @@ impl AuthorityRecord {
 
 pub(super) struct Inner {
     pub(super) space: SpaceId,
-    pub(super) ledger: AuthorityLedger,
+    pub(super) ledger: Authority,
     pub(super) seed: [u8; 32],
     pub(super) me: DeviceId,
     pub(super) keyring: BTreeMap<[u8; 16], SpaceKey>,
@@ -199,7 +197,7 @@ impl Inner {
 
     /// The sealed records distributing every held epoch key to every device of
     /// `actor` (for batching with the authority effect that admits them).
-    pub(super) fn seal_records_for_actor(&mut self, target: &ActorId) -> Vec<Vec<u8>> {
+    pub(super) fn seal_records_for_actor(&mut self, target: &ActorId) -> Result<Vec<Vec<u8>>> {
         let devices = self.actor_plane().devices_of(target);
         let mut out = Vec::new();
         for (epoch, key) in self.keyring.iter() {
@@ -207,7 +205,9 @@ impl Inner {
                 if self.ledger.sealed_for(epoch, d).is_some() {
                     continue;
                 }
-                if let Some(sealed) = crypto::seal_to(d, key) {
+                if let Some(sealed) = crypto::seal_to(d, key)
+                    .map_err(|failure| anyhow!("seal epoch key: {failure}"))?
+                {
                     out.push(
                         SealedKeyRecord {
                             epoch: *epoch,
@@ -219,7 +219,7 @@ impl Inner {
                 }
             }
         }
-        out
+        Ok(out)
     }
 
     /// Author one signed ACL op as this device's actor and commit it — with
@@ -246,7 +246,7 @@ impl Inner {
             &self.space,
         );
         let mut effects = extra_effects;
-        effects.push(LedgerEffect::Acl(op).encode());
+        effects.push(Effect::Acl(op).encode());
         self.ledger
             .commit_batch(&effects, &sealed_records)
             .map_err(|e| anyhow!("authority commit: {e}"))?;
@@ -446,14 +446,16 @@ impl Inner {
         // and its capabilities land together or not at all. The grant ops
         // chain causally off the AddMember so the expansion applies after the
         // admission in every replay.
-        let inception_effect = LedgerEffect::Actor(inception.clone()).encode();
+        let inception_effect = Effect::Actor(inception.clone()).encode();
         // Devices of the joiner: from the candidate plane (the inception is
         // not yet committed, so resolve against the candidate set).
         let devices = actor::replay(&self.space, &candidate).devices_of(&joiner_actor);
         let mut sealed_records = Vec::new();
         for (epoch, key) in self.keyring.iter() {
             for d in &devices {
-                if let Some(sealed) = crypto::seal_to(d, key) {
+                if let Some(sealed) = crypto::seal_to(d, key)
+                    .map_err(|failure| anyhow!("seal admission epoch key: {failure}"))?
+                {
                     sealed_records.push(
                         SealedKeyRecord {
                             epoch: *epoch,
@@ -494,16 +496,20 @@ impl Inner {
             &self.space,
         );
         let mut prev = add.hash();
-        let mut effects: Vec<Vec<u8>> = vec![inception_effect, LedgerEffect::Acl(add).encode()];
+        let mut effects: Vec<Vec<u8>> = vec![inception_effect, Effect::Acl(add).encode()];
         for (i, (capability, resource)) in admission.evidence.assignments.iter().enumerate() {
             // Deterministic salt from the acceptance id: an exact replay of
             // this redemption derives the identical grant ids.
             let mut salt_input = acceptance_id.to_vec();
-            salt_input.extend_from_slice(&(i as u32).to_be_bytes());
-            let salt: [u8; 16] = blake3::derive_key("lait.admission-grant-salt.v1", &salt_input)
-                [..16]
-                .try_into()
-                .expect("16 bytes");
+            let assignment_index = u32::try_from(i).context("too many admission assignments")?;
+            salt_input.extend_from_slice(&assignment_index.to_be_bytes());
+            let derived = blake3::derive_key("lait.admission-grant-salt.v1", &salt_input);
+            let mut salt = [0u8; 16];
+            salt.copy_from_slice(
+                derived
+                    .get(..16)
+                    .ok_or_else(|| anyhow!("derived admission salt is too short"))?,
+            );
             let grant_id = acl::capability_grant_id(&joiner_actor, capability, resource, &salt)
                 .ok_or_else(|| anyhow!("grant id"))?;
             let op = acl::sign_op(
@@ -524,7 +530,7 @@ impl Inner {
                 &self.space,
             );
             prev = op.hash();
-            effects.push(LedgerEffect::Acl(op).encode());
+            effects.push(Effect::Acl(op).encode());
         }
         self.ledger
             .commit_batch(&effects, &sealed_records)
@@ -537,7 +543,7 @@ impl Inner {
 /// to the signed mint's commitment (the free-function form, so the ceremony
 /// engine's fence can run while the ledger is mutably borrowed).
 pub(super) fn refresh_keyring_into(
-    ledger: &mut AuthorityLedger,
+    ledger: &mut Authority,
     keyring: &mut BTreeMap<[u8; 16], SpaceKey>,
     seed: &[u8; 32],
     me: &DeviceId,
@@ -562,7 +568,7 @@ pub(super) fn refresh_keyring_into(
 /// Mint a fresh key epoch for the current member set (see
 /// [`Inner::rotate_key`]) — the free-function form over disjoint borrows.
 pub(super) fn rotate_epoch(
-    ledger: &mut AuthorityLedger,
+    ledger: &mut Authority,
     keyring: &mut BTreeMap<[u8; 16], SpaceKey>,
     seed: &[u8; 32],
     me: &DeviceId,
@@ -580,8 +586,8 @@ pub(super) fn rotate_epoch(
         .max_by(|a, b| a.gen.cmp(&b.gen).then_with(|| a.id.cmp(&b.id)))
         .map(|e| e.gen + 1)
         .unwrap_or(0);
-    let id = super::rand16();
-    let key = crypto::random_key();
+    let id = super::rand16()?;
+    let key = crypto::random_key().map_err(|failure| anyhow!("generate epoch key: {failure}"))?;
     let key_commit = *blake3::hash(&key).as_bytes();
     let members: Vec<ActorId> = acl_state.members().into_iter().map(|(a, _)| a).collect();
     // Seal the fresh key to every current member device before the mint lands,
@@ -589,7 +595,9 @@ pub(super) fn rotate_epoch(
     let mut sealed_records = Vec::new();
     for actor in &members {
         for d in plane.devices_of(actor) {
-            if let Some(sealed) = crypto::seal_to(&d, &key) {
+            if let Some(sealed) = crypto::seal_to(&d, &key)
+                .map_err(|failure| anyhow!("seal rotated epoch key: {failure}"))?
+            {
                 sealed_records.push(
                     SealedKeyRecord {
                         epoch: id,
@@ -618,13 +626,13 @@ pub(super) fn rotate_epoch(
         &space_of(ledger),
     );
     ledger
-        .commit_batch(&[LedgerEffect::Acl(op).encode()], &sealed_records)
+        .commit_batch(&[Effect::Acl(op).encode()], &sealed_records)
         .map_err(|e| anyhow!("authority commit: {e}"))?;
     keyring.insert(id, key);
     Ok(())
 }
 
-fn space_of(ledger: &AuthorityLedger) -> SpaceId {
+fn space_of(ledger: &Authority) -> SpaceId {
     ledger.space().clone()
 }
 
@@ -633,7 +641,7 @@ fn space_of(ledger: &AuthorityLedger) -> SpaceId {
 /// epoch, mint a fresh one (idempotent otherwise). A departed root's epochs
 /// are de-authorized by the re-root, so this is what re-keys the space.
 pub(super) fn fence_epoch(
-    ledger: &mut AuthorityLedger,
+    ledger: &mut Authority,
     keyring: &mut BTreeMap<[u8; 16], SpaceKey>,
     seed: &[u8; 32],
     me: &DeviceId,
@@ -663,8 +671,8 @@ fn now_secs() -> u64 {
 fn inner_grant(
     inner: &mut Inner,
     actor: &ActorId,
-    capability: mechanics::demand::PolicyCapability,
-    resource: mechanics::demand::Resource,
+    capability: mechanics::authorization::PolicyCapability,
+    resource: mechanics::authorization::Resource,
     salt: [u8; 16],
 ) -> Result<()> {
     let grant_id = acl::capability_grant_id(actor, &capability, &resource, &salt)
@@ -709,20 +717,20 @@ impl SpaceAuthority {
         device_seed: &[u8; 32],
         display_name: &str,
         approach_routes: Vec<runtime::coordinates::ApproachRoute>,
-    ) -> Result<(Self, runtime::SignedCoordinates)> {
-        let me = crypto::device_from_seed(device_seed);
-        let salt = super::rand16();
-        let (recovery_pub, space_recovery_secret) = crate::space::mint_recovery_key();
-        let recovery_root =
-            crate::space::recovery_commit(&recovery_pub).ok_or_else(|| anyhow!("recovery key"))?;
-        let space = crate::space::derive_space_id(&me, &salt, &recovery_root);
+    ) -> Result<(Self, runtime::coordinates::SignedCoordinates)> {
+        let me = device_from_seed(device_seed);
+        let salt = super::rand16()?;
+        let (recovery_pub, space_recovery_secret) =
+            mechanics::space::mint_recovery_key().context("generate Space recovery key")?;
+        let recovery_root = mechanics::space::recovery_commit(&recovery_pub)
+            .ok_or_else(|| anyhow!("recovery key"))?;
+        let space = mechanics::space::derive_space_id(&me, &salt, &recovery_root);
         let dir = Self::dir_for(root, &space);
         std::fs::create_dir_all(&dir)?;
 
         let (recovery_commit, actor_recovery_seed) = {
-            let mut seed = [0u8; 32];
-            getrandom::fill(&mut seed).expect("getrandom");
-            let public = crypto::device_from_seed(&seed);
+            let seed = mechanics::actor::random_seed().context("generate actor recovery key")?;
+            let public = device_from_seed(&seed);
             (
                 actor::recovery_commitment(&public).ok_or_else(|| anyhow!("recovery pub"))?,
                 seed,
@@ -738,8 +746,8 @@ impl SpaceAuthority {
         let (inception, actor_id) = actor::incept_single(
             device_seed,
             &space,
-            super::rand16(),
-            super::rand16(),
+            super::rand16()?,
+            super::rand16()?,
             Some(recovery_commit),
         );
         let genesis = Genesis {
@@ -749,13 +757,14 @@ impl SpaceAuthority {
             recovery_root,
         };
         std::fs::write(dir.join(GENESIS_FILE), serde_json::to_vec_pretty(&genesis)?)?;
-        let mut ledger = AuthorityLedger::create(dir.join(LEDGER_DIR), genesis)
+        let mut ledger = Authority::create(dir.join(LEDGER_DIR), genesis)
             .map_err(|e| anyhow!("authority ledger: {e}"))?;
 
         // Epoch 0, sealed to the founder — one atomic founding batch:
         // inception + mint + sealed envelope.
-        let key = crypto::random_key();
-        let epoch0 = super::rand16();
+        let key = crypto::random_key()
+            .map_err(|failure| anyhow!("generate founding epoch key: {failure}"))?;
+        let epoch0 = super::rand16()?;
         let key_commit = *blake3::hash(&key).as_bytes();
         let mint = acl::sign_op(
             device_seed,
@@ -773,12 +782,14 @@ impl SpaceAuthority {
             vec![],
             &space,
         );
-        let sealed = crypto::seal_to(&me, &key).ok_or_else(|| anyhow!("seal epoch key"))?;
+        let sealed = crypto::seal_to(&me, &key)
+            .map_err(|failure| anyhow!("seal founding epoch key: {failure}"))?
+            .ok_or_else(|| anyhow!("founder device cannot receive sealed epoch key"))?;
         ledger
             .commit_batch(
                 &[
-                    LedgerEffect::Actor(inception).encode(),
-                    LedgerEffect::Acl(mint).encode(),
+                    Effect::Actor(inception).encode(),
+                    Effect::Acl(mint).encode(),
                 ],
                 &[SealedKeyRecord {
                     epoch: epoch0,
@@ -814,12 +825,12 @@ impl SpaceAuthority {
     pub fn enter(
         root: &Path,
         device_seed: &[u8; 32],
-        coordinates: &runtime::SignedCoordinates,
+        coordinates: &runtime::coordinates::SignedCoordinates,
     ) -> Result<Self> {
         let verified = coordinates
             .verify()
             .map_err(|e| anyhow!("coordinates: {e}"))?;
-        let me = crypto::device_from_seed(device_seed);
+        let me = device_from_seed(device_seed);
         let space = verified.space.clone();
         let dir = Self::dir_for(root, &space);
         std::fs::create_dir_all(&dir)?;
@@ -835,13 +846,13 @@ impl SpaceAuthority {
         };
         let ledger_root = dir.join(LEDGER_DIR);
         let mut ledger = if ledger_root.join("current-manifest").exists() {
-            AuthorityLedger::open(&ledger_root).map_err(|e| anyhow!("authority ledger: {e}"))?
+            Authority::open(&ledger_root).map_err(|e| anyhow!("authority ledger: {e}"))?
         } else {
             std::fs::write(dir.join(GENESIS_FILE), serde_json::to_vec_pretty(&genesis)?)?;
-            let mut fresh = AuthorityLedger::create(&ledger_root, genesis)
+            let mut fresh = Authority::create(&ledger_root, genesis)
                 .map_err(|e| anyhow!("authority ledger: {e}"))?;
             fresh
-                .commit_batch(&[LedgerEffect::Actor(founder_inception).encode()], &[])
+                .commit_batch(&[Effect::Actor(founder_inception).encode()], &[])
                 .map_err(|e| anyhow!("founder inception: {e}"))?;
             fresh
         };
@@ -862,8 +873,9 @@ impl SpaceAuthority {
         if inner.my_actor().is_none() && inner.pending_inception.is_none() {
             let (recovery_commit, _seed) = {
                 let mut seed = [0u8; 32];
-                getrandom::fill(&mut seed).expect("getrandom");
-                let public = crypto::device_from_seed(&seed);
+                getrandom::fill(&mut seed)
+                    .map_err(|error| anyhow!("system entropy unavailable: {error}"))?;
+                let public = device_from_seed(&seed);
                 (
                     actor::recovery_commitment(&public).ok_or_else(|| anyhow!("recovery pub"))?,
                     seed,
@@ -872,8 +884,8 @@ impl SpaceAuthority {
             let (ev, _) = actor::incept_single(
                 device_seed,
                 &inner.space,
-                super::rand16(),
-                super::rand16(),
+                super::rand16()?,
+                super::rand16()?,
                 Some(recovery_commit),
             );
             std::fs::write(
@@ -899,7 +911,7 @@ impl SpaceAuthority {
                 let proof = runtime::coordinates::InvitationAcceptanceProof::sign(
                     device_seed,
                     now,
-                    super::rand16(),
+                    super::rand16()?,
                     &coords_digest,
                     &space_bytes,
                     &admission.issuer,
@@ -927,12 +939,12 @@ impl SpaceAuthority {
     /// Open existing mechanics material for a Space.
     pub fn open(root: &Path, space: &SpaceId, device_seed: &[u8; 32]) -> Result<Self> {
         let dir = Self::dir_for(root, space);
-        let ledger = AuthorityLedger::open(dir.join(LEDGER_DIR))
-            .map_err(|e| anyhow!("authority ledger: {e}"))?;
+        let ledger =
+            Authority::open(dir.join(LEDGER_DIR)).map_err(|e| anyhow!("authority ledger: {e}"))?;
         if ledger.space() != space {
             return Err(anyhow!("authority ledger belongs to another Space"));
         }
-        let me = crypto::device_from_seed(device_seed);
+        let me = device_from_seed(device_seed);
         let mut inner = Inner {
             space: space.clone(),
             ledger,
@@ -964,7 +976,7 @@ impl SpaceAuthority {
         display_name: &str,
         approach_routes: Vec<runtime::coordinates::ApproachRoute>,
         admission: Option<AdmissionCapability>,
-    ) -> Result<runtime::SignedCoordinates> {
+    ) -> Result<runtime::coordinates::SignedCoordinates> {
         let inner = self.lock();
         let genesis = inner.ledger.genesis().clone();
         let founder = genesis
@@ -984,7 +996,7 @@ impl SpaceAuthority {
             recovery_root: genesis.recovery_root,
             founder_inception: postcard::to_stdvec(&inception)?,
             display_name_hint: display_name.to_string(),
-            approach_station: crypto::device_from_seed(station_seed)
+            approach_station: device_from_seed(station_seed)
                 .key_bytes()
                 .ok_or_else(|| anyhow!("station key"))?,
             approach_nick_hint: String::new(),
@@ -994,7 +1006,10 @@ impl SpaceAuthority {
                 None => runtime::coordinates::CoordinatesAdmission::None,
             },
         };
-        Ok(runtime::SignedCoordinates::sign(payload, station_seed))
+        Ok(runtime::coordinates::SignedCoordinates::sign(
+            payload,
+            station_seed,
+        ))
     }
 
     /// Mint an admission capability carrying a **role's** exact expanded
@@ -1029,7 +1044,7 @@ impl SpaceAuthority {
             crate::world::roles::role_admission_evidence(&revision, parent_manifest_root);
         // Prove the issuer may delegate every assignment BEFORE anything is
         // signed. The issuing device must resolve to a member actor.
-        let issuer_device = crypto::device_from_seed(issuer_seed);
+        let issuer_device = device_from_seed(issuer_seed);
         let issuer_actor = inner
             .actor_plane()
             .actor_of_device(&issuer_device)
@@ -1056,7 +1071,7 @@ impl SpaceAuthority {
         };
         AdmissionCapability::sign(
             &inner.space,
-            super::rand16(),
+            super::rand16()?,
             now,
             now,
             now + ttl_secs,
@@ -1075,11 +1090,11 @@ impl SpaceAuthority {
     /// The space plane's standing root state plus the count of terminal
     /// Space-authority effects — the ceremony gates' terminal-state oracle
     /// (exact root, exact generation, exactly-one-terminal-effect proofs).
-    pub fn space_root_state(&self) -> (crate::space::RootState, usize) {
+    pub fn space_root_state(&self) -> (mechanics::space::RootState, usize) {
         let inner = self.lock();
         let events = inner.ledger.space_authority_events();
         let genesis = inner.ledger.genesis().clone();
-        let state = crate::space::replay(&genesis, &inner.space, &events);
+        let state = mechanics::space::replay(&genesis, &inner.space, &events);
         (state, events.len())
     }
 
@@ -1187,7 +1202,7 @@ impl SpaceAuthority {
     /// `sponsor` names the human whose standing seats it. Sponsorship is
     /// rendered as information — a badge + link the viewer draws — never a
     /// distinct actor class.
-    pub fn members(&self) -> Vec<crate::dto::MemberDto> {
+    pub fn members(&self) -> Vec<issues::dto::MemberDto> {
         let mut inner = self.lock();
         let acl = inner.acl();
         let plane = inner.actor_plane();
@@ -1203,8 +1218,8 @@ impl SpaceAuthority {
                     .devices_of(&actor)
                     .into_iter()
                     .min()
-                    .and_then(|d| crate::crypto::did_key_from_device(&d));
-                crate::dto::MemberDto {
+                    .and_then(|d| mechanics::actor::did_key_from_device(&d));
+                issues::dto::MemberDto {
                     key: actor.as_str().to_string(),
                     role: acl::role_label(&grants).to_string(),
                     did,
@@ -1217,7 +1232,7 @@ impl SpaceAuthority {
     }
 
     /// The signed ACL DAG replayed as an audit log.
-    pub fn member_log(&self) -> Vec<crate::dto::MemberLogEntry> {
+    pub fn member_log(&self) -> Vec<issues::dto::MemberLogEntry> {
         let inner = self.lock();
         let genesis = inner.ledger.genesis().clone();
         let events = inner.ledger.actor_events();
@@ -1225,7 +1240,7 @@ impl SpaceAuthority {
         let (_, audit) = acl::replay_with_audit(&genesis, &events, &ops);
         audit
             .into_iter()
-            .map(|entry| crate::dto::MemberLogEntry {
+            .map(|entry| issues::dto::MemberLogEntry {
                 op: entry.hash,
                 actor: entry.by.map(|a| a.as_str().to_string()).unwrap_or_default(),
                 kind: entry.kind.to_string(),
@@ -1266,7 +1281,7 @@ impl SpaceAuthority {
             return Ok(());
         }
         let grants = acl::membership_grants(admin);
-        let sealed = inner.seal_records_for_actor(&actor);
+        let sealed = inner.seal_records_for_actor(&actor)?;
         inner.author(
             AclAction::AddMember {
                 actor: actor.clone(),
@@ -1384,11 +1399,11 @@ impl SpaceAuthority {
                 Vec::new()
             } else {
                 let space_res =
-                    mechanics::demand::Resource::root(crate::world::contract::PRODUCT_WORLD);
+                    mechanics::authorization::Resource::root(crate::world::contract::PRODUCT_WORLD);
                 let acl_state = inner.acl();
                 let mut ids = acl_state.effective_capability_grants(
                     &actor,
-                    &mechanics::demand::PolicyCapability::new(
+                    &mechanics::authorization::PolicyCapability::new(
                         crate::world::contract::PRODUCT_WORLD,
                         "space.admin",
                     ),
@@ -1437,7 +1452,7 @@ impl SpaceAuthority {
     pub fn device_accept_consent(&self, actor_str: &str) -> Result<actor::DeviceBinding> {
         let inner = self.lock();
         let actor = ActorId::parse(actor_str).ok_or_else(|| anyhow!("invalid actor id"))?;
-        let nonce = super::rand16();
+        let nonce = super::rand16()?;
         Ok(actor::consent_sign(
             &inner.seed,
             inner.space.as_str(),
@@ -1475,7 +1490,9 @@ impl SpaceAuthority {
         // Seal every held epoch key to the new device in the same batch.
         let mut sealed_records = Vec::new();
         for (epoch, key) in inner.keyring.iter() {
-            if let Some(sealed) = crypto::seal_to(&device, key) {
+            if let Some(sealed) = crypto::seal_to(&device, key)
+                .map_err(|failure| anyhow!("seal device epoch key: {failure}"))?
+            {
                 sealed_records.push(
                     SealedKeyRecord {
                         epoch: *epoch,
@@ -1488,7 +1505,7 @@ impl SpaceAuthority {
         }
         inner
             .ledger
-            .commit_batch(&[LedgerEffect::Actor(event).encode()], &sealed_records)
+            .commit_batch(&[Effect::Actor(event).encode()], &sealed_records)
             .map_err(|e| anyhow!("device add: {e}"))?;
         Ok(device)
     }
@@ -1528,7 +1545,7 @@ impl SpaceAuthority {
         );
         inner
             .ledger
-            .commit_batch(&[LedgerEffect::Actor(event).encode()], &[])
+            .commit_batch(&[Effect::Actor(event).encode()], &[])
             .map_err(|e| anyhow!("device revoke: {e}"))?;
         let rotated = inner.acl().is_admin(&me);
         if rotated {
@@ -1559,7 +1576,7 @@ impl SpaceAuthority {
         let seed = inner
             .read_recovery_key()
             .ok_or_else(|| anyhow!("no actor recovery key on this device"))?;
-        let recovery_pub = crypto::device_from_seed(&seed);
+        let recovery_pub = device_from_seed(&seed);
         let commit = actor::recovery_commitment(&recovery_pub);
         let plane = inner.actor_plane();
         let actor = plane
@@ -1570,7 +1587,7 @@ impl SpaceAuthority {
         let binding = actor::consent_sign(
             &inner.seed,
             inner.space.as_str(),
-            super::rand16(),
+            super::rand16()?,
             &actor::ConsentCtx::Member { actor: &actor },
         );
         let ev = actor::sign_event(
@@ -1597,7 +1614,7 @@ impl SpaceAuthority {
         }
         inner
             .ledger
-            .commit_batch(&[LedgerEffect::Actor(ev).encode()], &[])
+            .commit_batch(&[Effect::Actor(ev).encode()], &[])
             .map_err(|e| anyhow!("actor recover: {e}"))?;
         Ok(actor)
     }
@@ -1658,7 +1675,7 @@ impl SpaceAuthority {
             if inner.acl().is_member(&agent) {
                 return Err(anyhow!("{} is already a principal", agent.short()));
             }
-            let sealed = inner.seal_records_for_actor(&agent);
+            let sealed = inner.seal_records_for_actor(&agent)?;
             inner.author(
                 AclAction::AddAgent {
                     actor: agent.clone(),
@@ -1705,7 +1722,7 @@ impl SpaceAuthority {
     /// machine (Architecture B). Idempotent: re-provisioning a known, sponsored
     /// agent returns its actor. Returns the agent's actor id.
     pub fn provision_agent(&self, agent_seed: &[u8; 32]) -> Result<ActorId> {
-        let agent_device = crypto::device_from_seed(agent_seed);
+        let agent_device = device_from_seed(agent_seed);
         // 1. Incept into the shared actor plane if not already known. The
         //    inception is self-signed (it proves key ownership); it establishes
         //    that the actor *exists*, never that it has standing — standing is
@@ -1716,13 +1733,13 @@ impl SpaceAuthority {
                 let (inception, _actor) = actor::incept_single(
                     agent_seed,
                     &inner.space,
-                    super::rand16(),
-                    super::rand16(),
+                    super::rand16()?,
+                    super::rand16()?,
                     None,
                 );
                 inner
                     .ledger
-                    .commit_batch(&[LedgerEffect::Actor(inception).encode()], &[])
+                    .commit_batch(&[Effect::Actor(inception).encode()], &[])
                     .map_err(|e| anyhow!("agent inception: {e}"))?;
             }
         }
@@ -1768,15 +1785,24 @@ impl SpaceAuthority {
                     &inner.pending_inception,
                     &inner.pending_proof,
                 ) {
-                    records.push(
-                        AuthorityRecord::Admission {
-                            admission: postcard::to_stdvec(admission).expect("admission bytes"),
-                            inception: postcard::to_stdvec(inception).expect("inception bytes"),
-                            proof: postcard::to_stdvec(proof).expect("proof bytes"),
-                            coordinates_digest: *coords_digest,
+                    match (
+                        postcard::to_stdvec(admission),
+                        postcard::to_stdvec(inception),
+                        postcard::to_stdvec(proof),
+                    ) {
+                        (Ok(admission), Ok(inception), Ok(proof)) => records.push(
+                            AuthorityRecord::Admission {
+                                admission,
+                                inception,
+                                proof,
+                                coordinates_digest: *coords_digest,
+                            }
+                            .encode(),
+                        ),
+                        _ => {
+                            tracing::error!("could not encode pending admission authority material")
                         }
-                        .encode(),
-                    );
+                    }
                 }
             }
         }
@@ -1792,10 +1818,10 @@ impl SpaceAuthority {
     /// persisted and this device is not yet admitted — the daemon reads it to
     /// teach the transport the approach Station's routes and dial. `None` once
     /// admitted (the pending material is cleaned up).
-    pub fn pending_coordinates(&self) -> Option<runtime::SignedCoordinates> {
+    pub fn pending_coordinates(&self) -> Option<runtime::coordinates::SignedCoordinates> {
         let inner = self.lock();
         let bytes = std::fs::read(inner.dir.join(COORDINATES_FILE)).ok()?;
-        runtime::SignedCoordinates::decode_canonical(&bytes).ok()
+        runtime::coordinates::SignedCoordinates::decode_canonical(&bytes).ok()
     }
 
     /// Activate a World implementation id for this Space — an admin-authored
@@ -1836,8 +1862,8 @@ impl SpaceAuthority {
         &self,
         actor: &ActorId,
         assignments: &[(
-            mechanics::demand::PolicyCapability,
-            mechanics::demand::Resource,
+            mechanics::authorization::PolicyCapability,
+            mechanics::authorization::Resource,
         )],
     ) -> Result<Vec<[u8; 32]>> {
         let mut inner = self.lock();
@@ -1869,9 +1895,13 @@ impl SpaceAuthority {
             salt_input.extend_from_slice(capability.name.as_bytes());
             salt_input.push(0);
             salt_input.extend_from_slice(resource.segments.join("/").as_bytes());
-            let salt: [u8; 16] = blake3::derive_key("lait.access-grant-salt.v1", &salt_input)[..16]
-                .try_into()
-                .expect("16 bytes");
+            let derived = blake3::derive_key("lait.access-grant-salt.v1", &salt_input);
+            let mut salt = [0u8; 16];
+            salt.copy_from_slice(
+                derived
+                    .get(..16)
+                    .ok_or_else(|| anyhow!("derived access-grant salt is too short"))?,
+            );
             let grant_id = acl::capability_grant_id(actor, capability, resource, &salt)
                 .ok_or_else(|| anyhow!("grant id"))?;
             if acl_state
@@ -1900,7 +1930,7 @@ impl SpaceAuthority {
                 &inner.space,
             );
             prev = Some(op.hash());
-            effects.push(LedgerEffect::Acl(op).encode());
+            effects.push(Effect::Acl(op).encode());
             granted.push(grant_id);
         }
         if effects.is_empty() {
@@ -1926,7 +1956,7 @@ impl SpaceAuthority {
     }
 
     /// The effective scoped assignments (all members, or one actor's).
-    pub fn assignment_rows(&self, actor: Option<&ActorId>) -> Vec<crate::dto::AssignmentDto> {
+    pub fn assignment_rows(&self, actor: Option<&ActorId>) -> Vec<issues::dto::AssignmentDto> {
         let mut inner = self.lock();
         let acl_state = inner.acl();
         let subjects: Vec<ActorId> = match actor {
@@ -1936,7 +1966,7 @@ impl SpaceAuthority {
         let mut rows = Vec::new();
         for subject in subjects {
             for (id, grant) in acl_state.effective_assignments(&subject) {
-                rows.push(crate::dto::AssignmentDto {
+                rows.push(issues::dto::AssignmentDto {
                     grant_id: data_encoding::HEXLOWER.encode(&id),
                     actor: subject.as_str().to_string(),
                     world: grant.capability.world.clone(),
@@ -1954,8 +1984,8 @@ impl SpaceAuthority {
     pub fn grant_actor_capability(
         &self,
         actor: &ActorId,
-        capability: mechanics::demand::PolicyCapability,
-        resource: mechanics::demand::Resource,
+        capability: mechanics::authorization::PolicyCapability,
+        resource: mechanics::authorization::Resource,
         salt: [u8; 16],
     ) -> Result<()> {
         let mut inner = self.lock();
@@ -1975,8 +2005,8 @@ impl SpaceAuthority {
     /// product-authority bootstrap seam (idempotent by grant id).
     pub fn grant_self_capability(
         &self,
-        capability: mechanics::demand::PolicyCapability,
-        resource: mechanics::demand::Resource,
+        capability: mechanics::authorization::PolicyCapability,
+        resource: mechanics::authorization::Resource,
         salt: [u8; 16],
     ) -> Result<()> {
         let mut inner = self.lock();
@@ -2008,15 +2038,15 @@ impl SpaceAuthority {
     }
 }
 
-impl runtime::AuthorityView for SpaceAuthority {
-    fn resolve(&self, device: &DeviceId) -> Option<runtime::PrincipalResolution> {
+impl runtime::world::AuthorityView for SpaceAuthority {
+    fn resolve(&self, device: &DeviceId) -> Option<runtime::world::PrincipalResolution> {
         let mut inner = self.lock();
         let actor = inner.actor_plane().actor_of_device(device).cloned()?;
         let acl_state = inner.acl();
         if !acl_state.is_member(&actor) {
             return None;
         }
-        Some(runtime::PrincipalResolution {
+        Some(runtime::world::PrincipalResolution {
             actor,
             authority_frontier: inner.frontier(),
         })
@@ -2025,7 +2055,7 @@ impl runtime::AuthorityView for SpaceAuthority {
     fn admit_contact_peer(
         &self,
         station: &mechanics::station::Key,
-    ) -> Option<runtime::PrincipalResolution> {
+    ) -> Option<runtime::world::PrincipalResolution> {
         if let Some(member) = self.resolve(&station.as_device()) {
             return Some(member);
         }
@@ -2036,7 +2066,7 @@ impl runtime::AuthorityView for SpaceAuthority {
         // device key, and incorporation decides whether its authority material
         // is legitimate before membership changes.
         let inner = self.lock();
-        Some(runtime::PrincipalResolution {
+        Some(runtime::world::PrincipalResolution {
             actor: ActorId::from_incept_hash(&data_encoding::HEXLOWER.encode(&station.key_bytes())),
             authority_frontier: inner.frontier(),
         })
@@ -2044,7 +2074,7 @@ impl runtime::AuthorityView for SpaceAuthority {
 
     fn active_implementation(
         &self,
-        world: &replica::ids::WorldId,
+        world: &replica::body::WorldId,
         authority_frontier: &AuthorityFrontier,
     ) -> Option<[u8; 32]> {
         let mut inner = self.lock();
@@ -2059,7 +2089,7 @@ impl runtime::AuthorityView for SpaceAuthority {
     fn authorize_mutation(
         &self,
         _space: &SpaceId,
-        world: &replica::ids::WorldId,
+        world: &replica::body::WorldId,
         actor: &ActorId,
         device: &DeviceId,
         authority_frontier: &AuthorityFrontier,
@@ -2069,14 +2099,16 @@ impl runtime::AuthorityView for SpaceAuthority {
         demand: &[u8],
         operations_digest: [u8; 32],
         core_digest: [u8; 32],
-    ) -> Result<Vec<u8>, String> {
+    ) -> Result<Vec<u8>, mechanics::authorization::Refusal> {
         let mut inner = self.lock();
         let receipt = inner
             .ledger
-            .authorize(&mechanics::ledger::AuthorizationRequest {
+            .authorize(&mechanics::authorization::AuthorizationRequest {
                 world: world.as_str(),
                 actor: actor.as_str(),
-                device: device.key_bytes().ok_or("device key")?,
+                device: device
+                    .key_bytes()
+                    .ok_or(mechanics::authorization::Refusal::Denied)?,
                 authority_frontier: authority_frontier.as_bytes(),
                 parent_manifest_root,
                 implementation_id,
@@ -2084,8 +2116,7 @@ impl runtime::AuthorityView for SpaceAuthority {
                 demand,
                 effect_operations_digest: operations_digest,
                 body_transaction_core_digest: core_digest,
-            })
-            .map_err(|e| e.to_string())?;
+            })?;
         Ok(receipt.encode())
     }
 
@@ -2095,7 +2126,7 @@ impl runtime::AuthorityView for SpaceAuthority {
         authority_frontier: &AuthorityFrontier,
         demand: &[u8],
     ) -> bool {
-        let parsed = match mechanics::demand::AuthorizationDemand::decode_canonical(demand) {
+        let parsed = match mechanics::authorization::AuthorizationDemand::decode_canonical(demand) {
             Ok(d) => d,
             Err(_) => return false,
         };
@@ -2107,7 +2138,7 @@ impl runtime::AuthorityView for SpaceAuthority {
     }
 }
 
-impl replica::AuthoritySource for SpaceAuthority {
+impl replica::transaction::AuthoritySource for SpaceAuthority {
     fn signer_authorized(&self, signer: &[u8; 32], frontier: &AuthorityFrontier) -> bool {
         // The Manifest-advertisement legitimacy check: standing is evaluated at
         // the **referenced** frontier — the exact effect closure its heads name
@@ -2118,17 +2149,22 @@ impl replica::AuthoritySource for SpaceAuthority {
             .signer_authorized_at(signer, frontier.as_bytes())
     }
 
-    fn verify_transaction(&self, tx: &replica::Transaction) -> Result<(), String> {
+    fn verify_transaction(
+        &self,
+        tx: &replica::transaction::Transaction,
+    ) -> Result<(), replica::transaction::Refusal> {
         // Remote historical authorization: verify the transaction's
         // authorization receipt against signed mechanics history at its
         // referenced frontier. No World callback runs.
-        let receipt = tx.receipt().map_err(|e| e.to_string())?;
+        let receipt = tx
+            .receipt()
+            .map_err(|_| replica::transaction::Refusal::Unauthorized)?;
         let mut inner = self.lock();
         inner
             .ledger
             .verify_receipt(
                 &receipt,
-                &mechanics::ledger::ReceiptExpectations {
+                &mechanics::authorization::ReceiptExpectations {
                     device: &tx.core.signer,
                     authority_frontier: tx.core.authority_frontier.as_bytes(),
                     parent_manifest_root: &tx.core.parent_manifest_root,
@@ -2138,35 +2174,31 @@ impl replica::AuthoritySource for SpaceAuthority {
                     body_transaction_core_digest: &tx.core.digest(),
                 },
             )
-            .map_err(|e| e.to_string())
+            .map_err(|_| replica::transaction::Refusal::Unauthorized)
     }
 }
 
-impl replica::BodyKeySource for SpaceAuthority {
-    fn sealing_key(&self) -> Option<mechanics::crypto::AuthorizedBodyKey> {
+impl replica::body::BodyKeySource for SpaceAuthority {
+    fn sealing_key(&self) -> Option<mechanics::authorization::AuthorizedBodyKey> {
         let mut inner = self.lock();
         let epoch = inner.active_epoch()?;
         let key = inner.keyring.get(&epoch.id)?;
-        Some(mechanics::crypto::AuthorizedBodyKey::for_authorized_epoch(
-            epoch.id, *key,
-        ))
+        Some(mechanics::authorization::AuthorizedBodyKey::for_authorized_epoch(epoch.id, *key))
     }
-    fn opening_key(&self, epoch: &[u8; 16]) -> Option<mechanics::crypto::AuthorizedBodyKey> {
+    fn opening_key(&self, epoch: &[u8; 16]) -> Option<mechanics::authorization::AuthorizedBodyKey> {
         let mut inner = self.lock();
         // Only an AUTHORIZED epoch's key may open material.
         inner.acl().epoch(epoch)?;
         let key = inner.keyring.get(epoch)?;
-        Some(mechanics::crypto::AuthorizedBodyKey::for_authorized_epoch(
-            *epoch, *key,
-        ))
+        Some(mechanics::authorization::AuthorizedBodyKey::for_authorized_epoch(*epoch, *key))
     }
 }
 
-impl replica::AuthorityIncorporator for SpaceAuthority {
+impl replica::convergence::AuthorityIncorporator for SpaceAuthority {
     fn incorporate_authority(
         &mut self,
         records: &[Vec<u8>],
-    ) -> Result<replica::AuthorityBatchReceipt, String> {
+    ) -> Result<replica::convergence::AuthorityBatchReceipt, replica::convergence::Failure> {
         let mut inner = self.lock();
         // Split the staged records: effects + sealed keys commit as ONE
         // atomic ledger batch (an invalid record refuses the whole batch);
@@ -2187,7 +2219,7 @@ impl replica::AuthorityIncorporator for SpaceAuthority {
                     proof,
                     coordinates_digest,
                 }) => admissions.push((admission, inception, proof, coordinates_digest)),
-                None => return Err("unrecognized authority record".into()),
+                None => return Err(replica::convergence::Failure::Invalid),
             }
         }
         // Pre-validate the ceremony batch (decode + ceremony-domain signature)
@@ -2195,24 +2227,24 @@ impl replica::AuthorityIncorporator for SpaceAuthority {
         // incorporation with the durable ledger unchanged — no material class
         // commits ahead of another's validation failure.
         for record in &ceremony {
-            let material =
-                mechanics::ledger::CeremonyMaterial::decode(record).map_err(|e| e.to_string())?;
+            let material = mechanics::recovery::CeremonyMaterial::decode(record)
+                .map_err(|_| replica::convergence::Failure::Invalid)?;
             if !material.verify(&inner.space) {
-                return Err("ceremony record fails ceremony-domain verification".into());
+                return Err(replica::convergence::Failure::Invalid);
             }
         }
         let prior = inner.frontier();
         let receipt = inner
             .ledger
             .commit_batch(&effects, &sealed)
-            .map_err(|e| e.to_string())?;
+            .map_err(authority_incorporation_failure)?;
         // The ceremony-material class commits at its own linearization point,
         // after the authority batch (a crash between the two exposes the
         // complete earlier phase; idempotent retry re-lands the rest).
         inner
             .ledger
             .commit_ceremony_batch(&ceremony)
-            .map_err(|e| e.to_string())?;
+            .map_err(authority_incorporation_failure)?;
         for (admission, inception, proof, coords_digest) in &admissions {
             // Best-effort: only an admin holding the key can redeem;
             // everyone else carries the material onward.
@@ -2238,11 +2270,25 @@ impl replica::AuthorityIncorporator for SpaceAuthority {
             let _ = std::fs::remove_file(inner.dir.join(PENDING_PROOF_FILE));
             let _ = std::fs::remove_file(inner.dir.join(COORDINATES_FILE));
         }
-        Ok(replica::AuthorityBatchReceipt {
+        Ok(replica::convergence::AuthorityBatchReceipt {
             space: inner.space.clone(),
             prior_frontier: prior,
             resulting_frontier: inner.frontier(),
             batch_digest: receipt.batch_digest,
         })
+    }
+}
+
+fn authority_incorporation_failure(
+    failure: mechanics::space::Failure,
+) -> replica::convergence::Failure {
+    match failure {
+        mechanics::space::Failure::InvalidRecord | mechanics::space::Failure::MalformedFrontier => {
+            replica::convergence::Failure::Invalid
+        }
+        mechanics::space::Failure::MissingHistory => replica::convergence::Failure::Refusal,
+        mechanics::space::Failure::Journal(_) | mechanics::space::Failure::Corrupt => {
+            replica::convergence::Failure::Operation
+        }
     }
 }

@@ -65,7 +65,7 @@ pub trait RecvFlow: Send {
     async fn read_exact(&mut self, len: usize) -> Result<Vec<u8>> {
         let mut out = Vec::with_capacity(len.min(64 * 1024));
         while out.len() < len {
-            let want = len - out.len();
+            let want = len.saturating_sub(out.len());
             match self.read_chunk(want).await? {
                 Some(bytes) if !bytes.is_empty() => out.extend_from_slice(&bytes),
                 _ => anyhow::bail!("flow ended after {} of {len} bytes", out.len()),

@@ -1,3 +1,8 @@
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    reason = "canonicalization validates bounded threshold counts before numeric conversion"
+)]
 //! Ownership-policy grammar and canonical identity.
 //!
 //! A space's ownership rule is a **monotone** boolean formula over principals:
@@ -9,7 +14,7 @@
 //!
 //! [`PolicyId`] is the **human ownership rule** and nothing else. It is *not* the
 //! compiler's `AccessStructureCommitment` (the exact linear-secret-sharing
-//! output) nor the deployed `AuthorityConfigurationId` (the scheme, compiler
+//! output) nor the deployed `ConfigId` (the scheme, compiler
 //! version, and expansion actually operating a key). A compiler upgrade or a
 //! custody change alters the deployed configuration without touching the human
 //! policy; conflating the three is how "the policy changed" checks start lying.
@@ -32,7 +37,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::authority::PrincipalId;
+use crate::authority::Principal;
 
 /// Domain for policy hashing. The trailing `/1` is the **grammar version**: a
 /// future grammar change bumps it, so ids from different grammars never collide.
@@ -54,7 +59,7 @@ pub const MAX_ENCODED_BYTES: usize = 65536;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OwnershipPolicy {
     /// A single principal must sign.
-    Key(PrincipalId),
+    Key(Principal),
     /// `k` of `members` must be satisfied.
     Threshold {
         k: u16,
@@ -71,7 +76,7 @@ pub enum OwnershipPolicy {
 /// only shape that produces a [`PolicyId`].
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum CanonicalPolicy {
-    Key(PrincipalId),
+    Key(Principal),
     Threshold {
         k: u16,
         members: Vec<CanonicalPolicy>,
@@ -247,7 +252,9 @@ fn normalize_gate(
 
     // `Threshold{1,[x]} ≡ x` — unwrap a lone member.
     if members.len() == 1 {
-        return Ok(members.pop().unwrap());
+        if let Some(member) = members.pop() {
+            return Ok(member);
+        }
     }
     Ok(CanonicalPolicy::Threshold { k, members })
 }
@@ -275,6 +282,10 @@ fn flatten_into(members: &mut Vec<CanonicalPolicy>, same_gate: impl Fn(&Canonica
 impl CanonicalPolicy {
     /// The canonical encoding (postcard). Deterministic because the structure is
     /// normalized.
+    #[allow(
+        clippy::expect_used,
+        reason = "derived postcard serialization of canonical policy has no fallible fields"
+    )]
     pub fn encode(&self) -> Vec<u8> {
         postcard::to_stdvec(self).expect("encode canonical policy")
     }
@@ -292,13 +303,13 @@ impl CanonicalPolicy {
     /// (different gates); those are separate *occurrences*, and expansion maps each to
     /// its own leaf. Identical subtrees were already deduped, so no occurrence is
     /// a silent duplicate.
-    pub fn leaves(&self) -> Vec<&PrincipalId> {
+    pub fn leaves(&self) -> Vec<&Principal> {
         let mut out = Vec::new();
         self.collect_leaves(&mut out);
         out
     }
 
-    fn collect_leaves<'a>(&'a self, out: &mut Vec<&'a PrincipalId>) {
+    fn collect_leaves<'a>(&'a self, out: &mut Vec<&'a Principal>) {
         match self {
             CanonicalPolicy::Key(p) => out.push(p),
             CanonicalPolicy::Threshold { members, .. } => {
@@ -323,8 +334,8 @@ impl CanonicalPolicy {
 mod tests {
     use super::*;
 
-    fn p(n: u8) -> PrincipalId {
-        PrincipalId::of_device(&crate::crypto::device_from_seed(&[n; 32]))
+    fn p(n: u8) -> Principal {
+        Principal::of_device(&crate::crypto::device_from_seed(&[n; 32]))
     }
     fn key(n: u8) -> OwnershipPolicy {
         OwnershipPolicy::Key(p(n))
@@ -531,7 +542,7 @@ mod tests {
                     seed[0] = (i & 0xff) as u8;
                     seed[1] = (i >> 8) as u8;
                     seed[2] = 7;
-                    OwnershipPolicy::Key(PrincipalId::of_device(&crate::crypto::device_from_seed(
+                    OwnershipPolicy::Key(Principal::of_device(&crate::crypto::device_from_seed(
                         &seed,
                     )))
                 })
@@ -552,7 +563,7 @@ mod tests {
             members: vec![key(1), OwnershipPolicy::AnyOf(vec![key(1), key(2)])],
         };
         let c = policy.canonicalize().unwrap();
-        let leaves: Vec<&PrincipalId> = c.leaves();
+        let leaves: Vec<&Principal> = c.leaves();
         assert_eq!(leaves.iter().filter(|l| ***l == p(1)).count(), 2);
     }
 

@@ -13,7 +13,7 @@
 //! This gate parses. The line-oriented prefix scan it replaces could only see
 //! sixteen declaration keywords at the start of a line, so it missed fields,
 //! locals, parameters, enum variants, and every declaration inside an `impl`
-//! block — and it walked six crates, silently exempting `world-bridge`,
+//! block — and it walked six crates, silently exempting an application-call crate,
 //! `world-interface`, and both `products/*` packages. Extending the old
 //! technique to fields and locals would have produced false positives
 //! immediately (`let v1 = …`, a field named `ipv4`); a syntax tree does not
@@ -35,6 +35,15 @@ fn workspace_root() -> PathBuf {
 /// `src/**`, and each product package's `src/**`. Tests and fixtures are not
 /// production names.
 fn production_sources() -> Vec<PathBuf> {
+    fn is_test_source(path: &Path) -> bool {
+        path.components()
+            .any(|component| component.as_os_str() == "internal_tests")
+            || path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .is_some_and(|stem| stem == "internal_tests" || stem.ends_with("_tests"))
+    }
+
     fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;
@@ -43,7 +52,7 @@ fn production_sources() -> Vec<PathBuf> {
             let p = entry.path();
             if p.is_dir() {
                 walk(&p, out);
-            } else if p.extension().and_then(|e| e.to_str()) == Some("rs") {
+            } else if p.extension().and_then(|e| e.to_str()) == Some("rs") && !is_test_source(&p) {
                 out.push(p);
             }
         }
@@ -109,6 +118,12 @@ fn test_gated(attrs: &[syn::Attribute]) -> bool {
         }
         if !attr.path().is_ident("cfg") {
             return false;
+        }
+        if matches!(
+            &attr.meta,
+            syn::Meta::List(list) if list.tokens.to_string().contains("fault-injection")
+        ) {
+            return true;
         }
         let mut gated = false;
         let _ = attr.parse_nested_meta(|meta| {
@@ -184,11 +199,17 @@ impl Declarations {
 
 impl<'ast> Visit<'ast> for Declarations {
     fn visit_item_struct(&mut self, node: &'ast syn::ItemStruct) {
+        if test_gated(&node.attrs) {
+            return;
+        }
         self.note_type(&node.ident);
         self.note_fields(&node.fields);
         syn::visit::visit_item_struct(self, node);
     }
     fn visit_item_enum(&mut self, node: &'ast syn::ItemEnum) {
+        if test_gated(&node.attrs) {
+            return;
+        }
         self.note_type(&node.ident);
         for variant in &node.variants {
             self.note(&variant.ident);
@@ -197,6 +218,9 @@ impl<'ast> Visit<'ast> for Declarations {
         syn::visit::visit_item_enum(self, node);
     }
     fn visit_item_union(&mut self, node: &'ast syn::ItemUnion) {
+        if test_gated(&node.attrs) {
+            return;
+        }
         self.note_type(&node.ident);
         for field in &node.fields.named {
             if let Some(ident) = &field.ident {
@@ -206,10 +230,16 @@ impl<'ast> Visit<'ast> for Declarations {
         syn::visit::visit_item_union(self, node);
     }
     fn visit_item_trait(&mut self, node: &'ast syn::ItemTrait) {
+        if test_gated(&node.attrs) {
+            return;
+        }
         self.note_type(&node.ident);
         syn::visit::visit_item_trait(self, node);
     }
     fn visit_item_type(&mut self, node: &'ast syn::ItemType) {
+        if test_gated(&node.attrs) {
+            return;
+        }
         self.note_type(&node.ident);
         syn::visit::visit_item_type(self, node);
     }
@@ -221,10 +251,16 @@ impl<'ast> Visit<'ast> for Declarations {
         syn::visit::visit_item_mod(self, node);
     }
     fn visit_item_const(&mut self, node: &'ast syn::ItemConst) {
+        if test_gated(&node.attrs) {
+            return;
+        }
         self.note(&node.ident);
         syn::visit::visit_item_const(self, node);
     }
     fn visit_item_static(&mut self, node: &'ast syn::ItemStatic) {
+        if test_gated(&node.attrs) {
+            return;
+        }
         self.note(&node.ident);
         syn::visit::visit_item_static(self, node);
     }
@@ -236,26 +272,44 @@ impl<'ast> Visit<'ast> for Declarations {
         syn::visit::visit_item_fn(self, node);
     }
     fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
+        if test_gated(&node.attrs) {
+            return;
+        }
         self.note_signature(&node.sig);
         syn::visit::visit_impl_item_fn(self, node);
     }
     fn visit_impl_item_const(&mut self, node: &'ast syn::ImplItemConst) {
+        if test_gated(&node.attrs) {
+            return;
+        }
         self.note(&node.ident);
         syn::visit::visit_impl_item_const(self, node);
     }
     fn visit_impl_item_type(&mut self, node: &'ast syn::ImplItemType) {
+        if test_gated(&node.attrs) {
+            return;
+        }
         self.note(&node.ident);
         syn::visit::visit_impl_item_type(self, node);
     }
     fn visit_trait_item_fn(&mut self, node: &'ast syn::TraitItemFn) {
+        if test_gated(&node.attrs) {
+            return;
+        }
         self.note_signature(&node.sig);
         syn::visit::visit_trait_item_fn(self, node);
     }
     fn visit_trait_item_const(&mut self, node: &'ast syn::TraitItemConst) {
+        if test_gated(&node.attrs) {
+            return;
+        }
         self.note(&node.ident);
         syn::visit::visit_trait_item_const(self, node);
     }
     fn visit_trait_item_type(&mut self, node: &'ast syn::TraitItemType) {
+        if test_gated(&node.attrs) {
+            return;
+        }
         self.note(&node.ident);
         syn::visit::visit_trait_item_type(self, node);
     }
@@ -298,7 +352,106 @@ fn prefixed_error_types(text: &str) -> Vec<String> {
     declarations.prefixed_errors.into_iter().collect()
 }
 
+#[derive(Default)]
+struct PublicFaultSurfaces(BTreeSet<String>);
+
+impl PublicFaultSurfaces {
+    fn note(&mut self, visibility: &syn::Visibility, ident: &syn::Ident) {
+        if matches!(visibility, syn::Visibility::Public(_)) {
+            let name = ident.to_string();
+            let lower = name.to_ascii_lowercase();
+            let operational = lower
+                .split('_')
+                .any(|part| part == "fault" || part == "injector");
+            if operational {
+                self.0.insert(name);
+            }
+        }
+    }
+}
+
+impl<'ast> Visit<'ast> for PublicFaultSurfaces {
+    fn visit_item_type(&mut self, node: &'ast syn::ItemType) {
+        if !test_gated(&node.attrs) {
+            self.note(&node.vis, &node.ident);
+            syn::visit::visit_item_type(self, node);
+        }
+    }
+
+    fn visit_item_const(&mut self, node: &'ast syn::ItemConst) {
+        if !test_gated(&node.attrs) {
+            self.note(&node.vis, &node.ident);
+            syn::visit::visit_item_const(self, node);
+        }
+    }
+
+    fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
+        if !test_gated(&node.attrs) {
+            self.note(&node.vis, &node.sig.ident);
+            syn::visit::visit_item_fn(self, node);
+        }
+    }
+
+    fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
+        if !test_gated(&node.attrs) {
+            self.note(&node.vis, &node.sig.ident);
+            syn::visit::visit_impl_item_fn(self, node);
+        }
+    }
+}
+
+fn public_fault_surfaces(text: &str) -> Vec<String> {
+    let Ok(file) = syn::parse_file(text) else {
+        return Vec::new();
+    };
+    let mut surfaces = PublicFaultSurfaces::default();
+    surfaces.visit_file(&file);
+    surfaces.0.into_iter().collect()
+}
+
+fn direct_public_modules(path: &Path) -> BTreeSet<String> {
+    let text = std::fs::read_to_string(path).expect("read crate root");
+    let file = syn::parse_file(&text).expect("parse crate root");
+    file.items
+        .into_iter()
+        .filter_map(|item| match item {
+            syn::Item::Mod(module)
+                if matches!(module.vis, syn::Visibility::Public(_))
+                    && !test_gated(&module.attrs) =>
+            {
+                Some(module.ident.to_string())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 const RETIRED: &[&str] = &[
+    "LaitDaemon",
+    "LaitDaemonClient",
+    "ControlRouter",
+    "StationPlacement",
+    "PlacementHost",
+    "MemoryEngine",
+    "JournaledStore",
+    "ObjectRef",
+    "CallerIndex",
+    "StoreManifest",
+    "RecoveryStatus",
+    "RecoveryApproved",
+    "DegradedRecoveryHolder",
+    "AuthorityConfiguration",
+    "AuthorityConfigurationId",
+    "AuthorityScheme",
+    "AuthorityId",
+    "PrincipalId",
+    "LeafId",
+    "AuthoritySharePackage",
+    "WorldCall",
+    "WorldReply",
+    "WorldCallHandler",
+    "CallFailure",
+    "CallFailureCode",
     "StationId",
     "StationEpoch",
     "SpaceFormationOptions",
@@ -328,12 +481,118 @@ const RETIRED: &[&str] = &[
     "PolicyGrant",
     "WorldRegistration",
     "TransientScope",
-    "SpaceBridge",
-    "WorldBridge",
-    "WorldBridgeRegistry",
-    "WorldBridgesBuilder",
+    concat!("Space", "Bri", "dge"),
+    concat!("World", "Bri", "dge"),
+    concat!("World", "Bri", "dgeRegistry"),
+    concat!("World", "Bri", "dgesBuilder"),
     "OrbitalMechanics",
 ];
+
+#[test]
+fn compatibility_source_vocabulary_is_absent() {
+    let root = workspace_root();
+    let mut found = Vec::new();
+    for file in production_sources() {
+        let rel = file
+            .strip_prefix(&root)
+            .unwrap_or(&file)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let text = std::fs::read_to_string(&file).unwrap_or_default();
+        let lower = text.to_ascii_lowercase();
+        if lower.contains(concat!("bri", "dge")) {
+            found.push(format!("{rel}: retired boundary vocabulary"));
+        }
+        if lower.contains("#[path") || lower.contains("#[ path") {
+            found.push(format!("{rel}: compatibility path module"));
+        }
+        if (rel.starts_with("crates/runtime/src/") || rel.starts_with("crates/replica/src/"))
+            && lower.contains("issues")
+        {
+            found.push(format!("{rel}: product vocabulary"));
+        }
+    }
+    assert!(
+        found.is_empty(),
+        "retired compatibility vocabulary in production sources:\n  {}",
+        found.join("\n  ")
+    );
+}
+
+#[test]
+fn production_boundaries_expose_no_fault_injectors() {
+    let root = workspace_root();
+    let mut found = Vec::new();
+    for file in production_sources() {
+        let rel = file
+            .strip_prefix(&root)
+            .unwrap_or(&file)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let text = std::fs::read_to_string(&file).unwrap_or_default();
+        for name in public_fault_surfaces(&text) {
+            found.push(format!("{rel}: `{name}`"));
+        }
+    }
+    assert!(
+        found.is_empty(),
+        "fault injection escaped a production boundary:\n  {}",
+        found.join("\n  ")
+    );
+}
+
+#[test]
+fn concept_crates_expose_only_their_semantic_namespaces() {
+    let root = workspace_root();
+    let expected: &[(&str, &[&str])] = &[
+        ("fabric", &[]),
+        ("journal", &[]),
+        (
+            "mechanics",
+            &[
+                "actor",
+                "assignment",
+                "authorization",
+                "ids",
+                "membership",
+                "policy",
+                "recovery",
+                "space",
+                "station",
+            ],
+        ),
+        (
+            "replica",
+            &[
+                "body",
+                "content",
+                "convergence",
+                "frontier",
+                "manifest",
+                "receipt",
+                "transaction",
+            ],
+        ),
+        (
+            "runtime",
+            &[
+                "beacon",
+                "coordinates",
+                "neighbor",
+                "plane",
+                "signal",
+                "transient",
+                "world",
+            ],
+        ),
+    ];
+
+    for (package, allowed) in expected {
+        let found = direct_public_modules(&root.join("crates").join(package).join("src/lib.rs"));
+        let allowed: BTreeSet<String> = allowed.iter().map(|name| (*name).to_owned()).collect();
+        assert_eq!(found, allowed, "{package} public module allowlist changed");
+    }
+}
 
 #[test]
 fn retired_declarations_and_module_prefix_stutter_are_absent() {

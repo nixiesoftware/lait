@@ -12,6 +12,7 @@
 //! device", an `ActorId` as "who".
 
 use std::fmt;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 
@@ -33,15 +34,29 @@ impl UlidSource for SystemUlidSource {
     fn now_ms(&self) -> u64 {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
+            .ok()
+            .and_then(|duration| u64::try_from(duration.as_millis()).ok())
             .unwrap_or(0)
     }
     fn rand80(&self) -> u128 {
+        static FALLBACK_COUNTER: AtomicU64 = AtomicU64::new(0);
         let mut buf = [0u8; 10];
-        getrandom::fill(&mut buf).expect("getrandom");
+        if let Err(error) = getrandom::fill(&mut buf) {
+            let counter = FALLBACK_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let mut hasher = blake3::Hasher::new();
+            hasher.update(b"lait/ulid-entropy-fallback/1");
+            hasher.update(&self.now_ms().to_le_bytes());
+            hasher.update(&u64::from(std::process::id()).to_le_bytes());
+            hasher.update(&counter.to_le_bytes());
+            let digest = hasher.finalize();
+            if let Some(prefix) = digest.as_bytes().get(..buf.len()) {
+                buf.copy_from_slice(prefix);
+            }
+            tracing::warn!(%error, "OS randomness unavailable; using process-local ULID entropy");
+        }
         let mut v: u128 = 0;
         for b in buf {
-            v = (v << 8) | b as u128;
+            v = (v << 8) | u128::from(b);
         }
         v
     }
@@ -62,15 +77,22 @@ fn encode_ulid(value: u128) -> String {
     let mut out = [0u8; 26];
     let mut v = value;
     for i in (0..26).rev() {
-        out[i] = CROCKFORD[(v & 0x1f) as usize];
+        let alphabet_index = usize::try_from(v & 0x1f).unwrap_or(0);
+        let Some(encoded) = CROCKFORD.get(alphabet_index).copied() else {
+            return String::new();
+        };
+        let Some(target) = out.get_mut(i) else {
+            return String::new();
+        };
+        *target = encoded;
         v >>= 5;
     }
-    String::from_utf8(out.to_vec()).expect("ascii")
+    out.into_iter().map(char::from).collect()
 }
 
 /// Mint a fresh ULID string from a source: 48-bit ms timestamp + 80-bit random.
 pub fn mint_ulid(src: &dyn UlidSource) -> String {
-    let ts = (src.now_ms() as u128) & ((1u128 << 48) - 1);
+    let ts = u128::from(src.now_ms()) & ((1u128 << 48) - 1);
     let rand = src.rand80() & ((1u128 << 80) - 1);
     encode_ulid((ts << 80) | rand)
 }
@@ -123,14 +145,14 @@ macro_rules! prefixed_id {
             /// chars) — the canonical human handle. `n` counts
             /// ULID characters after the textual prefix.
             pub fn short(&self, n: usize) -> String {
-                let ulid = &self.0[$prefix.len()..];
-                let take = n.min(ulid.len());
-                format!("{}{}", $prefix, &ulid[..take])
+                let ulid = self.0.strip_prefix($prefix).unwrap_or_default();
+                let short: String = ulid.chars().take(n).collect();
+                format!("{}{}", $prefix, short)
             }
 
             /// The bare ULID portion (no textual prefix).
             pub fn ulid(&self) -> &str {
-                &self.0[$prefix.len()..]
+                self.0.strip_prefix($prefix).unwrap_or_default()
             }
         }
 
@@ -275,7 +297,7 @@ impl ActorId {
 
     /// The bare incept-event hash (no textual prefix).
     pub fn incept_hash(&self) -> &str {
-        &self.0[Self::PREFIX.len()..]
+        self.0.strip_prefix(Self::PREFIX).unwrap_or_default()
     }
 
     pub fn as_str(&self) -> &str {
@@ -284,7 +306,10 @@ impl ActorId {
 
     /// A short, display-friendly handle: `act_` + first 8 hash chars.
     pub fn short(&self) -> String {
-        self.0.chars().take(Self::PREFIX.len() + 8).collect()
+        self.0
+            .chars()
+            .take(Self::PREFIX.len().saturating_add(8))
+            .collect()
     }
 }
 

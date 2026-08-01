@@ -9,30 +9,31 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use mechanics::crypto::AuthorizedBodyKey;
+use mechanics::authorization::AuthorizedBodyKey;
 use mechanics::{
     ids::{ActorId, DeviceId, SpaceId},
     station::Key,
 };
+use replica::body::{BodyId, BodyKey, EncodingId, SchemaId, WorldId};
 use replica::body::{MutationModel, Op, Schema};
 use replica::frontier::{AuthorityFrontier, ReplicaFrontier};
-use replica::ids::{BodyId, BodyKey, EncodingId, SchemaId, WorldId};
-use runtime::contact::CONTACT_ALPN;
 use runtime::coordinates::{ApproachRoute, CoordinatesAdmission, CoordinatesPayload};
+use runtime::plane::contact::CONTACT_ALPN;
 
 #[allow(dead_code)]
 fn any_demand() -> Vec<u8> {
-    mechanics::demand::AuthorizationDemand::require(
-        mechanics::demand::PolicyCapability::new("w", "c"),
-        mechanics::demand::Resource::root("w"),
+    mechanics::authorization::AuthorizationDemand::require(
+        mechanics::authorization::PolicyCapability::new("w", "c"),
+        mechanics::authorization::Resource::root("w"),
     )
     .encode_canonical()
     .expect("canonical demand")
 }
 use runtime::{
-    ActivationOptions, Authority, CommsOptions, Context, Descriptor, Effect, Intent, Limits,
-    Projection, Query, Rejection, RequestId, Runtime, RuntimeBuilder, SignedCoordinates, Station,
-    Version, World, PRESENCE_ALPN,
+    coordinates::SignedCoordinates, neighbor::PRESENCE_ALPN, plane::contact::Authority,
+    plane::Activation, plane::CommsOptions, world::Builder, world::Context, world::Descriptor,
+    world::Effect, world::Intent, world::Limits, world::Projection, world::Query, world::Rejection,
+    world::RequestId, world::Version, world::World, Runtime, Station,
 };
 
 const FOUNDER_SEED: [u8; 32] = [7u8; 32];
@@ -70,7 +71,7 @@ fn coordinates() -> (SpaceId, SignedCoordinates) {
         recovery_root: rc,
         founder_inception: postcard::to_stdvec(&incept).unwrap(),
         display_name_hint: "Iroh Space".into(),
-        approach_station: mechanics::crypto::device_from_seed(&STATION_A_SEED)
+        approach_station: mechanics::actor::device_from_seed(&STATION_A_SEED)
             .key_bytes()
             .unwrap(),
         approach_nick_hint: "a".into(),
@@ -129,7 +130,7 @@ impl World for KvWorld {
                     value: value.as_bytes().to_vec(),
                 },
             )],
-            scopes: vec![body],
+            bodies: vec![body],
             effect: vec![],
             declarations: vec![],
         })
@@ -147,9 +148,9 @@ impl World for KvWorld {
 }
 
 struct TestAuthority;
-impl runtime::AuthorityView for TestAuthority {
-    fn resolve(&self, _device: &DeviceId) -> Option<runtime::PrincipalResolution> {
-        Some(runtime::PrincipalResolution {
+impl runtime::world::AuthorityView for TestAuthority {
+    fn resolve(&self, _device: &DeviceId) -> Option<runtime::world::PrincipalResolution> {
+        Some(runtime::world::PrincipalResolution {
             actor: ActorId::from_incept_hash(&"d".repeat(64)),
             authority_frontier: AuthorityFrontier::from_canonical_bytes(vec![4]),
         })
@@ -157,21 +158,21 @@ impl runtime::AuthorityView for TestAuthority {
 }
 
 struct AnyKnownSigner;
-impl replica::AuthoritySource for AnyKnownSigner {
+impl replica::transaction::AuthoritySource for AnyKnownSigner {
     fn signer_authorized(&self, signer: &[u8; 32], _f: &AuthorityFrontier) -> bool {
         [WRITER_SEED, STATION_A_SEED, STATION_B_SEED]
             .iter()
-            .any(|seed| mechanics::crypto::device_from_seed(seed).key_bytes() == Some(*signer))
+            .any(|seed| mechanics::actor::device_from_seed(seed).key_bytes() == Some(*signer))
     }
 }
 
 struct AcceptingIncorporator;
-impl replica::AuthorityIncorporator for AcceptingIncorporator {
+impl replica::convergence::AuthorityIncorporator for AcceptingIncorporator {
     fn incorporate_authority(
         &mut self,
         _records: &[Vec<u8>],
-    ) -> Result<replica::AuthorityBatchReceipt, String> {
-        Ok(replica::AuthorityBatchReceipt {
+    ) -> Result<replica::convergence::AuthorityBatchReceipt, replica::convergence::Failure> {
+        Ok(replica::convergence::AuthorityBatchReceipt {
             space: coordinates().0,
             prior_frontier: replica::frontier::AuthorityFrontier::from_canonical_bytes(vec![]),
             resulting_frontier: AuthorityFrontier::from_canonical_bytes(vec![4]),
@@ -190,15 +191,12 @@ fn runtime_at(root: &std::path::Path) -> Runtime {
         scope_schemas: Vec::new(),
         signal_schemas: Vec::new(),
     };
-    let registry = RuntimeBuilder::new()
-        .register(Arc::new(world))
-        .build()
-        .unwrap();
+    let registry = Builder::new().register(Arc::new(world)).build().unwrap();
     Runtime::open(
         root.to_path_buf(),
         registry,
         Arc::new(TestAuthority),
-        Arc::new(replica::StaticBodyKeys::new(
+        Arc::new(replica::body::StaticBodyKeys::new(
             AuthorizedBodyKey::for_authorized_epoch(EPOCH, EPOCH_KEY),
         )),
     )
@@ -293,7 +291,7 @@ fn a_real_iroh_contact_converges_two_stations() {
     let station_a = rt_a
         .materialize(&coords)
         .unwrap()
-        .open(ActivationOptions {
+        .open(Activation {
             planes: Default::default(),
             content: Default::default(),
             drain_deadline: Duration::from_secs(5),
@@ -306,7 +304,7 @@ fn a_real_iroh_contact_converges_two_stations() {
     let station_b = rt_b
         .materialize(&coords)
         .unwrap()
-        .open(ActivationOptions {
+        .open(Activation {
             planes: Default::default(),
             content: Default::default(),
             drain_deadline: Duration::from_secs(5),
@@ -315,7 +313,7 @@ fn a_real_iroh_contact_converges_two_stations() {
         })
         .unwrap();
 
-    let a_id = Key::from_device(&mechanics::crypto::device_from_seed(&STATION_A_SEED)).unwrap();
+    let a_id = Key::from_device(&mechanics::actor::device_from_seed(&STATION_A_SEED)).unwrap();
     let outcome = station_b.contact(&a_id).unwrap();
     assert!(outcome.bytes_moved > 0);
     assert!(outcome.convergence.accepted >= 1);

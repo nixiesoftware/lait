@@ -1,3 +1,22 @@
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects,
+        clippy::unreachable,
+        clippy::unimplemented,
+        clippy::unchecked_time_subtraction,
+        clippy::todo,
+        clippy::string_slice,
+        clippy::panic_in_result_fn,
+        clippy::panic,
+        clippy::exit,
+        clippy::as_conversions
+    )
+)]
+
 //! lait binary shim. All logic lives in the `lait` library crate
 //! (see `lib.rs` and `app::run`) so tests, doctests, and the MCP/DTO parity
 //! check exercise the same code paths the binary runs.

@@ -1,3 +1,10 @@
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "ledger replay validates bounded records; derived postcard serialization of owned semantic records is infallible"
+)]
 //! The authority ledger — mechanics' canonical journaled effect store and
 //! materialization spine.
 //!
@@ -36,7 +43,7 @@ use crate::actor::{self, Directory, SignedEvent};
 use crate::genesis::Genesis;
 use crate::ids::{ActorId, DeviceId, SpaceId};
 use crate::space::SignedSpaceEvent;
-use journal::{Failure as JournalFailure, JournaledStore, ObjectRef};
+use journal::{Failure as JournalFailure, Object, Store};
 
 /// The replay-semantics version persisted in every checkpoint. Bumping it
 /// forces an explicit rebuild of all checkpoints from the signed effects.
@@ -53,27 +60,49 @@ pub enum Failure {
     /// A batch record failed validation (undecodable, wrong Space binding,
     /// bad signature, unknown kind). The **whole batch** was refused; the
     /// durable ledger is unchanged.
-    InvalidRecord(String),
+    InvalidRecord,
     /// A referenced frontier names effects this ledger does not hold. The
     /// caller may retry once the missing history arrives.
-    MissingHistory(String),
+    MissingHistory,
     /// A referenced frontier is malformed (non-canonical bytes, unknown
     /// version, unsorted or duplicate heads).
-    MalformedFrontier(String),
+    MalformedFrontier,
     /// The durable store failed (see [`JournalFailure`]).
     Journal(JournalFailure),
     /// The durable ledger failed integrity validation on open.
-    Corrupt(String),
+    Corrupt,
+}
+
+impl Failure {
+    fn invalid_record(diagnostic: impl std::fmt::Display) -> Self {
+        tracing::warn!(%diagnostic, "Authority record was invalid");
+        Self::InvalidRecord
+    }
+
+    fn missing_history(diagnostic: impl std::fmt::Display) -> Self {
+        tracing::debug!(%diagnostic, "Authority history was unavailable");
+        Self::MissingHistory
+    }
+
+    fn malformed_frontier(diagnostic: impl std::fmt::Display) -> Self {
+        tracing::warn!(%diagnostic, "Authority frontier was malformed");
+        Self::MalformedFrontier
+    }
+
+    fn corrupt(diagnostic: impl std::fmt::Display) -> Self {
+        tracing::error!(%diagnostic, "Authority ledger integrity check failed");
+        Self::Corrupt
+    }
 }
 
 impl std::fmt::Display for Failure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Failure::InvalidRecord(m) => write!(f, "invalid authority record: {m}"),
-            Failure::MissingHistory(m) => write!(f, "missing authority history: {m}"),
-            Failure::MalformedFrontier(m) => write!(f, "malformed authority frontier: {m}"),
+            Failure::InvalidRecord => f.write_str("invalid authority record"),
+            Failure::MissingHistory => f.write_str("missing authority history"),
+            Failure::MalformedFrontier => f.write_str("malformed authority frontier"),
             Failure::Journal(e) => write!(f, "authority journal: {e}"),
-            Failure::Corrupt(m) => write!(f, "authority ledger corrupt: {m}"),
+            Failure::Corrupt => f.write_str("authority ledger corrupt"),
         }
     }
 }
@@ -88,10 +117,10 @@ impl From<JournalFailure> for Failure {
 /// One replicated **authoritative** effect: a signed node on one of the three
 /// mechanics authority planes. The canonical wire encoding is postcard of this
 /// enum (variant tags 0/1/2 — [`CeremonyMaterial`] owns the distinct tag 3 and
-/// is *not* a `LedgerEffect`: ceremony transcript traffic never enters an
+/// is *not* a `Effect`: ceremony transcript traffic never enters an
 /// authority frontier).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum LedgerEffect {
+pub enum Effect {
     /// Actor-plane event (inception, device add/revoke, recovery rotate).
     Actor(SignedEvent),
     /// Membership/ACL op (add/remove/grants/epoch mint/invite revoke).
@@ -104,7 +133,7 @@ pub enum LedgerEffect {
     SpaceAuthority(SignedSpaceEvent),
 }
 
-impl LedgerEffect {
+impl Effect {
     pub fn encode(&self) -> Vec<u8> {
         postcard::to_stdvec(self).expect("encode ledger effect")
     }
@@ -112,12 +141,10 @@ impl LedgerEffect {
     /// Canonical decode: exact re-encode equality, so a non-canonical byte
     /// stream can never alias a canonical effect.
     pub fn decode(bytes: &[u8]) -> Result<Self, Failure> {
-        let effect: LedgerEffect = postcard::from_bytes(bytes)
-            .map_err(|e| Failure::InvalidRecord(format!("undecodable effect: {e}")))?;
+        let effect: Effect = postcard::from_bytes(bytes)
+            .map_err(|e| Failure::invalid_record(format!("undecodable effect: {e}")))?;
         if effect.encode() != bytes {
-            return Err(Failure::InvalidRecord(
-                "non-canonical effect encoding".into(),
-            ));
+            return Err(Failure::invalid_record("non-canonical effect encoding"));
         }
         Ok(effect)
     }
@@ -125,9 +152,7 @@ impl LedgerEffect {
     /// The effect's content hash — its inner signed node's DAG hash.
     pub fn hash(&self) -> String {
         match self {
-            LedgerEffect::Actor(n) | LedgerEffect::Acl(n) | LedgerEffect::SpaceAuthority(n) => {
-                n.hash()
-            }
+            Effect::Actor(n) | Effect::Acl(n) | Effect::SpaceAuthority(n) => n.hash(),
         }
     }
 
@@ -137,9 +162,9 @@ impl LedgerEffect {
     /// fails here, refusing the whole batch before journal mutation.
     pub fn verify(&self, space: &SpaceId) -> bool {
         match self {
-            LedgerEffect::Actor(n) => n.verify_sig(actor::ACTOR_DOMAIN, space.as_str()),
-            LedgerEffect::Acl(n) => n.verify_sig(acl::ACL_DOMAIN, space.as_str()),
-            LedgerEffect::SpaceAuthority(n) => {
+            Effect::Actor(n) => n.verify_sig(actor::ACTOR_DOMAIN, space.as_str()),
+            Effect::Acl(n) => n.verify_sig(acl::ACL_DOMAIN, space.as_str()),
+            Effect::SpaceAuthority(n) => {
                 n.verify_sig(crate::space::SPACE_EVENT_DOMAIN, space.as_str())
             }
         }
@@ -147,23 +172,21 @@ impl LedgerEffect {
 
     fn kind(&self) -> u8 {
         match self {
-            LedgerEffect::Actor(_) => 0,
-            LedgerEffect::Acl(_) => 1,
-            LedgerEffect::SpaceAuthority(_) => 2,
+            Effect::Actor(_) => 0,
+            Effect::Acl(_) => 1,
+            Effect::SpaceAuthority(_) => 2,
         }
     }
 
     fn parents(&self) -> &[String] {
         match self {
-            LedgerEffect::Actor(n) | LedgerEffect::Acl(n) | LedgerEffect::SpaceAuthority(n) => {
-                &n.parents
-            }
+            Effect::Actor(n) | Effect::Acl(n) | Effect::SpaceAuthority(n) => &n.parents,
         }
     }
 }
 
 /// The encoded material-class tag [`CeremonyMaterial`] leads with — distinct
-/// from every [`LedgerEffect`] variant tag (0/1/2), so neither class of bytes
+/// from every [`Effect`] variant tag (0/1/2), so neither class of bytes
 /// can decode as the other.
 pub const CEREMONY_MATERIAL_TAG: u8 = 3;
 
@@ -201,16 +224,16 @@ impl CeremonyMaterial {
     /// Canonical decode: tag check plus exact re-encode equality.
     pub fn decode(bytes: &[u8]) -> Result<Self, Failure> {
         let material: CeremonyMaterial = postcard::from_bytes(bytes)
-            .map_err(|e| Failure::InvalidRecord(format!("undecodable ceremony record: {e}")))?;
+            .map_err(|e| Failure::invalid_record(format!("undecodable ceremony record: {e}")))?;
         if material.tag != CEREMONY_MATERIAL_TAG {
-            return Err(Failure::InvalidRecord(format!(
+            return Err(Failure::invalid_record(format!(
                 "ceremony record carries material-class tag {} (expected {CEREMONY_MATERIAL_TAG})",
                 material.tag
             )));
         }
         if material.encode() != bytes {
-            return Err(Failure::InvalidRecord(
-                "non-canonical ceremony record encoding".into(),
+            return Err(Failure::invalid_record(
+                "non-canonical ceremony record encoding",
             ));
         }
         Ok(material)
@@ -270,14 +293,14 @@ impl CeremonyAuditRecord {
     }
 
     fn decode(bytes: &[u8]) -> Result<Self, Failure> {
-        postcard::from_bytes(bytes).map_err(|e| Failure::Corrupt(format!("ceremony audit: {e}")))
+        postcard::from_bytes(bytes).map_err(|e| Failure::corrupt(format!("ceremony audit: {e}")))
     }
 }
 
 /// A staged sealed-key key with its decoded record and canonical bytes.
 type StagedSealed = (([u8; 16], DeviceId), SealedKeyRecord, Vec<u8>);
 /// A staged sealed-key index entry: key, plaintext-sealed bytes, object ref.
-type StagedSealedRef = (([u8; 16], DeviceId), Vec<u8>, ObjectRef);
+type StagedSealedRef = (([u8; 16], DeviceId), Vec<u8>, Object);
 
 /// A sealed key-epoch envelope addressed to one device — distribution
 /// material that rides beside the effects (its *authorization* is the signed
@@ -296,11 +319,9 @@ impl SealedKeyRecord {
     }
     pub fn decode(bytes: &[u8]) -> Result<Self, Failure> {
         let rec: SealedKeyRecord = postcard::from_bytes(bytes)
-            .map_err(|e| Failure::InvalidRecord(format!("undecodable sealed key: {e}")))?;
+            .map_err(|e| Failure::invalid_record(format!("undecodable sealed key: {e}")))?;
         if rec.encode() != bytes {
-            return Err(Failure::InvalidRecord(
-                "non-canonical sealed key encoding".into(),
-            ));
+            return Err(Failure::invalid_record("non-canonical sealed key encoding"));
         }
         Ok(rec)
     }
@@ -326,9 +347,9 @@ impl FrontierBody {
 
     fn decode(bytes: &[u8]) -> Result<Self, Failure> {
         let body: FrontierBody =
-            postcard::from_bytes(bytes).map_err(|e| Failure::MalformedFrontier(format!("{e}")))?;
+            postcard::from_bytes(bytes).map_err(|e| Failure::malformed_frontier(format!("{e}")))?;
         if body.version != 1 {
-            return Err(Failure::MalformedFrontier(format!(
+            return Err(Failure::malformed_frontier(format!(
                 "unsupported frontier version {}",
                 body.version
             )));
@@ -339,14 +360,14 @@ impl FrontierBody {
             &body.space_authority_heads,
         ] {
             if list.windows(2).any(|w| w[0] >= w[1]) {
-                return Err(Failure::MalformedFrontier(
-                    "frontier heads unsorted or duplicated".into(),
+                return Err(Failure::malformed_frontier(
+                    "frontier heads unsorted or duplicated",
                 ));
             }
         }
         if body.encode() != bytes {
-            return Err(Failure::MalformedFrontier(
-                "non-canonical frontier encoding".into(),
+            return Err(Failure::malformed_frontier(
+                "non-canonical frontier encoding",
             ));
         }
         Ok(body)
@@ -381,7 +402,7 @@ pub struct AuthorizationRequest<'a> {
 
 /// Why an authorization evaluation refused. A denial is a typed result and
 /// never a receipt.
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Refusal {
     /// The demand is unsatisfied, the device resolves to no actor at the
     /// frontier, or the resolved actor differs from the claimed one.
@@ -393,6 +414,19 @@ pub enum Refusal {
     /// Frontier resolution failed (missing history, malformed frontier, or a
     /// durable failure).
     Ledger(Failure),
+}
+
+impl From<String> for Refusal {
+    fn from(diagnostic: String) -> Self {
+        tracing::warn!(%diagnostic, "Authorization was refused");
+        Self::Denied
+    }
+}
+
+impl From<&str> for Refusal {
+    fn from(diagnostic: &str) -> Self {
+        Self::from(diagnostic.to_owned())
+    }
 }
 
 impl std::fmt::Display for Refusal {
@@ -421,10 +455,10 @@ pub struct ReceiptExpectations<'a> {
 }
 
 /// Why remote receipt verification refused.
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Invalid {
     /// A bound field disagrees with the transaction (substitution).
-    Binding(&'static str),
+    Binding(ReceiptField),
     /// The demand is not satisfied at the referenced frontier by the claimed
     /// actor (or the actor does not resolve there).
     Unsatisfied,
@@ -432,10 +466,29 @@ pub enum Invalid {
     Ledger(Failure),
 }
 
+/// Which authorization-receipt coordinate failed validation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReceiptField {
+    Space,
+    Decision,
+    Device,
+    AuthorityFrontier,
+    ParentManifest,
+    Intent,
+    Operations,
+    Core,
+    Demand,
+    DemandDigest,
+    Checkpoint,
+    Implementation,
+    Actor,
+    Evidence,
+}
+
 impl std::fmt::Display for Invalid {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Invalid::Binding(field) => write!(f, "receipt binding mismatch: {field}"),
+            Invalid::Binding(field) => write!(f, "receipt binding mismatch: {field:?}"),
             Invalid::Unsatisfied => write!(f, "demand unsatisfied at the referenced frontier"),
             Invalid::Ledger(e) => write!(f, "{e}"),
         }
@@ -470,7 +523,7 @@ impl BatchReceipt {
         postcard::to_stdvec(self).expect("encode batch receipt")
     }
     fn decode(bytes: &[u8]) -> Result<Self, Failure> {
-        postcard::from_bytes(bytes).map_err(|e| Failure::Corrupt(format!("receipt: {e}")))
+        postcard::from_bytes(bytes).map_err(|e| Failure::corrupt(format!("receipt: {e}")))
     }
 }
 
@@ -513,21 +566,21 @@ struct LedgerMeta {
     version: u8,
     genesis: Genesis,
     /// (effect hash, kind, object)
-    effects: Vec<(String, u8, ObjectRef)>,
+    effects: Vec<(String, u8, Object)>,
     /// ((epoch, device), object)
-    sealed: Vec<(([u8; 16], DeviceId), ObjectRef)>,
+    sealed: Vec<(([u8; 16], DeviceId), Object)>,
     /// (frontier digest, checkpoint object)
-    checkpoints: Vec<([u8; 32], ObjectRef)>,
+    checkpoints: Vec<([u8; 32], Object)>,
     /// (batch digest, receipt object)
-    receipts: Vec<([u8; 32], ObjectRef)>,
+    receipts: Vec<([u8; 32], Object)>,
     /// The current frontier's canonical bytes.
     frontier: Vec<u8>,
     /// The ceremony-material log: (sequence, node hash, object), append order.
-    ceremony: Vec<(u64, String, ObjectRef)>,
+    ceremony: Vec<(u64, String, Object)>,
     /// The next ceremony sequence — the bounded synchronization cursor.
     ceremony_next_seq: u64,
     /// Durable compaction audit records: (commitment, object).
-    ceremony_audits: Vec<([u8; 32], ObjectRef)>,
+    ceremony_audits: Vec<([u8; 32], Object)>,
 }
 
 /// A resolved view of the authority state at one frontier.
@@ -566,28 +619,28 @@ impl StateView {
 }
 
 /// The journaled authority ledger for one Space.
-pub struct AuthorityLedger {
-    store: JournaledStore,
+pub struct Authority {
+    store: Store,
     genesis: Genesis,
     /// Every held effect, by hash.
-    effects: BTreeMap<String, LedgerEffect>,
-    effect_refs: BTreeMap<String, (u8, ObjectRef)>,
-    sealed: BTreeMap<([u8; 16], DeviceId), (Vec<u8>, ObjectRef)>,
+    effects: BTreeMap<String, Effect>,
+    effect_refs: BTreeMap<String, (u8, Object)>,
+    sealed: BTreeMap<([u8; 16], DeviceId), (Vec<u8>, Object)>,
     /// Durable checkpoints by frontier digest.
-    checkpoint_refs: BTreeMap<[u8; 32], ObjectRef>,
+    checkpoint_refs: BTreeMap<[u8; 32], Object>,
     /// Decoded checkpoint cache (bounded).
     checkpoint_cache: BTreeMap<[u8; 32], CheckpointObject>,
     receipts: BTreeMap<[u8; 32], BatchReceipt>,
-    receipt_refs: BTreeMap<[u8; 32], ObjectRef>,
+    receipt_refs: BTreeMap<[u8; 32], Object>,
     frontier: Vec<u8>,
     /// The ceremony-material log, in append (sequence) order.
     ceremony: Vec<(u64, String, SignedSpaceEvent)>,
     /// Held ceremony records by node hash → (sequence, object).
-    ceremony_refs: BTreeMap<String, (u64, ObjectRef)>,
+    ceremony_refs: BTreeMap<String, (u64, Object)>,
     /// The next ceremony sequence to assign (the bounded cursor).
     ceremony_next_seq: u64,
     /// Durable compaction audit records: (commitment, object), oldest first.
-    ceremony_audits: Vec<([u8; 32], ObjectRef)>,
+    ceremony_audits: Vec<([u8; 32], Object)>,
     /// The replay-semantics version this handle materializes at (the crate
     /// const in production; parameterized so the explicit rebuild path is
     /// testable).
@@ -598,15 +651,13 @@ pub struct AuthorityLedger {
 /// from their objects; this only bounds memory).
 const CHECKPOINT_CACHE_MAX: usize = 64;
 
-impl AuthorityLedger {
+impl Authority {
     /// Create a fresh ledger for a Space at `root` (fails if one exists).
     pub fn create(root: impl Into<PathBuf>, genesis: Genesis) -> Result<Self, Failure> {
         let root = root.into();
-        let store = JournaledStore::open(&root)?;
+        let store = Store::open(&root)?;
         if store.manifest().is_some() {
-            return Err(Failure::Corrupt(
-                "a ledger already exists at this root".into(),
-            ));
+            return Err(Failure::corrupt("a ledger already exists at this root"));
         }
         let mut ledger = Self {
             store,
@@ -637,7 +688,7 @@ impl AuthorityLedger {
         Self::open_expecting_semantics(root, LEDGER_SEMANTICS_VERSION)
     }
 
-    /// [`AuthorityLedger::open`] at an explicit semantics version — the test
+    /// [`Authority::open`] at an explicit semantics version — the test
     /// seam proving the semantics-version rebuild is a verified recovery from
     /// the signed effects, never a silent cache miss.
     #[doc(hidden)]
@@ -645,14 +696,14 @@ impl AuthorityLedger {
         root: impl Into<PathBuf>,
         semantics: u16,
     ) -> Result<Self, Failure> {
-        let store = JournaledStore::open(root)?;
+        let store = Store::open(root)?;
         let meta_bytes = store
             .caller_meta()?
-            .ok_or_else(|| Failure::Corrupt("no committed ledger at this root".into()))?;
+            .ok_or_else(|| Failure::corrupt("no committed ledger at this root"))?;
         let meta: LedgerMeta = postcard::from_bytes(&meta_bytes)
-            .map_err(|e| Failure::Corrupt(format!("ledger meta: {e}")))?;
+            .map_err(|e| Failure::corrupt(format!("ledger meta: {e}")))?;
         if meta.version != 1 {
-            return Err(Failure::Corrupt(format!(
+            return Err(Failure::corrupt(format!(
                 "unsupported ledger meta version {}",
                 meta.version
             )));
@@ -661,17 +712,17 @@ impl AuthorityLedger {
         let mut effect_refs = BTreeMap::new();
         for (hash, kind, obj) in &meta.effects {
             let bytes = store.read_object(obj)?;
-            let effect = LedgerEffect::decode(&bytes)
-                .map_err(|e| Failure::Corrupt(format!("stored effect {hash}: {e}")))?;
+            let effect = Effect::decode(&bytes)
+                .map_err(|e| Failure::corrupt(format!("stored effect {hash}: {e}")))?;
             if effect.hash() != *hash || effect.kind() != *kind {
-                return Err(Failure::Corrupt(format!(
+                return Err(Failure::corrupt(format!(
                     "stored effect {hash} fails its index binding"
                 )));
             }
             // Stored effects were verified at ingest; re-verify on open so a
             // corrupted-but-decodable object cannot slip standing forward.
             if !effect.verify(&meta.genesis.space_id) {
-                return Err(Failure::Corrupt(format!(
+                return Err(Failure::corrupt(format!(
                     "stored effect {hash} fails signature verification"
                 )));
             }
@@ -682,11 +733,9 @@ impl AuthorityLedger {
         for (key, obj) in &meta.sealed {
             let bytes = store.read_object(obj)?;
             let rec = SealedKeyRecord::decode(&bytes)
-                .map_err(|e| Failure::Corrupt(format!("sealed key: {e}")))?;
+                .map_err(|e| Failure::corrupt(format!("sealed key: {e}")))?;
             if rec.epoch != key.0 || rec.device != key.1 {
-                return Err(Failure::Corrupt(
-                    "sealed key fails its index binding".into(),
-                ));
+                return Err(Failure::corrupt("sealed key fails its index binding"));
             }
             sealed.insert(key.clone(), (rec.sealed, *obj));
         }
@@ -696,7 +745,7 @@ impl AuthorityLedger {
             let bytes = store.read_object(obj)?;
             let receipt = BatchReceipt::decode(&bytes)?;
             if receipt.batch_digest != *digest {
-                return Err(Failure::Corrupt("receipt fails its index binding".into()));
+                return Err(Failure::corrupt("receipt fails its index binding"));
             }
             receipts.insert(*digest, receipt);
             receipt_refs.insert(*digest, *obj);
@@ -706,7 +755,7 @@ impl AuthorityLedger {
             // Verify readability + semantics version now; decode lazily later.
             let bytes = store.read_object(obj)?;
             let cp: CheckpointObject = postcard::from_bytes(&bytes)
-                .map_err(|e| Failure::Corrupt(format!("checkpoint: {e}")))?;
+                .map_err(|e| Failure::corrupt(format!("checkpoint: {e}")))?;
             if cp.semantics == semantics {
                 checkpoint_refs.insert(*digest, *obj);
             }
@@ -718,14 +767,14 @@ impl AuthorityLedger {
         for (seq, hash, obj) in &meta.ceremony {
             let bytes = store.read_object(obj)?;
             let material = CeremonyMaterial::decode(&bytes)
-                .map_err(|e| Failure::Corrupt(format!("stored ceremony record: {e}")))?;
+                .map_err(|e| Failure::corrupt(format!("stored ceremony record: {e}")))?;
             if material.hash() != *hash {
-                return Err(Failure::Corrupt(format!(
+                return Err(Failure::corrupt(format!(
                     "stored ceremony record {hash} fails its index binding"
                 )));
             }
             if !material.verify(&meta.genesis.space_id) {
-                return Err(Failure::Corrupt(format!(
+                return Err(Failure::corrupt(format!(
                     "stored ceremony record {hash} fails ceremony-domain verification"
                 )));
             }
@@ -737,9 +786,7 @@ impl AuthorityLedger {
             .iter()
             .any(|(seq, _, _)| *seq >= meta.ceremony_next_seq)
         {
-            return Err(Failure::Corrupt(
-                "ceremony log sequence exceeds its cursor".into(),
-            ));
+            return Err(Failure::corrupt("ceremony log sequence exceeds its cursor"));
         }
         let mut ceremony_audits = Vec::new();
         for (commitment, obj) in &meta.ceremony_audits {
@@ -750,8 +797,8 @@ impl AuthorityLedger {
                     .commitment
                     != *commitment
             {
-                return Err(Failure::Corrupt(
-                    "ceremony audit record fails its commitment binding".into(),
+                return Err(Failure::corrupt(
+                    "ceremony audit record fails its commitment binding",
                 ));
             }
             ceremony_audits.push((*commitment, *obj));
@@ -781,7 +828,8 @@ impl AuthorityLedger {
     }
 
     /// Test seam: attach a fault injector to the underlying journal.
-    pub fn with_fault_injector(mut self, injector: journal::FaultInjector) -> Self {
+    #[cfg(any(test, feature = "fault-injection"))]
+    pub fn with_fault_injector(mut self, injector: Box<dyn Fn(&str) -> bool + Send>) -> Self {
         self.store.set_fault_injector(injector);
         self
     }
@@ -848,7 +896,7 @@ impl AuthorityLedger {
         self.effects
             .values()
             .filter_map(|e| match e {
-                LedgerEffect::Acl(op) => Some(op.clone()),
+                Effect::Acl(op) => Some(op.clone()),
                 _ => None,
             })
             .collect()
@@ -859,7 +907,7 @@ impl AuthorityLedger {
         self.effects
             .values()
             .filter_map(|e| match e {
-                LedgerEffect::Actor(ev) => Some(ev.clone()),
+                Effect::Actor(ev) => Some(ev.clone()),
                 _ => None,
             })
             .collect()
@@ -867,12 +915,12 @@ impl AuthorityLedger {
 
     /// All held **terminal** Space-authority events (kind 2) — the input to
     /// `space::replay`. Ceremony transcript traffic is NOT here; see
-    /// [`AuthorityLedger::ceremony_nodes`].
+    /// [`Authority::ceremony_nodes`].
     pub fn space_authority_events(&self) -> Vec<SignedSpaceEvent> {
         self.effects
             .values()
             .filter_map(|e| match e {
-                LedgerEffect::SpaceAuthority(ev) => Some(ev.clone()),
+                Effect::SpaceAuthority(ev) => Some(ev.clone()),
                 _ => None,
             })
             .collect()
@@ -932,7 +980,7 @@ impl AuthorityLedger {
         for record in records {
             let material = CeremonyMaterial::decode(record)?;
             if !material.verify(&self.genesis.space_id) {
-                return Err(Failure::InvalidRecord(format!(
+                return Err(Failure::invalid_record(format!(
                     "ceremony record {} fails ceremony-domain verification for this Space",
                     material.hash()
                 )));
@@ -954,7 +1002,7 @@ impl AuthorityLedger {
         let prior_next = self.ceremony_next_seq;
         let mut new_objects: Vec<Vec<u8>> = Vec::new();
         for (hash, node, bytes) in &fresh {
-            let obj = ObjectRef {
+            let obj = Object {
                 hash: journal::object_content_hash(bytes),
                 len: bytes.len() as u64,
             };
@@ -996,19 +1044,17 @@ impl AuthorityLedger {
     pub fn compact_ceremony(&mut self, drop_hashes: &[String]) -> Result<[u8; 32], Failure> {
         for h in drop_hashes {
             if !self.ceremony_refs.contains_key(h) {
-                return Err(Failure::InvalidRecord(format!(
+                return Err(Failure::invalid_record(format!(
                     "compaction names an unheld ceremony record {h}"
                 )));
             }
         }
         if drop_hashes.is_empty() {
-            return Err(Failure::InvalidRecord(
-                "compaction with an empty drop set".into(),
-            ));
+            return Err(Failure::invalid_record("compaction with an empty drop set"));
         }
         let audit = CeremonyAuditRecord::build(&self.genesis.space_id, drop_hashes.to_vec());
         let audit_bytes = audit.encode();
-        let audit_obj = ObjectRef {
+        let audit_obj = Object {
             hash: journal::object_content_hash(&audit_bytes),
             len: audit_bytes.len() as u64,
         };
@@ -1041,7 +1087,7 @@ impl AuthorityLedger {
             .effects
             .values()
             .filter_map(|e| match e {
-                LedgerEffect::Actor(ev) => Some(ev),
+                Effect::Actor(ev) => Some(ev),
                 _ => None,
             })
             .filter(|ev| {
@@ -1122,7 +1168,7 @@ impl AuthorityLedger {
             .actor_events
             .iter()
             .filter_map(|h| match self.effects.get(h) {
-                Some(LedgerEffect::Actor(ev)) => Some(ev.clone()),
+                Some(Effect::Actor(ev)) => Some(ev.clone()),
                 _ => None,
             })
             .collect();
@@ -1136,7 +1182,7 @@ impl AuthorityLedger {
     /// Whether `signer` had authoring standing at the referenced frontier —
     /// the historical-authorization seam Replica consults. Errors (malformed
     /// frontier, missing history) are `false` at this boolean seam; callers
-    /// needing the distinction use [`AuthorityLedger::state_at`].
+    /// needing the distinction use [`Authority::state_at`].
     pub fn signer_authorized_at(&mut self, signer: &[u8; 32], frontier_bytes: &[u8]) -> bool {
         self.state_at(frontier_bytes)
             .map(|view| view.signer_can_write(signer))
@@ -1228,43 +1274,47 @@ impl AuthorityLedger {
         expectations: &ReceiptExpectations<'_>,
     ) -> Result<(), Invalid> {
         if receipt.space != self.genesis.space_id.as_str() {
-            return Err(Invalid::Binding("space"));
+            return Err(Invalid::Binding(ReceiptField::Space));
         }
         if receipt.decision != 1 {
-            return Err(Invalid::Binding("decision"));
+            return Err(Invalid::Binding(ReceiptField::Decision));
         }
         if receipt.device != *expectations.device {
-            return Err(Invalid::Binding("device"));
+            return Err(Invalid::Binding(ReceiptField::Device));
         }
         if receipt.authority_frontier != expectations.authority_frontier {
-            return Err(Invalid::Binding("authority frontier"));
+            return Err(Invalid::Binding(ReceiptField::AuthorityFrontier));
         }
         if receipt.parent_manifest_root != *expectations.parent_manifest_root {
-            return Err(Invalid::Binding("parent manifest root"));
+            return Err(Invalid::Binding(ReceiptField::ParentManifest));
         }
         if receipt.intent_digest != *expectations.intent_digest {
-            return Err(Invalid::Binding("intent digest"));
+            return Err(Invalid::Binding(ReceiptField::Intent));
         }
         if receipt.effect_operations_digest != *expectations.effect_operations_digest {
-            return Err(Invalid::Binding("operations digest"));
+            return Err(Invalid::Binding(ReceiptField::Operations));
         }
         if receipt.body_transaction_core_digest != *expectations.body_transaction_core_digest {
-            return Err(Invalid::Binding("core digest"));
+            return Err(Invalid::Binding(ReceiptField::Core));
         }
         let demand = crate::demand::AuthorizationDemand::decode_canonical(expectations.demand)
-            .map_err(|_| Invalid::Binding("demand"))?;
-        if receipt.demand_digest != demand.digest().map_err(|_| Invalid::Binding("demand"))? {
-            return Err(Invalid::Binding("demand digest"));
+            .map_err(|_| Invalid::Binding(ReceiptField::Demand))?;
+        if receipt.demand_digest
+            != demand
+                .digest()
+                .map_err(|_| Invalid::Binding(ReceiptField::Demand))?
+        {
+            return Err(Invalid::Binding(ReceiptField::DemandDigest));
         }
         let cp = self
             .checkpoint_for(&receipt.authority_frontier)
             .map_err(Invalid::Ledger)?;
         if checkpoint_commitment(&cp) != receipt.authority_checkpoint_commitment {
-            return Err(Invalid::Binding("checkpoint commitment"));
+            return Err(Invalid::Binding(ReceiptField::Checkpoint));
         }
         match cp.replay.state.active_implementation(&receipt.world) {
             Some(active) if active == receipt.implementation_id => {}
-            _ => return Err(Invalid::Binding("implementation id")),
+            _ => return Err(Invalid::Binding(ReceiptField::Implementation)),
         }
         let view = self
             .state_at(&receipt.authority_frontier)
@@ -1276,7 +1326,7 @@ impl AuthorityLedger {
             .cloned()
             .ok_or(Invalid::Unsatisfied)?;
         if actor.as_str() != receipt.actor {
-            return Err(Invalid::Binding("actor"));
+            return Err(Invalid::Binding(ReceiptField::Actor));
         }
         let witness = cp
             .replay
@@ -1284,7 +1334,7 @@ impl AuthorityLedger {
             .evaluate_demand(&actor, &demand)
             .ok_or(Invalid::Unsatisfied)?;
         if crate::demand::policy_evidence_digest(&witness) != receipt.policy_evidence_digest {
-            return Err(Invalid::Binding("policy evidence digest"));
+            return Err(Invalid::Binding(ReceiptField::Evidence));
         }
         Ok(())
     }
@@ -1303,12 +1353,12 @@ impl AuthorityLedger {
                 match self.effects.get(h) {
                     Some(e) if e.kind() == kind => stack.push(h),
                     Some(_) => {
-                        return Err(Failure::MalformedFrontier(format!(
+                        return Err(Failure::malformed_frontier(format!(
                             "head {h} names an effect on another plane"
                         )))
                     }
                     None => {
-                        return Err(Failure::MissingHistory(format!(
+                        return Err(Failure::missing_history(format!(
                             "frontier head {h} is not held"
                         )))
                     }
@@ -1324,7 +1374,7 @@ impl AuthorityLedger {
                 match self.effects.get(p) {
                     Some(_) => stack.push(p),
                     None => {
-                        return Err(Failure::MissingHistory(format!(
+                        return Err(Failure::missing_history(format!(
                             "effect {h} names an unheld parent {p}"
                         )))
                     }
@@ -1344,7 +1394,7 @@ impl AuthorityLedger {
         if let Some(obj) = self.checkpoint_refs.get(&digest) {
             let bytes = self.store.read_object(obj)?;
             let cp: CheckpointObject = postcard::from_bytes(&bytes)
-                .map_err(|e| Failure::Corrupt(format!("checkpoint: {e}")))?;
+                .map_err(|e| Failure::corrupt(format!("checkpoint: {e}")))?;
             if cp.semantics == self.semantics && cp.frontier == frontier_bytes {
                 self.cache_checkpoint(digest, cp.clone());
                 return Ok(cp);
@@ -1390,14 +1440,14 @@ impl AuthorityLedger {
         let acl_ops: Vec<SignedOp> = closure
             .iter()
             .filter_map(|h| match self.effects.get(h) {
-                Some(LedgerEffect::Acl(op)) => Some(op.clone()),
+                Some(Effect::Acl(op)) => Some(op.clone()),
                 _ => None,
             })
             .collect();
         let actor_events: Vec<SignedEvent> = closure
             .iter()
             .filter_map(|h| match self.effects.get(h) {
-                Some(LedgerEffect::Actor(ev)) => Some(ev.clone()),
+                Some(Effect::Actor(ev)) => Some(ev.clone()),
                 _ => None,
             })
             .collect();
@@ -1405,7 +1455,7 @@ impl AuthorityLedger {
         let space_events: Vec<SignedSpaceEvent> = closure
             .iter()
             .filter_map(|h| match self.effects.get(h) {
-                Some(LedgerEffect::SpaceAuthority(ev)) => Some(ev.clone()),
+                Some(Effect::SpaceAuthority(ev)) => Some(ev.clone()),
                 _ => None,
             })
             .collect();
@@ -1469,7 +1519,7 @@ impl AuthorityLedger {
             return Ok(());
         }
         let bytes = postcard::to_stdvec(cp).expect("encode checkpoint");
-        let obj = ObjectRef {
+        let obj = Object {
             hash: journal::object_content_hash(&bytes),
             len: bytes.len() as u64,
         };
@@ -1487,8 +1537,8 @@ impl AuthorityLedger {
     }
 
     /// The complete meta index + keep set over everything currently indexed.
-    fn assemble_meta(&self) -> (Vec<ObjectRef>, Vec<u8>) {
-        let mut keep: Vec<ObjectRef> = Vec::new();
+    fn assemble_meta(&self) -> (Vec<Object>, Vec<u8>) {
+        let mut keep: Vec<Object> = Vec::new();
         let mut effects = Vec::new();
         for (h, (kind, obj)) in &self.effect_refs {
             effects.push((h.clone(), *kind, *obj));
@@ -1565,11 +1615,11 @@ impl AuthorityLedger {
         }
 
         // 1. Validate the complete batch in memory.
-        let mut new_effects: Vec<(String, LedgerEffect, Vec<u8>)> = Vec::new();
+        let mut new_effects: Vec<(String, Effect, Vec<u8>)> = Vec::new();
         for record in effect_records {
-            let effect = LedgerEffect::decode(record)?;
+            let effect = Effect::decode(record)?;
             if !effect.verify(&self.genesis.space_id) {
-                return Err(Failure::InvalidRecord(format!(
+                return Err(Failure::invalid_record(format!(
                     "effect {} fails signature verification for this Space",
                     effect.hash()
                 )));
@@ -1627,9 +1677,9 @@ impl AuthorityLedger {
         let receipt_bytes = receipt.encode();
 
         let mut new_objects: Vec<Vec<u8>> = Vec::new();
-        let mut staged_effect_refs: Vec<(String, u8, ObjectRef)> = Vec::new();
+        let mut staged_effect_refs: Vec<(String, u8, Object)> = Vec::new();
         for (hash, effect, bytes) in &new_effects {
-            let obj = ObjectRef {
+            let obj = Object {
                 hash: journal::object_content_hash(bytes),
                 len: bytes.len() as u64,
             };
@@ -1638,19 +1688,19 @@ impl AuthorityLedger {
         }
         let mut staged_sealed_refs: Vec<StagedSealedRef> = Vec::new();
         for (key, rec, bytes) in &new_sealed {
-            let obj = ObjectRef {
+            let obj = Object {
                 hash: journal::object_content_hash(bytes),
                 len: bytes.len() as u64,
             };
             staged_sealed_refs.push((key.clone(), rec.sealed.clone(), obj));
             new_objects.push(bytes.clone());
         }
-        let cp_obj = ObjectRef {
+        let cp_obj = Object {
             hash: journal::object_content_hash(&cp_bytes),
             len: cp_bytes.len() as u64,
         };
         new_objects.push(cp_bytes);
-        let receipt_obj = ObjectRef {
+        let receipt_obj = Object {
             hash: journal::object_content_hash(&receipt_bytes),
             len: receipt_bytes.len() as u64,
         };
@@ -1766,10 +1816,10 @@ mod tests {
     fn create_open_roundtrip_and_empty_frontier() {
         let dir = tempdir();
         let fx = fx();
-        let ledger = AuthorityLedger::create(&dir, fx.genesis.clone()).unwrap();
+        let ledger = Authority::create(&dir, fx.genesis.clone()).unwrap();
         let frontier = ledger.frontier();
         drop(ledger);
-        let ledger = AuthorityLedger::open(&dir).unwrap();
+        let ledger = Authority::open(&dir).unwrap();
         assert_eq!(ledger.frontier(), frontier);
         assert_eq!(ledger.space(), &fx.genesis.space_id);
         cleanup(&dir);
@@ -1779,18 +1829,18 @@ mod tests {
     fn batch_is_atomic_no_prefix_survives_an_invalid_record() {
         let dir = tempdir();
         let fx = fx();
-        let mut ledger = AuthorityLedger::create(&dir, fx.genesis.clone()).unwrap();
-        let good = LedgerEffect::Actor(fx.founder_incept.clone()).encode();
+        let mut ledger = Authority::create(&dir, fx.genesis.clone()).unwrap();
+        let good = Effect::Actor(fx.founder_incept.clone()).encode();
         let bad = vec![0xFF, 0xEE, 0xDD];
         let before = ledger.frontier();
         let before_seq = ledger.journal_sequence();
         let err = ledger.commit_batch(&[good, bad], &[]).unwrap_err();
-        assert!(matches!(err, Failure::InvalidRecord(_)));
+        assert!(matches!(err, Failure::InvalidRecord));
         assert_eq!(ledger.frontier(), before, "no partial adoption");
         assert_eq!(ledger.journal_sequence(), before_seq, "no journal write");
         // Restart: still unchanged (the *durable* store was untouched).
         drop(ledger);
-        let ledger = AuthorityLedger::open(&dir).unwrap();
+        let ledger = Authority::open(&dir).unwrap();
         assert_eq!(ledger.frontier(), before);
         assert!(ledger.actor_events().is_empty());
         cleanup(&dir);
@@ -1800,8 +1850,8 @@ mod tests {
     fn exact_replay_returns_the_original_receipt() {
         let dir = tempdir();
         let fx = fx();
-        let mut ledger = AuthorityLedger::create(&dir, fx.genesis.clone()).unwrap();
-        let batch = vec![LedgerEffect::Actor(fx.founder_incept.clone()).encode()];
+        let mut ledger = Authority::create(&dir, fx.genesis.clone()).unwrap();
+        let batch = vec![Effect::Actor(fx.founder_incept.clone()).encode()];
         let first = ledger.commit_batch(&batch, &[]).unwrap();
         let seq = ledger.journal_sequence();
         let replay = ledger.commit_batch(&batch, &[]).unwrap();
@@ -1814,14 +1864,14 @@ mod tests {
     fn historical_standing_survives_current_removal() {
         let dir = tempdir();
         let fx = fx();
-        let mut ledger = AuthorityLedger::create(&dir, fx.genesis.clone()).unwrap();
+        let mut ledger = Authority::create(&dir, fx.genesis.clone()).unwrap();
         let (incept2, actor2) = incept_other(&fx, 2);
         // Batch 1: founder inception + member 2 inception + AddMember(write).
         ledger
             .commit_batch(
                 &[
-                    LedgerEffect::Actor(fx.founder_incept.clone()).encode(),
-                    LedgerEffect::Actor(incept2.clone()).encode(),
+                    Effect::Actor(fx.founder_incept.clone()).encode(),
+                    Effect::Actor(incept2.clone()).encode(),
                 ],
                 &[],
             )
@@ -1834,7 +1884,7 @@ mod tests {
             vec![Standing::Write],
         );
         ledger
-            .commit_batch(&[LedgerEffect::Acl(add).encode()], &[])
+            .commit_batch(&[Effect::Acl(add).encode()], &[])
             .unwrap();
         let member_frontier = ledger.frontier();
         let member_key = crate::crypto::device_from_seed(&seed(2))
@@ -1857,7 +1907,7 @@ mod tests {
             &fx.genesis.space_id,
         );
         ledger
-            .commit_batch(&[LedgerEffect::Acl(remove).encode()], &[])
+            .commit_batch(&[Effect::Acl(remove).encode()], &[])
             .unwrap();
         let removed_frontier = ledger.frontier();
 
@@ -1877,13 +1927,13 @@ mod tests {
     fn unauthorized_at_referenced_frontier_despite_current_standing() {
         let dir = tempdir();
         let fx = fx();
-        let mut ledger = AuthorityLedger::create(&dir, fx.genesis.clone()).unwrap();
+        let mut ledger = Authority::create(&dir, fx.genesis.clone()).unwrap();
         let (incept2, actor2) = incept_other(&fx, 2);
         ledger
             .commit_batch(
                 &[
-                    LedgerEffect::Actor(fx.founder_incept.clone()).encode(),
-                    LedgerEffect::Actor(incept2.clone()).encode(),
+                    Effect::Actor(fx.founder_incept.clone()).encode(),
+                    Effect::Actor(incept2.clone()).encode(),
                 ],
                 &[],
             )
@@ -1897,7 +1947,7 @@ mod tests {
             vec![Standing::Write],
         );
         ledger
-            .commit_batch(&[LedgerEffect::Acl(add).encode()], &[])
+            .commit_batch(&[Effect::Acl(add).encode()], &[])
             .unwrap();
         let member_key = crate::crypto::device_from_seed(&seed(2))
             .key_bytes()
@@ -1914,7 +1964,7 @@ mod tests {
     fn unknown_frontier_is_missing_history_not_a_pass() {
         let dir = tempdir();
         let fx = fx();
-        let mut ledger = AuthorityLedger::create(&dir, fx.genesis.clone()).unwrap();
+        let mut ledger = Authority::create(&dir, fx.genesis.clone()).unwrap();
         let fake = FrontierBody {
             version: 1,
             acl_heads: vec!["ab".repeat(32)],
@@ -1923,7 +1973,7 @@ mod tests {
         }
         .encode();
         match ledger.state_at(&fake) {
-            Err(Failure::MissingHistory(_)) => {}
+            Err(Failure::MissingHistory) => {}
             other => panic!("expected MissingHistory, got {other:?}"),
         }
         let founder_key = crate::crypto::device_from_seed(&fx.founder_seed)
@@ -1937,7 +1987,7 @@ mod tests {
     fn malformed_frontiers_reject() {
         let dir = tempdir();
         let fx = fx();
-        let mut ledger = AuthorityLedger::create(&dir, fx.genesis).unwrap();
+        let mut ledger = Authority::create(&dir, fx.genesis).unwrap();
         for bytes in [
             vec![],
             vec![0xFF; 4],
@@ -1950,7 +2000,7 @@ mod tests {
             .encode(),
         ] {
             match ledger.state_at(&bytes) {
-                Err(Failure::MalformedFrontier(_)) => {}
+                Err(Failure::MalformedFrontier) => {}
                 other => panic!("expected MalformedFrontier, got {other:?}"),
             }
         }
@@ -1963,7 +2013,7 @@ mod tests {
         };
         let bytes = postcard::to_stdvec(&unsorted).unwrap();
         match ledger.state_at(&bytes) {
-            Err(Failure::MalformedFrontier(_)) => {}
+            Err(Failure::MalformedFrontier) => {}
             other => panic!("expected MalformedFrontier for unsorted, got {other:?}"),
         }
         unsorted.acl_heads.clear();
@@ -1974,15 +2024,15 @@ mod tests {
     fn continuation_equals_complete_replay() {
         let dir = tempdir();
         let fx = fx();
-        let mut ledger = AuthorityLedger::create(&dir, fx.genesis.clone()).unwrap();
+        let mut ledger = Authority::create(&dir, fx.genesis.clone()).unwrap();
         let (incept2, actor2) = incept_other(&fx, 2);
         let (incept3, actor3) = incept_other(&fx, 3);
         ledger
             .commit_batch(
                 &[
-                    LedgerEffect::Actor(fx.founder_incept.clone()).encode(),
-                    LedgerEffect::Actor(incept2).encode(),
-                    LedgerEffect::Actor(incept3).encode(),
+                    Effect::Actor(fx.founder_incept.clone()).encode(),
+                    Effect::Actor(incept2).encode(),
+                    Effect::Actor(incept3).encode(),
                 ],
                 &[],
             )
@@ -1997,7 +2047,7 @@ mod tests {
                 vec![Standing::Write],
             );
             ledger
-                .commit_batch(&[LedgerEffect::Acl(add).encode()], &[])
+                .commit_batch(&[Effect::Acl(add).encode()], &[])
                 .unwrap();
         }
         // Differential: the ledger's materialized state equals the complete
@@ -2013,16 +2063,13 @@ mod tests {
     fn reopen_after_crash_between_batches_shows_complete_state() {
         let dir = tempdir();
         let fx = fx();
-        let mut ledger = AuthorityLedger::create(&dir, fx.genesis.clone()).unwrap();
+        let mut ledger = Authority::create(&dir, fx.genesis.clone()).unwrap();
         ledger
-            .commit_batch(
-                &[LedgerEffect::Actor(fx.founder_incept.clone()).encode()],
-                &[],
-            )
+            .commit_batch(&[Effect::Actor(fx.founder_incept.clone()).encode()], &[])
             .unwrap();
         let frontier = ledger.frontier();
         drop(ledger); // "crash": nothing in flight
-        let mut ledger = AuthorityLedger::open(&dir).unwrap();
+        let mut ledger = Authority::open(&dir).unwrap();
         assert_eq!(ledger.frontier(), frontier);
         assert_eq!(ledger.actor_events().len(), 1);
         // Historical evaluation still works after reopen.

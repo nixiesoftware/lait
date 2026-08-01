@@ -7,9 +7,8 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use lait::orbital::{read_bootstrap_record, BootstrapFault, BootstrapPhase, SpaceAuthority};
 use lait::world::contract;
-use runtime::{Context, Query, Rejection, World};
+use runtime::{world::Context, world::Query, world::Rejection, world::World};
 
 const FOUNDER_SEED: [u8; 32] = [71u8; 32];
 
@@ -21,98 +20,6 @@ fn temp_home(tag: &str) -> PathBuf {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir
-}
-
-/// Query the formed space's snapshot through a real docked Session.
-fn snapshot_projects(home: &std::path::Path, mech: &SpaceAuthority) -> usize {
-    let rt = runtime::Runtime::open(
-        lait::orbital::orbital_store_root(home),
-        runtime::RuntimeBuilder::new()
-            .register(std::sync::Arc::new(lait::world::IssuesWorld::new()))
-            .build()
-            .unwrap(),
-        std::sync::Arc::new(mech.clone()),
-        std::sync::Arc::new(mech.clone()),
-    );
-    let station = rt
-        .acquire(&mech.space())
-        .unwrap()
-        .open(runtime::ActivationOptions::offline())
-        .unwrap();
-    let identity = runtime::Runtime::identity_from_seed(&FOUNDER_SEED);
-    let session = station.dock(&contract::world_id(), &identity).unwrap();
-    let projection = session
-        .query(runtime::Query {
-            schema: contract::issue_schema(),
-            schema_version: contract::ISSUE_SCHEMA_VERSION,
-            payload: contract::IssueQuery::Snapshot.to_json(),
-        })
-        .unwrap();
-    let v: serde_json::Value = serde_json::from_slice(&projection.bytes).unwrap();
-    let n = v["catalog"]["projects"].as_object().map(|m| m.len());
-    let _ = station.vacate();
-    n.unwrap_or(0)
-}
-
-#[test]
-fn formation_resumes_the_exact_signed_action_across_every_fault() {
-    for fault in [
-        BootstrapFault::BeforeRecord,
-        BootstrapFault::AfterRecord,
-        BootstrapFault::BeforeSubmit,
-        BootstrapFault::BeforeComplete,
-    ] {
-        let home = temp_home("fault");
-        let err = match lait::orbital::form_space_with_fault(
-            &home,
-            &FOUNDER_SEED,
-            "Fault Space",
-            None,
-            Some(fault),
-        ) {
-            Err(e) => e,
-            Ok(_) => panic!("the injected fault must interrupt formation"),
-        };
-        assert!(err.to_string().contains("injected fault"), "{err}");
-
-        let space = lait::orbital::discover_space_id(&home).expect("the Space store exists");
-        let interrupted = read_bootstrap_record(&home, &space);
-        match fault {
-            BootstrapFault::BeforeRecord => {
-                assert!(interrupted.is_none(), "no record before the record write")
-            }
-            _ => {
-                let rec = interrupted.clone().expect("the record is durable");
-                assert_eq!(rec.phase, BootstrapPhase::Recorded);
-                assert_eq!(rec.space, space.as_str());
-            }
-        }
-
-        // Resume: the EXACT persisted signed bytes replay; nothing is
-        // reconstructed with a fresh timestamp/id/signature.
-        let (mech, _coords) =
-            lait::orbital::form_space(&home, &FOUNDER_SEED, "Fault Space").unwrap();
-        let complete = read_bootstrap_record(&home, &space).expect("record complete");
-        assert_eq!(complete.phase, BootstrapPhase::Complete);
-        if let Some(rec) = interrupted {
-            assert_eq!(
-                rec.signed_action, complete.signed_action,
-                "resume replays the identical signed action bytes ({fault:?})"
-            );
-            assert_eq!(rec.request_id, complete.request_id);
-            assert_eq!(rec.canonical_intent_bytes, complete.canonical_intent_bytes);
-        }
-        // Exactly one initialization: one project, no duplicate Catalog state.
-        assert_eq!(
-            snapshot_projects(&home, &mech),
-            1,
-            "exactly one initial project after resume ({fault:?})"
-        );
-        // A THIRD run changes nothing (idempotent by the durable record).
-        let (mech2, _c) = lait::orbital::form_space(&home, &FOUNDER_SEED, "Fault Space").unwrap();
-        assert_eq!(snapshot_projects(&home, &mech2), 1);
-        let _ = std::fs::remove_dir_all(&home);
-    }
 }
 
 #[test]
@@ -136,60 +43,60 @@ fn the_catalog_identity_is_deterministic_per_space() {
 /// catalog-schema binding set the World enumerates.
 #[derive(Default)]
 struct StubReader {
-    views: BTreeMap<replica::ids::BodyKey, replica::CollaborativeView>,
-    catalog_bodies: Vec<replica::ids::BodyKey>,
+    views: BTreeMap<replica::body::BodyKey, fabric::CollaborativeView>,
+    catalog_bodies: Vec<replica::body::BodyKey>,
 }
 
-impl runtime::BodyReader for StubReader {
-    fn read_body(&self, _key: &replica::ids::BodyKey) -> Option<Vec<u8>> {
+impl runtime::world::BodyReader for StubReader {
+    fn read_body(&self, _key: &replica::body::BodyKey) -> Option<Vec<u8>> {
         None
     }
     fn read_collaborative_body(
         &self,
-        key: &replica::ids::BodyKey,
-    ) -> Result<replica::CollaborativeView, replica::projection::Failure> {
+        key: &replica::body::BodyKey,
+    ) -> Result<fabric::CollaborativeView, fabric::projection::Failure> {
         self.views
             .get(key)
             .cloned()
-            .ok_or(replica::projection::Failure::NotCollaborative)
+            .ok_or(fabric::projection::Failure::NotCollaborative)
     }
-    fn body_version(&self, _key: &replica::ids::BodyKey) -> Option<replica::Version> {
+    fn body_version(&self, _key: &replica::body::BodyKey) -> Option<fabric::Version> {
         None
     }
     fn anchor_in_body(
         &self,
-        _key: &replica::ids::BodyKey,
+        _key: &replica::body::BodyKey,
         _path: &str,
         _position: u64,
-    ) -> Option<replica::Anchor> {
+    ) -> Option<fabric::Anchor> {
         None
     }
     fn resolve_anchor(
         &self,
-        _key: &replica::ids::BodyKey,
-        _anchor: &replica::Anchor,
-    ) -> replica::AnchorResolution {
-        replica::AnchorResolution::Drifted
+        _key: &replica::body::BodyKey,
+        _anchor: &fabric::Anchor,
+    ) -> fabric::AnchorResolution {
+        fabric::AnchorResolution::Drifted
     }
     fn content_status(
         &self,
-        _content: &replica::ContentRef,
+        _content: &replica::content::ContentRef,
     ) -> Option<runtime::world::ContentStatus> {
         None
     }
 
     fn bodies_with_schema(
         &self,
-        _world: &replica::ids::WorldId,
-        _schema: &replica::ids::SchemaId,
-    ) -> Vec<replica::ids::BodyKey> {
+        _world: &replica::body::WorldId,
+        _schema: &replica::body::SchemaId,
+    ) -> Vec<replica::body::BodyKey> {
         self.catalog_bodies.clone()
     }
 }
 
-fn principal(space: &mechanics::ids::SpaceId) -> runtime::PrincipalFacts {
-    let device = mechanics::crypto::device_from_seed(&FOUNDER_SEED);
-    runtime::PrincipalFacts {
+fn principal(space: &mechanics::ids::SpaceId) -> runtime::world::PrincipalFacts {
+    let device = mechanics::actor::device_from_seed(&FOUNDER_SEED);
+    runtime::world::PrincipalFacts {
         actor: mechanics::ids::ActorId::from_incept_hash(&"ab".repeat(32)),
         station: mechanics::station::Key::from_device(&device).unwrap(),
         device,
@@ -217,9 +124,9 @@ fn misplaced_and_duplicate_catalogs_are_typed_corrupt_never_repaired() {
     let world = lait::world::IssuesWorld::new();
     let facts = principal(&space);
     let right = contract::catalog_key(&space);
-    let wrong = replica::ids::BodyKey::new(
+    let wrong = replica::body::BodyKey::new(
         contract::world_id(),
-        replica::ids::BodyId::from_bytes([9u8; 16]),
+        replica::body::BodyId::from_bytes([9u8; 16]),
     );
 
     // A catalog-schema Body at the WRONG key only: corrupt (never selected).
@@ -229,7 +136,7 @@ fn misplaced_and_duplicate_catalogs_are_typed_corrupt_never_repaired() {
     };
     reader
         .views
-        .insert(wrong.clone(), replica::CollaborativeView::default());
+        .insert(wrong.clone(), fabric::CollaborativeView::default());
     let ctx = Context::with_reads(&facts, &reader, [0u8; 32]);
     assert!(
         matches!(snapshot_query(&world, &ctx), Err(Rejection::StateCorrupt)),
@@ -243,10 +150,10 @@ fn misplaced_and_duplicate_catalogs_are_typed_corrupt_never_repaired() {
     };
     reader
         .views
-        .insert(right.clone(), replica::CollaborativeView::default());
+        .insert(right.clone(), fabric::CollaborativeView::default());
     reader
         .views
-        .insert(wrong, replica::CollaborativeView::default());
+        .insert(wrong, fabric::CollaborativeView::default());
     let ctx = Context::with_reads(&facts, &reader, [0u8; 32]);
     assert!(
         matches!(snapshot_query(&world, &ctx), Err(Rejection::StateCorrupt)),

@@ -1,3 +1,11 @@
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    clippy::indexing_slicing,
+    clippy::string_slice,
+    clippy::expect_used,
+    reason = "canonical coordinate fields are ASCII and length-validated before fixed-format operations"
+)]
 //! Coordinates v1 — the canonical, verifiable material to identify and approach
 //! a Space. This is S2's replacement for the pre-carve join ticket: a signed,
 //! self-describing envelope with a fixed postcard tuple layout, a length-framed
@@ -167,7 +175,7 @@ pub struct AdmissionCapability {
     pub use_policy: AdmissionUsePolicy,
     /// The generic role expansion redemption installs (opaque to Mechanics
     /// beyond its generic assignments).
-    pub evidence: mechanics::demand::WorldAssignmentEvidence,
+    pub evidence: mechanics::authorization::WorldAssignmentEvidence,
     pub signature_algorithm: u8,
     #[serde(with = "serde_byte_array")]
     pub signature: [u8; 64],
@@ -304,10 +312,10 @@ impl AdmissionCapability {
         not_before: u64,
         expires_at: u64,
         use_policy: AdmissionUsePolicy,
-        evidence: mechanics::demand::WorldAssignmentEvidence,
+        evidence: mechanics::authorization::WorldAssignmentEvidence,
         issuer_seed: &[u8; 32],
     ) -> Option<Self> {
-        let issuer = mechanics::crypto::device_from_seed(issuer_seed).key_bytes()?;
+        let issuer = mechanics::actor::device_from_seed(issuer_seed).key_bytes()?;
         let mut cap = Self {
             version: 2,
             space: space_id_bytes(space)?,
@@ -321,7 +329,7 @@ impl AdmissionCapability {
             signature_algorithm: SIG_ALG_ED25519,
             signature: [0u8; 64],
         };
-        cap.signature = mechanics::crypto::sign_detached(issuer_seed, &cap.preimage());
+        cap.signature = mechanics::actor::sign_detached(issuer_seed, &cap.preimage());
         Some(cap)
     }
 
@@ -355,7 +363,7 @@ impl AdmissionCapability {
         if self.evidence.validate().is_err() {
             return Err(Invalid::BadAdmission);
         }
-        if !mechanics::crypto::verify_detached(&self.issuer, &self.preimage(), &self.signature) {
+        if !mechanics::actor::verify_detached(&self.issuer, &self.preimage(), &self.signature) {
             return Err(Invalid::BadSignature);
         }
         Ok(())
@@ -453,7 +461,7 @@ impl InvitationAcceptanceProof {
         capability_id: &[u8; 32],
         candidate_actor: &str,
     ) -> Option<Self> {
-        let public_key = mechanics::crypto::device_from_seed(candidate_seed).key_bytes()?;
+        let public_key = mechanics::actor::device_from_seed(candidate_seed).key_bytes()?;
         let mut proof = Self {
             version: 1,
             public_key,
@@ -469,7 +477,7 @@ impl InvitationAcceptanceProof {
             candidate_actor,
             &public_key,
         );
-        proof.signature = mechanics::crypto::sign_detached(candidate_seed, &preimage);
+        proof.signature = mechanics::actor::sign_detached(candidate_seed, &preimage);
         Some(proof)
     }
 
@@ -496,7 +504,7 @@ impl InvitationAcceptanceProof {
             candidate_actor,
             candidate_device,
         );
-        mechanics::crypto::verify_detached(&self.public_key, &preimage, &self.signature)
+        mechanics::actor::verify_detached(&self.public_key, &preimage, &self.signature)
     }
 }
 
@@ -509,7 +517,7 @@ impl SignedCoordinates {
     /// Mint and sign Coordinates from the approach Station's device seed. The
     /// seed's public key must equal `payload.approach_station`.
     pub fn sign(payload: CoordinatesPayload, station_seed: &[u8; 32]) -> Self {
-        let issuer = mechanics::crypto::device_from_seed(station_seed)
+        let issuer = mechanics::actor::device_from_seed(station_seed)
             .key_bytes()
             .expect("device key bytes");
         let mut coords = Self {
@@ -519,7 +527,7 @@ impl SignedCoordinates {
             signature_algorithm: SIG_ALG_ED25519,
             signature: [0u8; 64],
         };
-        coords.signature = mechanics::crypto::sign_detached(station_seed, &coords.preimage());
+        coords.signature = mechanics::actor::sign_detached(station_seed, &coords.preimage());
         coords
     }
 
@@ -630,7 +638,7 @@ impl SignedCoordinates {
         }
 
         // Outer signature by the approach Station.
-        if !mechanics::crypto::verify_detached(&self.issuer, &self.preimage(), &self.signature) {
+        if !mechanics::actor::verify_detached(&self.issuer, &self.preimage(), &self.signature) {
             return Err(Invalid::BadSignature);
         }
 

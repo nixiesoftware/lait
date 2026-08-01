@@ -1,3 +1,12 @@
+// Command dispatch validates clap shapes before indexing and uses bounded display
+// arithmetic. `process::exit` is confined to explicit CLI outcome boundaries.
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    clippy::exit,
+    clippy::indexing_slicing
+)]
+
 //! Binary entry point logic: parse the CLI and dispatch. Lives in the lib (not
 //! `main.rs`) so integration tests and doctests can drive the same command
 //! surface the binary exposes. `main.rs` is a thin shim over [`run`].
@@ -251,7 +260,9 @@ async fn dispatch(specs: &[cmdspec::Spec], matches: &ArgMatches, out: Out) -> Re
     // a packager running them in a clean sandbox never mints a key or store.
     match &leaf.dispatch {
         Dispatch::Special(Special::Completions) => {
-            let shell = *m.get_one::<Shell>("shell").expect("shell is required");
+            let shell = *m
+                .get_one::<Shell>("shell")
+                .ok_or_else(|| anyhow!("completion shell is required"))?;
             let mut cmd = cmdspec::build_cli(specs);
             let name = cmd.get_name().to_string();
             generate(shell, &mut cmd, name, &mut std::io::stdout());
@@ -409,7 +420,7 @@ async fn dispatch(specs: &[cmdspec::Spec], matches: &ArgMatches, out: Out) -> Re
             let action = crate::client_action::ClientAction::from_legacy(f(m)?);
             let req = action
                 .request()
-                .expect("legacy command registry emitted a WorldCall unexpectedly");
+                .ok_or_else(|| anyhow!("command registry emitted a World call as a host action"))?;
             use std::io::IsTerminal;
             // Ask before destroying (delete / member remove / key rotate). Gated
             // on the Request, so the list lives in one place; everything else
@@ -429,7 +440,7 @@ async fn dispatch(specs: &[cmdspec::Spec], matches: &ArgMatches, out: Out) -> Re
         Dispatch::Special(s) => match s {
             Special::Id => {
                 let seed = load_or_create_identity(&config::identity_dir()?)?;
-                crate::cli::emit_text(crate::crypto::device_from_seed(&seed).as_str(), out);
+                crate::cli::emit_text(mechanics::actor::device_from_seed(&seed).as_str(), out);
                 // The actor line (GOV-11): a pending joiner must be able to
                 // name their own actor to the approving admin, and the daemon
                 // resolves it from the actor plane even before admission.
@@ -449,7 +460,9 @@ async fn dispatch(specs: &[cmdspec::Spec], matches: &ArgMatches, out: Out) -> Re
                 mcp::run_mcp(&home).await?;
             }
             Special::InstallMcp => {
-                let client = *m.get_one::<Client>("client").expect("has default");
+                let client = *m
+                    .get_one::<Client>("client")
+                    .ok_or_else(|| anyhow!("MCP client selection is missing"))?;
                 let scope = m.get_one::<Scope>("scope").copied();
                 let name = m
                     .get_one::<String>("name")
@@ -510,9 +523,7 @@ async fn dispatch(specs: &[cmdspec::Spec], matches: &ArgMatches, out: Out) -> Re
             | Special::DeviceAccept
             | Special::Daemon
             | Special::Serve
-            | Special::Update => {
-                unreachable!("handled before home resolution")
-            }
+            | Special::Update => return Err(anyhow!("command escaped its pre-home dispatcher")),
         },
     }
 
@@ -599,7 +610,7 @@ async fn run_init(m: &ArgMatches, out: Out) -> Result<()> {
         cfg.save(&p)?;
     }
     let seed = load_or_create_identity(&config::identity_dir()?)?;
-    let me = crate::crypto::device_from_seed(&seed);
+    let me = mechanics::actor::device_from_seed(&seed);
     // Orbital formation: mechanics material + Runtime Orbit store + a seeded
     // default project, so `lait issues new` works on the next command.
     let (ws, project) = crate::orbital::found_space_cli(&home, &seed, &name)?;
@@ -646,7 +657,7 @@ fn run_device_accept(m: &ArgMatches, out: Out) -> Result<()> {
     let mut parts = token.split_whitespace();
     let actor = parts
         .next()
-        .and_then(crate::ids::ActorId::parse)
+        .and_then(issues::ids::ActorId::parse)
         .ok_or_else(|| anyhow!("invalid device token (expected `<actor_id> <space_id>`)"))?;
     let space = parts
         .next()
@@ -656,11 +667,11 @@ fn run_device_accept(m: &ArgMatches, out: Out) -> Result<()> {
     let seed = load_or_create_identity(&config::identity_dir()?)?;
     let mut nonce = [0u8; 16];
     getrandom::fill(&mut nonce).map_err(|e| anyhow!("getrandom: {e}"))?;
-    let binding = crate::actor::consent_sign(
+    let binding = mechanics::actor::consent_sign(
         &seed,
         &space,
         nonce,
-        &crate::actor::ConsentCtx::Member { actor: &actor },
+        &mechanics::actor::ConsentCtx::Member { actor: &actor },
     );
     let blob = data_encoding::HEXLOWER.encode(&postcard::to_stdvec(&binding)?);
     if out.json {
@@ -696,7 +707,7 @@ fn dir_display_name(home: &std::path::Path) -> String {
 /// so repeated joiner-side Connects converge to membership without a manual
 /// admin step (for an auto-approving invite).
 async fn run_join_orbital(m: &ArgMatches, link: &str, out: Out) -> Result<()> {
-    let coords = runtime::SignedCoordinates::parse_link(link.trim())
+    let coords = runtime::coordinates::SignedCoordinates::parse_link(link.trim())
         .map_err(|e| anyhow!("invalid invite link: {e}"))?;
     let verified = coords.verify().map_err(|e| anyhow!("invite: {e}"))?;
     let space = verified.space.as_str().to_string();
@@ -864,7 +875,7 @@ async fn run_join_cli(m: &ArgMatches, out: Out) -> Result<()> {
     // — a pre-carve join ticket, an older/newer link, malformed bytes — is
     // refused with the typed [`runtime::coordinates::Invalid`] (a pre-carve ticket surfaces
     // as `UnsupportedVersion`), never a fallback to a legacy code path.
-    match runtime::SignedCoordinates::parse_link(ticket_str.trim()) {
+    match runtime::coordinates::SignedCoordinates::parse_link(ticket_str.trim()) {
         Ok(_) => run_join_orbital(m, &ticket_str, out).await,
         Err(runtime::coordinates::Invalid::UnsupportedVersion(v)) => Err(anyhow!(
             "this invite is not a lait Coordinates link (version {v} — it looks like a \
@@ -894,7 +905,7 @@ async fn run_config(dispatch: &Dispatch, m: &ArgMatches, out: Out) -> Result<()>
     let home = config::existing_home().filter(|h| crate::orbital::space_store_present(h));
     let which = match dispatch {
         Dispatch::Special(s) => *s,
-        _ => unreachable!(),
+        Dispatch::Action(_) => return Err(anyhow!("non-config action reached config dispatch")),
     };
     match which {
         Special::ConfigList => {
@@ -982,7 +993,7 @@ async fn run_config(dispatch: &Dispatch, m: &ArgMatches, out: Out) -> Result<()>
             crate::cli::emit_ok(&format!("{message}{applied}"), out);
             Ok(())
         }
-        _ => unreachable!(),
+        _ => Err(anyhow!("non-config command reached config dispatch")),
     }
 }
 

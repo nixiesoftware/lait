@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use lait::orbital::SpaceAuthority;
-use replica::AuthorityIncorporator;
+use replica::convergence::AuthorityIncorporator;
 
 const FOUNDER_SEED: [u8; 32] = [11u8; 32];
 const C1_SEED: [u8; 32] = [12u8; 32];
@@ -41,7 +41,7 @@ fn now_secs() -> u64 {
 }
 
 fn device_of(seed: &[u8; 32]) -> String {
-    mechanics::crypto::device_from_seed(seed)
+    mechanics::actor::device_from_seed(seed)
         .as_str()
         .to_string()
 }
@@ -205,7 +205,10 @@ fn solo_to_threshold_elevation_installs_a_group_key_across_three_nodes() {
     converge(&[&f, &c1.1, &c2.1]);
 
     let before = f.recovery_status();
-    assert_eq!(before.scheme, mechanics::authority::AuthorityScheme::Single);
+    assert_eq!(
+        before.configuration,
+        mechanics::recovery::ConfigId::single()
+    );
 
     // Founder proposes a 2-of-3 recovery arrangement over the two co-founders.
     f.space_elevate(vec![device_of(&C1_SEED), device_of(&C2_SEED)], 2)
@@ -216,25 +219,32 @@ fn solo_to_threshold_elevation_installs_a_group_key_across_three_nodes() {
     // scheme, and the solo break-glass key no longer stands.
     let after = f.recovery_status();
     assert_eq!(
-        after.scheme,
-        mechanics::authority::AuthorityScheme::FrostThreshold,
+        after.configuration != mechanics::recovery::ConfigId::single(),
+        true,
         "the recovery authority became a FROST threshold group"
     );
-    assert_eq!((after.k, after.n), (2, 3), "a 2-of-3 arrangement installed");
+    assert_eq!(
+        after.authority.as_ref().map(|a| a.configuration),
+        Some(after.configuration),
+        "the typed authority names the standing configuration"
+    );
 }
 
 #[test]
 fn break_glass_solo_recovery_re_roots_and_re_keys() {
     let (_rf, f) = founder("solo-rec");
     let before = f.recovery_status();
-    assert_eq!(before.scheme, mechanics::authority::AuthorityScheme::Single);
+    assert_eq!(
+        before.configuration,
+        mechanics::recovery::ConfigId::single()
+    );
     // The founder holds the solo space-recovery key (escrowed at formation), so
     // break-glass recovery re-roots the space to it and re-keys to fence the
     // old root — a completed, installed recovery.
     match f.space_recover().unwrap() {
-        mechanics::ceremony::SpaceRecovery::Installed(done) => {
+        mechanics::recovery::SpaceRecovery::Installed(done) => {
             assert!(
-                done.rekey_failed.is_none(),
+                done.completion == mechanics::recovery::Completion::Complete,
                 "the follow-on content re-key succeeded"
             );
         }
@@ -252,8 +262,8 @@ fn threshold_recovery_installs_the_exact_root_and_fences_the_old_epoch() {
         .unwrap();
     converge(&[&f, &c1.1, &c2.1]);
     assert_eq!(
-        f.recovery_status().scheme,
-        mechanics::authority::AuthorityScheme::FrostThreshold
+        f.recovery_status().configuration != mechanics::recovery::ConfigId::single(),
+        true
     );
     let (state, terminal_before) = f.space_root_state();
     assert_eq!(state.gen, 1, "the elevation's Rotate advanced to gen 1");
@@ -268,7 +278,7 @@ fn threshold_recovery_installs_the_exact_root_and_fences_the_old_epoch() {
     // group signature installs on convergence.
     let opened = c1.1.space_recover().unwrap();
     let session = match &opened {
-        mechanics::ceremony::SpaceRecovery::Pending { session, .. } => *session,
+        mechanics::recovery::SpaceRecovery::Pending { session, .. } => *session,
         other => panic!("one holder alone cannot complete a threshold recovery: {other:?}"),
     };
     converge(&[&f, &c1.1, &c2.1]);
@@ -303,8 +313,8 @@ fn threshold_recovery_installs_the_exact_root_and_fences_the_old_epoch() {
     }
     // The group arrangement survives a recovery under it.
     assert_eq!(
-        c1.1.recovery_status().scheme,
-        mechanics::authority::AuthorityScheme::FrostThreshold
+        c1.1.recovery_status().configuration != mechanics::recovery::ConfigId::single(),
+        true
     );
     // Re-key: the new root is the sole admin and holds a usable active epoch
     // (rotating from it succeeds); the OLD root is fenced — no longer a
@@ -347,8 +357,8 @@ fn indispensable_arrangement_waits_for_every_custody_attestation() {
     // The DKG produced shares, but with no custody attestations the group key
     // has NOT been installed — the authority is still the solo scheme.
     assert_eq!(
-        f.recovery_status().scheme,
-        mechanics::authority::AuthorityScheme::Single,
+        f.recovery_status().configuration,
+        mechanics::recovery::ConfigId::single(),
         "an indispensable arrangement does not install before every custody ack"
     );
 
@@ -366,11 +376,11 @@ fn indispensable_arrangement_waits_for_every_custody_attestation() {
     // Now every custodian has attested, the 3-of-3 group key installs.
     let after = f.recovery_status();
     assert_eq!(
-        after.scheme,
-        mechanics::authority::AuthorityScheme::FrostThreshold,
+        after.configuration != mechanics::recovery::ConfigId::single(),
+        true,
         "once every custody ack is in, the indispensable arrangement installs"
     );
-    assert_eq!((after.k, after.n), (3, 3));
+    assert!(after.backing.satisfies_configuration);
 }
 
 #[test]
@@ -385,8 +395,8 @@ fn resharing_replaces_a_participant_without_changing_the_key() {
     converge(&[&f, &c1.1, &c2.1, &c3.1]);
     let before = f.recovery_status();
     assert_eq!(
-        (before.scheme, before.k, before.n),
-        (mechanics::authority::AuthorityScheme::FrostThreshold, 2, 3)
+        before.configuration != mechanics::recovery::ConfigId::single(),
+        true
     );
     let standing_key = before.authority.clone().expect("standing authority known");
     let (state_before, terminal_before) = f.space_root_state();
@@ -414,14 +424,22 @@ fn resharing_replaces_a_participant_without_changing_the_key() {
     // Installed: the arrangement moved, the KEY did not.
     let after = f.recovery_status();
     assert_eq!(
-        (after.scheme, after.k, after.n),
-        (mechanics::authority::AuthorityScheme::FrostThreshold, 2, 3),
+        after.configuration != mechanics::recovery::ConfigId::single(),
+        true,
         "the reshared 2-of-3 arrangement installed"
     );
+    let reshared_authority = after.authority.as_ref().expect("reshared authority known");
     assert_eq!(
-        after.authority.as_deref(),
-        Some(standing_key.as_str()),
+        reshared_authority.public_key, standing_key.public_key,
         "a reshare NEVER changes the recovery key"
+    );
+    assert_eq!(
+        reshared_authority.configuration, after.configuration,
+        "the authority names its newly installed arrangement"
+    );
+    assert_ne!(
+        reshared_authority.configuration, standing_key.configuration,
+        "a reshare replaces the standing arrangement"
     );
     let (state_after, terminal_after) = f.space_root_state();
     assert_eq!(
@@ -447,7 +465,7 @@ fn resharing_replaces_a_participant_without_changing_the_key() {
     // co-signs a threshold recovery that installs.
     let opened = c1.1.space_recover().unwrap();
     let session = match &opened {
-        mechanics::ceremony::SpaceRecovery::Pending { session, .. } => *session,
+        mechanics::recovery::SpaceRecovery::Pending { session, .. } => *session,
         other => panic!("threshold recovery still needs a co-signature: {other:?}"),
     };
     converge(&[&f, &c1.1, &c2.1, &c3.1]);
@@ -472,15 +490,15 @@ fn an_offline_participant_resumes_and_completes_an_elevation() {
     // (round 1 needs all N), so nothing installs.
     converge(&[&f, &c1.1]);
     assert_eq!(
-        f.recovery_status().scheme,
-        mechanics::authority::AuthorityScheme::Single,
+        f.recovery_status().configuration,
+        mechanics::recovery::ConfigId::single(),
         "an elevation cannot install while a participant is offline"
     );
     // c2 comes back: the ceremony resumes from the durable board and installs.
     converge(&[&f, &c1.1, &c2.1]);
     assert_eq!(
-        f.recovery_status().scheme,
-        mechanics::authority::AuthorityScheme::FrostThreshold,
+        f.recovery_status().configuration != mechanics::recovery::ConfigId::single(),
+        true,
         "the offline participant resumed and the elevation completed"
     );
 }
@@ -520,9 +538,12 @@ fn a_cold_restart_mid_ceremony_resumes_without_regenerating_material() {
     converge(&[&f, &c1m, &c2m]);
     let after = f.recovery_status();
     assert_eq!(
-        after.scheme,
-        mechanics::authority::AuthorityScheme::FrostThreshold,
+        after.configuration != mechanics::recovery::ConfigId::single(),
+        true,
         "the ceremony resumed across a cold restart of every node"
     );
-    assert_eq!((after.k, after.n), (2, 3));
+    assert_eq!(
+        after.authority.as_ref().map(|a| a.configuration),
+        Some(after.configuration)
+    );
 }

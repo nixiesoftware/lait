@@ -4,7 +4,7 @@
 //! sets, summed counters, no lost list inserts, preserved concurrent text, and
 //! an agreed LWW register winner.
 
-use fabric::{Engine, Key, MemoryEngine, Op, Transaction};
+use fabric::{Engine, Key, Op, Transaction};
 
 fn key() -> Key {
     Key::from_bytes(b"body/collab".to_vec())
@@ -17,8 +17,8 @@ fn req(ops: Vec<Op>) -> Transaction {
 /// A common ancestor with every path initialized (the documented discipline:
 /// paths are created in the Body's creating transaction, before concurrent
 /// editing), then forked into two engines.
-fn forked_pair() -> (MemoryEngine, MemoryEngine) {
-    let mut a = MemoryEngine::new();
+fn forked_pair() -> (Engine, Engine) {
+    let mut a = Engine::new();
     a.commit(req(vec![
         Op::CreateBody { key: key() },
         Op::RegisterSet {
@@ -65,13 +65,13 @@ fn forked_pair() -> (MemoryEngine, MemoryEngine) {
     .unwrap();
     // Fork by cloning the single Body's canonical per-Body export into b.
     let export = a.export_body(&key()).unwrap();
-    let mut b = MemoryEngine::new();
+    let mut b = Engine::new();
     b.import_body(&key(), &export).unwrap();
     (a, b)
 }
 
 /// Cross-merge both engines (per-Body) and assert their views are identical.
-fn converge(a: &mut MemoryEngine, b: &mut MemoryEngine) -> fabric::CollaborativeView {
+fn converge(a: &mut Engine, b: &mut Engine) -> fabric::CollaborativeView {
     let ea = a.export_body(&key()).unwrap();
     let eb = b.export_body(&key()).unwrap();
     a.import_body(&key(), &eb).unwrap();

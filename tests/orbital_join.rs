@@ -19,14 +19,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use lait::dto::IssueView;
+use issues::dto::IssueView;
 use lait::orbital::SpaceAuthority;
 use lait::world::contract::{self, IssueIntent, IssueQuery};
 use lait::world::IssuesWorld;
-use replica::AuthorityIncorporator;
+use replica::convergence::AuthorityIncorporator;
 use runtime::{
-    ActivationOptions, Authority, CommsOptions, Intent, Query, RequestId, Runtime, RuntimeBuilder,
-    Session, Station,
+    plane::contact::Authority, plane::Activation, plane::CommsOptions, world::Builder,
+    world::Intent, world::Query, world::RequestId, Runtime, Session, Station,
 };
 
 const FOUNDER_SEED: [u8; 32] = [81u8; 32];
@@ -43,8 +43,8 @@ fn temp_root(tag: &str) -> std::path::PathBuf {
     dir
 }
 
-fn registry() -> runtime::Registry {
-    RuntimeBuilder::new()
+fn registry() -> runtime::world::Catalog {
+    Builder::new()
         .register(Arc::new(IssuesWorld::new()))
         .build()
         .unwrap()
@@ -78,7 +78,7 @@ fn activate(
     root: &std::path::Path,
     seed: [u8; 32],
     mech: &SpaceAuthority,
-    coords: &runtime::SignedCoordinates,
+    coords: &runtime::coordinates::SignedCoordinates,
     transport: Arc<dyn comms::Transport>,
 ) -> (Runtime, Station) {
     let rt = Runtime::open(
@@ -90,7 +90,7 @@ fn activate(
     let station = rt
         .materialize(coords)
         .unwrap()
-        .open(ActivationOptions {
+        .open(Activation {
             planes: Default::default(),
             content: Default::default(),
             drain_deadline: Duration::from_secs(5),
@@ -110,7 +110,7 @@ fn submit(
     session: &Session,
     seed: &[u8; 32],
     intent: &IssueIntent,
-) -> Result<(), runtime::session::Failure> {
+) -> Result<(), runtime::world::Failure> {
     let identity = Runtime::identity_from_seed(seed);
     let action = identity.sign_action(
         session,
@@ -137,18 +137,18 @@ fn query<T: serde::de::DeserializeOwned>(session: &Session, q: &IssueQuery) -> T
 }
 
 fn station_id(seed: &[u8; 32]) -> mechanics::station::Key {
-    mechanics::station::Key::from_device(&mechanics::crypto::device_from_seed(seed)).unwrap()
+    mechanics::station::Key::from_device(&mechanics::actor::device_from_seed(seed)).unwrap()
 }
 
 #[test]
 fn form_invite_join_autoapprove_and_e2ee_convergence() {
     let net = comms::mem::MemNet::new();
     let t_founder: Arc<dyn comms::Transport> =
-        Arc::new(net.peer(mechanics::crypto::device_from_seed(&FOUNDER_SEED)));
+        Arc::new(net.peer(mechanics::actor::device_from_seed(&FOUNDER_SEED)));
     let t_joiner: Arc<dyn comms::Transport> =
-        Arc::new(net.peer(mechanics::crypto::device_from_seed(&JOINER_SEED)));
+        Arc::new(net.peer(mechanics::actor::device_from_seed(&JOINER_SEED)));
     let t_stranger: Arc<dyn comms::Transport> =
-        Arc::new(net.peer(mechanics::crypto::device_from_seed(&STRANGER_SEED)));
+        Arc::new(net.peer(mechanics::actor::device_from_seed(&STRANGER_SEED)));
 
     // 1. Formation: real genesis + founding inception + epoch-0.
     let root_f = temp_root("founder");
@@ -162,7 +162,7 @@ fn form_invite_join_autoapprove_and_e2ee_convergence() {
     let (_rt_f, station_f) = activate(&root_f, FOUNDER_SEED, &mech_f, &coords, t_founder);
     let session_f = dock(&station_f, &FOUNDER_SEED);
     // Seed product state under real keys.
-    let project = lait::ids::ProjectId::mint(&lait::ids::SystemUlidSource)
+    let project = issues::ids::ProjectId::mint(&issues::ids::SystemUlidSource)
         .as_str()
         .to_string();
     submit(
@@ -174,18 +174,18 @@ fn form_invite_join_autoapprove_and_e2ee_convergence() {
             &project,
             "Core",
             "core",
-            mechanics::crypto::device_from_seed(&FOUNDER_SEED).as_str(),
+            mechanics::actor::device_from_seed(&FOUNDER_SEED).as_str(),
         ),
     )
     .unwrap();
-    let doc = lait::ids::DocId::mint(&lait::ids::SystemUlidSource)
+    let doc = issues::ids::DocId::mint(&issues::ids::SystemUlidSource)
         .as_str()
         .to_string();
     let founder_actor = {
         // The founder's actor id, from its own resolution.
-        use runtime::AuthorityView;
+        use runtime::world::AuthorityView;
         mech_f
-            .resolve(&mechanics::crypto::device_from_seed(&FOUNDER_SEED))
+            .resolve(&mechanics::actor::device_from_seed(&FOUNDER_SEED))
             .unwrap()
             .actor
     };
@@ -204,7 +204,7 @@ fn form_invite_join_autoapprove_and_e2ee_convergence() {
             new_labels: vec![],
             body: Some("the sealed body".into()),
             actor: founder_actor.as_str().to_string(),
-            device: mechanics::crypto::device_from_seed(&FOUNDER_SEED)
+            device: mechanics::actor::device_from_seed(&FOUNDER_SEED)
                 .as_str()
                 .to_string(),
             ts: 3,
@@ -257,10 +257,10 @@ fn form_invite_join_autoapprove_and_e2ee_convergence() {
     let _ = outcome;
     // The founder's replay now admits the joiner's actor.
     {
-        use runtime::AuthorityView;
+        use runtime::world::AuthorityView;
         assert!(
             mech_f
-                .resolve(&mechanics::crypto::device_from_seed(&JOINER_SEED))
+                .resolve(&mechanics::actor::device_from_seed(&JOINER_SEED))
                 .is_some(),
             "the joiner is admitted on the founder's replay"
         );
@@ -288,9 +288,9 @@ fn form_invite_join_autoapprove_and_e2ee_convergence() {
 
     // 7. The admitted joiner writes; the founder converges it back.
     let joiner_actor = {
-        use runtime::AuthorityView;
+        use runtime::world::AuthorityView;
         mech_j
-            .resolve(&mechanics::crypto::device_from_seed(&JOINER_SEED))
+            .resolve(&mechanics::actor::device_from_seed(&JOINER_SEED))
             .unwrap()
             .actor
     };
@@ -303,7 +303,7 @@ fn form_invite_join_autoapprove_and_e2ee_convergence() {
             doc: doc.clone(),
             body: "joined and commenting".into(),
             actor: joiner_actor.as_str().to_string(),
-            device: mechanics::crypto::device_from_seed(&JOINER_SEED)
+            device: mechanics::actor::device_from_seed(&JOINER_SEED)
                 .as_str()
                 .to_string(),
             ts: 9,

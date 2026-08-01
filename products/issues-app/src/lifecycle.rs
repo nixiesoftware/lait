@@ -1,3 +1,9 @@
+#![allow(
+    clippy::expect_used,
+    clippy::as_conversions,
+    clippy::indexing_slicing,
+    reason = "formation constants and tracker records are compile-time validated and bounded"
+)]
 //! Product-owned formation policy and crash-resumable tracker bootstrap.
 //!
 //! The orbital host forms or enters a Space, activates a Station, and supplies
@@ -10,12 +16,14 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Result};
 use issues::ids::{ProjectId, SpaceId, SystemUlidSource};
-use runtime::{Intent, LocalIdentity, RequestId, Session, SignedWorldAction};
+use runtime::{
+    world::Intent, world::LocalIdentity, world::RequestId, world::SignedWorldAction, Session,
+};
 
 /// One deterministic founder grant supplied to the generic authority host.
 pub struct FounderGrant {
-    pub capability: mechanics::demand::PolicyCapability,
-    pub resource: mechanics::demand::Resource,
+    pub capability: mechanics::authorization::PolicyCapability,
+    pub resource: mechanics::authorization::Resource,
     pub salt: [u8; 16],
 }
 
@@ -107,13 +115,34 @@ pub enum BootstrapPhase {
     Complete,
 }
 
-/// Failure points used to prove crash-resumable formation.
+/// Failure points used only by the crate-local crash-resumption matrix.
+#[cfg(feature = "fault-injection")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BootstrapFault {
+pub enum Fault {
     BeforeRecord,
     AfterRecord,
     BeforeSubmit,
     BeforeComplete,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Point {
+    BeforeRecord,
+    AfterRecord,
+    BeforeSubmit,
+    BeforeComplete,
+}
+
+#[cfg(feature = "fault-injection")]
+impl From<Fault> for Point {
+    fn from(fault: Fault) -> Self {
+        match fault {
+            Fault::BeforeRecord => Self::BeforeRecord,
+            Fault::AfterRecord => Self::AfterRecord,
+            Fault::BeforeSubmit => Self::BeforeSubmit,
+            Fault::BeforeComplete => Self::BeforeComplete,
+        }
+    }
 }
 
 fn bootstrap_record_path(store_root: &Path, space: &SpaceId) -> PathBuf {
@@ -156,7 +185,53 @@ pub fn bootstrap_tracker(
     device: &str,
     display_name: &str,
     initial_project: Option<InitialProject>,
-    fault: Option<BootstrapFault>,
+) -> Result<()> {
+    bootstrap_tracker_inner(
+        store_root,
+        space,
+        session,
+        identity,
+        device,
+        display_name,
+        initial_project,
+        None,
+    )
+}
+
+#[cfg(feature = "fault-injection")]
+#[allow(clippy::too_many_arguments)]
+pub fn bootstrap_tracker_with_fault(
+    store_root: &Path,
+    space: &SpaceId,
+    session: &Session,
+    identity: &LocalIdentity,
+    device: &str,
+    display_name: &str,
+    initial_project: Option<InitialProject>,
+    fault: Fault,
+) -> Result<()> {
+    bootstrap_tracker_inner(
+        store_root,
+        space,
+        session,
+        identity,
+        device,
+        display_name,
+        initial_project,
+        Some(fault.into()),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn bootstrap_tracker_inner(
+    store_root: &Path,
+    space: &SpaceId,
+    session: &Session,
+    identity: &LocalIdentity,
+    device: &str,
+    display_name: &str,
+    initial_project: Option<InitialProject>,
+    fault: Option<Point>,
 ) -> Result<()> {
     let record = match read_bootstrap_record(store_root, space) {
         Some(record) => {
@@ -166,7 +241,7 @@ pub fn bootstrap_tracker(
             record
         }
         None => {
-            if fault == Some(BootstrapFault::BeforeRecord) {
+            if fault == Some(Point::BeforeRecord) {
                 return Err(anyhow!("injected fault: before record write"));
             }
             let project =
@@ -208,7 +283,7 @@ pub fn bootstrap_tracker(
                 phase: BootstrapPhase::Recorded,
             };
             write_bootstrap_record(store_root, space, &record)?;
-            if fault == Some(BootstrapFault::AfterRecord) {
+            if fault == Some(Point::AfterRecord) {
                 return Err(anyhow!("injected fault: after record write"));
             }
             record
@@ -217,13 +292,13 @@ pub fn bootstrap_tracker(
 
     let action: SignedWorldAction = postcard::from_bytes(&record.signed_action)
         .map_err(|error| anyhow!("bootstrap record corrupt: {error}"))?;
-    if fault == Some(BootstrapFault::BeforeSubmit) {
+    if fault == Some(Point::BeforeSubmit) {
         return Err(anyhow!("injected fault: before submit"));
     }
     session
         .submit(action)
         .map_err(|error| anyhow!("initialize-tracker: {error:?}"))?;
-    if fault == Some(BootstrapFault::BeforeComplete) {
+    if fault == Some(Point::BeforeComplete) {
         return Err(anyhow!("injected fault: before completion marking"));
     }
 

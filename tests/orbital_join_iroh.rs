@@ -15,14 +15,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use lait::dto::IssueView;
+use issues::dto::IssueView;
 use lait::orbital::SpaceAuthority;
 use lait::world::contract::{self, IssueIntent, IssueQuery};
 use lait::world::IssuesWorld;
-use replica::AuthorityIncorporator;
+use replica::convergence::AuthorityIncorporator;
 use runtime::{
-    ActivationOptions, Authority, CommsOptions, GossipOptions, Intent, Query, RequestId, Runtime,
-    RuntimeBuilder, Session, Station,
+    plane::contact::Authority, plane::Activation, plane::CommsOptions, plane::GossipOptions,
+    world::Builder, world::Intent, world::Query, world::RequestId, Runtime, Session, Station,
 };
 
 const FOUNDER_SEED: [u8; 32] = [91u8; 32];
@@ -38,8 +38,8 @@ fn temp_root(tag: &str) -> std::path::PathBuf {
     dir
 }
 
-fn registry() -> runtime::Registry {
-    RuntimeBuilder::new()
+fn registry() -> runtime::world::Catalog {
+    Builder::new()
         .register(Arc::new(IssuesWorld::new()))
         .build()
         .unwrap()
@@ -81,7 +81,7 @@ fn activate(
     root: &std::path::Path,
     seed: [u8; 32],
     mech: &SpaceAuthority,
-    coords: &runtime::SignedCoordinates,
+    coords: &runtime::coordinates::SignedCoordinates,
     transport: Arc<dyn comms::Transport>,
     bootstrap: Vec<comms::PeerId>,
 ) -> (Runtime, Station) {
@@ -94,7 +94,7 @@ fn activate(
     let station = rt
         .materialize(coords)
         .unwrap()
-        .open(ActivationOptions {
+        .open(Activation {
             planes: Default::default(),
             content: Default::default(),
             drain_deadline: Duration::from_secs(5),
@@ -114,7 +114,7 @@ fn submit(
     session: &Session,
     seed: &[u8; 32],
     intent: &IssueIntent,
-) -> Result<(), runtime::session::Failure> {
+) -> Result<(), runtime::world::Failure> {
     let identity = Runtime::identity_from_seed(seed);
     let action = identity.sign_action(
         session,
@@ -141,7 +141,7 @@ fn query<T: serde::de::DeserializeOwned>(session: &Session, q: &IssueQuery) -> T
 }
 
 fn station_id(seed: &[u8; 32]) -> mechanics::station::Key {
-    mechanics::station::Key::from_device(&mechanics::crypto::device_from_seed(seed)).unwrap()
+    mechanics::station::Key::from_device(&mechanics::actor::device_from_seed(seed)).unwrap()
 }
 
 /// Retry a Contact until it converges (over real iroh, path establishment and
@@ -159,7 +159,10 @@ fn contact_until<F: Fn() -> bool>(station: &Station, peer: &mechanics::station::
 
 #[test]
 fn coordinates_only_two_endpoint_bootstrap_over_real_iroh() {
-    let alpns: &[comms::Alpn] = &[runtime::contact::CONTACT_ALPN, runtime::PRESENCE_ALPN];
+    let alpns: &[comms::Alpn] = &[
+        runtime::plane::contact::CONTACT_ALPN,
+        runtime::neighbor::PRESENCE_ALPN,
+    ];
     let net = comms::policy::Network::Isolated;
     // A long-lived multi-thread runtime hosts both endpoints' background tasks.
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -178,7 +181,7 @@ fn coordinates_only_two_endpoint_bootstrap_over_real_iroh() {
     });
     let t_founder: Arc<dyn comms::Transport> = Arc::new(t_founder);
     let t_joiner: Arc<dyn comms::Transport> = Arc::new(t_joiner);
-    let founder_routes = runtime::canonical_routes(&founder_routes);
+    let founder_routes = runtime::coordinates::canonical_routes(&founder_routes);
     assert!(
         !founder_routes.is_empty(),
         "an isolated iroh endpoint advertises at least one direct route"
@@ -210,10 +213,10 @@ fn coordinates_only_two_endpoint_bootstrap_over_real_iroh() {
         &lait::world::contract::initialize_tracker_intent(
             "Iroh Space",
             1,
-            lait::ids::ProjectId::mint(&lait::ids::SystemUlidSource).as_str(),
+            issues::ids::ProjectId::mint(&issues::ids::SystemUlidSource).as_str(),
             "Main",
             "MAIN",
-            mechanics::crypto::device_from_seed(&FOUNDER_SEED).as_str(),
+            mechanics::actor::device_from_seed(&FOUNDER_SEED).as_str(),
         ),
     )
     .unwrap();
@@ -263,9 +266,9 @@ fn coordinates_only_two_endpoint_bootstrap_over_real_iroh() {
     //    joiner's routes) and redeems the admission (AddMember + sealing).
     contact_until(&station_f, &station_id(&JOINER_SEED), || {
         mech_f.am_i_admin() && {
-            use runtime::AuthorityView;
+            use runtime::world::AuthorityView;
             mech_f
-                .resolve(&mechanics::crypto::device_from_seed(&JOINER_SEED))
+                .resolve(&mechanics::actor::device_from_seed(&JOINER_SEED))
                 .is_some()
         }
     });
@@ -281,7 +284,7 @@ fn coordinates_only_two_endpoint_bootstrap_over_real_iroh() {
     let session_j = dock(&station_j, &JOINER_SEED);
 
     // 7. The joiner creates an issue and it converges back to the founder.
-    let doc = lait::ids::DocId::mint(&lait::ids::SystemUlidSource)
+    let doc = issues::ids::DocId::mint(&issues::ids::SystemUlidSource)
         .as_str()
         .to_string();
     // The founder created the default project via SpaceInit; the joiner reads it.
@@ -317,15 +320,15 @@ fn coordinates_only_two_endpoint_bootstrap_over_real_iroh() {
             duedate: None,
             estimate: None,
             actor: {
-                use runtime::AuthorityView;
+                use runtime::world::AuthorityView;
                 mech_j
-                    .resolve(&mechanics::crypto::device_from_seed(&JOINER_SEED))
+                    .resolve(&mechanics::actor::device_from_seed(&JOINER_SEED))
                     .unwrap()
                     .actor
                     .as_str()
                     .to_string()
             },
-            device: mechanics::crypto::device_from_seed(&JOINER_SEED)
+            device: mechanics::actor::device_from_seed(&JOINER_SEED)
                 .as_str()
                 .to_string(),
             ts: 3,

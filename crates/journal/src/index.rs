@@ -51,6 +51,7 @@ pub struct IndexEntry {
 }
 
 /// A reference to a child subtree: its node hash and how many entries it holds.
+///
 /// The count is what makes the merge rule cheap — a branch knows whether its
 /// whole subtree would fit one leaf without reading the subtree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -99,13 +100,29 @@ pub trait NodeSource {
 }
 
 /// The nibble of `key` at `depth`.
-fn nibble(key: &IndexKey, depth: usize) -> usize {
-    let byte = key[depth / 2];
-    if depth.is_multiple_of(2) {
-        (byte >> 4) as usize
+fn nibble(key: &IndexKey, depth: usize) -> Result<usize, Failure> {
+    let byte = key.get(depth / 2).copied().ok_or(Failure::Bounds)?;
+    Ok(if depth.is_multiple_of(2) {
+        usize::from(byte >> 4)
     } else {
-        (byte & 0x0F) as usize
+        usize::from(byte & 0x0F)
+    })
+}
+
+fn next_depth(depth: usize) -> Result<usize, Failure> {
+    let next = depth.checked_add(1).ok_or(Failure::Bounds)?;
+    if next > MAX_DEPTH {
+        return Err(Failure::Bounds);
     }
+    Ok(next)
+}
+
+fn count(entries: usize) -> Result<u64, Failure> {
+    u64::try_from(entries).map_err(|_| Failure::Bounds)
+}
+
+fn capacity(entries: u64) -> Result<usize, Failure> {
+    usize::try_from(entries).map_err(|_| Failure::Bounds)
 }
 
 /// The content address of an encoded node — the store's object address, not a
@@ -115,13 +132,15 @@ fn nibble(key: &IndexKey, depth: usize) -> usize {
 /// `ChildRef` named an address the store had never heard of, and the store
 /// would then keep the node alive under one name while the index looked for it
 /// under another. They must be the same name or reachability is a fiction.
+#[must_use]
 pub fn node_hash(bytes: &[u8]) -> [u8; 32] {
     crate::object_content_hash(bytes)
 }
 
 impl IndexNode {
-    pub fn encode(&self) -> Vec<u8> {
-        postcard::to_stdvec(self).expect("postcard index node")
+    #[must_use]
+    pub fn encode(&self) -> Result<Vec<u8>, Failure> {
+        postcard::to_stdvec(self).map_err(|_| Failure::Bounds)
     }
 
     /// Decode, insisting the encoding was canonical. Bounds are checked before
@@ -131,7 +150,7 @@ impl IndexNode {
             return Err(Failure::Bounds);
         }
         let node: Self = postcard::from_bytes(bytes).map_err(|_| Failure::NonCanonical)?;
-        if node.encode() != bytes {
+        if node.encode()? != bytes {
             return Err(Failure::NonCanonical);
         }
         Ok(node)
@@ -143,12 +162,12 @@ impl IndexNode {
 /// A single entry always fits: at maximum depth the whole key is consumed and
 /// two distinct keys cannot share every nibble, so a deepest leaf holds exactly
 /// one entry and must be allowed to whatever size that entry is.
-fn fits_leaf(entries: &[IndexEntry], depth: usize) -> bool {
+fn fits_leaf(entries: &[IndexEntry], depth: usize) -> Result<bool, Failure> {
     if entries.len() <= 1 || depth >= MAX_DEPTH {
-        return true;
+        return Ok(true);
     }
-    entries.len() <= MAX_LEAF_ENTRIES
-        && IndexNode::Leaf(entries.to_vec()).encode().len() <= MAX_NODE_BYTES
+    Ok(entries.len() <= MAX_LEAF_ENTRIES
+        && IndexNode::Leaf(entries.to_vec()).encode()?.len() <= MAX_NODE_BYTES)
 }
 
 /// Collects the nodes an update produced, so the caller can persist exactly the
@@ -160,43 +179,53 @@ pub struct NodeSink {
 }
 
 impl NodeSink {
-    fn emit(&mut self, node: &IndexNode, count: u64) -> ChildRef {
-        let bytes = node.encode();
+    fn emit(&mut self, node: &IndexNode, count: u64) -> Result<ChildRef, Failure> {
+        let bytes = node.encode()?;
         let hash = node_hash(&bytes);
         self.written.push(bytes);
-        ChildRef { hash, count }
+        Ok(ChildRef { hash, count })
     }
 }
 
 /// Build the canonical subtree for an already-sorted, unique entry set at
 /// `depth`. A pure function of the set: this is the definition the incremental
 /// path must agree with.
-fn build(entries: &[IndexEntry], depth: usize, sink: &mut NodeSink) -> Option<ChildRef> {
+fn build(
+    entries: &[IndexEntry],
+    depth: usize,
+    sink: &mut NodeSink,
+) -> Result<Option<ChildRef>, Failure> {
     if entries.is_empty() {
-        return None;
+        return Ok(None);
     }
-    if fits_leaf(entries, depth) {
+    if fits_leaf(entries, depth)? {
         let node = IndexNode::Leaf(entries.to_vec());
-        return Some(sink.emit(&node, entries.len() as u64));
+        return sink.emit(&node, count(entries.len())?).map(Some);
     }
     let mut children: [Option<ChildRef>; FANOUT] = Default::default();
     let mut total = 0u64;
     let mut start = 0usize;
     while start < entries.len() {
-        let slot = nibble(&entries[start].key, depth);
+        let entry = entries.get(start).ok_or(Failure::Bounds)?;
+        let slot = nibble(&entry.key, depth)?;
         let mut end = start;
-        while end < entries.len() && nibble(&entries[end].key, depth) == slot {
-            end += 1;
+        while let Some(entry) = entries.get(end) {
+            if nibble(&entry.key, depth)? != slot {
+                break;
+            }
+            end = end.checked_add(1).ok_or(Failure::Bounds)?;
         }
-        let child = build(&entries[start..end], depth + 1, sink);
+        let slice = entries.get(start..end).ok_or(Failure::Bounds)?;
+        let child = build(slice, next_depth(depth)?, sink)?;
         if let Some(c) = child {
-            total += c.count;
+            total = total.checked_add(c.count).ok_or(Failure::Bounds)?;
         }
-        children[slot] = child;
+        let target = children.get_mut(slot).ok_or(Failure::Bounds)?;
+        *target = child;
         start = end;
     }
     let node = IndexNode::Branch(Box::new(children));
-    Some(sink.emit(&node, total))
+    sink.emit(&node, total).map(Some)
 }
 
 /// Build a canonical index from scratch. Entries need not be sorted; duplicate
@@ -211,10 +240,13 @@ pub fn build_index(
         }
     }
     entries.sort_by_key(|e| e.key);
-    if entries.windows(2).any(|w| w[0].key == w[1].key) {
+    if entries
+        .windows(2)
+        .any(|window| matches!(window, [left, right] if left.key == right.key))
+    {
         return Err(Failure::Order);
     }
-    Ok(build(&entries, 0, sink))
+    build(&entries, 0, sink)
 }
 
 /// Read every entry of a subtree, in key order. Bounded by the caller: only
@@ -235,7 +267,7 @@ fn collect(
         IndexNode::Leaf(entries) => out.extend(entries),
         IndexNode::Branch(children) => {
             for slot in children.iter().flatten() {
-                collect(source, slot, depth + 1, out)?;
+                collect(source, slot, next_depth(depth)?, out)?;
             }
         }
     }
@@ -325,11 +357,11 @@ fn descend(
                         .map(|value| IndexEntry { key: c.key, value })
                 })
                 .collect();
-            Ok(build(&entries, depth, sink))
+            build(&entries, depth, sink)
         }
         Some((_, IndexNode::Leaf(entries))) => {
             let merged = merge_into(entries, changes);
-            Ok(build(&merged, depth, sink))
+            build(&merged, depth, sink)
         }
         Some((child, IndexNode::Branch(children))) => {
             // Decide the merge *before* descending, because merging after
@@ -344,31 +376,41 @@ fn descend(
             // validation refuses. Once the bound says a merge is possible the
             // whole subtree is rebuilt from its own entries; `build` then
             // produces a leaf or re-splits, whichever the set calls for.
-            let deletes = changes.iter().filter(|c| c.value.is_none()).count() as u64;
-            if child.count.saturating_sub(deletes) <= MAX_LEAF_ENTRIES as u64 {
-                let mut entries = Vec::with_capacity(child.count as usize);
+            let deletes = count(changes.iter().filter(|c| c.value.is_none()).count())?;
+            if child.count.saturating_sub(deletes) <= count(MAX_LEAF_ENTRIES)? {
+                let mut entries = Vec::with_capacity(capacity(child.count)?);
                 for slot in children.iter().flatten() {
-                    collect(source, slot, depth + 1, &mut entries)?;
+                    collect(source, slot, next_depth(depth)?, &mut entries)?;
                 }
                 entries.sort_by_key(|e| e.key);
                 let merged = merge_into(entries, changes);
-                return Ok(build(&merged, depth, sink));
+                return build(&merged, depth, sink);
             }
 
             let mut next = *children;
             let mut total = child.count;
             let mut start = 0usize;
             while start < changes.len() {
-                let slot = nibble(&changes[start].key, depth);
+                let change = changes.get(start).ok_or(Failure::Bounds)?;
+                let slot = nibble(&change.key, depth)?;
                 let mut end = start;
-                while end < changes.len() && nibble(&changes[end].key, depth) == slot {
-                    end += 1;
+                while let Some(change) = changes.get(end) {
+                    if nibble(&change.key, depth)? != slot {
+                        break;
+                    }
+                    end = end.checked_add(1).ok_or(Failure::Bounds)?;
                 }
-                let before = next[slot].map_or(0, |c| c.count);
-                let updated = descend(source, next[slot], depth + 1, &changes[start..end], sink)?;
+                let current = next.get(slot).copied().ok_or(Failure::Bounds)?;
+                let before = current.map_or(0, |c| c.count);
+                let changed = changes.get(start..end).ok_or(Failure::Bounds)?;
+                let updated = descend(source, current, next_depth(depth)?, changed, sink)?;
                 let after = updated.map_or(0, |c| c.count);
-                total = total + after - before;
-                next[slot] = updated;
+                total = total
+                    .checked_sub(before)
+                    .and_then(|remaining| remaining.checked_add(after))
+                    .ok_or(Failure::CountMismatch)?;
+                let target = next.get_mut(slot).ok_or(Failure::Bounds)?;
+                *target = updated;
                 start = end;
             }
 
@@ -376,33 +418,26 @@ fn descend(
                 return Ok(None);
             }
             let node = IndexNode::Branch(Box::new(next));
-            Ok(Some(sink.emit(&node, total)))
+            sink.emit(&node, total).map(Some)
         }
     }
 }
 
 /// Fold a sorted change list into a sorted entry list.
 fn merge_into(entries: Vec<IndexEntry>, changes: &[IndexChange]) -> Vec<IndexEntry> {
-    let mut out: Vec<IndexEntry> = Vec::with_capacity(entries.len() + changes.len());
+    let mut out: Vec<IndexEntry> = Vec::new();
     let mut e = entries.into_iter().peekable();
     let mut c = changes.iter().peekable();
     loop {
         match (e.peek(), c.peek()) {
             (None, None) => break,
-            (Some(_), None) => out.push(e.next().expect("peeked")),
-            (None, Some(_)) => {
-                let change = c.next().expect("peeked");
-                if let Some(value) = change.value.clone() {
-                    out.push(IndexEntry {
-                        key: change.key,
-                        value,
-                    });
+            (Some(_), None) => {
+                if let Some(entry) = e.next() {
+                    out.push(entry);
                 }
             }
-            (Some(entry), Some(change)) => match entry.key.cmp(&change.key) {
-                std::cmp::Ordering::Less => out.push(e.next().expect("peeked")),
-                std::cmp::Ordering::Greater => {
-                    let change = c.next().expect("peeked");
+            (None, Some(_)) => {
+                if let Some(change) = c.next() {
                     if let Some(value) = change.value.clone() {
                         out.push(IndexEntry {
                             key: change.key,
@@ -410,14 +445,32 @@ fn merge_into(entries: Vec<IndexEntry>, changes: &[IndexChange]) -> Vec<IndexEnt
                         });
                     }
                 }
+            }
+            (Some(entry), Some(change)) => match entry.key.cmp(&change.key) {
+                std::cmp::Ordering::Less => {
+                    if let Some(entry) = e.next() {
+                        out.push(entry);
+                    }
+                }
+                std::cmp::Ordering::Greater => {
+                    if let Some(change) = c.next() {
+                        if let Some(value) = change.value.clone() {
+                            out.push(IndexEntry {
+                                key: change.key,
+                                value,
+                            });
+                        }
+                    }
+                }
                 std::cmp::Ordering::Equal => {
                     e.next();
-                    let change = c.next().expect("peeked");
-                    if let Some(value) = change.value.clone() {
-                        out.push(IndexEntry {
-                            key: change.key,
-                            value,
-                        });
+                    if let Some(change) = c.next() {
+                        if let Some(value) = change.value.clone() {
+                            out.push(IndexEntry {
+                                key: change.key,
+                                value,
+                            });
+                        }
                     }
                 }
             },
@@ -446,8 +499,11 @@ pub fn lookup(
                 return Ok(entries.into_iter().find(|e| &e.key == key).map(|e| e.value))
             }
             IndexNode::Branch(children) => {
-                current = children[nibble(key, depth)];
-                depth += 1;
+                current = children
+                    .get(nibble(key, depth)?)
+                    .copied()
+                    .ok_or(Failure::Bounds)?;
+                depth = next_depth(depth)?;
             }
         }
     }
@@ -478,12 +534,14 @@ pub fn stream(
                 for entry in &entries {
                     visit(entry);
                 }
-                Ok(entries.len() as u64)
+                count(entries.len())
             }
             IndexNode::Branch(children) => {
-                let mut total = 0;
+                let mut total = 0u64;
                 for slot in children.iter().flatten() {
-                    total += walk(source, slot, depth + 1, visit)?;
+                    total = total
+                        .checked_add(walk(source, slot, next_depth(depth)?, visit)?)
+                        .ok_or(Failure::Bounds)?;
                 }
                 Ok(total)
             }
@@ -519,7 +577,7 @@ pub fn spine(
             .ok_or(Failure::MissingNode(child.hash))?;
         if let IndexNode::Branch(children) = IndexNode::decode_canonical(&bytes)? {
             for slot in children.iter().flatten() {
-                walk(source, slot, depth + 1, out)?;
+                walk(source, slot, next_depth(depth)?, out)?;
             }
         }
         Ok(())
@@ -562,8 +620,8 @@ pub fn validate(source: &dyn NodeSource, root: Option<ChildRef>) -> Result<u64, 
                 if entries.is_empty() {
                     return Err(Failure::NotCanonicalShape);
                 }
-                for w in entries.windows(2) {
-                    if w[0].key >= w[1].key {
+                for window in entries.windows(2) {
+                    if matches!(window, [left, right] if left.key >= right.key) {
                         return Err(Failure::Order);
                     }
                 }
@@ -572,18 +630,19 @@ pub fn validate(source: &dyn NodeSource, root: Option<ChildRef>) -> Result<u64, 
                         return Err(Failure::Bounds);
                     }
                     for (level, expected) in prefix.iter().enumerate() {
-                        if nibble(&entry.key, level) != *expected {
+                        if nibble(&entry.key, level)? != *expected {
                             return Err(Failure::Order);
                         }
                     }
                 }
-                if !fits_leaf(&entries, depth) {
+                if !fits_leaf(&entries, depth)? {
                     return Err(Failure::NotCanonicalShape);
                 }
-                if child.count != entries.len() as u64 {
+                let entry_count = count(entries.len())?;
+                if child.count != entry_count {
                     return Err(Failure::CountMismatch);
                 }
-                Ok(entries.len() as u64)
+                Ok(entry_count)
             }
             IndexNode::Branch(children) => {
                 let occupied = children.iter().flatten().count();
@@ -595,20 +654,22 @@ pub fn validate(source: &dyn NodeSource, root: Option<ChildRef>) -> Result<u64, 
                     let Some(reference) = entry else { continue };
                     let mut next = prefix.to_vec();
                     next.push(slot);
-                    total += walk(source, reference, depth + 1, &next)?;
+                    total = total
+                        .checked_add(walk(source, reference, next_depth(depth)?, &next)?)
+                        .ok_or(Failure::Bounds)?;
                 }
                 if total != child.count {
                     return Err(Failure::CountMismatch);
                 }
                 // A branch whose whole subtree fits one leaf is not canonical:
                 // the canonical encoding of that set is the leaf.
-                if total <= MAX_LEAF_ENTRIES as u64 {
-                    let mut entries = Vec::with_capacity(total as usize);
+                if total <= count(MAX_LEAF_ENTRIES)? {
+                    let mut entries = Vec::with_capacity(capacity(total)?);
                     for slot in children.iter().flatten() {
-                        collect(source, slot, depth + 1, &mut entries)?;
+                        collect(source, slot, next_depth(depth)?, &mut entries)?;
                     }
                     entries.sort_by_key(|e| e.key);
-                    if fits_leaf(&entries, depth) {
+                    if fits_leaf(&entries, depth)? {
                         return Err(Failure::NotCanonicalShape);
                     }
                 }
@@ -670,6 +731,7 @@ impl Reconciliation {
     /// `max_nodes` bounds how much a peer can make us fetch. A remote root is
     /// remote input, and a descent it controls is a descent it could otherwise
     /// make unbounded.
+    #[must_use]
     pub fn begin(local: Option<ChildRef>, remote: Option<ChildRef>, max_nodes: u64) -> Self {
         let mut wanted = Vec::new();
         if let Some(remote) = remote {
@@ -727,7 +789,7 @@ impl Reconciliation {
             if !self.seen.insert(remote.hash) {
                 continue;
             }
-            self.fetched += 1;
+            self.fetched = self.fetched.checked_add(1).ok_or(Failure::Bounds)?;
             if self.fetched > self.max_nodes || depth > MAX_DEPTH {
                 return Err(Failure::Bounds);
             }
@@ -782,11 +844,12 @@ impl Reconciliation {
                     };
                     // The whole point: an identical subtree is dismissed by one
                     // hash comparison, however much it holds.
-                    if local_children[slot] == Some(*remote_slot) {
+                    let local_slot = local_children.get(slot).copied().ok_or(Failure::Bounds)?;
+                    if local_slot == Some(*remote_slot) {
                         continue;
                     }
                     self.wanted
-                        .push((*remote_slot, local_children[slot], depth + 1));
+                        .push((*remote_slot, local_slot, next_depth(depth)?));
                 }
             }
             (IndexNode::Branch(remote_children), _) => {
@@ -798,7 +861,8 @@ impl Reconciliation {
                 // an O(difference) descent into an O(remote) transfer at
                 // exactly the shapes where the two sides disagree about depth.
                 for remote_slot in remote_children.iter().flatten() {
-                    self.wanted.push((*remote_slot, local_child, depth + 1));
+                    self.wanted
+                        .push((*remote_slot, local_child, next_depth(depth)?));
                 }
             }
         }
@@ -827,8 +891,11 @@ fn lookup_from(
                 return Ok(entries.into_iter().find(|e| &e.key == key).map(|e| e.value))
             }
             IndexNode::Branch(children) => {
-                current = children[nibble(key, depth)];
-                depth += 1;
+                current = children
+                    .get(nibble(key, depth)?)
+                    .copied()
+                    .ok_or(Failure::Bounds)?;
+                depth = next_depth(depth)?;
             }
         }
     }

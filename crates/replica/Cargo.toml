@@ -14,6 +14,9 @@ license = "MIT OR Apache-2.0"
 # agree with it.
 publish = false
 
+[features]
+fault-injection = ["journal/fault-injection"]
+
 [dependencies]
 # mechanics — identity, authority, custody, key legitimacy. Replica combines
 # these facts with Fabric durability into orbital Replica semantics.
@@ -23,6 +26,7 @@ mechanics = { path = "../mechanics" }
 # receipt. `loro` is intentionally ABSENT from this manifest: the seal is the
 # dependency edge, so the CRDT engine cannot be named here.
 fabric = { path = "../fabric" }
+journal = { path = "../journal" }
 
 serde = { version = "1", features = ["derive"] }
 # `[u8; 64]` signature fields on the S5 Body-transaction records.
@@ -32,6 +36,12 @@ blake3 = "1"
 data-encoding = "2.6"
 getrandom = "0.3"
 anyhow = "1"
+tracing = "0.1"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
 
 [dev-dependencies]
 serde_json = "1"
+journal = { path = "../journal", features = ["fault-injection"] }

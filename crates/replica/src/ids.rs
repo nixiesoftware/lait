@@ -17,11 +17,15 @@ use serde::{Deserialize, Serialize};
 fn base32_nopad_lower() -> data_encoding::Encoding {
     let mut spec = data_encoding::Specification::new();
     spec.symbols.push_str("abcdefghijklmnopqrstuvwxyz234567");
+    #[allow(
+        clippy::expect_used,
+        reason = "the compile-time RFC 4648 alphabet is valid by construction"
+    )]
     spec.encoding().expect("valid base32 spec")
 }
 
 /// A World identity — a stable namespaced identifier in **reverse-domain form**
-/// (e.g. `com.example.issues`), 3–63 lowercase ASCII bytes. Reverse-domain form
+/// (e.g. `com.example.product`), 3–63 lowercase ASCII bytes. Reverse-domain form
 /// means dot-separated labels, each a nonempty `[a-z0-9-]` run that neither
 /// starts nor ends with `-`, and at least two labels (one dot).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -43,7 +47,7 @@ impl WorldId {
                 return None;
             }
             let lb = label.as_bytes();
-            if lb[0] == b'-' || lb[lb.len() - 1] == b'-' {
+            if lb.first() == Some(&b'-') || lb.last() == Some(&b'-') {
                 return None;
             }
             if !label
@@ -79,7 +83,10 @@ fn valid_schema_grammar(s: &str) -> bool {
     if b.is_empty() || b.len() > 63 {
         return false;
     }
-    if !(b[0].is_ascii_lowercase() || b[0].is_ascii_digit()) {
+    let Some(first) = b.first() else {
+        return false;
+    };
+    if !(first.is_ascii_lowercase() || first.is_ascii_digit()) {
         return false;
     }
     b.iter().all(|&c| {
@@ -140,10 +147,13 @@ pub struct BodyId([u8; 16]);
 
 impl BodyId {
     /// Mint a fresh Body id from 128 bits of OS CSPRNG entropy.
-    pub fn mint() -> Self {
+    pub fn mint() -> Result<Self, crate::body::Failure> {
         let mut raw = [0u8; 16];
-        getrandom::fill(&mut raw).expect("getrandom");
-        Self(raw)
+        getrandom::fill(&mut raw).map_err(|source| {
+            tracing::error!(error = %source, "OS entropy unavailable while minting Body identity");
+            crate::body::Failure::Randomness
+        })?;
+        Ok(Self(raw))
     }
 
     /// Wrap the canonical 16 raw bytes.
@@ -194,7 +204,7 @@ mod tests {
 
     #[test]
     fn world_id_accepts_reverse_domain_and_rejects_malformed() {
-        assert!(WorldId::parse("com.example.issues").is_some());
+        assert!(WorldId::parse("com.example.product").is_some());
         assert!(WorldId::parse("a.b").is_some());
         // too short / no dot / empty label / bad chars / edge hyphen / too long
         assert!(WorldId::parse("ab").is_none(), "no dot");
@@ -222,7 +232,7 @@ mod tests {
 
     #[test]
     fn body_id_is_128_bits_and_roundtrips_lowercase_base32() {
-        let id = BodyId::mint();
+        let id = BodyId::mint().expect("mint Body id");
         let s = id.render();
         assert_eq!(s.len(), 26, "128 bits → 26 base32 chars");
         assert!(
@@ -232,7 +242,10 @@ mod tests {
         );
         assert_eq!(BodyId::parse(&s), Some(id));
         // Two mints differ with overwhelming probability.
-        assert_ne!(BodyId::mint(), BodyId::mint());
+        assert_ne!(
+            BodyId::mint().expect("mint first Body id"),
+            BodyId::mint().expect("mint second Body id")
+        );
     }
 
     #[test]

@@ -1,3 +1,8 @@
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    reason = "neighbor scores and bounded counters use policy-limited domains"
+)]
 //! The persistent Neighbor registry (v1) — C2.1.
 //!
 //! Keyed by `(SpaceId, Key)`: verified Beacon high-water
@@ -556,8 +561,12 @@ impl NeighborRegistry {
                 ]
                 .concat(),
             );
-            let jitter =
-                u64::from_le_bytes(seed.as_bytes()[..8].try_into().unwrap()) % (capped / 8).max(1);
+            let prefix = seed
+                .as_bytes()
+                .get(..8)
+                .and_then(|bytes| <[u8; 8]>::try_from(bytes).ok())
+                .unwrap_or([0u8; 8]);
+            let jitter = u64::from_le_bytes(prefix) % (capped / 8).max(1);
             e.next_attempt_ms = now_ms.saturating_add(capped.saturating_sub(jitter));
             self.persist_now(now_ms)?;
         }
@@ -673,7 +682,7 @@ mod tests {
         // ignored.
         drop(reg);
         let mut reg = NeighborRegistry::load(&dir, &space()).unwrap();
-        let station = mechanics::crypto::device_from_seed(&SEED);
+        let station = mechanics::actor::device_from_seed(&SEED);
         let station = Key::from_device(&station).unwrap();
         assert_eq!(reg.high_water(&station), Some((2, 5)));
         assert!(!reg

@@ -249,7 +249,7 @@ describe("the core has no privileged path", () => {
   });
 });
 
-describe("the cmdk filter bridge", () => {
+describe("the cmdk filter adapter", () => {
   // `cmdkFilter` adapts our scorer to cmdk's contract, and the two disagree in a
   // way that fails silently: ours returns null-for-no-match over an unbounded
   // range, cmdk reads 0 as "hide". A legitimate match CAN score <= 0 (the length
@@ -283,7 +283,7 @@ describe("the cmdk filter bridge", () => {
   });
 
   // A picker keys its items by id and searches the label through `keywords` (see
-  // Picker.tsx), which only works because the bridge scores keywords equally.
+  // Picker.tsx), which only works because the adapter scores keywords equally.
   it("finds a picker option by its label when the value is an opaque id", () => {
     expect(cmdkFilter("iss_01JTHLH8QT", "fix login", ["fix login race"])).toBeGreaterThan(0);
   });

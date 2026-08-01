@@ -165,7 +165,7 @@ export function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [personalNavRevision, setPersonalNavRevision] = useState(0);
   /** Bulk-selection checks, by canonical ref. Distinct from `selection`: the
-   *  focus is one row, the checks are a set, and `x` is the bridge. */
+   *  focus is one row, the checks are a set, and `x` is the socket. */
   const [checked, setChecked] = useState<ReadonlySet<string>>(new Set());
   const [bulkProgress, setBulkProgress] = useState<BulkProgress | null>(null);
   const bulkOperation = useRef<((reff: string) => Promise<unknown>) | null>(null);

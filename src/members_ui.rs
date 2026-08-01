@@ -1,3 +1,11 @@
+// Terminal geometry and member-row offsets are clamped to rendered collections;
+// conversions adapt ratatui/crossterm's fixed-width coordinate APIs.
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    clippy::indexing_slicing
+)]
+
 //! Interactive `lait members` selector: an **inline** picker, not a
 //! full-screen TUI. Run bare in a terminal, `lait members` renders a small,
 //! arrow-key list *in place* below the prompt (ratatui's inline viewport — no
@@ -41,8 +49,8 @@ use ratatui::{
 
 use crate::cli::{client, ensure_daemon};
 use crate::control::{Request, Response};
-use crate::dto::MemberDto;
 use crate::list_picker::{row_line, window, Cell};
+use issues::dto::MemberDto;
 
 /// One selectable row: an existing member.
 #[derive(Clone)]

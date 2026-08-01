@@ -1,6 +1,25 @@
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects,
+        clippy::unreachable,
+        clippy::unimplemented,
+        clippy::unchecked_time_subtraction,
+        clippy::todo,
+        clippy::string_slice,
+        clippy::panic_in_result_fn,
+        clippy::panic,
+        clippy::exit,
+        clippy::as_conversions
+    )
+)]
+
 //! Client-facing application interfaces supplied by a World package.
 //!
-//! Runtime and [`world_bridge`] deliberately know nothing about presentation.
+//! Runtime's World-call boundary deliberately knows nothing about presentation.
 //! This crate is the outer compile-time seam: a product declares its CLI mount
 //! and MCP tools, while the Lait shell supplies process lifecycle, Orbit
 //! selection, transport, and output policy.
@@ -14,27 +33,53 @@ use std::path::Path;
 use std::pin::Pin;
 
 use clap::{ArgMatches, Command};
-use replica::ids::WorldId;
+use replica::body::WorldId;
+use runtime::world::call::{Call, Reply};
 use serde_json::Value;
-use world_bridge::{WorldCall, WorldReply};
 
-/// A client-surface declaration or dispatch failure.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Failure {
-    message: String,
+/// A typed client-surface failure.
+///
+/// Concrete adapter diagnostics are logged at conversion and are deliberately
+/// not retained in this public value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Failure {
+    /// A declaration, invocation, or returned value was invalid.
+    Invalid,
+    /// A valid operation was refused by the selected surface.
+    Refusal,
+    /// An accepted operation could not be completed.
+    Operation,
+    /// An established client operation ended before completion.
+    Interruption,
 }
 
 impl Failure {
-    pub fn new(message: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-        }
+    pub fn new(message: impl fmt::Display) -> Self {
+        tracing::warn!(diagnostic = %message, "World client adapter rejected an operation");
+        Self::Invalid
+    }
+
+    pub const fn refusal() -> Self {
+        Self::Refusal
+    }
+
+    pub const fn operation() -> Self {
+        Self::Operation
+    }
+
+    pub const fn interruption() -> Self {
+        Self::Interruption
     }
 }
 
 impl fmt::Display for Failure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.message)
+        f.write_str(match self {
+            Self::Invalid => "invalid client operation",
+            Self::Refusal => "client operation refused",
+            Self::Operation => "client operation failed",
+            Self::Interruption => "client operation interrupted",
+        })
     }
 }
 
@@ -44,7 +89,7 @@ impl std::error::Error for Failure {}
 ///
 /// This classifies the whole package-owned operation, including caller-local
 /// effects such as advancing a watermark or writing an attachment. It is not a
-/// substitute for the daemon's independent [`world_bridge::WorldCallAccess`]
+/// substitute for the daemon's independent [`runtime::world::call::Access`]
 /// classification of an opaque World call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClientAccess {
@@ -62,7 +107,7 @@ pub struct LocalInvocation {
 /// The target selected by a parsed product invocation.
 #[derive(Debug, Clone)]
 pub enum ClientInvocationKind {
-    World(WorldCall),
+    World(Call),
     Local(LocalInvocation),
 }
 
@@ -81,11 +126,7 @@ pub struct ClientInvocation {
 }
 
 impl ClientInvocation {
-    pub fn world(
-        call: WorldCall,
-        access: ClientAccess,
-        confirmation_question: Option<String>,
-    ) -> Self {
+    pub fn world(call: Call, access: ClientAccess, confirmation_question: Option<String>) -> Self {
         Self {
             world: call.world().clone(),
             access,
@@ -174,8 +215,8 @@ impl CliMount {
 
 pub type McpSchemaFactory = fn() -> Value;
 pub type McpCallFactory = fn(Value) -> Result<ClientInvocation, Failure>;
-pub type WorldReplyDecoder = fn(&WorldCall, WorldReply) -> Result<Value, Failure>;
-pub type WorldReplyPresenter = fn(Value, PresentationOptions) -> Result<Presentation, Failure>;
+pub type ReplyDecoder = fn(&Call, Reply) -> Result<Value, Failure>;
+pub type ReplyPresenter = fn(Value, PresentationOptions) -> Result<Presentation, Failure>;
 pub type WebParser = fn(Value) -> Result<ClientInvocation, Failure>;
 
 /// Output policy supplied by the navigation shell to a product presenter.
@@ -290,7 +331,7 @@ pub type ClientFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, Failure>> +
 /// authority. `local_root` is caller-local state, never replicated World state.
 pub trait ClientHost: Send + Sync {
     fn local_root(&self) -> &Path;
-    fn call_world<'a>(&'a self, call: WorldCall) -> ClientFuture<'a, WorldReply>;
+    fn call_world<'a>(&'a self, call: Call) -> ClientFuture<'a, Reply>;
     fn call_control<'a>(&'a self, request: HostControlRequest) -> ClientFuture<'a, Value>;
     /// Move bytes on and off the content plane.
     ///
@@ -364,8 +405,8 @@ pub struct WorldClientPackage {
     cli: CliMount,
     mcp_tools: Vec<McpTool>,
     mcp_instructions: &'static str,
-    decode_reply: WorldReplyDecoder,
-    present_reply: Option<WorldReplyPresenter>,
+    decode_reply: ReplyDecoder,
+    present_reply: Option<ReplyPresenter>,
     local_handler: Option<LocalInvocationHandler>,
     web_parser: Option<WebParser>,
     confirmation: Option<ConfirmationResolver>,
@@ -377,7 +418,7 @@ impl WorldClientPackage {
         cli: CliMount,
         mcp_tools: Vec<McpTool>,
         mcp_instructions: &'static str,
-        decode_reply: WorldReplyDecoder,
+        decode_reply: ReplyDecoder,
     ) -> Result<Self, Failure> {
         validate_name("CLI mount", cli.name())?;
         let mut local_tools = BTreeSet::new();
@@ -404,7 +445,7 @@ impl WorldClientPackage {
         })
     }
 
-    pub fn with_presenter(mut self, presenter: WorldReplyPresenter) -> Self {
+    pub fn with_presenter(mut self, presenter: ReplyPresenter) -> Self {
         self.present_reply = Some(presenter);
         self
     }
@@ -440,7 +481,7 @@ impl WorldClientPackage {
         self.mcp_instructions
     }
 
-    pub fn decode_reply(&self, call: &WorldCall, reply: WorldReply) -> Result<Value, Failure> {
+    pub fn decode_reply(&self, call: &Call, reply: Reply) -> Result<Value, Failure> {
         (self.decode_reply)(call, reply)
     }
 
@@ -655,8 +696,8 @@ mod tests {
         serde_json::json!({"type": "object", "additionalProperties": false})
     }
 
-    fn files_call(_: Value) -> Result<WorldCall, Failure> {
-        WorldCall::new(
+    fn files_call(_: Value) -> Result<Call, Failure> {
+        Call::new(
             WorldId::parse("com.example.files").unwrap(),
             "files.list",
             1,
@@ -681,8 +722,8 @@ mod tests {
         ))
     }
 
-    fn notes_call(_: Value) -> Result<WorldCall, Failure> {
-        WorldCall::new(
+    fn notes_call(_: Value) -> Result<Call, Failure> {
+        Call::new(
             WorldId::parse("com.example.notes").unwrap(),
             "notes.list",
             1,
@@ -707,7 +748,7 @@ mod tests {
         ))
     }
 
-    fn decode_json_reply(call: &WorldCall, reply: WorldReply) -> Result<Value, Failure> {
+    fn decode_json_reply(call: &Call, reply: Reply) -> Result<Value, Failure> {
         reply
             .validate_for(call)
             .map_err(|error| Failure::new(error.to_string()))?;
@@ -756,7 +797,7 @@ mod tests {
         assert_eq!(tools, vec!["files_list", "notes_list"]);
 
         let call = files_call(Value::Null).unwrap();
-        let reply = WorldReply::ok(
+        let reply = Reply::ok(
             &call,
             serde_json::to_vec(&serde_json::json!(["a.txt"])).unwrap(),
         );

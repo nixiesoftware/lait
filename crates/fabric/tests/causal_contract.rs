@@ -10,9 +10,8 @@
 //! an ordinary edit writes update-sized material, and no path in a commit
 //! exports a whole history.
 
-use fabric::causal::Invalid;
 use fabric::{
-    AnchorResolution, Artifact, CausalRelation, CheckpointPolicy, Engine, Key, MemoryEngine, Op,
+    AnchorResolution, Artifact, CausalRelation, CheckpointPolicy, Engine, Invalid, Key, Op,
     Transaction, Version,
 };
 
@@ -34,7 +33,7 @@ fn splice(k: &Key, index: u64, insert: &str) -> Op {
     }
 }
 
-fn commit(fabric: &mut MemoryEngine, label: &str, ops: Vec<Op>) {
+fn commit(fabric: &mut Engine, label: &str, ops: Vec<Op>) {
     fabric
         .commit(Transaction {
             request: label.into(),
@@ -43,7 +42,7 @@ fn commit(fabric: &mut MemoryEngine, label: &str, ops: Vec<Op>) {
         .expect("commit");
 }
 
-fn text(fabric: &MemoryEngine, k: &Key) -> String {
+fn text(fabric: &Engine, k: &Key) -> String {
     fabric
         .read_collaborative(k)
         .expect("projects")
@@ -59,7 +58,7 @@ fn a_version_is_a_head_set_and_stays_one_across_activations() {
     // must not grow what gets committed or advertised.
     let mut carried: Option<Artifact> = None;
     for activation in 0..32 {
-        let mut fabric = MemoryEngine::new();
+        let mut fabric = Engine::new();
         if let Some(artifact) = &carried {
             fabric.import_artifact(&key(), artifact).expect("import");
         }
@@ -79,7 +78,7 @@ fn a_version_is_a_head_set_and_stays_one_across_activations() {
 fn an_ordinary_edit_produces_update_sized_material() {
     // §9's budget. The comparison that matters is against the snapshot this
     // replaces, not against zero.
-    let mut fabric = MemoryEngine::new();
+    let mut fabric = Engine::new();
     for i in 0..2_000 {
         commit(
             &mut fabric,
@@ -102,7 +101,7 @@ fn an_ordinary_edit_produces_update_sized_material() {
 
 #[test]
 fn a_delta_from_an_unknown_base_is_refused_by_name() {
-    let mut fabric = MemoryEngine::new();
+    let mut fabric = Engine::new();
     commit(&mut fabric, "seed", vec![splice(&key(), 0, "hello")]);
 
     // A base naming operations this replica has never seen.
@@ -125,7 +124,7 @@ fn a_delta_from_an_unknown_base_is_refused_by_name() {
 fn artifacts_converge_out_of_order_and_duplicates_are_free() {
     // Why no version negotiation is needed: the receiver does not have to be
     // told what it is missing, or in what order.
-    let mut author = MemoryEngine::new();
+    let mut author = Engine::new();
     commit(&mut author, "one", vec![splice(&key(), 0, "one ")]);
     let first = author
         .export_delta(&key(), &Version::empty())
@@ -134,7 +133,7 @@ fn artifacts_converge_out_of_order_and_duplicates_are_free() {
     commit(&mut author, "two", vec![splice(&key(), 0, "two ")]);
     let second = author.export_delta(&key(), &after_first).expect("second");
 
-    let mut receiver = MemoryEngine::new();
+    let mut receiver = Engine::new();
     let held = receiver
         .import_artifact(&key(), &second)
         .expect("out-of-order import is accepted");
@@ -152,7 +151,7 @@ fn artifacts_converge_out_of_order_and_duplicates_are_free() {
 
 #[test]
 fn a_checkpoint_reconstructs_state_without_the_history_behind_it() {
-    let mut author = MemoryEngine::new();
+    let mut author = Engine::new();
     for i in 0..500 {
         commit(
             &mut author,
@@ -169,7 +168,7 @@ fn a_checkpoint_reconstructs_state_without_the_history_behind_it() {
         "a checkpoint must be cheaper than the history it replaces"
     );
 
-    let mut receiver = MemoryEngine::new();
+    let mut receiver = Engine::new();
     receiver
         .import_artifact(&key(), &checkpoint)
         .expect("import checkpoint");
@@ -180,14 +179,14 @@ fn a_checkpoint_reconstructs_state_without_the_history_behind_it() {
 fn work_older_than_the_retention_frontier_is_refused_and_recovers() {
     // §5.2 outcome 2, end to end. The refusal has to be typed and the recovery
     // has to exist, or "refusing old work" is indistinguishable from losing it.
-    let mut origin = MemoryEngine::new();
+    let mut origin = Engine::new();
     commit(&mut origin, "base", vec![splice(&key(), 0, "shared")]);
     let base = origin
         .export_delta(&key(), &Version::empty())
         .expect("base");
 
     // A peer forks here and edits offline.
-    let mut stale = MemoryEngine::new();
+    let mut stale = Engine::new();
     stale.import_artifact(&key(), &base).expect("import base");
     commit(&mut stale, "offline", vec![splice(&key(), 0, "offline ")]);
     let offline = stale
@@ -210,7 +209,7 @@ fn work_older_than_the_retention_frontier_is_refused_and_recovers() {
         .expect("checkpoint");
 
     // A replica rebuilt from the checkpoint alone cannot admit the old work.
-    let mut compacted = MemoryEngine::new();
+    let mut compacted = Engine::new();
     compacted
         .import_artifact(&key(), &checkpoint)
         .expect("import checkpoint");
@@ -223,7 +222,7 @@ fn work_older_than_the_retention_frontier_is_refused_and_recovers() {
 
     // And the recovery path works: rebuild from the archive taken before the
     // trim, and the same work applies.
-    let mut rebuilt = MemoryEngine::new();
+    let mut rebuilt = Engine::new();
     rebuilt
         .import_artifact(&key(), &archive)
         .expect("import archive");
@@ -236,11 +235,11 @@ fn work_older_than_the_retention_frontier_is_refused_and_recovers() {
 
 #[test]
 fn concurrent_offline_edits_both_survive() {
-    let mut a = MemoryEngine::new();
+    let mut a = Engine::new();
     commit(&mut a, "base", vec![splice(&key(), 0, "base")]);
     let base = a.export_delta(&key(), &Version::empty()).expect("base");
 
-    let mut b = MemoryEngine::new();
+    let mut b = Engine::new();
     b.import_artifact(&key(), &base).expect("import");
 
     commit(&mut a, "a", vec![splice(&key(), 0, "A")]);
@@ -261,7 +260,7 @@ fn concurrent_offline_edits_both_survive() {
 
 #[test]
 fn relation_says_undetermined_rather_than_guessing() {
-    let mut fabric = MemoryEngine::new();
+    let mut fabric = Engine::new();
     commit(&mut fabric, "one", vec![splice(&key(), 0, "one")]);
     let first = fabric.version(&key()).expect("version");
     commit(&mut fabric, "two", vec![splice(&key(), 0, "two")]);
@@ -298,7 +297,7 @@ fn relation_says_undetermined_rather_than_guessing() {
 fn an_anchor_follows_its_text_across_a_concurrent_edit() {
     // What plan 14's carets rest on. An offset does not survive an insertion
     // before it; an anchor does.
-    let mut fabric = MemoryEngine::new();
+    let mut fabric = Engine::new();
     commit(&mut fabric, "seed", vec![splice(&key(), 0, "hello world")]);
     let anchor = fabric.anchor(&key(), "body", 6).expect("anchor");
 
@@ -316,7 +315,7 @@ fn an_anchor_follows_its_text_across_a_concurrent_edit() {
 
 #[test]
 fn resolving_an_anchor_never_fails_and_never_mutates() {
-    let mut fabric = MemoryEngine::new();
+    let mut fabric = Engine::new();
     commit(&mut fabric, "seed", vec![splice(&key(), 0, "hello")]);
     let anchor = fabric.anchor(&key(), "body", 3).expect("anchor");
     let before = fabric.version(&key()).expect("version");
@@ -361,7 +360,7 @@ fn a_failed_batch_changes_nothing_and_exports_no_history() {
     // The rollback replacement. Atomicity has to hold, and it has to hold
     // without a whole-history export — which was the cost hiding inside the
     // previous mechanism.
-    let mut fabric = MemoryEngine::new();
+    let mut fabric = Engine::new();
     for i in 0..500 {
         commit(
             &mut fabric,
@@ -405,7 +404,7 @@ fn a_failed_batch_changes_nothing_and_exports_no_history() {
 
 #[test]
 fn a_batch_that_creates_a_body_and_fails_leaves_no_body() {
-    let mut fabric = MemoryEngine::new();
+    let mut fabric = Engine::new();
     let outcome = fabric.commit(Transaction {
         request: "doomed".into(),
         ops: vec![
@@ -433,7 +432,7 @@ fn a_batch_that_creates_a_body_and_fails_leaves_no_body() {
 
 #[test]
 fn a_failed_batch_that_removed_a_body_restores_it() {
-    let mut fabric = MemoryEngine::new();
+    let mut fabric = Engine::new();
     commit(&mut fabric, "seed", vec![splice(&key(), 0, "important")]);
 
     let outcome = fabric.commit(Transaction {
@@ -453,7 +452,7 @@ fn a_failed_batch_that_removed_and_recreated_a_body_restores_the_original() {
     // is a fresh document, so reverting it to the old one's frontiers is
     // `FrontiersNotFound` — and the early return that produced left every
     // later Body in the batch still dirty.
-    let mut fabric = MemoryEngine::new();
+    let mut fabric = Engine::new();
     commit(
         &mut fabric,
         "seed",
@@ -490,7 +489,7 @@ fn a_failed_batch_that_removed_and_recreated_a_body_restores_the_original() {
 fn a_failed_batch_cannot_replace_a_collaborative_body_with_a_value() {
     // The worst variant: remove, write an atomic value over the same key, then
     // fail. The failed batch's value used to survive as the Body's contents.
-    let mut fabric = MemoryEngine::new();
+    let mut fabric = Engine::new();
     commit(&mut fabric, "seed", vec![splice(&key(), 0, "important")]);
 
     let outcome = fabric.commit(Transaction {
@@ -556,7 +555,7 @@ fn body_material_is_the_same_size_however_long_the_body_lives() {
 
 #[test]
 fn causal_encodings_are_canonical() {
-    let mut fabric = MemoryEngine::new();
+    let mut fabric = Engine::new();
     commit(&mut fabric, "seed", vec![splice(&key(), 0, "hello")]);
     let version = fabric.version(&key()).expect("version");
     let anchor = fabric.anchor(&key(), "body", 2).expect("anchor");
@@ -600,7 +599,7 @@ fn an_anchor_does_not_resolve_against_another_body() {
     // across documents. Without the Body in the anchor, a caret taken in one
     // Body resolves against another to a plausible index — the silently wrong
     // answer `Drifted` exists to prevent.
-    let mut fabric = MemoryEngine::new();
+    let mut fabric = Engine::new();
     commit(
         &mut fabric,
         "seed",
@@ -628,7 +627,7 @@ fn a_deleted_anchor_drifts_rather_than_landing_one_place_over() {
     // left. Treating that like a live resolution and adding one puts the caret
     // a character to the right of where it belongs, which is exactly the
     // silently wrong index the type promises never to return.
-    let mut fabric = MemoryEngine::new();
+    let mut fabric = Engine::new();
     commit(&mut fabric, "seed", vec![splice(&key(), 0, "abcdef")]);
     let anchor = fabric.anchor(&key(), "body", 3).expect("anchor");
     assert_eq!(
@@ -661,7 +660,7 @@ fn a_replacement_artifact_cannot_flatten_a_collaborative_body() {
     // kind must not be able to discard a Body's whole history by overwriting it
     // with a value.
     use fabric::Artifact;
-    let mut fabric = MemoryEngine::new();
+    let mut fabric = Engine::new();
     commit(
         &mut fabric,
         "seed",

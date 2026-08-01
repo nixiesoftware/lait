@@ -1,9 +1,16 @@
+#![allow(
+    clippy::expect_used,
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    clippy::indexing_slicing,
+    reason = "Issues validates command, schema, and projection shapes before fixed contract operations and canonical serialization"
+)]
 //! The issue product's semantic Runtime World implementation.
 //!
-//! `IssuesWorld` implements the public `runtime::World` contract over the
+//! `IssuesWorld` implements the public `runtime::world::World` contract over the
 //! frozen mapping in `contract.rs`: current Issues behavior expressed as
 //! collaborative Body operations. It is deliberately **not** a reusable
-//! privileged Runtime path: it registers through the same `RuntimeBuilder` any
+//! privileged Runtime path: it registers through the same `Builder` any
 //! consumer uses and touches nothing below the World boundary. The World is
 //! pure: ids, timestamps, and resolved refs
 //! arrive inside the intent; validation is re-checked here (the daemon
@@ -14,9 +21,12 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use replica::body::BodyKey;
 use replica::body::{CollaborativeSchema, MutationModel, Op, Schema};
-use replica::ids::BodyKey;
-use runtime::{BodyDeclaration, Context, Effect, Intent, Projection, Query, Rejection, World};
+use runtime::{
+    world::BodyDeclaration, world::Context, world::Effect, world::Intent, world::Projection,
+    world::Query, world::Rejection, world::World,
+};
 
 use crate::dto::{ActivityEvent, CatalogScope, FieldChange, Priority, StatusCategory};
 use crate::ids::{ActorId, DocId};
@@ -87,7 +97,7 @@ fn place(ordered: &[Milestone], id: &str, pos: &Pos) -> Option<String> {
 
 /// The registered product World.
 pub struct IssuesWorld {
-    id: replica::ids::WorldId,
+    id: replica::body::WorldId,
     schemas: Vec<Schema>,
     /// Owned rather than built on demand, because the trait hands back a slice
     /// and the registry compares it against the registration byte for byte —
@@ -215,9 +225,9 @@ impl IssuesWorld {
     /// The reviewed implementation descriptor this build ships. Its canonical
     /// id is the authority identity the founder activates and every product
     /// transaction pins.
-    pub fn implementation_descriptor() -> runtime::implementation::WorldImplementationDescriptor {
+    pub fn implementation_descriptor() -> runtime::world::Implementation {
         let world = Self::new();
-        runtime::implementation::WorldImplementationDescriptor::from_registration(
+        runtime::world::Implementation::from_registration(
             &world.descriptor(),
             1,
             *blake3::hash(b"lait.issues.policy-table.v1").as_bytes(),
@@ -232,7 +242,7 @@ struct Staging {
     /// identity input.
     space: mechanics::ids::SpaceId,
     ops: Vec<(BodyKey, Op)>,
-    scopes: Vec<BodyKey>,
+    bodies: Vec<BodyKey>,
     declarations: Vec<BodyDeclaration>,
     /// The complete content set for each Body this transaction declares one for.
     ///
@@ -241,7 +251,7 @@ struct Staging {
     /// erase its set — which is what would happen on the next comment if every
     /// staged Body got an entry. Only a key that explicitly declares appears
     /// here.
-    declared: std::collections::BTreeMap<BodyKey, Vec<replica::ContentRef>>,
+    declared: std::collections::BTreeMap<BodyKey, Vec<replica::content::ContentRef>>,
     /// Whether a catalog op must carry the creation declaration — true exactly
     /// when the committed snapshot holds no Catalog yet (first-ever write).
     declare_catalog_on_use: bool,
@@ -254,7 +264,7 @@ impl Staging {
         Self {
             space,
             ops: Vec::new(),
-            scopes: Vec::new(),
+            bodies: Vec::new(),
             declarations: Vec::new(),
             declared: std::collections::BTreeMap::new(),
             declare_catalog_on_use,
@@ -301,8 +311,8 @@ impl Staging {
         if matches!(op, Op::Create) {
             self.declare_issue(key);
         }
-        if !self.scopes.contains(key) {
-            self.scopes.push(key.clone());
+        if !self.bodies.contains(key) {
+            self.bodies.push(key.clone());
         }
         self.ops.push((key.clone(), op));
     }
@@ -312,8 +322,8 @@ impl Staging {
             self.declare_catalog();
         }
         let key = catalog_key(&self.space);
-        if !self.scopes.contains(&key) {
-            self.scopes.push(key.clone());
+        if !self.bodies.contains(&key) {
+            self.bodies.push(key.clone());
         }
         self.ops.push((key, op));
     }
@@ -331,7 +341,7 @@ impl Staging {
     /// Only a key that calls this appears in the effect at all — a blanket
     /// declaration would erase the set on the next comment, which is exactly
     /// the failure this shape exists to make impossible.
-    fn declare(&mut self, key: &BodyKey, refs: Vec<replica::ContentRef>) {
+    fn declare(&mut self, key: &BodyKey, refs: Vec<replica::content::ContentRef>) {
         self.declared.insert(key.clone(), refs);
     }
 
@@ -340,7 +350,7 @@ impl Staging {
         Effect {
             content_refs: self.declared.into_iter().collect(),
             operations: self.ops,
-            scopes: self.scopes,
+            bodies: self.bodies,
             effect: IssueEffect {
                 doc,
                 unchanged: false,
@@ -353,9 +363,9 @@ impl Staging {
 }
 
 /// A content id as a World writes it: 32 bytes of lowercase hex.
-fn parse_content_ref(raw: &str) -> Option<replica::ContentRef> {
+fn parse_content_ref(raw: &str) -> Option<replica::content::ContentRef> {
     let bytes = data_encoding::HEXLOWER.decode(raw.as_bytes()).ok()?;
-    Some(replica::ContentRef {
+    Some(replica::content::ContentRef {
         content_id: <[u8; 32]>::try_from(bytes.as_slice()).ok()?,
     })
 }
@@ -381,7 +391,9 @@ fn raw_attachments(ctx: &Context<'_>, doc: &str) -> BTreeMap<String, Vec<u8>> {
 /// — and skipping means publishing a declaration that omits content the Body
 /// still references, which makes those bytes collectable while something still
 /// points at them.
-fn content_of(records: &BTreeMap<String, Vec<u8>>) -> Result<Vec<replica::ContentRef>, Rejection> {
+fn content_of(
+    records: &BTreeMap<String, Vec<u8>>,
+) -> Result<Vec<replica::content::ContentRef>, Rejection> {
     let mut refs = Vec::new();
     for value in records.values() {
         let record: serde_json::Value =
@@ -422,7 +434,7 @@ fn unchanged_effect(doc: Option<String>) -> Effect {
         // Body's existing declaration is touched.
         content_refs: Vec::new(),
         operations: vec![],
-        scopes: vec![],
+        bodies: vec![],
         effect: IssueEffect {
             doc,
             unchanged: true,
@@ -441,9 +453,7 @@ fn unchanged_effect(doc: Option<String>) -> Effect {
 /// duplicate semantic Catalog, an unrelated Catalog-shaped Body — is typed
 /// [`Rejection::StateCorrupt`]; the World never selects among, merges,
 /// repairs, or silently recreates Catalogs.
-fn checked_catalog_view(
-    ctx: &Context<'_>,
-) -> Result<Option<replica::CollaborativeView>, Rejection> {
+fn checked_catalog_view(ctx: &Context<'_>) -> Result<Option<fabric::CollaborativeView>, Rejection> {
     let expected = catalog_key(&ctx.principal().space);
     let catalogs = ctx.bodies_with_schema(&contract::world_id(), &contract::catalog_schema());
     match catalogs.as_slice() {
@@ -633,9 +643,9 @@ fn resolve_comment_anchor(
         Some(_) => {}
     }
     let key = issue_key(doc);
-    let one = |hex: &str| -> Option<replica::AnchorResolution> {
+    let one = |hex: &str| -> Option<fabric::AnchorResolution> {
         let raw = data_encoding::HEXLOWER.decode(hex.as_bytes()).ok()?;
-        let anchor = replica::Anchor::decode_canonical(&raw).ok()?;
+        let anchor = fabric::Anchor::decode_canonical(&raw).ok()?;
         // The record names a field and so does the anchor inside it. This
         // build writes them together and they always agree; a record from
         // anywhere else that disagrees cannot say which one its writer meant,
@@ -652,7 +662,7 @@ fn resolve_comment_anchor(
         Some(hex) => one(hex),
     };
     let state = match (head, tail) {
-        (replica::AnchorResolution::Resolved(h), Some(replica::AnchorResolution::Resolved(t))) => {
+        (fabric::AnchorResolution::Resolved(h), Some(fabric::AnchorResolution::Resolved(t))) => {
             // A resolved anchor sits one past the character it bound to. For a
             // span that character is the first one inside it, so the span's
             // start is one back; a caret bound to the character in front of it
@@ -973,18 +983,18 @@ fn is_ancestor(catalog: &CatalogState, start: &str, needle: &str) -> bool {
 }
 
 impl World for IssuesWorld {
-    fn descriptor(&self) -> runtime::Descriptor {
-        runtime::Descriptor {
+    fn descriptor(&self) -> runtime::world::Descriptor {
+        runtime::world::Descriptor {
             id: self.id.clone(),
-            implementation_version: runtime::Version(1),
+            implementation_version: runtime::world::Version(1),
             schemas: self.schemas.clone(),
-            limits: runtime::Limits::default(),
+            limits: runtime::world::Limits::default(),
             scope_schemas: Vec::new(),
             signal_schemas: self.signal_schemas.clone(),
         }
     }
 
-    fn id(&self) -> replica::ids::WorldId {
+    fn id(&self) -> replica::body::WorldId {
         self.id.clone()
     }
 
@@ -2960,7 +2970,7 @@ impl World for IssuesWorld {
             schema: contract::issue_schema(),
             schema_version: contract::ISSUE_SCHEMA_VERSION,
             bytes,
-            frontier: replica::ReplicaFrontier::EMPTY, // stamped by Runtime
+            frontier: replica::frontier::ReplicaFrontier::EMPTY, // stamped by Runtime
             demand: contract::demand_read(),
         };
         match query {
@@ -3828,67 +3838,67 @@ mod comment_anchor_tests {
     /// the guards ahead of the reader stop before it.
     #[derive(Default)]
     struct ScriptedReader {
-        by_offset: BTreeMap<u64, replica::AnchorResolution>,
+        by_offset: BTreeMap<u64, fabric::AnchorResolution>,
         asked: AtomicUsize,
     }
 
-    impl runtime::BodyReader for ScriptedReader {
-        fn read_body(&self, _key: &replica::ids::BodyKey) -> Option<Vec<u8>> {
+    impl runtime::world::BodyReader for ScriptedReader {
+        fn read_body(&self, _key: &replica::body::BodyKey) -> Option<Vec<u8>> {
             None
         }
         fn read_collaborative_body(
             &self,
-            _key: &replica::ids::BodyKey,
-        ) -> Result<replica::CollaborativeView, replica::projection::Failure> {
-            Err(replica::projection::Failure::NotCollaborative)
+            _key: &replica::body::BodyKey,
+        ) -> Result<fabric::CollaborativeView, fabric::projection::Failure> {
+            Err(fabric::projection::Failure::NotCollaborative)
         }
         fn bodies_with_schema(
             &self,
-            _world: &replica::ids::WorldId,
-            _schema: &replica::ids::SchemaId,
-        ) -> Vec<replica::ids::BodyKey> {
+            _world: &replica::body::WorldId,
+            _schema: &replica::body::SchemaId,
+        ) -> Vec<replica::body::BodyKey> {
             Vec::new()
         }
-        fn body_version(&self, _key: &replica::ids::BodyKey) -> Option<replica::Version> {
+        fn body_version(&self, _key: &replica::body::BodyKey) -> Option<fabric::Version> {
             None
         }
         fn anchor_in_body(
             &self,
-            _key: &replica::ids::BodyKey,
+            _key: &replica::body::BodyKey,
             _path: &str,
             _position: u64,
-        ) -> Option<replica::Anchor> {
+        ) -> Option<fabric::Anchor> {
             None
         }
         fn resolve_anchor(
             &self,
-            _key: &replica::ids::BodyKey,
-            anchor: &replica::Anchor,
-        ) -> replica::AnchorResolution {
+            _key: &replica::body::BodyKey,
+            anchor: &fabric::Anchor,
+        ) -> fabric::AnchorResolution {
             self.asked.fetch_add(1, Ordering::SeqCst);
             self.by_offset
                 .get(&anchor.offset)
                 .copied()
-                .unwrap_or(replica::AnchorResolution::Drifted)
+                .unwrap_or(fabric::AnchorResolution::Drifted)
         }
         fn content_status(
             &self,
-            _content: &replica::ContentRef,
+            _content: &replica::content::ContentRef,
         ) -> Option<runtime::world::ContentStatus> {
             None
         }
     }
 
-    fn scripted<const N: usize>(script: [(u64, replica::AnchorResolution); N]) -> ScriptedReader {
+    fn scripted<const N: usize>(script: [(u64, fabric::AnchorResolution); N]) -> ScriptedReader {
         ScriptedReader {
             by_offset: script.into_iter().collect(),
             asked: AtomicUsize::new(0),
         }
     }
 
-    fn facts() -> runtime::PrincipalFacts {
-        let device = mechanics::crypto::device_from_seed(&[3u8; 32]);
-        runtime::PrincipalFacts {
+    fn facts() -> runtime::world::PrincipalFacts {
+        let device = mechanics::actor::device_from_seed(&[3u8; 32]);
+        runtime::world::PrincipalFacts {
             actor: ActorId::from_incept_hash(&"cd".repeat(32)),
             station: mechanics::station::Key::from_device(&device).unwrap(),
             device,
@@ -3918,14 +3928,14 @@ mod comment_anchor_tests {
     /// Bytes with the shape a real stored anchor has: canonical, naming a path,
     /// and carrying the offset the script keys on.
     fn anchor_hex(path: &str, offset: u64) -> String {
-        let anchor = replica::Anchor {
-            format_version: replica::CAUSAL_FORMAT_VERSION,
+        let anchor = fabric::Anchor {
+            format_version: fabric::CAUSAL_FORMAT_VERSION,
             body: [9u8; 32],
             path: path.into(),
             anchored_to: None,
             offset,
             after: true,
-            taken_at: replica::Version::empty(),
+            taken_at: fabric::Version::empty(),
         };
         data_encoding::HEXLOWER.encode(&anchor.encode())
     }
@@ -3967,8 +3977,8 @@ mod comment_anchor_tests {
     #[test]
     fn a_resolved_span_reports_the_material_its_ends_bound_to() {
         let reader = scripted([
-            (5, replica::AnchorResolution::Resolved(13)),
-            (9, replica::AnchorResolution::Resolved(17)),
+            (5, fabric::AnchorResolution::Resolved(13)),
+            (9, fabric::AnchorResolution::Resolved(17)),
         ]);
         let resolved = resolve(
             &reader,
@@ -3988,7 +3998,7 @@ mod comment_anchor_tests {
     /// itself, so nothing is taken off.
     #[test]
     fn a_resolved_caret_reports_the_position_it_bound_to() {
-        let reader = scripted([(4, replica::AnchorResolution::Resolved(12))]);
+        let reader = scripted([(4, fabric::AnchorResolution::Resolved(12))]);
         let resolved = resolve(
             &reader,
             &issue("PRE the quick brown fox"),
@@ -4007,12 +4017,12 @@ mod comment_anchor_tests {
     fn either_end_lost_drifts_the_whole_span() {
         for script in [
             [
-                (5, replica::AnchorResolution::Drifted),
-                (9, replica::AnchorResolution::Resolved(17)),
+                (5, fabric::AnchorResolution::Drifted),
+                (9, fabric::AnchorResolution::Resolved(17)),
             ],
             [
-                (5, replica::AnchorResolution::Resolved(13)),
-                (9, replica::AnchorResolution::Drifted),
+                (5, fabric::AnchorResolution::Resolved(13)),
+                (9, fabric::AnchorResolution::Drifted),
             ],
         ] {
             let reader = scripted(script);
@@ -4030,8 +4040,8 @@ mod comment_anchor_tests {
     #[test]
     fn ends_that_resolve_out_of_order_are_not_a_span() {
         let reader = scripted([
-            (5, replica::AnchorResolution::Resolved(13)),
-            (9, replica::AnchorResolution::Resolved(3)),
+            (5, fabric::AnchorResolution::Resolved(13)),
+            (9, fabric::AnchorResolution::Resolved(3)),
         ]);
         let resolved = resolve(
             &reader,
@@ -4051,7 +4061,7 @@ mod comment_anchor_tests {
     /// ours.
     #[test]
     fn undecodable_bytes_are_unresolved_and_not_drifted() {
-        let reader = scripted([(4, replica::AnchorResolution::Resolved(4))]);
+        let reader = scripted([(4, fabric::AnchorResolution::Resolved(4))]);
         for bad in ["", "zz", "00"] {
             let at = contract::StoredAnchor {
                 field: "description".into(),
@@ -4084,7 +4094,7 @@ mod comment_anchor_tests {
     /// which is a wrong index wearing the right shape.
     #[test]
     fn a_record_that_disagrees_with_its_own_anchor_is_unresolved() {
-        let reader = scripted([(4, replica::AnchorResolution::Resolved(4))]);
+        let reader = scripted([(4, fabric::AnchorResolution::Resolved(4))]);
         let at = contract::StoredAnchor {
             field: "description".into(),
             start: anchor_hex("title", 4),
@@ -4104,7 +4114,7 @@ mod comment_anchor_tests {
     /// [`IssueState::anchorable_text`] is the list, and it binds both seams.
     #[test]
     fn a_record_naming_a_field_with_no_positions_is_unresolved() {
-        let reader = scripted([(4, replica::AnchorResolution::Resolved(4))]);
+        let reader = scripted([(4, fabric::AnchorResolution::Resolved(4))]);
         let resolved = resolve(
             &reader,
             &issue("the quick brown fox"),
@@ -4123,7 +4133,7 @@ mod comment_anchor_tests {
     /// position, and there are no positions in an empty text.
     #[test]
     fn a_record_in_an_emptied_field_has_drifted() {
-        let reader = scripted([(0, replica::AnchorResolution::Resolved(0))]);
+        let reader = scripted([(0, fabric::AnchorResolution::Resolved(0))]);
         let resolved = resolve(&reader, &issue(""), Some(stored("description", 0, None))).unwrap();
         assert_eq!(resolved.state, CommentAnchorState::Drifted);
         assert_eq!(reader.asked.load(Ordering::SeqCst), 0);

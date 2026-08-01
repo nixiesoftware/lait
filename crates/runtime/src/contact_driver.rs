@@ -1,3 +1,8 @@
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    reason = "Contact frame counts and byte budgets are validated against fixed protocol maxima"
+)]
 //! The Station's Contact plane — C2.2/C2.3.
 //!
 //! One tracked driver thread runs a current-thread tokio runtime hosting:
@@ -28,20 +33,21 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use mechanics::{ids::SpaceId, station::Key};
-use replica::{AuthorityIncorporator, AuthoritySource, StagedContactMaterial};
+use replica::convergence::{AuthorityIncorporator, StagedContactMaterial};
+use replica::transaction::AuthoritySource;
 
 use crate::admission::{judge, AcceptedOpenings, Admission, OpeningContext, PlanePolicy, Replay};
 use crate::beacon::{RouteHint, SignedBeacon, BEACON_FLAG_DORMANT, BEACON_PROTOCOL};
-use crate::contact::Failure;
-use crate::contact::{
-    build_transfer_frames, AccepterEvent, AccepterValidator, ContactFrame, ContactId,
-    InitiatorReceiver, Offer, OutboundTransfer, Progress, Proof, ReceivedMaterial, CONTACT_ALPN,
-    CONTACT_PROTOCOL, MAX_FRAME,
-};
 use crate::lifecycle::CancelToken;
 use crate::lifecycle::ContactOutcome;
 use crate::neighbor_presence::{PresenceAck, PresenceProbe, PRESENCE_ALPN};
 use crate::neighbors::NeighborRegistry;
+use crate::plane::contact::Failure;
+use crate::plane::contact::{
+    build_transfer_frames, AccepterEvent, AccepterValidator, ContactFrame, ContactId,
+    InitiatorReceiver, Offer, OutboundTransfer, Progress, Proof, ReceivedMaterial, CONTACT_ALPN,
+    CONTACT_PROTOCOL, MAX_FRAME,
+};
 use crate::plane::{Accept, Open, Plane};
 use crate::session::StationCore;
 
@@ -78,7 +84,7 @@ pub struct Authority {
     pub export: Arc<dyn Fn() -> Vec<Vec<u8>> + Send + Sync>,
     /// The current local authority frontier (for signing manifests and
     /// attributing incorporation).
-    pub frontier: Arc<dyn Fn() -> replica::AuthorityFrontier + Send + Sync>,
+    pub frontier: Arc<dyn Fn() -> replica::frontier::AuthorityFrontier + Send + Sync>,
 }
 
 /// Gossip participation for Beacon emission/ingestion.
@@ -263,7 +269,8 @@ async fn drive(ctx: DriverContext) {
     // Neighbors under the in-flight bounds.
     let in_flight: std::rc::Rc<std::cell::RefCell<std::collections::BTreeSet<Key>>> =
         Default::default();
-    let mut last_beacon = Instant::now() - Duration::from_secs(3600);
+    let now = Instant::now();
+    let mut last_beacon = now.checked_sub(Duration::from_secs(3600)).unwrap_or(now);
     // The state vector last carried by an emission; `None` forces the
     // activation beacon on the first tick (§4.1 emitter 1).
     let mut last_emitted: Option<([u8; 32], u64)> = None;
@@ -539,7 +546,7 @@ async fn contact_neighbor(ctx: &DriverContext, station: &Key) -> Result<ContactO
             .unwrap_or_else(|p| p.into_inner());
         ctx.core
             .with_replica(|replica| {
-                let commit_ctx = replica::CommitContext {
+                let commit_ctx = replica::transaction::CommitContext {
                     space: &ctx.space,
                     signer: &signer,
                     authority_frontier: frontier.clone(),
@@ -570,17 +577,17 @@ async fn contact_neighbor(ctx: &DriverContext, station: &Key) -> Result<ContactO
     // that produced it — a consumer should never have to reassemble one Contact
     // from an authority record plus a Body record.
     let authority_advanced = (ctx.options.authority.frontier)() != frontier;
-    let (scopes, body_frontier) = match &attempted {
+    let (bodies, body_frontier) = match &attempted {
         Ok(convergence) if convergence.advanced() => {
-            (convergence.scopes.clone(), convergence.current)
+            (convergence.bodies.clone(), convergence.current)
         }
         Ok(convergence) => (Vec::new(), convergence.current),
         Err(_) => (Vec::new(), ctx.core.frontier()),
     };
-    if authority_advanced || !scopes.is_empty() {
+    if authority_advanced || !bodies.is_empty() {
         ctx.core
             .broadcaster
-            .publish(scopes, body_frontier, authority_advanced);
+            .publish(bodies, body_frontier, authority_advanced);
     }
     if authority_advanced {
         // Rung here as well as on a local write, and this is the half that
@@ -666,7 +673,7 @@ async fn initiate(
         .core
         .with_replica(|replica| Ok(replica.published_root()))
         .map_err(|_| Failure::Convergence)?;
-    let holdings_root = published.map(|r| r.hash).unwrap_or([0u8; 32]);
+    let holdings_root = published.map(|r| r.0).unwrap_or([0u8; 32]);
 
     // The declaration is sent whenever this replica holds anything, and equal
     // roots are not a reason to skip it. A root proves equal *catalogs*; the
@@ -683,12 +690,12 @@ async fn initiate(
         .core
         .with_replica(|replica| Ok(replica.head_commitments()))
         .map_err(|_| Failure::Convergence)?;
-    let holdings_bytes = crate::contact::encode_holdings(&held);
+    let holdings_bytes = crate::plane::contact::encode_holdings(&held);
     let holdings_count = held.len() as u32;
     let holdings_digest = if held.is_empty() {
         [0u8; 32]
     } else {
-        crate::contact::holdings_digest(&holdings_bytes)
+        crate::plane::contact::holdings_digest(&holdings_bytes)
     };
     let hello = Offer::sign(
         opening.hash(),
@@ -709,7 +716,10 @@ async fn initiate(
         .map_err(|_| Failure::Transport)?;
     let mut holdings_sent = 0u64;
     if holdings_count > 0 {
-        for (index, chunk) in holdings_bytes.chunks(crate::contact::MAX_CHUNK).enumerate() {
+        for (index, chunk) in holdings_bytes
+            .chunks(crate::plane::contact::MAX_CHUNK)
+            .enumerate()
+        {
             let frame = ContactFrame::HoldingsChunk {
                 index: index as u32,
                 bytes: chunk.to_vec(),
@@ -864,7 +874,7 @@ async fn serve_contact(
     // cannot read publishes a root and declares nothing — and it is exactly
     // that peer the full advertisement has to reach.
 
-    let mut held: std::collections::BTreeSet<(replica::BodyKey, [u8; 32])> =
+    let mut held: std::collections::BTreeSet<(replica::body::BodyKey, [u8; 32])> =
         std::collections::BTreeSet::new();
     if hello.holdings_count > 0 {
         let mut buf: Vec<u8> = Vec::new();
@@ -886,7 +896,7 @@ async fn serve_contact(
                         return Err(Failure::Holdings);
                     }
                     next_index += 1;
-                    if buf.len() + bytes.len() > crate::contact::MAX_HOLDINGS_BYTES {
+                    if buf.len() + bytes.len() > crate::plane::contact::MAX_HOLDINGS_BYTES {
                         return Err(Failure::Holdings);
                     }
                     buf.extend_from_slice(&bytes);
@@ -894,12 +904,12 @@ async fn serve_contact(
                 ContactFrame::HoldingsEnd { count, digest } => {
                     if count != hello.holdings_count
                         || digest != hello.holdings_digest
-                        || crate::contact::holdings_digest(&buf) != hello.holdings_digest
+                        || crate::plane::contact::holdings_digest(&buf) != hello.holdings_digest
                     {
                         return Err(Failure::Holdings);
                     }
-                    let decoded =
-                        crate::contact::decode_holdings(&buf).map_err(|_| Failure::Holdings)?;
+                    let decoded = crate::plane::contact::decode_holdings(&buf)
+                        .map_err(|_| Failure::Holdings)?;
                     if decoded.len() != hello.holdings_count as usize {
                         return Err(Failure::Holdings);
                     }
@@ -934,7 +944,7 @@ async fn serve_contact(
     let (material, manifest) = if advertise {
         ctx.core
             .with_replica(|replica| {
-                let commit_ctx = replica::CommitContext {
+                let commit_ctx = replica::transaction::CommitContext {
                     space: &ctx.space,
                     signer: &signer,
                     authority_frontier: frontier.clone(),

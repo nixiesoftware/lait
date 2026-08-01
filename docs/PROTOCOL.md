@@ -109,7 +109,7 @@ The receiving Contact state machine still performs canonical decoding and all
 signature, peer, protocol, responder, and Space checks; local demultiplexing is
 not authority and changes no wire bytes. Presence probes follow the same rule.
 
-The Contact protocol field is currently version 3. The ALPN and individual
+The Contact protocol field is version 2. The ALPN and individual
 domain strings have their own versioning and must not be inferred from that
 field. A clean format break updates the affected bytes and fixtures atomically.
 
@@ -218,7 +218,7 @@ authorization.
 ## 10. Local control channel
 
 CLI, web, and MCP clients enter one local protocol. A request carries an
-explicit bridge route:
+explicit control route:
 
 - `daemon` for the process-level catalog and daemon lifecycle;
 - `space { orbit, space }` for Mechanics, Station, observations, and lifecycle
@@ -229,14 +229,14 @@ explicit bridge route:
 `space` is repeated as an expectation. Distinct local Orbits in the same Space
 therefore remain independently addressable, and a stale or confused binding
 fails before activation. A trusted client adapter validates the complete route
-against its `ClientScope`, the LaitDaemon resolves it through its own
-`OrbitDirectory`, and the receiving bridge independently validates its address.
+against its `ClientScope`, the daemon::Daemon resolves it through its own
+`orbits::Catalog`, and the receiving endpoint independently validates its address.
 The allowed set is never accepted as a claim in the request.
 
 A missing route is accepted only by the historical per-home adapter: its socket
 identifies one Orbit and the uniquely claiming bundled World package is
 selected. An absent or ambiguous package claim rejects. The identity-scoped
-LaitDaemon endpoint requires an explicit route. A version handshake precedes
+daemon::Daemon endpoint requires an explicit route. A version handshake precedes
 requests. The production request classifier assigns every historical typed
 request exactly one terminal owner; there is no wildcard product fallback.
 
@@ -248,7 +248,7 @@ the daemon from product payload shape.
 
 The optional `if_running: true` envelope field is reserved for passive,
 explicitly Space-routed status, identity display, and configuration reload.
-LaitDaemon resolves and validates the complete Orbit address, then queries only
+daemon::Daemon resolves and validates the complete Orbit address, then queries only
 an already-live compatibility adapter; it does not place a vacant Orbit. Other
 verbs and routes reject this mode. The field is omitted for ordinary dispatch,
 preserving the existing envelope shape.
@@ -277,7 +277,7 @@ per-Orbit socket. Protocol v5 retired the typed product-request path;
 protocol v6 removed product host projections from root `Request`/`Response`.
 Older processes are outside the compatibility window and must restart before
 attachment. The issue-tracker application emits
-`com.lait.issues` / `issues.control` v1; LaitDaemon does not infer or hardcode
+`com.lait.issues` / `issues.control` v1; daemon::Daemon does not infer or hardcode
 either value.
 
 Product client packages decode `WorldReply.payload`, own presentation for CLI

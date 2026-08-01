@@ -1,3 +1,9 @@
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    clippy::expect_used,
+    reason = "canonical action framing is bounded before fixed-width length arithmetic"
+)]
 //! `SignedWorldAction` — the canonical, signed application-action envelope.
 //!
 //! A World intent that must be authorized and durably committed rides this
@@ -20,8 +26,8 @@
 //! Contact/Convergence, never a second submit API.
 
 use mechanics::ids::{ActorId, DeviceId, SpaceId};
+use replica::body::{SchemaId, WorldId};
 use replica::frontier::AuthorityFrontier;
-use replica::ids::{SchemaId, WorldId};
 use serde::{Deserialize, Serialize};
 
 /// The signature domain for a World action.
@@ -150,9 +156,9 @@ impl SignedWorldAction {
     /// Construct and sign a World action from the acting device's identity seed.
     /// The seed's public key must equal `header.device`.
     pub fn sign(header: WorldActionHeader, payload: Vec<u8>, device_seed: &[u8; 32]) -> Self {
-        let signer = mechanics::crypto::device_from_seed(device_seed);
+        let signer = mechanics::actor::device_from_seed(device_seed);
         let preimage = action_preimage(1, &header, &payload, &signer);
-        let signature = mechanics::crypto::sign_detached(device_seed, &preimage);
+        let signature = mechanics::actor::sign_detached(device_seed, &preimage);
         Self {
             version: 1,
             header,
@@ -205,7 +211,7 @@ impl SignedWorldAction {
         }
         let key = self.signer.key_bytes().ok_or(Invalid::SignerMismatch)?;
         let preimage = action_preimage(self.version, &self.header, &self.payload, &self.signer);
-        if !mechanics::crypto::verify_detached(&key, &preimage, &self.signature) {
+        if !mechanics::actor::verify_detached(&key, &preimage, &self.signature) {
             return Err(Invalid::BadSignature);
         }
         Ok(IdempotencyKey {
@@ -225,7 +231,7 @@ mod tests {
         WorldActionHeader {
             request: RequestId::from_bytes([1u8; 16]),
             space: SpaceId::from_digest([2u8; 16]),
-            world: WorldId::parse("com.example.issues").unwrap(),
+            world: WorldId::parse("com.example.product").unwrap(),
             actor: ActorId::from_incept_hash(&"a".repeat(64)),
             device: device.clone(),
             authority_frontier: AuthorityFrontier::from_canonical_bytes(vec![0xAA, 0xBB]),
@@ -236,7 +242,7 @@ mod tests {
     }
 
     fn signed(seed: &[u8; 32]) -> SignedWorldAction {
-        let device = mechanics::crypto::device_from_seed(seed);
+        let device = mechanics::actor::device_from_seed(seed);
         let payload = b"an application intent".to_vec();
         SignedWorldAction::sign(header(&payload, &device), payload, seed)
     }
@@ -269,7 +275,7 @@ mod tests {
     fn wrong_signer_is_rejected() {
         // Re-sign the preimage with a different seed but claim the original device.
         let mut action = signed(&[7u8; 32]);
-        action.signer = mechanics::crypto::device_from_seed(&[9u8; 32]);
+        action.signer = mechanics::actor::device_from_seed(&[9u8; 32]);
         // signer no longer matches header.device
         assert_eq!(action.verify_self(), Err(Invalid::SignerMismatch));
     }
@@ -305,7 +311,7 @@ mod tests {
     #[test]
     fn oversized_payload_is_rejected() {
         let seed = [3u8; 32];
-        let device = mechanics::crypto::device_from_seed(&seed);
+        let device = mechanics::actor::device_from_seed(&seed);
         let payload = vec![0u8; MAX_PAYLOAD + 1];
         let action = SignedWorldAction::sign(header(&payload, &device), payload, &seed);
         assert_eq!(action.verify_self(), Err(Invalid::PayloadTooLarge));

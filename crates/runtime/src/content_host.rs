@@ -1,3 +1,9 @@
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    clippy::indexing_slicing,
+    reason = "content ranges are checked against descriptor geometry and cache bounds before access"
+)]
 //! The product-neutral content surface.
 //!
 //! What a caller gets here is deliberately narrow: ingest from a reader, ask
@@ -18,7 +24,7 @@
 use std::io::Read;
 use std::sync::Arc;
 
-use mechanics::crypto::AuthorizedBodyKey;
+use mechanics::authorization::AuthorizedBodyKey;
 use mechanics::ids::SpaceId;
 use replica::content::{
     ChunkProof, ContentDescriptor, ContentIngest, ContentRef, Invalid as ContentInvalid,
@@ -167,10 +173,10 @@ pub trait ContentKeys: Send + Sync {
 /// to exist without the Body plane's vocabulary — but on a real Station they
 /// are the same epochs, and pretending otherwise would mean a Station holding
 /// two answers to "which key is current".
-pub struct StationContentKeys(Arc<dyn replica::BodyKeySource>);
+pub struct StationContentKeys(Arc<dyn replica::body::BodyKeySource>);
 
 impl StationContentKeys {
-    pub fn new(keys: Arc<dyn replica::BodyKeySource>) -> Self {
+    pub fn new(keys: Arc<dyn replica::body::BodyKeySource>) -> Self {
         Self(keys)
     }
 }
@@ -190,22 +196,22 @@ pub struct ContentHost {
     /// commit through the one Replica writer. A host with its own core would
     /// be a second writer, which the store does not have.
     core: Arc<StationCore>,
-    cache: Arc<replica::journal::cache::ResidentCache>,
+    cache: Arc<replica::content::Residency>,
 }
 
 impl ContentHost {
-    pub fn new(core: Arc<StationCore>, cache: Arc<replica::journal::cache::ResidentCache>) -> Self {
+    pub fn new(core: Arc<StationCore>, cache: Arc<replica::content::Residency>) -> Self {
         Self { core, cache }
     }
 
-    pub fn cache(&self) -> &replica::journal::cache::ResidentCache {
+    pub fn cache(&self) -> &replica::content::Residency {
         &self.cache
     }
 
     /// A shared handle to the same cache, for a caller that must outlive a
     /// borrow — a transfer's drop guard has to be able to let go of its leases
     /// after the host reference that created it is gone.
-    pub fn cache_handle(&self) -> Arc<replica::journal::cache::ResidentCache> {
+    pub fn cache_handle(&self) -> Arc<replica::content::Residency> {
         self.cache.clone()
     }
 
@@ -220,7 +226,7 @@ impl ContentHost {
         policy: &ContentPolicy<'_>,
         operation: [u8; 16],
         reader: &mut dyn Read,
-        ctx: &replica::CommitContext<'_>,
+        ctx: &replica::transaction::CommitContext<'_>,
     ) -> Result<ContentRef, Failure> {
         (policy.authorize)(ContentAction::Publish).map_err(|demand| Failure::Denied { demand })?;
         let key = policy
@@ -234,7 +240,7 @@ impl ContentHost {
             operation,
             &self.cache,
             policy.max_content_len.min(MAX_CONTENT_LEN),
-        );
+        )?;
         let mut buffer = vec![0u8; READ_BUFFER];
         loop {
             let read = reader
@@ -625,14 +631,10 @@ impl ContentHost {
             .install(&entry, ciphertext, &sidecar)
             .map_err(|_| Failure::Storage(Storage::Cache))?;
         // Both holds, as ingest takes them: the transfer's, and the content's.
-        for hold in [
-            replica::journal::cache::Lease::operation(operation, entry),
-            replica::journal::cache::Lease::content(descriptor.content_nonce, entry),
-        ] {
-            self.cache
-                .lease(&hold)
-                .map_err(|_| Failure::Storage(Storage::Cache))?;
-        }
+        self.cache
+            .hold_operation(operation, entry)
+            .and_then(|()| self.cache.hold_content(descriptor.content_nonce, entry))
+            .map_err(|_| Failure::Storage(Storage::Cache))?;
         Ok(())
     }
 

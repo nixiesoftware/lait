@@ -84,7 +84,7 @@ pub enum Invalid {
     /// because the refusal is typed, attributable, and recoverable.
     BeforeRetentionFrontier { frontier: Version },
     /// The engine refused an operation.
-    Engine(String),
+    Engine,
 }
 
 impl std::fmt::Display for Invalid {
@@ -139,6 +139,10 @@ impl Version {
     }
 
     pub fn encode(&self) -> Vec<u8> {
+        #[allow(
+            clippy::expect_used,
+            reason = "derived serialization of this bounded owned value is infallible"
+        )]
         postcard::to_stdvec(self).expect("postcard Engine version")
     }
 
@@ -158,8 +162,9 @@ impl Version {
         if self.heads.len() > MAX_HEADS {
             return Err(Invalid::Bounds);
         }
-        for w in self.heads.windows(2) {
-            if w[0] >= w[1] {
+        for window in self.heads.windows(2) {
+            let [left, right] = window else { continue };
+            if left >= right {
                 return Err(Invalid::NonCanonical);
             }
         }
@@ -208,6 +213,10 @@ pub enum Artifact {
 
 impl Artifact {
     pub fn encode(&self) -> Vec<u8> {
+        #[allow(
+            clippy::expect_used,
+            reason = "derived serialization of this bounded owned value is infallible"
+        )]
         postcard::to_stdvec(self).expect("postcard Engine artifact")
     }
 
@@ -304,6 +313,10 @@ pub enum AnchorResolution {
 
 impl Anchor {
     pub fn encode(&self) -> Vec<u8> {
+        #[allow(
+            clippy::expect_used,
+            reason = "derived serialization of this bounded owned value is infallible"
+        )]
         postcard::to_stdvec(self).expect("postcard Engine anchor")
     }
 
@@ -405,6 +418,10 @@ pub struct Material {
 
 impl Material {
     pub fn encode(&self) -> Vec<u8> {
+        #[allow(
+            clippy::expect_used,
+            reason = "derived serialization of this bounded owned value is infallible"
+        )]
         postcard::to_stdvec(self).expect("postcard body material")
     }
 

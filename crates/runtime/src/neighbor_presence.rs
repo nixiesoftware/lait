@@ -1,3 +1,7 @@
+#![allow(
+    clippy::expect_used,
+    reason = "presence records use derived serialization over bounded fixed-layout values"
+)]
 //! Neighbor presence v1 — an authenticated two-message liveness challenge
 //! (`lait/neighbor-presence/1`), the S4 replacement for the raw `PRESENCE_ALPN`
 //! dial.
@@ -122,7 +126,7 @@ impl PresenceProbe {
         nonce: [u8; 32],
         initiator_seed: &[u8; 32],
     ) -> Option<Self> {
-        let station = mechanics::crypto::device_from_seed(initiator_seed).key_bytes()?;
+        let station = mechanics::actor::device_from_seed(initiator_seed).key_bytes()?;
         let preimage = Self::preimage(
             protocol,
             &space,
@@ -131,7 +135,7 @@ impl PresenceProbe {
             &station,
             &nonce,
         );
-        let signature = mechanics::crypto::sign_detached(initiator_seed, &preimage);
+        let signature = mechanics::actor::sign_detached(initiator_seed, &preimage);
         Some(Self {
             protocol,
             space,
@@ -193,8 +197,7 @@ impl PresenceProbe {
             &self.initiator_transport,
             &self.nonce,
         );
-        if !mechanics::crypto::verify_detached(&self.initiator_station, &preimage, &self.signature)
-        {
+        if !mechanics::actor::verify_detached(&self.initiator_station, &preimage, &self.signature) {
             return Err(Invalid::BadSignature);
         }
         Ok(())
@@ -214,10 +217,10 @@ impl PresenceAck {
 
     /// Sign an ack answering `probe` from the responder's device seed.
     pub fn sign(probe: &PresenceProbe, nonce: [u8; 32], responder_seed: &[u8; 32]) -> Option<Self> {
-        let responder = mechanics::crypto::device_from_seed(responder_seed).key_bytes()?;
+        let responder = mechanics::actor::device_from_seed(responder_seed).key_bytes()?;
         let probe_hash = probe.hash();
         let preimage = Self::preimage(&probe_hash, &responder, &nonce);
-        let signature = mechanics::crypto::sign_detached(responder_seed, &preimage);
+        let signature = mechanics::actor::sign_detached(responder_seed, &preimage);
         Some(Self {
             probe_hash,
             responder_transport: responder,
@@ -261,7 +264,7 @@ impl PresenceAck {
             return Err(Invalid::IdentityMismatch);
         }
         let preimage = Self::preimage(&self.probe_hash, &self.responder_transport, &self.nonce);
-        if !mechanics::crypto::verify_detached(&probe.responder_station, &preimage, &self.signature)
+        if !mechanics::actor::verify_detached(&probe.responder_station, &preimage, &self.signature)
         {
             return Err(Invalid::BadSignature);
         }

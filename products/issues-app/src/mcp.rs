@@ -1,3 +1,7 @@
+#![allow(
+    clippy::expect_used,
+    reason = "MCP schemas use derived serialization over static bounded tool descriptors"
+)]
 //! Issues-owned MCP tools.
 
 use schemars::JsonSchema;

@@ -19,13 +19,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use lait::orbital::{AuthorityRecord, SpaceAuthority};
-use mechanics::ledger::LedgerEffect;
+use mechanics::space::Effect;
+use replica::body::{BodyBinding, Op, SupportedSchemas, MUTATION_COLLABORATIVE};
+use replica::body::{BodyId, BodyKey, EncodingId, SchemaId, WorldId};
+use replica::convergence::{AuthorityIncorporator, StagedContactMaterial};
 use replica::transaction::NO_PARENT_ROOT;
-use replica::{
-    AuthorityIncorporator, BodyBinding, BodyId, BodyKey, CommitAuthorization, CommitContext,
-    EncodingId, Op, Replica, SchemaId, SeedSigner, StagedContactMaterial, SupportedSchemas,
-    WorldId, MUTATION_COLLABORATIVE,
-};
+use replica::transaction::{CommitAuthorization, CommitContext, SeedSigner};
+use replica::Replica;
 
 type SignedUnit = (replica::transaction::Transaction, Vec<(BodyKey, Vec<u8>)>);
 
@@ -51,14 +51,14 @@ fn world() -> WorldId {
 
 fn commit_demand() -> Vec<u8> {
     // The default contributor demand (what admission grants a joiner).
-    mechanics::demand::AuthorizationDemand::Any(vec![
-        mechanics::demand::AuthorizationDemand::require(
-            mechanics::demand::PolicyCapability::new("com.lait.issues", "space.contributor"),
-            mechanics::demand::Resource::root("com.lait.issues"),
+    mechanics::authorization::AuthorizationDemand::Any(vec![
+        mechanics::authorization::AuthorizationDemand::require(
+            mechanics::authorization::PolicyCapability::new("com.lait.issues", "space.contributor"),
+            mechanics::authorization::Resource::root("com.lait.issues"),
         ),
-        mechanics::demand::AuthorizationDemand::require(
-            mechanics::demand::PolicyCapability::new("com.lait.issues", "space.admin"),
-            mechanics::demand::Resource::root("com.lait.issues"),
+        mechanics::authorization::AuthorizationDemand::require(
+            mechanics::authorization::PolicyCapability::new("com.lait.issues", "space.admin"),
+            mechanics::authorization::Resource::root("com.lait.issues"),
         ),
     ])
     .encode_canonical()
@@ -74,9 +74,12 @@ struct MechAuthorizer<'a> {
     implementation_id: [u8; 32],
 }
 
-impl replica::TransactionAuthorizer for MechAuthorizer<'_> {
-    fn authorize(&self, core: &replica::Core) -> Result<Vec<u8>, String> {
-        use runtime::AuthorityView;
+impl replica::transaction::TransactionAuthorizer for MechAuthorizer<'_> {
+    fn authorize(
+        &self,
+        core: &replica::transaction::Core,
+    ) -> Result<Vec<u8>, mechanics::authorization::Refusal> {
+        use runtime::world::AuthorityView;
         let actor = mechanics::ids::ActorId::parse(&core.actor).ok_or("actor")?;
         let device = mechanics::ids::DeviceId::from_key_bytes(&core.signer);
         self.mech.authorize_mutation(
@@ -102,8 +105,8 @@ fn impl_id() -> [u8; 32] {
 
 /// The actor a device seed speaks for in this mechanics Space.
 fn actor_of(mech: &SpaceAuthority, seed: &[u8; 32]) -> String {
-    use runtime::AuthorityView;
-    mech.resolve(&mechanics::crypto::device_from_seed(seed))
+    use runtime::world::AuthorityView;
+    mech.resolve(&mechanics::actor::device_from_seed(seed))
         .expect("device has standing")
         .actor
         .as_str()
@@ -152,21 +155,19 @@ fn admit_joiner(mech: &SpaceAuthority) -> mechanics::ids::ActorId {
     let (inception, actor_id) =
         mechanics::actor::incept_single(&JOINER_SEED, &space, [9u8; 16], [8u8; 16], None);
     let mut m = mech.clone();
-    m.incorporate_authority(&[
-        AuthorityRecord::Effect(LedgerEffect::Actor(inception).encode()).encode(),
-    ])
-    .unwrap();
+    m.incorporate_authority(&[AuthorityRecord::Effect(Effect::Actor(inception).encode()).encode()])
+        .unwrap();
     mech.member_add(actor_id.as_str(), false).unwrap();
     // Expand the default-contributor role (member_add does not itself grant
     // capabilities; the admission path and the IAM designer do).
-    let res = mechanics::demand::Resource::root("com.lait.issues");
+    let res = mechanics::authorization::Resource::root("com.lait.issues");
     for (i, name) in ["space.contributor", "space.issue.read"]
         .into_iter()
         .enumerate()
     {
         mech.grant_actor_capability(
             &actor_id,
-            mechanics::demand::PolicyCapability::new("com.lait.issues", name),
+            mechanics::authorization::PolicyCapability::new("com.lait.issues", name),
             res.clone(),
             [i as u8 + 100; 16],
         )
@@ -185,7 +186,7 @@ fn signed_note_tx(
     actor: &str,
     frontier: replica::frontier::AuthorityFrontier,
     n: u8,
-) -> Result<SignedUnit, replica::commit::Failure> {
+) -> Result<SignedUnit, replica::transaction::commit::Failure> {
     let space = mech.space();
     let mut r = Replica::loro().with_keys(Arc::new(mech.clone()));
     r.set_supported(supported());
@@ -195,7 +196,7 @@ fn signed_note_tx(
         signer: &signer,
         authority_frontier: frontier,
     };
-    let device = mechanics::crypto::device_from_seed(signer_seed);
+    let device = mechanics::actor::device_from_seed(signer_seed);
     let authorizer = MechAuthorizer {
         mech,
         world: world(),
@@ -262,7 +263,7 @@ fn historical_authorized_but_currently_removed_remains_legitimate() {
     // receipt: its demand is unsatisfied now that it is removed.
     let err = signed_note_tx(&mech, &JOINER_SEED, &joiner_actor, removed_frontier, 2).unwrap_err();
     assert!(
-        matches!(err, replica::commit::Failure::Unauthorized(_)),
+        matches!(err, replica::transaction::commit::Failure::Unauthorized(_)),
         "a removed author cannot author at the removal frontier: {err:?}"
     );
 }
@@ -278,14 +279,12 @@ fn unauthorized_at_referenced_frontier_is_denied_at_signing() {
     let (inception, joiner_actor) =
         mechanics::actor::incept_single(&JOINER_SEED, &space, [9u8; 16], [8u8; 16], None);
     let mut m = mech.clone();
-    m.incorporate_authority(&[
-        AuthorityRecord::Effect(LedgerEffect::Actor(inception).encode()).encode(),
-    ])
-    .unwrap();
+    m.incorporate_authority(&[AuthorityRecord::Effect(Effect::Actor(inception).encode()).encode()])
+        .unwrap();
     let frontier = mech.current_frontier();
     let err = signed_note_tx(&mech, &JOINER_SEED, joiner_actor.as_str(), frontier, 1).unwrap_err();
     assert!(
-        matches!(err, replica::commit::Failure::Unauthorized(_)),
+        matches!(err, replica::transaction::commit::Failure::Unauthorized(_)),
         "an unadmitted author is denied: {err:?}"
     );
 }
@@ -297,12 +296,12 @@ fn a_valid_record_followed_by_an_invalid_one_changes_nothing_even_after_restart(
     let frontier_before = mech.current_frontier();
     let (inception, _) =
         mechanics::actor::incept_single(&JOINER_SEED, &space, [9u8; 16], [8u8; 16], None);
-    let valid = AuthorityRecord::Effect(LedgerEffect::Actor(inception).encode()).encode();
+    let valid = AuthorityRecord::Effect(Effect::Actor(inception).encode()).encode();
     let invalid = AuthorityRecord::Effect(vec![0xDE, 0xAD, 0xBE, 0xEF]).encode();
 
     let mut m = mech.clone();
     let err = m.incorporate_authority(&[valid, invalid]).unwrap_err();
-    assert!(err.contains("invalid"), "typed refusal, got: {err}");
+    assert_eq!(err, replica::convergence::Failure::Invalid);
     assert_eq!(mech.current_frontier(), frontier_before, "nothing adopted");
 
     // Restart: the durable ledger never saw the batch.
@@ -318,8 +317,8 @@ fn reorder_substitute_truncate_cannot_ride_an_honest_receipt() {
     let space = mech.space();
     let (i1, _) = mechanics::actor::incept_single(&JOINER_SEED, &space, [9u8; 16], [8u8; 16], None);
     let (i2, _) = mechanics::actor::incept_single(&[23u8; 32], &space, [7u8; 16], [6u8; 16], None);
-    let r1 = AuthorityRecord::Effect(LedgerEffect::Actor(i1).encode()).encode();
-    let r2 = AuthorityRecord::Effect(LedgerEffect::Actor(i2).encode()).encode();
+    let r1 = AuthorityRecord::Effect(Effect::Actor(i1).encode()).encode();
+    let r2 = AuthorityRecord::Effect(Effect::Actor(i2).encode()).encode();
 
     let mut m = mech.clone();
     let receipt = m.incorporate_authority(&[r1.clone(), r2.clone()]).unwrap();
@@ -360,7 +359,7 @@ fn authority_survives_a_body_crash_and_the_retry_incorporates_exactly_once() {
         signer: &signer,
         authority_frontier: mech_a.current_frontier(),
     };
-    let device = mechanics::crypto::device_from_seed(&FOUNDER_SEED);
+    let device = mechanics::actor::device_from_seed(&FOUNDER_SEED);
     let founder_actor = actor_of(&mech_a, &FOUNDER_SEED);
     let authorizer = MechAuthorizer {
         mech: &mech_a,
@@ -427,7 +426,7 @@ fn authority_survives_a_body_crash_and_the_retry_incorporates_exactly_once() {
     std::fs::create_dir_all(&store_dir).unwrap();
     let crash_now = Arc::new(std::sync::atomic::AtomicBool::new(true));
     let crash_flag = crash_now.clone();
-    let mut target = Replica::open_journaled(&store_dir, Arc::new(mech_b.clone()))
+    let mut target = Replica::open(&store_dir, Arc::new(mech_b.clone()))
         .unwrap()
         .with_store_fault_injector(Box::new(move |point| {
             point == "manifest-rename" && crash_flag.load(Ordering::SeqCst)
@@ -463,7 +462,7 @@ fn authority_survives_a_body_crash_and_the_retry_incorporates_exactly_once() {
 
     // Phase 2: retry after "reboot" — incorporates exactly once.
     crash_now.store(false, Ordering::SeqCst);
-    let mut target = Replica::open_journaled(&store_dir, Arc::new(mech_b2.clone())).unwrap();
+    let mut target = Replica::open(&store_dir, Arc::new(mech_b2.clone())).unwrap();
     target.set_supported(supported());
     let bundle = {
         let mut inc = mech_b2.clone();

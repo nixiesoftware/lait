@@ -63,7 +63,10 @@ impl MemNet {
         let (tx, rx) = mpsc::unbounded_channel();
         let (session_tx, session_rx) = mpsc::unbounded_channel();
         {
-            let mut inner = self.0.lock().unwrap();
+            let mut inner = self
+                .0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             inner.peers.insert(id.clone(), tx);
             inner.sessions.insert(id.clone(), session_tx);
         }
@@ -78,7 +81,7 @@ impl MemNet {
     fn topic_bus(&self, topic: Topic) -> broadcast::Sender<TopicMsg> {
         self.0
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .topics
             .entry(topic)
             .or_insert_with(|| broadcast::channel(256).0)
@@ -306,10 +309,9 @@ impl super::Connection for MemConnection {
                 let send = handoff
                     .send
                     .ok_or_else(|| anyhow!("peer opened a unidirectional flow"))?;
-                Ok(Some((
-                    Box::new(send) as Box<dyn SendFlow>,
-                    Box::new(handoff.recv) as Box<dyn RecvFlow>,
-                )))
+                let send: Box<dyn SendFlow> = Box::new(send);
+                let recv: Box<dyn RecvFlow> = Box::new(handoff.recv);
+                Ok(Some((send, recv)))
             }
             None => Ok(None),
         }
@@ -334,7 +336,10 @@ impl super::Connection for MemConnection {
             _ = self.until_closed() => None,
         };
         match next {
-            Some(handoff) => Ok(Some(Box::new(handoff.recv) as Box<dyn RecvFlow>)),
+            Some(handoff) => {
+                let recv: Box<dyn RecvFlow> = Box::new(handoff.recv);
+                Ok(Some(recv))
+            }
             None => Ok(None),
         }
     }
@@ -515,7 +520,7 @@ impl Transport for MemTransport {
             .net
             .0
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .peers
             .get(&peer)
             .cloned()
@@ -544,7 +549,7 @@ impl Transport for MemTransport {
             .net
             .0
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .sessions
             .get(&peer)
             .cloned()
@@ -591,7 +596,12 @@ impl Transport for MemTransport {
     }
 
     async fn shutdown(&self) {
-        self.net.0.lock().unwrap().peers.remove(&self.id);
+        self.net
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .peers
+            .remove(&self.id);
     }
 }
 
@@ -606,7 +616,7 @@ mod tests {
     const TEST_ALPN: Alpn = b"comms/test/1";
 
     fn id(seed: u8) -> PeerId {
-        mechanics::crypto::device_from_seed(&[seed; 32])
+        mechanics::actor::device_from_seed(&[seed; 32])
     }
 
     #[tokio::test]

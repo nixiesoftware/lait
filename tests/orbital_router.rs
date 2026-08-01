@@ -10,9 +10,9 @@ use issues_app::{
     BoardPos, Filter, IssueRouter, IssuesErrorKind, IssuesRequest as Request,
     IssuesResponse as Response, RouterFacts,
 };
-use mechanics::crypto::AuthorizedBodyKey;
+use mechanics::authorization::AuthorizedBodyKey;
 use replica::frontier::AuthorityFrontier;
-use runtime::{ActivationOptions, LocalIdentity, Runtime, RuntimeBuilder, Session, Station};
+use runtime::{plane::Activation, world::Builder, world::LocalIdentity, Runtime, Session, Station};
 
 const WRITER_SEED: [u8; 32] = [71u8; 32];
 
@@ -24,9 +24,9 @@ fn temp_root() -> std::path::PathBuf {
 }
 
 struct WriterAuthority;
-impl runtime::AuthorityView for WriterAuthority {
-    fn resolve(&self, _device: &DeviceId) -> Option<runtime::PrincipalResolution> {
-        Some(runtime::PrincipalResolution {
+impl runtime::world::AuthorityView for WriterAuthority {
+    fn resolve(&self, _device: &DeviceId) -> Option<runtime::world::PrincipalResolution> {
+        Some(runtime::world::PrincipalResolution {
             actor: actor(),
             authority_frontier: AuthorityFrontier::from_canonical_bytes(vec![1]),
         })
@@ -38,7 +38,7 @@ fn actor() -> ActorId {
 }
 
 fn station() -> (Runtime, Station) {
-    let registry = RuntimeBuilder::new()
+    let registry = Builder::new()
         .register(Arc::new(IssuesWorld::new()))
         .build()
         .unwrap();
@@ -46,21 +46,17 @@ fn station() -> (Runtime, Station) {
         temp_root(),
         registry,
         Arc::new(WriterAuthority),
-        Arc::new(replica::StaticBodyKeys::new(
+        Arc::new(replica::body::StaticBodyKeys::new(
             AuthorizedBodyKey::for_authorized_epoch([3u8; 16], [4u8; 32]),
         )),
     );
-    let station = rt
-        .create()
-        .unwrap()
-        .open(ActivationOptions::offline())
-        .unwrap();
+    let station = rt.create().unwrap().open(Activation::offline()).unwrap();
     (rt, station)
 }
 
 fn facts() -> RouterFacts {
     RouterFacts {
-        device: mechanics::crypto::device_from_seed(&WRITER_SEED)
+        device: mechanics::actor::device_from_seed(&WRITER_SEED)
             .as_str()
             .to_string(),
         actor: actor().as_str().to_string(),
@@ -280,9 +276,9 @@ fn the_router_maps_the_control_surface_to_the_issues_world() {
 
     // A view-only principal is refused with the legacy message.
     struct ReadOnly;
-    impl runtime::AuthorityView for ReadOnly {
-        fn resolve(&self, _d: &DeviceId) -> Option<runtime::PrincipalResolution> {
-            Some(runtime::PrincipalResolution {
+    impl runtime::world::AuthorityView for ReadOnly {
+        fn resolve(&self, _d: &DeviceId) -> Option<runtime::world::PrincipalResolution> {
+            Some(runtime::world::PrincipalResolution {
                 actor: actor(),
                 authority_frontier: AuthorityFrontier::from_canonical_bytes(vec![1]),
             })

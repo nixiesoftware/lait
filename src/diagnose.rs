@@ -10,7 +10,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::dto::SCHEMA_VERSION;
+use issues::dto::SCHEMA_VERSION;
 
 /// The state of a single onboarding gate. `Skip` is *not* blocking (it means the
 /// gate doesn't apply yet — e.g. board-sync while still `pending`); `Wait`/`Fail`
@@ -104,14 +104,14 @@ pub struct DiagnoseInput<'a> {
     pub expected_space: Option<&'a str>,
     /// Recovery shares present on this device that cannot be used. Borrowed as a
     /// slice so the struct stays `Copy`.
-    pub degraded_recovery: &'a [mechanics::ceremony::DegradedRecoveryHolder],
+    pub degraded_recovery: &'a [mechanics::recovery::DegradedHolder],
     /// An outstanding rekey obligation this node cannot discharge itself — an
     /// actor evicted by a revoked invite still holds live keys and no admin has
     /// rotated past the fence yet.
     pub rekey_pending: Option<&'a str>,
     /// This device's custody standing for the recovery authority. Borrowed so
     /// the struct stays `Copy`.
-    pub local_custody: Option<&'a mechanics::ceremony::LocalCustodyState>,
+    pub local_custody: Option<&'a mechanics::recovery::Custody>,
 }
 
 /// Project daemon state into the ordered gate list (pure — the validation core).
@@ -255,10 +255,12 @@ pub fn diagnose(input: DiagnoseInput<'_>) -> DiagnosisView {
         key_notes.push(format!(
             "your share of {scope} is unusable ({})",
             match &h.reason {
-                mechanics::ceremony::RecoveryArtifactFailure::Undecryptable(_) =>
+                mechanics::recovery::artifact::Failure::WrongProtector =>
                     "protected under another Windows account or machine",
-                mechanics::ceremony::RecoveryArtifactFailure::Io(_) =>
-                    "present but could not be read",
+                mechanics::recovery::artifact::Failure::PermissionDenied =>
+                    "present but permission was denied",
+                mechanics::recovery::artifact::Failure::Corrupt => "present but corrupt",
+                mechanics::recovery::artifact::Failure::Io(_) => "present but could not be read",
             }
         ));
     }
@@ -268,11 +270,11 @@ pub fn diagnose(input: DiagnoseInput<'_>) -> DiagnosisView {
     match input.local_custody {
         // Usable today, unrecoverable tomorrow — and the difference is invisible
         // until it matters, which is exactly why it is worth a standing warning.
-        Some(mechanics::ceremony::LocalCustodyState::BackupUnverified) => key_notes.push(
+        Some(mechanics::recovery::Custody::BackupUnverified) => key_notes.push(
             "your share of an all-holders arrangement has no verified portable backup              (`space custody-export`)"
                 .into(),
         ),
-        Some(mechanics::ceremony::LocalCustodyState::Missing) => {
+        Some(mechanics::recovery::Custody::Missing) => {
             key_notes.push("this device should hold a recovery share and does not".into())
         }
         _ => {}
@@ -343,10 +345,10 @@ mod tests {
         }
     }
 
-    fn degraded(current: Option<bool>) -> mechanics::ceremony::DegradedRecoveryHolder {
-        mechanics::ceremony::DegradedRecoveryHolder {
+    fn degraded(current: Option<bool>) -> mechanics::recovery::DegradedHolder {
+        mechanics::recovery::DegradedHolder {
             transcript: "a".repeat(64),
-            reason: mechanics::ceremony::RecoveryArtifactFailure::Undecryptable("dpapi".into()),
+            reason: mechanics::recovery::artifact::Failure::WrongProtector,
             is_current_authority: current,
         }
     }
@@ -382,7 +384,7 @@ mod tests {
     #[test]
     fn an_unbacked_indispensable_share_warns() {
         let v = diagnose(DiagnoseInput {
-            local_custody: Some(&mechanics::ceremony::LocalCustodyState::BackupUnverified),
+            local_custody: Some(&mechanics::recovery::Custody::BackupUnverified),
             ..input()
         });
         assert_eq!(gate(&v, "keys").state, GateState::Warn);
@@ -393,7 +395,7 @@ mod tests {
     #[test]
     fn a_ready_holder_does_not_warn() {
         let v = diagnose(DiagnoseInput {
-            local_custody: Some(&mechanics::ceremony::LocalCustodyState::Ready),
+            local_custody: Some(&mechanics::recovery::Custody::Ready),
             ..input()
         });
         assert_eq!(gate(&v, "keys").state, GateState::Pass);

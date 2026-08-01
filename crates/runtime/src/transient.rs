@@ -1,3 +1,9 @@
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    clippy::expect_used,
+    reason = "transient material is size-bounded before fixed-layout derived serialization"
+)]
 //! Transient collaboration state: cursors, presence, typing, residency hints.
 //!
 //! Everything here is state a Station currently believes and will happily
@@ -44,10 +50,13 @@ pub const MAX_TRANSIENT_ITEM_BYTES: usize = 4 * 1024;
 /// part of a container key inside the collaborative document.
 pub const MAX_SCOPE_FIELD_BYTES: usize = 128;
 
+/// Maximum scopes one Live connection may subscribe to at once.
+pub const MAX_SUBSCRIPTIONS: usize = slots::MAX_SUBSCRIBED_SCOPES_PER_CONNECTION;
+
 /// The longest encoded anchor a payload may carry.
 ///
 /// `Anchor::decode_canonical` bounds its head set and enforces re-encode
-/// equality, and places no bound at all on `path` — while `MemoryEngine::resolve`
+/// equality, and places no bound at all on `path` — while `Engine::resolve`
 /// feeds that path into loro's container namespace twice, once through
 /// `doc.get_text(typed_key("text", &path))` and once through a `ContainerID::Root`
 /// name. A mismatched Body is already safe there; the path is not. This is the
@@ -125,7 +134,7 @@ impl Target {
         // shape, and something that is merely short is not therefore one. The
         // two World-facing shapes disagreeing about what a World id *is* is how
         // a scope and a signal about the same World stop matching.
-        let world_id = |value: &str| replica::ids::WorldId::parse(value).ok_or(Invalid::Malformed);
+        let world_id = |value: &str| replica::body::WorldId::parse(value).ok_or(Invalid::Malformed);
         match self {
             Self::Body { world, .. } | Self::Material { world, .. } => {
                 world_id(world)?;
@@ -138,7 +147,7 @@ impl Target {
             Self::Content { .. } => Ok(()),
             Self::World { world, schema, key } => {
                 world_id(world)?;
-                replica::ids::SchemaId::parse(schema).ok_or(Invalid::Malformed)?;
+                replica::body::SchemaId::parse(schema).ok_or(Invalid::Malformed)?;
                 // The key is the World's own, so it gets a bound and no grammar
                 // — the substrate has no opinion about what a World calls its
                 // rows. What the World itself declared is enforced above this,
@@ -224,7 +233,7 @@ impl TransientPayload {
             // means a peer can only ask about what it already said it was
             // watching.
             let decoded =
-                replica::Anchor::decode_canonical(anchor).map_err(|_| Invalid::Malformed)?;
+                fabric::Anchor::decode_canonical(anchor).map_err(|_| Invalid::Malformed)?;
             if decoded.path.len() > MAX_SCOPE_FIELD_BYTES {
                 return Err(Invalid::Bounds);
             }

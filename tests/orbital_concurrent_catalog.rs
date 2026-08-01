@@ -12,13 +12,13 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use async_trait::async_trait;
+use comms::mem::MemNet;
+use comms::policy::Network;
+use comms::{Transport, TransportFactory};
 use issues_app::IssuesResponse as IssueResponse;
+use lait::control::OrbitAddress;
 use lait::control::{request, ControlRoute, Request, Response};
-use lait::daemon::OrbitAddress;
-use lait::net::Network;
-use lait::orbital::run_space_bridge_with;
-use lait::transport::mem::MemNet;
-use lait::transport::{Transport, TransportFactory};
+use lait::orbital::run_station_process_with;
 
 const FOUNDER_SEED: [u8; 32] = [221u8; 32];
 const JOINER_SEED: [u8; 32] = [222u8; 32];
@@ -36,7 +36,8 @@ impl TransportFactory for MemFactory {
         _protocols: comms::Protocols<'_>,
     ) -> Result<Arc<dyn Transport>> {
         Ok(Arc::new(
-            self.0.peer(lait::crypto::device_from_seed(identity_seed)),
+            self.0
+                .peer(mechanics::actor::device_from_seed(identity_seed)),
         ))
     }
 }
@@ -96,7 +97,7 @@ fn spawn_daemon(home: PathBuf, seed: [u8; 32], net: MemNet) -> std::thread::Join
     std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async move {
-            if let Err(e) = run_space_bridge_with(home, seed, &MemFactory(net)).await {
+            if let Err(e) = run_station_process_with(home, seed, &MemFactory(net)).await {
                 eprintln!("DAEMON ERR: {e:#}");
             }
         });
@@ -135,8 +136,8 @@ fn concurrent_issue_creation_converges_across_daemons() {
     let _founder = spawn_daemon(founder_home.clone(), FOUNDER_SEED, net.clone());
     let rt = tokio::runtime::Runtime::new().unwrap();
     wait_online(&rt, &founder_home);
-    let founder_device = lait::crypto::device_from_seed(&FOUNDER_SEED).to_string();
-    let joiner_device = lait::crypto::device_from_seed(&JOINER_SEED).to_string();
+    let founder_device = mechanics::actor::device_from_seed(&FOUNDER_SEED).to_string();
+    let joiner_device = mechanics::actor::device_from_seed(&JOINER_SEED).to_string();
 
     // Founder authors one issue BEFORE the joiner exists.
     let resp = issue_req(
@@ -221,7 +222,7 @@ fn concurrent_issue_creation_converges_across_daemons() {
     lait::orbital::enter_space(&viewer_home, &VIEWER_SEED, &vinvite).unwrap();
     let _viewer = spawn_daemon(viewer_home.clone(), VIEWER_SEED, net.clone());
     wait_online(&rt, &viewer_home);
-    let viewer_device = lait::crypto::device_from_seed(&VIEWER_SEED).to_string();
+    let viewer_device = mechanics::actor::device_from_seed(&VIEWER_SEED).to_string();
     let vadmitted = poll_until(Duration::from_secs(30), || {
         req(
             &rt,

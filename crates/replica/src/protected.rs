@@ -8,13 +8,13 @@
 //! frontiers of the transaction that produced it. The persisted envelope is
 //! exactly `epoch_id[16] || nonce[12] || ciphertext_and_tag` (the existing
 //! construction — no new cryptography), produced by
-//! [`mechanics::crypto::body_seal`] under an opaque
-//! [`mechanics::crypto::AuthorizedBodyKey`] capability that mechanics-side
+//! [`mechanics::authorization::body_seal`] under an opaque
+//! [`mechanics::authorization::AuthorizedBodyKey`] capability that mechanics-side
 //! policy mints. Replica selects the capability under Space policy and passes
 //! it only to seal/open; nothing here decides epoch legitimacy.
 
 use fabric::BodyExport;
-use mechanics::crypto::{AuthorizedBodyKey, BODY_ENVELOPE_OVERHEAD, BODY_EPOCH_ID_LEN};
+use mechanics::authorization::{AuthorizedBodyKey, BODY_ENVELOPE_OVERHEAD, BODY_EPOCH_ID_LEN};
 use serde::{Deserialize, Serialize};
 
 use crate::frontier::ReplicaFrontier;
@@ -57,6 +57,9 @@ pub enum Invalid {
     UnsupportedVersion(u8),
     /// No authorized key material is available for a local write.
     BodyKeyUnavailable,
+    /// An accepted local protection operation could not obtain entropy or
+    /// produce ciphertext.
+    Protection(mechanics::authorization::Failure),
 }
 
 impl std::fmt::Display for Invalid {
@@ -87,6 +90,10 @@ impl Material {
     }
 
     pub fn encode(&self) -> Vec<u8> {
+        #[allow(
+            clippy::expect_used,
+            reason = "derived serialization of this bounded protected material is infallible"
+        )]
         postcard::to_stdvec(self).expect("postcard protected payload")
     }
 
@@ -122,7 +129,7 @@ impl Material {
         if plaintext.len() > MAX_PROTECTED_PLAINTEXT {
             return Err(Invalid::BodyTooLarge);
         }
-        Ok(mechanics::crypto::body_seal(key, &plaintext))
+        mechanics::authorization::body_seal(key, &plaintext).map_err(Invalid::Protection)
     }
 
     /// Open a protected envelope with the capability for its epoch. Bounds are
@@ -135,8 +142,8 @@ impl Material {
         if envelope.len() < BODY_EPOCH_ID_LEN {
             return Err(Invalid::InvalidProtectedBody);
         }
-        let plaintext =
-            mechanics::crypto::body_open(key, envelope).ok_or(Invalid::InvalidProtectedBody)?;
+        let plaintext = mechanics::authorization::body_open(key, envelope)
+            .ok_or(Invalid::InvalidProtectedBody)?;
         Self::decode_canonical(&plaintext)
     }
 }

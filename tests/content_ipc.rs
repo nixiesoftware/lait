@@ -18,15 +18,15 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use async_trait::async_trait;
+use comms::mem::MemNet;
+use comms::policy::Network;
+use comms::{Transport, TransportFactory};
+use lait::control::OrbitAddress;
 use lait::control::{
     content_call, content_request, ContentCall, ContentClientRequest, ContentErrorCode,
     ContentReply, ContentUpload, ControlRoute, Request, Response,
 };
-use lait::daemon::OrbitAddress;
-use lait::net::Network;
-use lait::orbital::run_space_bridge_with;
-use lait::transport::mem::MemNet;
-use lait::transport::{Transport, TransportFactory};
+use lait::orbital::run_station_process_with;
 
 const FOUNDER_SEED: [u8; 32] = [151u8; 32];
 
@@ -43,7 +43,8 @@ impl TransportFactory for MemFactory {
         _protocols: comms::Protocols<'_>,
     ) -> Result<Arc<dyn Transport>> {
         Ok(Arc::new(
-            self.0.peer(lait::crypto::device_from_seed(identity_seed)),
+            self.0
+                .peer(mechanics::actor::device_from_seed(identity_seed)),
         ))
     }
 }
@@ -90,7 +91,8 @@ fn node(tag: &str) -> Node {
         std::thread::spawn(move || {
             let rt = tokio::runtime::Runtime::new().unwrap();
             rt.block_on(async move {
-                if let Err(e) = run_space_bridge_with(home, FOUNDER_SEED, &MemFactory(net)).await {
+                if let Err(e) = run_station_process_with(home, FOUNDER_SEED, &MemFactory(net)).await
+                {
                     eprintln!("DAEMON ERR: {e:#}");
                 }
             });

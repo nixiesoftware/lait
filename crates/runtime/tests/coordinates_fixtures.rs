@@ -24,7 +24,7 @@ fn founding(founder_seed: [u8; 32], salt: [u8; 16]) -> (SpaceId, [u8; 32], Vec<u
 }
 
 fn station_pubkey() -> [u8; 32] {
-    mechanics::crypto::device_from_seed(&STATION_SEED)
+    mechanics::actor::device_from_seed(&STATION_SEED)
         .key_bytes()
         .unwrap()
 }
@@ -63,7 +63,7 @@ fn test_admission(
     not_before: u64,
     expires: u64,
 ) -> AdmissionCapability {
-    let evidence = mechanics::demand::WorldAssignmentEvidence {
+    let evidence = mechanics::authorization::WorldAssignmentEvidence {
         world: "com.example.issues".into(),
         opaque_definition_ref: vec![],
         definition_digest: [0u8; 32],

@@ -1,3 +1,22 @@
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects,
+        clippy::unreachable,
+        clippy::unimplemented,
+        clippy::unchecked_time_subtraction,
+        clippy::todo,
+        clippy::string_slice,
+        clippy::panic_in_result_fn,
+        clippy::panic,
+        clippy::exit,
+        clippy::as_conversions
+    )
+)]
+
 //! **Runtime** — LAIT's orbital lifecycle.
 //!
 //! ```text
@@ -28,61 +47,42 @@
 //! World/Session/Contact in S5); their signatures here fix ownership and
 //! consumption semantics.
 
-pub mod action;
-pub mod admission;
+mod action;
+mod admission;
 pub mod beacon;
-pub mod budget;
-pub mod contact;
-pub mod contact_driver;
-pub mod content_host;
+mod budget;
+mod contact_driver;
+mod content_host;
 pub mod coordinates;
 #[cfg(test)]
 mod dispatch_tests;
-pub mod dto;
-pub mod fetch;
-pub mod freight;
-pub mod implementation;
-pub mod lifecycle;
-pub mod live;
-pub mod neighbor_presence;
-pub mod neighbors;
-#[path = "planes.rs"]
+mod dto;
+mod fetch;
+mod implementation;
+#[cfg(test)]
+mod internal_tests;
+mod lifecycle;
+pub mod neighbor;
+mod neighbor_presence;
+mod neighbors;
 pub mod plane;
-pub mod plane_driver;
-pub mod plane_stream;
-pub mod registry;
-pub mod session;
+mod plane_driver;
+mod plane_stream;
+mod registry;
+mod session;
 pub mod signal;
-pub mod store;
-pub mod transfer;
+mod store;
+mod transfer;
 pub mod transient;
 pub(crate) mod wire;
 pub mod world;
 
-pub use action::{IdempotencyKey, RequestId, SignedWorldAction, WorldActionHeader};
-pub use beacon::{RouteHint, SignedBeacon, VerifiedBeacon};
-pub use contact::{
-    AccepterEvent, AccepterValidator, ContactFrame, ContactId, InitiatorReceiver, InitiatorState,
-    Offer, Progress, Proof, ReceivedMaterial,
-};
-pub use contact_driver::{Authority, CommsOptions, GossipOptions, MAX_CONTACTS_IN_FLIGHT};
-pub use coordinates::{
-    canonical_routes, AdmissionCapability, ApproachRoute, CoordinatesAdmission, CoordinatesPayload,
-    SignedCoordinates, VerifiedCoordinates,
-};
+#[cfg(test)]
+extern crate self as runtime;
+
+pub use lifecycle::Failure as Error;
 pub use lifecycle::{
-    ActivationOptions, CancelToken, ContactOutcome, Neighbor, Orbit, OrbitStatus, Reachability,
+    Exit, ExitReason, Integrity, Interruption, Orbit, OrbitStatus, Persistence,
     RemovalConfirmation, Runtime, Station,
 };
-pub use neighbor_presence::{PresenceAck, PresenceProbe, PRESENCE_ALPN, PRESENCE_PROTOCOL};
-pub use neighbors::{NeighborRecord, NeighborRegistry, StoredRoute};
-pub use registry::{Registry, RuntimeBuilder};
-pub use session::{
-    CommittedEffect, Observation, ObservationCursor, ObservationStream, Session,
-    DEFAULT_OBSERVATION_CAPACITY, MAX_OBSERVATION_CAPACITY,
-};
-pub use world::{
-    AuthorityView, BodyDeclaration, BodyReader, Context, Descriptor, Effect, Intent, Limits,
-    LocalIdentity, PrincipalFacts, PrincipalResolution, Projection, Query, Rejection, Version,
-    World,
-};
+pub use session::Session;

@@ -1,3 +1,9 @@
+#![allow(
+    clippy::as_conversions,
+    clippy::indexing_slicing,
+    clippy::string_slice,
+    reason = "host projections validate product identifiers and ASCII routes before fixed-layout access"
+)]
 //! Typed host capabilities requested by Issues client interfaces.
 //!
 //! These operations need facilities outside a World Session (the working tree,
@@ -214,8 +220,8 @@ pub fn invocation(operation: &str, input: Value) -> Result<ClientInvocation, Fai
 /// Construct one Issues World invocation with package-owned client policy.
 pub fn world_invocation(request: IssuesRequest) -> Result<ClientInvocation, Failure> {
     let access = match request.access() {
-        world_bridge::WorldCallAccess::Query => ClientAccess::Query,
-        world_bridge::WorldCallAccess::Command => ClientAccess::Command,
+        runtime::world::call::Access::Query => ClientAccess::Query,
+        runtime::world::call::Access::Command => ClientAccess::Command,
     };
     let confirmation = request.destructive_question();
     let call = crate::encode_call(&request).map_err(|error| Failure::new(error.to_string()))?;
@@ -932,7 +938,7 @@ pub fn plan_access_grant(
     let scope_kind = body["scope_kind"].as_str().unwrap_or("space");
     let world = issues::contract::PRODUCT_WORLD;
     let resource = match (scope_kind, project) {
-        ("space", None) => mechanics::demand::Resource::root(world),
+        ("space", None) => mechanics::authorization::Resource::root(world),
         ("space", Some(_)) => {
             return Err(AccessRefusal::Invalid(
                 "that is a Space role — it takes no --project".into(),
@@ -962,7 +968,7 @@ pub fn plan_access_grant(
                     "no project matches '{selector}'"
                 )));
             };
-            mechanics::demand::Resource::segments(world, [&id])
+            mechanics::authorization::Resource::segments(world, [&id])
                 .map_err(|error| AccessRefusal::Invalid(error.to_string()))?
         }
         ("project", None) => {
@@ -1065,7 +1071,7 @@ mod tests {
     #[test]
     fn rejects_incomplete_access_grants_before_the_host_sees_them() {
         let error = decode(LOCAL_ACCESS, json!({"action": "grant", "actor": "alice"})).unwrap_err();
-        assert!(error.to_string().contains("missing 'role'"));
+        assert_eq!(error, Failure::Invalid);
     }
 
     #[test]
@@ -1078,9 +1084,8 @@ mod tests {
     }
 
     #[test]
-    fn malformed_world_input_keeps_its_product_error() {
+    fn malformed_world_input_is_a_typed_invalid_operation() {
         let error = parse_web(json!({"cmd": "issue_new"})).unwrap_err();
-        assert!(error.to_string().contains("bad Issues request"));
-        assert!(error.to_string().contains("title"));
+        assert_eq!(error, Failure::Invalid);
     }
 }

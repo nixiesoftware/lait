@@ -8,22 +8,22 @@ use std::sync::Arc;
 
 use mechanics::ids::{ActorId, DeviceId};
 
-use crate::lifecycle::{ActivationOptions, Runtime};
-use crate::registry::RuntimeBuilder;
+use crate::lifecycle::{Activation, Runtime};
+use crate::registry::Builder;
 use crate::session::{Conflict, Failure as SessionFailure, ObservationCursor};
 use crate::world::Rejection;
 use crate::world::{
     AuthorityView, Context, Descriptor, Effect, Intent, Limits, LocalIdentity, PrincipalResolution,
     Projection, Query, Version, World,
 };
+use replica::body::{BodyId, BodyKey, EncodingId, SchemaId, WorldId};
 use replica::body::{MutationModel, Op, Schema};
 use replica::frontier::{AuthorityFrontier, ReplicaFrontier};
-use replica::ids::{BodyId, BodyKey, EncodingId, SchemaId, WorldId};
 
 fn any_demand() -> Vec<u8> {
-    mechanics::demand::AuthorizationDemand::require(
-        mechanics::demand::PolicyCapability::new("w", "c"),
-        mechanics::demand::Resource::root("w"),
+    mechanics::authorization::AuthorizationDemand::require(
+        mechanics::authorization::PolicyCapability::new("w", "c"),
+        mechanics::authorization::Resource::root("w"),
     )
     .encode_canonical()
     .expect("canonical demand")
@@ -72,8 +72,8 @@ impl AuthorityView for SeedAuthority {
         demand: &[u8],
         operations_digest: [u8; 32],
         core_digest: [u8; 32],
-    ) -> Result<Vec<u8>, String> {
-        let writer = mechanics::crypto::device_from_seed(&WRITER_SEED);
+    ) -> Result<Vec<u8>, mechanics::authorization::Refusal> {
+        let writer = mechanics::actor::device_from_seed(&WRITER_SEED);
         if device != &writer {
             return Err("device holds no write authority".into());
         }
@@ -101,9 +101,9 @@ fn reader() -> LocalIdentity {
     Runtime::identity_from_seed(&READER_SEED)
 }
 
-fn test_keys() -> Arc<dyn replica::BodyKeySource> {
-    Arc::new(replica::StaticBodyKeys::new(
-        mechanics::crypto::AuthorizedBodyKey::for_authorized_epoch([1u8; 16], [2u8; 32]),
+fn test_keys() -> Arc<dyn replica::body::BodyKeySource> {
+    Arc::new(replica::body::StaticBodyKeys::new(
+        mechanics::authorization::AuthorizedBodyKey::for_authorized_epoch([1u8; 16], [2u8; 32]),
     ))
 }
 
@@ -161,7 +161,7 @@ impl World for NoteWorld {
                     value: intent.payload.clone(),
                 },
             )],
-            scopes: vec![key],
+            bodies: vec![key],
             effect: intent.payload,
             declarations: vec![],
         })
@@ -244,7 +244,7 @@ fn temp_root() -> PathBuf {
 }
 
 fn station_with(reg: Descriptor, world: Arc<dyn World>) -> crate::lifecycle::Station {
-    let registry = RuntimeBuilder::new()
+    let registry = Builder::new()
         .register(Arc::new(DescribedWorld {
             descriptor: reg,
             inner: world,
@@ -252,10 +252,7 @@ fn station_with(reg: Descriptor, world: Arc<dyn World>) -> crate::lifecycle::Sta
         .build()
         .unwrap();
     let rt = Runtime::open(temp_root(), registry, Arc::new(SeedAuthority), test_keys());
-    rt.create()
-        .unwrap()
-        .open(ActivationOptions::default())
-        .unwrap()
+    rt.create().unwrap().open(Activation::default()).unwrap()
 }
 
 fn station() -> crate::lifecycle::Station {
@@ -292,7 +289,7 @@ fn test_world_submits_and_queries_through_dispatch() {
     .unwrap();
     assert_eq!(committed.effect, b"hello");
     assert_eq!(committed.frontier.transaction_count, 1);
-    assert_eq!(committed.scopes.len(), 1);
+    assert_eq!(committed.bodies.len(), 1);
     assert_ne!(committed.frontier, ReplicaFrontier::EMPTY);
 
     // The query now reads back the committed Body.
@@ -509,13 +506,13 @@ fn an_acknowledged_commit_survives_a_crash_without_dormancy() {
     // acknowledged commit must still be there on the next activation, because
     // durability happened AT COMMIT, not at shutdown.
     let (reg, world) = note_registration();
-    let registry = RuntimeBuilder::new().register(world).build().unwrap();
+    let registry = Builder::new().register(world).build().unwrap();
     let rt = Runtime::open(temp_root(), registry, Arc::new(SeedAuthority), test_keys());
     let world_id = WorldId::parse("com.example.notes").unwrap();
 
     let orbit = rt.create().unwrap();
     let space = orbit.space_id().clone();
-    let station = orbit.open(ActivationOptions::default()).unwrap();
+    let station = orbit.open(Activation::default()).unwrap();
     let session = station.dock(&world_id, &writer()).unwrap();
     submit_as(
         &session,
@@ -534,7 +531,7 @@ fn an_acknowledged_commit_survives_a_crash_without_dormancy() {
     let station = rt
         .acquire(&space)
         .unwrap()
-        .open(ActivationOptions::default())
+        .open(Activation::default())
         .unwrap();
     let session = station.dock(&world_id, &writer()).unwrap();
     let proj = session
@@ -552,15 +549,11 @@ fn commits_made_during_an_activation_survive_wait_exit() {
     // Finding #1's second scenario: Station::wait returns without a checkpoint.
     // Per-commit durability means nothing made during the activation is lost.
     let (reg, world) = note_registration();
-    let registry = RuntimeBuilder::new().register(world).build().unwrap();
+    let registry = Builder::new().register(world).build().unwrap();
     let rt = Runtime::open(temp_root(), registry, Arc::new(SeedAuthority), test_keys());
     let world_id = WorldId::parse("com.example.notes").unwrap();
 
-    let station = rt
-        .create()
-        .unwrap()
-        .open(ActivationOptions::default())
-        .unwrap();
+    let station = rt.create().unwrap().open(Activation::default()).unwrap();
     let space = station.space_id().clone();
     let session = station.dock(&world_id, &writer()).unwrap();
     submit_as(
@@ -580,7 +573,7 @@ fn commits_made_during_an_activation_survive_wait_exit() {
     let station = rt
         .acquire(&space)
         .unwrap()
-        .open(ActivationOptions::default())
+        .open(Activation::default())
         .unwrap();
     let session = station.dock(&world_id, &writer()).unwrap();
     let proj = session
@@ -598,13 +591,13 @@ fn committed_bodies_survive_dormancy_and_reactivation() {
     // The full durable loop: form → activate → submit → vacate (checkpoint)
     // → re-acquire → activate → the committed Body is read back.
     let (reg, world) = note_registration();
-    let registry = RuntimeBuilder::new().register(world).build().unwrap();
+    let registry = Builder::new().register(world).build().unwrap();
     let rt = Runtime::open(temp_root(), registry, Arc::new(SeedAuthority), test_keys());
     let world_id = WorldId::parse("com.example.notes").unwrap();
 
     let orbit = rt.create().unwrap();
     let space = orbit.space_id().clone();
-    let station = orbit.open(ActivationOptions::default()).unwrap();
+    let station = orbit.open(Activation::default()).unwrap();
     let session = station.dock(&world_id, &writer()).unwrap();
     submit_as(
         &session,
@@ -624,7 +617,7 @@ fn committed_bodies_survive_dormancy_and_reactivation() {
     let station = rt
         .acquire(&space)
         .unwrap()
-        .open(ActivationOptions::default())
+        .open(Activation::default())
         .unwrap();
     let session = station.dock(&world_id, &writer()).unwrap();
     let proj = session
@@ -664,7 +657,7 @@ impl World for RogueWorld {
                     value: intent.payload,
                 },
             )],
-            scopes: vec![foreign],
+            bodies: vec![foreign],
             effect: vec![],
             declarations: vec![],
         })
@@ -773,13 +766,9 @@ fn a_changed_authority_frontier_refuses_the_commit() {
         inner,
         authority: authority.clone(),
     });
-    let registry = RuntimeBuilder::new().register(world).build().unwrap();
+    let registry = Builder::new().register(world).build().unwrap();
     let rt = Runtime::open(temp_root(), registry, authority, test_keys());
-    let station = rt
-        .create()
-        .unwrap()
-        .open(ActivationOptions::default())
-        .unwrap();
+    let station = rt.create().unwrap().open(Activation::default()).unwrap();
     let session = station.dock(&id, &writer()).unwrap();
     let before = station.frontier();
     let r = submit_as(
@@ -882,7 +871,7 @@ impl World for BoardWorld {
                     },
                 ),
             ],
-            scopes: vec![key],
+            bodies: vec![key],
             effect: vec![],
             declarations: vec![],
         })
@@ -921,14 +910,11 @@ fn a_collaborative_world_commits_and_reads_through_the_session() {
         scope_schemas: Vec::new(),
         signal_schemas: Vec::new(),
     };
-    let registry = RuntimeBuilder::new()
-        .register(Arc::new(world))
-        .build()
-        .unwrap();
+    let registry = Builder::new().register(Arc::new(world)).build().unwrap();
     let rt = Runtime::open(temp_root(), registry, Arc::new(SeedAuthority), test_keys());
     let orbit = rt.create().unwrap();
     let space = orbit.space_id().clone();
-    let station = orbit.open(ActivationOptions::default()).unwrap();
+    let station = orbit.open(Activation::default()).unwrap();
     let session = station.dock(&id, &writer()).unwrap();
 
     let query = || Query {
@@ -953,7 +939,7 @@ fn a_collaborative_world_commits_and_reads_through_the_session() {
     let station = rt
         .acquire(&space)
         .unwrap()
-        .open(ActivationOptions::default())
+        .open(Activation::default())
         .unwrap();
     let session = station.dock(&id, &writer()).unwrap();
     let proj = session.query(query()).unwrap();
@@ -986,7 +972,7 @@ impl World for MixedWorld {
                     delta: 1,
                 },
             )],
-            scopes: vec![key],
+            bodies: vec![key],
             effect: vec![],
             declarations: vec![],
         })

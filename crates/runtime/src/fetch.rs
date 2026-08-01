@@ -1,3 +1,8 @@
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    reason = "fetch rounds and chunk geometry are bounded by descriptor and transfer policy"
+)]
 //! Freight's requesting half: choosing providers, and moving only what is
 //! missing.
 //!
@@ -25,7 +30,7 @@ use replica::content::{ChunkProof, ContentDescriptor, ContentRef};
 
 use crate::budget::{deadline, slots};
 use crate::content_host::{ContentAction, ContentHost, ContentKeys, ContentPolicy};
-use crate::freight::{frame, read_frame};
+use crate::plane::freight::{frame, read_frame};
 use crate::plane::{bounds, Accept, FreightFrame, Open, Plane, SPACE_ID_LEN};
 use crate::transfer::{TransferHandle, TransferRegistry, TransferState};
 

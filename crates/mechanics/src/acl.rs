@@ -1,3 +1,8 @@
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::indexing_slicing,
+    reason = "membership replay validates DAG shape and indexes only bounded, internally constructed tables"
+)]
 //! Membership and access control through an **actor-keyed** signed ACL op-graph.
 //!
 //! Membership binds an [`ActorId`] — a
@@ -446,6 +451,10 @@ pub struct AclOp {
 }
 
 impl AclOp {
+    #[allow(
+        clippy::expect_used,
+        reason = "derived postcard serialization of AclOp has no fallible fields"
+    )]
     fn encode(&self) -> Vec<u8> {
         postcard::to_stdvec(self).expect("encode acl op")
     }
@@ -1338,7 +1347,9 @@ pub fn replay_continue(
         if !ok {
             continue;
         }
-        let op = decoded[h].as_ref().expect("authorized ops decoded");
+        let Some(op) = decoded.get(h).and_then(Option::as_ref) else {
+            continue;
+        };
         authorized.push(h.clone());
         apply_authorized(
             op,
@@ -1414,7 +1425,9 @@ fn materialize_authorized(
     let mut policy = PolicyPass::default();
 
     for h in authorized {
-        let op = decoded[h].as_ref().expect("authorized ops decoded");
+        let Some(op) = decoded.get(h).and_then(Option::as_ref) else {
+            continue;
+        };
         if let (AclAction::AddMember { .. }, Some(nonce)) = (&op.action, &op.nonce) {
             spent_nonces.insert(*nonce);
         }

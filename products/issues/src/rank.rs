@@ -1,3 +1,9 @@
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    clippy::indexing_slicing,
+    reason = "rank operations validate the ASCII alphabet and rank bounds before positional arithmetic"
+)]
 //! Fractional index ranks — an order over LWW map records.
 //!
 //! Milestones live in a catalog *map*, not a list, so their order cannot be the

@@ -462,7 +462,7 @@ fn the_wire_bounds_agree_with_the_geometry_and_the_store() {
         "a request cannot name more chunks than any content can have"
     );
     assert_eq!(
-        runtime::contact::MAX_CHUNK,
+        runtime::plane::contact::MAX_CHUNK,
         replica::content::CHUNK_PLAINTEXT_LEN as usize,
         "Contact's body chunk and the content chunk are one number by intent, \
          not by coincidence"

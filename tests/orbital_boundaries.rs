@@ -42,7 +42,7 @@ fn issues_semantics_and_client_application_are_separate_packages() {
     let semantic = products.join("issues");
     let application = products.join("issues-app");
 
-    for forbidden in ["clap", "world-interface", "world-bridge"] {
+    for forbidden in ["clap", "world-interface"] {
         assert!(
             !manifest_at(&semantic, forbidden),
             "the semantic IssuesWorld package must not depend on {forbidden}"
@@ -54,7 +54,6 @@ fn issues_semantics_and_client_application_are_separate_packages() {
         "replica",
         "runtime",
         "world-interface",
-        "world-bridge",
     ] {
         assert!(
             manifest_at(&application, required),
@@ -92,14 +91,14 @@ fn issues_semantics_and_client_application_are_separate_packages() {
             "Issues formation detail `{product_detail}` leaked into the orbital host"
         );
     }
-    let space_bridge = read(&workspace_root().join("src/orbital/space_bridge.rs"));
+    let station_host = read(&workspace_root().join("src/orbital/hosting.rs"));
     for product_projection in [
         "IssueQuery::Inbox",
         "IssueQuery::RingDigest",
         "RingDigestView",
     ] {
         assert!(
-            !space_bridge.contains(product_projection),
+            !station_host.contains(product_projection),
             "Issues projection detail `{product_projection}` leaked into StationHost"
         );
     }

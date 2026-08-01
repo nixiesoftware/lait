@@ -1,3 +1,22 @@
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects,
+        clippy::unreachable,
+        clippy::unimplemented,
+        clippy::unchecked_time_subtraction,
+        clippy::todo,
+        clippy::string_slice,
+        clippy::panic_in_result_fn,
+        clippy::panic,
+        clippy::exit,
+        clippy::as_conversions
+    )
+)]
+
 //! The Engine maintains the **shared world**: collaborative documents,
 //! persistence, history, convergence, and projection.
 //!
@@ -13,28 +32,18 @@
 //! inputs. Raw document handles never cross the boundary — everything outside
 //! sees [`fabric::Op`] transactions and typed exports.
 
+#[cfg(test)]
+mod algebra_reservation_tests;
 mod fabric;
 mod loro_ext;
 mod op;
 
-/// The semantics-free durable commit protocol, extracted into the lower
-/// `journal` crate (mechanics commits its authority ledger through the same
-/// machinery). Re-exported here so Engine consumers keep one durability
-/// namespace.
-pub mod journal {
-    pub use ::journal::*;
-}
-
-pub mod causal;
+mod causal;
 pub use causal::{
     Anchor, AnchorResolution, Artifact, ArtifactRef, CausalRelation, CheckpointPolicy,
-    ImportStatus, Material, OpHead, Version, CAUSAL_FORMAT_VERSION, MAX_HEADS,
+    ImportStatus, Invalid, Material, OpHead, Version, CAUSAL_FORMAT_VERSION, MAX_HEADS,
 };
 pub use fabric::{
-    commit, projection, BodyExport, CausalToken, CollaborativeView, Engine, Key, ListElement,
-    MemoryEngine, Op, Receipt, Transaction,
-};
-pub use fabric::{is_implemented_type_tag, is_reserved_type_tag};
-pub use journal::{
-    CallerIndex, FaultInjector, JournaledStore, ObjectRef, StoreManifest, FAULT_POINTS,
+    commit, projection, BodyExport, CausalToken, CollaborativeView, Engine, Key, ListElement, Op,
+    Receipt, Transaction,
 };

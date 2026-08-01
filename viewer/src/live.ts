@@ -17,7 +17,7 @@
  *
  * **This module does not read anything.** It folds. The engine polls the live
  * view once per tick for the whole server and pushes the answer down the
- * bridge's transient lane, so a hundred tabs on one issue cost one read; a
+ * socket's transient lane, so a hundred tabs on one issue cost one read; a
  * second reader here would be a second poller asking the same question with its
  * own generation, and for `signals` it would be worse than duplication — that
  * request drains, so two callers split the set and neither sees the whole.
@@ -36,7 +36,7 @@
 
 import { useCallback, useEffect, useMemo } from "react";
 
-import { openBridge, type Bridge, type BridgeEvent, type Question } from "./bridge";
+import { openSocket, type Socket, type SocketEvent, type Question } from "./socket";
 import { useWorldResource, useWorldViewStore } from "./core/worldViewReact";
 import type { ResourceKey, WorldViewStore } from "./core/worldViewStore";
 import type { CaretPosition, LiveEntry, LiveScope, Response, SignalEntry } from "./types";
@@ -398,7 +398,7 @@ export class LiveSlots {
 
 /** How a plane gets its socket. Injected so the slot store can be exercised
  *  without one. */
-export type BridgeOpener = (onEvent: (event: BridgeEvent) => void) => Bridge;
+export type SocketOpener = (onEvent: (event: SocketEvent) => void) => Socket;
 
 /**
  * The socket, and the slots it feeds.
@@ -417,7 +417,7 @@ export type BridgeOpener = (onEvent: (event: BridgeEvent) => void) => Bridge;
  */
 export class LivePlane {
   readonly slots: LiveSlots;
-  private bridge: Bridge | null = null;
+  private socket: Socket | null = null;
   /**
    * The space this tab is in.
    *
@@ -431,7 +431,7 @@ export class LivePlane {
 
   constructor(
     store: WorldViewStore,
-    private readonly open: BridgeOpener = openBridge,
+    private readonly open: SocketOpener = openSocket,
     clock: () => number = () => Date.now(),
   ) {
     this.slots = new LiveSlots(store, clock);
@@ -455,12 +455,12 @@ export class LivePlane {
       this.question ?? (this.attached === null ? null : { space: this.attached });
     this.slots.ask(this.question);
     // A tab that has named nothing at all does not open a socket to say so.
-    if (this.bridge === null && declared === null) return;
-    this.bridge ??= this.open((event) => this.receive(event));
-    this.bridge.watch(declared);
+    if (this.socket === null && declared === null) return;
+    this.socket ??= this.open((event) => this.receive(event));
+    this.socket.watch(declared);
   }
 
-  private receive(event: BridgeEvent): void {
+  private receive(event: SocketEvent): void {
     if (event.kind === "live") {
       this.slots.admit(event.space, event.issue, event.view);
       return;

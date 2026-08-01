@@ -1,3 +1,9 @@
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    clippy::indexing_slicing,
+    reason = "authorization compilation validates bounded policy dimensions before its private solver runs"
+)]
 //! The bounded authorization-demand algebra — the World-defined,
 //! Mechanics-enforced policy vocabulary.
 //!
@@ -56,26 +62,53 @@ const TAG_ANY: u8 = 0x03;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Invalid {
     /// A world/capability identifier violates the grammar or bounds.
-    BadIdentifier(String),
+    BadIdentifier,
     /// A resource violates the segment/byte bounds or contains a wildcard.
-    BadResource(String),
+    BadResource,
     /// The expression violates a structural bound (depth, children, leaves,
     /// bytes) or contains an empty node.
-    BadStructure(String),
+    BadStructure,
     /// Children are unsorted or duplicated (non-canonical input).
-    NonCanonical(String),
+    NonCanonical,
     /// The encoded form has an unknown tag, truncation, or trailing bytes.
-    BadEncoding(String),
+    BadEncoding,
+}
+
+impl Invalid {
+    fn bad_identifier(diagnostic: String) -> Self {
+        tracing::warn!(%diagnostic, "Authorization identifier was invalid");
+        Self::BadIdentifier
+    }
+
+    fn bad_resource(diagnostic: String) -> Self {
+        tracing::warn!(%diagnostic, "Authorization resource was invalid");
+        Self::BadResource
+    }
+
+    fn bad_structure(diagnostic: String) -> Self {
+        tracing::warn!(%diagnostic, "Authorization demand structure was invalid");
+        Self::BadStructure
+    }
+
+    fn non_canonical(diagnostic: String) -> Self {
+        tracing::warn!(%diagnostic, "Authorization demand was noncanonical");
+        Self::NonCanonical
+    }
+
+    fn bad_encoding(diagnostic: String) -> Self {
+        tracing::warn!(%diagnostic, "Authorization encoding was invalid");
+        Self::BadEncoding
+    }
 }
 
 impl std::fmt::Display for Invalid {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Invalid::BadIdentifier(m) => write!(f, "bad identifier: {m}"),
-            Invalid::BadResource(m) => write!(f, "bad resource: {m}"),
-            Invalid::BadStructure(m) => write!(f, "bad demand structure: {m}"),
-            Invalid::NonCanonical(m) => write!(f, "non-canonical demand: {m}"),
-            Invalid::BadEncoding(m) => write!(f, "bad demand encoding: {m}"),
+            Invalid::BadIdentifier => f.write_str("bad identifier"),
+            Invalid::BadResource => f.write_str("bad resource"),
+            Invalid::BadStructure => f.write_str("bad demand structure"),
+            Invalid::NonCanonical => f.write_str("non-canonical demand"),
+            Invalid::BadEncoding => f.write_str("bad demand encoding"),
         }
     }
 }
@@ -123,26 +156,26 @@ impl Resource {
 
     pub fn validate(&self) -> Result<(), Invalid> {
         if !valid_name(&self.world) {
-            return Err(Invalid::BadIdentifier(format!("world `{}`", self.world)));
+            return Err(Invalid::bad_identifier(format!("world `{}`", self.world)));
         }
         if self.segments.len() > MAX_RESOURCE_SEGMENTS {
-            return Err(Invalid::BadResource("too many segments".into()));
+            return Err(Invalid::bad_resource("too many segments".into()));
         }
         let mut total = 0usize;
         for seg in &self.segments {
             if seg.is_empty() || seg.len() > MAX_SEGMENT_BYTES {
-                return Err(Invalid::BadResource(format!(
+                return Err(Invalid::bad_resource(format!(
                     "segment length {}",
                     seg.len()
                 )));
             }
             if seg == "*" {
-                return Err(Invalid::BadResource("wildcard segment".into()));
+                return Err(Invalid::bad_resource("wildcard segment".into()));
             }
             total += seg.len();
         }
         if total > MAX_RESOURCE_BYTES {
-            return Err(Invalid::BadResource("resource bytes exceed 512".into()));
+            return Err(Invalid::bad_resource("resource bytes exceed 512".into()));
         }
         Ok(())
     }
@@ -165,10 +198,10 @@ impl PolicyCapability {
 
     pub fn validate(&self) -> Result<(), Invalid> {
         if !valid_name(&self.world) {
-            return Err(Invalid::BadIdentifier(format!("world `{}`", self.world)));
+            return Err(Invalid::bad_identifier(format!("world `{}`", self.world)));
         }
         if !valid_name(&self.name) {
-            return Err(Invalid::BadIdentifier(format!(
+            return Err(Invalid::bad_identifier(format!(
                 "capability `{}`",
                 self.name
             )));
@@ -208,7 +241,7 @@ impl AuthorizationDemand {
         let mut leaves = 0usize;
         let bytes = self.encode_node(1, &mut leaves)?;
         if bytes.len() > MAX_DEMAND_BYTES {
-            return Err(Invalid::BadStructure(
+            return Err(Invalid::bad_structure(
                 "canonical bytes exceed 16 KiB".into(),
             ));
         }
@@ -217,7 +250,7 @@ impl AuthorizationDemand {
 
     fn encode_node(&self, depth: usize, leaves: &mut usize) -> Result<Vec<u8>, Invalid> {
         if depth > MAX_DEMAND_DEPTH {
-            return Err(Invalid::BadStructure("depth exceeds 8".into()));
+            return Err(Invalid::bad_structure("depth exceeds 8".into()));
         }
         match self {
             AuthorizationDemand::Require {
@@ -227,13 +260,13 @@ impl AuthorizationDemand {
                 capability.validate()?;
                 resource.validate()?;
                 if capability.world != resource.world {
-                    return Err(Invalid::BadStructure(
+                    return Err(Invalid::bad_structure(
                         "capability and resource name different Worlds".into(),
                     ));
                 }
                 *leaves += 1;
                 if *leaves > MAX_REQUIRE_LEAVES {
-                    return Err(Invalid::BadStructure("more than 128 leaves".into()));
+                    return Err(Invalid::bad_structure("more than 128 leaves".into()));
                 }
                 let mut out = vec![TAG_REQUIRE];
                 push_str(&mut out, &capability.world);
@@ -245,37 +278,36 @@ impl AuthorizationDemand {
                 Ok(out)
             }
             AuthorizationDemand::All(children) | AuthorizationDemand::Any(children) => {
-                let (tag, same_kind): (u8, fn(&AuthorizationDemand) -> bool) = match self {
-                    AuthorizationDemand::All(_) => {
-                        (TAG_ALL, |d| matches!(d, AuthorizationDemand::All(_)))
+                let is_all = matches!(self, AuthorizationDemand::All(_));
+                let tag = if is_all { TAG_ALL } else { TAG_ANY };
+                let same_kind = |d: &AuthorizationDemand| {
+                    if is_all {
+                        matches!(d, AuthorizationDemand::All(_))
+                    } else {
+                        matches!(d, AuthorizationDemand::Any(_))
                     }
-                    AuthorizationDemand::Any(_) => {
-                        (TAG_ANY, |d| matches!(d, AuthorizationDemand::Any(_)))
-                    }
-                    AuthorizationDemand::Require { .. } => unreachable!(),
                 };
                 // Flatten nested same-kind nodes before encoding.
                 let mut flat: Vec<&AuthorizationDemand> = Vec::new();
                 let mut stack: Vec<&AuthorizationDemand> = children.iter().rev().collect();
                 while let Some(child) = stack.pop() {
                     if same_kind(child) {
-                        match child {
-                            AuthorizationDemand::All(inner) | AuthorizationDemand::Any(inner) => {
-                                for c in inner.iter().rev() {
-                                    stack.push(c);
-                                }
+                        if let AuthorizationDemand::All(inner) | AuthorizationDemand::Any(inner) =
+                            child
+                        {
+                            for c in inner.iter().rev() {
+                                stack.push(c);
                             }
-                            AuthorizationDemand::Require { .. } => unreachable!(),
                         }
                     } else {
                         flat.push(child);
                     }
                 }
                 if flat.is_empty() {
-                    return Err(Invalid::BadStructure("empty node".into()));
+                    return Err(Invalid::bad_structure("empty node".into()));
                 }
                 if flat.len() > MAX_CHILDREN {
-                    return Err(Invalid::BadStructure("more than 32 children".into()));
+                    return Err(Invalid::bad_structure("more than 32 children".into()));
                 }
                 let mut encoded: Vec<Vec<u8>> = flat
                     .iter()
@@ -284,7 +316,7 @@ impl AuthorizationDemand {
                 encoded.sort();
                 for w in encoded.windows(2) {
                     if w[0] == w[1] {
-                        return Err(Invalid::NonCanonical("duplicate children".into()));
+                        return Err(Invalid::non_canonical("duplicate children".into()));
                     }
                 }
                 let mut out = vec![tag];
@@ -303,17 +335,17 @@ impl AuthorizationDemand {
     /// nesting (a same-kind child that should have been flattened) all reject.
     pub fn decode_canonical(bytes: &[u8]) -> Result<Self, Invalid> {
         if bytes.len() > MAX_DEMAND_BYTES {
-            return Err(Invalid::BadEncoding("exceeds 16 KiB".into()));
+            return Err(Invalid::bad_encoding("exceeds 16 KiB".into()));
         }
         let mut leaves = 0usize;
         let (demand, used) = Self::decode_node(bytes, 1, &mut leaves)?;
         if used != bytes.len() {
-            return Err(Invalid::BadEncoding("trailing bytes".into()));
+            return Err(Invalid::bad_encoding("trailing bytes".into()));
         }
         // Canonical means round-trip byte equality.
         let re = demand.encode_canonical()?;
         if re != bytes {
-            return Err(Invalid::NonCanonical("re-encode mismatch".into()));
+            return Err(Invalid::non_canonical("re-encode mismatch".into()));
         }
         Ok(demand)
     }
@@ -324,11 +356,11 @@ impl AuthorizationDemand {
         leaves: &mut usize,
     ) -> Result<(Self, usize), Invalid> {
         if depth > MAX_DEMAND_DEPTH {
-            return Err(Invalid::BadStructure("depth exceeds 8".into()));
+            return Err(Invalid::bad_structure("depth exceeds 8".into()));
         }
         let tag = *bytes
             .first()
-            .ok_or_else(|| Invalid::BadEncoding("empty".into()))?;
+            .ok_or_else(|| Invalid::bad_encoding("empty".into()))?;
         match tag {
             TAG_REQUIRE => {
                 let mut pos = 1;
@@ -336,11 +368,11 @@ impl AuthorizationDemand {
                 let name = read_str(bytes, &mut pos)?;
                 let count = *bytes
                     .get(pos)
-                    .ok_or_else(|| Invalid::BadEncoding("truncated".into()))?
+                    .ok_or_else(|| Invalid::bad_encoding("truncated".into()))?
                     as usize;
                 pos += 1;
                 if count > MAX_RESOURCE_SEGMENTS {
-                    return Err(Invalid::BadResource("too many segments".into()));
+                    return Err(Invalid::bad_resource("too many segments".into()));
                 }
                 let mut segments = Vec::with_capacity(count);
                 for _ in 0..count {
@@ -348,7 +380,7 @@ impl AuthorizationDemand {
                 }
                 *leaves += 1;
                 if *leaves > MAX_REQUIRE_LEAVES {
-                    return Err(Invalid::BadStructure("more than 128 leaves".into()));
+                    return Err(Invalid::bad_structure("more than 128 leaves".into()));
                 }
                 let demand = AuthorizationDemand::Require {
                     capability: PolicyCapability {
@@ -361,21 +393,21 @@ impl AuthorizationDemand {
             }
             TAG_ALL | TAG_ANY => {
                 if bytes.len() < 3 {
-                    return Err(Invalid::BadEncoding("truncated".into()));
+                    return Err(Invalid::bad_encoding("truncated".into()));
                 }
                 let count = u16::from_be_bytes([bytes[1], bytes[2]]) as usize;
                 if count == 0 {
-                    return Err(Invalid::BadStructure("empty node".into()));
+                    return Err(Invalid::bad_structure("empty node".into()));
                 }
                 if count > MAX_CHILDREN {
-                    return Err(Invalid::BadStructure("more than 32 children".into()));
+                    return Err(Invalid::bad_structure("more than 32 children".into()));
                 }
                 let mut pos = 3;
                 let mut children = Vec::with_capacity(count);
                 let mut prev: Option<&[u8]> = None;
                 for _ in 0..count {
                     if bytes.len() < pos + 4 {
-                        return Err(Invalid::BadEncoding("truncated".into()));
+                        return Err(Invalid::bad_encoding("truncated".into()));
                     }
                     let len = u32::from_be_bytes([
                         bytes[pos],
@@ -385,25 +417,25 @@ impl AuthorizationDemand {
                     ]) as usize;
                     pos += 4;
                     if bytes.len() < pos + len {
-                        return Err(Invalid::BadEncoding("truncated child".into()));
+                        return Err(Invalid::bad_encoding("truncated child".into()));
                     }
                     let slice = &bytes[pos..pos + len];
                     if let Some(prev) = prev {
                         if prev >= slice {
-                            return Err(Invalid::NonCanonical(
+                            return Err(Invalid::non_canonical(
                                 "children unsorted or duplicated".into(),
                             ));
                         }
                     }
                     // A same-kind nested child should have been flattened.
                     if slice.first() == Some(&tag) {
-                        return Err(Invalid::NonCanonical(
+                        return Err(Invalid::non_canonical(
                             "same-kind child not flattened".into(),
                         ));
                     }
                     let (child, used) = Self::decode_node(slice, depth + 1, leaves)?;
                     if used != len {
-                        return Err(Invalid::BadEncoding("child trailing bytes".into()));
+                        return Err(Invalid::bad_encoding("child trailing bytes".into()));
                     }
                     children.push(child);
                     prev = Some(slice);
@@ -416,7 +448,7 @@ impl AuthorizationDemand {
                 };
                 Ok((demand, pos))
             }
-            other => Err(Invalid::BadEncoding(format!("unknown tag {other}"))),
+            other => Err(Invalid::bad_encoding(format!("unknown tag {other}"))),
         }
     }
 
@@ -488,6 +520,10 @@ pub struct AuthorizationReceipt {
 }
 
 impl AuthorizationReceipt {
+    #[allow(
+        clippy::expect_used,
+        reason = "derived postcard serialization of a validated receipt has no fallible fields"
+    )]
     pub fn encode(&self) -> Vec<u8> {
         postcard::to_stdvec(self).expect("encode authorization receipt")
     }
@@ -495,14 +531,14 @@ impl AuthorizationReceipt {
     /// Canonical decode with exact re-encode equality and the Allow pin.
     pub fn decode(bytes: &[u8]) -> Result<Self, Invalid> {
         let r: AuthorizationReceipt = postcard::from_bytes(bytes)
-            .map_err(|e| Invalid::BadEncoding(format!("receipt: {e}")))?;
+            .map_err(|e| Invalid::bad_encoding(format!("receipt: {e}")))?;
         if r.encode() != bytes {
-            return Err(Invalid::BadEncoding(
+            return Err(Invalid::bad_encoding(
                 "non-canonical receipt encoding".into(),
             ));
         }
         if r.decision != 1 {
-            return Err(Invalid::BadEncoding("a receipt is always an Allow".into()));
+            return Err(Invalid::bad_encoding("a receipt is always an Allow".into()));
         }
         Ok(r)
     }
@@ -534,6 +570,10 @@ pub struct WorldAssignmentEvidence {
 
 impl WorldAssignmentEvidence {
     /// The canonical bytes (postcard with sorted, deduplicated assignments).
+    #[allow(
+        clippy::expect_used,
+        reason = "derived postcard serialization of owned assignment evidence has no fallible fields"
+    )]
     pub fn canonical(&self) -> Vec<u8> {
         let mut e = self.clone();
         e.assignments.sort();
@@ -550,10 +590,10 @@ impl WorldAssignmentEvidence {
     /// every assignment scoped to the declared World.
     pub fn validate(&self) -> Result<(), Invalid> {
         if !valid_name(&self.world) {
-            return Err(Invalid::BadIdentifier(format!("world `{}`", self.world)));
+            return Err(Invalid::bad_identifier(format!("world `{}`", self.world)));
         }
         if self.assignments.len() > MAX_REQUIRE_LEAVES {
-            return Err(Invalid::BadStructure("too many assignments".into()));
+            return Err(Invalid::bad_structure("too many assignments".into()));
         }
         for (cap, res) in &self.assignments {
             cap.validate()?;
@@ -566,7 +606,7 @@ impl WorldAssignmentEvidence {
             let is_meta = *cap == crate::acl::policy_admin_capability()
                 && *res == crate::acl::policy_admin_resource();
             if !is_meta && (cap.world != self.world || res.world != self.world) {
-                return Err(Invalid::BadStructure(
+                return Err(Invalid::bad_structure(
                     "assignment outside the declared World".into(),
                 ));
             }
@@ -585,38 +625,38 @@ fn push_str(out: &mut Vec<u8>, s: &str) {
 /// project ids may carry any UTF-8).
 fn read_segment(bytes: &[u8], pos: &mut usize) -> Result<String, Invalid> {
     if bytes.len() < *pos + 2 {
-        return Err(Invalid::BadEncoding("truncated".into()));
+        return Err(Invalid::bad_encoding("truncated".into()));
     }
     let len = u16::from_be_bytes([bytes[*pos], bytes[*pos + 1]]) as usize;
     *pos += 2;
     if bytes.len() < *pos + len {
-        return Err(Invalid::BadEncoding("truncated string".into()));
+        return Err(Invalid::bad_encoding("truncated string".into()));
     }
     let s = std::str::from_utf8(&bytes[*pos..*pos + len])
-        .map_err(|_| Invalid::BadEncoding("non-UTF-8".into()))?
+        .map_err(|_| Invalid::bad_encoding("non-UTF-8".into()))?
         .to_string();
     *pos += len;
     if s.is_empty() || s.len() > MAX_SEGMENT_BYTES || s == "*" {
-        return Err(Invalid::BadResource(format!("segment `{s}`")));
+        return Err(Invalid::bad_resource(format!("segment `{s}`")));
     }
     Ok(s)
 }
 
 fn read_str(bytes: &[u8], pos: &mut usize) -> Result<String, Invalid> {
     if bytes.len() < *pos + 2 {
-        return Err(Invalid::BadEncoding("truncated".into()));
+        return Err(Invalid::bad_encoding("truncated".into()));
     }
     let len = u16::from_be_bytes([bytes[*pos], bytes[*pos + 1]]) as usize;
     *pos += 2;
     if bytes.len() < *pos + len {
-        return Err(Invalid::BadEncoding("truncated string".into()));
+        return Err(Invalid::bad_encoding("truncated string".into()));
     }
     let s = std::str::from_utf8(&bytes[*pos..*pos + len])
-        .map_err(|_| Invalid::BadEncoding("non-UTF-8".into()))?
+        .map_err(|_| Invalid::bad_encoding("non-UTF-8".into()))?
         .to_string();
     *pos += len;
     if !valid_name(&s) {
-        return Err(Invalid::BadIdentifier(s));
+        return Err(Invalid::bad_identifier(s));
     }
     Ok(s)
 }
@@ -671,10 +711,7 @@ mod tests {
             AuthorizationDemand::require(cap("space.admin"), space()),
             AuthorizationDemand::require(cap("space.admin"), space()),
         ]);
-        assert!(matches!(
-            d.encode_canonical(),
-            Err(Invalid::NonCanonical(_))
-        ));
+        assert!(matches!(d.encode_canonical(), Err(Invalid::NonCanonical)));
     }
 
     #[test]
@@ -694,10 +731,7 @@ mod tests {
                 AuthorizationDemand::Any(vec![d])
             };
         }
-        assert!(matches!(
-            d.encode_canonical(),
-            Err(Invalid::BadStructure(_))
-        ));
+        assert!(matches!(d.encode_canonical(), Err(Invalid::BadStructure)));
 
         // Children: 33 distinct leaves under one Any.
         let many: Vec<_> = (0..33)
@@ -790,13 +824,13 @@ mod tests {
         bad[0] = 0x7F;
         assert!(matches!(
             AuthorizationDemand::decode_canonical(&bad),
-            Err(Invalid::BadEncoding(_))
+            Err(Invalid::BadEncoding)
         ));
         // Trailing bytes.
         bytes.push(0x00);
         assert!(matches!(
             AuthorizationDemand::decode_canonical(&bytes),
-            Err(Invalid::BadEncoding(_))
+            Err(Invalid::BadEncoding)
         ));
         // Unsorted children: encode two leaves, swap them manually.
         let a = AuthorizationDemand::require(cap("aa"), space())
@@ -813,7 +847,7 @@ mod tests {
         }
         assert!(matches!(
             AuthorizationDemand::decode_canonical(&swapped),
-            Err(Invalid::NonCanonical(_))
+            Err(Invalid::NonCanonical)
         ));
         // A same-kind nested child (should have been flattened).
         let inner_any = {
@@ -829,7 +863,7 @@ mod tests {
         nested.extend_from_slice(&inner_any);
         assert!(matches!(
             AuthorizationDemand::decode_canonical(&nested),
-            Err(Invalid::NonCanonical(_))
+            Err(Invalid::NonCanonical)
         ));
     }
 

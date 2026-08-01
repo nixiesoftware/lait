@@ -114,15 +114,21 @@ fn truncate_preserving_extension(name: &str, limit: usize) -> String {
     }
     let extension = name
         .rfind('.')
-        .filter(|dot| *dot > 0 && name.len() - dot <= 16)
-        .map(|dot| &name[dot..])
+        .filter(|dot| {
+            *dot > 0
+                && name
+                    .len()
+                    .checked_sub(*dot)
+                    .is_some_and(|length| length <= 16)
+        })
+        .and_then(|dot| name.get(dot..))
         .unwrap_or("");
     let room = limit.saturating_sub(extension.len());
     let mut end = room.min(name.len());
     while end > 0 && !name.is_char_boundary(end) {
-        end -= 1;
+        end = end.saturating_sub(1);
     }
-    format!("{}{}", &name[..end], extension)
+    format!("{}{}", name.get(..end).unwrap_or(""), extension)
 }
 
 /// Where saved content is allowed to land.

@@ -1,3 +1,9 @@
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    clippy::expect_used,
+    reason = "authority configuration bounds make these widening counts and generation arithmetic explicit invariants"
+)]
 //! Scheme-neutral vocabulary for the recovery-authority lifecycle.
 //!
 //! The space plane understands exactly one thing: a public key that verifies one
@@ -9,7 +15,7 @@
 //! can be written once and survive a second signing backend. They deliberately
 //! carry **no** policy semantics: no trees, no access matrices, no
 //! reconstruction vectors. A scheme's specifics ride in an opaque
-//! [`AuthorityConfiguration::payload`], so adding a backend does not reshape the
+//! [`Config::payload`], so adding a backend does not reshape the
 //! lifecycle around it.
 //!
 //! # The distinction that matters most
@@ -33,11 +39,11 @@ const CONFIG_ID_DOMAIN: &[u8] = b"lait/space/1/authority/config-id";
 /// How an authority's private half is operated.
 ///
 /// The scheme is what tells a participant which decoder to apply to
-/// [`AuthorityConfiguration::payload`]. An unrecognized scheme must be rejected
+/// [`Config::payload`]. An unrecognized scheme must be rejected
 /// rather than guessed at — a node that cannot understand a configuration cannot
 /// safely take part in a ceremony that uses it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub enum AuthorityScheme {
+pub enum Scheme {
     /// One holder with the whole secret. The bootstrap state.
     Single,
     /// Flat K-of-N FROST over a participant list (RFC 9591).
@@ -53,61 +59,61 @@ pub enum AuthorityScheme {
 /// configurations around without understanding them, and only the backend that
 /// declares a scheme decodes its payload.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AuthorityConfiguration {
+pub struct Config {
     pub version: u16,
-    pub scheme: AuthorityScheme,
+    pub scheme: Scheme,
     pub payload: Vec<u8>,
 }
 
-impl AuthorityConfiguration {
+impl Config {
     /// A configuration for the bootstrap single-holder authority. The key itself
     /// identifies it, so the payload is empty.
     pub fn single() -> Self {
-        AuthorityConfiguration {
+        Config {
             version: 1,
-            scheme: AuthorityScheme::Single,
+            scheme: Scheme::Single,
             payload: Vec::new(),
         }
     }
 
     /// A flat K-of-N FROST configuration.
     pub fn frost_threshold(config: &FrostThresholdConfig) -> Self {
-        AuthorityConfiguration {
+        Config {
             version: 1,
-            scheme: AuthorityScheme::FrostThreshold,
+            scheme: Scheme::FrostThreshold,
             payload: postcard::to_stdvec(config).expect("encode frost config"),
         }
     }
 
     /// Decode this configuration as flat FROST, or `None` if it is not one.
     pub fn as_frost_threshold(&self) -> Option<FrostThresholdConfig> {
-        (self.scheme == AuthorityScheme::FrostThreshold)
+        (self.scheme == Scheme::FrostThreshold)
             .then(|| postcard::from_bytes(&self.payload).ok())
             .flatten()
     }
 
     /// A general-access configuration over a compiled ownership policy.
     pub fn general_access(config: &GeneralAccessConfig) -> Self {
-        AuthorityConfiguration {
+        Config {
             version: 1,
-            scheme: AuthorityScheme::GeneralAccess,
+            scheme: Scheme::GeneralAccess,
             payload: postcard::to_stdvec(config).expect("encode general-access config"),
         }
     }
 
     /// Decode this configuration as general-access, or `None`.
     pub fn as_general_access(&self) -> Option<GeneralAccessConfig> {
-        (self.scheme == AuthorityScheme::GeneralAccess)
+        (self.scheme == Scheme::GeneralAccess)
             .then(|| postcard::from_bytes(&self.payload).ok())
             .flatten()
     }
 
     /// The content-address of this configuration.
-    pub fn id(&self) -> AuthorityConfigurationId {
+    pub fn id(&self) -> ConfigId {
         let mut h = blake3::Hasher::new();
         h.update(CONFIG_ID_DOMAIN);
         h.update(&postcard::to_stdvec(self).expect("encode authority configuration"));
-        AuthorityConfigurationId(*h.finalize().as_bytes())
+        ConfigId(*h.finalize().as_bytes())
     }
 
     /// Whether this configuration is well formed *for its declared scheme*.
@@ -118,8 +124,8 @@ impl AuthorityConfiguration {
     /// whole ceremony depends on.
     pub fn is_well_formed(&self) -> bool {
         match self.scheme {
-            AuthorityScheme::Single => self.payload.is_empty(),
-            AuthorityScheme::FrostThreshold => self
+            Scheme::Single => self.payload.is_empty(),
+            Scheme::FrostThreshold => self
                 .as_frost_threshold()
                 .is_some_and(|c| c.is_well_formed()),
             // Structural well-formedness only: the payload decodes and its leaf
@@ -128,18 +134,18 @@ impl AuthorityConfiguration {
             // check that needs the policy tree — `compile::verify_compilation`
             // during transition acceptance — not something derivable from the
             // config alone.
-            AuthorityScheme::GeneralAccess => self
+            Scheme::GeneralAccess => self
                 .as_general_access()
                 .is_some_and(|c| c.is_structurally_well_formed()),
         }
     }
 }
 
-/// The content-address of an [`AuthorityConfiguration`].
+/// The content-address of an [`Config`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct AuthorityConfigurationId([u8; 32]);
+pub struct ConfigId([u8; 32]);
 
-impl AuthorityConfigurationId {
+impl ConfigId {
     pub fn to_hex(&self) -> String {
         data_encoding::HEXLOWER.encode(&self.0)
     }
@@ -150,7 +156,7 @@ impl AuthorityConfigurationId {
     /// old key-only `Rotate` — which never named a configuration — replays to.
     /// Content-addressed like any other, just from a fixed input.
     pub fn single() -> Self {
-        AuthorityConfiguration::single().id()
+        Config::single().id()
     }
 }
 
@@ -159,7 +165,7 @@ impl AuthorityConfigurationId {
 pub struct FrostThresholdConfig {
     pub k: u16,
     /// Participants, sorted and deduped. Position + 1 is the FROST index.
-    pub participants: Vec<PrincipalId>,
+    pub participants: Vec<Principal>,
 }
 
 impl FrostThresholdConfig {
@@ -168,7 +174,7 @@ impl FrostThresholdConfig {
     /// `k >= 1` is checked here, but note RFC 9591 itself requires `k >= 2`;
     /// a 1-of-N "threshold" is a single holder wearing a threshold's clothes and
     /// the FROST implementation rejects it. Callers building a configuration
-    /// should use [`AuthorityScheme::Single`] for that case.
+    /// should use [`Scheme::Single`] for that case.
     pub fn is_well_formed(&self) -> bool {
         let n = self.participants.len();
         let mut sorted = self.participants.clone();
@@ -182,7 +188,7 @@ impl FrostThresholdConfig {
     }
 
     /// This principal's 1-based FROST index, if it is a participant.
-    pub fn index_of(&self, who: &PrincipalId) -> Option<u16> {
+    pub fn index_of(&self, who: &Principal) -> Option<u16> {
         self.participants
             .iter()
             .position(|p| p == who)
@@ -214,7 +220,7 @@ impl GeneralAccessConfig {
         if self.leaves.is_empty() {
             return false;
         }
-        let distinct: std::collections::BTreeSet<&LeafId> =
+        let distinct: std::collections::BTreeSet<&Holder> =
             self.leaves.iter().map(|l| &l.leaf).collect();
         distinct.len() == self.leaves.len()
     }
@@ -227,11 +233,11 @@ impl GeneralAccessConfig {
 /// policy branch — a federated founder — at which point one principal owns
 /// several leaves and collapsing them would lose the distinction.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct PrincipalId(String);
+pub struct Principal(String);
 
-impl PrincipalId {
+impl Principal {
     pub fn of_device(device: &DeviceId) -> Self {
-        PrincipalId(device.as_str().to_string())
+        Principal(device.as_str().to_string())
     }
     /// The device this principal is, when it is a direct device principal.
     pub fn as_device(&self) -> Option<DeviceId> {
@@ -244,18 +250,18 @@ impl PrincipalId {
 
 /// A cryptographic participant in the compiled access structure.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct LeafId(String);
+pub struct Holder(String);
 
-impl LeafId {
+impl Holder {
     /// The leaf of a flat-FROST principal, where principal and leaf coincide.
     /// Principal-to-leaf expansion instead mints per-occurrence leaf ids.
-    pub fn of_principal(p: &PrincipalId) -> Self {
-        LeafId(p.0.clone())
+    pub fn of_principal(p: &Principal) -> Self {
+        Holder(p.0.clone())
     }
     /// A leaf id from an opaque string (a content-addressed hex id minted during
     /// principal-to-leaf expansion). Not validated; the caller owns the derivation.
     pub fn from_string(s: String) -> Self {
-        LeafId(s)
+        Holder(s)
     }
     pub fn as_str(&self) -> &str {
         &self.0
@@ -269,21 +275,21 @@ impl LeafId {
 /// would mean only "the current key", and a proposal authorized before a
 /// configuration change could be replayed after one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AuthorityId {
+pub struct Authority {
     pub public_key: DeviceId,
-    pub configuration: AuthorityConfigurationId,
+    pub configuration: ConfigId,
 }
 
-impl AuthorityId {
-    pub fn new(public_key: DeviceId, configuration: &AuthorityConfiguration) -> Self {
-        AuthorityId {
+impl Authority {
+    pub fn new(public_key: DeviceId, configuration: &Config) -> Self {
+        Authority {
             public_key,
             configuration: configuration.id(),
         }
     }
     /// The bootstrap authority for a solo recovery key.
     pub fn single(public_key: DeviceId) -> Self {
-        Self::new(public_key, &AuthorityConfiguration::single())
+        Self::new(public_key, &Config::single())
     }
 }
 
@@ -298,14 +304,14 @@ impl AuthorityId {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AuthorityTransition {
     RotateKey {
-        from: AuthorityId,
-        next_configuration: AuthorityConfigurationId,
+        from: Authority,
+        next_configuration: ConfigId,
         next_public_key: DeviceId,
     },
     /// Reserved until proactive same-key resharing is implemented.
     Reshare {
-        authority: AuthorityId,
-        next_configuration: AuthorityConfigurationId,
+        authority: Authority,
+        next_configuration: ConfigId,
     },
 }
 
@@ -313,10 +319,10 @@ pub enum AuthorityTransition {
 mod tests {
     use super::*;
 
-    fn principals(seeds: &[u8]) -> Vec<PrincipalId> {
-        let mut v: Vec<PrincipalId> = seeds
+    fn principals(seeds: &[u8]) -> Vec<Principal> {
+        let mut v: Vec<Principal> = seeds
             .iter()
-            .map(|n| PrincipalId::of_device(&crate::crypto::device_from_seed(&[*n; 32])))
+            .map(|n| Principal::of_device(&crate::crypto::device_from_seed(&[*n; 32])))
             .collect();
         v.sort();
         v.dedup();
@@ -325,41 +331,37 @@ mod tests {
 
     #[test]
     fn a_configuration_id_is_stable_and_content_addressed() {
-        let a = AuthorityConfiguration::frost_threshold(&FrostThresholdConfig {
+        let a = Config::frost_threshold(&FrostThresholdConfig {
             k: 2,
             participants: principals(&[1, 2, 3]),
         });
-        let same = AuthorityConfiguration::frost_threshold(&FrostThresholdConfig {
+        let same = Config::frost_threshold(&FrostThresholdConfig {
             k: 2,
             participants: principals(&[1, 2, 3]),
         });
         assert_eq!(a.id(), same.id(), "same content, same id");
 
         // Every field is covered.
-        let other_k = AuthorityConfiguration::frost_threshold(&FrostThresholdConfig {
+        let other_k = Config::frost_threshold(&FrostThresholdConfig {
             k: 3,
             participants: principals(&[1, 2, 3]),
         });
         assert_ne!(a.id(), other_k.id(), "threshold is committed");
-        let other_set = AuthorityConfiguration::frost_threshold(&FrostThresholdConfig {
+        let other_set = Config::frost_threshold(&FrostThresholdConfig {
             k: 2,
             participants: principals(&[1, 2, 4]),
         });
         assert_ne!(a.id(), other_set.id(), "participants are committed");
-        assert_ne!(
-            a.id(),
-            AuthorityConfiguration::single().id(),
-            "scheme is committed"
-        );
+        assert_ne!(a.id(), Config::single().id(), "scheme is committed");
     }
 
     #[test]
     fn well_formedness_is_checked_per_scheme() {
-        assert!(AuthorityConfiguration::single().is_well_formed());
+        assert!(Config::single().is_well_formed());
         // Single carries no payload; anything else is malformed.
-        let bogus = AuthorityConfiguration {
+        let bogus = Config {
             version: 1,
-            scheme: AuthorityScheme::Single,
+            scheme: Scheme::Single,
             payload: vec![1],
         };
         assert!(!bogus.is_well_formed());
@@ -368,7 +370,7 @@ mod tests {
             k: 2,
             participants: principals(&[1, 2, 3]),
         };
-        assert!(AuthorityConfiguration::frost_threshold(&good).is_well_formed());
+        assert!(Config::frost_threshold(&good).is_well_formed());
 
         // A duplicated participant would corrupt the index mapping.
         let mut dup = good.clone();
@@ -402,9 +404,9 @@ mod tests {
     /// acceptable-because-undecodable.
     #[test]
     fn an_unimplemented_scheme_is_not_well_formed() {
-        let reserved = AuthorityConfiguration {
+        let reserved = Config {
             version: 1,
-            scheme: AuthorityScheme::GeneralAccess,
+            scheme: Scheme::GeneralAccess,
             payload: vec![],
         };
         assert!(!reserved.is_well_formed());
@@ -421,7 +423,7 @@ mod tests {
         assert_eq!(c.index_of(&ps[0]), Some(1));
         assert_eq!(c.index_of(&ps[2]), Some(3));
         assert_eq!(
-            c.index_of(&PrincipalId::of_device(&crate::crypto::device_from_seed(
+            c.index_of(&Principal::of_device(&crate::crypto::device_from_seed(
                 &[9u8; 32]
             ))),
             None
@@ -431,11 +433,11 @@ mod tests {
     #[test]
     fn an_authority_id_distinguishes_key_from_arrangement() {
         let key = crate::crypto::device_from_seed(&[1u8; 32]);
-        let two_of_three = AuthorityConfiguration::frost_threshold(&FrostThresholdConfig {
+        let two_of_three = Config::frost_threshold(&FrostThresholdConfig {
             k: 2,
             participants: principals(&[1, 2, 3]),
         });
-        let three_of_three = AuthorityConfiguration::frost_threshold(&FrostThresholdConfig {
+        let three_of_three = Config::frost_threshold(&FrostThresholdConfig {
             k: 3,
             participants: principals(&[1, 2, 3]),
         });
@@ -443,8 +445,8 @@ mod tests {
         // stops a proposal authorized under one configuration being replayed
         // after the configuration changed.
         assert_ne!(
-            AuthorityId::new(key.clone(), &two_of_three),
-            AuthorityId::new(key, &three_of_three)
+            Authority::new(key.clone(), &two_of_three),
+            Authority::new(key, &three_of_three)
         );
     }
 }

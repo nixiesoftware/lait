@@ -1,3 +1,7 @@
+#![allow(
+    clippy::as_conversions,
+    reason = "projection counts are bounded by validated product collections"
+)]
 //! Issues-specific projections used by host-owned status, inbox, and
 //! observation delivery.
 //!
@@ -9,8 +13,8 @@ use std::collections::{BTreeMap, HashMap};
 use issues::contract::{self, IssueQuery, RingDigestView};
 use issues::dto::{CatalogScope, DirtyProject, InboxEntry, ProjectRef};
 use issues::ids::SpaceId;
-use replica::ids::{BodyId, BodyKey};
-use runtime::{Query, Session};
+use replica::body::{BodyId, BodyKey};
+use runtime::{world::Query, Session};
 
 /// The Issues portion of a host status response.
 pub struct StatusProjection {
@@ -143,21 +147,21 @@ pub fn ring_state(session: &Session) -> Option<RingState> {
     Some(RingState { docs, planes })
 }
 
-/// Translate generic changed Body scopes into the Issues doorbell dirty-set.
+/// Translate generic changed Bodies into the Issues doorbell dirty-set.
 ///
 /// `baseline` is host-owned lifecycle state but its contents and update rules
 /// are product-defined. A missing projection conservatively returns no named
-/// scopes; the generic Observation reset/authority flags still pass through.
+/// Bodies; the generic Observation reset/authority flags still pass through.
 pub fn observation(
     session: &Session,
     space: &SpaceId,
-    scopes: &[BodyKey],
+    bodies: &[BodyKey],
     baseline: &mut Option<BTreeMap<CatalogScope, String>>,
 ) -> (Vec<DirtyProject>, Vec<CatalogScope>) {
     let catalog_body = contract::catalog_body_id(space);
     let mut catalog_dirty = false;
     let mut docs = Vec::new();
-    for key in scopes {
+    for key in bodies {
         if key.body == catalog_body {
             catalog_dirty = true;
         } else {

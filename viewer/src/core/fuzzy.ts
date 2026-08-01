@@ -55,7 +55,7 @@ export function fuzzyScore(needle: string, haystack: string): number | null {
  * cmdk's filter contract: return 0 to hide, higher sorts first.
  *
  * Shared by the palette and every picker so "matches" means one thing in this
- * client. Bridges `fuzzyScore`, whose `null`-means-no-match and unbounded range are
+ * client. Adapts `fuzzyScore`, whose `null`-means-no-match and unbounded range are
  * not what cmdk expects.
  *
  * Two traps, both survived by real bugs:

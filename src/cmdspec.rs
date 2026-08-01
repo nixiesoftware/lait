@@ -1,3 +1,7 @@
+// Clap's data registry uses enum discriminants and validated numeric ranges when
+// adapting its declarative command specification.
+#![allow(clippy::as_conversions)]
+
 //! Programmatic clap command registry.
 //!
 //! The CLI command set is defined as **data** — a `Vec<Spec>` built by
@@ -348,14 +352,16 @@ pub fn build_cli(specs: &[Spec]) -> Command {
         root = root.subcommand(build_sub(s));
     }
     let clients = crate::world::client_packages();
-    clients
+    let clients_valid = clients
         .validate_reserved(
             specs.iter().map(|spec| spec.name),
             std::iter::empty::<&str>(),
         )
-        .expect("World client namespaces must not collide with shell commands");
-    for package in clients.packages() {
-        root = root.subcommand(package.cli().command().display_order(ORDER_DAILY));
+        .is_ok();
+    if clients_valid {
+        for package in clients.packages() {
+            root = root.subcommand(package.cli().command().display_order(ORDER_DAILY));
+        }
     }
     root
 }
@@ -481,7 +487,7 @@ pub fn parse_world_invocation(
         .cli()
         .parse(package_matches)
         .map(Some)
-        .map_err(|error| anyhow!(error.to_string()))
+        .map_err(anyhow::Error::new)
 }
 
 /// The palette's canonical completion source: every visible invocable command

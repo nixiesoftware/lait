@@ -1,14 +1,21 @@
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    clippy::indexing_slicing,
+    clippy::unwrap_used,
+    reason = "implementation tables and canonical payloads validate dimensions before fixed-layout access"
+)]
 //! The World implementation identity — the authority-approved
 //! compatibility/trust identity a Space pins.
 //!
 //! `WorldImplementationId` is the canonical digest of a
-//! [`WorldImplementationDescriptor`]. It is **not** native-code attestation:
+//! [`Implementation`]. It is **not** native-code attestation:
 //! trusted in-process Rust self-asserts its embedded descriptor; Runtime
 //! hashes it and requires the resulting id to be **active in Mechanics at the
 //! pinned authority frontier** before activation, dock, submit, query,
 //! projection/audit helpers, or IAM expansion planning. Upgrade and rollback
 //! are explicit authority operations
-//! ([`mechanics::acl::AclAction::ActivateWorldImplementation`]), never
+//! ([`mechanics::membership::AclAction::ActivateWorldImplementation`]), never
 //! deployment configuration.
 //!
 //! The descriptor body is a fixed-order binary tuple: `u16` version
@@ -43,7 +50,7 @@
 //! (`docs/COMPATIBILITY.md` §1, "A hash domain").
 
 use replica::body::{MutationModel, Schema};
-use replica::ids::{SchemaId, WorldId};
+use replica::body::{SchemaId, WorldId};
 
 use crate::world::{Descriptor, ScopeSchema, SignalSchema};
 
@@ -60,7 +67,7 @@ pub const DESCRIPTOR_VERSION_SECTIONED: u16 = 2;
 /// The longest list a count word can describe.
 ///
 /// Enforced at encode rather than at registration, unlike the *value* bounds
-/// `RuntimeBuilder::build` applies: those are policy about what a declaration
+/// `Builder::build` applies: those are policy about what a declaration
 /// may say, this is a fact about the format. A list past it has no canonical
 /// encoding, and an unchecked cast would truncate the count, derive an id over
 /// bytes carrying it, and leave `decode` refusing the very bytes the id
@@ -113,7 +120,7 @@ impl std::error::Error for Invalid {}
 
 /// The complete implementation descriptor a World embeds and self-asserts.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WorldImplementationDescriptor {
+pub struct Implementation {
     pub world: WorldId,
     /// The policy-protocol version this implementation speaks (demand
     /// selection semantics).
@@ -358,7 +365,7 @@ pub fn policy_table_commitment(table_bytes: &[u8]) -> [u8; 32] {
     blake3::derive_key(POLICY_TABLE_CONTEXT, table_bytes)
 }
 
-impl WorldImplementationDescriptor {
+impl Implementation {
     /// Build a descriptor from a complete World registration: schemas
     /// canonicalized and sorted, declarations sorted by name, and a section
     /// omitted entirely when its list is empty.
@@ -560,7 +567,7 @@ impl WorldImplementationDescriptor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use replica::ids::{EncodingId, SchemaId};
+    use replica::body::{EncodingId, SchemaId};
 
     fn schema(name: &str, version: u32) -> Schema {
         Schema {
@@ -583,13 +590,8 @@ mod tests {
         }
     }
 
-    fn descriptor(schemas: &[Schema]) -> WorldImplementationDescriptor {
-        WorldImplementationDescriptor::from_registration(
-            &registration(schemas),
-            1,
-            [3u8; 32],
-            [4u8; 32],
-        )
+    fn descriptor(schemas: &[Schema]) -> Implementation {
+        Implementation::from_registration(&registration(schemas), 1, [3u8; 32], [4u8; 32])
     }
 
     fn scope(name: &str, max_key_bytes: u32) -> ScopeSchema {
@@ -616,7 +618,7 @@ mod tests {
         ] {
             let d = descriptor(&schemas);
             let bytes = d.encode().unwrap();
-            let back = WorldImplementationDescriptor::decode(&bytes).unwrap();
+            let back = Implementation::decode(&bytes).unwrap();
             assert_eq!(d, back);
             assert_eq!(d.id().unwrap(), back.id().unwrap());
         }
@@ -626,7 +628,7 @@ mod tests {
     fn reordered_and_duplicate_schemas_reject() {
         let d = descriptor(&[schema("aa", 1), schema("bb", 1)]);
         let good = d.encode().unwrap();
-        WorldImplementationDescriptor::decode(&good).unwrap();
+        Implementation::decode(&good).unwrap();
 
         // Manually swap the two schema entries.
         let mut manual = d.clone();
@@ -671,14 +673,11 @@ mod tests {
         let mut wrong = bytes.clone();
         wrong[1] = 3;
         assert_eq!(
-            WorldImplementationDescriptor::decode(&wrong),
+            Implementation::decode(&wrong),
             Err(Invalid::UnknownVersion(3))
         );
         bytes.push(0);
-        assert_eq!(
-            WorldImplementationDescriptor::decode(&bytes),
-            Err(Invalid::TrailingBytes)
-        );
+        assert_eq!(Implementation::decode(&bytes), Err(Invalid::TrailingBytes));
     }
 
     #[test]
@@ -691,7 +690,7 @@ mod tests {
         bytes[1] = DESCRIPTOR_VERSION_SECTIONED as u8;
         bytes.extend_from_slice(&0u16.to_be_bytes());
         assert_eq!(
-            WorldImplementationDescriptor::decode(&bytes),
+            Implementation::decode(&bytes),
             Err(Invalid::EmptySectionTable)
         );
     }
@@ -713,7 +712,7 @@ mod tests {
             d.sections = sections;
             let bytes = d.encode().unwrap();
             assert_eq!(u16::from_be_bytes([bytes[0], bytes[1]]), 2);
-            let back = WorldImplementationDescriptor::decode(&bytes).unwrap();
+            let back = Implementation::decode(&bytes).unwrap();
             assert_eq!(d, back);
             assert_eq!(d.id().unwrap(), back.id().unwrap());
         }
@@ -727,7 +726,7 @@ mod tests {
         let mut reg = registration(&[schema("aa", 1)]);
         reg.scope_schemas = vec![scope("card", 32), scope("board", 64)];
         reg.signal_schemas = vec![signal("typing", 8), signal("note", 1024)];
-        let d = WorldImplementationDescriptor::from_registration(&reg, 1, [3u8; 32], [4u8; 32]);
+        let d = Implementation::from_registration(&reg, 1, [3u8; 32], [4u8; 32]);
         assert_eq!(
             d.sections,
             vec![
@@ -736,7 +735,7 @@ mod tests {
             ]
         );
         assert_eq!(d.implementation_version, 7);
-        WorldImplementationDescriptor::decode(&d.encode().unwrap()).unwrap();
+        Implementation::decode(&d.encode().unwrap()).unwrap();
     }
 
     #[test]
@@ -796,7 +795,7 @@ mod tests {
             scopes[..MAX_ENCODABLE_ENTRIES].to_vec(),
         )];
         let bytes = d.encode().unwrap();
-        assert_eq!(WorldImplementationDescriptor::decode(&bytes).unwrap(), d);
+        assert_eq!(Implementation::decode(&bytes).unwrap(), d);
 
         d.sections = Vec::new();
         d.schemas = (0..=MAX_ENCODABLE_ENTRIES)
@@ -817,7 +816,7 @@ mod tests {
         bytes.extend_from_slice(&2u32.to_be_bytes());
         bytes.extend_from_slice(&[0, 0]);
         assert_eq!(
-            WorldImplementationDescriptor::decode(&bytes),
+            Implementation::decode(&bytes),
             Err(Invalid::UnknownSectionTag(0x0009))
         );
     }
@@ -836,7 +835,7 @@ mod tests {
         fat[len_at..len_at + 4].copy_from_slice(&(len + 1).to_be_bytes());
         fat.push(0);
         assert_eq!(
-            WorldImplementationDescriptor::decode(&fat),
+            Implementation::decode(&fat),
             Err(Invalid::BadSection(section::SCOPE_SCHEMAS))
         );
 
@@ -847,7 +846,7 @@ mod tests {
         short[len_at..len_at + 4].copy_from_slice(&(len - 1).to_be_bytes());
         short.pop();
         assert_eq!(
-            WorldImplementationDescriptor::decode(&short),
+            Implementation::decode(&short),
             Err(Invalid::BadSection(section::SCOPE_SCHEMAS))
         );
     }

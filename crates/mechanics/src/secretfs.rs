@@ -1,3 +1,8 @@
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    reason = "platform FFI requires explicit pointer and ABI-width conversions after checked buffer construction"
+)]
 //! Creating secrets with an explicit private-storage boundary, on every platform.
 //!
 //! Key material (FROST shares, signing nonces, the break-glass recovery keys)

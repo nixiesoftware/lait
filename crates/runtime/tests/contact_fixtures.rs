@@ -5,8 +5,8 @@
 
 use mechanics::{ids::SpaceId, station::Key};
 use replica::body::ContentCommitment;
-use replica::ids::{BodyId, BodyKey, WorldId};
-use runtime::contact::{
+use replica::body::{BodyId, BodyKey, WorldId};
+use runtime::plane::contact::{
     abort, authority_record_hash, authority_set_hash, body_chunk_hash, manifest_node_hash,
     manifest_root_ref, AccepterEvent, AccepterValidator, ContactFrame, ContactId,
     InitiatorReceiver, InitiatorState, Invalid, Offer, Progress, Proof, CONTACT_PROTOCOL,
@@ -16,7 +16,7 @@ const INITIATOR_SEED: [u8; 32] = [71u8; 32];
 const RESPONDER_SEED: [u8; 32] = [72u8; 32];
 
 fn station_of(seed: &[u8; 32]) -> Key {
-    Key::from_device(&mechanics::crypto::device_from_seed(seed)).unwrap()
+    Key::from_device(&mechanics::actor::device_from_seed(seed)).unwrap()
 }
 
 fn space_bytes() -> [u8; 29] {
@@ -731,7 +731,7 @@ fn manifest_requests_must_reference_the_offer_and_stay_bounded() {
         acc.on_frame(
             &ContactFrame::ManifestRequest {
                 root,
-                nodes: vec![[1u8; 32]; runtime::contact::MAX_DESCENT_REQUEST + 1],
+                nodes: vec![[1u8; 32]; runtime::plane::contact::MAX_DESCENT_REQUEST + 1],
             }
             .encode(&contact()),
         ),
@@ -766,7 +766,7 @@ fn manifest_requests_must_reference_the_offer_and_stay_bounded() {
 
 #[test]
 fn the_signed_hello_binds_the_holdings_declaration() {
-    use runtime::contact::{encode_holdings, holdings_digest};
+    use runtime::plane::contact::{encode_holdings, holdings_digest};
     let held = vec![(body_key(), [7u8; 32]), (body_key(), [5u8; 32])];
     let bytes = encode_holdings(&held);
     let digest = holdings_digest(&bytes);
@@ -802,7 +802,7 @@ fn the_signed_hello_binds_the_holdings_declaration() {
 
 #[test]
 fn holdings_encoding_is_canonical_sorted_and_deduplicated() {
-    use runtime::contact::{decode_holdings, encode_holdings};
+    use runtime::plane::contact::{decode_holdings, encode_holdings};
     let a = vec![(body_key(), [7u8; 32]), (body_key(), [5u8; 32])];
     let b = vec![
         (body_key(), [5u8; 32]),
@@ -836,7 +836,7 @@ fn holdings_frames_roundtrip_and_stay_out_of_the_transfer_plane() {
     }
     // The initiator's transfer state machine refuses holdings frames — they
     // flow initiator -> accepter only, before the Ack.
-    let mut rx = runtime::InitiatorReceiver::new(contact());
+    let mut rx = runtime::plane::contact::InitiatorReceiver::new(contact());
     let enc = ContactFrame::HoldingsChunk {
         index: 0,
         bytes: vec![1],

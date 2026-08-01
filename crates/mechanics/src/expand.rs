@@ -1,3 +1,7 @@
+#![allow(
+    clippy::as_conversions,
+    reason = "expansion enforces small protocol ceilings before converting depth and leaf ordinals"
+)]
 //! Principal-to-leaf expansion.
 //!
 //! [`crate::policy`] gives a canonical policy over **principals** (ownership identities). Before
@@ -27,7 +31,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::authority::{LeafId, PrincipalId};
+use crate::authority::{Holder, Principal};
 use crate::ids::DeviceId;
 use crate::policy::{CanonicalPolicy, Invalid as PolicyInvalid, OwnershipPolicy, PolicyId};
 
@@ -63,7 +67,7 @@ pub enum PrincipalCustody {
 /// A principal and how it expands.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrincipalDescriptor {
-    pub id: PrincipalId,
+    pub id: Principal,
     pub custody: PrincipalCustody,
 }
 
@@ -72,8 +76,8 @@ pub struct PrincipalDescriptor {
 /// it distinct from every other leaf.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LeafDescriptor {
-    pub leaf: LeafId,
-    pub principal: PrincipalId,
+    pub leaf: Holder,
+    pub principal: Principal,
     pub device: DeviceId,
     /// Child-index path from the expanded root to this leaf. Unique per leaf.
     pub path: Vec<u32>,
@@ -83,7 +87,7 @@ pub struct LeafDescriptor {
 /// but with cryptographic leaves in place of principals.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum ExpandedPolicy {
-    Leaf(LeafId),
+    Leaf(Holder),
     Threshold {
         k: u16,
         members: Vec<ExpandedPolicy>,
@@ -126,9 +130,9 @@ impl Expansion {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Failure {
     /// A principal named in the policy has no descriptor.
-    UnknownPrincipal(PrincipalId),
+    UnknownPrincipal(Principal),
     /// A federated principal reaches itself, directly or through a chain.
-    Cycle(PrincipalId),
+    Cycle(Principal),
     /// Federation nests past [`MAX_FEDERATION_DEPTH`].
     TooDeep,
     /// Expansion produced more than [`MAX_EXPANDED_LEAVES`] leaves.
@@ -166,7 +170,7 @@ impl std::error::Error for Failure {}
 /// must be a pure function of the configuration, never of live state.
 pub fn expand(
     policy: &CanonicalPolicy,
-    resolve: &impl Fn(&PrincipalId) -> Option<PrincipalDescriptor>,
+    resolve: &impl Fn(&Principal) -> Option<PrincipalDescriptor>,
 ) -> Result<Expansion, Failure> {
     let mut leaves = Vec::new();
     let mut stack = Vec::new();
@@ -180,10 +184,10 @@ pub fn expand(
 
 fn expand_rec(
     policy: &CanonicalPolicy,
-    resolve: &impl Fn(&PrincipalId) -> Option<PrincipalDescriptor>,
+    resolve: &impl Fn(&Principal) -> Option<PrincipalDescriptor>,
     path: &mut Vec<u32>,
     // Principals currently being expanded on this descent, for cycle detection.
-    stack: &mut Vec<PrincipalId>,
+    stack: &mut Vec<Principal>,
     leaves: &mut Vec<LeafDescriptor>,
 ) -> Result<ExpandedPolicy, Failure> {
     if stack.len() > MAX_FEDERATION_DEPTH {
@@ -240,7 +244,7 @@ fn expand_rec(
 /// A leaf id bound to its occurrence path and provenance. The path makes it
 /// distinct per occurrence; principal and device bind provenance into the id so
 /// a descriptor cannot be swapped without changing the leaf it names.
-fn leaf_id(path: &[u32], principal: &PrincipalId, device: &DeviceId) -> LeafId {
+fn leaf_id(path: &[u32], principal: &Principal, device: &DeviceId) -> Holder {
     let mut h = blake3::Hasher::new();
     h.update(LEAF_DOMAIN);
     h.update(&(path.len() as u64).to_le_bytes());
@@ -249,17 +253,17 @@ fn leaf_id(path: &[u32], principal: &PrincipalId, device: &DeviceId) -> LeafId {
     }
     h.update(principal.as_str().as_bytes());
     h.update(device.as_str().as_bytes());
-    LeafId::from_string(data_encoding::HEXLOWER.encode(h.finalize().as_bytes()))
+    Holder::from_string(data_encoding::HEXLOWER.encode(h.finalize().as_bytes()))
 }
 
 impl ExpandedPolicy {
     /// The leaves of this expanded policy, in tree order.
-    pub fn leaves(&self) -> Vec<&LeafId> {
+    pub fn leaves(&self) -> Vec<&Holder> {
         let mut out = Vec::new();
         self.collect(&mut out);
         out
     }
-    fn collect<'a>(&'a self, out: &mut Vec<&'a LeafId>) {
+    fn collect<'a>(&'a self, out: &mut Vec<&'a Holder>) {
         match self {
             ExpandedPolicy::Leaf(l) => out.push(l),
             ExpandedPolicy::Threshold { members, .. } => {
@@ -279,8 +283,8 @@ mod tests {
     fn dev(n: u8) -> DeviceId {
         crate::crypto::device_from_seed(&[n; 32])
     }
-    fn prin(n: u8) -> PrincipalId {
-        PrincipalId::of_device(&dev(n))
+    fn prin(n: u8) -> Principal {
+        Principal::of_device(&dev(n))
     }
     fn key(n: u8) -> OwnershipPolicy {
         OwnershipPolicy::Key(prin(n))
@@ -289,9 +293,9 @@ mod tests {
     /// A resolver where each named principal is Direct on its own device, unless
     /// overridden with a federation.
     fn resolver(
-        federations: BTreeMap<PrincipalId, OwnershipPolicy>,
-    ) -> impl Fn(&PrincipalId) -> Option<PrincipalDescriptor> {
-        move |p: &PrincipalId| {
+        federations: BTreeMap<Principal, OwnershipPolicy>,
+    ) -> impl Fn(&Principal) -> Option<PrincipalDescriptor> {
+        move |p: &Principal| {
             let custody = match federations.get(p) {
                 Some(sub) => PrincipalCustody::Federated(sub.clone()),
                 None => PrincipalCustody::Direct {
@@ -393,7 +397,7 @@ mod tests {
             .canonicalize()
             .unwrap();
         // Resolver that knows no one.
-        let empty = |_: &PrincipalId| None;
+        let empty = |_: &Principal| None;
         assert!(matches!(
             expand(&policy, &empty),
             Err(Failure::UnknownPrincipal(_))
@@ -427,7 +431,7 @@ mod tests {
                         seed[1] = (base >> 8) as u8;
                         seed[2] = (i & 0xff) as u8;
                         seed[3] = (i >> 8) as u8;
-                        OwnershipPolicy::Key(PrincipalId::of_device(
+                        OwnershipPolicy::Key(Principal::of_device(
                             &crate::crypto::device_from_seed(&seed),
                         ))
                     })
@@ -457,7 +461,7 @@ mod tests {
         let e = expand(&policy, &resolver(fed)).unwrap();
         // Leaves: 20, 21 (from 2), and 3.
         assert_eq!(e.leaves().len(), 3);
-        let principals: Vec<&PrincipalId> = e.leaves().iter().map(|d| &d.principal).collect();
+        let principals: Vec<&Principal> = e.leaves().iter().map(|d| &d.principal).collect();
         assert!(principals.contains(&&prin(20)));
         assert!(principals.contains(&&prin(21)));
         assert!(principals.contains(&&prin(3)));

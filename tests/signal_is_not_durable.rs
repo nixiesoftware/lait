@@ -181,19 +181,21 @@ mod behaviour {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use mechanics::crypto::AuthorizedBodyKey;
+    use mechanics::authorization::AuthorizedBodyKey;
     use mechanics::{
         ids::{ActorId, DeviceId},
         station::Key,
     };
+    use replica::body::{BodyId, BodyKey, EncodingId, SchemaId, WorldId};
     use replica::body::{MutationModel, Op, Schema};
     use replica::frontier::{AuthorityFrontier, ReplicaFrontier};
-    use replica::ids::{BodyId, BodyKey, EncodingId, SchemaId, WorldId};
     use runtime::plane::Signal;
     use runtime::signal::DeliveredSignal;
     use runtime::{
-        ActivationOptions, Context, Descriptor, Effect, Intent, Limits, LocalIdentity, Projection,
-        Query, Rejection, RequestId, Runtime, RuntimeBuilder, Session, Station, Version, World,
+        plane::Activation, world::Builder, world::Context, world::Descriptor, world::Effect,
+        world::Intent, world::Limits, world::LocalIdentity, world::Projection, world::Query,
+        world::Rejection, world::RequestId, world::Version, world::World, Runtime, Session,
+        Station,
     };
 
     const WRITER_SEED: [u8; 32] = [55u8; 32];
@@ -208,9 +210,9 @@ mod behaviour {
     }
 
     fn demand() -> Vec<u8> {
-        mechanics::demand::AuthorizationDemand::require(
-            mechanics::demand::PolicyCapability::new("w", "c"),
-            mechanics::demand::Resource::root("w"),
+        mechanics::authorization::AuthorizationDemand::require(
+            mechanics::authorization::PolicyCapability::new("w", "c"),
+            mechanics::authorization::Resource::root("w"),
         )
         .encode_canonical()
         .expect("canonical demand")
@@ -262,7 +264,7 @@ mod behaviour {
                         value: value.as_bytes().to_vec(),
                     },
                 )],
-                scopes: vec![body],
+                bodies: vec![body],
                 effect: vec![],
                 declarations: vec![],
             })
@@ -280,9 +282,9 @@ mod behaviour {
     }
 
     struct Permissive;
-    impl runtime::AuthorityView for Permissive {
-        fn resolve(&self, _device: &DeviceId) -> Option<runtime::PrincipalResolution> {
-            Some(runtime::PrincipalResolution {
+    impl runtime::world::AuthorityView for Permissive {
+        fn resolve(&self, _device: &DeviceId) -> Option<runtime::world::PrincipalResolution> {
+            Some(runtime::world::PrincipalResolution {
                 actor: ActorId::from_incept_hash(&"e".repeat(64)),
                 authority_frontier: AuthorityFrontier::from_canonical_bytes(vec![5]),
             })
@@ -299,15 +301,12 @@ mod behaviour {
             scope_schemas: Vec::new(),
             signal_schemas: Vec::new(),
         };
-        let registry = RuntimeBuilder::new()
-            .register(Arc::new(world))
-            .build()
-            .unwrap();
+        let registry = Builder::new().register(Arc::new(world)).build().unwrap();
         Runtime::open(
             root.to_path_buf(),
             registry,
             Arc::new(Permissive),
-            Arc::new(replica::StaticBodyKeys::new(
+            Arc::new(replica::body::StaticBodyKeys::new(
                 AuthorizedBodyKey::for_authorized_epoch([17u8; 16], [18u8; 32]),
             )),
         )
@@ -317,8 +316,8 @@ mod behaviour {
         runtime_at(root).create().unwrap().open(options()).unwrap()
     }
 
-    fn options() -> ActivationOptions {
-        ActivationOptions {
+    fn options() -> Activation {
+        Activation {
             planes: Default::default(),
             content: Default::default(),
             drain_deadline: Duration::from_secs(5),
@@ -409,7 +408,7 @@ mod behaviour {
     /// record and then waits for live delivery, so counting a fresh one always
     /// returns one — which is how the first version of this passed its positive
     /// case and failed its own negative control.
-    fn drain(stream: &mut runtime::ObservationStream) -> usize {
+    fn drain(stream: &mut runtime::world::ObservationStream) -> usize {
         let mut seen = 0usize;
         while stream.try_next().is_ok_and(|record| record.is_some()) {
             seen += 1;
@@ -441,7 +440,7 @@ mod behaviour {
 
     fn drive(station: &Station, rounds: usize) {
         let from =
-            Key::from_device(&mechanics::crypto::device_from_seed(&[91u8; 32])).expect("station");
+            Key::from_device(&mechanics::actor::device_from_seed(&[91u8; 32])).expect("station");
         let live = station.live();
         for round in 0..rounds {
             for signal in signals() {

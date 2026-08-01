@@ -1,3 +1,10 @@
+#![allow(
+    clippy::expect_used,
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    clippy::indexing_slicing,
+    reason = "workflow tables are validated and canonicalized before indexed transition evaluation"
+)]
 //! IssuesWorld workflow definitions: deterministic assembly lines (plan 04).
 //!
 //! A workflow revision is `WorkflowRevision { revision_id, predecessor_ids,
@@ -12,7 +19,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::contract::PRODUCT_WORLD;
-use mechanics::demand::{AuthorizationDemand, PolicyCapability, Resource};
+use mechanics::authorization::{AuthorizationDemand, PolicyCapability, Resource};
 
 /// The BLAKE3 derive-key context for a workflow revision id.
 const WORKFLOW_REVISION_CONTEXT: &str = "lait.issues.workflow-revision.v1";
@@ -391,7 +398,8 @@ mod tests {
         let demand = t.demand_template.resolve("prj_x");
         let bytes = demand.encode_canonical().expect("canonical");
         // Round-trips through the canonical decoder (plan 01 limits hold).
-        mechanics::demand::AuthorizationDemand::decode_canonical(&bytes).expect("canonical demand");
+        mechanics::authorization::AuthorizationDemand::decode_canonical(&bytes)
+            .expect("canonical demand");
     }
 
     #[test]

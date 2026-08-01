@@ -1,3 +1,12 @@
+// Human-facing rendering operates on validated command shapes and bounded terminal
+// dimensions. Exits here are deliberate, documented CLI status outcomes.
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    clippy::exit,
+    clippy::string_slice
+)]
+
 //! CLI client: builds control requests, auto-spawns the daemon, prints results.
 //!
 //! CLI and MCP are Layer-B clients of the daemon (`docs/UI.md`); the web
@@ -313,7 +322,7 @@ pub async fn ensure_daemon(home: &Path) -> Result<()> {
 /// Ensure the current identity's process-level Lait daemon without selecting
 /// or activating an Orbit. The web viewer uses this even for an empty catalog.
 pub async fn ensure_lait_daemon() -> Result<()> {
-    let client = crate::daemon::LaitDaemonClient::current()?;
+    let client = crate::daemon::Client::current()?;
     let daemon_home = client.home();
     match client.probe().await {
         control::Probe::Healthy => return Ok(()),
@@ -465,7 +474,7 @@ pub async fn stop_daemon_verified(_home: &Path) -> Result<()> {
     // Read the pid before asking — a daemon that honours `stop` takes its lock
     // file with it, and we'd rather have the signal target than race for it.
     let pid = crate::config::daemon_pid(&daemon_home);
-    let daemon = crate::daemon::LaitDaemonClient::at(daemon_home.clone());
+    let daemon = crate::daemon::Client::at(daemon_home.clone());
     let _ = daemon
         .request(ControlRoute::Daemon, &Request::Stop, None)
         .await;
@@ -601,7 +610,7 @@ pub async fn client_action_as_scoped(
     let address = orbit_address_for_home(home)?;
     scope.authorize(&address)?;
     ensure_daemon(home).await?;
-    let daemon = crate::daemon::LaitDaemonClient::current()?;
+    let daemon = crate::daemon::Client::current()?;
     // The process endpoint answered the probe a moment ago, so a failure here
     // is the transport giving out mid-exchange: `3`, daemon unreachable.
     match action.payload() {
@@ -643,8 +652,8 @@ impl world_interface::ClientHost for PackageClientHost {
 
     fn call_world<'a>(
         &'a self,
-        call: crate::orbital::WorldCall,
-    ) -> world_interface::ClientFuture<'a, crate::orbital::WorldReply> {
+        call: runtime::world::call::Call,
+    ) -> world_interface::ClientFuture<'a, runtime::world::call::Reply> {
         Box::pin(async move {
             world_reply_as_scoped(&self.home, call, &self.scope, self.act_as.as_deref())
                 .await
@@ -704,7 +713,7 @@ impl world_interface::ClientHost for PackageClientHost {
                 .authorize(&address)
                 .map_err(|error| fail(anyhow!("{error:#}")))?;
             ensure_daemon(&self.home).await.map_err(&fail)?;
-            let daemon = crate::daemon::LaitDaemonClient::current().map_err(&fail)?;
+            let daemon = crate::daemon::Client::current().map_err(&fail)?;
             let route = crate::control::station_route(address);
             match request {
                 world_interface::HostContentRequest::Write { path } => {
@@ -763,8 +772,11 @@ async fn content_write(
         if read == 0 {
             break;
         }
+        let chunk = buffer
+            .get(..read)
+            .ok_or_else(|| fail("file reader returned an invalid byte count".to_string()))?;
         upload
-            .push(&buffer[..read])
+            .push(chunk)
             .await
             .map_err(|e| fail(format!("{e:#}")))?;
     }
@@ -805,7 +817,7 @@ async fn content_read(
                 crate::control::ContentCall::Read {
                     content: content.to_string(),
                     offset,
-                    len: runtime::content_host::MAX_RANGE_BYTES as u64,
+                    len: runtime::plane::freight::content::MAX_RANGE_BYTES as u64,
                 },
             ),
         )
@@ -890,10 +902,10 @@ pub fn print_presentation(presentation: &world_interface::Presentation) -> i32 {
 /// Send one package-owned call without decoding its opaque reply in the shell.
 pub async fn world_reply_as_scoped(
     home: &Path,
-    call: crate::orbital::WorldCall,
+    call: runtime::world::call::Call,
     scope: &ClientScope,
     act_as: Option<&str>,
-) -> Result<crate::orbital::WorldReply> {
+) -> Result<runtime::world::call::Reply> {
     let address = orbit_address_for_home(home)?;
     scope.authorize(&address)?;
     let route = ControlRoute::World {
@@ -901,7 +913,7 @@ pub async fn world_reply_as_scoped(
         world: call.world().as_str().to_string(),
     };
     ensure_daemon(home).await?;
-    crate::daemon::LaitDaemonClient::current()?
+    crate::daemon::Client::current()?
         .call_world(route, call, act_as)
         .await
         .map_err(|error| Failure::unreachable(format!("{error:#}")).into())
@@ -921,7 +933,7 @@ pub async fn request_running(home: &Path, req: &Request, act_as: Option<&str>) -
     scope.authorize(&address)?;
     let action = ClientAction::from_legacy(req.clone());
     let route = action.route(address);
-    let daemon = crate::daemon::LaitDaemonClient::current()?;
+    let daemon = crate::daemon::Client::current()?;
     if !matches!(daemon.probe().await, control::Probe::Healthy) {
         return Err(anyhow!("Lait daemon is not running"));
     }
@@ -1020,7 +1032,7 @@ pub async fn run_join(home: &Path, ticket: String, out: Out) -> Result<()> {
     // Parse client-side to recover the intended space before the link is
     // moved into the request. A malformed link simply yields no expectation;
     // the daemon returns the real parse error.
-    let parsed = runtime::SignedCoordinates::parse_link(ticket.trim())
+    let parsed = runtime::coordinates::SignedCoordinates::parse_link(ticket.trim())
         .ok()
         .and_then(|c| c.verify().ok());
     // An admission-carrying link admits automatically within seconds, so a
@@ -1496,10 +1508,14 @@ pub fn print_response(resp: &Response, out: Out) -> i32 {
             // when break-glass is attempted: by then it is too late to fix.
             for h in &s.degraded_recovery {
                 let why = match &h.reason {
-                    mechanics::ceremony::RecoveryArtifactFailure::Undecryptable(_) => {
+                    mechanics::recovery::artifact::Failure::WrongProtector => {
                         "it was protected under another Windows account or machine"
                     }
-                    mechanics::ceremony::RecoveryArtifactFailure::Io(_) => {
+                    mechanics::recovery::artifact::Failure::PermissionDenied => {
+                        "permission to read it was denied"
+                    }
+                    mechanics::recovery::artifact::Failure::Corrupt => "it is present but corrupt",
+                    mechanics::recovery::artifact::Failure::Io(_) => {
                         "it is present but could not be read"
                     }
                 };
@@ -2002,7 +2018,7 @@ pub async fn watch(
         address: address.clone(),
     };
     ensure_daemon(home).await?;
-    let daemon = crate::daemon::LaitDaemonClient::current()?;
+    let daemon = crate::daemon::Client::current()?;
     // Default to the current high-water: `watch` follows from now, not from the
     // start of the daemon's history.
     let mut cursor = match since {
@@ -2080,7 +2096,7 @@ pub async fn watch(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ids::SpaceId;
+    use issues::ids::SpaceId;
 
     #[test]
     fn client_side_exit_codes_come_from_the_type_not_the_prose() {

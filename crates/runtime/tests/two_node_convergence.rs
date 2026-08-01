@@ -14,16 +14,16 @@
 
 use std::sync::Arc;
 
-use mechanics::crypto::AuthorizedBodyKey;
+use mechanics::authorization::AuthorizedBodyKey;
 use mechanics::ids::SpaceId;
+use replica::body::{BodyBinding, Op, StaticBodyKeys, SupportedSchemas, MUTATION_COLLABORATIVE};
+use replica::body::{BodyId, BodyKey, EncodingId, SchemaId, WorldId};
 use replica::frontier::AuthorityFrontier;
 use replica::transaction::{AuthoritySource, Transaction, NO_PARENT_ROOT};
-use replica::{
-    BodyBinding, BodyId, BodyKey, CommitContext, EncodingId, Op, Replica, SchemaId, SeedSigner,
-    StaticBodyKeys, SupportedSchemas, WorldId, MUTATION_COLLABORATIVE,
-};
-use replica::{CommitAuthorization, StaticAuthorizer};
-use runtime::contact::{
+use replica::transaction::{CommitAuthorization, StaticAuthorizer};
+use replica::transaction::{CommitContext, SeedSigner};
+use replica::Replica;
+use runtime::plane::contact::{
     authority_record_hash, authority_set_hash, body_chunk_hash, manifest_node_hash,
     manifest_root_ref, ContactFrame, ContactId, InitiatorReceiver, InitiatorState, Progress,
     ReceivedMaterial,
@@ -46,7 +46,7 @@ struct ExporterAuthorized;
 impl AuthoritySource for ExporterAuthorized {
     fn signer_authorized(&self, signer: &[u8; 32], _f: &AuthorityFrontier) -> bool {
         *signer
-            == mechanics::crypto::device_from_seed(&EXPORT_SEED)
+            == mechanics::actor::device_from_seed(&EXPORT_SEED)
                 .key_bytes()
                 .unwrap()
     }
@@ -104,9 +104,9 @@ fn commit_votes(r: &mut Replica, request: [u8; 16], delta: i64) {
         world: note_key().world,
         implementation_id: [0u8; 32],
     };
-    let demand = mechanics::demand::AuthorizationDemand::require(
-        mechanics::demand::PolicyCapability::new(note_key().world.as_str(), "write"),
-        mechanics::demand::Resource::root(note_key().world.as_str()),
+    let demand = mechanics::authorization::AuthorizationDemand::require(
+        mechanics::authorization::PolicyCapability::new(note_key().world.as_str(), "write"),
+        mechanics::authorization::Resource::root(note_key().world.as_str()),
     )
     .encode_canonical()
     .unwrap();
@@ -120,7 +120,7 @@ fn commit_votes(r: &mut Replica, request: [u8; 16], delta: i64) {
             authorizer: &authorizer,
         },
         &note_key().world,
-        &mechanics::crypto::device_from_seed(&EXPORT_SEED),
+        &mechanics::actor::device_from_seed(&EXPORT_SEED),
         &request,
         &[1u8; 32],
         vec![],

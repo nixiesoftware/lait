@@ -20,13 +20,13 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use async_trait::async_trait;
+use comms::mem::MemNet;
+use comms::policy::Network;
+use comms::{Transport, TransportFactory};
 use lait::control::{request, Request, Response};
 use lait::diagnose::{DiagnosisView, GateState};
-use lait::net::Network;
-use lait::orbital::run_space_bridge_with;
+use lait::orbital::run_station_process_with;
 use lait::orbits::{Entry, Origin};
-use lait::transport::mem::MemNet;
-use lait::transport::{Transport, TransportFactory};
 
 const FOUNDER_SEED: [u8; 32] = [161u8; 32];
 const JOINER_SEED: [u8; 32] = [162u8; 32];
@@ -48,7 +48,8 @@ impl TransportFactory for MemFactory {
         _protocols: comms::Protocols<'_>,
     ) -> Result<Arc<dyn Transport>> {
         Ok(Arc::new(
-            self.0.peer(lait::crypto::device_from_seed(identity_seed)),
+            self.0
+                .peer(mechanics::actor::device_from_seed(identity_seed)),
         ))
     }
 }
@@ -92,7 +93,7 @@ fn spawn_daemon(home: PathBuf, seed: [u8; 32], net: MemNet) -> std::thread::Join
     std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async move {
-            if let Err(e) = run_space_bridge_with(home, seed, &MemFactory(net)).await {
+            if let Err(e) = run_station_process_with(home, seed, &MemFactory(net)).await {
                 eprintln!("DAEMON ERR: {e:#}");
             }
         });
@@ -182,11 +183,12 @@ fn diagnose_tracks_join_lifecycle_from_pending_to_all_pass() {
 
     // Drive Contact (the orbital admission handshake). Accepting the invite is
     // the approval — no manual admin step.
-    let founder_device = lait::crypto::device_from_seed(&FOUNDER_SEED).to_string();
-    let joiner_device = lait::crypto::device_from_seed(&JOINER_SEED).to_string();
+    let founder_device = mechanics::actor::device_from_seed(&FOUNDER_SEED).to_string();
+    let joiner_device = mechanics::actor::device_from_seed(&JOINER_SEED).to_string();
 
     // After admission + convergence, the joiner's diagnosis flips to all-pass:
     // member, peer online, board synced. blocked_on clears.
+    let mut last = None;
     let cleared = poll_until(Duration::from_secs(30), || {
         req(
             &rt,
@@ -210,9 +212,12 @@ fn diagnose_tracks_join_lifecycle_from_pending_to_all_pass() {
             },
         );
         let v = diagnose(&rt, &joiner_home, None);
+        last = Some(v.clone());
         v.blocked_on.is_none().then_some(v)
     });
-    let v = cleared.expect("the joiner should reach all-pass after admission + sync");
+    let v = cleared.unwrap_or_else(|| {
+        panic!("the joiner should reach all-pass after admission + sync: {last:?}")
+    });
     assert_eq!(gate_state(&v, "membership"), GateState::Pass);
     assert_eq!(gate_state(&v, "peer"), GateState::Pass);
     assert_eq!(gate_state(&v, "synced"), GateState::Pass);

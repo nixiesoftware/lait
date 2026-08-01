@@ -1,3 +1,7 @@
+#![allow(
+    clippy::arithmetic_side_effects,
+    reason = "lifecycle generations and bounded task counts are monotonic within process limits"
+)]
 //! The orbital lifecycle handles: [`Runtime`], [`Orbit`], and [`Station`].
 //!
 //! An Orbit is the durable relationship and persists while vacant or occupied.
@@ -29,12 +33,13 @@ use mechanics::{
     station::{Epoch, Key},
 };
 
-use crate::registry::{Registry, RuntimeBuilder};
+use crate::registry::{Builder, Catalog};
 use crate::session::Session;
 use crate::store::{OrbitStore, StoreLock};
 use crate::world::{AuthorityView, LocalIdentity, PrincipalFacts};
-use replica::ids::WorldId;
-use replica::{BodyKeySource, ConvergenceOutcome};
+use replica::body::BodyKeySource;
+use replica::body::WorldId;
+use replica::convergence::ConvergenceOutcome;
 
 /// The authority view a Runtime without one falls back to: nobody resolves, so
 /// nothing can dock. Membership exists only when the deployment supplies a real
@@ -56,10 +61,13 @@ impl AuthorityView for DenyAllAuthority {
 struct NoBodyKeys;
 
 impl BodyKeySource for NoBodyKeys {
-    fn sealing_key(&self) -> Option<mechanics::crypto::AuthorizedBodyKey> {
+    fn sealing_key(&self) -> Option<mechanics::authorization::AuthorizedBodyKey> {
         None
     }
-    fn opening_key(&self, _epoch: &[u8; 16]) -> Option<mechanics::crypto::AuthorizedBodyKey> {
+    fn opening_key(
+        &self,
+        _epoch: &[u8; 16],
+    ) -> Option<mechanics::authorization::AuthorizedBodyKey> {
         None
     }
 }
@@ -175,7 +183,7 @@ impl CancelToken {
 
 /// Options for activating an Orbit into a Station.
 #[derive(Debug, Default)]
-pub struct ActivationOptions {
+pub struct Activation {
     /// The deadline for draining tracked tasks at dormancy.
     pub drain_deadline: Duration,
     /// The content plane's local policy: how much disk it may hold, and how
@@ -192,7 +200,7 @@ pub struct ActivationOptions {
     pub observation_capacity: usize,
 }
 
-impl ActivationOptions {
+impl Activation {
     /// The default activation: offline, with the default drain deadline.
     pub fn offline() -> Self {
         Self {
@@ -300,7 +308,7 @@ impl RemovalConfirmation {
 /// [`Station`].
 #[derive(Clone)]
 pub struct Runtime {
-    registry: Registry,
+    registry: Catalog,
     root: Option<PathBuf>,
     /// The mechanics authority view principals are derived from. Sessions and
     /// Worlds cannot replace it; only the composition root supplies it.
@@ -313,14 +321,14 @@ pub struct Runtime {
 
 impl Runtime {
     /// Begin building a Runtime by registering Worlds.
-    pub fn builder() -> RuntimeBuilder {
-        RuntimeBuilder::new()
+    pub fn builder() -> Builder {
+        Builder::new()
     }
 
     /// Wrap a frozen registry into a Runtime with **no** store root and a
     /// deny-all authority. Such a Runtime can host Worlds but cannot form or
     /// acquire a durable Orbit, and nothing can dock.
-    pub fn from_registry(registry: Registry) -> Self {
+    pub fn from_registry(registry: Catalog) -> Self {
         Self {
             registry,
             root: None,
@@ -335,7 +343,7 @@ impl Runtime {
     /// `<root>/<space-id>/`.
     pub fn open(
         root: impl Into<PathBuf>,
-        registry: Registry,
+        registry: Catalog,
         authority: Arc<dyn AuthorityView>,
         keys: Arc<dyn BodyKeySource>,
     ) -> Self {
@@ -356,7 +364,7 @@ impl Runtime {
     }
 
     /// The immutable World registry this Runtime hosts.
-    pub fn registry(&self) -> &Registry {
+    pub fn registry(&self) -> &Catalog {
         &self.registry
     }
 
@@ -468,7 +476,7 @@ impl Runtime {
 /// consumes it.
 pub struct Orbit {
     store: OrbitStore,
-    registry: Registry,
+    registry: Catalog,
     authority: Arc<dyn AuthorityView>,
     keys: Arc<dyn BodyKeySource>,
     epoch: Epoch,
@@ -487,7 +495,7 @@ impl std::fmt::Debug for Orbit {
 impl Orbit {
     pub(crate) fn new(
         store: OrbitStore,
-        registry: Registry,
+        registry: Catalog,
         authority: Arc<dyn AuthorityView>,
         keys: Arc<dyn BodyKeySource>,
         epoch: Epoch,
@@ -518,7 +526,7 @@ impl Orbit {
     /// closed on overflow), then transfers the store lock into the live Station.
     /// The durable Orbit remains the same participation. Valid offline; grants
     /// no new Space authority.
-    fn open_station(self, options: ActivationOptions) -> Result<Station, Failure> {
+    fn open_station(self, options: Activation) -> Result<Station, Failure> {
         let drain_deadline = if options.drain_deadline.is_zero() {
             DEFAULT_DRAIN_DEADLINE
         } else {
@@ -530,21 +538,23 @@ impl Orbit {
         // state), and from then on every acknowledged commit has completed the
         // full journal protocol before `submit` returns. A crash, kill, or
         // `wait` exit after an acknowledged commit loses nothing.
-        let mut replica = replica::Replica::open_journaled(self.store.dir(), self.keys.clone())
-            .map_err(|e| match e {
-                replica::commit::Failure::Integrity(_) => Failure::Integrity(Integrity::Replica),
+        let mut replica =
+            replica::Replica::open(self.store.dir(), self.keys.clone()).map_err(|e| match e {
+                replica::transaction::commit::Failure::Integrity(_) => {
+                    Failure::Integrity(Integrity::Replica)
+                }
                 _ => Failure::Persistence(Persistence::Replica),
             })?;
         // Declare the registry's schemas so Convergence can classify remote
         // material as interpretable versus opaque.
-        let mut supported = replica::SupportedSchemas::new();
+        let mut supported = replica::body::SupportedSchemas::new();
         for id in self.registry.ids() {
             if let Some(reg) = self.registry.descriptor(id) {
                 for schema in &reg.schemas {
                     let model = match schema.mutation {
-                        replica::body::MutationModel::Atomic => replica::MUTATION_ATOMIC,
+                        replica::body::MutationModel::Atomic => replica::body::MUTATION_ATOMIC,
                         replica::body::MutationModel::Collaborative(_) => {
-                            replica::MUTATION_COLLABORATIVE
+                            replica::body::MUTATION_COLLABORATIVE
                         }
                     };
                     supported.declare(
@@ -574,7 +584,7 @@ impl Orbit {
         // chunk is optional by design. Mixing them would let a refetchable
         // chunk take a store down.
         let cache = Arc::new(
-            replica::journal::cache::ResidentCache::open(
+            replica::content::Residency::open(
                 self.store.dir().join(CACHE_DIR),
                 options.content.cache_quota_bytes,
             )
@@ -596,8 +606,8 @@ impl Orbit {
         // epoch key source and the operator ceiling — all of which belong to the
         // composition root, and a plane that invented its own would be a plane
         // deciding who may be served.
-        let residency: Arc<dyn crate::live::ResidencyOracle> =
-            Arc::new(crate::live::HostResidency::new(
+        let residency: Arc<dyn crate::plane::live::ResidencyOracle> =
+            Arc::new(crate::plane::live::HostResidency::new(
                 content.clone(),
                 Arc::new(crate::content_host::StationContentKeys::new(
                     self.keys.clone(),
@@ -605,7 +615,7 @@ impl Orbit {
                 self.store.space().clone(),
                 options.content.max_content_len,
             ));
-        let live = Arc::new(crate::live::LiveHandle::with_residency(
+        let live = Arc::new(crate::plane::live::LiveHandle::with_residency(
             Some(core.clone()),
             residency,
         ));
@@ -643,7 +653,7 @@ impl Orbit {
             let space = station.store.space().clone();
             let space_bytes = <[u8; 29]>::try_from(space.as_str().as_bytes())
                 .map_err(|_| Failure::Integrity(Integrity::SpaceIdentity))?;
-            let station_key = mechanics::crypto::device_from_seed(&comms.station_seed)
+            let station_key = mechanics::actor::device_from_seed(&comms.station_seed)
                 .key_bytes()
                 .ok_or(Failure::Integrity(Integrity::StationKey))?;
             let (tx, rx) = std::sync::mpsc::channel();
@@ -661,10 +671,11 @@ impl Orbit {
                 commands: rx,
                 cancel: station.cancel.clone(),
             };
-            station
-                .spawn_tracked(move |_cancel| crate::contact_driver::run_driver(ctx))
-                .expect("station is live at activation");
-            *station.driver.lock().expect("driver slot") = Some(tx);
+            station.spawn_tracked(move |_cancel| crate::contact_driver::run_driver(ctx))?;
+            *station
+                .driver
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(tx);
 
             // The first plane driver in a shipped Station.
             //
@@ -678,7 +689,7 @@ impl Orbit {
             // Taking the queue is what makes this exclusive. A second mount for
             // the same plane gets `None` rather than a second reader.
             let local_station =
-                Key::from_device(&mechanics::crypto::device_from_seed(&station_seed))
+                Key::from_device(&mechanics::actor::device_from_seed(&station_seed))
                     .ok_or(Failure::Integrity(Integrity::StationKey))?;
             if options.planes.freight_enabled {
                 if let Some(queue) = plane_transport.take_session_queue(crate::plane::FREIGHT_ALPN)
@@ -698,7 +709,7 @@ impl Orbit {
                         // whenever it happens to disconnect.
                         authority_tick: Some(station.core.authority_tick()),
                     };
-                    let service = crate::freight::FreightService::new(
+                    let service = crate::plane::freight::FreightService::new(
                         station.content.clone(),
                         Arc::new(crate::transfer::TransferRegistry::new()),
                         Arc::new(crate::content_host::StationContentKeys::new(
@@ -710,11 +721,9 @@ impl Orbit {
                     // Spawned tracked, so `drain_tasks` joins it rather than
                     // leaving a thread holding a queue after the Station is
                     // gone.
-                    station
-                        .spawn_tracked(move |_cancel| {
-                            crate::plane_driver::run_driver(context, queue, service)
-                        })
-                        .expect("station is live at activation");
+                    station.spawn_tracked(move |_cancel| {
+                        crate::plane_driver::run_driver(context, queue, service)
+                    })?;
                 }
             }
 
@@ -735,16 +744,14 @@ impl Orbit {
                         drain_deadline,
                         authority_tick: Some(station.core.authority_tick()),
                     };
-                    let service = crate::live::LiveService::new(
+                    let service = crate::plane::live::LiveService::new(
                         station.live.clone(),
                         station.authority.clone(),
                         station.registry.clone(),
                     );
-                    station
-                        .spawn_tracked(move |_cancel| {
-                            crate::plane_driver::run_driver(context, queue, service)
-                        })
-                        .expect("station is live at activation");
+                    station.spawn_tracked(move |_cancel| {
+                        crate::plane_driver::run_driver(context, queue, service)
+                    })?;
                 }
 
                 // And the outbound half, on its own thread for the same reason
@@ -758,7 +765,7 @@ impl Orbit {
                 // whose inbound queue was already claimed can still reach its
                 // neighbours.
                 let neighbors = station.neighbor_registry.clone();
-                let dial = crate::live::DialContext {
+                let dial = crate::plane::live::DialContext {
                     space: station.store.space().clone(),
                     local_station: dial_station,
                     transport: plane_transport.clone(),
@@ -776,16 +783,14 @@ impl Orbit {
                     worlds: station.registry.clone(),
                     cancel: station.cancel.clone(),
                 };
-                station
-                    .spawn_tracked(move |_cancel| crate::live::run_dialer(dial))
-                    .expect("station is live at activation");
+                station.spawn_tracked(move |_cancel| crate::plane::live::run_dialer(dial))?;
             }
         }
         Ok(station)
     }
 
     #[doc(hidden)]
-    pub fn open(self, options: ActivationOptions) -> Result<Station, Failure> {
+    pub fn open(self, options: Activation) -> Result<Station, Failure> {
         Station::open(self, options)
     }
 
@@ -815,7 +820,7 @@ pub struct OrbitStatus {
 /// [`Station::wait`] consume it.
 pub struct Station {
     store: OrbitStore,
-    registry: Registry,
+    registry: Catalog,
     authority: Arc<dyn AuthorityView>,
     keys: Arc<dyn BodyKeySource>,
     epoch: Epoch,
@@ -849,7 +854,7 @@ pub struct Station {
     /// Held whether or not a driver was mounted. A Station with no transport
     /// still answers "who is here" — with nobody — and a caller that had to
     /// branch on whether the plane exists would write that branch everywhere.
-    live: Arc<crate::live::LiveHandle>,
+    live: Arc<crate::plane::live::LiveHandle>,
     /// The largest single content this Station will ingest, from operator
     /// policy. Kept here because every local content call has to enforce it and
     /// the options struct does not outlive activation.
@@ -867,7 +872,7 @@ impl std::fmt::Debug for Station {
 
 impl Station {
     /// Open one activation of a vacant Orbit, consuming its operational lease.
-    pub fn open(orbit: Orbit, options: ActivationOptions) -> Result<Self, Failure> {
+    pub fn open(orbit: Orbit, options: Activation) -> Result<Self, Failure> {
         orbit.open_station(options)
     }
 
@@ -891,7 +896,7 @@ impl Station {
     /// Never durable and never authoritative: a Station with no Live driver
     /// answers with an empty view rather than an error, because "nobody is
     /// here" is the truth about a Station nobody is connected to.
-    pub fn live(&self) -> Arc<crate::live::LiveHandle> {
+    pub fn live(&self) -> Arc<crate::plane::live::LiveHandle> {
         self.live.clone()
     }
 
@@ -922,7 +927,7 @@ impl Station {
     pub fn content_stat(
         &self,
         identity: &crate::world::LocalIdentity,
-        content: &replica::ContentRef,
+        content: &replica::content::ContentRef,
     ) -> Result<crate::content_host::ContentStatus, crate::content_host::Failure> {
         let keys = self.content_keys();
         let allow = self.content_authorization(identity)?;
@@ -934,7 +939,7 @@ impl Station {
     pub fn content_read(
         &self,
         identity: &crate::world::LocalIdentity,
-        content: &replica::ContentRef,
+        content: &replica::content::ContentRef,
         offset: u64,
         len: usize,
     ) -> Result<Vec<u8>, crate::content_host::Failure> {
@@ -954,11 +959,11 @@ impl Station {
         identity: &crate::world::LocalIdentity,
         operation: [u8; 16],
         reader: &mut dyn std::io::Read,
-    ) -> Result<replica::ContentRef, crate::content_host::Failure> {
+    ) -> Result<replica::content::ContentRef, crate::content_host::Failure> {
         let keys = self.content_keys();
         let allow = self.content_authorization(identity)?;
         let frontier = self.identity_frontier(identity)?;
-        let ctx = replica::CommitContext {
+        let ctx = replica::transaction::CommitContext {
             space: self.store.space(),
             signer: identity,
             authority_frontier: frontier,
@@ -971,7 +976,7 @@ impl Station {
     pub fn content_forget(
         &self,
         identity: &crate::world::LocalIdentity,
-        content: &replica::ContentRef,
+        content: &replica::content::ContentRef,
     ) -> Result<(), crate::content_host::Failure> {
         let keys = self.content_keys();
         let allow = self.content_authorization(identity)?;
@@ -1055,7 +1060,10 @@ impl Station {
         }
         let token = self.cancel.clone();
         let handle = std::thread::spawn(move || f(token));
-        self.handles.lock().expect("task set").push(handle);
+        self.handles
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(handle);
         Ok(())
     }
 
@@ -1143,7 +1151,10 @@ impl Station {
         if !self.alive.load(Ordering::SeqCst) {
             return;
         }
-        let driver = self.driver.lock().expect("driver slot");
+        let driver = self
+            .driver
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(tx) = driver.as_ref() {
             let _ = tx.send(crate::contact_driver::DriverCmd::Beacon(bytes.to_vec()));
             return;
@@ -1174,30 +1185,41 @@ impl Station {
     /// initiator exchange, validate, and durably incorporate. Not exposed on
     /// ordinary Session handles; refused once the Station is going dormant or
     /// when no transport was activated.
-    pub fn contact(&self, neighbor: &Key) -> Result<ContactOutcome, crate::contact::Failure> {
+    pub fn contact(
+        &self,
+        neighbor: &Key,
+    ) -> Result<ContactOutcome, crate::plane::contact::Failure> {
         if !self.alive.load(Ordering::SeqCst) {
-            return Err(crate::contact::Failure::Interrupted);
+            return Err(crate::plane::contact::Failure::Interrupted);
         }
-        let driver = self.driver.lock().expect("driver slot");
+        let driver = self
+            .driver
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let Some(tx) = driver.as_ref() else {
-            return Err(crate::contact::Failure::Unreachable);
+            return Err(crate::plane::contact::Failure::Unreachable);
         };
         let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(1);
         tx.send(crate::contact_driver::DriverCmd::Contact {
             station: neighbor.clone(),
             reply: reply_tx,
         })
-        .map_err(|_| crate::contact::Failure::Unreachable)?;
+        .map_err(|_| crate::plane::contact::Failure::Unreachable)?;
         drop(driver);
         reply_rx
             .recv_timeout(self.contact_deadline + Duration::from_secs(5))
-            .map_err(|_| crate::contact::Failure::Unreachable)?
+            .map_err(|_| crate::plane::contact::Failure::Unreachable)?
     }
 
     /// Drain the tracked task set within `deadline`. Returns the join results of
     /// finished tasks and whether any task failed to finish in time.
     fn drain_tasks(&mut self, deadline: Instant) -> (bool, bool) {
-        let handles = std::mem::take(&mut *self.handles.lock().expect("task set"));
+        let handles = std::mem::take(
+            &mut *self
+                .handles
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        );
         loop {
             if handles.iter().all(|h| h.is_finished()) {
                 break;
@@ -1239,6 +1261,10 @@ impl Station {
         //    dormancy needs no separate checkpoint.
         self.core.close();
         // 5) build the recovered Orbit and release the lock last.
+        #[allow(
+            clippy::expect_used,
+            reason = "vacate consumes a Station whose lock is installed by its only constructor"
+        )]
         let lock = self.lock.take().expect("station holds its lock");
         if timed_out {
             // The lock releases here; the store persists and is re-acquirable.
@@ -1262,7 +1288,12 @@ impl Station {
     /// durably written by the per-commit sink, and the core is closed (under the
     /// writer mutex) before the Orbit is returned.
     pub fn wait(mut self) -> Exit {
-        let handles = std::mem::take(&mut *self.handles.lock().expect("task set"));
+        let handles = std::mem::take(
+            &mut *self
+                .handles
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        );
         let mut reason = None;
         for h in handles {
             if h.join().is_err() {
@@ -1271,6 +1302,10 @@ impl Station {
         }
         self.alive.store(false, Ordering::SeqCst);
         self.core.close();
+        #[allow(
+            clippy::expect_used,
+            reason = "wait consumes a Station whose lock is installed by its only constructor"
+        )]
         let lock = self.lock.take().expect("station holds its lock");
         Exit {
             orbit: Orbit::new(
@@ -1319,8 +1354,8 @@ mod tests {
     use std::sync::atomic::AtomicU64;
 
     pub(crate) fn test_keys() -> Arc<dyn BodyKeySource> {
-        Arc::new(replica::StaticBodyKeys::new(
-            mechanics::crypto::AuthorizedBodyKey::for_authorized_epoch([1u8; 16], [2u8; 32]),
+        Arc::new(replica::body::StaticBodyKeys::new(
+            mechanics::authorization::AuthorizedBodyKey::for_authorized_epoch([1u8; 16], [2u8; 32]),
         ))
     }
 
@@ -1338,7 +1373,7 @@ mod tests {
         // These lifecycle tests never dock, so the deny-all authority suffices.
         Runtime::open(
             root.to_path_buf(),
-            RuntimeBuilder::new().build().unwrap(),
+            Builder::new().build().unwrap(),
             Arc::new(DenyAllAuthority),
             test_keys(),
         )
@@ -1363,7 +1398,7 @@ mod tests {
         let rt = runtime(&root);
         let orbit = rt.create().unwrap();
         let space = orbit.space_id().clone();
-        let station = orbit.open(ActivationOptions::default()).unwrap();
+        let station = orbit.open(Activation::default()).unwrap();
         // Observation sees the Orbit and reports it locked, but yields no handle
         // that can activate or remove (it is a plain data snapshot).
         let obs = rt.inspect(&space).unwrap();
@@ -1380,13 +1415,13 @@ mod tests {
         let space = orbit.space_id().clone();
         assert_eq!(orbit.epoch(), Epoch::ZERO);
 
-        let station = orbit.open(ActivationOptions::default()).unwrap();
+        let station = orbit.open(Activation::default()).unwrap();
         assert_eq!(station.epoch(), Epoch::from_u64(1));
 
         let orbit = station.vacate().unwrap();
         assert_eq!(orbit.space_id(), &space);
         // A second activation advances the durable epoch again.
-        let station = orbit.open(ActivationOptions::default()).unwrap();
+        let station = orbit.open(Activation::default()).unwrap();
         assert_eq!(station.epoch(), Epoch::from_u64(2));
         drop(station);
     }
@@ -1397,7 +1432,7 @@ mod tests {
         let rt = runtime(&root);
         let orbit = rt.create().unwrap();
         let space = orbit.space_id().clone();
-        let station = orbit.open(ActivationOptions::default()).unwrap();
+        let station = orbit.open(Activation::default()).unwrap();
         // While the Station holds the lock, a second acquisition is refused.
         assert!(matches!(rt.acquire(&space), Err(Failure::ReplicaLocked(_))));
         drop(station);
@@ -1409,7 +1444,7 @@ mod tests {
         let rt = runtime(&root);
         let orbit = rt.create().unwrap();
         let space = orbit.space_id().clone();
-        let station = orbit.open(ActivationOptions::default()).unwrap();
+        let station = orbit.open(Activation::default()).unwrap();
         // A cooperative tracked task that finishes on cancellation.
         station
             .spawn_tracked(|cancel| {
@@ -1431,7 +1466,7 @@ mod tests {
         let stop = Arc::new(AtomicBool::new(false));
         let orbit = rt.create().unwrap();
         let space = orbit.space_id().clone();
-        let opts = ActivationOptions {
+        let opts = Activation {
             drain_deadline: Duration::from_millis(20),
             ..Default::default()
         };
@@ -1489,7 +1524,7 @@ mod tests {
         let rt = runtime(&root);
         let orbit = rt.create().unwrap();
         let space = orbit.space_id().clone();
-        let station = orbit.open(ActivationOptions::default()).unwrap();
+        let station = orbit.open(Activation::default()).unwrap();
         // A task that exits on its own.
         station.spawn_tracked(|_cancel| {}).unwrap();
         let exit = station.wait();
@@ -1499,7 +1534,7 @@ mod tests {
 
     #[test]
     fn a_runtime_without_a_root_cannot_form() {
-        let rt = Runtime::from_registry(RuntimeBuilder::new().build().unwrap());
+        let rt = Runtime::from_registry(Builder::new().build().unwrap());
         assert!(matches!(rt.create(), Err(Failure::NoStoreRoot)));
         assert!(rt.list().is_empty());
     }

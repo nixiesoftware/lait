@@ -1,3 +1,9 @@
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    clippy::indexing_slicing,
+    reason = "the private resharing backend runs only on ceremony-validated old and new holder sets"
+)]
 //! Proactive same-key resharing.
 //!
 //! ```text
@@ -52,7 +58,7 @@ use curve25519_dalek::edwards::EdwardsPoint;
 use curve25519_dalek::scalar::Scalar;
 use curve25519_dalek::traits::Identity;
 
-use crate::authority::LeafId;
+use crate::authority::Holder;
 use crate::compile::{ReconstructionWitness, StructurallyValidatedCompiledPolicy};
 use crate::gaccess::KeyShares;
 use crate::gdkg::GroupKey;
@@ -64,16 +70,16 @@ pub enum Failure {
     /// contributing leaves are not a qualified coalition of it.
     UnqualifiedOldSet,
     /// Two contributions claim the same old dealer.
-    DuplicateDealer { dealer: LeafId },
+    DuplicateDealer { dealer: Holder },
     /// The contributions do not correspond exactly to the qualified old set.
     ContributorSetMismatch,
     /// A contribution's commitment vector is not `d₂` long.
-    WrongDimension { dealer: LeafId },
+    WrongDimension { dealer: Holder },
     /// A sub-share failed its Feldman check against the contribution's commitments.
-    InconsistentSubShare { dealer: LeafId, leaf: LeafId },
+    InconsistentSubShare { dealer: Holder, leaf: Holder },
     /// A contribution's `C_0` is not the old public share `S_i` of its dealer —
     /// the dealer tried to reshare a sub-secret other than its real old share.
-    WrongOldCommitment { dealer: LeafId },
+    WrongOldCommitment { dealer: Holder },
     /// The recomputed public key `Σ λ_i S_i` is not the old `Y`. The witness and
     /// the old commitments are inconsistent; refuse rather than silently mint a
     /// different key.
@@ -85,13 +91,13 @@ pub enum Failure {
 /// One old holder's resharing of its share into the new structure.
 #[derive(Debug, Clone)]
 pub struct ReshareContribution {
-    dealer: LeafId,
+    dealer: Holder,
     commitments: Vec<EdwardsPoint>,
-    sub_shares: BTreeMap<LeafId, Scalar>,
+    sub_shares: BTreeMap<Holder, Scalar>,
 }
 
 impl ReshareContribution {
-    pub fn dealer(&self) -> &LeafId {
+    pub fn dealer(&self) -> &Holder {
         &self.dealer
     }
 }
@@ -102,7 +108,7 @@ fn random_scalar() -> Scalar {
     Scalar::from_bytes_mod_order_wide(&wide)
 }
 
-fn row_of(compiled: &StructurallyValidatedCompiledPolicy, leaf: &LeafId) -> Option<Vec<Scalar>> {
+fn row_of(compiled: &StructurallyValidatedCompiledPolicy, leaf: &Holder) -> Option<Vec<Scalar>> {
     let idx = compiled.leaves().iter().position(|l| l == leaf)?;
     Some(
         compiled.inner().matrix.rows[idx]
@@ -122,7 +128,7 @@ fn decompress(bytes: &[u8; 32]) -> Option<EdwardsPoint> {
 /// exactly its known old public share `S_i`.
 pub fn contribution(
     new_compiled: &StructurallyValidatedCompiledPolicy,
-    dealer: LeafId,
+    dealer: Holder,
     old_share: Scalar,
 ) -> ReshareContribution {
     let cols = new_compiled.cols();
@@ -206,7 +212,7 @@ pub fn reshare(
 
     // Coefficients keyed by old leaf. verify_witness guarantees unique, ordered
     // leaves and canonical nonzero coefficients.
-    let mut lambda: BTreeMap<LeafId, Scalar> = BTreeMap::new();
+    let mut lambda: BTreeMap<Holder, Scalar> = BTreeMap::new();
     for (leaf, coeff) in old_witness.leaves.iter().zip(&old_witness.coefficients) {
         lambda.insert(leaf.clone(), coeff.as_scalar().ok_or(Failure::BadPoint)?);
     }
@@ -214,7 +220,7 @@ pub fn reshare(
     // Contributions correspond exactly to the qualified set — a set, not a
     // multiset. Reject a repeated dealer before comparing membership, so a replay
     // cannot stand in for an absent dealer.
-    let mut by_dealer: BTreeMap<&LeafId, &ReshareContribution> = BTreeMap::new();
+    let mut by_dealer: BTreeMap<&Holder, &ReshareContribution> = BTreeMap::new();
     for c in contributions {
         if by_dealer.insert(&c.dealer, c).is_some() {
             return Err(Failure::DuplicateDealer {
@@ -222,8 +228,8 @@ pub fn reshare(
             });
         }
     }
-    let dealer_set: BTreeSet<&LeafId> = by_dealer.keys().copied().collect();
-    let witness_set: BTreeSet<&LeafId> = lambda.keys().collect();
+    let dealer_set: BTreeSet<&Holder> = by_dealer.keys().copied().collect();
+    let witness_set: BTreeSet<&Holder> = lambda.keys().collect();
     if dealer_set != witness_set {
         return Err(Failure::ContributorSetMismatch);
     }
@@ -284,7 +290,7 @@ pub fn reshare(
 
 fn leaf_ok(
     new_compiled: &StructurallyValidatedCompiledPolicy,
-    leaf: &LeafId,
+    leaf: &Holder,
     c: &ReshareContribution,
 ) -> bool {
     let Some(row) = row_of(new_compiled, leaf) else {
@@ -300,21 +306,21 @@ fn leaf_ok(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::authority::PrincipalId;
+    use crate::authority::Principal;
     use crate::compile::compile;
     use crate::expand::{expand, PrincipalCustody, PrincipalDescriptor};
     use crate::gaccess::{commit, sign_qualified, verify, KeyShares, Nonce};
     use crate::gdkg::{aggregate, contribute};
     use crate::policy::OwnershipPolicy;
 
-    fn prin(n: u8) -> PrincipalId {
-        PrincipalId::of_device(&crate::crypto::device_from_seed(&[n; 32]))
+    fn prin(n: u8) -> Principal {
+        Principal::of_device(&crate::crypto::device_from_seed(&[n; 32]))
     }
     fn key(n: u8) -> OwnershipPolicy {
         OwnershipPolicy::Key(prin(n))
     }
-    fn resolver() -> impl Fn(&PrincipalId) -> Option<PrincipalDescriptor> {
-        |p: &PrincipalId| {
+    fn resolver() -> impl Fn(&Principal) -> Option<PrincipalDescriptor> {
+        |p: &Principal| {
             Some(PrincipalDescriptor {
                 id: p.clone(),
                 custody: PrincipalCustody::Direct {
@@ -323,14 +329,14 @@ mod tests {
             })
         }
     }
-    fn compiled(o: OwnershipPolicy) -> (StructurallyValidatedCompiledPolicy, Vec<LeafId>) {
+    fn compiled(o: OwnershipPolicy) -> (StructurallyValidatedCompiledPolicy, Vec<Holder>) {
         let canon = o.canonicalize().unwrap();
         let exp = expand(&canon, &resolver()).unwrap();
         let c = compile(&exp).unwrap();
         let leaves = c.leaves().to_vec();
         (c, leaves)
     }
-    fn dkg(c: &StructurallyValidatedCompiledPolicy, leaves: &[LeafId]) -> GroupKey {
+    fn dkg(c: &StructurallyValidatedCompiledPolicy, leaves: &[Holder]) -> GroupKey {
         let contribs: Vec<_> = leaves.iter().map(|l| contribute(c, l.clone())).collect();
         aggregate(c, &contribs).expect("aggregate")
     }
@@ -338,11 +344,11 @@ mod tests {
     fn sign_with<K: KeyShares>(
         c: &StructurallyValidatedCompiledPolicy,
         key_material: &K,
-        signers: &[LeafId],
+        signers: &[Holder],
         msg: &[u8],
     ) -> bool {
         let witness = c.reconstruct(signers).expect("qualified");
-        let mut nonces: BTreeMap<LeafId, Nonce> = BTreeMap::new();
+        let mut nonces: BTreeMap<Holder, Nonce> = BTreeMap::new();
         let mut commitments = Vec::new();
         for leaf in &witness.leaves {
             let (n, com) = commit();
@@ -356,7 +362,7 @@ mod tests {
     fn honest_contributions(
         new_c: &StructurallyValidatedCompiledPolicy,
         old: &GroupKey,
-        set: &[LeafId],
+        set: &[Holder],
     ) -> Vec<ReshareContribution> {
         set.iter()
             .map(|l| contribution(new_c, l.clone(), old.share(l).unwrap()))

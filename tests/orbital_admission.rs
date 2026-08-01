@@ -12,8 +12,8 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use lait::orbital::{AuthorityRecord, SpaceAuthority};
-use replica::AuthorityIncorporator;
-use runtime::AuthorityView;
+use replica::convergence::AuthorityIncorporator;
+use runtime::world::AuthorityView;
 
 const FOUNDER_SEED: [u8; 32] = [61u8; 32];
 const JOINER_SEED: [u8; 32] = [62u8; 32];
@@ -40,7 +40,7 @@ fn founder(tag: &str) -> (PathBuf, SpaceAuthority) {
 /// A joiner that entered the invite: returns its mechanics and its exported
 /// Admission record (the acceptance proof rides it).
 fn joiner_admission(
-    invite: &runtime::SignedCoordinates,
+    invite: &runtime::coordinates::SignedCoordinates,
     seed: &[u8; 32],
     tag: &str,
 ) -> (PathBuf, SpaceAuthority, Vec<u8>) {
@@ -67,7 +67,7 @@ fn redeem_at_founder(founder: &SpaceAuthority, joiner: &SpaceAuthority) {
 }
 
 fn joiner_actor(mech: &SpaceAuthority, seed: &[u8; 32]) -> Option<mechanics::ids::ActorId> {
-    mech.resolve(&mechanics::crypto::device_from_seed(seed))
+    mech.resolve(&mechanics::actor::device_from_seed(seed))
         .map(|r| r.actor)
 }
 
@@ -486,8 +486,8 @@ fn tampered_role_evidence_breaks_the_capability_signature() {
         .unwrap();
     // Escalate the evidence post-hoc: append the admin capability.
     admission.evidence.assignments.push((
-        mechanics::demand::PolicyCapability::new("com.lait.issues", "space.admin"),
-        mechanics::demand::Resource::root("com.lait.issues"),
+        mechanics::authorization::PolicyCapability::new("com.lait.issues", "space.admin"),
+        mechanics::authorization::Resource::root("com.lait.issues"),
     ));
     let space = mech_f.space();
     assert!(

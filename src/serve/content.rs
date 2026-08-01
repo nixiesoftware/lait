@@ -1,3 +1,7 @@
+// HTTP range/chunk arithmetic is validated against declared and observed lengths;
+// conversions preserve the existing content envelope and header encodings.
+#![allow(clippy::arithmetic_side_effects, clippy::as_conversions)]
+
 //! Content over the local web surface: HEAD, ranged download, streaming upload.
 //!
 //! The browser's half of the content plane. Everything here is a thin, bounded
@@ -32,7 +36,7 @@ use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 
 use crate::control::{ContentCall, ContentErrorCode, ContentReply};
-use crate::daemon::StationIdentity;
+use crate::orbits::StationIdentity;
 
 use super::{err_json, App, ErrorKind};
 
@@ -56,7 +60,7 @@ const RETRY_AFTER_SECONDS: &str = "1";
 /// Matched to the engine's own `MAX_RANGE_BYTES` rather than chosen
 /// independently, because a browser asking for more would get a short read and
 /// have to guess why.
-const MAX_RANGE_BYTES: u64 = runtime::content_host::MAX_RANGE_BYTES as u64;
+const MAX_RANGE_BYTES: u64 = runtime::plane::freight::content::MAX_RANGE_BYTES as u64;
 
 /// The permits every content route acquires before it moves a byte.
 ///
@@ -500,7 +504,7 @@ async fn next_piece(
 /// Where a content call for this space goes, and whether this identity may
 /// write there.
 struct ContentStation {
-    address: crate::daemon::OrbitAddress,
+    address: crate::control::OrbitAddress,
     daemon_home: std::path::PathBuf,
 }
 
@@ -681,7 +685,8 @@ mod tests {
 #[cfg(test)]
 mod end_to_end {
     use super::*;
-    use crate::daemon::{LaitDaemonClient, LocalOrbitId, OrbitDirectory};
+    use crate::daemon::{Client, LocalOrbitId};
+    use crate::orbits::Catalog;
     use crate::serve::auth::Guard;
     use crate::serve::{cookie_name, router, App};
     use axum::http::Request as HttpRequest;
@@ -690,18 +695,19 @@ mod end_to_end {
     const TOKEN: &str = "1f2e3d4c5b6a798807162534435261700f1e2d3c4b5a69788796a5b4c3d2e1f0";
     const FOUNDER_SEED: [u8; 32] = [173u8; 32];
 
-    struct MemFactory(crate::transport::mem::MemNet);
+    struct MemFactory(comms::mem::MemNet);
 
     #[async_trait::async_trait]
-    impl crate::transport::TransportFactory for MemFactory {
+    impl comms::TransportFactory for MemFactory {
         async fn build(
             &self,
             identity_seed: &[u8; 32],
-            _network: &crate::net::Network,
+            _network: &comms::policy::Network,
             _protocols: comms::Protocols<'_>,
-        ) -> anyhow::Result<Arc<dyn crate::transport::Transport>> {
+        ) -> anyhow::Result<Arc<dyn comms::Transport>> {
             Ok(Arc::new(
-                self.0.peer(crate::crypto::device_from_seed(identity_seed)),
+                self.0
+                    .peer(mechanics::actor::device_from_seed(identity_seed)),
             ))
         }
     }
@@ -736,13 +742,13 @@ mod end_to_end {
         crate::orbital::form_space(&dir, &FOUNDER_SEED, "Serve Content").unwrap();
         let space = crate::orbital::discover_space_id(&dir).unwrap();
 
-        let net = crate::transport::mem::MemNet::new();
-        let bridge_home = dir.clone();
+        let net = comms::mem::MemNet::new();
+        let station_home = dir.clone();
         std::thread::spawn(move || {
             let rt = tokio::runtime::Runtime::new().unwrap();
             rt.block_on(async move {
-                let _ = crate::orbital::run_space_bridge_with(
-                    bridge_home,
+                let _ = crate::orbital::run_station_process_with(
+                    station_home,
                     FOUNDER_SEED,
                     &MemFactory(net),
                 )
@@ -771,13 +777,13 @@ mod end_to_end {
         };
         let app = Arc::new(App {
             guard: Guard::new(TOKEN.into(), 7717),
-            directory: OrbitDirectory::with_entries(dir.clone(), dir.clone(), true, vec![entry]),
-            daemon: LaitDaemonClient::at(dir.clone()),
+            directory: Catalog::with_entries(dir.clone(), dir.clone(), true, vec![entry]),
+            daemon: Client::at(dir.clone()),
             doorbells: tokio::sync::broadcast::channel(4).0,
             cookie: cookie_name(7717),
             stop: tokio::sync::watch::channel(false).0,
             content_permits: ContentStreamPermits::new(),
-            bridge: crate::serve::bridge::BridgeHub::new(),
+            socket: crate::serve::socket::Hub::new(),
         });
 
         // Larger than one control-channel read buffer, so the body's first bytes

@@ -73,7 +73,7 @@ fn examples() -> serde_json::Value {
         "positive": [
             { "def": "RoleBody", "value": role_example() },
             { "def": "WorkflowBody", "value": workflow_example() },
-            { "def": "AssignmentDto", "value": lait::dto::AssignmentDto {
+            { "def": "AssignmentDto", "value": issues::dto::AssignmentDto {
                 grant_id: "ab".repeat(32),
                 actor: format!("act_{}", "a".repeat(64)),
                 world: "com.lait.issues".into(),
@@ -112,7 +112,7 @@ fn examples() -> serde_json::Value {
 #[test]
 fn the_committed_product_schema_matches_the_rust_contract() {
     let generated =
-        serde_json::to_string_pretty(&lait::dto::product_policy_schema_bundle()).unwrap();
+        serde_json::to_string_pretty(&issues::dto::product_policy_schema_bundle()).unwrap();
     let path = schema_path();
     if std::env::var("LAIT_BLESS_SCHEMA").is_ok() {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();

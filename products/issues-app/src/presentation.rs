@@ -1,3 +1,8 @@
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    reason = "presentation layout is clamped to terminal and payload bounds before coordinate arithmetic"
+)]
 //! Issues-owned terminal and JSON presentation.
 
 use std::fmt::Write as _;

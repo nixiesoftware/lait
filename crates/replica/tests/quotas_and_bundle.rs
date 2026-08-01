@@ -17,14 +17,16 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use mechanics::crypto::AuthorizedBodyKey;
+use mechanics::authorization::AuthorizedBodyKey;
 use mechanics::ids::SpaceId;
-use replica::frontier::AuthorityFrontier;
-use replica::{
-    ActionOutcome, AuthorityBatchReceipt, AuthorityIncorporator, BodyBinding, BodyId, BodyKey,
-    CommitAuthorization, CommitContext, EncodingId, Op, QuotaConfig, Replica, SchemaId, SeedSigner,
-    StagedContactMaterial, StaticBodyKeys, SupportedSchemas, WorldId, MUTATION_COLLABORATIVE,
+use replica::body::{
+    BodyBinding, Op, QuotaConfig, StaticBodyKeys, SupportedSchemas, MUTATION_COLLABORATIVE,
 };
+use replica::body::{BodyId, BodyKey, EncodingId, SchemaId, WorldId};
+use replica::convergence::{AuthorityBatchReceipt, AuthorityIncorporator, StagedContactMaterial};
+use replica::frontier::AuthorityFrontier;
+use replica::transaction::{ActionOutcome, CommitAuthorization, CommitContext, SeedSigner};
+use replica::Replica;
 
 const WRITER_SEED: [u8; 32] = [71u8; 32];
 const EPOCH: [u8; 16] = [11u8; 16];
@@ -56,15 +58,15 @@ fn world() -> WorldId {
 
 /// A test authorizer + commit-authorization helper (the machinery each commit
 /// needs now that authorization is bound into the signed transaction).
-fn test_auth() -> replica::StaticAuthorizer {
-    replica::StaticAuthorizer {
+fn test_auth() -> replica::transaction::StaticAuthorizer {
+    replica::transaction::StaticAuthorizer {
         world: world(),
         implementation_id: [0u8; 32],
     }
 }
 
 fn test_demand() -> Vec<u8> {
-    use mechanics::demand::{AuthorizationDemand, PolicyCapability, Resource};
+    use mechanics::authorization::{AuthorizationDemand, PolicyCapability, Resource};
     AuthorizationDemand::require(
         PolicyCapability::new("com.example.notes", "write"),
         Resource::root("com.example.notes"),
@@ -100,7 +102,7 @@ fn supported() -> SupportedSchemas {
         SchemaId::parse("blob").unwrap(),
         1,
         EncodingId::parse("bytes").unwrap(),
-        replica::MUTATION_ATOMIC,
+        replica::body::MUTATION_ATOMIC,
     );
     s
 }
@@ -110,7 +112,7 @@ fn atomic_binding() -> BodyBinding {
         schema: SchemaId::parse("blob").unwrap(),
         schema_version: 1,
         encoding: EncodingId::parse("bytes").unwrap(),
-        mutation_model: replica::MUTATION_ATOMIC,
+        mutation_model: replica::body::MUTATION_ATOMIC,
     }
 }
 
@@ -122,7 +124,7 @@ fn commit_blob(
     request: [u8; 16],
     key: &BodyKey,
     bytes: &[u8],
-) -> Result<ActionOutcome, replica::commit::Failure> {
+) -> Result<ActionOutcome, replica::transaction::commit::Failure> {
     let (space, signer) = ctx_parts();
     let ctx = CommitContext {
         space: &space,
@@ -157,7 +159,7 @@ fn commit_blob(
 }
 
 fn device() -> mechanics::ids::DeviceId {
-    mechanics::crypto::device_from_seed(&WRITER_SEED)
+    mechanics::actor::device_from_seed(&WRITER_SEED)
 }
 
 fn authority_frontier() -> AuthorityFrontier {
@@ -165,7 +167,7 @@ fn authority_frontier() -> AuthorityFrontier {
 }
 
 struct WriterAuthorized;
-impl replica::AuthoritySource for WriterAuthorized {
+impl replica::transaction::AuthoritySource for WriterAuthorized {
     fn signer_authorized(&self, signer: &[u8; 32], _f: &AuthorityFrontier) -> bool {
         *signer == device().key_bytes().unwrap()
     }
@@ -180,9 +182,9 @@ impl AuthorityIncorporator for RecordingIncorporator {
     fn incorporate_authority(
         &mut self,
         records: &[Vec<u8>],
-    ) -> Result<AuthorityBatchReceipt, String> {
+    ) -> Result<AuthorityBatchReceipt, replica::convergence::Failure> {
         self.batches.push(records.to_vec());
-        Ok(replica::AuthorityBatchReceipt {
+        Ok(replica::convergence::AuthorityBatchReceipt {
             space: space(),
             prior_frontier: replica::frontier::AuthorityFrontier::from_canonical_bytes(vec![]),
             resulting_frontier: authority_frontier(),
@@ -206,7 +208,7 @@ fn commit_note(
     request: [u8; 16],
     key: &BodyKey,
     text: &str,
-) -> Result<ActionOutcome, replica::commit::Failure> {
+) -> Result<ActionOutcome, replica::transaction::commit::Failure> {
     let (space, signer) = ctx_parts();
     let ctx = CommitContext {
         space: &space,
@@ -323,7 +325,7 @@ fn adversarial_stagings_are_rejected_whole() {
         .push((tx_id, body(9), stray.bodies[0].2.clone()));
     assert!(matches!(
         b.validate_contact(&stray, &WriterAuthorized, &mut incorporator),
-        Err(replica::commit::Failure::Illegitimate(_))
+        Err(replica::transaction::commit::Failure::Illegitimate(_))
     ));
 
     // An omitted manifest index node.
@@ -331,7 +333,7 @@ fn adversarial_stagings_are_rejected_whole() {
     omitted.manifest_nodes.clear();
     assert!(matches!(
         b.validate_contact(&omitted, &WriterAuthorized, &mut incorporator),
-        Err(replica::commit::Failure::Illegitimate(_))
+        Err(replica::transaction::commit::Failure::Illegitimate(_))
     ));
 
     // A tampered payload byte.
@@ -340,19 +342,19 @@ fn adversarial_stagings_are_rejected_whole() {
     tampered.bodies[0].2[last] ^= 0xff;
     assert!(matches!(
         b.validate_contact(&tampered, &WriterAuthorized, &mut incorporator),
-        Err(replica::commit::Failure::Illegitimate(_))
+        Err(replica::transaction::commit::Failure::Illegitimate(_))
     ));
 
     // An authority view that refuses the signer rejects root and transactions.
     struct DenyAll;
-    impl replica::AuthoritySource for DenyAll {
+    impl replica::transaction::AuthoritySource for DenyAll {
         fn signer_authorized(&self, _s: &[u8; 32], _f: &AuthorityFrontier) -> bool {
             false
         }
     }
     assert!(matches!(
         b.validate_contact(&staged, &DenyAll, &mut incorporator),
-        Err(replica::commit::Failure::Illegitimate(_))
+        Err(replica::transaction::commit::Failure::Illegitimate(_))
     ));
 
     // Nothing reached the engine through any of it.
@@ -380,7 +382,7 @@ fn adversarial_stagings_are_rejected_whole() {
 #[test]
 fn body_count_quota_has_exact_boundaries() {
     let dir = temp_store("count");
-    let mut r = Replica::open_journaled(&dir, keys()).unwrap();
+    let mut r = Replica::open(&dir, keys()).unwrap();
     r.set_supported(supported());
     r.set_quota(QuotaConfig {
         max_space_bodies: 2,
@@ -393,7 +395,7 @@ fn body_count_quota_has_exact_boundaries() {
     // exact+1 refuses cleanly BEFORE anything applies…
     assert_eq!(
         commit_note(&mut r, [5u8; 16], &body(5), "three").unwrap_err(),
-        replica::commit::Failure::QuotaExceeded
+        replica::transaction::commit::Failure::QuotaExceeded
     );
     assert_eq!(r.frontier(), frontier, "no frontier change");
     // …and the handle still works: updating an EXISTING Body is fine.
@@ -405,7 +407,7 @@ fn body_count_quota_has_exact_boundaries() {
 fn space_byte_quota_has_exact_boundaries() {
     // Measure the exact ledger of one deterministic commit…
     let dir = temp_store("bytes-measure");
-    let mut probe = Replica::open_journaled(&dir, keys()).unwrap();
+    let mut probe = Replica::open(&dir, keys()).unwrap();
     probe.set_supported(supported());
     commit_blob(&mut probe, [7u8; 16], &body(6), b"measured").unwrap();
     let (usage, _) = probe.usage();
@@ -414,7 +416,7 @@ fn space_byte_quota_has_exact_boundaries() {
 
     // …exact: a fresh store configured to exactly that usage accepts it.
     let dir = temp_store("bytes-exact");
-    let mut r = Replica::open_journaled(&dir, keys()).unwrap();
+    let mut r = Replica::open(&dir, keys()).unwrap();
     r.set_supported(supported());
     r.set_quota(QuotaConfig {
         max_space_bytes: usage,
@@ -428,7 +430,7 @@ fn space_byte_quota_has_exact_boundaries() {
     // exact-1: one byte less refuses (fail-stop after apply; reopen shows the
     // old — empty — durable state).
     let dir = temp_store("bytes-under");
-    let mut r = Replica::open_journaled(&dir, keys()).unwrap();
+    let mut r = Replica::open(&dir, keys()).unwrap();
     r.set_supported(supported());
     r.set_quota(QuotaConfig {
         max_space_bytes: usage - 1,
@@ -436,17 +438,17 @@ fn space_byte_quota_has_exact_boundaries() {
     });
     assert_eq!(
         commit_blob(&mut r, [7u8; 16], &body(6), b"measured").unwrap_err(),
-        replica::commit::Failure::QuotaExceeded
+        replica::transaction::commit::Failure::QuotaExceeded
     );
     drop(r);
-    let r = Replica::open_journaled(&dir, keys()).unwrap();
+    let r = Replica::open(&dir, keys()).unwrap();
     assert!(r.body_keys().is_empty(), "nothing durable");
     drop(r);
     let _ = std::fs::remove_dir_all(&dir);
 
     // exact+1: one byte more accepts.
     let dir = temp_store("bytes-over");
-    let mut r = Replica::open_journaled(&dir, keys()).unwrap();
+    let mut r = Replica::open(&dir, keys()).unwrap();
     r.set_supported(supported());
     r.set_quota(QuotaConfig {
         max_space_bytes: usage + 1,
@@ -465,7 +467,7 @@ fn unknown_world_retention_subquota_evicts_nothing_and_stages_nothing() {
     commit_note(&mut a, [9u8; 16], &body(8), "second").unwrap();
 
     let dir = temp_store("opaque");
-    let mut b = Replica::open_journaled(&dir, keys()).unwrap();
+    let mut b = Replica::open(&dir, keys()).unwrap();
     // no supported schemas: everything is opaque
     b.set_quota(QuotaConfig {
         max_unknown_world_bodies: 1,
@@ -511,7 +513,7 @@ fn unknown_world_retention_subquota_evicts_nothing_and_stages_nothing() {
     assert_eq!(
         b.incorporate(&ctx, tx2, &second_payload, &WriterAuthorized)
             .unwrap_err(),
-        replica::commit::Failure::OpaqueQuotaExceeded
+        replica::transaction::commit::Failure::OpaqueQuotaExceeded
     );
     assert_eq!(b.frontier(), frontier);
     assert!(
@@ -522,7 +524,7 @@ fn unknown_world_retention_subquota_evicts_nothing_and_stages_nothing() {
     assert_eq!(b.opaque_usage(&world()).1, 1);
     drop(b);
     // And nothing about the refused material is in the durable store.
-    let b = Replica::open_journaled(&dir, keys()).unwrap();
+    let b = Replica::open(&dir, keys()).unwrap();
     assert_eq!(b.opaque_usage(&world()).1, 1);
     let _ = std::fs::remove_dir_all(&dir);
     let _ = first; // first staging kept alive for clarity
@@ -554,7 +556,7 @@ fn operator_configuration_lowers_but_never_raises_protocol_maxima() {
 #[test]
 fn configured_limits_persist_so_restart_cannot_raise_capacity() {
     let dir = temp_store("persist");
-    let mut r = Replica::open_journaled(&dir, keys()).unwrap();
+    let mut r = Replica::open(&dir, keys()).unwrap();
     r.set_supported(supported());
     r.set_quota(QuotaConfig {
         max_space_bodies: 1,
@@ -564,12 +566,12 @@ fn configured_limits_persist_so_restart_cannot_raise_capacity() {
     drop(r);
 
     // A reopen WITHOUT reconfiguring still enforces the persisted limit.
-    let mut r = Replica::open_journaled(&dir, keys()).unwrap();
+    let mut r = Replica::open(&dir, keys()).unwrap();
     r.set_supported(supported());
     assert_eq!(r.quota().max_space_bodies, 1);
     assert_eq!(
         commit_note(&mut r, [11u8; 16], &body(10), "more").unwrap_err(),
-        replica::commit::Failure::QuotaExceeded
+        replica::transaction::commit::Failure::QuotaExceeded
     );
     let _ = std::fs::remove_dir_all(&dir);
 }

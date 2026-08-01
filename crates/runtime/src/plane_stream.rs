@@ -1,3 +1,9 @@
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    clippy::expect_used,
+    reason = "stream frame lengths are validated before allocation and conversion"
+)]
 //! One framing, and one way to find out what a stream is.
 //!
 //! Freight grew its own length-prefixed framing because it was the first plane

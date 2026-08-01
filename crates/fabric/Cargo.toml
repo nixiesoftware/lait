@@ -33,6 +33,11 @@ blake3 = "1"
 data-encoding = "2.6"
 anyhow = "1"
 getrandom = "0.3"
+tracing = "0.1"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
 
 [dev-dependencies]
 # a membership test constructs a raw signing key to forge an op author.

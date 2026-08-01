@@ -21,7 +21,7 @@
 //! same semantic transaction coordinate (Replica frontier); [`ManifestBook`]
 //! rejects and reports it.
 
-use fabric::journal::index::{self, ChildRef, IndexEntry, IndexKey, NodeSink, NodeSource};
+use crate::index::{self, ChildRef, IndexEntry, IndexKey, NodeSink, NodeSource};
 use mechanics::ids::SpaceId;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -91,18 +91,18 @@ pub struct ManifestEntry {
 /// The signed manifest root.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManifestRoot {
-    pub format_version: u8,
-    pub space: [u8; SPACE_ID_LEN],
-    pub replica_frontier: ReplicaFrontier,
-    pub body_index_root: Option<ChildRef>,
-    pub body_count: u64,
-    pub content_index_root: Option<ChildRef>,
-    pub content_count: u64,
-    pub signer: [u8; 32],
-    pub authority_frontier: AuthorityFrontier,
-    pub signature_algorithm: u8,
+    pub(crate) format_version: u8,
+    pub(crate) space: [u8; SPACE_ID_LEN],
+    pub(crate) replica_frontier: ReplicaFrontier,
+    pub(crate) body_index_root: Option<ChildRef>,
+    pub(crate) body_count: u64,
+    pub(crate) content_index_root: Option<ChildRef>,
+    pub(crate) content_count: u64,
+    pub(crate) signer: [u8; 32],
+    pub(crate) authority_frontier: AuthorityFrontier,
+    pub(crate) signature_algorithm: u8,
     #[serde(with = "serde_byte_array")]
-    pub signature: [u8; 64],
+    pub(crate) signature: [u8; 64],
 }
 
 /// Why a manifest failed validation.
@@ -138,10 +138,15 @@ impl std::fmt::Display for Invalid {
 impl std::error::Error for Invalid {}
 
 fn length_framed(domain: &[u8], body: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(2 + domain.len() + 4 + body.len());
-    out.extend_from_slice(&(domain.len() as u16).to_be_bytes());
+    let capacity = 6usize
+        .saturating_add(domain.len())
+        .saturating_add(body.len());
+    let mut out = Vec::with_capacity(capacity);
+    let domain_len = u16::try_from(domain.len()).unwrap_or(u16::MAX);
+    out.extend_from_slice(&domain_len.to_be_bytes());
     out.extend_from_slice(domain);
-    out.extend_from_slice(&(body.len() as u32).to_be_bytes());
+    let body_len = u32::try_from(body.len()).unwrap_or(u32::MAX);
+    out.extend_from_slice(&body_len.to_be_bytes());
     out.extend_from_slice(body);
     out
 }
@@ -167,6 +172,10 @@ pub fn body_index_key(key: &BodyKey) -> IndexKey {
 
 impl ManifestEntry {
     pub fn encode(&self) -> Vec<u8> {
+        #[allow(
+            clippy::expect_used,
+            reason = "derived serialization of this validated manifest entry is infallible"
+        )]
         postcard::to_stdvec(self).expect("postcard manifest entry")
     }
 
@@ -186,13 +195,15 @@ impl ManifestEntry {
         if self.content_refs.len() > MAX_CONTENT_REFS_PER_BODY {
             return Err(Invalid::Bounds);
         }
-        for w in self.heads.windows(2) {
-            if w[0] >= w[1] {
+        for window in self.heads.windows(2) {
+            let [left, right] = window else { continue };
+            if left >= right {
                 return Err(Invalid::OrderViolation);
             }
         }
-        for w in self.content_refs.windows(2) {
-            if w[0] >= w[1] {
+        for window in self.content_refs.windows(2) {
+            let [left, right] = window else { continue };
+            if left >= right {
                 return Err(Invalid::OrderViolation);
             }
         }
@@ -226,6 +237,10 @@ impl ManifestEntry {
 
 impl ManifestRoot {
     fn preimage(&self) -> Vec<u8> {
+        #[allow(
+            clippy::expect_used,
+            reason = "derived serialization of this fixed manifest preimage is infallible"
+        )]
         let body = postcard::to_stdvec(&(
             self.format_version,
             self.space,
@@ -245,7 +260,7 @@ impl ManifestRoot {
     /// Station may sign; mechanics validates its standing at the authority
     /// frontier separately, like every signed object.
     #[allow(clippy::too_many_arguments)]
-    pub fn sign_with(
+    pub(crate) fn sign_with(
         space: &SpaceId,
         replica_frontier: ReplicaFrontier,
         body_index_root: Option<ChildRef>,
@@ -271,6 +286,10 @@ impl ManifestRoot {
     }
 
     pub fn encode(&self) -> Vec<u8> {
+        #[allow(
+            clippy::expect_used,
+            reason = "derived serialization of this validated manifest root is infallible"
+        )]
         postcard::to_stdvec(self).expect("postcard manifest root")
     }
 
@@ -304,7 +323,7 @@ impl ManifestRoot {
         {
             return Err(Invalid::CountMismatch);
         }
-        if !mechanics::crypto::verify_detached(&self.signer, &self.preimage(), &self.signature) {
+        if !mechanics::actor::verify_detached(&self.signer, &self.preimage(), &self.signature) {
             return Err(Invalid::BadSignature);
         }
         Ok(())
@@ -321,7 +340,7 @@ impl ManifestRoot {
     /// it looks: an entry cannot sit under a key it does not hash to, and a
     /// descriptor's hash is over the whole descriptor. Substituting a geometry,
     /// a nonce, or a Merkle root moves the entry.
-    pub fn verify_index(&self, nodes: &dyn NodeSource) -> Result<u64, Invalid> {
+    pub(crate) fn verify_index(&self, nodes: &dyn NodeSource) -> Result<u64, Invalid> {
         let counted =
             index::validate(nodes, self.body_index_root).map_err(|_| Invalid::IndexInvalid)?;
         if counted != self.body_count {
@@ -417,7 +436,7 @@ impl ManifestRoot {
 /// Build a Body index from a complete catalog. Used when publishing from a
 /// catalog held whole in memory; incremental publication updates the prior root
 /// through the index's own `apply` instead.
-pub fn build_body_index(
+pub(crate) fn build_body_index(
     entries: Vec<ManifestEntry>,
     sink: &mut NodeSink,
 ) -> Result<Option<ChildRef>, Invalid> {
@@ -443,7 +462,7 @@ pub fn build_body_index(
 /// already derive from bytes it is entitled to: geometry, an epoch id, a
 /// per-ingest nonce, and a Merkle root over ciphertext. None of it opens
 /// anything.
-pub fn build_content_index(
+pub(crate) fn build_content_index(
     descriptors: Vec<crate::content::ContentDescriptor>,
     sink: &mut NodeSink,
 ) -> Result<Option<ChildRef>, Invalid> {
@@ -567,7 +586,7 @@ impl ManifestBook {
             return 0;
         }
         coordinates.sort_by_key(|(_, _, count)| *count);
-        let excess = coordinates.len() - self.per_signer_limit;
+        let excess = coordinates.len().saturating_sub(self.per_signer_limit);
         for coordinate in coordinates.into_iter().take(excess) {
             self.seen.remove(&coordinate);
         }

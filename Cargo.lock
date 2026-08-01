@@ -1536,6 +1536,7 @@ dependencies = [
  "postcard",
  "serde",
  "serde_json",
+ "tracing",
 ]
 
 [[package]]
@@ -2882,6 +2883,7 @@ dependencies = [
  "data-encoding",
  "postcard",
  "serde",
+ "tracing",
 ]
 
 [[package]]
@@ -2947,7 +2949,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "windows-sys 0.61.2",
- "world-bridge",
  "world-interface",
  "zip",
 ]
@@ -2958,6 +2959,7 @@ version = "0.6.1"
 dependencies = [
  "blake3",
  "data-encoding",
+ "fabric",
  "mechanics",
  "postcard",
  "replica",
@@ -2982,7 +2984,6 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
- "world-bridge",
  "world-interface",
 ]
 
@@ -4603,11 +4604,13 @@ dependencies = [
  "data-encoding",
  "fabric",
  "getrandom 0.3.4",
+ "journal",
  "mechanics",
  "postcard",
  "serde",
  "serde-byte-array",
  "serde_json",
+ "tracing",
 ]
 
 [[package]]
@@ -4722,8 +4725,10 @@ dependencies = [
  "blake3",
  "comms",
  "data-encoding",
+ "fabric",
  "fs2",
  "getrandom 0.3.4",
+ "journal",
  "mechanics",
  "postcard",
  "regex",
@@ -6881,25 +6886,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "world-bridge"
-version = "0.6.1"
-dependencies = [
- "data-encoding",
- "replica",
- "runtime",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "world-interface"
 version = "0.6.1"
 dependencies = [
  "clap",
  "replica",
+ "runtime",
  "schemars",
  "serde_json",
- "world-bridge",
+ "tracing",
 ]
 
 [[package]]

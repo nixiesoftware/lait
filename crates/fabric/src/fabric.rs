@@ -15,7 +15,7 @@
 //!   proof of a real Engine commit — an outside crate cannot forge the token
 //!   Replica advances from.
 //!
-//! [`MemoryEngine`] is the sole engine: atomic Bodies plus the frozen
+//! [`Engine`] is the sole engine: atomic Bodies plus the frozen
 //! collaborative algebra (register/map/list/text/set/counter with stable
 //! element identity) over real Loro containers — one Loro document per Body,
 //! so per-Body export/import carries exactly one Body's causal history — with
@@ -185,12 +185,23 @@ impl Receipt {
 
 /// Commit outcomes owned by the Engine boundary.
 pub mod commit {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Invalid {
+        Import,
+        Bounds,
+        ListIndex,
+        UnknownElement,
+        TextRange,
+        CounterOverflow,
+        Merge,
+    }
+
     /// Why an Engine commit failed.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub enum Failure {
         /// A durable write (or a rollback after a failed apply) failed. The engine
         /// state may have diverged from the store — the caller must fail stop.
-        Durability(String),
+        Journal(journal::Failure),
         /// The engine does not support this operation. Reserved (the Loro engine
         /// supports the full algebra); the error surface stays stable.
         Unsupported,
@@ -200,11 +211,7 @@ pub mod commit {
         TypeConflict,
         /// The operation was structurally invalid at apply time (out-of-bounds
         /// index, unknown element id, counter overflow). The batch is rolled back.
-        InvalidOp(String),
-        /// The durable store failed integrity validation (a manifest naming absent
-        /// or corrupt objects, a corrupt journal, a missing transaction counter).
-        /// Never repaired heuristically — recreation guidance is the caller's.
-        Integrity(String),
+        Invalid(Invalid),
         /// The authoritative switch happened but its durability confirmation
         /// failed: the commit may or may not survive power loss. Fail stop and
         /// reopen — recovery resolves the outcome deterministically from the
@@ -222,9 +229,8 @@ pub mod commit {
     impl From<journal::Failure> for Failure {
         fn from(e: journal::Failure) -> Self {
             match e {
-                journal::Failure::Durability(m) => Failure::Durability(m),
-                journal::Failure::Integrity(m) => Failure::Integrity(m),
                 journal::Failure::OutcomeUnknown => Failure::OutcomeUnknown,
+                failure => Failure::Journal(failure),
             }
         }
     }
@@ -253,102 +259,6 @@ pub struct CollaborativeView {
 pub struct ListElement {
     pub element: String,
     pub value: Vec<u8>,
-}
-
-/// The Engine engine: the durable, canonical collaborative representation
-/// Replica drives. It accepts semantic operations and returns a receipt whose
-/// construction is Engine-private, serves committed reads, and exports/imports
-/// **one Body at a time** — the canonical store persists per-Body protected
-/// objects, never a whole-engine snapshot. [`MemoryEngine`] is the only engine.
-pub trait Engine {
-    /// Durably apply a transaction and return a commit receipt. Atomic: either
-    /// every op is applied and a receipt returned, or nothing changes.
-    fn commit(&mut self, request: Transaction) -> Result<Receipt, Failure>;
-
-    /// Read the committed canonical bytes at a key, if present.
-    fn read(&self, key: &Key) -> Option<Vec<u8>>;
-
-    /// Project the committed collaborative view of a Body.
-    ///
-    /// Fallible rather than optional, because "there is nothing here" and "there
-    /// is something here I cannot read" are different answers and a caller acts
-    /// differently on each. A Body carrying a collaborative type this build does
-    /// not implement is [`ProjectionFailure::SchemaAhead`] — its bytes stay
-    /// stored, forwarded, and converged, and no caller is handed a view that
-    /// looks complete and is not.
-    fn read_collaborative(&self, key: &Key) -> Result<CollaborativeView, ProjectionFailure>;
-
-    /// Export **one Body's** canonical representation, if the Body exists. A
-    /// collaborative export preserves causal history and stable element
-    /// identity for exactly that Body — never a whole-engine or cross-Body
-    /// snapshot. This is the payload the protected Body object seals.
-    fn export_body(&self, key: &Key) -> Option<BodyExport>;
-
-    /// This Body's current position in its collaborative history.
-    fn version(&self, key: &Key) -> Result<crate::causal::Version, crate::causal::Invalid>;
-
-    /// Operations after `from`, as an independently importable artifact.
-    ///
-    /// `from` is always this replica's own prior version. It cannot be a remote
-    /// claim: expanding a head set requires the history it names, so a diverged
-    /// peer could not be answered anyway — which is why convergence exchanges
-    /// artifacts rather than versions.
-    fn export_delta(
-        &self,
-        key: &Key,
-        from: &crate::causal::Version,
-    ) -> Result<crate::causal::Artifact, crate::causal::Invalid>;
-
-    /// Current state with history trimmed at `retention_frontier`.
-    fn export_checkpoint(
-        &self,
-        key: &Key,
-        retention_frontier: &crate::causal::Version,
-    ) -> Result<crate::causal::Artifact, crate::causal::Invalid>;
-
-    /// The complete history as it stands now — taken immediately before a trim,
-    /// so the work the trim will refuse can still be readmitted later.
-    fn export_history(&self, key: &Key) -> Result<crate::causal::Artifact, crate::causal::Invalid>;
-
-    /// Import one artifact. Order-independent: material whose dependencies have
-    /// not arrived is held pending rather than refused.
-    fn import_artifact(
-        &mut self,
-        key: &Key,
-        artifact: &crate::causal::Artifact,
-    ) -> Result<crate::causal::ImportStatus, crate::causal::Invalid>;
-
-    /// How two positions in this Body's history relate.
-    fn relation(
-        &self,
-        key: &Key,
-        a: &crate::causal::Version,
-        b: &crate::causal::Version,
-    ) -> crate::causal::CausalRelation;
-
-    /// Take an anchor at a position in a collaborative value.
-    fn anchor(
-        &self,
-        key: &Key,
-        path: &str,
-        position: u64,
-    ) -> Result<crate::causal::Anchor, crate::causal::Invalid>;
-
-    /// Resolve an anchor against the Body's current state.
-    ///
-    /// Total, and never mutates: a position that cannot be mapped is `Drifted`,
-    /// so this is safe on a read-only replica and a renderer is never handed a
-    /// silently wrong index.
-    fn resolve(&self, key: &Key, anchor: &crate::causal::Anchor)
-        -> crate::causal::AnchorResolution;
-
-    /// Import one Body's canonical exported representation, addressed to
-    /// exactly the given key. A collaborative import merges causally (already
-    /// -known material returns `None`); an atomic import replaces the value
-    /// (`None` when byte-identical). Engine applies the change as directed —
-    /// legitimacy, ordering, and conflict policy for atomic replacement are
-    /// the caller's (Replica's) to decide **before** calling.
-    fn import_body(&mut self, key: &Key, export: &BodyExport) -> Result<Option<Receipt>, Failure>;
 }
 
 /// The Body identity an anchor carries. A digest rather than the key itself so
@@ -401,7 +311,7 @@ pub enum BodyExport {
 /// merge — the child-container/LWW shadowing that op-identified containers
 /// suffer under concurrency cannot occur (the multi-writer reference corpus
 /// proved that shadowing fatal for a shared catalog).
-pub struct MemoryEngine {
+pub struct Engine {
     /// This activation's writer id, minted once and shared by every document
     /// this engine authors into. One id per activation rather than one per
     /// document keeps a Body's version vector growing with restarts rather than
@@ -451,22 +361,18 @@ pub mod projection {
         /// implement. Reserved-but-unimplemented tags land here, which is the
         /// point: schema gating upstream should have refused the Body already, and
         /// the projection layer is the wrong place to paper over that.
-        SchemaAhead { tag: String },
+        SchemaAhead,
         /// A known tag bound to a value shape it cannot hold. Corruption or a
         /// schema disagreement, not a version gap.
-        Malformed { tag: String },
+        Malformed,
     }
 
     impl std::fmt::Display for Failure {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             match self {
                 Failure::NotCollaborative => write!(f, "not a collaborative Body"),
-                Failure::SchemaAhead { tag } => {
-                    write!(f, "collaborative type `{tag}` is ahead of this build")
-                }
-                Failure::Malformed { tag } => {
-                    write!(f, "collaborative type `{tag}` holds an impossible value")
-                }
+                Failure::SchemaAhead => write!(f, "collaborative schema is ahead of this build"),
+                Failure::Malformed => write!(f, "collaborative material is malformed"),
             }
         }
     }
@@ -494,13 +400,15 @@ fn typed_key(tag: &str, path: &str) -> String {
 
 fn mint_bytes<const N: usize>() -> [u8; N] {
     let mut raw = [0u8; N];
-    getrandom::fill(&mut raw).expect("getrandom");
+    crate::op::fill_identity(&mut raw);
     raw
 }
 
 /// The set-member key prefix for a value: 128 bits of BLAKE3 over the value.
 fn set_member_prefix(value: &[u8]) -> String {
-    data_encoding::HEXLOWER.encode(&blake3::hash(value).as_bytes()[..16])
+    let digest = blake3::hash(value);
+    let prefix = digest.as_bytes().get(..16).unwrap_or(digest.as_bytes());
+    data_encoding::HEXLOWER.encode(prefix)
 }
 
 /// A fresh per-Body doc with the crate's canonical Loro config, authoring as
@@ -527,7 +435,7 @@ impl BodyState {
             BodyState::Collab(doc) => doc
                 .export(loro::ExportMode::Snapshot)
                 .map(BodyExport::Collaborative)
-                .map_err(|e| Failure::Durability(format!("export body: {e}"))),
+                .map_err(|_| Failure::Invalid(commit::Invalid::Import)),
         }
     }
 
@@ -540,14 +448,14 @@ impl BodyState {
                 // through `collab_doc`.
                 let doc = new_body_doc(None);
                 doc.import(snapshot)
-                    .map_err(|e| Failure::InvalidOp(format!("import body: {e}")))?;
+                    .map_err(|_| Failure::Invalid(commit::Invalid::Import))?;
                 Ok(BodyState::Collab(doc))
             }
         }
     }
 }
 
-impl MemoryEngine {
+impl Engine {
     /// A fresh, empty Loro-backed engine, minting this activation's writer id.
     pub fn new() -> Self {
         Self {
@@ -567,7 +475,8 @@ impl MemoryEngine {
     }
 
     fn loro_err(e: impl std::fmt::Display) -> Failure {
-        Failure::InvalidOp(e.to_string())
+        tracing::warn!(%e, "fabric operation was invalid");
+        Failure::Invalid(commit::Invalid::Import)
     }
 
     /// The collaborative doc for a Body, creating it when `create`. An atomic
@@ -580,12 +489,10 @@ impl MemoryEngine {
                 BodyState::Atomic(_) => Err(Failure::TypeConflict),
             },
             Entry::Vacant(v) if create => {
-                let BodyState::Collab(doc) =
-                    v.insert(BodyState::Collab(new_body_doc(Some(self.writer))))
-                else {
-                    unreachable!()
-                };
-                Ok(Some(doc))
+                match v.insert(BodyState::Collab(new_body_doc(Some(self.writer)))) {
+                    BodyState::Collab(doc) => Ok(Some(doc)),
+                    BodyState::Atomic(_) => Err(Failure::TypeConflict),
+                }
             }
             Entry::Vacant(_) => Ok(None),
         }
@@ -618,7 +525,7 @@ impl MemoryEngine {
     /// The Body's doc for a typed-path write, with the path-type binding
     /// enforced.
     fn doc_for(&mut self, key: &Key, tag: &str, path: &str) -> Result<&loro::LoroDoc, Failure> {
-        let doc = self.collab_doc(key, true)?.expect("created on demand");
+        let doc = self.collab_doc(key, true)?.ok_or(Failure::TypeConflict)?;
         Self::check_path_type(doc, tag, path)?;
         Ok(doc)
     }
@@ -640,8 +547,11 @@ impl MemoryEngine {
             if bytes.len() < ELEMENT_ID_LEN {
                 continue;
             }
-            let id = data_encoding::HEXLOWER.encode(&bytes[..ELEMENT_ID_LEN]);
-            out.push((i, id, bytes[ELEMENT_ID_LEN..].to_vec()));
+            let Some((identity, value)) = bytes.split_at_checked(ELEMENT_ID_LEN) else {
+                continue;
+            };
+            let id = data_encoding::HEXLOWER.encode(identity);
+            out.push((i, id, value.to_vec()));
         }
         out
     }
@@ -651,13 +561,15 @@ impl MemoryEngine {
         let mut h = blake3::Hasher::new();
         h.update(CAUSAL_DOMAIN);
         for key in touched {
-            h.update(&(key.as_bytes().len() as u64).to_le_bytes());
+            let key_len = u64::try_from(key.as_bytes().len()).unwrap_or(u64::MAX);
+            h.update(&key_len.to_le_bytes());
             h.update(key.as_bytes());
             match self.bodies.get(key) {
                 Some(state) => {
                     let digest = state.digest();
                     h.update(&[1]);
-                    h.update(&(digest.len() as u64).to_le_bytes());
+                    let digest_len = u64::try_from(digest.len()).unwrap_or(u64::MAX);
+                    h.update(&digest_len.to_le_bytes());
                     h.update(&digest);
                 }
                 None => {
@@ -730,14 +642,16 @@ impl MemoryEngine {
             } => {
                 let doc = self.doc_for(key, "list", path)?;
                 let l = doc.get_movable_list(typed_key("list", path).as_str());
-                let index = *index as usize;
+                let index = usize::try_from(*index)
+                    .map_err(|_| Failure::Invalid(commit::Invalid::ListIndex))?;
                 if index > l.len() {
-                    return Err(Failure::InvalidOp("list index out of bounds".into()));
+                    return Err(Failure::Invalid(commit::Invalid::ListIndex));
                 }
                 // Engine mints the stable element id and embeds it in the value,
                 // so identity survives synchronization.
                 let id: [u8; ELEMENT_ID_LEN] = mint_bytes();
-                let mut blob = Vec::with_capacity(ELEMENT_ID_LEN + value.len());
+                let capacity = ELEMENT_ID_LEN.saturating_add(value.len());
+                let mut blob = Vec::with_capacity(capacity);
                 blob.extend_from_slice(&id);
                 blob.extend_from_slice(value);
                 l.insert(index, blob.as_slice()).map_err(Self::loro_err)
@@ -749,7 +663,7 @@ impl MemoryEngine {
                     .into_iter()
                     .find(|(_, id, _)| id == element)
                 else {
-                    return Err(Failure::InvalidOp("unknown list element".into()));
+                    return Err(Failure::Invalid(commit::Invalid::UnknownElement));
                 };
                 l.delete(i, 1).map_err(Self::loro_err)
             }
@@ -765,11 +679,12 @@ impl MemoryEngine {
                     .into_iter()
                     .find(|(_, id, _)| id == element)
                 else {
-                    return Err(Failure::InvalidOp("unknown list element".into()));
+                    return Err(Failure::Invalid(commit::Invalid::UnknownElement));
                 };
-                let to = *index as usize;
+                let to = usize::try_from(*index)
+                    .map_err(|_| Failure::Invalid(commit::Invalid::ListIndex))?;
                 if to >= l.len() {
-                    return Err(Failure::InvalidOp("list index out of bounds".into()));
+                    return Err(Failure::Invalid(commit::Invalid::ListIndex));
                 }
                 l.mov(from, to).map_err(Self::loro_err)
             }
@@ -783,10 +698,12 @@ impl MemoryEngine {
                 let doc = self.doc_for(key, "text", path)?;
                 let t = doc.get_text(typed_key("text", path).as_str());
                 let len = t.to_string().chars().count();
-                let index = *index as usize;
-                let delete = *delete as usize;
-                if index + delete > len {
-                    return Err(Failure::InvalidOp("text splice out of bounds".into()));
+                let index = usize::try_from(*index)
+                    .map_err(|_| Failure::Invalid(commit::Invalid::TextRange))?;
+                let delete = usize::try_from(*delete)
+                    .map_err(|_| Failure::Invalid(commit::Invalid::TextRange))?;
+                if index.checked_add(delete).is_none_or(|end| end > len) {
+                    return Err(Failure::Invalid(commit::Invalid::TextRange));
                 }
                 if delete > 0 {
                     t.delete(index, delete).map_err(Self::loro_err)?;
@@ -830,7 +747,7 @@ impl MemoryEngine {
                 let current = crate::loro_ext::get_i64(&m, &me).unwrap_or(0);
                 let next = current
                     .checked_add(*delta)
-                    .ok_or_else(|| Failure::InvalidOp("counter overflow".into()))?;
+                    .ok_or(Failure::Invalid(commit::Invalid::CounterOverflow))?;
                 m.insert(&me, next).map_err(Self::loro_err)
             }
         }
@@ -857,14 +774,14 @@ impl MemoryEngine {
     }
 }
 
-impl Default for MemoryEngine {
+impl Default for Engine {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl Engine for MemoryEngine {
-    fn commit(&mut self, request: Transaction) -> Result<Receipt, Failure> {
+impl Engine {
+    pub fn commit(&mut self, request: Transaction) -> Result<Receipt, Failure> {
         // Batch atomicity, bounded. This used to back every touched Body up by
         // full export before applying — a complete-history snapshot per
         // ordinary edit, paid inside Engine before anything was sealed, and no
@@ -933,14 +850,13 @@ impl Engine for MemoryEngine {
                 {
                     doc.commit();
                     if doc.revert_to(&frontiers).is_err() {
-                        unrestored += 1;
+                        unrestored = unrestored.saturating_add(1);
                     }
                 }
             }
             if unrestored > 0 {
-                return Err(Failure::Durability(format!(
-                    "rollback after failed apply did not restore {unrestored} bodies"
-                )));
+                tracing::error!(unrestored, "fabric rollback did not restore all bodies");
+                return Err(Failure::OutcomeUnknown);
             }
             return Err(e);
         }
@@ -952,20 +868,19 @@ impl Engine for MemoryEngine {
                 doc.commit();
             }
         }
-        Ok(Receipt::new(
-            self.causal_for(&touched),
-            request.ops.len() as u32,
-        ))
+        let applied = u32::try_from(request.ops.len())
+            .map_err(|_| Failure::Invalid(commit::Invalid::Bounds))?;
+        Ok(Receipt::new(self.causal_for(&touched), applied))
     }
 
-    fn read(&self, key: &Key) -> Option<Vec<u8>> {
+    pub fn read(&self, key: &Key) -> Option<Vec<u8>> {
         match self.bodies.get(key)? {
             BodyState::Atomic(bytes) => Some(bytes.clone()),
             BodyState::Collab(_) => None,
         }
     }
 
-    fn read_collaborative(&self, key: &Key) -> Result<CollaborativeView, ProjectionFailure> {
+    pub fn read_collaborative(&self, key: &Key) -> Result<CollaborativeView, ProjectionFailure> {
         let Some(BodyState::Collab(doc)) = self.bodies.get(key) else {
             return Err(ProjectionFailure::NotCollaborative);
         };
@@ -991,14 +906,12 @@ impl Engine for MemoryEngine {
                 continue;
             }
             let Some((tag, path)) = name.split_once(':') else {
-                return Err(ProjectionFailure::SchemaAhead {
-                    tag: name.to_string(),
-                });
+                tracing::warn!(tag = %name, "unrecognized collaborative root");
+                return Err(ProjectionFailure::SchemaAhead);
             };
             if !is_implemented_type_tag(tag) {
-                return Err(ProjectionFailure::SchemaAhead {
-                    tag: tag.to_string(),
-                });
+                tracing::warn!(tag, "unsupported collaborative type");
+                return Err(ProjectionFailure::SchemaAhead);
             }
             let path = path.to_string();
             match (tag, value) {
@@ -1020,9 +933,12 @@ impl Engine for MemoryEngine {
                         if bytes.len() < ELEMENT_ID_LEN {
                             continue;
                         }
+                        let Some((identity, value)) = bytes.split_at_checked(ELEMENT_ID_LEN) else {
+                            continue;
+                        };
                         elements.push(ListElement {
-                            element: data_encoding::HEXLOWER.encode(&bytes[..ELEMENT_ID_LEN]),
-                            value: bytes[ELEMENT_ID_LEN..].to_vec(),
+                            element: data_encoding::HEXLOWER.encode(identity),
+                            value: value.to_vec(),
                         });
                     }
                     view.lists.insert(path, elements);
@@ -1053,16 +969,15 @@ impl Engine for MemoryEngine {
                     view.counters.insert(path, total);
                 }
                 _ => {
-                    return Err(ProjectionFailure::Malformed {
-                        tag: tag.to_string(),
-                    })
+                    tracing::warn!(tag, "collaborative type held an invalid value");
+                    return Err(ProjectionFailure::Malformed);
                 }
             }
         }
         Ok(view)
     }
 
-    fn version(&self, key: &Key) -> Result<crate::causal::Version, crate::causal::Invalid> {
+    pub fn version(&self, key: &Key) -> Result<crate::causal::Version, crate::causal::Invalid> {
         match self.bodies.get(key) {
             Some(BodyState::Collab(doc)) => Ok(crate::causal::Version::from_frontiers(
                 &doc.oplog_frontiers(),
@@ -1075,7 +990,7 @@ impl Engine for MemoryEngine {
         }
     }
 
-    fn export_delta(
+    pub fn export_delta(
         &self,
         key: &Key,
         from: &crate::causal::Version,
@@ -1089,7 +1004,10 @@ impl Engine for MemoryEngine {
                 };
                 let bytes = doc
                     .export(loro::ExportMode::updates(&vv))
-                    .map_err(|e| crate::causal::Invalid::Engine(e.to_string()))?;
+                    .map_err(|source| {
+                        tracing::warn!(%source, "fabric delta export failed");
+                        crate::causal::Invalid::Engine
+                    })?;
                 Ok(crate::causal::Artifact::Delta {
                     format_version: crate::causal::CAUSAL_FORMAT_VERSION,
                     base: from.clone(),
@@ -1105,7 +1023,7 @@ impl Engine for MemoryEngine {
         }
     }
 
-    fn export_checkpoint(
+    pub fn export_checkpoint(
         &self,
         key: &Key,
         retention_frontier: &crate::causal::Version,
@@ -1123,7 +1041,10 @@ impl Engine for MemoryEngine {
                 }
                 let bytes = doc
                     .export(loro::ExportMode::shallow_snapshot(&frontier))
-                    .map_err(|e| crate::causal::Invalid::Engine(e.to_string()))?;
+                    .map_err(|source| {
+                        tracing::warn!(%source, "fabric checkpoint export failed");
+                        crate::causal::Invalid::Engine
+                    })?;
                 Ok(crate::causal::Artifact::Checkpoint {
                     format_version: crate::causal::CAUSAL_FORMAT_VERSION,
                     retention_frontier: crate::causal::Version::from_frontiers(&frontier),
@@ -1139,12 +1060,16 @@ impl Engine for MemoryEngine {
         }
     }
 
-    fn export_history(&self, key: &Key) -> Result<crate::causal::Artifact, crate::causal::Invalid> {
+    pub fn export_history(
+        &self,
+        key: &Key,
+    ) -> Result<crate::causal::Artifact, crate::causal::Invalid> {
         match self.bodies.get(key) {
             Some(BodyState::Collab(doc)) => {
-                let bytes = doc
-                    .export(loro::ExportMode::Snapshot)
-                    .map_err(|e| crate::causal::Invalid::Engine(e.to_string()))?;
+                let bytes = doc.export(loro::ExportMode::Snapshot).map_err(|source| {
+                    tracing::warn!(%source, "fabric history export failed");
+                    crate::causal::Invalid::Engine
+                })?;
                 Ok(crate::causal::Artifact::Archive {
                     format_version: crate::causal::CAUSAL_FORMAT_VERSION,
                     result: crate::causal::Version::from_frontiers(&doc.oplog_frontiers()),
@@ -1159,7 +1084,7 @@ impl Engine for MemoryEngine {
         }
     }
 
-    fn import_artifact(
+    pub fn import_artifact(
         &mut self,
         key: &Key,
         artifact: &crate::causal::Artifact,
@@ -1193,7 +1118,7 @@ impl Engine for MemoryEngine {
             Artifact::Delta { bytes, .. }
             | Artifact::Checkpoint { bytes, .. }
             | Artifact::Archive { bytes, .. } => bytes,
-            Artifact::Replace { .. } => unreachable!("handled above"),
+            Artifact::Replace { .. } => return Err(Invalid::Engine),
         };
 
         let writer = self.writer;
@@ -1216,7 +1141,8 @@ impl Engine for MemoryEngine {
                     frontier: Version::from_frontiers(&doc.shallow_since_frontiers()),
                 }
             } else {
-                Invalid::Engine(message)
+                tracing::warn!(%message, "fabric import failed");
+                Invalid::Engine
             }
         })?;
         let after = doc.oplog_frontiers();
@@ -1226,7 +1152,7 @@ impl Engine for MemoryEngine {
         })
     }
 
-    fn relation(
+    pub fn relation(
         &self,
         key: &Key,
         a: &crate::causal::Version,
@@ -1238,7 +1164,7 @@ impl Engine for MemoryEngine {
         }
     }
 
-    fn anchor(
+    pub fn anchor(
         &self,
         key: &Key,
         path: &str,
@@ -1248,7 +1174,7 @@ impl Engine for MemoryEngine {
             return Err(crate::causal::Invalid::NotCollaborative);
         };
         let text = doc.get_text(typed_key("text", path));
-        let length = text.len_unicode() as u64;
+        let length = u64::try_from(text.len_unicode()).unwrap_or(u64::MAX);
         // Bind the position to the operation that wrote the character before
         // it. That is what survives concurrent edits: an offset does not, and a
         // caret that does not survive a concurrent edit is worse than no caret.
@@ -1256,7 +1182,9 @@ impl Engine for MemoryEngine {
             None
         } else {
             text.get_cursor(
-                (position.min(length) as usize).saturating_sub(1),
+                usize::try_from(position.min(length))
+                    .unwrap_or(usize::MAX)
+                    .saturating_sub(1),
                 loro::cursor::Side::Right,
             )
             .and_then(|cursor| cursor.id)
@@ -1276,7 +1204,7 @@ impl Engine for MemoryEngine {
         })
     }
 
-    fn resolve(
+    pub fn resolve(
         &self,
         key: &Key,
         anchor: &crate::causal::Anchor,
@@ -1289,7 +1217,7 @@ impl Engine for MemoryEngine {
             return AnchorResolution::Drifted;
         };
         let text = doc.get_text(typed_key("text", &anchor.path));
-        let length = text.len_unicode() as u64;
+        let length = u64::try_from(text.len_unicode()).unwrap_or(u64::MAX);
 
         // An anchor at the very start is the one position concurrent edits
         // cannot move.
@@ -1310,7 +1238,7 @@ impl Engine for MemoryEngine {
             } else {
                 loro::cursor::Side::Left
             },
-            anchor.offset as usize,
+            usize::try_from(anchor.offset).unwrap_or(usize::MAX),
         );
         match doc.get_cursor_pos(&cursor) {
             // The anchor bound to the character *before* the caret, so a live
@@ -1321,7 +1249,11 @@ impl Engine for MemoryEngine {
             // this case is documented to be, and it is what a renderer can act
             // on.
             Ok(position) if position.current.side == loro::cursor::Side::Right => {
-                AnchorResolution::Resolved((position.current.pos as u64 + 1).min(length))
+                let resolved = u64::try_from(position.current.pos)
+                    .unwrap_or(u64::MAX)
+                    .saturating_add(1)
+                    .min(length);
+                AnchorResolution::Resolved(resolved)
             }
             Ok(_) => AnchorResolution::Drifted,
             // An anchor older than what this replica retains.
@@ -1329,11 +1261,15 @@ impl Engine for MemoryEngine {
         }
     }
 
-    fn export_body(&self, key: &Key) -> Option<BodyExport> {
+    pub fn export_body(&self, key: &Key) -> Option<BodyExport> {
         self.bodies.get(key).and_then(|s| s.export().ok())
     }
 
-    fn import_body(&mut self, key: &Key, export: &BodyExport) -> Result<Option<Receipt>, Failure> {
+    pub fn import_body(
+        &mut self,
+        key: &Key,
+        export: &BodyExport,
+    ) -> Result<Option<Receipt>, Failure> {
         let changed = match (self.bodies.get(key), export) {
             // Atomic replacement — policy for concurrent atomic writes is
             // Replica's, decided before this call.
@@ -1355,7 +1291,7 @@ impl Engine for MemoryEngine {
             (Some(BodyState::Collab(doc)), BodyExport::Collaborative(snapshot)) => {
                 let before = doc.oplog_frontiers().encode();
                 doc.import(snapshot)
-                    .map_err(|e| Failure::InvalidOp(format!("merge import: {e}")))?;
+                    .map_err(|_| Failure::Invalid(commit::Invalid::Merge))?;
                 doc.oplog_frontiers().encode() != before
             }
             (None, BodyExport::Collaborative(_)) => {
@@ -1386,7 +1322,7 @@ mod tests {
     fn a_body_export_carries_exactly_one_body() {
         // Two collaborative Bodies; exporting one and importing it elsewhere
         // must bring that Body only — never a cross-Body snapshot.
-        let mut a = MemoryEngine::new();
+        let mut a = Engine::new();
         let k1 = Key::from_bytes(b"body/1".to_vec());
         let k2 = Key::from_bytes(b"body/2".to_vec());
         a.commit(Transaction::new(
@@ -1408,7 +1344,7 @@ mod tests {
 
         let export = a.export_body(&k1).unwrap();
         assert!(matches!(export, BodyExport::Collaborative(_)));
-        let mut b = MemoryEngine::new();
+        let mut b = Engine::new();
         b.import_body(&k1, &export).unwrap().unwrap();
         assert_eq!(
             b.read_collaborative(&k1).unwrap().registers["title"],
@@ -1422,7 +1358,7 @@ mod tests {
 
     #[test]
     fn per_body_import_preserves_stable_element_identity() {
-        let mut a = MemoryEngine::new();
+        let mut a = Engine::new();
         let k = Key::from_bytes(b"body/ids".to_vec());
         a.commit(Transaction::new(
             "created",
@@ -1439,7 +1375,7 @@ mod tests {
             .clone();
 
         // B imports the Body and removes the element BY THE SAME STABLE ID.
-        let mut b = MemoryEngine::new();
+        let mut b = Engine::new();
         b.import_body(&k, &a.export_body(&k).unwrap()).unwrap();
         b.commit(Transaction::new(
             "removed",
@@ -1455,7 +1391,7 @@ mod tests {
 
     #[test]
     fn reimporting_known_material_is_unchanged() {
-        let mut a = MemoryEngine::new();
+        let mut a = Engine::new();
         let k = Key::from_bytes(b"body/known".to_vec());
         a.commit(Transaction::new(
             "created",
@@ -1467,7 +1403,7 @@ mod tests {
         ))
         .unwrap();
         let export = a.export_body(&k).unwrap();
-        let mut b = MemoryEngine::new();
+        let mut b = Engine::new();
         assert!(b.import_body(&k, &export).unwrap().is_some(), "new");
         assert!(
             b.import_body(&k, &export).unwrap().is_none(),
@@ -1482,7 +1418,7 @@ mod tests {
 
     #[test]
     fn a_model_mismatch_at_the_same_key_is_a_type_conflict() {
-        let mut f = MemoryEngine::new();
+        let mut f = Engine::new();
         let k = Key::from_bytes(b"body/mismatch".to_vec());
         f.commit(Transaction::new(
             "created",
@@ -1493,7 +1429,7 @@ mod tests {
         ))
         .unwrap();
         // A collaborative export addressed at an atomic key is refused.
-        let mut other = MemoryEngine::new();
+        let mut other = Engine::new();
         other
             .commit(Transaction::new(
                 "created",
@@ -1533,7 +1469,7 @@ mod tests {
 
     #[test]
     fn atomic_bodies_commit_read_remove_and_advance_the_causal_token() {
-        let mut fabric = MemoryEngine::new();
+        let mut fabric = Engine::new();
         let key = Key::from_bytes(b"body/0".to_vec());
         let r1 = fabric
             .commit(Transaction::new(

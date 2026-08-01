@@ -1,3 +1,7 @@
+#![allow(
+    clippy::arithmetic_side_effects,
+    reason = "bounded signed-DAG traversal counters are checked by protocol ceilings before traversal"
+)]
 //! The shared **signed hash-DAG envelope** — the Regime-C primitive
 //! (`docs/DATA-CONTRACT.md`) the authority planes ride:
 //!
@@ -222,7 +226,9 @@ pub fn topo_order(nodes: &std::collections::HashMap<String, &SignedNode>) -> Vec
     for (h, node) in nodes {
         for p in &node.parents {
             if nodes.contains_key(p) {
-                *indeg.get_mut(h).unwrap() += 1;
+                if let Some(degree) = indeg.get_mut(h) {
+                    *degree = degree.saturating_add(1);
+                }
                 children.entry(p.clone()).or_default().push(h.clone());
             }
         }
@@ -240,10 +246,11 @@ pub fn topo_order(nodes: &std::collections::HashMap<String, &SignedNode>) -> Vec
             let mut cs = cs.clone();
             cs.sort();
             for c in cs {
-                let d = indeg.get_mut(&c).unwrap();
-                *d -= 1;
-                if *d == 0 {
-                    ready.insert(c);
+                if let Some(degree) = indeg.get_mut(&c) {
+                    *degree = degree.saturating_sub(1);
+                    if *degree == 0 {
+                        ready.insert(c);
+                    }
                 }
             }
         }
@@ -267,11 +274,10 @@ fn hex32(s: &str) -> Option<[u8; 32]> {
     if s.len() != 64 || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }
-    let mut out = [0u8; 32];
-    for (i, b) in out.iter_mut().enumerate() {
-        *b = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).ok()?;
-    }
-    Some(out)
+    let decoded = data_encoding::HEXLOWER_PERMISSIVE
+        .decode(s.as_bytes())
+        .ok()?;
+    <[u8; 32]>::try_from(decoded.as_slice()).ok()
 }
 
 #[cfg(test)]

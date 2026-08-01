@@ -1,3 +1,22 @@
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects,
+        clippy::unreachable,
+        clippy::unimplemented,
+        clippy::unchecked_time_subtraction,
+        clippy::todo,
+        clippy::string_slice,
+        clippy::panic_in_result_fn,
+        clippy::panic,
+        clippy::exit,
+        clippy::as_conversions
+    )
+)]
+
 //! lait: an orbital shell for local-first, peer-to-peer collaboration.
 //!
 //! One binary, four roles:
@@ -19,7 +38,7 @@
 //!     orbital lifecycle, each behind its own crate boundary.
 //!   * **Bundled products** ([`world`]): the composition root that docks
 //!     independently packaged Worlds and mounts their client interfaces.
-//!   * **Layer B — control protocol** ([`control`], [`dto`]): a stable,
+//!   * **Layer B — control protocol** ([`control`]): a stable,
 //!     versioned, hand-maintained projection over the local socket. Never a
 //!     dump of storage internals.
 
@@ -32,10 +51,6 @@ pub mod control;
 pub mod daemon;
 pub mod daemon_spawn;
 pub mod diagnose;
-/// Layer-B data-transfer objects (the product's external JSON shapes).
-pub mod dto;
-/// Product identifiers: the generic mechanics ids plus the Issues-owned ids.
-pub mod ids;
 pub mod install;
 pub mod list_picker;
 pub mod mcp;
@@ -43,36 +58,11 @@ pub mod members_ui;
 /// The product's adoption of the orbital lifecycle (hosts a World, drives
 /// Sessions through the public `runtime` API).
 pub mod orbital;
-#[path = "spaces.rs"]
 pub mod orbits;
 pub mod registry;
 pub mod serve;
 /// The composition adapter for independently packaged Worlds.
 pub mod world;
-
-// The **kernel** (`mechanics`) holds lait's roots — identity, the trust
-// planes, derivation rules — in a crate that lists no scaffold, so no CRDT or
-// transport reference there can compile. Re-exported here so the app layer
-// keeps reaching them by their historical crate-root paths (`crate::acl`,
-// `lait::crypto`, …); the boundary is enforced by the kernel crate's manifest,
-// not by these aliases.
-pub use mechanics::{
-    acl, actor, authority, compile, crypto, custody, dkg, expand, genesis, policy, secretfs,
-    sigdag, space, transition,
-};
-
-// The **fabric** (`fabric`) is the substrate's convergence boundary — the only
-// crate whose manifest lists the CRDT engine, so document merge internals are
-// unnameable outside it.
-pub use fabric::{self as fabric};
-
-// The **net adapter** (`comms`) is how independently held replicas exchange
-// their material: lait's own `Transport` seam plus the network policy behind it,
-// in a crate that alone lists iroh. `iroh` is absent from THIS manifest, so no
-// `iroh::` reference compiles in the app layer. Re-exported so the daemon keeps
-// reaching the seam by its historical paths (`crate::transport`, `crate::net`).
-pub use comms as transport;
-pub use comms::policy as net;
 
 /// Clean-env test entrypoint (step 0 of the Agent Experience initiative).
 ///

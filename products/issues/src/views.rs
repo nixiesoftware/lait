@@ -1,3 +1,11 @@
+#![allow(
+    clippy::expect_used,
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    clippy::indexing_slicing,
+    clippy::string_slice,
+    reason = "view layouts operate on validated product records and ASCII canonical identifiers"
+)]
 //! Parsed catalog/issue state and the legacy-shape projections (C4.2).
 //!
 //! `CatalogState`/`IssueState` decode the collaborative Body views into typed
@@ -7,7 +15,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use replica::CollaborativeView;
+use fabric::CollaborativeView;
 use serde::{Deserialize, Serialize};
 
 use crate::dto::{
@@ -516,7 +524,7 @@ impl IssueState {
     /// The current text of a field a comment may attach a span to.
     ///
     /// THE list of anchorable paths, and the reason it is a list rather than a
-    /// pass-through: [`runtime::BodyReader::anchor_in_body`] mints an anchor
+    /// pass-through: [`runtime::world::BodyReader::anchor_in_body`] mints an anchor
     /// for **any** path on a collaborative Body, including one that names a
     /// register and one no operation ever wrote. There is no text at such a
     /// path, so the anchor binds to no operation, and resolving it answers

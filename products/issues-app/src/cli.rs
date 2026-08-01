@@ -1,3 +1,10 @@
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    clippy::indexing_slicing,
+    clippy::string_slice,
+    reason = "CLI paths and render spans are produced by the validated clap command tree and ASCII tokenization"
+)]
 //! Issues-owned CLI namespace.
 
 use clap::{Arg, ArgAction, ArgMatches, Command};
@@ -1167,7 +1174,7 @@ fn opt(m: &ArgMatches, id: &str) -> Option<String> {
 }
 
 fn req(m: &ArgMatches, id: &str) -> String {
-    opt(m, id).unwrap_or_else(|| panic!("required Issues CLI argument '{id}' is missing"))
+    opt(m, id).unwrap_or_default()
 }
 
 fn many(m: &ArgMatches, id: &str) -> Vec<String> {

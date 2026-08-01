@@ -1,3 +1,8 @@
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    reason = "session counters and request lengths are constrained by World limits"
+)]
 //! [`Session`] — a local caller docked to a hosted World.
 //!
 //! A Session is bound to one World, principal, and Station activation epoch.
@@ -26,9 +31,9 @@ use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
 use mechanics::station::Epoch;
+use replica::body::{BodyKey, SchemaId, WorldId};
 use replica::body::{MutationModel, Op, Schema};
 use replica::frontier::ReplicaFrontier;
-use replica::ids::{BodyKey, SchemaId, WorldId};
 use serde::{Deserialize, Serialize};
 
 use crate::world::{
@@ -110,7 +115,7 @@ pub struct Observation {
     /// A `BodyKey` names its own World, so grouping is recoverable from this
     /// alone — a separate `world` field could only ever disagree with it, and
     /// one durable change that spans Worlds is still one change.
-    pub scopes: Vec<BodyKey>,
+    pub bodies: Vec<BodyKey>,
     /// The Space's **authority** advanced in this same change (membership,
     /// roles, devices, keys).
     ///
@@ -123,7 +128,7 @@ pub struct Observation {
 
 /// The result of a durable [`Session::submit`]: the application-defined effect
 /// bytes, the **committed** Replica frontier the change advanced to, and the
-/// Observation scopes it touched. A `CommittedEffect` is proof of durability —
+/// Observation Bodies it touched. A `CommittedEffect` is proof of durability —
 /// it is returned only after the Replica advanced from a real Engine receipt.
 /// An identical replay of the same request returns the identical
 /// `CommittedEffect` without reapplying anything; invalidation delivery is the
@@ -132,7 +137,7 @@ pub struct Observation {
 pub struct CommittedEffect {
     pub effect: Vec<u8>,
     pub frontier: ReplicaFrontier,
-    pub scopes: Vec<BodyKey>,
+    pub bodies: Vec<BodyKey>,
 }
 
 /// The single mutex-guarded committing state: the Replica writer plus the
@@ -206,7 +211,7 @@ impl Broadcaster {
     /// carrying both, because splitting it would force every consumer to handle
     /// a scopeless record just to learn something the next one repeats. Scopes
     /// may span Worlds; `authority` may stand alone.
-    pub(crate) fn publish(&self, scopes: Vec<BodyKey>, frontier: ReplicaFrontier, authority: bool) {
+    pub(crate) fn publish(&self, bodies: Vec<BodyKey>, frontier: ReplicaFrontier, authority: bool) {
         let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         if state.closed {
             return;
@@ -218,7 +223,7 @@ impl Broadcaster {
             epoch: self.epoch,
             sequence,
             reset: false,
-            scopes,
+            bodies,
             authority,
             frontier,
         };
@@ -242,7 +247,7 @@ impl Broadcaster {
 /// cursor replays retained records and then follows live delivery. Dormancy
 /// ends the stream with a typed [`Interruption::StationDormant`].
 /// A stream is Station-wide, not World-scoped: it never filtered by World, and a
-/// record's own `scopes` name theirs. Carrying a World here would only have been
+/// record's own `bodies` name theirs. Carrying a World here would only have been
 /// able to imply a narrowing that does not happen.
 pub struct ObservationStream {
     broadcaster: Arc<Broadcaster>,
@@ -277,7 +282,7 @@ impl ObservationStream {
             epoch: self.broadcaster.epoch,
             sequence: state.next_seq - 1,
             reset: true,
-            scopes: Vec::new(),
+            bodies: Vec::new(),
             // A reset says "trust nothing", which subsumes every plane; flagging
             // authority as well would only invite a consumer to treat the two as
             // separable when rebaselining.
@@ -426,11 +431,11 @@ impl StationCore {
     /// a second kind of borrow on state that cannot be shared.
     pub fn with_replica<T>(
         &self,
-        f: impl FnOnce(&mut replica::Replica) -> Result<T, replica::commit::Failure>,
-    ) -> Result<T, replica::commit::Failure> {
+        f: impl FnOnce(&mut replica::Replica) -> Result<T, replica::transaction::commit::Failure>,
+    ) -> Result<T, replica::transaction::commit::Failure> {
         let mut inner = self.lock();
         if inner.closed {
-            return Err(replica::commit::Failure::Illegitimate(
+            return Err(replica::transaction::commit::Failure::Illegitimate(
                 "station dormant".into(),
             ));
         }
@@ -450,7 +455,7 @@ impl StationCore {
 
 /// The per-submit authorizer: captures the mechanics [`AuthorityView`] and the
 /// mutation's companion coordinates, and turns the built transaction-core
-/// digest into a signed [`mechanics::demand::AuthorizationReceipt`].
+/// digest into a signed [`mechanics::authorization::AuthorizationReceipt`].
 struct SessionAuthorizer<'a> {
     authority: &'a dyn AuthorityView,
     space: &'a mechanics::ids::SpaceId,
@@ -461,8 +466,11 @@ struct SessionAuthorizer<'a> {
     implementation_id: [u8; 32],
 }
 
-impl replica::TransactionAuthorizer for SessionAuthorizer<'_> {
-    fn authorize(&self, core: &replica::Core) -> Result<Vec<u8>, String> {
+impl replica::transaction::TransactionAuthorizer for SessionAuthorizer<'_> {
+    fn authorize(
+        &self,
+        core: &replica::transaction::Core,
+    ) -> Result<Vec<u8>, mechanics::authorization::Refusal> {
         self.authority.authorize_mutation(
             self.space,
             self.world,
@@ -484,8 +492,8 @@ impl replica::TransactionAuthorizer for SessionAuthorizer<'_> {
 /// Implemented here rather than in `live.rs` because this is the type that owns
 /// the lock: a caller reading these two methods sees `with_replica` one line
 /// away and the paragraph explaining why it is exclusive one line after that.
-impl crate::live::AnchorSource for StationCore {
-    fn anchor_in_body(&self, key: &BodyKey, path: &str, position: u64) -> Option<replica::Anchor> {
+impl crate::plane::live::AnchorSource for StationCore {
+    fn anchor_in_body(&self, key: &BodyKey, path: &str, position: u64) -> Option<fabric::Anchor> {
         // A dormant core answers `None`, which is the same answer a position
         // the algebra cannot bind gets. Both mean there is no anchor to send,
         // and a caller has nothing different to do about them.
@@ -494,12 +502,12 @@ impl crate::live::AnchorSource for StationCore {
             .flatten()
     }
 
-    fn resolve_anchor(&self, key: &BodyKey, anchor: &replica::Anchor) -> replica::AnchorResolution {
+    fn resolve_anchor(&self, key: &BodyKey, anchor: &fabric::Anchor) -> fabric::AnchorResolution {
         // Total, so a dormant core is `Drifted` rather than an error — the
         // renderer's contract is that this never fails and never lies, not that
         // it always knows.
         self.with_replica(|replica| Ok(replica.resolve_anchor(key, anchor)))
-            .unwrap_or(replica::AnchorResolution::Drifted)
+            .unwrap_or(fabric::AnchorResolution::Drifted)
     }
 }
 
@@ -513,19 +521,22 @@ impl crate::world::BodyReader for ReplicaReader<'_> {
     fn read_collaborative_body(
         &self,
         key: &BodyKey,
-    ) -> Result<replica::CollaborativeView, replica::projection::Failure> {
+    ) -> Result<fabric::CollaborativeView, fabric::projection::Failure> {
         self.0.read_collaborative(key)
     }
-    fn body_version(&self, key: &BodyKey) -> Option<replica::Version> {
+    fn body_version(&self, key: &BodyKey) -> Option<fabric::Version> {
         self.0.body_version(key)
     }
-    fn anchor_in_body(&self, key: &BodyKey, path: &str, position: u64) -> Option<replica::Anchor> {
+    fn anchor_in_body(&self, key: &BodyKey, path: &str, position: u64) -> Option<fabric::Anchor> {
         self.0.anchor(key, path, position)
     }
-    fn resolve_anchor(&self, key: &BodyKey, anchor: &replica::Anchor) -> replica::AnchorResolution {
+    fn resolve_anchor(&self, key: &BodyKey, anchor: &fabric::Anchor) -> fabric::AnchorResolution {
         self.0.resolve_anchor(key, anchor)
     }
-    fn content_status(&self, content: &replica::ContentRef) -> Option<crate::world::ContentStatus> {
+    fn content_status(
+        &self,
+        content: &replica::content::ContentRef,
+    ) -> Option<crate::world::ContentStatus> {
         // Residency is the host's question, not the Replica's, so a World
         // reading through a committed snapshot sees geometry with zero
         // residency. The host surface is where "how much is here" is answered,
@@ -651,11 +662,11 @@ impl Session {
         replica: &replica::Replica,
         effect: &Effect,
         intent_schema: &SchemaId,
-    ) -> Result<Vec<(BodyKey, replica::BodyBinding)>, Rejection> {
-        if effect.operations.len() > replica::algebra::MAX_OPS_PER_TRANSACTION {
+    ) -> Result<Vec<(BodyKey, replica::body::BodyBinding)>, Rejection> {
+        if effect.operations.len() > replica::transaction::MAX_OPS_PER_TRANSACTION {
             return Err(Rejection::ContractViolation);
         }
-        let mut bindings: Vec<(BodyKey, replica::BodyBinding)> = Vec::new();
+        let mut bindings: Vec<(BodyKey, replica::body::BodyBinding)> = Vec::new();
         for (key, op) in &effect.operations {
             if key.world != self.world_id {
                 return Err(Rejection::ContractViolation);
@@ -693,20 +704,20 @@ impl Session {
             if !bindings.iter().any(|(k, _)| k == key) {
                 bindings.push((
                     key.clone(),
-                    replica::BodyBinding {
+                    replica::body::BodyBinding {
                         schema: schema.id.clone(),
                         schema_version: schema.version,
                         encoding: schema.encoding.clone(),
                         mutation_model: if collaborative {
-                            replica::MUTATION_COLLABORATIVE
+                            replica::body::MUTATION_COLLABORATIVE
                         } else {
-                            replica::MUTATION_ATOMIC
+                            replica::body::MUTATION_ATOMIC
                         },
                     },
                 ));
             }
         }
-        for scope in &effect.scopes {
+        for scope in &effect.bodies {
             if scope.world != self.world_id {
                 return Err(Rejection::ContractViolation);
             }
@@ -854,10 +865,10 @@ impl Session {
                 return Ok(CommittedEffect {
                     effect: receipt.effect,
                     frontier: receipt.frontier,
-                    scopes: receipt.scopes,
+                    bodies: receipt.bodies,
                 });
             }
-            Err(replica::commit::Failure::RequestIdConflict) => {
+            Err(replica::transaction::commit::Failure::RequestIdConflict) => {
                 return Err(Failure::Conflict(Conflict::Request))
             }
             Err(_) => return Err(Failure::Persistence),
@@ -903,7 +914,7 @@ impl Session {
             .active_implementation(&self.world_id, &action.header.authority_frontier)
             .ok_or(Rejection::Denied)?;
         let parent_manifest_root = inner.replica.manifest_root();
-        let ctx = replica::CommitContext {
+        let ctx = replica::transaction::CommitContext {
             space: &self.space,
             signer: &self.identity,
             authority_frontier: action.header.authority_frontier.clone(),
@@ -919,7 +930,7 @@ impl Session {
             authority_frontier: &action.header.authority_frontier,
             implementation_id,
         };
-        let auth = replica::CommitAuthorization {
+        let auth = replica::transaction::CommitAuthorization {
             actor: principal.actor.as_str(),
             parent_manifest_root,
             demand: effect.demand.clone(),
@@ -936,7 +947,7 @@ impl Session {
                 &request,
                 &payload_hash,
                 effect.effect,
-                effect.scopes,
+                effect.bodies,
                 &label,
                 &effect.operations,
                 &bindings,
@@ -944,58 +955,69 @@ impl Session {
             )
             .map_err(|e| match e {
                 // A staged op the engine cannot express is a World bug.
-                replica::commit::Failure::UnsupportedOp => {
+                replica::transaction::commit::Failure::UnsupportedOp => {
                     Failure::Rejected(Rejection::ContractViolation)
                 }
-                replica::commit::Failure::PathInvalid | replica::commit::Failure::InvalidOp(_) => {
+                replica::transaction::commit::Failure::PathInvalid
+                | replica::transaction::commit::Failure::InvalidOp(_) => {
                     Failure::Rejected(Rejection::InvalidRequest)
                 }
-                replica::commit::Failure::OpLimit => Failure::Rejected(Rejection::LimitExceeded),
-                replica::commit::Failure::EffectTooLarge => {
+                replica::transaction::commit::Failure::OpLimit => {
                     Failure::Rejected(Rejection::LimitExceeded)
                 }
-                replica::commit::Failure::TypeConflict => Failure::Conflict(Conflict::Body),
-                replica::commit::Failure::SchemaMismatch => {
+                replica::transaction::commit::Failure::EffectTooLarge => {
+                    Failure::Rejected(Rejection::LimitExceeded)
+                }
+                replica::transaction::commit::Failure::TypeConflict => {
+                    Failure::Conflict(Conflict::Body)
+                }
+                replica::transaction::commit::Failure::SchemaMismatch => {
                     Failure::Rejected(Rejection::ContractViolation)
                 }
-                replica::commit::Failure::RequestIdConflict => Failure::Conflict(Conflict::Request),
-                replica::commit::Failure::QuotaExceeded
-                | replica::commit::Failure::OpaqueQuotaExceeded => {
+                replica::transaction::commit::Failure::RequestIdConflict => {
+                    Failure::Conflict(Conflict::Request)
+                }
+                replica::transaction::commit::Failure::QuotaExceeded
+                | replica::transaction::commit::Failure::OpaqueQuotaExceeded => {
                     Failure::Rejected(Rejection::LimitExceeded)
                 }
                 // The mechanics authorizer refused: the demand was unsatisfied
                 // at the pinned frontier (a real Denied, not a bug).
-                replica::commit::Failure::Unauthorized(_) => Failure::Rejected(Rejection::Denied),
-                replica::commit::Failure::ParentManifestUnavailable => {
+                replica::transaction::commit::Failure::Unauthorized(_) => {
+                    Failure::Rejected(Rejection::Denied)
+                }
+                replica::transaction::commit::Failure::ParentManifestUnavailable => {
                     Failure::Conflict(Conflict::Body)
                 }
                 // Illegitimate is an incorporation-path error; a local commit
                 // never produces it, but the match stays exhaustive.
-                replica::commit::Failure::Illegitimate(_)
-                | replica::commit::Failure::Engine(_)
-                | replica::commit::Failure::Integrity(_)
-                | replica::commit::Failure::BodyKeyUnavailable
-                | replica::commit::Failure::Durability(_)
-                | replica::commit::Failure::OutcomeUnknown
-                | replica::commit::Failure::Poisoned => Failure::Persistence,
+                replica::transaction::commit::Failure::Illegitimate(_)
+                | replica::transaction::commit::Failure::Engine(_)
+                | replica::transaction::commit::Failure::Integrity(_)
+                | replica::transaction::commit::Failure::Body(_)
+                | replica::transaction::commit::Failure::BodyKeyUnavailable
+                | replica::transaction::commit::Failure::Durability(_)
+                | replica::transaction::commit::Failure::OutcomeUnknown
+                | replica::transaction::commit::Failure::Poisoned => Failure::Persistence,
             })?;
         // Publish the Observation for a FRESH durable commit while still
         // holding the writer lock: publication order equals commit order, and
         // nothing is ever published before durability. A replay publishes
         // nothing (nothing committed).
-        if let replica::ActionOutcome::Committed(receipt) = &outcome {
+        if let replica::transaction::ActionOutcome::Committed(receipt) = &outcome {
             self.core
                 .broadcaster
-                .publish(receipt.scopes.clone(), receipt.frontier, false);
+                .publish(receipt.bodies.clone(), receipt.frontier, false);
         }
         drop(inner);
         let receipt = match outcome {
-            replica::ActionOutcome::Committed(r) | replica::ActionOutcome::Replayed(r) => r,
+            replica::transaction::ActionOutcome::Committed(r)
+            | replica::transaction::ActionOutcome::Replayed(r) => r,
         };
         Ok(CommittedEffect {
             effect: receipt.effect,
             frontier: receipt.frontier,
-            scopes: receipt.scopes,
+            bodies: receipt.bodies,
         })
     }
 
@@ -1049,7 +1071,7 @@ impl Session {
     /// reset at the current sequence and committed frontier, after which live
     /// records follow. A cursor from THIS epoch replays every retained record
     /// with a greater sequence, then follows live delivery; a cursor pointing
-    /// into a discarded gap yields one reset instead. Records carry scopes and
+    /// into a discarded gap yields one reset instead. Records carry Bodies and
     /// the committed frontier — never state; consumers re-query after every
     /// reset. Dormancy ends the stream with a typed error.
     pub fn observe(&self, cursor: Option<ObservationCursor>) -> ObservationStream {

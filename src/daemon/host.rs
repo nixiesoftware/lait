@@ -1,9 +1,17 @@
+// Compatibility process framing validates byte boundaries and lengths before its
+// bounded codec operations; the encoding must remain byte-identical.
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    clippy::indexing_slicing
+)]
+
 //! The identity-scoped Lait daemon and its single local control endpoint.
 //!
-//! The host owns no Space state directly. It owns one [`ControlRouter`], which
+//! The host owns no Space state directly. It owns one [`crate::orbits::Router`], which
 //! lazily places Stations into addressed Orbits and keeps their StationHosts
 //! inside this process. Historical per-home control sockets remain behind those
-//! bridges as compatibility adapters, but new CLI, MCP, and web requests enter
+//! process hosts as compatibility adapters, but new CLI, MCP, and web requests enter
 //! through this endpoint first.
 
 use std::path::{Path, PathBuf};
@@ -19,22 +27,25 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 use crate::config::{acquire_daemon_lock, DaemonLock};
 use crate::control::{
-    self, ClientRequest, ControlRoute, Request, Response, WorldClientRequest,
+    self, ClientRequest, ControlRoute, Endpoint, Request, Response, WorldClientRequest,
     CONTROL_PROTOCOL_VERSION,
 };
-use crate::orbital::{CallFailureCode, WorldCall, WorldPackages, WorldReply};
+use crate::orbital::WorldPackages;
 #[cfg(test)]
-use crate::transport::TransportFactory;
+use comms::TransportFactory;
+use runtime::world::call::{Call, Code, Reply};
 
-use super::{ControlRouter, OrbitDirectory, OrbitDoorbell};
+use super::OrbitDoorbell;
+use crate::orbits::Catalog;
+use crate::orbits::{ContentPlacement, Router};
 
 /// A client for the current identity's one Lait daemon.
 #[derive(Debug, Clone)]
-pub struct LaitDaemonClient {
+pub struct Client {
     home: PathBuf,
 }
 
-impl LaitDaemonClient {
+impl Client {
     pub fn current() -> Result<Self> {
         Ok(Self {
             home: crate::config::lait_daemon_home()?,
@@ -67,9 +78,9 @@ impl LaitDaemonClient {
     pub async fn call_world(
         &self,
         route: ControlRoute,
-        call: WorldCall,
+        call: Call,
         act_as: Option<&str>,
-    ) -> Result<WorldReply> {
+    ) -> Result<Reply> {
         control::call_world(&self.home, route, call, act_as).await
     }
 
@@ -132,25 +143,28 @@ impl OrbitSubscription {
     }
 }
 
-/// The process-level daemon service behind the identity-scoped endpoint.
-pub struct LaitDaemon {
-    router: Arc<ControlRouter>,
+/// The identity-scoped local listener and control-protocol service.
+///
+/// It owns framing, connection tasks, streaming, and delegation. Placement
+/// state remains owned by [`Router`].
+pub(crate) struct Listener {
+    router: Arc<Router>,
     stopping: tokio::sync::watch::Sender<bool>,
 }
 
-impl LaitDaemon {
-    fn new(router: Arc<ControlRouter>) -> Self {
+impl Listener {
+    pub(crate) fn new(router: Arc<Router>) -> Self {
         Self {
             router,
             stopping: tokio::sync::watch::channel(false).0,
         }
     }
 
-    fn begin_stop(&self) {
+    pub(crate) fn begin_stop(&self) {
         self.stopping.send_replace(true);
     }
 
-    async fn serve(self: Arc<Self>, home: &Path) -> Result<()> {
+    pub(crate) async fn serve(self: Arc<Self>, home: &Path) -> Result<()> {
         let control = control::control_name(home)?;
         #[cfg(unix)]
         let _ = std::fs::remove_file(crate::config::socket_path(home));
@@ -174,8 +188,8 @@ impl LaitDaemon {
                 },
                 accepted = listener.accept() => match accepted {
                     Ok(stream) => {
-                        let daemon = self.clone();
-                        connections.spawn(async move { daemon.handle_conn(stream).await });
+                        let endpoint = self.clone();
+                        connections.spawn(async move { endpoint.handle_conn(stream).await });
                     }
                     Err(error) => {
                         tracing::warn!(%error, "Lait daemon accept failed");
@@ -222,8 +236,6 @@ impl LaitDaemon {
         mut write_half: tokio::io::WriteHalf<LocalStream>,
         request: control::ContentClientRequest,
     ) {
-        use crate::daemon::control_router::ContentPlacement;
-
         let placement = match self.router.content_placement(&request.route).await {
             Ok(placement) => placement,
             Err(error) => {
@@ -240,8 +252,8 @@ impl LaitDaemon {
         };
 
         match placement {
-            ContentPlacement::InProcess { bridge, address } => {
-                let ceiling = bridge.max_content_len();
+            ContentPlacement::InProcess { host, address } => {
+                let ceiling = host.max_content_len();
                 if request.body_len > ceiling {
                     let _ = write_line(
                         &mut write_half,
@@ -262,7 +274,7 @@ impl LaitDaemon {
                 let call = request.content.clone();
                 let mut stopping = self.stopping.subscribe();
                 let work = tokio::task::spawn_blocking(move || {
-                    bridge.content_call(&address, &call, expects_body.then_some(body))
+                    host.content_call(&address, &call, expects_body.then_some(body))
                 });
                 let (_, sealed) = tokio::join!(pump, work);
                 let (reply, payload) = sealed.unwrap_or_else(|_| {
@@ -393,7 +405,7 @@ impl LaitDaemon {
                 .call_world(route, &call, act_as.as_deref())
                 .await
                 .unwrap_or_else(|error| {
-                    WorldReply::error(&call, CallFailureCode::InvalidCall, format!("{error:#}"))
+                    Reply::error(&call, Code::InvalidCall, format!("{error:#}"))
                 });
             let _ = write_line(&mut write_half, &reply).await;
             return;
@@ -580,19 +592,42 @@ impl LaitDaemon {
     }
 }
 
+/// The autonomous identity-scoped process supervisor.
+pub struct Daemon {
+    router: Arc<Router>,
+    endpoint: Arc<Endpoint>,
+}
+
+impl Daemon {
+    fn new(router: Arc<Router>) -> Self {
+        Self {
+            endpoint: Arc::new(Endpoint::new(router.clone())),
+            router,
+        }
+    }
+
+    fn begin_stop(&self) {
+        self.endpoint.begin_stop();
+    }
+
+    async fn serve(self: Arc<Self>, home: &Path) -> Result<()> {
+        self.endpoint.clone().serve(home).await
+    }
+}
+
 /// Joinable ownership of the process endpoint and its process-wide lock.
-pub(crate) struct LaitDaemonRunner {
+pub(crate) struct Runner {
     home: PathBuf,
-    daemon: Arc<LaitDaemon>,
+    daemon: Arc<Daemon>,
     _lock: DaemonLock,
 }
 
 #[derive(Clone)]
-pub(crate) struct LaitDaemonStop {
-    daemon: Weak<LaitDaemon>,
+pub(crate) struct Stop {
+    daemon: Weak<Daemon>,
 }
 
-impl LaitDaemonStop {
+impl Stop {
     pub(crate) fn stop(&self) {
         if let Some(daemon) = self.daemon.upgrade() {
             daemon.begin_stop();
@@ -600,18 +635,18 @@ impl LaitDaemonStop {
     }
 }
 
-impl LaitDaemonRunner {
-    pub(crate) fn start(home: PathBuf, router: Arc<ControlRouter>) -> Result<Self> {
+impl Runner {
+    pub(crate) fn start(home: PathBuf, router: Arc<Router>) -> Result<Self> {
         let lock = acquire_daemon_lock(&home)?;
         Ok(Self {
             home,
-            daemon: Arc::new(LaitDaemon::new(router)),
+            daemon: Arc::new(Daemon::new(router)),
             _lock: lock,
         })
     }
 
-    pub(crate) fn stop_handle(&self) -> LaitDaemonStop {
-        LaitDaemonStop {
+    pub(crate) fn stop_handle(&self) -> Stop {
+        Stop {
             daemon: Arc::downgrade(&self.daemon),
         }
     }
@@ -638,11 +673,11 @@ pub async fn run_lait_daemon(packages: WorldPackages) -> Result<()> {
     let self_contained = std::env::var_os("LAIT_HOME").is_some();
     let agents_base = crate::registry::agents_base(&config_root);
     let home = crate::config::lait_daemon_home()?;
-    let router = Arc::new(ControlRouter::new(
-        OrbitDirectory::new(identity, agents_base, self_contained),
+    let router = Arc::new(Router::new(
+        Catalog::new(identity, agents_base, self_contained),
         packages,
     ));
-    let runner = LaitDaemonRunner::start(home, router)?;
+    let runner = Runner::start(home, router)?;
     let stop = runner.stop_handle();
     let signal = tokio::spawn(async move {
         shutdown_signal().await;
@@ -770,7 +805,7 @@ async fn proxy_content(
     // header goes out, so that a bad answer is still a refusal rather than a
     // truncated file.
     if let control::ContentReply::ContentStream { len } = reply {
-        if len > runtime::content_host::MAX_RANGE_BYTES as u64 {
+        if len > runtime::plane::freight::content::MAX_RANGE_BYTES as u64 {
             return Err(ProxyFailure::BeforeHeader(
                 "the attached Space process offered an answer past the range bound".into(),
             ));
@@ -821,13 +856,13 @@ async fn write_line<T: serde::Serialize>(
 #[cfg(test)]
 pub(crate) fn runner_with_factory(
     home: PathBuf,
-    directory: OrbitDirectory,
+    catalog: Catalog,
     factory: Arc<dyn TransportFactory>,
-) -> Result<LaitDaemonRunner> {
-    LaitDaemonRunner::start(
+) -> Result<Runner> {
+    Runner::start(
         home,
-        Arc::new(ControlRouter::with_factory(
-            directory,
+        Arc::new(Router::with_factory(
+            catalog,
             factory,
             crate::world::packages(),
         )),
@@ -841,10 +876,10 @@ mod tests {
     use async_trait::async_trait;
 
     use super::*;
-    use crate::net::Network;
     use crate::orbits::{Entry, Origin};
-    use crate::transport::mem::MemNet;
-    use crate::transport::Transport;
+    use comms::mem::MemNet;
+    use comms::policy::Network;
+    use comms::Transport;
 
     static HOME_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
@@ -859,7 +894,8 @@ mod tests {
             _protocols: comms::Protocols<'_>,
         ) -> Result<Arc<dyn Transport>> {
             Ok(Arc::new(
-                self.0.peer(crate::crypto::device_from_seed(identity_seed)),
+                self.0
+                    .peer(mechanics::actor::device_from_seed(identity_seed)),
             ))
         }
     }
@@ -867,12 +903,7 @@ mod tests {
     fn formed_directory(
         tag: &str,
         seed: &[u8; 32],
-    ) -> (
-        PathBuf,
-        PathBuf,
-        OrbitDirectory,
-        super::super::ResolvedOrbit,
-    ) {
+    ) -> (PathBuf, PathBuf, Catalog, crate::orbits::ResolvedOrbit) {
         let n = HOME_COUNTER.fetch_add(1, Ordering::SeqCst);
         let base = std::env::temp_dir().join(format!("lait-host-{tag}-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
@@ -887,7 +918,7 @@ mod tests {
         )
         .unwrap();
         let id = super::super::LocalOrbitId::for_store(&home);
-        let directory = OrbitDirectory::with_entries(
+        let directory = Catalog::with_entries(
             home.clone(),
             home.join("agents"),
             false,
@@ -917,7 +948,7 @@ mod tests {
         )
         .unwrap();
         let completion = tokio::spawn(runner.run());
-        let client = LaitDaemonClient::at(daemon_home.clone());
+        let client = Client::at(daemon_home.clone());
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         while !matches!(client.probe().await, control::Probe::Healthy) {
             assert!(
@@ -991,7 +1022,7 @@ mod tests {
         let seed = [212; 32];
         let (base, daemon_home, directory, mut resolved) = formed_directory("scope", &seed);
         let orbit_home = resolved.home.clone();
-        resolved.address.space = crate::ids::SpaceId::from_digest([99; 16]);
+        resolved.address.space = issues::ids::SpaceId::from_digest([99; 16]);
         let runner = runner_with_factory(
             daemon_home.clone(),
             directory,
@@ -999,7 +1030,7 @@ mod tests {
         )
         .unwrap();
         let completion = tokio::spawn(runner.run());
-        let client = LaitDaemonClient::at(daemon_home);
+        let client = Client::at(daemon_home);
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         while !matches!(client.probe().await, control::Probe::Healthy) {
             assert!(tokio::time::Instant::now() < deadline);

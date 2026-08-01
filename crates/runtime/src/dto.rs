@@ -1,5 +1,5 @@
 //! External DTOs — the language-neutral JSON surface an independent,
-//! Issues-free consumer speaks to the orbital runtime (C6.1).
+//! Product-neutral consumer speaks to the orbital runtime (C6.1).
 //!
 //! These are **not** the signed/internal protocol (that stays postcard and is
 //! never exposed as a language DTO). They are versioned JSON objects carrying an
@@ -83,14 +83,14 @@ fn check_hex16(s: &str) -> Result<(), Invalid> {
 
 fn check_world(s: &str) -> Result<(), Invalid> {
     check_len(s)?;
-    replica::ids::WorldId::parse(s)
+    replica::body::WorldId::parse(s)
         .map(|_| ())
         .ok_or(Invalid::BadIdentifier)
 }
 
 fn check_schema_id(s: &str) -> Result<(), Invalid> {
     check_len(s)?;
-    replica::ids::SchemaId::parse(s)
+    replica::body::SchemaId::parse(s)
         .map(|_| ())
         .ok_or(Invalid::BadIdentifier)
 }

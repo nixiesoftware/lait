@@ -18,16 +18,16 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use async_trait::async_trait;
+use comms::mem::MemNet;
+use comms::policy::Network;
+use comms::{Transport, TransportFactory};
+use issues::ids::SpaceId;
 use issues_app::IssuesResponse as IssueResponse;
+use lait::control::OrbitAddress;
 use lait::control::{
     request, request_routed, subscribe, CatalogScope, ControlRoute, Request, Response,
 };
-use lait::daemon::OrbitAddress;
-use lait::ids::SpaceId;
-use lait::net::Network;
-use lait::orbital::run_space_bridge_with;
-use lait::transport::mem::MemNet;
-use lait::transport::{Transport, TransportFactory};
+use lait::orbital::run_station_process_with;
 
 const FOUNDER_SEED: [u8; 32] = [113u8; 32];
 
@@ -44,7 +44,8 @@ impl TransportFactory for MemFactory {
         _protocols: comms::Protocols<'_>,
     ) -> Result<Arc<dyn Transport>> {
         Ok(Arc::new(
-            self.0.peer(lait::crypto::device_from_seed(identity_seed)),
+            self.0
+                .peer(mechanics::actor::device_from_seed(identity_seed)),
         ))
     }
 }
@@ -116,7 +117,7 @@ fn spawn_daemon(home: PathBuf, seed: [u8; 32], net: MemNet) -> std::thread::Join
     std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async move {
-            if let Err(e) = run_space_bridge_with(home, seed, &MemFactory(net)).await {
+            if let Err(e) = run_station_process_with(home, seed, &MemFactory(net)).await {
                 eprintln!("DAEMON ERR: {e:#}");
             }
         });
@@ -170,7 +171,7 @@ fn explicit_routes_cannot_cross_space_or_world_boundaries() {
         .unwrap();
     assert!(matches!(
         wrong_space,
-        Response::Error { message, .. } if message.contains("this bridge owns")
+        Response::Error { message, .. } if message.contains("this host owns")
     ));
 
     let wrong_orbit = rt
@@ -184,11 +185,11 @@ fn explicit_routes_cannot_cross_space_or_world_boundaries() {
         .unwrap();
     assert!(matches!(
         wrong_orbit,
-        Response::Error { message, .. } if message.contains("this bridge occupies")
+        Response::Error { message, .. } if message.contains("this host occupies")
     ));
 
-    let files_call = lait::orbital::WorldCall::new(
-        replica::ids::WorldId::parse("com.example.files").unwrap(),
+    let files_call = runtime::world::call::Call::new(
+        replica::body::WorldId::parse("com.example.files").unwrap(),
         "files.list",
         1,
         Vec::new(),
@@ -207,7 +208,7 @@ fn explicit_routes_cannot_cross_space_or_world_boundaries() {
         .unwrap();
     assert!(matches!(
         missing_world.into_result(),
-        Err(error) if error.message.contains("is not enabled")
+        Err(error) if error.code == runtime::world::call::Code::UnsupportedOperation
     ));
 
     let issues_call = issues_app::encode_call(&issues_app::IssuesRequest::ProjectList).unwrap();
@@ -223,7 +224,7 @@ fn explicit_routes_cannot_cross_space_or_world_boundaries() {
         .unwrap();
     assert!(matches!(
         wrong_level.into_result(),
-        Err(error) if error.message.contains("requires an explicit World route")
+        Err(error) if error.code == runtime::world::call::Code::InvalidCall
     ));
 
     let rejected_stop = rt
@@ -240,7 +241,7 @@ fn explicit_routes_cannot_cross_space_or_world_boundaries() {
         .unwrap();
     assert!(matches!(
         rejected_stop,
-        Response::Error { message, .. } if message.contains("this bridge owns")
+        Response::Error { message, .. } if message.contains("this host owns")
     ));
     let still_online = rt
         .block_on(request_routed(

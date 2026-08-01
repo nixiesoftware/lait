@@ -1,3 +1,9 @@
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::indexing_slicing,
+    clippy::expect_used,
+    reason = "beacon windows and pairs are validated before fixed-width ordering operations"
+)]
 //! Beacon v1 — a small signed lossy announcement (`lait/beacon/1`).
 //!
 //! A Station emits Beacons over the gossip overlay (the S4 replacement for the
@@ -116,7 +122,7 @@ impl SignedBeacon {
         routes: Vec<RouteHint>,
         station_seed: &[u8; 32],
     ) -> Option<Self> {
-        let station = mechanics::crypto::device_from_seed(station_seed).key_bytes()?;
+        let station = mechanics::actor::device_from_seed(station_seed).key_bytes()?;
         let body = BeaconBody {
             protocol,
             space: space_bytes(space)?,
@@ -128,7 +134,7 @@ impl SignedBeacon {
             flags,
             routes,
         };
-        let signature = mechanics::crypto::sign_detached(station_seed, &Self::preimage(&body));
+        let signature = mechanics::actor::sign_detached(station_seed, &Self::preimage(&body));
         Some(Self {
             version: 1,
             body,
@@ -184,7 +190,7 @@ impl SignedBeacon {
                 return Err(Invalid::UnsortedOrDuplicateRoutes);
             }
         }
-        if !mechanics::crypto::verify_detached(
+        if !mechanics::actor::verify_detached(
             &self.body.station,
             &Self::preimage(&self.body),
             &self.signature,

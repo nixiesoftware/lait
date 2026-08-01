@@ -1,13 +1,13 @@
 //! Restart durability over a process-backed **StationHost** (in-process, in-memory
-//! transport): a joiner that is admitted and converged, then has its bridge
+//! transport): a joiner that is admitted and converged, then has its host
 //! killed and restarted on the SAME home, must come back holding its persisted
 //! membership and reconverge with a peer that files new content while it was
 //! down.
 //!
 //! `orbital_two_node.rs` proves the cold form → invite → enter → admit →
 //! converge arc. This adds the restart in the middle: after admission, the
-//! joiner bridge is dropped, the founder files a new issue, and the joiner
-//! bridge is respawned on its persisted store. It must re-dock from persisted
+//! joiner host is dropped, the founder files a new issue, and the joiner
+//! host is respawned on its persisted store. It must re-dock from persisted
 //! membership and, once Contact is re-driven, converge to the post-restart
 //! issue — proving the orbital store survives a crash and rejoins.
 
@@ -18,13 +18,13 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use async_trait::async_trait;
+use comms::mem::MemNet;
+use comms::policy::Network;
+use comms::{Transport, TransportFactory};
 use issues_app::IssuesResponse as IssueResponse;
+use lait::control::OrbitAddress;
 use lait::control::{request, ControlRoute, Request, Response};
-use lait::daemon::OrbitAddress;
-use lait::net::Network;
-use lait::orbital::run_space_bridge_with;
-use lait::transport::mem::MemNet;
-use lait::transport::{Transport, TransportFactory};
+use lait::orbital::run_station_process_with;
 
 const FOUNDER_SEED: [u8; 32] = [151u8; 32];
 const JOINER_SEED: [u8; 32] = [152u8; 32];
@@ -42,7 +42,8 @@ impl TransportFactory for MemFactory {
         _protocols: comms::Protocols<'_>,
     ) -> Result<Arc<dyn Transport>> {
         Ok(Arc::new(
-            self.0.peer(lait::crypto::device_from_seed(identity_seed)),
+            self.0
+                .peer(mechanics::actor::device_from_seed(identity_seed)),
         ))
     }
 }
@@ -102,7 +103,7 @@ fn spawn_daemon(home: PathBuf, seed: [u8; 32], net: MemNet) -> std::thread::Join
     std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async move {
-            if let Err(e) = run_space_bridge_with(home, seed, &MemFactory(net)).await {
+            if let Err(e) = run_station_process_with(home, seed, &MemFactory(net)).await {
                 eprintln!("DAEMON ERR: {e:#}");
             }
         });
@@ -205,8 +206,8 @@ fn restarted_joiner_daemon_reconverges_from_its_persisted_store() {
     let mut joiner_handle = Some(spawn_daemon(joiner_home.clone(), JOINER_SEED, net.clone()));
     wait_online(&rt, &joiner_home);
 
-    let founder_device = lait::crypto::device_from_seed(&FOUNDER_SEED).to_string();
-    let joiner_device = lait::crypto::device_from_seed(&JOINER_SEED).to_string();
+    let founder_device = mechanics::actor::device_from_seed(&FOUNDER_SEED).to_string();
+    let joiner_device = mechanics::actor::device_from_seed(&JOINER_SEED).to_string();
 
     let drive_contact = |rt: &tokio::runtime::Runtime| {
         req(

@@ -7,10 +7,18 @@ description = "Semantics-free crash-safe object/manifest journal: immutable cont
 license = "MIT OR Apache-2.0"
 publish = false
 
+[features]
+fault-injection = []
+
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 postcard = { version = "1", features = ["use-std"] }
 blake3 = "1"
 data-encoding = "2.6"
+tracing = "0.1"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
 
 [dev-dependencies]

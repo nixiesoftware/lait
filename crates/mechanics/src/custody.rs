@@ -9,7 +9,7 @@
 //! chose and nobody can audit.
 //!
 //! So DPAPI is treated here as a **local convenience unlock**, never as the
-//! durability boundary. The canonical artifact is an [`AuthoritySharePackage`]:
+//! durability boundary. The canonical artifact is an [`Package`]:
 //! self-describing, portable, and openable by any of several independent
 //! [`KeySlot`]s. Losing one slot costs convenience; it does not cost the share.
 //!
@@ -28,7 +28,7 @@
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::authority::{AuthorityId, AuthorityScheme, LeafId, PrincipalId};
+use crate::authority::{Authority, Holder, Principal, Scheme};
 use crate::crypto::{self, SpaceKey};
 use crate::ids::{DeviceId, SpaceId};
 
@@ -121,14 +121,14 @@ pub struct FrostSharePayload {
 
 /// A portable, self-describing custody envelope for one holder's share.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AuthoritySharePackage {
+pub struct Package {
     pub version: u16,
     pub space: SpaceId,
-    pub authority: AuthorityId,
+    pub authority: Authority,
     pub ceremony: String,
-    pub scheme: AuthorityScheme,
-    pub principal: PrincipalId,
-    pub leaf: LeafId,
+    pub scheme: Scheme,
+    pub principal: Principal,
+    pub leaf: Holder,
     /// [`SharePayload`], AEAD-encrypted under the package DEK.
     pub encrypted_payload: Vec<u8>,
     pub key_slots: Vec<KeySlot>,
@@ -143,38 +143,39 @@ pub struct AuthoritySharePackage {
 #[derive(Debug, Clone)]
 pub struct PackageExpectation<'a> {
     pub space: &'a SpaceId,
-    pub authority: &'a AuthorityId,
+    pub authority: &'a Authority,
     pub ceremony: &'a str,
-    pub leaf: &'a LeafId,
+    pub leaf: &'a Holder,
     /// The group public key this holder expects to be part of.
     pub group_key: &'a DeviceId,
     /// The participant index this holder expects to occupy.
     pub index: u16,
 }
 
-impl AuthoritySharePackage {
+impl Package {
     /// Build a package, encrypting `payload` under a fresh DEK wrapped by every
     /// slot in `slot_specs`.
     pub fn seal(
         space: &SpaceId,
-        authority: &AuthorityId,
+        authority: &Authority,
         ceremony: &str,
-        principal: &PrincipalId,
-        leaf: &LeafId,
+        principal: &Principal,
+        leaf: &Holder,
         payload: &SharePayload,
         slot_specs: &[SlotSpec],
     ) -> Result<Self> {
         if slot_specs.is_empty() {
             return Err(anyhow!("a share package needs at least one unlock slot"));
         }
-        let dek = crypto::random_key();
+        let dek = crypto::random_key().map_err(|failure| anyhow!("protection: {failure:?}"))?;
         let plaintext = postcard::to_stdvec(payload)?;
-        let encrypted_payload = crypto::aead_encrypt(&dek, &plaintext);
+        let encrypted_payload = crypto::aead_encrypt(&dek, &plaintext)
+            .map_err(|failure| anyhow!("protection: {failure:?}"))?;
         let key_slots = slot_specs
             .iter()
             .map(|spec| spec.wrap(&dek))
             .collect::<Result<Vec<_>>>()?;
-        Ok(AuthoritySharePackage {
+        Ok(Package {
             version: PACKAGE_VERSION,
             space: space.clone(),
             authority: authority.clone(),
@@ -266,10 +267,10 @@ impl AuthoritySharePackage {
     }
 }
 
-fn authority_scheme_of(payload: &SharePayload) -> AuthorityScheme {
+fn authority_scheme_of(payload: &SharePayload) -> Scheme {
     match payload {
-        SharePayload::Frost(_) => AuthorityScheme::FrostThreshold,
-        SharePayload::GeneralAccess(_) => AuthorityScheme::GeneralAccess,
+        SharePayload::Frost(_) => Scheme::FrostThreshold,
+        SharePayload::GeneralAccess(_) => Scheme::GeneralAccess,
     }
 }
 
@@ -299,6 +300,7 @@ impl SlotSpec {
             }),
             SlotSpec::RecoveryKey { recipient } => {
                 let wrapped_dek = crypto::seal_to(recipient, dek.as_slice())
+                    .map_err(|failure| anyhow!("protection: {failure:?}"))?
                     .ok_or_else(|| anyhow!("cannot seal to {}", recipient.short()))?;
                 Ok(KeySlot::RecoveryKey {
                     recipient: recipient.clone(),
@@ -314,7 +316,8 @@ impl SlotSpec {
                 Ok(KeySlot::Passphrase {
                     salt: *salt,
                     params: *params,
-                    wrapped_dek: crypto::aead_encrypt(&kek, dek.as_slice()),
+                    wrapped_dek: crypto::aead_encrypt(&kek, dek.as_slice())
+                        .map_err(|failure| anyhow!("protection: {failure:?}"))?,
                 })
             }
         }
@@ -388,7 +391,7 @@ fn derive_passphrase_key(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::authority::{AuthorityConfiguration, FrostThresholdConfig};
+    use crate::authority::{Config, FrostThresholdConfig};
     use crate::ids::SystemUlidSource;
 
     /// Cheap parameters so tests do not spend a second per derivation. Never use
@@ -403,9 +406,9 @@ mod tests {
 
     fn fixture() -> (
         SpaceId,
-        AuthorityId,
-        PrincipalId,
-        LeafId,
+        Authority,
+        Principal,
+        Holder,
         SharePayload,
         DeviceId,
     ) {
@@ -413,13 +416,13 @@ mod tests {
         let (holders, group_key) = crate::dkg::tests_support::run_dkg(3, 2);
         let (share, pkp) = holders[&1].clone();
         let device = crypto::device_from_seed(&[1u8; 32]);
-        let principal = PrincipalId::of_device(&device);
-        let leaf = LeafId::of_principal(&principal);
-        let config = AuthorityConfiguration::frost_threshold(&FrostThresholdConfig {
+        let principal = Principal::of_device(&device);
+        let leaf = Holder::of_principal(&principal);
+        let config = Config::frost_threshold(&FrostThresholdConfig {
             k: 2,
             participants: vec![principal.clone()],
         });
-        let authority = AuthorityId::new(group_key.clone(), &config);
+        let authority = Authority::new(group_key.clone(), &config);
         let payload = SharePayload::Frost(FrostSharePayload {
             key_share: share,
             public_package: pkp,
@@ -431,7 +434,7 @@ mod tests {
     #[test]
     fn a_passphrase_slot_opens_the_package_anywhere() {
         let (ws, authority, principal, leaf, payload, _) = fixture();
-        let pkg = AuthoritySharePackage::seal(
+        let pkg = Package::seal(
             &ws,
             &authority,
             "ceremony-1",
@@ -463,7 +466,7 @@ mod tests {
     fn any_single_slot_opens_the_same_package() {
         let (ws, authority, principal, leaf, payload, _) = fixture();
         let device = crypto::device_from_seed(&[9u8; 32]);
-        let pkg = AuthoritySharePackage::seal(
+        let pkg = Package::seal(
             &ws,
             &authority,
             "ceremony-1",
@@ -507,7 +510,7 @@ mod tests {
     #[test]
     fn a_dpapi_only_package_is_not_portable() {
         let (ws, authority, principal, leaf, payload, _) = fixture();
-        let pkg = AuthoritySharePackage::seal(
+        let pkg = Package::seal(
             &ws,
             &authority,
             "ceremony-1",
@@ -528,7 +531,7 @@ mod tests {
     #[test]
     fn a_package_needs_at_least_one_slot() {
         let (ws, authority, principal, leaf, payload, _) = fixture();
-        assert!(AuthoritySharePackage::seal(
+        assert!(Package::seal(
             &ws,
             &authority,
             "ceremony-1",
@@ -545,7 +548,7 @@ mod tests {
     #[test]
     fn verification_rejects_a_package_from_the_wrong_context() {
         let (ws, authority, principal, leaf, payload, group_key) = fixture();
-        let pkg = AuthoritySharePackage::seal(
+        let pkg = Package::seal(
             &ws,
             &authority,
             "ceremony-1",
@@ -589,7 +592,7 @@ mod tests {
                 }
             )
             .is_err());
-        let other_leaf = LeafId::of_principal(&PrincipalId::of_device(&crypto::device_from_seed(
+        let other_leaf = Holder::of_principal(&Principal::of_device(&crypto::device_from_seed(
             &[42u8; 32],
         )));
         assert!(pkg
@@ -626,19 +629,19 @@ mod tests {
         let ws = SpaceId::mint(&SystemUlidSource);
         let (forged, pkp, group_key) = crate::dkg::tests_support::share_with_foreign_secret();
         let device = crypto::device_from_seed(&[1u8; 32]);
-        let principal = PrincipalId::of_device(&device);
-        let leaf = LeafId::of_principal(&principal);
-        let config = AuthorityConfiguration::frost_threshold(&FrostThresholdConfig {
+        let principal = Principal::of_device(&device);
+        let leaf = Holder::of_principal(&principal);
+        let config = Config::frost_threshold(&FrostThresholdConfig {
             k: 2,
             participants: vec![principal.clone()],
         });
-        let authority = AuthorityId::new(group_key.clone(), &config);
+        let authority = Authority::new(group_key.clone(), &config);
         let broken = SharePayload::Frost(FrostSharePayload {
             key_share: forged,
             public_package: pkp.clone(),
             index: 1,
         });
-        let pkg = AuthoritySharePackage::seal(
+        let pkg = Package::seal(
             &ws,
             &authority,
             "ceremony-1",
@@ -680,7 +683,7 @@ mod tests {
     #[test]
     fn a_package_round_trips_through_its_wire_form() {
         let (ws, authority, principal, leaf, payload, _) = fixture();
-        let pkg = AuthoritySharePackage::seal(
+        let pkg = Package::seal(
             &ws,
             &authority,
             "ceremony-1",
@@ -695,7 +698,7 @@ mod tests {
         )
         .unwrap();
         let bytes = postcard::to_stdvec(&pkg).unwrap();
-        let back: AuthoritySharePackage = postcard::from_bytes(&bytes).unwrap();
+        let back: Package = postcard::from_bytes(&bytes).unwrap();
         assert_eq!(pkg, back);
         assert_eq!(
             back.open(&UnlockKey::Passphrase("pass".into())).unwrap(),

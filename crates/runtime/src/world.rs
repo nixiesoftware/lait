@@ -13,15 +13,25 @@
 //! work. Runtime contains an unwind-safe panic as `WorldPanicked`
 //! without ending the Station.
 
+pub mod call;
+
 use mechanics::{
     ids::{ActorId, DeviceId},
     station::Key,
 };
 use replica::body::Op;
+use replica::body::Schema;
+use replica::body::{BodyKey, SchemaId, WorldId};
 use replica::frontier::AuthorityFrontier;
-use replica::ids::{BodyKey, SchemaId, WorldId};
-use replica::Schema;
 use serde::{Deserialize, Serialize};
+
+pub use crate::action::{IdempotencyKey, RequestId, SignedWorldAction, WorldActionHeader};
+pub use crate::implementation::Implementation;
+pub use crate::registry::{Builder, Catalog, Declaration, Refusal};
+pub use crate::session::{
+    CommittedEffect, Conflict, Failure, Interruption, Observation, ObservationCursor,
+    ObservationStream, DEFAULT_OBSERVATION_CAPACITY, MAX_OBSERVATION_CAPACITY,
+};
 
 /// A World-owned semantic rejection. These values are deterministic decisions
 /// about a well-bounded request or the World's declared contract; Runtime
@@ -58,7 +68,7 @@ pub struct PrincipalFacts {
     pub device: DeviceId,
     pub station: Key,
     /// The Space this principal is docked in — with the WorldId, the input to
-    /// deterministic per-Space identities (e.g. the Issues Catalog BodyId).
+    /// deterministic per-Space identities (for example, a product index BodyId).
     pub space: mechanics::ids::SpaceId,
     pub authority_frontier: AuthorityFrontier,
 }
@@ -124,7 +134,7 @@ pub trait AuthorityView: Send + Sync {
         Some([0u8; 32])
     }
 
-    /// Produce canonical [`mechanics::demand::AuthorizationReceipt`] bytes for
+    /// Produce canonical [`mechanics::authorization::AuthorizationReceipt`] bytes for
     /// a mutation whose transaction core hashes to `core_digest`, binding every
     /// companion coordinate, or a typed denial. No World callback runs. The
     /// default builds a structurally-valid receipt without a real policy
@@ -144,21 +154,25 @@ pub trait AuthorityView: Send + Sync {
         demand: &[u8],
         operations_digest: [u8; 32],
         core_digest: [u8; 32],
-    ) -> Result<Vec<u8>, String> {
-        let parsed = mechanics::demand::AuthorizationDemand::decode_canonical(demand)
-            .map_err(|e| format!("demand: {e}"))?;
-        let receipt = mechanics::demand::AuthorizationReceipt {
+    ) -> Result<Vec<u8>, mechanics::authorization::Refusal> {
+        let parsed = mechanics::authorization::AuthorizationDemand::decode_canonical(demand)
+            .map_err(mechanics::authorization::Refusal::Demand)?;
+        let receipt = mechanics::authorization::AuthorizationReceipt {
             space: space.as_str().to_string(),
             world: world.as_str().to_string(),
             actor: actor.as_str().to_string(),
-            device: device.key_bytes().ok_or("device key")?,
+            device: device
+                .key_bytes()
+                .ok_or(mechanics::authorization::Refusal::Denied)?,
             authority_frontier: authority_frontier.as_bytes().to_vec(),
             authority_checkpoint_commitment: [0u8; 32],
-            policy_evidence_digest: mechanics::demand::policy_evidence_digest(&[]),
+            policy_evidence_digest: mechanics::authorization::policy_evidence_digest(&[]),
             parent_manifest_root,
             implementation_id,
             intent_digest,
-            demand_digest: parsed.digest().map_err(|e| format!("demand digest: {e}"))?,
+            demand_digest: parsed
+                .digest()
+                .map_err(mechanics::authorization::Refusal::Demand)?,
             effect_operations_digest: operations_digest,
             body_transaction_core_digest: core_digest,
             decision: 1,
@@ -202,7 +216,7 @@ impl std::fmt::Debug for LocalIdentity {
 impl LocalIdentity {
     pub(crate) fn from_seed(seed: &[u8; 32]) -> Self {
         Self {
-            device: mechanics::crypto::device_from_seed(seed),
+            device: mechanics::actor::device_from_seed(seed),
             seed: *seed,
         }
     }
@@ -253,12 +267,16 @@ impl LocalIdentity {
 /// commits; the seed never leaves this type.
 impl replica::transaction::Signer for LocalIdentity {
     fn signer_key(&self) -> [u8; 32] {
+        #[allow(
+            clippy::expect_used,
+            reason = "LocalIdentity is constructed from an Ed25519 seed and therefore always has key bytes"
+        )]
         self.device
             .key_bytes()
             .expect("seed-derived device key is well-formed")
     }
     fn sign_preimage(&self, preimage: &[u8]) -> [u8; 64] {
-        mechanics::crypto::sign_detached(&self.seed, preimage)
+        mechanics::actor::sign_detached(&self.seed, preimage)
     }
 }
 
@@ -283,42 +301,31 @@ pub struct Limits {
 /// demand is absent because nothing has decided what one would mean for a
 /// scope; carrying the field before its semantics exist is the wrong order.
 ///
-/// The ceiling below is declared and reviewed — it is in the implementation id
-/// — and it is **not yet applied at delivery**. `transient.rs` bounds every
-/// scope field at
-/// [`MAX_SCOPE_FIELD_BYTES`](crate::transient::MAX_SCOPE_FIELD_BYTES) and
-/// consults no registered `ScopeSchema`, so a World declaring 8 still sees 128.
-/// Committing the number to the reviewed identity ahead of the check is
-/// deliberate: wiring it changes no descriptor bytes and therefore moves no id
-/// an authority has already activated.
+/// The ceiling below is declared, reviewed, committed to the implementation id,
+/// and enforced when a World transient scope is admitted. The substrate ceiling
+/// remains the outer allocation bound; this declaration may only tighten it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScopeSchema {
     pub name: SchemaId,
     /// The World's declared ceiling on a scope field. Registration refuses one
     /// that does not tighten the substrate's
-    /// [`MAX_SCOPE_FIELD_BYTES`](crate::transient::MAX_SCOPE_FIELD_BYTES),
-    /// which is the only place it is read today.
+    /// [`MAX_SCOPE_FIELD_BYTES`](crate::transient::MAX_SCOPE_FIELD_BYTES).
     pub max_key_bytes: u32,
 }
 
 /// A World signal schema: what it is called, how large it may be, and what
 /// authority sending it demands.
 ///
-/// The authority is canonical `mechanics::demand::AuthorizationDemand` bytes
+/// The authority is canonical `mechanics::authorization::AuthorizationDemand` bytes
 /// rather than a capability name, because that is the form
 /// [`SignalDemand::World`](crate::signal::SignalDemand) carries and policy
 /// evaluates; a name would need a translation to demand bytes that nobody has
 /// written.
 ///
-/// Neither the ceiling nor the demand is applied at delivery yet. Every World
-/// signal rides `selector::WORLD`, whose core declaration carries
-/// `SignalDemand::Session` and
-/// [`MAX_SIGNAL_BYTES`](crate::plane::bounds::MAX_SIGNAL_BYTES), and the read
-/// path resolves its bound and its authority from that declaration without
-/// consulting the registered schema. Both numbers are declared, reviewed, and
-/// committed to the implementation id; what is missing is the resolution step
-/// that turns a `selector::WORLD` frame into its schema's declaration. Wiring
-/// it changes no descriptor bytes, so it moves no already-activated id.
+/// The ceiling and demand are enforced after the World signal body identifies
+/// its registered schema. The generic `selector::WORLD` declaration supplies
+/// only the substrate bound; the schema supplies the tighter product bound and
+/// the authority demand evaluated at the pinned frontier.
 ///
 /// There is deliberately no answer policy, and that omission is a different
 /// case from the two above. `selector::WORLD` declares
@@ -331,11 +338,10 @@ pub struct SignalSchema {
     pub name: SchemaId,
     /// The World's declared ceiling. Registration refuses one that does not
     /// tighten the plane's
-    /// [`MAX_SIGNAL_BYTES`](crate::plane::bounds::MAX_SIGNAL_BYTES), which is
-    /// the only place it is read today.
+    /// [`MAX_SIGNAL_BYTES`](crate::plane::bounds::MAX_SIGNAL_BYTES).
     pub max_payload_bytes: u32,
-    /// Canonical [`mechanics::demand::AuthorizationDemand`] bytes. Parsed at
-    /// registration; not evaluated on any delivery path yet.
+    /// Canonical [`mechanics::authorization::AuthorizationDemand`] bytes. Parsed at
+    /// registration and evaluated before delivery.
     pub demand: Vec<u8>,
 }
 
@@ -357,7 +363,7 @@ pub struct Descriptor {
 /// payload is the World's own bytes; Runtime does not interpret it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Intent {
-    pub schema: replica::ids::SchemaId,
+    pub schema: replica::body::SchemaId,
     pub schema_version: u32,
     pub payload: Vec<u8>,
 }
@@ -365,7 +371,7 @@ pub struct Intent {
 /// A decoded application query handed to a World.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Query {
-    pub schema: replica::ids::SchemaId,
+    pub schema: replica::body::SchemaId,
     pub schema_version: u32,
     pub payload: Vec<u8>,
 }
@@ -378,12 +384,12 @@ pub struct Query {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BodyDeclaration {
     pub key: BodyKey,
-    pub schema: replica::ids::SchemaId,
+    pub schema: replica::body::SchemaId,
     pub schema_version: u32,
 }
 
 /// The result a World returns from `submit`: the staged Body operations, the
-/// Observation scopes they touch, an opaque application effect payload, and the
+/// Observation Bodies they touch, an opaque application effect payload, and the
 /// **canonical non-empty authorization demand** the mutation requires. There
 /// is no implicit `Write` fallback — Runtime evaluates this exact demand at the
 /// pinned authority frontier and commits nothing if it is unsatisfied.
@@ -401,18 +407,18 @@ pub struct Effect {
     ///
     /// Absent means unchanged. An empty vector means "this Body references
     /// nothing", which is how content is released.
-    pub content_refs: Vec<(BodyKey, Vec<replica::ContentRef>)>,
+    pub content_refs: Vec<(BodyKey, Vec<replica::content::ContentRef>)>,
     /// Body operations staged this transaction, each keyed to the Body it
     /// mutates.
     pub operations: Vec<(BodyKey, Op)>,
-    /// The Observation scopes affected, so Runtime can publish invalidations.
-    pub scopes: Vec<BodyKey>,
+    /// The Observation Bodies affected, so Runtime can publish invalidations.
+    pub bodies: Vec<BodyKey>,
     /// An opaque application-defined effect payload returned to the caller.
     pub effect: Vec<u8>,
     /// Schema declarations for Bodies this transaction creates (multi-schema
     /// transactions declare each non-intent-schema Body explicitly).
     pub declarations: Vec<BodyDeclaration>,
-    /// The canonical [`mechanics::demand::AuthorizationDemand`] bytes this
+    /// The canonical [`mechanics::authorization::AuthorizationDemand`] bytes this
     /// mutation requires (mandatory, non-empty).
     pub demand: Vec<u8>,
 }
@@ -423,7 +429,7 @@ pub struct Effect {
 /// policy — there is no implicit-read fallback.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Projection {
-    pub schema: replica::ids::SchemaId,
+    pub schema: replica::body::SchemaId,
     pub schema_version: u32,
     pub bytes: Vec<u8>,
     pub frontier: replica::frontier::ReplicaFrontier,
@@ -463,7 +469,7 @@ pub trait BodyReader {
     fn read_collaborative_body(
         &self,
         key: &BodyKey,
-    ) -> Result<replica::CollaborativeView, replica::projection::Failure>;
+    ) -> Result<fabric::CollaborativeView, fabric::projection::Failure>;
     /// Every interpreted Body of `world` bound to `schema` — the
     /// singleton-integrity seam (a World validating that exactly its one
     /// deterministic instance of a schema exists).
@@ -474,28 +480,28 @@ pub trait BodyReader {
     /// Opaque and orderable, and never the convergence engine's own type. A
     /// World uses it to compare
     /// positions and to stamp anchors; it cannot use it to reach the engine.
-    fn body_version(&self, key: &BodyKey) -> Option<replica::Version>;
+    fn body_version(&self, key: &BodyKey) -> Option<fabric::Version>;
 
     /// Take an anchor at a position inside a collaborative value.
     ///
     /// This is the seam plan 14's carets and range-attached comments consume,
     /// and it is exposed here rather than there because only the algebra that
     /// moves a position can mint one that survives being moved.
-    fn anchor_in_body(&self, key: &BodyKey, path: &str, position: u64) -> Option<replica::Anchor>;
+    fn anchor_in_body(&self, key: &BodyKey, path: &str, position: u64) -> Option<fabric::Anchor>;
 
     /// Resolve an anchor against a Body's current state.
     ///
     /// Total and read-only: a position whose material was deleted, or whose
     /// anchor predates what this replica retains, is `Drifted`. Never an error,
     /// never a mutation, and never a silently wrong index.
-    fn resolve_anchor(&self, key: &BodyKey, anchor: &replica::Anchor) -> replica::AnchorResolution;
+    fn resolve_anchor(&self, key: &BodyKey, anchor: &fabric::Anchor) -> fabric::AnchorResolution;
 
     /// What one content is, and how much of it is here.
     ///
     /// A World sees size, geometry, and residency — never a path, never bytes,
     /// never a key. Reading the bytes is a host call with its own demand, and
     /// a `ContentRef` alone authorizes nothing.
-    fn content_status(&self, content: &replica::ContentRef) -> Option<ContentStatus>;
+    fn content_status(&self, content: &replica::content::ContentRef) -> Option<ContentStatus>;
 
     /// An opaque per-Body VERSION STAMP: two reads returning the same stamp
     /// for a key are guaranteed byte-equivalent Bodies, so a World may reuse
@@ -576,12 +582,12 @@ impl<'a> Context<'a> {
     }
 
     /// A Body's causal position, for comparison and for stamping anchors.
-    pub fn body_version(&self, key: &BodyKey) -> Option<replica::Version> {
+    pub fn body_version(&self, key: &BodyKey) -> Option<fabric::Version> {
         self.reads.and_then(|r| r.body_version(key))
     }
 
     /// Take an anchor at a position inside a collaborative value.
-    pub fn anchor(&self, key: &BodyKey, path: &str, position: u64) -> Option<replica::Anchor> {
+    pub fn anchor(&self, key: &BodyKey, path: &str, position: u64) -> Option<fabric::Anchor> {
         self.reads
             .and_then(|r| r.anchor_in_body(key, path, position))
     }
@@ -590,16 +596,16 @@ impl<'a> Context<'a> {
     pub fn resolve_anchor(
         &self,
         key: &BodyKey,
-        anchor: &replica::Anchor,
-    ) -> replica::AnchorResolution {
+        anchor: &fabric::Anchor,
+    ) -> fabric::AnchorResolution {
         match self.reads {
             Some(reads) => reads.resolve_anchor(key, anchor),
-            None => replica::AnchorResolution::Drifted,
+            None => fabric::AnchorResolution::Drifted,
         }
     }
 
     /// What one content is, and how much of it is here.
-    pub fn content_status(&self, content: &replica::ContentRef) -> Option<ContentStatus> {
+    pub fn content_status(&self, content: &replica::content::ContentRef) -> Option<ContentStatus> {
         self.reads.and_then(|r| r.content_status(content))
     }
 
@@ -607,10 +613,10 @@ impl<'a> Context<'a> {
     pub fn read_collaborative(
         &self,
         key: &BodyKey,
-    ) -> Result<replica::CollaborativeView, replica::projection::Failure> {
+    ) -> Result<fabric::CollaborativeView, fabric::projection::Failure> {
         match self.reads {
             Some(reads) => reads.read_collaborative_body(key),
-            None => Err(replica::projection::Failure::NotCollaborative),
+            None => Err(fabric::projection::Failure::NotCollaborative),
         }
     }
 }

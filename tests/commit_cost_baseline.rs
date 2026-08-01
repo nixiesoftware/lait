@@ -32,13 +32,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
-use mechanics::crypto::AuthorizedBodyKey;
+use mechanics::authorization::AuthorizedBodyKey;
 use mechanics::ids::SpaceId;
+use replica::body::{BodyBinding, Op, StaticBodyKeys, SupportedSchemas, MUTATION_ATOMIC};
+use replica::body::{BodyId, BodyKey, EncodingId, SchemaId, WorldId};
 use replica::frontier::AuthorityFrontier;
-use replica::{
-    BodyBinding, BodyId, BodyKey, CommitAuthorization, CommitContext, EncodingId, Op, Replica,
-    SchemaId, SeedSigner, StaticBodyKeys, SupportedSchemas, WorldId, MUTATION_ATOMIC,
-};
+use replica::transaction::{CommitAuthorization, CommitContext, SeedSigner};
+use replica::Replica;
 
 const WRITER_SEED: [u8; 32] = [61u8; 32];
 const EPOCH: [u8; 16] = [3u8; 16];
@@ -63,7 +63,7 @@ fn world() -> WorldId {
 }
 
 fn device() -> mechanics::ids::DeviceId {
-    mechanics::crypto::device_from_seed(&WRITER_SEED)
+    mechanics::actor::device_from_seed(&WRITER_SEED)
 }
 
 fn keys() -> Arc<StaticBodyKeys> {
@@ -94,7 +94,7 @@ fn supported() -> SupportedSchemas {
 }
 
 fn demand() -> Vec<u8> {
-    use mechanics::demand::{AuthorizationDemand, PolicyCapability, Resource};
+    use mechanics::authorization::{AuthorizationDemand, PolicyCapability, Resource};
     AuthorizationDemand::require(
         PolicyCapability::new("com.example.notes", "write"),
         Resource::root("com.example.notes"),
@@ -136,7 +136,7 @@ fn commit(replica: &mut Replica, seq: u64, ops: &[(BodyKey, Op)]) {
                 parent_manifest_root: [0u8; 32],
                 demand: demand(),
                 intent_digest: [7u8; 32],
-                authorizer: &replica::StaticAuthorizer {
+                authorizer: &replica::transaction::StaticAuthorizer {
                     world: world(),
                     implementation_id: [0u8; 32],
                 },
@@ -256,7 +256,7 @@ struct Measurement {
 /// Build `bodies` Bodies, then time `samples` further single-Body edits.
 fn measure(bodies: u64, samples: usize) -> Measurement {
     let dir = temp_store(&format!("{bodies}"));
-    let mut replica = Replica::open_journaled(&dir, keys()).expect("open store");
+    let mut replica = Replica::open(&dir, keys()).expect("open store");
     replica.set_supported(supported());
 
     let quota = *replica.quota();
