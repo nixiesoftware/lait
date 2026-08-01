@@ -37,7 +37,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use crate::{atomic_replace, io_err, sync_dir, write_sync, JournalError};
+use crate::{atomic_replace, io_err, sync_dir, write_sync, Failure as JournalFailure};
 
 const ENTRIES_DIR: &str = "chunks";
 const TAGS_DIR: &str = "tags";
@@ -49,11 +49,11 @@ const ENTRY_HEADER_LEN: usize = 4 + 32;
 
 /// Why a cache operation failed.
 ///
-/// Deliberately distinct from [`JournalError`]: a missing resident entry is
+/// Deliberately distinct from [`JournalFailure`]: a missing resident entry is
 /// **not** an integrity failure. Collapsing the two is what would let a
 /// refetchable chunk take a store down.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CacheError {
+pub enum Failure {
     /// The entry is not here. Expected, and usually means "go fetch it".
     NotResident,
     /// The bytes are here but do not match the address they are filed under, or
@@ -68,21 +68,21 @@ pub enum CacheError {
     Bounds,
 }
 
-impl std::fmt::Display for CacheError {
+impl std::fmt::Display for Failure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            CacheError::NotResident => write!(f, "not resident"),
-            CacheError::Corrupt => write!(f, "corrupt cache entry"),
-            CacheError::Durability(m) => write!(f, "durability: {m}"),
-            CacheError::Bounds => write!(f, "bounds"),
+            Failure::NotResident => write!(f, "not resident"),
+            Failure::Corrupt => write!(f, "corrupt cache entry"),
+            Failure::Durability(m) => write!(f, "durability: {m}"),
+            Failure::Bounds => write!(f, "bounds"),
         }
     }
 }
-impl std::error::Error for CacheError {}
+impl std::error::Error for Failure {}
 
-impl From<JournalError> for CacheError {
-    fn from(e: JournalError) -> Self {
-        CacheError::Durability(e.to_string())
+impl From<JournalFailure> for Failure {
+    fn from(e: JournalFailure) -> Self {
+        Failure::Durability(e.to_string())
     }
 }
 
@@ -237,11 +237,11 @@ fn split_entry(raw: &[u8]) -> Option<([u8; 32], &[u8], &[u8])> {
 impl ResidentCache {
     /// Open (creating) a cache under `root`, reclaiming anything a previous run
     /// left half-written.
-    pub fn open(root: impl Into<PathBuf>, quota_bytes: u64) -> Result<Self, CacheError> {
+    pub fn open(root: impl Into<PathBuf>, quota_bytes: u64) -> Result<Self, Failure> {
         let root = root.into();
         for dir in [ENTRIES_DIR, TAGS_DIR, STAGING_DIR] {
             std::fs::create_dir_all(root.join(dir))
-                .map_err(|e| CacheError::Durability(format!("cache dir: {e}")))?;
+                .map_err(|e| Failure::Durability(format!("cache dir: {e}")))?;
         }
         let cache = Self {
             root,
@@ -272,8 +272,8 @@ impl ResidentCache {
     /// What it guarantees is that whatever comes back out of a slot is
     /// byte-identical to what went in; whether those are the *right* bytes for
     /// that slot is the caller's question, and the sidecar is how it answers.
-    pub fn install(&self, slot: &[u8; 32], bytes: &[u8], sidecar: &[u8]) -> Result<(), CacheError> {
-        let sidecar_len = u32::try_from(sidecar.len()).map_err(|_| CacheError::Bounds)?;
+    pub fn install(&self, slot: &[u8; 32], bytes: &[u8], sidecar: &[u8]) -> Result<(), Failure> {
+        let sidecar_len = u32::try_from(sidecar.len()).map_err(|_| Failure::Bounds)?;
         let mut raw = Vec::with_capacity(ENTRY_HEADER_LEN + sidecar.len() + bytes.len());
         raw.extend_from_slice(&sidecar_len.to_le_bytes());
         raw.extend_from_slice(&crate::object_content_hash(bytes));
@@ -296,21 +296,19 @@ impl ResidentCache {
     /// correct response is to fetch again. A transient read failure is a
     /// different answer — it is not evidence the entry is wrong, and deleting on
     /// it would turn a busy filesystem into data loss.
-    pub fn read(&self, slot: &[u8; 32]) -> Result<(Vec<u8>, Vec<u8>), CacheError> {
+    pub fn read(&self, slot: &[u8; 32]) -> Result<(Vec<u8>, Vec<u8>), Failure> {
         let raw = match std::fs::read(self.entry_path(slot)) {
             Ok(raw) => raw,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Err(CacheError::NotResident)
-            }
-            Err(e) => return Err(CacheError::Durability(format!("cache read: {e}"))),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(Failure::NotResident),
+            Err(e) => return Err(Failure::Durability(format!("cache read: {e}"))),
         };
         let Some((address, sidecar, bytes)) = split_entry(&raw) else {
             self.drop_entry(slot);
-            return Err(CacheError::Corrupt);
+            return Err(Failure::Corrupt);
         };
         if crate::object_content_hash(bytes) != address {
             self.drop_entry(slot);
-            return Err(CacheError::Corrupt);
+            return Err(Failure::Corrupt);
         }
         Ok((bytes.to_vec(), sidecar.to_vec()))
     }
@@ -348,14 +346,14 @@ impl ResidentCache {
         entry: &[u8; 32],
         offset: u64,
         len: usize,
-    ) -> Result<Vec<u8>, CacheError> {
+    ) -> Result<Vec<u8>, Failure> {
         if len > crate::index::MAX_NODE_BYTES {
-            return Err(CacheError::Bounds);
+            return Err(Failure::Bounds);
         }
         let (bytes, _) = self.read(entry)?;
-        let start = usize::try_from(offset).map_err(|_| CacheError::Bounds)?;
+        let start = usize::try_from(offset).map_err(|_| Failure::Bounds)?;
         if start > bytes.len() {
-            return Err(CacheError::Bounds);
+            return Err(Failure::Bounds);
         }
         let end = start.saturating_add(len).min(bytes.len());
         Ok(bytes[start..end].to_vec())
@@ -373,7 +371,7 @@ impl ResidentCache {
 
     /// Take a lease. Idempotent: the same holder taking the same lease twice
     /// holds it once.
-    pub fn lease(&self, lease: &Lease) -> Result<(), CacheError> {
+    pub fn lease(&self, lease: &Lease) -> Result<(), Failure> {
         let dir = self.root.join(TAGS_DIR);
         write_sync(&dir.join(lease.tag_name()), &[])?;
         sync_dir(&dir)?;
@@ -382,7 +380,7 @@ impl ResidentCache {
 
     /// Release a lease. Releasing one never collects anything on its own — a
     /// sweep decides — so a reader still holding the entry cannot be torn.
-    pub fn release(&self, lease: &Lease) -> Result<(), CacheError> {
+    pub fn release(&self, lease: &Lease) -> Result<(), Failure> {
         match std::fs::remove_file(self.root.join(TAGS_DIR).join(lease.tag_name())) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -397,21 +395,21 @@ impl ResidentCache {
     ///
     /// Operation holds only. A content hold that happened to share the same
     /// sixteen bytes is a different kind of promise and survives.
-    pub fn release_operation(&self, operation: &[u8; 16]) -> Result<u64, CacheError> {
+    pub fn release_operation(&self, operation: &[u8; 16]) -> Result<u64, Failure> {
         self.release_holder(LeaseKind::Operation, operation)
     }
 
     /// Release every hold one content's nonce took, which is what forgetting a
     /// content means.
-    pub fn release_content(&self, content_nonce: &[u8; 16]) -> Result<u64, CacheError> {
+    pub fn release_content(&self, content_nonce: &[u8; 16]) -> Result<u64, Failure> {
         self.release_holder(LeaseKind::Content, content_nonce)
     }
 
-    fn release_holder(&self, kind: LeaseKind, holder: &[u8; 16]) -> Result<u64, CacheError> {
+    fn release_holder(&self, kind: LeaseKind, holder: &[u8; 16]) -> Result<u64, Failure> {
         let mut released = 0;
         let dir = self.root.join(TAGS_DIR);
-        let entries = std::fs::read_dir(&dir)
-            .map_err(|e| CacheError::Durability(format!("tags dir: {e}")))?;
+        let entries =
+            std::fs::read_dir(&dir).map_err(|e| Failure::Durability(format!("tags dir: {e}")))?;
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
             if Lease::parse(&name).is_some_and(|l| l.kind == kind && &l.holder == holder) {
@@ -423,14 +421,14 @@ impl ResidentCache {
         Ok(released)
     }
 
-    pub fn pin(&self, entry: &[u8; 32]) -> Result<(), CacheError> {
+    pub fn pin(&self, entry: &[u8; 32]) -> Result<(), Failure> {
         let dir = self.root.join(TAGS_DIR);
         write_sync(&dir.join(pin_name(entry)), &[])?;
         sync_dir(&dir)?;
         Ok(())
     }
 
-    pub fn unpin(&self, entry: &[u8; 32]) -> Result<(), CacheError> {
+    pub fn unpin(&self, entry: &[u8; 32]) -> Result<(), Failure> {
         match std::fs::remove_file(self.root.join(TAGS_DIR).join(pin_name(entry))) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -446,7 +444,7 @@ impl ResidentCache {
     }
 
     /// Whether anything currently holds this entry.
-    pub fn is_held(&self, entry: &[u8; 32]) -> Result<bool, CacheError> {
+    pub fn is_held(&self, entry: &[u8; 32]) -> Result<bool, Failure> {
         Ok(self.held()?.contains(entry))
     }
 
@@ -456,12 +454,12 @@ impl ResidentCache {
     /// whether deletion is allowed, so an unreadable tag directory has to stop
     /// the sweep — returning an empty set on error would make every pinned and
     /// leased entry collectable at exactly the moment the filesystem is unwell.
-    fn held(&self) -> Result<BTreeSet<[u8; 32]>, CacheError> {
+    fn held(&self) -> Result<BTreeSet<[u8; 32]>, Failure> {
         let mut out = BTreeSet::new();
         let entries = std::fs::read_dir(self.root.join(TAGS_DIR))
-            .map_err(|e| CacheError::Durability(format!("tags dir: {e}")))?;
+            .map_err(|e| Failure::Durability(format!("tags dir: {e}")))?;
         for entry in entries {
-            let entry = entry.map_err(|e| CacheError::Durability(format!("tag: {e}")))?;
+            let entry = entry.map_err(|e| Failure::Durability(format!("tag: {e}")))?;
             let name = entry.file_name().to_string_lossy().into_owned();
             if let Some(rest) = name.strip_prefix("pin.") {
                 if let Some(hash) = unhex(rest) {
@@ -493,22 +491,22 @@ impl ResidentCache {
         part: u32,
         offset: u64,
         bytes: &[u8],
-    ) -> Result<u64, CacheError> {
+    ) -> Result<u64, Failure> {
         use std::io::Write;
         let path = self.stage(operation, part);
         let current = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
         if offset != current {
-            return Err(CacheError::Corrupt);
+            return Err(Failure::Corrupt);
         }
         let mut file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&path)
-            .map_err(|e| CacheError::Durability(format!("stage: {e}")))?;
+            .map_err(|e| Failure::Durability(format!("stage: {e}")))?;
         file.write_all(bytes)
-            .map_err(|e| CacheError::Durability(format!("stage write: {e}")))?;
+            .map_err(|e| Failure::Durability(format!("stage write: {e}")))?;
         file.sync_all()
-            .map_err(|e| CacheError::Durability(format!("stage fsync: {e}")))?;
+            .map_err(|e| Failure::Durability(format!("stage fsync: {e}")))?;
         Ok(current + bytes.len() as u64)
     }
 
@@ -539,8 +537,8 @@ impl ResidentCache {
         total
     }
 
-    pub fn read_staged(&self, operation: &[u8; 16], part: u32) -> Result<Vec<u8>, CacheError> {
-        std::fs::read(self.stage(operation, part)).map_err(|_| CacheError::NotResident)
+    pub fn read_staged(&self, operation: &[u8; 16], part: u32) -> Result<Vec<u8>, Failure> {
+        std::fs::read(self.stage(operation, part)).map_err(|_| Failure::NotResident)
     }
 
     /// Discard one staging slot.
@@ -549,17 +547,17 @@ impl ResidentCache {
     /// whole operation. A transfer that installed its third chunk and then
     /// discarded *the operation* would delete the partials for every other
     /// chunk still in flight — so finishing one part has to say so.
-    pub fn discard_staged_part(&self, operation: &[u8; 16], part: u32) -> Result<(), CacheError> {
+    pub fn discard_staged_part(&self, operation: &[u8; 16], part: u32) -> Result<(), Failure> {
         match std::fs::remove_file(self.stage(operation, part)) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(CacheError::Durability(format!("discard staged part: {e}"))),
+            Err(e) => Err(Failure::Durability(format!("discard staged part: {e}"))),
         }
     }
 
     /// Discard everything an operation staged. A cancelled ingest or transfer
     /// leaves nothing durable behind it.
-    pub fn discard_staged(&self, operation: &[u8; 16]) -> Result<u64, CacheError> {
+    pub fn discard_staged(&self, operation: &[u8; 16]) -> Result<u64, Failure> {
         let prefix = data_encoding::HEXLOWER.encode(operation);
         let mut removed = 0;
         if let Ok(entries) = std::fs::read_dir(self.root.join(STAGING_DIR)) {
@@ -581,7 +579,7 @@ impl ResidentCache {
     /// these bytes to go, and a caller that asked should not have to wait for
     /// quota pressure that may never come. Both refuse to touch a held entry —
     /// "I want this gone" does not outrank "someone is reading it".
-    pub fn evict(&self, entry: &[u8; 32]) -> Result<bool, CacheError> {
+    pub fn evict(&self, entry: &[u8; 32]) -> Result<bool, Failure> {
         if self.held()?.contains(entry) {
             return Ok(false);
         }
@@ -622,7 +620,7 @@ impl ResidentCache {
     /// There is nothing else to reclaim: an entry is one file published by one
     /// rename, so the only wreckage a crash can leave is a temporary that was
     /// never renamed.
-    fn reclaim_incomplete(&self) -> Result<(), CacheError> {
+    fn reclaim_incomplete(&self) -> Result<(), Failure> {
         if let Ok(entries) = std::fs::read_dir(self.root.join(ENTRIES_DIR)) {
             for entry in entries.flatten() {
                 let name = entry.file_name().to_string_lossy().into_owned();
@@ -646,7 +644,7 @@ impl ResidentCache {
     /// content's own lease, so a cache full of committed content has no
     /// eligible victims at all. `over_quota_bytes` is what an operator needs to
     /// see to know the answer is "unpin or forget something", not "wait".
-    pub fn sweep(&self) -> Result<SweepReport, CacheError> {
+    pub fn sweep(&self) -> Result<SweepReport, Failure> {
         let mut report = SweepReport::default();
         self.reclaim_incomplete()?;
 
@@ -698,11 +696,11 @@ impl ResidentCache {
     ///
     /// Content holds are untouched: they belong to committed content, not to an
     /// operation, and no restart makes them stale.
-    pub fn sweep_leases(&self, live: &BTreeSet<[u8; 16]>) -> Result<u64, CacheError> {
+    pub fn sweep_leases(&self, live: &BTreeSet<[u8; 16]>) -> Result<u64, Failure> {
         let mut released = 0;
         let dir = self.root.join(TAGS_DIR);
-        let entries = std::fs::read_dir(&dir)
-            .map_err(|e| CacheError::Durability(format!("tags dir: {e}")))?;
+        let entries =
+            std::fs::read_dir(&dir).map_err(|e| Failure::Durability(format!("tags dir: {e}")))?;
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
             let Some(lease) = Lease::parse(&name) else {
@@ -719,7 +717,7 @@ impl ResidentCache {
 
     /// Discard staging older than the caller's cutoff set — the caller decides
     /// which operations are dead, because only it knows.
-    pub fn sweep_staging(&self, live: &BTreeSet<[u8; 16]>) -> Result<SweepReport, CacheError> {
+    pub fn sweep_staging(&self, live: &BTreeSet<[u8; 16]>) -> Result<SweepReport, Failure> {
         let mut report = SweepReport::default();
         let live_prefixes: BTreeMap<String, ()> = live
             .iter()

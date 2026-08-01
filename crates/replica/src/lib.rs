@@ -53,9 +53,12 @@ pub use convergence::{
     StagedContactMaterial, ValidatedContactBundle,
 };
 pub use fabric::{
-    Anchor, AnchorResolution, CollaborativeView, ListElement, OpHead, ProjectionError, Version,
+    Anchor, AnchorResolution, CollaborativeView, ListElement, OpHead, Version,
     CAUSAL_FORMAT_VERSION,
 };
+pub mod projection {
+    pub use fabric::projection::Failure;
+}
 pub use frontier::{AuthorityFrontier, ReplicaFrontier};
 pub use ids::{BodyId, BodyKey, EncodingId, SchemaId, WorldId};
 pub use manifest::{

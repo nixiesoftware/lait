@@ -12,9 +12,10 @@
 //! stored, forwarded, and converged — that is what byte-completeness means —
 //! but no caller is ever handed a view that looks complete and is not.
 
+use fabric::projection::Failure as ProjectionFailure;
 use fabric::{
     is_implemented_type_tag, is_reserved_type_tag, BodyExport, Engine, Key, MemoryEngine, Op,
-    ProjectionError, Transaction,
+    Transaction,
 };
 use loro::{ExportMode, LoroDoc};
 
@@ -93,7 +94,7 @@ fn a_reserved_tag_refuses_the_projection_rather_than_omitting_it() {
         .expect("a Body we cannot project still imports");
 
     match fabric.read_collaborative(&key()) {
-        Err(ProjectionError::SchemaAhead { tag }) => assert_eq!(tag, "tree"),
+        Err(ProjectionFailure::SchemaAhead { tag }) => assert_eq!(tag, "tree"),
         other => panic!("expected SchemaAhead for a reserved tag, got {other:?}"),
     }
 }
@@ -106,7 +107,7 @@ fn an_unknown_tag_refuses_the_projection() {
         .expect("import");
 
     match fabric.read_collaborative(&key()) {
-        Err(ProjectionError::SchemaAhead { tag }) => assert_eq!(tag, "quaternion"),
+        Err(ProjectionFailure::SchemaAhead { tag }) => assert_eq!(tag, "quaternion"),
         other => panic!("expected SchemaAhead for an unknown tag, got {other:?}"),
     }
 }
@@ -133,7 +134,7 @@ fn an_unprojectable_body_still_exports_and_converges() {
     assert!(
         matches!(
             behind.read_collaborative(&key()),
-            Err(ProjectionError::SchemaAhead { .. })
+            Err(ProjectionFailure::SchemaAhead { .. })
         ),
         "the receiving replica refuses the projection"
     );

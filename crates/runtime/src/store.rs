@@ -20,14 +20,14 @@ use fs2::FileExt;
 use mechanics::ids::SpaceId;
 use replica::marker::{Invalid as MarkerInvalid, StoreMarker};
 
-use crate::lifecycle::Failure;
+use crate::lifecycle::{Failure, Integrity, Persistence};
 
 const MARKER_FILE: &str = "marker";
 const EPOCH_FILE: &str = "epoch";
 const LOCK_FILE: &str = "lock";
 
 fn io_err(e: std::io::Error) -> Failure {
-    Failure::Store(e.to_string())
+    Failure::Persistence(Persistence::Io(e.kind()))
 }
 
 /// A test seam mirroring the Engine journal's: called with a named fault point
@@ -69,8 +69,7 @@ impl OrbitStore {
             return Err(Failure::AlreadyExists(space.clone()));
         }
         std::fs::create_dir_all(&dir).map_err(io_err)?;
-        let marker = StoreMarker::new(space)
-            .ok_or(Failure::Integrity("space id is not renderable".into()))?;
+        let marker = StoreMarker::new(space).ok_or(Failure::Integrity(Integrity::SpaceIdentity))?;
         write_sync(&dir.join(MARKER_FILE), &marker.encode())?;
         write_sync(&dir.join(EPOCH_FILE), &0u64.to_le_bytes())?;
         // Make the new directory entries themselves durable — a formation whose
@@ -96,9 +95,7 @@ impl OrbitStore {
         };
         let marker = StoreMarker::classify(&marker_bytes).map_err(marker_err)?;
         if marker.space().as_ref() != Some(space) {
-            return Err(Failure::Integrity(
-                "store marker names a different Space".into(),
-            ));
+            return Err(Failure::Integrity(Integrity::Marker));
         }
         Ok(Self {
             dir,
@@ -116,7 +113,7 @@ impl OrbitStore {
     fn point(&self, name: &str) -> Result<(), Failure> {
         if let Some(injector) = &self.injector {
             if injector(name) {
-                return Err(Failure::Store(format!("injected fault at {name}")));
+                return Err(Failure::Persistence(Persistence::InjectedFault));
             }
         }
         Ok(())
@@ -135,18 +132,13 @@ impl OrbitStore {
         let mut f = match File::open(self.dir.join(EPOCH_FILE)) {
             Ok(f) => f,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Err(Failure::Integrity(
-                    "epoch file missing — the store is corrupt; a committed epoch \
-                     cannot be safely reused"
-                        .into(),
-                ))
+                return Err(Failure::Integrity(Integrity::Epoch))
             }
             Err(e) => return Err(io_err(e)),
         };
         let mut buf = [0u8; 8];
-        f.read_exact(&mut buf).map_err(|_| {
-            Failure::Integrity("epoch file truncated — the store is corrupt".into())
-        })?;
+        f.read_exact(&mut buf)
+            .map_err(|_| Failure::Integrity(Integrity::Epoch))?;
         Ok(u64::from_le_bytes(buf))
     }
 
@@ -347,15 +339,11 @@ fn sync_dir(dir: &Path) -> std::io::Result<()> {
 
 fn marker_err(e: MarkerInvalid) -> Failure {
     match e {
-        MarkerInvalid::NotAReplicaStore => Failure::Integrity("not a Replica store".into()),
-        MarkerInvalid::UnsupportedStoreVersion { found } => {
-            Failure::Integrity(format!("unsupported store version {found}"))
-        }
-        MarkerInvalid::CorruptStoreMarker => Failure::Integrity("corrupt store marker".into()),
-        MarkerInvalid::ReplicaIntegrityFailure => {
-            Failure::Integrity("replica integrity failure".into())
-        }
-        MarkerInvalid::ReplicaLocked => Failure::Integrity("replica locked".into()),
+        MarkerInvalid::NotAReplicaStore
+        | MarkerInvalid::UnsupportedStoreVersion { .. }
+        | MarkerInvalid::CorruptStoreMarker
+        | MarkerInvalid::ReplicaIntegrityFailure
+        | MarkerInvalid::ReplicaLocked => Failure::Integrity(Integrity::Marker),
     }
 }
 
@@ -393,7 +381,7 @@ mod tests {
             }));
             let err = faulty.bump_epoch().unwrap_err();
             assert!(
-                matches!(err, Failure::Store(_)),
+                matches!(err, Failure::Persistence(Persistence::InjectedFault)),
                 "fault at {point} must abort the bump"
             );
             // The store is intact: the epoch reads as a complete value and the

@@ -13,7 +13,7 @@
 //! inputs. Raw document handles never cross the boundary — everything outside
 //! sees [`fabric::Op`] transactions and typed exports.
 
-pub mod fabric;
+mod fabric;
 mod loro_ext;
 mod op;
 
@@ -27,14 +27,14 @@ pub mod journal {
 
 pub mod causal;
 pub use causal::{
-    Anchor, AnchorResolution, Artifact, ArtifactRef, CausalError, CausalRelation, CheckpointPolicy,
+    Anchor, AnchorResolution, Artifact, ArtifactRef, CausalRelation, CheckpointPolicy,
     ImportStatus, Material, OpHead, Version, CAUSAL_FORMAT_VERSION, MAX_HEADS,
 };
-pub use fabric::{is_implemented_type_tag, is_reserved_type_tag};
 pub use fabric::{
-    BodyExport, CausalToken, CollaborativeView, Engine, Error, Key, ListElement, MemoryEngine, Op,
-    ProjectionError, Receipt, Transaction,
+    commit, projection, BodyExport, CausalToken, CollaborativeView, Engine, Key, ListElement,
+    MemoryEngine, Op, Receipt, Transaction,
 };
+pub use fabric::{is_implemented_type_tag, is_reserved_type_tag};
 pub use journal::{
     CallerIndex, FaultInjector, JournaledStore, ObjectRef, StoreManifest, FAULT_POINTS,
 };

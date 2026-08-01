@@ -741,7 +741,7 @@ pub fn open_resident_chunk(
     entry: &[u8; 32],
 ) -> Result<Vec<u8>, Invalid> {
     let (ciphertext, sidecar) = cache.read(entry).map_err(|e| match e {
-        fabric::journal::cache::CacheError::NotResident => Invalid::NotResident,
+        fabric::journal::cache::Failure::NotResident => Invalid::NotResident,
         _ => Invalid::ChunkMismatch,
     })?;
     let proof: ChunkProof = postcard::from_bytes(&sidecar).map_err(|_| Invalid::NonCanonical)?;

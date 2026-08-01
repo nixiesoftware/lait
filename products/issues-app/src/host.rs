@@ -9,8 +9,8 @@ use std::process::{Command, Stdio};
 
 use serde_json::{json, Value};
 use world_interface::{
-    ClientAccess, ClientHost, ClientInvocation, ClientInvocationKind, ClientOutput, HostAssignment,
-    HostControlRequest, InterfaceError, LocalInvocation, Presentation, PresentationFailure,
+    ClientAccess, ClientHost, ClientInvocation, ClientInvocationKind, ClientOutput, Failure,
+    HostAssignment, HostControlRequest, LocalInvocation, Presentation, PresentationFailure,
     PresentationOptions,
 };
 
@@ -115,12 +115,12 @@ pub fn now_seconds() -> u64 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AccessPlanError {
+pub enum AccessRefusal {
     NotFound(String),
     Invalid(String),
 }
 
-impl std::fmt::Display for AccessPlanError {
+impl std::fmt::Display for AccessRefusal {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NotFound(message) | Self::Invalid(message) => formatter.write_str(message),
@@ -128,22 +128,22 @@ impl std::fmt::Display for AccessPlanError {
     }
 }
 
-impl std::error::Error for AccessPlanError {}
+impl std::error::Error for AccessRefusal {}
 
 /// Decode one package-emitted local invocation at the product/host boundary.
-pub fn decode(operation: &str, input: Value) -> Result<IssuesHostRequest, InterfaceError> {
+pub fn decode(operation: &str, input: Value) -> Result<IssuesHostRequest, Failure> {
     match operation {
         LOCAL_FOCUS => Ok(IssuesHostRequest::Focus),
         LOCAL_NEW_START => serde_json::from_value(input)
             .map(IssuesHostRequest::NewStart)
-            .map_err(|error| InterfaceError::new(format!("decode Issues new/start: {error}"))),
+            .map_err(|error| Failure::new(format!("decode Issues new/start: {error}"))),
         LOCAL_WORK_STATE => {
             let action = match required(&input, "action")?.as_str() {
                 "start" => WorkStateAction::Start,
                 "done" => WorkStateAction::Done,
                 "stop" => WorkStateAction::Stop,
                 other => {
-                    return Err(InterfaceError::new(format!(
+                    return Err(Failure::new(format!(
                         "unsupported Issues work-state action '{other}'"
                     )));
                 }
@@ -176,7 +176,7 @@ pub fn decode(operation: &str, input: Value) -> Result<IssuesHostRequest, Interf
                     grant_id: required(&input, "grant_id")?,
                 },
                 other => {
-                    return Err(InterfaceError::new(format!(
+                    return Err(Failure::new(format!(
                         "unsupported Issues access action '{other}'"
                     )));
                 }
@@ -193,14 +193,14 @@ pub fn decode(operation: &str, input: Value) -> Result<IssuesHostRequest, Interf
             id: required(&input, "id")?,
             out: optional(&input, "out"),
         }),
-        other => Err(InterfaceError::new(format!(
+        other => Err(Failure::new(format!(
             "unsupported Issues host capability '{other}'"
         ))),
     }
 }
 
 /// Construct one package-owned local invocation with whole-operation policy.
-pub fn invocation(operation: &str, input: Value) -> Result<ClientInvocation, InterfaceError> {
+pub fn invocation(operation: &str, input: Value) -> Result<ClientInvocation, Failure> {
     let request = decode(operation, input.clone())?;
     Ok(ClientInvocation::local(
         issues::contract::world_id(),
@@ -212,14 +212,13 @@ pub fn invocation(operation: &str, input: Value) -> Result<ClientInvocation, Int
 }
 
 /// Construct one Issues World invocation with package-owned client policy.
-pub fn world_invocation(request: IssuesRequest) -> Result<ClientInvocation, InterfaceError> {
+pub fn world_invocation(request: IssuesRequest) -> Result<ClientInvocation, Failure> {
     let access = match request.access() {
         world_bridge::WorldCallAccess::Query => ClientAccess::Query,
         world_bridge::WorldCallAccess::Command => ClientAccess::Command,
     };
     let confirmation = request.destructive_question();
-    let call =
-        crate::encode_call(&request).map_err(|error| InterfaceError::new(error.to_string()))?;
+    let call = crate::encode_call(&request).map_err(|error| Failure::new(error.to_string()))?;
     Ok(ClientInvocation::world(call, access, confirmation))
 }
 
@@ -227,18 +226,18 @@ pub fn world_invocation(request: IssuesRequest) -> Result<ClientInvocation, Inte
 ///
 /// Viewer-only host capabilities are adapted here; ordinary commands remain
 /// the exact strict [`IssuesRequest`] schema carried by CLI and MCP.
-pub fn parse_web(input: Value) -> Result<ClientInvocation, InterfaceError> {
+pub fn parse_web(input: Value) -> Result<ClientInvocation, Failure> {
     let command = input
         .get("cmd")
         .and_then(Value::as_str)
-        .ok_or_else(|| InterfaceError::new("Issues request is missing string field 'cmd'"))?;
+        .ok_or_else(|| Failure::new("Issues request is missing string field 'cmd'"))?;
     match command {
         "inbox" => {
             let clear = match input.get("clear") {
                 None => false,
                 Some(Value::Bool(clear)) => *clear,
                 Some(_) => {
-                    return Err(InterfaceError::new("inbox 'clear' must be a boolean"));
+                    return Err(Failure::new("inbox 'clear' must be a boolean"));
                 }
             };
             invocation(LOCAL_INBOX, json!({ "clear": clear }))
@@ -268,7 +267,7 @@ pub fn parse_web(input: Value) -> Result<ClientInvocation, InterfaceError> {
         ),
         _ => {
             let request: IssuesRequest = serde_json::from_value(input)
-                .map_err(|error| InterfaceError::new(format!("bad Issues request: {error}")))?;
+                .map_err(|error| Failure::new(format!("bad Issues request: {error}")))?;
             world_invocation(request)
         }
     }
@@ -347,14 +346,13 @@ pub fn confirmation<'a>(
 async fn call_issues(
     host: &dyn ClientHost,
     request: IssuesRequest,
-) -> Result<crate::IssuesResponse, InterfaceError> {
-    let call =
-        crate::encode_call(&request).map_err(|error| InterfaceError::new(error.to_string()))?;
+) -> Result<crate::IssuesResponse, Failure> {
+    let call = crate::encode_call(&request).map_err(|error| Failure::new(error.to_string()))?;
     let reply = host.call_world(call.clone()).await?;
-    let value = crate::decode_reply(&call, reply)
-        .map_err(|error| InterfaceError::new(error.to_string()))?;
+    let value =
+        crate::decode_reply(&call, reply).map_err(|error| Failure::new(error.to_string()))?;
     serde_json::from_value(value)
-        .map_err(|error| InterfaceError::new(format!("decode Issues response: {error}")))
+        .map_err(|error| Failure::new(format!("decode Issues response: {error}")))
 }
 
 fn issues_output(response: &crate::IssuesResponse, options: PresentationOptions) -> ClientOutput {
@@ -368,7 +366,7 @@ async fn run_inbox(
     host: &dyn ClientHost,
     clear: bool,
     options: PresentationOptions,
-) -> Result<ClientOutput, InterfaceError> {
+) -> Result<ClientOutput, Failure> {
     let response = call_issues(
         host,
         IssuesRequest::Inbox {
@@ -377,9 +375,8 @@ async fn run_inbox(
     )
     .await?;
     if clear && matches!(&response, crate::IssuesResponse::Inbox { .. }) {
-        write_inbox_watermark(host.local_root(), now_seconds()).map_err(|error| {
-            InterfaceError::new(format!("advance Issues inbox watermark: {error}"))
-        })?;
+        write_inbox_watermark(host.local_root(), now_seconds())
+            .map_err(|error| Failure::new(format!("advance Issues inbox watermark: {error}")))?;
     }
     Ok(issues_output(&response, options))
 }
@@ -387,7 +384,7 @@ async fn run_inbox(
 async fn run_focus(
     host: &dyn ClientHost,
     options: PresentationOptions,
-) -> Result<ClientOutput, InterfaceError> {
+) -> Result<ClientOutput, Failure> {
     let inbox = call_issues(
         host,
         IssuesRequest::Inbox {
@@ -471,7 +468,7 @@ async fn run_new_start(
     host: &dyn ClientHost,
     request: IssuesRequest,
     options: PresentationOptions,
-) -> Result<ClientOutput, InterfaceError> {
+) -> Result<ClientOutput, Failure> {
     let response = call_issues(host, request).await?;
     match response {
         crate::IssuesResponse::Ref { reff } => {
@@ -495,7 +492,7 @@ async fn run_work_state(
     reff: String,
     no_branch: bool,
     options: PresentationOptions,
-) -> Result<ClientOutput, InterfaceError> {
+) -> Result<ClientOutput, Failure> {
     let request = match action {
         WorkStateAction::Start => IssuesRequest::IssueStart { reff },
         WorkStateAction::Done => IssuesRequest::IssueDone { reff },
@@ -538,7 +535,7 @@ async fn run_access(
     host: &dyn ClientHost,
     access: AccessRequest,
     options: PresentationOptions,
-) -> Result<ClientOutput, InterfaceError> {
+) -> Result<ClientOutput, Failure> {
     let control = match access {
         AccessRequest::List { actor } => HostControlRequest::AssignmentList { actor },
         AccessRequest::Revoke { grant_id } => HostControlRequest::AssignmentRevoke { grant_id },
@@ -574,7 +571,7 @@ async fn run_attach(
     path: String,
     comment: Option<String>,
     options: PresentationOptions,
-) -> Result<ClientOutput, InterfaceError> {
+) -> Result<ClientOutput, Failure> {
     // Two steps, and the order is the contract: the content is committed
     // first, then the issue names it. The substrate refuses a declaration whose
     // descriptor is not committed, so doing it the other way round does not
@@ -595,9 +592,7 @@ async fn run_attach(
     let content = stored
         .get("content")
         .and_then(|c| c.as_str())
-        .ok_or_else(|| {
-            InterfaceError::new("the content plane stored the file but did not name it")
-        })?
+        .ok_or_else(|| Failure::new("the content plane stored the file but did not name it"))?
         .to_string();
     let size = stored
         .get("size")
@@ -639,7 +634,7 @@ async fn run_attachment_get(
     id: String,
     out: Option<String>,
     options: PresentationOptions,
-) -> Result<ClientOutput, InterfaceError> {
+) -> Result<ClientOutput, Failure> {
     let response = call_issues(host, IssuesRequest::AttachmentGet { reff, id }).await?;
     let crate::IssuesResponse::Attachment {
         name,
@@ -672,14 +667,13 @@ async fn run_attachment_get(
         (None, Some(data_b64)) => {
             let bytes = data_encoding::BASE64
                 .decode(data_b64.as_bytes())
-                .map_err(|_| InterfaceError::new("stored attachment did not decode"))?;
-            std::fs::write(&destination, &bytes).map_err(|error| {
-                InterfaceError::new(format!("could not write {destination}: {error}"))
-            })?;
+                .map_err(|_| Failure::new("stored attachment did not decode"))?;
+            std::fs::write(&destination, &bytes)
+                .map_err(|error| Failure::new(format!("could not write {destination}: {error}")))?;
             bytes.len() as u64
         }
         (None, None) => {
-            return Err(InterfaceError::new(
+            return Err(Failure::new(
                 "this attachment record carries neither bytes nor a content id",
             ))
         }
@@ -902,14 +896,14 @@ pub fn plan_access_grant(
     session: &runtime::Session,
     role: &str,
     project: Option<&str>,
-) -> Result<AccessGrantPlan, AccessPlanError> {
+) -> Result<AccessGrantPlan, AccessRefusal> {
     let Some(view) = crate::projections::query_json(
         session,
         issues::contract::IssueQuery::RoleShow {
             role: role.to_string(),
         },
     ) else {
-        return Err(AccessPlanError::NotFound(format!(
+        return Err(AccessRefusal::NotFound(format!(
             "no role `{role}` in this space"
         )));
     };
@@ -918,20 +912,20 @@ pub fn plan_access_grant(
         .cloned()
         .unwrap_or_default();
     if !conflicts.is_empty() {
-        return Err(AccessPlanError::Invalid(format!(
+        return Err(AccessRefusal::Invalid(format!(
             "role `{role}` has {} concurrent revision heads — resolve them with \
              `lait issues role resolve` before assigning",
             conflicts.len()
         )));
     }
     let Some(revision) = view.get("revision").filter(|revision| !revision.is_null()) else {
-        return Err(AccessPlanError::NotFound(format!(
+        return Err(AccessRefusal::NotFound(format!(
             "role `{role}` has no usable revision"
         )));
     };
     let body = &revision["body"];
     if body["tombstone"].as_bool() == Some(true) {
-        return Err(AccessPlanError::Invalid(format!(
+        return Err(AccessRefusal::Invalid(format!(
             "role `{role}` is tombstoned"
         )));
     }
@@ -940,7 +934,7 @@ pub fn plan_access_grant(
     let resource = match (scope_kind, project) {
         ("space", None) => mechanics::demand::Resource::root(world),
         ("space", Some(_)) => {
-            return Err(AccessPlanError::Invalid(
+            return Err(AccessRefusal::Invalid(
                 "that is a Space role — it takes no --project".into(),
             ));
         }
@@ -948,7 +942,7 @@ pub fn plan_access_grant(
             let Some(snapshot) =
                 crate::projections::query_json(session, issues::contract::IssueQuery::Snapshot)
             else {
-                return Err(AccessPlanError::Invalid(
+                return Err(AccessRefusal::Invalid(
                     "the Issues catalog is unavailable".into(),
                 ));
             };
@@ -964,20 +958,20 @@ pub fn plan_access_grant(
                     .map(|(id, _)| id.clone())
             });
             let Some(id) = resolved else {
-                return Err(AccessPlanError::NotFound(format!(
+                return Err(AccessRefusal::NotFound(format!(
                     "no project matches '{selector}'"
                 )));
             };
             mechanics::demand::Resource::segments(world, [&id])
-                .map_err(|error| AccessPlanError::Invalid(error.to_string()))?
+                .map_err(|error| AccessRefusal::Invalid(error.to_string()))?
         }
         ("project", None) => {
-            return Err(AccessPlanError::Invalid(
+            return Err(AccessRefusal::Invalid(
                 "that is a Project role — pass -p <project>".into(),
             ));
         }
         _ => {
-            return Err(AccessPlanError::Invalid(
+            return Err(AccessRefusal::Invalid(
                 "unrecognized Issues role scope".into(),
             ));
         }
@@ -997,17 +991,17 @@ pub fn plan_access_grant(
         })
         .unwrap_or_default();
     if assignments.is_empty() {
-        return Err(AccessPlanError::Invalid(format!(
+        return Err(AccessRefusal::Invalid(format!(
             "role `{role}` expands to no capabilities"
         )));
     }
     Ok(AccessGrantPlan { assignments })
 }
 
-fn required(value: &Value, field: &str) -> Result<String, InterfaceError> {
+fn required(value: &Value, field: &str) -> Result<String, Failure> {
     optional(value, field)
         .filter(|value| !value.is_empty())
-        .ok_or_else(|| InterfaceError::new(format!("Issues invocation is missing '{field}'")))
+        .ok_or_else(|| Failure::new(format!("Issues invocation is missing '{field}'")))
 }
 
 fn optional(value: &Value, field: &str) -> Option<String> {

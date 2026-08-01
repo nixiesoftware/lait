@@ -291,7 +291,7 @@ fn a_signed_submit_dto_validates_every_spelled_coordinate() {
     // unknown field
     assert!(matches!(
         SignedSubmitDto::from_json(br#"{"protocolVersion":1,"surprise":true}"#),
-        Err(Invalid::Malformed(_))
+        Err(Invalid::Malformed)
     ));
 }
 
@@ -378,12 +378,12 @@ fn canonical_negative_examples_are_each_rejected_for_their_stated_reason() {
         SubmitRequestDto::from_json(
             br#"{"protocolVersion":1,"world":"w.x","schema":"s","schemaVersion":1,"requestIdHex":"00000000000000000000000000000000","payloadB64":"","extra":1}"#
         ),
-        Err(Invalid::Malformed(_))
+        Err(Invalid::Malformed)
     ));
     // missing mandatory field
     assert!(matches!(
         SubmitRequestDto::from_json(br#"{"protocolVersion":1,"world":"w.x"}"#),
-        Err(Invalid::Malformed(_))
+        Err(Invalid::Malformed)
     ));
     // invalid identifier
     let mut bad = submit_example();
@@ -425,6 +425,6 @@ fn canonical_negative_examples_are_each_rejected_for_their_stated_reason() {
         SubmitRequestDto::from_json(
             br#"{"protocolVersion":1,"world":"w.x","schema":"s","schemaVersion":4294967296,"requestIdHex":"00000000000000000000000000000000","payloadB64":""}"#
         ),
-        Err(Invalid::Malformed(_))
+        Err(Invalid::Malformed)
     ));
 }

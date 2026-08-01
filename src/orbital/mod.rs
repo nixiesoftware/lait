@@ -111,8 +111,8 @@ pub use space_bridge::{
     run_space_bridge, run_space_bridge_with, run_space_bridge_with_packages, StationHost,
 };
 pub use world_bridge::{
-    WorldCall, WorldCallAccess, WorldCallContext, WorldCallError, WorldCallErrorCode,
-    WorldCallHandler, WorldHost, WorldNudge, WorldPackage, WorldPackages, WorldReply, WorldRouter,
+    CallFailure, CallFailureCode, WorldCall, WorldCallAccess, WorldCallContext, WorldCallHandler,
+    WorldHost, WorldNudge, WorldPackage, WorldPackages, WorldReply, WorldRouter,
 };
 
 // Compatibility exports for callers that reached the issue tracker's outer

@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::authority::{LeafId, PrincipalId};
 use crate::ids::DeviceId;
-use crate::policy::{CanonicalPolicy, OwnershipPolicy, PolicyError, PolicyId};
+use crate::policy::{CanonicalPolicy, Invalid as PolicyInvalid, OwnershipPolicy, PolicyId};
 
 /// Domain for leaf-id derivation, separate from policy hashing.
 const LEAF_DOMAIN: &[u8] = b"lait/space/1/policy/1/leaf";
@@ -124,7 +124,7 @@ impl Expansion {
 
 /// Why expansion failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ExpandError {
+pub enum Failure {
     /// A principal named in the policy has no descriptor.
     UnknownPrincipal(PrincipalId),
     /// A federated principal reaches itself, directly or through a chain.
@@ -136,28 +136,28 @@ pub enum ExpandError {
     /// The expanded tree is deeper than [`MAX_EXPANDED_DEPTH`].
     TooDeepExpanded,
     /// A federated sub-policy is itself malformed.
-    Policy(PolicyError),
+    Policy(PolicyInvalid),
 }
 
-impl std::fmt::Display for ExpandError {
+impl std::fmt::Display for Failure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ExpandError::UnknownPrincipal(p) => {
+            Failure::UnknownPrincipal(p) => {
                 write!(f, "no descriptor for principal {}", p.as_str())
             }
-            ExpandError::Cycle(p) => write!(f, "principal {} federates to itself", p.as_str()),
-            ExpandError::TooDeep => write!(f, "federation nests past {MAX_FEDERATION_DEPTH}"),
-            ExpandError::TooManyLeaves => {
+            Failure::Cycle(p) => write!(f, "principal {} federates to itself", p.as_str()),
+            Failure::TooDeep => write!(f, "federation nests past {MAX_FEDERATION_DEPTH}"),
+            Failure::TooManyLeaves => {
                 write!(f, "expansion exceeds {MAX_EXPANDED_LEAVES} leaves")
             }
-            ExpandError::TooDeepExpanded => {
+            Failure::TooDeepExpanded => {
                 write!(f, "expanded tree deeper than {MAX_EXPANDED_DEPTH}")
             }
-            ExpandError::Policy(e) => write!(f, "federated sub-policy is malformed: {e}"),
+            Failure::Policy(e) => write!(f, "federated sub-policy is malformed: {e}"),
         }
     }
 }
-impl std::error::Error for ExpandError {}
+impl std::error::Error for Failure {}
 
 /// Expand `policy` to leaves, resolving each principal through `resolve`.
 ///
@@ -167,7 +167,7 @@ impl std::error::Error for ExpandError {}
 pub fn expand(
     policy: &CanonicalPolicy,
     resolve: &impl Fn(&PrincipalId) -> Option<PrincipalDescriptor>,
-) -> Result<Expansion, ExpandError> {
+) -> Result<Expansion, Failure> {
     let mut leaves = Vec::new();
     let mut stack = Vec::new();
     let tree = expand_rec(policy, resolve, &mut Vec::new(), &mut stack, &mut leaves)?;
@@ -185,21 +185,21 @@ fn expand_rec(
     // Principals currently being expanded on this descent, for cycle detection.
     stack: &mut Vec<PrincipalId>,
     leaves: &mut Vec<LeafDescriptor>,
-) -> Result<ExpandedPolicy, ExpandError> {
+) -> Result<ExpandedPolicy, Failure> {
     if stack.len() > MAX_FEDERATION_DEPTH {
-        return Err(ExpandError::TooDeep);
+        return Err(Failure::TooDeep);
     }
     if path.len() > MAX_EXPANDED_DEPTH {
-        return Err(ExpandError::TooDeepExpanded);
+        return Err(Failure::TooDeepExpanded);
     }
     match policy {
         CanonicalPolicy::Key(principal) => {
-            let descriptor = resolve(principal)
-                .ok_or_else(|| ExpandError::UnknownPrincipal(principal.clone()))?;
+            let descriptor =
+                resolve(principal).ok_or_else(|| Failure::UnknownPrincipal(principal.clone()))?;
             match descriptor.custody {
                 PrincipalCustody::Direct { device } => {
                     if leaves.len() >= MAX_EXPANDED_LEAVES {
-                        return Err(ExpandError::TooManyLeaves);
+                        return Err(Failure::TooManyLeaves);
                     }
                     let leaf = leaf_id(path, principal, &device);
                     leaves.push(LeafDescriptor {
@@ -212,9 +212,9 @@ fn expand_rec(
                 }
                 PrincipalCustody::Federated(sub) => {
                     if stack.contains(principal) {
-                        return Err(ExpandError::Cycle(principal.clone()));
+                        return Err(Failure::Cycle(principal.clone()));
                     }
-                    let canon = sub.canonicalize().map_err(ExpandError::Policy)?;
+                    let canon = sub.canonicalize().map_err(Failure::Policy)?;
                     stack.push(principal.clone());
                     let out = expand_rec(&canon, resolve, path, stack, leaves)?;
                     stack.pop();
@@ -396,7 +396,7 @@ mod tests {
         let empty = |_: &PrincipalId| None;
         assert!(matches!(
             expand(&policy, &empty),
-            Err(ExpandError::UnknownPrincipal(_))
+            Err(Failure::UnknownPrincipal(_))
         ));
     }
 
@@ -408,7 +408,7 @@ mod tests {
         let policy = key(1).canonicalize().unwrap();
         assert!(matches!(
             expand(&policy, &resolver(fed)),
-            Err(ExpandError::Cycle(_))
+            Err(Failure::Cycle(_))
         ));
     }
 
@@ -443,7 +443,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             expand(&policy, &resolver(fed)),
-            Err(ExpandError::TooManyLeaves)
+            Err(Failure::TooManyLeaves)
         ));
     }
 

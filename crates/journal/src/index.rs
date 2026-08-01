@@ -69,7 +69,7 @@ pub enum IndexNode {
 
 /// Why an index operation failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum IndexError {
+pub enum Failure {
     /// A node did not decode, or re-encoding it did not reproduce its bytes.
     NonCanonical,
     /// A node, value, or path exceeded a protocol bound.
@@ -85,12 +85,12 @@ pub enum IndexError {
     NotCanonicalShape,
 }
 
-impl std::fmt::Display for IndexError {
+impl std::fmt::Display for Failure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{self:?}")
     }
 }
-impl std::error::Error for IndexError {}
+impl std::error::Error for Failure {}
 
 /// Where nodes are read from. The store implements it over its object
 /// directory; tests implement it over a map.
@@ -126,13 +126,13 @@ impl IndexNode {
 
     /// Decode, insisting the encoding was canonical. Bounds are checked before
     /// the decode allocates.
-    pub fn decode_canonical(bytes: &[u8]) -> Result<Self, IndexError> {
+    pub fn decode_canonical(bytes: &[u8]) -> Result<Self, Failure> {
         if bytes.len() > MAX_NODE_BYTES {
-            return Err(IndexError::Bounds);
+            return Err(Failure::Bounds);
         }
-        let node: Self = postcard::from_bytes(bytes).map_err(|_| IndexError::NonCanonical)?;
+        let node: Self = postcard::from_bytes(bytes).map_err(|_| Failure::NonCanonical)?;
         if node.encode() != bytes {
-            return Err(IndexError::NonCanonical);
+            return Err(Failure::NonCanonical);
         }
         Ok(node)
     }
@@ -204,15 +204,15 @@ fn build(entries: &[IndexEntry], depth: usize, sink: &mut NodeSink) -> Option<Ch
 pub fn build_index(
     mut entries: Vec<IndexEntry>,
     sink: &mut NodeSink,
-) -> Result<Option<ChildRef>, IndexError> {
+) -> Result<Option<ChildRef>, Failure> {
     for entry in &entries {
         if entry.value.len() > MAX_VALUE_BYTES {
-            return Err(IndexError::Bounds);
+            return Err(Failure::Bounds);
         }
     }
     entries.sort_by_key(|e| e.key);
     if entries.windows(2).any(|w| w[0].key == w[1].key) {
-        return Err(IndexError::Order);
+        return Err(Failure::Order);
     }
     Ok(build(&entries, 0, sink))
 }
@@ -224,13 +224,13 @@ fn collect(
     child: &ChildRef,
     depth: usize,
     out: &mut Vec<IndexEntry>,
-) -> Result<(), IndexError> {
+) -> Result<(), Failure> {
     if depth > MAX_DEPTH {
-        return Err(IndexError::Bounds);
+        return Err(Failure::Bounds);
     }
     let bytes = source
         .node(&child.hash)
-        .ok_or(IndexError::MissingNode(child.hash))?;
+        .ok_or(Failure::MissingNode(child.hash))?;
     match IndexNode::decode_canonical(&bytes)? {
         IndexNode::Leaf(entries) => out.extend(entries),
         IndexNode::Branch(children) => {
@@ -264,14 +264,14 @@ pub fn apply(
     root: Option<ChildRef>,
     mut changes: Vec<IndexChange>,
     sink: &mut NodeSink,
-) -> Result<Option<ChildRef>, IndexError> {
+) -> Result<Option<ChildRef>, Failure> {
     for change in &changes {
         if change
             .value
             .as_ref()
             .is_some_and(|v| v.len() > MAX_VALUE_BYTES)
         {
-            return Err(IndexError::Bounds);
+            return Err(Failure::Bounds);
         }
     }
     changes.sort_by_key(|c| c.key);
@@ -294,13 +294,13 @@ fn descend(
     depth: usize,
     changes: &[IndexChange],
     sink: &mut NodeSink,
-) -> Result<Option<ChildRef>, IndexError> {
+) -> Result<Option<ChildRef>, Failure> {
     // Nothing to do here: carry the subtree forward by reference, unread.
     if changes.is_empty() {
         return Ok(node);
     }
     if depth > MAX_DEPTH {
-        return Err(IndexError::Bounds);
+        return Err(Failure::Bounds);
     }
 
     let existing = match node {
@@ -308,7 +308,7 @@ fn descend(
         Some(child) => {
             let bytes = source
                 .node(&child.hash)
-                .ok_or(IndexError::MissingNode(child.hash))?;
+                .ok_or(Failure::MissingNode(child.hash))?;
             Some((child, IndexNode::decode_canonical(&bytes)?))
         }
     };
@@ -431,16 +431,16 @@ pub fn lookup(
     source: &dyn NodeSource,
     root: Option<ChildRef>,
     key: &IndexKey,
-) -> Result<Option<Vec<u8>>, IndexError> {
+) -> Result<Option<Vec<u8>>, Failure> {
     let mut current = root;
     let mut depth = 0usize;
     while let Some(child) = current {
         if depth > MAX_DEPTH {
-            return Err(IndexError::Bounds);
+            return Err(Failure::Bounds);
         }
         let bytes = source
             .node(&child.hash)
-            .ok_or(IndexError::MissingNode(child.hash))?;
+            .ok_or(Failure::MissingNode(child.hash))?;
         match IndexNode::decode_canonical(&bytes)? {
             IndexNode::Leaf(entries) => {
                 return Ok(entries.into_iter().find(|e| &e.key == key).map(|e| e.value))
@@ -460,19 +460,19 @@ pub fn stream(
     source: &dyn NodeSource,
     root: Option<ChildRef>,
     visit: &mut dyn FnMut(&IndexEntry),
-) -> Result<u64, IndexError> {
+) -> Result<u64, Failure> {
     fn walk(
         source: &dyn NodeSource,
         child: &ChildRef,
         depth: usize,
         visit: &mut dyn FnMut(&IndexEntry),
-    ) -> Result<u64, IndexError> {
+    ) -> Result<u64, Failure> {
         if depth > MAX_DEPTH {
-            return Err(IndexError::Bounds);
+            return Err(Failure::Bounds);
         }
         let bytes = source
             .node(&child.hash)
-            .ok_or(IndexError::MissingNode(child.hash))?;
+            .ok_or(Failure::MissingNode(child.hash))?;
         match IndexNode::decode_canonical(&bytes)? {
             IndexNode::Leaf(entries) => {
                 for entry in &entries {
@@ -501,22 +501,22 @@ pub fn stream(
 pub fn spine(
     source: &dyn NodeSource,
     root: Option<ChildRef>,
-) -> Result<std::collections::BTreeSet<[u8; 32]>, IndexError> {
+) -> Result<std::collections::BTreeSet<[u8; 32]>, Failure> {
     fn walk(
         source: &dyn NodeSource,
         child: &ChildRef,
         depth: usize,
         out: &mut std::collections::BTreeSet<[u8; 32]>,
-    ) -> Result<(), IndexError> {
+    ) -> Result<(), Failure> {
         if depth > MAX_DEPTH {
-            return Err(IndexError::Bounds);
+            return Err(Failure::Bounds);
         }
         if !out.insert(child.hash) {
             return Ok(());
         }
         let bytes = source
             .node(&child.hash)
-            .ok_or(IndexError::MissingNode(child.hash))?;
+            .ok_or(Failure::MissingNode(child.hash))?;
         if let IndexNode::Branch(children) = IndexNode::decode_canonical(&bytes)? {
             for slot in children.iter().flatten() {
                 walk(source, slot, depth + 1, out)?;
@@ -541,54 +541,54 @@ pub fn spine(
 /// split a leaf that fit or kept a branch that should have merged. Accepting
 /// those would mean one set had many roots, and a root would stop being a
 /// commitment to a set.
-pub fn validate(source: &dyn NodeSource, root: Option<ChildRef>) -> Result<u64, IndexError> {
+pub fn validate(source: &dyn NodeSource, root: Option<ChildRef>) -> Result<u64, Failure> {
     fn walk(
         source: &dyn NodeSource,
         child: &ChildRef,
         depth: usize,
         prefix: &[usize],
-    ) -> Result<u64, IndexError> {
+    ) -> Result<u64, Failure> {
         if depth > MAX_DEPTH {
-            return Err(IndexError::Bounds);
+            return Err(Failure::Bounds);
         }
         let bytes = source
             .node(&child.hash)
-            .ok_or(IndexError::MissingNode(child.hash))?;
+            .ok_or(Failure::MissingNode(child.hash))?;
         if node_hash(&bytes) != child.hash {
-            return Err(IndexError::NonCanonical);
+            return Err(Failure::NonCanonical);
         }
         match IndexNode::decode_canonical(&bytes)? {
             IndexNode::Leaf(entries) => {
                 if entries.is_empty() {
-                    return Err(IndexError::NotCanonicalShape);
+                    return Err(Failure::NotCanonicalShape);
                 }
                 for w in entries.windows(2) {
                     if w[0].key >= w[1].key {
-                        return Err(IndexError::Order);
+                        return Err(Failure::Order);
                     }
                 }
                 for entry in &entries {
                     if entry.value.len() > MAX_VALUE_BYTES {
-                        return Err(IndexError::Bounds);
+                        return Err(Failure::Bounds);
                     }
                     for (level, expected) in prefix.iter().enumerate() {
                         if nibble(&entry.key, level) != *expected {
-                            return Err(IndexError::Order);
+                            return Err(Failure::Order);
                         }
                     }
                 }
                 if !fits_leaf(&entries, depth) {
-                    return Err(IndexError::NotCanonicalShape);
+                    return Err(Failure::NotCanonicalShape);
                 }
                 if child.count != entries.len() as u64 {
-                    return Err(IndexError::CountMismatch);
+                    return Err(Failure::CountMismatch);
                 }
                 Ok(entries.len() as u64)
             }
             IndexNode::Branch(children) => {
                 let occupied = children.iter().flatten().count();
                 if occupied == 0 {
-                    return Err(IndexError::NotCanonicalShape);
+                    return Err(Failure::NotCanonicalShape);
                 }
                 let mut total = 0u64;
                 for (slot, entry) in children.iter().enumerate() {
@@ -598,7 +598,7 @@ pub fn validate(source: &dyn NodeSource, root: Option<ChildRef>) -> Result<u64, 
                     total += walk(source, reference, depth + 1, &next)?;
                 }
                 if total != child.count {
-                    return Err(IndexError::CountMismatch);
+                    return Err(Failure::CountMismatch);
                 }
                 // A branch whose whole subtree fits one leaf is not canonical:
                 // the canonical encoding of that set is the leaf.
@@ -609,7 +609,7 @@ pub fn validate(source: &dyn NodeSource, root: Option<ChildRef>) -> Result<u64, 
                     }
                     entries.sort_by_key(|e| e.key);
                     if fits_leaf(&entries, depth) {
-                        return Err(IndexError::NotCanonicalShape);
+                        return Err(Failure::NotCanonicalShape);
                     }
                 }
                 Ok(total)
@@ -713,7 +713,7 @@ impl Reconciliation {
         &mut self,
         local: &dyn NodeSource,
         remote_nodes: &std::collections::BTreeMap<[u8; 32], Vec<u8>>,
-    ) -> Result<(), IndexError> {
+    ) -> Result<(), Failure> {
         let outstanding = std::mem::take(&mut self.wanted);
         for (remote, local_child, depth) in outstanding {
             let Some(bytes) = remote_nodes.get(&remote.hash) else {
@@ -722,14 +722,14 @@ impl Reconciliation {
                 continue;
             };
             if node_hash(bytes) != remote.hash {
-                return Err(IndexError::NonCanonical);
+                return Err(Failure::NonCanonical);
             }
             if !self.seen.insert(remote.hash) {
                 continue;
             }
             self.fetched += 1;
             if self.fetched > self.max_nodes || depth > MAX_DEPTH {
-                return Err(IndexError::Bounds);
+                return Err(Failure::Bounds);
             }
             let node = IndexNode::decode_canonical(bytes)?;
             self.compare(local, &node, local_child, depth)?;
@@ -743,7 +743,7 @@ impl Reconciliation {
         remote: &IndexNode,
         local_child: Option<ChildRef>,
         depth: usize,
-    ) -> Result<(), IndexError> {
+    ) -> Result<(), Failure> {
         let local_node = match local_child {
             None => None,
             Some(child) => local
@@ -812,12 +812,12 @@ fn lookup_from(
     root: Option<ChildRef>,
     key: &IndexKey,
     start_depth: usize,
-) -> Result<Option<Vec<u8>>, IndexError> {
+) -> Result<Option<Vec<u8>>, Failure> {
     let mut current = root;
     let mut depth = start_depth;
     while let Some(child) = current {
         if depth > MAX_DEPTH {
-            return Err(IndexError::Bounds);
+            return Err(Failure::Bounds);
         }
         let Some(bytes) = source.node(&child.hash) else {
             return Ok(None);

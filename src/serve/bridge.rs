@@ -176,16 +176,16 @@ impl BridgeFrame {
     /// already reserved the room by the time it fails. The fields are decoded in
     /// declaration order, so a lane byte this build does not know is refused
     /// before the body's declared length is read, let alone believed.
-    pub fn decode(bytes: &[u8]) -> Result<Self, BridgeError> {
+    pub fn decode(bytes: &[u8]) -> Result<Self, Invalid> {
         if bytes.len() > MAX_BRIDGE_FRAME_BYTES {
-            return Err(BridgeError::TooLarge);
+            return Err(Invalid::TooLarge);
         }
-        let frame: Self = postcard::from_bytes(bytes).map_err(|_| BridgeError::Malformed)?;
+        let frame: Self = postcard::from_bytes(bytes).map_err(|_| Invalid::Malformed)?;
         if frame.protocol_version != BRIDGE_PROTOCOL_VERSION {
-            return Err(BridgeError::WrongVersion(frame.protocol_version));
+            return Err(Invalid::WrongVersion(frame.protocol_version));
         }
         if frame.body.len() > MAX_BRIDGE_FRAME_BYTES {
-            return Err(BridgeError::TooLarge);
+            return Err(Invalid::TooLarge);
         }
         Ok(frame)
     }
@@ -193,7 +193,7 @@ impl BridgeFrame {
 
 /// Why a frame was not accepted.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum BridgeError {
+pub enum Invalid {
     TooLarge,
     Malformed,
     /// A tab from another build. Reported once, then the connection closes —
@@ -201,7 +201,7 @@ pub enum BridgeError {
     WrongVersion(u32),
 }
 
-impl std::fmt::Display for BridgeError {
+impl std::fmt::Display for Invalid {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::TooLarge => write!(f, "frame past the {MAX_BRIDGE_FRAME_BYTES}-byte ceiling"),
@@ -836,11 +836,11 @@ async fn run_socket(mut socket: WebSocket, app: &App, watching: &mut Option<Watc
                         // plane, never posted by a browser — and progress is
                         // this machine reporting on itself.
                         Ok(_) => {}
-                        Err(BridgeError::WrongVersion(v)) => {
+                        Err(Invalid::WrongVersion(v)) => {
                             let _ = socket
                                 .send(Message::Close(Some(axum::extract::ws::CloseFrame {
                                     code: 1002,
-                                    reason: BridgeError::WrongVersion(v).to_string().into(),
+                                    reason: Invalid::WrongVersion(v).to_string().into(),
                                 })))
                                 .await;
                             return;
@@ -936,7 +936,7 @@ mod tests {
         // The order is the whole point: a decoder told a message is large has
         // already reserved the room by the time it fails.
         let oversize = vec![0u8; MAX_BRIDGE_FRAME_BYTES + 1];
-        assert_eq!(BridgeFrame::decode(&oversize), Err(BridgeError::TooLarge));
+        assert_eq!(BridgeFrame::decode(&oversize), Err(Invalid::TooLarge));
     }
 
     #[test]
@@ -948,10 +948,7 @@ mod tests {
             lane: Lane::Control,
             body: vec![7u8; MAX_BRIDGE_FRAME_BYTES + 1],
         };
-        assert_eq!(
-            BridgeFrame::decode(&frame.encode()),
-            Err(BridgeError::TooLarge)
-        );
+        assert_eq!(BridgeFrame::decode(&frame.encode()), Err(Invalid::TooLarge));
     }
 
     #[test]
@@ -966,7 +963,7 @@ mod tests {
         let mut hostile = vec![BRIDGE_PROTOCOL_VERSION as u8, unknown_lane];
         hostile.extend_from_slice(&[0xff, 0xff, 0xff, 0xff, 0x07]);
         assert!(hostile.len() < MAX_BRIDGE_FRAME_BYTES);
-        assert_eq!(BridgeFrame::decode(&hostile), Err(BridgeError::Malformed));
+        assert_eq!(BridgeFrame::decode(&hostile), Err(Invalid::Malformed));
     }
 
     #[test]
@@ -979,7 +976,7 @@ mod tests {
         let refusal = BridgeFrame::decode(&stale.encode());
         assert_eq!(
             refusal,
-            Err(BridgeError::WrongVersion(BRIDGE_PROTOCOL_VERSION + 1))
+            Err(Invalid::WrongVersion(BRIDGE_PROTOCOL_VERSION + 1))
         );
         assert!(
             refusal.unwrap_err().to_string().contains("reload"),
@@ -1019,7 +1016,7 @@ mod tests {
         for bytes in [&b""[..], &b"\xff\xff\xff\xff"[..], &b"not postcard"[..]] {
             assert!(matches!(
                 BridgeFrame::decode(bytes),
-                Err(BridgeError::Malformed) | Err(BridgeError::WrongVersion(_))
+                Err(Invalid::Malformed) | Err(Invalid::WrongVersion(_))
             ));
         }
     }

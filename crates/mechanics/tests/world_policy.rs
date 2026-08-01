@@ -17,8 +17,7 @@ use mechanics::demand::{AuthorizationDemand, PolicyCapability, Resource};
 use mechanics::genesis::Genesis;
 use mechanics::ids::{ActorId, SpaceId, SystemUlidSource};
 use mechanics::ledger::{
-    AuthorityLedger, AuthorizationRequest, AuthorizeError, LedgerEffect, ReceiptExpectations,
-    VerifyError,
+    AuthorityLedger, AuthorizationRequest, Invalid, LedgerEffect, ReceiptExpectations, Refusal,
 };
 
 const WORLD: &str = "com.lait.issues";
@@ -255,7 +254,7 @@ fn require_all_any_witness_selection_and_historical_evaluation() {
             impl_id,
             &needs_admin
         )),
-        Err(AuthorizeError::Denied)
+        Err(Refusal::Denied)
     ));
 
     // A project-scoped Require is satisfied for p1 but denied for p2 (exact
@@ -285,7 +284,7 @@ fn require_all_any_witness_selection_and_historical_evaluation() {
             impl_id,
             &edit_p2
         )),
-        Err(AuthorizeError::Denied)
+        Err(Refusal::Denied)
     ));
     cleanup(&dir);
 }
@@ -377,7 +376,7 @@ fn historical_grant_then_removal_evaluated_at_each_frontier() {
             impl_id,
             &demand
         )),
-        Err(AuthorizeError::Denied)
+        Err(Refusal::Denied)
     ));
     cleanup(&dir);
 }
@@ -406,7 +405,7 @@ fn implementation_pin_refuses_unapproved_id() {
             impl_id,
             &demand
         )),
-        Err(AuthorizeError::Denied)
+        Err(Refusal::Denied)
     ));
     // A wrong implementation id refuses before demand evaluation.
     assert!(matches!(
@@ -418,7 +417,7 @@ fn implementation_pin_refuses_unapproved_id() {
             [0u8; 32],
             &demand
         )),
-        Err(AuthorizeError::ImplementationNotActive)
+        Err(Refusal::ImplementationNotActive)
     ));
     cleanup(&dir);
 }
@@ -502,7 +501,7 @@ fn receipt_verifies_and_every_substitution_is_caught() {
         .unwrap();
     assert!(matches!(
         ledger.verify_receipt(&receipt, &expect(&wrong_dev, &frontier, &demand)),
-        Err(VerifyError::Binding(_))
+        Err(Invalid::Binding(_))
     ));
     // Substitute the demand: refused.
     let other_demand = AuthorizationDemand::require(cap("space.admin"), space_res())
@@ -510,14 +509,14 @@ fn receipt_verifies_and_every_substitution_is_caught() {
         .unwrap();
     assert!(matches!(
         ledger.verify_receipt(&receipt, &expect(&member_dev, &frontier, &other_demand)),
-        Err(VerifyError::Binding(_))
+        Err(Invalid::Binding(_))
     ));
     // Tamper the receipt's evidence digest: refused.
     let mut tampered = receipt.clone();
     tampered.policy_evidence_digest[0] ^= 0xff;
     assert!(matches!(
         ledger.verify_receipt(&tampered, &expect(&member_dev, &frontier, &demand)),
-        Err(VerifyError::Binding(_))
+        Err(Invalid::Binding(_))
     ));
     cleanup(&dir);
 }

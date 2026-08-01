@@ -34,7 +34,7 @@ pub enum Rejection {
     Denied,
     Conflict,
     LimitExceeded,
-    WorldStateCorrupt,
+    StateCorrupt,
     ContractViolation,
 }
 
@@ -463,7 +463,7 @@ pub trait BodyReader {
     fn read_collaborative_body(
         &self,
         key: &BodyKey,
-    ) -> Result<replica::CollaborativeView, replica::ProjectionError>;
+    ) -> Result<replica::CollaborativeView, replica::projection::Failure>;
     /// Every interpreted Body of `world` bound to `schema` — the
     /// singleton-integrity seam (a World validating that exactly its one
     /// deterministic instance of a schema exists).
@@ -607,10 +607,10 @@ impl<'a> Context<'a> {
     pub fn read_collaborative(
         &self,
         key: &BodyKey,
-    ) -> Result<replica::CollaborativeView, replica::ProjectionError> {
+    ) -> Result<replica::CollaborativeView, replica::projection::Failure> {
         match self.reads {
             Some(reads) => reads.read_collaborative_body(key),
-            None => Err(replica::ProjectionError::NotCollaborative),
+            None => Err(replica::projection::Failure::NotCollaborative),
         }
     }
 }

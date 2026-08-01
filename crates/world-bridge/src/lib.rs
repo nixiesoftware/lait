@@ -35,10 +35,10 @@ const MAX_ENCODED_CALL_PAYLOAD: usize = (MAX_WORLD_CALL_PAYLOAD * 4 / 3) + 4;
 pub struct OpaquePayload(Vec<u8>);
 
 impl OpaquePayload {
-    pub fn new(bytes: Vec<u8>) -> Result<Self, WorldCallError> {
+    pub fn new(bytes: Vec<u8>) -> Result<Self, CallFailure> {
         if bytes.len() > MAX_WORLD_REPLY_PAYLOAD {
-            return Err(WorldCallError::new(
-                WorldCallErrorCode::InvalidCall,
+            return Err(CallFailure::new(
+                CallFailureCode::InvalidCall,
                 format!(
                     "World payload is {} bytes; limit is {}",
                     bytes.len(),
@@ -150,7 +150,7 @@ impl WorldCall {
         operation: impl Into<String>,
         version: u32,
         payload: Vec<u8>,
-    ) -> Result<Self, WorldCallError> {
+    ) -> Result<Self, CallFailure> {
         let call = Self {
             world,
             operation: operation.into(),
@@ -177,7 +177,7 @@ impl WorldCall {
         self.payload.as_bytes()
     }
 
-    pub fn validate(&self) -> Result<(), WorldCallError> {
+    pub fn validate(&self) -> Result<(), CallFailure> {
         let valid_operation = !self.operation.is_empty()
             && self.operation.len() <= MAX_OPERATION_LEN
             && self.operation.bytes().all(|byte| {
@@ -186,8 +186,8 @@ impl WorldCall {
                     || matches!(byte, b'.' | b'_' | b'-')
             });
         if !valid_operation {
-            return Err(WorldCallError::new(
-                WorldCallErrorCode::InvalidCall,
+            return Err(CallFailure::new(
+                CallFailureCode::InvalidCall,
                 format!(
                     "World operation must be 1..={MAX_OPERATION_LEN} lowercase ASCII \
                      letters, digits, '.', '_' or '-'"
@@ -195,14 +195,14 @@ impl WorldCall {
             ));
         }
         if self.version == 0 {
-            return Err(WorldCallError::new(
-                WorldCallErrorCode::InvalidCall,
+            return Err(CallFailure::new(
+                CallFailureCode::InvalidCall,
                 "World call version must be non-zero",
             ));
         }
         if self.payload.as_bytes().len() > MAX_WORLD_CALL_PAYLOAD {
-            return Err(WorldCallError::new(
-                WorldCallErrorCode::InvalidCall,
+            return Err(CallFailure::new(
+                CallFailureCode::InvalidCall,
                 format!(
                     "World call payload is {} bytes; limit is {}",
                     self.payload.as_bytes().len(),
@@ -228,7 +228,7 @@ pub enum WorldCallAccess {
 /// payload and retain the product's own response schema.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum WorldCallErrorCode {
+pub enum CallFailureCode {
     InvalidCall,
     UnsupportedOperation,
     UnsupportedVersion,
@@ -239,13 +239,13 @@ pub enum WorldCallErrorCode {
 
 /// A failure to validate or host an application call.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WorldCallError {
-    pub code: WorldCallErrorCode,
+pub struct CallFailure {
+    pub code: CallFailureCode,
     pub message: String,
 }
 
-impl WorldCallError {
-    pub fn new(code: WorldCallErrorCode, message: impl Into<String>) -> Self {
+impl CallFailure {
+    pub fn new(code: CallFailureCode, message: impl Into<String>) -> Self {
         Self {
             code,
             message: message.into(),
@@ -253,13 +253,13 @@ impl WorldCallError {
     }
 }
 
-impl fmt::Display for WorldCallError {
+impl fmt::Display for CallFailure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.message)
     }
 }
 
-impl std::error::Error for WorldCallError {}
+impl std::error::Error for CallFailure {}
 
 /// One reply bound to the exact World operation and payload version requested.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -275,7 +275,7 @@ pub struct WorldReply {
 #[serde(tag = "status", rename_all = "snake_case")]
 enum WorldReplyOutcome {
     Ok { payload: OpaquePayload },
-    Error { error: WorldCallError },
+    Error { error: CallFailure },
 }
 
 impl WorldReply {
@@ -287,17 +287,17 @@ impl WorldReply {
                 version: call.version,
                 outcome: WorldReplyOutcome::Ok { payload },
             },
-            Err(error) => Self::error(call, WorldCallErrorCode::Internal, error.message),
+            Err(error) => Self::error(call, CallFailureCode::Internal, error.message),
         }
     }
 
-    pub fn error(call: &WorldCall, code: WorldCallErrorCode, message: impl Into<String>) -> Self {
+    pub fn error(call: &WorldCall, code: CallFailureCode, message: impl Into<String>) -> Self {
         Self {
             world: call.world.clone(),
             operation: call.operation.clone(),
             version: call.version,
             outcome: WorldReplyOutcome::Error {
-                error: WorldCallError::new(code, message),
+                error: CallFailure::new(code, message),
             },
         }
     }
@@ -310,20 +310,20 @@ impl WorldReply {
         matches!(self.outcome, WorldReplyOutcome::Ok { .. })
     }
 
-    pub fn validate_for(&self, call: &WorldCall) -> Result<(), WorldCallError> {
+    pub fn validate_for(&self, call: &WorldCall) -> Result<(), CallFailure> {
         if self.world != call.world
             || self.operation != call.operation
             || self.version != call.version
         {
-            return Err(WorldCallError::new(
-                WorldCallErrorCode::Internal,
+            return Err(CallFailure::new(
+                CallFailureCode::Internal,
                 "World handler returned a reply for a different call contract",
             ));
         }
         if let WorldReplyOutcome::Ok { payload } = &self.outcome {
             if payload.as_bytes().len() > MAX_WORLD_REPLY_PAYLOAD {
-                return Err(WorldCallError::new(
-                    WorldCallErrorCode::Internal,
+                return Err(CallFailure::new(
+                    CallFailureCode::Internal,
                     "World handler returned an oversized reply",
                 ));
             }
@@ -331,7 +331,7 @@ impl WorldReply {
         Ok(())
     }
 
-    pub fn into_result(self) -> Result<Vec<u8>, WorldCallError> {
+    pub fn into_result(self) -> Result<Vec<u8>, CallFailure> {
         match self.outcome {
             WorldReplyOutcome::Ok { payload } => Ok(payload.into_bytes()),
             WorldReplyOutcome::Error { error } => Err(error),
@@ -377,7 +377,7 @@ pub struct WorldNudge {
 pub trait WorldCallHandler: Send + Sync {
     /// Decode and classify a call. Hosts use this trusted classification for
     /// policy such as delegated-agent partial-view guards.
-    fn access(&self, call: &WorldCall) -> Result<WorldCallAccess, WorldCallError>;
+    fn access(&self, call: &WorldCall) -> Result<WorldCallAccess, CallFailure>;
 
     /// Execute a validated product call through the World's docked Session.
     fn call(&self, call: &WorldCall, context: &WorldCallContext<'_>) -> WorldReply;

@@ -90,7 +90,7 @@ impl PolicyId {
 
 /// Why a policy could not be canonicalized.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PolicyError {
+pub enum Invalid {
     /// A threshold/AllOf/AnyOf with no members.
     Empty,
     /// A threshold with `k == 0`.
@@ -117,30 +117,30 @@ pub enum PolicyError {
     TooLarge(usize),
 }
 
-impl std::fmt::Display for PolicyError {
+impl std::fmt::Display for Invalid {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            PolicyError::Empty => write!(f, "a group must have at least one member"),
-            PolicyError::ZeroThreshold => write!(f, "a threshold of 0 is always satisfied"),
-            PolicyError::Unsatisfiable { k, members } => write!(
+            Invalid::Empty => write!(f, "a group must have at least one member"),
+            Invalid::ZeroThreshold => write!(f, "a threshold of 0 is always satisfied"),
+            Invalid::Unsatisfiable { k, members } => write!(
                 f,
                 "threshold of {k} over {members} member(s) can never be met"
             ),
-            PolicyError::DuplicateMember => write!(
+            Invalid::DuplicateMember => write!(
                 f,
                 "a member appears twice in one group — give it a distinct occurrence, not a duplicate"
             ),
-            PolicyError::TooDeep => write!(f, "policy nests deeper than {MAX_DEPTH}"),
-            PolicyError::TooManyLeaves(n) => {
+            Invalid::TooDeep => write!(f, "policy nests deeper than {MAX_DEPTH}"),
+            Invalid::TooManyLeaves(n) => {
                 write!(f, "policy has {n} leaves, over the {MAX_LEAVES} limit")
             }
-            PolicyError::TooLarge(n) => {
+            Invalid::TooLarge(n) => {
                 write!(f, "canonical policy is {n} bytes, over the {MAX_ENCODED_BYTES} limit")
             }
         }
     }
 }
-impl std::error::Error for PolicyError {}
+impl std::error::Error for Invalid {}
 
 impl OwnershipPolicy {
     /// Reduce to canonical normal form, or reject a malformed policy.
@@ -149,15 +149,15 @@ impl OwnershipPolicy {
     /// canonicalizing an already-canonical policy is idempotent — so equivalent
     /// policies always produce the same [`CanonicalPolicy`] and hence the same
     /// [`PolicyId`].
-    pub fn canonicalize(&self) -> Result<CanonicalPolicy, PolicyError> {
+    pub fn canonicalize(&self) -> Result<CanonicalPolicy, Invalid> {
         let c = normalize(self, 0)?;
         let leaves = c.leaf_count();
         if leaves > MAX_LEAVES {
-            return Err(PolicyError::TooManyLeaves(leaves));
+            return Err(Invalid::TooManyLeaves(leaves));
         }
         let size = c.encode().len();
         if size > MAX_ENCODED_BYTES {
-            return Err(PolicyError::TooLarge(size));
+            return Err(Invalid::TooLarge(size));
         }
         Ok(c)
     }
@@ -178,9 +178,9 @@ enum Gate {
 
 /// Bottom-up normalization. Children are reduced first, so every rewrite acts on
 /// already-canonical subtrees.
-fn normalize(p: &OwnershipPolicy, depth: usize) -> Result<CanonicalPolicy, PolicyError> {
+fn normalize(p: &OwnershipPolicy, depth: usize) -> Result<CanonicalPolicy, Invalid> {
     if depth > MAX_DEPTH {
-        return Err(PolicyError::TooDeep);
+        return Err(Invalid::TooDeep);
     }
     match p {
         OwnershipPolicy::Key(pid) => Ok(CanonicalPolicy::Key(pid.clone())),
@@ -196,12 +196,12 @@ fn normalize_gate(
     gate: Gate,
     xs: &[OwnershipPolicy],
     depth: usize,
-) -> Result<CanonicalPolicy, PolicyError> {
+) -> Result<CanonicalPolicy, Invalid> {
     if xs.is_empty() {
-        return Err(PolicyError::Empty);
+        return Err(Invalid::Empty);
     }
     if let Gate::Fixed(0) = gate {
-        return Err(PolicyError::ZeroThreshold);
+        return Err(Invalid::ZeroThreshold);
     }
     // Reduce every child to canonical form first.
     let mut members: Vec<CanonicalPolicy> = xs
@@ -228,7 +228,7 @@ fn normalize_gate(
     let before = members.len();
     members.dedup();
     if members.len() != before {
-        return Err(PolicyError::DuplicateMember);
+        return Err(Invalid::DuplicateMember);
     }
 
     // Resolve the effective threshold and validate it against the member count.
@@ -239,7 +239,7 @@ fn normalize_gate(
         Gate::Fixed(k) => k,
     };
     if k > n {
-        return Err(PolicyError::Unsatisfiable {
+        return Err(Invalid::Unsatisfiable {
             k,
             members: n as usize,
         });
@@ -459,7 +459,7 @@ mod tests {
                 members: vec![key(1), key(1), key(2)],
             },
         ] {
-            assert_eq!(policy.canonicalize(), Err(PolicyError::DuplicateMember));
+            assert_eq!(policy.canonicalize(), Err(Invalid::DuplicateMember));
         }
     }
 
@@ -470,7 +470,7 @@ mod tests {
         assert_eq!(
             OwnershipPolicy::AllOf(vec![OwnershipPolicy::AllOf(vec![key(1), key(2)]), key(1)])
                 .canonicalize(),
-            Err(PolicyError::DuplicateMember)
+            Err(Invalid::DuplicateMember)
         );
     }
 
@@ -494,7 +494,7 @@ mod tests {
     fn malformed_policies_are_rejected() {
         assert_eq!(
             OwnershipPolicy::AllOf(vec![]).canonicalize(),
-            Err(PolicyError::Empty)
+            Err(Invalid::Empty)
         );
         assert_eq!(
             OwnershipPolicy::Threshold {
@@ -502,7 +502,7 @@ mod tests {
                 members: vec![key(1)]
             }
             .canonicalize(),
-            Err(PolicyError::ZeroThreshold)
+            Err(Invalid::ZeroThreshold)
         );
         assert_eq!(
             OwnershipPolicy::Threshold {
@@ -510,7 +510,7 @@ mod tests {
                 members: vec![key(1), key(2)]
             }
             .canonicalize(),
-            Err(PolicyError::Unsatisfiable { k: 3, members: 2 })
+            Err(Invalid::Unsatisfiable { k: 3, members: 2 })
         );
     }
 
@@ -521,7 +521,7 @@ mod tests {
         for _ in 0..(MAX_DEPTH + 2) {
             deep = OwnershipPolicy::AllOf(vec![deep, key(2)]);
         }
-        assert_eq!(deep.canonicalize(), Err(PolicyError::TooDeep));
+        assert_eq!(deep.canonicalize(), Err(Invalid::TooDeep));
 
         // Too many distinct leaves (vary two seed bytes for uniqueness).
         let wide = OwnershipPolicy::AnyOf(
@@ -539,7 +539,7 @@ mod tests {
         );
         assert!(matches!(
             wide.canonicalize(),
-            Err(PolicyError::TooManyLeaves(_))
+            Err(Invalid::TooManyLeaves(_))
         ));
     }
 

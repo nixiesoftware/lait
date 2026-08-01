@@ -51,18 +51,18 @@ impl Default for Out {
 /// exactly what that rule exists to prevent. Plain `anyhow` errors stay code `1`,
 /// so classifying is opt-in and nothing has to be reclassified at once.
 #[derive(Debug)]
-pub struct CliError {
+pub struct Failure {
     /// The documented exit code for this failure.
     pub code: i32,
     pub message: String,
 }
 
-impl CliError {
+impl Failure {
     /// `2` — a selector resolved to nothing. Matches what the daemon already
     /// returns for a missing ref, user, or label, so a missing *space* doesn't
     /// answer differently to the same kind of mistake.
     pub fn not_found(message: impl Into<String>) -> Self {
-        CliError {
+        Failure {
             code: 2,
             message: message.into(),
         }
@@ -70,20 +70,20 @@ impl CliError {
 
     /// `3` — the daemon could not be reached, or could not be understood.
     pub fn unreachable(message: impl Into<String>) -> Self {
-        CliError {
+        Failure {
             code: 3,
             message: message.into(),
         }
     }
 }
 
-impl std::fmt::Display for CliError {
+impl std::fmt::Display for Failure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.message)
     }
 }
 
-impl std::error::Error for CliError {}
+impl std::error::Error for Failure {}
 
 /// The exit code represented by a client-side error. Split from
 /// [`report_error`] so the mapping is testable without a process to exit —
@@ -92,7 +92,7 @@ impl std::error::Error for CliError {}
 /// An unclassified error is `1`, so the classification is additive: a plain
 /// `anyhow!` keeps behaving exactly as it did.
 fn exit_code_for_error(e: &anyhow::Error) -> i32 {
-    if let Some(c) = e.downcast_ref::<CliError>() {
+    if let Some(c) = e.downcast_ref::<Failure>() {
         return c.code;
     }
     // Something is listening and no request will ever get through to it: `3`,
@@ -368,7 +368,7 @@ pub async fn ensure_lait_daemon() -> Result<()> {
             return Err(daemon_exited_error(status, &log_path));
         }
     }
-    Err(CliError::unreachable(format!(
+    Err(Failure::unreachable(format!(
         "Lait daemon did not come online within 20s — it is running but not answering.\n\
          see {log}, or run `lait daemon` in the foreground to watch it start.",
         log = log_path.display(),
@@ -610,7 +610,7 @@ pub async fn client_action_as_scoped(
             daemon
                 .request(route, request, act_as)
                 .await
-                .map_err(|e| CliError::unreachable(format!("{e:#}")).into())
+                .map_err(|e| Failure::unreachable(format!("{e:#}")).into())
         }
         ClientPayload::World(_) => Err(anyhow!(
             "World actions must be dispatched through their client package"
@@ -648,7 +648,7 @@ impl world_interface::ClientHost for PackageClientHost {
         Box::pin(async move {
             world_reply_as_scoped(&self.home, call, &self.scope, self.act_as.as_deref())
                 .await
-                .map_err(|error| world_interface::InterfaceError::new(format!("{error:#}")))
+                .map_err(|error| world_interface::Failure::new(format!("{error:#}")))
         })
     }
 
@@ -686,11 +686,9 @@ impl world_interface::ClientHost for PackageClientHost {
             let response =
                 client_as_scoped(&self.home, request, &self.scope, self.act_as.as_deref())
                     .await
-                    .map_err(|error| world_interface::InterfaceError::new(format!("{error:#}")))?;
+                    .map_err(|error| world_interface::Failure::new(format!("{error:#}")))?;
             serde_json::to_value(response).map_err(|error| {
-                world_interface::InterfaceError::new(format!(
-                    "encode host control response: {error}"
-                ))
+                world_interface::Failure::new(format!("encode host control response: {error}"))
             })
         })
     }
@@ -700,8 +698,7 @@ impl world_interface::ClientHost for PackageClientHost {
         request: world_interface::HostContentRequest,
     ) -> world_interface::ClientFuture<'a, serde_json::Value> {
         Box::pin(async move {
-            let fail =
-                |error: anyhow::Error| world_interface::InterfaceError::new(format!("{error:#}"));
+            let fail = |error: anyhow::Error| world_interface::Failure::new(format!("{error:#}"));
             let address = orbit_address_for_home(&self.home).map_err(&fail)?;
             self.scope
                 .authorize(&address)
@@ -734,10 +731,10 @@ async fn content_write(
     home: &Path,
     route: crate::control::ControlRoute,
     path: &Path,
-) -> Result<serde_json::Value, world_interface::InterfaceError> {
+) -> Result<serde_json::Value, world_interface::Failure> {
     use tokio::io::AsyncReadExt;
 
-    let fail = |message: String| world_interface::InterfaceError::new(message);
+    let fail = |message: String| world_interface::Failure::new(message);
     let mut file = tokio::fs::File::open(path)
         .await
         .map_err(|e| fail(format!("could not read {}: {e}", path.display())))?;
@@ -791,10 +788,10 @@ async fn content_read(
     route: crate::control::ControlRoute,
     content: &str,
     destination: &Path,
-) -> Result<serde_json::Value, world_interface::InterfaceError> {
+) -> Result<serde_json::Value, world_interface::Failure> {
     use tokio::io::AsyncWriteExt;
 
-    let fail = |message: String| world_interface::InterfaceError::new(message);
+    let fail = |message: String| world_interface::Failure::new(message);
     let temporary = destination.with_extension("lait-partial");
     let mut file = tokio::fs::File::create(&temporary)
         .await
@@ -851,8 +848,8 @@ async fn content_stat(
     home: &Path,
     route: crate::control::ControlRoute,
     content: &str,
-) -> Result<serde_json::Value, world_interface::InterfaceError> {
-    let fail = |message: String| world_interface::InterfaceError::new(message);
+) -> Result<serde_json::Value, world_interface::Failure> {
+    let fail = |message: String| world_interface::Failure::new(message);
     let (reply, _) = crate::control::content_call(
         home,
         &crate::control::content_request(
@@ -907,7 +904,7 @@ pub async fn world_reply_as_scoped(
     crate::daemon::LaitDaemonClient::current()?
         .call_world(route, call, act_as)
         .await
-        .map_err(|error| CliError::unreachable(format!("{error:#}")).into())
+        .map_err(|error| Failure::unreachable(format!("{error:#}")).into())
 }
 
 /// Send through the current Lait daemon only if it is already running.
@@ -947,7 +944,7 @@ pub async fn run_action(home: &Path, action: ClientAction, out: Out) -> Result<(
             Ok(())
         }
         // Propagate rather than reporting here: `client` errors are already
-        // classified (`CliError::unreachable`), and the top-level reporter is what
+        // classified (`Failure::unreachable`), and the top-level reporter is what
         // honours `--json`. This arm used to print and `exit(3)` itself, which
         // hardcoded "daemon unreachable" onto conditions that weren't — including
         // `ensure_daemon`'s "no space at …", a missing store.
@@ -2089,11 +2086,11 @@ mod tests {
     fn client_side_exit_codes_come_from_the_type_not_the_prose() {
         // Classified errors carry their documented code.
         assert_eq!(
-            exit_code_for_error(&CliError::not_found("no space matches 'x'").into()),
+            exit_code_for_error(&Failure::not_found("no space matches 'x'").into()),
             2,
         );
         assert_eq!(
-            exit_code_for_error(&CliError::unreachable("daemon is deaf").into()),
+            exit_code_for_error(&Failure::unreachable("daemon is deaf").into()),
             3,
         );
         // ...and anything unclassified stays 1, so this is additive rather than a
@@ -2102,7 +2099,7 @@ mod tests {
         // The code must survive `.context()`: callers add context freely, and a
         // wrapped not-found is still a not-found. (This is the whole reason the
         // class is a type and not a prefix on the message.)
-        let wrapped = Err::<(), _>(anyhow::Error::from(CliError::not_found("gone")))
+        let wrapped = Err::<(), _>(anyhow::Error::from(Failure::not_found("gone")))
             .context("while resolving --orbit")
             .unwrap_err();
         assert_eq!(exit_code_for_error(&wrapped), 2);

@@ -3,7 +3,7 @@
 use schemars::JsonSchema;
 use serde::{de::DeserializeOwned, Deserialize};
 use serde_json::{json, Value};
-use world_interface::{ClientInvocation as CliInvocation, InterfaceError, McpTool};
+use world_interface::{ClientInvocation as CliInvocation, Failure, McpTool};
 
 use crate::cli::{LOCAL_ACCESS, LOCAL_INBOX};
 use crate::{BoardPos, Filter, IssuesRequest};
@@ -344,7 +344,7 @@ pub fn tools() -> Vec<McpTool> {
 fn tool<T: JsonSchema>(
     name: &'static str,
     description: &'static str,
-    call: fn(Value) -> Result<CliInvocation, InterfaceError>,
+    call: fn(Value) -> Result<CliInvocation, Failure>,
 ) -> McpTool {
     McpTool::new(name, description, schema::<T>, call)
 }
@@ -354,20 +354,20 @@ fn schema<T: JsonSchema>() -> Value {
         .expect("Issues MCP schemas are JSON serializable")
 }
 
-fn args<T: DeserializeOwned>(input: Value) -> Result<T, InterfaceError> {
+fn args<T: DeserializeOwned>(input: Value) -> Result<T, Failure> {
     serde_json::from_value(input)
-        .map_err(|error| InterfaceError::new(format!("invalid tool arguments: {error}")))
+        .map_err(|error| Failure::new(format!("invalid tool arguments: {error}")))
 }
 
-fn world(request: IssuesRequest) -> Result<CliInvocation, InterfaceError> {
+fn world(request: IssuesRequest) -> Result<CliInvocation, Failure> {
     crate::host::world_invocation(request)
 }
 
-fn local(operation: &str, input: Value) -> Result<CliInvocation, InterfaceError> {
+fn local(operation: &str, input: Value) -> Result<CliInvocation, Failure> {
     crate::host::invocation(operation, input)
 }
 
-fn issue_new(input: Value) -> Result<CliInvocation, InterfaceError> {
+fn issue_new(input: Value) -> Result<CliInvocation, Failure> {
     let a: IssueNewArgs = args(input)?;
     world(IssuesRequest::IssueNew {
         title: a.title,
@@ -382,27 +382,27 @@ fn issue_new(input: Value) -> Result<CliInvocation, InterfaceError> {
     })
 }
 
-fn issue_start(input: Value) -> Result<CliInvocation, InterfaceError> {
+fn issue_start(input: Value) -> Result<CliInvocation, Failure> {
     let a: RefArgs = args(input)?;
     world(IssuesRequest::IssueStart { reff: a.reff })
 }
 
-fn issue_done(input: Value) -> Result<CliInvocation, InterfaceError> {
+fn issue_done(input: Value) -> Result<CliInvocation, Failure> {
     let a: RefArgs = args(input)?;
     world(IssuesRequest::IssueDone { reff: a.reff })
 }
 
-fn issue_stop(input: Value) -> Result<CliInvocation, InterfaceError> {
+fn issue_stop(input: Value) -> Result<CliInvocation, Failure> {
     let a: RefArgs = args(input)?;
     world(IssuesRequest::IssueStop { reff: a.reff })
 }
 
-fn inbox(input: Value) -> Result<CliInvocation, InterfaceError> {
+fn inbox(input: Value) -> Result<CliInvocation, Failure> {
     let a: InboxArgs = args(input)?;
     local(LOCAL_INBOX, json!({ "clear": a.clear }))
 }
 
-fn issue_edit(input: Value) -> Result<CliInvocation, InterfaceError> {
+fn issue_edit(input: Value) -> Result<CliInvocation, Failure> {
     let a: IssueEditArgs = args(input)?;
     world(IssuesRequest::IssueEdit {
         reff: a.reff,
@@ -415,7 +415,7 @@ fn issue_edit(input: Value) -> Result<CliInvocation, InterfaceError> {
     })
 }
 
-fn issue_move(input: Value) -> Result<CliInvocation, InterfaceError> {
+fn issue_move(input: Value) -> Result<CliInvocation, Failure> {
     let a: IssueMoveArgs = args(input)?;
     world(IssuesRequest::IssueMove {
         reff: a.reff,
@@ -424,7 +424,7 @@ fn issue_move(input: Value) -> Result<CliInvocation, InterfaceError> {
     })
 }
 
-fn assign(input: Value) -> Result<CliInvocation, InterfaceError> {
+fn assign(input: Value) -> Result<CliInvocation, Failure> {
     let a: AssignArgs = args(input)?;
     world(IssuesRequest::Assign {
         reff: a.reff,
@@ -433,7 +433,7 @@ fn assign(input: Value) -> Result<CliInvocation, InterfaceError> {
     })
 }
 
-fn label(input: Value) -> Result<CliInvocation, InterfaceError> {
+fn label(input: Value) -> Result<CliInvocation, Failure> {
     let a: LabelArgs = args(input)?;
     world(IssuesRequest::Label {
         reff: a.reff,
@@ -442,7 +442,7 @@ fn label(input: Value) -> Result<CliInvocation, InterfaceError> {
     })
 }
 
-fn comment(input: Value) -> Result<CliInvocation, InterfaceError> {
+fn comment(input: Value) -> Result<CliInvocation, Failure> {
     let a: CommentArgs = args(input)?;
     world(IssuesRequest::Comment {
         reff: a.reff,
@@ -451,7 +451,7 @@ fn comment(input: Value) -> Result<CliInvocation, InterfaceError> {
     })
 }
 
-fn comment_at(input: Value) -> Result<CliInvocation, InterfaceError> {
+fn comment_at(input: Value) -> Result<CliInvocation, Failure> {
     let a: CommentAtArgs = args(input)?;
     world(IssuesRequest::CommentAt {
         reff: a.reff,
@@ -463,7 +463,7 @@ fn comment_at(input: Value) -> Result<CliInvocation, InterfaceError> {
     })
 }
 
-fn react(input: Value) -> Result<CliInvocation, InterfaceError> {
+fn react(input: Value) -> Result<CliInvocation, Failure> {
     let a: ReactArgs = args(input)?;
     world(IssuesRequest::React {
         reff: a.reff,
@@ -473,17 +473,17 @@ fn react(input: Value) -> Result<CliInvocation, InterfaceError> {
     })
 }
 
-fn issue_delete(input: Value) -> Result<CliInvocation, InterfaceError> {
+fn issue_delete(input: Value) -> Result<CliInvocation, Failure> {
     let a: RefArgs = args(input)?;
     world(IssuesRequest::IssueDelete { reff: a.reff })
 }
 
-fn issue_restore(input: Value) -> Result<CliInvocation, InterfaceError> {
+fn issue_restore(input: Value) -> Result<CliInvocation, Failure> {
     let a: RefArgs = args(input)?;
     world(IssuesRequest::IssueRestore { reff: a.reff })
 }
 
-fn issue_link(input: Value) -> Result<CliInvocation, InterfaceError> {
+fn issue_link(input: Value) -> Result<CliInvocation, Failure> {
     let a: LinkArgs = args(input)?;
     world(IssuesRequest::IssueLink {
         reff: a.reff,
@@ -492,7 +492,7 @@ fn issue_link(input: Value) -> Result<CliInvocation, InterfaceError> {
     })
 }
 
-fn issue_unlink(input: Value) -> Result<CliInvocation, InterfaceError> {
+fn issue_unlink(input: Value) -> Result<CliInvocation, Failure> {
     let a: LinkArgs = args(input)?;
     world(IssuesRequest::IssueUnlink {
         reff: a.reff,
@@ -501,7 +501,7 @@ fn issue_unlink(input: Value) -> Result<CliInvocation, InterfaceError> {
     })
 }
 
-fn issue_parent(input: Value) -> Result<CliInvocation, InterfaceError> {
+fn issue_parent(input: Value) -> Result<CliInvocation, Failure> {
     let a: ParentArgs = args(input)?;
     world(IssuesRequest::IssueParent {
         reff: a.reff,
@@ -509,17 +509,17 @@ fn issue_parent(input: Value) -> Result<CliInvocation, InterfaceError> {
     })
 }
 
-fn issue_graph(input: Value) -> Result<CliInvocation, InterfaceError> {
+fn issue_graph(input: Value) -> Result<CliInvocation, Failure> {
     let a: RefArgs = args(input)?;
     world(IssuesRequest::IssueGraph { reff: a.reff })
 }
 
-fn issue_view(input: Value) -> Result<CliInvocation, InterfaceError> {
+fn issue_view(input: Value) -> Result<CliInvocation, Failure> {
     let a: RefArgs = args(input)?;
     world(IssuesRequest::IssueView { reff: a.reff })
 }
 
-fn list(input: Value) -> Result<CliInvocation, InterfaceError> {
+fn list(input: Value) -> Result<CliInvocation, Failure> {
     let a: ListArgs = args(input)?;
     world(IssuesRequest::List {
         project: a.project,
@@ -533,7 +533,7 @@ fn list(input: Value) -> Result<CliInvocation, InterfaceError> {
     })
 }
 
-fn board(input: Value) -> Result<CliInvocation, InterfaceError> {
+fn board(input: Value) -> Result<CliInvocation, Failure> {
     let a: BoardArgs = args(input)?;
     world(IssuesRequest::Board {
         project: a.project,
@@ -541,12 +541,12 @@ fn board(input: Value) -> Result<CliInvocation, InterfaceError> {
     })
 }
 
-fn history(input: Value) -> Result<CliInvocation, InterfaceError> {
+fn history(input: Value) -> Result<CliInvocation, Failure> {
     let a: RefArgs = args(input)?;
     world(IssuesRequest::History { reff: a.reff })
 }
 
-fn project_new(input: Value) -> Result<CliInvocation, InterfaceError> {
+fn project_new(input: Value) -> Result<CliInvocation, Failure> {
     let a: ProjectNewArgs = args(input)?;
     world(IssuesRequest::ProjectNew {
         name: a.name,
@@ -555,12 +555,12 @@ fn project_new(input: Value) -> Result<CliInvocation, InterfaceError> {
     })
 }
 
-fn project_list(input: Value) -> Result<CliInvocation, InterfaceError> {
+fn project_list(input: Value) -> Result<CliInvocation, Failure> {
     let _: EmptyArgs = args(input)?;
     world(IssuesRequest::ProjectList)
 }
 
-fn label_new(input: Value) -> Result<CliInvocation, InterfaceError> {
+fn label_new(input: Value) -> Result<CliInvocation, Failure> {
     let a: LabelNewArgs = args(input)?;
     world(IssuesRequest::LabelNew {
         name: a.name,
@@ -568,27 +568,27 @@ fn label_new(input: Value) -> Result<CliInvocation, InterfaceError> {
     })
 }
 
-fn label_list(input: Value) -> Result<CliInvocation, InterfaceError> {
+fn label_list(input: Value) -> Result<CliInvocation, Failure> {
     let _: EmptyArgs = args(input)?;
     world(IssuesRequest::LabelList)
 }
 
-fn activity(input: Value) -> Result<CliInvocation, InterfaceError> {
+fn activity(input: Value) -> Result<CliInvocation, Failure> {
     let a: ActivityArgs = args(input)?;
     world(IssuesRequest::Activity { since: a.since })
 }
 
-fn role_list(input: Value) -> Result<CliInvocation, InterfaceError> {
+fn role_list(input: Value) -> Result<CliInvocation, Failure> {
     let _: EmptyArgs = args(input)?;
     world(IssuesRequest::RoleList)
 }
 
-fn role_show(input: Value) -> Result<CliInvocation, InterfaceError> {
+fn role_show(input: Value) -> Result<CliInvocation, Failure> {
     let a: RoleShowArgs = args(input)?;
     world(IssuesRequest::RoleShow { role: a.role })
 }
 
-fn role_create(input: Value) -> Result<CliInvocation, InterfaceError> {
+fn role_create(input: Value) -> Result<CliInvocation, Failure> {
     let a: RoleCreateArgs = args(input)?;
     world(IssuesRequest::RoleCreate {
         name: a.name,
@@ -598,7 +598,7 @@ fn role_create(input: Value) -> Result<CliInvocation, InterfaceError> {
     })
 }
 
-fn role_edit(input: Value) -> Result<CliInvocation, InterfaceError> {
+fn role_edit(input: Value) -> Result<CliInvocation, Failure> {
     let a: RoleEditArgs = args(input)?;
     world(IssuesRequest::RoleEdit {
         role: a.role,
@@ -609,7 +609,7 @@ fn role_edit(input: Value) -> Result<CliInvocation, InterfaceError> {
     })
 }
 
-fn role_delete(input: Value) -> Result<CliInvocation, InterfaceError> {
+fn role_delete(input: Value) -> Result<CliInvocation, Failure> {
     let a: RoleDeleteArgs = args(input)?;
     world(IssuesRequest::RoleDelete {
         role: a.role,
@@ -617,7 +617,7 @@ fn role_delete(input: Value) -> Result<CliInvocation, InterfaceError> {
     })
 }
 
-fn role_resolve(input: Value) -> Result<CliInvocation, InterfaceError> {
+fn role_resolve(input: Value) -> Result<CliInvocation, Failure> {
     let a: RoleResolveArgs = args(input)?;
     world(IssuesRequest::RoleResolve {
         role: a.role,
@@ -626,12 +626,12 @@ fn role_resolve(input: Value) -> Result<CliInvocation, InterfaceError> {
     })
 }
 
-fn access_list(input: Value) -> Result<CliInvocation, InterfaceError> {
+fn access_list(input: Value) -> Result<CliInvocation, Failure> {
     let a: AccessListArgs = args(input)?;
     local(LOCAL_ACCESS, json!({ "action": "ls", "actor": a.actor }))
 }
 
-fn access_grant(input: Value) -> Result<CliInvocation, InterfaceError> {
+fn access_grant(input: Value) -> Result<CliInvocation, Failure> {
     let a: AccessGrantArgs = args(input)?;
     local(
         LOCAL_ACCESS,
@@ -644,7 +644,7 @@ fn access_grant(input: Value) -> Result<CliInvocation, InterfaceError> {
     )
 }
 
-fn access_revoke(input: Value) -> Result<CliInvocation, InterfaceError> {
+fn access_revoke(input: Value) -> Result<CliInvocation, Failure> {
     let a: AccessRevokeArgs = args(input)?;
     local(
         LOCAL_ACCESS,
@@ -652,19 +652,19 @@ fn access_revoke(input: Value) -> Result<CliInvocation, InterfaceError> {
     )
 }
 
-fn workflow_show(input: Value) -> Result<CliInvocation, InterfaceError> {
+fn workflow_show(input: Value) -> Result<CliInvocation, Failure> {
     let a: WorkflowShowArgs = args(input)?;
     world(IssuesRequest::WorkflowShow { project: a.project })
 }
 
-fn workflow_validate(input: Value) -> Result<CliInvocation, InterfaceError> {
+fn workflow_validate(input: Value) -> Result<CliInvocation, Failure> {
     let a: WorkflowValidateArgs = args(input)?;
     world(IssuesRequest::WorkflowValidate {
         body_json: a.body_json,
     })
 }
 
-fn workflow_set(input: Value) -> Result<CliInvocation, InterfaceError> {
+fn workflow_set(input: Value) -> Result<CliInvocation, Failure> {
     let a: WorkflowSetArgs = args(input)?;
     world(IssuesRequest::WorkflowSet {
         project: a.project,

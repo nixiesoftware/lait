@@ -19,7 +19,7 @@ use mechanics::acl::{self, AclAction, AclOp, Standing};
 use mechanics::actor;
 use mechanics::genesis::Genesis;
 use mechanics::ids::{ActorId, SpaceId, SystemUlidSource};
-use mechanics::ledger::{AuthorityLedger, LedgerEffect, LedgerError};
+use mechanics::ledger::{AuthorityLedger, Failure, LedgerEffect};
 
 fn seed(n: u8) -> [u8; 32] {
     [n; 32]
@@ -350,8 +350,7 @@ fn corrupt_objects_fail_open_as_integrity() {
         corrupted[0] ^= 0xFF;
         std::fs::write(path, &corrupted).unwrap();
         match AuthorityLedger::open(&dir) {
-            Err(LedgerError::Journal(journal::JournalError::Integrity(_)))
-            | Err(LedgerError::Corrupt(_)) => {}
+            Err(Failure::Journal(journal::Failure::Integrity(_))) | Err(Failure::Corrupt(_)) => {}
             other => panic!(
                 "corrupting {} must fail integrity, got {:?}",
                 path.display(),

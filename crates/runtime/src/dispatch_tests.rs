@@ -383,7 +383,7 @@ fn a_session_cannot_stop_the_station() {
     let exit = station.wait();
     assert!(matches!(
         exit.reason,
-        Some(crate::lifecycle::ExitReason::TaskFailed(_))
+        Some(crate::lifecycle::ExitReason::TaskFailed)
     ));
 }
 

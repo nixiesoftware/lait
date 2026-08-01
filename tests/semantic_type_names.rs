@@ -127,6 +127,7 @@ fn test_gated(attrs: &[syn::Attribute]) -> bool {
 struct Declarations {
     found: BTreeSet<String>,
     all: BTreeSet<String>,
+    prefixed_errors: BTreeSet<String>,
 }
 
 impl Declarations {
@@ -135,6 +136,14 @@ impl Declarations {
         self.all.insert(name.clone());
         if versioned_ident(&name) {
             self.found.insert(name);
+        }
+    }
+
+    fn note_type(&mut self, ident: &syn::Ident) {
+        self.note(ident);
+        let name = ident.to_string();
+        if name.ends_with("Error") && name != "Error" && name != "WireError" {
+            self.prefixed_errors.insert(name);
         }
     }
 
@@ -175,12 +184,12 @@ impl Declarations {
 
 impl<'ast> Visit<'ast> for Declarations {
     fn visit_item_struct(&mut self, node: &'ast syn::ItemStruct) {
-        self.note(&node.ident);
+        self.note_type(&node.ident);
         self.note_fields(&node.fields);
         syn::visit::visit_item_struct(self, node);
     }
     fn visit_item_enum(&mut self, node: &'ast syn::ItemEnum) {
-        self.note(&node.ident);
+        self.note_type(&node.ident);
         for variant in &node.variants {
             self.note(&variant.ident);
             self.note_fields(&variant.fields);
@@ -188,7 +197,7 @@ impl<'ast> Visit<'ast> for Declarations {
         syn::visit::visit_item_enum(self, node);
     }
     fn visit_item_union(&mut self, node: &'ast syn::ItemUnion) {
-        self.note(&node.ident);
+        self.note_type(&node.ident);
         for field in &node.fields.named {
             if let Some(ident) = &field.ident {
                 self.note(ident);
@@ -197,11 +206,11 @@ impl<'ast> Visit<'ast> for Declarations {
         syn::visit::visit_item_union(self, node);
     }
     fn visit_item_trait(&mut self, node: &'ast syn::ItemTrait) {
-        self.note(&node.ident);
+        self.note_type(&node.ident);
         syn::visit::visit_item_trait(self, node);
     }
     fn visit_item_type(&mut self, node: &'ast syn::ItemType) {
-        self.note(&node.ident);
+        self.note_type(&node.ident);
         syn::visit::visit_item_type(self, node);
     }
     fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
@@ -278,6 +287,15 @@ fn declared_identifiers(text: &str) -> Vec<String> {
     let mut declarations = Declarations::default();
     declarations.visit_file(&file);
     declarations.all.into_iter().collect()
+}
+
+fn prefixed_error_types(text: &str) -> Vec<String> {
+    let Ok(file) = syn::parse_file(text) else {
+        return Vec::new();
+    };
+    let mut declarations = Declarations::default();
+    declarations.visit_file(&file);
+    declarations.prefixed_errors.into_iter().collect()
 }
 
 const RETIRED: &[&str] = &[
@@ -360,6 +378,11 @@ fn retired_declarations_and_module_prefix_stutter_are_absent() {
             {
                 found.push(format!("{rel}: product vocabulary `{name}`"));
             }
+        }
+        for name in prefixed_error_types(&text) {
+            found.push(format!(
+                "{rel}: prefixed error bag `{name}`; qualify Failure, Invalid, Refusal, or Interruption by its owner"
+            ));
         }
     }
     assert!(

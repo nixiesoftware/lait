@@ -132,7 +132,7 @@ pub struct ReconstructionWitness {
 
 /// Why a [`CompiledPolicy`] failed validation.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ValidationError {
+pub enum Invalid {
     UnsupportedVersion(u16),
     /// A row length, the target length, or the leaf count disagrees with `cols`.
     DimensionMismatch,
@@ -146,31 +146,29 @@ pub enum ValidationError {
     TooLarge,
 }
 
-impl std::fmt::Display for ValidationError {
+impl std::fmt::Display for Invalid {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ValidationError::UnsupportedVersion(v) => write!(f, "unsupported compiler version {v}"),
-            ValidationError::DimensionMismatch => write!(f, "matrix dimensions are inconsistent"),
-            ValidationError::NoncanonicalScalar => {
+            Invalid::UnsupportedVersion(v) => write!(f, "unsupported compiler version {v}"),
+            Invalid::DimensionMismatch => write!(f, "matrix dimensions are inconsistent"),
+            Invalid::NoncanonicalScalar => {
                 write!(f, "a matrix entry is not a canonical field element")
             }
-            ValidationError::BadTarget => write!(f, "the target vector is not e1"),
-            ValidationError::DuplicateLeaf => write!(f, "a leaf appears in two rows"),
-            ValidationError::TooLarge => write!(f, "the access matrix exceeds a consensus limit"),
+            Invalid::BadTarget => write!(f, "the target vector is not e1"),
+            Invalid::DuplicateLeaf => write!(f, "a leaf appears in two rows"),
+            Invalid::TooLarge => write!(f, "the access matrix exceeds a consensus limit"),
         }
     }
 }
-impl std::error::Error for ValidationError {}
+impl std::error::Error for Invalid {}
 
 impl CompiledPolicy {
     /// Check every structural invariant, returning a [`StructurallyValidatedCompiledPolicy`]
     /// that alone exposes the arithmetic paths. Consumes `self` so an unvalidated
     /// value cannot linger.
-    pub fn validate_structure(
-        self,
-    ) -> Result<StructurallyValidatedCompiledPolicy, ValidationError> {
+    pub fn validate_structure(self) -> Result<StructurallyValidatedCompiledPolicy, Invalid> {
         if self.version != COMPILER_VERSION {
-            return Err(ValidationError::UnsupportedVersion(self.version));
+            return Err(Invalid::UnsupportedVersion(self.version));
         }
         let cols = self.matrix.cols;
         let rows = self.matrix.rows.len();
@@ -179,13 +177,13 @@ impl CompiledPolicy {
             || self.target.len() != cols
             || self.matrix.rows.iter().any(|r| r.len() != cols)
         {
-            return Err(ValidationError::DimensionMismatch);
+            return Err(Invalid::DimensionMismatch);
         }
         if rows > MAX_MATRIX_ROWS
             || cols > MAX_MATRIX_COLS
             || rows.saturating_mul(cols) > MAX_MATRIX_CELLS
         {
-            return Err(ValidationError::TooLarge);
+            return Err(Invalid::TooLarge);
         }
         // Every stored element is a canonical scalar.
         let canonical = self
@@ -196,18 +194,18 @@ impl CompiledPolicy {
             .chain(self.target.iter())
             .all(|f| f.as_scalar().is_some());
         if !canonical {
-            return Err(ValidationError::NoncanonicalScalar);
+            return Err(Invalid::NoncanonicalScalar);
         }
         // Target is exactly e1.
         let one = Fe::from_scalar(&Scalar::ONE);
         let zero = Fe::from_scalar(&Scalar::ZERO);
         if self.target[0] != one || self.target[1..].iter().any(|f| *f != zero) {
-            return Err(ValidationError::BadTarget);
+            return Err(Invalid::BadTarget);
         }
         // Leaves are unique.
         let distinct: std::collections::BTreeSet<&LeafId> = self.leaves.iter().collect();
         if distinct.len() != self.leaves.len() {
-            return Err(ValidationError::DuplicateLeaf);
+            return Err(Invalid::DuplicateLeaf);
         }
         Ok(StructurallyValidatedCompiledPolicy(self))
     }
@@ -363,9 +361,7 @@ impl StructurallyValidatedCompiledPolicy {
 
 /// Compile an expansion into its validated access structure. Identity is taken
 /// from the expansion (finding 4), so no mismatched policy id can be asserted.
-pub fn compile(
-    expansion: &Expansion,
-) -> Result<StructurallyValidatedCompiledPolicy, ValidationError> {
+pub fn compile(expansion: &Expansion) -> Result<StructurallyValidatedCompiledPolicy, Invalid> {
     let mut rows: Vec<(LeafId, Vec<Scalar>)> = Vec::new();
     let mut cols = 1usize; // column 0 is the secret
     build(expansion.tree(), vec![Scalar::ONE], &mut cols, &mut rows);
@@ -398,20 +394,20 @@ pub fn compile(
 
 /// The error of [`verify_compilation`].
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum VerifyError {
+pub enum Refusal {
     /// The recompiled artifact did not even validate structurally (should not
     /// happen for an expansion we built, but the boundary is explicit).
-    Structure(ValidationError),
+    Structure(Invalid),
     /// The recompiled commitment does not equal the advertised one — the
     /// advertised matrix does not implement this policy's expansion.
     CommitmentMismatch,
 }
 
-impl std::fmt::Display for VerifyError {
+impl std::fmt::Display for Refusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            VerifyError::Structure(e) => write!(f, "recompilation failed to validate: {e}"),
-            VerifyError::CommitmentMismatch => {
+            Refusal::Structure(e) => write!(f, "recompilation failed to validate: {e}"),
+            Refusal::CommitmentMismatch => {
                 write!(
                     f,
                     "the advertised access structure does not implement this policy"
@@ -420,7 +416,7 @@ impl std::fmt::Display for VerifyError {
         }
     }
 }
-impl std::error::Error for VerifyError {}
+impl std::error::Error for Refusal {}
 
 /// Prove that `advertised` is the access structure of `expansion`'s policy —
 /// **not** merely that some structurally-valid artifact carries that commitment.
@@ -439,41 +435,43 @@ impl std::error::Error for VerifyError {}
 pub fn verify_compilation(
     expansion: &Expansion,
     advertised: AccessStructureCommitment,
-) -> Result<StructurallyValidatedCompiledPolicy, VerifyError> {
-    let recompiled = compile(expansion).map_err(VerifyError::Structure)?;
+) -> Result<StructurallyValidatedCompiledPolicy, Refusal> {
+    let recompiled = compile(expansion).map_err(Refusal::Structure)?;
     if recompiled.commitment() != advertised {
-        return Err(VerifyError::CommitmentMismatch);
+        return Err(Refusal::CommitmentMismatch);
     }
     Ok(recompiled)
 }
 
 /// The error of [`verify_general_access_config`].
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ConfigError {
+pub enum ConfigurationInvalid {
     /// The supplied canonical policy is not the one the config names.
     PolicyMismatch,
     /// The expansion the config committed does not match one recomputed from the
     /// policy and the custody snapshot — a different custody arrangement.
     LeafMismatch,
     /// The config's access structure does not implement the policy.
-    Verify(VerifyError),
+    Verify(Refusal),
     /// The policy or its expansion is malformed.
     Malformed,
 }
 
-impl std::fmt::Display for ConfigError {
+impl std::fmt::Display for ConfigurationInvalid {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ConfigError::PolicyMismatch => write!(f, "the policy does not match the config"),
-            ConfigError::LeafMismatch => {
+            ConfigurationInvalid::PolicyMismatch => {
+                write!(f, "the policy does not match the config")
+            }
+            ConfigurationInvalid::LeafMismatch => {
                 write!(f, "the committed leaves do not match the expansion")
             }
-            ConfigError::Verify(e) => write!(f, "{e}"),
-            ConfigError::Malformed => write!(f, "the policy or expansion is malformed"),
+            ConfigurationInvalid::Verify(e) => write!(f, "{e}"),
+            ConfigurationInvalid::Malformed => write!(f, "the policy or expansion is malformed"),
         }
     }
 }
-impl std::error::Error for ConfigError {}
+impl std::error::Error for ConfigurationInvalid {}
 
 /// **Transition acceptance invariant.** Accept a general-access configuration only
 /// when deterministic recompilation of its committed canonical policy and
@@ -492,17 +490,18 @@ pub fn verify_general_access_config(
     config: &GeneralAccessConfig,
     canonical_policy: &CanonicalPolicy,
     resolve: &impl Fn(&PrincipalId) -> Option<PrincipalDescriptor>,
-) -> Result<StructurallyValidatedCompiledPolicy, ConfigError> {
+) -> Result<StructurallyValidatedCompiledPolicy, ConfigurationInvalid> {
     if canonical_policy.id() != config.policy {
-        return Err(ConfigError::PolicyMismatch);
+        return Err(ConfigurationInvalid::PolicyMismatch);
     }
-    let expansion = expand(canonical_policy, resolve).map_err(|_| ConfigError::Malformed)?;
+    let expansion =
+        expand(canonical_policy, resolve).map_err(|_| ConfigurationInvalid::Malformed)?;
     // The config's committed leaves must be exactly the expansion's — same order,
     // same ids, same provenance — or a different custody snapshot was used.
     if expansion.leaves() != config.leaves.as_slice() {
-        return Err(ConfigError::LeafMismatch);
+        return Err(ConfigurationInvalid::LeafMismatch);
     }
-    verify_compilation(&expansion, config.access_structure).map_err(ConfigError::Verify)
+    verify_compilation(&expansion, config.access_structure).map_err(ConfigurationInvalid::Verify)
 }
 
 fn build(
@@ -898,7 +897,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             verify_general_access_config(&config, &other, &resolver()),
-            Err(ConfigError::PolicyMismatch)
+            Err(ConfigurationInvalid::PolicyMismatch)
         );
 
         // Tampered access structure (a different policy's commitment).
@@ -906,7 +905,7 @@ mod tests {
         bad.access_structure = general_access_config(&other).access_structure;
         assert!(matches!(
             verify_general_access_config(&bad, &canon, &resolver()),
-            Err(ConfigError::Verify(VerifyError::CommitmentMismatch))
+            Err(ConfigurationInvalid::Verify(Refusal::CommitmentMismatch))
         ));
 
         // Tampered leaf snapshot.
@@ -914,7 +913,7 @@ mod tests {
         bad.leaves.pop();
         assert_eq!(
             verify_general_access_config(&bad, &canon, &resolver()),
-            Err(ConfigError::LeafMismatch)
+            Err(ConfigurationInvalid::LeafMismatch)
         );
     }
 
@@ -953,7 +952,7 @@ mod tests {
         assert_ne!(hostile_commitment, honest);
         assert_eq!(
             verify_compilation(&exp, hostile_commitment),
-            Err(VerifyError::CommitmentMismatch),
+            Err(Refusal::CommitmentMismatch),
             "a matrix that does not implement this policy is rejected by recompilation"
         );
     }
@@ -997,38 +996,29 @@ mod tests {
         // Non-canonical scalar in a row.
         let mut bad = base.clone();
         bad.matrix.rows[0][0] = Fe([0xff; 32]);
-        assert_eq!(
-            bad.validate_structure(),
-            Err(ValidationError::NoncanonicalScalar)
-        );
+        assert_eq!(bad.validate_structure(), Err(Invalid::NoncanonicalScalar));
 
         // Inconsistent row length.
         let mut bad = base.clone();
         bad.matrix.rows[0].push(Fe::from_scalar(&Scalar::ONE));
-        assert_eq!(
-            bad.validate_structure(),
-            Err(ValidationError::DimensionMismatch)
-        );
+        assert_eq!(bad.validate_structure(), Err(Invalid::DimensionMismatch));
 
         // Target that is not e1.
         let mut bad = base.clone();
         bad.target[0] = Fe::from_scalar(&Scalar::from(5u64));
-        assert_eq!(bad.validate_structure(), Err(ValidationError::BadTarget));
+        assert_eq!(bad.validate_structure(), Err(Invalid::BadTarget));
 
         // Duplicate leaf.
         let mut bad = base.clone();
         bad.leaves[1] = bad.leaves[0].clone();
-        assert_eq!(
-            bad.validate_structure(),
-            Err(ValidationError::DuplicateLeaf)
-        );
+        assert_eq!(bad.validate_structure(), Err(Invalid::DuplicateLeaf));
 
         // Wrong version.
         let mut bad = base;
         bad.version = 99;
         assert_eq!(
             bad.validate_structure(),
-            Err(ValidationError::UnsupportedVersion(99))
+            Err(Invalid::UnsupportedVersion(99))
         );
     }
 }

@@ -64,7 +64,7 @@ use crate::gaccess::KeyShares;
 
 /// Errors aggregating a DKG.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DkgError {
+pub enum Failure {
     /// No contributions to aggregate.
     NoContributions,
     /// A contribution's commitment vector has the wrong dimension.
@@ -234,9 +234,9 @@ impl KeyShares for GroupKey {
 pub fn aggregate(
     compiled: &StructurallyValidatedCompiledPolicy,
     contributions: &[Contribution],
-) -> Result<GroupKey, DkgError> {
+) -> Result<GroupKey, Failure> {
     if contributions.is_empty() {
-        return Err(DkgError::NoContributions);
+        return Err(Failure::NoContributions);
     }
     let cols = compiled.cols();
     let leaves = compiled.leaves();
@@ -247,7 +247,7 @@ pub fn aggregate(
     let mut seen: BTreeSet<&LeafId> = BTreeSet::new();
     for c in contributions {
         if !seen.insert(&c.dealer) {
-            return Err(DkgError::DuplicateDealer {
+            return Err(Failure::DuplicateDealer {
                 dealer: c.dealer.clone(),
             });
         }
@@ -256,18 +256,18 @@ pub fn aggregate(
     // Validate every contribution before trusting any of it.
     for c in contributions {
         if c.commitments.len() != cols {
-            return Err(DkgError::WrongDimension {
+            return Err(Failure::WrongDimension {
                 dealer: c.dealer.clone(),
             });
         }
         if c.shares.len() != leaves.len() || leaves.iter().any(|l| !c.shares.contains_key(l)) {
-            return Err(DkgError::ShareSetMismatch {
+            return Err(Failure::ShareSetMismatch {
                 dealer: c.dealer.clone(),
             });
         }
         for leaf in leaves {
             if !verify_share(compiled, leaf, c) {
-                return Err(DkgError::InconsistentShare {
+                return Err(Failure::InconsistentShare {
                     dealer: c.dealer.clone(),
                     leaf: leaf.clone(),
                 });
@@ -285,7 +285,7 @@ pub fn aggregate(
     // group secret) — a rushing final contributor can force it. Signing would refuse
     // to verify under such a key; reject it here rather than mint an unusable one.
     if public == EdwardsPoint::identity() {
-        return Err(DkgError::DegenerateKey);
+        return Err(Failure::DegenerateKey);
     }
 
     // s_i = Σ_p s_i^(p), and the aggregate column commitments for S_i.
@@ -425,7 +425,7 @@ mod tests {
         assert!(!verify_share(&c, &victim, &contribs[1]));
         assert_eq!(
             aggregate(&c, &contribs),
-            Err(DkgError::InconsistentShare {
+            Err(Failure::InconsistentShare {
                 dealer: contribs[1].dealer.clone(),
                 leaf: victim,
             })
@@ -444,7 +444,7 @@ mod tests {
         contribs.push(replay);
         assert_eq!(
             aggregate(&c, &contribs),
-            Err(DkgError::DuplicateDealer {
+            Err(Failure::DuplicateDealer {
                 dealer: leaves[0].clone(),
             })
         );
@@ -471,7 +471,7 @@ mod tests {
         }
         assert_eq!(
             aggregate(&c, &[a, negated]),
-            Err(DkgError::DegenerateKey),
+            Err(Failure::DegenerateKey),
             "a zero group key must be refused"
         );
     }
@@ -500,7 +500,7 @@ mod tests {
         contribs[0].commitments.pop(); // drop a column commitment
         assert_eq!(
             aggregate(&c, &contribs),
-            Err(DkgError::WrongDimension {
+            Err(Failure::WrongDimension {
                 dealer: contribs[0].dealer.clone(),
             })
         );
@@ -509,6 +509,6 @@ mod tests {
     #[test]
     fn no_contributions_is_an_error() {
         let (c, _) = compiled(OwnershipPolicy::Key(prin(1)));
-        assert_eq!(aggregate(&c, &[]), Err(DkgError::NoContributions));
+        assert_eq!(aggregate(&c, &[]), Err(Failure::NoContributions));
     }
 }

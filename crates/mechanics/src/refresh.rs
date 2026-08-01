@@ -61,7 +61,7 @@ use crate::gdkg::GroupKey;
 
 /// Errors refreshing a group key.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RefreshError {
+pub enum Failure {
     /// A contribution's commitment vector is not `d` long.
     WrongDimension { dealer: LeafId },
     /// A contribution's `C_0` is not the identity — it does not share zero, so it
@@ -179,25 +179,25 @@ pub fn refresh(
     compiled: &StructurallyValidatedCompiledPolicy,
     old: &GroupKey,
     contributions: &[RefreshContribution],
-) -> Result<GroupKey, RefreshError> {
+) -> Result<GroupKey, Failure> {
     // Contributor identity is a set: a replayed zero-sharing must not be applied
     // twice, which would double its delta and re-randomize past the agreed epoch.
     let mut seen: BTreeSet<&LeafId> = BTreeSet::new();
     for c in contributions {
         if !seen.insert(&c.dealer) {
-            return Err(RefreshError::DuplicateDealer {
+            return Err(Failure::DuplicateDealer {
                 dealer: c.dealer.clone(),
             });
         }
     }
     for c in contributions {
         if c.commitments.len() != compiled.cols() {
-            return Err(RefreshError::WrongDimension {
+            return Err(Failure::WrongDimension {
                 dealer: c.dealer.clone(),
             });
         }
         if c.commitments[0] != EdwardsPoint::identity() {
-            return Err(RefreshError::NonZeroSecret {
+            return Err(Failure::NonZeroSecret {
                 dealer: c.dealer.clone(),
             });
         }
@@ -206,7 +206,7 @@ pub fn refresh(
                 .zip(c.deltas.get(leaf))
                 .is_some_and(|(expected, &d)| G * d == expected);
             if !ok {
-                return Err(RefreshError::InconsistentDelta {
+                return Err(Failure::InconsistentDelta {
                     dealer: c.dealer.clone(),
                     leaf: leaf.clone(),
                 });
@@ -217,21 +217,21 @@ pub fn refresh(
     let mut shares = BTreeMap::new();
     let mut leaf_commitments = BTreeMap::new();
     for leaf in compiled.leaves() {
-        let old_share = old.share(leaf).ok_or(RefreshError::BadPoint)?;
-        let old_commit = decompress(&old.leaf_commitment(leaf).ok_or(RefreshError::BadPoint)?)
-            .ok_or(RefreshError::BadPoint)?;
+        let old_share = old.share(leaf).ok_or(Failure::BadPoint)?;
+        let old_commit = decompress(&old.leaf_commitment(leaf).ok_or(Failure::BadPoint)?)
+            .ok_or(Failure::BadPoint)?;
         let mut s = old_share;
         let mut commit = old_commit;
         for c in contributions {
             s += c.deltas[leaf];
-            commit += delta_point(compiled, leaf, &c.commitments).ok_or(RefreshError::BadPoint)?;
+            commit += delta_point(compiled, leaf, &c.commitments).ok_or(Failure::BadPoint)?;
         }
         shares.insert(leaf.clone(), s);
         leaf_commitments.insert(leaf.clone(), commit.compress().to_bytes());
     }
 
     GroupKey::from_verified_parts(old.public_key(), shares, leaf_commitments)
-        .ok_or(RefreshError::BadPoint)
+        .ok_or(Failure::BadPoint)
 }
 
 /// One helper's masked contribution toward repairing a lost share.
@@ -391,7 +391,7 @@ mod tests {
         contribs.push(contribs[0].clone());
         assert_eq!(
             refresh(&c, &old, &contribs),
-            Err(RefreshError::DuplicateDealer {
+            Err(Failure::DuplicateDealer {
                 dealer: leaves[0].clone(),
             })
         );
@@ -420,7 +420,7 @@ mod tests {
         assert!(!verify_refresh(&c, &bad));
         assert_eq!(
             refresh(&c, &old, &[bad]),
-            Err(RefreshError::NonZeroSecret {
+            Err(Failure::NonZeroSecret {
                 dealer: leaves[0].clone()
             })
         );
@@ -441,7 +441,7 @@ mod tests {
         *contribs[0].deltas.get_mut(&victim).unwrap() += Scalar::ONE;
         assert_eq!(
             refresh(&c, &old, &contribs),
-            Err(RefreshError::InconsistentDelta {
+            Err(Failure::InconsistentDelta {
                 dealer: leaves[0].clone(),
                 leaf: victim,
             })

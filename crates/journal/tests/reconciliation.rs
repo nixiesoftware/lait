@@ -9,8 +9,8 @@
 use std::collections::BTreeMap;
 
 use journal::index::{
-    apply, build_index, node_hash, ChildRef, IndexChange, IndexEntry, IndexError, IndexKey,
-    NodeSink, NodeSource, Reconciliation, ReconciliationStep,
+    apply, build_index, node_hash, ChildRef, Failure, IndexChange, IndexEntry, IndexKey, NodeSink,
+    NodeSource, Reconciliation, ReconciliationStep,
 };
 
 #[derive(Default, Clone)]
@@ -225,10 +225,7 @@ fn a_node_that_is_not_what_was_asked_for_is_refused() {
     };
     let mut forged = BTreeMap::new();
     forged.insert(hashes[0], b"not the node you asked for".to_vec());
-    assert_eq!(
-        session.absorb(&local, &forged),
-        Err(IndexError::NonCanonical)
-    );
+    assert_eq!(session.absorb(&local, &forged), Err(Failure::NonCanonical));
 }
 
 #[test]
@@ -245,7 +242,7 @@ fn a_remote_cannot_make_the_descent_unbounded() {
                     .iter()
                     .filter_map(|h| remote.node(h).map(|b| (*h, b)))
                     .collect();
-                if session.absorb(&local, &supplied) == Err(IndexError::Bounds) {
+                if session.absorb(&local, &supplied) == Err(Failure::Bounds) {
                     refused = true;
                     break;
                 }

@@ -439,7 +439,7 @@ fn unchanged_effect(doc: Option<String>) -> Effect {
 /// the ONE deterministic Catalog key for this Space, or nothing (not yet
 /// initialized/adopted). Any other catalog-schema Body — wrong key, a
 /// duplicate semantic Catalog, an unrelated Catalog-shaped Body — is typed
-/// [`Rejection::WorldStateCorrupt`]; the World never selects among, merges,
+/// [`Rejection::StateCorrupt`]; the World never selects among, merges,
 /// repairs, or silently recreates Catalogs.
 fn checked_catalog_view(
     ctx: &Context<'_>,
@@ -453,9 +453,9 @@ fn checked_catalog_view(
             // Bound as a catalog but unreadable: a wrong-model/encoding Body,
             // or one carrying a collaborative type this build cannot project.
             // Either way not a missing catalog.
-            Err(_) => Err(Rejection::WorldStateCorrupt),
+            Err(_) => Err(Rejection::StateCorrupt),
         },
-        _ => Err(Rejection::WorldStateCorrupt),
+        _ => Err(Rejection::StateCorrupt),
     }
 }
 
@@ -728,7 +728,7 @@ fn transition_gate(
     // (and further ordinary edits) until `workflow set --expect-head`
     // resolves. A project with NO revision at all is corrupt catalog state.
     if !catalog.workflow_revisions.contains_key(project) {
-        return Err(Rejection::WorldStateCorrupt);
+        return Err(Rejection::StateCorrupt);
     }
     let revision = catalog.workflow_head(project).ok_or(Rejection::Conflict)?;
     let transition = revision
@@ -3509,7 +3509,7 @@ impl World for IssuesWorld {
                     .and_then(|m| m.get(&id))
                     .ok_or(Rejection::InvalidRequest)?;
                 let record: serde_json::Value =
-                    serde_json::from_slice(raw).map_err(|_| Rejection::WorldStateCorrupt)?;
+                    serde_json::from_slice(raw).map_err(|_| Rejection::StateCorrupt)?;
                 Ok(projection(serde_json::to_vec(&record).expect("attachment")))
             }
         }
@@ -3839,8 +3839,8 @@ mod comment_anchor_tests {
         fn read_collaborative_body(
             &self,
             _key: &replica::ids::BodyKey,
-        ) -> Result<replica::CollaborativeView, replica::ProjectionError> {
-            Err(replica::ProjectionError::NotCollaborative)
+        ) -> Result<replica::CollaborativeView, replica::projection::Failure> {
+            Err(replica::projection::Failure::NotCollaborative)
         }
         fn bodies_with_schema(
             &self,

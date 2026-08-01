@@ -185,7 +185,7 @@ fn ceremony_traffic_never_enlarges_the_ordinary_frontier() {
         .commit_batch(&[LedgerEffect::SpaceAuthority(ceremony_node).encode()], &[])
         .unwrap_err();
     assert!(
-        matches!(err, mechanics::ledger::LedgerError::InvalidRecord(_)),
+        matches!(err, mechanics::ledger::Failure::InvalidRecord(_)),
         "ceremony-domain bytes cannot enter the authority plane: {err:?}"
     );
     // A Space-event-domain terminal effect smuggled in as ceremony material:
@@ -202,7 +202,7 @@ fn ceremony_traffic_never_enlarges_the_ordinary_frontier() {
         .commit_ceremony_batch(&[CeremonyMaterial::new(terminal_node.clone()).encode()])
         .unwrap_err();
     assert!(
-        matches!(err, mechanics::ledger::LedgerError::InvalidRecord(_)),
+        matches!(err, mechanics::ledger::Failure::InvalidRecord(_)),
         "space-domain bytes cannot enter the ceremony class: {err:?}"
     );
     assert_eq!(ledger.journal_sequence(), seq_before, "no journal mutation");
@@ -307,10 +307,7 @@ fn ceremony_traffic_never_enlarges_the_ordinary_frontier() {
 
     // Compacting an unheld record refuses.
     let err = ledger.compact_ceremony(&["ff".repeat(32)]).unwrap_err();
-    assert!(matches!(
-        err,
-        mechanics::ledger::LedgerError::InvalidRecord(_)
-    ));
+    assert!(matches!(err, mechanics::ledger::Failure::InvalidRecord(_)));
 
     let _ = (
         AuthorityId::single(space::recovery_pub_of(&seed(40))),

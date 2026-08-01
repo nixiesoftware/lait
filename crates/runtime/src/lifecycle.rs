@@ -76,28 +76,51 @@ pub enum Failure {
     OrbitNotFound(SpaceId),
     ReplicaLocked(SpaceId),
     UnsupportedCoordinatesVersion,
-    Integrity(String),
+    Integrity(Integrity),
     NoStoreRoot,
     AlreadyExists(SpaceId),
     EpochOverflow,
-    Store(String),
+    Persistence(Persistence),
     StationDormant,
     PrincipalDenied,
     UnknownWorld(WorldId),
+}
+
+/// The durable invariant that failed validation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Integrity {
+    Coordinates,
+    Marker,
+    SpaceIdentity,
+    Epoch,
+    Replica,
+    NeighborRegistry,
+    StationKey,
+    RemovalConfirmation,
+}
+
+/// The local resource that prevented a lifecycle operation from completing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Persistence {
+    Entropy,
+    Io(std::io::ErrorKind),
+    Replica,
+    Cache,
+    InjectedFault,
 }
 
 /// A failure while a Station drains and returns its Orbit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Interruption {
     DrainTimeout,
-    Checkpoint(String),
-    Transport(String),
+    Checkpoint,
+    Transport,
 }
 
 /// Why an activation ended without an orderly vacate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExitReason {
-    TaskFailed(String),
+    TaskFailed,
     Vacate(Interruption),
 }
 
@@ -349,7 +372,7 @@ impl Runtime {
     pub fn create(&self) -> Result<Orbit, Failure> {
         let root = self.root()?;
         let mut digest = [0u8; 16];
-        getrandom::fill(&mut digest).map_err(|e| Failure::Store(e.to_string()))?;
+        getrandom::fill(&mut digest).map_err(|_| Failure::Persistence(Persistence::Entropy))?;
         let space = SpaceId::from_digest(digest);
         let store = OrbitStore::create(root, &space)?;
         let lock = store.acquire_lock()?;
@@ -379,7 +402,7 @@ impl Runtime {
             crate::coordinates::Invalid::UnsupportedVersion(_) => {
                 Failure::UnsupportedCoordinatesVersion
             }
-            other => Failure::Integrity(other.to_string()),
+            _ => Failure::Integrity(Integrity::Coordinates),
         })?;
         let store = match OrbitStore::open(root, &verified.space) {
             Ok(store) => store,
@@ -509,8 +532,8 @@ impl Orbit {
         // `wait` exit after an acknowledged commit loses nothing.
         let mut replica = replica::Replica::open_journaled(self.store.dir(), self.keys.clone())
             .map_err(|e| match e {
-                replica::commit::Failure::Integrity(m) => Failure::Integrity(m),
-                other => Failure::Store(other.to_string()),
+                replica::commit::Failure::Integrity(_) => Failure::Integrity(Integrity::Replica),
+                _ => Failure::Persistence(Persistence::Replica),
             })?;
         // Declare the registry's schemas so Convergence can classify remote
         // material as interpretable versus opaque.
@@ -537,7 +560,7 @@ impl Orbit {
         replica.set_supported(supported);
         let neighbor_registry = Arc::new(Mutex::new(
             crate::neighbors::NeighborRegistry::load(self.store.dir(), self.store.space())
-                .map_err(|e| Failure::Integrity(e.to_string()))?,
+                .map_err(|_| Failure::Integrity(Integrity::NeighborRegistry))?,
         ));
         let capacity = if options.observation_capacity == 0 {
             crate::session::DEFAULT_OBSERVATION_CAPACITY
@@ -555,7 +578,7 @@ impl Orbit {
                 self.store.dir().join(CACHE_DIR),
                 options.content.cache_quota_bytes,
             )
-            .map_err(|e| Failure::Store(e.to_string()))?,
+            .map_err(|_| Failure::Persistence(Persistence::Cache))?,
         );
         // Nothing was in flight before this Station existed, so every operation
         // lease and every staging slot on disk belongs to a run that is over.
@@ -563,10 +586,10 @@ impl Orbit {
         // keeps a killed transfer from holding its chunks resident forever.
         cache
             .sweep_leases(&std::collections::BTreeSet::new())
-            .map_err(|e| Failure::Store(e.to_string()))?;
+            .map_err(|_| Failure::Persistence(Persistence::Cache))?;
         cache
             .sweep_staging(&std::collections::BTreeSet::new())
-            .map_err(|e| Failure::Store(e.to_string()))?;
+            .map_err(|_| Failure::Persistence(Persistence::Cache))?;
         let content = Arc::new(crate::content_host::ContentHost::new(core.clone(), cache));
         // The oracle over this Station's own content host. Built here rather
         // than inside the plane because a `ContentPolicy` names the Space, the
@@ -619,10 +642,10 @@ impl Orbit {
             let station_seed = comms.station_seed;
             let space = station.store.space().clone();
             let space_bytes = <[u8; 29]>::try_from(space.as_str().as_bytes())
-                .map_err(|_| Failure::Integrity("space id shape".into()))?;
+                .map_err(|_| Failure::Integrity(Integrity::SpaceIdentity))?;
             let station_key = mechanics::crypto::device_from_seed(&comms.station_seed)
                 .key_bytes()
-                .ok_or_else(|| Failure::Integrity("station seed key".into()))?;
+                .ok_or(Failure::Integrity(Integrity::StationKey))?;
             let (tx, rx) = std::sync::mpsc::channel();
             let ctx = crate::contact_driver::DriverContext {
                 space,
@@ -656,7 +679,7 @@ impl Orbit {
             // the same plane gets `None` rather than a second reader.
             let local_station =
                 Key::from_device(&mechanics::crypto::device_from_seed(&station_seed))
-                    .ok_or_else(|| Failure::Integrity("station id".into()))?;
+                    .ok_or(Failure::Integrity(Integrity::StationKey))?;
             if options.planes.freight_enabled {
                 if let Some(queue) = plane_transport.take_session_queue(crate::plane::FREIGHT_ALPN)
                 {
@@ -770,9 +793,7 @@ impl Orbit {
     /// confirmation must name this exact Space.
     pub fn remove(self, confirmation: RemovalConfirmation) -> Result<(), Failure> {
         if confirmation.space() != self.store.space() {
-            return Err(Failure::Integrity(
-                "remove confirmation names a different Space".into(),
-            ));
+            return Err(Failure::Integrity(Integrity::RemovalConfirmation));
         }
         self.store.remove()?;
         // The lock file is gone with the directory; drop the guard.
@@ -1155,7 +1176,7 @@ impl Station {
     /// when no transport was activated.
     pub fn contact(&self, neighbor: &Key) -> Result<ContactOutcome, crate::contact::Failure> {
         if !self.alive.load(Ordering::SeqCst) {
-            return Err(crate::contact::Failure::Transfer("station dormant".into()));
+            return Err(crate::contact::Failure::Interrupted);
         }
         let driver = self.driver.lock().expect("driver slot");
         let Some(tx) = driver.as_ref() else {
@@ -1245,7 +1266,7 @@ impl Station {
         let mut reason = None;
         for h in handles {
             if h.join().is_err() {
-                reason = Some(ExitReason::TaskFailed("a tracked task panicked".into()));
+                reason = Some(ExitReason::TaskFailed);
             }
         }
         self.alive.store(false, Ordering::SeqCst);
@@ -1452,7 +1473,10 @@ mod tests {
         // A confirmation for a *different* Space is refused, and the store is
         // left intact (the confirmation binds removal to an exact Space).
         let wrong = RemovalConfirmation::for_space(SpaceId::from_digest([0xEE; 16]));
-        assert!(matches!(orbit.remove(wrong), Err(Failure::Integrity(_))));
+        assert!(matches!(
+            orbit.remove(wrong),
+            Err(Failure::Integrity(Integrity::RemovalConfirmation))
+        ));
         assert!(
             rt.acquire(&space).is_ok(),
             "store survived the refused remove"

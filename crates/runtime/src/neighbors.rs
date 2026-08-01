@@ -42,8 +42,10 @@ pub enum Failure {
     UnsupportedRegistryVersion(u8),
     /// The registry belongs to a different Space.
     ForeignRegistry,
+    /// The registry could not be encoded for persistence.
+    Encoding,
     /// An I/O failure reading or writing the registry.
-    Io(String),
+    Io(std::io::ErrorKind),
 }
 
 impl std::fmt::Display for Failure {
@@ -162,7 +164,7 @@ impl NeighborRegistry {
         let path = store_dir.join(NEIGHBORS_FILE);
         let entries = match std::fs::read(&path) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
-            Err(e) => return Err(Failure::Io(e.to_string())),
+            Err(e) => return Err(Failure::Io(e.kind())),
             Ok(bytes) => Self::decode_entries(&bytes, space)?,
         };
         Ok(Self {
@@ -228,10 +230,10 @@ impl NeighborRegistry {
             space: self.space.clone(),
             entries: self.entries.values().cloned().collect(),
         };
-        let bytes = postcard::to_stdvec(&file).map_err(|e| Failure::Io(e.to_string()))?;
+        let bytes = postcard::to_stdvec(&file).map_err(|_| Failure::Encoding)?;
         let tmp = self.path.with_extension("tmp");
-        std::fs::write(&tmp, &bytes).map_err(|e| Failure::Io(e.to_string()))?;
-        std::fs::rename(&tmp, &self.path).map_err(|e| Failure::Io(e.to_string()))?;
+        std::fs::write(&tmp, &bytes).map_err(|e| Failure::Io(e.kind()))?;
+        std::fs::rename(&tmp, &self.path).map_err(|e| Failure::Io(e.kind()))?;
         self.dirty = false;
         self.last_persist_ms = now_ms;
         Ok(())

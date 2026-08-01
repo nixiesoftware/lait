@@ -36,7 +36,7 @@ use crate::actor::{self, Directory, SignedEvent};
 use crate::genesis::Genesis;
 use crate::ids::{ActorId, DeviceId, SpaceId};
 use crate::space::SignedSpaceEvent;
-use journal::{JournalError, JournaledStore, ObjectRef};
+use journal::{Failure as JournalFailure, JournaledStore, ObjectRef};
 
 /// The replay-semantics version persisted in every checkpoint. Bumping it
 /// forces an explicit rebuild of all checkpoints from the signed effects.
@@ -49,7 +49,7 @@ const BATCH_CONTEXT: &str = "lait.authority-batch.v1";
 
 /// Why a ledger operation failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LedgerError {
+pub enum Failure {
     /// A batch record failed validation (undecodable, wrong Space binding,
     /// bad signature, unknown kind). The **whole batch** was refused; the
     /// durable ledger is unchanged.
@@ -60,28 +60,28 @@ pub enum LedgerError {
     /// A referenced frontier is malformed (non-canonical bytes, unknown
     /// version, unsorted or duplicate heads).
     MalformedFrontier(String),
-    /// The durable store failed (see [`JournalError`]).
-    Journal(JournalError),
+    /// The durable store failed (see [`JournalFailure`]).
+    Journal(JournalFailure),
     /// The durable ledger failed integrity validation on open.
     Corrupt(String),
 }
 
-impl std::fmt::Display for LedgerError {
+impl std::fmt::Display for Failure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            LedgerError::InvalidRecord(m) => write!(f, "invalid authority record: {m}"),
-            LedgerError::MissingHistory(m) => write!(f, "missing authority history: {m}"),
-            LedgerError::MalformedFrontier(m) => write!(f, "malformed authority frontier: {m}"),
-            LedgerError::Journal(e) => write!(f, "authority journal: {e}"),
-            LedgerError::Corrupt(m) => write!(f, "authority ledger corrupt: {m}"),
+            Failure::InvalidRecord(m) => write!(f, "invalid authority record: {m}"),
+            Failure::MissingHistory(m) => write!(f, "missing authority history: {m}"),
+            Failure::MalformedFrontier(m) => write!(f, "malformed authority frontier: {m}"),
+            Failure::Journal(e) => write!(f, "authority journal: {e}"),
+            Failure::Corrupt(m) => write!(f, "authority ledger corrupt: {m}"),
         }
     }
 }
-impl std::error::Error for LedgerError {}
+impl std::error::Error for Failure {}
 
-impl From<JournalError> for LedgerError {
-    fn from(e: JournalError) -> Self {
-        LedgerError::Journal(e)
+impl From<JournalFailure> for Failure {
+    fn from(e: JournalFailure) -> Self {
+        Failure::Journal(e)
     }
 }
 
@@ -111,11 +111,11 @@ impl LedgerEffect {
 
     /// Canonical decode: exact re-encode equality, so a non-canonical byte
     /// stream can never alias a canonical effect.
-    pub fn decode(bytes: &[u8]) -> Result<Self, LedgerError> {
+    pub fn decode(bytes: &[u8]) -> Result<Self, Failure> {
         let effect: LedgerEffect = postcard::from_bytes(bytes)
-            .map_err(|e| LedgerError::InvalidRecord(format!("undecodable effect: {e}")))?;
+            .map_err(|e| Failure::InvalidRecord(format!("undecodable effect: {e}")))?;
         if effect.encode() != bytes {
-            return Err(LedgerError::InvalidRecord(
+            return Err(Failure::InvalidRecord(
                 "non-canonical effect encoding".into(),
             ));
         }
@@ -199,17 +199,17 @@ impl CeremonyMaterial {
     }
 
     /// Canonical decode: tag check plus exact re-encode equality.
-    pub fn decode(bytes: &[u8]) -> Result<Self, LedgerError> {
+    pub fn decode(bytes: &[u8]) -> Result<Self, Failure> {
         let material: CeremonyMaterial = postcard::from_bytes(bytes)
-            .map_err(|e| LedgerError::InvalidRecord(format!("undecodable ceremony record: {e}")))?;
+            .map_err(|e| Failure::InvalidRecord(format!("undecodable ceremony record: {e}")))?;
         if material.tag != CEREMONY_MATERIAL_TAG {
-            return Err(LedgerError::InvalidRecord(format!(
+            return Err(Failure::InvalidRecord(format!(
                 "ceremony record carries material-class tag {} (expected {CEREMONY_MATERIAL_TAG})",
                 material.tag
             )));
         }
         if material.encode() != bytes {
-            return Err(LedgerError::InvalidRecord(
+            return Err(Failure::InvalidRecord(
                 "non-canonical ceremony record encoding".into(),
             ));
         }
@@ -269,9 +269,8 @@ impl CeremonyAuditRecord {
         postcard::to_stdvec(self).expect("encode ceremony audit")
     }
 
-    fn decode(bytes: &[u8]) -> Result<Self, LedgerError> {
-        postcard::from_bytes(bytes)
-            .map_err(|e| LedgerError::Corrupt(format!("ceremony audit: {e}")))
+    fn decode(bytes: &[u8]) -> Result<Self, Failure> {
+        postcard::from_bytes(bytes).map_err(|e| Failure::Corrupt(format!("ceremony audit: {e}")))
     }
 }
 
@@ -295,11 +294,11 @@ impl SealedKeyRecord {
     pub fn encode(&self) -> Vec<u8> {
         postcard::to_stdvec(self).expect("encode sealed key record")
     }
-    pub fn decode(bytes: &[u8]) -> Result<Self, LedgerError> {
+    pub fn decode(bytes: &[u8]) -> Result<Self, Failure> {
         let rec: SealedKeyRecord = postcard::from_bytes(bytes)
-            .map_err(|e| LedgerError::InvalidRecord(format!("undecodable sealed key: {e}")))?;
+            .map_err(|e| Failure::InvalidRecord(format!("undecodable sealed key: {e}")))?;
         if rec.encode() != bytes {
-            return Err(LedgerError::InvalidRecord(
+            return Err(Failure::InvalidRecord(
                 "non-canonical sealed key encoding".into(),
             ));
         }
@@ -325,11 +324,11 @@ impl FrontierBody {
         postcard::to_stdvec(self).expect("encode frontier")
     }
 
-    fn decode(bytes: &[u8]) -> Result<Self, LedgerError> {
-        let body: FrontierBody = postcard::from_bytes(bytes)
-            .map_err(|e| LedgerError::MalformedFrontier(format!("{e}")))?;
+    fn decode(bytes: &[u8]) -> Result<Self, Failure> {
+        let body: FrontierBody =
+            postcard::from_bytes(bytes).map_err(|e| Failure::MalformedFrontier(format!("{e}")))?;
         if body.version != 1 {
-            return Err(LedgerError::MalformedFrontier(format!(
+            return Err(Failure::MalformedFrontier(format!(
                 "unsupported frontier version {}",
                 body.version
             )));
@@ -340,13 +339,13 @@ impl FrontierBody {
             &body.space_authority_heads,
         ] {
             if list.windows(2).any(|w| w[0] >= w[1]) {
-                return Err(LedgerError::MalformedFrontier(
+                return Err(Failure::MalformedFrontier(
                     "frontier heads unsorted or duplicated".into(),
                 ));
             }
         }
         if body.encode() != bytes {
-            return Err(LedgerError::MalformedFrontier(
+            return Err(Failure::MalformedFrontier(
                 "non-canonical frontier encoding".into(),
             ));
         }
@@ -383,32 +382,32 @@ pub struct AuthorizationRequest<'a> {
 /// Why an authorization evaluation refused. A denial is a typed result and
 /// never a receipt.
 #[derive(Debug)]
-pub enum AuthorizeError {
+pub enum Refusal {
     /// The demand is unsatisfied, the device resolves to no actor at the
     /// frontier, or the resolved actor differs from the claimed one.
     Denied,
     /// The claimed implementation id is not active at the pinned frontier.
     ImplementationNotActive,
     /// The demand bytes are malformed/non-canonical.
-    Demand(crate::demand::DemandError),
+    Demand(crate::demand::Invalid),
     /// Frontier resolution failed (missing history, malformed frontier, or a
     /// durable failure).
-    Ledger(LedgerError),
+    Ledger(Failure),
 }
 
-impl std::fmt::Display for AuthorizeError {
+impl std::fmt::Display for Refusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            AuthorizeError::Denied => write!(f, "demand unsatisfied"),
-            AuthorizeError::ImplementationNotActive => {
+            Refusal::Denied => write!(f, "demand unsatisfied"),
+            Refusal::ImplementationNotActive => {
                 write!(f, "implementation not active at the pinned frontier")
             }
-            AuthorizeError::Demand(e) => write!(f, "{e}"),
-            AuthorizeError::Ledger(e) => write!(f, "{e}"),
+            Refusal::Demand(e) => write!(f, "{e}"),
+            Refusal::Ledger(e) => write!(f, "{e}"),
         }
     }
 }
-impl std::error::Error for AuthorizeError {}
+impl std::error::Error for Refusal {}
 
 /// The exact companion coordinates a remote receipt must bind.
 pub struct ReceiptExpectations<'a> {
@@ -423,26 +422,26 @@ pub struct ReceiptExpectations<'a> {
 
 /// Why remote receipt verification refused.
 #[derive(Debug)]
-pub enum VerifyError {
+pub enum Invalid {
     /// A bound field disagrees with the transaction (substitution).
     Binding(&'static str),
     /// The demand is not satisfied at the referenced frontier by the claimed
     /// actor (or the actor does not resolve there).
     Unsatisfied,
     /// Frontier resolution failed (missing history is retryable).
-    Ledger(LedgerError),
+    Ledger(Failure),
 }
 
-impl std::fmt::Display for VerifyError {
+impl std::fmt::Display for Invalid {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            VerifyError::Binding(field) => write!(f, "receipt binding mismatch: {field}"),
-            VerifyError::Unsatisfied => write!(f, "demand unsatisfied at the referenced frontier"),
-            VerifyError::Ledger(e) => write!(f, "{e}"),
+            Invalid::Binding(field) => write!(f, "receipt binding mismatch: {field}"),
+            Invalid::Unsatisfied => write!(f, "demand unsatisfied at the referenced frontier"),
+            Invalid::Ledger(e) => write!(f, "{e}"),
         }
     }
 }
-impl std::error::Error for VerifyError {}
+impl std::error::Error for Invalid {}
 
 /// The digest a checkpoint/receipt keys a frontier by.
 fn frontier_digest(space: &SpaceId, frontier_bytes: &[u8]) -> [u8; 32] {
@@ -470,8 +469,8 @@ impl BatchReceipt {
     pub fn encode(&self) -> Vec<u8> {
         postcard::to_stdvec(self).expect("encode batch receipt")
     }
-    fn decode(bytes: &[u8]) -> Result<Self, LedgerError> {
-        postcard::from_bytes(bytes).map_err(|e| LedgerError::Corrupt(format!("receipt: {e}")))
+    fn decode(bytes: &[u8]) -> Result<Self, Failure> {
+        postcard::from_bytes(bytes).map_err(|e| Failure::Corrupt(format!("receipt: {e}")))
     }
 }
 
@@ -601,11 +600,11 @@ const CHECKPOINT_CACHE_MAX: usize = 64;
 
 impl AuthorityLedger {
     /// Create a fresh ledger for a Space at `root` (fails if one exists).
-    pub fn create(root: impl Into<PathBuf>, genesis: Genesis) -> Result<Self, LedgerError> {
+    pub fn create(root: impl Into<PathBuf>, genesis: Genesis) -> Result<Self, Failure> {
         let root = root.into();
         let store = JournaledStore::open(&root)?;
         if store.manifest().is_some() {
-            return Err(LedgerError::Corrupt(
+            return Err(Failure::Corrupt(
                 "a ledger already exists at this root".into(),
             ));
         }
@@ -634,7 +633,7 @@ impl AuthorityLedger {
     /// Open an existing ledger, verifying the complete index. Every checkpoint
     /// whose semantics version is stale is discarded (rebuilt lazily from the
     /// signed effects — an explicit verified recovery, not a silent miss).
-    pub fn open(root: impl Into<PathBuf>) -> Result<Self, LedgerError> {
+    pub fn open(root: impl Into<PathBuf>) -> Result<Self, Failure> {
         Self::open_expecting_semantics(root, LEDGER_SEMANTICS_VERSION)
     }
 
@@ -645,15 +644,15 @@ impl AuthorityLedger {
     pub fn open_expecting_semantics(
         root: impl Into<PathBuf>,
         semantics: u16,
-    ) -> Result<Self, LedgerError> {
+    ) -> Result<Self, Failure> {
         let store = JournaledStore::open(root)?;
         let meta_bytes = store
             .caller_meta()?
-            .ok_or_else(|| LedgerError::Corrupt("no committed ledger at this root".into()))?;
+            .ok_or_else(|| Failure::Corrupt("no committed ledger at this root".into()))?;
         let meta: LedgerMeta = postcard::from_bytes(&meta_bytes)
-            .map_err(|e| LedgerError::Corrupt(format!("ledger meta: {e}")))?;
+            .map_err(|e| Failure::Corrupt(format!("ledger meta: {e}")))?;
         if meta.version != 1 {
-            return Err(LedgerError::Corrupt(format!(
+            return Err(Failure::Corrupt(format!(
                 "unsupported ledger meta version {}",
                 meta.version
             )));
@@ -663,16 +662,16 @@ impl AuthorityLedger {
         for (hash, kind, obj) in &meta.effects {
             let bytes = store.read_object(obj)?;
             let effect = LedgerEffect::decode(&bytes)
-                .map_err(|e| LedgerError::Corrupt(format!("stored effect {hash}: {e}")))?;
+                .map_err(|e| Failure::Corrupt(format!("stored effect {hash}: {e}")))?;
             if effect.hash() != *hash || effect.kind() != *kind {
-                return Err(LedgerError::Corrupt(format!(
+                return Err(Failure::Corrupt(format!(
                     "stored effect {hash} fails its index binding"
                 )));
             }
             // Stored effects were verified at ingest; re-verify on open so a
             // corrupted-but-decodable object cannot slip standing forward.
             if !effect.verify(&meta.genesis.space_id) {
-                return Err(LedgerError::Corrupt(format!(
+                return Err(Failure::Corrupt(format!(
                     "stored effect {hash} fails signature verification"
                 )));
             }
@@ -683,9 +682,9 @@ impl AuthorityLedger {
         for (key, obj) in &meta.sealed {
             let bytes = store.read_object(obj)?;
             let rec = SealedKeyRecord::decode(&bytes)
-                .map_err(|e| LedgerError::Corrupt(format!("sealed key: {e}")))?;
+                .map_err(|e| Failure::Corrupt(format!("sealed key: {e}")))?;
             if rec.epoch != key.0 || rec.device != key.1 {
-                return Err(LedgerError::Corrupt(
+                return Err(Failure::Corrupt(
                     "sealed key fails its index binding".into(),
                 ));
             }
@@ -697,9 +696,7 @@ impl AuthorityLedger {
             let bytes = store.read_object(obj)?;
             let receipt = BatchReceipt::decode(&bytes)?;
             if receipt.batch_digest != *digest {
-                return Err(LedgerError::Corrupt(
-                    "receipt fails its index binding".into(),
-                ));
+                return Err(Failure::Corrupt("receipt fails its index binding".into()));
             }
             receipts.insert(*digest, receipt);
             receipt_refs.insert(*digest, *obj);
@@ -709,7 +706,7 @@ impl AuthorityLedger {
             // Verify readability + semantics version now; decode lazily later.
             let bytes = store.read_object(obj)?;
             let cp: CheckpointObject = postcard::from_bytes(&bytes)
-                .map_err(|e| LedgerError::Corrupt(format!("checkpoint: {e}")))?;
+                .map_err(|e| Failure::Corrupt(format!("checkpoint: {e}")))?;
             if cp.semantics == semantics {
                 checkpoint_refs.insert(*digest, *obj);
             }
@@ -721,14 +718,14 @@ impl AuthorityLedger {
         for (seq, hash, obj) in &meta.ceremony {
             let bytes = store.read_object(obj)?;
             let material = CeremonyMaterial::decode(&bytes)
-                .map_err(|e| LedgerError::Corrupt(format!("stored ceremony record: {e}")))?;
+                .map_err(|e| Failure::Corrupt(format!("stored ceremony record: {e}")))?;
             if material.hash() != *hash {
-                return Err(LedgerError::Corrupt(format!(
+                return Err(Failure::Corrupt(format!(
                     "stored ceremony record {hash} fails its index binding"
                 )));
             }
             if !material.verify(&meta.genesis.space_id) {
-                return Err(LedgerError::Corrupt(format!(
+                return Err(Failure::Corrupt(format!(
                     "stored ceremony record {hash} fails ceremony-domain verification"
                 )));
             }
@@ -740,7 +737,7 @@ impl AuthorityLedger {
             .iter()
             .any(|(seq, _, _)| *seq >= meta.ceremony_next_seq)
         {
-            return Err(LedgerError::Corrupt(
+            return Err(Failure::Corrupt(
                 "ceremony log sequence exceeds its cursor".into(),
             ));
         }
@@ -753,7 +750,7 @@ impl AuthorityLedger {
                     .commitment
                     != *commitment
             {
-                return Err(LedgerError::Corrupt(
+                return Err(Failure::Corrupt(
                     "ceremony audit record fails its commitment binding".into(),
                 ));
             }
@@ -929,13 +926,13 @@ impl AuthorityLedger {
     /// and a batch with nothing new writes nothing. The ordinary authority
     /// frontier, checkpoints and receipts are untouched — ceremony material
     /// never enters them. Returns the resulting cursor.
-    pub fn commit_ceremony_batch(&mut self, records: &[Vec<u8>]) -> Result<u64, LedgerError> {
+    pub fn commit_ceremony_batch(&mut self, records: &[Vec<u8>]) -> Result<u64, Failure> {
         // 1. Validate the complete batch in memory.
         let mut fresh: Vec<(String, SignedSpaceEvent, Vec<u8>)> = Vec::new();
         for record in records {
             let material = CeremonyMaterial::decode(record)?;
             if !material.verify(&self.genesis.space_id) {
-                return Err(LedgerError::InvalidRecord(format!(
+                return Err(Failure::InvalidRecord(format!(
                     "ceremony record {} fails ceremony-domain verification for this Space",
                     material.hash()
                 )));
@@ -996,16 +993,16 @@ impl AuthorityLedger {
     /// packets are *safe* to drop (terminal, not active, not required for
     /// validation or custody evidence) is the caller's policy — see
     /// `ceremony::terminal_compactable`.
-    pub fn compact_ceremony(&mut self, drop_hashes: &[String]) -> Result<[u8; 32], LedgerError> {
+    pub fn compact_ceremony(&mut self, drop_hashes: &[String]) -> Result<[u8; 32], Failure> {
         for h in drop_hashes {
             if !self.ceremony_refs.contains_key(h) {
-                return Err(LedgerError::InvalidRecord(format!(
+                return Err(Failure::InvalidRecord(format!(
                     "compaction names an unheld ceremony record {h}"
                 )));
             }
         }
         if drop_hashes.is_empty() {
-            return Err(LedgerError::InvalidRecord(
+            return Err(Failure::InvalidRecord(
                 "compaction with an empty drop set".into(),
             ));
         }
@@ -1105,7 +1102,7 @@ impl AuthorityLedger {
     }
 
     /// The current materialized ACL state (at the current frontier).
-    pub fn acl_state(&mut self) -> Result<AclState, LedgerError> {
+    pub fn acl_state(&mut self) -> Result<AclState, Failure> {
         let frontier = self.frontier.clone();
         Ok(self.checkpoint_for(&frontier)?.replay.state)
     }
@@ -1117,9 +1114,9 @@ impl AuthorityLedger {
 
     /// Resolve the authority state **at a referenced historical frontier**.
     /// The frontier must be canonical and every named head locally held;
-    /// missing heads are [`LedgerError::MissingHistory`] (retryable), never a
+    /// missing heads are [`Failure::MissingHistory`] (retryable), never a
     /// fallback to current state.
-    pub fn state_at(&mut self, frontier_bytes: &[u8]) -> Result<StateView, LedgerError> {
+    pub fn state_at(&mut self, frontier_bytes: &[u8]) -> Result<StateView, Failure> {
         let cp = self.checkpoint_for(frontier_bytes)?;
         let plane_events: Vec<SignedEvent> = cp
             .actor_events
@@ -1151,17 +1148,14 @@ impl AuthorityLedger {
         &mut self,
         frontier_bytes: &[u8],
         world: &str,
-    ) -> Result<Option<[u8; 32]>, LedgerError> {
+    ) -> Result<Option<[u8; 32]>, Failure> {
         let cp = self.checkpoint_for(frontier_bytes)?;
         Ok(cp.replay.state.active_implementation(world))
     }
 
     /// The canonical commitment of the materialized checkpoint at a frontier —
     /// deterministic across every node holding the same effect closure.
-    pub fn checkpoint_commitment_at(
-        &mut self,
-        frontier_bytes: &[u8],
-    ) -> Result<[u8; 32], LedgerError> {
+    pub fn checkpoint_commitment_at(&mut self, frontier_bytes: &[u8]) -> Result<[u8; 32], Failure> {
         let cp = self.checkpoint_for(frontier_bytes)?;
         Ok(checkpoint_commitment(&cp))
     }
@@ -1176,35 +1170,35 @@ impl AuthorityLedger {
     pub fn authorize(
         &mut self,
         request: &AuthorizationRequest<'_>,
-    ) -> Result<crate::demand::AuthorizationReceipt, AuthorizeError> {
+    ) -> Result<crate::demand::AuthorizationReceipt, Refusal> {
         let demand = crate::demand::AuthorizationDemand::decode_canonical(request.demand)
-            .map_err(AuthorizeError::Demand)?;
+            .map_err(Refusal::Demand)?;
         let cp = self
             .checkpoint_for(request.authority_frontier)
-            .map_err(AuthorizeError::Ledger)?;
+            .map_err(Refusal::Ledger)?;
         // Resolve the device to its actor AT the pinned frontier.
         let view = self
             .state_at(request.authority_frontier)
-            .map_err(AuthorizeError::Ledger)?;
+            .map_err(Refusal::Ledger)?;
         let device = DeviceId::from_key_bytes(&request.device);
         let actor = view
             .plane
             .actor_of_device(&device)
             .cloned()
-            .ok_or(AuthorizeError::Denied)?;
+            .ok_or(Refusal::Denied)?;
         if actor.as_str() != request.actor {
-            return Err(AuthorizeError::Denied);
+            return Err(Refusal::Denied);
         }
         // The implementation id must be active at the pinned frontier.
         match cp.replay.state.active_implementation(request.world) {
             Some(active) if active == request.implementation_id => {}
-            _ => return Err(AuthorizeError::ImplementationNotActive),
+            _ => return Err(Refusal::ImplementationNotActive),
         }
         let witness = cp
             .replay
             .state
             .evaluate_demand(&actor, &demand)
-            .ok_or(AuthorizeError::Denied)?;
+            .ok_or(Refusal::Denied)?;
         Ok(crate::demand::AuthorizationReceipt {
             space: self.genesis.space_id.as_str().to_string(),
             world: request.world.to_string(),
@@ -1216,7 +1210,7 @@ impl AuthorityLedger {
             parent_manifest_root: request.parent_manifest_root,
             implementation_id: request.implementation_id,
             intent_digest: request.intent_digest,
-            demand_digest: demand.digest().map_err(AuthorizeError::Demand)?,
+            demand_digest: demand.digest().map_err(Refusal::Demand)?,
             effect_operations_digest: request.effect_operations_digest,
             body_transaction_core_digest: request.body_transaction_core_digest,
             decision: 1,
@@ -1232,76 +1226,72 @@ impl AuthorityLedger {
         &mut self,
         receipt: &crate::demand::AuthorizationReceipt,
         expectations: &ReceiptExpectations<'_>,
-    ) -> Result<(), VerifyError> {
+    ) -> Result<(), Invalid> {
         if receipt.space != self.genesis.space_id.as_str() {
-            return Err(VerifyError::Binding("space"));
+            return Err(Invalid::Binding("space"));
         }
         if receipt.decision != 1 {
-            return Err(VerifyError::Binding("decision"));
+            return Err(Invalid::Binding("decision"));
         }
         if receipt.device != *expectations.device {
-            return Err(VerifyError::Binding("device"));
+            return Err(Invalid::Binding("device"));
         }
         if receipt.authority_frontier != expectations.authority_frontier {
-            return Err(VerifyError::Binding("authority frontier"));
+            return Err(Invalid::Binding("authority frontier"));
         }
         if receipt.parent_manifest_root != *expectations.parent_manifest_root {
-            return Err(VerifyError::Binding("parent manifest root"));
+            return Err(Invalid::Binding("parent manifest root"));
         }
         if receipt.intent_digest != *expectations.intent_digest {
-            return Err(VerifyError::Binding("intent digest"));
+            return Err(Invalid::Binding("intent digest"));
         }
         if receipt.effect_operations_digest != *expectations.effect_operations_digest {
-            return Err(VerifyError::Binding("operations digest"));
+            return Err(Invalid::Binding("operations digest"));
         }
         if receipt.body_transaction_core_digest != *expectations.body_transaction_core_digest {
-            return Err(VerifyError::Binding("core digest"));
+            return Err(Invalid::Binding("core digest"));
         }
         let demand = crate::demand::AuthorizationDemand::decode_canonical(expectations.demand)
-            .map_err(|_| VerifyError::Binding("demand"))?;
-        if receipt.demand_digest
-            != demand
-                .digest()
-                .map_err(|_| VerifyError::Binding("demand"))?
-        {
-            return Err(VerifyError::Binding("demand digest"));
+            .map_err(|_| Invalid::Binding("demand"))?;
+        if receipt.demand_digest != demand.digest().map_err(|_| Invalid::Binding("demand"))? {
+            return Err(Invalid::Binding("demand digest"));
         }
         let cp = self
             .checkpoint_for(&receipt.authority_frontier)
-            .map_err(VerifyError::Ledger)?;
+            .map_err(Invalid::Ledger)?;
         if checkpoint_commitment(&cp) != receipt.authority_checkpoint_commitment {
-            return Err(VerifyError::Binding("checkpoint commitment"));
+            return Err(Invalid::Binding("checkpoint commitment"));
         }
         match cp.replay.state.active_implementation(&receipt.world) {
             Some(active) if active == receipt.implementation_id => {}
-            _ => return Err(VerifyError::Binding("implementation id")),
+            _ => return Err(Invalid::Binding("implementation id")),
         }
         let view = self
             .state_at(&receipt.authority_frontier)
-            .map_err(VerifyError::Ledger)?;
+            .map_err(Invalid::Ledger)?;
         let device = DeviceId::from_key_bytes(&receipt.device);
         let actor = view
             .plane
             .actor_of_device(&device)
             .cloned()
-            .ok_or(VerifyError::Unsatisfied)?;
+            .ok_or(Invalid::Unsatisfied)?;
         if actor.as_str() != receipt.actor {
-            return Err(VerifyError::Binding("actor"));
+            return Err(Invalid::Binding("actor"));
         }
         let witness = cp
             .replay
             .state
             .evaluate_demand(&actor, &demand)
-            .ok_or(VerifyError::Unsatisfied)?;
+            .ok_or(Invalid::Unsatisfied)?;
         if crate::demand::policy_evidence_digest(&witness) != receipt.policy_evidence_digest {
-            return Err(VerifyError::Binding("policy evidence digest"));
+            return Err(Invalid::Binding("policy evidence digest"));
         }
         Ok(())
     }
 
     /// The closure of a frontier: every effect hash reachable from its heads,
-    /// per plane. Missing heads or parents are [`LedgerError::MissingHistory`].
-    fn closure_of(&self, body: &FrontierBody) -> Result<BTreeSet<String>, LedgerError> {
+    /// per plane. Missing heads or parents are [`Failure::MissingHistory`].
+    fn closure_of(&self, body: &FrontierBody) -> Result<BTreeSet<String>, Failure> {
         let mut out: BTreeSet<String> = BTreeSet::new();
         let mut stack: Vec<&String> = Vec::new();
         for (heads, kind) in [
@@ -1313,12 +1303,12 @@ impl AuthorityLedger {
                 match self.effects.get(h) {
                     Some(e) if e.kind() == kind => stack.push(h),
                     Some(_) => {
-                        return Err(LedgerError::MalformedFrontier(format!(
+                        return Err(Failure::MalformedFrontier(format!(
                             "head {h} names an effect on another plane"
                         )))
                     }
                     None => {
-                        return Err(LedgerError::MissingHistory(format!(
+                        return Err(Failure::MissingHistory(format!(
                             "frontier head {h} is not held"
                         )))
                     }
@@ -1334,7 +1324,7 @@ impl AuthorityLedger {
                 match self.effects.get(p) {
                     Some(_) => stack.push(p),
                     None => {
-                        return Err(LedgerError::MissingHistory(format!(
+                        return Err(Failure::MissingHistory(format!(
                             "effect {h} names an unheld parent {p}"
                         )))
                     }
@@ -1345,7 +1335,7 @@ impl AuthorityLedger {
     }
 
     /// Load or build (and durably journal) the checkpoint for a frontier.
-    fn checkpoint_for(&mut self, frontier_bytes: &[u8]) -> Result<CheckpointObject, LedgerError> {
+    fn checkpoint_for(&mut self, frontier_bytes: &[u8]) -> Result<CheckpointObject, Failure> {
         let body = FrontierBody::decode(frontier_bytes)?;
         let digest = frontier_digest(&self.genesis.space_id, frontier_bytes);
         if let Some(cp) = self.checkpoint_cache.get(&digest) {
@@ -1354,7 +1344,7 @@ impl AuthorityLedger {
         if let Some(obj) = self.checkpoint_refs.get(&digest) {
             let bytes = self.store.read_object(obj)?;
             let cp: CheckpointObject = postcard::from_bytes(&bytes)
-                .map_err(|e| LedgerError::Corrupt(format!("checkpoint: {e}")))?;
+                .map_err(|e| Failure::Corrupt(format!("checkpoint: {e}")))?;
             if cp.semantics == self.semantics && cp.frontier == frontier_bytes {
                 self.cache_checkpoint(digest, cp.clone());
                 return Ok(cp);
@@ -1395,7 +1385,7 @@ impl AuthorityLedger {
         &mut self,
         body: &FrontierBody,
         frontier_bytes: &[u8],
-    ) -> Result<CheckpointObject, LedgerError> {
+    ) -> Result<CheckpointObject, Failure> {
         let closure = self.closure_of(body)?;
         let acl_ops: Vec<SignedOp> = closure
             .iter()
@@ -1473,7 +1463,7 @@ impl AuthorityLedger {
         .map(|(cp, _)| cp)
     }
 
-    fn persist_checkpoint(&mut self, cp: &CheckpointObject) -> Result<(), LedgerError> {
+    fn persist_checkpoint(&mut self, cp: &CheckpointObject) -> Result<(), Failure> {
         let digest = frontier_digest(&self.genesis.space_id, &cp.frontier);
         if self.checkpoint_refs.contains_key(&digest) {
             return Ok(());
@@ -1564,7 +1554,7 @@ impl AuthorityLedger {
         &mut self,
         effect_records: &[Vec<u8>],
         sealed_records: &[Vec<u8>],
-    ) -> Result<BatchReceipt, LedgerError> {
+    ) -> Result<BatchReceipt, Failure> {
         // Exact-replay idempotency (effects + sealed both bind the digest).
         let mut all_records: Vec<Vec<u8>> = Vec::new();
         all_records.extend(effect_records.iter().cloned());
@@ -1579,7 +1569,7 @@ impl AuthorityLedger {
         for record in effect_records {
             let effect = LedgerEffect::decode(record)?;
             if !effect.verify(&self.genesis.space_id) {
-                return Err(LedgerError::InvalidRecord(format!(
+                return Err(Failure::InvalidRecord(format!(
                     "effect {} fails signature verification for this Space",
                     effect.hash()
                 )));
@@ -1795,7 +1785,7 @@ mod tests {
         let before = ledger.frontier();
         let before_seq = ledger.journal_sequence();
         let err = ledger.commit_batch(&[good, bad], &[]).unwrap_err();
-        assert!(matches!(err, LedgerError::InvalidRecord(_)));
+        assert!(matches!(err, Failure::InvalidRecord(_)));
         assert_eq!(ledger.frontier(), before, "no partial adoption");
         assert_eq!(ledger.journal_sequence(), before_seq, "no journal write");
         // Restart: still unchanged (the *durable* store was untouched).
@@ -1933,7 +1923,7 @@ mod tests {
         }
         .encode();
         match ledger.state_at(&fake) {
-            Err(LedgerError::MissingHistory(_)) => {}
+            Err(Failure::MissingHistory(_)) => {}
             other => panic!("expected MissingHistory, got {other:?}"),
         }
         let founder_key = crate::crypto::device_from_seed(&fx.founder_seed)
@@ -1960,7 +1950,7 @@ mod tests {
             .encode(),
         ] {
             match ledger.state_at(&bytes) {
-                Err(LedgerError::MalformedFrontier(_)) => {}
+                Err(Failure::MalformedFrontier(_)) => {}
                 other => panic!("expected MalformedFrontier, got {other:?}"),
             }
         }
@@ -1973,7 +1963,7 @@ mod tests {
         };
         let bytes = postcard::to_stdvec(&unsorted).unwrap();
         match ledger.state_at(&bytes) {
-            Err(LedgerError::MalformedFrontier(_)) => {}
+            Err(Failure::MalformedFrontier(_)) => {}
             other => panic!("expected MalformedFrontier for unsorted, got {other:?}"),
         }
         unsorted.acl_heads.clear();

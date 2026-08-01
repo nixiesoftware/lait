@@ -102,7 +102,7 @@ fn resolve_orbit_selector(sel: &str) -> Result<std::path::PathBuf> {
                 .collect();
             // A selector that resolved to nothing: exit `2`, the same answer the
             // daemon already gives for a missing ref / user / label.
-            Err(crate::cli::CliError::not_found(format!(
+            Err(crate::cli::Failure::not_found(format!(
                 "no Orbit matches '{sel}' — known: {} (see `lait orbits`)",
                 if known.is_empty() {
                     "(none)".to_string()

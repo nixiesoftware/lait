@@ -42,7 +42,7 @@ pub enum Failure {
     /// Every candidate that offered them failed to deliver.
     Incomplete { missing: usize },
     /// Local storage refused.
-    Storage(String),
+    Storage,
     /// This operation is already in flight, or this Station is already moving
     /// as much as it will at once.
     Busy,

@@ -3,7 +3,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use world_bridge::{WorldCall, WorldCallAccess, WorldCallError, WorldCallErrorCode, WorldReply};
+use world_bridge::{CallFailure, CallFailureCode, WorldCall, WorldCallAccess, WorldReply};
 
 pub const OPERATION: &str = "issues.control";
 pub const VERSION: u32 = 1;
@@ -644,21 +644,21 @@ impl IssuesRequest {
     }
 }
 
-pub fn encode_call(request: &IssuesRequest) -> Result<WorldCall, WorldCallError> {
+pub fn encode_call(request: &IssuesRequest) -> Result<WorldCall, CallFailure> {
     let payload = serde_json::to_vec(request).map_err(|error| {
-        WorldCallError::new(
-            WorldCallErrorCode::InvalidCall,
+        CallFailure::new(
+            CallFailureCode::InvalidCall,
             format!("encode Issues request: {error}"),
         )
     })?;
     WorldCall::new(issues::contract::world_id(), OPERATION, VERSION, payload)
 }
 
-pub fn decode_call(call: &WorldCall) -> Result<IssuesRequest, WorldCallError> {
+pub fn decode_call(call: &WorldCall) -> Result<IssuesRequest, CallFailure> {
     validate_contract(call)?;
     serde_json::from_slice(call.payload()).map_err(|error| {
-        WorldCallError::new(
-            WorldCallErrorCode::InvalidCall,
+        CallFailure::new(
+            CallFailureCode::InvalidCall,
             format!("decode Issues request: {error}"),
         )
     })
@@ -669,27 +669,27 @@ pub fn encode_reply(call: &WorldCall, response: &Value) -> WorldReply {
         Ok(payload) => WorldReply::ok(call, payload),
         Err(error) => WorldReply::error(
             call,
-            WorldCallErrorCode::Internal,
+            CallFailureCode::Internal,
             format!("encode Issues response: {error}"),
         ),
     }
 }
 
-pub fn decode_reply(call: &WorldCall, reply: WorldReply) -> Result<Value, WorldCallError> {
+pub fn decode_reply(call: &WorldCall, reply: WorldReply) -> Result<Value, CallFailure> {
     reply.validate_for(call)?;
     let payload = reply.into_result()?;
     serde_json::from_slice(&payload).map_err(|error| {
-        WorldCallError::new(
-            WorldCallErrorCode::Internal,
+        CallFailure::new(
+            CallFailureCode::Internal,
             format!("decode Issues response: {error}"),
         )
     })
 }
 
-fn validate_contract(call: &WorldCall) -> Result<(), WorldCallError> {
+fn validate_contract(call: &WorldCall) -> Result<(), CallFailure> {
     if call.world() != &issues::contract::world_id() {
-        return Err(WorldCallError::new(
-            WorldCallErrorCode::InvalidCall,
+        return Err(CallFailure::new(
+            CallFailureCode::InvalidCall,
             format!(
                 "Issues call addresses World {}, not {}",
                 call.world(),
@@ -698,14 +698,14 @@ fn validate_contract(call: &WorldCall) -> Result<(), WorldCallError> {
         ));
     }
     if call.operation() != OPERATION {
-        return Err(WorldCallError::new(
-            WorldCallErrorCode::UnsupportedOperation,
+        return Err(CallFailure::new(
+            CallFailureCode::UnsupportedOperation,
             format!("unsupported Issues operation '{}'", call.operation()),
         ));
     }
     if call.version() != VERSION {
-        return Err(WorldCallError::new(
-            WorldCallErrorCode::UnsupportedVersion,
+        return Err(CallFailure::new(
+            CallFailureCode::UnsupportedVersion,
             format!(
                 "unsupported Issues protocol version {}; expected {VERSION}",
                 call.version()

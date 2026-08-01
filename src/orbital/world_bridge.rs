@@ -16,12 +16,12 @@ use std::sync::{Arc, Mutex};
 use mechanics::ids::DeviceId;
 use replica::ids::WorldId;
 use runtime::lifecycle::Failure;
-use runtime::registry::Refusal;
+use runtime::registry::Refusal as RegistrationRefusal;
 use runtime::{LocalIdentity, Registry, RuntimeBuilder, Session, Station, World};
 
 pub use ::world_bridge::{
-    WorldCall, WorldCallAccess, WorldCallContext, WorldCallError, WorldCallErrorCode,
-    WorldCallHandler, WorldNudge, WorldReply,
+    CallFailure, CallFailureCode, WorldCall, WorldCallAccess, WorldCallContext, WorldCallHandler,
+    WorldNudge, WorldReply,
 };
 
 /// One product package available to the application build.
@@ -116,15 +116,15 @@ impl WorldPackages {
         self.call_access(call).is_ok()
     }
 
-    pub fn call_access(&self, call: &WorldCall) -> Result<WorldCallAccess, WorldCallError> {
+    pub fn call_access(&self, call: &WorldCall) -> Result<WorldCallAccess, CallFailure> {
         let control = self
             .packages
             .iter()
             .find(|package| package.world_id() == call.world())
             .and_then(|package| package.control.as_deref())
             .ok_or_else(|| {
-                WorldCallError::new(
-                    WorldCallErrorCode::UnsupportedOperation,
+                CallFailure::new(
+                    CallFailureCode::UnsupportedOperation,
                     format!("World '{}' has no application call handler", call.world()),
                 )
             })?;
@@ -133,7 +133,7 @@ impl WorldPackages {
 
     /// Freeze the semantic registry and create one application bridge per
     /// registered World.
-    pub fn build(&self) -> Result<(Registry, WorldRouter), Refusal> {
+    pub fn build(&self) -> Result<(Registry, WorldRouter), RegistrationRefusal> {
         let mut runtime = RuntimeBuilder::new();
         let mut bridges = Vec::with_capacity(self.packages.len());
         for package in &self.packages {
@@ -338,12 +338,12 @@ mod tests {
     struct ProjectControl;
 
     impl WorldCallHandler for ProjectControl {
-        fn access(&self, call: &WorldCall) -> Result<WorldCallAccess, WorldCallError> {
+        fn access(&self, call: &WorldCall) -> Result<WorldCallAccess, CallFailure> {
             if call.operation() == "projects.control" && call.version() == 1 {
                 Ok(WorldCallAccess::Query)
             } else {
-                Err(WorldCallError::new(
-                    WorldCallErrorCode::UnsupportedOperation,
+                Err(CallFailure::new(
+                    CallFailureCode::UnsupportedOperation,
                     "unsupported project call",
                 ))
             }
@@ -428,7 +428,9 @@ mod tests {
             .unwrap_err();
         assert_eq!(
             err,
-            Refusal::DuplicateWorld(WorldId::parse("com.example.files").expect("test World id"))
+            RegistrationRefusal::DuplicateWorld(
+                WorldId::parse("com.example.files").expect("test World id")
+            )
         );
     }
 

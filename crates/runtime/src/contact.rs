@@ -41,7 +41,17 @@ pub use crate::contact_driver::Authority;
 pub enum Failure {
     UnknownNeighbor,
     Unreachable,
-    Transfer(String),
+    Capacity,
+    Entropy,
+    Transport,
+    Admission,
+    Protocol,
+    Signing,
+    Holdings,
+    Convergence,
+    Deadline,
+    Interrupted,
+    PeerAborted(u16),
 }
 
 impl std::fmt::Display for Failure {

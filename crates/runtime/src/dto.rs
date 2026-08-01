@@ -30,7 +30,7 @@ pub const MAX_DTO_PAYLOAD: usize = 1024 * 1024;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Invalid {
     /// The bytes were not the expected JSON shape (or carried unknown fields).
-    Malformed(String),
+    Malformed,
     /// `protocolVersion` was not [`DTO_PROTOCOL_VERSION`].
     UnsupportedProtocol(u32),
     /// A bounded string exceeded [`MAX_DTO_STRING`].
@@ -112,8 +112,7 @@ macro_rules! json_codec {
             /// Decode from JSON, rejecting unknown fields, foreign protocol
             /// versions, over-long strings, and malformed/over-long encodings.
             pub fn from_json(bytes: &[u8]) -> Result<Self, Invalid> {
-                let dto: Self =
-                    serde_json::from_slice(bytes).map_err(|e| Invalid::Malformed(e.to_string()))?;
+                let dto: Self = serde_json::from_slice(bytes).map_err(|_| Invalid::Malformed)?;
                 dto.validate()?;
                 Ok(dto)
             }
@@ -351,7 +350,7 @@ impl ErrorDto {
             E::Denied => "denied",
             E::Conflict => "conflict",
             E::LimitExceeded => "limit-exceeded",
-            E::WorldStateCorrupt => "world-state-corrupt",
+            E::StateCorrupt => "world-state-corrupt",
             E::ContractViolation => "contract-violation",
         }
     }
@@ -478,7 +477,7 @@ mod tests {
         let json = br#"{"protocolVersion":1,"world":"w.x","schema":"s","schemaVersion":1,"requestIdHex":"0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a","payloadB64":"","surprise":true}"#;
         assert!(matches!(
             SubmitRequestDto::from_json(json),
-            Err(Invalid::Malformed(_))
+            Err(Invalid::Malformed)
         ));
     }
 
@@ -487,7 +486,7 @@ mod tests {
         let json = br#"{"protocolVersion":1,"world":"w.x","schema":"s","payloadB64":""}"#;
         assert!(matches!(
             SubmitRequestDto::from_json(json),
-            Err(Invalid::Malformed(_))
+            Err(Invalid::Malformed)
         ));
     }
 

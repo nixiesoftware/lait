@@ -10,7 +10,7 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use journal::cache::{CacheError, Lease, ResidentCache};
+use journal::cache::{Failure, Lease, ResidentCache};
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -60,7 +60,7 @@ fn a_slot_returns_exactly_what_was_put_in_it() {
     let mut raw = std::fs::read(&path).unwrap();
     *raw.last_mut().unwrap() ^= 0xFF;
     std::fs::write(&path, &raw).unwrap();
-    assert_eq!(cache.read(&slot), Err(CacheError::Corrupt));
+    assert_eq!(cache.read(&slot), Err(Failure::Corrupt));
     assert!(!cache.is_resident(&slot), "corrupt bytes are dropped");
 }
 
@@ -69,7 +69,7 @@ fn an_absent_entry_is_not_resident_rather_than_an_integrity_failure() {
     // The whole reason this is a separate store. A missing required object
     // takes the journal down; a missing chunk is a fetch.
     let cache = ResidentCache::open(temp_root("absent"), 1 << 20).unwrap();
-    assert_eq!(cache.read(&[1u8; 32]), Err(CacheError::NotResident));
+    assert_eq!(cache.read(&[1u8; 32]), Err(Failure::NotResident));
 }
 
 #[test]
@@ -81,10 +81,10 @@ fn corruption_drops_the_entry_and_leaves_it_refetchable() {
     cache.install(&entry, &bytes, b"proof").unwrap();
 
     std::fs::write(root.join("chunks").join(hex(&entry)), b"tampered!!").unwrap();
-    assert_eq!(cache.read(&entry), Err(CacheError::Corrupt));
+    assert_eq!(cache.read(&entry), Err(Failure::Corrupt));
     // Dropped, so the next read is an honest miss rather than a repeated lie.
     assert!(!cache.is_resident(&entry));
-    assert_eq!(cache.read(&entry), Err(CacheError::NotResident));
+    assert_eq!(cache.read(&entry), Err(Failure::NotResident));
 
     // And it can simply be installed again.
     cache.install(&entry, &bytes, b"proof").unwrap();
@@ -112,7 +112,7 @@ fn an_entry_cannot_be_half_present() {
     // A truncated entry file is corrupt rather than half-resident, and reading
     // it drops it so the next attempt refetches.
     std::fs::write(root.join("chunks").join(hex(&entry)), b"	").unwrap();
-    assert_eq!(cache.read(&entry), Err(CacheError::Corrupt));
+    assert_eq!(cache.read(&entry), Err(Failure::Corrupt));
     assert!(!cache.is_resident(&entry));
 }
 
@@ -247,7 +247,7 @@ fn staged_bytes_are_never_advertised_and_resume_from_where_they_are() {
     // A resumed transfer proves where it is rather than being trusted about it.
     assert_eq!(
         cache.append_staged(&op, 0, 3, b"nope"),
-        Err(CacheError::Corrupt)
+        Err(Failure::Corrupt)
     );
 
     // Partial bytes are not an entry: nothing about them is resident.
@@ -294,7 +294,7 @@ fn a_range_read_returns_only_what_was_asked_for() {
     assert_eq!(cache.read_range(&entry, 8, 10).unwrap(), b"89");
     assert_eq!(
         cache.read_range(&[0u8; 32], 0, 1),
-        Err(CacheError::NotResident)
+        Err(Failure::NotResident)
     );
 }
 
@@ -383,14 +383,11 @@ fn an_unreadable_tag_directory_stops_the_sweep_rather_than_freeing_everything() 
 
     std::fs::remove_dir_all(root.join("tags")).unwrap();
     assert!(
-        matches!(cache.sweep(), Err(CacheError::Durability(_))),
+        matches!(cache.sweep(), Err(Failure::Durability(_))),
         "a sweep that cannot read the holds must refuse"
     );
     assert!(cache.is_resident(&entry), "and must not have deleted");
-    assert!(matches!(
-        cache.evict(&entry),
-        Err(CacheError::Durability(_))
-    ));
+    assert!(matches!(cache.evict(&entry), Err(Failure::Durability(_))));
     assert!(cache.is_resident(&entry));
 }
 
@@ -410,7 +407,7 @@ fn a_transient_read_failure_does_not_delete_the_entry() {
     let path = root.join("chunks").join(hex(&entry));
     std::fs::remove_file(&path).unwrap();
     std::fs::create_dir(&path).unwrap();
-    assert!(matches!(cache.read(&entry), Err(CacheError::Durability(_))));
+    assert!(matches!(cache.read(&entry), Err(Failure::Durability(_))));
     assert!(path.exists(), "a transient failure must not delete");
 }
 

@@ -30,11 +30,11 @@ impl runtime::BodyReader for StubReader {
     fn read_collaborative_body(
         &self,
         key: &replica::ids::BodyKey,
-    ) -> Result<replica::CollaborativeView, replica::ProjectionError> {
+    ) -> Result<replica::CollaborativeView, replica::projection::Failure> {
         self.views
             .get(key)
             .cloned()
-            .ok_or(replica::ProjectionError::NotCollaborative)
+            .ok_or(replica::projection::Failure::NotCollaborative)
     }
     fn body_version(&self, _key: &replica::ids::BodyKey) -> Option<replica::Version> {
         None

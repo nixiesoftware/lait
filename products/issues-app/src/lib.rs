@@ -21,7 +21,7 @@ pub use protocol::{
 pub use router::{IssueRouter, IssuesCallHandler, RouterFacts};
 
 /// The complete client-facing package mounted by the navigation shell.
-pub fn package() -> Result<world_interface::WorldClientPackage, world_interface::InterfaceError> {
+pub fn package() -> Result<world_interface::WorldClientPackage, world_interface::Failure> {
     world_interface::WorldClientPackage::new(
         issues::contract::world_id(),
         world_interface::CliMount::new("issues", cli::command, cli::parse),
@@ -41,7 +41,6 @@ pub fn package() -> Result<world_interface::WorldClientPackage, world_interface:
 fn decode_client_reply(
     call: &world_bridge::WorldCall,
     reply: world_bridge::WorldReply,
-) -> Result<serde_json::Value, world_interface::InterfaceError> {
-    decode_reply(call, reply)
-        .map_err(|error| world_interface::InterfaceError::new(error.to_string()))
+) -> Result<serde_json::Value, world_interface::Failure> {
+    decode_reply(call, reply).map_err(|error| world_interface::Failure::new(error.to_string()))
 }

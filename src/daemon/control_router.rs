@@ -21,7 +21,7 @@ use tokio::sync::{broadcast, Mutex, RwLock};
 
 use crate::control::{self, ControlRoute, Doorbell, Request, Response};
 use crate::orbital::space_bridge::{StationHostRunner, StationHostStop};
-use crate::orbital::{WorldCall, WorldCallErrorCode, WorldPackages, WorldReply};
+use crate::orbital::{CallFailureCode, WorldCall, WorldPackages, WorldReply};
 use crate::transport::{DefaultFactory, TransportFactory};
 
 use super::transport_hub::TransportHubFactory;
@@ -623,7 +623,7 @@ impl ControlRouter {
                 let Some(bridge) = bridge.upgrade() else {
                     return Ok(WorldReply::error(
                         call,
-                        WorldCallErrorCode::Unavailable,
+                        CallFailureCode::Unavailable,
                         "owned StationHost is draining",
                     ));
                 };
@@ -888,7 +888,7 @@ mod tests {
         let error = reply.into_result().unwrap_err();
         assert_eq!(
             error.code,
-            crate::orbital::WorldCallErrorCode::UnsupportedVersion
+            crate::orbital::CallFailureCode::UnsupportedVersion
         );
         assert!(router.occupancy.placements().await.is_empty());
         drop(

@@ -22,7 +22,7 @@ use crate::control::{
     self, ClientRequest, ControlRoute, Request, Response, WorldClientRequest,
     CONTROL_PROTOCOL_VERSION,
 };
-use crate::orbital::{WorldCall, WorldCallErrorCode, WorldPackages, WorldReply};
+use crate::orbital::{CallFailureCode, WorldCall, WorldPackages, WorldReply};
 #[cfg(test)]
 use crate::transport::TransportFactory;
 
@@ -393,7 +393,7 @@ impl LaitDaemon {
                 .call_world(route, &call, act_as.as_deref())
                 .await
                 .unwrap_or_else(|error| {
-                    WorldReply::error(&call, WorldCallErrorCode::InvalidCall, format!("{error:#}"))
+                    WorldReply::error(&call, CallFailureCode::InvalidCall, format!("{error:#}"))
                 });
             let _ = write_line(&mut write_half, &reply).await;
             return;

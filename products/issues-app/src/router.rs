@@ -14,8 +14,8 @@ use runtime::session::{Conflict as SessionConflict, Failure as SessionFailure};
 use runtime::{Intent, Query, Rejection, RequestId, Session};
 use serde::de::DeserializeOwned;
 use world_bridge::{
-    WorldCall, WorldCallAccess, WorldCallContext, WorldCallError, WorldCallErrorCode,
-    WorldCallHandler, WorldNudge, WorldReply,
+    CallFailure, CallFailureCode, WorldCall, WorldCallAccess, WorldCallContext, WorldCallHandler,
+    WorldNudge, WorldReply,
 };
 
 use crate::{
@@ -52,7 +52,7 @@ impl IssuesCallHandler {
     pub const OPERATION: &'static str = OPERATION;
     pub const VERSION: u32 = VERSION;
 
-    fn decode_request(call: &WorldCall) -> Result<Request, WorldCallError> {
+    fn decode_request(call: &WorldCall) -> Result<Request, CallFailure> {
         decode_call(call)
     }
 
@@ -91,7 +91,7 @@ impl IssuesCallHandler {
 }
 
 impl WorldCallHandler for IssuesCallHandler {
-    fn access(&self, call: &WorldCall) -> Result<WorldCallAccess, WorldCallError> {
+    fn access(&self, call: &WorldCall) -> Result<WorldCallAccess, CallFailure> {
         let request = Self::decode_request(call)?;
         Ok(request.access())
     }
@@ -106,7 +106,7 @@ impl WorldCallHandler for IssuesCallHandler {
             Ok(response) => encode_reply(call, &response),
             Err(error) => WorldReply::error(
                 call,
-                WorldCallErrorCode::Internal,
+                CallFailureCode::Internal,
                 format!("encode Issues response: {error}"),
             ),
         }
@@ -531,7 +531,7 @@ impl<'a> IssueRouter<'a> {
                 Response::err("internal error")
             }
             SessionFailure::Reset => Response::err("state reset — re-query"),
-            SessionFailure::Rejected(Rejection::WorldStateCorrupt) => Response::err(
+            SessionFailure::Rejected(Rejection::StateCorrupt) => Response::err(
                 "the space's issue catalog is corrupt (missing, duplicated, or mis-bound) — \
                  this store needs operator attention; nothing was changed",
             ),
@@ -634,10 +634,10 @@ impl<'a> IssueRouter<'a> {
             Request::AccessPlan { role, project } => {
                 let plan = crate::host::plan_access_grant(self.session, &role, project.as_deref())
                     .map_err(|error| match error {
-                        crate::host::AccessPlanError::NotFound(message) => {
+                        crate::host::AccessRefusal::NotFound(message) => {
                             Response::not_found(message)
                         }
-                        crate::host::AccessPlanError::Invalid(message) => Response::err(message),
+                        crate::host::AccessRefusal::Invalid(message) => Response::err(message),
                     })?;
                 Ok((
                     Response::AccessPlan {

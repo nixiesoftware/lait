@@ -66,7 +66,7 @@ pub enum CausalRelation {
 
 /// Why a causal operation failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CausalError {
+pub enum Invalid {
     /// No collaborative Body at this key.
     NotCollaborative,
     /// A version, artifact, or path exceeded a protocol bound.
@@ -87,10 +87,10 @@ pub enum CausalError {
     Engine(String),
 }
 
-impl std::fmt::Display for CausalError {
+impl std::fmt::Display for Invalid {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            CausalError::BeforeRetentionFrontier { .. } => write!(
+            Invalid::BeforeRetentionFrontier { .. } => write!(
                 f,
                 "this work predates the Body's retention frontier; rebuild from \
                  its archive or re-bootstrap"
@@ -99,7 +99,7 @@ impl std::fmt::Display for CausalError {
         }
     }
 }
-impl std::error::Error for CausalError {}
+impl std::error::Error for Invalid {}
 
 impl Version {
     pub(crate) fn from_frontiers(frontiers: &Frontiers) -> Self {
@@ -142,25 +142,25 @@ impl Version {
         postcard::to_stdvec(self).expect("postcard Engine version")
     }
 
-    pub fn decode_canonical(bytes: &[u8]) -> Result<Self, CausalError> {
-        let version: Self = postcard::from_bytes(bytes).map_err(|_| CausalError::NonCanonical)?;
+    pub fn decode_canonical(bytes: &[u8]) -> Result<Self, Invalid> {
+        let version: Self = postcard::from_bytes(bytes).map_err(|_| Invalid::NonCanonical)?;
         version.validate()?;
         if version.encode() != bytes {
-            return Err(CausalError::NonCanonical);
+            return Err(Invalid::NonCanonical);
         }
         Ok(version)
     }
 
-    pub fn validate(&self) -> Result<(), CausalError> {
+    pub fn validate(&self) -> Result<(), Invalid> {
         if self.format_version != CAUSAL_FORMAT_VERSION {
-            return Err(CausalError::NonCanonical);
+            return Err(Invalid::NonCanonical);
         }
         if self.heads.len() > MAX_HEADS {
-            return Err(CausalError::Bounds);
+            return Err(Invalid::Bounds);
         }
         for w in self.heads.windows(2) {
             if w[0] >= w[1] {
-                return Err(CausalError::NonCanonical);
+                return Err(Invalid::NonCanonical);
             }
         }
         Ok(())
@@ -211,10 +211,10 @@ impl Artifact {
         postcard::to_stdvec(self).expect("postcard Engine artifact")
     }
 
-    pub fn decode_canonical(bytes: &[u8]) -> Result<Self, CausalError> {
-        let artifact: Self = postcard::from_bytes(bytes).map_err(|_| CausalError::NonCanonical)?;
+    pub fn decode_canonical(bytes: &[u8]) -> Result<Self, Invalid> {
+        let artifact: Self = postcard::from_bytes(bytes).map_err(|_| Invalid::NonCanonical)?;
         if artifact.encode() != bytes {
-            return Err(CausalError::NonCanonical);
+            return Err(Invalid::NonCanonical);
         }
         Ok(artifact)
     }
@@ -307,11 +307,11 @@ impl Anchor {
         postcard::to_stdvec(self).expect("postcard Engine anchor")
     }
 
-    pub fn decode_canonical(bytes: &[u8]) -> Result<Self, CausalError> {
-        let anchor: Self = postcard::from_bytes(bytes).map_err(|_| CausalError::NonCanonical)?;
+    pub fn decode_canonical(bytes: &[u8]) -> Result<Self, Invalid> {
+        let anchor: Self = postcard::from_bytes(bytes).map_err(|_| Invalid::NonCanonical)?;
         anchor.taken_at.validate()?;
         if anchor.encode() != bytes {
-            return Err(CausalError::NonCanonical);
+            return Err(Invalid::NonCanonical);
         }
         Ok(anchor)
     }
@@ -408,21 +408,21 @@ impl Material {
         postcard::to_stdvec(self).expect("postcard body material")
     }
 
-    pub fn decode_canonical(bytes: &[u8]) -> Result<Self, CausalError> {
-        let material: Self = postcard::from_bytes(bytes).map_err(|_| CausalError::NonCanonical)?;
+    pub fn decode_canonical(bytes: &[u8]) -> Result<Self, Invalid> {
+        let material: Self = postcard::from_bytes(bytes).map_err(|_| Invalid::NonCanonical)?;
         material.validate()?;
         if material.encode() != bytes {
-            return Err(CausalError::NonCanonical);
+            return Err(Invalid::NonCanonical);
         }
         Ok(material)
     }
 
-    pub fn validate(&self) -> Result<(), CausalError> {
+    pub fn validate(&self) -> Result<(), Invalid> {
         if self.format_version != CAUSAL_FORMAT_VERSION {
-            return Err(CausalError::NonCanonical);
+            return Err(Invalid::NonCanonical);
         }
         if self.delta_tail.len() > CheckpointPolicy::default().max_tail_deltas {
-            return Err(CausalError::Bounds);
+            return Err(Invalid::Bounds);
         }
         self.version.validate()
     }

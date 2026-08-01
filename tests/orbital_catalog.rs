@@ -1,7 +1,7 @@
 //! Deterministic Catalog formation gates (plan M4): the crash-resumable
 //! `InitializeTracker` bootstrap record, exact signed-action replay at every
 //! injected fault, deterministic Catalog identity, and typed
-//! `WorldStateCorrupt` for missing/misplaced/duplicated Catalog state.
+//! `StateCorrupt` for missing/misplaced/duplicated Catalog state.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -130,7 +130,7 @@ fn the_catalog_identity_is_deterministic_per_space() {
     let _ = std::fs::remove_dir_all(&home_b);
 }
 
-// ---- WorldStateCorrupt: missing / misplaced / duplicated Catalog ----------
+// ---- StateCorrupt: missing / misplaced / duplicated Catalog ----------
 
 /// A stub committed snapshot: collaborative views by key, plus the
 /// catalog-schema binding set the World enumerates.
@@ -147,11 +147,11 @@ impl runtime::BodyReader for StubReader {
     fn read_collaborative_body(
         &self,
         key: &replica::ids::BodyKey,
-    ) -> Result<replica::CollaborativeView, replica::ProjectionError> {
+    ) -> Result<replica::CollaborativeView, replica::projection::Failure> {
         self.views
             .get(key)
             .cloned()
-            .ok_or(replica::ProjectionError::NotCollaborative)
+            .ok_or(replica::projection::Failure::NotCollaborative)
     }
     fn body_version(&self, _key: &replica::ids::BodyKey) -> Option<replica::Version> {
         None
@@ -232,10 +232,7 @@ fn misplaced_and_duplicate_catalogs_are_typed_corrupt_never_repaired() {
         .insert(wrong.clone(), replica::CollaborativeView::default());
     let ctx = Context::with_reads(&facts, &reader, [0u8; 32]);
     assert!(
-        matches!(
-            snapshot_query(&world, &ctx),
-            Err(Rejection::WorldStateCorrupt)
-        ),
+        matches!(snapshot_query(&world, &ctx), Err(Rejection::StateCorrupt)),
         "a misplaced catalog is never chosen"
     );
 
@@ -252,10 +249,7 @@ fn misplaced_and_duplicate_catalogs_are_typed_corrupt_never_repaired() {
         .insert(wrong, replica::CollaborativeView::default());
     let ctx = Context::with_reads(&facts, &reader, [0u8; 32]);
     assert!(
-        matches!(
-            snapshot_query(&world, &ctx),
-            Err(Rejection::WorldStateCorrupt)
-        ),
+        matches!(snapshot_query(&world, &ctx), Err(Rejection::StateCorrupt)),
         "a duplicate catalog is never merged"
     );
 
@@ -267,10 +261,7 @@ fn misplaced_and_duplicate_catalogs_are_typed_corrupt_never_repaired() {
     };
     let ctx = Context::with_reads(&facts, &reader, [0u8; 32]);
     assert!(
-        matches!(
-            snapshot_query(&world, &ctx),
-            Err(Rejection::WorldStateCorrupt)
-        ),
+        matches!(snapshot_query(&world, &ctx), Err(Rejection::StateCorrupt)),
         "a wrong-model catalog is corrupt"
     );
 

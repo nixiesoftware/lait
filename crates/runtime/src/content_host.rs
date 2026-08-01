@@ -46,9 +46,19 @@ pub enum Failure {
     /// The content or the request exceeded a bound.
     Bounds,
     /// The store or cache refused.
-    Storage(String),
+    Storage(Storage),
     /// The material is here but did not verify or open.
     Invalid(ContentInvalid),
+}
+
+/// The local resource that prevented a content operation from completing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Storage {
+    KeyUnavailable,
+    Input(std::io::ErrorKind),
+    Replica,
+    Cache,
+    Encoding,
 }
 
 impl std::fmt::Display for Failure {
@@ -216,7 +226,7 @@ impl ContentHost {
         let key = policy
             .keys
             .sealing_key()
-            .ok_or_else(|| Failure::Storage("no authorized sealing key".into()))?;
+            .ok_or(Failure::Storage(Storage::KeyUnavailable))?;
 
         let mut ingest = ContentIngest::begin(
             policy.space,
@@ -229,7 +239,7 @@ impl ContentHost {
         loop {
             let read = reader
                 .read(&mut buffer)
-                .map_err(|e| Failure::Storage(e.to_string()))?;
+                .map_err(|e| Failure::Storage(Storage::Input(e.kind())))?;
             if read == 0 {
                 break;
             }
@@ -240,7 +250,7 @@ impl ContentHost {
         let committed = self.core.with_replica(|replica| {
             replica.commit_content(ctx, std::slice::from_ref(&ingested.descriptor))
         });
-        if let Err(e) = committed {
+        if committed.is_err() {
             // Nothing durable survives a failed ingest. The chunks are already
             // installed and holding two leases, and the descriptor that would
             // have made them reachable does not exist — so without this they
@@ -253,7 +263,7 @@ impl ContentHost {
             for (_, slot) in self.resident_entries(&ingested.descriptor) {
                 let _ = self.cache.evict(&slot);
             }
-            return Err(Failure::Storage(e.to_string()));
+            return Err(Failure::Storage(Storage::Replica));
         }
 
         // The descriptor is committed, so the ingest's own hold on the chunks
@@ -390,7 +400,7 @@ impl ContentHost {
         for (_, entry) in self.resident_entries(&descriptor) {
             self.cache
                 .pin(&entry)
-                .map_err(|e| Failure::Storage(e.to_string()))?;
+                .map_err(|_| Failure::Storage(Storage::Cache))?;
         }
         Ok(())
     }
@@ -401,7 +411,7 @@ impl ContentHost {
         for (_, entry) in self.resident_entries(&descriptor) {
             self.cache
                 .unpin(&entry)
-                .map_err(|e| Failure::Storage(e.to_string()))?;
+                .map_err(|_| Failure::Storage(Storage::Cache))?;
         }
         Ok(())
     }
@@ -420,7 +430,7 @@ impl ContentHost {
         let entries = self.resident_entries(&descriptor);
         self.cache
             .release_content(&descriptor.content_nonce)
-            .map_err(|e| Failure::Storage(e.to_string()))?;
+            .map_err(|_| Failure::Storage(Storage::Cache))?;
         for (_, entry) in entries {
             let _ = self.cache.unpin(&entry);
             // Evicted rather than swept: the caller asked for these bytes to
@@ -429,7 +439,7 @@ impl ContentHost {
             // "I want this gone" does not outrank "someone is reading it".
             self.cache
                 .evict(&entry)
-                .map_err(|e| Failure::Storage(e.to_string()))?;
+                .map_err(|_| Failure::Storage(Storage::Cache))?;
         }
         Ok(())
     }
@@ -553,7 +563,7 @@ impl ContentHost {
             Ok(()) => {
                 self.cache
                     .discard_staged_part(&operation, part)
-                    .map_err(|e| Failure::Storage(e.to_string()))?;
+                    .map_err(|_| Failure::Storage(Storage::Cache))?;
                 Ok(())
             }
             // Convicted: these bytes will never verify, so keeping them would
@@ -609,10 +619,11 @@ impl ContentHost {
         let descriptor = self.descriptor(content)?;
         descriptor.verify_chunk(proof, ciphertext)?;
         let entry = replica::content::chunk_slot(&descriptor, proof.leaf.chunk_index);
-        let sidecar = postcard::to_stdvec(proof).map_err(|e| Failure::Storage(e.to_string()))?;
+        let sidecar =
+            postcard::to_stdvec(proof).map_err(|_| Failure::Storage(Storage::Encoding))?;
         self.cache
             .install(&entry, ciphertext, &sidecar)
-            .map_err(|e| Failure::Storage(e.to_string()))?;
+            .map_err(|_| Failure::Storage(Storage::Cache))?;
         // Both holds, as ingest takes them: the transfer's, and the content's.
         for hold in [
             replica::journal::cache::Lease::operation(operation, entry),
@@ -620,7 +631,7 @@ impl ContentHost {
         ] {
             self.cache
                 .lease(&hold)
-                .map_err(|e| Failure::Storage(e.to_string()))?;
+                .map_err(|_| Failure::Storage(Storage::Cache))?;
         }
         Ok(())
     }
@@ -643,7 +654,7 @@ impl ContentHost {
     fn descriptor(&self, content: &ContentRef) -> Result<ContentDescriptor, Failure> {
         self.core
             .with_replica(|replica| Ok(replica.content_descriptor(content)))
-            .map_err(|e| Failure::Storage(e.to_string()))?
+            .map_err(|_| Failure::Storage(Storage::Replica))?
             .ok_or(Failure::Unknown)
     }
 

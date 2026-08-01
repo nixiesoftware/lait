@@ -10,9 +10,10 @@
 //! an ordinary edit writes update-sized material, and no path in a commit
 //! exports a whole history.
 
+use fabric::causal::Invalid;
 use fabric::{
-    AnchorResolution, Artifact, CausalError, CausalRelation, CheckpointPolicy, Engine, Key,
-    MemoryEngine, Op, Transaction, Version,
+    AnchorResolution, Artifact, CausalRelation, CheckpointPolicy, Engine, Key, MemoryEngine, Op,
+    Transaction, Version,
 };
 
 fn key() -> Key {
@@ -114,7 +115,7 @@ fn a_delta_from_an_unknown_base_is_refused_by_name() {
     };
     assert_eq!(
         fabric.export_delta(&key(), &stranger),
-        Err(CausalError::MissingBase)
+        Err(Invalid::MissingBase)
     );
     // And the universally shared base always works.
     assert!(fabric.export_delta(&key(), &Version::empty()).is_ok());
@@ -215,7 +216,7 @@ fn work_older_than_the_retention_frontier_is_refused_and_recovers() {
         .expect("import checkpoint");
     let refusal = compacted.import_artifact(&key(), &offline);
     match &refusal {
-        Err(CausalError::BeforeRetentionFrontier { .. }) => {}
+        Err(Invalid::BeforeRetentionFrontier { .. }) => {}
         Ok(status) if status.pending => {}
         other => panic!("pre-trim work must be refused or held, got {other:?}"),
     }
@@ -550,7 +551,7 @@ fn body_material_is_the_same_size_however_long_the_body_lives() {
 
     // The tail is bounded, and a descriptor claiming more is refused.
     let overlong = material(CheckpointPolicy::default().max_tail_deltas + 1, 0);
-    assert_eq!(overlong.validate(), Err(CausalError::Bounds));
+    assert_eq!(overlong.validate(), Err(Invalid::Bounds));
 }
 
 #[test]
@@ -589,7 +590,7 @@ fn causal_encodings_are_canonical() {
     };
     assert_eq!(
         Version::decode_canonical(&postcard::to_stdvec(&unsorted).unwrap()),
-        Err(CausalError::NonCanonical)
+        Err(Invalid::NonCanonical)
     );
 }
 

@@ -513,7 +513,7 @@ impl crate::world::BodyReader for ReplicaReader<'_> {
     fn read_collaborative_body(
         &self,
         key: &BodyKey,
-    ) -> Result<replica::CollaborativeView, replica::ProjectionError> {
+    ) -> Result<replica::CollaborativeView, replica::projection::Failure> {
         self.0.read_collaborative(key)
     }
     fn body_version(&self, key: &BodyKey) -> Option<replica::Version> {

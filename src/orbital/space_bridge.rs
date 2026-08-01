@@ -44,8 +44,8 @@ use crate::control::{
 };
 use crate::daemon::OrbitAddress;
 use crate::orbital::{
-    orbital_store_root, unsupported_store_at, SpaceAuthority, WorldCall, WorldCallAccess,
-    WorldCallContext, WorldCallErrorCode, WorldPackages, WorldReply, WorldRouter,
+    orbital_store_root, unsupported_store_at, CallFailureCode, SpaceAuthority, WorldCall,
+    WorldCallAccess, WorldCallContext, WorldPackages, WorldReply, WorldRouter,
 };
 use crate::transport::{Transport, TransportFactory};
 
@@ -495,7 +495,7 @@ impl StationHost {
         if address != &self.address {
             return WorldReply::error(
                 call,
-                WorldCallErrorCode::InvalidCall,
+                CallFailureCode::InvalidCall,
                 format!(
                     "World call targets Orbit {} in Space {}, but this bridge occupies \
                      Orbit {} in Space {}",
@@ -652,7 +652,7 @@ impl StationHost {
         let Some(bridge) = self.worlds.bridge(world) else {
             return WorldReply::error(
                 call,
-                WorldCallErrorCode::UnsupportedOperation,
+                CallFailureCode::UnsupportedOperation,
                 format!(
                     "World '{world}' is not enabled in Space {}",
                     self.address.space
@@ -662,7 +662,7 @@ impl StationHost {
         let Some(control) = bridge.control() else {
             return WorldReply::error(
                 call,
-                WorldCallErrorCode::UnsupportedOperation,
+                CallFailureCode::UnsupportedOperation,
                 format!("World '{world}' has no application call handler"),
             );
         };
@@ -677,11 +677,7 @@ impl StationHost {
         let seed = match self.acting_seed(act_as) {
             Ok(s) => s,
             Err(response) => {
-                return WorldReply::error(
-                    call,
-                    WorldCallErrorCode::Denied,
-                    response_message(response),
-                )
+                return WorldReply::error(call, CallFailureCode::Denied, response_message(response))
             }
         };
         let device = crate::crypto::device_from_seed(&seed);
@@ -700,7 +696,7 @@ impl StationHost {
                     if !divergence.is_empty() {
                         return WorldReply::error(
                             call,
-                            WorldCallErrorCode::Denied,
+                            CallFailureCode::Denied,
                             format!(
                                 "refusing to author against a partial view — {}. Run `sync` \
                                  until whole first; a delegated agent must not act on World \
@@ -719,7 +715,7 @@ impl StationHost {
             if !self.ensure_world_session(world) {
                 return WorldReply::error(
                     call,
-                    WorldCallErrorCode::Unavailable,
+                    CallFailureCode::Unavailable,
                     "not admitted to this space yet — run `lait connect` to reach an admin \
                      and complete admission before using this World",
                 );
@@ -739,7 +735,7 @@ impl StationHost {
                 Ok(response) => response,
                 Err(_) => WorldReply::error(
                     call,
-                    WorldCallErrorCode::Denied,
+                    CallFailureCode::Denied,
                     "this agent identity holds no standing in the space yet — a human member \
                      must sponsor it (`lait members agent <key>`) before it can author. \
                      Nothing was changed.",
@@ -2390,7 +2386,7 @@ impl StationHost {
                     if route_world.as_ref() != Some(call.world()) {
                         WorldReply::error(
                             &call,
-                            WorldCallErrorCode::InvalidCall,
+                            CallFailureCode::InvalidCall,
                             format!(
                                 "World route addresses '{world}', but the call addresses '{}'",
                                 call.world()
@@ -2402,7 +2398,7 @@ impl StationHost {
                 }
                 _ => WorldReply::error(
                     &call,
-                    WorldCallErrorCode::InvalidCall,
+                    CallFailureCode::InvalidCall,
                     "World call requires an explicit World route",
                 ),
             };

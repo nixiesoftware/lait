@@ -23,7 +23,7 @@
 //! mechanics validates the signer's standing at the transaction's referenced
 //! authority frontier, every payload must match its descriptor's ciphertext
 //! commitment, and only then does material reach the engine — per Body, via
-//! [`fabric::fabric::import_body`], never as a raw engine snapshot. Supported
+//! [`fabric::Engine::import_body`], never as a raw engine snapshot. Supported
 //! material becomes exact per-Body Engine changes; unsupported-but-legitimate
 //! material (unknown World/schema, or no local key) is retained opaquely and
 //! forwarded byte-identically. Body-level tombstones are local retirement:
@@ -33,7 +33,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use fabric::{journal::ObjectRef, BodyExport, Engine, Error, JournaledStore, Key, MemoryEngine};
+use fabric::{
+    commit::Failure as EngineFailure, journal::ObjectRef, BodyExport, Engine, JournaledStore, Key,
+    MemoryEngine,
+};
 use mechanics::crypto::BODY_EPOCH_ID_LEN;
 use mechanics::ids::SpaceId;
 use serde::{Deserialize, Serialize};
@@ -721,7 +724,7 @@ impl Replica {
     ) -> Result<Self, Failure> {
         let store = match JournaledStore::open(root) {
             Ok(s) => s,
-            Err(fabric::journal::JournalError::Integrity(m)) => return Err(Failure::Integrity(m)),
+            Err(fabric::journal::Failure::Integrity(m)) => return Err(Failure::Integrity(m)),
             Err(e) => return Err(Failure::Durability(e.to_string())),
         };
         let mut replica = Self::new(Box::new(MemoryEngine::new())).with_keys(keys.clone());
@@ -1160,7 +1163,7 @@ impl Replica {
         };
         match store.commit(&added, &removed, caller_index, meta_bytes) {
             Ok(_) => {}
-            Err(fabric::journal::JournalError::OutcomeUnknown) => {
+            Err(fabric::journal::Failure::OutcomeUnknown) => {
                 self.poisoned = true;
                 return Err(Failure::OutcomeUnknown);
             }
@@ -1517,7 +1520,7 @@ impl Replica {
         };
         match store.commit(&added, &removed, caller_index, meta_bytes) {
             Ok(_) => {}
-            Err(fabric::journal::JournalError::OutcomeUnknown) => {
+            Err(fabric::journal::Failure::OutcomeUnknown) => {
                 self.poisoned = true;
                 return Err(Failure::OutcomeUnknown);
             }
@@ -2394,7 +2397,7 @@ impl Replica {
                                 merge_append: change.merge_append,
                             });
                         }
-                        Err(Error::TypeConflict) => {
+                        Err(EngineFailure::TypeConflict) => {
                             outcome.rejected += 1;
                         }
                         Err(e) => {
@@ -3214,15 +3217,15 @@ impl Replica {
             .commit(fabric::Transaction::new(request_label, fabric_ops))
         {
             Ok(r) => Ok(r),
-            Err(Error::Unsupported) => Err(Failure::UnsupportedOp),
-            Err(Error::TypeConflict) => Err(Failure::TypeConflict),
-            Err(Error::InvalidOp(m)) => Err(Failure::InvalidOp(m)),
-            Err(Error::Integrity(m)) => Err(Failure::Integrity(m)),
-            Err(Error::OutcomeUnknown) => {
+            Err(EngineFailure::Unsupported) => Err(Failure::UnsupportedOp),
+            Err(EngineFailure::TypeConflict) => Err(Failure::TypeConflict),
+            Err(EngineFailure::InvalidOp(m)) => Err(Failure::InvalidOp(m)),
+            Err(EngineFailure::Integrity(m)) => Err(Failure::Integrity(m)),
+            Err(EngineFailure::OutcomeUnknown) => {
                 self.poisoned = true;
                 Err(Failure::OutcomeUnknown)
             }
-            Err(Error::Durability(m)) => {
+            Err(EngineFailure::Durability(m)) => {
                 self.poisoned = true;
                 Err(Failure::Durability(m))
             }
@@ -3424,7 +3427,7 @@ impl Replica {
     pub fn read_collaborative(
         &self,
         key: &BodyKey,
-    ) -> Result<fabric::CollaborativeView, fabric::ProjectionError> {
+    ) -> Result<fabric::CollaborativeView, fabric::projection::Failure> {
         self.fabric.read_collaborative(&fabric_key(key))
     }
 }

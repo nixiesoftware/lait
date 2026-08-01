@@ -99,40 +99,40 @@ pub fn revision_preimage(role_id: &str, predecessors: &[[u8; 32]], body_json: &[
 
 /// Why a role revision refused to build.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RoleError {
+pub enum Invalid {
     BadRoleId,
     BodyTooLarge,
     TooManyPredecessors,
     UnknownRole(String),
 }
 
-impl std::fmt::Display for RoleError {
+impl std::fmt::Display for Invalid {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            RoleError::BadRoleId => write!(f, "invalid role id"),
-            RoleError::BodyTooLarge => write!(f, "role body exceeds 16 KiB"),
-            RoleError::TooManyPredecessors => write!(f, "more than 8 predecessors"),
-            RoleError::UnknownRole(r) => write!(f, "unknown role `{r}`"),
+            Invalid::BadRoleId => write!(f, "invalid role id"),
+            Invalid::BodyTooLarge => write!(f, "role body exceeds 16 KiB"),
+            Invalid::TooManyPredecessors => write!(f, "more than 8 predecessors"),
+            Invalid::UnknownRole(r) => write!(f, "unknown role `{r}`"),
         }
     }
 }
-impl std::error::Error for RoleError {}
+impl std::error::Error for Invalid {}
 
 /// Build a revision over `body` with `predecessors` (bounds-checked; the id
 /// hashes the framed preimage).
 pub fn build_revision(
     body: RoleBody,
     predecessors: Vec<[u8; 32]>,
-) -> Result<RoleRevision, RoleError> {
+) -> Result<RoleRevision, Invalid> {
     if body.role_id.is_empty() || body.role_id.len() > MAX_ROLE_ID {
-        return Err(RoleError::BadRoleId);
+        return Err(Invalid::BadRoleId);
     }
     if predecessors.len() > MAX_PREDECESSORS {
-        return Err(RoleError::TooManyPredecessors);
+        return Err(Invalid::TooManyPredecessors);
     }
     let json = body.canonical_json();
     if json.len() > MAX_ROLE_BODY {
-        return Err(RoleError::BodyTooLarge);
+        return Err(Invalid::BodyTooLarge);
     }
     let revision_id = blake3::derive_key(
         ROLE_REVISION_CONTEXT,
@@ -297,15 +297,15 @@ mod tests {
         body.role_id = "x".repeat(65);
         assert_eq!(
             build_revision(body.clone(), vec![]),
-            Err(RoleError::BadRoleId)
+            Err(Invalid::BadRoleId)
         );
         body.role_id = "ok".into();
         assert_eq!(
             build_revision(body.clone(), vec![[0u8; 32]; 9]),
-            Err(RoleError::TooManyPredecessors)
+            Err(Invalid::TooManyPredecessors)
         );
         body.description = "d".repeat(MAX_ROLE_BODY);
-        assert_eq!(build_revision(body, vec![]), Err(RoleError::BodyTooLarge));
+        assert_eq!(build_revision(body, vec![]), Err(Invalid::BodyTooLarge));
     }
 
     #[test]

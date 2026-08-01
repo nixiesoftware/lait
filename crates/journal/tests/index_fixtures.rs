@@ -15,8 +15,8 @@
 use std::collections::BTreeMap;
 
 use journal::index::{
-    apply, build_index, lookup, node_hash, spine, stream, validate, ChildRef, IndexChange,
-    IndexEntry, IndexError, IndexKey, NodeSink, NodeSource, MAX_LEAF_ENTRIES, MAX_VALUE_BYTES,
+    apply, build_index, lookup, node_hash, spine, stream, validate, ChildRef, Failure, IndexChange,
+    IndexEntry, IndexKey, NodeSink, NodeSource, MAX_LEAF_ENTRIES, MAX_VALUE_BYTES,
 };
 
 /// An in-memory node store. Nodes are never deleted here, so a test can assert
@@ -319,7 +319,7 @@ fn a_non_canonical_shape_is_refused() {
     });
     assert_eq!(
         validate(&nodes, root),
-        Err(IndexError::NotCanonicalShape),
+        Err(Failure::NotCanonicalShape),
         "two entries belong in one leaf; a branch over them is not canonical"
     );
 }
@@ -353,7 +353,7 @@ fn a_count_that_lies_is_refused() {
                 count: 999,
             })
         ),
-        Err(IndexError::CountMismatch)
+        Err(Failure::CountMismatch)
     );
 }
 
@@ -364,7 +364,7 @@ fn a_missing_node_is_named_rather_than_papered_over() {
     let empty = Nodes::default();
     assert_eq!(
         validate(&empty, Some(root)),
-        Err(IndexError::MissingNode(root.hash))
+        Err(Failure::MissingNode(root.hash))
     );
 }
 
@@ -375,7 +375,7 @@ fn bounds_are_enforced_before_anything_is_built() {
         key: key(0),
         value: vec![0u8; MAX_VALUE_BYTES + 1],
     }];
-    assert_eq!(build_index(oversize, &mut sink), Err(IndexError::Bounds));
+    assert_eq!(build_index(oversize, &mut sink), Err(Failure::Bounds));
     assert!(sink.written.is_empty(), "nothing may be written on refusal");
 
     let nodes = Nodes::default();
@@ -390,7 +390,7 @@ fn bounds_are_enforced_before_anything_is_built() {
             }],
             &mut sink,
         ),
-        Err(IndexError::Bounds)
+        Err(Failure::Bounds)
     );
 }
 
@@ -399,7 +399,7 @@ fn duplicate_keys_are_refused_rather_than_silently_resolved() {
     let mut sink = NodeSink::default();
     assert_eq!(
         build_index(vec![entry(0, b"a"), entry(0, b"b")], &mut sink),
-        Err(IndexError::Order)
+        Err(Failure::Order)
     );
 }
 

@@ -178,7 +178,7 @@ pub struct RecoveryApproved {
 pub enum ArtifactRead {
     Missing,
     Present(Vec<u8>),
-    Unreadable(crate::secretfs::SecretError),
+    Unreadable(crate::secretfs::Failure),
 }
 
 /// Why a recovery artifact could not be produced, for structured reporting.
@@ -729,10 +729,10 @@ impl CeremonyEngine<'_> {
             .keys()
             .filter_map(|id| {
                 let reason = match self.dkg_artifact(id, "share") {
-                    ArtifactRead::Unreadable(crate::secretfs::SecretError::Undecryptable(m)) => {
+                    ArtifactRead::Unreadable(crate::secretfs::Failure::Undecryptable(m)) => {
                         RecoveryArtifactFailure::Undecryptable(m)
                     }
-                    ArtifactRead::Unreadable(crate::secretfs::SecretError::Io(e)) => {
+                    ArtifactRead::Unreadable(crate::secretfs::Failure::Io(e)) => {
                         RecoveryArtifactFailure::Io(e.to_string())
                     }
                     _ => return None,
@@ -1759,10 +1759,10 @@ impl CeremonyEngine<'_> {
                         k,
                         n,
                         local_custody: LocalCustodyState::Unreadable(match e {
-                            crate::secretfs::SecretError::Undecryptable(m) => {
+                            crate::secretfs::Failure::Undecryptable(m) => {
                                 RecoveryArtifactFailure::Undecryptable(m)
                             }
-                            crate::secretfs::SecretError::Io(e) => {
+                            crate::secretfs::Failure::Io(e) => {
                                 RecoveryArtifactFailure::Io(e.to_string())
                             }
                         }),

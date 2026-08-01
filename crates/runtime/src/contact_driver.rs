@@ -42,7 +42,7 @@ use crate::lifecycle::CancelToken;
 use crate::lifecycle::ContactOutcome;
 use crate::neighbor_presence::{PresenceAck, PresenceProbe, PRESENCE_ALPN};
 use crate::neighbors::NeighborRegistry;
-use crate::plane::{Accept, Open, Plane, Refusal};
+use crate::plane::{Accept, Open, Plane};
 use crate::session::StationCore;
 
 /// The Contact scheduler's global in-flight bound.
@@ -285,8 +285,7 @@ async fn drive(ctx: DriverContext) {
                     if in_flight.borrow().contains(&station)
                         || in_flight.borrow().len() >= MAX_CONTACTS_IN_FLIGHT
                     {
-                        let _ =
-                            reply.send(Err(Failure::Transfer("contact slots exhausted".into())));
+                        let _ = reply.send(Err(Failure::Capacity));
                         continue;
                     }
                     in_flight.borrow_mut().insert(station.clone());
@@ -556,7 +555,7 @@ async fn contact_neighbor(ctx: &DriverContext, station: &Key) -> Result<ContactO
                     ctx.options.authority.source.as_ref(),
                 )
             })
-            .map_err(|e| Failure::Transfer(e.to_string()))
+            .map_err(|_| Failure::Convergence)
     };
     // ---- One Contact, one published change. -------------------------------
     //
@@ -627,9 +626,9 @@ async fn initiate(
     let contact = ContactId::mint();
     let connection_id = contact.as_bytes();
     let mut connection_epoch = [0u8; 16];
-    getrandom::fill(&mut connection_epoch).map_err(|e| Failure::Transfer(e.to_string()))?;
+    getrandom::fill(&mut connection_epoch).map_err(|_| Failure::Entropy)?;
     let mut nonce = [0u8; 32];
-    getrandom::fill(&mut nonce).map_err(|e| Failure::Transfer(e.to_string()))?;
+    getrandom::fill(&mut nonce).map_err(|_| Failure::Entropy)?;
     let opening = Open {
         plane: Plane::Contact,
         protocol_version: CONTACT_PROTOCOL,
@@ -645,24 +644,19 @@ async fn initiate(
     step(deadline, progress, stream.send(&opening.encode()))
         .await
         .map_err(|_| Failure::Unreachable)?
-        .map_err(|e| Failure::Transfer(e.to_string()))?;
+        .map_err(|_| Failure::Transport)?;
     let admission_bytes = step(deadline, progress, stream.recv())
         .await
         .map_err(|_| Failure::Unreachable)?
-        .map_err(|e| Failure::Transfer(e.to_string()))?
+        .map_err(|_| Failure::Transport)?
         .ok_or(Failure::Unreachable)?;
-    let accept = Accept::decode_canonical(&admission_bytes).map_err(|_| {
-        let refusal = Refusal::decode_canonical(&admission_bytes)
-            .map(|value| format!("{value:?}"))
-            .unwrap_or_else(|_| "malformed admission answer".into());
-        Failure::Transfer(refusal)
-    })?;
+    let accept = Accept::decode_canonical(&admission_bytes).map_err(|_| Failure::Admission)?;
     if accept.connection_id != connection_id
         || accept.connection_epoch != connection_epoch
         || accept.capability.plane != Plane::Contact
         || accept.capability.protocol_version != CONTACT_PROTOCOL
     {
-        return Err(Failure::Transfer("contact acceptance mismatch".into()));
+        return Err(Failure::Admission);
     }
     // The declaration is a root. It used to be every head this replica holds,
     // streamed as chunked frames after the hello; a root is 40 bytes whatever
@@ -671,7 +665,7 @@ async fn initiate(
     let published = ctx
         .core
         .with_replica(|replica| Ok(replica.published_root()))
-        .map_err(|e: replica::commit::Failure| Failure::Transfer(e.to_string()))?;
+        .map_err(|_| Failure::Convergence)?;
     let holdings_root = published.map(|r| r.hash).unwrap_or([0u8; 32]);
 
     // The declaration is sent whenever this replica holds anything, and equal
@@ -688,7 +682,7 @@ async fn initiate(
     let held = ctx
         .core
         .with_replica(|replica| Ok(replica.head_commitments()))
-        .map_err(|e: replica::commit::Failure| Failure::Transfer(e.to_string()))?;
+        .map_err(|_| Failure::Convergence)?;
     let holdings_bytes = crate::contact::encode_holdings(&held);
     let holdings_count = held.len() as u32;
     let holdings_digest = if held.is_empty() {
@@ -708,11 +702,11 @@ async fn initiate(
         holdings_digest,
         &ctx.options.station_seed,
     )
-    .ok_or_else(|| Failure::Transfer("sign hello".into()))?;
+    .ok_or_else(|| Failure::Signing)?;
     step(deadline, progress, stream.send(&hello.encode()))
         .await
         .map_err(|_| Failure::Unreachable)?
-        .map_err(|e| Failure::Transfer(e.to_string()))?;
+        .map_err(|_| Failure::Transport)?;
     let mut holdings_sent = 0u64;
     if holdings_count > 0 {
         for (index, chunk) in holdings_bytes.chunks(crate::contact::MAX_CHUNK).enumerate() {
@@ -725,7 +719,7 @@ async fn initiate(
             step(deadline, progress, stream.send(&frame))
                 .await
                 .map_err(|_| Failure::Unreachable)?
-                .map_err(|e| Failure::Transfer(e.to_string()))?;
+                .map_err(|_| Failure::Transport)?;
         }
         let end = ContactFrame::HoldingsEnd {
             count: holdings_count,
@@ -736,30 +730,30 @@ async fn initiate(
         step(deadline, progress, stream.send(&end))
             .await
             .map_err(|_| Failure::Unreachable)?
-            .map_err(|e| Failure::Transfer(e.to_string()))?;
+            .map_err(|_| Failure::Transport)?;
     }
 
     let ack_bytes = step(deadline, progress, stream.recv())
         .await
         .map_err(|_| Failure::Unreachable)?
-        .map_err(|e| Failure::Transfer(e.to_string()))?
+        .map_err(|_| Failure::Transport)?
         .ok_or(Failure::Unreachable)?;
-    let ack = Proof::decode(&ack_bytes).map_err(|e| Failure::Transfer(e.to_string()))?;
+    let ack = Proof::decode(&ack_bytes).map_err(|_| Failure::Protocol)?;
     // Bind the negotiated transport peer to the signed Station identity
     // BEFORE any staging is allocated.
     ack.verify(&hello, responder)
-        .map_err(|e| Failure::Transfer(e.to_string()))?;
+        .map_err(|_| Failure::Protocol)?;
 
     let mut receiver = InitiatorReceiver::new(contact);
     let mut bytes_moved = (hello.encode().len() + ack_bytes.len()) as u64 + holdings_sent;
     loop {
         let frame = step(deadline, progress, stream.recv())
             .await
-            .map_err(|_| Failure::Transfer("contact deadline".into()))?
-            .map_err(|e| Failure::Transfer(e.to_string()))?
-            .ok_or_else(|| Failure::Transfer("stream ended mid-transfer".into()))?;
+            .map_err(|_| Failure::Deadline)?
+            .map_err(|_| Failure::Transport)?
+            .ok_or_else(|| Failure::Protocol)?;
         if frame.len() > MAX_FRAME {
-            return Err(Failure::Transfer("frame over limit".into()));
+            return Err(Failure::Protocol);
         }
         bytes_moved += frame.len() as u64;
         match receiver.on_frame(&frame) {
@@ -769,19 +763,17 @@ async fn initiate(
                 bytes_moved += raw.len() as u64;
                 step(deadline, progress, stream.send(&raw))
                     .await
-                    .map_err(|_| Failure::Transfer("contact deadline".into()))?
-                    .map_err(|e| Failure::Transfer(e.to_string()))?;
+                    .map_err(|_| Failure::Deadline)?
+                    .map_err(|_| Failure::Transport)?;
                 let _ = step(deadline, progress, stream.finish()).await;
                 break;
             }
             Ok(Progress::PeerAborted(code)) | Err(code) => {
-                return Err(Failure::Transfer(format!("aborted: code {code}")));
+                return Err(Failure::PeerAborted(code));
             }
         }
     }
-    let received = receiver
-        .into_received()
-        .ok_or_else(|| Failure::Transfer("incomplete transfer".into()))?;
+    let received = receiver.into_received().ok_or_else(|| Failure::Protocol)?;
     Ok((received, bytes_moved))
 }
 
@@ -798,11 +790,10 @@ async fn serve_contact(
     let opening_bytes = step(deadline, progress, stream.recv())
         .await
         .map_err(|_| Failure::Unreachable)?
-        .map_err(|e| Failure::Transfer(e.to_string()))?
+        .map_err(|_| Failure::Transport)?
         .ok_or(Failure::Unreachable)?;
     let transport_peer = Key::from_device(&from).ok_or(Failure::UnknownNeighbor)?;
-    let opening =
-        Open::decode_canonical(&opening_bytes).map_err(|e| Failure::Transfer(e.to_string()))?;
+    let opening = Open::decode_canonical(&opening_bytes).map_err(|_| Failure::Protocol)?;
     let opening_context = OpeningContext {
         space: &ctx.space,
         local_station: Key::from_key_bytes(ctx.station_key),
@@ -825,7 +816,7 @@ async fn serve_contact(
                 }
                 Admission::Refuse(refusal) => {
                     let _ = step(deadline, progress, stream.send(&refusal.encode())).await;
-                    return Err(Failure::Transfer(format!("contact refused: {refusal:?}")));
+                    return Err(Failure::Admission);
                 }
             },
         }
@@ -833,23 +824,23 @@ async fn serve_contact(
     step(deadline, progress, stream.send(&accept.encode()))
         .await
         .map_err(|_| Failure::Unreachable)?
-        .map_err(|e| Failure::Transfer(e.to_string()))?;
+        .map_err(|_| Failure::Transport)?;
     let hello_bytes = step(deadline, progress, stream.recv())
         .await
         .map_err(|_| Failure::Unreachable)?
-        .map_err(|e| Failure::Transfer(e.to_string()))?
+        .map_err(|_| Failure::Transport)?
         .ok_or(Failure::Unreachable)?;
-    let hello = Offer::decode(&hello_bytes).map_err(|e| Failure::Transfer(e.to_string()))?;
+    let hello = Offer::decode(&hello_bytes).map_err(|_| Failure::Protocol)?;
     if hello.contact.as_bytes() != opening.connection_id {
-        return Err(Failure::Transfer("offer connection mismatch".into()));
+        return Err(Failure::Protocol);
     }
     // Bind the transport peer to the signed initiator identity BEFORE
     // allocating anything.
     hello
         .verify(&opening.hash(), &ctx.space_bytes, &transport_peer)
-        .map_err(|e| Failure::Transfer(e.to_string()))?;
+        .map_err(|_| Failure::Protocol)?;
     if hello.responder_station != ctx.station_key {
-        return Err(Failure::Transfer("hello for another Station".into()));
+        return Err(Failure::Protocol);
     }
     // Arm a reciprocal dial to the initiator: the responder only SERVES material
     // here, so a pull back is what redeems a joiner's admission and converges us.
@@ -882,21 +873,21 @@ async fn serve_contact(
             let frame_bytes = step(deadline, progress, stream.recv())
                 .await
                 .map_err(|_| Failure::Unreachable)?
-                .map_err(|e| Failure::Transfer(e.to_string()))?
+                .map_err(|_| Failure::Transport)?
                 .ok_or(Failure::Unreachable)?;
-            let (frame_contact, frame) = ContactFrame::decode(&frame_bytes)
-                .map_err(|e| Failure::Transfer(format!("holdings frame: {e:?}")))?;
+            let (frame_contact, frame) =
+                ContactFrame::decode(&frame_bytes).map_err(|_| Failure::Holdings)?;
             if frame_contact != hello.contact {
-                return Err(Failure::Transfer("holdings contact mismatch".into()));
+                return Err(Failure::Holdings);
             }
             match frame {
                 ContactFrame::HoldingsChunk { index, bytes } => {
                     if index != next_index {
-                        return Err(Failure::Transfer("holdings chunk order".into()));
+                        return Err(Failure::Holdings);
                     }
                     next_index += 1;
                     if buf.len() + bytes.len() > crate::contact::MAX_HOLDINGS_BYTES {
-                        return Err(Failure::Transfer("holdings too large".into()));
+                        return Err(Failure::Holdings);
                     }
                     buf.extend_from_slice(&bytes);
                 }
@@ -905,32 +896,28 @@ async fn serve_contact(
                         || digest != hello.holdings_digest
                         || crate::contact::holdings_digest(&buf) != hello.holdings_digest
                     {
-                        return Err(Failure::Transfer(
-                            "holdings do not match the signed hello".into(),
-                        ));
+                        return Err(Failure::Holdings);
                     }
-                    let decoded = crate::contact::decode_holdings(&buf)
-                        .map_err(|e| Failure::Transfer(format!("holdings: {e:?}")))?;
+                    let decoded =
+                        crate::contact::decode_holdings(&buf).map_err(|_| Failure::Holdings)?;
                     if decoded.len() != hello.holdings_count as usize {
-                        return Err(Failure::Transfer(
-                            "holdings count does not match the declaration".into(),
-                        ));
+                        return Err(Failure::Holdings);
                     }
                     held = decoded.into_iter().collect();
                     break;
                 }
-                _ => return Err(Failure::Transfer("unexpected pre-ack frame".into())),
+                _ => return Err(Failure::Holdings),
             }
         }
     }
     let mut nonce = [0u8; 32];
-    getrandom::fill(&mut nonce).map_err(|e| Failure::Transfer(e.to_string()))?;
-    let ack = Proof::sign(&hello, nonce, &ctx.options.station_seed)
-        .ok_or_else(|| Failure::Transfer("sign ack".into()))?;
+    getrandom::fill(&mut nonce).map_err(|_| Failure::Entropy)?;
+    let ack =
+        Proof::sign(&hello, nonce, &ctx.options.station_seed).ok_or_else(|| Failure::Signing)?;
     step(deadline, progress, stream.send(&ack.encode()))
         .await
         .map_err(|_| Failure::Unreachable)?
-        .map_err(|e| Failure::Transfer(e.to_string()))?;
+        .map_err(|_| Failure::Transport)?;
 
     // Snapshot the served material under the writer lock. A Station whose
     // device holds no authoring standing at its own current frontier (an
@@ -956,7 +943,7 @@ async fn serve_contact(
                 let manifest = replica.export_manifest(&commit_ctx)?;
                 Ok((material, manifest))
             })
-            .map_err(|e: replica::commit::Failure| Failure::Transfer(e.to_string()))?
+            .map_err(|_| Failure::Convergence)?
     } else {
         (Vec::new(), (Vec::new(), Vec::new()))
     };
@@ -980,32 +967,30 @@ async fn serve_contact(
     let mut validator = AccepterValidator::new(contact);
     for frame in &frames {
         if ctx.cancel.is_cancelled() {
-            return Err(Failure::Transfer("station dormant".into()));
+            return Err(Failure::Interrupted);
         }
         validator.record_sent(frame);
         step(deadline, progress, stream.send(frame))
             .await
-            .map_err(|_| Failure::Transfer("contact deadline".into()))?
-            .map_err(|e| Failure::Transfer(e.to_string()))?;
+            .map_err(|_| Failure::Deadline)?
+            .map_err(|_| Failure::Transport)?;
     }
     // Await the TransferAck through the validator, then finish + wait_closed.
     loop {
         let frame = step(deadline, progress, stream.recv())
             .await
-            .map_err(|_| Failure::Transfer("contact deadline".into()))?
-            .map_err(|e| Failure::Transfer(e.to_string()))?
-            .ok_or_else(|| Failure::Transfer("closed before ack".into()))?;
+            .map_err(|_| Failure::Deadline)?
+            .map_err(|_| Failure::Transport)?
+            .ok_or_else(|| Failure::Protocol)?;
         match validator.on_frame(&frame) {
             Ok(AccepterEvent::Acked { .. }) => break,
-            Ok(AccepterEvent::PeerAborted(code)) => {
-                return Err(Failure::Transfer(format!("peer aborted: {code}")))
-            }
+            Ok(AccepterEvent::PeerAborted(code)) => return Err(Failure::PeerAborted(code)),
             Ok(_) => {}
             Err(code) => {
                 let _ = stream
                     .send(&ContactFrame::Abort { code }.encode(&contact))
                     .await;
-                return Err(Failure::Transfer(format!("abort: {code}")));
+                return Err(Failure::PeerAborted(code));
             }
         }
     }
@@ -1024,21 +1009,20 @@ async fn serve_presence(
     let probe_bytes = step(deadline, ctx.options.progress_deadline, stream.recv())
         .await
         .map_err(|_| Failure::Unreachable)?
-        .map_err(|e| Failure::Transfer(e.to_string()))?
+        .map_err(|_| Failure::Transport)?
         .ok_or(Failure::Unreachable)?;
-    let probe =
-        PresenceProbe::decode(&probe_bytes).map_err(|e| Failure::Transfer(e.to_string()))?;
+    let probe = PresenceProbe::decode(&probe_bytes).map_err(|_| Failure::Protocol)?;
     let prober = Key::from_device(&from).ok_or(Failure::UnknownNeighbor)?;
     probe
         .verify(&ctx.space_bytes, &prober)
-        .map_err(|e| Failure::Transfer(e.to_string()))?;
+        .map_err(|_| Failure::Protocol)?;
     if probe.responder_station != ctx.station_key {
-        return Err(Failure::Transfer("probe for another Station".into()));
+        return Err(Failure::Protocol);
     }
     let mut nonce = [0u8; 32];
-    getrandom::fill(&mut nonce).map_err(|e| Failure::Transfer(e.to_string()))?;
+    getrandom::fill(&mut nonce).map_err(|_| Failure::Entropy)?;
     let ack = PresenceAck::sign(&probe, nonce, &ctx.options.station_seed)
-        .ok_or_else(|| Failure::Transfer("sign presence ack".into()))?;
+        .ok_or_else(|| Failure::Signing)?;
     let _ = step(
         deadline,
         ctx.options.progress_deadline,
