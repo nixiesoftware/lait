@@ -280,6 +280,18 @@ jobs:
         shell: bash
         run: bash ci/coverage-manifest.sh --check
 
+      # The manifest is a Linux artifact — cfg(unix) tests do not exist on
+      # Windows, so regenerating there records their absence as coverage loss.
+      # Rather than telling a developer on another OS to find a Linux box, hand
+      # them the file this job just computed.
+      - name: Upload the corrected manifest
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: coverage-manifest
+          path: ci/coverage-manifest.txt.actual
+          if-no-files-found: ignore
+
   # The formats gate carried one thing the workspace suite does not: it replays
   # the committed schema examples through a NON-Rust JSON Schema 2020-12
   # validator, so the external contract is proven language-neutral rather than

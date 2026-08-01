@@ -6,9 +6,9 @@
 # reviewed like one, not discovered when a gate goes red on a refactor.
 
 [tiers]
-pr             1267
-pr-platform    939
-nightly        1296
+pr             1263
+pr-platform    935
+nightly        1292
 
 [gates]
 orbital-boundaries           6
@@ -177,7 +177,6 @@ lait config::tests::find_store_dir_walks_up_to_the_nearest_lait
 lait config::tests::key_table_rejects_unknown_and_reserves_space_namespace
 lait config::tests::second_daemon_lock_fails_while_first_is_held
 lait config::tests::settings_store_layer_wins_over_global
-lait config::tests::socket_path_stays_under_the_unix_limit
 lait config::tests::the_lock_holder_stays_identifiable_while_it_holds_the_lock
 lait control::tests::a_drained_signal_says_how_many_were_lost
 lait control::tests::a_first_live_read_carries_no_generation_at_all
@@ -429,8 +428,6 @@ lait::cli_parse unknown_subcommand_is_a_usage_error
 lait::cli_parse work_state_verbs_are_special_dispatch
 lait::cli_safety a_client_side_error_keeps_the_cli_contract
 lait::cli_safety a_dead_daemon_is_reported_dead_and_a_live_one_is_not
-lait::cli_safety a_foreign_daemon_is_named_not_timed_out
-lait::cli_safety a_newer_daemon_is_never_replaced_even_with_yes
 lait::cli_safety a_spawned_daemon_does_not_hold_our_stdout_open
 lait::cli_safety colliding_leaf_names_do_not_read_each_others_args
 lait::cli_safety delete_without_yes_refuses_and_keeps_the_issue
@@ -764,7 +761,6 @@ mechanics secretfs::tests::create_new_refuses_to_overwrite_single_use_material
 mechanics secretfs::tests::create_private_dir_is_idempotent
 mechanics secretfs::tests::inspect_the_real_acl
 mechanics secretfs::tests::persist_replace_overwrites_an_existing_target_atomically
-mechanics secretfs::tests::unix_modes_are_owner_only
 mechanics sigdag::tests::aclop_v1_payload_is_byte_identical
 mechanics sigdag::tests::detached_message_signing_roundtrips_and_binds_domain_and_space
 mechanics sigdag::tests::sign_verify_roundtrip_and_bindings

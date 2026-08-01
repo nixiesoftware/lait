@@ -1,6 +1,7 @@
 mod admission_fixtures;
 mod budget_fixtures;
 mod content_host;
+mod convergence_simulation;
 mod dto_schema;
 mod freight_transfer;
 mod freight_two_node;

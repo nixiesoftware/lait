@@ -30,14 +30,33 @@
 #             teeth: a deleted test is a deleted line, visible in review, and
 #             no count arithmetic can hide it.
 #
+# ## The manifest is a LINUX artifact
+#
+# Some tests do not exist on every platform — `#[cfg(unix)]` covers four of
+# them here, including the one that checks a Unix socket path fits in
+# sun_path. So "every test id in the workspace" is a different set on Windows
+# than on Linux, and a manifest regenerated on the wrong OS reports coverage
+# loss that is really just cfg.
+#
+# Linux is the canonical platform because it is where the `pr` tier — the whole
+# suite — runs. Regenerating elsewhere is refused rather than silently wrong.
+# When CI finds the manifest stale it uploads the corrected file as an
+# artifact, so a developer on another OS fixes it by downloading rather than by
+# finding a Linux box.
+#
 # ## Usage
 #
 #   bash ci/coverage-manifest.sh --check    # CI: regenerate and diff
-#   bash ci/coverage-manifest.sh --update   # you: accept the new coverage
+#   bash ci/coverage-manifest.sh --update   # Linux: accept the new coverage
 set -euo pipefail
 
 MANIFEST="ci/coverage-manifest.txt"
 MODE="${1:---check}"
+
+case "$(uname -s)" in
+  Linux) CANONICAL=1 ;;
+  *)     CANONICAL=0 ;;
+esac
 
 # The named release gates. Each is a claim the docket makes about the
 # substrate, and each must keep selecting tests. Kept here rather than in the
@@ -54,6 +73,7 @@ GATES=(
   "orbital-bootstrap-real|binary(orbital_join_iroh) + binary(orbital_admission) + binary(orbital_concurrent_catalog)"
   "orbital-ceremonies|binary(orbital_ceremonies) + (binary(mechanics) & test(sparse_ceremony_tests))"
   "orbital-independent-world|binary(independent_world) + binary(orbital_adoption)"
+  "convergence-simulation|binary(runtime) & test(internal_tests::convergence_simulation)"
   "orbital-product-parity|binary(orbital_product_parity) + binary(issues_policy_designer) + binary(lait_daemon) + binary(control_classification) + binary(mcp_parity) + binary(viewer_parity)"
 )
 
@@ -61,9 +81,6 @@ TIERS=(pr pr-platform nightly)
 
 COMMON=(--workspace --locked --all-features --message-format json)
 
-# Count the testcases a filterset actually SELECTS. nextest's top-level
-# `test-count` counts the whole inventory it walked, mismatches included, so
-# reading that number would report the same value for every filter.
 # Both helpers write through `sys.stdout.buffer`, which is binary and performs
 # no newline translation. Python's `print` would emit CRLF on Windows, and this
 # manifest is generated on whatever machine a developer has and then diffed
@@ -75,6 +92,9 @@ emit() {
   python3 -c "$1"
 }
 
+# Count the testcases a filterset actually SELECTS. nextest's top-level
+# `test-count` counts the whole inventory it walked, mismatches included, so
+# reading that number would report the same value for every filter.
 count_matches() {
   emit '
 import json, sys
@@ -141,6 +161,14 @@ generate() {
 
 case "$MODE" in
   --update)
+    if [ "$CANONICAL" -ne 1 ]; then
+      echo "::error::the coverage manifest is generated on Linux — see the header." >&2
+      echo "  This machine is $(uname -s), where cfg(unix) tests do not exist, so" >&2
+      echo "  regenerating here would record their absence as coverage loss." >&2
+      echo "  Push and let CI produce the corrected file: the 'coverage manifest'" >&2
+      echo "  job uploads it as an artifact when it finds a mismatch." >&2
+      exit 1
+    fi
     generate > "$MANIFEST.new"
     mv "$MANIFEST.new" "$MANIFEST"
     echo "wrote $MANIFEST"
@@ -151,8 +179,13 @@ case "$MODE" in
       rm -f "$MANIFEST.actual"
       echo "coverage manifest is current"
     else
-      rm -f "$MANIFEST.actual"
-      echo "::error::coverage changed. If intended, run 'bash ci/coverage-manifest.sh --update' and commit the result."
+      if [ "$CANONICAL" -ne 1 ]; then
+        echo "::notice::this is $(uname -s); the manifest is generated on Linux, so a" >&2
+        echo "  difference of only cfg(unix) tests is expected here and not a failure." >&2
+      fi
+      # Leave the .actual file in place: the CI job uploads it so the fix is a
+      # download rather than a hunt for a Linux machine.
+      echo "::error::coverage changed. If intended, run 'bash ci/coverage-manifest.sh --update' on Linux and commit the result, or take the artifact this job uploaded."
       exit 1
     fi
     ;;

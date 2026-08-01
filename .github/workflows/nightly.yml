@@ -138,6 +138,21 @@ jobs:
           path: crates/fabric/proptest-regressions/
           if-no-files-found: ignore
 
+      # The multi-peer convergence simulation explores SCHEDULES, so its
+      # coverage is the number of distinct seeds it has been run against. 24 per
+      # push keeps the tier under seven seconds; 512 here is what actually walks
+      # the interleaving space — four peers authoring concurrently through a
+      # network that drops, duplicates, reorders and partitions.
+      #
+      # A failure names its seed. That seed reproduces the schedule exactly, on
+      # any machine, because the simulation's only entropy is the seed itself —
+      # so turn a nightly failure into a permanent case by pinning the seed in
+      # `the_fleet_converges_on_a_known_seed`.
+      - name: Convergence simulation (deep)
+        env:
+          LAIT_SIM_SEEDS: "512"
+        run: cargo nextest run -p runtime --locked --all-features -E 'test(internal_tests::convergence_simulation)'
+
       # The 50k and 100k Body points. `commit_cost_baseline`'s own docs call
       # these opt-in and note the store-manifest commit cost they measure is an
       # implementation cost rather than a protocol one — which is exactly the
