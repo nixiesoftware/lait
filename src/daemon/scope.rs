@@ -100,7 +100,7 @@ impl OrbitAddress {
 /// grant itself access by asserting a larger set. CLI/MCP construct a pinned
 /// scope from their resolved home. The web adapter applies its broader identity
 /// visibility policy before constructing a catalog-resolved route. The
-/// LaitDaemon resolves every explicit address through its own OrbitDirectory
+/// Daemon resolves every explicit address through its own Catalog
 /// and never accepts an allowed set as a wire claim.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientScope {

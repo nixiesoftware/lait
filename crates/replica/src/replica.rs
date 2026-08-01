@@ -1,15 +1,15 @@
-//! [`Replica`] — the committing semantic layer over a Fabric engine and the
+//! [`Replica`] — the committing semantic layer over a Engine engine and the
 //! canonical durable Body store.
 //!
-//! Replica translates a validated set of staged [`BodyOp`]s into semantic
-//! [`FabricOp`]s, submits them to a Fabric engine for an atomic apply, and
-//! advances its semantic frontier **only** from the returned Fabric receipt.
+//! Replica translates a validated set of staged [`Op`]s into semantic
+//! [`Op`]s, submits them to a Engine engine for an atomic apply, and
+//! advances its semantic frontier **only** from the returned Engine receipt.
 //! It never authors a raw document delta and never fabricates a receipt.
 //!
-//! **The canonical store.** A durable Replica persists — through the Fabric
+//! **The canonical store.** A durable Replica persists — through the Engine
 //! journal's six-step commit protocol, at one linearization point per
-//! transaction — the canonical signed [`BodyTransaction`] record, one sealed
-//! [`ProtectedBodyPayload`] object per changed Body (`epoch_id[16] ||
+//! transaction — the canonical signed [`Transaction`] record, one sealed
+//! [`Material`] object per changed Body (`epoch_id[16] ||
 //! nonce[12] || ciphertext_and_tag`; no plaintext Body payload is ever at
 //! rest), the [`RequestReceipt`] idempotency record, and the signed Manifest
 //! root over the full Body set. Recovery reopens exactly that graph: a
@@ -19,12 +19,12 @@
 //! key legitimately arrives.
 //!
 //! **Convergence.** [`Replica::incorporate`] accepts only a signed
-//! [`BodyTransaction`] plus the exact descriptor-bound protected payloads:
+//! [`Transaction`] plus the exact descriptor-bound protected payloads:
 //! mechanics validates the signer's standing at the transaction's referenced
 //! authority frontier, every payload must match its descriptor's ciphertext
 //! commitment, and only then does material reach the engine — per Body, via
-//! [`fabric::Fabric::import_body`], never as a raw engine snapshot. Supported
-//! material becomes exact per-Body Fabric changes; unsupported-but-legitimate
+//! [`fabric::Engine::import_body`], never as a raw engine snapshot. Supported
+//! material becomes exact per-Body Engine changes; unsupported-but-legitimate
 //! material (unknown World/schema, or no local key) is retained opaquely and
 //! forwarded byte-identically. Body-level tombstones are local retirement:
 //! cross-replica deletion is application state inside a Body, so a tombstoned
@@ -33,40 +33,43 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use fabric::{
-    journal::ObjectRef, BodyExport, CrdtFabric, Fabric, FabricError, FabricKey, FabricOp,
-    FabricTransactionRequest, JournaledStore,
-};
-use mechanics::crypto::BODY_EPOCH_ID_LEN;
+use fabric::{commit::Failure as EngineFailure, BodyExport, Engine, Key};
+use journal::{Object, Store};
+use mechanics::authorization::BODY_EPOCH_ID_LEN;
 use mechanics::ids::SpaceId;
 use serde::{Deserialize, Serialize};
 
 use crate::algebra;
-use crate::body::{BodyOp, ContentCommitment};
+use crate::body::{ContentCommitment, Op};
 use crate::convergence::ConvergenceOutcome;
 use crate::frontier::{AuthorityFrontier, ReplicaFrontier};
 use crate::ids::{BodyKey, EncodingId, SchemaId, WorldId};
 use crate::manifest::{body_index_key, ManifestEntry, ManifestHead, ManifestRoot};
-use crate::protected::{BodyKeySource, ProtectedBodyPayload, ProtectedError, MAX_BODY_BYTES};
+use crate::protected::{BodyKeySource, Invalid as BodyInvalid, Material, MAX_BODY_BYTES};
 use crate::receipt::RequestReceipt;
-use crate::transaction::{
-    AuthoritySource, BodyDescriptor, BodyTransaction, BodyTransactionCore, TransactionSignRequest,
-    TransactionSigner,
-};
+use crate::transaction::{AuthoritySource, Core, Descriptor, SignRequest, Signer, Transaction};
 
-/// Domain separator for deriving a Fabric key from a Body key.
+/// Domain separator for deriving a Engine key from a Body key.
 const BODY_KEY_DOMAIN: &[u8] = b"lait/fabric-key/1";
 /// Domain separator for advancing the semantic frontier from a commit receipt.
 const FRONTIER_DOMAIN: &[u8] = b"lait/replica-frontier/1";
 /// Domain separator for advancing a Body's chain frontier from a transaction.
 const BODY_CHAIN_DOMAIN: &[u8] = b"lait/body-chain/1";
 
+struct StoreNodes<'a>(&'a Store);
+
+impl crate::index::NodeSource for StoreNodes<'_> {
+    fn node(&self, hash: &[u8; 32]) -> Option<Vec<u8>> {
+        self.0.read(hash).ok()
+    }
+}
+
 /// The mutation-model tags shared with [`crate::protected`].
 pub use crate::protected::{MUTATION_ATOMIC, MUTATION_COLLABORATIVE};
 
 /// Why a Replica commit failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ReplicaCommitError {
+pub enum Failure {
     /// A staged operation is not supported by the current engine (the in-memory
     /// reference engine is atomic-only).
     UnsupportedOp,
@@ -80,32 +83,32 @@ pub enum ReplicaCommitError {
     TypeConflict,
     /// The operation was structurally invalid at apply time (out-of-bounds
     /// index, unknown element id, counter overflow). Nothing was committed.
-    InvalidOp(String),
+    InvalidOp(fabric::commit::Invalid),
     /// A staged operation addressed a Body whose immutable schema binding
     /// disagrees with the declared binding. Nothing was committed.
     SchemaMismatch,
     /// Incoming material failed legitimacy validation (signature, signer
     /// authority, or payload binding). Nothing was incorporated.
-    Illegitimate(String),
+    Illegitimate(Invalid),
     /// The mechanics authorizer refused to produce an authorization receipt
     /// for a local commit — the demand was unsatisfied at the pinned
     /// frontier, or the implementation id was not active. Nothing committed.
-    Unauthorized(String),
+    Unauthorized(Refusal),
     /// A referenced parent Manifest is not locally reconstructable; retry once
     /// the exact material arrives. Never falls back to current state.
     ParentManifestUnavailable,
     /// The durable store failed integrity validation on open — never repaired
     /// heuristically; recreation guidance is the caller's.
-    Integrity(String),
-    /// The Fabric engine failed to apply the transaction.
-    Fabric(String),
+    Integrity(Defect),
+    /// The Engine engine failed to apply the transaction.
+    Engine(fabric::commit::Failure),
     /// No authorized key material is held for sealing new local material.
     /// Nothing was committed.
     BodyKeyUnavailable,
     /// The durable write of the committed state failed. The acknowledged
     /// frontier did not advance, and the Replica is poisoned (fail-stop) so the
     /// diverged in-memory representation can never acknowledge further commits.
-    Durability(String),
+    Durability(journal::Failure),
     /// The durable commit's authoritative switch happened but its durability
     /// confirmation failed: the outcome is unknown until the store is reopened
     /// (recovery resolves it from the on-disk manifest). The Replica is
@@ -128,14 +131,53 @@ pub enum ReplicaCommitError {
     /// performed, neither manifest nor frontier changes, and no staging
     /// objects are retained.
     OpaqueQuotaExceeded,
+    /// A Body-owned identity or transaction seed could not obtain entropy.
+    Body(crate::body::Failure),
 }
 
-impl std::fmt::Display for ReplicaCommitError {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Invalid {
+    Signature,
+    Binding,
+    Encoding,
+    Index,
+    Space,
+    IncompleteMaterial,
+    UnbackedContent,
+}
+
+impl From<&str> for Invalid {
+    fn from(_: &str) -> Self {
+        Self::Binding
+    }
+}
+
+impl From<String> for Invalid {
+    fn from(_: String) -> Self {
+        Self::Binding
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refusal {
+    Authorization,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Defect {
+    Store(journal::Defect),
+    Encoding,
+    Index,
+    MissingMaterial,
+    CorruptMaterial,
+}
+
+impl std::fmt::Display for Failure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{self:?}")
     }
 }
-impl std::error::Error for ReplicaCommitError {}
+impl std::error::Error for Failure {}
 
 /// The outcome of committing a request through the persistent-idempotency
 /// scope: either a fresh commit or a replay of the original receipt.
@@ -168,12 +210,12 @@ pub struct BodyBinding {
     pub mutation_model: u8,
 }
 
-type IncorporationUnit = (BodyTransaction, Vec<(BodyKey, Vec<u8>)>);
+type IncorporationUnit = (Transaction, Vec<(BodyKey, Vec<u8>)>);
 
 /// One exported unit per retained transaction: the signed record plus its
 /// per-Body sealed payload bytes, byte-identical to what was committed or
 /// incorporated.
-pub type ExportedMaterial = Vec<(BodyTransaction, Vec<(BodyKey, Vec<u8>)>)>;
+pub type ExportedMaterial = Vec<(Transaction, Vec<(BodyKey, Vec<u8>)>)>;
 
 /// The Space material quotas, enforced transactionally under the Replica
 /// writer. The ledger counts canonical material bytes — protected Body
@@ -199,7 +241,7 @@ pub struct QuotaConfig {
 impl Default for QuotaConfig {
     fn default() -> Self {
         Self {
-            max_body_bytes: MAX_BODY_BYTES as u64,
+            max_body_bytes: u64::try_from(MAX_BODY_BYTES).unwrap_or(u64::MAX),
             max_space_bytes: 4 * 1024 * 1024 * 1024,
             max_space_bodies: 100_000,
             max_unknown_world_bytes: 1024 * 1024 * 1024,
@@ -232,7 +274,7 @@ impl QuotaConfig {
 /// request was authorized at.
 pub struct CommitContext<'a> {
     pub space: &'a SpaceId,
-    pub signer: &'a dyn TransactionSigner,
+    pub signer: &'a dyn Signer,
     pub authority_frontier: AuthorityFrontier,
 }
 
@@ -240,7 +282,7 @@ pub struct CommitContext<'a> {
 /// transaction: the acting principal, the parent Manifest root the request was
 /// authored against, the canonical demand, the intent digest, and the
 /// mechanics authorizer that — given the built core digest — produces the
-/// canonical [`mechanics::demand::AuthorizationReceipt`] bytes (or a typed
+/// canonical [`mechanics::authorization::AuthorizationReceipt`] bytes (or a typed
 /// denial). Incorporation carries fully-formed transactions and needs none of
 /// this.
 pub struct CommitAuthorization<'a> {
@@ -258,7 +300,7 @@ pub struct CommitAuthorization<'a> {
 /// commitment, policy evidence). The composition root implements it over the
 /// authority ledger; a denial is a typed `Err`, never a receipt.
 pub trait TransactionAuthorizer {
-    fn authorize(&self, core: &BodyTransactionCore) -> Result<Vec<u8>, String>;
+    fn authorize(&self, core: &Core) -> Result<Vec<u8>, mechanics::authorization::Refusal>;
 }
 
 /// A self-contained [`TransactionAuthorizer`] that builds a structurally-valid
@@ -272,24 +314,26 @@ pub struct StaticAuthorizer {
 }
 
 impl TransactionAuthorizer for StaticAuthorizer {
-    fn authorize(&self, core: &BodyTransactionCore) -> Result<Vec<u8>, String> {
+    fn authorize(&self, core: &Core) -> Result<Vec<u8>, mechanics::authorization::Refusal> {
         let space = std::str::from_utf8(&core.space)
-            .map_err(|_| "space id".to_string())?
+            .map_err(|_| mechanics::authorization::Refusal::Denied)?
             .to_string();
-        let demand = mechanics::demand::AuthorizationDemand::decode_canonical(&core.demand)
-            .map_err(|e| format!("demand: {e}"))?;
-        let receipt = mechanics::demand::AuthorizationReceipt {
+        let demand = mechanics::authorization::AuthorizationDemand::decode_canonical(&core.demand)
+            .map_err(mechanics::authorization::Refusal::Demand)?;
+        let receipt = mechanics::authorization::AuthorizationReceipt {
             space,
             world: self.world.as_str().to_string(),
             actor: core.actor.clone(),
             device: core.signer,
             authority_frontier: core.authority_frontier.as_bytes().to_vec(),
             authority_checkpoint_commitment: [0u8; 32],
-            policy_evidence_digest: mechanics::demand::policy_evidence_digest(&[]),
+            policy_evidence_digest: mechanics::authorization::policy_evidence_digest(&[]),
             parent_manifest_root: core.parent_manifest_root,
             implementation_id: self.implementation_id,
             intent_digest: core.intent_digest,
-            demand_digest: demand.digest().map_err(|e| format!("demand digest: {e}"))?,
+            demand_digest: demand
+                .digest()
+                .map_err(mechanics::authorization::Refusal::Demand)?,
             effect_operations_digest: core.operations_digest,
             body_transaction_core_digest: core.digest(),
             decision: 1,
@@ -349,9 +393,9 @@ struct BodyHead {
     /// Commitment to this head's signed transaction bytes.
     tx_commitment: [u8; 32],
     /// The sealed protected payload object (durable stores only).
-    protected: Option<ObjectRef>,
+    protected: Option<Object>,
     /// The signed transaction record object (durable stores only).
-    transaction: Option<ObjectRef>,
+    transaction: Option<Object>,
     /// The sealed envelope length (quota ledger input).
     protected_len: u64,
     /// The signed transaction record length (quota ledger input; distinct
@@ -379,11 +423,15 @@ struct BodyRecord {
 
 impl BodyRecord {
     /// The primary head — the only head on every single-writer path.
-    fn head(&self) -> &BodyHead {
-        &self.heads[0]
+    fn head(&self) -> Result<&BodyHead, Failure> {
+        self.heads
+            .first()
+            .ok_or(Failure::Integrity(Defect::MissingMaterial))
     }
-    fn head_mut(&mut self) -> &mut BodyHead {
-        &mut self.heads[0]
+    fn head_mut(&mut self) -> Result<&mut BodyHead, Failure> {
+        self.heads
+            .first_mut()
+            .ok_or(Failure::Integrity(Defect::MissingMaterial))
     }
     /// Total sealed-envelope bytes across heads (quota ledger input).
     fn protected_total(&self) -> u64 {
@@ -420,13 +468,13 @@ struct StoreMeta {
     content_index_root: Option<IndexRef>,
     /// Idempotency scope → the receipt object that answers a replay.
     receipt_index_root: Option<IndexRef>,
-    manifest_root: Option<ObjectRef>,
+    manifest_root: Option<Object>,
 }
 
 /// The store meta's encoded generation.
 const STORE_META_FORMAT_VERSION: u8 = 2;
 
-type IndexRef = fabric::journal::index::ChildRef;
+type IndexRef = crate::index::ChildRef;
 
 /// One Body's indexed entry. The key travels with the record because an index
 /// key is a hash and cannot be inverted, and reopening needs the Body back.
@@ -440,7 +488,7 @@ struct IndexedBody {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct IndexedReceipt {
     scope: Vec<u8>,
-    object: ObjectRef,
+    object: Object,
 }
 
 /// The index key a receipt scope sits under.
@@ -451,18 +499,18 @@ fn receipt_index_key(scope: &[u8]) -> [u8; 32] {
     *h.finalize().as_bytes()
 }
 
-/// The Orbit's durable local materialization, over a Fabric engine.
+/// The Orbit's durable local materialization, over a Engine engine.
 pub struct Replica {
-    fabric: Box<dyn Fabric + Send>,
+    fabric: Engine,
     frontier: ReplicaFrontier,
-    durable: Option<JournaledStore>,
+    durable: Option<Store>,
     poisoned: bool,
     keys: Option<Arc<dyn BodyKeySource>>,
     space: Option<SpaceId>,
     supported: SupportedSchemas,
     quota: QuotaConfig,
     bodies: BTreeMap<BodyKey, BodyRecord>,
-    receipts: BTreeMap<Vec<u8>, (RequestReceipt, Option<ObjectRef>)>,
+    receipts: BTreeMap<Vec<u8>, (RequestReceipt, Option<Object>)>,
     /// Roots of the durable catalogs, carried so a commit can apply a delta
     /// rather than rebuild.
     body_index_root: Option<IndexRef>,
@@ -489,7 +537,7 @@ pub struct Replica {
     /// durable hold would have had to reproduce with an expiry sweep anyway.
     pending_content: BTreeMap<[u8; 32], std::time::Instant>,
     receipt_index_root: Option<IndexRef>,
-    manifest_root_object: Option<ObjectRef>,
+    manifest_root_object: Option<Object>,
     /// How many live references each stored object has.
     ///
     /// A commit must tell the journal which objects stopped being required, and
@@ -513,14 +561,14 @@ type RetainedHead = ([u8; 32], Vec<u8>, Vec<u8>);
 /// advertises for it.
 pub type DivergentBody = (BodyKey, Vec<[u8; 32]>);
 
-/// The canonical Fabric key for a Body: `BLAKE3(domain || world || 0x00 || body)`.
-fn fabric_key(key: &BodyKey) -> FabricKey {
+/// The canonical Engine key for a Body: `BLAKE3(domain || world || 0x00 || body)`.
+fn fabric_key(key: &BodyKey) -> Key {
     let mut h = blake3::Hasher::new();
     h.update(BODY_KEY_DOMAIN);
     h.update(key.world.as_bytes());
     h.update(&[0x00]);
     h.update(&key.body.as_bytes());
-    FabricKey::from_bytes(h.finalize().as_bytes().to_vec())
+    Key::from_bytes(h.finalize().as_bytes().to_vec())
 }
 
 /// Advance the Replica frontier from a commit's causal evidence.
@@ -582,10 +630,13 @@ fn chain_order(a: &ReplicaFrontier, b: &ReplicaFrontier) -> std::cmp::Ordering {
 /// `resulting_frontier` for concurrent-write resolution. It is NOT the
 /// transaction id (that is the full signed-envelope digest, known only after
 /// signing).
-fn mint_chain_seed() -> [u8; 16] {
+fn mint_chain_seed() -> Result<[u8; 16], Failure> {
     let mut raw = [0u8; 16];
-    getrandom::fill(&mut raw).expect("getrandom");
-    raw
+    getrandom::fill(&mut raw).map_err(|source| {
+        tracing::error!(error = %source, "OS entropy unavailable while minting Body chain seed");
+        Failure::Body(crate::body::Failure::Randomness)
+    })?;
+    Ok(raw)
 }
 
 #[allow(dead_code)]
@@ -593,7 +644,11 @@ fn space_bytes(space: &SpaceId) -> Option<[u8; 29]> {
     <[u8; 29]>::try_from(space.as_str().as_bytes()).ok()
 }
 
-fn descriptor_hash(d: &BodyDescriptor) -> [u8; 32] {
+fn descriptor_hash(d: &Descriptor) -> [u8; 32] {
+    #[allow(
+        clippy::expect_used,
+        reason = "derived serialization of this validated descriptor is infallible"
+    )]
     let bytes = postcard::to_stdvec(d).expect("postcard descriptor");
     *blake3::hash(&bytes).as_bytes()
 }
@@ -602,34 +657,34 @@ fn tx_commitment(bytes: &[u8]) -> [u8; 32] {
     *blake3::hash(bytes).as_bytes()
 }
 
-/// The public accessor for [`operations_digest`] — the committing layer
-/// computes the same digest to bind into its authorization request.
-pub fn operations_digest_of(ops: &[(BodyKey, BodyOp)]) -> [u8; 32] {
-    operations_digest(ops)
-}
-
 /// The canonical digest of a transaction's staged operation set — the value
 /// the authorization receipt binds as `effect_operations_digest`. Order-stable
 /// (operations sort by `(BodyKey, canonical op bytes)`).
-fn operations_digest(ops: &[(BodyKey, BodyOp)]) -> [u8; 32] {
+fn operations_digest(ops: &[(BodyKey, Op)]) -> [u8; 32] {
     let mut items: Vec<Vec<u8>> = ops
         .iter()
-        .map(|(k, op)| postcard::to_stdvec(&(k, op)).expect("postcard op"))
+        .map(|(k, op)| {
+            #[allow(
+                clippy::expect_used,
+                reason = "derived serialization of a validated Body operation is infallible"
+            )]
+            postcard::to_stdvec(&(k, op)).expect("postcard op")
+        })
         .collect();
     items.sort();
     let mut h = blake3::Hasher::new();
     h.update(b"lait/operations-digest/1");
-    h.update(&(items.len() as u64).to_be_bytes());
+    h.update(&u64::try_from(items.len()).unwrap_or(u64::MAX).to_be_bytes());
     for it in items {
-        h.update(&(it.len() as u64).to_be_bytes());
+        h.update(&u64::try_from(it.len()).unwrap_or(u64::MAX).to_be_bytes());
         h.update(&it);
     }
     *h.finalize().as_bytes()
 }
 
 impl Replica {
-    /// Build a Replica over a given Fabric engine (no durability, no keys).
-    pub fn new(fabric: Box<dyn Fabric + Send>) -> Self {
+    /// Build a Replica over a given Engine engine (no durability, no keys).
+    fn from_engine(fabric: Engine) -> Self {
         Self {
             fabric,
             frontier: ReplicaFrontier::EMPTY,
@@ -653,9 +708,9 @@ impl Replica {
         }
     }
 
-    /// Build a fabric-backed Replica with **no** durable store (tests/scratch).
+    /// Build a Engine-backed Replica with **no** durable store (tests/scratch).
     pub fn loro() -> Self {
-        Self::new(Box::new(CrdtFabric::new()))
+        Self::from_engine(Engine::new())
     }
 
     /// Attach a mechanics-owned key source (required to seal local commits and
@@ -697,9 +752,9 @@ impl Replica {
             bytes = bytes.saturating_add(*len);
         }
         for (receipt, _) in self.receipts.values() {
-            bytes = bytes.saturating_add(receipt.encode().len() as u64);
+            bytes = bytes.saturating_add(u64::try_from(receipt.encode().len()).unwrap_or(u64::MAX));
         }
-        (bytes, self.bodies.len() as u64)
+        (bytes, u64::try_from(self.bodies.len()).unwrap_or(u64::MAX))
     }
 
     /// The retained-unknown-World usage for one World: (bytes, bodies).
@@ -709,7 +764,7 @@ impl Replica {
         for (key, record) in &self.bodies {
             if !record.interpreted && &key.world == world {
                 bytes = bytes.saturating_add(record.protected_total());
-                count += 1;
+                count = count.saturating_add(1);
             }
         }
         (bytes, count)
@@ -721,33 +776,29 @@ impl Replica {
     /// epoch is locally held into the engine. A Body without local key
     /// material is retained opaquely. Missing or corrupt objects fail
     /// integrity validation without heuristic repair.
-    pub fn open_journaled(
+    pub fn open(
         root: impl Into<std::path::PathBuf>,
         keys: Arc<dyn BodyKeySource>,
-    ) -> Result<Self, ReplicaCommitError> {
-        let store = match JournaledStore::open(root) {
+    ) -> Result<Self, Failure> {
+        let store = match Store::open(root) {
             Ok(s) => s,
-            Err(fabric::journal::JournalError::Integrity(m)) => {
-                return Err(ReplicaCommitError::Integrity(m))
+            Err(journal::Failure::Integrity(defect)) => {
+                return Err(Failure::Integrity(Defect::Store(defect)))
             }
-            Err(e) => return Err(ReplicaCommitError::Durability(e.to_string())),
+            Err(e) => return Err(Failure::Durability(e)),
         };
-        let mut replica = Self::new(Box::new(CrdtFabric::new())).with_keys(keys.clone());
+        let mut replica = Self::from_engine(Engine::new()).with_keys(keys.clone());
         let Some(meta_bytes) = store
             .caller_meta()
-            .map_err(|e| ReplicaCommitError::Integrity(e.to_string()))?
+            .map_err(|_| Failure::Integrity(Defect::Encoding))?
         else {
             replica.durable = Some(store);
             return Ok(replica);
         };
-        let meta: StoreMeta = postcard::from_bytes(&meta_bytes)
-            .map_err(|e| ReplicaCommitError::Integrity(format!("store meta: {e}")))?;
+        let meta: StoreMeta =
+            postcard::from_bytes(&meta_bytes).map_err(|_| Failure::Integrity(Defect::Encoding))?;
         if meta.format_version != STORE_META_FORMAT_VERSION {
-            return Err(ReplicaCommitError::Integrity(format!(
-                "unsupported store meta version {} — an older store is refused, \
-                 never upgraded",
-                meta.format_version
-            )));
+            return Err(Failure::Integrity(Defect::Encoding));
         }
         replica.frontier = meta.frontier;
         replica.space = meta.space.clone();
@@ -759,67 +810,63 @@ impl Replica {
         replica.manifest_root_object = meta.manifest_root;
 
         // Stream the catalogs rather than decoding one giant vector. The engine
-        // still materialises every Body — Fabric holds a document per Body — so
+        // still materialises every Body — Engine holds a document per Body — so
         // opening remains proportional to the store. What changed is that the
         // commit point no longer is.
         let mut indexed_bodies: Vec<IndexedBody> = Vec::new();
-        let mut decode_failure: Option<String> = None;
-        fabric::journal::index::stream(&store.nodes(), meta.body_index_root, &mut |entry| {
-            if decode_failure.is_some() {
+        let mut decode_failure = false;
+        crate::index::stream(&StoreNodes(&store), meta.body_index_root, &mut |entry| {
+            if decode_failure {
                 return;
             }
             match postcard::from_bytes::<IndexedBody>(&entry.value) {
                 Ok(body) => indexed_bodies.push(body),
-                Err(e) => decode_failure = Some(format!("body entry: {e}")),
+                Err(_) => decode_failure = true,
             }
         })
-        .map_err(|e| ReplicaCommitError::Integrity(format!("body index: {e}")))?;
-        if let Some(reason) = decode_failure {
-            return Err(ReplicaCommitError::Integrity(reason));
+        .map_err(|_| Failure::Integrity(Defect::Index))?;
+        if decode_failure {
+            return Err(Failure::Integrity(Defect::Encoding));
         }
 
         let mut indexed_receipts: Vec<IndexedReceipt> = Vec::new();
-        let mut decode_failure: Option<String> = None;
-        fabric::journal::index::stream(&store.nodes(), meta.receipt_index_root, &mut |entry| {
-            if decode_failure.is_some() {
+        let mut decode_failure = false;
+        crate::index::stream(&StoreNodes(&store), meta.receipt_index_root, &mut |entry| {
+            if decode_failure {
                 return;
             }
             match postcard::from_bytes::<IndexedReceipt>(&entry.value) {
                 Ok(receipt) => indexed_receipts.push(receipt),
-                Err(e) => decode_failure = Some(format!("receipt entry: {e}")),
+                Err(_) => decode_failure = true,
             }
         })
-        .map_err(|e| ReplicaCommitError::Integrity(format!("receipt index: {e}")))?;
-        if let Some(reason) = decode_failure {
-            return Err(ReplicaCommitError::Integrity(reason));
+        .map_err(|_| Failure::Integrity(Defect::Index))?;
+        if decode_failure {
+            return Err(Failure::Integrity(Defect::Encoding));
         }
 
         for IndexedBody { key, mut record } in indexed_bodies {
             if record.heads.is_empty() {
-                return Err(ReplicaCommitError::Integrity(
-                    "body record without heads".into(),
-                ));
+                return Err(Failure::Integrity(Defect::MissingMaterial));
             }
             // Load and verify EVERY constituent head; a multi-writer Body's
             // state is the engine merge of all of them, restored in order.
             let mut loaded: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
             for head in &record.heads {
                 let (Some(protected_ref), Some(tx_ref)) = (head.protected, head.transaction) else {
-                    return Err(ReplicaCommitError::Integrity(
-                        "body record without durable objects".into(),
-                    ));
+                    return Err(Failure::Integrity(Defect::MissingMaterial));
                 };
                 // The transaction record must decode and verify structurally.
                 let tx_bytes = store
                     .read_object(&tx_ref)
-                    .map_err(|e| ReplicaCommitError::Integrity(e.to_string()))?;
-                let tx = BodyTransaction::decode_canonical(&tx_bytes)
-                    .map_err(|e| ReplicaCommitError::Integrity(format!("transaction: {e}")))?;
+                    .map_err(|_| Failure::Integrity(Defect::Encoding))?;
+                let tx = Transaction::decode_canonical(&tx_bytes)
+                    .map_err(|_| Failure::Integrity(Defect::Encoding))?;
                 tx.verify()
-                    .map_err(|e| ReplicaCommitError::Integrity(format!("transaction: {e}")))?;
+                    .map_err(|_| Failure::Integrity(Defect::Encoding))?;
                 let envelope = store
                     .read_object(&protected_ref)
-                    .map_err(|e| ReplicaCommitError::Integrity(e.to_string()))?;
+                    .map_err(|_| Failure::Integrity(Defect::Encoding))?;
                 loaded.push((envelope, tx_bytes));
             }
             // A Body retained opaquely stays opaque at reopen: interpreting it
@@ -831,21 +878,16 @@ impl Replica {
             let mut degraded = !record.interpreted;
             if record.interpreted {
                 for (envelope, _) in &loaded {
-                    let epoch = mechanics::crypto::body_epoch_id(envelope).ok_or_else(|| {
-                        ReplicaCommitError::Integrity(
-                            "protected object without epoch prefix".into(),
-                        )
-                    })?;
+                    let epoch = mechanics::authorization::body_epoch_id(envelope)
+                        .ok_or_else(|| Failure::Integrity(Defect::CorruptMaterial))?;
                     match keys.opening_key(&epoch) {
                         Some(key_cap) => {
-                            let payload =
-                                ProtectedBodyPayload::open(&key_cap, envelope).map_err(|e| {
-                                    ReplicaCommitError::Integrity(format!("protected: {e}"))
-                                })?;
+                            let payload = Material::open(&key_cap, envelope)
+                                .map_err(|_| Failure::Integrity(Defect::CorruptMaterial))?;
                             replica
                                 .fabric
                                 .import_body(&fabric_key(&key), &payload.payload)
-                                .map_err(|e| ReplicaCommitError::Integrity(e.to_string()))?;
+                                .map_err(|_| Failure::Integrity(Defect::CorruptMaterial))?;
                         }
                         None => {
                             degraded = true;
@@ -865,15 +907,16 @@ impl Replica {
                 replica.raw_material.insert(key.clone(), entries);
             }
             for hash in Self::record_object_refs(&record) {
-                *replica.object_refs.entry(hash).or_insert(0) += 1;
+                let count = replica.object_refs.entry(hash).or_insert(0);
+                *count = count.saturating_add(1);
             }
             replica.bodies.insert(key, record);
         }
         // Declarations live in the published catalog, so reopening recovers
         // them from the same place a peer would read them.
-        let mut declared_failure: Option<String> = None;
-        fabric::journal::index::stream(&store.nodes(), meta.manifest_body_root, &mut |entry| {
-            if declared_failure.is_some() {
+        let mut declared_failure = false;
+        crate::index::stream(&StoreNodes(&store), meta.manifest_body_root, &mut |entry| {
+            if declared_failure {
                 return;
             }
             match crate::manifest::ManifestEntry::decode_canonical(&entry.value) {
@@ -883,25 +926,27 @@ impl Replica {
                         .insert(published.key, published.content_refs);
                 }
                 Ok(_) => {}
-                Err(e) => declared_failure = Some(format!("published entry: {e}")),
+                Err(_) => declared_failure = true,
             }
         })
-        .map_err(|e| ReplicaCommitError::Integrity(format!("published index: {e}")))?;
-        if let Some(reason) = declared_failure {
-            return Err(ReplicaCommitError::Integrity(reason));
+        .map_err(|_| Failure::Integrity(Defect::Index))?;
+        if declared_failure {
+            return Err(Failure::Integrity(Defect::Encoding));
         }
 
         for IndexedReceipt { scope, object } in indexed_receipts {
             let bytes = store
                 .read_object(&object)
-                .map_err(|e| ReplicaCommitError::Integrity(e.to_string()))?;
+                .map_err(|_| Failure::Integrity(Defect::Encoding))?;
             let receipt = RequestReceipt::decode_canonical(&bytes)
-                .map_err(|e| ReplicaCommitError::Integrity(format!("receipt: {e}")))?;
-            *replica.object_refs.entry(object.hash).or_insert(0) += 1;
+                .map_err(|_| Failure::Integrity(Defect::Encoding))?;
+            let count = replica.object_refs.entry(object.hash).or_insert(0);
+            *count = count.saturating_add(1);
             replica.receipts.insert(scope, (receipt, Some(object)));
         }
         if let Some(root) = meta.manifest_root {
-            *replica.object_refs.entry(root.hash).or_insert(0) += 1;
+            let count = replica.object_refs.entry(root.hash).or_insert(0);
+            *count = count.saturating_add(1);
         }
         replica.durable = Some(store);
         Ok(replica)
@@ -909,7 +954,7 @@ impl Replica {
 
     /// Every object one Body record names, for reference counting.
     fn record_object_refs(record: &BodyRecord) -> Vec<[u8; 32]> {
-        let mut out = Vec::with_capacity(record.heads.len() * 2);
+        let mut out = Vec::with_capacity(record.heads.len().saturating_mul(2));
         for head in &record.heads {
             if let Some(r) = head.protected {
                 out.push(r.hash);
@@ -922,14 +967,15 @@ impl Replica {
     }
 
     fn retain_object(&mut self, hash: [u8; 32]) {
-        *self.object_refs.entry(hash).or_insert(0) += 1;
+        let count = self.object_refs.entry(hash).or_insert(0);
+        *count = count.saturating_add(1);
     }
 
     /// Drop one reference, reporting whether that was the last.
     fn release_object(&mut self, hash: [u8; 32]) -> bool {
         match self.object_refs.get_mut(&hash) {
             Some(count) if *count > 1 => {
-                *count -= 1;
+                *count = count.saturating_sub(1);
                 false
             }
             Some(_) => {
@@ -951,7 +997,7 @@ impl Replica {
         key: &BodyKey,
         record: &BodyRecord,
         content_refs: Vec<[u8; 32]>,
-    ) -> Result<ManifestEntry, ReplicaCommitError> {
+    ) -> Result<ManifestEntry, Failure> {
         ManifestEntry::declaring(
             key.clone(),
             record
@@ -964,7 +1010,7 @@ impl Replica {
                 .collect(),
             content_refs,
         )
-        .map_err(|e| ReplicaCommitError::Integrity(format!("manifest entry for {key:?}: {e}")))
+        .map_err(|_| Failure::Integrity(Defect::Encoding))
     }
 
     /// The single durable write.
@@ -984,8 +1030,8 @@ impl Replica {
         new_receipt: Option<&RequestReceipt>,
         mut new_objects: Vec<Vec<u8>>,
         next_frontier: ReplicaFrontier,
-    ) -> Result<(), ReplicaCommitError> {
-        use fabric::journal::index::{self, IndexChange, NodeSink};
+    ) -> Result<(), Failure> {
+        use crate::index::{self, IndexChange, NodeSink};
 
         let mut sink = NodeSink::default();
         let mut removed: Vec<[u8; 32]> = Vec::new();
@@ -1023,7 +1069,7 @@ impl Replica {
                     };
                     Some(
                         postcard::to_stdvec(&entry)
-                            .map_err(|e| ReplicaCommitError::Fabric(e.to_string()))?,
+                            .map_err(|_| Failure::Integrity(Defect::Encoding))?,
                     )
                 }
             };
@@ -1062,7 +1108,7 @@ impl Replica {
         for descriptor in descriptors {
             descriptor
                 .validate()
-                .map_err(|e| ReplicaCommitError::Illegitimate(format!("content: {e}")))?;
+                .map_err(|_| Failure::Illegitimate(Invalid::Encoding))?;
             content_changes.push(IndexChange {
                 key: crate::manifest::content_index_key(descriptor.content_ref().as_bytes()),
                 value: Some(descriptor.encode()),
@@ -1070,16 +1116,17 @@ impl Replica {
         }
 
         let (body_index_root, manifest_body_root, content_index_root) = {
-            let nodes = self.durable.as_ref().expect("durable path").nodes();
+            let store = self.durable.as_ref().ok_or(Failure::Poisoned)?;
+            let nodes = StoreNodes(store);
             let body_index_root =
                 index::apply(&nodes, self.body_index_root, body_changes, &mut sink)
-                    .map_err(|e| ReplicaCommitError::Integrity(format!("body index: {e}")))?;
+                    .map_err(|_| Failure::Integrity(Defect::Index))?;
             let manifest_body_root =
                 index::apply(&nodes, self.manifest_body_root, manifest_changes, &mut sink)
-                    .map_err(|e| ReplicaCommitError::Integrity(format!("manifest index: {e}")))?;
+                    .map_err(|_| Failure::Integrity(Defect::Index))?;
             let content_index_root =
                 index::apply(&nodes, self.content_index_root, content_changes, &mut sink)
-                    .map_err(|e| ReplicaCommitError::Integrity(format!("content index: {e}")))?;
+                    .map_err(|_| Failure::Integrity(Defect::Index))?;
             (body_index_root, manifest_body_root, content_index_root)
         };
 
@@ -1094,9 +1141,10 @@ impl Replica {
                 scope: receipt.scope_key(),
                 object: reference,
             };
-            let value = postcard::to_stdvec(&entry)
-                .map_err(|e| ReplicaCommitError::Fabric(e.to_string()))?;
-            let nodes = self.durable.as_ref().expect("durable path").nodes();
+            let value =
+                postcard::to_stdvec(&entry).map_err(|_| Failure::Integrity(Defect::Encoding))?;
+            let store = self.durable.as_ref().ok_or(Failure::Poisoned)?;
+            let nodes = StoreNodes(store);
             receipt_index_root = index::apply(
                 &nodes,
                 receipt_index_root,
@@ -1106,7 +1154,7 @@ impl Replica {
                 }],
                 &mut sink,
             )
-            .map_err(|e| ReplicaCommitError::Integrity(format!("receipt index: {e}")))?;
+            .map_err(|_| Failure::Integrity(Defect::Index))?;
         }
 
         // 3. The signed root over the catalogs. A commit with no attribution
@@ -1122,7 +1170,7 @@ impl Replica {
                     ctx.authority_frontier.clone(),
                     ctx.signer,
                 )
-                .ok_or_else(|| ReplicaCommitError::Illegitimate("sign manifest root".into()))?;
+                .ok_or_else(|| Failure::Illegitimate("sign manifest root".into()))?;
                 let bytes = root.encode();
                 let reference = object_ref(&bytes);
                 new_objects.push(bytes);
@@ -1148,7 +1196,7 @@ impl Replica {
             manifest_root: manifest_root_object,
         };
         let meta_bytes =
-            postcard::to_stdvec(&meta).map_err(|e| ReplicaCommitError::Fabric(e.to_string()))?;
+            postcard::to_stdvec(&meta).map_err(|_| Failure::Integrity(Defect::Encoding))?;
 
         // Index nodes are handed over separately, not folded into `added`. An
         // entry in the required set is a promise that never expires, so a node
@@ -1165,27 +1213,28 @@ impl Replica {
         removed.sort();
         removed.dedup();
 
-        let roots: Vec<IndexRef> = body_index_root
+        let roots: Vec<([u8; 32], u64)> = body_index_root
             .into_iter()
             .chain(manifest_body_root)
             .chain(content_index_root)
             .chain(receipt_index_root)
+            .map(|root| (root.hash, root.count))
             .collect();
 
-        let store = self.durable.as_mut().expect("durable path");
-        let caller_index = fabric::journal::CallerIndex {
+        let store = self.durable.as_mut().ok_or(Failure::Poisoned)?;
+        let caller_index = journal::Index {
             roots: &roots,
             nodes: &index_nodes,
         };
         match store.commit(&added, &removed, caller_index, meta_bytes) {
             Ok(_) => {}
-            Err(fabric::journal::JournalError::OutcomeUnknown) => {
+            Err(journal::Failure::OutcomeUnknown) => {
                 self.poisoned = true;
-                return Err(ReplicaCommitError::OutcomeUnknown);
+                return Err(Failure::OutcomeUnknown);
             }
             Err(e) => {
                 self.poisoned = true;
-                return Err(ReplicaCommitError::Durability(e.to_string()));
+                return Err(Failure::Durability(e));
             }
         }
         self.body_index_root = body_index_root;
@@ -1205,11 +1254,11 @@ impl Replica {
         &mut self,
         ctx: &CommitContext<'_>,
         descriptors: &[crate::content::ContentDescriptor],
-    ) -> Result<Vec<crate::content::ContentRef>, ReplicaCommitError> {
+    ) -> Result<Vec<crate::content::ContentRef>, Failure> {
         if self.poisoned {
-            return Err(ReplicaCommitError::Poisoned);
+            return Err(Failure::Poisoned);
         }
-        let mut causal = Vec::with_capacity(descriptors.len() * 32);
+        let mut causal = Vec::with_capacity(descriptors.len().saturating_mul(32));
         for descriptor in descriptors {
             causal.extend_from_slice(descriptor.content_ref().as_bytes());
         }
@@ -1269,26 +1318,26 @@ impl Replica {
         &mut self,
         ctx: &CommitContext<'_>,
         declarations: BTreeMap<BodyKey, Vec<crate::content::ContentRef>>,
-    ) -> Result<(), ReplicaCommitError> {
+    ) -> Result<(), Failure> {
         if self.poisoned {
-            return Err(ReplicaCommitError::Poisoned);
+            return Err(Failure::Poisoned);
         }
         let mut declared: BTreeMap<BodyKey, Vec<[u8; 32]>> = BTreeMap::new();
         let mut changed: BTreeMap<BodyKey, Option<BodyRecord>> = BTreeMap::new();
         for (key, refs) in declarations {
             if refs.len() > crate::manifest::MAX_CONTENT_REFS_PER_BODY {
-                return Err(ReplicaCommitError::Illegitimate(
+                return Err(Failure::Illegitimate(
                     "declared content references exceed the per-Body bound".into(),
                 ));
             }
             let Some(record) = self.bodies.get(&key) else {
-                return Err(ReplicaCommitError::Illegitimate(
+                return Err(Failure::Illegitimate(
                     "a declaration names a Body this Replica does not hold".into(),
                 ));
             };
             for reference in &refs {
                 if self.content_descriptor(reference).is_none() {
-                    return Err(ReplicaCommitError::Illegitimate(
+                    return Err(Failure::Illegitimate(
                         "a declaration names content with no committed descriptor".into(),
                     ));
                 }
@@ -1329,12 +1378,12 @@ impl Replica {
     }
 
     /// A Body's causal position, in lait's own head-set terms.
-    pub fn body_version(&self, key: &BodyKey) -> Option<fabric::FabricVersion> {
+    pub fn body_version(&self, key: &BodyKey) -> Option<fabric::Version> {
         self.fabric.version(&fabric_key(key)).ok()
     }
 
     /// Take an anchor at a position inside a collaborative value.
-    pub fn anchor(&self, key: &BodyKey, path: &str, position: u64) -> Option<fabric::FabricAnchor> {
+    pub fn anchor(&self, key: &BodyKey, path: &str, position: u64) -> Option<fabric::Anchor> {
         self.fabric.anchor(&fabric_key(key), path, position).ok()
     }
 
@@ -1342,7 +1391,7 @@ impl Replica {
     pub fn resolve_anchor(
         &self,
         key: &BodyKey,
-        anchor: &fabric::FabricAnchor,
+        anchor: &fabric::Anchor,
     ) -> fabric::AnchorResolution {
         self.fabric.resolve(&fabric_key(key), anchor)
     }
@@ -1372,8 +1421,8 @@ impl Replica {
         content: &crate::content::ContentRef,
     ) -> Option<crate::content::ContentDescriptor> {
         let store = self.durable.as_ref()?;
-        let value = fabric::journal::index::lookup(
-            &store.nodes(),
+        let value = crate::index::lookup(
+            &StoreNodes(store),
             self.content_index_root,
             &crate::manifest::content_index_key(content.as_bytes()),
         )
@@ -1433,18 +1482,18 @@ impl Replica {
     pub fn sweep_unreferenced_content(
         &mut self,
         ctx: &CommitContext<'_>,
-        cache: Option<&fabric::journal::cache::ResidentCache>,
-    ) -> Result<Vec<crate::content::ContentRef>, ReplicaCommitError> {
-        use fabric::journal::index::{self, IndexChange, NodeSink};
+        cache: Option<&crate::cache::Residency>,
+    ) -> Result<Vec<crate::content::ContentRef>, Failure> {
+        use crate::index::{self, IndexChange, NodeSink};
 
         let now = std::time::Instant::now();
         self.pending_content.retain(|_, until| *until > now);
         let reachable = self.retained_content(now);
         let mut unreferenced: Vec<crate::content::ContentDescriptor> = Vec::new();
         {
-            let store = self.durable.as_ref().expect("durable path");
+            let store = self.durable.as_ref().ok_or(Failure::Poisoned)?;
             let mut failure: Option<String> = None;
-            index::stream(&store.nodes(), self.content_index_root, &mut |entry| {
+            index::stream(&StoreNodes(store), self.content_index_root, &mut |entry| {
                 if failure.is_some() {
                     return;
                 }
@@ -1457,9 +1506,10 @@ impl Replica {
                     Err(e) => failure = Some(format!("content entry: {e}")),
                 }
             })
-            .map_err(|e| ReplicaCommitError::Integrity(format!("content index: {e}")))?;
+            .map_err(|_| Failure::Integrity(Defect::Index))?;
             if let Some(reason) = failure {
-                return Err(ReplicaCommitError::Integrity(reason));
+                tracing::warn!(%reason, "content index entry is not canonical");
+                return Err(Failure::Integrity(Defect::Encoding));
             }
         }
         if unreferenced.is_empty() {
@@ -1475,15 +1525,20 @@ impl Replica {
             })
             .collect();
         let content_index_root = {
-            let store = self.durable.as_ref().expect("durable path");
-            index::apply(&store.nodes(), self.content_index_root, changes, &mut sink)
-                .map_err(|e| ReplicaCommitError::Integrity(format!("content index: {e}")))?
+            let store = self.durable.as_ref().ok_or(Failure::Poisoned)?;
+            index::apply(
+                &StoreNodes(store),
+                self.content_index_root,
+                changes,
+                &mut sink,
+            )
+            .map_err(|_| Failure::Integrity(Defect::Index))?
         };
 
         // Republish under the shrunken catalog before touching residency, so a
         // crash between the two leaves bytes without a descriptor — reclaimable
         // garbage — rather than a descriptor whose bytes are gone.
-        let mut causal = Vec::with_capacity(unreferenced.len() * 32);
+        let mut causal = Vec::with_capacity(unreferenced.len().saturating_mul(32));
         for descriptor in &unreferenced {
             causal.extend_from_slice(descriptor.content_ref().as_bytes());
         }
@@ -1496,7 +1551,7 @@ impl Replica {
             ctx.authority_frontier.clone(),
             ctx.signer,
         )
-        .ok_or_else(|| ReplicaCommitError::Illegitimate("sign manifest root".into()))?;
+        .ok_or_else(|| Failure::Illegitimate("sign manifest root".into()))?;
         let root_bytes = root.encode();
         let root_ref = object_ref(&root_bytes);
         self.retain_object(root_ref.hash);
@@ -1519,31 +1574,32 @@ impl Replica {
             manifest_root: Some(root_ref),
         };
         let meta_bytes =
-            postcard::to_stdvec(&meta).map_err(|e| ReplicaCommitError::Fabric(e.to_string()))?;
+            postcard::to_stdvec(&meta).map_err(|_| Failure::Integrity(Defect::Encoding))?;
         let added = vec![root_bytes];
         let index_nodes = sink.written;
-        let roots: Vec<IndexRef> = self
+        let roots: Vec<([u8; 32], u64)> = self
             .body_index_root
             .into_iter()
             .chain(self.manifest_body_root)
             .chain(content_index_root)
             .chain(self.receipt_index_root)
+            .map(|root| (root.hash, root.count))
             .collect();
 
-        let store = self.durable.as_mut().expect("durable path");
-        let caller_index = fabric::journal::CallerIndex {
+        let store = self.durable.as_mut().ok_or(Failure::Poisoned)?;
+        let caller_index = journal::Index {
             roots: &roots,
             nodes: &index_nodes,
         };
         match store.commit(&added, &removed, caller_index, meta_bytes) {
             Ok(_) => {}
-            Err(fabric::journal::JournalError::OutcomeUnknown) => {
+            Err(journal::Failure::OutcomeUnknown) => {
                 self.poisoned = true;
-                return Err(ReplicaCommitError::OutcomeUnknown);
+                return Err(Failure::OutcomeUnknown);
             }
             Err(e) => {
                 self.poisoned = true;
-                return Err(ReplicaCommitError::Durability(e.to_string()));
+                return Err(Failure::Durability(e));
             }
         }
         self.content_index_root = content_index_root;
@@ -1564,9 +1620,10 @@ impl Replica {
     }
 
     /// Test seam: attach a fault injector to the underlying journaled store
-    /// (see [`fabric::journal::FAULT_POINTS`]). No effect without a durable
+    /// (see [`journal::FAULT_POINTS`]). No effect without a durable
     /// store.
-    pub fn with_store_fault_injector(mut self, injector: fabric::journal::FaultInjector) -> Self {
+    #[cfg(any(test, feature = "fault-injection"))]
+    pub fn with_store_fault_injector(mut self, injector: Box<dyn Fn(&str) -> bool + Send>) -> Self {
         if let Some(store) = self.durable.take() {
             self.durable = Some(store.with_fault_injector(injector));
         }
@@ -1631,12 +1688,12 @@ impl Replica {
         device: &mechanics::ids::DeviceId,
         request: &[u8; 16],
         payload_hash: &[u8; 32],
-    ) -> Result<Option<RequestReceipt>, ReplicaCommitError> {
+    ) -> Result<Option<RequestReceipt>, Failure> {
         let key = crate::receipt::scope_key(space, world, device, request);
         match self.receipts.get(&key) {
             None => Ok(None),
             Some((r, _)) if &r.payload_hash == payload_hash => Ok(Some(r.clone())),
-            Some(_) => Err(ReplicaCommitError::RequestIdConflict),
+            Some(_) => Err(Failure::RequestIdConflict),
         }
     }
 
@@ -1647,19 +1704,19 @@ impl Replica {
     pub fn commit(
         &mut self,
         request_label: &str,
-        ops: &[(BodyKey, BodyOp)],
-    ) -> Result<ReplicaFrontier, ReplicaCommitError> {
+        ops: &[(BodyKey, Op)],
+    ) -> Result<ReplicaFrontier, Failure> {
         if self.durable.is_some() {
-            return Err(ReplicaCommitError::Illegitimate(
+            return Err(Failure::Illegitimate(
                 "a durable Replica commits only signed, attributed transactions".into(),
             ));
         }
         if self.poisoned {
-            return Err(ReplicaCommitError::Poisoned);
+            return Err(Failure::Poisoned);
         }
         let receipt = self.apply_ops(request_label, ops)?;
         // Track minimal body records so bindings/tombstones behave uniformly.
-        self.update_records_unattributed(ops);
+        self.update_records_unattributed(ops)?;
         self.frontier = advance(self.frontier, receipt.causal().as_bytes());
         Ok(self.frontier)
     }
@@ -1667,7 +1724,7 @@ impl Replica {
     /// Commit a request's staged operations under its persistent-idempotency
     /// scope, as one durable signed transaction. Identical replay returns the
     /// original receipt **without reapplying** a single operation; reuse with
-    /// a different payload hash is [`ReplicaCommitError::RequestIdConflict`];
+    /// a different payload hash is [`Failure::RequestIdConflict`];
     /// a fresh request commits durably — signed transaction record, sealed
     /// per-Body payloads, idempotency receipt, and manifest, at one journal
     /// linearization point — and records its receipt with the transaction.
@@ -1681,14 +1738,14 @@ impl Replica {
         request: &[u8; 16],
         payload_hash: &[u8; 32],
         effect: Vec<u8>,
-        scopes: Vec<BodyKey>,
+        bodies: Vec<BodyKey>,
         request_label: &str,
-        ops: &[(BodyKey, BodyOp)],
+        ops: &[(BodyKey, Op)],
         bindings: &[(BodyKey, BodyBinding)],
         content_refs: &[(BodyKey, Vec<crate::content::ContentRef>)],
-    ) -> Result<ActionOutcome, ReplicaCommitError> {
+    ) -> Result<ActionOutcome, Failure> {
         if self.poisoned {
-            return Err(ReplicaCommitError::Poisoned);
+            return Err(Failure::Poisoned);
         }
         if let Some(receipt) =
             self.lookup_action(ctx.space, world, device, request, payload_hash)?
@@ -1696,7 +1753,7 @@ impl Replica {
             return Ok(ActionOutcome::Replayed(receipt));
         }
         if effect.len() > crate::receipt::MAX_EFFECT_BYTES {
-            return Err(ReplicaCommitError::EffectTooLarge);
+            return Err(Failure::EffectTooLarge);
         }
         // An idempotent no-op: no operations, nothing applied, the frontier
         // does not advance — but the receipt is still recorded durably so an
@@ -1710,7 +1767,7 @@ impl Replica {
                 request: *request,
                 payload_hash: *payload_hash,
                 effect,
-                scopes,
+                bodies,
                 frontier: self.frontier,
                 transaction: [0u8; 32],
             };
@@ -1726,7 +1783,7 @@ impl Replica {
             None => self.space = Some(ctx.space.clone()),
             Some(space) if space == ctx.space => {}
             Some(_) => {
-                return Err(ReplicaCommitError::Illegitimate(
+                return Err(Failure::Illegitimate(
                     "commit addressed to a different Space".into(),
                 ))
             }
@@ -1740,10 +1797,10 @@ impl Replica {
         for key in &touched {
             match (self.bodies.get(key), bindings.get(key)) {
                 (Some(record), Some(declared)) if &&record.binding != declared => {
-                    return Err(ReplicaCommitError::SchemaMismatch)
+                    return Err(Failure::SchemaMismatch)
                 }
                 (None, None) => {
-                    return Err(ReplicaCommitError::SchemaMismatch);
+                    return Err(Failure::SchemaMismatch);
                 }
                 _ => {}
             }
@@ -1756,11 +1813,11 @@ impl Replica {
         let mut declared: BTreeMap<BodyKey, Vec<[u8; 32]>> = BTreeMap::new();
         for (key, refs) in content_refs {
             if refs.len() > crate::manifest::MAX_CONTENT_REFS_PER_BODY {
-                return Err(ReplicaCommitError::QuotaExceeded);
+                return Err(Failure::QuotaExceeded);
             }
             for reference in refs {
                 if self.content_descriptor(reference).is_none() {
-                    return Err(ReplicaCommitError::Illegitimate(
+                    return Err(Failure::Illegitimate(
                         "a declaration names content with no committed descriptor".into(),
                     ));
                 }
@@ -1772,29 +1829,36 @@ impl Replica {
         }
 
         // Body-count quota, reserved under the writer BEFORE anything applies.
-        let new_bodies = touched
-            .iter()
-            .filter(|k| !self.bodies.contains_key(*k))
-            .count() as u64;
-        if (self.bodies.len() as u64).saturating_add(new_bodies) > self.quota.max_space_bodies {
-            return Err(ReplicaCommitError::QuotaExceeded);
+        let new_bodies = u64::try_from(
+            touched
+                .iter()
+                .filter(|k| !self.bodies.contains_key(*k))
+                .count(),
+        )
+        .unwrap_or(u64::MAX);
+        if u64::try_from(self.bodies.len())
+            .unwrap_or(u64::MAX)
+            .saturating_add(new_bodies)
+            > self.quota.max_space_bodies
+        {
+            return Err(Failure::QuotaExceeded);
         }
         // A durable commit needs sealing material before the engine moves; a
         // non-durable Replica with keys still seals (so its material can be
         // exported), and one without keys commits locally-only.
         let sealing = match self.keys.as_ref().and_then(|k| k.sealing_key()) {
             Some(key) => Some(key),
-            None if self.durable.is_some() => return Err(ReplicaCommitError::BodyKeyUnavailable),
+            None if self.durable.is_some() => return Err(Failure::BodyKeyUnavailable),
             None => None,
         };
 
         let receipt = self.apply_ops(request_label, ops)?;
         let next_frontier = advance(self.frontier, receipt.causal().as_bytes());
-        let chain_seed = mint_chain_seed();
+        let chain_seed = mint_chain_seed()?;
 
         // Build per-Body chain advances and records for every touched Body.
         let mut new_records: BTreeMap<BodyKey, Option<BodyRecord>> = BTreeMap::new();
-        let mut sealed: Vec<(BodyKey, Vec<u8>, ProtectedBodyPayload)> = Vec::new();
+        let mut sealed: Vec<(BodyKey, Vec<u8>, Material)> = Vec::new();
         for key in &touched {
             let export = self.fabric.export_body(&fabric_key(key));
             match export {
@@ -1815,15 +1879,17 @@ impl Replica {
                             .bodies
                             .get(key)
                             .map(|r| r.binding.clone())
-                            .expect("validated above"),
+                            .ok_or(Failure::SchemaMismatch)?,
                     };
-                    let payload = ProtectedBodyPayload::new(export, base, chain);
+                    let payload = Material::new(export, base, chain);
                     let envelope = match &sealing {
                         Some(sealing) => payload.seal(sealing).map_err(|e| {
                             self.poisoned = true;
                             match e {
-                                ProtectedError::BodyTooLarge => ReplicaCommitError::OpLimit,
-                                _ => ReplicaCommitError::Fabric(e.to_string()),
+                                BodyInvalid::BodyTooLarge => Failure::OpLimit,
+                                _ => Failure::Engine(fabric::commit::Failure::Invalid(
+                                    fabric::commit::Invalid::Import,
+                                )),
                             }
                         })?,
                         None => Vec::new(),
@@ -1841,7 +1907,7 @@ impl Replica {
                                 tx_commitment: [0u8; 32],   // filled below
                                 protected: None,
                                 transaction: None,
-                                protected_len: envelope.len() as u64,
+                                protected_len: u64::try_from(envelope.len()).unwrap_or(u64::MAX),
                                 tx_len: 0, // filled once the transaction is signed
                             }],
                             interpreted: true,
@@ -1855,13 +1921,13 @@ impl Replica {
         // Durable path: build the signed transaction + manifest and run the
         // journal protocol at one linearization point.
         let durable_result = if sealing.is_some() {
-            let mut descriptors: Vec<BodyDescriptor> = Vec::new();
+            let mut descriptors: Vec<Descriptor> = Vec::new();
             for (key, envelope, _) in &sealed {
                 let record = new_records
                     .get(key)
                     .and_then(|r| r.as_ref())
-                    .expect("sealed bodies have records");
-                descriptors.push(BodyDescriptor {
+                    .ok_or(Failure::Integrity(Defect::MissingMaterial))?;
+                descriptors.push(Descriptor {
                     world: key.world.clone(),
                     body: key.body.clone(),
                     schema: record.binding.schema.clone(),
@@ -1873,8 +1939,8 @@ impl Replica {
             }
             descriptors.sort_by_key(|d| d.key());
             let operations_digest = operations_digest(ops);
-            let tx = BodyTransaction::sign_with(
-                TransactionSignRequest {
+            let tx = Transaction::sign_with(
+                SignRequest {
                     space: ctx.space,
                     parent_manifest_root: auth.parent_manifest_root,
                     replica_frontier: next_frontier,
@@ -1888,12 +1954,12 @@ impl Replica {
                 ctx.signer,
                 |core| auth.authorizer.authorize(core),
             )
-            .map_err(ReplicaCommitError::Unauthorized)?;
+            .map_err(|_| Failure::Unauthorized(Refusal::Authorization))?;
             let tx_id = tx.id();
             // Stamp the resolved transaction id into every touched record.
             for key in &touched {
                 if let Some(Some(record)) = new_records.get_mut(key) {
-                    record.head_mut().tx = tx_id;
+                    record.head_mut()?.tx = tx_id;
                 }
             }
             let receipt_record = RequestReceipt {
@@ -1904,7 +1970,7 @@ impl Replica {
                 request: *request,
                 payload_hash: *payload_hash,
                 effect: effect.clone(),
-                scopes: scopes.clone(),
+                bodies: bodies.clone(),
                 frontier: next_frontier,
                 transaction: tx_id,
             };
@@ -1915,20 +1981,23 @@ impl Replica {
             // reopened.
             let (mut projected, _) = self.usage();
             for (key, envelope, _) in &sealed {
-                if envelope.len() as u64 > self.quota.max_body_bytes {
+                let envelope_len = u64::try_from(envelope.len()).unwrap_or(u64::MAX);
+                if envelope_len > self.quota.max_body_bytes {
                     self.poisoned = true;
-                    return Err(ReplicaCommitError::QuotaExceeded);
+                    return Err(Failure::QuotaExceeded);
                 }
-                projected = projected.saturating_add(envelope.len() as u64);
+                projected = projected.saturating_add(envelope_len);
                 if let Some(old) = self.bodies.get(key) {
                     projected = projected.saturating_sub(old.protected_total());
                 }
             }
-            projected = projected.saturating_add(tx.encode().len() as u64);
-            projected = projected.saturating_add(receipt_record.encode().len() as u64);
+            projected =
+                projected.saturating_add(u64::try_from(tx.encode().len()).unwrap_or(u64::MAX));
+            projected = projected
+                .saturating_add(u64::try_from(receipt_record.encode().len()).unwrap_or(u64::MAX));
             if projected > self.quota.max_space_bytes {
                 self.poisoned = true;
-                return Err(ReplicaCommitError::QuotaExceeded);
+                return Err(Failure::QuotaExceeded);
             }
             if self.durable.is_some() {
                 Some(self.persist_transaction(
@@ -1950,8 +2019,8 @@ impl Replica {
                         vec![(tx.id(), envelope.clone(), tx_bytes.clone())],
                     );
                     if let Some(Some(record)) = new_records.get_mut(key) {
-                        let head = record.head_mut();
-                        head.tx_len = tx_bytes.len() as u64;
+                        let head = record.head_mut()?;
+                        head.tx_len = u64::try_from(tx_bytes.len()).unwrap_or(u64::MAX);
                         head.tx_commitment = tx_commitment(&tx_bytes);
                         if let Some(d) = tx.core.descriptors.iter().find(|d| &d.key() == key) {
                             head.descriptor_hash = descriptor_hash(d);
@@ -1993,7 +2062,7 @@ impl Replica {
                 request: *request,
                 payload_hash: *payload_hash,
                 effect,
-                scopes,
+                bodies,
                 frontier: next_frontier,
                 transaction: [0u8; 32],
             },
@@ -2004,21 +2073,21 @@ impl Replica {
     }
 
     /// Incorporate remote material through the Convergence pipeline. The signed
-    /// [`BodyTransaction`] is verified — structure, signature, **and signer
+    /// [`Transaction`] is verified — structure, signature, **and signer
     /// standing at its referenced authority frontier through mechanics** — and
     /// every provided payload must match its descriptor's ciphertext
     /// commitment **before** any byte reaches the engine. Supported, openable
-    /// material becomes exact per-Body Fabric changes; unsupported-but-
+    /// material becomes exact per-Body Engine changes; unsupported-but-
     /// legitimate material is retained opaquely, byte-identically. Never
     /// reachable from a World or an ordinary Session. Durability before
     /// acknowledgment applies exactly as for a local commit.
     pub fn incorporate(
         &mut self,
         ctx: &CommitContext<'_>,
-        tx: &BodyTransaction,
+        tx: &Transaction,
         payloads: &[(BodyKey, Vec<u8>)],
         authority: &dyn AuthoritySource,
-    ) -> Result<ConvergenceOutcome, ReplicaCommitError> {
+    ) -> Result<ConvergenceOutcome, Failure> {
         self.incorporate_units(
             ctx,
             &[(tx.clone(), payloads.to_vec())],
@@ -2044,9 +2113,9 @@ impl Replica {
         bundle_declared: &BTreeMap<BodyKey, Vec<[u8; 32]>>,
         bundle_descriptors: &[crate::content::ContentDescriptor],
         authority: &dyn AuthoritySource,
-    ) -> Result<ConvergenceOutcome, ReplicaCommitError> {
+    ) -> Result<ConvergenceOutcome, Failure> {
         if self.poisoned {
-            return Err(ReplicaCommitError::Poisoned);
+            return Err(Failure::Poisoned);
         }
         let previous = self.frontier;
         let mut outcome = ConvergenceOutcome::unchanged(previous);
@@ -2058,19 +2127,19 @@ impl Replica {
         let mut tx_space: Option<SpaceId> = None;
         for (tx, _) in units {
             tx.verify_authorized(authority)
-                .map_err(|e| ReplicaCommitError::Illegitimate(e.to_string()))?;
+                .map_err(|_| Failure::Illegitimate(Invalid::Signature))?;
             let space = std::str::from_utf8(&tx.core.space)
                 .ok()
                 .and_then(SpaceId::parse)
-                .ok_or_else(|| ReplicaCommitError::Illegitimate("space id".into()))?;
+                .ok_or_else(|| Failure::Illegitimate("space id".into()))?;
             match (&tx_space, &self.space) {
                 (Some(prev), _) if prev != &space => {
-                    return Err(ReplicaCommitError::Illegitimate(
+                    return Err(Failure::Illegitimate(
                         "transactions address different Spaces".into(),
                     ))
                 }
                 (_, Some(bound)) if bound != &space => {
-                    return Err(ReplicaCommitError::Illegitimate(
+                    return Err(Failure::Illegitimate(
                         "transaction addressed to a different Space".into(),
                     ))
                 }
@@ -2079,11 +2148,11 @@ impl Replica {
         }
 
         // ---- Phase 2: resolve payloads to descriptors; bounds; commitments. --
-        let mut resolved: Vec<(usize, &BodyDescriptor, &[u8])> = Vec::new();
+        let mut resolved: Vec<(usize, &Descriptor, &[u8])> = Vec::new();
         for (idx, (tx, payloads)) in units.iter().enumerate() {
             for (key, payload) in payloads {
                 if payload.len() > MAX_BODY_BYTES {
-                    return Err(ReplicaCommitError::Illegitimate(
+                    return Err(Failure::Illegitimate(
                         "payload exceeds the Body maximum".into(),
                     ));
                 }
@@ -2093,12 +2162,10 @@ impl Replica {
                     .iter()
                     .find(|d| &d.key() == key)
                     .ok_or_else(|| {
-                        ReplicaCommitError::Illegitimate(
-                            "payload without a matching descriptor".into(),
-                        )
+                        Failure::Illegitimate("payload without a matching descriptor".into())
                     })?;
                 if !descriptor.commits_to(payload) {
-                    return Err(ReplicaCommitError::Illegitimate(
+                    return Err(Failure::Illegitimate(
                         "payload does not match the signed commitment".into(),
                     ));
                 }
@@ -2116,7 +2183,7 @@ impl Replica {
             envelope: Vec<u8>,
             /// `Some` when the payload opens and is locally interpreted;
             /// `None` for the opaque branch.
-            payload: Option<ProtectedBodyPayload>,
+            payload: Option<Material>,
             record: BodyRecord,
             /// A concurrent collaborative merge: the staged head JOINS the
             /// existing record's head set (the union is the state) instead of
@@ -2130,13 +2197,18 @@ impl Replica {
         let mut overlay: BTreeMap<BodyKey, (ReplicaFrontier, bool)> = BTreeMap::new();
         for (unit, descriptor, envelope) in &resolved {
             let key = descriptor.key();
+            let transaction = units
+                .get(*unit)
+                .map(|(transaction, _)| transaction)
+                .ok_or(Failure::Illegitimate(Invalid::IncompleteMaterial))?;
+            let transaction_bytes = transaction.encode();
             // Immutable schema binding across replicas too.
             if let Some(record) = self.bodies.get(&key) {
                 if record.binding.schema != descriptor.schema
                     || record.binding.schema_version != descriptor.schema_version
                     || record.binding.encoding != descriptor.encoding
                 {
-                    outcome.rejected += 1;
+                    outcome.rejected = outcome.rejected.saturating_add(1);
                     continue;
                 }
             }
@@ -2151,7 +2223,7 @@ impl Replica {
             let supported =
                 self.supported
                     .lookup(&key.world, &descriptor.schema, descriptor.schema_version);
-            let epoch = mechanics::crypto::body_epoch_id(envelope);
+            let epoch = mechanics::authorization::body_epoch_id(envelope);
             let opening = match (&self.keys, epoch) {
                 (Some(keys), Some(epoch)) => keys.opening_key(&epoch),
                 _ => None,
@@ -2159,7 +2231,7 @@ impl Replica {
             match (supported, opening) {
                 (Some((encoding, model)), Some(open_key)) => {
                     if encoding != &descriptor.encoding {
-                        outcome.rejected += 1;
+                        outcome.rejected = outcome.rejected.saturating_add(1);
                         continue;
                     }
                     // A head an INTERPRETED record already carries (same
@@ -2168,25 +2240,25 @@ impl Replica {
                     // still fall through: re-receiving it with the schema and
                     // key epoch now available IS the upgrade/revalidation
                     // path.
-                    let staged_commitment = tx_commitment(&units[*unit].0.encode());
+                    let staged_commitment = tx_commitment(&transaction_bytes);
                     if self
                         .bodies
                         .get(&key)
                         .is_some_and(|r| r.interpreted && r.has_commitment(&staged_commitment))
                     {
-                        outcome.unchanged += 1;
+                        outcome.unchanged = outcome.unchanged.saturating_add(1);
                         continue;
                     }
-                    let payload = match ProtectedBodyPayload::open(&open_key, envelope) {
+                    let payload = match Material::open(&open_key, envelope) {
                         Ok(p) => p,
                         Err(_) => {
                             // InvalidProtectedBody: authenticated rejection.
-                            outcome.rejected += 1;
+                            outcome.rejected = outcome.rejected.saturating_add(1);
                             continue;
                         }
                     };
                     if payload.mutation_model != *model {
-                        outcome.rejected += 1;
+                        outcome.rejected = outcome.rejected.saturating_add(1);
                         continue;
                     }
                     // Material retained opaquely upgrades to interpreted the
@@ -2209,7 +2281,7 @@ impl Replica {
                             (BodyExport::Collaborative(_), Some(_)) => true,
                         };
                     if !apply {
-                        outcome.unchanged += 1;
+                        outcome.unchanged = outcome.unchanged.saturating_add(1);
                         continue;
                     }
                     // Fast-forward (fresh body, opaque upgrade, or a payload
@@ -2245,13 +2317,13 @@ impl Replica {
                             },
                             chain,
                             heads: vec![BodyHead {
-                                tx: units[*unit].0.id(),
+                                tx: transaction.id(),
                                 descriptor_hash: descriptor_hash(descriptor),
                                 tx_commitment: staged_commitment,
                                 protected: None,
                                 transaction: None,
-                                protected_len: envelope.len() as u64,
-                                tx_len: units[*unit].0.encode().len() as u64,
+                                protected_len: u64::try_from(envelope.len()).unwrap_or(u64::MAX),
+                                tx_len: u64::try_from(transaction_bytes.len()).unwrap_or(u64::MAX),
                             }],
                             interpreted: true,
                         },
@@ -2269,7 +2341,7 @@ impl Replica {
                             .any(|(_, bytes, _)| bytes.as_slice() == *envelope)
                     });
                     if already {
-                        outcome.unchanged += 1;
+                        outcome.unchanged = outcome.unchanged.saturating_add(1);
                         continue;
                     }
                     let model_tag = supported.map(|(_, m)| *m).unwrap_or(0);
@@ -2278,7 +2350,9 @@ impl Replica {
                     // opaque bytes.
                     let chain = ReplicaFrontier::new(
                         *blake3::hash(envelope).as_bytes(),
-                        current_chain.map(|c| c.transaction_count + 1).unwrap_or(1),
+                        current_chain
+                            .map(|c| c.transaction_count.saturating_add(1))
+                            .unwrap_or(1),
                     );
                     overlay.insert(key.clone(), (chain, false));
                     planned.push(Planned {
@@ -2295,13 +2369,13 @@ impl Replica {
                             },
                             chain,
                             heads: vec![BodyHead {
-                                tx: units[*unit].0.id(),
+                                tx: transaction.id(),
                                 descriptor_hash: descriptor_hash(descriptor),
-                                tx_commitment: tx_commitment(&units[*unit].0.encode()),
+                                tx_commitment: tx_commitment(&transaction_bytes),
                                 protected: None,
                                 transaction: None,
-                                protected_len: envelope.len() as u64,
-                                tx_len: units[*unit].0.encode().len() as u64,
+                                protected_len: u64::try_from(envelope.len()).unwrap_or(u64::MAX),
+                                tx_len: u64::try_from(transaction_bytes.len()).unwrap_or(u64::MAX),
                             }],
                             interpreted: false,
                         },
@@ -2330,11 +2404,12 @@ impl Replica {
             let mut counted_tx: BTreeSet<usize> = BTreeSet::new();
             let mut seen_key: BTreeSet<BodyKey> = BTreeSet::new();
             for change in &planned {
-                if change.envelope.len() as u64 > self.quota.max_body_bytes {
-                    return Err(ReplicaCommitError::QuotaExceeded);
+                let envelope_len = u64::try_from(change.envelope.len()).unwrap_or(u64::MAX);
+                if envelope_len > self.quota.max_body_bytes {
+                    return Err(Failure::QuotaExceeded);
                 }
                 let old = self.bodies.get(&change.key);
-                projected_bytes = projected_bytes.saturating_add(change.envelope.len() as u64);
+                projected_bytes = projected_bytes.saturating_add(envelope_len);
                 let first_for_key = seen_key.insert(change.key.clone());
                 if first_for_key {
                     match old {
@@ -2343,34 +2418,38 @@ impl Replica {
                                 projected_bytes.saturating_sub(old_record.protected_total());
                         }
                         Some(_) => {}
-                        None => projected_bodies += 1,
+                        None => projected_bodies = projected_bodies.saturating_add(1),
                     }
                 }
                 if counted_tx.insert(change.unit) {
-                    projected_bytes =
-                        projected_bytes.saturating_add(units[change.unit].0.encode().len() as u64);
+                    let transaction_len = units
+                        .get(change.unit)
+                        .map(|(transaction, _)| transaction.encode().len())
+                        .and_then(|len| u64::try_from(len).ok())
+                        .ok_or(Failure::Illegitimate(Invalid::IncompleteMaterial))?;
+                    projected_bytes = projected_bytes.saturating_add(transaction_len);
                 }
                 if !change.record.interpreted {
                     let entry = opaque_delta
                         .entry(change.key.world.clone())
                         .or_insert((0, 0));
-                    entry.0 = entry.0.saturating_add(change.envelope.len() as u64);
+                    entry.0 = entry.0.saturating_add(envelope_len);
                     if old.is_none() && first_for_key {
-                        entry.1 += 1;
+                        entry.1 = entry.1.saturating_add(1);
                     }
                 }
             }
             if projected_bytes > self.quota.max_space_bytes
                 || projected_bodies > self.quota.max_space_bodies
             {
-                return Err(ReplicaCommitError::QuotaExceeded);
+                return Err(Failure::QuotaExceeded);
             }
             for (world, (dbytes, dbodies)) in opaque_delta {
                 let (cur_bytes, cur_bodies) = self.opaque_usage(&world);
                 if cur_bytes.saturating_add(dbytes) > self.quota.max_unknown_world_bytes
                     || cur_bodies.saturating_add(dbodies) > self.quota.max_unknown_world_bodies
                 {
-                    return Err(ReplicaCommitError::OpaqueQuotaExceeded);
+                    return Err(Failure::OpaqueQuotaExceeded);
                 }
             }
         }
@@ -2400,10 +2479,10 @@ impl Replica {
                         .import_body(&fabric_key(&change.key), &payload.payload)
                     {
                         Ok(None) => {
-                            outcome.unchanged += 1;
+                            outcome.unchanged = outcome.unchanged.saturating_add(1);
                         }
                         Ok(Some(receipt)) => {
-                            outcome.accepted += 1;
+                            outcome.accepted = outcome.accepted.saturating_add(1);
                             unit_causal
                                 .entry(change.unit)
                                 .or_default()
@@ -2416,17 +2495,17 @@ impl Replica {
                                 merge_append: change.merge_append,
                             });
                         }
-                        Err(FabricError::TypeConflict) => {
-                            outcome.rejected += 1;
+                        Err(EngineFailure::TypeConflict) => {
+                            outcome.rejected = outcome.rejected.saturating_add(1);
                         }
                         Err(e) => {
                             self.poisoned = true;
-                            return Err(ReplicaCommitError::Fabric(e.to_string()));
+                            return Err(Failure::Engine(e));
                         }
                     }
                 }
                 None => {
-                    outcome.unsupported_retained += 1;
+                    outcome.unsupported_retained = outcome.unsupported_retained.saturating_add(1);
                     unit_causal.entry(change.unit).or_default();
                     changed.push(AcceptedChange {
                         key: change.key,
@@ -2443,9 +2522,9 @@ impl Replica {
             outcome.current = previous;
             return Ok(outcome);
         }
-        outcome.scopes = changed.iter().map(|c| c.key.clone()).collect();
-        outcome.scopes.sort();
-        outcome.scopes.dedup();
+        outcome.bodies = changed.iter().map(|c| c.key.clone()).collect();
+        outcome.bodies.sort();
+        outcome.bodies.dedup();
 
         // Frontier: advance once per unit that contributed changes, in unit
         // order, from that unit's transaction id + engine causal evidence.
@@ -2455,8 +2534,12 @@ impl Replica {
             if !touched {
                 continue;
             }
-            let mut causal = Vec::with_capacity(16 + causal_tail.len());
-            causal.extend_from_slice(&units[*idx].0.id());
+            let mut causal = Vec::with_capacity(16usize.saturating_add(causal_tail.len()));
+            let transaction = units
+                .get(*idx)
+                .map(|(transaction, _)| transaction)
+                .ok_or(Failure::Illegitimate(Invalid::IncompleteMaterial))?;
+            causal.extend_from_slice(&transaction.id());
             causal.extend_from_slice(causal_tail);
             next_frontier = advance(next_frontier, &causal);
         }
@@ -2472,7 +2555,7 @@ impl Replica {
         // must land durable (or in raw material) for re-serving.
         let mut staged_material: Vec<(BodyKey, [u8; 32], Vec<u8>, usize)> = Vec::new();
         for change in changed {
-            let staged_head = change.record.head().clone();
+            let staged_head = change.record.head()?.clone();
             staged_material.push((
                 change.key.clone(),
                 staged_head.tx,
@@ -2521,7 +2604,11 @@ impl Replica {
                 let entries = self.raw_material.entry(key.clone()).or_default();
                 for (skey, tx_id, envelope, unit) in &staged_material {
                     if skey == &key && !entries.iter().any(|(t, _, _)| t == tx_id) {
-                        entries.push((*tx_id, envelope.clone(), units[*unit].0.encode()));
+                        let transaction = units
+                            .get(*unit)
+                            .map(|(transaction, _)| transaction)
+                            .ok_or(Failure::Illegitimate(Invalid::IncompleteMaterial))?;
+                        entries.push((*tx_id, envelope.clone(), transaction.encode()));
                     }
                 }
                 // Drop retained entries for heads the fold replaced.
@@ -2549,24 +2636,25 @@ impl Replica {
         declared: &BTreeMap<BodyKey, Vec<[u8; 32]>>,
         descriptors: &[crate::content::ContentDescriptor],
         next_frontier: ReplicaFrontier,
-    ) -> Result<BTreeMap<BodyKey, BodyRecord>, ReplicaCommitError> {
+    ) -> Result<BTreeMap<BodyKey, BodyRecord>, Failure> {
         // Fill object refs into a working copy of the final records: each
         // staged head gets refs to the objects written below; heads carried
         // over from the prior record keep the refs they already have.
         let mut new_records: BTreeMap<BodyKey, BodyRecord> = final_records.clone();
         let mut tx_bytes_by_unit: BTreeMap<usize, Vec<u8>> = BTreeMap::new();
         for (key, tx_id, envelope, unit) in staged_material {
-            let tx_bytes = tx_bytes_by_unit
-                .entry(*unit)
-                .or_insert_with(|| units[*unit].0.encode())
-                .clone();
+            let encoded = units
+                .get(*unit)
+                .map(|(transaction, _)| transaction.encode())
+                .ok_or(Failure::Illegitimate(Invalid::IncompleteMaterial))?;
+            let tx_bytes = tx_bytes_by_unit.entry(*unit).or_insert(encoded).clone();
             if let Some(record) = new_records.get_mut(key) {
                 if let Some(head) = record.heads.iter_mut().find(|h| &h.tx == tx_id) {
                     head.protected = Some(object_ref(envelope));
                     head.transaction = Some(object_ref(&tx_bytes));
                     head.tx_commitment = tx_commitment(&tx_bytes);
-                    head.protected_len = envelope.len() as u64;
-                    head.tx_len = tx_bytes.len() as u64;
+                    head.protected_len = u64::try_from(envelope.len()).unwrap_or(u64::MAX);
+                    head.tx_len = u64::try_from(tx_bytes.len()).unwrap_or(u64::MAX);
                 }
             }
         }
@@ -2634,13 +2722,13 @@ impl Replica {
         staged: &crate::convergence::StagedContactMaterial,
         authority: &dyn AuthoritySource,
         incorporator: &mut dyn crate::convergence::AuthorityIncorporator,
-    ) -> Result<crate::convergence::ValidatedContactBundle, ReplicaCommitError> {
-        let illegit = |m: String| ReplicaCommitError::Illegitimate(m);
+    ) -> Result<crate::convergence::ValidatedContactBundle, Failure> {
+        let illegit = |_: String| Failure::Illegitimate(Invalid::Binding);
         // 1. Split the authority section.
-        let mut transactions: Vec<(BodyTransaction, Vec<u8>)> = Vec::new();
+        let mut transactions: Vec<(Transaction, Vec<u8>)> = Vec::new();
         let mut authority_material: Vec<Vec<u8>> = Vec::new();
         for record in &staged.authority_records {
-            match BodyTransaction::decode_canonical(record) {
+            match Transaction::decode_canonical(record) {
                 Ok(tx) => {
                     // A duplicated transaction id under different bytes is an
                     // equivocation attempt — reject the whole staging rather
@@ -2699,10 +2787,10 @@ impl Replica {
         let offered: BTreeMap<[u8; 32], Vec<u8>> = staged
             .manifest_nodes
             .iter()
-            .map(|bytes| (fabric::journal::object_content_hash(bytes), bytes.clone()))
+            .map(|bytes| (journal::object_content_hash(bytes), bytes.clone()))
             .collect();
         struct OfferedNodes<'a>(&'a BTreeMap<[u8; 32], Vec<u8>>);
-        impl fabric::journal::index::NodeSource for OfferedNodes<'_> {
+        impl crate::index::NodeSource for OfferedNodes<'_> {
             fn node(&self, hash: &[u8; 32]) -> Option<Vec<u8>> {
                 self.0.get(hash).cloned()
             }
@@ -2711,11 +2799,11 @@ impl Replica {
         authorized
             .root()
             .verify_index(&nodes)
-            .map_err(|e| illegit(format!("manifest index: {e}")))?;
+            .map_err(|_| Failure::Illegitimate(Invalid::Index))?;
 
         let mut entries: BTreeMap<BodyKey, ManifestEntry> = BTreeMap::new();
         let mut entry_failure: Option<String> = None;
-        fabric::journal::index::stream(&nodes, authorized.root().body_index_root, &mut |entry| {
+        crate::index::stream(&nodes, authorized.root().body_index_root, &mut |entry| {
             if entry_failure.is_some() {
                 return;
             }
@@ -2726,9 +2814,10 @@ impl Replica {
                 Err(e) => entry_failure = Some(format!("manifest entry: {e}")),
             }
         })
-        .map_err(|e| illegit(format!("manifest index: {e}")))?;
+        .map_err(|_| Failure::Illegitimate(Invalid::Index))?;
         if let Some(reason) = entry_failure {
-            return Err(illegit(reason));
+            tracing::warn!(%reason, "manifest entry is not canonical");
+            return Err(Failure::Illegitimate(Invalid::Encoding));
         }
         // 5. Every provided transaction verifies with historical standing,
         //    bound to the root's Space.
@@ -2740,7 +2829,7 @@ impl Replica {
             }
         }
         // 6. Every received Body payload resolves through the verified graph.
-        type Units = BTreeMap<[u8; 32], (BodyTransaction, Vec<(BodyKey, Vec<u8>)>)>;
+        type Units = BTreeMap<[u8; 32], (Transaction, Vec<(BodyKey, Vec<u8>)>)>;
         let mut units: Units = BTreeMap::new();
         for (tx_id, key, envelope) in &staged.bodies {
             if envelope.len() > MAX_BODY_BYTES {
@@ -2800,11 +2889,7 @@ impl Replica {
                     })
                 });
                 if !local_matches {
-                    return Err(illegit(format!(
-                        "manifest names material neither held nor transferred: {}/{}",
-                        key.world.as_str(),
-                        key.body
-                    )));
+                    return Err(Failure::Illegitimate(Invalid::IncompleteMaterial));
                 }
             }
         }
@@ -2826,7 +2911,7 @@ impl Replica {
         //    again for us to accept a comment on the same issue.
         let advertised = self.advertised_content(&nodes, authorized.root())?;
         let mut descriptors = Vec::new();
-        for (key, refs) in &declared_content {
+        for (_key, refs) in &declared_content {
             for content in refs {
                 if let Some(descriptor) = advertised.get(content) {
                     if self
@@ -2847,11 +2932,7 @@ impl Replica {
                 {
                     continue;
                 }
-                return Err(illegit(format!(
-                    "manifest declares content it does not advertise: {}/{}",
-                    key.world.as_str(),
-                    key.body
-                )));
+                return Err(Failure::Illegitimate(Invalid::UnbackedContent));
             }
         }
         descriptors.sort_by_key(|d| *d.content_ref().as_bytes());
@@ -2873,12 +2954,12 @@ impl Replica {
     /// only reads it out.
     fn advertised_content(
         &self,
-        nodes: &dyn fabric::journal::index::NodeSource,
+        nodes: &dyn crate::index::NodeSource,
         root: &ManifestRoot,
-    ) -> Result<BTreeMap<[u8; 32], crate::content::ContentDescriptor>, ReplicaCommitError> {
+    ) -> Result<BTreeMap<[u8; 32], crate::content::ContentDescriptor>, Failure> {
         let mut catalog = BTreeMap::new();
         let mut failure: Option<String> = None;
-        fabric::journal::index::stream(nodes, root.content_index_root, &mut |entry| {
+        crate::index::stream(nodes, root.content_index_root, &mut |entry| {
             if failure.is_some() {
                 return;
             }
@@ -2889,9 +2970,9 @@ impl Replica {
                 Err(e) => failure = Some(format!("content entry: {e}")),
             }
         })
-        .map_err(|e| ReplicaCommitError::Illegitimate(format!("content index: {e}")))?;
+        .map_err(|_| Failure::Illegitimate(Invalid::Index))?;
         match failure {
-            Some(reason) => Err(ReplicaCommitError::Illegitimate(reason)),
+            Some(_) => Err(Failure::Illegitimate(Invalid::Index)),
             None => Ok(catalog),
         }
     }
@@ -2906,7 +2987,7 @@ impl Replica {
         ctx: &CommitContext<'_>,
         bundle: crate::convergence::ValidatedContactBundle,
         authority: &dyn AuthoritySource,
-    ) -> Result<ConvergenceOutcome, ReplicaCommitError> {
+    ) -> Result<ConvergenceOutcome, Failure> {
         self.incorporate_units(
             ctx,
             &bundle.units,
@@ -2945,8 +3026,8 @@ impl Replica {
     pub fn export_manifest(
         &self,
         ctx: &CommitContext<'_>,
-    ) -> Result<(Vec<u8>, Vec<Vec<u8>>), ReplicaCommitError> {
-        use fabric::journal::index::NodeSink;
+    ) -> Result<(Vec<u8>, Vec<Vec<u8>>), Failure> {
+        use crate::index::NodeSink;
 
         let entries: Vec<ManifestEntry> = self
             .bodies
@@ -2961,10 +3042,10 @@ impl Replica {
             .collect::<Result<_, _>>()?;
         let mut sink = NodeSink::default();
         let body_root = crate::manifest::build_body_index(entries, &mut sink)
-            .map_err(|e| ReplicaCommitError::Illegitimate(format!("manifest index: {e}")))?;
+            .map_err(|_| Failure::Illegitimate(Invalid::Index))?;
         let content_root =
             crate::manifest::build_content_index(self.advertised_descriptors()?, &mut sink)
-                .map_err(|e| ReplicaCommitError::Illegitimate(format!("content index: {e}")))?;
+                .map_err(|_| Failure::Illegitimate(Invalid::Index))?;
         let root = ManifestRoot::sign_with(
             ctx.space,
             self.frontier,
@@ -2973,7 +3054,7 @@ impl Replica {
             ctx.authority_frontier.clone(),
             ctx.signer,
         )
-        .ok_or_else(|| ReplicaCommitError::Illegitimate("sign manifest root".into()))?;
+        .ok_or_else(|| Failure::Illegitimate("sign manifest root".into()))?;
         Ok((root.encode(), sink.written))
     }
 
@@ -2984,9 +3065,7 @@ impl Replica {
     /// because that is the same rule the sweep applies — a maintained set and a
     /// derived one would eventually disagree, and the disagreement would be
     /// invisible until a peer could not open an attachment.
-    fn advertised_descriptors(
-        &self,
-    ) -> Result<Vec<crate::content::ContentDescriptor>, ReplicaCommitError> {
+    fn advertised_descriptors(&self) -> Result<Vec<crate::content::ContentDescriptor>, Failure> {
         let Some(store) = self.durable.as_ref() else {
             return Ok(Vec::new());
         };
@@ -2996,7 +3075,7 @@ impl Replica {
         }
         let mut descriptors = Vec::with_capacity(reachable.len());
         let mut failure: Option<String> = None;
-        fabric::journal::index::stream(&store.nodes(), self.content_index_root, &mut |entry| {
+        crate::index::stream(&StoreNodes(store), self.content_index_root, &mut |entry| {
             if failure.is_some() {
                 return;
             }
@@ -3009,9 +3088,9 @@ impl Replica {
                 Err(e) => failure = Some(format!("content entry: {e}")),
             }
         })
-        .map_err(|e| ReplicaCommitError::Integrity(format!("content index: {e}")))?;
+        .map_err(|_| Failure::Integrity(Defect::Index))?;
         match failure {
-            Some(reason) => Err(ReplicaCommitError::Integrity(reason)),
+            Some(_) => Err(Failure::Integrity(Defect::Index)),
             None => Ok(descriptors),
         }
     }
@@ -3024,8 +3103,8 @@ impl Replica {
     /// was sized for exactly that; a root is 40 bytes whatever the catalog
     /// holds, and equal roots prove equal catalogs outright because the
     /// encoding is canonical.
-    pub fn published_root(&self) -> Option<fabric::journal::index::ChildRef> {
-        self.manifest_body_root
+    pub fn published_root(&self) -> Option<([u8; 32], u64)> {
+        self.manifest_body_root.map(|root| (root.hash, root.count))
     }
 
     /// The signed manifest root this Replica is currently advertising.
@@ -3048,13 +3127,11 @@ impl Replica {
     /// Collect objects no root reaches. A maintenance beat, safe at any quiet
     /// moment — the store sweeps periodically on its own, and this lets a
     /// caller that knows it is idle pre-empt that.
-    pub fn collect_unreachable_objects(&self) -> Result<(), ReplicaCommitError> {
+    pub fn collect_unreachable_objects(&self) -> Result<(), Failure> {
         let Some(store) = self.durable.as_ref() else {
             return Ok(());
         };
-        store
-            .collect_unreachable()
-            .map_err(|e| ReplicaCommitError::Durability(e.to_string()))
+        store.collect_unreachable().map_err(Failure::Durability)
     }
 
     /// Serve the requested published-catalog nodes to a descending peer.
@@ -3062,12 +3139,16 @@ impl Replica {
     /// Bounded by the caller and by what exists: an unknown hash is simply
     /// absent from the answer, so a peer cannot use requests to probe for
     /// anything it could not already address.
-    pub fn published_nodes(&self, hashes: &[[u8; 32]], max: usize) -> BTreeMap<[u8; 32], Vec<u8>> {
-        use fabric::journal::index::NodeSource;
+    pub(crate) fn published_nodes(
+        &self,
+        hashes: &[[u8; 32]],
+        max: usize,
+    ) -> BTreeMap<[u8; 32], Vec<u8>> {
+        use crate::index::NodeSource;
         let Some(store) = self.durable.as_ref() else {
             return BTreeMap::new();
         };
-        let nodes = store.nodes();
+        let nodes = StoreNodes(store);
         hashes
             .iter()
             .take(max)
@@ -3081,42 +3162,41 @@ impl Replica {
     /// the answers, and eventually names the Bodies whose advertised heads
     /// differ. Cost is proportional to the disagreement, not to either
     /// catalog — two converged peers exchange nothing at all.
-    pub fn begin_reconciliation(
+    pub(crate) fn begin_reconciliation(
         &self,
-        peer_root: Option<fabric::journal::index::ChildRef>,
+        peer_root: Option<crate::index::ChildRef>,
         max_nodes: u64,
-    ) -> fabric::journal::index::Reconciliation {
-        fabric::journal::index::Reconciliation::begin(self.manifest_body_root, peer_root, max_nodes)
+    ) -> crate::index::Reconciliation {
+        crate::index::Reconciliation::begin(self.manifest_body_root, peer_root, max_nodes)
     }
 
     /// Feed a reconciliation the nodes it asked for, against this Replica's own
     /// catalog.
-    pub fn absorb_reconciliation(
+    pub(crate) fn absorb_reconciliation(
         &self,
-        session: &mut fabric::journal::index::Reconciliation,
+        session: &mut crate::index::Reconciliation,
         nodes: &BTreeMap<[u8; 32], Vec<u8>>,
-    ) -> Result<(), ReplicaCommitError> {
+    ) -> Result<(), Failure> {
         let Some(store) = self.durable.as_ref() else {
-            return Err(ReplicaCommitError::Illegitimate(
+            return Err(Failure::Illegitimate(
                 "a non-durable Replica has no catalog to reconcile against".into(),
             ));
         };
         session
-            .absorb(&store.nodes(), nodes)
-            .map_err(|e| ReplicaCommitError::Integrity(format!("reconciliation: {e}")))
+            .absorb(&StoreNodes(store), nodes)
+            .map_err(|_| Failure::Integrity(Defect::Index))
     }
 
     /// Decode the divergent entries a completed reconciliation produced into
     /// the Bodies and heads this Replica should ask for.
-    pub fn divergent_heads(
-        entries: &[fabric::journal::index::IndexEntry],
-    ) -> Result<Vec<DivergentBody>, ReplicaCommitError> {
+    pub(crate) fn divergent_heads(
+        entries: &[crate::index::IndexEntry],
+    ) -> Result<Vec<DivergentBody>, Failure> {
         entries
             .iter()
             .map(|entry| {
-                let published = ManifestEntry::decode_canonical(&entry.value).map_err(|e| {
-                    ReplicaCommitError::Illegitimate(format!("published entry: {e}"))
-                })?;
+                let published = ManifestEntry::decode_canonical(&entry.value)
+                    .map_err(|_| Failure::Illegitimate(Invalid::Encoding))?;
                 let commitments = published
                     .heads
                     .iter()
@@ -3156,7 +3236,7 @@ impl Replica {
     /// **retained** signed transaction record and protected payload bytes —
     /// byte-identical to what was committed or incorporated, grouped by
     /// transaction. Opaque Bodies forward their retained bytes unchanged.
-    pub fn export_material(&self) -> Result<ExportedMaterial, ReplicaCommitError> {
+    pub fn export_material(&self) -> Result<ExportedMaterial, Failure> {
         self.export_material_excluding(&std::collections::BTreeSet::new())
     }
 
@@ -3170,8 +3250,8 @@ impl Replica {
     pub fn export_material_excluding(
         &self,
         held: &std::collections::BTreeSet<(BodyKey, [u8; 32])>,
-    ) -> Result<ExportedMaterial, ReplicaCommitError> {
-        type Grouped = BTreeMap<[u8; 32], (BodyTransaction, Vec<(BodyKey, Vec<u8>)>)>;
+    ) -> Result<ExportedMaterial, Failure> {
+        type Grouped = BTreeMap<[u8; 32], (Transaction, Vec<(BodyKey, Vec<u8>)>)>;
         let mut by_tx: Grouped = BTreeMap::new();
         for (key, record) in &self.bodies {
             // A Body the manifest advertises MUST be fully exportable — every
@@ -3193,30 +3273,22 @@ impl Replica {
                         let (Some(protected_ref), Some(tx_ref)) =
                             (head.protected, head.transaction)
                         else {
-                            return Err(ReplicaCommitError::Integrity(format!(
-                                "unexportable head (no refs, no raw material): {}/{}",
-                                key.world.as_str(),
-                                key.body
-                            )));
+                            return Err(Failure::Integrity(Defect::MissingMaterial));
                         };
                         let envelope = store
                             .read_object(&protected_ref)
-                            .map_err(|e| ReplicaCommitError::Integrity(e.to_string()))?;
+                            .map_err(|_| Failure::Integrity(Defect::Encoding))?;
                         let tx_bytes = store
                             .read_object(&tx_ref)
-                            .map_err(|e| ReplicaCommitError::Integrity(e.to_string()))?;
+                            .map_err(|_| Failure::Integrity(Defect::Encoding))?;
                         (envelope, tx_bytes)
                     }
                     (None, None) => {
-                        return Err(ReplicaCommitError::Integrity(format!(
-                            "unexportable head (no store, no raw material): {}/{}",
-                            key.world.as_str(),
-                            key.body
-                        )));
+                        return Err(Failure::Integrity(Defect::MissingMaterial));
                     }
                 };
-                let tx = BodyTransaction::decode_canonical(&tx_bytes)
-                    .map_err(|e| ReplicaCommitError::Integrity(e.to_string()))?;
+                let tx = Transaction::decode_canonical(&tx_bytes)
+                    .map_err(|_| Failure::Integrity(Defect::Encoding))?;
                 let entry = by_tx.entry(head.tx).or_insert_with(|| (tx, Vec::new()));
                 entry.1.push((key.clone(), envelope));
             }
@@ -3228,38 +3300,43 @@ impl Replica {
     fn apply_ops(
         &mut self,
         request_label: &str,
-        ops: &[(BodyKey, BodyOp)],
-    ) -> Result<fabric::FabricCommitReceipt, ReplicaCommitError> {
+        ops: &[(BodyKey, Op)],
+    ) -> Result<fabric::Receipt, Failure> {
         let mut fabric_ops = Vec::with_capacity(ops.len());
         for (key, op) in ops {
             fabric_ops.push(translate(fabric_key(key), op)?);
         }
         match self
             .fabric
-            .commit(FabricTransactionRequest::new(request_label, fabric_ops))
+            .commit(fabric::Transaction::new(request_label, fabric_ops))
         {
             Ok(r) => Ok(r),
-            Err(FabricError::Unsupported) => Err(ReplicaCommitError::UnsupportedOp),
-            Err(FabricError::TypeConflict) => Err(ReplicaCommitError::TypeConflict),
-            Err(FabricError::InvalidOp(m)) => Err(ReplicaCommitError::InvalidOp(m)),
-            Err(FabricError::Integrity(m)) => Err(ReplicaCommitError::Integrity(m)),
-            Err(FabricError::OutcomeUnknown) => {
+            Err(EngineFailure::Unsupported) => Err(Failure::UnsupportedOp),
+            Err(EngineFailure::TypeConflict) => Err(Failure::TypeConflict),
+            Err(EngineFailure::Invalid(invalid)) => Err(Failure::InvalidOp(invalid)),
+            Err(EngineFailure::OutcomeUnknown) => {
                 self.poisoned = true;
-                Err(ReplicaCommitError::OutcomeUnknown)
+                Err(Failure::OutcomeUnknown)
             }
-            Err(FabricError::Durability(m)) => {
+            Err(EngineFailure::Journal(journal::Failure::Integrity(defect))) => {
                 self.poisoned = true;
-                Err(ReplicaCommitError::Durability(m))
+                Err(Failure::Integrity(Defect::Store(defect)))
+            }
+            Err(EngineFailure::Journal(failure)) => {
+                self.poisoned = true;
+                Err(Failure::Durability(failure))
             }
         }
     }
 
     /// Track records for an unattributed (non-durable) commit so bindings and
     /// reads stay consistent in tests.
-    fn update_records_unattributed(&mut self, ops: &[(BodyKey, BodyOp)]) {
-        let seed = mint_chain_seed();
+    fn update_records_unattributed(&mut self, ops: &[(BodyKey, Op)]) -> Result<(), Failure> {
+        let seed = mint_chain_seed()?;
         let mut tx = [0u8; 32];
-        tx[..16].copy_from_slice(&seed);
+        tx.get_mut(..16)
+            .ok_or(Failure::Integrity(Defect::Encoding))?
+            .copy_from_slice(&seed);
         let mut touched: Vec<BodyKey> = ops.iter().map(|(k, _)| k.clone()).collect();
         touched.sort();
         touched.dedup();
@@ -3281,9 +3358,11 @@ impl Replica {
                     let record = BodyRecord {
                         binding: self.bodies.get(&key).map(|r| r.binding.clone()).unwrap_or(
                             BodyBinding {
-                                schema: SchemaId::parse("unattributed").expect("schema id"),
+                                schema: SchemaId::parse("unattributed")
+                                    .ok_or(Failure::Integrity(Defect::Encoding))?,
                                 schema_version: 1,
-                                encoding: EncodingId::parse("bytes").expect("encoding id"),
+                                encoding: EncodingId::parse("bytes")
+                                    .ok_or(Failure::Integrity(Defect::Encoding))?,
                                 mutation_model: model,
                             },
                         ),
@@ -3303,6 +3382,7 @@ impl Replica {
                 }
             }
         }
+        Ok(())
     }
 
     /// Persist a local signed transaction: the transaction record, sealed
@@ -3312,18 +3392,18 @@ impl Replica {
     fn persist_transaction(
         &mut self,
         ctx: &CommitContext<'_>,
-        tx: &BodyTransaction,
-        sealed: &[(BodyKey, Vec<u8>, ProtectedBodyPayload)],
+        tx: &Transaction,
+        sealed: &[(BodyKey, Vec<u8>, Material)],
         new_records: &mut BTreeMap<BodyKey, Option<BodyRecord>>,
         receipt: Option<RequestReceipt>,
         next_frontier: ReplicaFrontier,
         declared: &BTreeMap<BodyKey, Vec<[u8; 32]>>,
-    ) -> Result<RequestReceipt, ReplicaCommitError> {
+    ) -> Result<RequestReceipt, Failure> {
         let sealed: Vec<(BodyKey, Vec<u8>, ())> = sealed
             .iter()
             .map(|(k, e, _)| (k.clone(), e.clone(), ()))
             .collect();
-        let receipt = receipt.expect("local commits carry a receipt");
+        let receipt = receipt.ok_or(Failure::Integrity(Defect::MissingMaterial))?;
         self.persist_graph(
             ctx,
             tx,
@@ -3339,7 +3419,7 @@ impl Replica {
     /// Persist ONLY a new idempotency receipt. No Body changed and no manifest
     /// is republished, so this writes the receipt, one index path, and the
     /// commit point — and nothing else.
-    fn persist_receipt_only(&mut self, receipt: &RequestReceipt) -> Result<(), ReplicaCommitError> {
+    fn persist_receipt_only(&mut self, receipt: &RequestReceipt) -> Result<(), Failure> {
         let frontier = self.frontier;
         self.persist(
             None,
@@ -3365,13 +3445,13 @@ impl Replica {
     fn persist_graph(
         &mut self,
         ctx: &CommitContext<'_>,
-        tx: &BodyTransaction,
+        tx: &Transaction,
         sealed: &[(BodyKey, Vec<u8>, ())],
         new_records: &mut BTreeMap<BodyKey, Option<BodyRecord>>,
         receipt: Option<&RequestReceipt>,
         next_frontier: ReplicaFrontier,
         declared: &BTreeMap<BodyKey, Vec<[u8; 32]>>,
-    ) -> Result<(), ReplicaCommitError> {
+    ) -> Result<(), Failure> {
         let tx_bytes = tx.encode();
         let tx_ref = object_ref(&tx_bytes);
         let commitment = tx_commitment(&tx_bytes);
@@ -3380,12 +3460,12 @@ impl Replica {
         // commit's sealed envelope is the full merged state: one head.
         for (key, envelope, _) in sealed {
             if let Some(Some(record)) = new_records.get_mut(key) {
-                let head = record.head_mut();
+                let head = record.head_mut()?;
                 head.protected = Some(object_ref(envelope));
                 head.transaction = Some(tx_ref);
                 head.tx_commitment = commitment;
-                head.protected_len = envelope.len() as u64;
-                head.tx_len = tx_bytes.len() as u64;
+                head.protected_len = u64::try_from(envelope.len()).unwrap_or(u64::MAX);
+                head.tx_len = u64::try_from(tx_bytes.len()).unwrap_or(u64::MAX);
                 if head.descriptor_hash == [0u8; 32] {
                     if let Some(d) = tx.core.descriptors.iter().find(|d| &d.key() == key) {
                         head.descriptor_hash = descriptor_hash(d);
@@ -3449,7 +3529,7 @@ impl Replica {
     pub fn read_collaborative(
         &self,
         key: &BodyKey,
-    ) -> Result<fabric::CollaborativeView, fabric::ProjectionError> {
+    ) -> Result<fabric::CollaborativeView, fabric::projection::Failure> {
         self.fabric.read_collaborative(&fabric_key(key))
     }
 }
@@ -3467,52 +3547,52 @@ fn combine_chains(a: &ReplicaFrontier, b: &ReplicaFrontier) -> ReplicaFrontier {
     )
 }
 
-fn object_ref(bytes: &[u8]) -> ObjectRef {
-    ObjectRef {
-        hash: fabric::journal::object_content_hash(bytes),
-        len: bytes.len() as u64,
+fn object_ref(bytes: &[u8]) -> Object {
+    Object {
+        hash: journal::object_content_hash(bytes),
+        len: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
     }
 }
 
 /// Validate one staged Body operation against the frozen algebra (path grammar
-/// and limits) and translate it into its Fabric operation. Replica owns this
-/// translation; a World never authors Fabric operations, and Fabric never sees
+/// and limits) and translate it into its Engine operation. Replica owns this
+/// translation; a World never authors Engine operations, and Engine never sees
 /// an op Replica has not validated.
-fn translate(key: FabricKey, op: &BodyOp) -> Result<FabricOp, ReplicaCommitError> {
+fn translate(key: Key, op: &Op) -> Result<fabric::Op, Failure> {
     let path_ok = |p: &str| {
         algebra::valid_path(p)
             .then_some(())
-            .ok_or(ReplicaCommitError::PathInvalid)
+            .ok_or(Failure::PathInvalid)
     };
     let value_ok = |v: &[u8]| {
         (v.len() <= algebra::MAX_VALUE_BYTES)
             .then_some(())
-            .ok_or(ReplicaCommitError::OpLimit)
+            .ok_or(Failure::OpLimit)
     };
     Ok(match op {
-        BodyOp::ReplaceAtomic { value } => FabricOp::PutCanonical {
+        Op::ReplaceAtomic { value } => fabric::Op::PutCanonical {
             key,
             value: value.clone(),
         },
-        BodyOp::Create => FabricOp::CreateBody { key },
-        BodyOp::Tombstone => FabricOp::Remove { key },
-        BodyOp::RegisterSet { path, value } => {
+        Op::Create => fabric::Op::CreateBody { key },
+        Op::Tombstone => fabric::Op::Remove { key },
+        Op::RegisterSet { path, value } => {
             path_ok(path)?;
             value_ok(value)?;
-            FabricOp::RegisterSet {
+            fabric::Op::RegisterSet {
                 key,
                 path: path.clone(),
                 value: value.clone(),
             }
         }
-        BodyOp::RegisterClear { path } => {
+        Op::RegisterClear { path } => {
             path_ok(path)?;
-            FabricOp::RegisterClear {
+            fabric::Op::RegisterClear {
                 key,
                 path: path.clone(),
             }
         }
-        BodyOp::MapSet {
+        Op::MapSet {
             path,
             key: entry,
             value,
@@ -3520,55 +3600,55 @@ fn translate(key: FabricKey, op: &BodyOp) -> Result<FabricOp, ReplicaCommitError
             path_ok(path)?;
             value_ok(value)?;
             if entry.len() > algebra::MAX_MAP_KEY_BYTES {
-                return Err(ReplicaCommitError::OpLimit);
+                return Err(Failure::OpLimit);
             }
-            FabricOp::MapSet {
+            fabric::Op::MapSet {
                 key,
                 path: path.clone(),
                 entry: entry.clone(),
                 value: value.clone(),
             }
         }
-        BodyOp::MapRemove { path, key: entry } => {
+        Op::MapRemove { path, key: entry } => {
             path_ok(path)?;
-            FabricOp::MapRemove {
+            fabric::Op::MapRemove {
                 key,
                 path: path.clone(),
                 entry: entry.clone(),
             }
         }
-        BodyOp::ListInsert { path, index, value } => {
+        Op::ListInsert { path, index, value } => {
             path_ok(path)?;
             value_ok(value)?;
-            FabricOp::ListInsert {
+            fabric::Op::ListInsert {
                 key,
                 path: path.clone(),
                 index: *index,
                 value: value.clone(),
             }
         }
-        BodyOp::ListRemove { path, element } => {
+        Op::ListRemove { path, element } => {
             path_ok(path)?;
-            FabricOp::ListRemove {
+            fabric::Op::ListRemove {
                 key,
                 path: path.clone(),
                 element: element.clone(),
             }
         }
-        BodyOp::ListMove {
+        Op::ListMove {
             path,
             element,
             index,
         } => {
             path_ok(path)?;
-            FabricOp::ListMove {
+            fabric::Op::ListMove {
                 key,
                 path: path.clone(),
                 element: element.clone(),
                 index: *index,
             }
         }
-        BodyOp::TextSplice {
+        Op::TextSplice {
             path,
             index,
             delete,
@@ -3576,9 +3656,9 @@ fn translate(key: FabricKey, op: &BodyOp) -> Result<FabricOp, ReplicaCommitError
         } => {
             path_ok(path)?;
             if insert.len() > algebra::MAX_TEXT_INSERT_BYTES {
-                return Err(ReplicaCommitError::OpLimit);
+                return Err(Failure::OpLimit);
             }
-            FabricOp::TextSplice {
+            fabric::Op::TextSplice {
                 key,
                 path: path.clone(),
                 index: *index,
@@ -3586,27 +3666,27 @@ fn translate(key: FabricKey, op: &BodyOp) -> Result<FabricOp, ReplicaCommitError
                 insert: insert.clone(),
             }
         }
-        BodyOp::SetAdd { path, value } => {
+        Op::SetAdd { path, value } => {
             path_ok(path)?;
             value_ok(value)?;
-            FabricOp::SetAdd {
+            fabric::Op::SetAdd {
                 key,
                 path: path.clone(),
                 value: value.clone(),
             }
         }
-        BodyOp::SetRemove { path, value } => {
+        Op::SetRemove { path, value } => {
             path_ok(path)?;
             value_ok(value)?;
-            FabricOp::SetRemove {
+            fabric::Op::SetRemove {
                 key,
                 path: path.clone(),
                 value: value.clone(),
             }
         }
-        BodyOp::CounterAdd { path, delta } => {
+        Op::CounterAdd { path, delta } => {
             path_ok(path)?;
-            FabricOp::CounterAdd {
+            fabric::Op::CounterAdd {
                 key,
                 path: path.clone(),
                 delta: *delta,

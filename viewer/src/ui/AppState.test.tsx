@@ -133,16 +133,18 @@ describe("local trust summary", () => {
       projects: 13,
       membership: "admin",
       recovery: {
-        scheme: "Single",
-        k: 1,
-        n: 1,
-        local_custody: { state: "unreadable", detail: { kind: "undecryptable", detail: "wrong key" } },
+        authority: null,
+        configuration: Array(32).fill(0),
+        generation: 1,
+        custody: { state: "unreadable", detail: { kind: "wrong_protector" } },
+        backing: { holders: [], satisfies_configuration: false },
+        availability: { state: "unknown" },
       },
       degraded_recovery: [{
         transcript: "transcript-1",
-        reason: { kind: "undecryptable", detail: "wrong key" },
+        reason: { kind: "wrong_protector" },
         is_current_authority: true,
       }],
-    })).toContain("Failure: undecryptable: wrong key");
+    })).toContain("Failure: wrong_protector");
   });
 });

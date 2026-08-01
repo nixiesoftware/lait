@@ -1,0 +1,183 @@
+# The tiers that are not worth a developer's wait.
+#
+# `ci.yml` runs the fast, deterministic majority of the suite on every push:
+# the whole workspace on Linux, and the OS seam on Windows and macOS. What it
+# deliberately does NOT run is here — the full cross-platform matrix, the CPU
+# gates that take minutes each, and the suites that put real traffic on a real
+# relay.
+#
+# Nothing was deleted to make the PR path fast. It moved to where its latency
+# is nobody's:
+#
+#   full-matrix   the complete workspace suite on all three operating systems,
+#                 which is what the PR path used to do and what made a 20 min
+#                 workflow out of a 3 min one.
+#   deep          the corpus knobs turned up — the commit-cost baseline at 50k
+#                 and 100k Bodies, and the CRDT laws at many times the per-push
+#                 case count. This is the tier that BUYS something by running
+#                 longer rather than merely re-proving the same thing slower.
+#
+# `perf.yml` remains separate and weekly: the full reference corpus is hours of
+# daemon traffic and has its own baseline-freezing story.
+name: nightly
+
+on:
+  schedule:
+    # Nightly, off-peak, offset from perf.yml's Monday 03:17 so a Monday does
+    # not run both against the same cold cache.
+    - cron: "41 4 * * *"
+  workflow_dispatch:
+  # The merge path. A PR is gated on the fast tiers; main gets the full matrix
+  # once the merge lands, so a platform regression is attributed to the commit
+  # that caused it rather than discovered by whoever pushes next.
+  push:
+    branches: [main]
+
+concurrency:
+  group: nightly-${{ github.ref }}
+  # Deliberately NOT cancel-in-progress. On the PR path cancelling a superseded
+  # run is free — the next push re-runs everything in minutes. Here a cancelled
+  # run means a night with no cross-platform signal, and a burst of merges to
+  # main would cancel every run but the last.
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # The complete suite, every OS. This is `check` as it was before the tiering
+  # split, plus the heavy gates the PR path now skips.
+  full-matrix:
+    name: full suite (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    # The two mechanics ceremony gates measure 133 s and 143 s on an idle
+    # 12-core dev box and share cores with ~1300 other tests here; a hosted
+    # two-core windows-latest needs room for that without the job being killed
+    # mid-suite and reporting nothing.
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [namespace-profile-nixiesoftware, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Install Rust (stable + clippy)
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          toolchain: stable
+          components: clippy
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+
+      - name: Install nextest
+        uses: taiki-e/install-action@e658debeddbabf20b2b866d9235eb08a2375b1ad
+        with:
+          tool: nextest
+
+      # Per-OS linting. The PR path's `platform` job type-checks with `cargo
+      # check` rather than clippy, because clippy's artifacts do not share
+      # fingerprints with rustc's and running both compiles the workspace twice
+      # — a cost worth avoiding per push and worth paying nightly. What it buys
+      # is the lint that only exists on one OS: a `clippy::unwrap_used` inside a
+      # `cfg(windows)` island is invisible to the Linux job.
+      - name: Clippy (this OS)
+        run: cargo clippy --workspace --all-targets --all-features --locked
+
+      - name: Build
+        run: cargo build --workspace --locked --all-targets --all-features
+
+      # The `nightly` profile runs everything and gives the heavy gates their
+      # own slow-timeout budget, plus a retry on the real-network group — a
+      # relay hiccup at 04:41 should not read as a code regression.
+      #
+      # `issues_reference_perf` runs here at SMOKE scale (no LAIT_PERF_FULL).
+      # The full corpus belongs to perf.yml, which uploads samples and gates
+      # p95 against frozen baselines on one pinned runner; running it on three
+      # differently-sized machines would measure the machines.
+      - name: Test (everything)
+        run: cargo nextest run --workspace --locked --all-features --profile nightly
+
+      - name: Doctests
+        run: cargo test --workspace --locked --doc --all-features
+
+      - name: Smoke run (P0 tracker flow)
+        shell: bash
+        run: bash ci/smoke-p0.sh "${{ matrix.os }}"
+
+  # Depth rather than breadth: the same tests, given enough budget to explore.
+  deep:
+    name: deep (corpus knobs up)
+    runs-on: namespace-profile-nixiesoftware
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          toolchain: stable
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+
+      - name: Install nextest
+        uses: taiki-e/install-action@e658debeddbabf20b2b866d9235eb08a2375b1ad
+        with:
+          tool: nextest
+
+      # The CRDT laws are generated, so their value scales with the number of
+      # distinct seeds they have been run against. 64 per push keeps the tier
+      # cheap; 4096 here is the part that actually explores the state space.
+      #
+      # A failure writes its shrunk seed to crates/fabric/proptest-regressions/.
+      # When this job goes red, commit that file: the counterexample then
+      # replays on EVERY later run, including the per-push tier, which is how a
+      # nightly discovery becomes a permanent regression test.
+      - name: CRDT laws (deep)
+        env:
+          PROPTEST_CASES: "4096"
+        run: cargo nextest run -p fabric --locked --all-features -E 'test(convergence_laws_tests)'
+
+      - name: Upload any shrunk counterexamples
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: proptest-regressions
+          path: crates/fabric/proptest-regressions/
+          if-no-files-found: ignore
+
+      # The multi-peer convergence simulation explores SCHEDULES, so its
+      # coverage is the number of distinct seeds it has been run against. 24 per
+      # push keeps the tier under seven seconds; 512 here is what actually walks
+      # the interleaving space — four peers authoring concurrently through a
+      # network that drops, duplicates, reorders and partitions.
+      #
+      # A failure names its seed. That seed reproduces the schedule exactly, on
+      # any machine, because the simulation's only entropy is the seed itself —
+      # so turn a nightly failure into a permanent case by pinning the seed in
+      # `the_fleet_converges_on_a_known_seed`.
+      - name: Convergence simulation (deep)
+        env:
+          LAIT_SIM_SEEDS: "512"
+        run: cargo nextest run -p runtime --locked --all-features -E 'test(internal_tests::convergence_simulation)'
+
+      # The 50k and 100k Body points. `commit_cost_baseline`'s own docs call
+      # these opt-in and note the store-manifest commit cost they measure is an
+      # implementation cost rather than a protocol one — which is exactly the
+      # kind of claim that needs measuring on a schedule rather than argued.
+      - name: Commit-cost baseline (full corpus)
+        env:
+          LAIT_COMMIT_BASELINE_FULL: "1"
+        run: cargo nextest run --locked --all-features -E 'binary(commit_cost_baseline)' --profile nightly
+
+      # Real relays, real discovery. Excluded from the PR path not for time but
+      # for dependence: these carry retries because they are nondeterministic
+      # by nature, and a relay outage should not red a PR that never touched
+      # networking. iroh itself draws the line here — netsim in CI, real
+      # relays sparingly.
+      - name: Real-network suites
+        run: |
+          cargo nextest run --workspace --locked --all-features --profile nightly \
+            -E 'binary(orbital_join_iroh) + binary(contact_iroh) + (package(comms) & kind(test))'

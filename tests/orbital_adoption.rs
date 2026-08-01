@@ -10,23 +10,23 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use lait::orbital::{open_orbital_runtime, orbital_store_root, WorldBridgesBuilder};
+use lait::orbital::{open_orbital_runtime, orbital_store_root, WorldPackages};
 use mechanics::ids::{ActorId, DeviceId};
 use runtime::{
-    ActivationOptions, AuthorityView, PrincipalResolution, Runtime, RuntimeBuilder,
-    SpaceFormationOptions, World, WorldContext, WorldEffect, WorldError, WorldIntent, WorldLimits,
-    WorldProjection, WorldQuery, WorldRegistration, WorldVersion,
+    plane::Activation, world::AuthorityView, world::Builder, world::Context, world::Descriptor,
+    world::Effect, world::Intent, world::Limits, world::PrincipalResolution, world::Projection,
+    world::Query, world::Rejection, world::Version, world::World, Runtime,
 };
 
-use ::replica::body::{BodyOp, BodySchema, MutationModel};
+use ::replica::body::{BodyId, BodyKey, EncodingId, SchemaId, WorldId};
+use ::replica::body::{MutationModel, Op, Schema};
 use ::replica::frontier::{AuthorityFrontier, ReplicaFrontier};
-use ::replica::ids::{BodyId, BodyKey, EncodingId, SchemaId, WorldId};
 
 #[allow(dead_code)]
 fn any_demand() -> Vec<u8> {
-    mechanics::demand::AuthorizationDemand::require(
-        mechanics::demand::PolicyCapability::new("w", "c"),
-        mechanics::demand::PolicyResource::space("w"),
+    mechanics::authorization::AuthorizationDemand::require(
+        mechanics::authorization::PolicyCapability::new("w", "c"),
+        mechanics::authorization::Resource::root("w"),
     )
     .encode_canonical()
     .expect("canonical demand")
@@ -49,7 +49,7 @@ struct ExampleAuthority;
 
 impl AuthorityView for ExampleAuthority {
     fn resolve(&self, device: &DeviceId) -> Option<PrincipalResolution> {
-        let writer = mechanics::crypto::device_from_seed(&WRITER_SEED);
+        let writer = mechanics::actor::device_from_seed(&WRITER_SEED);
         (device == &writer).then(|| PrincipalResolution {
             actor: ActorId::from_incept_hash(&"c".repeat(64)),
             authority_frontier: AuthorityFrontier::from_canonical_bytes(vec![3]),
@@ -62,7 +62,7 @@ impl AuthorityView for ExampleAuthority {
 struct TallyWorld {
     id: WorldId,
     body_id: BodyId,
-    schemas: Vec<BodySchema>,
+    schemas: Vec<Schema>,
 }
 
 impl TallyWorld {
@@ -74,7 +74,7 @@ impl TallyWorld {
         Self {
             id: WorldId::parse(id).unwrap(),
             body_id: BodyId::from_bytes([body_marker; 16]),
-            schemas: vec![BodySchema {
+            schemas: vec![Schema {
                 id: SchemaId::parse("tally").unwrap(),
                 version: 1,
                 encoding: EncodingId::parse("ascii.decimal").unwrap(),
@@ -86,7 +86,7 @@ impl TallyWorld {
     fn body(&self) -> BodyKey {
         BodyKey::new(self.id.clone(), self.body_id.clone())
     }
-    fn current(&self, ctx: &WorldContext<'_>) -> u64 {
+    fn current(&self, ctx: &Context<'_>) -> u64 {
         ctx.read_body(&self.body())
             .and_then(|b| String::from_utf8(b).ok())
             .and_then(|s| s.parse().ok())
@@ -98,36 +98,28 @@ impl World for TallyWorld {
     fn id(&self) -> WorldId {
         self.id.clone()
     }
-    fn schemas(&self) -> &[BodySchema] {
+    fn schemas(&self) -> &[Schema] {
         &self.schemas
     }
-    fn submit(
-        &self,
-        ctx: &mut WorldContext<'_>,
-        intent: WorldIntent,
-    ) -> Result<WorldEffect, WorldError> {
+    fn submit(&self, ctx: &mut Context<'_>, intent: Intent) -> Result<Effect, Rejection> {
         let next = self.current(ctx) + intent.payload.len() as u64;
         let key = self.body();
-        Ok(WorldEffect {
+        Ok(Effect {
             content_refs: Vec::new(),
             demand: any_demand(),
             operations: vec![(
                 key.clone(),
-                BodyOp::ReplaceAtomic {
+                Op::ReplaceAtomic {
                     value: next.to_string().into_bytes(),
                 },
             )],
-            scopes: vec![key],
+            bodies: vec![key],
             effect: next.to_string().into_bytes(),
             declarations: vec![],
         })
     }
-    fn query(
-        &self,
-        ctx: &WorldContext<'_>,
-        _query: WorldQuery,
-    ) -> Result<WorldProjection, WorldError> {
-        Ok(WorldProjection {
+    fn query(&self, ctx: &Context<'_>, _query: Query) -> Result<Projection, Rejection> {
+        Ok(Projection {
             demand: any_demand(),
             schema: SchemaId::parse("tally").unwrap(),
             schema_version: 1,
@@ -137,12 +129,12 @@ impl World for TallyWorld {
     }
 }
 
-fn registration(world: &TallyWorld) -> WorldRegistration {
-    WorldRegistration {
+fn registration(world: &TallyWorld) -> Descriptor {
+    Descriptor {
         id: world.id(),
-        implementation_version: WorldVersion(1),
+        implementation_version: Version(1),
         schemas: world.schemas().to_vec(),
-        limits: WorldLimits::default(),
+        limits: Limits::default(),
         scope_schemas: Vec::new(),
         signal_schemas: Vec::new(),
     }
@@ -151,10 +143,10 @@ fn registration(world: &TallyWorld) -> WorldRegistration {
 /// Sign and submit an intent through the frozen public action API.
 fn submit_as(
     session: &runtime::Session,
-    identity: &runtime::LocalIdentity,
-    intent: WorldIntent,
-) -> Result<runtime::CommittedEffect, WorldError> {
-    session.submit(identity.sign_action(session, runtime::RequestId::mint(), intent)?)
+    identity: &runtime::world::LocalIdentity,
+    intent: Intent,
+) -> Result<runtime::world::CommittedEffect, runtime::world::Failure> {
+    session.submit(identity.sign_action(session, runtime::world::RequestId::mint(), intent)?)
 }
 
 #[test]
@@ -163,29 +155,26 @@ fn the_product_composes_the_orbital_runtime_for_an_independent_world() {
     let world = TallyWorld::new();
     let world_id = world.id();
     let reg = registration(&world);
-    let registry = RuntimeBuilder::new()
-        .register(reg, Arc::new(world))
-        .build()
-        .unwrap();
+    let registry = Builder::new().register(Arc::new(world)).build().unwrap();
 
     // The product's composition seam: store-root convention + supplied parts.
-    let keys = Arc::new(replica::StaticBodyKeys::new(
-        mechanics::crypto::AuthorizedBodyKey::for_authorized_epoch([1u8; 16], [2u8; 32]),
+    let keys = Arc::new(replica::body::StaticBodyKeys::new(
+        mechanics::authorization::AuthorizedBodyKey::for_authorized_epoch([1u8; 16], [2u8; 32]),
     ));
     let rt = open_orbital_runtime(&home, registry, Arc::new(ExampleAuthority), keys).unwrap();
     assert!(orbital_store_root(&home).ends_with("orbital"));
 
     let writer = Runtime::identity_from_seed(&WRITER_SEED);
-    let orbit = rt.form_space(SpaceFormationOptions::default()).unwrap();
+    let orbit = rt.create().unwrap();
     let space = orbit.space_id().clone();
-    let station = orbit.activate(ActivationOptions::default()).unwrap();
+    let station = orbit.open(Activation::default()).unwrap();
     let session = station.dock(&world_id, &writer).unwrap();
 
     // Two increments: 5 then 3 bytes.
     submit_as(
         &session,
         &writer,
-        WorldIntent {
+        Intent {
             schema: SchemaId::parse("tally").unwrap(),
             schema_version: 1,
             payload: b"hello".to_vec(),
@@ -195,7 +184,7 @@ fn the_product_composes_the_orbital_runtime_for_an_independent_world() {
     let second = submit_as(
         &session,
         &writer,
-        WorldIntent {
+        Intent {
             schema: SchemaId::parse("tally").unwrap(),
             schema_version: 1,
             payload: b"add".to_vec(),
@@ -203,22 +192,22 @@ fn the_product_composes_the_orbital_runtime_for_an_independent_world() {
     )
     .unwrap();
     assert_eq!(second.effect, b"8");
-    assert_eq!(second.scopes.len(), 1);
+    assert_eq!(second.bodies.len(), 1);
 
     // The store lives under the product's orbital root.
     assert!(orbital_store_root(&home).join(space.as_str()).is_dir());
 
     // Restart durability through the product seam.
-    let orbit = station.go_dormant().unwrap();
+    let orbit = station.vacate().unwrap();
     drop(orbit);
     let station = rt
-        .orbit(&space)
+        .acquire(&space)
         .unwrap()
-        .activate(ActivationOptions::default())
+        .open(Activation::default())
         .unwrap();
     let session = station.dock(&world_id, &writer).unwrap();
     let proj = session
-        .query(WorldQuery {
+        .query(Query {
             schema: SchemaId::parse("tally").unwrap(),
             schema_version: 1,
             payload: vec![],
@@ -230,33 +219,29 @@ fn the_product_composes_the_orbital_runtime_for_an_independent_world() {
 }
 
 #[test]
-fn one_space_bridge_docks_and_routes_two_world_bridges_independently() {
+fn one_station_hosts_and_routes_two_worlds_independently() {
     let home = temp_home();
     let files = TallyWorld::named("dev.example.files", 7);
     let notes = TallyWorld::named("dev.example.notes", 8);
     let files_id = files.id();
     let notes_id = notes.id();
-    let (registry, worlds) = WorldBridgesBuilder::new()
-        .register(registration(&files), Arc::new(files), [7; 32])
-        .register(registration(&notes), Arc::new(notes), [8; 32])
+    let (registry, worlds) = WorldPackages::new()
+        .register(Arc::new(files), [7; 32])
+        .register(Arc::new(notes), [8; 32])
         .build()
         .unwrap();
 
-    let keys = Arc::new(replica::StaticBodyKeys::new(
-        mechanics::crypto::AuthorizedBodyKey::for_authorized_epoch([1u8; 16], [2u8; 32]),
+    let keys = Arc::new(replica::body::StaticBodyKeys::new(
+        mechanics::authorization::AuthorizedBodyKey::for_authorized_epoch([1u8; 16], [2u8; 32]),
     ));
     let rt = open_orbital_runtime(&home, registry, Arc::new(ExampleAuthority), keys).unwrap();
     let writer = Runtime::identity_from_seed(&WRITER_SEED);
-    let station = rt
-        .form_space(SpaceFormationOptions::default())
-        .unwrap()
-        .activate(ActivationOptions::default())
-        .unwrap();
+    let station = rt.create().unwrap().open(Activation::default()).unwrap();
 
     worlds.ensure_primary(&station, &files_id, &writer).unwrap();
     worlds.ensure_primary(&station, &notes_id, &writer).unwrap();
 
-    let intent = |payload: &[u8]| WorldIntent {
+    let intent = |payload: &[u8]| Intent {
         schema: SchemaId::parse("tally").unwrap(),
         schema_version: 1,
         payload: payload.to_vec(),
@@ -276,7 +261,7 @@ fn one_space_bridge_docks_and_routes_two_world_bridges_independently() {
 
     assert_eq!(files_effect.effect, b"4");
     assert_eq!(notes_effect.effect, b"5");
-    let query = WorldQuery {
+    let query = Query {
         schema: SchemaId::parse("tally").unwrap(),
         schema_version: 1,
         payload: vec![],
@@ -305,9 +290,9 @@ fn a_legacy_home_is_refused_with_recreation_guidance_and_never_overwritten() {
     // A pre-orbital store signature.
     std::fs::create_dir_all(home.join("repo")).unwrap();
     std::fs::write(home.join("repo").join("genesis.json"), b"{}").unwrap();
-    let registry = RuntimeBuilder::new().build().unwrap();
-    let keys = Arc::new(replica::StaticBodyKeys::new(
-        mechanics::crypto::AuthorizedBodyKey::for_authorized_epoch([1u8; 16], [2u8; 32]),
+    let registry = Builder::new().build().unwrap();
+    let keys = Arc::new(replica::body::StaticBodyKeys::new(
+        mechanics::authorization::AuthorizedBodyKey::for_authorized_epoch([1u8; 16], [2u8; 32]),
     ));
     let err = match open_orbital_runtime(&home, registry, Arc::new(ExampleAuthority), keys) {
         Err(err) => err,

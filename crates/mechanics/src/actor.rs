@@ -1,3 +1,8 @@
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::indexing_slicing,
+    reason = "actor replay validates event shape before indexing its bounded transition tables"
+)]
 //! The **actor identity plane** — the third signed hash-DAG plane
 //! (`lait/actor/1`), beneath membership. Where the ACL ([`crate::acl`])
 //! answers *which actors are here* and content authority
@@ -83,6 +88,27 @@ use serde::{Deserialize, Serialize};
 use crate::ids::{ActorId, DeviceId, SpaceId};
 use crate::sigdag::{self, SignedNode};
 
+pub use crate::crypto::{
+    device_from_seed, did_key_from_device, did_key_from_pubkey, sign_detached, verify_detached,
+};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Failure {
+    Randomness,
+}
+
+impl std::fmt::Display for Failure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("OS randomness unavailable")
+    }
+}
+
+impl std::error::Error for Failure {}
+
+pub fn random_seed() -> Result<[u8; 32], Failure> {
+    crate::crypto::random_seed().map_err(|_| Failure::Randomness)
+}
+
 /// The signing domain for actor key-events (see [`crate::sigdag`]).
 pub const ACTOR_DOMAIN: &[u8] = b"lait/actor/1";
 
@@ -156,6 +182,10 @@ impl ActorOp {
             | ActorOp::Recover { actor, .. } => Some(actor),
         }
     }
+    #[allow(
+        clippy::expect_used,
+        reason = "derived postcard serialization of ActorOp has no fallible fields"
+    )]
     fn encode(&self) -> Vec<u8> {
         postcard::to_stdvec(self).expect("encode actor op")
     }
@@ -277,11 +307,10 @@ fn hex_key(s: &str) -> Option<[u8; 32]> {
     if s.len() != 64 || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }
-    let mut out = [0u8; 32];
-    for (i, b) in out.iter_mut().enumerate() {
-        *b = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).ok()?;
-    }
-    Some(out)
+    let decoded = data_encoding::HEXLOWER_PERMISSIVE
+        .decode(s.as_bytes())
+        .ok()?;
+    <[u8; 32]>::try_from(decoded.as_slice()).ok()
 }
 
 /// The blake3 hash of an ed25519 public key (the pre-rotation commitment
@@ -340,11 +369,11 @@ pub struct ActorState {
 /// The materialized actor plane: every validly-incepted actor and its current
 /// device set. Pure function of `(space id, event set)`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ActorPlane {
+pub struct Directory {
     actors: BTreeMap<ActorId, ActorState>,
 }
 
-impl ActorPlane {
+impl Directory {
     pub fn state(&self, actor: &ActorId) -> Option<&ActorState> {
         self.actors.get(actor)
     }
@@ -385,7 +414,7 @@ impl ActorPlane {
 }
 
 /// Replay the full event set. See module docs for the two-pass rules.
-pub fn replay(space_id: &SpaceId, events: &[SignedEvent]) -> ActorPlane {
+pub fn replay(space_id: &SpaceId, events: &[SignedEvent]) -> Directory {
     replay_inner(space_id, events, None)
 }
 
@@ -396,9 +425,9 @@ pub fn replay(space_id: &SpaceId, events: &[SignedEvent]) -> ActorPlane {
 /// hold the frontier resolve identically regardless of what else they hold.
 /// An oversized frontier (> [`MAX_ACTOR_ASOF`]) resolves to nothing — a
 /// malformed claim never authorizes.
-pub fn replay_at(space_id: &SpaceId, events: &[SignedEvent], frontier: &[String]) -> ActorPlane {
+pub fn replay_at(space_id: &SpaceId, events: &[SignedEvent], frontier: &[String]) -> Directory {
     if frontier.len() > MAX_ACTOR_ASOF {
-        return ActorPlane::default();
+        return Directory::default();
     }
     replay_inner(space_id, events, Some(frontier))
 }
@@ -407,7 +436,7 @@ fn replay_inner(
     space_id: &SpaceId,
     events: &[SignedEvent],
     frontier: Option<&[String]>,
-) -> ActorPlane {
+) -> Directory {
     let ws = space_id.as_str();
 
     // Index signature-valid events by hash; undecodable ops stay as opaque DAG
@@ -620,7 +649,7 @@ fn replay_inner(
             }
             ActorOp::AddDevice { actor, binding } => {
                 if !belongs_to(h, actor) {
-                    continue; // not in this actor's log (bridge/cross-actor)
+                    continue; // not in this actor's log (cross-actor material)
                 }
                 let author = &nodes[h].author;
                 let Some(st) = states.get_mut(actor) else {
@@ -698,7 +727,7 @@ fn replay_inner(
         }
     }
 
-    ActorPlane { actors: states }
+    Directory { actors: states }
 }
 
 #[cfg(test)]

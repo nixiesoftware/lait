@@ -18,14 +18,14 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use mechanics::crypto::AuthorizedBodyKey;
+use mechanics::authorization::AuthorizedBodyKey;
 use mechanics::ids::SpaceId;
+use replica::body::{BodyBinding, Op, StaticBodyKeys, SupportedSchemas, MUTATION_COLLABORATIVE};
+use replica::body::{BodyId, BodyKey, SchemaId, WorldId};
+use replica::convergence::{AuthorityBatchReceipt, AuthorityIncorporator, StagedContactMaterial};
 use replica::frontier::AuthorityFrontier;
-use replica::{
-    ActionOutcome, AuthorityBatchReceipt, AuthorityIncorporator, BodyBinding, BodyId, BodyKey,
-    BodyOp, CommitAuthorization, CommitContext, Replica, ReplicaCommitError, SchemaId, SeedSigner,
-    StagedContactMaterial, StaticBodyKeys, SupportedSchemas, WorldId, MUTATION_COLLABORATIVE,
-};
+use replica::transaction::{ActionOutcome, CommitAuthorization, CommitContext, SeedSigner};
+use replica::Replica;
 
 const SEED_A: [u8; 32] = [81u8; 32];
 const SEED_B: [u8; 32] = [82u8; 32];
@@ -57,18 +57,18 @@ fn world() -> WorldId {
     WorldId::parse("com.example.notes").unwrap()
 }
 
-fn test_auth() -> replica::StaticAuthorizer {
-    replica::StaticAuthorizer {
+fn test_auth() -> replica::transaction::StaticAuthorizer {
+    replica::transaction::StaticAuthorizer {
         world: world(),
         implementation_id: [0u8; 32],
     }
 }
 
 fn test_demand() -> Vec<u8> {
-    use mechanics::demand::{AuthorizationDemand, PolicyCapability, PolicyResource};
+    use mechanics::authorization::{AuthorizationDemand, PolicyCapability, Resource};
     AuthorizationDemand::require(
         PolicyCapability::new("com.example.notes", "write"),
-        PolicyResource::space("com.example.notes"),
+        Resource::root("com.example.notes"),
     )
     .encode_canonical()
     .expect("canonical demand")
@@ -82,7 +82,7 @@ fn binding() -> BodyBinding {
     BodyBinding {
         schema: SchemaId::parse("note").unwrap(),
         schema_version: 1,
-        encoding: replica::EncodingId::parse("collab").unwrap(),
+        encoding: replica::body::EncodingId::parse("collab").unwrap(),
         mutation_model: MUTATION_COLLABORATIVE,
     }
 }
@@ -93,7 +93,7 @@ fn supported() -> SupportedSchemas {
         world(),
         SchemaId::parse("note").unwrap(),
         1,
-        replica::EncodingId::parse("collab").unwrap(),
+        replica::body::EncodingId::parse("collab").unwrap(),
         MUTATION_COLLABORATIVE,
     );
     s
@@ -101,11 +101,11 @@ fn supported() -> SupportedSchemas {
 
 /// Any of the three test devices is an authorized signer.
 struct AnyWriter;
-impl replica::AuthoritySource for AnyWriter {
+impl replica::transaction::AuthoritySource for AnyWriter {
     fn signer_authorized(&self, signer: &[u8; 32], _f: &AuthorityFrontier) -> bool {
         [SEED_A, SEED_B, SEED_C]
             .iter()
-            .any(|seed| mechanics::crypto::device_from_seed(seed).key_bytes() == Some(*signer))
+            .any(|seed| mechanics::actor::device_from_seed(seed).key_bytes() == Some(*signer))
     }
 }
 
@@ -115,8 +115,8 @@ impl AuthorityIncorporator for AcceptingIncorporator {
     fn incorporate_authority(
         &mut self,
         records: &[Vec<u8>],
-    ) -> Result<AuthorityBatchReceipt, String> {
-        Ok(replica::AuthorityBatchReceipt {
+    ) -> Result<AuthorityBatchReceipt, replica::convergence::Failure> {
+        Ok(replica::convergence::AuthorityBatchReceipt {
             space: space(),
             prior_frontier: AuthorityFrontier::from_canonical_bytes(vec![]),
             resulting_frontier: authority_frontier(),
@@ -141,13 +141,13 @@ fn keyed_replica() -> Replica {
 
 fn durable_replica(tag: &str) -> (Replica, PathBuf) {
     let root = temp_store(tag);
-    let mut r = Replica::open_journaled(&root, keys()).unwrap();
+    let mut r = Replica::open(&root, keys()).unwrap();
     r.set_supported(supported());
     (r, root)
 }
 
 fn reopen(root: &PathBuf) -> Replica {
-    let mut r = Replica::open_journaled(root, keys()).unwrap();
+    let mut r = Replica::open(root, keys()).unwrap();
     r.set_supported(supported());
     r
 }
@@ -159,7 +159,7 @@ fn commit_register(
     request: [u8; 16],
     path: &str,
     value: &str,
-) -> Result<ActionOutcome, ReplicaCommitError> {
+) -> Result<ActionOutcome, replica::transaction::commit::Failure> {
     let (space, signer) = ctx_for(seed);
     let ctx = CommitContext {
         space: &space,
@@ -176,7 +176,7 @@ fn commit_register(
             authorizer: &test_auth(),
         },
         &world(),
-        &mechanics::crypto::device_from_seed(seed),
+        &mechanics::actor::device_from_seed(seed),
         &request,
         &[7u8; 32],
         vec![],
@@ -184,7 +184,7 @@ fn commit_register(
         "note",
         &[(
             shared_body(),
-            BodyOp::RegisterSet {
+            Op::RegisterSet {
                 path: path.into(),
                 value: value.as_bytes().to_vec(),
             },
@@ -257,7 +257,7 @@ fn pull(
     into_seed: &'static [u8; 32],
     from: &Replica,
     from_seed: &'static [u8; 32],
-) -> replica::ConvergenceOutcome {
+) -> replica::convergence::ConvergenceOutcome {
     let staged = stage(from, from_seed);
     let (space, signer) = ctx_for(into_seed);
     let ctx = CommitContext {
@@ -360,7 +360,7 @@ fn pull_staged(
     into: &mut Replica,
     into_seed: &'static [u8; 32],
     staged: &StagedContactMaterial,
-) -> Result<replica::ConvergenceOutcome, replica::ReplicaCommitError> {
+) -> Result<replica::convergence::ConvergenceOutcome, replica::transaction::commit::Failure> {
     let (space, signer) = ctx_for(into_seed);
     let ctx = CommitContext {
         space: &space,
@@ -408,7 +408,7 @@ fn a_delta_pull_ships_only_missing_heads_and_converges() {
             authorizer: &test_auth(),
         },
         &world(),
-        &mechanics::crypto::device_from_seed(&SEED_A),
+        &mechanics::actor::device_from_seed(&SEED_A),
         &[13u8; 16],
         &[7u8; 32],
         vec![],
@@ -416,7 +416,7 @@ fn a_delta_pull_ships_only_missing_heads_and_converges() {
         "note",
         &[(
             second_body(),
-            BodyOp::RegisterSet {
+            Op::RegisterSet {
                 path: "fresh".into(),
                 value: b"new-body".to_vec(),
             },
@@ -470,9 +470,12 @@ fn a_false_holdings_declaration_starves_only_the_claimant() {
     let starved = stage_excluding(&a, &SEED_A, &lie);
     assert!(starved.bodies.is_empty());
     let err = pull_staged(&mut b, &SEED_B, &starved).unwrap_err();
-    assert!(
-        format!("{err:?}").contains("neither held nor transferred"),
-        "whole-root rejection, got {err:?}"
+    assert_eq!(
+        err,
+        replica::transaction::commit::Failure::Illegitimate(
+            replica::transaction::commit::Invalid::IncompleteMaterial
+        ),
+        "the incomplete root is rejected as one semantic bundle"
     );
     assert!(
         register_of(&b, "froma").is_none(),

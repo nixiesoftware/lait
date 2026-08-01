@@ -1,7 +1,7 @@
 //! Convergence outcomes.
 //!
 //! Contact reports transfer separately from Convergence. Convergence classifies
-//! legitimacy, incorporates material through Fabric, advances the semantic
+//! legitimacy, incorporates material through Engine, advances the semantic
 //! frontier, and reports what changed. Outcomes report bytes moved separately
 //! from accepted, unchanged, rejected, and retryable material — a World never
 //! overrides Space legitimacy, and unknown-World material stays opaque and
@@ -42,8 +42,8 @@ pub struct ConvergenceOutcome {
     pub unsupported_retained: u32,
     pub retryable: u32,
     /// The Body keys this pass changed (accepted or opaquely retained) — the
-    /// Observation scopes for remote convergence.
-    pub scopes: Vec<crate::ids::BodyKey>,
+    /// Observation Bodies for remote convergence.
+    pub bodies: Vec<crate::ids::BodyKey>,
 }
 
 impl ConvergenceOutcome {
@@ -57,7 +57,7 @@ impl ConvergenceOutcome {
             rejected: 0,
             unsupported_retained: 0,
             retryable: 0,
-            scopes: Vec::new(),
+            bodies: Vec::new(),
         }
     }
 
@@ -111,6 +111,39 @@ pub struct AuthorityBatchReceipt {
     pub batch_digest: [u8; 32],
 }
 
+/// Why authority history could not be incorporated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Failure {
+    Invalid,
+    Refusal,
+    Operation,
+}
+
+impl From<String> for Failure {
+    fn from(diagnostic: String) -> Self {
+        tracing::warn!(%diagnostic, "Authority incorporation failed");
+        Self::Operation
+    }
+}
+
+impl From<&str> for Failure {
+    fn from(diagnostic: &str) -> Self {
+        Self::from(diagnostic.to_owned())
+    }
+}
+
+impl std::fmt::Display for Failure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Invalid => "invalid authority material",
+            Self::Refusal => "authority material refused",
+            Self::Operation => "authority incorporation failed",
+        })
+    }
+}
+
+impl std::error::Error for Failure {}
+
 /// The mechanics-owned authority incorporation seam. The composition root
 /// implements it over the durable signed-history ledger; the fixture
 /// implementation for tests records batches in memory.
@@ -123,7 +156,7 @@ pub trait AuthorityIncorporator {
     fn incorporate_authority(
         &mut self,
         records: &[Vec<u8>],
-    ) -> Result<AuthorityBatchReceipt, String>;
+    ) -> Result<AuthorityBatchReceipt, Failure>;
 }
 
 /// A **sealed** validated Contact bundle: constructible only by
@@ -155,7 +188,7 @@ pub struct ValidatedContactBundle {
 
 /// The bundle's validated transactions with their per-Body payloads.
 pub(crate) type BundleUnits = Vec<(
-    crate::transaction::BodyTransaction,
+    crate::transaction::Transaction,
     Vec<(crate::ids::BodyKey, Vec<u8>)>,
 )>;
 

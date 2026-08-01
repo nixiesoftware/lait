@@ -164,7 +164,7 @@ old one.
 
 | ALPN | Plane | Status |
 |---|---|---|
-| `lait/contact/1` | Contact — authority, manifest nodes, Body payloads | implemented |
+| `lait/contact/2` | Contact — authority, manifest nodes, Body payloads | implemented |
 | `lait/neighbor-presence/1` | liveness probe | implemented |
 | `lait/freight/1` | Freight — reliable exact-object request and response | implemented and **mounted** |
 | `lait/session/1` | Live — transient collaboration and reliable signals | implemented and **mounted**, inbound and outbound; carries the control lane and the reliable-signal lane |
@@ -252,7 +252,7 @@ cross a trust boundary.
 
 v7 moved the minimum with the version rather than leaving a window, and that is
 not the usual caution. A v6 process would accept a content request's header line
-and then read the raw body as a second request — so an attached SpaceBridge on
+and then read the raw body as a second request — so an attached StationHost on
 v6 does not fail the call, it desynchronises the channel the first time anyone
 uploads, and every later request on that connection reads someone else's bytes.
 A window whose only content is that outcome is not a window worth having.

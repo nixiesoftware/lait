@@ -1,4 +1,4 @@
-//! Seed-registry end-to-end over a process-backed **SpaceBridge** (in-process, in-memory
+//! Seed-registry end-to-end over a process-backed **StationHost** (in-process, in-memory
 //! transport). A node pins an always-on bootstrap seed — by device id or by an
 //! orbital Coordinates link — into its node-local `seeds.json`, and that pin
 //! (1) surfaces in a structured `Seeds` DTO with live reachability, and
@@ -17,11 +17,11 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use async_trait::async_trait;
+use comms::mem::MemNet;
+use comms::policy::Network;
+use comms::{Transport, TransportFactory};
 use lait::control::{request, Request, Response};
-use lait::net::Network;
-use lait::orbital::run_space_bridge_with;
-use lait::transport::mem::MemNet;
-use lait::transport::{Transport, TransportFactory};
+use lait::orbital::run_station_process_with;
 
 const FOUNDER_SEED: [u8; 32] = [141u8; 32];
 const OTHER_SEED: [u8; 32] = [142u8; 32];
@@ -39,7 +39,8 @@ impl TransportFactory for MemFactory {
         _protocols: comms::Protocols<'_>,
     ) -> Result<Arc<dyn Transport>> {
         Ok(Arc::new(
-            self.0.peer(lait::crypto::device_from_seed(identity_seed)),
+            self.0
+                .peer(mechanics::actor::device_from_seed(identity_seed)),
         ))
     }
 }
@@ -74,7 +75,7 @@ fn spawn_daemon(home: PathBuf, seed: [u8; 32], net: MemNet) -> std::thread::Join
     std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async move {
-            if let Err(e) = run_space_bridge_with(home, seed, &MemFactory(net)).await {
+            if let Err(e) = run_station_process_with(home, seed, &MemFactory(net)).await {
                 eprintln!("DAEMON ERR: {e:#}");
             }
         });
@@ -87,7 +88,7 @@ fn wait_online(rt: &tokio::runtime::Runtime, home: &Path) {
     });
     assert!(
         online.is_some(),
-        "SpaceBridge at {} never came online",
+        "StationHost at {} never came online",
         home.display()
     );
 }
@@ -141,7 +142,7 @@ fn seed_pin_lists_structured_and_survives_restart() {
     );
 
     // The link's approach Station is the founder's own device.
-    let founder_id = lait::crypto::device_from_seed(&FOUNDER_SEED).to_string();
+    let founder_id = mechanics::actor::device_from_seed(&FOUNDER_SEED).to_string();
 
     // It lists as one structured seed, carrying the id and the advertised space.
     match req(&rt, &home, Request::SeedList) {
@@ -197,7 +198,7 @@ fn seed_add_and_remove_by_device_id() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     wait_online(&rt, &home);
 
-    let other_id = lait::crypto::device_from_seed(&OTHER_SEED).to_string();
+    let other_id = mechanics::actor::device_from_seed(&OTHER_SEED).to_string();
     assert!(
         matches!(
             req(

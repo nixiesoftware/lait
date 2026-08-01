@@ -1,9 +1,16 @@
+#![allow(
+    clippy::expect_used,
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    clippy::indexing_slicing,
+    reason = "Issues validates command, schema, and projection shapes before fixed contract operations and canonical serialization"
+)]
 //! The issue product's semantic Runtime World implementation.
 //!
-//! `IssuesWorld` implements the public `runtime::World` contract over the
+//! `IssuesWorld` implements the public `runtime::world::World` contract over the
 //! frozen mapping in `contract.rs`: current Issues behavior expressed as
 //! collaborative Body operations. It is deliberately **not** a reusable
-//! privileged Runtime path: it registers through the same `RuntimeBuilder` any
+//! privileged Runtime path: it registers through the same `Builder` any
 //! consumer uses and touches nothing below the World boundary. The World is
 //! pure: ids, timestamps, and resolved refs
 //! arrive inside the intent; validation is re-checked here (the daemon
@@ -14,11 +21,11 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use replica::body::{BodyOp, BodySchema, CollaborativeSchema, MutationModel};
-use replica::ids::BodyKey;
+use replica::body::BodyKey;
+use replica::body::{CollaborativeSchema, MutationModel, Op, Schema};
 use runtime::{
-    BodyDeclaration, World, WorldContext, WorldEffect, WorldError, WorldIntent, WorldProjection,
-    WorldQuery,
+    world::BodyDeclaration, world::Context, world::Effect, world::Intent, world::Projection,
+    world::Query, world::Rejection, world::World,
 };
 
 use crate::dto::{ActivityEvent, CatalogScope, FieldChange, Priority, StatusCategory};
@@ -90,8 +97,8 @@ fn place(ordered: &[Milestone], id: &str, pos: &Pos) -> Option<String> {
 
 /// The registered product World.
 pub struct IssuesWorld {
-    id: replica::ids::WorldId,
-    schemas: Vec<BodySchema>,
+    id: replica::body::WorldId,
+    schemas: Vec<Schema>,
     /// Owned rather than built on demand, because the trait hands back a slice
     /// and the registry compares it against the registration byte for byte —
     /// two constructions of "the same" list is how they come to differ.
@@ -134,7 +141,7 @@ impl IssuesWorld {
     /// (reusing per-issue parses whose reader stamp is unchanged) and cached
     /// under the root. A zero root (fixture contexts without a snapshot
     /// identity) is never cached.
-    fn derived_snapshot(&self, ctx: &WorldContext<'_>) -> Result<Arc<DerivedSnapshot>, WorldError> {
+    fn derived_snapshot(&self, ctx: &Context<'_>) -> Result<Arc<DerivedSnapshot>, Rejection> {
         let root = ctx.manifest_root();
         let identified = root != [0u8; 32];
         if identified {
@@ -197,14 +204,14 @@ impl IssuesWorld {
             cache: std::sync::Mutex::new(RootKeyedCache::default()),
             signal_schemas: contract::signal_schemas(),
             schemas: vec![
-                BodySchema {
+                Schema {
                     id: contract::issue_schema(),
                     version: contract::ISSUE_SCHEMA_VERSION,
                     encoding: contract::issue_encoding(),
                     mutation: MutationModel::Collaborative(CollaborativeSchema::default()),
                     readable_predecessors: vec![],
                 },
-                BodySchema {
+                Schema {
                     id: contract::catalog_schema(),
                     version: contract::CATALOG_SCHEMA_VERSION,
                     encoding: contract::catalog_encoding(),
@@ -215,32 +222,13 @@ impl IssuesWorld {
         }
     }
 
-    /// The registration the composition root hands to `RuntimeBuilder`.
-    pub fn registration() -> runtime::WorldRegistration {
-        let world = Self::new();
-        runtime::WorldRegistration {
-            id: world.id.clone(),
-            implementation_version: runtime::WorldVersion(1),
-            schemas: world.schemas.clone(),
-            limits: runtime::WorldLimits::default(),
-            // No scopes. Presence, carets and typing on an issue are the
-            // substrate's own shapes over a Body — `IssueView`, `TextCaret`,
-            // `Typing` — and this World gets them without declaring anything. A
-            // declaration is for a scope the substrate has no name for, and
-            // Issues has none yet.
-            scope_schemas: Vec::new(),
-            signal_schemas: world.signal_schemas.clone(),
-        }
-    }
-
     /// The reviewed implementation descriptor this build ships. Its canonical
     /// id is the authority identity the founder activates and every product
-    /// transaction pins. `policy_protocol`/`implementation_version` are 1; the
-    /// policy-table commitment and artifact identity are build-embedded
-    /// release ids (fixed here until a versioned policy table lands).
-    pub fn implementation_descriptor() -> runtime::implementation::WorldImplementationDescriptor {
-        runtime::implementation::WorldImplementationDescriptor::from_registration(
-            &Self::registration(),
+    /// transaction pins.
+    pub fn implementation_descriptor() -> runtime::world::Implementation {
+        let world = Self::new();
+        runtime::world::Implementation::from_registration(
+            &world.descriptor(),
             1,
             *blake3::hash(b"lait.issues.policy-table.v1").as_bytes(),
             *blake3::hash(b"lait.issues.artifact.v1").as_bytes(),
@@ -253,8 +241,8 @@ struct Staging {
     /// The Space the transaction commits in — the deterministic Catalog's
     /// identity input.
     space: mechanics::ids::SpaceId,
-    ops: Vec<(BodyKey, BodyOp)>,
-    scopes: Vec<BodyKey>,
+    ops: Vec<(BodyKey, Op)>,
+    bodies: Vec<BodyKey>,
     declarations: Vec<BodyDeclaration>,
     /// The complete content set for each Body this transaction declares one for.
     ///
@@ -263,7 +251,7 @@ struct Staging {
     /// erase its set — which is what would happen on the next comment if every
     /// staged Body got an entry. Only a key that explicitly declares appears
     /// here.
-    declared: std::collections::BTreeMap<BodyKey, Vec<replica::ContentRef>>,
+    declared: std::collections::BTreeMap<BodyKey, Vec<replica::content::ContentRef>>,
     /// Whether a catalog op must carry the creation declaration — true exactly
     /// when the committed snapshot holds no Catalog yet (first-ever write).
     declare_catalog_on_use: bool,
@@ -276,7 +264,7 @@ impl Staging {
         Self {
             space,
             ops: Vec::new(),
-            scopes: Vec::new(),
+            bodies: Vec::new(),
             declarations: Vec::new(),
             declared: std::collections::BTreeMap::new(),
             declare_catalog_on_use,
@@ -319,23 +307,23 @@ impl Staging {
         }
     }
 
-    fn issue(&mut self, key: &BodyKey, op: BodyOp) {
-        if matches!(op, BodyOp::Create) {
+    fn issue(&mut self, key: &BodyKey, op: Op) {
+        if matches!(op, Op::Create) {
             self.declare_issue(key);
         }
-        if !self.scopes.contains(key) {
-            self.scopes.push(key.clone());
+        if !self.bodies.contains(key) {
+            self.bodies.push(key.clone());
         }
         self.ops.push((key.clone(), op));
     }
 
-    fn catalog(&mut self, op: BodyOp) {
+    fn catalog(&mut self, op: Op) {
         if self.declare_catalog_on_use {
             self.declare_catalog();
         }
         let key = catalog_key(&self.space);
-        if !self.scopes.contains(&key) {
-            self.scopes.push(key.clone());
+        if !self.bodies.contains(&key) {
+            self.bodies.push(key.clone());
         }
         self.ops.push((key, op));
     }
@@ -353,16 +341,16 @@ impl Staging {
     /// Only a key that calls this appears in the effect at all — a blanket
     /// declaration would erase the set on the next comment, which is exactly
     /// the failure this shape exists to make impossible.
-    fn declare(&mut self, key: &BodyKey, refs: Vec<replica::ContentRef>) {
+    fn declare(&mut self, key: &BodyKey, refs: Vec<replica::content::ContentRef>) {
         self.declared.insert(key.clone(), refs);
     }
 
-    fn into_effect(self, doc: Option<String>) -> WorldEffect {
+    fn into_effect(self, doc: Option<String>) -> Effect {
         let demand = self.demand.unwrap_or_else(contract::demand_contributor);
-        WorldEffect {
+        Effect {
             content_refs: self.declared.into_iter().collect(),
             operations: self.ops,
-            scopes: self.scopes,
+            bodies: self.bodies,
             effect: IssueEffect {
                 doc,
                 unchanged: false,
@@ -375,9 +363,9 @@ impl Staging {
 }
 
 /// A content id as a World writes it: 32 bytes of lowercase hex.
-fn parse_content_ref(raw: &str) -> Option<replica::ContentRef> {
+fn parse_content_ref(raw: &str) -> Option<replica::content::ContentRef> {
     let bytes = data_encoding::HEXLOWER.decode(raw.as_bytes()).ok()?;
-    Some(replica::ContentRef {
+    Some(replica::content::ContentRef {
         content_id: <[u8; 32]>::try_from(bytes.as_slice()).ok()?,
     })
 }
@@ -389,7 +377,7 @@ fn parse_content_ref(raw: &str) -> Option<replica::ContentRef> {
 /// that does not count toward the cap, cannot be detached, and — worst — is
 /// missing from a declaration that is supposed to name everything this Body
 /// references.
-fn raw_attachments(ctx: &WorldContext<'_>, doc: &str) -> BTreeMap<String, Vec<u8>> {
+fn raw_attachments(ctx: &Context<'_>, doc: &str) -> BTreeMap<String, Vec<u8>> {
     ctx.read_collaborative(&issue_key(doc))
         .ok()
         .and_then(|view| view.maps.get("attachments").cloned())
@@ -403,18 +391,20 @@ fn raw_attachments(ctx: &WorldContext<'_>, doc: &str) -> BTreeMap<String, Vec<u8
 /// — and skipping means publishing a declaration that omits content the Body
 /// still references, which makes those bytes collectable while something still
 /// points at them.
-fn content_of(records: &BTreeMap<String, Vec<u8>>) -> Result<Vec<replica::ContentRef>, WorldError> {
+fn content_of(
+    records: &BTreeMap<String, Vec<u8>>,
+) -> Result<Vec<replica::content::ContentRef>, Rejection> {
     let mut refs = Vec::new();
     for value in records.values() {
         let record: serde_json::Value =
-            serde_json::from_slice(value).map_err(|_| WorldError::ContractViolation)?;
+            serde_json::from_slice(value).map_err(|_| Rejection::ContractViolation)?;
         let Some(content) = record.get("content").and_then(|c| c.as_str()) else {
             // A legacy record carries its bytes inline and references no
             // content at all. That is not a failure to decode; it is a record
             // from before the content plane, and it declares nothing.
             continue;
         };
-        let reference = parse_content_ref(content).ok_or(WorldError::ContractViolation)?;
+        let reference = parse_content_ref(content).ok_or(Rejection::ContractViolation)?;
         if !refs.contains(&reference) {
             refs.push(reference);
         }
@@ -422,29 +412,29 @@ fn content_of(records: &BTreeMap<String, Vec<u8>>) -> Result<Vec<replica::Conten
     Ok(refs)
 }
 
-fn reg(path: &str, value: impl Into<Vec<u8>>) -> BodyOp {
-    BodyOp::RegisterSet {
+fn reg(path: &str, value: impl Into<Vec<u8>>) -> Op {
+    Op::RegisterSet {
         path: path.into(),
         value: value.into(),
     }
 }
 
-fn map_set(path: &str, key: impl Into<String>, value: impl Into<Vec<u8>>) -> BodyOp {
-    BodyOp::MapSet {
+fn map_set(path: &str, key: impl Into<String>, value: impl Into<Vec<u8>>) -> Op {
+    Op::MapSet {
         path: path.into(),
         key: key.into(),
         value: value.into(),
     }
 }
 
-fn unchanged_effect(doc: Option<String>) -> WorldEffect {
-    WorldEffect {
+fn unchanged_effect(doc: Option<String>) -> Effect {
+    Effect {
         // A no-op declares nothing, which is not the same as declaring nothing
         // *for* a Body: an empty list here means no key is named at all, so no
         // Body's existing declaration is touched.
         content_refs: Vec::new(),
         operations: vec![],
-        scopes: vec![],
+        bodies: vec![],
         effect: IssueEffect {
             doc,
             unchanged: true,
@@ -461,11 +451,9 @@ fn unchanged_effect(doc: Option<String>) -> WorldEffect {
 /// the ONE deterministic Catalog key for this Space, or nothing (not yet
 /// initialized/adopted). Any other catalog-schema Body — wrong key, a
 /// duplicate semantic Catalog, an unrelated Catalog-shaped Body — is typed
-/// [`WorldError::WorldStateCorrupt`]; the World never selects among, merges,
+/// [`Rejection::StateCorrupt`]; the World never selects among, merges,
 /// repairs, or silently recreates Catalogs.
-fn checked_catalog_view(
-    ctx: &WorldContext<'_>,
-) -> Result<Option<replica::CollaborativeView>, WorldError> {
+fn checked_catalog_view(ctx: &Context<'_>) -> Result<Option<fabric::CollaborativeView>, Rejection> {
     let expected = catalog_key(&ctx.principal().space);
     let catalogs = ctx.bodies_with_schema(&contract::world_id(), &contract::catalog_schema());
     match catalogs.as_slice() {
@@ -475,18 +463,18 @@ fn checked_catalog_view(
             // Bound as a catalog but unreadable: a wrong-model/encoding Body,
             // or one carrying a collaborative type this build cannot project.
             // Either way not a missing catalog.
-            Err(_) => Err(WorldError::WorldStateCorrupt),
+            Err(_) => Err(Rejection::StateCorrupt),
         },
-        _ => Err(WorldError::WorldStateCorrupt),
+        _ => Err(Rejection::StateCorrupt),
     }
 }
 
 /// Load the catalog state from the committed snapshot (integrity-checked).
-fn catalog_state(ctx: &WorldContext<'_>) -> Result<CatalogState, WorldError> {
+fn catalog_state(ctx: &Context<'_>) -> Result<CatalogState, Rejection> {
     Ok(CatalogState::from_view(checked_catalog_view(ctx)?.as_ref()))
 }
 
-fn issue_state(ctx: &WorldContext<'_>, doc: &str) -> Option<IssueState> {
+fn issue_state(ctx: &Context<'_>, doc: &str) -> Option<IssueState> {
     ctx.read_collaborative(&issue_key(doc))
         .ok()
         .map(|v| IssueState::from_view(&v))
@@ -498,22 +486,22 @@ fn issue_state(ctx: &WorldContext<'_>, doc: &str) -> Option<IssueState> {
 /// because a duplicated id would fuse two comments' reactions, replies and
 /// spans.
 fn check_comment(
-    ctx: &WorldContext<'_>,
+    ctx: &Context<'_>,
     doc: &str,
     body: &str,
     actor: &str,
     id: Option<&str>,
     parent: Option<&str>,
-) -> Result<IssueState, WorldError> {
+) -> Result<IssueState, Rejection> {
     if body.is_empty() || ActorId::parse(actor).is_none() {
-        return Err(WorldError::InvalidRequest);
+        return Err(Rejection::InvalidRequest);
     }
-    let issue = issue_state(ctx, doc).ok_or(WorldError::InvalidRequest)?;
+    let issue = issue_state(ctx, doc).ok_or(Rejection::InvalidRequest)?;
     if let Some(id) = id {
         if !contract::is_comment_id(id)
             || issue.comments.iter().any(|c| c.id.as_deref() == Some(id))
         {
-            return Err(WorldError::InvalidRequest);
+            return Err(Rejection::InvalidRequest);
         }
     }
     if let Some(parent) = parent {
@@ -524,9 +512,9 @@ fn check_comment(
             .comments
             .iter()
             .find(|c| c.id.as_deref() == Some(parent))
-            .ok_or(WorldError::InvalidRequest)?;
+            .ok_or(Rejection::InvalidRequest)?;
         if id.is_none() || target.parent.is_some() {
-            return Err(WorldError::InvalidRequest);
+            return Err(Rejection::InvalidRequest);
         }
     }
     Ok(issue)
@@ -535,7 +523,7 @@ fn check_comment(
 /// Append a comment record and its history event.
 fn stage_comment(
     staging: &mut Staging,
-    ctx: &WorldContext<'_>,
+    ctx: &Context<'_>,
     doc: &str,
     issue: &IssueState,
     record: StoredComment,
@@ -546,7 +534,7 @@ fn stage_comment(
     ev.x = record.b.clone();
     staging.issue(
         &issue_key(doc),
-        BodyOp::ListInsert {
+        Op::ListInsert {
             path: "comments".into(),
             index: issue.comments.len() as u64,
             value: serde_json::to_vec(&record).expect("comment json"),
@@ -584,28 +572,28 @@ fn stage_comment(
 /// character-in-front binding, which is the only one a caret at the very end of
 /// a text can have.
 fn mint_comment_anchor(
-    ctx: &WorldContext<'_>,
+    ctx: &Context<'_>,
     doc: &str,
     issue: &IssueState,
     field: &str,
     start: u64,
     end: Option<u64>,
-) -> Result<contract::StoredAnchor, WorldError> {
+) -> Result<contract::StoredAnchor, Rejection> {
     let text = issue
         .anchorable_text(field)
-        .ok_or(WorldError::InvalidRequest)?;
-    // Unicode scalars: the coordinate system `BodyOp::TextSplice` is validated
+        .ok_or(Rejection::InvalidRequest)?;
+    // Unicode scalars: the coordinate system `Op::TextSplice` is validated
     // in, so a span counted any other way would name a different place.
     let length = text.chars().count() as u64;
     let last = end.unwrap_or(start);
     if length == 0 || start > last || last > length {
-        return Err(WorldError::InvalidRequest);
+        return Err(Rejection::InvalidRequest);
     }
     let key = issue_key(doc);
-    let mint = |position: u64| -> Result<String, WorldError> {
+    let mint = |position: u64| -> Result<String, Rejection> {
         ctx.anchor(&key, field, position)
             .map(|anchor| data_encoding::HEXLOWER.encode(&anchor.encode()))
-            .ok_or(WorldError::InvalidRequest)
+            .ok_or(Rejection::InvalidRequest)
     };
     let span = start < last;
     Ok(contract::StoredAnchor {
@@ -631,7 +619,7 @@ fn mint_comment_anchor(
 /// drift. Refusing that only at the write seam would leave the read seam
 /// affirming the exact lie the write seam exists to stop.
 fn resolve_comment_anchor(
-    ctx: &WorldContext<'_>,
+    ctx: &Context<'_>,
     doc: &str,
     issue: &IssueState,
     comment: &StoredComment,
@@ -655,9 +643,9 @@ fn resolve_comment_anchor(
         Some(_) => {}
     }
     let key = issue_key(doc);
-    let one = |hex: &str| -> Option<replica::AnchorResolution> {
+    let one = |hex: &str| -> Option<fabric::AnchorResolution> {
         let raw = data_encoding::HEXLOWER.decode(hex.as_bytes()).ok()?;
-        let anchor = replica::FabricAnchor::decode_canonical(&raw).ok()?;
+        let anchor = fabric::Anchor::decode_canonical(&raw).ok()?;
         // The record names a field and so does the anchor inside it. This
         // build writes them together and they always agree; a record from
         // anywhere else that disagrees cannot say which one its writer meant,
@@ -674,7 +662,7 @@ fn resolve_comment_anchor(
         Some(hex) => one(hex),
     };
     let state = match (head, tail) {
-        (replica::AnchorResolution::Resolved(h), Some(replica::AnchorResolution::Resolved(t))) => {
+        (fabric::AnchorResolution::Resolved(h), Some(fabric::AnchorResolution::Resolved(t))) => {
             // A resolved anchor sits one past the character it bound to. For a
             // span that character is the first one inside it, so the span's
             // start is one back; a caret bound to the character in front of it
@@ -709,7 +697,7 @@ fn actor_of(event: &IssueEvent) -> Option<ActorId> {
 }
 
 /// Append one history event to an issue's `events` list.
-fn push_event(staging: &mut Staging, ctx: &WorldContext<'_>, doc: &str, event: &IssueEvent) {
+fn push_event(staging: &mut Staging, ctx: &Context<'_>, doc: &str, event: &IssueEvent) {
     // Stamped here rather than at each construction site, which is why the
     // eleven of them and the intents carrying `device` are untouched. The actor
     // is the Session's own, re-derived by the authority view at every submit —
@@ -727,7 +715,7 @@ fn push_event(staging: &mut Staging, ctx: &WorldContext<'_>, doc: &str, event: &
         .unwrap_or(0);
     staging.issue(
         &key,
-        BodyOp::ListInsert {
+        Op::ListInsert {
             path: "events".into(),
             index: len,
             value: serde_json::to_vec(event).expect("event json"),
@@ -745,23 +733,23 @@ fn transition_gate(
     project: &str,
     from: &str,
     to: &str,
-) -> Result<(Vec<u8>, crate::workflow::WorkflowTransitionEvidence), WorldError> {
+) -> Result<(Vec<u8>, crate::workflow::WorkflowTransitionEvidence), Rejection> {
     // The single usable head gates transitions; concurrent heads block them
     // (and further ordinary edits) until `workflow set --expect-head`
     // resolves. A project with NO revision at all is corrupt catalog state.
     if !catalog.workflow_revisions.contains_key(project) {
-        return Err(WorldError::WorldStateCorrupt);
+        return Err(Rejection::StateCorrupt);
     }
-    let revision = catalog.workflow_head(project).ok_or(WorldError::Conflict)?;
+    let revision = catalog.workflow_head(project).ok_or(Rejection::Conflict)?;
     let transition = revision
         .body
         .transition_for(from, to)
-        .ok_or(WorldError::InvalidRequest)?;
+        .ok_or(Rejection::InvalidRequest)?;
     let demand = transition.demand_template.resolve(project);
     let bytes = demand
         .encode_canonical()
-        .map_err(|_| WorldError::ContractViolation)?;
-    let digest = demand.digest().map_err(|_| WorldError::ContractViolation)?;
+        .map_err(|_| Rejection::ContractViolation)?;
+    let digest = demand.digest().map_err(|_| Rejection::ContractViolation)?;
     let evidence = crate::workflow::WorkflowTransitionEvidence {
         transition_id: transition.transition_id.clone(),
         workflow_revision_id: revision.revision_id.clone(),
@@ -774,22 +762,22 @@ fn transition_gate(
 
 /// Whether every capability id is registered for the declared scope kind
 /// (sorted, unique, non-empty).
-fn validate_role_caps(caps: &[String], scope: crate::roles::ScopeKind) -> Result<(), WorldError> {
+fn validate_role_caps(caps: &[String], scope: crate::roles::ScopeKind) -> Result<(), Rejection> {
     if caps.is_empty() {
-        return Err(WorldError::InvalidRequest);
+        return Err(Rejection::InvalidRequest);
     }
     let mut sorted = caps.to_vec();
     sorted.sort();
     sorted.dedup();
     if sorted.len() != caps.len() {
-        return Err(WorldError::InvalidRequest);
+        return Err(Rejection::InvalidRequest);
     }
     let registered = |c: &str| match scope {
         crate::roles::ScopeKind::Space => contract::is_space_capability(c),
         crate::roles::ScopeKind::Project => contract::is_project_capability(c),
     };
     if caps.iter().any(|c| !registered(c)) {
-        return Err(WorldError::InvalidRequest);
+        return Err(Rejection::InvalidRequest);
     }
     Ok(())
 }
@@ -800,24 +788,24 @@ fn expect_single_head<'a>(
     catalog: &'a CatalogState,
     role_id: &str,
     expected: &str,
-) -> Result<&'a crate::views::StoredRoleRevision, WorldError> {
+) -> Result<&'a crate::views::StoredRoleRevision, Rejection> {
     let heads = catalog.role_heads(role_id);
     match heads.as_slice() {
-        [] => Err(WorldError::InvalidRequest),
-        [one] if one.body.tombstone => Err(WorldError::InvalidRequest),
+        [] => Err(Rejection::InvalidRequest),
+        [one] if one.body.tombstone => Err(Rejection::InvalidRequest),
         [one] if one.revision_id == expected => Ok(one),
-        [_one] => Err(WorldError::Conflict),
-        _ => Err(WorldError::Conflict),
+        [_one] => Err(Rejection::Conflict),
+        _ => Err(Rejection::Conflict),
     }
 }
 
-fn decode_hex32(hex: &str) -> Result<[u8; 32], WorldError> {
+fn decode_hex32(hex: &str) -> Result<[u8; 32], Rejection> {
     let raw = data_encoding::HEXLOWER
         .decode(hex.as_bytes())
-        .map_err(|_| WorldError::InvalidRequest)?;
+        .map_err(|_| Rejection::InvalidRequest)?;
     raw.as_slice()
         .try_into()
-        .map_err(|_| WorldError::InvalidRequest)
+        .map_err(|_| Rejection::InvalidRequest)
 }
 
 /// Stage one role revision into the grow-only log.
@@ -864,7 +852,7 @@ fn board_insert_top(staging: &mut Staging, catalog: &CatalogState, project: &str
     {
         return;
     }
-    staging.catalog(BodyOp::ListInsert {
+    staging.catalog(Op::ListInsert {
         path: board_path(project),
         index: 0,
         value: doc.as_bytes().to_vec(),
@@ -876,7 +864,7 @@ fn board_remove(staging: &mut Staging, catalog: &CatalogState, project: &str, do
         .into_iter()
         .find(|(_, d)| d == doc)
     {
-        staging.catalog(BodyOp::ListRemove {
+        staging.catalog(Op::ListRemove {
             path: board_path(project),
             element,
         });
@@ -917,7 +905,7 @@ fn board_move(
                 }
             };
             let to = to.min(len.saturating_sub(1));
-            staging.catalog(BodyOp::ListMove {
+            staging.catalog(Op::ListMove {
                 path: board_path(project),
                 element: entries[from].0.clone(),
                 index: to as u64,
@@ -925,7 +913,7 @@ fn board_move(
         }
         (None, Some(a)) => {
             let at = if after { a + 1 } else { a }.min(len);
-            staging.catalog(BodyOp::ListInsert {
+            staging.catalog(Op::ListInsert {
                 path: board_path(project),
                 index: at as u64,
                 value: doc.as_bytes().to_vec(),
@@ -933,7 +921,7 @@ fn board_move(
         }
         (Some(from), None) => {
             if len > 0 {
-                staging.catalog(BodyOp::ListMove {
+                staging.catalog(Op::ListMove {
                     path: board_path(project),
                     element: entries[from].0.clone(),
                     index: (len - 1) as u64,
@@ -941,7 +929,7 @@ fn board_move(
             }
         }
         (None, None) => {
-            staging.catalog(BodyOp::ListInsert {
+            staging.catalog(Op::ListInsert {
                 path: board_path(project),
                 index: len as u64,
                 value: doc.as_bytes().to_vec(),
@@ -995,11 +983,22 @@ fn is_ancestor(catalog: &CatalogState, start: &str, needle: &str) -> bool {
 }
 
 impl World for IssuesWorld {
-    fn id(&self) -> replica::ids::WorldId {
+    fn descriptor(&self) -> runtime::world::Descriptor {
+        runtime::world::Descriptor {
+            id: self.id.clone(),
+            implementation_version: runtime::world::Version(1),
+            schemas: self.schemas.clone(),
+            limits: runtime::world::Limits::default(),
+            scope_schemas: Vec::new(),
+            signal_schemas: self.signal_schemas.clone(),
+        }
+    }
+
+    fn id(&self) -> replica::body::WorldId {
         self.id.clone()
     }
 
-    fn schemas(&self) -> &[BodySchema] {
+    fn schemas(&self) -> &[Schema] {
         &self.schemas
     }
 
@@ -1007,12 +1006,8 @@ impl World for IssuesWorld {
         &self.signal_schemas
     }
 
-    fn submit(
-        &self,
-        ctx: &mut WorldContext<'_>,
-        intent: WorldIntent,
-    ) -> Result<WorldEffect, WorldError> {
-        let intent = IssueIntent::from_json(&intent.payload).ok_or(WorldError::InvalidRequest)?;
+    fn submit(&self, ctx: &mut Context<'_>, intent: Intent) -> Result<Effect, Rejection> {
+        let intent = IssueIntent::from_json(&intent.payload).ok_or(Rejection::InvalidRequest)?;
         let catalog_view = checked_catalog_view(ctx)?;
         let catalog = CatalogState::from_view(catalog_view.as_ref());
         let mut staging = Staging::for_space(ctx.principal().space.clone(), catalog_view.is_none());
@@ -1040,18 +1035,18 @@ impl World for IssuesWorld {
                     || project_id.is_empty()
                     || ts == 0
                 {
-                    return Err(WorldError::InvalidRequest);
+                    return Err(Rejection::InvalidRequest);
                 }
                 // The golden commitments must match this implementation's
                 // compiled-in definitions exactly.
                 let registry_hex =
                     data_encoding::HEXLOWER.encode(&contract::capability_registry_commitment());
                 if capability_registry_commitment != registry_hex {
-                    return Err(WorldError::InvalidRequest);
+                    return Err(Rejection::InvalidRequest);
                 }
                 let workflow_revision = crate::workflow::default_workflow_revision(&project_id);
                 if default_workflow_commitment != workflow_revision.revision_id {
-                    return Err(WorldError::InvalidRequest);
+                    return Err(Rejection::InvalidRequest);
                 }
                 let mut goldens: Vec<(String, String, String)> = Vec::new();
                 for id in crate::roles::BUILT_IN_ROLE_IDS {
@@ -1063,7 +1058,7 @@ impl World for IssuesWorld {
                     ));
                 }
                 if built_in_roles != goldens {
-                    return Err(WorldError::InvalidRequest);
+                    return Err(Rejection::InvalidRequest);
                 }
                 // The deterministic Catalog must not exist yet: joiners adopt
                 // it through Manifest synchronization and never create it, and
@@ -1075,7 +1070,7 @@ impl World for IssuesWorld {
                     if initialized {
                         return Ok(unchanged_effect(None));
                     }
-                    return Err(WorldError::Conflict);
+                    return Err(Rejection::Conflict);
                 }
                 // ---- one atomic Catalog transaction: display name, legacy
                 // workflow states, the workflow revision, the initial project,
@@ -1087,7 +1082,7 @@ impl World for IssuesWorld {
                     registry_hex.clone().into_bytes(),
                 ));
                 for (i, state) in contract::default_workflow().into_iter().enumerate() {
-                    staging.catalog(BodyOp::ListInsert {
+                    staging.catalog(Op::ListInsert {
                         path: "workflow".into(),
                         index: i as u64,
                         value: serde_json::to_vec(&state).expect("workflow json"),
@@ -1144,24 +1139,24 @@ impl World for IssuesWorld {
                 ts,
             } => {
                 if title.trim().is_empty() || DocId::parse(&doc).is_none() {
-                    return Err(WorldError::InvalidRequest);
+                    return Err(Rejection::InvalidRequest);
                 }
                 if !catalog.projects.contains_key(&project) {
-                    return Err(WorldError::InvalidRequest);
+                    return Err(Rejection::InvalidRequest);
                 }
                 if Priority::parse(&priority).is_none() {
-                    return Err(WorldError::InvalidRequest);
+                    return Err(Rejection::InvalidRequest);
                 }
                 for label in &labels {
                     if !catalog.labels.contains_key(label) {
-                        return Err(WorldError::InvalidRequest);
+                        return Err(Rejection::InvalidRequest);
                     }
                 }
                 if duedate == Some(0) || estimate.is_some_and(|e| e > contract::MAX_ESTIMATE) {
-                    return Err(WorldError::InvalidRequest);
+                    return Err(Rejection::InvalidRequest);
                 }
                 let key = issue_key(&doc);
-                staging.issue(&key, BodyOp::Create);
+                staging.issue(&key, Op::Create);
                 staging.issue(&key, reg("projectid", project.as_bytes().to_vec()));
                 staging.issue(&key, reg("title", title.as_bytes().to_vec()));
                 staging.issue(&key, reg("status", DEFAULT_STATUS.as_bytes().to_vec()));
@@ -1177,7 +1172,7 @@ impl World for IssuesWorld {
                 if let Some(body) = body.filter(|b| !b.is_empty()) {
                     staging.issue(
                         &key,
-                        BodyOp::TextSplice {
+                        Op::TextSplice {
                             path: "description".into(),
                             index: 0,
                             delete: 0,
@@ -1188,7 +1183,7 @@ impl World for IssuesWorld {
                 for who in &assignees {
                     staging.issue(
                         &key,
-                        BodyOp::SetAdd {
+                        Op::SetAdd {
                             path: "assignees".into(),
                             value: who.as_bytes().to_vec(),
                         },
@@ -1208,7 +1203,7 @@ impl World for IssuesWorld {
                 for label in labels.iter().chain(new_labels.iter().map(|l| &l.id)) {
                     staging.issue(
                         &key,
-                        BodyOp::SetAdd {
+                        Op::SetAdd {
                             path: "labels".into(),
                             value: label.as_bytes().to_vec(),
                         },
@@ -1233,7 +1228,7 @@ impl World for IssuesWorld {
                 device,
                 ts,
             } => {
-                let issue = issue_state(ctx, &doc).ok_or(WorldError::InvalidRequest)?;
+                let issue = issue_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
                 if title.is_none()
                     && status.is_none()
                     && priority.is_none()
@@ -1241,23 +1236,23 @@ impl World for IssuesWorld {
                     && duedate.is_none()
                     && estimate.is_none()
                 {
-                    return Err(WorldError::InvalidRequest);
+                    return Err(Rejection::InvalidRequest);
                 }
                 if duedate == Some(Some(0))
                     || estimate
                         .flatten()
                         .is_some_and(|e| e > contract::MAX_ESTIMATE)
                 {
-                    return Err(WorldError::InvalidRequest);
+                    return Err(Rejection::InvalidRequest);
                 }
                 if let Some(status) = &status {
                     if catalog.workflow_state(status).is_none() {
-                        return Err(WorldError::InvalidRequest);
+                        return Err(Rejection::InvalidRequest);
                     }
                 }
                 if let Some(priority) = &priority {
                     if Priority::parse(priority).is_none() {
-                        return Err(WorldError::InvalidRequest);
+                        return Err(Rejection::InvalidRequest);
                     }
                 }
                 let key = issue_key(&doc);
@@ -1310,7 +1305,7 @@ impl World for IssuesWorld {
                     {
                         staging.issue(
                             &key,
-                            BodyOp::TextSplice {
+                            Op::TextSplice {
                                 path: "description".into(),
                                 index,
                                 delete,
@@ -1337,7 +1332,7 @@ impl World for IssuesWorld {
                             }
                             None => staging.issue(
                                 &key,
-                                BodyOp::RegisterClear {
+                                Op::RegisterClear {
                                     path: "duedate".into(),
                                 },
                             ),
@@ -1356,7 +1351,7 @@ impl World for IssuesWorld {
                                 .issue(&key, reg("estimate", points.to_string().into_bytes())),
                             None => staging.issue(
                                 &key,
-                                BodyOp::RegisterClear {
+                                Op::RegisterClear {
                                     path: "estimate".into(),
                                 },
                             ),
@@ -1383,11 +1378,11 @@ impl World for IssuesWorld {
                 device,
                 ts,
             } => {
-                let issue = issue_state(ctx, &doc).ok_or(WorldError::InvalidRequest)?;
+                let issue = issue_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
                 let mut effective = issue.project.clone();
                 if let Some(target) = &project {
                     if !catalog.projects.contains_key(target) {
-                        return Err(WorldError::InvalidRequest);
+                        return Err(Rejection::InvalidRequest);
                     }
                     if target != &issue.project {
                         staging.issue(
@@ -1409,7 +1404,7 @@ impl World for IssuesWorld {
                             .iter()
                             .filter(|(_, d)| d != &doc)
                             .count();
-                        staging.catalog(BodyOp::ListInsert {
+                        staging.catalog(Op::ListInsert {
                             path: board_path(&effective),
                             index: len as u64,
                             value: doc.as_bytes().to_vec(),
@@ -1435,19 +1430,19 @@ impl World for IssuesWorld {
                 device,
                 ts,
             } => {
-                let _issue = issue_state(ctx, &doc).ok_or(WorldError::InvalidRequest)?;
+                let _issue = issue_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
                 let key = issue_key(&doc);
                 for actor in &who {
                     if ActorId::parse(actor).is_none() {
-                        return Err(WorldError::InvalidRequest);
+                        return Err(Rejection::InvalidRequest);
                     }
                     let op = if add {
-                        BodyOp::SetAdd {
+                        Op::SetAdd {
                             path: "assignees".into(),
                             value: actor.as_bytes().to_vec(),
                         }
                     } else {
-                        BodyOp::SetRemove {
+                        Op::SetRemove {
                             path: "assignees".into(),
                             value: actor.as_bytes().to_vec(),
                         }
@@ -1474,15 +1469,15 @@ impl World for IssuesWorld {
                 device,
                 ts,
             } => {
-                let _issue = issue_state(ctx, &doc).ok_or(WorldError::InvalidRequest)?;
+                let _issue = issue_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
                 for label in &add {
                     if !catalog.labels.contains_key(label) {
-                        return Err(WorldError::InvalidRequest);
+                        return Err(Rejection::InvalidRequest);
                     }
                 }
                 for label in &remove {
                     if !catalog.labels.contains_key(label) {
-                        return Err(WorldError::InvalidRequest);
+                        return Err(Rejection::InvalidRequest);
                     }
                 }
                 let key = issue_key(&doc);
@@ -1500,7 +1495,7 @@ impl World for IssuesWorld {
                 for label in add.iter().chain(new_labels.iter().map(|l| &l.id)) {
                     staging.issue(
                         &key,
-                        BodyOp::SetAdd {
+                        Op::SetAdd {
                             path: "labels".into(),
                             value: label.as_bytes().to_vec(),
                         },
@@ -1509,7 +1504,7 @@ impl World for IssuesWorld {
                 for label in &remove {
                     staging.issue(
                         &key,
-                        BodyOp::SetRemove {
+                        Op::SetRemove {
                             path: "labels".into(),
                             value: label.as_bytes().to_vec(),
                         },
@@ -1592,24 +1587,24 @@ impl World for IssuesWorld {
                     || !contract::is_comment_id(&comment)
                     || !contract::is_reaction_emoji(&emoji)
                 {
-                    return Err(WorldError::InvalidRequest);
+                    return Err(Rejection::InvalidRequest);
                 }
-                let issue = issue_state(ctx, &doc).ok_or(WorldError::InvalidRequest)?;
+                let issue = issue_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
                 if !issue
                     .comments
                     .iter()
                     .any(|c| c.id.as_deref() == Some(comment.as_str()))
                 {
-                    return Err(WorldError::InvalidRequest);
+                    return Err(Rejection::InvalidRequest);
                 }
                 let value = contract::reaction_value(&emoji, &actor);
                 let path = contract::reaction_path(&comment);
                 staging.issue(
                     &issue_key(&doc),
                     if on {
-                        BodyOp::SetAdd { path, value }
+                        Op::SetAdd { path, value }
                     } else {
-                        BodyOp::SetRemove { path, value }
+                        Op::SetRemove { path, value }
                     },
                 );
                 // No history event, deliberately — see the intent's contract
@@ -1622,7 +1617,7 @@ impl World for IssuesWorld {
                 device,
                 ts,
             } => {
-                let issue = issue_state(ctx, &doc).ok_or(WorldError::InvalidRequest)?;
+                let issue = issue_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
                 staging.catalog(map_set(
                     "tombstones",
                     doc.clone(),
@@ -1651,10 +1646,10 @@ impl World for IssuesWorld {
             } => {
                 let kind = kind.to_ascii_lowercase();
                 if !LINK_KINDS.contains(&kind.as_str()) || doc == target {
-                    return Err(WorldError::InvalidRequest);
+                    return Err(Rejection::InvalidRequest);
                 }
-                let _issue = issue_state(ctx, &doc).ok_or(WorldError::InvalidRequest)?;
-                let _other = issue_state(ctx, &target).ok_or(WorldError::InvalidRequest)?;
+                let _issue = issue_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
+                let _other = issue_state(ctx, &target).ok_or(Rejection::InvalidRequest)?;
                 // `relates` is symmetric: canonicalize by sorted endpoints.
                 let (from, to) = if kind == "relates" && target < doc {
                     (target.clone(), doc.clone())
@@ -1669,9 +1664,9 @@ impl World for IssuesWorld {
                         .edges
                         .contains(&(from.clone(), kind.clone(), to.clone()))
                     {
-                        return Err(WorldError::InvalidRequest);
+                        return Err(Rejection::InvalidRequest);
                     }
-                    staging.catalog(BodyOp::MapRemove {
+                    staging.catalog(Op::MapRemove {
                         path: "edges".into(),
                         key: edge,
                     });
@@ -1687,14 +1682,14 @@ impl World for IssuesWorld {
                 device,
                 ts,
             } => {
-                let _issue = issue_state(ctx, &doc).ok_or(WorldError::InvalidRequest)?;
+                let _issue = issue_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
                 if let Some(parent) = &parent {
                     if parent == &doc {
-                        return Err(WorldError::Conflict);
+                        return Err(Rejection::Conflict);
                     }
-                    let _p = issue_state(ctx, parent).ok_or(WorldError::InvalidRequest)?;
+                    let _p = issue_state(ctx, parent).ok_or(Rejection::InvalidRequest)?;
                     if is_ancestor(&catalog, parent, &doc) {
-                        return Err(WorldError::Conflict);
+                        return Err(Rejection::Conflict);
                     }
                 }
                 staging.catalog(map_set(
@@ -1714,9 +1709,9 @@ impl World for IssuesWorld {
                 device,
                 ts,
             } => {
-                let issue = issue_state(ctx, &doc).ok_or(WorldError::InvalidRequest)?;
+                let issue = issue_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
                 if ActorId::parse(&actor).is_none() {
-                    return Err(WorldError::InvalidRequest);
+                    return Err(Rejection::InvalidRequest);
                 }
                 let (category, kind) = match action {
                     WorkAction::Start => (StatusCategory::Active, "started"),
@@ -1725,7 +1720,7 @@ impl World for IssuesWorld {
                 };
                 let target = catalog
                     .first_state_in(category)
-                    .ok_or(WorldError::Conflict)?
+                    .ok_or(Rejection::Conflict)?
                     .clone();
                 let key = issue_key(&doc);
                 let mut changes = Vec::new();
@@ -1762,7 +1757,7 @@ impl World for IssuesWorld {
                         });
                         staging.issue(
                             &key,
-                            BodyOp::SetAdd {
+                            Op::SetAdd {
                                 path: "assignees".into(),
                                 value: actor.as_bytes().to_vec(),
                             },
@@ -1776,7 +1771,7 @@ impl World for IssuesWorld {
                         });
                         staging.issue(
                             &key,
-                            BodyOp::SetRemove {
+                            Op::SetRemove {
                                 path: "assignees".into(),
                                 value: actor.as_bytes().to_vec(),
                             },
@@ -1810,10 +1805,10 @@ impl World for IssuesWorld {
                     || key.len() > 8
                     || !key.bytes().all(|b| b.is_ascii_alphabetic())
                 {
-                    return Err(WorldError::InvalidRequest);
+                    return Err(Rejection::InvalidRequest);
                 }
                 if catalog.projects.values().any(|p| p.key == key) {
-                    return Err(WorldError::Conflict);
+                    return Err(Rejection::Conflict);
                 }
                 staging.catalog(map_set(
                     "projects",
@@ -1844,14 +1839,14 @@ impl World for IssuesWorld {
                 ts: _,
             } => {
                 if name.trim().is_empty() {
-                    return Err(WorldError::InvalidRequest);
+                    return Err(Rejection::InvalidRequest);
                 }
                 if catalog
                     .labels
                     .values()
                     .any(|l| l.name.eq_ignore_ascii_case(&name))
                 {
-                    return Err(WorldError::Conflict);
+                    return Err(Rejection::Conflict);
                 }
                 staging.catalog(map_set(
                     "labels",
@@ -1878,15 +1873,12 @@ impl World for IssuesWorld {
                 ts: _,
             } => {
                 staging.require(contract::demand_space_any("project.configure"));
-                let current = catalog
-                    .projects
-                    .get(&id)
-                    .ok_or(WorldError::InvalidRequest)?;
+                let current = catalog.projects.get(&id).ok_or(Rejection::InvalidRequest)?;
                 let mut meta = current.clone();
                 if let Some(name) = name {
                     let name = name.trim().to_string();
                     if name.is_empty() {
-                        return Err(WorldError::InvalidRequest);
+                        return Err(Rejection::InvalidRequest);
                     }
                     // No name-uniqueness guard: projects are unique on KEY, not
                     // name (which stays immutable here), so two may share a name.
@@ -1913,7 +1905,7 @@ impl World for IssuesWorld {
                 if let Some(team) = team {
                     // Empty clears; a set names a live team.
                     if !team.is_empty() && !catalog.teams.get(&team).is_some_and(|t| !t.tombstone) {
-                        return Err(WorldError::InvalidRequest);
+                        return Err(Rejection::InvalidRequest);
                     }
                     meta.team = team;
                 }
@@ -1941,11 +1933,11 @@ impl World for IssuesWorld {
             } => {
                 staging.require(contract::demand_space_any("project.configure"));
                 if !catalog.projects.contains_key(&project_id) {
-                    return Err(WorldError::InvalidRequest);
+                    return Err(Rejection::InvalidRequest);
                 }
                 let body = body.trim();
                 if body.is_empty() {
-                    return Err(WorldError::InvalidRequest);
+                    return Err(Rejection::InvalidRequest);
                 }
                 let update = crate::views::ProjectUpdate {
                     id: id.clone(),
@@ -1970,12 +1962,12 @@ impl World for IssuesWorld {
                 ts: _,
             } => {
                 staging.require(contract::demand_space_any("catalog.label.configure"));
-                let current = catalog.labels.get(&id).ok_or(WorldError::InvalidRequest)?;
+                let current = catalog.labels.get(&id).ok_or(Rejection::InvalidRequest)?;
                 let mut meta = current.clone();
                 if let Some(name) = name {
                     let name = name.trim().to_string();
                     if name.is_empty() {
-                        return Err(WorldError::InvalidRequest);
+                        return Err(Rejection::InvalidRequest);
                     }
                     // Case-insensitive uniqueness against the OTHER labels — the
                     // same guard `LabelNew` applies, minus this label itself.
@@ -1984,7 +1976,7 @@ impl World for IssuesWorld {
                         .iter()
                         .any(|(lid, l)| lid != &id && l.name.eq_ignore_ascii_case(&name))
                     {
-                        return Err(WorldError::Conflict);
+                        return Err(Rejection::Conflict);
                     }
                     meta.name = name;
                 }
@@ -2012,9 +2004,9 @@ impl World for IssuesWorld {
             } => {
                 staging.require(contract::demand_space_any("catalog.label.configure"));
                 if !catalog.labels.contains_key(&id) {
-                    return Err(WorldError::InvalidRequest);
+                    return Err(Rejection::InvalidRequest);
                 }
-                staging.catalog(BodyOp::MapRemove {
+                staging.catalog(Op::MapRemove {
                     path: "labels".into(),
                     key: id,
                 });
@@ -2028,7 +2020,7 @@ impl World for IssuesWorld {
                 staging.require(contract::demand_admin());
                 let name = name.trim();
                 if name.is_empty() {
-                    return Err(WorldError::InvalidRequest);
+                    return Err(Rejection::InvalidRequest);
                 }
                 if catalog.name == name {
                     return Ok(staging.into_effect(None));
@@ -2065,18 +2057,18 @@ impl World for IssuesWorld {
                     || role_id.len() > 64
                     || crate::roles::built_in(&role_id).is_some()
                 {
-                    return Err(WorldError::InvalidRequest);
+                    return Err(Rejection::InvalidRequest);
                 }
                 if catalog.roles.contains_key(&role_id)
                     || catalog.role_revisions.contains_key(&role_id)
                 {
-                    return Err(WorldError::Conflict);
+                    return Err(Rejection::Conflict);
                 }
                 let scope_kind = match &scope_project {
                     None => crate::roles::ScopeKind::Space,
                     Some(project) => {
                         if !catalog.projects.contains_key(project) {
-                            return Err(WorldError::InvalidRequest);
+                            return Err(Rejection::InvalidRequest);
                         }
                         crate::roles::ScopeKind::Project
                     }
@@ -2091,7 +2083,7 @@ impl World for IssuesWorld {
                     tombstone: false,
                 };
                 let revision = crate::roles::build_revision(body, vec![])
-                    .map_err(|_| WorldError::InvalidRequest)?;
+                    .map_err(|_| Rejection::InvalidRequest)?;
                 stage_role_revision(&mut staging, &revision);
                 staging.require(contract::demand_space_any("policy.configure"));
                 Ok(staging.into_effect(None))
@@ -2107,7 +2099,7 @@ impl World for IssuesWorld {
             } => {
                 if catalog.roles.contains_key(&role_id) {
                     // Built-ins are immutable in every field.
-                    return Err(WorldError::InvalidRequest);
+                    return Err(Rejection::InvalidRequest);
                 }
                 let head = expect_single_head(&catalog, &role_id, &expected_revision)?;
                 let mut body = head.body.clone();
@@ -2123,7 +2115,7 @@ impl World for IssuesWorld {
                 }
                 let predecessor = decode_hex32(&expected_revision)?;
                 let revision = crate::roles::build_revision(body, vec![predecessor])
-                    .map_err(|_| WorldError::InvalidRequest)?;
+                    .map_err(|_| Rejection::InvalidRequest)?;
                 stage_role_revision(&mut staging, &revision);
                 staging.require(contract::demand_space_any("policy.configure"));
                 Ok(staging.into_effect(None))
@@ -2135,14 +2127,14 @@ impl World for IssuesWorld {
                 ts: _,
             } => {
                 if catalog.roles.contains_key(&role_id) {
-                    return Err(WorldError::InvalidRequest);
+                    return Err(Rejection::InvalidRequest);
                 }
                 let head = expect_single_head(&catalog, &role_id, &expected_revision)?;
                 let mut body = head.body.clone();
                 body.tombstone = true;
                 let predecessor = decode_hex32(&expected_revision)?;
                 let revision = crate::roles::build_revision(body, vec![predecessor])
-                    .map_err(|_| WorldError::InvalidRequest)?;
+                    .map_err(|_| Rejection::InvalidRequest)?;
                 stage_role_revision(&mut staging, &revision);
                 staging.require(contract::demand_space_any("policy.configure"));
                 Ok(staging.into_effect(None))
@@ -2155,7 +2147,7 @@ impl World for IssuesWorld {
                 ts: _,
             } => {
                 if catalog.roles.contains_key(&role_id) {
-                    return Err(WorldError::InvalidRequest);
+                    return Err(Rejection::InvalidRequest);
                 }
                 let mut current: Vec<String> = catalog
                     .role_heads(&role_id)
@@ -2167,12 +2159,12 @@ impl World for IssuesWorld {
                 expected.sort();
                 expected.dedup();
                 if current.is_empty() || current != expected {
-                    return Err(WorldError::Conflict);
+                    return Err(Rejection::Conflict);
                 }
                 let body: crate::roles::RoleBody =
-                    serde_json::from_str(&body_json).map_err(|_| WorldError::InvalidRequest)?;
+                    serde_json::from_str(&body_json).map_err(|_| Rejection::InvalidRequest)?;
                 if body.role_id != role_id {
-                    return Err(WorldError::InvalidRequest);
+                    return Err(Rejection::InvalidRequest);
                 }
                 validate_role_caps(&body.capabilities, body.scope_kind)?;
                 let predecessors: Vec<[u8; 32]> = expected
@@ -2180,7 +2172,7 @@ impl World for IssuesWorld {
                     .map(|h| decode_hex32(h))
                     .collect::<Result<_, _>>()?;
                 let revision = crate::roles::build_revision(body, predecessors)
-                    .map_err(|_| WorldError::InvalidRequest)?;
+                    .map_err(|_| Rejection::InvalidRequest)?;
                 stage_role_revision(&mut staging, &revision);
                 staging.require(contract::demand_space_any("policy.configure"));
                 Ok(staging.into_effect(None))
@@ -2193,7 +2185,7 @@ impl World for IssuesWorld {
                 ts: _,
             } => {
                 if !catalog.projects.contains_key(&project_id) {
-                    return Err(WorldError::InvalidRequest);
+                    return Err(Rejection::InvalidRequest);
                 }
                 let mut current: Vec<String> = catalog
                     .workflow_heads(&project_id)
@@ -2205,19 +2197,19 @@ impl World for IssuesWorld {
                 expected.sort();
                 expected.dedup();
                 if current.is_empty() || current != expected {
-                    return Err(WorldError::Conflict);
+                    return Err(Rejection::Conflict);
                 }
                 let body: crate::workflow::WorkflowBody =
-                    serde_json::from_str(&body_json).map_err(|_| WorldError::InvalidRequest)?;
+                    serde_json::from_str(&body_json).map_err(|_| Rejection::InvalidRequest)?;
                 if body.project_id != project_id {
-                    return Err(WorldError::InvalidRequest);
+                    return Err(Rejection::InvalidRequest);
                 }
                 let predecessors: Vec<[u8; 32]> = expected
                     .iter()
                     .map(|h| decode_hex32(h))
                     .collect::<Result<_, _>>()?;
                 let revision = crate::workflow::build_revision(body, predecessors)
-                    .map_err(|_| WorldError::InvalidRequest)?;
+                    .map_err(|_| Rejection::InvalidRequest)?;
                 staging.catalog(map_set(
                     "workflow_revisions",
                     format!("{project_id}/{}", revision.revision_id),
@@ -2233,7 +2225,7 @@ impl World for IssuesWorld {
             } => {
                 staging.require(contract::demand_project_any("project.delete", &id));
                 if !catalog.projects.contains_key(&id) {
-                    return Err(WorldError::InvalidRequest);
+                    return Err(Rejection::InvalidRequest);
                 }
                 // The safe v1 (CUSTOM-10): a project still referenced by ANY
                 // issue — live or tombstoned — refuses. Every doc's alias keys
@@ -2245,9 +2237,9 @@ impl World for IssuesWorld {
                     .filter_map(|key| ctx.read_collaborative(key).ok())
                     .any(|view| IssueState::from_view(&view).project == id);
                 if referenced {
-                    return Err(WorldError::Conflict);
+                    return Err(Rejection::Conflict);
                 }
-                let map_remove = |path: &str, key: String| BodyOp::MapRemove {
+                let map_remove = |path: &str, key: String| Op::MapRemove {
                     path: path.into(),
                     key,
                 };
@@ -2298,19 +2290,19 @@ impl World for IssuesWorld {
                 ts: _,
             } => {
                 if ActorId::parse(&actor).is_none() {
-                    return Err(WorldError::InvalidRequest);
+                    return Err(Rejection::InvalidRequest);
                 }
-                let _issue = issue_state(ctx, &doc).ok_or(WorldError::InvalidRequest)?;
+                let _issue = issue_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
                 let value = actor.into_bytes();
                 staging.issue(
                     &issue_key(&doc),
                     if on {
-                        BodyOp::SetAdd {
+                        Op::SetAdd {
                             path: "followers".into(),
                             value,
                         }
                     } else {
-                        BodyOp::SetRemove {
+                        Op::SetRemove {
                             path: "followers".into(),
                             value,
                         }
@@ -2333,7 +2325,7 @@ impl World for IssuesWorld {
             } => {
                 staging.require(contract::demand_space_any("project.configure"));
                 if !catalog.projects.contains_key(&project_id) || id.is_empty() {
-                    return Err(WorldError::InvalidRequest);
+                    return Err(Rejection::InvalidRequest);
                 }
 
                 // The project's live milestones in the order a reader sees them,
@@ -2375,7 +2367,7 @@ impl World for IssuesWorld {
                     None => {
                         let name = name.clone().unwrap_or_default();
                         if name.trim().is_empty() {
-                            return Err(WorldError::InvalidRequest);
+                            return Err(Rejection::InvalidRequest);
                         }
                         crate::views::Milestone {
                             id: id.clone(),
@@ -2394,12 +2386,12 @@ impl World for IssuesWorld {
                     }
                 };
                 if let Some(pos) = &pos {
-                    record.rank = place(&ordered, &id, pos).ok_or(WorldError::InvalidRequest)?;
+                    record.rank = place(&ordered, &id, pos).ok_or(Rejection::InvalidRequest)?;
                 }
                 if current.is_some() {
                     if let Some(name) = &name {
                         if name.trim().is_empty() {
-                            return Err(WorldError::InvalidRequest);
+                            return Err(Rejection::InvalidRequest);
                         }
                         record.name = name.trim().to_string();
                     }
@@ -2443,7 +2435,7 @@ impl World for IssuesWorld {
                 device,
                 ts,
             } => {
-                let issue = issue_state(ctx, &doc).ok_or(WorldError::InvalidRequest)?;
+                let issue = issue_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
                 let label = match &milestone {
                     Some(m) => {
                         let record = catalog
@@ -2451,14 +2443,14 @@ impl World for IssuesWorld {
                             .get(&issue.project)
                             .and_then(|ms| ms.get(m))
                             .filter(|r| !r.tombstone)
-                            .ok_or(WorldError::InvalidRequest)?;
+                            .ok_or(Rejection::InvalidRequest)?;
                         staging.issue(&issue_key(&doc), reg("milestone", m.as_bytes().to_vec()));
                         record.name.clone()
                     }
                     None => {
                         staging.issue(
                             &issue_key(&doc),
-                            BodyOp::RegisterClear {
+                            Op::RegisterClear {
                                 path: "milestone".into(),
                             },
                         );
@@ -2485,7 +2477,7 @@ impl World for IssuesWorld {
             } => {
                 staging.require(contract::demand_space_any("project.configure"));
                 if !catalog.projects.contains_key(&project_id) || id.is_empty() {
-                    return Err(WorldError::InvalidRequest);
+                    return Err(Rejection::InvalidRequest);
                 }
                 let current = catalog
                     .cycles
@@ -2497,7 +2489,7 @@ impl World for IssuesWorld {
                     None => {
                         let name = name.clone().unwrap_or_default();
                         if name.trim().is_empty() {
-                            return Err(WorldError::InvalidRequest);
+                            return Err(Rejection::InvalidRequest);
                         }
                         crate::views::Cycle {
                             id: id.clone(),
@@ -2512,7 +2504,7 @@ impl World for IssuesWorld {
                 if current.is_some() {
                     if let Some(name) = &name {
                         if name.trim().is_empty() {
-                            return Err(WorldError::InvalidRequest);
+                            return Err(Rejection::InvalidRequest);
                         }
                         record.name = name.trim().to_string();
                     }
@@ -2524,7 +2516,7 @@ impl World for IssuesWorld {
                     record.end = end.unwrap_or(0);
                 }
                 if record.start != 0 && record.end != 0 && record.end < record.start {
-                    return Err(WorldError::InvalidRequest);
+                    return Err(Rejection::InvalidRequest);
                 }
                 if let Some(tombstone) = tombstone {
                     record.tombstone = tombstone;
@@ -2545,7 +2537,7 @@ impl World for IssuesWorld {
                 device,
                 ts,
             } => {
-                let issue = issue_state(ctx, &doc).ok_or(WorldError::InvalidRequest)?;
+                let issue = issue_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
                 let label = match &cycle {
                     Some(c) => {
                         let record = catalog
@@ -2553,14 +2545,14 @@ impl World for IssuesWorld {
                             .get(&issue.project)
                             .and_then(|cs| cs.get(c))
                             .filter(|r| !r.tombstone)
-                            .ok_or(WorldError::InvalidRequest)?;
+                            .ok_or(Rejection::InvalidRequest)?;
                         staging.issue(&issue_key(&doc), reg("cycle", c.as_bytes().to_vec()));
                         record.name.clone()
                     }
                     None => {
                         staging.issue(
                             &issue_key(&doc),
-                            BodyOp::RegisterClear {
+                            Op::RegisterClear {
                                 path: "cycle".into(),
                             },
                         );
@@ -2589,7 +2581,7 @@ impl World for IssuesWorld {
             } => {
                 staging.require(contract::demand_space_any("project.create"));
                 if id.is_empty() {
-                    return Err(WorldError::InvalidRequest);
+                    return Err(Rejection::InvalidRequest);
                 }
                 let current = catalog.initiatives.get(&id).cloned();
                 let mut record = match current.clone() {
@@ -2597,7 +2589,7 @@ impl World for IssuesWorld {
                     None => {
                         let name = name.clone().unwrap_or_default();
                         if name.trim().is_empty() {
-                            return Err(WorldError::InvalidRequest);
+                            return Err(Rejection::InvalidRequest);
                         }
                         crate::views::Initiative {
                             id: id.clone(),
@@ -2609,7 +2601,7 @@ impl World for IssuesWorld {
                 if current.is_some() {
                     if let Some(name) = &name {
                         if name.trim().is_empty() {
-                            return Err(WorldError::InvalidRequest);
+                            return Err(Rejection::InvalidRequest);
                         }
                         record.name = name.trim().to_string();
                     }
@@ -2619,13 +2611,13 @@ impl World for IssuesWorld {
                 }
                 if let Some(owner) = owner {
                     if !owner.is_empty() && ActorId::parse(&owner).is_none() {
-                        return Err(WorldError::InvalidRequest);
+                        return Err(Rejection::InvalidRequest);
                     }
                     record.owner = owner;
                 }
                 if let Some(health) = health {
                     if !health.is_empty() && !contract::HEALTH_LABELS.contains(&health.as_str()) {
-                        return Err(WorldError::InvalidRequest);
+                        return Err(Rejection::InvalidRequest);
                     }
                     record.health = health;
                 }
@@ -2635,7 +2627,7 @@ impl World for IssuesWorld {
                 if let Some(projects) = projects {
                     for project in &projects {
                         if !catalog.projects.contains_key(project) {
-                            return Err(WorldError::InvalidRequest);
+                            return Err(Rejection::InvalidRequest);
                         }
                     }
                     record.projects = projects;
@@ -2666,7 +2658,7 @@ impl World for IssuesWorld {
             } => {
                 staging.require(contract::demand_admin());
                 if id.is_empty() {
-                    return Err(WorldError::InvalidRequest);
+                    return Err(Rejection::InvalidRequest);
                 }
                 let current = catalog.teams.get(&id).cloned();
                 let mut record = match current.clone() {
@@ -2679,10 +2671,10 @@ impl World for IssuesWorld {
                             || key.len() > 8
                             || !key.bytes().all(|b| b.is_ascii_alphabetic())
                         {
-                            return Err(WorldError::InvalidRequest);
+                            return Err(Rejection::InvalidRequest);
                         }
                         if catalog.teams.values().any(|t| !t.tombstone && t.key == key) {
-                            return Err(WorldError::Conflict);
+                            return Err(Rejection::Conflict);
                         }
                         crate::views::Team {
                             id: id.clone(),
@@ -2695,11 +2687,11 @@ impl World for IssuesWorld {
                 if current.is_some() {
                     // The key binds at creation, like a project key.
                     if key.is_some_and(|k| k.to_ascii_uppercase() != record.key) {
-                        return Err(WorldError::InvalidRequest);
+                        return Err(Rejection::InvalidRequest);
                     }
                     if let Some(name) = &name {
                         if name.trim().is_empty() {
-                            return Err(WorldError::InvalidRequest);
+                            return Err(Rejection::InvalidRequest);
                         }
                         record.name = name.trim().to_string();
                     }
@@ -2709,14 +2701,14 @@ impl World for IssuesWorld {
                 }
                 if let Some(lead) = lead {
                     if !lead.is_empty() && ActorId::parse(&lead).is_none() {
-                        return Err(WorldError::InvalidRequest);
+                        return Err(Rejection::InvalidRequest);
                     }
                     record.lead = lead;
                 }
                 if let Some(mut members) = members {
                     for member in &members {
                         if ActorId::parse(member).is_none() {
-                            return Err(WorldError::InvalidRequest);
+                            return Err(Rejection::InvalidRequest);
                         }
                     }
                     members.sort();
@@ -2750,7 +2742,7 @@ impl World for IssuesWorld {
                     || ActorId::parse(&actor).is_none()
                     || catalog.triage.contains_key(&id)
                 {
-                    return Err(WorldError::InvalidRequest);
+                    return Err(Rejection::InvalidRequest);
                 }
                 let item = crate::views::TriageItem {
                     id: id.clone(),
@@ -2782,12 +2774,12 @@ impl World for IssuesWorld {
                 if !contract::TRIAGE_OUTCOMES.contains(&outcome.as_str())
                     || ActorId::parse(&actor).is_none()
                 {
-                    return Err(WorldError::InvalidRequest);
+                    return Err(Rejection::InvalidRequest);
                 }
-                let item = catalog.triage.get(&id).ok_or(WorldError::InvalidRequest)?;
+                let item = catalog.triage.get(&id).ok_or(Rejection::InvalidRequest)?;
                 // Decided exactly once.
                 if !item.outcome.is_empty() {
-                    return Err(WorldError::Conflict);
+                    return Err(Rejection::Conflict);
                 }
                 let mut decided = item.clone();
                 decided.outcome = outcome.clone();
@@ -2799,14 +2791,14 @@ impl World for IssuesWorld {
                         // Atomically create the issue in the same transaction
                         // that stamps the outcome — an accept can never half
                         // happen.
-                        let project = project.ok_or(WorldError::InvalidRequest)?;
-                        let doc = doc.ok_or(WorldError::InvalidRequest)?;
+                        let project = project.ok_or(Rejection::InvalidRequest)?;
+                        let doc = doc.ok_or(Rejection::InvalidRequest)?;
                         if !catalog.projects.contains_key(&project) || DocId::parse(&doc).is_none()
                         {
-                            return Err(WorldError::InvalidRequest);
+                            return Err(Rejection::InvalidRequest);
                         }
                         let key = issue_key(&doc);
-                        staging.issue(&key, BodyOp::Create);
+                        staging.issue(&key, Op::Create);
                         staging.issue(&key, reg("projectid", project.as_bytes().to_vec()));
                         staging.issue(&key, reg("title", item.title.as_bytes().to_vec()));
                         staging.issue(&key, reg("status", DEFAULT_STATUS.as_bytes().to_vec()));
@@ -2819,7 +2811,7 @@ impl World for IssuesWorld {
                         if !item.body.is_empty() {
                             staging.issue(
                                 &key,
-                                BodyOp::TextSplice {
+                                Op::TextSplice {
                                     path: "description".into(),
                                     index: 0,
                                     delete: 0,
@@ -2835,8 +2827,8 @@ impl World for IssuesWorld {
                         decided.doc = doc;
                     }
                     "duplicate" => {
-                        let doc = doc.ok_or(WorldError::InvalidRequest)?;
-                        let _target = issue_state(ctx, &doc).ok_or(WorldError::InvalidRequest)?;
+                        let doc = doc.ok_or(Rejection::InvalidRequest)?;
+                        let _target = issue_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
                         decided.doc = doc;
                     }
                     _ => {}
@@ -2874,24 +2866,24 @@ impl World for IssuesWorld {
                     || name.len() > contract::MAX_ATTACHMENT_NAME_BYTES
                     || name.chars().any(|c| c.is_control())
                 {
-                    return Err(WorldError::InvalidRequest);
+                    return Err(Rejection::InvalidRequest);
                 }
                 let Some(content_ref) = parse_content_ref(&content) else {
-                    return Err(WorldError::InvalidRequest);
+                    return Err(Rejection::InvalidRequest);
                 };
                 if size == 0 {
-                    return Err(WorldError::InvalidRequest);
+                    return Err(Rejection::InvalidRequest);
                 }
-                let issue = issue_state(ctx, &doc).ok_or(WorldError::InvalidRequest)?;
+                let issue = issue_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
                 let existing = raw_attachments(ctx, &doc);
                 if existing.contains_key(&id) {
-                    return Err(WorldError::InvalidRequest);
+                    return Err(Rejection::InvalidRequest);
                 }
                 // Counted against the raw map rather than the decoded list. A
                 // record this build cannot read still occupies a slot, and a cap
                 // that skipped it would let a corrupt record raise the ceiling.
                 if existing.len() >= contract::MAX_ATTACHMENTS_PER_ISSUE {
-                    return Err(WorldError::LimitExceeded);
+                    return Err(Rejection::LimitExceeded);
                 }
                 if let Some(comment) = &comment {
                     if !issue
@@ -2899,7 +2891,7 @@ impl World for IssuesWorld {
                         .iter()
                         .any(|c| c.id.as_deref() == Some(comment.as_str()))
                     {
-                        return Err(WorldError::InvalidRequest);
+                        return Err(Rejection::InvalidRequest);
                     }
                 }
                 let name = name.to_string();
@@ -2916,7 +2908,7 @@ impl World for IssuesWorld {
                 let key = issue_key(&doc);
                 staging.issue(
                     &key,
-                    BodyOp::MapSet {
+                    Op::MapSet {
                         path: "attachments".into(),
                         key: id.clone(),
                         value: serde_json::to_vec(&record).expect("attachment json"),
@@ -2947,14 +2939,14 @@ impl World for IssuesWorld {
                 device,
                 ts,
             } => {
-                let issue = issue_state(ctx, &doc).ok_or(WorldError::InvalidRequest)?;
+                let issue = issue_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
                 let Some(meta) = issue.attachments.iter().find(|a| a.id == id) else {
-                    return Err(WorldError::InvalidRequest);
+                    return Err(Rejection::InvalidRequest);
                 };
                 let name = meta.name.clone();
                 staging.issue(
                     &issue_key(&doc),
-                    BodyOp::MapRemove {
+                    Op::MapRemove {
                         path: "attachments".into(),
                         key: id,
                     },
@@ -2967,22 +2959,18 @@ impl World for IssuesWorld {
         }
     }
 
-    fn query(
-        &self,
-        ctx: &WorldContext<'_>,
-        query: WorldQuery,
-    ) -> Result<WorldProjection, WorldError> {
-        let query = IssueQuery::from_json(&query.payload).ok_or(WorldError::InvalidRequest)?;
+    fn query(&self, ctx: &Context<'_>, query: Query) -> Result<Projection, Rejection> {
+        let query = IssueQuery::from_json(&query.payload).ok_or(Rejection::InvalidRequest)?;
         // ONE derived read model per Manifest root; every arm below reads the
         // same immutable snapshot (see [`IssuesWorld::derived_snapshot`]).
         let snap = self.derived_snapshot(ctx)?;
         let catalog: &CatalogState = &snap.catalog;
         let aliases: &DerivedAliases = &snap.aliases;
-        let projection = |bytes: Vec<u8>| WorldProjection {
+        let projection = |bytes: Vec<u8>| Projection {
             schema: contract::issue_schema(),
             schema_version: contract::ISSUE_SCHEMA_VERSION,
             bytes,
-            frontier: replica::ReplicaFrontier::EMPTY, // stamped by Runtime
+            frontier: replica::frontier::ReplicaFrontier::EMPTY, // stamped by Runtime
             demand: contract::demand_read(),
         };
         match query {
@@ -3092,7 +3080,7 @@ impl World for IssuesWorld {
             IssueQuery::Board { project, me } => {
                 let me = me.and_then(|m| ActorId::parse(&m));
                 let view = board_view(catalog, aliases, &project, &snap.issues, me.as_ref())
-                    .ok_or(WorldError::InvalidRequest)?;
+                    .ok_or(Rejection::InvalidRequest)?;
                 Ok(projection(serde_json::to_vec(&view).expect("board json")))
             }
             IssueQuery::Graph { doc, me } => {
@@ -3101,7 +3089,7 @@ impl World for IssuesWorld {
                 Ok(projection(serde_json::to_vec(&view).expect("graph json")))
             }
             IssueQuery::History { doc } => {
-                let issue = snap.issues.get(&doc).ok_or(WorldError::InvalidRequest)?;
+                let issue = snap.issues.get(&doc).ok_or(Rejection::InvalidRequest)?;
                 let reff = canonical_for(aliases, &doc);
                 let events: Vec<ActivityEvent> = issue
                     .events
@@ -3179,7 +3167,7 @@ impl World for IssuesWorld {
                 actor,
                 exclude_device,
             } => {
-                let actor = ActorId::parse(&actor).ok_or(WorldError::InvalidRequest)?;
+                let actor = ActorId::parse(&actor).ok_or(Rejection::InvalidRequest)?;
                 let mut entries: Vec<serde_json::Value> = Vec::new();
                 for (doc, issue) in &snap.issues {
                     // Addressed-to-you: assigned, or subscribed (INBOX-9) —
@@ -3294,7 +3282,7 @@ impl World for IssuesWorld {
                 let heads = catalog.role_heads(&role);
                 let head = catalog.role_head(&role);
                 if head.is_none() && heads.is_empty() {
-                    return Err(WorldError::InvalidRequest);
+                    return Err(Rejection::InvalidRequest);
                 }
                 let view = serde_json::json!({
                     "role_id": role,
@@ -3310,7 +3298,7 @@ impl World for IssuesWorld {
             }
             IssueQuery::Workflow { project } => {
                 if !catalog.projects.contains_key(&project) {
-                    return Err(WorldError::InvalidRequest);
+                    return Err(Rejection::InvalidRequest);
                 }
                 let heads = catalog.workflow_heads(&project);
                 let head = catalog.workflow_head(&project);
@@ -3329,7 +3317,7 @@ impl World for IssuesWorld {
             }
             IssueQuery::Milestones { project } => {
                 if !catalog.projects.contains_key(&project) {
-                    return Err(WorldError::InvalidRequest);
+                    return Err(Rejection::InvalidRequest);
                 }
                 // Derived progress: live issues of the project targeting each
                 // milestone, done = a Done-category status.
@@ -3380,7 +3368,7 @@ impl World for IssuesWorld {
             }
             IssueQuery::Cycles { project } => {
                 if !catalog.projects.contains_key(&project) {
-                    return Err(WorldError::InvalidRequest);
+                    return Err(Rejection::InvalidRequest);
                 }
                 let counts = |cid: &str| -> (u32, u32) {
                     let mut total = 0;
@@ -3524,14 +3512,14 @@ impl World for IssuesWorld {
                 // map, bypassing the metadata-only snapshot cache.
                 let view = ctx
                     .read_collaborative(&issue_key(&doc))
-                    .map_err(|_| WorldError::InvalidRequest)?;
+                    .map_err(|_| Rejection::InvalidRequest)?;
                 let raw = view
                     .maps
                     .get("attachments")
                     .and_then(|m| m.get(&id))
-                    .ok_or(WorldError::InvalidRequest)?;
+                    .ok_or(Rejection::InvalidRequest)?;
                 let record: serde_json::Value =
-                    serde_json::from_slice(raw).map_err(|_| WorldError::WorldStateCorrupt)?;
+                    serde_json::from_slice(raw).map_err(|_| Rejection::StateCorrupt)?;
                 Ok(projection(serde_json::to_vec(&record).expect("attachment")))
             }
         }
@@ -3841,7 +3829,7 @@ mod comment_anchor_tests {
     /// A reader that answers a scripted resolution per anchor offset, and
     /// counts how often it was asked.
     ///
-    /// [`WorldContext::new`] carries no reader and answers `Drifted` for every
+    /// [`Context::new`] carries no reader and answers `Drifted` for every
     /// anchor, which puts the resolved arms of [`resolve_comment_anchor`] out
     /// of reach — a module built on it passes unchanged when the resolver is
     /// replaced by a constant. The offsets of a stored span's two ends differ,
@@ -3850,69 +3838,69 @@ mod comment_anchor_tests {
     /// the guards ahead of the reader stop before it.
     #[derive(Default)]
     struct ScriptedReader {
-        by_offset: BTreeMap<u64, replica::AnchorResolution>,
+        by_offset: BTreeMap<u64, fabric::AnchorResolution>,
         asked: AtomicUsize,
     }
 
-    impl runtime::BodyReader for ScriptedReader {
-        fn read_body(&self, _key: &replica::ids::BodyKey) -> Option<Vec<u8>> {
+    impl runtime::world::BodyReader for ScriptedReader {
+        fn read_body(&self, _key: &replica::body::BodyKey) -> Option<Vec<u8>> {
             None
         }
         fn read_collaborative_body(
             &self,
-            _key: &replica::ids::BodyKey,
-        ) -> Result<replica::CollaborativeView, replica::ProjectionError> {
-            Err(replica::ProjectionError::NotCollaborative)
+            _key: &replica::body::BodyKey,
+        ) -> Result<fabric::CollaborativeView, fabric::projection::Failure> {
+            Err(fabric::projection::Failure::NotCollaborative)
         }
         fn bodies_with_schema(
             &self,
-            _world: &replica::ids::WorldId,
-            _schema: &replica::ids::SchemaId,
-        ) -> Vec<replica::ids::BodyKey> {
+            _world: &replica::body::WorldId,
+            _schema: &replica::body::SchemaId,
+        ) -> Vec<replica::body::BodyKey> {
             Vec::new()
         }
-        fn body_version(&self, _key: &replica::ids::BodyKey) -> Option<replica::FabricVersion> {
+        fn body_version(&self, _key: &replica::body::BodyKey) -> Option<fabric::Version> {
             None
         }
         fn anchor_in_body(
             &self,
-            _key: &replica::ids::BodyKey,
+            _key: &replica::body::BodyKey,
             _path: &str,
             _position: u64,
-        ) -> Option<replica::FabricAnchor> {
+        ) -> Option<fabric::Anchor> {
             None
         }
         fn resolve_anchor(
             &self,
-            _key: &replica::ids::BodyKey,
-            anchor: &replica::FabricAnchor,
-        ) -> replica::AnchorResolution {
+            _key: &replica::body::BodyKey,
+            anchor: &fabric::Anchor,
+        ) -> fabric::AnchorResolution {
             self.asked.fetch_add(1, Ordering::SeqCst);
             self.by_offset
                 .get(&anchor.offset)
                 .copied()
-                .unwrap_or(replica::AnchorResolution::Drifted)
+                .unwrap_or(fabric::AnchorResolution::Drifted)
         }
         fn content_status(
             &self,
-            _content: &replica::ContentRef,
-        ) -> Option<runtime::world::WorldContentStatus> {
+            _content: &replica::content::ContentRef,
+        ) -> Option<runtime::world::ContentStatus> {
             None
         }
     }
 
-    fn scripted<const N: usize>(script: [(u64, replica::AnchorResolution); N]) -> ScriptedReader {
+    fn scripted<const N: usize>(script: [(u64, fabric::AnchorResolution); N]) -> ScriptedReader {
         ScriptedReader {
             by_offset: script.into_iter().collect(),
             asked: AtomicUsize::new(0),
         }
     }
 
-    fn facts() -> runtime::PrincipalFacts {
-        let device = mechanics::crypto::device_from_seed(&[3u8; 32]);
-        runtime::PrincipalFacts {
+    fn facts() -> runtime::world::PrincipalFacts {
+        let device = mechanics::actor::device_from_seed(&[3u8; 32]);
+        runtime::world::PrincipalFacts {
             actor: ActorId::from_incept_hash(&"cd".repeat(32)),
-            station: mechanics::ids::StationId::from_device(&device).unwrap(),
+            station: mechanics::station::Key::from_device(&device).unwrap(),
             device,
             space: mechanics::ids::SpaceId::from_digest([5u8; 16]),
             authority_frontier: replica::frontier::AuthorityFrontier::from_canonical_bytes(vec![]),
@@ -3940,14 +3928,14 @@ mod comment_anchor_tests {
     /// Bytes with the shape a real stored anchor has: canonical, naming a path,
     /// and carrying the offset the script keys on.
     fn anchor_hex(path: &str, offset: u64) -> String {
-        let anchor = replica::FabricAnchor {
-            format_version: replica::CAUSAL_FORMAT_VERSION,
+        let anchor = fabric::Anchor {
+            format_version: fabric::CAUSAL_FORMAT_VERSION,
             body: [9u8; 32],
             path: path.into(),
             anchored_to: None,
             offset,
             after: true,
-            taken_at: replica::FabricVersion::empty(),
+            taken_at: fabric::Version::empty(),
         };
         data_encoding::HEXLOWER.encode(&anchor.encode())
     }
@@ -3967,7 +3955,7 @@ mod comment_anchor_tests {
         at: Option<contract::StoredAnchor>,
     ) -> Option<crate::dto::CommentAnchorDto> {
         let facts = facts();
-        let ctx = WorldContext::with_reads(&facts, reader, [0u8; 32]);
+        let ctx = Context::with_reads(&facts, reader, [0u8; 32]);
         resolve_comment_anchor(&ctx, "iss_x", issue, &comment(at))
     }
 
@@ -3989,8 +3977,8 @@ mod comment_anchor_tests {
     #[test]
     fn a_resolved_span_reports_the_material_its_ends_bound_to() {
         let reader = scripted([
-            (5, replica::AnchorResolution::Resolved(13)),
-            (9, replica::AnchorResolution::Resolved(17)),
+            (5, fabric::AnchorResolution::Resolved(13)),
+            (9, fabric::AnchorResolution::Resolved(17)),
         ]);
         let resolved = resolve(
             &reader,
@@ -4010,7 +3998,7 @@ mod comment_anchor_tests {
     /// itself, so nothing is taken off.
     #[test]
     fn a_resolved_caret_reports_the_position_it_bound_to() {
-        let reader = scripted([(4, replica::AnchorResolution::Resolved(12))]);
+        let reader = scripted([(4, fabric::AnchorResolution::Resolved(12))]);
         let resolved = resolve(
             &reader,
             &issue("PRE the quick brown fox"),
@@ -4029,12 +4017,12 @@ mod comment_anchor_tests {
     fn either_end_lost_drifts_the_whole_span() {
         for script in [
             [
-                (5, replica::AnchorResolution::Drifted),
-                (9, replica::AnchorResolution::Resolved(17)),
+                (5, fabric::AnchorResolution::Drifted),
+                (9, fabric::AnchorResolution::Resolved(17)),
             ],
             [
-                (5, replica::AnchorResolution::Resolved(13)),
-                (9, replica::AnchorResolution::Drifted),
+                (5, fabric::AnchorResolution::Resolved(13)),
+                (9, fabric::AnchorResolution::Drifted),
             ],
         ] {
             let reader = scripted(script);
@@ -4052,8 +4040,8 @@ mod comment_anchor_tests {
     #[test]
     fn ends_that_resolve_out_of_order_are_not_a_span() {
         let reader = scripted([
-            (5, replica::AnchorResolution::Resolved(13)),
-            (9, replica::AnchorResolution::Resolved(3)),
+            (5, fabric::AnchorResolution::Resolved(13)),
+            (9, fabric::AnchorResolution::Resolved(3)),
         ]);
         let resolved = resolve(
             &reader,
@@ -4073,7 +4061,7 @@ mod comment_anchor_tests {
     /// ours.
     #[test]
     fn undecodable_bytes_are_unresolved_and_not_drifted() {
-        let reader = scripted([(4, replica::AnchorResolution::Resolved(4))]);
+        let reader = scripted([(4, fabric::AnchorResolution::Resolved(4))]);
         for bad in ["", "zz", "00"] {
             let at = contract::StoredAnchor {
                 field: "description".into(),
@@ -4106,7 +4094,7 @@ mod comment_anchor_tests {
     /// which is a wrong index wearing the right shape.
     #[test]
     fn a_record_that_disagrees_with_its_own_anchor_is_unresolved() {
-        let reader = scripted([(4, replica::AnchorResolution::Resolved(4))]);
+        let reader = scripted([(4, fabric::AnchorResolution::Resolved(4))]);
         let at = contract::StoredAnchor {
             field: "description".into(),
             start: anchor_hex("title", 4),
@@ -4126,7 +4114,7 @@ mod comment_anchor_tests {
     /// [`IssueState::anchorable_text`] is the list, and it binds both seams.
     #[test]
     fn a_record_naming_a_field_with_no_positions_is_unresolved() {
-        let reader = scripted([(4, replica::AnchorResolution::Resolved(4))]);
+        let reader = scripted([(4, fabric::AnchorResolution::Resolved(4))]);
         let resolved = resolve(
             &reader,
             &issue("the quick brown fox"),
@@ -4145,7 +4133,7 @@ mod comment_anchor_tests {
     /// position, and there are no positions in an empty text.
     #[test]
     fn a_record_in_an_emptied_field_has_drifted() {
-        let reader = scripted([(0, replica::AnchorResolution::Resolved(0))]);
+        let reader = scripted([(0, fabric::AnchorResolution::Resolved(0))]);
         let resolved = resolve(&reader, &issue(""), Some(stored("description", 0, None))).unwrap();
         assert_eq!(resolved.state, CommentAnchorState::Drifted);
         assert_eq!(reader.asked.load(Ordering::SeqCst), 0);

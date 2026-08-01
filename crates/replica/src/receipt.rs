@@ -6,7 +6,7 @@
 //! committed result **without reapplying** the operations; reusing the same
 //! request id with a different payload is a typed conflict. The receipt carries
 //! everything an identical replay must return: the application effect bytes,
-//! the Observation scopes, and the committed Replica frontier the transaction
+//! the Observation Bodies, and the committed Replica frontier the transaction
 //! advanced to.
 //!
 //! C0 freezes the canonical bytes, bounds, and lookup semantics. The durable
@@ -41,8 +41,8 @@ pub struct RequestReceipt {
     pub payload_hash: [u8; 32],
     /// The application-defined effect bytes the original commit returned.
     pub effect: Vec<u8>,
-    /// The Observation scopes the original commit touched.
-    pub scopes: Vec<BodyKey>,
+    /// The Observation Bodies the original commit touched.
+    pub bodies: Vec<BodyKey>,
     /// The committed Replica frontier the transaction advanced to.
     pub frontier: ReplicaFrontier,
     /// The committed transaction's id (the full signed-envelope digest);
@@ -52,7 +52,7 @@ pub struct RequestReceipt {
 
 /// Why a receipt failed to decode or validate.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ReceiptError {
+pub enum Invalid {
     /// The bytes did not decode, left trailing bytes, or were non-canonical.
     NonCanonical,
     /// `version` was not 1.
@@ -61,32 +61,36 @@ pub enum ReceiptError {
     EffectTooLarge,
 }
 
-impl std::fmt::Display for ReceiptError {
+impl std::fmt::Display for Invalid {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{self:?}")
     }
 }
-impl std::error::Error for ReceiptError {}
+impl std::error::Error for Invalid {}
 
 impl RequestReceipt {
     /// Encode to canonical bytes.
     pub fn encode(&self) -> Vec<u8> {
+        #[allow(
+            clippy::expect_used,
+            reason = "derived serialization of this bounded receipt is infallible"
+        )]
         postcard::to_stdvec(self).expect("postcard receipt")
     }
 
     /// Decode from canonical bytes, requiring exact decode/re-encode equality
     /// and validating version and effect bound.
-    pub fn decode_canonical(bytes: &[u8]) -> Result<Self, ReceiptError> {
-        let receipt: Self = postcard::from_bytes(bytes).map_err(|_| ReceiptError::NonCanonical)?;
-        let re = postcard::to_stdvec(&receipt).map_err(|_| ReceiptError::NonCanonical)?;
+    pub fn decode_canonical(bytes: &[u8]) -> Result<Self, Invalid> {
+        let receipt: Self = postcard::from_bytes(bytes).map_err(|_| Invalid::NonCanonical)?;
+        let re = postcard::to_stdvec(&receipt).map_err(|_| Invalid::NonCanonical)?;
         if re != bytes {
-            return Err(ReceiptError::NonCanonical);
+            return Err(Invalid::NonCanonical);
         }
         if receipt.version != 1 {
-            return Err(ReceiptError::UnsupportedVersion(receipt.version));
+            return Err(Invalid::UnsupportedVersion(receipt.version));
         }
         if receipt.effect.len() > MAX_EFFECT_BYTES {
-            return Err(ReceiptError::EffectTooLarge);
+            return Err(Invalid::EffectTooLarge);
         }
         Ok(receipt)
     }
@@ -105,6 +109,10 @@ pub fn scope_key(
     device: &DeviceId,
     request: &[u8; 16],
 ) -> Vec<u8> {
+    #[allow(
+        clippy::expect_used,
+        reason = "derived serialization of this fixed idempotency key is infallible"
+    )]
     postcard::to_stdvec(&(space, world, device, request)).expect("postcard scope key")
 }
 
@@ -118,11 +126,11 @@ mod tests {
             version: 1,
             space: SpaceId::from_digest([2u8; 16]),
             world: WorldId::parse("com.example.notes").unwrap(),
-            device: mechanics::crypto::device_from_seed(&[5u8; 32]),
+            device: mechanics::actor::device_from_seed(&[5u8; 32]),
             request: [7u8; 16],
             payload_hash: [9u8; 32],
             effect: b"created".to_vec(),
-            scopes: vec![BodyKey::new(
+            bodies: vec![BodyKey::new(
                 WorldId::parse("com.example.notes").unwrap(),
                 BodyId::from_bytes([1u8; 16]),
             )],
@@ -144,7 +152,7 @@ mod tests {
         bytes.push(0);
         assert_eq!(
             RequestReceipt::decode_canonical(&bytes),
-            Err(ReceiptError::NonCanonical)
+            Err(Invalid::NonCanonical)
         );
     }
 
@@ -154,7 +162,7 @@ mod tests {
         r.version = 2;
         assert_eq!(
             RequestReceipt::decode_canonical(&r.encode()),
-            Err(ReceiptError::UnsupportedVersion(2))
+            Err(Invalid::UnsupportedVersion(2))
         );
     }
 
@@ -166,7 +174,7 @@ mod tests {
         r.effect = vec![0u8; MAX_EFFECT_BYTES + 1];
         assert_eq!(
             RequestReceipt::decode_canonical(&r.encode()),
-            Err(ReceiptError::EffectTooLarge)
+            Err(Invalid::EffectTooLarge)
         );
     }
 
@@ -177,7 +185,7 @@ mod tests {
         other.request = [8u8; 16];
         assert_ne!(base.scope_key(), other.scope_key());
         let mut other = base.clone();
-        other.device = mechanics::crypto::device_from_seed(&[6u8; 32]);
+        other.device = mechanics::actor::device_from_seed(&[6u8; 32]);
         assert_ne!(base.scope_key(), other.scope_key());
         let mut other = base.clone();
         other.world = WorldId::parse("com.example.other").unwrap();

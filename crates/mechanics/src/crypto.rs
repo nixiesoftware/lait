@@ -1,3 +1,9 @@
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    clippy::indexing_slicing,
+    reason = "cryptographic operations use fixed-width arrays and deliberately wrapping finite-field and framing arithmetic"
+)]
 //! End-to-end encryption primitives. All pure Rust (RustCrypto/dalek), no C toolchain,
 //! no `aws-lc` — respecting the portability + supply-chain bans.
 //!
@@ -31,19 +37,30 @@ pub const KEY_LEN: usize = 32;
 pub type SpaceKey = [u8; KEY_LEN];
 const NONCE_LEN: usize = 12;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Failure {
+    Randomness,
+    Encryption,
+}
+
+pub(crate) fn random_array<const N: usize>() -> Result<[u8; N], Failure> {
+    let mut bytes = [0u8; N];
+    getrandom::fill(&mut bytes).map_err(|error| {
+        tracing::error!(%error, "OS randomness unavailable");
+        Failure::Randomness
+    })?;
+    Ok(bytes)
+}
+
 /// A fresh random 32-byte space key.
-pub fn random_key() -> SpaceKey {
-    let mut k = [0u8; KEY_LEN];
-    getrandom::fill(&mut k).expect("getrandom");
-    k
+pub fn random_key() -> Result<SpaceKey, Failure> {
+    random_array()
 }
 
 /// A fresh random 32-byte identity seed. A lait identity is just this seed; the
 /// transport constructs its keypair from it (see [`device_from_seed`]).
-pub fn random_seed() -> [u8; 32] {
-    let mut s = [0u8; 32];
-    getrandom::fill(&mut s).expect("getrandom");
-    s
+pub fn random_seed() -> Result<[u8; 32], Failure> {
+    random_array()
 }
 
 /// The lait [`DeviceId`] (device key) of an identity seed: the ed25519 public key
@@ -116,7 +133,7 @@ pub fn sign_detached(seed: &[u8; 32], preimage: &[u8]) -> [u8; 64] {
 }
 
 /// Verify a detached Ed25519 signature over a preimage against a 32-byte public
-/// key (the raw bytes a [`DeviceId`]/`StationId` *is*). Never panics on a
+/// key (the raw bytes a [`DeviceId`]/`Key` *is*). Never panics on a
 /// malformed key or signature — a bad input is a failed verification, not a
 /// crash.
 pub fn verify_detached(public_key: &[u8; 32], preimage: &[u8], signature: &[u8; 64]) -> bool {
@@ -128,23 +145,21 @@ pub fn verify_detached(public_key: &[u8; 32], preimage: &[u8], signature: &[u8; 
     vk.verify(preimage, &sig).is_ok()
 }
 
-fn random_nonce() -> [u8; NONCE_LEN] {
-    let mut n = [0u8; NONCE_LEN];
-    getrandom::fill(&mut n).expect("getrandom");
-    n
+fn random_nonce() -> Result<[u8; NONCE_LEN], Failure> {
+    random_array()
 }
 
 /// AEAD-seal a payload with the space key. Output = `nonce(12) || ciphertext`.
-pub fn aead_encrypt(key: &SpaceKey, plaintext: &[u8]) -> Vec<u8> {
+pub fn aead_encrypt(key: &SpaceKey, plaintext: &[u8]) -> Result<Vec<u8>, Failure> {
     let cipher = ChaCha20Poly1305::new(key.into());
-    let nonce = random_nonce();
+    let nonce = random_nonce()?;
     let ct = cipher
         .encrypt(Nonce::from_slice(&nonce), plaintext)
-        .expect("aead encrypt");
+        .map_err(|_| Failure::Encryption)?;
     let mut out = Vec::with_capacity(NONCE_LEN + ct.len());
     out.extend_from_slice(&nonce);
     out.extend_from_slice(&ct);
-    out
+    Ok(out)
 }
 
 /// AEAD-open a payload; `None` if the key is wrong or the blob is malformed (the
@@ -164,11 +179,10 @@ fn ed_pubkey_bytes(device: &DeviceId) -> Option<[u8; 32]> {
     if s.len() != 64 {
         return None;
     }
-    let mut out = [0u8; 32];
-    for (i, b) in out.iter_mut().enumerate() {
-        *b = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).ok()?;
-    }
-    Some(out)
+    let decoded = data_encoding::HEXLOWER_PERMISSIVE
+        .decode(s.as_bytes())
+        .ok()?;
+    <[u8; 32]>::try_from(decoded.as_slice()).ok()
 }
 
 /// ed25519 public → X25519 public (Edwards-Y → Montgomery-u).
@@ -191,23 +205,28 @@ fn ed_seed_to_x(seed: &[u8; 32]) -> StaticSecret {
 /// Seal `msg` to a member addressed by their ed25519 `DeviceId` (an anonymous
 /// sealed box). Output = `eph_x_pub(32) || nonce(12) || ciphertext`. Used to
 /// distribute the space key. Returns `None` if the recipient key is invalid.
-pub fn seal_to(recipient: &DeviceId, msg: &[u8]) -> Option<Vec<u8>> {
-    let recip_ed = ed_pubkey_bytes(recipient)?;
-    let recip_x = ed_pk_to_x(&recip_ed)?;
-    let mut eph_seed = [0u8; 32];
-    getrandom::fill(&mut eph_seed).expect("getrandom");
+pub fn seal_to(recipient: &DeviceId, msg: &[u8]) -> Result<Option<Vec<u8>>, Failure> {
+    let Some(recip_ed) = ed_pubkey_bytes(recipient) else {
+        return Ok(None);
+    };
+    let Some(recip_x) = ed_pk_to_x(&recip_ed) else {
+        return Ok(None);
+    };
+    let eph_seed = random_array()?;
     let eph = StaticSecret::from(eph_seed);
     let eph_pub = XPublic::from(&eph);
     let shared = eph.diffie_hellman(&recip_x);
     let key = box_key(shared.as_bytes(), eph_pub.as_bytes(), recip_x.as_bytes());
     let cipher = ChaCha20Poly1305::new((&key).into());
-    let nonce = random_nonce();
-    let ct = cipher.encrypt(Nonce::from_slice(&nonce), msg).ok()?;
+    let nonce = random_nonce()?;
+    let ct = cipher
+        .encrypt(Nonce::from_slice(&nonce), msg)
+        .map_err(|_| Failure::Encryption)?;
     let mut out = Vec::with_capacity(32 + NONCE_LEN + ct.len());
     out.extend_from_slice(eph_pub.as_bytes());
     out.extend_from_slice(&nonce);
     out.extend_from_slice(&ct);
-    Some(out)
+    Ok(Some(out))
 }
 
 /// Open a sealed box addressed to us, given our ed25519 seed + `DeviceId`.
@@ -247,7 +266,7 @@ pub const BODY_ENVELOPE_OVERHEAD: usize = BODY_EPOCH_ID_LEN + NONCE_LEN + 16;
 /// one approved key epoch: the authorized epoch id plus its current key
 /// material. Mechanics-side policy (the composition root, reading the
 /// authorized epoch set) mints it; Replica selects it under Space policy and
-/// passes it only to Fabric seal/open. Fabric never decides epoch legitimacy —
+/// passes it only to Engine seal/open. Engine never decides epoch legitimacy —
 /// holding this capability *is* the legitimacy decision, made upstream. The
 /// key material has no accessor, no serialization, and no `Debug` leak.
 #[derive(Clone)]
@@ -281,11 +300,11 @@ impl AuthorizedBodyKey {
 /// Seal a Body plaintext under an authorized key epoch. The persisted envelope
 /// is exactly `epoch_id[16] || nonce[12] || ciphertext_and_tag` — the existing
 /// construction; this completion pass introduces no new cryptography.
-pub fn body_seal(key: &AuthorizedBodyKey, plaintext: &[u8]) -> Vec<u8> {
+pub fn body_seal(key: &AuthorizedBodyKey, plaintext: &[u8]) -> Result<Vec<u8>, Failure> {
     let mut out = Vec::with_capacity(BODY_EPOCH_ID_LEN + NONCE_LEN + plaintext.len() + 16);
     out.extend_from_slice(&key.epoch);
-    out.extend_from_slice(&aead_encrypt(&key.key, plaintext));
-    out
+    out.extend_from_slice(&aead_encrypt(&key.key, plaintext)?);
+    Ok(out)
 }
 
 /// Open a protected Body envelope with the capability for **its** epoch.
@@ -361,9 +380,9 @@ pub fn content_chunk_seal(
     key: &AuthorizedBodyKey,
     binding: &ContentChunkBinding<'_>,
     plaintext: &[u8],
-) -> Vec<u8> {
+) -> Result<Vec<u8>, Failure> {
     let cipher = ChaCha20Poly1305::new((&key.key).into());
-    let nonce = random_nonce();
+    let nonce = random_nonce()?;
     let ct = cipher
         .encrypt(
             Nonce::from_slice(&nonce),
@@ -372,12 +391,12 @@ pub fn content_chunk_seal(
                 aad: &binding.associated_data(),
             },
         )
-        .expect("aead encrypt");
+        .map_err(|_| Failure::Encryption)?;
     let mut out = Vec::with_capacity(BODY_EPOCH_ID_LEN + NONCE_LEN + ct.len());
     out.extend_from_slice(&key.epoch);
     out.extend_from_slice(&nonce);
     out.extend_from_slice(&ct);
-    out
+    Ok(out)
 }
 
 /// Open a content-chunk envelope with the capability for **its** epoch and the
@@ -412,8 +431,8 @@ mod tests {
 
     #[test]
     fn aead_roundtrip_and_wrong_key_fails() {
-        let k = random_key();
-        let blob = aead_encrypt(&k, b"opaque loro export");
+        let k = random_key().expect("random key");
+        let blob = aead_encrypt(&k, b"opaque loro export").expect("encrypt");
         assert_eq!(
             aead_decrypt(&k, &blob).as_deref(),
             Some(&b"opaque loro export"[..])
@@ -458,8 +477,10 @@ mod tests {
         // net seam — see tests/identity_interop.rs.)
         let seed = [5u8; 32];
         let uid = device_from_seed(&seed);
-        let key = random_key();
-        let sealed = seal_to(&uid, &key).expect("seal to seed-derived key");
+        let key = random_key().expect("random key");
+        let sealed = seal_to(&uid, &key)
+            .expect("encrypt")
+            .expect("seal to seed-derived key");
         assert_eq!(
             open_sealed(&seed, &uid, &sealed).as_deref(),
             Some(&key[..]),
@@ -471,8 +492,10 @@ mod tests {
     fn sealed_box_only_opens_for_recipient() {
         let seed = [7u8; 32];
         let me = device_from_seed(&seed);
-        let key = random_key();
-        let sealed = seal_to(&me, &key).expect("seal");
+        let key = random_key().expect("random key");
+        let sealed = seal_to(&me, &key)
+            .expect("encrypt")
+            .expect("valid recipient");
         assert_eq!(open_sealed(&seed, &me, &sealed).as_deref(), Some(&key[..]));
         // a different member cannot open it.
         let other_seed = [9u8; 32];

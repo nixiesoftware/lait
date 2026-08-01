@@ -15,16 +15,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use lait::dto::{BoardView, GraphView, IssueView, LabelDto, ProjectDto, Row, StatusCategory};
-use lait::ids::{ActorId, DeviceId, DocId, LabelId, ProjectId, SystemUlidSource};
+use issues::dto::{BoardView, GraphView, IssueView, LabelDto, ProjectDto, Row, StatusCategory};
+use issues::ids::{ActorId, DeviceId, DocId, LabelId, ProjectId, SystemUlidSource};
 use lait::world::contract::{self, IssueIntent, IssueQuery, Pos, WorkAction};
 use lait::world::IssuesWorld;
-use mechanics::crypto::AuthorizedBodyKey;
+use mechanics::authorization::AuthorizedBodyKey;
 use replica::frontier::AuthorityFrontier;
 use runtime::{
-    ActivationOptions, CommsOptions, ContactMechanics, ContactOptions, EnterOptions, LocalIdentity,
-    RequestId, Runtime, RuntimeBuilder, Session, SignedWorldAction, Station, WorldError,
-    WorldIntent, WorldQuery,
+    plane::contact::Authority, plane::Activation, plane::CommsOptions, world::Builder,
+    world::Intent, world::LocalIdentity, world::Query, world::Rejection, world::RequestId,
+    world::SignedWorldAction, Runtime, Session, Station,
 };
 
 const FOUNDER_SEED: [u8; 32] = [7u8; 32];
@@ -45,7 +45,7 @@ fn temp_root(tag: &str) -> std::path::PathBuf {
     dir
 }
 
-fn coordinates() -> runtime::SignedCoordinates {
+fn coordinates() -> runtime::coordinates::SignedCoordinates {
     use runtime::coordinates::{ApproachRoute, CoordinatesAdmission, CoordinatesPayload};
     let rc = mechanics::space::recovery_commit(&mechanics::space::recovery_pub_of(&RECOVERY_SEED))
         .unwrap();
@@ -59,7 +59,7 @@ fn coordinates() -> runtime::SignedCoordinates {
         recovery_root: rc,
         founder_inception: postcard::to_stdvec(&incept).unwrap(),
         display_name_hint: "Parity Space".into(),
-        approach_station: mechanics::crypto::device_from_seed(&STATION_A_SEED)
+        approach_station: mechanics::actor::device_from_seed(&STATION_A_SEED)
             .key_bytes()
             .unwrap(),
         approach_nick_hint: "a".into(),
@@ -69,13 +69,13 @@ fn coordinates() -> runtime::SignedCoordinates {
         }],
         admission: CoordinatesAdmission::None,
     };
-    runtime::SignedCoordinates::sign(payload, &STATION_A_SEED)
+    runtime::coordinates::SignedCoordinates::sign(payload, &STATION_A_SEED)
 }
 
 struct WriterAuthority;
-impl runtime::AuthorityView for WriterAuthority {
-    fn resolve(&self, _device: &DeviceId) -> Option<runtime::PrincipalResolution> {
-        Some(runtime::PrincipalResolution {
+impl runtime::world::AuthorityView for WriterAuthority {
+    fn resolve(&self, _device: &DeviceId) -> Option<runtime::world::PrincipalResolution> {
+        Some(runtime::world::PrincipalResolution {
             actor: my_actor(),
             authority_frontier: AuthorityFrontier::from_canonical_bytes(vec![8]),
         })
@@ -83,21 +83,21 @@ impl runtime::AuthorityView for WriterAuthority {
 }
 
 struct AnyKnownSigner;
-impl replica::AuthoritySource for AnyKnownSigner {
+impl replica::transaction::AuthoritySource for AnyKnownSigner {
     fn signer_authorized(&self, signer: &[u8; 32], _f: &AuthorityFrontier) -> bool {
         [WRITER_SEED, STATION_A_SEED, STATION_B_SEED]
             .iter()
-            .any(|seed| mechanics::crypto::device_from_seed(seed).key_bytes() == Some(*signer))
+            .any(|seed| mechanics::actor::device_from_seed(seed).key_bytes() == Some(*signer))
     }
 }
 
 struct AcceptingIncorporator;
-impl replica::AuthorityIncorporator for AcceptingIncorporator {
+impl replica::convergence::AuthorityIncorporator for AcceptingIncorporator {
     fn incorporate_authority(
         &mut self,
         _records: &[Vec<u8>],
-    ) -> Result<replica::AuthorityBatchReceipt, String> {
-        Ok(replica::AuthorityBatchReceipt {
+    ) -> Result<replica::convergence::AuthorityBatchReceipt, replica::convergence::Failure> {
+        Ok(replica::convergence::AuthorityBatchReceipt {
             space: coordinates().verify().unwrap().space.clone(),
             prior_frontier: replica::frontier::AuthorityFrontier::from_canonical_bytes(vec![]),
             resulting_frontier: AuthorityFrontier::from_canonical_bytes(vec![8]),
@@ -111,19 +111,19 @@ fn my_actor() -> ActorId {
 }
 
 fn my_device() -> DeviceId {
-    mechanics::crypto::device_from_seed(&WRITER_SEED)
+    mechanics::actor::device_from_seed(&WRITER_SEED)
 }
 
 fn product_runtime(root: &std::path::Path) -> Runtime {
-    let registry = RuntimeBuilder::new()
-        .register(IssuesWorld::registration(), Arc::new(IssuesWorld::new()))
+    let registry = Builder::new()
+        .register(Arc::new(IssuesWorld::new()))
         .build()
         .unwrap();
     Runtime::open(
         root.to_path_buf(),
         registry,
         Arc::new(WriterAuthority),
-        Arc::new(replica::StaticBodyKeys::new(
+        Arc::new(replica::body::StaticBodyKeys::new(
             AuthorizedBodyKey::for_authorized_epoch(EPOCH, EPOCH_KEY),
         )),
     )
@@ -157,7 +157,7 @@ impl Driver {
             .sign_action(
                 &self.session,
                 RequestId::mint(),
-                WorldIntent {
+                Intent {
                     schema: contract::issue_schema(),
                     schema_version: contract::ISSUE_SCHEMA_VERSION,
                     payload: intent.to_json(),
@@ -166,14 +166,17 @@ impl Driver {
             .unwrap()
     }
 
-    fn submit(&self, intent: &IssueIntent) -> Result<contract::IssueEffect, WorldError> {
+    fn submit(
+        &self,
+        intent: &IssueIntent,
+    ) -> Result<contract::IssueEffect, runtime::world::Failure> {
         let committed = self.session.submit(self.signed(intent))?;
         Ok(contract::IssueEffect::from_json(&committed.effect).unwrap())
     }
 
     fn query_raw(&self, query: &IssueQuery) -> Vec<u8> {
         self.session
-            .query(WorldQuery {
+            .query(Query {
                 schema: contract::issue_schema(),
                 schema_version: contract::ISSUE_SCHEMA_VERSION,
                 payload: query.to_json(),
@@ -213,11 +216,7 @@ impl Driver {
 
 fn setup(root: &std::path::Path) -> (Runtime, Station) {
     let rt = product_runtime(root);
-    let station = rt
-        .form_space(runtime::SpaceFormationOptions::default())
-        .unwrap()
-        .activate(ActivationOptions::offline())
-        .unwrap();
+    let station = rt.create().unwrap().open(Activation::offline()).unwrap();
     (rt, station)
 }
 
@@ -276,7 +275,7 @@ fn the_full_issue_surface_round_trips_with_legacy_shapes() {
     assert_eq!(view.title, "First issue");
     assert_eq!(view.description, "the description");
     assert_eq!(view.status, "backlog");
-    assert_eq!(view.priority, lait::dto::Priority::High);
+    assert_eq!(view.priority, issues::dto::Priority::High);
     assert_eq!(view.assignees, vec![my_actor()]);
     assert_eq!(view.key_alias.as_deref(), Some("ENG-1"));
 
@@ -432,7 +431,7 @@ fn the_full_issue_surface_round_trips_with_legacy_shapes() {
             device: my_device().as_str().to_string(),
             ts,
         }),
-        Err(WorldError::InvalidRequest)
+        Err(runtime::world::Failure::Rejected(Rejection::InvalidRequest))
     );
 
     // Parent hierarchy with ancestor-cycle refusal.
@@ -453,7 +452,7 @@ fn the_full_issue_surface_round_trips_with_legacy_shapes() {
             device: my_device().as_str().to_string(),
             ts,
         }),
-        Err(WorldError::Conflict)
+        Err(runtime::world::Failure::Rejected(Rejection::Conflict))
     );
 
     // Work state: done moves off the board; an idempotent repeat stages
@@ -542,13 +541,13 @@ fn the_full_issue_surface_round_trips_with_legacy_shapes() {
 
     // Restart durability: everything above survives a cold reactivation.
     let space = station.space_id().clone();
-    let orbit = station.go_dormant().unwrap();
+    let orbit = station.vacate().unwrap();
     drop(orbit);
     let rt = product_runtime(&root);
     let station = rt
-        .orbit(&space)
+        .acquire(&space)
         .unwrap()
-        .activate(ActivationOptions::offline())
+        .open(Activation::offline())
         .unwrap();
     let driver = Driver::dock(&station);
     let view: IssueView = driver.query(&IssueQuery::View {
@@ -558,7 +557,7 @@ fn the_full_issue_surface_round_trips_with_legacy_shapes() {
     assert_eq!(view.title, "First issue");
     assert_eq!(view.comments.len(), 1);
     assert_eq!(driver.resolve("ENG-2").as_deref(), Some(doc2.as_str()));
-    let _ = station.go_dormant();
+    let _ = station.vacate();
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -588,7 +587,7 @@ fn a_denied_or_invalid_request_commits_and_publishes_nothing() {
             device: my_device().as_str().to_string(),
             ts,
         }),
-        Err(WorldError::InvalidRequest)
+        Err(runtime::world::Failure::Rejected(Rejection::InvalidRequest))
     );
     let ts = driver.ts();
     assert_eq!(
@@ -603,10 +602,10 @@ fn a_denied_or_invalid_request_commits_and_publishes_nothing() {
             device: my_device().as_str().to_string(),
             ts,
         }),
-        Err(WorldError::InvalidRequest)
+        Err(runtime::world::Failure::Rejected(Rejection::InvalidRequest))
     );
     assert_eq!(station.frontier(), frontier, "nothing committed");
-    let _ = station.go_dormant();
+    let _ = station.vacate();
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -615,13 +614,13 @@ fn two_stations_converge_product_issues_over_the_contact_plane() {
     let coords = coordinates();
     let net = comms::mem::MemNet::new();
     let ta: Arc<dyn comms::Transport> =
-        Arc::new(net.peer(mechanics::crypto::device_from_seed(&STATION_A_SEED)));
+        Arc::new(net.peer(mechanics::actor::device_from_seed(&STATION_A_SEED)));
     let tb: Arc<dyn comms::Transport> =
-        Arc::new(net.peer(mechanics::crypto::device_from_seed(&STATION_B_SEED)));
+        Arc::new(net.peer(mechanics::actor::device_from_seed(&STATION_B_SEED)));
     let comms_options = |transport: Arc<dyn comms::Transport>, seed: [u8; 32]| CommsOptions {
         transport,
         station_seed: seed,
-        mechanics: ContactMechanics {
+        authority: Authority {
             source: Arc::new(AnyKnownSigner),
             incorporator: Arc::new(Mutex::new(AcceptingIncorporator)),
             export: Arc::new(Vec::new),
@@ -636,9 +635,9 @@ fn two_stations_converge_product_issues_over_the_contact_plane() {
     let root_a = temp_root("conv-a");
     let root_b = temp_root("conv-b");
     let station_a = product_runtime(&root_a)
-        .enter_orbit(&coords, EnterOptions)
+        .materialize(&coords)
         .unwrap()
-        .activate(ActivationOptions {
+        .open(Activation {
             planes: Default::default(),
             content: Default::default(),
             drain_deadline: Duration::from_secs(5),
@@ -650,9 +649,9 @@ fn two_stations_converge_product_issues_over_the_contact_plane() {
     let (project, doc, _alias) = seed_space(&mut driver_a);
 
     let station_b = product_runtime(&root_b)
-        .enter_orbit(&coords, EnterOptions)
+        .materialize(&coords)
         .unwrap()
-        .activate(ActivationOptions {
+        .open(Activation {
             planes: Default::default(),
             content: Default::default(),
             drain_deadline: Duration::from_secs(5),
@@ -660,11 +659,10 @@ fn two_stations_converge_product_issues_over_the_contact_plane() {
             observation_capacity: 0,
         })
         .unwrap();
-    let a_station_id = mechanics::ids::StationId::from_device(
-        &mechanics::crypto::device_from_seed(&STATION_A_SEED),
-    )
-    .unwrap();
-    let outcome = station_b.contact(&a_station_id, ContactOptions).unwrap();
+    let a_station_id =
+        mechanics::station::Key::from_device(&mechanics::actor::device_from_seed(&STATION_A_SEED))
+            .unwrap();
+    let outcome = station_b.contact(&a_station_id).unwrap();
     assert!(outcome.convergence.accepted >= 1);
 
     // B sees A's product state through the SAME World adapter.
@@ -688,17 +686,16 @@ fn two_stations_converge_product_issues_over_the_contact_plane() {
             doc: doc.clone(),
             body: "from b".into(),
             actor: my_actor().as_str().to_string(),
-            device: mechanics::crypto::device_from_seed(&STATION_B_SEED)
+            device: mechanics::actor::device_from_seed(&STATION_B_SEED)
                 .as_str()
                 .to_string(),
             ts,
         })
         .unwrap();
-    let b_station_id = mechanics::ids::StationId::from_device(
-        &mechanics::crypto::device_from_seed(&STATION_B_SEED),
-    )
-    .unwrap();
-    let outcome = station_a.contact(&b_station_id, ContactOptions).unwrap();
+    let b_station_id =
+        mechanics::station::Key::from_device(&mechanics::actor::device_from_seed(&STATION_B_SEED))
+            .unwrap();
+    let outcome = station_a.contact(&b_station_id).unwrap();
     assert!(outcome.convergence.accepted >= 1);
     let view: IssueView = driver_a.query(&IssueQuery::View {
         doc: doc.clone(),
@@ -714,8 +711,8 @@ fn two_stations_converge_product_issues_over_the_contact_plane() {
     });
     assert_eq!(board.columns[0].rows.len(), 1);
 
-    let _ = station_a.go_dormant();
-    let _ = station_b.go_dormant();
+    let _ = station_a.vacate();
+    let _ = station_b.vacate();
     let _ = std::fs::remove_dir_all(&root_a);
     let _ = std::fs::remove_dir_all(&root_b);
     let _ = BTreeMap::<String, String>::new();
@@ -797,10 +794,13 @@ fn due_dates_estimates_and_comment_reactions_round_trip() {
         device: my_device().as_str().to_string(),
         ts,
     });
-    assert!(matches!(refused, Err(WorldError::InvalidRequest)));
+    assert!(matches!(
+        refused,
+        Err(runtime::world::Failure::Rejected(Rejection::InvalidRequest))
+    ));
 
     // ---- comment identity, replies, reactions ----
-    let cid = lait::ids::mint_comment_id(&SystemUlidSource);
+    let cid = issues::ids::mint_comment_id(&SystemUlidSource);
     let ts = driver.ts();
     driver
         .submit(&IssueIntent::Comment {
@@ -824,9 +824,12 @@ fn due_dates_estimates_and_comment_reactions_round_trip() {
         device: my_device().as_str().to_string(),
         ts,
     });
-    assert!(matches!(refused, Err(WorldError::InvalidRequest)));
+    assert!(matches!(
+        refused,
+        Err(runtime::world::Failure::Rejected(Rejection::InvalidRequest))
+    ));
 
-    let reply = lait::ids::mint_comment_id(&SystemUlidSource);
+    let reply = issues::ids::mint_comment_id(&SystemUlidSource);
     let ts = driver.ts();
     driver
         .submit(&IssueIntent::Comment {
@@ -844,13 +847,16 @@ fn due_dates_estimates_and_comment_reactions_round_trip() {
     let refused = driver.submit(&IssueIntent::Comment {
         doc: doc.clone(),
         body: "reply to reply".into(),
-        id: Some(lait::ids::mint_comment_id(&SystemUlidSource)),
+        id: Some(issues::ids::mint_comment_id(&SystemUlidSource)),
         parent: Some(reply.clone()),
         actor: my_actor().as_str().to_string(),
         device: my_device().as_str().to_string(),
         ts,
     });
-    assert!(matches!(refused, Err(WorldError::InvalidRequest)));
+    assert!(matches!(
+        refused,
+        Err(runtime::world::Failure::Rejected(Rejection::InvalidRequest))
+    ));
 
     let ts = driver.ts();
     driver
@@ -911,12 +917,15 @@ fn due_dates_estimates_and_comment_reactions_round_trip() {
     let ts = driver.ts();
     let refused = driver.submit(&IssueIntent::React {
         doc: doc.clone(),
-        comment: lait::ids::mint_comment_id(&SystemUlidSource),
+        comment: issues::ids::mint_comment_id(&SystemUlidSource),
         emoji: "🎉".into(),
         actor: my_actor().as_str().to_string(),
         on: true,
         device: my_device().as_str().to_string(),
         ts,
     });
-    assert!(matches!(refused, Err(WorldError::InvalidRequest)));
+    assert!(matches!(
+        refused,
+        Err(runtime::world::Failure::Rejected(Rejection::InvalidRequest))
+    ));
 }

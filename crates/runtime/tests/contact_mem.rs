@@ -13,27 +13,30 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use mechanics::crypto::AuthorizedBodyKey;
-use mechanics::ids::{ActorId, DeviceId, SpaceId, StationId};
-use replica::body::{BodyOp, BodySchema, MutationModel};
+use mechanics::authorization::AuthorizedBodyKey;
+use mechanics::{
+    ids::{ActorId, DeviceId, SpaceId},
+    station::Key,
+};
+use replica::body::{BodyId, BodyKey, EncodingId, SchemaId, WorldId};
+use replica::body::{MutationModel, Op, Schema};
 use replica::frontier::{AuthorityFrontier, ReplicaFrontier};
-use replica::ids::{BodyId, BodyKey, EncodingId, SchemaId, WorldId};
 use runtime::coordinates::{ApproachRoute, CoordinatesAdmission, CoordinatesPayload};
 
 #[allow(dead_code)]
 fn any_demand() -> Vec<u8> {
-    mechanics::demand::AuthorizationDemand::require(
-        mechanics::demand::PolicyCapability::new("w", "c"),
-        mechanics::demand::PolicyResource::space("w"),
+    mechanics::authorization::AuthorizationDemand::require(
+        mechanics::authorization::PolicyCapability::new("w", "c"),
+        mechanics::authorization::Resource::root("w"),
     )
     .encode_canonical()
     .expect("canonical demand")
 }
 use runtime::{
-    ActivationOptions, CommsOptions, ContactMechanics, ContactOptions, EnterOptions, GossipOptions,
-    RequestId, Runtime, RuntimeBuilder, SignedCoordinates, Station, World, WorldContext,
-    WorldEffect, WorldError, WorldIntent, WorldLimits, WorldProjection, WorldQuery,
-    WorldRegistration, WorldVersion,
+    coordinates::SignedCoordinates, plane::contact::Authority, plane::Activation,
+    plane::CommsOptions, plane::GossipOptions, world::Builder, world::Context, world::Descriptor,
+    world::Effect, world::Intent, world::Limits, world::Projection, world::Query, world::Rejection,
+    world::RequestId, world::Version, world::World, Runtime, Station,
 };
 
 const FOUNDER_SEED: [u8; 32] = [7u8; 32];
@@ -70,7 +73,7 @@ fn coordinates() -> (SpaceId, SignedCoordinates) {
         recovery_root: rc,
         founder_inception: postcard::to_stdvec(&incept).unwrap(),
         display_name_hint: "Contact Space".into(),
-        approach_station: mechanics::crypto::device_from_seed(&STATION_A_SEED)
+        approach_station: mechanics::actor::device_from_seed(&STATION_A_SEED)
             .key_bytes()
             .unwrap(),
         approach_nick_hint: "a".into(),
@@ -86,14 +89,14 @@ fn coordinates() -> (SpaceId, SignedCoordinates) {
 /// The shared note World: intents `key=value` set atomic Bodies.
 struct KvWorld {
     id: WorldId,
-    schemas: Vec<BodySchema>,
+    schemas: Vec<Schema>,
 }
 
 impl KvWorld {
     fn new() -> Self {
         Self {
             id: WorldId::parse("dev.example.kv").unwrap(),
-            schemas: vec![BodySchema {
+            schemas: vec![Schema {
                 id: SchemaId::parse("entry").unwrap(),
                 version: 1,
                 encoding: EncodingId::parse("bytes").unwrap(),
@@ -114,38 +117,30 @@ impl World for KvWorld {
     fn id(&self) -> WorldId {
         self.id.clone()
     }
-    fn schemas(&self) -> &[BodySchema] {
+    fn schemas(&self) -> &[Schema] {
         &self.schemas
     }
-    fn submit(
-        &self,
-        _ctx: &mut WorldContext<'_>,
-        intent: WorldIntent,
-    ) -> Result<WorldEffect, WorldError> {
-        let text = String::from_utf8(intent.payload).map_err(|_| WorldError::InvalidRequest)?;
-        let (key, value) = text.split_once('=').ok_or(WorldError::InvalidRequest)?;
+    fn submit(&self, _ctx: &mut Context<'_>, intent: Intent) -> Result<Effect, Rejection> {
+        let text = String::from_utf8(intent.payload).map_err(|_| Rejection::InvalidRequest)?;
+        let (key, value) = text.split_once('=').ok_or(Rejection::InvalidRequest)?;
         let body = self.body(key);
-        Ok(WorldEffect {
+        Ok(Effect {
             content_refs: Vec::new(),
             demand: any_demand(),
             operations: vec![(
                 body.clone(),
-                BodyOp::ReplaceAtomic {
+                Op::ReplaceAtomic {
                     value: value.as_bytes().to_vec(),
                 },
             )],
-            scopes: vec![body],
+            bodies: vec![body],
             effect: vec![],
             declarations: vec![],
         })
     }
-    fn query(
-        &self,
-        ctx: &WorldContext<'_>,
-        query: WorldQuery,
-    ) -> Result<WorldProjection, WorldError> {
-        let key = String::from_utf8(query.payload).map_err(|_| WorldError::InvalidRequest)?;
-        Ok(WorldProjection {
+    fn query(&self, ctx: &Context<'_>, query: Query) -> Result<Projection, Rejection> {
+        let key = String::from_utf8(query.payload).map_err(|_| Rejection::InvalidRequest)?;
+        Ok(Projection {
             demand: any_demand(),
             schema: SchemaId::parse("entry").unwrap(),
             schema_version: 1,
@@ -157,9 +152,9 @@ impl World for KvWorld {
 
 /// Authorizes everyone this test names (writer + both stations).
 struct TestAuthority;
-impl runtime::AuthorityView for TestAuthority {
-    fn resolve(&self, _device: &DeviceId) -> Option<runtime::PrincipalResolution> {
-        Some(runtime::PrincipalResolution {
+impl runtime::world::AuthorityView for TestAuthority {
+    fn resolve(&self, _device: &DeviceId) -> Option<runtime::world::PrincipalResolution> {
+        Some(runtime::world::PrincipalResolution {
             actor: ActorId::from_incept_hash(&"c".repeat(64)),
             authority_frontier: AuthorityFrontier::from_canonical_bytes(vec![3]),
         })
@@ -167,22 +162,22 @@ impl runtime::AuthorityView for TestAuthority {
 }
 
 struct AnyKnownSigner;
-impl replica::AuthoritySource for AnyKnownSigner {
+impl replica::transaction::AuthoritySource for AnyKnownSigner {
     fn signer_authorized(&self, signer: &[u8; 32], _f: &AuthorityFrontier) -> bool {
         [WRITER_SEED, STATION_A_SEED, STATION_B_SEED]
             .iter()
-            .any(|seed| mechanics::crypto::device_from_seed(seed).key_bytes() == Some(*signer))
+            .any(|seed| mechanics::actor::device_from_seed(seed).key_bytes() == Some(*signer))
     }
 }
 
 #[derive(Default)]
 struct AcceptingIncorporator;
-impl replica::AuthorityIncorporator for AcceptingIncorporator {
+impl replica::convergence::AuthorityIncorporator for AcceptingIncorporator {
     fn incorporate_authority(
         &mut self,
         _records: &[Vec<u8>],
-    ) -> Result<replica::AuthorityBatchReceipt, String> {
-        Ok(replica::AuthorityBatchReceipt {
+    ) -> Result<replica::convergence::AuthorityBatchReceipt, replica::convergence::Failure> {
+        Ok(replica::convergence::AuthorityBatchReceipt {
             space: coordinates().0,
             prior_frontier: replica::frontier::AuthorityFrontier::from_canonical_bytes(vec![]),
             resulting_frontier: AuthorityFrontier::from_canonical_bytes(vec![3]),
@@ -191,26 +186,23 @@ impl replica::AuthorityIncorporator for AcceptingIncorporator {
     }
 }
 
-fn test_keys() -> Arc<dyn replica::BodyKeySource> {
-    Arc::new(replica::StaticBodyKeys::new(
+fn test_keys() -> Arc<dyn replica::body::BodyKeySource> {
+    Arc::new(replica::body::StaticBodyKeys::new(
         AuthorizedBodyKey::for_authorized_epoch(EPOCH, EPOCH_KEY),
     ))
 }
 
 fn runtime_at(root: &std::path::Path) -> Runtime {
     let world = KvWorld::new();
-    let reg = WorldRegistration {
+    let reg = Descriptor {
         id: world.id(),
-        implementation_version: WorldVersion(1),
+        implementation_version: Version(1),
         schemas: world.schemas().to_vec(),
-        limits: WorldLimits::default(),
+        limits: Limits::default(),
         scope_schemas: Vec::new(),
         signal_schemas: Vec::new(),
     };
-    let registry = RuntimeBuilder::new()
-        .register(reg, Arc::new(world))
-        .build()
-        .unwrap();
+    let registry = Builder::new().register(Arc::new(world)).build().unwrap();
     Runtime::open(
         root.to_path_buf(),
         registry,
@@ -227,7 +219,7 @@ fn comms_options(
     CommsOptions {
         transport,
         station_seed,
-        mechanics: ContactMechanics {
+        authority: Authority {
             source: Arc::new(AnyKnownSigner),
             incorporator: Arc::new(Mutex::new(AcceptingIncorporator)),
             export: Arc::new(Vec::new),
@@ -247,9 +239,9 @@ fn activate_with(
     seed: [u8; 32],
     gossip: Option<GossipOptions>,
 ) -> Station {
-    rt.enter_orbit(coords, EnterOptions)
+    rt.materialize(coords)
         .unwrap()
-        .activate(ActivationOptions {
+        .open(Activation {
             planes: Default::default(),
             content: Default::default(),
             drain_deadline: Duration::from_secs(5),
@@ -267,7 +259,7 @@ fn submit_kv(station: &Station, entry: &str) {
         .sign_action(
             &session,
             RequestId::mint(),
-            WorldIntent {
+            Intent {
                 schema: SchemaId::parse("entry").unwrap(),
                 schema_version: 1,
                 payload: entry.as_bytes().to_vec(),
@@ -282,7 +274,7 @@ fn read_kv(station: &Station, key: &str) -> Vec<u8> {
     let writer = Runtime::identity_from_seed(&WRITER_SEED);
     let session = station.dock(&world_id, &writer).unwrap();
     session
-        .query(WorldQuery {
+        .query(Query {
             schema: SchemaId::parse("entry").unwrap(),
             schema_version: 1,
             payload: key.as_bytes().to_vec(),
@@ -291,8 +283,8 @@ fn read_kv(station: &Station, key: &str) -> Vec<u8> {
         .bytes
 }
 
-fn station_id(seed: &[u8; 32]) -> StationId {
-    StationId::from_device(&mechanics::crypto::device_from_seed(seed)).unwrap()
+fn station_id(seed: &[u8; 32]) -> Key {
+    Key::from_device(&mechanics::actor::device_from_seed(seed)).unwrap()
 }
 
 #[test]
@@ -300,9 +292,9 @@ fn two_stations_converge_through_the_public_contact_api() {
     let (_space, coords) = coordinates();
     let net = comms::mem::MemNet::new();
     let ta: Arc<dyn comms::Transport> =
-        Arc::new(net.peer(mechanics::crypto::device_from_seed(&STATION_A_SEED)));
+        Arc::new(net.peer(mechanics::actor::device_from_seed(&STATION_A_SEED)));
     let tb: Arc<dyn comms::Transport> =
-        Arc::new(net.peer(mechanics::crypto::device_from_seed(&STATION_B_SEED)));
+        Arc::new(net.peer(mechanics::actor::device_from_seed(&STATION_B_SEED)));
 
     let root_a = temp_root("a");
     let root_b = temp_root("b");
@@ -322,9 +314,7 @@ fn two_stations_converge_through_the_public_contact_api() {
     let mut obs = obs_session.observe(None);
     assert!(obs.try_next().unwrap().unwrap().reset);
     // The privileged administrative Contact, through the public API.
-    let outcome = station_b
-        .contact(&station_id(&STATION_A_SEED), ContactOptions)
-        .unwrap();
+    let outcome = station_b.contact(&station_id(&STATION_A_SEED)).unwrap();
     assert!(outcome.bytes_moved > 0, "bytes accounted separately");
     assert!(outcome.convergence.accepted >= 1);
     let remote_record = obs
@@ -333,7 +323,7 @@ fn two_stations_converge_through_the_public_contact_api() {
         .expect("remote convergence publishes");
     assert!(!remote_record.reset);
     assert!(
-        !remote_record.scopes.is_empty(),
+        !remote_record.bodies.is_empty(),
         "the Bodies that converged must be named: {remote_record:?}"
     );
     // ONE record for one Contact. Authority and Bodies are separate durability
@@ -345,7 +335,7 @@ fn two_stations_converge_through_the_public_contact_api() {
         obs.try_next().unwrap().is_none(),
         "a single Contact published more than one Observation"
     );
-    obs_session.undock();
+    obs_session.close();
     assert_eq!(read_kv(&station_b, "greeting"), b"hello");
     assert_eq!(read_kv(&station_b, "farewell"), b"bye");
 
@@ -353,9 +343,7 @@ fn two_stations_converge_through_the_public_contact_api() {
     // O(changed) protocol it also SHIPS nothing new: B's signed holdings
     // declaration covers every head, so the accepter serves only the
     // manifest advertisement and the idle pull is a fraction of the first.
-    let again = station_b
-        .contact(&station_id(&STATION_A_SEED), ContactOptions)
-        .unwrap();
+    let again = station_b.contact(&station_id(&STATION_A_SEED)).unwrap();
     assert_eq!(again.convergence.accepted, 0);
     assert!(!again.convergence.advanced());
     assert!(
@@ -367,15 +355,15 @@ fn two_stations_converge_through_the_public_contact_api() {
 
     // Restart B: incorporated material is durable, and a further Contact is
     // still unchanged.
-    let orbit_b = station_b.go_dormant().unwrap();
+    let orbit_b = station_b.vacate().unwrap();
     drop(orbit_b);
     let tb2: Arc<dyn comms::Transport> =
-        Arc::new(net.peer(mechanics::crypto::device_from_seed(&STATION_B_SEED)));
+        Arc::new(net.peer(mechanics::actor::device_from_seed(&STATION_B_SEED)));
     let space = station_a.space_id().clone();
     let station_b = rt_b
-        .orbit(&space)
+        .acquire(&space)
         .unwrap()
-        .activate(ActivationOptions {
+        .open(Activation {
             planes: Default::default(),
             content: Default::default(),
             drain_deadline: Duration::from_secs(5),
@@ -384,14 +372,12 @@ fn two_stations_converge_through_the_public_contact_api() {
         })
         .unwrap();
     assert_eq!(read_kv(&station_b, "greeting"), b"hello");
-    let after_restart = station_b
-        .contact(&station_id(&STATION_A_SEED), ContactOptions)
-        .unwrap();
+    let after_restart = station_b.contact(&station_id(&STATION_A_SEED)).unwrap();
     assert_eq!(after_restart.convergence.accepted, 0);
 
     // Dormancy rejects newly queued work with a typed refusal.
     let station_id_a = station_id(&STATION_A_SEED);
-    let orbit_b = station_b.go_dormant().unwrap();
+    let orbit_b = station_b.vacate().unwrap();
     drop(orbit_b);
     drop(station_a);
     let _ = std::fs::remove_dir_all(&root_a);
@@ -404,9 +390,9 @@ fn a_beacon_drives_fully_automatic_convergence() {
     let (_space, coords) = coordinates();
     let net = comms::mem::MemNet::new();
     let ta: Arc<dyn comms::Transport> =
-        Arc::new(net.peer(mechanics::crypto::device_from_seed(&STATION_A_SEED)));
+        Arc::new(net.peer(mechanics::actor::device_from_seed(&STATION_A_SEED)));
     let tb: Arc<dyn comms::Transport> =
-        Arc::new(net.peer(mechanics::crypto::device_from_seed(&STATION_B_SEED)));
+        Arc::new(net.peer(mechanics::actor::device_from_seed(&STATION_B_SEED)));
 
     let root_a = temp_root("auto-a");
     let root_b = temp_root("auto-b");
@@ -417,7 +403,7 @@ fn a_beacon_drives_fully_automatic_convergence() {
         Some(GossipOptions {
             bootstrap: vec![],
             advertise: if advertise {
-                vec![runtime::RouteHint {
+                vec![runtime::beacon::RouteHint {
                     scheme: 1,
                     bytes: b"127.0.0.1:1".to_vec(),
                 }]
@@ -450,8 +436,8 @@ fn a_beacon_drives_fully_automatic_convergence() {
         .iter()
         .any(|n| n.station == station_id(&STATION_A_SEED)));
 
-    let _ = station_a.go_dormant();
-    let _ = station_b.go_dormant();
+    let _ = station_a.vacate();
+    let _ = station_b.vacate();
     let _ = std::fs::remove_dir_all(&root_a);
     let _ = std::fs::remove_dir_all(&root_b);
 }
@@ -461,23 +447,23 @@ fn an_unknown_neighbor_is_unreachable_and_dormancy_refuses_contact() {
     let (_space, coords) = coordinates();
     let net = comms::mem::MemNet::new();
     let tb: Arc<dyn comms::Transport> =
-        Arc::new(net.peer(mechanics::crypto::device_from_seed(&STATION_B_SEED)));
+        Arc::new(net.peer(mechanics::actor::device_from_seed(&STATION_B_SEED)));
     let root_b = temp_root("refuse");
     let rt_b = runtime_at(&root_b);
     let station_b = activate_with(&rt_b, &coords, tb, STATION_B_SEED, None);
 
     // Nobody answers this station id on the network.
     let ghost = station_id(&[99u8; 32]);
-    assert!(station_b.contact(&ghost, ContactOptions).is_err());
+    assert!(station_b.contact(&ghost).is_err());
 
     // After dormancy, newly queued work is refused with a typed error and no
     // task, staging file, or lock is leaked (the Orbit reactivates cleanly).
-    let orbit = station_b.go_dormant().unwrap();
-    let station_b = orbit.activate(ActivationOptions::offline()).unwrap();
+    let orbit = station_b.vacate().unwrap();
+    let station_b = orbit.open(Activation::offline()).unwrap();
     assert!(matches!(
-        station_b.contact(&ghost, ContactOptions),
-        Err(runtime::ContactError::Unreachable)
+        station_b.contact(&ghost),
+        Err(runtime::plane::contact::Failure::Unreachable)
     ));
-    let _ = station_b.go_dormant().unwrap();
+    let _ = station_b.vacate().unwrap();
     let _ = std::fs::remove_dir_all(&root_b);
 }

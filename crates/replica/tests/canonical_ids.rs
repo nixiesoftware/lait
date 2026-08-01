@@ -4,8 +4,8 @@
 //! extraction; S5 installs the signed Body/store formats that make them contracts.
 
 use replica::body::ContentCommitment;
+use replica::body::{BodyId, SchemaId, WorldId};
 use replica::frontier::ReplicaFrontier;
-use replica::ids::{BodyId, SchemaId, WorldId};
 
 #[test]
 fn body_id_all_zero_renders_26_a_and_roundtrips() {

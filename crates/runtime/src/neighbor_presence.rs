@@ -1,3 +1,7 @@
+#![allow(
+    clippy::expect_used,
+    reason = "presence records use derived serialization over bounded fixed-layout values"
+)]
 //! Neighbor presence v1 — an authenticated two-message liveness challenge
 //! (`lait/neighbor-presence/1`), the S4 replacement for the raw `PRESENCE_ALPN`
 //! dial.
@@ -5,11 +9,11 @@
 //! The exchange proves a Neighbor is reachable *now* without conferring any
 //! standing: it carries no frontier, routes, standing, or authority material.
 //! Both messages are signed (`.../probe`, `.../ack`); each signature key must
-//! match its StationId, and the StationId must equal the negotiated transport
+//! match its Key, and the Key must equal the negotiated transport
 //! identity (in LAIT a peer *is* its device key). Nonces come from the OS
 //! CSPRNG; challenges are single-use for one exchange.
 
-use mechanics::ids::StationId;
+use mechanics::station::Key;
 use serde::{Deserialize, Serialize};
 
 use crate::wire::length_framed;
@@ -56,12 +60,12 @@ pub struct PresenceAck {
 
 /// Why a presence message failed validation.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PresenceError {
+pub enum Invalid {
     /// The signed protocol field names a version this build does not speak.
     UnsupportedProtocol(u16),
     UnsupportedSignatureAlgorithm(u8),
     NonCanonical,
-    /// A signer/StationId/transport identity did not agree.
+    /// A signer/Key/transport identity did not agree.
     IdentityMismatch,
     /// The Space did not match the expected exchange Space (cross-Space replay).
     SpaceMismatch,
@@ -70,24 +74,24 @@ pub enum PresenceError {
     BadSignature,
 }
 
-impl std::fmt::Display for PresenceError {
+impl std::fmt::Display for Invalid {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{self:?}")
     }
 }
-impl std::error::Error for PresenceError {}
+impl std::error::Error for Invalid {}
 
-fn decode_canonical<T>(bytes: &[u8]) -> Result<T, PresenceError>
+fn decode_canonical<T>(bytes: &[u8]) -> Result<T, Invalid>
 where
     T: serde::de::DeserializeOwned + Serialize,
 {
     if bytes.len() > MAX_MESSAGE {
-        return Err(PresenceError::NonCanonical);
+        return Err(Invalid::NonCanonical);
     }
-    let value: T = postcard::from_bytes(bytes).map_err(|_| PresenceError::NonCanonical)?;
-    let re = postcard::to_stdvec(&value).map_err(|_| PresenceError::NonCanonical)?;
+    let value: T = postcard::from_bytes(bytes).map_err(|_| Invalid::NonCanonical)?;
+    let re = postcard::to_stdvec(&value).map_err(|_| Invalid::NonCanonical)?;
     if re != bytes {
-        return Err(PresenceError::NonCanonical);
+        return Err(Invalid::NonCanonical);
     }
     Ok(value)
 }
@@ -122,7 +126,7 @@ impl PresenceProbe {
         nonce: [u8; 32],
         initiator_seed: &[u8; 32],
     ) -> Option<Self> {
-        let station = mechanics::crypto::device_from_seed(initiator_seed).key_bytes()?;
+        let station = mechanics::actor::device_from_seed(initiator_seed).key_bytes()?;
         let preimage = Self::preimage(
             protocol,
             &space,
@@ -131,7 +135,7 @@ impl PresenceProbe {
             &station,
             &nonce,
         );
-        let signature = mechanics::crypto::sign_detached(initiator_seed, &preimage);
+        let signature = mechanics::actor::sign_detached(initiator_seed, &preimage);
         Some(Self {
             protocol,
             space,
@@ -148,7 +152,7 @@ impl PresenceProbe {
         postcard::to_stdvec(self).expect("postcard probe")
     }
 
-    pub fn decode(bytes: &[u8]) -> Result<Self, PresenceError> {
+    pub fn decode(bytes: &[u8]) -> Result<Self, Invalid> {
         decode_canonical(bytes)
     }
 
@@ -166,28 +170,24 @@ impl PresenceProbe {
     }
 
     /// Verify the probe: algorithm, the expected exchange Space (rejecting a
-    /// cross-Space replay), the initiator's signature, and that its StationId
+    /// cross-Space replay), the initiator's signature, and that its Key
     /// equals its transport identity and the connection peer.
-    pub fn verify(
-        &self,
-        expected_space: &[u8; 29],
-        transport_peer: &StationId,
-    ) -> Result<(), PresenceError> {
+    pub fn verify(&self, expected_space: &[u8; 29], transport_peer: &Key) -> Result<(), Invalid> {
         if self.protocol != PRESENCE_PROTOCOL {
-            return Err(PresenceError::UnsupportedProtocol(self.protocol));
+            return Err(Invalid::UnsupportedProtocol(self.protocol));
         }
         if self.signature_algorithm != SIG_ALG_ED25519 {
-            return Err(PresenceError::UnsupportedSignatureAlgorithm(
+            return Err(Invalid::UnsupportedSignatureAlgorithm(
                 self.signature_algorithm,
             ));
         }
         if &self.space != expected_space {
-            return Err(PresenceError::SpaceMismatch);
+            return Err(Invalid::SpaceMismatch);
         }
         if self.initiator_station != self.initiator_transport
             || self.initiator_transport != transport_peer.key_bytes()
         {
-            return Err(PresenceError::IdentityMismatch);
+            return Err(Invalid::IdentityMismatch);
         }
         let preimage = Self::preimage(
             self.protocol,
@@ -197,9 +197,8 @@ impl PresenceProbe {
             &self.initiator_transport,
             &self.nonce,
         );
-        if !mechanics::crypto::verify_detached(&self.initiator_station, &preimage, &self.signature)
-        {
-            return Err(PresenceError::BadSignature);
+        if !mechanics::actor::verify_detached(&self.initiator_station, &preimage, &self.signature) {
+            return Err(Invalid::BadSignature);
         }
         Ok(())
     }
@@ -218,10 +217,10 @@ impl PresenceAck {
 
     /// Sign an ack answering `probe` from the responder's device seed.
     pub fn sign(probe: &PresenceProbe, nonce: [u8; 32], responder_seed: &[u8; 32]) -> Option<Self> {
-        let responder = mechanics::crypto::device_from_seed(responder_seed).key_bytes()?;
+        let responder = mechanics::actor::device_from_seed(responder_seed).key_bytes()?;
         let probe_hash = probe.hash();
         let preimage = Self::preimage(&probe_hash, &responder, &nonce);
-        let signature = mechanics::crypto::sign_detached(responder_seed, &preimage);
+        let signature = mechanics::actor::sign_detached(responder_seed, &preimage);
         Some(Self {
             probe_hash,
             responder_transport: responder,
@@ -235,43 +234,39 @@ impl PresenceAck {
         postcard::to_stdvec(self).expect("postcard ack")
     }
 
-    pub fn decode(bytes: &[u8]) -> Result<Self, PresenceError> {
+    pub fn decode(bytes: &[u8]) -> Result<Self, Invalid> {
         decode_canonical(bytes)
     }
 
     /// Verify the ack against the probe it answers and the responder's
     /// negotiated transport identity. Rejects reflection (echoing the probe's
     /// nonce), commitment mismatch, and identity/signature substitution.
-    pub fn verify(
-        &self,
-        probe: &PresenceProbe,
-        transport_peer: &StationId,
-    ) -> Result<(), PresenceError> {
+    pub fn verify(&self, probe: &PresenceProbe, transport_peer: &Key) -> Result<(), Invalid> {
         if self.signature_algorithm != SIG_ALG_ED25519 {
-            return Err(PresenceError::UnsupportedSignatureAlgorithm(
+            return Err(Invalid::UnsupportedSignatureAlgorithm(
                 self.signature_algorithm,
             ));
         }
         // The ack must commit to exactly this probe.
         if self.probe_hash != probe.hash() {
-            return Err(PresenceError::ChallengeMismatch);
+            return Err(Invalid::ChallengeMismatch);
         }
         // A single-use challenge: the responder must present a fresh nonce, not
         // reflect the initiator's.
         if self.nonce == probe.nonce {
-            return Err(PresenceError::ChallengeMismatch);
+            return Err(Invalid::ChallengeMismatch);
         }
         // The responder's transport identity must be the probe's responder
         // Station and the negotiated connection peer.
         if self.responder_transport != probe.responder_station
             || self.responder_transport != transport_peer.key_bytes()
         {
-            return Err(PresenceError::IdentityMismatch);
+            return Err(Invalid::IdentityMismatch);
         }
         let preimage = Self::preimage(&self.probe_hash, &self.responder_transport, &self.nonce);
-        if !mechanics::crypto::verify_detached(&probe.responder_station, &preimage, &self.signature)
+        if !mechanics::actor::verify_detached(&probe.responder_station, &preimage, &self.signature)
         {
-            return Err(PresenceError::BadSignature);
+            return Err(Invalid::BadSignature);
         }
         Ok(())
     }

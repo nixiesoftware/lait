@@ -1,3 +1,7 @@
+// Picker offsets are clamped to the current non-empty row set before bounded
+// slicing and terminal-coordinate arithmetic.
+#![allow(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
+
 //! List-rendering machinery for the inline `lait members` picker: windowing
 //! (keep the selection visible) plus row styling.
 //!

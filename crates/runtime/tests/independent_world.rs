@@ -14,27 +14,32 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use mechanics::crypto::AuthorizedBodyKey;
-use mechanics::ids::{ActorId, DeviceId, SpaceId, StationId};
-use replica::body::{BodyOp, BodySchema, CollaborativeSchema, MutationModel};
+use mechanics::authorization::AuthorizedBodyKey;
+use mechanics::{
+    ids::{ActorId, DeviceId, SpaceId},
+    station::Key,
+};
+use replica::body::{BodyId, BodyKey, EncodingId, SchemaId, WorldId};
+use replica::body::{CollaborativeSchema, MutationModel, Op, Schema};
 use replica::frontier::{AuthorityFrontier, ReplicaFrontier};
-use replica::ids::{BodyId, BodyKey, EncodingId, SchemaId, WorldId};
 use runtime::coordinates::{ApproachRoute, CoordinatesAdmission, CoordinatesPayload};
 
 #[allow(dead_code)]
 fn any_demand() -> Vec<u8> {
-    mechanics::demand::AuthorizationDemand::require(
-        mechanics::demand::PolicyCapability::new("w", "c"),
-        mechanics::demand::PolicyResource::space("w"),
+    mechanics::authorization::AuthorizationDemand::require(
+        mechanics::authorization::PolicyCapability::new("w", "c"),
+        mechanics::authorization::Resource::root("w"),
     )
     .encode_canonical()
     .expect("canonical demand")
 }
+use runtime::world::{Conflict, Failure as SessionFailure, Interruption};
 use runtime::{
-    ActivationOptions, CommsOptions, ContactMechanics, ContactOptions, EnterOptions, LocalIdentity,
-    ObservationCursor, ObservationStreamError, RequestId, Runtime, RuntimeBuilder, Session,
-    SignedCoordinates, World, WorldContext, WorldEffect, WorldError, WorldIntent, WorldLimits,
-    WorldProjection, WorldQuery, WorldRegistration, WorldVersion,
+    coordinates::SignedCoordinates, plane::contact::Authority, plane::Activation,
+    plane::CommsOptions, world::Builder, world::Context, world::Descriptor, world::Effect,
+    world::Intent, world::Limits, world::LocalIdentity, world::ObservationCursor,
+    world::Projection, world::Query, world::Rejection, world::RequestId, world::Version,
+    world::World, Runtime, Session,
 };
 
 const FOUNDER_SEED: [u8; 32] = [7u8; 32];
@@ -71,7 +76,7 @@ fn coordinates() -> (SpaceId, SignedCoordinates) {
         recovery_root: rc,
         founder_inception: postcard::to_stdvec(&incept).unwrap(),
         display_name_hint: "Independent".into(),
-        approach_station: mechanics::crypto::device_from_seed(&STATION_A_SEED)
+        approach_station: mechanics::actor::device_from_seed(&STATION_A_SEED)
             .key_bytes()
             .unwrap(),
         approach_nick_hint: "a".into(),
@@ -87,7 +92,7 @@ fn coordinates() -> (SpaceId, SignedCoordinates) {
 /// The multi-schema independent World.
 struct MultiWorld {
     id: WorldId,
-    schemas: Vec<BodySchema>,
+    schemas: Vec<Schema>,
 }
 
 impl MultiWorld {
@@ -95,14 +100,14 @@ impl MultiWorld {
         Self {
             id: WorldId::parse("dev.example.multi").unwrap(),
             schemas: vec![
-                BodySchema {
+                Schema {
                     id: SchemaId::parse("entry").unwrap(),
                     version: 1,
                     encoding: EncodingId::parse("bytes").unwrap(),
                     mutation: MutationModel::Atomic,
                     readable_predecessors: vec![],
                 },
-                BodySchema {
+                Schema {
                     id: SchemaId::parse("pad").unwrap(),
                     version: 1,
                     encoding: EncodingId::parse("collab").unwrap(),
@@ -127,37 +132,33 @@ impl World for MultiWorld {
     fn id(&self) -> WorldId {
         self.id.clone()
     }
-    fn schemas(&self) -> &[BodySchema] {
+    fn schemas(&self) -> &[Schema] {
         &self.schemas
     }
-    fn submit(
-        &self,
-        ctx: &mut WorldContext<'_>,
-        intent: WorldIntent,
-    ) -> Result<WorldEffect, WorldError> {
+    fn submit(&self, ctx: &mut Context<'_>, intent: Intent) -> Result<Effect, Rejection> {
         let v: serde_json::Value =
-            serde_json::from_slice(&intent.payload).map_err(|_| WorldError::InvalidRequest)?;
-        let op = v["op"].as_str().ok_or(WorldError::InvalidRequest)?;
+            serde_json::from_slice(&intent.payload).map_err(|_| Rejection::InvalidRequest)?;
+        let op = v["op"].as_str().ok_or(Rejection::InvalidRequest)?;
         let mut operations = Vec::new();
         let mut declarations = Vec::new();
-        let mut scopes = Vec::new();
-        let mut declare = |key: &BodyKey, schema: &str, ops: &mut Vec<_>, op: BodyOp| {
-            declarations.push(runtime::BodyDeclaration {
+        let mut bodies = Vec::new();
+        let mut declare = |key: &BodyKey, schema: &str, ops: &mut Vec<_>, op: Op| {
+            declarations.push(runtime::world::BodyDeclaration {
                 key: key.clone(),
                 schema: SchemaId::parse(schema).unwrap(),
                 schema_version: 1,
             });
-            scopes.push(key.clone());
+            bodies.push(key.clone());
             ops.push((key.clone(), op));
         };
         match op {
             "set" => {
-                let key = self.entry_key(v["k"].as_str().ok_or(WorldError::InvalidRequest)?);
+                let key = self.entry_key(v["k"].as_str().ok_or(Rejection::InvalidRequest)?);
                 declare(
                     &key,
                     "entry",
                     &mut operations,
-                    BodyOp::ReplaceAtomic {
+                    Op::ReplaceAtomic {
                         value: v["v"].as_str().unwrap_or_default().as_bytes().to_vec(),
                     },
                 );
@@ -174,7 +175,7 @@ impl World for MultiWorld {
                     &key,
                     "pad",
                     &mut operations,
-                    BodyOp::TextSplice {
+                    Op::TextSplice {
                         path: "body".into(),
                         index: at,
                         delete: 0,
@@ -183,12 +184,12 @@ impl World for MultiWorld {
                 );
             }
             "both" => {
-                let key = self.entry_key(v["k"].as_str().ok_or(WorldError::InvalidRequest)?);
+                let key = self.entry_key(v["k"].as_str().ok_or(Rejection::InvalidRequest)?);
                 declare(
                     &key,
                     "entry",
                     &mut operations,
-                    BodyOp::ReplaceAtomic {
+                    Op::ReplaceAtomic {
                         value: v["v"].as_str().unwrap_or_default().as_bytes().to_vec(),
                     },
                 );
@@ -197,7 +198,7 @@ impl World for MultiWorld {
                     &pad,
                     "pad",
                     &mut operations,
-                    BodyOp::TextSplice {
+                    Op::TextSplice {
                         path: "body".into(),
                         index: 0,
                         delete: 0,
@@ -213,7 +214,7 @@ impl World for MultiWorld {
                     &key,
                     "entry",
                     &mut operations,
-                    BodyOp::ReplaceAtomic {
+                    Op::ReplaceAtomic {
                         value: b"must not survive".to_vec(),
                     },
                 );
@@ -222,30 +223,26 @@ impl World for MultiWorld {
                     &pad,
                     "pad",
                     &mut operations,
-                    BodyOp::ListRemove {
+                    Op::ListRemove {
                         path: "items".into(),
                         element: "0".repeat(32),
                     },
                 );
             }
-            _ => return Err(WorldError::InvalidRequest),
+            _ => return Err(Rejection::InvalidRequest),
         }
-        Ok(WorldEffect {
+        Ok(Effect {
             content_refs: Vec::new(),
             demand: any_demand(),
             operations,
-            scopes,
+            bodies,
             effect: vec![],
             declarations,
         })
     }
-    fn query(
-        &self,
-        ctx: &WorldContext<'_>,
-        query: WorldQuery,
-    ) -> Result<WorldProjection, WorldError> {
+    fn query(&self, ctx: &Context<'_>, query: Query) -> Result<Projection, Rejection> {
         let v: serde_json::Value =
-            serde_json::from_slice(&query.payload).map_err(|_| WorldError::InvalidRequest)?;
+            serde_json::from_slice(&query.payload).map_err(|_| Rejection::InvalidRequest)?;
         let bytes = match v["q"].as_str() {
             Some("entry") => ctx
                 .read_body(&self.entry_key(v["k"].as_str().unwrap_or_default()))
@@ -256,9 +253,9 @@ impl World for MultiWorld {
                 .and_then(|p| p.texts.get("body").cloned())
                 .unwrap_or_default()
                 .into_bytes(),
-            _ => return Err(WorldError::InvalidRequest),
+            _ => return Err(Rejection::InvalidRequest),
         };
-        Ok(WorldProjection {
+        Ok(Projection {
             demand: any_demand(),
             schema: SchemaId::parse("entry").unwrap(),
             schema_version: 1,
@@ -277,15 +274,15 @@ struct FlipAuthority {
 /// receipt — the permissive delegate for the writer-only view's allow path.
 struct PermissiveAuthority;
 
-impl runtime::AuthorityView for PermissiveAuthority {
-    fn resolve(&self, _device: &DeviceId) -> Option<runtime::PrincipalResolution> {
+impl runtime::world::AuthorityView for PermissiveAuthority {
+    fn resolve(&self, _device: &DeviceId) -> Option<runtime::world::PrincipalResolution> {
         None
     }
 }
 
-impl runtime::AuthorityView for FlipAuthority {
-    fn resolve(&self, _device: &DeviceId) -> Option<runtime::PrincipalResolution> {
-        Some(runtime::PrincipalResolution {
+impl runtime::world::AuthorityView for FlipAuthority {
+    fn resolve(&self, _device: &DeviceId) -> Option<runtime::world::PrincipalResolution> {
+        Some(runtime::world::PrincipalResolution {
             actor: ActorId::from_incept_hash(&"a".repeat(64)),
             authority_frontier: AuthorityFrontier::from_canonical_bytes(
                 self.frontier.lock().unwrap().clone(),
@@ -307,10 +304,10 @@ impl runtime::AuthorityView for FlipAuthority {
         demand: &[u8],
         operations_digest: [u8; 32],
         core_digest: [u8; 32],
-    ) -> Result<Vec<u8>, String> {
+    ) -> Result<Vec<u8>, mechanics::authorization::Refusal> {
         // The coarse per-device write gate lives in the view, as the orbital
         // composition's demand evaluation does — never in the World callback.
-        let writer = mechanics::crypto::device_from_seed(&WRITER_SEED);
+        let writer = mechanics::actor::device_from_seed(&WRITER_SEED);
         if device != &writer {
             return Err("device holds no write authority".into());
         }
@@ -331,21 +328,21 @@ impl runtime::AuthorityView for FlipAuthority {
 }
 
 struct AnyKnownSigner;
-impl replica::AuthoritySource for AnyKnownSigner {
+impl replica::transaction::AuthoritySource for AnyKnownSigner {
     fn signer_authorized(&self, signer: &[u8; 32], _f: &AuthorityFrontier) -> bool {
         [WRITER_SEED, STATION_A_SEED, STATION_B_SEED, STATION_C_SEED]
             .iter()
-            .any(|seed| mechanics::crypto::device_from_seed(seed).key_bytes() == Some(*signer))
+            .any(|seed| mechanics::actor::device_from_seed(seed).key_bytes() == Some(*signer))
     }
 }
 
 struct AcceptingIncorporator;
-impl replica::AuthorityIncorporator for AcceptingIncorporator {
+impl replica::convergence::AuthorityIncorporator for AcceptingIncorporator {
     fn incorporate_authority(
         &mut self,
         _records: &[Vec<u8>],
-    ) -> Result<replica::AuthorityBatchReceipt, String> {
-        Ok(replica::AuthorityBatchReceipt {
+    ) -> Result<replica::convergence::AuthorityBatchReceipt, replica::convergence::Failure> {
+        Ok(replica::convergence::AuthorityBatchReceipt {
             space: coordinates().0,
             prior_frontier: replica::frontier::AuthorityFrontier::from_canonical_bytes(vec![]),
             resulting_frontier: AuthorityFrontier::from_canonical_bytes(vec![6]),
@@ -354,25 +351,25 @@ impl replica::AuthorityIncorporator for AcceptingIncorporator {
     }
 }
 
-fn test_keys() -> Arc<dyn replica::BodyKeySource> {
-    Arc::new(replica::StaticBodyKeys::new(
+fn test_keys() -> Arc<dyn replica::body::BodyKeySource> {
+    Arc::new(replica::body::StaticBodyKeys::new(
         AuthorizedBodyKey::for_authorized_epoch(EPOCH, EPOCH_KEY),
     ))
 }
 
-fn registry(with_world: bool) -> runtime::WorldRegistry {
-    let mut builder = RuntimeBuilder::new();
+fn registry(with_world: bool) -> runtime::world::Catalog {
+    let mut builder = Builder::new();
     if with_world {
         let world = MultiWorld::new();
-        let reg = WorldRegistration {
+        let reg = Descriptor {
             id: world.id(),
-            implementation_version: WorldVersion(1),
+            implementation_version: Version(1),
             schemas: world.schemas().to_vec(),
-            limits: WorldLimits::default(),
+            limits: Limits::default(),
             scope_schemas: Vec::new(),
             signal_schemas: Vec::new(),
         };
-        builder = builder.register(reg, Arc::new(world));
+        builder = builder.register(Arc::new(world));
     }
     builder.build().unwrap()
 }
@@ -387,7 +384,7 @@ fn comms_options(transport: Arc<dyn comms::Transport>, seed: [u8; 32]) -> CommsO
     CommsOptions {
         transport,
         station_seed: seed,
-        mechanics: ContactMechanics {
+        authority: Authority {
             source: Arc::new(AnyKnownSigner),
             incorporator: Arc::new(Mutex::new(AcceptingIncorporator)),
             export: Arc::new(Vec::new),
@@ -414,11 +411,11 @@ fn submit_json(
     request: RequestId,
     schema: &str,
     value: serde_json::Value,
-) -> Result<runtime::CommittedEffect, WorldError> {
+) -> Result<runtime::world::CommittedEffect, SessionFailure> {
     let action = identity.sign_action(
         session,
         request,
-        WorldIntent {
+        Intent {
             schema: SchemaId::parse(schema).unwrap(),
             schema_version: 1,
             payload: serde_json::to_vec(&value).unwrap(),
@@ -429,7 +426,7 @@ fn submit_json(
 
 fn query_json(session: &Session, value: serde_json::Value) -> Vec<u8> {
     session
-        .query(WorldQuery {
+        .query(Query {
             schema: SchemaId::parse("entry").unwrap(),
             schema_version: 1,
             payload: serde_json::to_vec(&value).unwrap(),
@@ -444,9 +441,9 @@ fn bodies_authority_restart_idempotency_and_observation() {
     let auth = authority();
     let rt = Runtime::open(root.clone(), registry(true), auth.clone(), test_keys());
     let station = rt
-        .form_space(runtime::SpaceFormationOptions::default())
+        .create()
         .unwrap()
-        .activate(ActivationOptions {
+        .open(Activation {
             planes: Default::default(),
             content: Default::default(),
             drain_deadline: Duration::from_secs(5),
@@ -488,7 +485,7 @@ fn bodies_authority_restart_idempotency_and_observation() {
         serde_json::json!({"op":"bad_both"}),
     )
     .unwrap_err();
-    assert_eq!(err, WorldError::InvalidRequest);
+    assert_eq!(err, SessionFailure::Rejected(Rejection::InvalidRequest));
     assert_eq!(station.frontier(), before);
     assert_eq!(
         query_json(&session, serde_json::json!({"q":"entry","k":"poisoned"})),
@@ -507,7 +504,7 @@ fn bodies_authority_restart_idempotency_and_observation() {
             "entry",
             serde_json::json!({"op":"set","k":"x","v":"y"}),
         ),
-        Err(WorldError::Denied)
+        Err(SessionFailure::Rejected(Rejection::Denied))
     );
 
     // Authority change between signing and submit commits nothing.
@@ -515,7 +512,7 @@ fn bodies_authority_restart_idempotency_and_observation() {
         .sign_action(
             &session,
             RequestId::mint(),
-            WorldIntent {
+            Intent {
                 schema: SchemaId::parse("entry").unwrap(),
                 schema_version: 1,
                 payload: serde_json::to_vec(&serde_json::json!({"op":"set","k":"stale","v":"no"}))
@@ -524,7 +521,10 @@ fn bodies_authority_restart_idempotency_and_observation() {
         )
         .unwrap();
     *auth.frontier.lock().unwrap() = vec![7, 7];
-    assert_eq!(session.submit(stale), Err(WorldError::AuthorityChanged));
+    assert_eq!(
+        session.submit(stale),
+        Err(SessionFailure::Conflict(Conflict::AuthorityChanged))
+    );
     *auth.frontier.lock().unwrap() = vec![6];
 
     // Observation backpressure: capacity 1, three commits — an old cursor
@@ -552,7 +552,7 @@ fn bodies_authority_restart_idempotency_and_observation() {
         .sign_action(
             &session,
             request,
-            WorldIntent {
+            Intent {
                 schema: SchemaId::parse("pad").unwrap(),
                 schema_version: 1,
                 payload: serde_json::to_vec(&serde_json::json!({"op":"pad","text":"-again"}))
@@ -570,9 +570,9 @@ fn bodies_authority_restart_idempotency_and_observation() {
     // Offline restart: acknowledged state is immediately queryable, streams
     // rebaseline, and the identical retry replays.
     let station = rt
-        .orbit(&space)
+        .acquire(&space)
         .unwrap()
-        .activate(ActivationOptions::offline())
+        .open(Activation::offline())
         .unwrap();
     let session = station.dock(&world_id(), &writer()).unwrap();
     assert_eq!(
@@ -591,10 +591,10 @@ fn bodies_authority_restart_idempotency_and_observation() {
     // Dormancy terminates streams typed and refuses new work.
     let mut stream = session.observe(None);
     let _ = stream.try_next();
-    let _ = station.go_dormant().unwrap();
+    let _ = station.vacate().unwrap();
     assert_eq!(
         stream.next_timeout(Duration::from_millis(200)),
-        Err(ObservationStreamError::StationDormant)
+        Err(Interruption::StationDormant)
     );
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -604,11 +604,11 @@ fn beacons_contact_and_opaque_forwarding_across_three_stations() {
     let (_space, coords) = coordinates();
     let net = comms::mem::MemNet::new();
     let ta: Arc<dyn comms::Transport> =
-        Arc::new(net.peer(mechanics::crypto::device_from_seed(&STATION_A_SEED)));
+        Arc::new(net.peer(mechanics::actor::device_from_seed(&STATION_A_SEED)));
     let tb: Arc<dyn comms::Transport> =
-        Arc::new(net.peer(mechanics::crypto::device_from_seed(&STATION_B_SEED)));
+        Arc::new(net.peer(mechanics::actor::device_from_seed(&STATION_B_SEED)));
     let tc: Arc<dyn comms::Transport> =
-        Arc::new(net.peer(mechanics::crypto::device_from_seed(&STATION_C_SEED)));
+        Arc::new(net.peer(mechanics::actor::device_from_seed(&STATION_C_SEED)));
 
     // A holds the World and commits; B is World-FREE (an unavailable World
     // deployment); C holds the World again.
@@ -620,9 +620,9 @@ fn beacons_contact_and_opaque_forwarding_across_three_stations() {
     let rt_c = Runtime::open(root_c.clone(), registry(true), authority(), test_keys());
 
     let station_a = rt_a
-        .enter_orbit(&coords, EnterOptions)
+        .materialize(&coords)
         .unwrap()
-        .activate(ActivationOptions {
+        .open(Activation {
             planes: Default::default(),
             content: Default::default(),
             drain_deadline: Duration::from_secs(5),
@@ -641,9 +641,9 @@ fn beacons_contact_and_opaque_forwarding_across_three_stations() {
     .unwrap();
 
     let station_b = rt_b
-        .enter_orbit(&coords, EnterOptions)
+        .materialize(&coords)
         .unwrap()
-        .activate(ActivationOptions {
+        .open(Activation {
             planes: Default::default(),
             content: Default::default(),
             drain_deadline: Duration::from_secs(5),
@@ -654,10 +654,7 @@ fn beacons_contact_and_opaque_forwarding_across_three_stations() {
     // B pulls A: the material is legitimate but its World is unavailable —
     // retained opaquely, never interpreted.
     let outcome = station_b
-        .contact(
-            &StationId::from_device(&mechanics::crypto::device_from_seed(&STATION_A_SEED)).unwrap(),
-            ContactOptions,
-        )
+        .contact(&Key::from_device(&mechanics::actor::device_from_seed(&STATION_A_SEED)).unwrap())
         .unwrap();
     assert!(outcome.convergence.unsupported_retained >= 1);
     assert_eq!(outcome.convergence.accepted, 0);
@@ -665,9 +662,9 @@ fn beacons_contact_and_opaque_forwarding_across_three_stations() {
     // A Beacon from B queues C's scheduler: fully automatic convergence of
     // the forwarded (still-opaque-at-B) material into C, which CAN interpret.
     let station_c = rt_c
-        .enter_orbit(&coords, EnterOptions)
+        .materialize(&coords)
         .unwrap()
-        .activate(ActivationOptions {
+        .open(Activation {
             planes: Default::default(),
             content: Default::default(),
             drain_deadline: Duration::from_secs(5),
@@ -675,7 +672,7 @@ fn beacons_contact_and_opaque_forwarding_across_three_stations() {
             observation_capacity: 0,
         })
         .unwrap();
-    let beacon = runtime::SignedBeacon::emit(
+    let beacon = runtime::beacon::SignedBeacon::emit(
         runtime::beacon::BEACON_PROTOCOL,
         station_b.space_id(),
         station_b.epoch(),
@@ -690,8 +687,7 @@ fn beacons_contact_and_opaque_forwarding_across_three_stations() {
     station_c.observe_beacon(&beacon.encode());
     // Beacon ingestion rides the Station driver: poll (bounded) for the
     // registry to reflect it.
-    let b_station =
-        StationId::from_device(&mechanics::crypto::device_from_seed(&STATION_B_SEED)).unwrap();
+    let b_station = Key::from_device(&mechanics::actor::device_from_seed(&STATION_B_SEED)).unwrap();
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {
         if station_c.neighbors().iter().any(|n| n.station == b_station) {
@@ -719,9 +715,9 @@ fn beacons_contact_and_opaque_forwarding_across_three_stations() {
         std::thread::sleep(Duration::from_millis(25));
     }
 
-    let _ = station_a.go_dormant();
-    let _ = station_b.go_dormant();
-    let _ = station_c.go_dormant();
+    let _ = station_a.vacate();
+    let _ = station_b.vacate();
+    let _ = station_c.vacate();
     let _ = std::fs::remove_dir_all(&root_a);
     let _ = std::fs::remove_dir_all(&root_b);
     let _ = std::fs::remove_dir_all(&root_c);
@@ -735,13 +731,13 @@ fn the_eclipse_fence_quarantines_unadmitted_beacon_emitters() {
     let (_space, coords) = coordinates();
     let net = comms::mem::MemNet::new();
     let tc: Arc<dyn comms::Transport> =
-        Arc::new(net.peer(mechanics::crypto::device_from_seed(&STATION_C_SEED)));
+        Arc::new(net.peer(mechanics::actor::device_from_seed(&STATION_C_SEED)));
     let root_c = temp_root("fence-c");
     let rt_c = Runtime::open(root_c.clone(), registry(true), authority(), test_keys());
     let station_c = rt_c
-        .enter_orbit(&coords, EnterOptions)
+        .materialize(&coords)
         .unwrap()
-        .activate(ActivationOptions {
+        .open(Activation {
             planes: Default::default(),
             content: Default::default(),
             drain_deadline: Duration::from_secs(5),
@@ -752,7 +748,7 @@ fn the_eclipse_fence_quarantines_unadmitted_beacon_emitters() {
 
     // A stranger key AnyKnownSigner does not authorize.
     const STRANGER_SEED: [u8; 32] = [99u8; 32];
-    let stranger_beacon = runtime::SignedBeacon::emit(
+    let stranger_beacon = runtime::beacon::SignedBeacon::emit(
         runtime::beacon::BEACON_PROTOCOL,
         station_c.space_id(),
         station_c.epoch(),
@@ -768,7 +764,7 @@ fn the_eclipse_fence_quarantines_unadmitted_beacon_emitters() {
 
     // Prove the ingestion pipeline is live with an ADMITTED emitter, then
     // check the stranger stayed out — absence is meaningful, not a race.
-    let admitted_beacon = runtime::SignedBeacon::emit(
+    let admitted_beacon = runtime::beacon::SignedBeacon::emit(
         runtime::beacon::BEACON_PROTOCOL,
         station_c.space_id(),
         station_c.epoch(),
@@ -781,10 +777,9 @@ fn the_eclipse_fence_quarantines_unadmitted_beacon_emitters() {
     )
     .unwrap();
     station_c.observe_beacon(&admitted_beacon.encode());
-    let b_station =
-        StationId::from_device(&mechanics::crypto::device_from_seed(&STATION_B_SEED)).unwrap();
+    let b_station = Key::from_device(&mechanics::actor::device_from_seed(&STATION_B_SEED)).unwrap();
     let stranger_station =
-        StationId::from_device(&mechanics::crypto::device_from_seed(&STRANGER_SEED)).unwrap();
+        Key::from_device(&mechanics::actor::device_from_seed(&STRANGER_SEED)).unwrap();
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {
         let neighbors = station_c.neighbors();
@@ -810,6 +805,6 @@ fn the_eclipse_fence_quarantines_unadmitted_beacon_emitters() {
         "the stranger appeared after the admitted beacon"
     );
 
-    let _ = station_c.go_dormant();
+    let _ = station_c.vacate();
     let _ = std::fs::remove_dir_all(&root_c);
 }

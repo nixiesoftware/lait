@@ -19,13 +19,13 @@ use std::time::Duration;
 use comms::mem::MemNet;
 use comms::policy::Network;
 use comms::{Alpn, Connection, DefaultTransport, Protocols, Transport};
-use mechanics::crypto::device_from_seed;
-use mechanics::ids::{ActorId, StationId};
-use runtime::planes::{stream_kind, Signal};
-use runtime::registry::RuntimeBuilder;
+use mechanics::actor::device_from_seed;
+use mechanics::{ids::ActorId, station::Key};
+use runtime::plane::{stream_kind, Signal};
 use runtime::signal::{
-    frame_signal, send_signal, serve_signal, SignalError, SignalOutcome, SignalPolicy,
+    frame_signal, send_signal, serve_signal, Refusal, SignalOutcome, SignalPolicy,
 };
+use runtime::world::Builder;
 use runtime::world::{AuthorityView, PrincipalResolution};
 
 const SESSION_ALPN: Alpn = b"lait/session/1";
@@ -139,8 +139,8 @@ fn actor() -> ActorId {
     ActorId::parse(&format!("act_{}", "ab".repeat(32))).expect("actor")
 }
 
-fn station(seed: u8) -> StationId {
-    StationId::from_device(&device_from_seed(&[seed; 32])).expect("station")
+fn station(seed: u8) -> Key {
+    Key::from_device(&device_from_seed(&[seed; 32])).expect("station")
 }
 
 /// A policy holding every lane this build serves.
@@ -153,22 +153,19 @@ fn policy(lanes: Vec<u8>) -> SignalPolicy {
         authority: Arc::new(Everyone),
         // No hosted Worlds. `WorldSignal` is refused on that basis below, which
         // is the honest shape: a build that hosts nothing can interpret nothing.
-        worlds: RuntimeBuilder::new().build().expect("empty registry"),
+        worlds: Builder::new().build().expect("empty registry"),
     }
 }
 
 /// Accept one flow on the responder and serve it as a signal.
-async fn serve_one(
-    connection: &dyn Connection,
-    policy: &SignalPolicy,
-) -> Result<Signal, SignalError> {
+async fn serve_one(connection: &dyn Connection, policy: &SignalPolicy) -> Result<Signal, Refusal> {
     let (mut send, mut recv) = connection
         .accept_bi()
         .await
         .expect("accept")
         .expect("a flow");
     // The caller of `serve_signal` owns the stream-kind byte, exactly as
-    // `LiveSession` does.
+    // `Connection` does.
     let kind = recv.read_exact(1).await.expect("kind byte");
     assert_eq!(kind[0], stream_kind::RELIABLE_SIGNAL);
     serve_signal(send.as_mut(), recv.as_mut(), policy).await
@@ -217,7 +214,7 @@ async fn a_one_way_signal_is_accepted_and_that_is_not_a_delivery_receipt() {
         });
 
         let attention = Signal::Attention {
-            scope: runtime::transient::TransientScope::IssueView {
+            scope: runtime::transient::Target::Body {
                 world: "com.example.notes".into(),
                 body: [4u8; 16],
             },
@@ -252,7 +249,7 @@ async fn an_ungranted_lane_is_refused_at_flow_open_and_the_connection_stays_up()
         let _ = send.finish();
 
         let refused = responder.await.expect("responder");
-        assert_eq!(refused, Err(SignalError::LaneNotGranted));
+        assert_eq!(refused, Err(Refusal::LaneNotGranted));
 
         // Refused at the flow, not at the connection: another flow still opens.
         assert!(pair.dialer.open_bi().await.is_ok());
@@ -281,7 +278,7 @@ async fn an_unknown_selector_is_refused_before_its_length_is_read() {
         let _ = send.finish();
 
         let refused = responder.await.expect("responder");
-        assert_eq!(refused, Err(SignalError::NotRegistered));
+        assert_eq!(refused, Err(Refusal::NotRegistered));
         assert!(pair.dialer.open_bi().await.is_ok(), "the connection stays");
     })
     .await;
@@ -307,7 +304,7 @@ async fn a_declared_length_over_the_schema_ceiling_is_refused_before_a_buffer_is
         let _ = send.finish();
 
         let refused = responder.await.expect("responder");
-        assert_eq!(refused, Err(SignalError::TooLarge));
+        assert_eq!(refused, Err(Refusal::TooLarge));
     })
     .await;
 }
@@ -341,7 +338,7 @@ async fn a_world_signal_for_a_world_this_build_does_not_host_is_refused() {
         let _ = send.finish();
 
         let refused = responder.await.expect("responder");
-        assert_eq!(refused, Err(SignalError::NotRegistered));
+        assert_eq!(refused, Err(Refusal::NotRegistered));
     })
     .await;
 }
@@ -364,7 +361,7 @@ async fn a_truncated_header_is_malformed_rather_than_a_hang() {
         let _ = send.finish();
 
         let refused = responder.await.expect("responder");
-        assert_eq!(refused, Err(SignalError::Malformed));
+        assert_eq!(refused, Err(Refusal::Malformed));
     })
     .await;
 }
@@ -410,46 +407,38 @@ async fn a_file_offer_crosses_intact_and_triggers_nothing() {
 /// membership alone.
 mod declared_schemas {
     use super::*;
-    use replica::body::{BodySchema, MutationModel};
-    use replica::ids::{EncodingId, SchemaId, WorldId};
+    use replica::body::{EncodingId, SchemaId, WorldId};
+    use replica::body::{MutationModel, Schema};
     use runtime::world::SignalSchema;
     use runtime::{
-        World, WorldContext, WorldEffect, WorldError, WorldIntent, WorldLimits, WorldProjection,
-        WorldQuery, WorldRegistration, WorldVersion,
+        world::Context, world::Descriptor, world::Effect, world::Intent, world::Limits,
+        world::Projection, world::Query, world::Rejection, world::Version, world::World,
     };
 
     const WORLD: &str = "dev.example.pad";
 
-    struct Pad(Vec<BodySchema>, Vec<SignalSchema>);
+    struct Pad(Vec<Schema>, Vec<SignalSchema>);
 
     impl World for Pad {
         fn id(&self) -> WorldId {
             WorldId::parse(WORLD).unwrap()
         }
-        fn schemas(&self) -> &[BodySchema] {
+        fn schemas(&self) -> &[Schema] {
             &self.0
         }
         fn signal_schemas(&self) -> &[SignalSchema] {
             &self.1
         }
-        fn submit(
-            &self,
-            _ctx: &mut WorldContext<'_>,
-            _intent: WorldIntent,
-        ) -> Result<WorldEffect, WorldError> {
-            Err(WorldError::InvalidRequest)
+        fn submit(&self, _ctx: &mut Context<'_>, _intent: Intent) -> Result<Effect, Rejection> {
+            Err(Rejection::InvalidRequest)
         }
-        fn query(
-            &self,
-            _ctx: &WorldContext<'_>,
-            _query: WorldQuery,
-        ) -> Result<WorldProjection, WorldError> {
-            Err(WorldError::InvalidRequest)
+        fn query(&self, _ctx: &Context<'_>, _query: Query) -> Result<Projection, Rejection> {
+            Err(Rejection::InvalidRequest)
         }
     }
 
     fn hosting(signals: Vec<SignalSchema>) -> SignalPolicy {
-        let schemas = vec![BodySchema {
+        let schemas = vec![Schema {
             id: SchemaId::parse("entry").unwrap(),
             version: 1,
             encoding: EncodingId::parse("bytes").unwrap(),
@@ -457,16 +446,8 @@ mod declared_schemas {
             readable_predecessors: vec![],
         }];
         let world = Pad(schemas.clone(), signals.clone());
-        let registration = WorldRegistration {
-            id: world.id(),
-            implementation_version: WorldVersion(1),
-            schemas,
-            limits: WorldLimits::default(),
-            scope_schemas: Vec::new(),
-            signal_schemas: signals,
-        };
-        let worlds = RuntimeBuilder::new()
-            .register(registration, Arc::new(world))
+        let worlds = Builder::new()
+            .register(Arc::new(world))
             .build()
             .expect("registry");
         SignalPolicy {
@@ -477,13 +458,13 @@ mod declared_schemas {
 
     /// A demand every registered signal schema must carry.
     ///
-    /// Not optional: `RuntimeBuilder::build` parses it through
+    /// Not optional: `Builder::build` parses it through
     /// `AuthorizationDemand::decode_canonical`, which refuses empty input — so a
     /// World cannot register a signal it declines to say anything about.
     fn some_demand() -> Vec<u8> {
-        mechanics::demand::AuthorizationDemand::require(
-            mechanics::demand::PolicyCapability::new("pad", "nudge"),
-            mechanics::demand::PolicyResource::space("pad"),
+        mechanics::authorization::AuthorizationDemand::require(
+            mechanics::authorization::PolicyCapability::new("pad", "nudge"),
+            mechanics::authorization::Resource::root("pad"),
         )
         .encode_canonical()
         .expect("canonical demand")
@@ -508,10 +489,7 @@ mod declared_schemas {
             demand: some_demand(),
         }]);
         assert_eq!(policy.admits_contents(&nudge(64)), Ok(()));
-        assert_eq!(
-            policy.admits_contents(&nudge(65)),
-            Err(SignalError::TooLarge)
-        );
+        assert_eq!(policy.admits_contents(&nudge(65)), Err(Refusal::TooLarge));
     }
 
     #[test]
@@ -529,10 +507,7 @@ mod declared_schemas {
             schema: "shout".into(),
             payload: vec![1],
         };
-        assert_eq!(
-            policy.admits_contents(&other),
-            Err(SignalError::NotRegistered)
-        );
+        assert_eq!(policy.admits_contents(&other), Err(Refusal::NotRegistered));
     }
 
     #[test]
@@ -542,7 +517,7 @@ mod declared_schemas {
         let policy = hosting(Vec::new());
         assert_eq!(
             policy.admits_contents(&nudge(1)),
-            Err(SignalError::NotRegistered)
+            Err(Refusal::NotRegistered)
         );
     }
 
@@ -551,7 +526,7 @@ mod declared_schemas {
         // Registration refuses an empty demand, which is why the delivery path
         // has no fallback for one. A signal a World declined to describe is a
         // signal nobody can decide about.
-        let schemas = vec![BodySchema {
+        let schemas = vec![Schema {
             id: SchemaId::parse("entry").unwrap(),
             version: 1,
             encoding: EncodingId::parse("bytes").unwrap(),
@@ -564,18 +539,7 @@ mod declared_schemas {
             demand: Vec::new(),
         }];
         let world = Pad(schemas.clone(), signals.clone());
-        let registration = WorldRegistration {
-            id: world.id(),
-            implementation_version: WorldVersion(1),
-            schemas,
-            limits: WorldLimits::default(),
-            scope_schemas: Vec::new(),
-            signal_schemas: signals,
-        };
-        assert!(RuntimeBuilder::new()
-            .register(registration, Arc::new(world))
-            .build()
-            .is_err());
+        assert!(Builder::new().register(Arc::new(world)).build().is_err());
     }
 
     #[test]

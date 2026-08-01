@@ -4,7 +4,7 @@
 //! `runtime` API only — the same surface an Issues-free consumer would use. It
 //! registers a small test World and drives Space formation, activation, docking,
 //! durable submit, committed-snapshot query, Observation, restart durability,
-//! the double-lock, per-request authorization, and destructive deorbit. Nothing
+//! the double-lock, per-request authorization, and destructive remove. Nothing
 //! here touches crate internals or product types.
 
 use std::path::PathBuf;
@@ -12,24 +12,25 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use mechanics::ids::{ActorId, DeviceId};
-use replica::body::{BodyOp, BodySchema, MutationModel};
+use replica::body::{BodyId, BodyKey, EncodingId, SchemaId, WorldId};
+use replica::body::{MutationModel, Op, Schema};
 use replica::frontier::{AuthorityFrontier, ReplicaFrontier};
-use replica::ids::{BodyId, BodyKey, EncodingId, SchemaId, WorldId};
 
 #[allow(dead_code)]
 fn any_demand() -> Vec<u8> {
-    mechanics::demand::AuthorizationDemand::require(
-        mechanics::demand::PolicyCapability::new("w", "c"),
-        mechanics::demand::PolicyResource::space("w"),
+    mechanics::authorization::AuthorizationDemand::require(
+        mechanics::authorization::PolicyCapability::new("w", "c"),
+        mechanics::authorization::Resource::root("w"),
     )
     .encode_canonical()
     .expect("canonical demand")
 }
+use runtime::Error as Failure;
 use runtime::{
-    ActivationOptions, AuthorityView, DeorbitConfirmation, LifecycleError, LocalIdentity,
-    PrincipalResolution, Runtime, RuntimeBuilder, SpaceFormationOptions, World, WorldContext,
-    WorldEffect, WorldError, WorldIntent, WorldLimits, WorldProjection, WorldQuery,
-    WorldRegistration, WorldVersion,
+    plane::Activation, world::AuthorityView, world::Builder, world::Context, world::Descriptor,
+    world::Effect, world::Intent, world::Limits, world::LocalIdentity, world::PrincipalResolution,
+    world::Projection, world::Query, world::Rejection, world::Version, world::World,
+    RemovalConfirmation, Runtime,
 };
 
 /// The consumer's writing device; a second device resolves with no grants.
@@ -72,10 +73,10 @@ impl AuthorityView for ConsumerAuthority {
         demand: &[u8],
         operations_digest: [u8; 32],
         core_digest: [u8; 32],
-    ) -> Result<Vec<u8>, String> {
+    ) -> Result<Vec<u8>, mechanics::authorization::Refusal> {
         // The coarse per-device write gate lives in the view, as the orbital
         // composition's demand evaluation does — never in the World callback.
-        let writer = mechanics::crypto::device_from_seed(&WRITER_SEED);
+        let writer = mechanics::actor::device_from_seed(&WRITER_SEED);
         if device != &writer {
             return Err("device holds no write authority".into());
         }
@@ -103,9 +104,9 @@ fn reader() -> LocalIdentity {
     Runtime::identity_from_seed(&READER_SEED)
 }
 
-fn test_keys() -> std::sync::Arc<dyn replica::BodyKeySource> {
-    std::sync::Arc::new(replica::StaticBodyKeys::new(
-        mechanics::crypto::AuthorizedBodyKey::for_authorized_epoch([1u8; 16], [2u8; 32]),
+fn test_keys() -> std::sync::Arc<dyn replica::body::BodyKeySource> {
+    std::sync::Arc::new(replica::body::StaticBodyKeys::new(
+        mechanics::authorization::AuthorizedBodyKey::for_authorized_epoch([1u8; 16], [2u8; 32]),
     ))
 }
 
@@ -113,9 +114,9 @@ fn test_keys() -> std::sync::Arc<dyn replica::BodyKeySource> {
 fn submit_as(
     session: &runtime::Session,
     identity: &LocalIdentity,
-    intent: WorldIntent,
-) -> Result<runtime::CommittedEffect, WorldError> {
-    session.submit(identity.sign_action(session, runtime::RequestId::mint(), intent)?)
+    intent: Intent,
+) -> Result<runtime::world::CommittedEffect, runtime::world::Failure> {
+    session.submit(identity.sign_action(session, runtime::world::RequestId::mint(), intent)?)
 }
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -132,14 +133,14 @@ fn temp_root() -> PathBuf {
 /// returns its committed value. Deterministic and product-free.
 struct KvWorld {
     id: WorldId,
-    schemas: Vec<BodySchema>,
+    schemas: Vec<Schema>,
 }
 
 impl KvWorld {
     fn new() -> Self {
         Self {
             id: WorldId::parse("dev.example.kv").unwrap(),
-            schemas: vec![BodySchema {
+            schemas: vec![Schema {
                 id: SchemaId::parse("entry").unwrap(),
                 version: 1,
                 encoding: EncodingId::parse("bytes").unwrap(),
@@ -162,39 +163,31 @@ impl World for KvWorld {
     fn id(&self) -> WorldId {
         self.id.clone()
     }
-    fn schemas(&self) -> &[BodySchema] {
+    fn schemas(&self) -> &[Schema] {
         &self.schemas
     }
-    fn submit(
-        &self,
-        _ctx: &mut WorldContext<'_>,
-        intent: WorldIntent,
-    ) -> Result<WorldEffect, WorldError> {
-        let text = String::from_utf8(intent.payload).map_err(|_| WorldError::InvalidRequest)?;
-        let (key, value) = text.split_once('=').ok_or(WorldError::InvalidRequest)?;
+    fn submit(&self, _ctx: &mut Context<'_>, intent: Intent) -> Result<Effect, Rejection> {
+        let text = String::from_utf8(intent.payload).map_err(|_| Rejection::InvalidRequest)?;
+        let (key, value) = text.split_once('=').ok_or(Rejection::InvalidRequest)?;
         let body = self.body(key);
-        Ok(WorldEffect {
+        Ok(Effect {
             content_refs: Vec::new(),
             demand: any_demand(),
             operations: vec![(
                 body.clone(),
-                BodyOp::ReplaceAtomic {
+                Op::ReplaceAtomic {
                     value: value.as_bytes().to_vec(),
                 },
             )],
-            scopes: vec![body],
+            bodies: vec![body],
             effect: value.as_bytes().to_vec(),
             declarations: vec![],
         })
     }
-    fn query(
-        &self,
-        ctx: &WorldContext<'_>,
-        query: WorldQuery,
-    ) -> Result<WorldProjection, WorldError> {
-        let key = String::from_utf8(query.payload).map_err(|_| WorldError::InvalidRequest)?;
+    fn query(&self, ctx: &Context<'_>, query: Query) -> Result<Projection, Rejection> {
+        let key = String::from_utf8(query.payload).map_err(|_| Rejection::InvalidRequest)?;
         let value = ctx.read_body(&self.body(&key)).unwrap_or_default();
-        Ok(WorldProjection {
+        Ok(Projection {
             demand: any_demand(),
             schema: SchemaId::parse("entry").unwrap(),
             schema_version: 1,
@@ -206,18 +199,15 @@ impl World for KvWorld {
 
 fn kv_runtime(root: &std::path::Path) -> Runtime {
     let world = KvWorld::new();
-    let reg = WorldRegistration {
+    let reg = Descriptor {
         id: world.id(),
-        implementation_version: WorldVersion(1),
+        implementation_version: Version(1),
         schemas: world.schemas().to_vec(),
-        limits: WorldLimits::default(),
+        limits: Limits::default(),
         scope_schemas: Vec::new(),
         signal_schemas: Vec::new(),
     };
-    let registry = RuntimeBuilder::new()
-        .register(reg, Arc::new(world))
-        .build()
-        .unwrap();
+    let registry = Builder::new().register(Arc::new(world)).build().unwrap();
     Runtime::open(
         root.to_path_buf(),
         registry,
@@ -236,46 +226,46 @@ fn a_consumer_drives_the_whole_lifecycle_through_the_public_api() {
     let rt = kv_runtime(&root);
 
     // Form a Space and activate its Orbit.
-    let orbit = rt.form_space(SpaceFormationOptions::default()).unwrap();
+    let orbit = rt.create().unwrap();
     let space = orbit.space_id().clone();
-    let station = orbit.activate(ActivationOptions::default()).unwrap();
+    let station = orbit.open(Activation::default()).unwrap();
 
     // Observation is advisory and reports the Space present + locked.
-    let obs = rt.observe_orbit(&space).unwrap();
+    let obs = rt.inspect(&space).unwrap();
     assert!(obs.locked);
-    assert_eq!(rt.observe_orbits().len(), 1);
+    assert_eq!(rt.list().len(), 1);
 
     // Dock and durably submit two entries.
     let session = station.dock(&world_id(), &writer()).unwrap();
     let c1 = submit_as(
         &session,
         &writer(),
-        WorldIntent {
+        Intent {
             schema: SchemaId::parse("entry").unwrap(),
             schema_version: 1,
             payload: b"greeting=hello".to_vec(),
         },
     )
     .unwrap();
-    assert_eq!(c1.scopes.len(), 1);
+    assert_eq!(c1.bodies.len(), 1);
     assert_ne!(c1.frontier, ReplicaFrontier::EMPTY);
     let c2 = submit_as(
         &session,
         &writer(),
-        WorldIntent {
+        Intent {
             schema: SchemaId::parse("entry").unwrap(),
             schema_version: 1,
             payload: b"farewell=bye".to_vec(),
         },
     )
     .unwrap();
-    assert_eq!(c2.scopes.len(), 1);
+    assert_eq!(c2.bodies.len(), 1);
     assert_ne!(c1.frontier, c2.frontier);
     assert_eq!(station.frontier(), c2.frontier);
 
     // Query reads the committed snapshot.
     let read = |s: &runtime::Session, key: &str| {
-        s.query(WorldQuery {
+        s.query(Query {
             schema: SchemaId::parse("entry").unwrap(),
             schema_version: 1,
             payload: key.as_bytes().to_vec(),
@@ -287,22 +277,19 @@ fn a_consumer_drives_the_whole_lifecycle_through_the_public_api() {
     assert_eq!(read(&session, "farewell"), b"bye");
 
     // Go dormant (checkpoints), then reactivate: committed entries survive.
-    let orbit = station.go_dormant().unwrap();
+    let orbit = station.vacate().unwrap();
     drop(orbit);
     let station = rt
-        .orbit(&space)
+        .acquire(&space)
         .unwrap()
-        .activate(ActivationOptions::default())
+        .open(Activation::default())
         .unwrap();
     let session = station.dock(&world_id(), &writer()).unwrap();
     assert_eq!(read(&session, "greeting"), b"hello");
     assert_eq!(read(&session, "farewell"), b"bye");
 
     // A double acquisition while the Station is live is refused.
-    assert!(matches!(
-        rt.orbit(&space),
-        Err(LifecycleError::ReplicaLocked(_))
-    ));
+    assert!(matches!(rt.acquire(&space), Err(Failure::ReplicaLocked(_))));
 
     // Per-request authorization: a read-only principal cannot write.
     let readonly = station.dock(&world_id(), &reader()).unwrap();
@@ -310,35 +297,28 @@ fn a_consumer_drives_the_whole_lifecycle_through_the_public_api() {
         submit_as(
             &readonly,
             &reader(),
-            WorldIntent {
+            Intent {
                 schema: SchemaId::parse("entry").unwrap(),
                 schema_version: 1,
                 payload: b"x=y".to_vec(),
             }
         ),
-        Err(WorldError::Denied)
+        Err(runtime::world::Failure::Rejected(Rejection::Denied))
     );
 
-    // Deorbit destroys the Space.
-    let orbit = station.go_dormant().unwrap();
+    // remove destroys the Space.
+    let orbit = station.vacate().unwrap();
     orbit
-        .deorbit(DeorbitConfirmation::for_space(space.clone()))
+        .remove(RemovalConfirmation::for_space(space.clone()))
         .unwrap();
-    assert!(matches!(
-        rt.orbit(&space),
-        Err(LifecycleError::OrbitNotFound(_))
-    ));
+    assert!(matches!(rt.acquire(&space), Err(Failure::OrbitNotFound(_))));
 }
 
 #[test]
 fn an_unregistered_world_cannot_be_docked() {
     let root = temp_root();
     let rt = kv_runtime(&root);
-    let station = rt
-        .form_space(SpaceFormationOptions::default())
-        .unwrap()
-        .activate(ActivationOptions::default())
-        .unwrap();
+    let station = rt.create().unwrap().open(Activation::default()).unwrap();
     let unknown = WorldId::parse("dev.example.other").unwrap();
     assert!(station.dock(&unknown, &writer()).is_err());
 }

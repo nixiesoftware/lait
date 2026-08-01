@@ -1,3 +1,22 @@
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects,
+        clippy::unreachable,
+        clippy::unimplemented,
+        clippy::unchecked_time_subtraction,
+        clippy::todo,
+        clippy::string_slice,
+        clippy::panic_in_result_fn,
+        clippy::panic,
+        clippy::exit,
+        clippy::as_conversions
+    )
+)]
+
 //! Application package for the bundled Issues World.
 //!
 //! [`issues`] remains the pure semantic World. This package owns the external
@@ -21,7 +40,7 @@ pub use protocol::{
 pub use router::{IssueRouter, IssuesCallHandler, RouterFacts};
 
 /// The complete client-facing package mounted by the navigation shell.
-pub fn package() -> Result<world_interface::WorldClientPackage, world_interface::InterfaceError> {
+pub fn package() -> Result<world_interface::WorldClientPackage, world_interface::Failure> {
     world_interface::WorldClientPackage::new(
         issues::contract::world_id(),
         world_interface::CliMount::new("issues", cli::command, cli::parse),
@@ -39,9 +58,8 @@ pub fn package() -> Result<world_interface::WorldClientPackage, world_interface:
 }
 
 fn decode_client_reply(
-    call: &world_bridge::WorldCall,
-    reply: world_bridge::WorldReply,
-) -> Result<serde_json::Value, world_interface::InterfaceError> {
-    decode_reply(call, reply)
-        .map_err(|error| world_interface::InterfaceError::new(error.to_string()))
+    call: &runtime::world::call::Call,
+    reply: runtime::world::call::Reply,
+) -> Result<serde_json::Value, world_interface::Failure> {
+    decode_reply(call, reply).map_err(|error| world_interface::Failure::new(error.to_string()))
 }

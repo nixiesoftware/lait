@@ -1,22 +1,22 @@
-//! Contact v1 fixtures: the signed Hello/Ack matrix, the frame codec, and the
+//! Contact v2 fixtures: the signed Offer/Proof matrix, the frame codec, and the
 //! transcript matrix over the pure state machines — happy path, reflection/
 //! substitution, wrong-state, duplicate/conflicting/overlapping chunks, gaps,
 //! commitment and transcript mismatches, and limit overflows.
 
-use mechanics::ids::{SpaceId, StationId};
+use mechanics::{ids::SpaceId, station::Key};
 use replica::body::ContentCommitment;
-use replica::ids::{BodyId, BodyKey, WorldId};
-use runtime::contact::{
+use replica::body::{BodyId, BodyKey, WorldId};
+use runtime::plane::contact::{
     abort, authority_record_hash, authority_set_hash, body_chunk_hash, manifest_node_hash,
-    manifest_root_ref, AccepterEvent, AccepterValidator, ContactFrame, ContactHello,
-    ContactHelloAck, ContactId, ContactWireError, InitiatorReceiver, InitiatorState, Progress,
+    manifest_root_ref, AccepterEvent, AccepterValidator, ContactFrame, ContactId,
+    InitiatorReceiver, InitiatorState, Invalid, Offer, Progress, Proof, CONTACT_PROTOCOL,
 };
 
 const INITIATOR_SEED: [u8; 32] = [71u8; 32];
 const RESPONDER_SEED: [u8; 32] = [72u8; 32];
 
-fn station_of(seed: &[u8; 32]) -> StationId {
-    StationId::from_device(&mechanics::crypto::device_from_seed(seed)).unwrap()
+fn station_of(seed: &[u8; 32]) -> Key {
+    Key::from_device(&mechanics::actor::device_from_seed(seed)).unwrap()
 }
 
 fn space_bytes() -> [u8; 29] {
@@ -38,9 +38,10 @@ fn body_key() -> BodyKey {
 // Hello / HelloAck
 // ---------------------------------------------------------------------------
 
-fn hello() -> ContactHello {
-    ContactHello::sign(
-        2,
+fn hello() -> Offer {
+    Offer::sign(
+        [0u8; 32],
+        CONTACT_PROTOCOL,
         space_bytes(),
         station_of(&RESPONDER_SEED).key_bytes(),
         [3u8; 32],
@@ -56,15 +57,16 @@ fn hello() -> ContactHello {
 #[test]
 fn a_valid_hello_exchange_completes() {
     let h = hello();
-    h.verify(&space_bytes(), &station_of(&INITIATOR_SEED))
+    h.verify(&[0u8; 32], &space_bytes(), &station_of(&INITIATOR_SEED))
         .unwrap();
-    let ack = ContactHelloAck::sign(&h, [4u8; 32], &RESPONDER_SEED).unwrap();
+    let ack = Proof::sign(&h, [4u8; 32], &RESPONDER_SEED).unwrap();
     ack.verify(&h, &station_of(&RESPONDER_SEED)).unwrap();
 }
 
 #[test]
 fn an_unsupported_contact_protocol_is_refused() {
-    let h = ContactHello::sign(
+    let h = Offer::sign(
+        [0u8; 32],
         99,
         space_bytes(),
         station_of(&RESPONDER_SEED).key_bytes(),
@@ -77,8 +79,8 @@ fn an_unsupported_contact_protocol_is_refused() {
     )
     .unwrap();
     assert_eq!(
-        h.verify(&space_bytes(), &station_of(&INITIATOR_SEED)),
-        Err(ContactWireError::UnsupportedProtocol(99))
+        h.verify(&[0u8; 32], &space_bytes(), &station_of(&INITIATOR_SEED)),
+        Err(Invalid::UnsupportedProtocol(99))
     );
 }
 
@@ -88,28 +90,29 @@ fn hello_substitution_and_replay_are_rejected() {
     // Cross-Space replay.
     let other = <[u8; 29]>::try_from(SpaceId::from_digest([9u8; 16]).as_str().as_bytes()).unwrap();
     assert_eq!(
-        h.verify(&other, &station_of(&INITIATOR_SEED)),
-        Err(ContactWireError::SpaceMismatch)
+        h.verify(&[0u8; 32], &other, &station_of(&INITIATOR_SEED)),
+        Err(Invalid::SpaceMismatch)
     );
     // Transport substitution: the connection peer is not the signer.
     assert_eq!(
-        h.verify(&space_bytes(), &station_of(&RESPONDER_SEED)),
-        Err(ContactWireError::IdentityMismatch)
+        h.verify(&[0u8; 32], &space_bytes(), &station_of(&RESPONDER_SEED)),
+        Err(Invalid::IdentityMismatch)
     );
     // Tampered signature.
     let mut bad = hello();
     bad.signature[0] ^= 0xff;
     assert_eq!(
-        bad.verify(&space_bytes(), &station_of(&INITIATOR_SEED)),
-        Err(ContactWireError::BadSignature)
+        bad.verify(&[0u8; 32], &space_bytes(), &station_of(&INITIATOR_SEED)),
+        Err(Invalid::BadSignature)
     );
 }
 
 #[test]
 fn ack_binds_the_exact_hello_and_a_fresh_nonce() {
     let h1 = hello();
-    let h2 = ContactHello::sign(
-        2,
+    let h2 = Offer::sign(
+        [0u8; 32],
+        CONTACT_PROTOCOL,
         space_bytes(),
         station_of(&RESPONDER_SEED).key_bytes(),
         [30u8; 32],
@@ -120,17 +123,17 @@ fn ack_binds_the_exact_hello_and_a_fresh_nonce() {
         &INITIATOR_SEED,
     )
     .unwrap();
-    let ack = ContactHelloAck::sign(&h1, [4u8; 32], &RESPONDER_SEED).unwrap();
+    let ack = Proof::sign(&h1, [4u8; 32], &RESPONDER_SEED).unwrap();
     // Presented against a different hello: commitment mismatch.
     assert_eq!(
         ack.verify(&h2, &station_of(&RESPONDER_SEED)),
-        Err(ContactWireError::ChallengeMismatch)
+        Err(Invalid::ChallengeMismatch)
     );
     // A reflected nonce is refused.
-    let reflected = ContactHelloAck::sign(&h1, h1.nonce, &RESPONDER_SEED).unwrap();
+    let reflected = Proof::sign(&h1, h1.nonce, &RESPONDER_SEED).unwrap();
     assert_eq!(
         reflected.verify(&h1, &station_of(&RESPONDER_SEED)),
-        Err(ContactWireError::ChallengeMismatch)
+        Err(Invalid::ChallengeMismatch)
     );
 }
 
@@ -248,16 +251,10 @@ fn frame_tags_are_the_canonical_wire_values() {
 fn unknown_tags_and_trailing_bytes_are_rejected() {
     let mut raw = ContactFrame::Abort { code: 1 }.encode(&contact());
     raw[0] = 99;
-    assert_eq!(
-        ContactFrame::decode(&raw),
-        Err(ContactWireError::UnknownTag(99))
-    );
+    assert_eq!(ContactFrame::decode(&raw), Err(Invalid::UnknownTag(99)));
     let mut raw = ContactFrame::Abort { code: 1 }.encode(&contact());
     raw.push(0);
-    assert_eq!(
-        ContactFrame::decode(&raw),
-        Err(ContactWireError::NonCanonical)
-    );
+    assert_eq!(ContactFrame::decode(&raw), Err(Invalid::NonCanonical));
 }
 
 // ---------------------------------------------------------------------------
@@ -334,7 +331,7 @@ fn happy_frames() -> Vec<Vec<u8>> {
     // The transcript covers every raw frame before TransferEnd.
     let mut raw: Vec<Vec<u8>> = frames.drain(..).map(|f| f.encode(&contact())).collect();
     let mut t = blake3::Hasher::new();
-    t.update(b"lait/contact/1/transcript");
+    t.update(b"lait/contact/2/transcript");
     for r in &raw {
         t.update(r);
     }
@@ -734,7 +731,7 @@ fn manifest_requests_must_reference_the_offer_and_stay_bounded() {
         acc.on_frame(
             &ContactFrame::ManifestRequest {
                 root,
-                nodes: vec![[1u8; 32]; runtime::contact::MAX_DESCENT_REQUEST + 1],
+                nodes: vec![[1u8; 32]; runtime::plane::contact::MAX_DESCENT_REQUEST + 1],
             }
             .encode(&contact()),
         ),
@@ -769,12 +766,13 @@ fn manifest_requests_must_reference_the_offer_and_stay_bounded() {
 
 #[test]
 fn the_signed_hello_binds_the_holdings_declaration() {
-    use runtime::contact::{encode_holdings, holdings_digest};
+    use runtime::plane::contact::{encode_holdings, holdings_digest};
     let held = vec![(body_key(), [7u8; 32]), (body_key(), [5u8; 32])];
     let bytes = encode_holdings(&held);
     let digest = holdings_digest(&bytes);
-    let h = ContactHello::sign(
-        2,
+    let h = Offer::sign(
+        [0u8; 32],
+        CONTACT_PROTOCOL,
         space_bytes(),
         station_of(&RESPONDER_SEED).key_bytes(),
         [3u8; 32],
@@ -785,26 +783,26 @@ fn the_signed_hello_binds_the_holdings_declaration() {
         &INITIATOR_SEED,
     )
     .unwrap();
-    h.verify(&space_bytes(), &station_of(&INITIATOR_SEED))
+    h.verify(&[0u8; 32], &space_bytes(), &station_of(&INITIATOR_SEED))
         .unwrap();
     // Tampering with either bound field breaks the signature.
     let mut bad = h.clone();
     bad.holdings_count = 1;
     assert_eq!(
-        bad.verify(&space_bytes(), &station_of(&INITIATOR_SEED)),
-        Err(ContactWireError::BadSignature)
+        bad.verify(&[0u8; 32], &space_bytes(), &station_of(&INITIATOR_SEED)),
+        Err(Invalid::BadSignature)
     );
     let mut bad = h.clone();
     bad.holdings_digest[0] ^= 0xff;
     assert_eq!(
-        bad.verify(&space_bytes(), &station_of(&INITIATOR_SEED)),
-        Err(ContactWireError::BadSignature)
+        bad.verify(&[0u8; 32], &space_bytes(), &station_of(&INITIATOR_SEED)),
+        Err(Invalid::BadSignature)
     );
 }
 
 #[test]
 fn holdings_encoding_is_canonical_sorted_and_deduplicated() {
-    use runtime::contact::{decode_holdings, encode_holdings};
+    use runtime::plane::contact::{decode_holdings, encode_holdings};
     let a = vec![(body_key(), [7u8; 32]), (body_key(), [5u8; 32])];
     let b = vec![
         (body_key(), [5u8; 32]),
@@ -838,7 +836,7 @@ fn holdings_frames_roundtrip_and_stay_out_of_the_transfer_plane() {
     }
     // The initiator's transfer state machine refuses holdings frames — they
     // flow initiator -> accepter only, before the Ack.
-    let mut rx = runtime::InitiatorReceiver::new(contact());
+    let mut rx = runtime::plane::contact::InitiatorReceiver::new(contact());
     let enc = ContactFrame::HoldingsChunk {
         index: 0,
         bytes: vec![1],

@@ -12,6 +12,7 @@
 //! device", an `ActorId` as "who".
 
 use std::fmt;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 
@@ -33,15 +34,29 @@ impl UlidSource for SystemUlidSource {
     fn now_ms(&self) -> u64 {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
+            .ok()
+            .and_then(|duration| u64::try_from(duration.as_millis()).ok())
             .unwrap_or(0)
     }
     fn rand80(&self) -> u128 {
+        static FALLBACK_COUNTER: AtomicU64 = AtomicU64::new(0);
         let mut buf = [0u8; 10];
-        getrandom::fill(&mut buf).expect("getrandom");
+        if let Err(error) = getrandom::fill(&mut buf) {
+            let counter = FALLBACK_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let mut hasher = blake3::Hasher::new();
+            hasher.update(b"lait/ulid-entropy-fallback/1");
+            hasher.update(&self.now_ms().to_le_bytes());
+            hasher.update(&u64::from(std::process::id()).to_le_bytes());
+            hasher.update(&counter.to_le_bytes());
+            let digest = hasher.finalize();
+            if let Some(prefix) = digest.as_bytes().get(..buf.len()) {
+                buf.copy_from_slice(prefix);
+            }
+            tracing::warn!(%error, "OS randomness unavailable; using process-local ULID entropy");
+        }
         let mut v: u128 = 0;
         for b in buf {
-            v = (v << 8) | b as u128;
+            v = (v << 8) | u128::from(b);
         }
         v
     }
@@ -62,15 +77,22 @@ fn encode_ulid(value: u128) -> String {
     let mut out = [0u8; 26];
     let mut v = value;
     for i in (0..26).rev() {
-        out[i] = CROCKFORD[(v & 0x1f) as usize];
+        let alphabet_index = usize::try_from(v & 0x1f).unwrap_or(0);
+        let Some(encoded) = CROCKFORD.get(alphabet_index).copied() else {
+            return String::new();
+        };
+        let Some(target) = out.get_mut(i) else {
+            return String::new();
+        };
+        *target = encoded;
         v >>= 5;
     }
-    String::from_utf8(out.to_vec()).expect("ascii")
+    out.into_iter().map(char::from).collect()
 }
 
 /// Mint a fresh ULID string from a source: 48-bit ms timestamp + 80-bit random.
 pub fn mint_ulid(src: &dyn UlidSource) -> String {
-    let ts = (src.now_ms() as u128) & ((1u128 << 48) - 1);
+    let ts = u128::from(src.now_ms()) & ((1u128 << 48) - 1);
     let rand = src.rand80() & ((1u128 << 80) - 1);
     encode_ulid((ts << 80) | rand)
 }
@@ -123,14 +145,14 @@ macro_rules! prefixed_id {
             /// chars) — the canonical human handle. `n` counts
             /// ULID characters after the textual prefix.
             pub fn short(&self, n: usize) -> String {
-                let ulid = &self.0[$prefix.len()..];
-                let take = n.min(ulid.len());
-                format!("{}{}", $prefix, &ulid[..take])
+                let ulid = self.0.strip_prefix($prefix).unwrap_or_default();
+                let short: String = ulid.chars().take(n).collect();
+                format!("{}{}", $prefix, short)
             }
 
             /// The bare ULID portion (no textual prefix).
             pub fn ulid(&self) -> &str {
-                &self.0[$prefix.len()..]
+                self.0.strip_prefix($prefix).unwrap_or_default()
             }
         }
 
@@ -275,7 +297,7 @@ impl ActorId {
 
     /// The bare incept-event hash (no textual prefix).
     pub fn incept_hash(&self) -> &str {
-        &self.0[Self::PREFIX.len()..]
+        self.0.strip_prefix(Self::PREFIX).unwrap_or_default()
     }
 
     pub fn as_str(&self) -> &str {
@@ -284,94 +306,16 @@ impl ActorId {
 
     /// A short, display-friendly handle: `act_` + first 8 hash chars.
     pub fn short(&self) -> String {
-        self.0.chars().take(Self::PREFIX.len() + 8).collect()
+        self.0
+            .chars()
+            .take(Self::PREFIX.len().saturating_add(8))
+            .collect()
     }
 }
 
 impl fmt::Display for ActorId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
-    }
-}
-
-/// A **station** id — the stable device identity of one Orbit, represented as
-/// the same canonical ed25519 public-key bytes as a [`DeviceId`] under a
-/// domain-specific newtype (`lait/station/1`). It is *not* per activation: it is
-/// the durable identity a Station presents as a Neighbor and signs Beacons/
-/// Contact with. Device-key replacement mints a *new* `StationId` and requires
-/// mechanics-authorized device admission/revocation.
-///
-/// Neighbor state is keyed by verified `StationId`; there is no wire-level
-/// `NeighborId`. Comparison is over the canonical 32 key bytes, never a display
-/// string.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct StationId([u8; 32]);
-
-impl StationId {
-    /// The 32 ed25519 public-key bytes this station identity *is*.
-    pub fn from_key_bytes(raw: [u8; 32]) -> Self {
-        Self(raw)
-    }
-
-    /// The device this station speaks as (the same key, viewed as a `DeviceId`).
-    pub fn from_device(device: &DeviceId) -> Option<Self> {
-        device.key_bytes().map(Self)
-    }
-
-    /// The raw 32 public-key bytes — the canonical comparison form.
-    pub fn key_bytes(&self) -> [u8; 32] {
-        self.0
-    }
-
-    /// The device id this station identity corresponds to (64-hex form).
-    pub fn as_device(&self) -> DeviceId {
-        DeviceId::from_key_bytes(&self.0)
-    }
-
-    /// A short, display-friendly prefix (first 8 hex chars of the key).
-    pub fn short(&self) -> String {
-        data_encoding::HEXLOWER.encode(&self.0[..4])
-    }
-}
-
-impl fmt::Display for StationId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&data_encoding::HEXLOWER.encode(&self.0))
-    }
-}
-
-/// A **station epoch** — a fresh activation identifier, a `u64` counter durably
-/// incremented before each activation of an Orbit. It is never an authority
-/// identity: it distinguishes one live Station instance from the next, and
-/// Beacon/Observation freshness is ordered by `(epoch, sequence)`. Recovery
-/// never reuses a committed epoch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct StationEpoch(u64);
-
-impl StationEpoch {
-    /// The zero epoch — the value before any activation has been committed.
-    pub const ZERO: StationEpoch = StationEpoch(0);
-
-    /// Wrap a raw counter value.
-    pub fn from_u64(v: u64) -> Self {
-        Self(v)
-    }
-
-    /// The raw counter value.
-    pub fn as_u64(self) -> u64 {
-        self.0
-    }
-
-    /// The next epoch, or `None` on counter overflow (activation must then fail
-    /// closed rather than reuse a committed epoch).
-    pub fn next(self) -> Option<Self> {
-        self.0.checked_add(1).map(Self)
-    }
-}
-
-impl fmt::Display for StationEpoch {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
     }
 }
 
@@ -453,26 +397,5 @@ mod tests {
             "non-hex rejected"
         );
         assert_eq!(DeviceId::parse(&key).unwrap().short().len(), 8);
-    }
-
-    #[test]
-    fn station_id_roundtrips_device_key_bytes() {
-        let raw = [7u8; 32];
-        let station = StationId::from_key_bytes(raw);
-        assert_eq!(station.key_bytes(), raw);
-        // A StationId is the same key bytes as its device, viewed under a domain
-        // newtype: the round-trip through DeviceId is byte-exact.
-        let device = station.as_device();
-        assert_eq!(StationId::from_device(&device), Some(station.clone()));
-        assert_eq!(device.key_bytes(), Some(raw));
-    }
-
-    #[test]
-    fn station_epoch_is_monotone_and_fails_closed_on_overflow() {
-        assert_eq!(StationEpoch::ZERO.as_u64(), 0);
-        assert_eq!(StationEpoch::ZERO.next(), Some(StationEpoch::from_u64(1)));
-        // Overflow must return None so activation fails closed rather than
-        // reusing a committed epoch.
-        assert_eq!(StationEpoch::from_u64(u64::MAX).next(), None);
     }
 }

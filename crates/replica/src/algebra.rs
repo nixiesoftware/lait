@@ -1,7 +1,7 @@
 //! The frozen collaborative-operation algebra (S1a).
 //!
 //! This module fixes the LAIT Body operation algebra's **declared semantics** and
-//! **bounds** so an implementation (S5, through Fabric) and an independent World
+//! **bounds** so an implementation (S5, through Engine) and an independent World
 //! author agree on behavior. It is LAIT semantics, not a copy of the CRDT engine's API.
 //!
 //! # Paths
@@ -14,7 +14,7 @@
 //!
 //! # Stable element identity
 //!
-//! Ordered-list and set elements have **stable element ids** assigned by Fabric
+//! Ordered-list and set elements have **stable element ids** assigned by Engine
 //! at insert time and echoed to the World in Projections. `ListRemove`/`ListMove`
 //! name an element by that id, never by index, so a concurrent insert cannot
 //! shift the target of a remove. `index` in `ListInsert`/`ListMove` is a
@@ -23,7 +23,7 @@
 //! # Concurrency winners
 //!
 //! - Registers and map entries are last-writer-wins by the semantic transaction
-//!   order Fabric commits; concurrent sets to the same path both survive as
+//!   order Engine commits; concurrent sets to the same path both survive as
 //!   conflicting versions only until the next observed commit resolves them.
 //! - Ordered lists converge by stable-id insertion order (no lost inserts;
 //!   concurrent inserts at the same index interleave deterministically).

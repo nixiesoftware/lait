@@ -1,3 +1,9 @@
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    clippy::indexing_slicing,
+    reason = "the private generalized DKG backend receives structurally validated matrices and participant sets"
+)]
 //! Dealer-free general-access key generation.
 //!
 //! [`crate::gaccess`] signs from shares a *trusted dealer* handed out. This module removes the
@@ -58,24 +64,24 @@ use curve25519_dalek::edwards::EdwardsPoint;
 use curve25519_dalek::scalar::Scalar;
 use curve25519_dalek::traits::Identity;
 
-use crate::authority::LeafId;
+use crate::authority::Holder;
 use crate::compile::StructurallyValidatedCompiledPolicy;
 use crate::gaccess::KeyShares;
 
 /// Errors aggregating a DKG.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DkgError {
+pub enum Failure {
     /// No contributions to aggregate.
     NoContributions,
     /// A contribution's commitment vector has the wrong dimension.
-    WrongDimension { dealer: LeafId },
+    WrongDimension { dealer: Holder },
     /// A contribution's shares do not cover exactly the compiled leaf set.
-    ShareSetMismatch { dealer: LeafId },
+    ShareSetMismatch { dealer: Holder },
     /// A dealt sub-share failed its Feldman check against the commitments.
-    InconsistentShare { dealer: LeafId, leaf: LeafId },
+    InconsistentShare { dealer: Holder, leaf: Holder },
     /// Two contributions claim the same dealer. Contributor identity is a set;
     /// a repeat would change the aggregate without adding a distinct dealer.
-    DuplicateDealer { dealer: LeafId },
+    DuplicateDealer { dealer: Holder },
     /// The aggregate public key is the identity — the contributions' secrets
     /// cancelled to zero. No signature verifies under it; refuse to mint it.
     DegenerateKey,
@@ -86,14 +92,14 @@ pub enum DkgError {
 /// `shares[i]` is, in a real deployment, sent privately to leaf `i`.
 #[derive(Debug, Clone)]
 pub struct Contribution {
-    dealer: LeafId,
+    dealer: Holder,
     commitments: Vec<EdwardsPoint>,
-    shares: BTreeMap<LeafId, Scalar>,
+    shares: BTreeMap<Holder, Scalar>,
 }
 
 impl Contribution {
     /// The dealer this contribution is from.
-    pub fn dealer(&self) -> &LeafId {
+    pub fn dealer(&self) -> &Holder {
         &self.dealer
     }
 }
@@ -106,7 +112,7 @@ fn random_scalar() -> Scalar {
 
 /// The matrix row for `leaf`, as scalars. `None` if the leaf is not in the
 /// compiled policy.
-fn row_of(compiled: &StructurallyValidatedCompiledPolicy, leaf: &LeafId) -> Option<Vec<Scalar>> {
+fn row_of(compiled: &StructurallyValidatedCompiledPolicy, leaf: &Holder) -> Option<Vec<Scalar>> {
     let idx = compiled.leaves().iter().position(|l| l == leaf)?;
     Some(
         compiled.inner().matrix.rows[idx]
@@ -119,7 +125,7 @@ fn row_of(compiled: &StructurallyValidatedCompiledPolicy, leaf: &LeafId) -> Opti
 /// Produce `dealer`'s contribution to the key: sample `ρ^(p)`, commit to it, and
 /// deal MSP sub-shares to every leaf. `dealer` need not itself be a leaf, but is
 /// recorded so aggregation can attribute a bad dealing.
-pub fn contribute(compiled: &StructurallyValidatedCompiledPolicy, dealer: LeafId) -> Contribution {
+pub fn contribute(compiled: &StructurallyValidatedCompiledPolicy, dealer: Holder) -> Contribution {
     let cols = compiled.cols();
     let rho: Vec<Scalar> = (0..cols).map(|_| random_scalar()).collect();
     let commitments: Vec<EdwardsPoint> = rho.iter().map(|r| G * r).collect();
@@ -142,7 +148,7 @@ pub fn contribute(compiled: &StructurallyValidatedCompiledPolicy, dealer: LeafId
 /// accepts a dealer.
 pub fn verify_share(
     compiled: &StructurallyValidatedCompiledPolicy,
-    leaf: &LeafId,
+    leaf: &Holder,
     contribution: &Contribution,
 ) -> bool {
     let Some(row) = row_of(compiled, leaf) else {
@@ -169,13 +175,13 @@ pub fn verify_share(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GroupKey {
     public: EdwardsPoint,
-    shares: BTreeMap<LeafId, Scalar>,
-    leaf_commitments: BTreeMap<LeafId, EdwardsPoint>,
+    shares: BTreeMap<Holder, Scalar>,
+    leaf_commitments: BTreeMap<Holder, EdwardsPoint>,
 }
 
 impl GroupKey {
     /// The public per-leaf share commitment `S_i = s_i·G`.
-    pub fn leaf_commitment(&self, leaf: &LeafId) -> Option<[u8; 32]> {
+    pub fn leaf_commitment(&self, leaf: &Holder) -> Option<[u8; 32]> {
         self.leaf_commitments
             .get(leaf)
             .map(|p| p.compress().to_bytes())
@@ -190,8 +196,8 @@ impl GroupKey {
     /// whose commitment is not `s·G`.
     pub fn from_verified_parts(
         public: [u8; 32],
-        shares: BTreeMap<LeafId, Scalar>,
-        leaf_commitments: BTreeMap<LeafId, [u8; 32]>,
+        shares: BTreeMap<Holder, Scalar>,
+        leaf_commitments: BTreeMap<Holder, [u8; 32]>,
     ) -> Option<Self> {
         // The public key crosses a trust boundary: non-identity, prime-order.
         let public = crate::gaccess::decompress_prime_order(&public)?;
@@ -223,7 +229,7 @@ impl KeyShares for GroupKey {
     fn public_key(&self) -> [u8; 32] {
         self.public.compress().to_bytes()
     }
-    fn share(&self, leaf: &LeafId) -> Option<Scalar> {
+    fn share(&self, leaf: &Holder) -> Option<Scalar> {
         self.shares.get(leaf).copied()
     }
 }
@@ -234,9 +240,9 @@ impl KeyShares for GroupKey {
 pub fn aggregate(
     compiled: &StructurallyValidatedCompiledPolicy,
     contributions: &[Contribution],
-) -> Result<GroupKey, DkgError> {
+) -> Result<GroupKey, Failure> {
     if contributions.is_empty() {
-        return Err(DkgError::NoContributions);
+        return Err(Failure::NoContributions);
     }
     let cols = compiled.cols();
     let leaves = compiled.leaves();
@@ -244,10 +250,10 @@ pub fn aggregate(
     // Contributor identity is a *set*, not a multiset: two contributions from one
     // dealer (e.g. a replayed valid one) would silently change the aggregate key
     // and every share. Reject duplicates before aggregating anything.
-    let mut seen: BTreeSet<&LeafId> = BTreeSet::new();
+    let mut seen: BTreeSet<&Holder> = BTreeSet::new();
     for c in contributions {
         if !seen.insert(&c.dealer) {
-            return Err(DkgError::DuplicateDealer {
+            return Err(Failure::DuplicateDealer {
                 dealer: c.dealer.clone(),
             });
         }
@@ -256,18 +262,18 @@ pub fn aggregate(
     // Validate every contribution before trusting any of it.
     for c in contributions {
         if c.commitments.len() != cols {
-            return Err(DkgError::WrongDimension {
+            return Err(Failure::WrongDimension {
                 dealer: c.dealer.clone(),
             });
         }
         if c.shares.len() != leaves.len() || leaves.iter().any(|l| !c.shares.contains_key(l)) {
-            return Err(DkgError::ShareSetMismatch {
+            return Err(Failure::ShareSetMismatch {
                 dealer: c.dealer.clone(),
             });
         }
         for leaf in leaves {
             if !verify_share(compiled, leaf, c) {
-                return Err(DkgError::InconsistentShare {
+                return Err(Failure::InconsistentShare {
                     dealer: c.dealer.clone(),
                     leaf: leaf.clone(),
                 });
@@ -285,7 +291,7 @@ pub fn aggregate(
     // group secret) — a rushing final contributor can force it. Signing would refuse
     // to verify under such a key; reject it here rather than mint an unusable one.
     if public == EdwardsPoint::identity() {
-        return Err(DkgError::DegenerateKey);
+        return Err(Failure::DegenerateKey);
     }
 
     // s_i = Σ_p s_i^(p), and the aggregate column commitments for S_i.
@@ -320,20 +326,20 @@ pub fn aggregate(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::authority::PrincipalId;
+    use crate::authority::Principal;
     use crate::compile::compile;
     use crate::expand::{expand, PrincipalCustody, PrincipalDescriptor};
     use crate::gaccess::{commit, sign_qualified, verify, Nonce};
     use crate::policy::OwnershipPolicy;
 
-    fn prin(n: u8) -> PrincipalId {
-        PrincipalId::of_device(&crate::crypto::device_from_seed(&[n; 32]))
+    fn prin(n: u8) -> Principal {
+        Principal::of_device(&crate::crypto::device_from_seed(&[n; 32]))
     }
     fn key(n: u8) -> OwnershipPolicy {
         OwnershipPolicy::Key(prin(n))
     }
-    fn resolver() -> impl Fn(&PrincipalId) -> Option<PrincipalDescriptor> {
-        |p: &PrincipalId| {
+    fn resolver() -> impl Fn(&Principal) -> Option<PrincipalDescriptor> {
+        |p: &Principal| {
             Some(PrincipalDescriptor {
                 id: p.clone(),
                 custody: PrincipalCustody::Direct {
@@ -342,7 +348,7 @@ mod tests {
             })
         }
     }
-    fn compiled(o: OwnershipPolicy) -> (StructurallyValidatedCompiledPolicy, Vec<LeafId>) {
+    fn compiled(o: OwnershipPolicy) -> (StructurallyValidatedCompiledPolicy, Vec<Holder>) {
         let canon = o.canonicalize().unwrap();
         let exp = expand(&canon, &resolver()).unwrap();
         let c = compile(&exp).unwrap();
@@ -352,7 +358,7 @@ mod tests {
 
     /// Every leaf acts as a contributor; a real DKG picks a contributor set, but
     /// leaves-as-contributors is the simplest complete instance.
-    fn run_dkg(c: &StructurallyValidatedCompiledPolicy, leaves: &[LeafId]) -> Vec<Contribution> {
+    fn run_dkg(c: &StructurallyValidatedCompiledPolicy, leaves: &[Holder]) -> Vec<Contribution> {
         leaves.iter().map(|l| contribute(c, l.clone())).collect()
     }
 
@@ -399,7 +405,7 @@ mod tests {
         // A qualified pair signs and the signature verifies under the DKG key.
         let signers = vec![leaves[0].clone(), leaves[2].clone()];
         let witness = c.reconstruct(&signers).expect("qualified");
-        let mut nonces: BTreeMap<LeafId, Nonce> = BTreeMap::new();
+        let mut nonces: BTreeMap<Holder, Nonce> = BTreeMap::new();
         let mut commitments = Vec::new();
         for leaf in &witness.leaves {
             let (n, com) = commit();
@@ -425,7 +431,7 @@ mod tests {
         assert!(!verify_share(&c, &victim, &contribs[1]));
         assert_eq!(
             aggregate(&c, &contribs),
-            Err(DkgError::InconsistentShare {
+            Err(Failure::InconsistentShare {
                 dealer: contribs[1].dealer.clone(),
                 leaf: victim,
             })
@@ -444,7 +450,7 @@ mod tests {
         contribs.push(replay);
         assert_eq!(
             aggregate(&c, &contribs),
-            Err(DkgError::DuplicateDealer {
+            Err(Failure::DuplicateDealer {
                 dealer: leaves[0].clone(),
             })
         );
@@ -471,7 +477,7 @@ mod tests {
         }
         assert_eq!(
             aggregate(&c, &[a, negated]),
-            Err(DkgError::DegenerateKey),
+            Err(Failure::DegenerateKey),
             "a zero group key must be refused"
         );
     }
@@ -500,7 +506,7 @@ mod tests {
         contribs[0].commitments.pop(); // drop a column commitment
         assert_eq!(
             aggregate(&c, &contribs),
-            Err(DkgError::WrongDimension {
+            Err(Failure::WrongDimension {
                 dealer: contribs[0].dealer.clone(),
             })
         );
@@ -509,6 +515,6 @@ mod tests {
     #[test]
     fn no_contributions_is_an_error() {
         let (c, _) = compiled(OwnershipPolicy::Key(prin(1)));
-        assert_eq!(aggregate(&c, &[]), Err(DkgError::NoContributions));
+        assert_eq!(aggregate(&c, &[]), Err(Failure::NoContributions));
     }
 }

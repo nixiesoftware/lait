@@ -14,15 +14,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use lait::dto::{CommentAnchorState, IssueView};
-use lait::ids::{ActorId, DeviceId, DocId, ProjectId, SystemUlidSource};
+use issues::dto::{CommentAnchorState, IssueView};
+use issues::ids::{ActorId, DeviceId, DocId, ProjectId, SystemUlidSource};
 use lait::world::contract::{self, IssueIntent, IssueQuery};
 use lait::world::IssuesWorld;
-use mechanics::crypto::AuthorizedBodyKey;
+use mechanics::authorization::AuthorizedBodyKey;
 use replica::frontier::AuthorityFrontier;
 use runtime::{
-    ActivationOptions, CommsOptions, ContactMechanics, ContactOptions, EnterOptions, LocalIdentity,
-    RequestId, Runtime, RuntimeBuilder, Session, Station, WorldError, WorldIntent, WorldQuery,
+    plane::contact::Authority, plane::Activation, plane::CommsOptions, world::Builder,
+    world::Intent, world::LocalIdentity, world::Query, world::Rejection, world::RequestId, Runtime,
+    Session, Station,
 };
 
 const FOUNDER_SEED: [u8; 32] = [37u8; 32];
@@ -54,13 +55,13 @@ fn my_actor() -> ActorId {
 }
 
 fn my_device() -> DeviceId {
-    mechanics::crypto::device_from_seed(&WRITER_SEED)
+    mechanics::actor::device_from_seed(&WRITER_SEED)
 }
 
 struct WriterAuthority;
-impl runtime::AuthorityView for WriterAuthority {
-    fn resolve(&self, _device: &DeviceId) -> Option<runtime::PrincipalResolution> {
-        Some(runtime::PrincipalResolution {
+impl runtime::world::AuthorityView for WriterAuthority {
+    fn resolve(&self, _device: &DeviceId) -> Option<runtime::world::PrincipalResolution> {
+        Some(runtime::world::PrincipalResolution {
             actor: my_actor(),
             authority_frontier: AuthorityFrontier::from_canonical_bytes(vec![8]),
         })
@@ -68,21 +69,21 @@ impl runtime::AuthorityView for WriterAuthority {
 }
 
 struct AnyKnownSigner;
-impl replica::AuthoritySource for AnyKnownSigner {
+impl replica::transaction::AuthoritySource for AnyKnownSigner {
     fn signer_authorized(&self, signer: &[u8; 32], _f: &AuthorityFrontier) -> bool {
         [WRITER_SEED, STATION_A_SEED, STATION_B_SEED]
             .iter()
-            .any(|seed| mechanics::crypto::device_from_seed(seed).key_bytes() == Some(*signer))
+            .any(|seed| mechanics::actor::device_from_seed(seed).key_bytes() == Some(*signer))
     }
 }
 
 struct AcceptingIncorporator;
-impl replica::AuthorityIncorporator for AcceptingIncorporator {
+impl replica::convergence::AuthorityIncorporator for AcceptingIncorporator {
     fn incorporate_authority(
         &mut self,
         records: &[Vec<u8>],
-    ) -> Result<replica::AuthorityBatchReceipt, String> {
-        Ok(replica::AuthorityBatchReceipt {
+    ) -> Result<replica::convergence::AuthorityBatchReceipt, replica::convergence::Failure> {
+        Ok(replica::convergence::AuthorityBatchReceipt {
             space: coordinates().verify().unwrap().space.clone(),
             prior_frontier: AuthorityFrontier::from_canonical_bytes(vec![]),
             resulting_frontier: AuthorityFrontier::from_canonical_bytes(vec![8]),
@@ -91,7 +92,7 @@ impl replica::AuthorityIncorporator for AcceptingIncorporator {
     }
 }
 
-fn coordinates() -> runtime::SignedCoordinates {
+fn coordinates() -> runtime::coordinates::SignedCoordinates {
     use runtime::coordinates::{ApproachRoute, CoordinatesAdmission, CoordinatesPayload};
     let rc = mechanics::space::recovery_commit(&mechanics::space::recovery_pub_of(&RECOVERY_SEED))
         .unwrap();
@@ -105,7 +106,7 @@ fn coordinates() -> runtime::SignedCoordinates {
         recovery_root: rc,
         founder_inception: postcard::to_stdvec(&incept).unwrap(),
         display_name_hint: "Anchor Space".into(),
-        approach_station: mechanics::crypto::device_from_seed(&STATION_A_SEED)
+        approach_station: mechanics::actor::device_from_seed(&STATION_A_SEED)
             .key_bytes()
             .unwrap(),
         approach_nick_hint: "a".into(),
@@ -115,19 +116,19 @@ fn coordinates() -> runtime::SignedCoordinates {
         }],
         admission: CoordinatesAdmission::None,
     };
-    runtime::SignedCoordinates::sign(payload, &STATION_A_SEED)
+    runtime::coordinates::SignedCoordinates::sign(payload, &STATION_A_SEED)
 }
 
 fn product_runtime(root: &std::path::Path) -> Runtime {
-    let registry = RuntimeBuilder::new()
-        .register(IssuesWorld::registration(), Arc::new(IssuesWorld::new()))
+    let registry = Builder::new()
+        .register(Arc::new(IssuesWorld::new()))
         .build()
         .unwrap();
     Runtime::open(
         root.to_path_buf(),
         registry,
         Arc::new(WriterAuthority),
-        Arc::new(replica::StaticBodyKeys::new(
+        Arc::new(replica::body::StaticBodyKeys::new(
             AuthorizedBodyKey::for_authorized_epoch(EPOCH, EPOCH_KEY),
         )),
     )
@@ -156,13 +157,16 @@ impl Driver {
         self.now
     }
 
-    fn submit(&self, intent: &IssueIntent) -> Result<contract::IssueEffect, WorldError> {
+    fn submit(
+        &self,
+        intent: &IssueIntent,
+    ) -> Result<contract::IssueEffect, runtime::world::Failure> {
         let signed = self
             .writer
             .sign_action(
                 &self.session,
                 RequestId::mint(),
-                WorldIntent {
+                Intent {
                     schema: contract::issue_schema(),
                     schema_version: contract::ISSUE_SCHEMA_VERSION,
                     payload: intent.to_json(),
@@ -176,7 +180,7 @@ impl Driver {
     fn view(&self, doc: &str) -> IssueView {
         let bytes = self
             .session
-            .query(WorldQuery {
+            .query(Query {
                 schema: contract::issue_schema(),
                 schema_version: contract::ISSUE_SCHEMA_VERSION,
                 payload: IssueQuery::View {
@@ -231,8 +235,8 @@ impl Driver {
         field: &str,
         start: u64,
         end: Option<u64>,
-    ) -> Result<String, WorldError> {
-        let id = lait::ids::mint_comment_id(&SystemUlidSource);
+    ) -> Result<String, runtime::world::Failure> {
+        let id = issues::ids::mint_comment_id(&SystemUlidSource);
         let ts = self.ts();
         self.submit(&IssueIntent::CommentAt {
             doc: doc.to_string(),
@@ -268,9 +272,9 @@ impl Driver {
 
 fn offline(root: &std::path::Path) -> Station {
     product_runtime(root)
-        .form_space(runtime::SpaceFormationOptions::default())
+        .create()
         .unwrap()
-        .activate(ActivationOptions::offline())
+        .open(Activation::offline())
         .unwrap()
 }
 
@@ -347,7 +351,7 @@ fn a_span_comment_reads_back_the_position_it_was_taken_at() {
         })
     );
 
-    let _ = station.go_dormant();
+    let _ = station.vacate();
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -402,7 +406,7 @@ fn an_insertion_before_the_span_moves_it_on_the_next_read() {
         "the span still names the same word"
     );
 
-    let _ = station.go_dormant();
+    let _ = station.vacate();
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -436,7 +440,7 @@ fn deleting_the_marked_text_drifts_the_span_and_keeps_the_comment() {
     assert_eq!(comment.body, "this word is wrong");
     assert_eq!(comment.author, my_actor());
 
-    let _ = station.go_dormant();
+    let _ = station.vacate();
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -454,16 +458,22 @@ fn an_atomic_field_cannot_carry_a_span() {
     let doc = driver.seed();
 
     let refused = driver.comment_at(&doc, "the title is wrong", "title", 0, Some(3));
-    assert!(matches!(refused, Err(WorldError::InvalidRequest)));
+    assert!(matches!(
+        refused,
+        Err(runtime::world::Failure::Rejected(Rejection::InvalidRequest))
+    ));
 
     // A field no operation writes at all is refused for the same reason.
     let refused = driver.comment_at(&doc, "nowhere", "notes", 0, Some(1));
-    assert!(matches!(refused, Err(WorldError::InvalidRequest)));
+    assert!(matches!(
+        refused,
+        Err(runtime::world::Failure::Rejected(Rejection::InvalidRequest))
+    ));
 
     // Refused means nothing was written: no comment, no anchor.
     assert!(driver.view(&doc).comments.is_empty());
 
-    let _ = station.go_dormant();
+    let _ = station.vacate();
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -484,7 +494,10 @@ fn a_span_outside_the_material_is_refused() {
     ] {
         let refused = driver.comment_at(&doc, "out of range", "description", start, end);
         assert!(
-            matches!(refused, Err(WorldError::InvalidRequest)),
+            matches!(
+                refused,
+                Err(runtime::world::Failure::Rejected(Rejection::InvalidRequest))
+            ),
             "span {start}..{end:?} of a {length}-character text must be refused"
         );
     }
@@ -493,11 +506,14 @@ fn a_span_outside_the_material_is_refused() {
     // nothing, and the anchor the algebra returns binds nothing.
     driver.describe(&doc, "");
     let refused = driver.comment_at(&doc, "on nothing", "description", 0, None);
-    assert!(matches!(refused, Err(WorldError::InvalidRequest)));
+    assert!(matches!(
+        refused,
+        Err(runtime::world::Failure::Rejected(Rejection::InvalidRequest))
+    ));
 
     assert!(driver.view(&doc).comments.is_empty());
 
-    let _ = station.go_dormant();
+    let _ = station.vacate();
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -514,7 +530,7 @@ fn an_ordinary_comment_carries_no_anchor() {
         .submit(&IssueIntent::Comment {
             doc: doc.clone(),
             body: "just a comment".into(),
-            id: Some(lait::ids::mint_comment_id(&SystemUlidSource)),
+            id: Some(issues::ids::mint_comment_id(&SystemUlidSource)),
             parent: None,
             actor: my_actor().as_str().to_string(),
             device: my_device().as_str().to_string(),
@@ -531,7 +547,7 @@ fn an_ordinary_comment_carries_no_anchor() {
         "an unattached comment must not grow an `anchor` key: {json}"
     );
 
-    let _ = station.go_dormant();
+    let _ = station.vacate();
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -557,7 +573,7 @@ fn a_point_attachment_resolves_to_a_zero_width_span() {
         CommentAnchorState::At { start: 8, end: 8 }
     );
 
-    let _ = station.go_dormant();
+    let _ = station.vacate();
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -585,7 +601,7 @@ fn a_span_starting_at_zero_moves_with_the_word_it_marks() {
     );
     assert_eq!(marked_text(&view, &id), "the");
 
-    let _ = station.go_dormant();
+    let _ = station.vacate();
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -613,7 +629,7 @@ fn a_caret_at_the_start_of_the_text_stays_at_the_start() {
         CommentAnchorState::At { start: 0, end: 0 }
     );
 
-    let _ = station.go_dormant();
+    let _ = station.vacate();
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -652,7 +668,7 @@ fn deleting_the_text_in_front_of_the_span_leaves_it_on_its_word() {
     );
     assert_eq!(marked_text(&view, &id), "quick");
 
-    let _ = station.go_dormant();
+    let _ = station.vacate();
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -680,7 +696,7 @@ fn deleting_the_sentence_in_front_of_the_span_leaves_it_on_its_word() {
     );
     assert_eq!(marked_text(&view, &id), "quick");
 
-    let _ = station.go_dormant();
+    let _ = station.vacate();
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -715,7 +731,7 @@ fn emptying_the_field_drifts_the_caret_it_carried() {
         "a drifted comment is still a comment"
     );
 
-    let _ = station.go_dormant();
+    let _ = station.vacate();
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -736,7 +752,10 @@ fn spans_are_counted_in_unicode_scalars_and_not_in_bytes() {
 
     let refused = driver.comment_at(&doc, "past the end", "description", 12, Some(13));
     assert!(
-        matches!(refused, Err(WorldError::InvalidRequest)),
+        matches!(
+            refused,
+            Err(runtime::world::Failure::Rejected(Rejection::InvalidRequest))
+        ),
         "12..13 is inside the byte length and past the scalar length"
     );
 
@@ -759,7 +778,7 @@ fn spans_are_counted_in_unicode_scalars_and_not_in_bytes() {
     );
     assert_eq!(marked_text(&view, &id), "wörld");
 
-    let _ = station.go_dormant();
+    let _ = station.vacate();
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -776,13 +795,13 @@ fn a_later_peers_edit_moves_the_span_and_never_invents_a_position() {
     let coords = coordinates();
     let net = comms::mem::MemNet::new();
     let ta: Arc<dyn comms::Transport> =
-        Arc::new(net.peer(mechanics::crypto::device_from_seed(&STATION_A_SEED)));
+        Arc::new(net.peer(mechanics::actor::device_from_seed(&STATION_A_SEED)));
     let tb: Arc<dyn comms::Transport> =
-        Arc::new(net.peer(mechanics::crypto::device_from_seed(&STATION_B_SEED)));
+        Arc::new(net.peer(mechanics::actor::device_from_seed(&STATION_B_SEED)));
     let comms_options = |transport: Arc<dyn comms::Transport>, seed: [u8; 32]| CommsOptions {
         transport,
         station_seed: seed,
-        mechanics: ContactMechanics {
+        authority: Authority {
             source: Arc::new(AnyKnownSigner),
             incorporator: Arc::new(Mutex::new(AcceptingIncorporator)),
             export: Arc::new(Vec::new),
@@ -793,7 +812,7 @@ fn a_later_peers_edit_moves_the_span_and_never_invents_a_position() {
         progress_deadline: Duration::from_secs(5),
         route_lease: Duration::from_secs(60),
     };
-    let activation = |transport: Arc<dyn comms::Transport>, seed: [u8; 32]| ActivationOptions {
+    let activation = |transport: Arc<dyn comms::Transport>, seed: [u8; 32]| Activation {
         planes: Default::default(),
         content: Default::default(),
         drain_deadline: Duration::from_secs(5),
@@ -804,9 +823,9 @@ fn a_later_peers_edit_moves_the_span_and_never_invents_a_position() {
     let root_a = temp_root("peer-a");
     let root_b = temp_root("peer-b");
     let station_a = product_runtime(&root_a)
-        .enter_orbit(&coords, EnterOptions)
+        .materialize(&coords)
         .unwrap()
-        .activate(activation(ta, STATION_A_SEED))
+        .open(activation(ta, STATION_A_SEED))
         .unwrap();
     let mut driver_a = Driver::dock(&station_a);
     let doc = driver_a.seed();
@@ -821,26 +840,17 @@ fn a_later_peers_edit_moves_the_span_and_never_invents_a_position() {
         .unwrap();
 
     let station_b = product_runtime(&root_b)
-        .enter_orbit(&coords, EnterOptions)
+        .materialize(&coords)
         .unwrap()
-        .activate(activation(tb, STATION_B_SEED))
+        .open(activation(tb, STATION_B_SEED))
         .unwrap();
-    let a_station = mechanics::ids::StationId::from_device(&mechanics::crypto::device_from_seed(
-        &STATION_A_SEED,
-    ))
-    .unwrap();
-    let b_station = mechanics::ids::StationId::from_device(&mechanics::crypto::device_from_seed(
-        &STATION_B_SEED,
-    ))
-    .unwrap();
-    assert!(
-        station_b
-            .contact(&a_station, ContactOptions)
-            .unwrap()
-            .convergence
-            .accepted
-            >= 1
-    );
+    let a_station =
+        mechanics::station::Key::from_device(&mechanics::actor::device_from_seed(&STATION_A_SEED))
+            .unwrap();
+    let b_station =
+        mechanics::station::Key::from_device(&mechanics::actor::device_from_seed(&STATION_B_SEED))
+            .unwrap();
+    assert!(station_b.contact(&a_station).unwrap().convergence.accepted >= 1);
 
     // B holds A's comment, and resolves A's span against its own replica.
     let mut driver_b = Driver::dock(&station_b);
@@ -856,14 +866,7 @@ fn a_later_peers_edit_moves_the_span_and_never_invents_a_position() {
 
     // B inserts in front of the span and A converges: A's span moved.
     driver_b.describe(&doc, "PRE the quick brown fox");
-    assert!(
-        station_a
-            .contact(&b_station, ContactOptions)
-            .unwrap()
-            .convergence
-            .accepted
-            >= 1
-    );
+    assert!(station_a.contact(&b_station).unwrap().convergence.accepted >= 1);
     let view = driver_a.view(&doc);
     assert_eq!(view.description, "PRE the quick brown fox");
     assert_eq!(
@@ -878,22 +881,15 @@ fn a_later_peers_edit_moves_the_span_and_never_invents_a_position() {
     // B deletes the marked word and A converges: A's span drifts, and A still
     // has the comment.
     driver_b.describe(&doc, "PRE the brown fox");
-    assert!(
-        station_a
-            .contact(&b_station, ContactOptions)
-            .unwrap()
-            .convergence
-            .accepted
-            >= 1
-    );
+    assert!(station_a.contact(&b_station).unwrap().convergence.accepted >= 1);
     let view = driver_a.view(&doc);
     assert_eq!(view.description, "PRE the brown fox");
     assert_eq!(state_of(&view, &id), CommentAnchorState::Drifted);
     assert_eq!(view.comments.len(), 1);
     assert_eq!(view.comments[0].body, "this word is wrong");
 
-    let _ = station_a.go_dormant();
-    let _ = station_b.go_dormant();
+    let _ = station_a.vacate();
+    let _ = station_b.vacate();
     let _ = std::fs::remove_dir_all(&root_a);
     let _ = std::fs::remove_dir_all(&root_b);
 }

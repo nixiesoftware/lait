@@ -16,9 +16,16 @@
 //! also means there is no plaintext-hash identity and so no equality oracle: two
 //! ingests of identical bytes produce different `ContentId`s.
 
-use mechanics::crypto::{AuthorizedBodyKey, ContentChunkBinding, BODY_ENVELOPE_OVERHEAD};
+use mechanics::authorization::{AuthorizedBodyKey, ContentChunkBinding, BODY_ENVELOPE_OVERHEAD};
 use mechanics::ids::SpaceId;
 use serde::{Deserialize, Serialize};
+
+pub use crate::cache::Residency;
+
+/// Outcomes and reports from content residency operations.
+pub mod residency {
+    pub use crate::cache::{Failure, SweepReport as Sweep};
+}
 
 /// The encoded generation of the content format. The number is the value; the
 /// identifier names what is versioned.
@@ -56,7 +63,7 @@ pub const MAX_PROOF_DEPTH: u8 = 22;
 pub const MAX_PROOF_BYTES: usize = 4 * 1024;
 
 /// The maximum number of chunks any content may declare.
-pub const MAX_CHUNK_COUNT: u32 = (MAX_CONTENT_LEN / CHUNK_PLAINTEXT_LEN as u64) as u32;
+pub const MAX_CHUNK_COUNT: u32 = 4_194_304;
 
 /// The canonical description of one immutable content. This — not the bytes —
 /// is what every full Replica carries.
@@ -91,7 +98,7 @@ impl ContentRef {
 /// Why a descriptor, chunk, or proof was refused. Every failure that could
 /// distinguish "wrong key" from "wrong bytes" collapses into one variant.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ContentError {
+pub enum Invalid {
     UnsupportedVersion(u8),
     /// A declared geometry that cannot describe any content: a length that
     /// disagrees with the chunk count, a count past the protocol maximum, a
@@ -110,21 +117,26 @@ pub enum ContentError {
     /// The chunk is simply not here. Expected — content is descriptor-complete,
     /// not byte-complete — and the caller's response is to fetch it.
     NotResident,
+    /// An accepted local protection operation could not obtain entropy or
+    /// produce ciphertext.
+    Protection(mechanics::authorization::Failure),
 }
 
-impl std::fmt::Display for ContentError {
+impl std::fmt::Display for Invalid {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{self:?}")
     }
 }
-impl std::error::Error for ContentError {}
+impl std::error::Error for Invalid {}
 
 fn framed(domain: &[u8], parts: &[&[u8]]) -> Vec<u8> {
     let mut out = Vec::new();
-    out.extend_from_slice(&(domain.len() as u16).to_be_bytes());
+    let domain_len = u16::try_from(domain.len()).unwrap_or(u16::MAX);
+    out.extend_from_slice(&domain_len.to_be_bytes());
     out.extend_from_slice(domain);
     for part in parts {
-        out.extend_from_slice(&(part.len() as u32).to_be_bytes());
+        let part_len = u32::try_from(part.len()).unwrap_or(u32::MAX);
+        out.extend_from_slice(&part_len.to_be_bytes());
         out.extend_from_slice(part);
     }
     out
@@ -141,12 +153,12 @@ pub struct ChunkLeaf {
 }
 
 impl ChunkLeaf {
-    pub fn of(chunk_index: u32, ciphertext: &[u8]) -> Self {
-        Self {
+    pub fn of(chunk_index: u32, ciphertext: &[u8]) -> Result<Self, Invalid> {
+        Ok(Self {
             chunk_index,
-            ciphertext_len: ciphertext.len() as u32,
+            ciphertext_len: u32::try_from(ciphertext.len()).map_err(|_| Invalid::ChunkMismatch)?,
             ciphertext_hash: *blake3::hash(ciphertext).as_bytes(),
-        }
+        })
     }
 
     pub fn hash(&self) -> [u8; 32] {
@@ -177,17 +189,19 @@ pub fn merkle_root(leaves: &[ChunkLeaf]) -> [u8; 32] {
     let mut level: Vec<[u8; 32]> = leaves.iter().map(ChunkLeaf::hash).collect();
     while level.len() > 1 {
         let mut next = Vec::with_capacity(level.len().div_ceil(2));
-        let mut i = 0;
-        while i + 1 < level.len() {
-            next.push(node_hash(&level[i], &level[i + 1]));
-            i += 2;
-        }
-        if i < level.len() {
-            next.push(level[i]);
+        for pair in level.chunks(2) {
+            match pair {
+                [left, right] => next.push(node_hash(left, right)),
+                [only] => next.push(*only),
+                _ => {}
+            }
         }
         level = next;
     }
-    level[0]
+    level
+        .first()
+        .copied()
+        .unwrap_or_else(|| *blake3::hash(&framed(CONTENT_NODE_DOMAIN, &[])).as_bytes())
 }
 
 /// The bounded sidecar that proves one chunk against a descriptor's root: the
@@ -212,30 +226,31 @@ pub struct ProofStep {
 /// [`merkle_root`] builds.
 pub fn chunk_proof(leaves: &[ChunkLeaf], chunk_index: u32) -> Option<ChunkProof> {
     let mut position = leaves.iter().position(|l| l.chunk_index == chunk_index)?;
-    let leaf = leaves[position];
+    let leaf = leaves.get(position).copied()?;
     let mut level: Vec<[u8; 32]> = leaves.iter().map(ChunkLeaf::hash).collect();
     let mut path = Vec::new();
     while level.len() > 1 {
         let mut next = Vec::with_capacity(level.len().div_ceil(2));
-        let mut i = 0;
-        while i + 1 < level.len() {
-            if position == i {
-                path.push(ProofStep {
-                    sibling: level[i + 1],
-                    sibling_is_left: false,
-                });
-            } else if position == i + 1 {
-                path.push(ProofStep {
-                    sibling: level[i],
-                    sibling_is_left: true,
-                });
+        for (pair_index, pair) in level.chunks(2).enumerate() {
+            let left_position = pair_index.saturating_mul(2);
+            match pair {
+                [left, right] => {
+                    if position == left_position {
+                        path.push(ProofStep {
+                            sibling: *right,
+                            sibling_is_left: false,
+                        });
+                    } else if position == left_position.saturating_add(1) {
+                        path.push(ProofStep {
+                            sibling: *left,
+                            sibling_is_left: true,
+                        });
+                    }
+                    next.push(node_hash(left, right));
+                }
+                [only] => next.push(*only),
+                _ => {}
             }
-            next.push(node_hash(&level[i], &level[i + 1]));
-            i += 2;
-        }
-        if i < level.len() {
-            // A promoted node: no sibling, so no step.
-            next.push(level[i]);
         }
         position /= 2;
         level = next;
@@ -246,6 +261,10 @@ pub fn chunk_proof(leaves: &[ChunkLeaf], chunk_index: u32) -> Option<ChunkProof>
 impl ChunkProof {
     /// Canonical bytes.
     pub fn encode(&self) -> Vec<u8> {
+        #[allow(
+            clippy::expect_used,
+            reason = "derived serialization of this bounded owned proof is infallible"
+        )]
         postcard::to_stdvec(self).expect("postcard chunk proof")
     }
 
@@ -256,25 +275,25 @@ impl ChunkProof {
     /// what it says. Re-encode equality is what keeps one proof from having two
     /// spellings, and the depth bound is checked here so a hostile path is
     /// refused before [`Self::root`] walks it.
-    pub fn decode_canonical(bytes: &[u8]) -> Result<Self, ContentError> {
+    pub fn decode_canonical(bytes: &[u8]) -> Result<Self, Invalid> {
         if bytes.len() > MAX_PROOF_BYTES {
-            return Err(ContentError::ProofMismatch);
+            return Err(Invalid::ProofMismatch);
         }
-        let proof: Self = postcard::from_bytes(bytes).map_err(|_| ContentError::NonCanonical)?;
-        if proof.path.len() > MAX_PROOF_DEPTH as usize {
-            return Err(ContentError::ProofMismatch);
+        let proof: Self = postcard::from_bytes(bytes).map_err(|_| Invalid::NonCanonical)?;
+        if proof.path.len() > usize::try_from(MAX_PROOF_DEPTH).unwrap_or(usize::MAX) {
+            return Err(Invalid::ProofMismatch);
         }
         if proof.encode() != bytes {
-            return Err(ContentError::NonCanonical);
+            return Err(Invalid::NonCanonical);
         }
         Ok(proof)
     }
 
     /// Recompute this chunk's root. Bounded before it allocates: a path longer
     /// than the protocol depth is refused rather than walked.
-    pub fn root(&self) -> Result<[u8; 32], ContentError> {
-        if self.path.len() > MAX_PROOF_DEPTH as usize {
-            return Err(ContentError::ProofMismatch);
+    pub fn root(&self) -> Result<[u8; 32], Invalid> {
+        if self.path.len() > usize::try_from(MAX_PROOF_DEPTH).unwrap_or(usize::MAX) {
+            return Err(Invalid::ProofMismatch);
         }
         let mut acc = self.leaf.hash();
         for step in &self.path {
@@ -291,36 +310,39 @@ impl ChunkProof {
 impl ContentDescriptor {
     /// Canonical bytes.
     pub fn encode(&self) -> Vec<u8> {
+        #[allow(
+            clippy::expect_used,
+            reason = "derived serialization of this validated descriptor is infallible"
+        )]
         postcard::to_stdvec(self).expect("postcard content descriptor")
     }
 
     /// Decode, insisting the encoding was canonical — re-encoding must
     /// reproduce the exact input, so there is one representation of a
     /// descriptor and its id is well defined.
-    pub fn decode_canonical(bytes: &[u8]) -> Result<Self, ContentError> {
-        let descriptor: Self =
-            postcard::from_bytes(bytes).map_err(|_| ContentError::NonCanonical)?;
+    pub fn decode_canonical(bytes: &[u8]) -> Result<Self, Invalid> {
+        let descriptor: Self = postcard::from_bytes(bytes).map_err(|_| Invalid::NonCanonical)?;
         if descriptor.encode() != bytes {
-            return Err(ContentError::NonCanonical);
+            return Err(Invalid::NonCanonical);
         }
         descriptor.validate()?;
         Ok(descriptor)
     }
 
     /// Structural validation, before signature or content work.
-    pub fn validate(&self) -> Result<(), ContentError> {
+    pub fn validate(&self) -> Result<(), Invalid> {
         if self.format_version != CONTENT_FORMAT_VERSION {
-            return Err(ContentError::UnsupportedVersion(self.format_version));
+            return Err(Invalid::UnsupportedVersion(self.format_version));
         }
-        SpaceId::parse(&self.space).ok_or(ContentError::BadSpaceId)?;
+        SpaceId::parse(&self.space).ok_or(Invalid::BadSpaceId)?;
         if self.chunk_plaintext_len != CHUNK_PLAINTEXT_LEN
             || self.plaintext_len > MAX_CONTENT_LEN
             || self.chunk_count > MAX_CHUNK_COUNT
         {
-            return Err(ContentError::Geometry);
+            return Err(Invalid::Geometry);
         }
-        if self.chunk_count as u64 != expected_chunk_count(self.plaintext_len) {
-            return Err(ContentError::Geometry);
+        if u64::from(self.chunk_count) != expected_chunk_count(self.plaintext_len) {
+            return Err(Invalid::Geometry);
         }
         Ok(())
     }
@@ -350,14 +372,14 @@ impl ContentDescriptor {
         key: &AuthorizedBodyKey,
         proof: &ChunkProof,
         ciphertext: &[u8],
-    ) -> Result<Vec<u8>, ContentError> {
+    ) -> Result<Vec<u8>, Invalid> {
         self.verify_chunk(proof, ciphertext)?;
-        mechanics::crypto::content_chunk_open(
+        mechanics::authorization::content_chunk_open(
             key,
             &self.binding(proof.leaf.chunk_index),
             ciphertext,
         )
-        .ok_or(ContentError::Unopenable)
+        .ok_or(Invalid::Unopenable)
     }
 
     /// Everything `open_chunk` checks except the decryption — what a provider or
@@ -368,34 +390,34 @@ impl ContentDescriptor {
     /// which is exactly what a receiver can check on a chunk header before it
     /// has agreed to read a body. A leaf that fails here means the bytes about
     /// to arrive are the wrong bytes, and refusing now costs nothing.
-    pub fn verify_leaf(&self, proof: &ChunkProof) -> Result<(), ContentError> {
+    pub fn verify_leaf(&self, proof: &ChunkProof) -> Result<(), Invalid> {
         if proof.leaf.chunk_index >= self.chunk_count {
-            return Err(ContentError::Geometry);
+            return Err(Invalid::Geometry);
         }
-        if proof.leaf.ciphertext_len as usize > max_ciphertext_len() {
-            return Err(ContentError::ChunkMismatch);
+        if usize::try_from(proof.leaf.ciphertext_len).unwrap_or(usize::MAX) > max_ciphertext_len() {
+            return Err(Invalid::ChunkMismatch);
         }
         if proof.path.len() != proof_depth(self.chunk_count, proof.leaf.chunk_index) {
-            return Err(ContentError::ProofMismatch);
+            return Err(Invalid::ProofMismatch);
         }
         if proof.root()? != self.ciphertext_merkle_root {
-            return Err(ContentError::ProofMismatch);
+            return Err(Invalid::ProofMismatch);
         }
         Ok(())
     }
 
-    pub fn verify_chunk(&self, proof: &ChunkProof, ciphertext: &[u8]) -> Result<(), ContentError> {
+    pub fn verify_chunk(&self, proof: &ChunkProof, ciphertext: &[u8]) -> Result<(), Invalid> {
         if proof.leaf.chunk_index >= self.chunk_count {
-            return Err(ContentError::Geometry);
+            return Err(Invalid::Geometry);
         }
-        if proof.leaf.ciphertext_len as usize != ciphertext.len() {
-            return Err(ContentError::ChunkMismatch);
+        if usize::try_from(proof.leaf.ciphertext_len).ok() != Some(ciphertext.len()) {
+            return Err(Invalid::ChunkMismatch);
         }
         if ciphertext.len() > max_ciphertext_len() {
-            return Err(ContentError::ChunkMismatch);
+            return Err(Invalid::ChunkMismatch);
         }
         if *blake3::hash(ciphertext).as_bytes() != proof.leaf.ciphertext_hash {
-            return Err(ContentError::ChunkMismatch);
+            return Err(Invalid::ChunkMismatch);
         }
         // The path has to be the length this content's geometry produces. A
         // longer one reconstructing the right root would take a collision, so
@@ -403,10 +425,10 @@ impl ContentDescriptor {
         // proof shape tied to the descriptor rather than to a global ceiling,
         // and it costs an integer comparison.
         if proof.path.len() != proof_depth(self.chunk_count, proof.leaf.chunk_index) {
-            return Err(ContentError::ProofMismatch);
+            return Err(Invalid::ProofMismatch);
         }
         if proof.root()? != self.ciphertext_merkle_root {
-            return Err(ContentError::ProofMismatch);
+            return Err(Invalid::ProofMismatch);
         }
         Ok(())
     }
@@ -416,15 +438,15 @@ impl ContentDescriptor {
 /// [`merkle_root`] uses. A promoted node has no sibling at that level, so the
 /// depth depends on the leaf's position and not only on the count.
 pub fn proof_depth(chunk_count: u32, chunk_index: u32) -> usize {
-    let mut width = chunk_count.max(1) as u64;
-    let mut position = chunk_index as u64;
-    let mut steps = 0;
+    let mut width = u64::from(chunk_count.max(1));
+    let mut position = u64::from(chunk_index);
+    let mut steps = 0usize;
     while width > 1 {
         // An odd last node is carried up rather than paired, so it gains no
         // step at this level.
-        let promoted = width % 2 == 1 && position == width - 1;
+        let promoted = width % 2 == 1 && position == width.saturating_sub(1);
         if !promoted {
-            steps += 1;
+            steps = steps.saturating_add(1);
         }
         position /= 2;
         width = width.div_ceil(2);
@@ -439,13 +461,15 @@ pub fn expected_chunk_count(plaintext_len: u64) -> u64 {
     if plaintext_len == 0 {
         return 1;
     }
-    plaintext_len.div_ceil(CHUNK_PLAINTEXT_LEN as u64)
+    plaintext_len.div_ceil(u64::from(CHUNK_PLAINTEXT_LEN))
 }
 
 /// The largest a sealed chunk can be: a full plaintext chunk plus the envelope's
 /// fixed overhead.
 pub fn max_ciphertext_len() -> usize {
-    CHUNK_PLAINTEXT_LEN as usize + BODY_ENVELOPE_OVERHEAD
+    usize::try_from(CHUNK_PLAINTEXT_LEN)
+        .unwrap_or(usize::MAX)
+        .saturating_add(BODY_ENVELOPE_OVERHEAD)
 }
 
 /// One content, sealed: its descriptor, its ordered ciphertexts, and a proof
@@ -465,28 +489,36 @@ pub fn seal_content(
     key: &AuthorizedBodyKey,
     content_nonce: [u8; 16],
     plaintext: &[u8],
-) -> Result<SealedContent, ContentError> {
-    let plaintext_len = plaintext.len() as u64;
+) -> Result<SealedContent, Invalid> {
+    let plaintext_len = u64::try_from(plaintext.len()).map_err(|_| Invalid::Geometry)?;
     if plaintext_len > MAX_CONTENT_LEN {
-        return Err(ContentError::Geometry);
+        return Err(Invalid::Geometry);
     }
-    let chunk_count = expected_chunk_count(plaintext_len) as u32;
+    let chunk_count =
+        u32::try_from(expected_chunk_count(plaintext_len)).map_err(|_| Invalid::Geometry)?;
 
     // The binding needs the geometry, and the geometry is known before the
     // root is, which is exactly why the nonce and not the id is bound.
-    let mut ciphertexts = Vec::with_capacity(chunk_count as usize);
-    let mut leaves = Vec::with_capacity(chunk_count as usize);
+    let capacity = usize::try_from(chunk_count).map_err(|_| Invalid::Geometry)?;
+    let mut ciphertexts = Vec::with_capacity(capacity);
+    let mut leaves = Vec::with_capacity(capacity);
     for index in 0..chunk_count {
-        let start = index as usize * CHUNK_PLAINTEXT_LEN as usize;
-        let end = (start + CHUNK_PLAINTEXT_LEN as usize).min(plaintext.len());
-        let slice = plaintext.get(start..end).unwrap_or(&[]);
+        let index = usize::try_from(index).map_err(|_| Invalid::Geometry)?;
+        let chunk_len = usize::try_from(CHUNK_PLAINTEXT_LEN).map_err(|_| Invalid::Geometry)?;
+        let start = index.checked_mul(chunk_len).ok_or(Invalid::Geometry)?;
+        let end = start.saturating_add(chunk_len).min(plaintext.len());
+        let slice = plaintext.get(start..end).ok_or(Invalid::Geometry)?;
         let binding = ContentChunkBinding {
             space: space.as_str(),
             content_nonce: &content_nonce,
-            chunk_index: index,
+            chunk_index: u32::try_from(index).map_err(|_| Invalid::Geometry)?,
         };
-        let sealed = mechanics::crypto::content_chunk_seal(key, &binding, slice);
-        leaves.push(ChunkLeaf::of(index, &sealed));
+        let sealed = mechanics::authorization::content_chunk_seal(key, &binding, slice)
+            .map_err(Invalid::Protection)?;
+        leaves.push(ChunkLeaf::of(
+            u32::try_from(index).map_err(|_| Invalid::Geometry)?,
+            &sealed,
+        )?);
         ciphertexts.push(sealed);
     }
 
@@ -503,8 +535,8 @@ pub fn seal_content(
     descriptor.validate()?;
 
     let proofs = (0..chunk_count)
-        .map(|i| chunk_proof(&leaves, i).expect("leaf exists"))
-        .collect();
+        .map(|index| chunk_proof(&leaves, index).ok_or(Invalid::ProofMismatch))
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(SealedContent {
         descriptor,
         ciphertexts,
@@ -528,7 +560,7 @@ pub struct ContentIngest<'a> {
     key: AuthorizedBodyKey,
     content_nonce: [u8; 16],
     operation: [u8; 16],
-    cache: &'a fabric::journal::cache::ResidentCache,
+    cache: &'a crate::cache::Residency,
     buffer: Vec<u8>,
     leaves: Vec<ChunkLeaf>,
     plaintext_len: u64,
@@ -547,7 +579,7 @@ pub struct ContentIngest<'a> {
 pub struct IngestedContent {
     pub descriptor: ContentDescriptor,
     pub content_ref: ContentRef,
-    pub leases: Vec<fabric::journal::cache::Lease>,
+    pub(crate) leases: Vec<crate::cache::Lease>,
 }
 
 impl<'a> ContentIngest<'a> {
@@ -557,57 +589,70 @@ impl<'a> ContentIngest<'a> {
         space: &SpaceId,
         key: &AuthorizedBodyKey,
         operation: [u8; 16],
-        cache: &'a fabric::journal::cache::ResidentCache,
+        cache: &'a crate::cache::Residency,
         max_len: u64,
-    ) -> Self {
+    ) -> Result<Self, Invalid> {
         let mut content_nonce = [0u8; 16];
-        getrandom::fill(&mut content_nonce).expect("getrandom");
-        Self {
+        getrandom::fill(&mut content_nonce).map_err(|source| {
+            tracing::error!(error = %source, "OS entropy unavailable while beginning content ingest");
+            Invalid::Protection(mechanics::authorization::Failure::Randomness)
+        })?;
+        Ok(Self {
             space: space.clone(),
             key: key.clone(),
             content_nonce,
             operation,
             cache,
-            buffer: Vec::with_capacity(CHUNK_PLAINTEXT_LEN as usize),
+            buffer: Vec::with_capacity(usize::try_from(CHUNK_PLAINTEXT_LEN).unwrap_or(usize::MAX)),
             leaves: Vec::new(),
             plaintext_len: 0,
             max_len: max_len.min(MAX_CONTENT_LEN),
             finished: false,
-        }
+        })
     }
 
     /// Feed the next bytes. Whole chunks are sealed as they complete, so peak
     /// memory is one chunk regardless of the content's size.
-    pub fn push(&mut self, mut bytes: &[u8]) -> Result<(), ContentError> {
-        if self.plaintext_len + bytes.len() as u64 > self.max_len {
-            return Err(ContentError::Geometry);
+    pub fn push(&mut self, mut bytes: &[u8]) -> Result<(), Invalid> {
+        let incoming = u64::try_from(bytes.len()).map_err(|_| Invalid::Geometry)?;
+        let Some(next_len) = self.plaintext_len.checked_add(incoming) else {
+            return Err(Invalid::Geometry);
+        };
+        if next_len > self.max_len {
+            return Err(Invalid::Geometry);
         }
-        self.plaintext_len += bytes.len() as u64;
+        self.plaintext_len = next_len;
         while !bytes.is_empty() {
-            let room = CHUNK_PLAINTEXT_LEN as usize - self.buffer.len();
+            let chunk_len = usize::try_from(CHUNK_PLAINTEXT_LEN).unwrap_or(usize::MAX);
+            let room = chunk_len.saturating_sub(self.buffer.len());
             let take = room.min(bytes.len());
-            self.buffer.extend_from_slice(&bytes[..take]);
-            bytes = &bytes[take..];
-            if self.buffer.len() == CHUNK_PLAINTEXT_LEN as usize {
+            let Some((accepted, remaining)) = bytes.split_at_checked(take) else {
+                return Err(Invalid::Geometry);
+            };
+            self.buffer.extend_from_slice(accepted);
+            bytes = remaining;
+            if self.buffer.len() == chunk_len {
                 self.seal_buffered()?;
             }
         }
         Ok(())
     }
 
-    fn seal_buffered(&mut self) -> Result<(), ContentError> {
-        let index = self.leaves.len() as u32;
+    fn seal_buffered(&mut self) -> Result<(), Invalid> {
+        let index = u32::try_from(self.leaves.len()).map_err(|_| Invalid::Geometry)?;
         if index >= MAX_CHUNK_COUNT {
-            return Err(ContentError::Geometry);
+            return Err(Invalid::Geometry);
         }
         let binding = ContentChunkBinding {
             space: self.space.as_str(),
             content_nonce: &self.content_nonce,
             chunk_index: index,
         };
-        let sealed = mechanics::crypto::content_chunk_seal(&self.key, &binding, &self.buffer);
+        let sealed =
+            mechanics::authorization::content_chunk_seal(&self.key, &binding, &self.buffer)
+                .map_err(Invalid::Protection)?;
         self.buffer.clear();
-        self.leaves.push(ChunkLeaf::of(index, &sealed));
+        self.leaves.push(ChunkLeaf::of(index, &sealed)?);
         // Staged, not retained. A sealed chunk cannot be installed until the
         // tree it proves against exists, and the tree is not known until the
         // last chunk — so holding them would make peak memory the whole
@@ -615,7 +660,7 @@ impl<'a> ContentIngest<'a> {
         // and never advertised, so a half-finished ingest is not servable.
         self.cache
             .append_staged(&self.operation, index, 0, &sealed)
-            .map_err(|_| ContentError::ChunkMismatch)?;
+            .map_err(|_| Invalid::ChunkMismatch)?;
         Ok(())
     }
 
@@ -625,7 +670,7 @@ impl<'a> ContentIngest<'a> {
     /// Chunks install only here, once the root exists — a proof cannot be
     /// written before the tree it proves against, and the cache refuses to
     /// advertise an entry without one.
-    pub fn finish(mut self) -> Result<IngestedContent, ContentError> {
+    pub fn finish(mut self) -> Result<IngestedContent, Invalid> {
         // Zero-length content is one canonical empty chunk, so a tail is sealed
         // whenever the buffer holds something or nothing has been sealed yet.
         if !self.buffer.is_empty() || self.leaves.is_empty() {
@@ -637,7 +682,7 @@ impl<'a> ContentIngest<'a> {
             content_nonce: self.content_nonce,
             plaintext_len: self.plaintext_len,
             chunk_plaintext_len: CHUNK_PLAINTEXT_LEN,
-            chunk_count: self.leaves.len() as u32,
+            chunk_count: u32::try_from(self.leaves.len()).map_err(|_| Invalid::Geometry)?,
             ciphertext_merkle_root: merkle_root(&self.leaves),
             epoch: *self.key.epoch_id(),
         };
@@ -649,19 +694,19 @@ impl<'a> ContentIngest<'a> {
             let ciphertext = self
                 .cache
                 .read_staged(&self.operation, index)
-                .map_err(|_| ContentError::ChunkMismatch)?;
+                .map_err(|_| Invalid::ChunkMismatch)?;
             // The staged bytes round-tripped through the filesystem, so check
             // them against the leaf that was built from them before they become
             // an entry anything can serve.
-            if ChunkLeaf::of(index, &ciphertext) != *leaf {
-                return Err(ContentError::ChunkMismatch);
+            if ChunkLeaf::of(index, &ciphertext)? != *leaf {
+                return Err(Invalid::ChunkMismatch);
             }
-            let proof = chunk_proof(&self.leaves, index).ok_or(ContentError::ProofMismatch)?;
-            let sidecar = postcard::to_stdvec(&proof).map_err(|_| ContentError::NonCanonical)?;
+            let proof = chunk_proof(&self.leaves, index).ok_or(Invalid::ProofMismatch)?;
+            let sidecar = postcard::to_stdvec(&proof).map_err(|_| Invalid::NonCanonical)?;
             let entry = chunk_slot(&descriptor, index);
             self.cache
                 .install(&entry, &ciphertext, &sidecar)
-                .map_err(|_| ContentError::ChunkMismatch)?;
+                .map_err(|_| Invalid::ChunkMismatch)?;
             // Two holds, for two different lifetimes. The ingest's own lease
             // lasts while the caller decides whether to commit the descriptor
             // at all. The content-scoped one lasts until the content becomes
@@ -673,16 +718,13 @@ impl<'a> ContentIngest<'a> {
             // the first of two concurrent fetches collect the other's bytes;
             // keying a transfer by content would make a cancelled fetch drop
             // content someone else committed.
-            let lease = fabric::journal::cache::Lease::operation(self.operation, entry);
+            let lease = crate::cache::Lease::operation(self.operation, entry);
             self.cache
                 .lease(&lease)
-                .map_err(|_| ContentError::ChunkMismatch)?;
+                .map_err(|_| Invalid::ChunkMismatch)?;
             self.cache
-                .lease(&fabric::journal::cache::Lease::content(
-                    self.content_nonce,
-                    entry,
-                ))
-                .map_err(|_| ContentError::ChunkMismatch)?;
+                .lease(&crate::cache::Lease::content(self.content_nonce, entry))
+                .map_err(|_| Invalid::ChunkMismatch)?;
             leases.push(lease);
         }
         let _ = self.cache.discard_staged(&self.operation);
@@ -738,14 +780,13 @@ pub fn chunk_slot(descriptor: &ContentDescriptor, chunk_index: u32) -> [u8; 32] 
 pub fn open_resident_chunk(
     descriptor: &ContentDescriptor,
     key: &AuthorizedBodyKey,
-    cache: &fabric::journal::cache::ResidentCache,
+    cache: &crate::cache::Residency,
     entry: &[u8; 32],
-) -> Result<Vec<u8>, ContentError> {
+) -> Result<Vec<u8>, Invalid> {
     let (ciphertext, sidecar) = cache.read(entry).map_err(|e| match e {
-        fabric::journal::cache::CacheError::NotResident => ContentError::NotResident,
-        _ => ContentError::ChunkMismatch,
+        crate::cache::Failure::NotResident => Invalid::NotResident,
+        _ => Invalid::ChunkMismatch,
     })?;
-    let proof: ChunkProof =
-        postcard::from_bytes(&sidecar).map_err(|_| ContentError::NonCanonical)?;
+    let proof: ChunkProof = postcard::from_bytes(&sidecar).map_err(|_| Invalid::NonCanonical)?;
     descriptor.open_chunk(key, &proof, &ciphertext)
 }

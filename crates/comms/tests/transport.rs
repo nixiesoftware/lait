@@ -22,7 +22,7 @@ const SYNC_ALPN: Alpn = b"comms/test-sync/1";
 const PRESENCE_ALPN: Alpn = b"comms/test-presence/1";
 
 fn device(seed: u8) -> mechanics::ids::DeviceId {
-    mechanics::crypto::device_from_seed(&[seed; 32])
+    mechanics::actor::device_from_seed(&[seed; 32])
 }
 
 /// Two Isolated transports that can reach each other: build both, then cross-

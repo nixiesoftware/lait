@@ -21,7 +21,7 @@
 //! same semantic transaction coordinate (Replica frontier); [`ManifestBook`]
 //! rejects and reports it.
 
-use fabric::journal::index::{self, ChildRef, IndexEntry, IndexKey, NodeSink, NodeSource};
+use crate::index::{self, ChildRef, IndexEntry, IndexKey, NodeSink, NodeSource};
 use mechanics::ids::SpaceId;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -51,7 +51,7 @@ pub const MAX_HEADS_PER_BODY: usize = 1024;
 pub const SPACE_ID_LEN: usize = 29;
 
 /// One advertised head: the hash of its public descriptor and the commitment to
-/// its signed BodyTransaction.
+/// its signed Transaction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ManifestHead {
     pub descriptor_hash: [u8; 32],
@@ -91,23 +91,23 @@ pub struct ManifestEntry {
 /// The signed manifest root.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManifestRoot {
-    pub format_version: u8,
-    pub space: [u8; SPACE_ID_LEN],
-    pub replica_frontier: ReplicaFrontier,
-    pub body_index_root: Option<ChildRef>,
-    pub body_count: u64,
-    pub content_index_root: Option<ChildRef>,
-    pub content_count: u64,
-    pub signer: [u8; 32],
-    pub authority_frontier: AuthorityFrontier,
-    pub signature_algorithm: u8,
+    pub(crate) format_version: u8,
+    pub(crate) space: [u8; SPACE_ID_LEN],
+    pub(crate) replica_frontier: ReplicaFrontier,
+    pub(crate) body_index_root: Option<ChildRef>,
+    pub(crate) body_count: u64,
+    pub(crate) content_index_root: Option<ChildRef>,
+    pub(crate) content_count: u64,
+    pub(crate) signer: [u8; 32],
+    pub(crate) authority_frontier: AuthorityFrontier,
+    pub(crate) signature_algorithm: u8,
     #[serde(with = "serde_byte_array")]
-    pub signature: [u8; 64],
+    pub(crate) signature: [u8; 64],
 }
 
 /// Why a manifest failed validation.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ManifestError {
+pub enum Invalid {
     UnsupportedVersion(u8),
     UnsupportedSignatureAlgorithm(u8),
     NonCanonical,
@@ -130,18 +130,23 @@ pub enum ManifestError {
     AuthorityUnverified,
 }
 
-impl std::fmt::Display for ManifestError {
+impl std::fmt::Display for Invalid {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{self:?}")
     }
 }
-impl std::error::Error for ManifestError {}
+impl std::error::Error for Invalid {}
 
 fn length_framed(domain: &[u8], body: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(2 + domain.len() + 4 + body.len());
-    out.extend_from_slice(&(domain.len() as u16).to_be_bytes());
+    let capacity = 6usize
+        .saturating_add(domain.len())
+        .saturating_add(body.len());
+    let mut out = Vec::with_capacity(capacity);
+    let domain_len = u16::try_from(domain.len()).unwrap_or(u16::MAX);
+    out.extend_from_slice(&domain_len.to_be_bytes());
     out.extend_from_slice(domain);
-    out.extend_from_slice(&(body.len() as u32).to_be_bytes());
+    let body_len = u32::try_from(body.len()).unwrap_or(u32::MAX);
+    out.extend_from_slice(&body_len.to_be_bytes());
     out.extend_from_slice(body);
     out
 }
@@ -167,40 +172,46 @@ pub fn body_index_key(key: &BodyKey) -> IndexKey {
 
 impl ManifestEntry {
     pub fn encode(&self) -> Vec<u8> {
+        #[allow(
+            clippy::expect_used,
+            reason = "derived serialization of this validated manifest entry is infallible"
+        )]
         postcard::to_stdvec(self).expect("postcard manifest entry")
     }
 
-    pub fn decode_canonical(bytes: &[u8]) -> Result<Self, ManifestError> {
-        let entry: Self = postcard::from_bytes(bytes).map_err(|_| ManifestError::NonCanonical)?;
+    pub fn decode_canonical(bytes: &[u8]) -> Result<Self, Invalid> {
+        let entry: Self = postcard::from_bytes(bytes).map_err(|_| Invalid::NonCanonical)?;
         if entry.encode() != bytes {
-            return Err(ManifestError::NonCanonical);
+            return Err(Invalid::NonCanonical);
         }
         entry.validate()?;
         Ok(entry)
     }
 
-    pub fn validate(&self) -> Result<(), ManifestError> {
+    pub fn validate(&self) -> Result<(), Invalid> {
         if self.heads.is_empty() || self.heads.len() > MAX_HEADS_PER_BODY {
-            return Err(ManifestError::Bounds);
+            return Err(Invalid::Bounds);
         }
         if self.content_refs.len() > MAX_CONTENT_REFS_PER_BODY {
-            return Err(ManifestError::Bounds);
+            return Err(Invalid::Bounds);
         }
-        for w in self.heads.windows(2) {
-            if w[0] >= w[1] {
-                return Err(ManifestError::OrderViolation);
+        for window in self.heads.windows(2) {
+            let [left, right] = window else { continue };
+            if left >= right {
+                return Err(Invalid::OrderViolation);
             }
         }
-        for w in self.content_refs.windows(2) {
-            if w[0] >= w[1] {
-                return Err(ManifestError::OrderViolation);
+        for window in self.content_refs.windows(2) {
+            let [left, right] = window else { continue };
+            if left >= right {
+                return Err(Invalid::OrderViolation);
             }
         }
         Ok(())
     }
 
     /// Build a canonical entry from an unordered head set and declaration.
-    pub fn new(key: BodyKey, heads: Vec<ManifestHead>) -> Result<Self, ManifestError> {
+    pub fn new(key: BodyKey, heads: Vec<ManifestHead>) -> Result<Self, Invalid> {
         Self::declaring(key, heads, Vec::new())
     }
 
@@ -209,7 +220,7 @@ impl ManifestEntry {
         key: BodyKey,
         mut heads: Vec<ManifestHead>,
         mut content_refs: Vec<[u8; 32]>,
-    ) -> Result<Self, ManifestError> {
+    ) -> Result<Self, Invalid> {
         heads.sort();
         heads.dedup();
         content_refs.sort();
@@ -226,6 +237,10 @@ impl ManifestEntry {
 
 impl ManifestRoot {
     fn preimage(&self) -> Vec<u8> {
+        #[allow(
+            clippy::expect_used,
+            reason = "derived serialization of this fixed manifest preimage is infallible"
+        )]
         let body = postcard::to_stdvec(&(
             self.format_version,
             self.space,
@@ -245,13 +260,13 @@ impl ManifestRoot {
     /// Station may sign; mechanics validates its standing at the authority
     /// frontier separately, like every signed object.
     #[allow(clippy::too_many_arguments)]
-    pub fn sign_with(
+    pub(crate) fn sign_with(
         space: &SpaceId,
         replica_frontier: ReplicaFrontier,
         body_index_root: Option<ChildRef>,
         content_index_root: Option<ChildRef>,
         authority_frontier: AuthorityFrontier,
-        signer: &dyn crate::transaction::TransactionSigner,
+        signer: &dyn crate::transaction::Signer,
     ) -> Option<Self> {
         let mut root = Self {
             format_version: MANIFEST_FORMAT_VERSION,
@@ -271,13 +286,17 @@ impl ManifestRoot {
     }
 
     pub fn encode(&self) -> Vec<u8> {
+        #[allow(
+            clippy::expect_used,
+            reason = "derived serialization of this validated manifest root is infallible"
+        )]
         postcard::to_stdvec(self).expect("postcard manifest root")
     }
 
-    pub fn decode_canonical(bytes: &[u8]) -> Result<Self, ManifestError> {
-        let root: Self = postcard::from_bytes(bytes).map_err(|_| ManifestError::NonCanonical)?;
+    pub fn decode_canonical(bytes: &[u8]) -> Result<Self, Invalid> {
+        let root: Self = postcard::from_bytes(bytes).map_err(|_| Invalid::NonCanonical)?;
         if root.encode() != bytes {
-            return Err(ManifestError::NonCanonical);
+            return Err(Invalid::NonCanonical);
         }
         Ok(root)
     }
@@ -286,26 +305,26 @@ impl ManifestRoot {
     /// against the roots they name, and the Station signature. Signer standing
     /// at the authority frontier is mechanics' separate check, and the index's
     /// contents are [`Self::verify_index`].
-    pub fn verify(&self) -> Result<(), ManifestError> {
+    pub fn verify(&self) -> Result<(), Invalid> {
         if self.format_version != MANIFEST_FORMAT_VERSION {
-            return Err(ManifestError::UnsupportedVersion(self.format_version));
+            return Err(Invalid::UnsupportedVersion(self.format_version));
         }
         if self.signature_algorithm != SIG_ALG_ED25519 {
-            return Err(ManifestError::UnsupportedSignatureAlgorithm(
+            return Err(Invalid::UnsupportedSignatureAlgorithm(
                 self.signature_algorithm,
             ));
         }
         std::str::from_utf8(&self.space)
             .ok()
             .and_then(SpaceId::parse)
-            .ok_or(ManifestError::BadSpaceId)?;
+            .ok_or(Invalid::BadSpaceId)?;
         if self.body_index_root.map_or(0, |c| c.count) != self.body_count
             || self.content_index_root.map_or(0, |c| c.count) != self.content_count
         {
-            return Err(ManifestError::CountMismatch);
+            return Err(Invalid::CountMismatch);
         }
-        if !mechanics::crypto::verify_detached(&self.signer, &self.preimage(), &self.signature) {
-            return Err(ManifestError::BadSignature);
+        if !mechanics::actor::verify_detached(&self.signer, &self.preimage(), &self.signature) {
+            return Err(Invalid::BadSignature);
         }
         Ok(())
     }
@@ -321,24 +340,24 @@ impl ManifestRoot {
     /// it looks: an entry cannot sit under a key it does not hash to, and a
     /// descriptor's hash is over the whole descriptor. Substituting a geometry,
     /// a nonce, or a Merkle root moves the entry.
-    pub fn verify_index(&self, nodes: &dyn NodeSource) -> Result<u64, ManifestError> {
-        let counted = index::validate(nodes, self.body_index_root)
-            .map_err(|_| ManifestError::IndexInvalid)?;
+    pub(crate) fn verify_index(&self, nodes: &dyn NodeSource) -> Result<u64, Invalid> {
+        let counted =
+            index::validate(nodes, self.body_index_root).map_err(|_| Invalid::IndexInvalid)?;
         if counted != self.body_count {
-            return Err(ManifestError::CountMismatch);
+            return Err(Invalid::CountMismatch);
         }
-        let mut failure: Option<ManifestError> = None;
+        let mut failure: Option<Invalid> = None;
         index::stream(nodes, self.body_index_root, &mut |entry| {
             if failure.is_some() {
                 return;
             }
             match ManifestEntry::decode_canonical(&entry.value) {
                 Ok(decoded) if body_index_key(&decoded.key) == entry.key => {}
-                Ok(_) => failure = Some(ManifestError::KeyMismatch),
+                Ok(_) => failure = Some(Invalid::KeyMismatch),
                 Err(e) => failure = Some(e),
             }
         })
-        .map_err(|_| ManifestError::IndexInvalid)?;
+        .map_err(|_| Invalid::IndexInvalid)?;
         if let Some(e) = failure {
             return Err(e);
         }
@@ -353,14 +372,14 @@ impl ManifestRoot {
     /// is not a degraded advertisement. The Space check is here rather than in
     /// [`crate::content::ContentDescriptor::validate`] because only the root
     /// knows which Space this catalog claims to be.
-    fn verify_content_index(&self, nodes: &dyn NodeSource) -> Result<u64, ManifestError> {
-        let counted = index::validate(nodes, self.content_index_root)
-            .map_err(|_| ManifestError::IndexInvalid)?;
+    fn verify_content_index(&self, nodes: &dyn NodeSource) -> Result<u64, Invalid> {
+        let counted =
+            index::validate(nodes, self.content_index_root).map_err(|_| Invalid::IndexInvalid)?;
         if counted != self.content_count {
-            return Err(ManifestError::CountMismatch);
+            return Err(Invalid::CountMismatch);
         }
-        let space = std::str::from_utf8(&self.space).map_err(|_| ManifestError::BadSpaceId)?;
-        let mut failure: Option<ManifestError> = None;
+        let space = std::str::from_utf8(&self.space).map_err(|_| Invalid::BadSpaceId)?;
+        let mut failure: Option<Invalid> = None;
         index::stream(nodes, self.content_index_root, &mut |entry| {
             if failure.is_some() {
                 return;
@@ -368,15 +387,15 @@ impl ManifestRoot {
             match crate::content::ContentDescriptor::decode_canonical(&entry.value) {
                 Ok(descriptor) => {
                     if descriptor.space != space {
-                        failure = Some(ManifestError::BadSpaceId);
+                        failure = Some(Invalid::BadSpaceId);
                     } else if content_index_key(descriptor.content_ref().as_bytes()) != entry.key {
-                        failure = Some(ManifestError::KeyMismatch);
+                        failure = Some(Invalid::KeyMismatch);
                     }
                 }
-                Err(_) => failure = Some(ManifestError::NonCanonical),
+                Err(_) => failure = Some(Invalid::NonCanonical),
             }
         })
-        .map_err(|_| ManifestError::IndexInvalid)?;
+        .map_err(|_| Invalid::IndexInvalid)?;
         match failure {
             Some(e) => Err(e),
             None => Ok(counted),
@@ -405,10 +424,10 @@ impl ManifestRoot {
     pub fn verify_authorized(
         self,
         authority: &dyn crate::transaction::AuthoritySource,
-    ) -> Result<AuthorizedRoot, ManifestError> {
+    ) -> Result<AuthorizedRoot, Invalid> {
         self.verify()?;
         if !authority.signer_authorized(&self.signer, &self.authority_frontier) {
-            return Err(ManifestError::AuthorityUnverified);
+            return Err(Invalid::AuthorityUnverified);
         }
         Ok(AuthorizedRoot { root: self })
     }
@@ -417,10 +436,10 @@ impl ManifestRoot {
 /// Build a Body index from a complete catalog. Used when publishing from a
 /// catalog held whole in memory; incremental publication updates the prior root
 /// through the index's own `apply` instead.
-pub fn build_body_index(
+pub(crate) fn build_body_index(
     entries: Vec<ManifestEntry>,
     sink: &mut NodeSink,
-) -> Result<Option<ChildRef>, ManifestError> {
+) -> Result<Option<ChildRef>, Invalid> {
     let indexed: Vec<IndexEntry> = entries
         .into_iter()
         .map(|entry| {
@@ -430,8 +449,8 @@ pub fn build_body_index(
                 value: entry.encode(),
             })
         })
-        .collect::<Result<_, ManifestError>>()?;
-    index::build_index(indexed, sink).map_err(|_| ManifestError::IndexInvalid)
+        .collect::<Result<_, Invalid>>()?;
+    index::build_index(indexed, sink).map_err(|_| Invalid::IndexInvalid)
 }
 
 /// Build the content catalog a Contact advertises: every committed descriptor,
@@ -443,23 +462,21 @@ pub fn build_body_index(
 /// already derive from bytes it is entitled to: geometry, an epoch id, a
 /// per-ingest nonce, and a Merkle root over ciphertext. None of it opens
 /// anything.
-pub fn build_content_index(
+pub(crate) fn build_content_index(
     descriptors: Vec<crate::content::ContentDescriptor>,
     sink: &mut NodeSink,
-) -> Result<Option<ChildRef>, ManifestError> {
+) -> Result<Option<ChildRef>, Invalid> {
     let indexed: Vec<IndexEntry> = descriptors
         .into_iter()
         .map(|descriptor| {
-            descriptor
-                .validate()
-                .map_err(|_| ManifestError::NonCanonical)?;
+            descriptor.validate().map_err(|_| Invalid::NonCanonical)?;
             Ok(IndexEntry {
                 key: content_index_key(descriptor.content_ref().as_bytes()),
                 value: descriptor.encode(),
             })
         })
-        .collect::<Result<_, ManifestError>>()?;
-    index::build_index(indexed, sink).map_err(|_| ManifestError::IndexInvalid)
+        .collect::<Result<_, Invalid>>()?;
+    index::build_index(indexed, sink).map_err(|_| Invalid::IndexInvalid)
 }
 
 /// A manifest root whose structure, signature, **and signer authority** have
@@ -535,14 +552,14 @@ impl ManifestBook {
     /// Observe an authority-verified root — the type makes verification
     /// non-optional. Equivocation is rejected and reported; the caller audits
     /// it (the book keeps the first-seen root).
-    pub fn observe(&mut self, root: &AuthorizedRoot) -> Result<RootObservation, ManifestError> {
+    pub fn observe(&mut self, root: &AuthorizedRoot) -> Result<RootObservation, Invalid> {
         let root = root.root();
         let (signer, frontier) = root.coordinate();
         let coordinate = (signer, frontier.root, frontier.transaction_count);
         let hash = root.root_hash();
         match self.seen.get(&coordinate) {
             Some(known) if *known == hash => Ok(RootObservation::AlreadyKnown),
-            Some(_) => Err(ManifestError::Equivocation),
+            Some(_) => Err(Invalid::Equivocation),
             None => {
                 self.seen.insert(coordinate, hash);
                 let evicted = self.trim(&signer);
@@ -569,7 +586,7 @@ impl ManifestBook {
             return 0;
         }
         coordinates.sort_by_key(|(_, _, count)| *count);
-        let excess = coordinates.len() - self.per_signer_limit;
+        let excess = coordinates.len().saturating_sub(self.per_signer_limit);
         for coordinate in coordinates.into_iter().take(excess) {
             self.seen.remove(&coordinate);
         }

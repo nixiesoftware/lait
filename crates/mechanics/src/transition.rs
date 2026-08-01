@@ -26,7 +26,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::authority::{AuthorityConfigurationId, LeafId};
+use crate::authority::{ConfigId, Holder};
 use crate::dkg::{SigningPlan, TranscriptId};
 use crate::ids::DeviceId;
 use crate::sigdag::SignedNode;
@@ -75,7 +75,7 @@ pub struct CandidateAuthority {
     pub transition: TransitionId,
     /// The DKG that produced the candidate.
     pub proposal: TranscriptId,
-    pub configuration: AuthorityConfigurationId,
+    pub configuration: ConfigId,
     pub public_key: DeviceId,
     /// Commitment to the ceremony transcript the candidate came from.
     pub transcript_commitment: [u8; 32],
@@ -96,9 +96,9 @@ pub struct CandidateAuthority {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CustodyAck {
     pub transition: TransitionId,
-    pub configuration: AuthorityConfigurationId,
+    pub configuration: ConfigId,
     pub share_generation: u64,
-    pub leaf: LeafId,
+    pub leaf: Holder,
     pub public_share_commitment: [u8; 32],
     pub package_commitment: [u8; 32],
 }
@@ -129,7 +129,7 @@ pub enum TransitionEvent {
     /// The transition was proposed (a new configuration named).
     Proposed {
         transition: TransitionId,
-        configuration: AuthorityConfigurationId,
+        configuration: ConfigId,
     },
     /// The current authority authorized generating the candidate.
     Authorized { transition: TransitionId },
@@ -194,9 +194,9 @@ pub enum TransitionState {
 pub fn project(
     events: &[TransitionEvent],
     transition: TransitionId,
-    configuration: AuthorityConfigurationId,
+    configuration: ConfigId,
     share_generation: u64,
-    required_leaves: &[LeafId],
+    required_leaves: &[Holder],
 ) -> Option<TransitionState> {
     let mine: Vec<&TransitionEvent> = events
         .iter()
@@ -221,7 +221,7 @@ pub fn project(
 
     if has(&|e| matches!(e, TransitionEvent::CandidateComplete { .. })) {
         // Custody: every required leaf must have a matching, generation-bound ack.
-        let acked: std::collections::BTreeSet<&LeafId> = mine
+        let acked: std::collections::BTreeSet<&Holder> = mine
             .iter()
             .filter_map(|e| match e {
                 TransitionEvent::Custody(a)
@@ -253,15 +253,15 @@ mod tests {
     fn tid(n: u8) -> TransitionId {
         TransitionId([n; 32])
     }
-    fn cfg(n: u8) -> AuthorityConfigurationId {
+    fn cfg(n: u8) -> ConfigId {
         // Reuse the Single id as a stand-in distinct value via the public helper.
         let _ = n;
-        AuthorityConfigurationId::single()
+        ConfigId::single()
     }
-    fn leaf(n: u8) -> LeafId {
-        LeafId::from_string(format!("{n:064x}"))
+    fn leaf(n: u8) -> Holder {
+        Holder::from_string(format!("{n:064x}"))
     }
-    fn ack(t: TransitionId, c: AuthorityConfigurationId, gen: u64, l: LeafId) -> TransitionEvent {
+    fn ack(t: TransitionId, c: ConfigId, gen: u64, l: Holder) -> TransitionEvent {
         TransitionEvent::Custody(CustodyAck {
             transition: t,
             configuration: c,
@@ -377,7 +377,7 @@ mod tests {
         assert_eq!(project(&ev, tid(9), c, 0, &[]), None, "unknown transition");
     }
 
-    fn dummy_candidate(t: TransitionId, c: AuthorityConfigurationId) -> CandidateAuthority {
+    fn dummy_candidate(t: TransitionId, c: ConfigId) -> CandidateAuthority {
         CandidateAuthority {
             transition: t,
             proposal: TranscriptId::parse_hex(&"a".repeat(64)).unwrap(),
@@ -392,7 +392,7 @@ mod tests {
     fn dummy_plan() -> SigningPlan {
         SigningPlan {
             signing: TranscriptId::parse_hex(&"b".repeat(64)).unwrap(),
-            authority: crate::authority::AuthorityId::single(crate::crypto::device_from_seed(
+            authority: crate::authority::Authority::single(crate::crypto::device_from_seed(
                 &[2u8; 32],
             )),
             message_commitment: [0u8; 32],

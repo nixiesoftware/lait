@@ -33,7 +33,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::authority::{AuthorityConfigurationId, LeafId};
+use crate::authority::{ConfigId, Holder};
 use crate::gaccess::{self, KeyShares, Signature};
 use crate::ids::DeviceId;
 use crate::transition::{CandidateAuthority, TransitionId, TransitionState};
@@ -51,12 +51,12 @@ const INSTALL_DOMAIN: &[u8] = b"lait/space/1/handover/1/install";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstallationTerms {
     transition: TransitionId,
-    configuration: AuthorityConfigurationId,
+    configuration: ConfigId,
     new_public_key: DeviceId,
     transcript_commitment: [u8; 32],
     /// The activation custody rule: leaves whose share must be attested. Kept
     /// sorted and deduped so the message is canonical.
-    required_leaves: Vec<LeafId>,
+    required_leaves: Vec<Holder>,
 }
 
 impl InstallationTerms {
@@ -64,10 +64,10 @@ impl InstallationTerms {
     /// `required_leaves` is sorted and deduped for a canonical message.
     pub fn new(
         transition: TransitionId,
-        configuration: AuthorityConfigurationId,
+        configuration: ConfigId,
         new_public_key: DeviceId,
         transcript_commitment: [u8; 32],
-        required_leaves: Vec<LeafId>,
+        required_leaves: Vec<Holder>,
     ) -> Self {
         let mut required_leaves = required_leaves;
         required_leaves.sort();
@@ -83,7 +83,7 @@ impl InstallationTerms {
 
     /// Project a completed candidate record onto the terms the old authority
     /// signs, paired with the activation custody rule for the transition.
-    pub fn for_candidate(candidate: &CandidateAuthority, required_leaves: Vec<LeafId>) -> Self {
+    pub fn for_candidate(candidate: &CandidateAuthority, required_leaves: Vec<Holder>) -> Self {
         Self::new(
             candidate.transition,
             candidate.configuration,
@@ -153,8 +153,8 @@ pub fn verify_installation(
 pub fn sign_installation<K: KeyShares>(
     old_key: &K,
     witness: &crate::compile::ReconstructionWitness,
-    nonces: &std::collections::BTreeMap<LeafId, gaccess::Nonce>,
-    commitments: &[(LeafId, gaccess::Commitment)],
+    nonces: &std::collections::BTreeMap<Holder, gaccess::Nonce>,
+    commitments: &[(Holder, gaccess::Commitment)],
     terms: &InstallationTerms,
 ) -> Option<Signature> {
     gaccess::sign_qualified(witness, old_key, nonces, commitments, &terms.message())
@@ -296,7 +296,7 @@ pub fn resolve(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::authority::PrincipalId;
+    use crate::authority::Principal;
     use crate::compile::{compile, StructurallyValidatedCompiledPolicy};
     use crate::expand::{expand, PrincipalCustody, PrincipalDescriptor};
     use crate::gaccess::{commit, Nonce};
@@ -304,14 +304,14 @@ mod tests {
     use crate::policy::OwnershipPolicy;
     use std::collections::BTreeMap;
 
-    fn prin(n: u8) -> PrincipalId {
-        PrincipalId::of_device(&crate::crypto::device_from_seed(&[n; 32]))
+    fn prin(n: u8) -> Principal {
+        Principal::of_device(&crate::crypto::device_from_seed(&[n; 32]))
     }
     fn key(n: u8) -> OwnershipPolicy {
         OwnershipPolicy::Key(prin(n))
     }
-    fn resolver() -> impl Fn(&PrincipalId) -> Option<PrincipalDescriptor> {
-        |p: &PrincipalId| {
+    fn resolver() -> impl Fn(&Principal) -> Option<PrincipalDescriptor> {
+        |p: &Principal| {
             Some(PrincipalDescriptor {
                 id: p.clone(),
                 custody: PrincipalCustody::Direct {
@@ -320,7 +320,7 @@ mod tests {
             })
         }
     }
-    fn compiled(o: OwnershipPolicy) -> (StructurallyValidatedCompiledPolicy, Vec<LeafId>) {
+    fn compiled(o: OwnershipPolicy) -> (StructurallyValidatedCompiledPolicy, Vec<Holder>) {
         let canon = o.canonicalize().unwrap();
         let exp = expand(&canon, &resolver()).unwrap();
         let c = compile(&exp).unwrap();
@@ -328,7 +328,7 @@ mod tests {
         (c, leaves)
     }
     /// Run a dealer-free DKG over the compiled policy (every leaf contributes).
-    fn dkg(c: &StructurallyValidatedCompiledPolicy, leaves: &[LeafId]) -> GroupKey {
+    fn dkg(c: &StructurallyValidatedCompiledPolicy, leaves: &[Holder]) -> GroupKey {
         let contribs: Vec<_> = leaves.iter().map(|l| contribute(c, l.clone())).collect();
         aggregate(c, &contribs).expect("aggregate")
     }
@@ -343,11 +343,11 @@ mod tests {
     fn old_signs(
         old_c: &StructurallyValidatedCompiledPolicy,
         old_key: &GroupKey,
-        signers: &[LeafId],
+        signers: &[Holder],
         terms: &InstallationTerms,
     ) -> Signature {
         let witness = old_c.reconstruct(signers).expect("old set is qualified");
-        let mut nonces: BTreeMap<LeafId, Nonce> = BTreeMap::new();
+        let mut nonces: BTreeMap<Holder, Nonce> = BTreeMap::new();
         let mut commitments = Vec::new();
         for leaf in &witness.leaves {
             let (n, com) = commit();
@@ -361,7 +361,7 @@ mod tests {
     /// Returns whether the installation verifies under the old key.
     fn handover(
         old_policy: OwnershipPolicy,
-        old_signers: impl Fn(&[LeafId]) -> Vec<LeafId>,
+        old_signers: impl Fn(&[Holder]) -> Vec<Holder>,
         new_policy: OwnershipPolicy,
     ) -> bool {
         let (old_c, old_leaves) = compiled(old_policy);
@@ -374,7 +374,7 @@ mod tests {
         // activation rule (here: every new leaf must be backed).
         let terms = InstallationTerms::new(
             tid(0xC1),
-            AuthorityConfigurationId::single(), // stand-in id; identity is what's bound
+            ConfigId::single(), // stand-in id; identity is what's bound
             device_of(&new_key),
             [7u8; 32],
             new_leaves.clone(),
@@ -460,7 +460,7 @@ mod tests {
 
         let terms_a = InstallationTerms::new(
             tid(0xAA),
-            AuthorityConfigurationId::single(),
+            ConfigId::single(),
             device_of(&a_key),
             [1u8; 32],
             a_leaves.clone(),
@@ -476,7 +476,7 @@ mod tests {
         // Same signature, terms naming B's key instead: must fail.
         let terms_b = InstallationTerms::new(
             tid(0xAA),
-            AuthorityConfigurationId::single(),
+            ConfigId::single(),
             device_of(&b_key),
             [1u8; 32],
             b_leaves.clone(),
@@ -490,7 +490,7 @@ mod tests {
     }
 
     // A one-leaf policy from a distinct principal, for the binding test above.
-    fn key_prin(n: u8) -> PrincipalId {
+    fn key_prin(n: u8) -> Principal {
         prin(n)
     }
 
@@ -499,7 +499,7 @@ mod tests {
     fn signed_installation(
         old_c: &StructurallyValidatedCompiledPolicy,
         old_key: &GroupKey,
-        old_signers: &[LeafId],
+        old_signers: &[Holder],
         transition: TransitionId,
         cand_seed: u8,
     ) -> SignedInstallation {
@@ -507,7 +507,7 @@ mod tests {
         let cand_key = dkg(&cand_c, &cand_leaves);
         let terms = InstallationTerms::new(
             transition,
-            AuthorityConfigurationId::single(),
+            ConfigId::single(),
             device_of(&cand_key),
             [cand_seed; 32],
             cand_leaves,

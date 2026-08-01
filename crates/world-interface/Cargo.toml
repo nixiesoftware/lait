@@ -10,8 +10,13 @@ publish = false
 [dependencies]
 clap = "4"
 replica = { path = "../replica" }
-world-bridge = { path = "../world-bridge" }
+runtime = { path = "../runtime" }
 serde_json = "1"
+tracing = "0.1"
 
 [dev-dependencies]
 schemars = "1"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }

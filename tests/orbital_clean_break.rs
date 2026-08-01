@@ -448,7 +448,7 @@ fn rules_have_teeth() {
     }
     // Negative controls: semantic names and encoded-version string contents
     // must NOT trip the identifier rule.
-    assert!(!versioned_ident("BodyTransaction"));
+    assert!(!versioned_ident("Transaction"));
     assert!(!versioned_ident("SignedCoordinates"));
     assert!(!versioned_ident("Ipv4"), "IP-family names are not versions");
     assert!(!versioned_ident("Ipv6Addr"));

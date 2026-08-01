@@ -1,3 +1,10 @@
+#![allow(
+    clippy::expect_used,
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    clippy::indexing_slicing,
+    reason = "router handlers consume the validated CLI/MCP argument shapes and bounded product DTOs"
+)]
 //! The Issues application router (C4.3 / C5 step 5 routing).
 //!
 //! `IssueRouter` maps the product's [`IssuesRequest`] onto the semantic
@@ -10,12 +17,10 @@
 use issues::contract::{self, IssueIntent, IssueQuery, NewLabel, Pos, WorkAction};
 use issues::dto::{BoardView, GraphView, IssueView, LabelDto, ProjectDto, Row};
 use issues::ids::{DocId, LabelId, ProjectId, SystemUlidSource, UlidSource};
-use runtime::{RequestId, Session, WorldError, WorldIntent, WorldQuery};
+use runtime::world::call::{Access, Call, Code, Context, Failure, Handler, Nudge, Reply};
+use runtime::world::{Conflict as SessionConflict, Failure as SessionFailure};
+use runtime::{world::Intent, world::Query, world::Rejection, world::RequestId, Session};
 use serde::de::DeserializeOwned;
-use world_bridge::{
-    WorldCall, WorldCallAccess, WorldCallContext, WorldCallError, WorldCallErrorCode,
-    WorldCallHandler, WorldNudge, WorldReply,
-};
 
 use crate::{
     decode_call, encode_reply, BoardPos, IssuesRequest as Request, IssuesResponse as Response,
@@ -51,11 +56,11 @@ impl IssuesCallHandler {
     pub const OPERATION: &'static str = OPERATION;
     pub const VERSION: u32 = VERSION;
 
-    fn decode_request(call: &WorldCall) -> Result<Request, WorldCallError> {
+    fn decode_request(call: &Call) -> Result<Request, Failure> {
         decode_call(call)
     }
 
-    fn route_request(&self, request: Request, context: &WorldCallContext<'_>) -> Response {
+    fn route_request(&self, request: Request, context: &Context<'_>) -> Response {
         static CLOCK: std::sync::OnceLock<SystemUlidSource> = std::sync::OnceLock::new();
 
         let router = IssueRouter::new(
@@ -89,23 +94,23 @@ impl IssuesCallHandler {
     }
 }
 
-impl WorldCallHandler for IssuesCallHandler {
-    fn access(&self, call: &WorldCall) -> Result<WorldCallAccess, WorldCallError> {
+impl Handler for IssuesCallHandler {
+    fn access(&self, call: &Call) -> Result<Access, Failure> {
         let request = Self::decode_request(call)?;
         Ok(request.access())
     }
 
-    fn call(&self, call: &WorldCall, context: &WorldCallContext<'_>) -> WorldReply {
+    fn call(&self, call: &Call, context: &Context<'_>) -> Reply {
         let request = match Self::decode_request(call) {
             Ok(request) => request,
-            Err(error) => return WorldReply::error(call, error.code, error.message),
+            Err(error) => return Reply::error(call, error.code, error.message()),
         };
         let response = self.route_request(request, context);
         match serde_json::to_value(response) {
             Ok(response) => encode_reply(call, &response),
-            Err(error) => WorldReply::error(
+            Err(error) => Reply::error(
                 call,
-                WorldCallErrorCode::Internal,
+                Code::Internal,
                 format!("encode Issues response: {error}"),
             ),
         }
@@ -121,12 +126,7 @@ impl WorldCallHandler for IssuesCallHandler {
     /// The acting identity is filtered out. Nobody is told about their own
     /// action — Linear does not, and a person notified of everything they did
     /// stops reading notifications.
-    fn nudges(
-        &self,
-        call: &WorldCall,
-        reply: &WorldReply,
-        context: &WorldCallContext<'_>,
-    ) -> Vec<WorldNudge> {
+    fn nudges(&self, call: &Call, reply: &Reply, context: &Context<'_>) -> Vec<Nudge> {
         // Asked only about work that happened. A refused call changed nothing,
         // and an idempotent replay changed nothing twice.
         if !reply.succeeded() {
@@ -155,7 +155,7 @@ impl WorldCallHandler for IssuesCallHandler {
         actors
             .into_iter()
             .filter(|actor| actor != context.actor)
-            .map(|actor| WorldNudge {
+            .map(|actor| Nudge {
                 actor,
                 schema: schema.to_string(),
                 payload: payload.clone(),
@@ -323,14 +323,14 @@ enum RefOutcome {
 /// The router.
 pub struct IssueRouter<'a> {
     session: &'a Session,
-    identity: &'a runtime::LocalIdentity,
+    identity: &'a runtime::world::LocalIdentity,
     clock: &'a dyn UlidSource,
 }
 
 impl<'a> IssueRouter<'a> {
     pub fn new(
         session: &'a Session,
-        identity: &'a runtime::LocalIdentity,
+        identity: &'a runtime::world::LocalIdentity,
         clock: &'a dyn UlidSource,
     ) -> Self {
         Self {
@@ -343,7 +343,7 @@ impl<'a> IssueRouter<'a> {
     fn snapshot(&self) -> Snapshot {
         let bytes = self
             .session
-            .query(WorldQuery {
+            .query(Query {
                 schema: contract::issue_schema(),
                 schema_version: contract::ISSUE_SCHEMA_VERSION,
                 payload: IssueQuery::Snapshot.to_json(),
@@ -358,11 +358,11 @@ impl<'a> IssueRouter<'a> {
         }
     }
 
-    fn submit(&self, intent: &IssueIntent) -> Result<contract::IssueEffect, WorldError> {
+    fn submit(&self, intent: &IssueIntent) -> Result<contract::IssueEffect, SessionFailure> {
         let action = self.identity.sign_action(
             self.session,
             RequestId::mint(),
-            WorldIntent {
+            Intent {
                 schema: contract::issue_schema(),
                 schema_version: contract::ISSUE_SCHEMA_VERSION,
                 payload: intent.to_json(),
@@ -407,16 +407,17 @@ impl<'a> IssueRouter<'a> {
         Some((doc, actors))
     }
 
-    fn query<T: DeserializeOwned>(&self, query: &IssueQuery) -> Result<T, WorldError> {
+    fn query<T: DeserializeOwned>(&self, query: &IssueQuery) -> Result<T, SessionFailure> {
         let bytes = self
             .session
-            .query(WorldQuery {
+            .query(Query {
                 schema: contract::issue_schema(),
                 schema_version: contract::ISSUE_SCHEMA_VERSION,
                 payload: query.to_json(),
             })?
             .bytes;
-        serde_json::from_slice(&bytes).map_err(|_| WorldError::InvalidRequest)
+        serde_json::from_slice(&bytes)
+            .map_err(|_| SessionFailure::Rejected(Rejection::InvalidRequest))
     }
 
     /// The canonical reff for a DocId (from the current snapshot).
@@ -498,27 +499,38 @@ impl<'a> IssueRouter<'a> {
         })
     }
 
-    fn effect_err(e: WorldError) -> Response {
+    fn effect_err(e: SessionFailure) -> Response {
         match e {
-            WorldError::Denied => Response::denied(
+            SessionFailure::Rejected(Rejection::Denied) => Response::denied(
                 "you lack write standing in this space — a sponsored agent needs a \
                  human member to grant it write access (`lait agent add`), and a \
                  view-only member needs an admin to grant it; nothing was changed",
             ),
-            WorldError::Conflict => Response::err("that change conflicts with the current state"),
-            WorldError::RequestIdConflict => Response::err("duplicate request"),
-            WorldError::InvalidRequest | WorldError::ContractViolation => {
+            SessionFailure::Rejected(Rejection::Conflict)
+            | SessionFailure::Conflict(SessionConflict::Body) => {
+                Response::err("that change conflicts with the current state")
+            }
+            SessionFailure::Conflict(SessionConflict::Request) => {
+                Response::err("duplicate request")
+            }
+            SessionFailure::Rejected(Rejection::InvalidRequest | Rejection::ContractViolation) => {
                 Response::err("invalid request")
             }
-            WorldError::UnsupportedSchema | WorldError::UnsupportedSchemaVersion => {
-                Response::err("unsupported request")
+            SessionFailure::Rejected(
+                Rejection::UnsupportedSchema | Rejection::UnsupportedSchemaVersion,
+            ) => Response::err("unsupported request"),
+            SessionFailure::Rejected(Rejection::LimitExceeded) => {
+                Response::err("request exceeds a limit")
             }
-            WorldError::LimitExceeded => Response::err("request exceeds a limit"),
-            WorldError::AuthorityChanged => Response::retry("membership changed — retry"),
-            WorldError::StationDormant => Response::err("the space is shutting down"),
-            WorldError::Persistence | WorldError::WorldPanicked => Response::err("internal error"),
-            WorldError::ResetRequired => Response::err("state reset — re-query"),
-            WorldError::WorldStateCorrupt => Response::err(
+            SessionFailure::Conflict(SessionConflict::AuthorityChanged) => {
+                Response::retry("membership changed — retry")
+            }
+            SessionFailure::Interrupted => Response::err("the space is shutting down"),
+            SessionFailure::Persistence | SessionFailure::CallbackPanicked => {
+                Response::err("internal error")
+            }
+            SessionFailure::Reset => Response::err("state reset — re-query"),
+            SessionFailure::Rejected(Rejection::StateCorrupt) => Response::err(
                 "the space's issue catalog is corrupt (missing, duplicated, or mis-bound) — \
                  this store needs operator attention; nothing was changed",
             ),
@@ -621,10 +633,10 @@ impl<'a> IssueRouter<'a> {
             Request::AccessPlan { role, project } => {
                 let plan = crate::host::plan_access_grant(self.session, &role, project.as_deref())
                     .map_err(|error| match error {
-                        crate::host::AccessPlanError::NotFound(message) => {
+                        crate::host::AccessRefusal::NotFound(message) => {
                             Response::not_found(message)
                         }
-                        crate::host::AccessPlanError::Invalid(message) => Response::err(message),
+                        crate::host::AccessRefusal::Invalid(message) => Response::err(message),
                     })?;
                 Ok((
                     Response::AccessPlan {
@@ -1115,7 +1127,8 @@ impl<'a> IssueRouter<'a> {
                     ts: facts.now,
                 })
                 .map_err(|e| match e {
-                    WorldError::Conflict => Response::err(
+                    SessionFailure::Rejected(Rejection::Conflict)
+                    | SessionFailure::Conflict(SessionConflict::Body) => Response::err(
                         "that project still has issues (live or deleted) — move them with \
                          `issue move`, or archive the project instead; only an empty project \
                          can be hard-deleted",
@@ -1527,7 +1540,8 @@ impl<'a> IssueRouter<'a> {
                         ts: facts.now,
                     })
                     .map_err(|e| match e {
-                        WorldError::Conflict => {
+                        SessionFailure::Rejected(Rejection::Conflict)
+                        | SessionFailure::Conflict(SessionConflict::Body) => {
                             Response::err("that triage item was already decided")
                         }
                         other => Self::effect_err(other),
@@ -1572,7 +1586,7 @@ impl<'a> IssueRouter<'a> {
                     // inline write path — the Station's `max_content_len` is
                     // what bounds a file now, and it refuses at upload, long
                     // before an intent is built.
-                    WorldError::LimitExceeded => Response::err(format!(
+                    SessionFailure::Rejected(Rejection::LimitExceeded) => Response::err(format!(
                         "attachment refused: at most {} files per issue",
                         contract::MAX_ATTACHMENTS_PER_ISSUE,
                     )),

@@ -1,6 +1,6 @@
 //! `authority_history` — exact-frontier authorization and atomic durable
 //! authority batches, proven through the real mechanics composition
-//! (`OrbitalMechanics` over the authority ledger) and the real Replica
+//! (`SpaceAuthority` over the authority ledger) and the real Replica
 //! validation chain.
 //!
 //! The M0.2 controlled matrix:
@@ -18,19 +18,16 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use lait::orbital::{AuthorityRecord, OrbitalMechanics};
-use mechanics::ledger::LedgerEffect;
+use lait::orbital::{AuthorityRecord, SpaceAuthority};
+use mechanics::space::Effect;
+use replica::body::{BodyBinding, Op, SupportedSchemas, MUTATION_COLLABORATIVE};
+use replica::body::{BodyId, BodyKey, EncodingId, SchemaId, WorldId};
+use replica::convergence::{AuthorityIncorporator, StagedContactMaterial};
 use replica::transaction::NO_PARENT_ROOT;
-use replica::{
-    AuthorityIncorporator, BodyBinding, BodyId, BodyKey, BodyOp, CommitAuthorization,
-    CommitContext, EncodingId, Replica, SchemaId, SeedSigner, StagedContactMaterial,
-    SupportedSchemas, WorldId, MUTATION_COLLABORATIVE,
-};
+use replica::transaction::{CommitAuthorization, CommitContext, SeedSigner};
+use replica::Replica;
 
-type SignedUnit = (
-    replica::transaction::BodyTransaction,
-    Vec<(BodyKey, Vec<u8>)>,
-);
+type SignedUnit = (replica::transaction::Transaction, Vec<(BodyKey, Vec<u8>)>);
 
 const FOUNDER_SEED: [u8; 32] = [21u8; 32];
 const JOINER_SEED: [u8; 32] = [22u8; 32];
@@ -54,14 +51,14 @@ fn world() -> WorldId {
 
 fn commit_demand() -> Vec<u8> {
     // The default contributor demand (what admission grants a joiner).
-    mechanics::demand::AuthorizationDemand::Any(vec![
-        mechanics::demand::AuthorizationDemand::require(
-            mechanics::demand::PolicyCapability::new("com.lait.issues", "space.contributor"),
-            mechanics::demand::PolicyResource::space("com.lait.issues"),
+    mechanics::authorization::AuthorizationDemand::Any(vec![
+        mechanics::authorization::AuthorizationDemand::require(
+            mechanics::authorization::PolicyCapability::new("com.lait.issues", "space.contributor"),
+            mechanics::authorization::Resource::root("com.lait.issues"),
         ),
-        mechanics::demand::AuthorizationDemand::require(
-            mechanics::demand::PolicyCapability::new("com.lait.issues", "space.admin"),
-            mechanics::demand::PolicyResource::space("com.lait.issues"),
+        mechanics::authorization::AuthorizationDemand::require(
+            mechanics::authorization::PolicyCapability::new("com.lait.issues", "space.admin"),
+            mechanics::authorization::Resource::root("com.lait.issues"),
         ),
     ])
     .encode_canonical()
@@ -72,14 +69,17 @@ fn commit_demand() -> Vec<u8> {
 /// mutation core by evaluating the demand at the pinned frontier — the same
 /// path the daemon Session uses.
 struct MechAuthorizer<'a> {
-    mech: &'a OrbitalMechanics,
+    mech: &'a SpaceAuthority,
     world: WorldId,
     implementation_id: [u8; 32],
 }
 
-impl replica::TransactionAuthorizer for MechAuthorizer<'_> {
-    fn authorize(&self, core: &replica::BodyTransactionCore) -> Result<Vec<u8>, String> {
-        use runtime::AuthorityView;
+impl replica::transaction::TransactionAuthorizer for MechAuthorizer<'_> {
+    fn authorize(
+        &self,
+        core: &replica::transaction::Core,
+    ) -> Result<Vec<u8>, mechanics::authorization::Refusal> {
+        use runtime::world::AuthorityView;
         let actor = mechanics::ids::ActorId::parse(&core.actor).ok_or("actor")?;
         let device = mechanics::ids::DeviceId::from_key_bytes(&core.signer);
         self.mech.authorize_mutation(
@@ -104,9 +104,9 @@ fn impl_id() -> [u8; 32] {
 }
 
 /// The actor a device seed speaks for in this mechanics Space.
-fn actor_of(mech: &OrbitalMechanics, seed: &[u8; 32]) -> String {
-    use runtime::AuthorityView;
-    mech.resolve(&mechanics::crypto::device_from_seed(seed))
+fn actor_of(mech: &SpaceAuthority, seed: &[u8; 32]) -> String {
+    use runtime::world::AuthorityView;
+    mech.resolve(&mechanics::actor::device_from_seed(seed))
         .expect("device has standing")
         .actor
         .as_str()
@@ -139,9 +139,9 @@ fn supported() -> SupportedSchemas {
 }
 
 /// Found a Space and return its mechanics handle (root stays on disk).
-fn form(tag: &str) -> (PathBuf, OrbitalMechanics) {
+fn form(tag: &str) -> (PathBuf, SpaceAuthority) {
     let root = temp_home(tag);
-    let (mech, _coords) = OrbitalMechanics::form(&root, &FOUNDER_SEED, "authist", vec![]).unwrap();
+    let (mech, _coords) = SpaceAuthority::form(&root, &FOUNDER_SEED, "authist", vec![]).unwrap();
     // The founder product-authority bootstrap (activate impl + grant caps), so
     // the founder's own transactions authorize through the real ledger.
     lait::orbital::seed_founder_policy(&mech).unwrap();
@@ -150,26 +150,24 @@ fn form(tag: &str) -> (PathBuf, OrbitalMechanics) {
 
 /// Incept + admit the joiner through the real incorporator + member_add path.
 /// Returns the joiner's actor id.
-fn admit_joiner(mech: &OrbitalMechanics) -> mechanics::ids::ActorId {
+fn admit_joiner(mech: &SpaceAuthority) -> mechanics::ids::ActorId {
     let space = mech.space();
     let (inception, actor_id) =
         mechanics::actor::incept_single(&JOINER_SEED, &space, [9u8; 16], [8u8; 16], None);
     let mut m = mech.clone();
-    m.incorporate_authority(&[
-        AuthorityRecord::Effect(LedgerEffect::Actor(inception).encode()).encode(),
-    ])
-    .unwrap();
+    m.incorporate_authority(&[AuthorityRecord::Effect(Effect::Actor(inception).encode()).encode()])
+        .unwrap();
     mech.member_add(actor_id.as_str(), false).unwrap();
     // Expand the default-contributor role (member_add does not itself grant
     // capabilities; the admission path and the IAM designer do).
-    let res = mechanics::demand::PolicyResource::space("com.lait.issues");
+    let res = mechanics::authorization::Resource::root("com.lait.issues");
     for (i, name) in ["space.contributor", "space.issue.read"]
         .into_iter()
         .enumerate()
     {
         mech.grant_actor_capability(
             &actor_id,
-            mechanics::demand::PolicyCapability::new("com.lait.issues", name),
+            mechanics::authorization::PolicyCapability::new("com.lait.issues", name),
             res.clone(),
             [i as u8 + 100; 16],
         )
@@ -183,12 +181,12 @@ fn admit_joiner(mech: &OrbitalMechanics) -> mechanics::ids::ActorId {
 /// signed history and `verify_authorized` exercises historical evaluation.
 /// Returns the durable commit result (an unauthorized author fails here).
 fn signed_note_tx(
-    mech: &OrbitalMechanics,
+    mech: &SpaceAuthority,
     signer_seed: &[u8; 32],
     actor: &str,
     frontier: replica::frontier::AuthorityFrontier,
     n: u8,
-) -> Result<SignedUnit, replica::ReplicaCommitError> {
+) -> Result<SignedUnit, replica::transaction::commit::Failure> {
     let space = mech.space();
     let mut r = Replica::loro().with_keys(Arc::new(mech.clone()));
     r.set_supported(supported());
@@ -198,7 +196,7 @@ fn signed_note_tx(
         signer: &signer,
         authority_frontier: frontier,
     };
-    let device = mechanics::crypto::device_from_seed(signer_seed);
+    let device = mechanics::actor::device_from_seed(signer_seed);
     let authorizer = MechAuthorizer {
         mech,
         world: world(),
@@ -222,7 +220,7 @@ fn signed_note_tx(
         "note",
         &[(
             body(n),
-            BodyOp::RegisterSet {
+            Op::RegisterSet {
                 path: "text".into(),
                 value: format!("note {n}").into_bytes(),
             },
@@ -265,7 +263,7 @@ fn historical_authorized_but_currently_removed_remains_legitimate() {
     // receipt: its demand is unsatisfied now that it is removed.
     let err = signed_note_tx(&mech, &JOINER_SEED, &joiner_actor, removed_frontier, 2).unwrap_err();
     assert!(
-        matches!(err, replica::ReplicaCommitError::Unauthorized(_)),
+        matches!(err, replica::transaction::commit::Failure::Unauthorized(_)),
         "a removed author cannot author at the removal frontier: {err:?}"
     );
 }
@@ -281,14 +279,12 @@ fn unauthorized_at_referenced_frontier_is_denied_at_signing() {
     let (inception, joiner_actor) =
         mechanics::actor::incept_single(&JOINER_SEED, &space, [9u8; 16], [8u8; 16], None);
     let mut m = mech.clone();
-    m.incorporate_authority(&[
-        AuthorityRecord::Effect(LedgerEffect::Actor(inception).encode()).encode(),
-    ])
-    .unwrap();
+    m.incorporate_authority(&[AuthorityRecord::Effect(Effect::Actor(inception).encode()).encode()])
+        .unwrap();
     let frontier = mech.current_frontier();
     let err = signed_note_tx(&mech, &JOINER_SEED, joiner_actor.as_str(), frontier, 1).unwrap_err();
     assert!(
-        matches!(err, replica::ReplicaCommitError::Unauthorized(_)),
+        matches!(err, replica::transaction::commit::Failure::Unauthorized(_)),
         "an unadmitted author is denied: {err:?}"
     );
 }
@@ -300,18 +296,18 @@ fn a_valid_record_followed_by_an_invalid_one_changes_nothing_even_after_restart(
     let frontier_before = mech.current_frontier();
     let (inception, _) =
         mechanics::actor::incept_single(&JOINER_SEED, &space, [9u8; 16], [8u8; 16], None);
-    let valid = AuthorityRecord::Effect(LedgerEffect::Actor(inception).encode()).encode();
+    let valid = AuthorityRecord::Effect(Effect::Actor(inception).encode()).encode();
     let invalid = AuthorityRecord::Effect(vec![0xDE, 0xAD, 0xBE, 0xEF]).encode();
 
     let mut m = mech.clone();
     let err = m.incorporate_authority(&[valid, invalid]).unwrap_err();
-    assert!(err.contains("invalid"), "typed refusal, got: {err}");
+    assert_eq!(err, replica::convergence::Failure::Invalid);
     assert_eq!(mech.current_frontier(), frontier_before, "nothing adopted");
 
     // Restart: the durable ledger never saw the batch.
     drop(m);
     drop(mech);
-    let reopened = OrbitalMechanics::open(&root, &space, &FOUNDER_SEED).unwrap();
+    let reopened = SpaceAuthority::open(&root, &space, &FOUNDER_SEED).unwrap();
     assert_eq!(reopened.current_frontier(), frontier_before);
 }
 
@@ -321,8 +317,8 @@ fn reorder_substitute_truncate_cannot_ride_an_honest_receipt() {
     let space = mech.space();
     let (i1, _) = mechanics::actor::incept_single(&JOINER_SEED, &space, [9u8; 16], [8u8; 16], None);
     let (i2, _) = mechanics::actor::incept_single(&[23u8; 32], &space, [7u8; 16], [6u8; 16], None);
-    let r1 = AuthorityRecord::Effect(LedgerEffect::Actor(i1).encode()).encode();
-    let r2 = AuthorityRecord::Effect(LedgerEffect::Actor(i2).encode()).encode();
+    let r1 = AuthorityRecord::Effect(Effect::Actor(i1).encode()).encode();
+    let r2 = AuthorityRecord::Effect(Effect::Actor(i2).encode()).encode();
 
     let mut m = mech.clone();
     let receipt = m.incorporate_authority(&[r1.clone(), r2.clone()]).unwrap();
@@ -363,7 +359,7 @@ fn authority_survives_a_body_crash_and_the_retry_incorporates_exactly_once() {
         signer: &signer,
         authority_frontier: mech_a.current_frontier(),
     };
-    let device = mechanics::crypto::device_from_seed(&FOUNDER_SEED);
+    let device = mechanics::actor::device_from_seed(&FOUNDER_SEED);
     let founder_actor = actor_of(&mech_a, &FOUNDER_SEED);
     let authorizer = MechAuthorizer {
         mech: &mech_a,
@@ -389,7 +385,7 @@ fn authority_survives_a_body_crash_and_the_retry_incorporates_exactly_once() {
             "note",
             &[(
                 body(1),
-                BodyOp::RegisterSet {
+                Op::RegisterSet {
                     path: "text".into(),
                     value: b"crash test".to_vec(),
                 },
@@ -424,20 +420,20 @@ fn authority_survives_a_body_crash_and_the_retry_incorporates_exactly_once() {
     // The receiving process runs the founder's device (a second home of
     // the same device), so the sealed epoch key riding the authority records
     // opens the Body material after incorporation.
-    let mech_b = OrbitalMechanics::enter(&root_b, &FOUNDER_SEED, &coords).unwrap();
+    let mech_b = SpaceAuthority::enter(&root_b, &FOUNDER_SEED, &coords).unwrap();
 
     let store_dir = root_b.join("replica-store");
     std::fs::create_dir_all(&store_dir).unwrap();
     let crash_now = Arc::new(std::sync::atomic::AtomicBool::new(true));
     let crash_flag = crash_now.clone();
-    let mut target = Replica::open_journaled(&store_dir, Arc::new(mech_b.clone()))
+    let mut target = Replica::open(&store_dir, Arc::new(mech_b.clone()))
         .unwrap()
         .with_store_fault_injector(Box::new(move |point| {
             point == "manifest-rename" && crash_flag.load(Ordering::SeqCst)
         }));
     target.set_supported(supported());
 
-    let incorporator: Arc<Mutex<OrbitalMechanics>> = Arc::new(Mutex::new(mech_b.clone()));
+    let incorporator: Arc<Mutex<SpaceAuthority>> = Arc::new(Mutex::new(mech_b.clone()));
     let frontier_before_contact = mech_b.current_frontier();
 
     // Phase 1: validation (authority incorporates durably) then a Body-phase
@@ -461,12 +457,12 @@ fn authority_survives_a_body_crash_and_the_retry_incorporates_exactly_once() {
     drop(target);
 
     // Authority survived the crash: a reopened mechanics still shows it.
-    let mech_b2 = OrbitalMechanics::open(&root_b, &space, &FOUNDER_SEED).unwrap();
+    let mech_b2 = SpaceAuthority::open(&root_b, &space, &FOUNDER_SEED).unwrap();
     assert_eq!(mech_b2.current_frontier(), frontier_after_authority);
 
     // Phase 2: retry after "reboot" — incorporates exactly once.
     crash_now.store(false, Ordering::SeqCst);
-    let mut target = Replica::open_journaled(&store_dir, Arc::new(mech_b2.clone())).unwrap();
+    let mut target = Replica::open(&store_dir, Arc::new(mech_b2.clone())).unwrap();
     target.set_supported(supported());
     let bundle = {
         let mut inc = mech_b2.clone();
@@ -493,7 +489,7 @@ fn authority_survives_a_body_crash_and_the_retry_incorporates_exactly_once() {
     assert_eq!(outcome.rejected, 0);
 }
 
-fn ctx_for<'a>(space: &'a mechanics::ids::SpaceId, mech: &OrbitalMechanics) -> CommitContext<'a> {
+fn ctx_for<'a>(space: &'a mechanics::ids::SpaceId, mech: &SpaceAuthority) -> CommitContext<'a> {
     static SIGNER: SeedSigner<'static> = SeedSigner(&FOUNDER_SEED);
     CommitContext {
         space,

@@ -98,11 +98,9 @@ fn track_dir(dir: &Path) {
     };
     for entry in entries.flatten() {
         let path = entry.path();
+        println!("cargo:rerun-if-changed={}", path.display());
         if path.is_dir() {
-            println!("cargo:rerun-if-changed={}", path.display());
             track_dir(&path);
-        } else {
-            println!("cargo:rerun-if-changed={}", path.display());
         }
     }
 }

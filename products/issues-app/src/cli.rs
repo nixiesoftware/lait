@@ -1,8 +1,15 @@
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    clippy::indexing_slicing,
+    clippy::string_slice,
+    reason = "CLI paths and render spans are produced by the validated clap command tree and ASCII tokenization"
+)]
 //! Issues-owned CLI namespace.
 
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use serde_json::{json, to_value};
-use world_interface::{ClientInvocation as CliInvocation, InterfaceError};
+use world_interface::{ClientInvocation as CliInvocation, Failure};
 
 use crate::{BoardPos, Filter, IssuesRequest};
 
@@ -126,7 +133,7 @@ pub fn command() -> Command {
         )
 }
 
-pub fn parse(matches: &ArgMatches) -> Result<CliInvocation, InterfaceError> {
+pub fn parse(matches: &ArgMatches) -> Result<CliInvocation, Failure> {
     let (path, m) = leaf_matches(matches);
     let request = match path.as_slice() {
         [] => return local(LOCAL_FOCUS, json!({})),
@@ -142,9 +149,9 @@ pub fn parse(matches: &ArgMatches) -> Result<CliInvocation, InterfaceError> {
                 due: opt(m, "due"),
                 estimate: opt(m, "estimate")
                     .map(|value| {
-                        value.parse::<u32>().map_err(|_| {
-                            InterfaceError::new("--estimate takes a whole number of points")
-                        })
+                        value
+                            .parse::<u32>()
+                            .map_err(|_| Failure::new("--estimate takes a whole number of points"))
                     })
                     .transpose()?,
             };
@@ -267,7 +274,7 @@ pub fn parse(matches: &ArgMatches) -> Result<CliInvocation, InterfaceError> {
             let reff = req(m, "reff");
             let parent = opt(m, "parent");
             if parent.is_none() && !yes(m, "none") {
-                return Err(InterfaceError::new(format!(
+                return Err(Failure::new(format!(
                     "give a parent ref, or --none to clear: `lait issues parent {reff} <epic>`"
                 )));
             }
@@ -380,10 +387,10 @@ pub fn parse(matches: &ArgMatches) -> Result<CliInvocation, InterfaceError> {
         ["activity"] => IssuesRequest::Activity {
             since: req(m, "since")
                 .parse()
-                .map_err(|_| InterfaceError::new("--since takes an integer sequence"))?,
+                .map_err(|_| Failure::new("--since takes an integer sequence"))?,
         },
         _ => {
-            return Err(InterfaceError::new(format!(
+            return Err(Failure::new(format!(
                 "unsupported Issues command path: {}",
                 path.join(" ")
             )));
@@ -392,15 +399,15 @@ pub fn parse(matches: &ArgMatches) -> Result<CliInvocation, InterfaceError> {
     world(request)
 }
 
-fn world(request: IssuesRequest) -> Result<CliInvocation, InterfaceError> {
+fn world(request: IssuesRequest) -> Result<CliInvocation, Failure> {
     crate::host::world_invocation(request)
 }
 
-fn local(operation: &str, input: serde_json::Value) -> Result<CliInvocation, InterfaceError> {
+fn local(operation: &str, input: serde_json::Value) -> Result<CliInvocation, Failure> {
     crate::host::invocation(operation, input)
 }
 
-fn parse_comment(m: &ArgMatches) -> Result<IssuesRequest, InterfaceError> {
+fn parse_comment(m: &ArgMatches) -> Result<IssuesRequest, Failure> {
     let (reff, body) = match (opt(m, "reff"), opt(m, "body")) {
         (Some(reff), Some(body)) => (Some(reff), Some(body)),
         (Some(only), None) if looks_like_issue_ref(&only) => (Some(only), None),
@@ -408,7 +415,7 @@ fn parse_comment(m: &ArgMatches) -> Result<IssuesRequest, InterfaceError> {
         _ => (None, None),
     };
     let reff = reff.or_else(infer_ref_from_git_branch).ok_or_else(|| {
-        InterfaceError::new("no issue ref given, and none could be inferred from the git branch")
+        Failure::new("no issue ref given, and none could be inferred from the git branch")
     })?;
     let body = match body {
         Some(body) => body,
@@ -420,7 +427,7 @@ fn parse_comment(m: &ArgMatches) -> Result<IssuesRequest, InterfaceError> {
         }
     };
     if body.trim().is_empty() {
-        return Err(InterfaceError::new(
+        return Err(Failure::new(
             "no comment body; pass it as an argument or pipe it on stdin",
         ));
     }
@@ -446,8 +453,8 @@ fn parse_comment(m: &ArgMatches) -> Result<IssuesRequest, InterfaceError> {
 ///
 /// Unicode scalars, because that is what the World validates the span in. A
 /// terminal caller counting characters is already counting the right thing.
-fn parse_span(at: &str) -> Result<(u64, Option<u64>), InterfaceError> {
-    let refuse = || InterfaceError::new(format!("--at wants `START..END` or `START`, got `{at}`"));
+fn parse_span(at: &str) -> Result<(u64, Option<u64>), Failure> {
+    let refuse = || Failure::new(format!("--at wants `START..END` or `START`, got `{at}`"));
     match at.split_once("..") {
         None => Ok((at.parse().map_err(|_| refuse())?, None)),
         Some((start, end)) => Ok((
@@ -457,7 +464,7 @@ fn parse_span(at: &str) -> Result<(u64, Option<u64>), InterfaceError> {
     }
 }
 
-fn parse_milestone(verb: &str, m: &ArgMatches) -> Result<IssuesRequest, InterfaceError> {
+fn parse_milestone(verb: &str, m: &ArgMatches) -> Result<IssuesRequest, Failure> {
     Ok(match verb {
         "ls" => IssuesRequest::MilestoneList {
             project: req(m, "project"),
@@ -493,7 +500,7 @@ fn parse_milestone(verb: &str, m: &ArgMatches) -> Result<IssuesRequest, Interfac
             reff: req(m, "reff"),
             milestone: opt(m, "milestone"),
         },
-        _ => return Err(InterfaceError::new("unknown milestone command")),
+        _ => return Err(Failure::new("unknown milestone command")),
     })
 }
 
@@ -511,7 +518,7 @@ fn milestone_pos(m: &ArgMatches) -> Option<BoardPos> {
     }
 }
 
-fn parse_cycle(verb: &str, m: &ArgMatches) -> Result<IssuesRequest, InterfaceError> {
+fn parse_cycle(verb: &str, m: &ArgMatches) -> Result<IssuesRequest, Failure> {
     Ok(match verb {
         "ls" => IssuesRequest::CycleList {
             project: req(m, "project"),
@@ -544,11 +551,11 @@ fn parse_cycle(verb: &str, m: &ArgMatches) -> Result<IssuesRequest, InterfaceErr
             reff: req(m, "reff"),
             cycle: opt(m, "cycle"),
         },
-        _ => return Err(InterfaceError::new("unknown cycle command")),
+        _ => return Err(Failure::new("unknown cycle command")),
     })
 }
 
-fn parse_initiative(verb: &str, m: &ArgMatches) -> Result<IssuesRequest, InterfaceError> {
+fn parse_initiative(verb: &str, m: &ArgMatches) -> Result<IssuesRequest, Failure> {
     Ok(match verb {
         "new" => IssuesRequest::InitiativeSet {
             initiative: None,
@@ -583,11 +590,11 @@ fn parse_initiative(verb: &str, m: &ArgMatches) -> Result<IssuesRequest, Interfa
             remove_projects: vec![],
             remove: true,
         },
-        _ => return Err(InterfaceError::new("unknown initiative command")),
+        _ => return Err(Failure::new("unknown initiative command")),
     })
 }
 
-fn parse_team(verb: &str, m: &ArgMatches) -> Result<IssuesRequest, InterfaceError> {
+fn parse_team(verb: &str, m: &ArgMatches) -> Result<IssuesRequest, Failure> {
     Ok(match verb {
         "new" => IssuesRequest::TeamSet {
             team: None,
@@ -639,11 +646,11 @@ fn parse_team(verb: &str, m: &ArgMatches) -> Result<IssuesRequest, InterfaceErro
             remove_members: vec![],
             remove: true,
         },
-        _ => return Err(InterfaceError::new("unknown team command")),
+        _ => return Err(Failure::new("unknown team command")),
     })
 }
 
-fn parse_triage(verb: &str, m: &ArgMatches) -> Result<IssuesRequest, InterfaceError> {
+fn parse_triage(verb: &str, m: &ArgMatches) -> Result<IssuesRequest, Failure> {
     Ok(match verb {
         "submit" => IssuesRequest::TriageSubmit {
             title: req(m, "title"),
@@ -671,11 +678,11 @@ fn parse_triage(verb: &str, m: &ArgMatches) -> Result<IssuesRequest, InterfaceEr
             target: opt(m, "reff"),
             note: opt(m, "note"),
         },
-        _ => return Err(InterfaceError::new("unknown triage command")),
+        _ => return Err(Failure::new("unknown triage command")),
     })
 }
 
-fn parse_role(verb: &str, m: &ArgMatches) -> Result<IssuesRequest, InterfaceError> {
+fn parse_role(verb: &str, m: &ArgMatches) -> Result<IssuesRequest, Failure> {
     Ok(match verb {
         "show" => IssuesRequest::RoleShow {
             role: req(m, "role"),
@@ -705,11 +712,11 @@ fn parse_role(verb: &str, m: &ArgMatches) -> Result<IssuesRequest, InterfaceErro
             expect_heads: many(m, "expect-head"),
             body_json: read_file(m, "file")?,
         },
-        _ => return Err(InterfaceError::new("unknown role command")),
+        _ => return Err(Failure::new("unknown role command")),
     })
 }
 
-fn parse_workflow(verb: &str, m: &ArgMatches) -> Result<IssuesRequest, InterfaceError> {
+fn parse_workflow(verb: &str, m: &ArgMatches) -> Result<IssuesRequest, Failure> {
     Ok(match verb {
         "show" => IssuesRequest::WorkflowShow {
             project: req(m, "project"),
@@ -722,7 +729,7 @@ fn parse_workflow(verb: &str, m: &ArgMatches) -> Result<IssuesRequest, Interface
             expect_heads: many(m, "expect-head"),
             body_json: read_file(m, "file")?,
         },
-        _ => return Err(InterfaceError::new("unknown workflow command")),
+        _ => return Err(Failure::new("unknown workflow command")),
     })
 }
 
@@ -1167,7 +1174,7 @@ fn opt(m: &ArgMatches, id: &str) -> Option<String> {
 }
 
 fn req(m: &ArgMatches, id: &str) -> String {
-    opt(m, id).unwrap_or_else(|| panic!("required Issues CLI argument '{id}' is missing"))
+    opt(m, id).unwrap_or_default()
 }
 
 fn many(m: &ArgMatches, id: &str) -> Vec<String> {
@@ -1199,10 +1206,9 @@ fn csv(value: Option<String>) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn read_file(m: &ArgMatches, id: &str) -> Result<String, InterfaceError> {
+fn read_file(m: &ArgMatches, id: &str) -> Result<String, Failure> {
     let path = req(m, id);
-    std::fs::read_to_string(&path)
-        .map_err(|error| InterfaceError::new(format!("read {path}: {error}")))
+    std::fs::read_to_string(&path).map_err(|error| Failure::new(format!("read {path}: {error}")))
 }
 
 fn title_case(key: &str) -> String {
@@ -1218,13 +1224,11 @@ fn project_hint(m: &ArgMatches) -> Option<String> {
     opt(m, "project").is_none().then(infer_project_key)?
 }
 
-fn resolve_reff(m: &ArgMatches) -> Result<String, InterfaceError> {
+fn resolve_reff(m: &ArgMatches) -> Result<String, Failure> {
     opt(m, "reff")
         .or_else(infer_ref_from_git_branch)
         .ok_or_else(|| {
-            InterfaceError::new(
-                "no issue ref given, and none could be inferred from the git branch",
-            )
+            Failure::new("no issue ref given, and none could be inferred from the git branch")
         })
 }
 
@@ -1296,8 +1300,8 @@ fn looks_like_issue_ref(value: &str) -> bool {
     }
 }
 
-fn interface_error(error: impl std::fmt::Display) -> InterfaceError {
-    InterfaceError::new(error.to_string())
+fn interface_error(error: impl std::fmt::Display) -> Failure {
+    Failure::new(error.to_string())
 }
 
 #[cfg(test)]

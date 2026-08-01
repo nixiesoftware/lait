@@ -5,7 +5,9 @@
 
 use std::sync::{Arc, LazyLock};
 
-use crate::orbital::{WorldPackage, WorldPackages};
+use crate::orbital::{
+    Invalidation, ObservationProjector, StatusProjection, WorldPackage, WorldPackages,
+};
 use world_interface::WorldClientRegistry;
 
 pub mod lifecycle;
@@ -19,16 +21,61 @@ pub use issues::{
 ///
 /// Keeping semantic implementation, reviewed identity, and application control
 /// adapter in one value makes this module the product composition root. The
-/// daemon and SpaceBridge receive packages by injection and do not construct or
+/// daemon and StationHost receive packages by injection and do not construct or
 /// name IssuesWorld themselves.
 pub fn package() -> WorldPackage {
     let control = Arc::new(issues_app::IssuesCallHandler);
-    WorldPackage::new(
-        IssuesWorld::registration(),
-        Arc::new(IssuesWorld::new()),
-        implementation_id(),
-    )
-    .with_control(control)
+    let projector = Arc::new(IssuesProjector::default());
+    WorldPackage::new(Arc::new(IssuesWorld::new()), implementation_id())
+        .with_control(control)
+        .with_projector(projector)
+}
+
+#[derive(Default)]
+struct IssuesProjector {
+    baseline:
+        std::sync::Mutex<Option<std::collections::BTreeMap<crate::control::CatalogScope, String>>>,
+}
+
+impl ObservationProjector for IssuesProjector {
+    fn status(&self, session: &runtime::Session) -> Option<StatusProjection> {
+        issues_app::projections::status(session).map(|projection| StatusProjection {
+            items: projection.issues,
+            groups: projection.projects,
+            name: projection.name,
+            description: projection.description,
+        })
+    }
+
+    fn start(&self, session: &runtime::Session, _space: &mechanics::ids::SpaceId) {
+        let baseline = issues_app::projections::ring_state(session).map(|state| state.planes);
+        *self
+            .baseline
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = baseline;
+    }
+
+    fn project(
+        &self,
+        session: &runtime::Session,
+        space: &mechanics::ids::SpaceId,
+        observation: &runtime::world::Observation,
+    ) -> Invalidation {
+        let mut baseline = self
+            .baseline
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (dirty_by_project, dirty_catalog) = issues_app::projections::observation(
+            session,
+            space,
+            &observation.bodies,
+            &mut baseline,
+        );
+        Invalidation {
+            dirty_by_project,
+            dirty_catalog,
+        }
+    }
 }
 
 /// Every product World bundled by the issue-tracker application.
@@ -37,9 +84,10 @@ pub fn packages() -> WorldPackages {
 }
 
 static CLIENT_PACKAGES: LazyLock<WorldClientRegistry> = LazyLock::new(|| {
-    WorldClientRegistry::new()
-        .with_package(issues_app::package().expect("valid bundled Issues client package"))
-        .expect("non-conflicting bundled World client packages")
+    issues_app::package()
+        .ok()
+        .and_then(|package| WorldClientRegistry::new().with_package(package).ok())
+        .unwrap_or_default()
 });
 
 /// Every client-facing World package mounted by the navigation shell.

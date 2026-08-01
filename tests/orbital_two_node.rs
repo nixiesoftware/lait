@@ -16,13 +16,13 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use async_trait::async_trait;
+use comms::mem::MemNet;
+use comms::policy::Network;
+use comms::{Transport, TransportFactory};
 use issues_app::IssuesResponse as IssueResponse;
+use lait::control::OrbitAddress;
 use lait::control::{request, ControlRoute, Request, Response};
-use lait::daemon::OrbitAddress;
-use lait::net::Network;
-use lait::orbital::run_space_bridge_with;
-use lait::transport::mem::MemNet;
-use lait::transport::{Transport, TransportFactory};
+use lait::orbital::run_station_process_with;
 
 const FOUNDER_SEED: [u8; 32] = [201u8; 32];
 const JOINER_SEED: [u8; 32] = [202u8; 32];
@@ -40,7 +40,8 @@ impl TransportFactory for MemFactory {
         _protocols: comms::Protocols<'_>,
     ) -> Result<Arc<dyn Transport>> {
         Ok(Arc::new(
-            self.0.peer(lait::crypto::device_from_seed(identity_seed)),
+            self.0
+                .peer(mechanics::actor::device_from_seed(identity_seed)),
         ))
     }
 }
@@ -96,14 +97,14 @@ fn poll_until<T>(timeout: Duration, mut check: impl FnMut() -> Option<T>) -> Opt
     }
 }
 
-/// Spawn a process-backed SpaceBridge for `home` on its own OS thread + runtime, with an
+/// Spawn a process-backed StationHost for `home` on its own OS thread + runtime, with an
 /// explicit device seed (the injectable multi-node contract — no shared global
 /// identity between the two daemons).
 fn spawn_daemon(home: PathBuf, seed: [u8; 32], net: MemNet) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async move {
-            if let Err(e) = run_space_bridge_with(home, seed, &MemFactory(net)).await {
+            if let Err(e) = run_station_process_with(home, seed, &MemFactory(net)).await {
                 eprintln!("DAEMON ERR: {e:#}");
             }
         });
@@ -122,7 +123,7 @@ fn wait_online(rt: &tokio::runtime::Runtime, home: &Path) {
 }
 
 #[test]
-fn two_space_bridges_join_admit_and_converge_over_the_socket() {
+fn two_station_hosts_join_admit_and_converge_over_the_socket() {
     let net = MemNet::new();
 
     // -- Founder: form the Space, seed a project + a sealed issue, then serve. --
@@ -203,8 +204,8 @@ fn two_space_bridges_join_admit_and_converge_over_the_socket() {
     //   1. joiner pulls founder  (retains the founder's Bodies opaquely),
     //   2. founder pulls joiner   (redeems admission: AddMember + epoch sealing),
     //   3. joiner pulls founder   (imports membership + keys, upgrades Bodies).
-    let founder_device = lait::crypto::device_from_seed(&FOUNDER_SEED).to_string();
-    let joiner_device = lait::crypto::device_from_seed(&JOINER_SEED).to_string();
+    let founder_device = mechanics::actor::device_from_seed(&FOUNDER_SEED).to_string();
+    let joiner_device = mechanics::actor::device_from_seed(&JOINER_SEED).to_string();
 
     let admitted = poll_until(Duration::from_secs(20), || {
         req(
@@ -379,7 +380,7 @@ fn the_inviter_reciprocates_so_a_joiner_side_only_connect_admits() {
 
     // Only the JOINER drives Connect (to the invite's approach Station). The
     // founder's driver must reciprocate to redeem the admission.
-    let approach = lait::crypto::device_from_seed(&F_SEED).to_string();
+    let approach = mechanics::actor::device_from_seed(&F_SEED).to_string();
     let admitted = poll_until(Duration::from_secs(25), || {
         req(
             &client,
@@ -436,7 +437,7 @@ fn members_promote_and_demote_over_the_socket() {
     lait::orbital::enter_space(&joiner_home, &J_SEED, &invite).unwrap();
     let joiner_handle = spawn_daemon(joiner_home.clone(), J_SEED, net.clone());
     wait_online(&client, &joiner_home);
-    let approach = lait::crypto::device_from_seed(&F_SEED).to_string();
+    let approach = mechanics::actor::device_from_seed(&F_SEED).to_string();
     let admitted = poll_until(Duration::from_secs(25), || {
         req(
             &client,

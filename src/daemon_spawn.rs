@@ -1,3 +1,7 @@
+// OS process APIs require lossless platform-handle and flag conversions at this
+// private adapter boundary.
+#![allow(clippy::as_conversions)]
+
 //! Spawning the daemon without handing it anything else of ours.
 //!
 //! The daemon outlives the command that spawns it, so every handle it comes up
@@ -40,7 +44,7 @@ pub struct DaemonChild {
 /// `identity` pins which `secret.key` it runs on, passed as `--home` rather than
 /// an env var. `None` selects the ordinary per-user identity; `Some` is the
 /// self-contained `$LAIT_HOME` case. Orbit selection is deliberately absent:
-/// the general daemon's [`crate::daemon::ControlRouter`] places many Orbits.
+/// the general daemon's [`crate::orbits::Router`] places many Orbits.
 pub fn spawn(
     exe: &Path,
     log: Option<std::fs::File>,

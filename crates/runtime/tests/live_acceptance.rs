@@ -15,17 +15,20 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use mechanics::crypto::AuthorizedBodyKey;
-use mechanics::ids::{ActorId, DeviceId, StationId};
-use replica::body::{BodySchema, MutationModel};
+use mechanics::authorization::AuthorizedBodyKey;
+use mechanics::{
+    ids::{ActorId, DeviceId},
+    station::Key,
+};
+use replica::body::{EncodingId, SchemaId, WorldId};
+use replica::body::{MutationModel, Schema};
 use replica::frontier::{AuthorityFrontier, ReplicaFrontier};
-use replica::ids::{EncodingId, SchemaId, WorldId};
-use runtime::live::LiveHandle;
-use runtime::transient::{TransientItem, TransientPayload, TransientScope};
+use runtime::plane::live::LiveHandle;
+use runtime::transient::{Target, TransientItem, TransientPayload};
 use runtime::{
-    ActivationOptions, Runtime, RuntimeBuilder, SpaceFormationOptions, Station, World,
-    WorldContext, WorldEffect, WorldError, WorldIntent, WorldLimits, WorldProjection, WorldQuery,
-    WorldRegistration, WorldVersion,
+    plane::Activation, world::Builder, world::Context, world::Descriptor, world::Effect,
+    world::Intent, world::Limits, world::Projection, world::Query, world::Rejection,
+    world::Version, world::World, Runtime, Station,
 };
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -42,14 +45,14 @@ fn temp_root() -> std::path::PathBuf {
 /// not the World.
 struct Empty {
     id: WorldId,
-    schemas: Vec<BodySchema>,
+    schemas: Vec<Schema>,
 }
 
 impl Empty {
     fn new() -> Self {
         Self {
             id: WorldId::parse("dev.example.pad").unwrap(),
-            schemas: vec![BodySchema {
+            schemas: vec![Schema {
                 id: SchemaId::parse("entry").unwrap(),
                 version: 1,
                 encoding: EncodingId::parse("bytes").unwrap(),
@@ -64,22 +67,14 @@ impl World for Empty {
     fn id(&self) -> WorldId {
         self.id.clone()
     }
-    fn schemas(&self) -> &[BodySchema] {
+    fn schemas(&self) -> &[Schema] {
         &self.schemas
     }
-    fn submit(
-        &self,
-        _ctx: &mut WorldContext<'_>,
-        _intent: WorldIntent,
-    ) -> Result<WorldEffect, WorldError> {
-        Err(WorldError::InvalidRequest)
+    fn submit(&self, _ctx: &mut Context<'_>, _intent: Intent) -> Result<Effect, Rejection> {
+        Err(Rejection::InvalidRequest)
     }
-    fn query(
-        &self,
-        _ctx: &WorldContext<'_>,
-        _query: WorldQuery,
-    ) -> Result<WorldProjection, WorldError> {
-        Ok(WorldProjection {
+    fn query(&self, _ctx: &Context<'_>, _query: Query) -> Result<Projection, Rejection> {
+        Ok(Projection {
             demand: Vec::new(),
             schema: SchemaId::parse("entry").unwrap(),
             schema_version: 1,
@@ -90,17 +85,17 @@ impl World for Empty {
 }
 
 struct Permissive;
-impl runtime::AuthorityView for Permissive {
-    fn resolve(&self, _device: &DeviceId) -> Option<runtime::PrincipalResolution> {
-        Some(runtime::PrincipalResolution {
+impl runtime::world::AuthorityView for Permissive {
+    fn resolve(&self, _device: &DeviceId) -> Option<runtime::world::PrincipalResolution> {
+        Some(runtime::world::PrincipalResolution {
             actor: ActorId::from_incept_hash(&"a".repeat(64)),
             authority_frontier: AuthorityFrontier::from_canonical_bytes(vec![1]),
         })
     }
 }
 
-fn options() -> ActivationOptions {
-    ActivationOptions {
+fn options() -> Activation {
+    Activation {
         planes: Default::default(),
         content: Default::default(),
         drain_deadline: Duration::from_secs(5),
@@ -110,7 +105,7 @@ fn options() -> ActivationOptions {
 }
 
 struct AnySigner;
-impl replica::AuthoritySource for AnySigner {
+impl replica::transaction::AuthoritySource for AnySigner {
     fn signer_authorized(&self, _signer: &[u8; 32], _f: &AuthorityFrontier) -> bool {
         true
     }
@@ -118,12 +113,12 @@ impl replica::AuthoritySource for AnySigner {
 
 #[derive(Default)]
 struct Accepting;
-impl replica::AuthorityIncorporator for Accepting {
+impl replica::convergence::AuthorityIncorporator for Accepting {
     fn incorporate_authority(
         &mut self,
         records: &[Vec<u8>],
-    ) -> Result<replica::AuthorityBatchReceipt, String> {
-        Ok(replica::AuthorityBatchReceipt {
+    ) -> Result<replica::convergence::AuthorityBatchReceipt, replica::convergence::Failure> {
+        Ok(replica::convergence::AuthorityBatchReceipt {
             space: mechanics::ids::SpaceId::from_digest([0u8; 16]),
             prior_frontier: AuthorityFrontier::from_canonical_bytes(vec![]),
             resulting_frontier: AuthorityFrontier::from_canonical_bytes(vec![1]),
@@ -139,15 +134,15 @@ impl replica::AuthorityIncorporator for Accepting {
 /// driver block when `comms` is `Some`. A dormancy test against an offline
 /// Station therefore drains an empty task set, which is the shape of a test
 /// that passes for a reason unrelated to what it claims.
-fn options_with_comms(transport: Arc<dyn comms::Transport>, seed: [u8; 32]) -> ActivationOptions {
-    ActivationOptions {
+fn options_with_comms(transport: Arc<dyn comms::Transport>, seed: [u8; 32]) -> Activation {
+    Activation {
         planes: Default::default(),
         content: Default::default(),
         drain_deadline: Duration::from_secs(5),
-        comms: Some(runtime::CommsOptions {
+        comms: Some(runtime::plane::CommsOptions {
             transport,
             station_seed: seed,
-            mechanics: runtime::ContactMechanics {
+            authority: runtime::plane::contact::Authority {
                 source: Arc::new(AnySigner),
                 incorporator: Arc::new(std::sync::Mutex::new(Accepting)),
                 export: Arc::new(Vec::new),
@@ -165,59 +160,53 @@ fn options_with_comms(transport: Arc<dyn comms::Transport>, seed: [u8; 32]) -> A
 fn station_with_comms(root: &std::path::Path, seed: [u8; 32]) -> Station {
     let net = comms::mem::MemNet::new();
     let transport: Arc<dyn comms::Transport> =
-        Arc::new(net.peer(mechanics::crypto::device_from_seed(&seed)));
+        Arc::new(net.peer(mechanics::actor::device_from_seed(&seed)));
     let world = Empty::new();
-    let registration = WorldRegistration {
+    let registration = Descriptor {
         id: world.id(),
-        implementation_version: WorldVersion(1),
+        implementation_version: Version(1),
         schemas: world.schemas().to_vec(),
-        limits: WorldLimits::default(),
+        limits: Limits::default(),
         scope_schemas: Vec::new(),
         signal_schemas: Vec::new(),
     };
-    let registry = RuntimeBuilder::new()
-        .register(registration, Arc::new(world))
-        .build()
-        .unwrap();
+    let registry = Builder::new().register(Arc::new(world)).build().unwrap();
     Runtime::open(
         root.to_path_buf(),
         registry,
         Arc::new(Permissive),
-        Arc::new(replica::StaticBodyKeys::new(
+        Arc::new(replica::body::StaticBodyKeys::new(
             AuthorizedBodyKey::for_authorized_epoch([1u8; 16], [2u8; 32]),
         )),
     )
-    .form_space(SpaceFormationOptions::default())
+    .create()
     .unwrap()
-    .activate(options_with_comms(transport, seed))
+    .open(options_with_comms(transport, seed))
     .unwrap()
 }
 
 fn station_at(root: &std::path::Path) -> Station {
     let world = Empty::new();
-    let registration = WorldRegistration {
+    let registration = Descriptor {
         id: world.id(),
-        implementation_version: WorldVersion(1),
+        implementation_version: Version(1),
         schemas: world.schemas().to_vec(),
-        limits: WorldLimits::default(),
+        limits: Limits::default(),
         scope_schemas: Vec::new(),
         signal_schemas: Vec::new(),
     };
-    let registry = RuntimeBuilder::new()
-        .register(registration, Arc::new(world))
-        .build()
-        .unwrap();
+    let registry = Builder::new().register(Arc::new(world)).build().unwrap();
     Runtime::open(
         root.to_path_buf(),
         registry,
         Arc::new(Permissive),
-        Arc::new(replica::StaticBodyKeys::new(
+        Arc::new(replica::body::StaticBodyKeys::new(
             AuthorizedBodyKey::for_authorized_epoch([1u8; 16], [2u8; 32]),
         )),
     )
-    .form_space(SpaceFormationOptions::default())
+    .create()
     .unwrap()
-    .activate(options())
+    .open(options())
     .unwrap()
 }
 
@@ -257,29 +246,29 @@ fn fingerprint(dir: &std::path::Path) -> [u8; 32] {
     *hasher.finalize().as_bytes()
 }
 
-fn peer_station(seed: u8) -> StationId {
-    StationId::from_device(&mechanics::crypto::device_from_seed(&[seed; 32])).expect("station")
+fn peer_station(seed: u8) -> Key {
+    Key::from_device(&mechanics::actor::device_from_seed(&[seed; 32])).expect("station")
 }
 
-fn caret_scope(body: u8) -> TransientScope {
-    TransientScope::TextCaret {
+fn caret_scope(body: u8) -> Target {
+    Target::Field {
         world: "dev.example.pad".into(),
         body: [body; 16],
         field: "text".into(),
     }
 }
 
-fn presence(scope: TransientScope, epoch: [u8; 16], seq: u64) -> TransientItem {
+fn presence(scope: Target, epoch: [u8; 16], seq: u64) -> TransientItem {
     TransientItem {
-        session_epoch: epoch,
+        connection_epoch: epoch,
         seq,
         scope,
         payload: TransientPayload::Presence,
     }
 }
 
-fn view_scope(body: u8) -> TransientScope {
-    TransientScope::IssueView {
+fn view_scope(body: u8) -> Target {
+    Target::Body {
         world: "dev.example.pad".into(),
         body: [body; 16],
     }
@@ -307,7 +296,7 @@ fn five_peers_moving_cursors_change_nothing_durable() {
             live.record(
                 &peer_station(peer + 40),
                 &TransientItem {
-                    session_epoch: [peer; 16],
+                    connection_epoch: [peer; 16],
                     seq: round,
                     scope: caret_scope(peer),
                     payload: TransientPayload::Typing,
@@ -341,8 +330,8 @@ fn a_restart_cannot_resurrect_a_cursor() {
     );
     assert_eq!(station.live().view(None, now).entries.len(), 1);
 
-    let orbit = station.go_dormant().expect("dormant");
-    let station = orbit.activate(options()).expect("reactivated");
+    let orbit = station.vacate().expect("dormant");
+    let station = orbit.open(options()).expect("reactivated");
 
     assert!(
         station.live().view(None, Instant::now()).entries.is_empty(),
@@ -384,7 +373,7 @@ fn dormancy_joins_the_drivers_it_started() {
     //
     // **With a transport**, which the first version of this did not have.
     // `Orbit::activate` only reaches the driver block when `comms` is `Some`, so
-    // against an offline Station `go_dormant` drained an empty task set and the
+    // against an offline Station `vacate` drained an empty task set and the
     // test passed without either plane ever having run.
     let root = temp_root();
     let station = station_with_comms(&root, [51u8; 32]);
@@ -400,7 +389,7 @@ fn dormancy_joins_the_drivers_it_started() {
     assert_eq!(live.view(None, now).entries.len(), 5);
 
     let started = std::time::Instant::now();
-    let orbit = station.go_dormant().expect("drained inside the deadline");
+    let orbit = station.vacate().expect("drained inside the deadline");
     // Inside the deadline, not merely eventually. A drain that ran long would
     // still return — it leaks rather than blocking — so the elapsed time is
     // what distinguishes "joined" from "gave up and leaked".
@@ -410,7 +399,7 @@ fn dormancy_joins_the_drivers_it_started() {
     );
     // Reactivating proves the store lock came back, which it does not if a
     // driver thread is still holding the Station's directory.
-    let station = orbit.activate(options()).expect("the lock was released");
+    let station = orbit.open(options()).expect("the lock was released");
     assert!(station.live().view(None, Instant::now()).entries.is_empty());
 }
 
@@ -430,7 +419,7 @@ fn an_offer_survives_a_disconnect_and_not_a_restart() {
     let before = fingerprint(station.store_dir());
     station.live().offer(runtime::signal::PendingOffer {
         from: offering.clone(),
-        session_epoch: [3u8; 16],
+        connection_epoch: [3u8; 16],
         content: [7u8; 32],
         plaintext_len: 1024,
         display_name: "notes.txt".into(),
@@ -453,8 +442,8 @@ fn an_offer_survives_a_disconnect_and_not_a_restart() {
         "a disconnect drops presence, not offers"
     );
 
-    let orbit = station.go_dormant().expect("dormant");
-    let station = orbit.activate(options()).expect("reactivated");
+    let orbit = station.vacate().expect("dormant");
+    let station = orbit.open(options()).expect("reactivated");
     assert!(
         station.live().pending_offers().is_empty(),
         "an offer is held in memory, and memory is what a restart discards"

@@ -1,3 +1,8 @@
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    reason = "presentation layout is clamped to terminal and payload bounds before coordinate arithmetic"
+)]
 //! Issues-owned terminal and JSON presentation.
 
 use std::fmt::Write as _;
@@ -7,7 +12,7 @@ use issues::dto::{
     Row,
 };
 use serde_json::Value;
-use world_interface::{InterfaceError, Presentation, PresentationFailure, PresentationOptions};
+use world_interface::{Failure, Presentation, PresentationFailure, PresentationOptions};
 
 use crate::{IssuesErrorKind, IssuesResponse};
 
@@ -20,9 +25,9 @@ mod ansi {
     pub const CYAN: &str = "\x1b[36m";
 }
 
-pub fn present(value: Value, options: PresentationOptions) -> Result<Presentation, InterfaceError> {
+pub fn present(value: Value, options: PresentationOptions) -> Result<Presentation, Failure> {
     let response: IssuesResponse = serde_json::from_value(value)
-        .map_err(|error| InterfaceError::new(format!("decode Issues response: {error}")))?;
+        .map_err(|error| Failure::new(format!("decode Issues response: {error}")))?;
     Ok(render(&response, options))
 }
 

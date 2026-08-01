@@ -2,7 +2,7 @@
 
 lait has three product surfaces: CLI, local web, and MCP. They are clients of
 the same daemon and use the same command and projection contract. No surface
-opens Replica or Fabric independently; product work reaches a World through a
+opens Replica or Engine independently; product work reaches a World through a
 docked Session.
 
 ## 1. Product model
@@ -64,7 +64,7 @@ to a row starts or reuses only the Station placed in that local Orbit, under the
 correct local identity. Rows use local Orbit ids because two local stores may
 participate in the same Space. The web process owns no Station: it sends routed
 requests and receives catalog doorbells through the same identity-scoped
-LaitDaemon endpoint as CLI and MCP.
+daemon::Daemon endpoint as CLI and MCP.
 
 The web application provides issue lists, boards, detail, inbox, activity,
 members, filters, and command actions. Server-side semantics such as reference

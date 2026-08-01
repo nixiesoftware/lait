@@ -1,7 +1,11 @@
+#![allow(
+    clippy::as_conversions,
+    reason = "registry schema counts are validated against public registration limits"
+)]
 //! The immutable World registry.
 //!
-//! World implementations register with a [`RuntimeBuilder`]. `build()` validates
-//! and **freezes** the set: registration is immutable per Runtime, and dynamic
+//! World implementations register with a [`Builder`]. `build()` validates
+//! and **freezes** the set: descriptors are immutable per Runtime, and dynamic
 //! loading is deferred. Runtime rejects duplicate ids, duplicate schema
 //! versions within a World, invalid limits, contradictory upgrade claims, and
 //! scope/signal declarations that repeat a name, bound it at zero, exceed the
@@ -11,9 +15,9 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use replica::ids::WorldId;
+use replica::body::WorldId;
 
-use crate::world::{World, WorldRegistration};
+use crate::world::{Descriptor, World};
 
 /// Which declaration list a registration failure is about.
 ///
@@ -21,14 +25,14 @@ use crate::world::{World, WorldRegistration};
 /// the two lists fail for the same reasons and a caller that wants to report
 /// them differently already has the kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DeclarationKind {
+pub enum Declaration {
     Scope,
     Signal,
 }
 
 /// Why registration was rejected at `build()`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RegistrationError {
+pub enum Refusal {
     /// Two Worlds registered the same [`WorldId`].
     DuplicateWorld(WorldId),
     /// A World declared the same `(schema id, version)` twice.
@@ -37,8 +41,6 @@ pub enum RegistrationError {
         schema: String,
         version: u32,
     },
-    /// A World's declared registration id/schemas disagree with the trait impl.
-    RegistrationMismatch(WorldId),
     /// A schema claims to read a predecessor version that is not strictly older
     /// than itself, or lists the same predecessor twice.
     ContradictoryUpgrade {
@@ -51,14 +53,14 @@ pub enum RegistrationError {
     /// A World declared the same scope or signal name twice.
     DuplicateDeclaration {
         world: WorldId,
-        kind: DeclarationKind,
+        kind: Declaration,
         name: String,
     },
     /// A declaration's bound is zero, exceeds the substrate ceiling it may only
     /// tighten, or its demand is not canonical.
     InvalidDeclaration {
         world: WorldId,
-        kind: DeclarationKind,
+        kind: Declaration,
         name: String,
     },
 }
@@ -70,36 +72,36 @@ pub enum RegistrationError {
 /// implementation id over bytes nothing can decode.
 pub const MAX_DECLARATIONS_PER_SECTION: usize = u16::MAX as usize;
 
-impl std::fmt::Display for RegistrationError {
+impl std::fmt::Display for Refusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{self:?}")
     }
 }
-impl std::error::Error for RegistrationError {}
+impl std::error::Error for Refusal {}
 
-/// One hosted World: its declared registration and its implementation.
+/// One hosted World: its descriptor and implementation.
 struct Hosted {
-    registration: WorldRegistration,
+    descriptor: Descriptor,
     world: Arc<dyn World>,
 }
 
 /// The frozen, immutable set of hosted Worlds. Lookup is by [`WorldId`].
 #[derive(Clone)]
-pub struct WorldRegistry {
+pub struct Catalog {
     worlds: Arc<BTreeMap<WorldId, Arc<Hosted>>>,
 }
 
 // `Hosted` holds `Arc<dyn World>`, which is not `Debug`; the registry only ever
 // shows which Worlds it hosts, so `Debug` lists the ids rather than deriving.
-impl std::fmt::Debug for WorldRegistry {
+impl std::fmt::Debug for Catalog {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("WorldRegistry")
+        f.debug_struct("Catalog")
             .field("worlds", &self.worlds.keys().collect::<Vec<_>>())
             .finish()
     }
 }
 
-impl WorldRegistry {
+impl Catalog {
     /// The number of hosted Worlds.
     pub fn len(&self) -> usize {
         self.worlds.len()
@@ -119,9 +121,9 @@ impl WorldRegistry {
         self.worlds.get(id).map(|h| h.world.clone())
     }
 
-    /// The declared registration for a hosted World, if any.
-    pub fn registration(&self, id: &WorldId) -> Option<&WorldRegistration> {
-        self.worlds.get(id).map(|h| &h.registration)
+    /// The reviewed descriptor for a hosted World, if any.
+    pub fn descriptor(&self, id: &WorldId) -> Option<&Descriptor> {
+        self.worlds.get(id).map(|h| &h.descriptor)
     }
 
     /// The hosted World ids, in canonical order.
@@ -131,47 +133,33 @@ impl WorldRegistry {
 }
 
 /// Accumulates World registrations, then validates and freezes them into an
-/// immutable [`WorldRegistry`]. Consumed by `build()`.
+/// immutable [`Catalog`]. Consumed by `build()`.
 #[derive(Default)]
-pub struct RuntimeBuilder {
+pub struct Builder {
     pending: Vec<Hosted>,
 }
 
-impl RuntimeBuilder {
+impl Builder {
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Register a World and its declared registration. Validation is deferred to
-    /// [`RuntimeBuilder::build`], so ordering never masks a duplicate.
-    pub fn register(mut self, registration: WorldRegistration, world: Arc<dyn World>) -> Self {
-        self.pending.push(Hosted {
-            registration,
-            world,
-        });
+    /// Register a World. Its descriptor is obtained from the implementation;
+    /// validation is deferred to [`Builder::build`], so ordering never
+    /// masks a duplicate.
+    pub fn register(mut self, world: Arc<dyn World>) -> Self {
+        let descriptor = world.descriptor();
+        self.pending.push(Hosted { descriptor, world });
         self
     }
 
     /// Validate and freeze the registry. Rejects duplicate Worlds/schema
     /// versions, registration/impl mismatch, invalid limits, contradictory
     /// upgrade claims, and invalid or duplicated scope/signal declarations.
-    pub fn build(self) -> Result<WorldRegistry, RegistrationError> {
+    pub fn build(self) -> Result<Catalog, Refusal> {
         let mut worlds: BTreeMap<WorldId, Arc<Hosted>> = BTreeMap::new();
         for hosted in self.pending {
-            let id = hosted.registration.id.clone();
-
-            // The declared registration must match what the impl reports. The
-            // declaration lists are compared for the same reason the schemas
-            // are: the registration is what the implementation descriptor is
-            // built from, so a list that disagrees with the running code is a
-            // reviewed identity describing something else.
-            if hosted.world.id() != id
-                || hosted.world.schemas() != hosted.registration.schemas.as_slice()
-                || hosted.world.scope_schemas() != hosted.registration.scope_schemas.as_slice()
-                || hosted.world.signal_schemas() != hosted.registration.signal_schemas.as_slice()
-            {
-                return Err(RegistrationError::RegistrationMismatch(id));
-            }
+            let id = hosted.descriptor.id.clone();
 
             // Invalid limits (reserved shape; only the "max is expressible"
             // check applies until S1 freezes the bounds).
@@ -181,10 +169,10 @@ impl RuntimeBuilder {
             // Per-World schema validation.
             let mut seen_versions: std::collections::BTreeSet<(String, u32)> =
                 std::collections::BTreeSet::new();
-            for schema in &hosted.registration.schemas {
+            for schema in &hosted.descriptor.schemas {
                 let key = (schema.id.as_str().to_string(), schema.version);
                 if !seen_versions.insert(key) {
-                    return Err(RegistrationError::DuplicateSchemaVersion {
+                    return Err(Refusal::DuplicateSchemaVersion {
                         world: id.clone(),
                         schema: schema.id.as_str().to_string(),
                         version: schema.version,
@@ -194,7 +182,7 @@ impl RuntimeBuilder {
                 let mut preds = std::collections::BTreeSet::new();
                 for &pred in &schema.readable_predecessors {
                     if pred >= schema.version || !preds.insert(pred) {
-                        return Err(RegistrationError::ContradictoryUpgrade {
+                        return Err(Refusal::ContradictoryUpgrade {
                             world: id.clone(),
                             schema: schema.id.as_str().to_string(),
                             version: schema.version,
@@ -217,17 +205,11 @@ impl RuntimeBuilder {
             // unrepresentable in the codec, because this is where a World's
             // declaration becomes this build's problem.
             for (kind, count) in [
-                (
-                    DeclarationKind::Scope,
-                    hosted.registration.scope_schemas.len(),
-                ),
-                (
-                    DeclarationKind::Signal,
-                    hosted.registration.signal_schemas.len(),
-                ),
+                (Declaration::Scope, hosted.descriptor.scope_schemas.len()),
+                (Declaration::Signal, hosted.descriptor.signal_schemas.len()),
             ] {
                 if count > MAX_DECLARATIONS_PER_SECTION {
-                    return Err(RegistrationError::InvalidDeclaration {
+                    return Err(Refusal::InvalidDeclaration {
                         world: id.clone(),
                         kind,
                         name: format!("{count} declarations"),
@@ -237,21 +219,21 @@ impl RuntimeBuilder {
 
             let mut seen_scopes: std::collections::BTreeSet<String> =
                 std::collections::BTreeSet::new();
-            for scope in &hosted.registration.scope_schemas {
+            for scope in &hosted.descriptor.scope_schemas {
                 let name = scope.name.as_str().to_string();
                 if !seen_scopes.insert(name.clone()) {
-                    return Err(RegistrationError::DuplicateDeclaration {
+                    return Err(Refusal::DuplicateDeclaration {
                         world: id.clone(),
-                        kind: DeclarationKind::Scope,
+                        kind: Declaration::Scope,
                         name,
                     });
                 }
                 if scope.max_key_bytes == 0
                     || scope.max_key_bytes as usize > crate::transient::MAX_SCOPE_FIELD_BYTES
                 {
-                    return Err(RegistrationError::InvalidDeclaration {
+                    return Err(Refusal::InvalidDeclaration {
                         world: id.clone(),
-                        kind: DeclarationKind::Scope,
+                        kind: Declaration::Scope,
                         name,
                     });
                 }
@@ -259,37 +241,37 @@ impl RuntimeBuilder {
 
             let mut seen_signals: std::collections::BTreeSet<String> =
                 std::collections::BTreeSet::new();
-            for signal in &hosted.registration.signal_schemas {
+            for signal in &hosted.descriptor.signal_schemas {
                 let name = signal.name.as_str().to_string();
                 if !seen_signals.insert(name.clone()) {
-                    return Err(RegistrationError::DuplicateDeclaration {
+                    return Err(Refusal::DuplicateDeclaration {
                         world: id.clone(),
-                        kind: DeclarationKind::Signal,
+                        kind: Declaration::Signal,
                         name,
                     });
                 }
                 let bound_ok = signal.max_payload_bytes > 0
-                    && signal.max_payload_bytes as usize <= crate::planes::bounds::MAX_SIGNAL_BYTES;
+                    && signal.max_payload_bytes as usize <= crate::plane::bounds::MAX_SIGNAL_BYTES;
                 // The bytes are what policy evaluates, so they are parsed here
                 // rather than carried unread into a reviewed identity that
                 // would fail the first time anyone sent the signal.
                 let demand_ok =
-                    mechanics::demand::AuthorizationDemand::decode_canonical(&signal.demand)
+                    mechanics::authorization::AuthorizationDemand::decode_canonical(&signal.demand)
                         .is_ok();
                 if !bound_ok || !demand_ok {
-                    return Err(RegistrationError::InvalidDeclaration {
+                    return Err(Refusal::InvalidDeclaration {
                         world: id.clone(),
-                        kind: DeclarationKind::Signal,
+                        kind: Declaration::Signal,
                         name,
                     });
                 }
             }
 
             if worlds.insert(id.clone(), Arc::new(hosted)).is_some() {
-                return Err(RegistrationError::DuplicateWorld(id));
+                return Err(Refusal::DuplicateWorld(id));
             }
         }
-        Ok(WorldRegistry {
+        Ok(Catalog {
             worlds: Arc::new(worlds),
         })
     }
@@ -298,19 +280,18 @@ impl RuntimeBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::error::WorldError;
+    use crate::world::Rejection;
     use crate::world::{
-        ScopeSchema, SignalSchema, World, WorldContext, WorldEffect, WorldIntent, WorldLimits,
-        WorldProjection, WorldQuery, WorldVersion,
+        Context, Effect, Intent, Projection, Query, ScopeSchema, SignalSchema, World,
     };
-    use replica::body::{BodySchema, MutationModel};
-    use replica::ids::{EncodingId, SchemaId};
+    use replica::body::{EncodingId, SchemaId};
+    use replica::body::{MutationModel, Schema};
 
     /// A minimal test-only World — the conformance harness's stand-in. It stages
     /// nothing and exists only to prove registry behavior.
     struct TestWorld {
         id: WorldId,
-        schemas: Vec<BodySchema>,
+        schemas: Vec<Schema>,
         scope_schemas: Vec<ScopeSchema>,
         signal_schemas: Vec<SignalSchema>,
     }
@@ -319,7 +300,7 @@ mod tests {
         fn id(&self) -> WorldId {
             self.id.clone()
         }
-        fn schemas(&self) -> &[BodySchema] {
+        fn schemas(&self) -> &[Schema] {
             &self.schemas
         }
         fn scope_schemas(&self) -> &[ScopeSchema] {
@@ -328,24 +309,16 @@ mod tests {
         fn signal_schemas(&self) -> &[SignalSchema] {
             &self.signal_schemas
         }
-        fn submit(
-            &self,
-            _ctx: &mut WorldContext<'_>,
-            _intent: WorldIntent,
-        ) -> Result<WorldEffect, WorldError> {
-            Err(WorldError::InvalidRequest)
+        fn submit(&self, _ctx: &mut Context<'_>, _intent: Intent) -> Result<Effect, Rejection> {
+            Err(Rejection::InvalidRequest)
         }
-        fn query(
-            &self,
-            _ctx: &WorldContext<'_>,
-            _query: WorldQuery,
-        ) -> Result<WorldProjection, WorldError> {
-            Err(WorldError::InvalidRequest)
+        fn query(&self, _ctx: &Context<'_>, _query: Query) -> Result<Projection, Rejection> {
+            Err(Rejection::InvalidRequest)
         }
     }
 
-    fn schema(id: &str, version: u32, preds: Vec<u32>) -> BodySchema {
-        BodySchema {
+    fn schema(id: &str, version: u32, preds: Vec<u32>) -> Schema {
+        Schema {
             id: SchemaId::parse(id).unwrap(),
             version,
             encoding: EncodingId::parse("lait.body.v1").unwrap(),
@@ -354,109 +327,63 @@ mod tests {
         }
     }
 
-    fn registration(id: &str, schemas: Vec<BodySchema>) -> (WorldRegistration, Arc<dyn World>) {
+    fn test_world(id: &str, schemas: Vec<Schema>) -> Arc<dyn World> {
         let wid = WorldId::parse(id).unwrap();
-        let reg = WorldRegistration {
-            id: wid.clone(),
-            implementation_version: WorldVersion(1),
-            schemas: schemas.clone(),
-            limits: WorldLimits::default(),
-            scope_schemas: Vec::new(),
-            signal_schemas: Vec::new(),
-        };
-        let world: Arc<dyn World> = Arc::new(TestWorld {
+        Arc::new(TestWorld {
             id: wid,
             schemas,
             scope_schemas: Vec::new(),
             signal_schemas: Vec::new(),
-        });
-        (reg, world)
+        })
     }
 
     #[test]
     fn single_world_builds_and_is_queryable() {
-        let (reg, world) = registration("com.example.issues", vec![schema("issue", 1, vec![])]);
-        let registry = RuntimeBuilder::new().register(reg, world).build().unwrap();
+        let world = test_world("com.example.product", vec![schema("issue", 1, vec![])]);
+        let registry = Builder::new().register(world).build().unwrap();
         assert_eq!(registry.len(), 1);
-        let id = WorldId::parse("com.example.issues").unwrap();
+        let id = WorldId::parse("com.example.product").unwrap();
         assert!(registry.contains(&id));
         assert!(registry.world(&id).is_some());
     }
 
     #[test]
     fn duplicate_world_id_is_rejected() {
-        let (r1, w1) = registration("com.example.issues", vec![schema("issue", 1, vec![])]);
-        let (r2, w2) = registration("com.example.issues", vec![schema("issue", 1, vec![])]);
-        let err = RuntimeBuilder::new()
-            .register(r1, w1)
-            .register(r2, w2)
+        let w1 = test_world("com.example.product", vec![schema("issue", 1, vec![])]);
+        let w2 = test_world("com.example.product", vec![schema("issue", 1, vec![])]);
+        let err = Builder::new()
+            .register(w1)
+            .register(w2)
             .build()
             .unwrap_err();
         assert_eq!(
             err,
-            RegistrationError::DuplicateWorld(WorldId::parse("com.example.issues").unwrap())
+            Refusal::DuplicateWorld(WorldId::parse("com.example.product").unwrap())
         );
     }
 
     #[test]
     fn duplicate_schema_version_is_rejected() {
-        let (reg, world) = registration(
-            "com.example.issues",
+        let world = test_world(
+            "com.example.product",
             vec![schema("issue", 1, vec![]), schema("issue", 1, vec![])],
         );
-        let err = RuntimeBuilder::new()
-            .register(reg, world)
-            .build()
-            .unwrap_err();
-        assert!(matches!(
-            err,
-            RegistrationError::DuplicateSchemaVersion { .. }
-        ));
+        let err = Builder::new().register(world).build().unwrap_err();
+        assert!(matches!(err, Refusal::DuplicateSchemaVersion { .. }));
     }
 
     #[test]
     fn contradictory_upgrade_claim_is_rejected() {
         // A v1 schema cannot "read" predecessor v1 (not strictly older).
-        let (reg, world) = registration("com.example.issues", vec![schema("issue", 1, vec![1])]);
-        let err = RuntimeBuilder::new()
-            .register(reg, world)
-            .build()
-            .unwrap_err();
-        assert!(matches!(
-            err,
-            RegistrationError::ContradictoryUpgrade { .. }
-        ));
+        let world = test_world("com.example.product", vec![schema("issue", 1, vec![1])]);
+        let err = Builder::new().register(world).build().unwrap_err();
+        assert!(matches!(err, Refusal::ContradictoryUpgrade { .. }));
 
         // A valid upgrade (v2 reads v1) is accepted.
-        let (reg, world) = registration(
-            "com.example.issues",
+        let world = test_world(
+            "com.example.product",
             vec![schema("issue", 1, vec![]), schema("issue", 2, vec![1])],
         );
-        assert!(RuntimeBuilder::new().register(reg, world).build().is_ok());
-    }
-
-    #[test]
-    fn registration_impl_mismatch_is_rejected() {
-        // Registration claims a schema the impl does not report.
-        let wid = WorldId::parse("com.example.issues").unwrap();
-        let reg = WorldRegistration {
-            id: wid.clone(),
-            implementation_version: WorldVersion(1),
-            schemas: vec![schema("issue", 1, vec![])],
-            limits: WorldLimits::default(),
-            scope_schemas: Vec::new(),
-            signal_schemas: Vec::new(),
-        };
-        let world: Arc<dyn World> = Arc::new(TestWorld {
-            id: wid,
-            schemas: vec![], // disagrees with the registration
-            scope_schemas: Vec::new(),
-            signal_schemas: Vec::new(),
-        });
-        let err = RuntimeBuilder::new()
-            .register(reg, world)
-            .build()
-            .unwrap_err();
-        assert!(matches!(err, RegistrationError::RegistrationMismatch(_)));
+        assert!(Builder::new().register(world).build().is_ok());
     }
 }

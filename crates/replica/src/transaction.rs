@@ -1,15 +1,15 @@
-//! `BodyTransaction` — the signed Body-transaction envelope, its core, and
+//! `Transaction` — the signed Body-transaction envelope, its core, and
 //! its descriptors (`lait/body-transaction/2`), the protection boundary.
 //!
 //! A transaction is a device-signed **envelope** over two parts:
 //!
-//! - the [`BodyTransactionCore`]: Space, parent Manifest root, resulting
+//! - the [`Core`]: Space, parent Manifest root, resulting
 //!   Replica frontier, referenced authority frontier, acting principal,
 //!   canonical authorization demand, intent/operations digests, and the
-//!   ordered BodyKey-sorted set of public [`BodyDescriptor`]s with their
+//!   ordered BodyKey-sorted set of public [`Descriptor`]s with their
 //!   ciphertext commitments;
 //! - the mechanics-derived **authorization receipt**
-//!   ([`mechanics::demand::AuthorizationReceipt`], canonical bytes), which
+//!   ([`mechanics::authorization::AuthorizationReceipt`], canonical bytes), which
 //!   binds the core digest, the demand, the evidence, the checkpoint
 //!   commitment, and the pinned coordinates.
 //!
@@ -24,16 +24,27 @@
 //! ([`crate::body::ContentCommitment`]), which avoids an equality oracle.
 //!
 //! **Two levels of verification, deliberately separate.**
-//! [`BodyTransaction::verify`] is the *opaque structural* check any Station
+//! [`Transaction::verify`] is the *opaque structural* check any Station
 //! can run without membership state: canonical shape, descriptor ordering,
 //! demand canonicality, the receipt's byte-exact binding to the core, and the
 //! committing signature. It is **not** an authority check. Before a
 //! transaction is retained or incorporated, mechanics must also prove the
 //! receipt against the referenced historical frontier — **no World callback
-//! runs**; [`BodyTransaction::verify_authorized`] runs the structural check
+//! runs**; [`Transaction::verify_authorized`] runs the structural check
 //! and then consults the mechanics-provided [`AuthoritySource`].
 
-use mechanics::demand::AuthorizationReceipt;
+pub use crate::replica::{
+    ActionOutcome, CommitAuthorization, CommitContext, StaticAuthorizer, TransactionAuthorizer,
+};
+
+/// Typed failures produced while committing or incorporating a transaction.
+pub mod commit {
+    pub use crate::replica::{Defect, Failure, Invalid, Refusal};
+}
+
+pub use crate::algebra::MAX_OPS_PER_TRANSACTION;
+
+use mechanics::authorization::AuthorizationReceipt;
 use mechanics::ids::SpaceId;
 use serde::{Deserialize, Serialize};
 
@@ -62,7 +73,7 @@ pub const NO_PARENT_ROOT: [u8; 32] = [0u8; 32];
 /// transaction is positional: descriptors live inside the signed core, so a
 /// descriptor can never be transplanted into another transaction.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BodyDescriptor {
+pub struct Descriptor {
     pub world: WorldId,
     pub body: BodyId,
     pub schema: SchemaId,
@@ -71,7 +82,7 @@ pub struct BodyDescriptor {
     pub content_commitment: [u8; 32],
 }
 
-impl BodyDescriptor {
+impl Descriptor {
     /// The BodyKey this descriptor addresses (the sort key).
     pub fn key(&self) -> BodyKey {
         BodyKey::new(self.world.clone(), self.body.clone())
@@ -89,7 +100,7 @@ impl BodyDescriptor {
 /// The transaction core: everything the receipt binds, excluding the receipt
 /// itself, the outer signature, and the outer transaction id.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BodyTransactionCore {
+pub struct Core {
     pub version: u8,
     pub space: [u8; SPACE_ID_LEN],
     /// The committed Manifest root this transaction was authored against
@@ -112,12 +123,16 @@ pub struct BodyTransactionCore {
     /// The canonical authorization-demand bytes (mandatory, non-empty).
     pub demand: Vec<u8>,
     /// The ordered, BodyKey-sorted descriptors.
-    pub descriptors: Vec<BodyDescriptor>,
+    pub descriptors: Vec<Descriptor>,
 }
 
-impl BodyTransactionCore {
+impl Core {
     /// The canonical core digest — the value the authorization receipt binds.
     pub fn digest(&self) -> [u8; 32] {
+        #[allow(
+            clippy::expect_used,
+            reason = "derived serialization of this validated transaction core is infallible"
+        )]
         let bytes = postcard::to_stdvec(self).expect("postcard transaction core");
         blake3::derive_key(CORE_DIGEST_CONTEXT, &bytes)
     }
@@ -125,10 +140,10 @@ impl BodyTransactionCore {
 
 /// The signed Body-transaction envelope: core plus authorization receipt.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BodyTransaction {
-    pub core: BodyTransactionCore,
+pub struct Transaction {
+    pub core: Core,
     /// Canonical [`AuthorizationReceipt`] bytes (opaque at the frame layer;
-    /// structurally bound to the core by [`BodyTransaction::verify`]).
+    /// structurally bound to the core by [`Transaction::verify`]).
     pub authorization_receipt: Vec<u8>,
     pub signature_algorithm: u8,
     #[serde(with = "serde_byte_array")]
@@ -137,7 +152,7 @@ pub struct BodyTransaction {
 
 /// Why a Body transaction failed validation.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TransactionError {
+pub enum Error {
     UnsupportedVersion(u8),
     UnsupportedSignatureAlgorithm(u8),
     NonCanonical,
@@ -150,28 +165,43 @@ pub enum TransactionError {
     BadDemand,
     /// The authorization receipt is undecodable or does not bind this exact
     /// core (actor, device, Space, frontier, parent root, digests).
-    ReceiptUnbound(&'static str),
+    ReceiptUnbound(ReceiptField),
     BadSignature,
     /// Structurally valid and correctly signed, but mechanics refused the
     /// receipt against the referenced historical frontier. Produced only by
-    /// [`BodyTransaction::verify_authorized`].
+    /// [`Transaction::verify_authorized`].
     AuthorityUnverified,
     /// The referenced parent Manifest is not locally resolvable; retry once
     /// the exact material arrives. Never fall back to current state.
     ParentManifestUnavailable,
 }
 
-impl std::fmt::Display for TransactionError {
+/// Which authorization-receipt binding failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReceiptField {
+    Encoding,
+    Space,
+    Actor,
+    Device,
+    AuthorityFrontier,
+    ParentManifest,
+    Intent,
+    Operations,
+    Demand,
+    Core,
+}
+
+impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{self:?}")
     }
 }
-impl std::error::Error for TransactionError {}
+impl std::error::Error for Error {}
 
 /// A device signing capability the committing layer supplies (runtime's
 /// `LocalIdentity` implements it). Replica builds the canonical preimage and
 /// hands it here — it never sees seed bytes.
-pub trait TransactionSigner: Send + Sync {
+pub trait Signer: Send + Sync {
     /// The raw ed25519 public key of the signing device.
     fn signer_key(&self) -> [u8; 32];
     /// Sign an already-built canonical preimage.
@@ -181,14 +211,18 @@ pub trait TransactionSigner: Send + Sync {
 /// A seed-backed signer for tests and seed-holding callers.
 pub struct SeedSigner<'a>(pub &'a [u8; 32]);
 
-impl TransactionSigner for SeedSigner<'_> {
+impl Signer for SeedSigner<'_> {
     fn signer_key(&self) -> [u8; 32] {
-        mechanics::crypto::device_from_seed(self.0)
+        #[allow(
+            clippy::expect_used,
+            reason = "device_from_seed always constructs an Ed25519 device identifier"
+        )]
+        mechanics::actor::device_from_seed(self.0)
             .key_bytes()
             .expect("seed-derived device key")
     }
     fn sign_preimage(&self, preimage: &[u8]) -> [u8; 64] {
-        mechanics::crypto::sign_detached(self.0, preimage)
+        mechanics::actor::sign_detached(self.0, preimage)
     }
 }
 
@@ -211,20 +245,31 @@ pub trait AuthoritySource {
     /// referenced frontier — the minimal legitimacy any Station can prove. A
     /// real mechanics implementation MUST override it to verify the full
     /// authorization receipt (the orbital composition does).
-    fn verify_transaction(&self, tx: &BodyTransaction) -> Result<(), String> {
+    fn verify_transaction(&self, tx: &Transaction) -> Result<(), Refusal> {
         if self.signer_authorized(&tx.core.signer, &tx.core.authority_frontier) {
             Ok(())
         } else {
-            Err("signer not authorized at the referenced frontier".into())
+            Err(Refusal::Unauthorized)
         }
     }
 }
 
+/// Why historical transaction standing was refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refusal {
+    Unauthorized,
+}
+
 fn length_framed(domain: &[u8], body: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(2 + domain.len() + 4 + body.len());
-    out.extend_from_slice(&(domain.len() as u16).to_be_bytes());
+    let capacity = 6usize
+        .saturating_add(domain.len())
+        .saturating_add(body.len());
+    let mut out = Vec::with_capacity(capacity);
+    let domain_len = u16::try_from(domain.len()).unwrap_or(u16::MAX);
+    out.extend_from_slice(&domain_len.to_be_bytes());
     out.extend_from_slice(domain);
-    out.extend_from_slice(&(body.len() as u32).to_be_bytes());
+    let body_len = u32::try_from(body.len()).unwrap_or(u32::MAX);
+    out.extend_from_slice(&body_len.to_be_bytes());
     out.extend_from_slice(body);
     out
 }
@@ -234,7 +279,7 @@ fn space_bytes(space: &SpaceId) -> Option<[u8; SPACE_ID_LEN]> {
 }
 
 /// The inputs the committing layer supplies to sign a transaction.
-pub struct TransactionSignRequest<'a> {
+pub struct SignRequest<'a> {
     pub space: &'a SpaceId,
     pub parent_manifest_root: [u8; 32],
     pub replica_frontier: ReplicaFrontier,
@@ -243,11 +288,15 @@ pub struct TransactionSignRequest<'a> {
     pub intent_digest: [u8; 32],
     pub operations_digest: [u8; 32],
     pub demand: Vec<u8>,
-    pub descriptors: Vec<BodyDescriptor>,
+    pub descriptors: Vec<Descriptor>,
 }
 
-impl BodyTransaction {
-    fn preimage(core: &BodyTransactionCore, receipt: &[u8]) -> Vec<u8> {
+impl Transaction {
+    fn preimage(core: &Core, receipt: &[u8]) -> Vec<u8> {
+        #[allow(
+            clippy::expect_used,
+            reason = "derived serialization of this validated envelope preimage is infallible"
+        )]
         let body = postcard::to_stdvec(&(core, receipt)).expect("postcard envelope preimage");
         length_framed(BODY_TRANSACTION_DOMAIN, &body)
     }
@@ -256,13 +305,13 @@ impl BodyTransaction {
     /// sign the envelope. `authorize` receives the exact core digest the
     /// receipt must bind.
     pub fn sign_with(
-        request: TransactionSignRequest<'_>,
-        signer: &dyn TransactionSigner,
-        authorize: impl FnOnce(&BodyTransactionCore) -> Result<Vec<u8>, String>,
-    ) -> Result<Self, String> {
-        let core = BodyTransactionCore {
+        request: SignRequest<'_>,
+        signer: &dyn Signer,
+        authorize: impl FnOnce(&Core) -> Result<Vec<u8>, mechanics::authorization::Refusal>,
+    ) -> Result<Self, mechanics::authorization::Refusal> {
+        let core = Core {
             version: 1,
-            space: space_bytes(request.space).ok_or("space id shape")?,
+            space: space_bytes(request.space).ok_or(mechanics::authorization::Refusal::Denied)?,
             parent_manifest_root: request.parent_manifest_root,
             replica_frontier: request.replica_frontier,
             authority_frontier: request.authority_frontier,
@@ -285,6 +334,10 @@ impl BodyTransaction {
     }
 
     pub fn encode(&self) -> Vec<u8> {
+        #[allow(
+            clippy::expect_used,
+            reason = "derived serialization of this validated transaction is infallible"
+        )]
         postcard::to_stdvec(self).expect("postcard body-transaction")
     }
 
@@ -294,91 +347,92 @@ impl BodyTransaction {
     }
 
     /// Decode canonical bytes: size-bounded, exact decode/re-encode equality.
-    pub fn decode_canonical(bytes: &[u8]) -> Result<Self, TransactionError> {
+    pub fn decode_canonical(bytes: &[u8]) -> Result<Self, Error> {
         if bytes.len() > MAX_TRANSACTION {
-            return Err(TransactionError::NonCanonical);
+            return Err(Error::NonCanonical);
         }
-        let tx: Self = postcard::from_bytes(bytes).map_err(|_| TransactionError::NonCanonical)?;
+        let tx: Self = postcard::from_bytes(bytes).map_err(|_| Error::NonCanonical)?;
         if tx.encode() != bytes {
-            return Err(TransactionError::NonCanonical);
+            return Err(Error::NonCanonical);
         }
         Ok(tx)
     }
 
     /// The decoded, binding-checked authorization receipt.
-    pub fn receipt(&self) -> Result<AuthorizationReceipt, TransactionError> {
+    pub fn receipt(&self) -> Result<AuthorizationReceipt, Error> {
         AuthorizationReceipt::decode(&self.authorization_receipt)
-            .map_err(|_| TransactionError::ReceiptUnbound("undecodable"))
+            .map_err(|_| Error::ReceiptUnbound(ReceiptField::Encoding))
     }
 
     /// **Structural** verification only: canonical shape, descriptor
     /// ordering, canonical demand, receipt-to-core binding, and the
     /// committing signature. This does **not** prove authority — use
     /// [`Self::verify_authorized`] before retaining or incorporating.
-    pub fn verify(&self) -> Result<(), TransactionError> {
+    pub fn verify(&self) -> Result<(), Error> {
         let core = &self.core;
         if core.version != 1 {
-            return Err(TransactionError::UnsupportedVersion(core.version));
+            return Err(Error::UnsupportedVersion(core.version));
         }
         if self.signature_algorithm != SIG_ALG_ED25519 {
-            return Err(TransactionError::UnsupportedSignatureAlgorithm(
+            return Err(Error::UnsupportedSignatureAlgorithm(
                 self.signature_algorithm,
             ));
         }
         let space = std::str::from_utf8(&core.space)
             .ok()
             .and_then(SpaceId::parse)
-            .ok_or(TransactionError::BadSpaceId)?;
+            .ok_or(Error::BadSpaceId)?;
 
         if core.descriptors.is_empty() || core.descriptors.len() > MAX_DESCRIPTORS {
-            return Err(TransactionError::BadDescriptorCount);
+            return Err(Error::BadDescriptorCount);
         }
         // Strictly BodyKey-sorted, no duplicates.
-        for w in core.descriptors.windows(2) {
-            if w[0].key() >= w[1].key() {
-                return Err(TransactionError::UnsortedOrDuplicate);
+        for window in core.descriptors.windows(2) {
+            let [left, right] = window else { continue };
+            if left.key() >= right.key() {
+                return Err(Error::UnsortedOrDuplicate);
             }
         }
         // The demand must be present and canonical.
-        let demand = mechanics::demand::AuthorizationDemand::decode_canonical(&core.demand)
-            .map_err(|_| TransactionError::BadDemand)?;
+        let demand = mechanics::authorization::AuthorizationDemand::decode_canonical(&core.demand)
+            .map_err(|_| Error::BadDemand)?;
 
         // The receipt must bind this exact core.
         let receipt = self.receipt()?;
         if receipt.space != space.as_str() {
-            return Err(TransactionError::ReceiptUnbound("space"));
+            return Err(Error::ReceiptUnbound(ReceiptField::Space));
         }
         if receipt.actor != core.actor {
-            return Err(TransactionError::ReceiptUnbound("actor"));
+            return Err(Error::ReceiptUnbound(ReceiptField::Actor));
         }
         if receipt.device != core.signer {
-            return Err(TransactionError::ReceiptUnbound("device"));
+            return Err(Error::ReceiptUnbound(ReceiptField::Device));
         }
         if receipt.authority_frontier != core.authority_frontier.as_bytes() {
-            return Err(TransactionError::ReceiptUnbound("authority frontier"));
+            return Err(Error::ReceiptUnbound(ReceiptField::AuthorityFrontier));
         }
         if receipt.parent_manifest_root != core.parent_manifest_root {
-            return Err(TransactionError::ReceiptUnbound("parent manifest root"));
+            return Err(Error::ReceiptUnbound(ReceiptField::ParentManifest));
         }
         if receipt.intent_digest != core.intent_digest {
-            return Err(TransactionError::ReceiptUnbound("intent digest"));
+            return Err(Error::ReceiptUnbound(ReceiptField::Intent));
         }
         if receipt.effect_operations_digest != core.operations_digest {
-            return Err(TransactionError::ReceiptUnbound("operations digest"));
+            return Err(Error::ReceiptUnbound(ReceiptField::Operations));
         }
-        if receipt.demand_digest != demand.digest().map_err(|_| TransactionError::BadDemand)? {
-            return Err(TransactionError::ReceiptUnbound("demand digest"));
+        if receipt.demand_digest != demand.digest().map_err(|_| Error::BadDemand)? {
+            return Err(Error::ReceiptUnbound(ReceiptField::Demand));
         }
         if receipt.body_transaction_core_digest != core.digest() {
-            return Err(TransactionError::ReceiptUnbound("core digest"));
+            return Err(Error::ReceiptUnbound(ReceiptField::Core));
         }
 
-        if !mechanics::crypto::verify_detached(
+        if !mechanics::actor::verify_detached(
             &core.signer,
             &Self::preimage(core, &self.authorization_receipt),
             &self.signature,
         ) {
-            return Err(TransactionError::BadSignature);
+            return Err(Error::BadSignature);
         }
         Ok(())
     }
@@ -386,13 +440,10 @@ impl BodyTransaction {
     /// Full verification for retention/incorporation: the structural
     /// [`Self::verify`] **and** the mechanics historical-receipt check at the
     /// referenced authority frontier. No World callback runs.
-    pub fn verify_authorized(
-        &self,
-        authority: &dyn AuthoritySource,
-    ) -> Result<(), TransactionError> {
+    pub fn verify_authorized(&self, authority: &dyn AuthoritySource) -> Result<(), Error> {
         self.verify()?;
         authority
             .verify_transaction(self)
-            .map_err(|_| TransactionError::AuthorityUnverified)
+            .map_err(|_| Error::AuthorityUnverified)
     }
 }

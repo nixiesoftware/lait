@@ -2,28 +2,25 @@
 //!
 //! The generic ceremony state machine — break-glass recovery, FROST
 //! elevation, threshold signing, custody export/import, artifact storage —
-//! lives in [`mechanics::ceremony`]. This file only composes the engine over
+//! lives behind [`mechanics::recovery`]. This file only composes the engine over
 //! the product's [`Inner`] mechanics state: it borrows the authority ledger,
 //! injects the Body-key epoch fence (mint a fresh epoch when this device is an
 //! admin holding none), and forwards the control-surface calls.
 
 use anyhow::Result;
 
-use mechanics::ceremony::{
-    CeremonyEngine, CeremonyProgress, CustodyExport, CustodyImport, DegradedRecoveryHolder,
-    Elevation, ElevationApproved, RecoveryApproved, RecoveryStatus, SpaceRecovery,
+use mechanics::recovery::{
+    Approval, Ceremony, CeremonyProgress, CustodyExport, CustodyImport, DegradedHolder, Elevation,
+    ElevationApproved, SpaceRecovery, State,
 };
-use mechanics::ledger::AuthorityLedger;
+use mechanics::space::Authority;
 
-use super::mechanics::{fence_epoch, Inner, OrbitalMechanics};
+use super::mechanics::{fence_epoch, Inner, SpaceAuthority};
 
 impl Inner {
     /// Run one ceremony-engine operation over this Space's ledger, with the
     /// product's epoch fence injected (disjoint borrows via destructuring).
-    pub(super) fn with_ceremony_engine<T>(
-        &mut self,
-        f: impl FnOnce(&mut CeremonyEngine<'_>) -> T,
-    ) -> T {
+    pub(super) fn with_ceremony_engine<T>(&mut self, f: impl FnOnce(&mut Ceremony<'_>) -> T) -> T {
         let Inner {
             ledger,
             keyring,
@@ -32,13 +29,13 @@ impl Inner {
             dir,
             ..
         } = self;
-        let mut fence = |ledger: &mut AuthorityLedger| fence_epoch(ledger, keyring, seed, me);
-        let mut engine = CeremonyEngine::new(ledger, *seed, me.clone(), dir.clone(), &mut fence);
+        let mut fence = |ledger: &mut Authority| fence_epoch(ledger, keyring, seed, me);
+        let mut engine = Ceremony::new(ledger, *seed, me.clone(), dir.clone(), &mut fence);
         f(&mut engine)
     }
 }
 
-impl OrbitalMechanics {
+impl SpaceAuthority {
     /// Break-glass space recovery: re-root the space to this device (solo key
     /// or FROST group signature).
     pub fn space_recover(&self) -> Result<SpaceRecovery> {
@@ -47,11 +44,7 @@ impl OrbitalMechanics {
 
     /// Co-sign a pending break-glass recovery as a holder of the current group
     /// key.
-    pub fn space_recover_approve(
-        &self,
-        session: String,
-        expect: Vec<String>,
-    ) -> Result<RecoveryApproved> {
+    pub fn space_recover_approve(&self, session: String, expect: Vec<String>) -> Result<Approval> {
         self.lock()
             .with_ceremony_engine(|e| e.space_recover_approve(session, expect))
     }
@@ -97,12 +90,12 @@ impl OrbitalMechanics {
     }
 
     /// What this device can say about recovery readiness right now.
-    pub fn recovery_status(&self) -> RecoveryStatus {
+    pub fn recovery_status(&self) -> State {
         self.lock().with_ceremony_engine(|e| e.recovery_status())
     }
 
     /// Holders on this device whose share exists but cannot be used.
-    pub fn degraded_recovery(&self) -> Vec<DegradedRecoveryHolder> {
+    pub fn degraded_recovery(&self) -> Vec<DegradedHolder> {
         self.lock()
             .with_ceremony_engine(|e| e.degraded_recovery_holders())
     }

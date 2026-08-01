@@ -1,3 +1,8 @@
+#![allow(
+    clippy::expect_used,
+    clippy::as_conversions,
+    reason = "the bundled role catalog is made only from compile-time validated capability names and bounded encodings"
+)]
 //! IssuesWorld role definitions: canonical bodies, revision identity, and
 //! the built-in roles (plan 04).
 //!
@@ -17,7 +22,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::contract::PRODUCT_WORLD;
-use mechanics::demand::{PolicyCapability, PolicyResource};
+use mechanics::authorization::{PolicyCapability, Resource};
 
 /// The BLAKE3 derive-key context for a role revision id.
 const ROLE_REVISION_CONTEXT: &str = "lait.issues.role-revision.v1";
@@ -99,40 +104,40 @@ pub fn revision_preimage(role_id: &str, predecessors: &[[u8; 32]], body_json: &[
 
 /// Why a role revision refused to build.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RoleError {
+pub enum Invalid {
     BadRoleId,
     BodyTooLarge,
     TooManyPredecessors,
     UnknownRole(String),
 }
 
-impl std::fmt::Display for RoleError {
+impl std::fmt::Display for Invalid {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            RoleError::BadRoleId => write!(f, "invalid role id"),
-            RoleError::BodyTooLarge => write!(f, "role body exceeds 16 KiB"),
-            RoleError::TooManyPredecessors => write!(f, "more than 8 predecessors"),
-            RoleError::UnknownRole(r) => write!(f, "unknown role `{r}`"),
+            Invalid::BadRoleId => write!(f, "invalid role id"),
+            Invalid::BodyTooLarge => write!(f, "role body exceeds 16 KiB"),
+            Invalid::TooManyPredecessors => write!(f, "more than 8 predecessors"),
+            Invalid::UnknownRole(r) => write!(f, "unknown role `{r}`"),
         }
     }
 }
-impl std::error::Error for RoleError {}
+impl std::error::Error for Invalid {}
 
 /// Build a revision over `body` with `predecessors` (bounds-checked; the id
 /// hashes the framed preimage).
 pub fn build_revision(
     body: RoleBody,
     predecessors: Vec<[u8; 32]>,
-) -> Result<RoleRevision, RoleError> {
+) -> Result<RoleRevision, Invalid> {
     if body.role_id.is_empty() || body.role_id.len() > MAX_ROLE_ID {
-        return Err(RoleError::BadRoleId);
+        return Err(Invalid::BadRoleId);
     }
     if predecessors.len() > MAX_PREDECESSORS {
-        return Err(RoleError::TooManyPredecessors);
+        return Err(Invalid::TooManyPredecessors);
     }
     let json = body.canonical_json();
     if json.len() > MAX_ROLE_BODY {
-        return Err(RoleError::BodyTooLarge);
+        return Err(Invalid::BodyTooLarge);
     }
     let revision_id = blake3::derive_key(
         ROLE_REVISION_CONTEXT,
@@ -210,9 +215,9 @@ pub fn provenance_ref(role_id: &str, revision_id: &[u8; 32]) -> Vec<u8> {
 pub fn role_admission_evidence(
     revision: &RoleRevision,
     parent_manifest_root: [u8; 32],
-) -> mechanics::demand::WorldAssignmentEvidence {
-    let res = PolicyResource::space(PRODUCT_WORLD);
-    let mut assignments: Vec<(PolicyCapability, PolicyResource)> = revision
+) -> mechanics::authorization::WorldAssignmentEvidence {
+    let res = Resource::root(PRODUCT_WORLD);
+    let mut assignments: Vec<(PolicyCapability, Resource)> = revision
         .body
         .capabilities
         .iter()
@@ -228,13 +233,13 @@ pub fn role_admission_evidence(
     // (policy administration), which only a policy admin may issue.
     if revision.body.role_id == "lait.administrator" {
         assignments.push((
-            mechanics::acl::policy_admin_capability(),
-            mechanics::acl::policy_admin_resource(),
+            mechanics::membership::policy_admin_capability(),
+            mechanics::membership::policy_admin_resource(),
         ));
     }
     assignments.sort();
     assignments.dedup();
-    mechanics::demand::WorldAssignmentEvidence {
+    mechanics::authorization::WorldAssignmentEvidence {
         world: PRODUCT_WORLD.to_string(),
         opaque_definition_ref: provenance_ref(&revision.body.role_id, &revision.revision_id),
         definition_digest: revision.body.definition_digest(),
@@ -297,15 +302,15 @@ mod tests {
         body.role_id = "x".repeat(65);
         assert_eq!(
             build_revision(body.clone(), vec![]),
-            Err(RoleError::BadRoleId)
+            Err(Invalid::BadRoleId)
         );
         body.role_id = "ok".into();
         assert_eq!(
             build_revision(body.clone(), vec![[0u8; 32]; 9]),
-            Err(RoleError::TooManyPredecessors)
+            Err(Invalid::TooManyPredecessors)
         );
         body.description = "d".repeat(MAX_ROLE_BODY);
-        assert_eq!(build_revision(body, vec![]), Err(RoleError::BodyTooLarge));
+        assert_eq!(build_revision(body, vec![]), Err(Invalid::BodyTooLarge));
     }
 
     #[test]
@@ -340,7 +345,7 @@ mod tests {
         }
         // Only the administrator carries the meta-grant.
         let admin = role_admission_evidence(&built_in("lait.administrator").unwrap(), [0u8; 32]);
-        let meta = mechanics::acl::policy_admin_capability();
+        let meta = mechanics::membership::policy_admin_capability();
         assert!(admin.assignments.iter().any(|(c, _)| c == &meta));
         let viewer = role_admission_evidence(&built_in("lait.viewer").unwrap(), [0u8; 32]);
         assert!(!viewer.assignments.iter().any(|(c, _)| c == &meta));

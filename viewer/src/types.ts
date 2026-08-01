@@ -478,32 +478,43 @@ export interface StatusInfo {
   counts_unavailable?: boolean;
   /** `admin` | `member` | `pending`. */
   membership: string;
-  degraded_recovery?: DegradedRecoveryHolder[];
-  recovery?: RecoveryStatus | null;
+  degraded_recovery?: DegradedHolder[];
+  recovery?: RecoveryState | null;
 }
 
-export interface RecoveryArtifactFailure {
-  kind: "undecryptable" | "io";
-  detail: string;
-}
+export type RecoveryIoKind =
+  | "not_found"
+  | "interrupted"
+  | "invalid_data"
+  | "other"
+  | "already_exists";
 
-export interface DegradedRecoveryHolder {
+export type RecoveryArtifactCause =
+  | { kind: "wrong_protector" }
+  | { kind: "permission_denied" }
+  | { kind: "corrupt" }
+  | { kind: "io"; detail: RecoveryIoKind };
+
+export interface DegradedHolder {
   transcript: string;
-  reason: RecoveryArtifactFailure;
+  reason: RecoveryArtifactCause;
   is_current_authority?: boolean | null;
 }
 
-export interface RecoveryStatus {
-  authority?: string | null;
-  scheme: "Single" | "FrostThreshold" | "GeneralAccess";
-  k: number;
-  n: number;
-  local_custody:
-    | { state: "not_a_holder" }
+export interface RecoveryState {
+  authority: { public_key: string; configuration: number[] } | null;
+  configuration: number[];
+  generation: number;
+  custody:
+    | { state: "not_holder" }
     | { state: "ready" }
     | { state: "missing" }
     | { state: "backup_unverified" }
-    | { state: "unreadable"; detail: RecoveryArtifactFailure };
+    | { state: "unreadable"; detail: RecoveryArtifactCause };
+  backing: { holders: string[]; satisfies_configuration: boolean };
+  availability:
+    | { state: "unknown" }
+    | { state: "observed"; holders: string[]; qualifies: boolean; enabling: string[] };
 }
 
 // ---- the Orbit directory projection (serve-level, not control-plane) --------

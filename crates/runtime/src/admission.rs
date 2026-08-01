@@ -20,12 +20,10 @@
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
-use mechanics::ids::{SpaceId, StationId};
+use mechanics::{ids::SpaceId, station::Key};
 use replica::frontier::AuthorityFrontier;
 
-use crate::planes::{
-    stream_kind, Plane, ProtocolCapability, SessionAccept, SessionOpen, SessionRefusal,
-};
+use crate::plane::{stream_kind, Accept, Capability, Open, Plane, Refusal};
 use crate::world::AuthorityView;
 
 /// What the local side knows before it reads a word of the opening.
@@ -34,10 +32,10 @@ pub struct OpeningContext<'a> {
     /// however well formed it is.
     pub space: &'a SpaceId,
     /// This Station's own identity, which the opening must name as responder.
-    pub local_station: StationId,
+    pub local_station: Key,
     /// The identity QUIC negotiated. The opening's initiator claim must equal
     /// it — a claim is a statement, and this is the thing that makes it true.
-    pub peer: StationId,
+    pub peer: Key,
     /// The ALPN the connection was negotiated on, which fixes the plane.
     pub plane: Plane,
 }
@@ -49,7 +47,7 @@ pub struct OpeningContext<'a> {
 /// exactly the confusion the gate that rejects it exists to prevent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdmittedPeer {
-    pub station: StationId,
+    pub station: Key,
     pub actor: mechanics::ids::ActorId,
     /// The frontier the admission decision was made at, pinned so every later
     /// question on this connection is answered against the same view.
@@ -63,8 +61,8 @@ pub struct AdmittedPeer {
     /// item's epoch is checked for equality against *this* one, so a plane
     /// service that could not see it could not tell a live datagram from one
     /// belonging to a session that has already reconnected.
-    pub session_id: [u8; 16],
-    pub session_epoch: [u8; 16],
+    pub connection_id: [u8; 16],
+    pub connection_epoch: [u8; 16],
     /// What both sides agreed on: the peer's offer intersected with
     /// `feature::LOCAL_SUPPORTED`.
     ///
@@ -123,13 +121,13 @@ impl Default for PlanePolicy {
 /// The decision.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Admission {
-    Accept(Box<SessionAccept>, Box<AdmittedPeer>),
-    Refuse(SessionRefusal),
+    Accept(Box<Accept>, Box<AdmittedPeer>),
+    Refuse(Refusal),
 }
 
 impl Admission {
     fn refuse() -> Self {
-        Admission::Refuse(SessionRefusal::Refused)
+        Admission::Refuse(Refusal::Refused)
     }
 }
 
@@ -141,7 +139,7 @@ impl Admission {
 /// the one that touches shared state — is asked last and only about a peer that
 /// has already proved it is talking to the right Station about the right Space.
 pub fn judge(
-    open: &SessionOpen,
+    open: &Open,
     context: &OpeningContext<'_>,
     authority: &dyn AuthorityView,
     policy: &PlanePolicy,
@@ -149,29 +147,33 @@ pub fn judge(
     if open.plane != context.plane {
         // The ALPN already fixed the plane, so an opening that disagrees with
         // it is not confused — it is trying something.
-        return Admission::Refuse(SessionRefusal::Malformed);
+        return Admission::Refuse(Refusal::Malformed);
     }
     if open.protocol_version != context.plane.protocol_version() {
-        return Admission::Refuse(SessionRefusal::UnsupportedVersion {
+        return Admission::Refuse(Refusal::UnsupportedVersion {
             supported: context.plane.protocol_version(),
         });
     }
     if open.space.as_slice() != context.space.as_str().as_bytes() {
-        return Admission::Refuse(SessionRefusal::Malformed);
+        return Admission::Refuse(Refusal::Malformed);
     }
     if open.initiator_station != context.peer.key_bytes() {
         // A claim that does not match the negotiated peer. Malformed rather
         // than refused: this one is not about standing at all.
-        return Admission::Refuse(SessionRefusal::Malformed);
+        return Admission::Refuse(Refusal::Malformed);
     }
     if open.responder_station != context.local_station.key_bytes() {
-        return Admission::Refuse(SessionRefusal::Malformed);
+        return Admission::Refuse(Refusal::Malformed);
     }
     if !policy_admits(context.plane, policy) {
         return Admission::refuse();
     }
 
-    let Some(resolution) = authority.admit_peer(&context.peer) else {
+    let resolution = match context.plane {
+        Plane::Contact => authority.admit_contact_peer(&context.peer),
+        Plane::Freight | Plane::Live => authority.admit_peer(&context.peer),
+    };
+    let Some(resolution) = resolution else {
         return Admission::refuse();
     };
 
@@ -202,11 +204,11 @@ pub fn judge(
         return Admission::refuse();
     }
 
-    let accept_features = open.features & crate::planes::feature::LOCAL_SUPPORTED;
-    let accept = SessionAccept {
-        session_id: open.session_id,
-        session_epoch: open.session_epoch,
-        capability: ProtocolCapability {
+    let accept_features = open.features & crate::plane::feature::LOCAL_SUPPORTED;
+    let accept = Accept {
+        connection_id: open.connection_id,
+        connection_epoch: open.connection_epoch,
+        capability: Capability {
             plane: context.plane,
             protocol_version: context.plane.protocol_version(),
             // Bits both sides set: what the peer offered, intersected with
@@ -224,8 +226,8 @@ pub fn judge(
             actor: resolution.actor,
             authority_frontier: resolution.authority_frontier,
             granted_lanes: granted,
-            session_id: open.session_id,
-            session_epoch: open.session_epoch,
+            connection_id: open.connection_id,
+            connection_epoch: open.connection_epoch,
             features: accept_features,
         }),
     )
@@ -238,6 +240,7 @@ fn policy_admits(plane: Plane, policy: &PlanePolicy) -> bool {
         // refusing at the connection rather than the request tells it more.
         Plane::Freight => policy.serve_enabled || policy.fetch_enabled,
         Plane::Live => policy.live_enabled,
+        Plane::Contact => true,
     }
 }
 
@@ -257,7 +260,7 @@ pub const MAX_ACCEPTED_OPENINGS: usize = 2048;
 /// 0.5-RTT data is replayable by anyone who can intercept handshake packets, so
 /// accepting an opening has to be idempotent: a replay must return the answer
 /// the first one got, allocate no second session, and consume no session budget
-/// twice. `session_id` and `session_epoch` together are what make a replay
+/// twice. `connection_id` and `connection_epoch` together are what make a replay
 /// recognisable without any other state — a reconnect mints a new epoch and is
 /// therefore a new session, which is the distinction that matters.
 ///
@@ -271,7 +274,7 @@ type OpeningKey = ([u8; 32], [u8; 16], [u8; 16]);
 /// Bounded and swept, because it is a table keyed by remote input.
 #[derive(Debug, Default)]
 pub struct AcceptedOpenings {
-    seen: BTreeMap<OpeningKey, (SessionAccept, Instant)>,
+    seen: BTreeMap<OpeningKey, (Accept, Instant)>,
 }
 
 /// What the ledger says about an opening.
@@ -280,15 +283,19 @@ pub enum Replay {
     /// Not seen. Judge it.
     Fresh,
     /// Seen. Return this answer again and mint nothing.
-    Repeat(Box<SessionAccept>),
+    Repeat(Box<Accept>),
 }
 
 impl AcceptedOpenings {
-    fn key(open: &SessionOpen) -> ([u8; 32], [u8; 16], [u8; 16]) {
-        (open.initiator_station, open.session_id, open.session_epoch)
+    fn key(open: &Open) -> ([u8; 32], [u8; 16], [u8; 16]) {
+        (
+            open.initiator_station,
+            open.connection_id,
+            open.connection_epoch,
+        )
     }
 
-    pub fn lookup(&mut self, open: &SessionOpen, now: Instant) -> Replay {
+    pub fn lookup(&mut self, open: &Open, now: Instant) -> Replay {
         self.sweep(now);
         match self.seen.get(&Self::key(open)) {
             Some((accept, _)) => Replay::Repeat(Box::new(accept.clone())),
@@ -297,7 +304,7 @@ impl AcceptedOpenings {
     }
 
     /// Record an accept so a replay of the same opening gets the same answer.
-    pub fn remember(&mut self, open: &SessionOpen, accept: &SessionAccept, now: Instant) {
+    pub fn remember(&mut self, open: &Open, accept: &Accept, now: Instant) {
         self.sweep(now);
         if self.seen.len() >= MAX_ACCEPTED_OPENINGS {
             // Drop the oldest rather than refuse to record. Forgetting an

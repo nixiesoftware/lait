@@ -16,7 +16,7 @@ use std::time::Duration;
 use comms::mem::MemNet;
 use comms::policy::Network;
 use comms::{Alpn, Connection, DefaultTransport, PeerId, Protocols, Transport};
-use mechanics::crypto::device_from_seed;
+use mechanics::actor::device_from_seed;
 
 const SESSION_ALPN: Alpn = b"lait/test-session/1";
 

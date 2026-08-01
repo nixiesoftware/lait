@@ -42,13 +42,13 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use async_trait::async_trait;
+use comms::mem::MemNet;
+use comms::policy::Network;
+use comms::{Transport, TransportFactory};
 use issues_app::IssuesResponse as IssueResponse;
+use lait::control::OrbitAddress;
 use lait::control::{request, ControlRoute, Request, Response};
-use lait::daemon::OrbitAddress;
-use lait::net::Network;
-use lait::orbital::run_space_bridge_with;
-use lait::transport::mem::MemNet;
-use lait::transport::{Transport, TransportFactory};
+use lait::orbital::run_station_process_with;
 
 const FOUNDER_SEED: [u8; 32] = [173u8; 32];
 
@@ -77,7 +77,8 @@ impl TransportFactory for MemFactory {
         _protocols: comms::Protocols<'_>,
     ) -> Result<Arc<dyn Transport>> {
         Ok(Arc::new(
-            self.0.peer(lait::crypto::device_from_seed(identity_seed)),
+            self.0
+                .peer(mechanics::actor::device_from_seed(identity_seed)),
         ))
     }
 }
@@ -159,7 +160,8 @@ fn spawn_daemon(home: &Path, seed: [u8; 32], net: &MemNet) -> std::thread::JoinH
     std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async move {
-            if let Err(e) = run_space_bridge_with(daemon_home, seed, &MemFactory(daemon_net)).await
+            if let Err(e) =
+                run_station_process_with(daemon_home, seed, &MemFactory(daemon_net)).await
             {
                 eprintln!("PERF DAEMON ERR: {e:#}");
             }
@@ -416,7 +418,7 @@ fn issues_reference_performance_gate() {
     let mut founder_daemon = Some(spawn_daemon(&founder_home, FOUNDER_SEED, &net));
     let rt = tokio::runtime::Runtime::new().unwrap();
     wait_online(&rt, &founder_home);
-    let founder_device = lait::crypto::device_from_seed(&FOUNDER_SEED).to_string();
+    let founder_device = mechanics::actor::device_from_seed(&FOUNDER_SEED).to_string();
 
     // ---- projects first (joiners sync the catalog at admission) ------------
     let build_started = Instant::now();
@@ -466,7 +468,7 @@ fn issues_reference_performance_gate() {
         lait::orbital::enter_space(&home, &seed, &invite).unwrap();
         let _joiner_daemon = spawn_daemon(&home, seed, &net);
         wait_online(&rt, &home);
-        let device = lait::crypto::device_from_seed(&seed).to_string();
+        let device = mechanics::actor::device_from_seed(&seed).to_string();
         let admitted = poll_until(Duration::from_secs(60), || {
             req(
                 &rt,

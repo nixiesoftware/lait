@@ -179,7 +179,7 @@ Loss may make recovery impossible; compromise may permit actor takeover.
 Space recovery can replace broader recovery authority. Threshold arrangements
 reduce dependence on one device but add DKG, resharing, custody, and transition
 risk. Public ceremony material is replicated; secret shares and nonces remain
-encrypted local state and must never enter Fabric or product Bodies.
+encrypted local state and must never enter Engine or product Bodies.
 
 ## Admission and delegation
 

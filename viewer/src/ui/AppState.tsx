@@ -285,10 +285,12 @@ export function TrustPopover({
                       {failure.transcript}
                     </span>
                     <span className="text-warn">
-                      {failure.reason.kind === "undecryptable" ? "Unreadable" : "I/O failure"}
+                      {recoveryCauseLabel(failure.reason)}
                       {failure.is_current_authority ? " · current authority" : ""}
                     </span>
-                    <span className="text-dim col-span-2 break-words">{failure.reason.detail}</span>
+                    <span className="text-dim col-span-2 break-words">
+                      {failure.reason.kind === "io" ? failure.reason.detail : failure.reason.kind}
+                    </span>
                   </li>
                 ))}
               </ul>
@@ -334,10 +336,10 @@ export function recoveryDiagnostics(status: StatusInfo | null): string {
     `Space: ${status.name} (${status.space ?? "unavailable"})`,
     `Membership: ${status.membership}`,
     `Recovery: ${recoveryLabel(status)}`,
-    `Scheme: ${status.recovery?.scheme ?? "not reported"}`,
+    `Generation: ${status.recovery?.generation ?? "not reported"}`,
     ...failures.flatMap((failure) => [
       `Transcript: ${failure.transcript}`,
-      `Failure: ${failure.reason.kind}: ${failure.reason.detail}`,
+      `Failure: ${failure.reason.kind}${failure.reason.kind === "io" ? `: ${failure.reason.detail}` : ""}`,
       `Current authority: ${failure.is_current_authority === true ? "yes" : "no"}`,
     ]),
   ].join("\n");
@@ -389,13 +391,22 @@ function Fact({
 }
 
 function recoveryLabel(status: StatusInfo | null): string {
-  const custody = status?.recovery?.local_custody.state;
+  const custody = status?.recovery?.custody.state;
   if (!custody) return "Not reported";
   return {
-    not_a_holder: "Not a holder",
+    not_holder: "Not a holder",
     ready: "Ready on this device",
     missing: "Share missing",
     backup_unverified: "Backup unverified",
     unreadable: "Share unreadable",
   }[custody];
+}
+
+function recoveryCauseLabel(cause: NonNullable<StatusInfo["degraded_recovery"]>[number]["reason"]): string {
+  return {
+    wrong_protector: "Wrong protector",
+    permission_denied: "Permission denied",
+    corrupt: "Corrupt",
+    io: "I/O failure",
+  }[cause.kind];
 }

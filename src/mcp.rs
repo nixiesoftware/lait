@@ -224,7 +224,7 @@ impl LaitMcp {
 
     fn world_tool_router() -> ToolRouter<Self> {
         let registry = crate::world::client_packages();
-        registry
+        if registry
             .validate_reserved(
                 std::iter::empty::<&str>(),
                 Self::tool_router()
@@ -232,15 +232,15 @@ impl LaitMcp {
                     .iter()
                     .map(|tool| tool.name.as_ref()),
             )
-            .expect("World MCP tools must not collide with shell tools");
+            .is_err()
+        {
+            return ToolRouter::new();
+        }
         let mut router = ToolRouter::new();
         for mounted in registry.mcp_tools() {
-            let schema = mounted
-                .tool
-                .schema()
-                .as_object()
-                .cloned()
-                .expect("World MCP input schema must be a JSON object");
+            let Some(schema) = mounted.tool.schema().as_object().cloned() else {
+                continue;
+            };
             let tool = mounted.tool.clone();
             let route = ToolRoute::new_dyn(
                 Tool::new(mounted.public_name, mounted.tool.description(), schema),
@@ -535,8 +535,8 @@ pub async fn run_mcp(home: &Path) -> Result<()> {
 #[cfg(test)]
 mod scope_tests {
     use super::*;
-    use crate::daemon::OrbitAddress;
-    use crate::ids::SpaceId;
+    use crate::control::OrbitAddress;
+    use issues::ids::SpaceId;
 
     #[test]
     fn an_mcp_server_is_pinned_to_the_home_it_was_constructed_for() {

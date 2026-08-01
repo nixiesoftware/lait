@@ -1,3 +1,22 @@
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects,
+        clippy::unreachable,
+        clippy::unimplemented,
+        clippy::unchecked_time_subtraction,
+        clippy::todo,
+        clippy::string_slice,
+        clippy::panic_in_result_fn,
+        clippy::panic,
+        clippy::exit,
+        clippy::as_conversions
+    )
+)]
+
 //! **Runtime** — LAIT's orbital lifecycle.
 //!
 //! ```text
@@ -18,7 +37,7 @@
 //! An Orbit is the durable relationship and persists while vacant or occupied.
 //! The Rust handles encode its exclusive operational lease:
 //! [`Orbit::activate`] consumes the vacant Orbit handle and returns a
-//! [`Station`]; [`Station::go_dormant`] consumes the active Station handle and
+//! [`Station`]; [`Station::vacate`] consumes the active Station handle and
 //! returns a vacant Orbit handle. Those ownership transfers are not an
 //! ontological conversion between Orbit and Station.
 //!
@@ -28,65 +47,42 @@
 //! World/Session/Contact in S5); their signatures here fix ownership and
 //! consumption semantics.
 
-pub mod action;
-pub mod admission;
+mod action;
+mod admission;
 pub mod beacon;
-pub mod budget;
-pub mod contact;
-pub mod contact_driver;
-pub mod content_host;
+mod budget;
+mod contact_driver;
+mod content_host;
 pub mod coordinates;
 #[cfg(test)]
 mod dispatch_tests;
-pub mod dto;
-pub mod error;
-pub mod fetch;
-pub mod freight;
-pub mod implementation;
-pub mod lifecycle;
-pub mod live;
-pub mod neighbor_presence;
-pub mod neighbors;
-pub mod plane_driver;
-pub mod plane_stream;
-pub mod planes;
-pub mod registry;
-pub mod session;
+mod dto;
+mod fetch;
+mod implementation;
+#[cfg(test)]
+mod internal_tests;
+mod lifecycle;
+pub mod neighbor;
+mod neighbor_presence;
+mod neighbors;
+pub mod plane;
+mod plane_driver;
+mod plane_stream;
+mod registry;
+mod session;
 pub mod signal;
-pub mod store;
-pub mod transfer;
+mod store;
+mod transfer;
 pub mod transient;
 pub(crate) mod wire;
 pub mod world;
 
-pub use action::{ActionError, IdempotencyKey, RequestId, SignedWorldAction, WorldActionHeader};
-pub use beacon::{BeaconError, RouteHint, SignedBeacon, VerifiedBeacon};
-pub use contact::{
-    AccepterEvent, AccepterValidator, ContactFrame, ContactHello, ContactHelloAck, ContactId,
-    ContactWireError, InitiatorReceiver, InitiatorState, Progress, ReceivedMaterial,
-};
-pub use contact_driver::{CommsOptions, ContactMechanics, GossipOptions, MAX_CONTACTS_IN_FLIGHT};
-pub use coordinates::{
-    canonical_routes, AdmissionCapability, ApproachRoute, CoordinatesAdmission, CoordinatesError,
-    CoordinatesPayload, SignedCoordinates, VerifiedCoordinates,
-};
-pub use error::{ContactError, DormancyError, LifecycleError, StationExit, WorldError};
+#[cfg(test)]
+extern crate self as runtime;
+
+pub use lifecycle::Failure as Error;
 pub use lifecycle::{
-    ActivationOptions, CancelToken, ContactOptions, ContactOutcome, DeorbitConfirmation,
-    EnterOptions, Neighbor, Orbit, OrbitObservation, Reachability, Runtime, SpaceFormationOptions,
-    Station,
+    Exit, ExitReason, Integrity, Interruption, Orbit, OrbitStatus, Persistence,
+    RemovalConfirmation, Runtime, Station,
 };
-pub use neighbor_presence::{
-    PresenceAck, PresenceError, PresenceProbe, PRESENCE_ALPN, PRESENCE_PROTOCOL,
-};
-pub use neighbors::{NeighborRecord, NeighborRegistry, RegistryError, StoredRoute};
-pub use registry::{RuntimeBuilder, WorldRegistry};
-pub use session::{
-    CommittedEffect, Observation, ObservationCursor, ObservationStream, ObservationStreamError,
-    Session, DEFAULT_OBSERVATION_CAPACITY, MAX_OBSERVATION_CAPACITY,
-};
-pub use world::{
-    AuthorityView, BodyDeclaration, BodyReader, LocalIdentity, PrincipalFacts, PrincipalResolution,
-    World, WorldContext, WorldEffect, WorldIntent, WorldLimits, WorldProjection, WorldQuery,
-    WorldRegistration, WorldVersion,
-};
+pub use session::Session;

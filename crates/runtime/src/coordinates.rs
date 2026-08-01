@@ -1,3 +1,11 @@
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    clippy::indexing_slicing,
+    clippy::string_slice,
+    clippy::expect_used,
+    reason = "canonical coordinate fields are ASCII and length-validated before fixed-format operations"
+)]
 //! Coordinates v1 — the canonical, verifiable material to identify and approach
 //! a Space. This is S2's replacement for the pre-carve join ticket: a signed,
 //! self-describing envelope with a fixed postcard tuple layout, a length-framed
@@ -14,7 +22,7 @@
 //! incorporated authority material at redemption.
 //!
 //! The old ticket tag/domain is rejected with
-//! [`CoordinatesError::UnsupportedVersion`]; there is no migration.
+//! [`Invalid::UnsupportedVersion`]; there is no migration.
 
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 
@@ -167,7 +175,7 @@ pub struct AdmissionCapability {
     pub use_policy: AdmissionUsePolicy,
     /// The generic role expansion redemption installs (opaque to Mechanics
     /// beyond its generic assignments).
-    pub evidence: mechanics::demand::WorldAssignmentEvidence,
+    pub evidence: mechanics::authorization::WorldAssignmentEvidence,
     pub signature_algorithm: u8,
     #[serde(with = "serde_byte_array")]
     pub signature: [u8; 64],
@@ -201,7 +209,7 @@ pub struct SignedCoordinates {
 
 /// Why Coordinates (or an admission) failed validation.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CoordinatesError {
+pub enum Invalid {
     /// The version tag was not 2 (covers Coordinates v1 and a pre-carve
     /// join ticket) — rejected, never negotiated.
     UnsupportedVersion(u8),
@@ -231,12 +239,12 @@ pub enum CoordinatesError {
     BadAdmission,
 }
 
-impl std::fmt::Display for CoordinatesError {
+impl std::fmt::Display for Invalid {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{self:?}")
     }
 }
-impl std::error::Error for CoordinatesError {}
+impl std::error::Error for Invalid {}
 
 /// The result of verifying Coordinates: the identified Space and its approach.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -304,10 +312,10 @@ impl AdmissionCapability {
         not_before: u64,
         expires_at: u64,
         use_policy: AdmissionUsePolicy,
-        evidence: mechanics::demand::WorldAssignmentEvidence,
+        evidence: mechanics::authorization::WorldAssignmentEvidence,
         issuer_seed: &[u8; 32],
     ) -> Option<Self> {
-        let issuer = mechanics::crypto::device_from_seed(issuer_seed).key_bytes()?;
+        let issuer = mechanics::actor::device_from_seed(issuer_seed).key_bytes()?;
         let mut cap = Self {
             version: 2,
             space: space_id_bytes(space)?,
@@ -321,7 +329,7 @@ impl AdmissionCapability {
             signature_algorithm: SIG_ALG_ED25519,
             signature: [0u8; 64],
         };
-        cap.signature = mechanics::crypto::sign_detached(issuer_seed, &cap.preimage());
+        cap.signature = mechanics::actor::sign_detached(issuer_seed, &cap.preimage());
         Some(cap)
     }
 
@@ -337,26 +345,26 @@ impl AdmissionCapability {
     /// Verify structure + self-signature + evidence shape + time-bound shape,
     /// and that it is bound to `space`. Authority, the exact time window, reuse
     /// cap, and evidence delegability are the redeemer's (mechanics) checks.
-    pub fn verify_structure(&self, space: &SpaceId) -> Result<(), CoordinatesError> {
+    pub fn verify_structure(&self, space: &SpaceId) -> Result<(), Invalid> {
         if self.version != 2 {
-            return Err(CoordinatesError::UnsupportedVersion(self.version));
+            return Err(Invalid::UnsupportedVersion(self.version));
         }
         if self.signature_algorithm != SIG_ALG_ED25519 {
-            return Err(CoordinatesError::UnsupportedSignatureAlgorithm(
+            return Err(Invalid::UnsupportedSignatureAlgorithm(
                 self.signature_algorithm,
             ));
         }
         if space_id_bytes(space).as_ref() != Some(&self.space) {
-            return Err(CoordinatesError::BadAdmission);
+            return Err(Invalid::BadAdmission);
         }
         if !self.use_policy.is_valid() || self.not_before > self.expires_at {
-            return Err(CoordinatesError::BadAdmission);
+            return Err(Invalid::BadAdmission);
         }
         if self.evidence.validate().is_err() {
-            return Err(CoordinatesError::BadAdmission);
+            return Err(Invalid::BadAdmission);
         }
-        if !mechanics::crypto::verify_detached(&self.issuer, &self.preimage(), &self.signature) {
-            return Err(CoordinatesError::BadSignature);
+        if !mechanics::actor::verify_detached(&self.issuer, &self.preimage(), &self.signature) {
+            return Err(Invalid::BadSignature);
         }
         Ok(())
     }
@@ -453,7 +461,7 @@ impl InvitationAcceptanceProof {
         capability_id: &[u8; 32],
         candidate_actor: &str,
     ) -> Option<Self> {
-        let public_key = mechanics::crypto::device_from_seed(candidate_seed).key_bytes()?;
+        let public_key = mechanics::actor::device_from_seed(candidate_seed).key_bytes()?;
         let mut proof = Self {
             version: 1,
             public_key,
@@ -469,7 +477,7 @@ impl InvitationAcceptanceProof {
             candidate_actor,
             &public_key,
         );
-        proof.signature = mechanics::crypto::sign_detached(candidate_seed, &preimage);
+        proof.signature = mechanics::actor::sign_detached(candidate_seed, &preimage);
         Some(proof)
     }
 
@@ -496,7 +504,7 @@ impl InvitationAcceptanceProof {
             candidate_actor,
             candidate_device,
         );
-        mechanics::crypto::verify_detached(&self.public_key, &preimage, &self.signature)
+        mechanics::actor::verify_detached(&self.public_key, &preimage, &self.signature)
     }
 }
 
@@ -509,7 +517,7 @@ impl SignedCoordinates {
     /// Mint and sign Coordinates from the approach Station's device seed. The
     /// seed's public key must equal `payload.approach_station`.
     pub fn sign(payload: CoordinatesPayload, station_seed: &[u8; 32]) -> Self {
-        let issuer = mechanics::crypto::device_from_seed(station_seed)
+        let issuer = mechanics::actor::device_from_seed(station_seed)
             .key_bytes()
             .expect("device key bytes");
         let mut coords = Self {
@@ -519,7 +527,7 @@ impl SignedCoordinates {
             signature_algorithm: SIG_ALG_ED25519,
             signature: [0u8; 64],
         };
-        coords.signature = mechanics::crypto::sign_detached(station_seed, &coords.preimage());
+        coords.signature = mechanics::actor::sign_detached(station_seed, &coords.preimage());
         coords
     }
 
@@ -534,7 +542,7 @@ impl SignedCoordinates {
     /// advertised `lait://join/<ticket>` form and the bare base32 ticket, and
     /// tolerates interior whitespace (terminal line-wrap in a copied link) —
     /// the base32 alphabet contains none, so stripping it is unambiguous.
-    pub fn parse_link(link: &str) -> Result<Self, CoordinatesError> {
+    pub fn parse_link(link: &str) -> Result<Self, Invalid> {
         let mut body = link.trim();
         for scheme in ["lait://join/", "lait://"] {
             if body.len() >= scheme.len() && body[..scheme.len()].eq_ignore_ascii_case(scheme) {
@@ -549,7 +557,7 @@ impl SignedCoordinates {
             .to_ascii_uppercase();
         let bytes = data_encoding::BASE32_NOPAD
             .decode(compact.as_bytes())
-            .map_err(|_| CoordinatesError::BadLink)?;
+            .map_err(|_| Invalid::BadLink)?;
         Self::decode_canonical(&bytes)
     }
 
@@ -564,14 +572,13 @@ impl SignedCoordinates {
     }
 
     /// Decode canonical bytes: size-bounded, exact decode/re-encode equality.
-    pub fn decode_canonical(bytes: &[u8]) -> Result<Self, CoordinatesError> {
+    pub fn decode_canonical(bytes: &[u8]) -> Result<Self, Invalid> {
         if bytes.len() > MAX_DECODED {
-            return Err(CoordinatesError::NonCanonical);
+            return Err(Invalid::NonCanonical);
         }
-        let coords: Self =
-            postcard::from_bytes(bytes).map_err(|_| CoordinatesError::NonCanonical)?;
+        let coords: Self = postcard::from_bytes(bytes).map_err(|_| Invalid::NonCanonical)?;
         if coords.encode() != bytes {
-            return Err(CoordinatesError::NonCanonical);
+            return Err(Invalid::NonCanonical);
         }
         Ok(coords)
     }
@@ -579,60 +586,60 @@ impl SignedCoordinates {
     /// Fully verify: version, algorithm, SpaceId shape, name hints, founding
     /// self-proof, issuer == approach_station, sorted/unique addresses, the
     /// outer signature, and the admission structure/signature.
-    pub fn verify(&self) -> Result<VerifiedCoordinates, CoordinatesError> {
+    pub fn verify(&self) -> Result<VerifiedCoordinates, Invalid> {
         if self.version != 2 {
-            return Err(CoordinatesError::UnsupportedVersion(self.version));
+            return Err(Invalid::UnsupportedVersion(self.version));
         }
         if self.signature_algorithm != SIG_ALG_ED25519 {
-            return Err(CoordinatesError::UnsupportedSignatureAlgorithm(
+            return Err(Invalid::UnsupportedSignatureAlgorithm(
                 self.signature_algorithm,
             ));
         }
         let p = &self.payload;
 
         // SpaceId shape.
-        let space = space_id_from_bytes(&p.space).ok_or(CoordinatesError::BadSpaceId)?;
+        let space = space_id_from_bytes(&p.space).ok_or(Invalid::BadSpaceId)?;
 
         // Name hints: bounded + NFC.
         if p.display_name_hint.len() > MAX_NAME || !is_nfc(&p.display_name_hint) {
-            return Err(CoordinatesError::BadNameHint);
+            return Err(Invalid::BadNameHint);
         }
         if p.approach_nick_hint.len() > MAX_NICK || !is_nfc(&p.approach_nick_hint) {
-            return Err(CoordinatesError::BadNameHint);
+            return Err(Invalid::BadNameHint);
         }
 
         // Founding self-proof: the SpaceId must commit to the inception.
         if p.founder_inception.len() > MAX_INCEPTION {
-            return Err(CoordinatesError::InceptionTooLarge);
+            return Err(Invalid::InceptionTooLarge);
         }
-        let inception: SignedEvent = postcard::from_bytes(&p.founder_inception)
-            .map_err(|_| CoordinatesError::FoundingInvalid)?;
+        let inception: SignedEvent =
+            postcard::from_bytes(&p.founder_inception).map_err(|_| Invalid::FoundingInvalid)?;
         let founder_actor =
             mechanics::space::verify_founding(&space, &p.salt, &p.recovery_root, &inception)
-                .map_err(|_| CoordinatesError::FoundingInvalid)?;
+                .map_err(|_| Invalid::FoundingInvalid)?;
 
         // issuer == approach_station.
         if self.issuer != p.approach_station {
-            return Err(CoordinatesError::IssuerMismatch);
+            return Err(Invalid::IssuerMismatch);
         }
 
         // Routes: bounded, strictly increasing (sorted + unique), each a
         // usable direct address (no unspecified/multicast/broadcast/zero-port).
         if p.approach_routes.len() > MAX_ADDRS {
-            return Err(CoordinatesError::BadAddresses);
+            return Err(Invalid::BadAddresses);
         }
         for w in p.approach_routes.windows(2) {
             if w[0] >= w[1] {
-                return Err(CoordinatesError::BadAddresses);
+                return Err(Invalid::BadAddresses);
             }
         }
         if p.approach_routes.iter().any(|r| !r.is_usable()) {
-            return Err(CoordinatesError::BadAddresses);
+            return Err(Invalid::BadAddresses);
         }
 
         // Outer signature by the approach Station.
-        if !mechanics::crypto::verify_detached(&self.issuer, &self.preimage(), &self.signature) {
-            return Err(CoordinatesError::BadSignature);
+        if !mechanics::actor::verify_detached(&self.issuer, &self.preimage(), &self.signature) {
+            return Err(Invalid::BadSignature);
         }
 
         // Admission structure/signature (authority/expiry checked at redemption).

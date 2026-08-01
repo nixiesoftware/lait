@@ -1,7 +1,7 @@
 //! Identity-keyed transport ownership and inbound Space demultiplexing.
 //!
 //! One device identity owns one concrete transport endpoint. Each active
-//! SpaceBridge receives a scoped view: outbound work and gossip delegate to the
+//! StationHost receives a scoped view: outbound work and gossip delegate to the
 //! shared endpoint, while inbound Contact/presence connections arrive only on
 //! that Space's queue. The hub reads the bounded opening frame solely to select
 //! the queue, then replays it unchanged; Runtime remains the authority that
@@ -17,12 +17,12 @@ use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use tokio::sync::{mpsc, watch, Mutex, Semaphore};
 
-use crate::ids::{DeviceId, SpaceId};
-use crate::net::Network;
-use crate::transport::{
+use comms::policy::Network;
+use comms::{
     Alpn, GossipReceiver, GossipSender, Incoming, IncomingConnection, PeerId, Stream, Topic,
     Transport, TransportFactory,
 };
+use issues::ids::{DeviceId, SpaceId};
 
 const SPACE_INCOMING_BUFFER: usize = 16;
 const MAX_PENDING_OPENERS: usize = 64;
@@ -63,7 +63,7 @@ impl TransportFactory for TransportHubFactory {
         &self,
         _identity_seed: &[u8; 32],
         _network: &Network,
-        _protocols: crate::transport::Protocols<'_>,
+        _protocols: comms::Protocols<'_>,
     ) -> Result<Arc<dyn Transport>> {
         Err(anyhow!(
             "the identity transport hub requires an explicit Space scope"
@@ -74,13 +74,13 @@ impl TransportFactory for TransportHubFactory {
         &self,
         identity_seed: &[u8; 32],
         network: &Network,
-        protocols: crate::transport::Protocols<'_>,
+        protocols: comms::Protocols<'_>,
         space: &SpaceId,
     ) -> Result<Arc<dyn Transport>> {
         if self.stopping.load(Ordering::Acquire) {
             return Err(anyhow!("the identity transport hub is shutting down"));
         }
-        let identity = crate::crypto::device_from_seed(identity_seed);
+        let identity = mechanics::actor::device_from_seed(identity_seed);
         let slot = self.slot(identity.clone());
         let mut occupied = slot.lock().await;
         if self.stopping.load(Ordering::Acquire) {
@@ -147,7 +147,7 @@ impl From<&Network> for NetworkKey {
     }
 }
 
-fn normalized_alpns(protocols: crate::transport::Protocols<'_>) -> Vec<Vec<u8>> {
+fn normalized_alpns(protocols: comms::Protocols<'_>) -> Vec<Vec<u8>> {
     let mut values: Vec<_> = protocols.all().map(|alpn| alpn.to_vec()).collect();
     values.sort();
     values.dedup();
@@ -198,7 +198,7 @@ impl IdentityTransportHub {
     fn start(
         transport: Arc<dyn Transport>,
         network: &Network,
-        protocols: crate::transport::Protocols<'_>,
+        protocols: comms::Protocols<'_>,
     ) -> Arc<Self> {
         let hub = Arc::new(Self {
             transport: transport.clone(),
@@ -231,11 +231,7 @@ impl IdentityTransportHub {
         hub
     }
 
-    fn require_compatible(
-        &self,
-        network: &Network,
-        protocols: crate::transport::Protocols<'_>,
-    ) -> Result<()> {
+    fn require_compatible(&self, network: &Network, protocols: comms::Protocols<'_>) -> Result<()> {
         let requested_network = NetworkKey::from(network);
         if self.network != requested_network {
             return Err(anyhow!(
@@ -591,12 +587,12 @@ async fn dispatch_connection(
 /// Space's owner from having to know the hub has a budget at all — the same
 /// shape `ReplayStream` already uses for the framed pump.
 struct HeldConnection {
-    inner: Box<dyn crate::transport::Connection>,
+    inner: Box<dyn comms::Connection>,
     _permit: tokio::sync::OwnedSemaphorePermit,
 }
 
 #[async_trait]
-impl crate::transport::Connection for HeldConnection {
+impl comms::Connection for HeldConnection {
     fn peer(&self) -> PeerId {
         self.inner.peer()
     }
@@ -605,31 +601,21 @@ impl crate::transport::Connection for HeldConnection {
         self.inner.alpn()
     }
 
-    async fn open_bi(
-        &self,
-    ) -> Result<(
-        Box<dyn crate::transport::SendFlow>,
-        Box<dyn crate::transport::RecvFlow>,
-    )> {
+    async fn open_bi(&self) -> Result<(Box<dyn comms::SendFlow>, Box<dyn comms::RecvFlow>)> {
         self.inner.open_bi().await
     }
 
     async fn accept_bi(
         &self,
-    ) -> Result<
-        Option<(
-            Box<dyn crate::transport::SendFlow>,
-            Box<dyn crate::transport::RecvFlow>,
-        )>,
-    > {
+    ) -> Result<Option<(Box<dyn comms::SendFlow>, Box<dyn comms::RecvFlow>)>> {
         self.inner.accept_bi().await
     }
 
-    async fn open_uni(&self) -> Result<Box<dyn crate::transport::SendFlow>> {
+    async fn open_uni(&self) -> Result<Box<dyn comms::SendFlow>> {
         self.inner.open_uni().await
     }
 
-    async fn accept_uni(&self) -> Result<Option<Box<dyn crate::transport::RecvFlow>>> {
+    async fn accept_uni(&self) -> Result<Option<Box<dyn comms::RecvFlow>>> {
         self.inner.accept_uni().await
     }
 
@@ -662,17 +648,17 @@ const REFUSED_CODE: u32 = 1;
 
 /// Read the opening from the connection's first flow, bounded before anything
 /// is allocated for it.
-async fn read_opening(connection: &dyn crate::transport::Connection) -> Result<Vec<u8>> {
+async fn read_opening(connection: &dyn comms::Connection) -> Result<Vec<u8>> {
     let mut recv = connection
         .accept_uni()
         .await?
         .ok_or_else(|| anyhow!("the peer opened no control flow"))?;
-    recv.read_to_end(runtime::planes::bounds::MAX_OPENING_BYTES)
+    recv.read_to_end(runtime::plane::bounds::MAX_OPENING_BYTES)
         .await
 }
 
 fn session_opening_space(opening: &[u8]) -> Option<SpaceBytes> {
-    let open = runtime::planes::SessionOpen::decode_canonical(opening).ok()?;
+    let open = runtime::plane::Open::decode_canonical(opening).ok()?;
     Some(open.space)
 }
 
@@ -735,25 +721,25 @@ async fn dispatch_incoming(
 }
 
 fn opening_limit(alpn: &[u8]) -> Option<usize> {
-    if alpn == runtime::contact::CONTACT_ALPN {
-        Some(runtime::contact::MAX_FRAME)
-    } else if alpn == runtime::PRESENCE_ALPN {
-        Some(runtime::neighbor_presence::MAX_MESSAGE)
+    if alpn == runtime::plane::contact::CONTACT_ALPN {
+        Some(runtime::plane::contact::MAX_FRAME)
+    } else if alpn == runtime::neighbor::PRESENCE_ALPN {
+        Some(runtime::neighbor::MAX_MESSAGE)
     } else {
         None
     }
 }
 
 fn opening_space(alpn: &[u8], first: &[u8]) -> Option<SpaceBytes> {
-    if alpn == runtime::contact::CONTACT_ALPN {
-        if first.len() > runtime::contact::MAX_FRAME {
+    if alpn == runtime::plane::contact::CONTACT_ALPN {
+        if first.len() > runtime::plane::contact::MAX_FRAME {
             return None;
         }
-        runtime::ContactHello::decode(first)
+        runtime::plane::contact::Offer::decode(first)
             .ok()
             .map(|hello| hello.space)
-    } else if alpn == runtime::PRESENCE_ALPN {
-        runtime::PresenceProbe::decode(first)
+    } else if alpn == runtime::neighbor::PRESENCE_ALPN {
+        runtime::neighbor::PresenceProbe::decode(first)
             .ok()
             .map(|probe| probe.space)
     } else {
@@ -858,7 +844,7 @@ impl Transport for ScopedTransport {
         &self,
         peer: PeerId,
         alpn: Alpn,
-    ) -> Result<Box<dyn crate::transport::Connection>> {
+    ) -> Result<Box<dyn comms::Connection>> {
         self.ensure_running()?;
         self.hub.transport.connect_session(peer, alpn).await
     }
@@ -874,7 +860,7 @@ impl Transport for ScopedTransport {
         None
     }
 
-    fn take_session_queue(&self, alpn: comms::Alpn) -> Option<comms::SessionQueue> {
+    fn take_session_queue(&self, alpn: comms::Alpn) -> Option<comms::ConnectionQueue> {
         self.session_queues
             .lock()
             .unwrap_or_else(|error| error.into_inner())
@@ -918,15 +904,15 @@ mod tests {
     /// its own queue, and taking one is how a driver gets its connections. The
     /// tests below say which plane they mean rather than accepting whatever
     /// arrived first, which is the property the split exists to give them.
-    fn freight_queue(view: &std::sync::Arc<dyn Transport>) -> comms::SessionQueue {
-        view.take_session_queue(runtime::planes::FREIGHT_ALPN)
+    fn freight_queue(view: &std::sync::Arc<dyn Transport>) -> comms::ConnectionQueue {
+        view.take_session_queue(runtime::plane::FREIGHT_ALPN)
             .expect("the Freight queue is taken exactly once")
     }
 
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
-    use crate::transport::mem::MemNet;
+    use comms::mem::MemNet;
 
     struct MemFactory {
         net: MemNet,
@@ -939,12 +925,12 @@ mod tests {
             &self,
             identity_seed: &[u8; 32],
             _network: &Network,
-            _protocols: crate::transport::Protocols<'_>,
+            _protocols: comms::Protocols<'_>,
         ) -> Result<Arc<dyn Transport>> {
             self.builds.fetch_add(1, Ordering::SeqCst);
             Ok(Arc::new(
                 self.net
-                    .peer(crate::crypto::device_from_seed(identity_seed)),
+                    .peer(mechanics::actor::device_from_seed(identity_seed)),
             ))
         }
     }
@@ -957,27 +943,30 @@ mod tests {
         SpaceBytes::try_from(space.as_str().as_bytes()).unwrap()
     }
 
-    const ALPNS: &[Alpn] = &[runtime::contact::CONTACT_ALPN, runtime::PRESENCE_ALPN];
-    const SESSION_ALPNS: &[Alpn] = &[runtime::planes::FREIGHT_ALPN, runtime::planes::LIVE_ALPN];
-    fn protocols() -> crate::transport::Protocols<'static> {
-        crate::transport::Protocols {
+    const ALPNS: &[Alpn] = &[
+        runtime::plane::contact::CONTACT_ALPN,
+        runtime::neighbor::PRESENCE_ALPN,
+    ];
+    const SESSION_ALPNS: &[Alpn] = &[runtime::plane::FREIGHT_ALPN, runtime::plane::LIVE_ALPN];
+    fn protocols() -> comms::Protocols<'static> {
+        comms::Protocols {
             framed: ALPNS,
             session: SESSION_ALPNS,
         }
     }
 
     fn session_open(space: &SpaceId) -> Vec<u8> {
-        runtime::planes::SessionOpen {
-            plane: runtime::planes::Plane::Freight,
-            protocol_version: runtime::planes::FREIGHT_PROTOCOL_VERSION,
+        runtime::plane::Open {
+            plane: runtime::plane::Plane::Freight,
+            protocol_version: runtime::plane::FREIGHT_PROTOCOL_VERSION,
             features: 0,
             space: space_bytes(space),
             initiator_station: [1u8; 32],
             responder_station: [2u8; 32],
-            session_id: [3u8; 16],
-            session_epoch: [4u8; 16],
+            connection_id: [3u8; 16],
+            connection_epoch: [4u8; 16],
             authority_frontier: Vec::new(),
-            requested_lanes: vec![runtime::planes::stream_kind::CONTROL],
+            requested_lanes: vec![runtime::plane::stream_kind::CONTROL],
         }
         .encode()
     }
@@ -988,9 +977,9 @@ mod tests {
         from: &Arc<dyn Transport>,
         to: PeerId,
         space: &SpaceId,
-    ) -> Box<dyn crate::transport::Connection> {
+    ) -> Box<dyn comms::Connection> {
         let connection = from
-            .connect_session(to, runtime::planes::FREIGHT_ALPN)
+            .connect_session(to, runtime::plane::FREIGHT_ALPN)
             .await
             .expect("dial");
         let mut opening = connection.open_uni().await.expect("open");
@@ -1008,19 +997,19 @@ mod tests {
         from: &Arc<dyn Transport>,
         to: PeerId,
         space: &SpaceId,
-        plane: runtime::planes::Plane,
-    ) -> Box<dyn crate::transport::Connection> {
+        plane: runtime::plane::Plane,
+    ) -> Box<dyn comms::Connection> {
         let connection = from.connect_session(to, plane.alpn()).await.expect("dial");
         let mut opening = connection.open_uni().await.expect("open");
-        let open = runtime::planes::SessionOpen {
+        let open = runtime::plane::Open {
             plane,
             protocol_version: plane.protocol_version(),
             features: 0,
             space: <[u8; 29]>::try_from(space.as_str().as_bytes()).expect("space"),
             initiator_station: [1u8; 32],
             responder_station: [2u8; 32],
-            session_id: [3u8; 16],
-            session_epoch: [4u8; 16],
+            connection_id: [3u8; 16],
+            connection_epoch: [4u8; 16],
             authority_frontier: Vec::new(),
             requested_lanes: Vec::new(),
         };
@@ -1062,27 +1051,21 @@ mod tests {
             .build_scoped(&seed_b, &network, protocols(), &space)
             .await
             .unwrap();
-        let peer_b = crate::crypto::device_from_seed(&seed_b);
+        let peer_b = mechanics::actor::device_from_seed(&seed_b);
 
         let mut live_queue = listener
-            .take_session_queue(runtime::planes::LIVE_ALPN)
+            .take_session_queue(runtime::plane::LIVE_ALPN)
             .expect("the Live queue");
         let mut freight_queue = listener
-            .take_session_queue(runtime::planes::FREIGHT_ALPN)
+            .take_session_queue(runtime::plane::FREIGHT_ALPN)
             .expect("the Freight queue");
 
-        let _live = dial_plane(
-            &dialer,
-            peer_b.clone(),
-            &space,
-            runtime::planes::Plane::Live,
-        )
-        .await;
+        let _live = dial_plane(&dialer, peer_b.clone(), &space, runtime::plane::Plane::Live).await;
         let _freight = dial_plane(
             &dialer,
             peer_b.clone(),
             &space,
-            runtime::planes::Plane::Freight,
+            runtime::plane::Plane::Freight,
         )
         .await;
 
@@ -1090,13 +1073,13 @@ mod tests {
             .await
             .expect("the Freight connection was not delayed by the Live one")
             .expect("a Freight connection");
-        assert_eq!(freight.alpn, runtime::planes::FREIGHT_ALPN.to_vec());
+        assert_eq!(freight.alpn, runtime::plane::FREIGHT_ALPN.to_vec());
 
         let live = tokio::time::timeout(Duration::from_secs(5), live_queue.recv())
             .await
             .expect("the Live connection was still waiting for its own reader")
             .expect("a Live connection");
-        assert_eq!(live.alpn, runtime::planes::LIVE_ALPN.to_vec());
+        assert_eq!(live.alpn, runtime::plane::LIVE_ALPN.to_vec());
 
         // And neither queue holds the other's traffic.
         assert!(
@@ -1121,10 +1104,10 @@ mod tests {
             .await
             .unwrap();
         assert!(view
-            .take_session_queue(runtime::planes::FREIGHT_ALPN)
+            .take_session_queue(runtime::plane::FREIGHT_ALPN)
             .is_some());
         assert!(
-            view.take_session_queue(runtime::planes::FREIGHT_ALPN)
+            view.take_session_queue(runtime::plane::FREIGHT_ALPN)
                 .is_none(),
             "a second taker got a second handle on one plane's connections"
         );
@@ -1162,15 +1145,15 @@ mod tests {
             .await
             .unwrap();
 
-        let peer_b = crate::crypto::device_from_seed(&seed_b);
+        let peer_b = mechanics::actor::device_from_seed(&seed_b);
         let dialed = dial_session(&a_space_a, peer_b.clone(), &space_a).await;
 
         let routed = tokio::time::timeout(Duration::from_secs(5), freight_queue(&b_space_a).recv())
             .await
             .expect("routed in time")
             .expect("a connection");
-        assert_eq!(routed.alpn, runtime::planes::FREIGHT_ALPN.to_vec());
-        assert_eq!(routed.from, crate::crypto::device_from_seed(&seed_a));
+        assert_eq!(routed.alpn, runtime::plane::FREIGHT_ALPN.to_vec());
+        assert_eq!(routed.from, mechanics::actor::device_from_seed(&seed_a));
         // The bytes the hub read to decide, handed over rather than replayed.
         // Reading a flow consumes it, so without this the Space's owner would
         // have to guess at what the peer said — or the two would parse it
@@ -1181,7 +1164,7 @@ mod tests {
             "the routed connection carries the opening the hub parsed"
         );
         assert_eq!(
-            runtime::planes::SessionOpen::decode_canonical(&routed.opening)
+            runtime::plane::Open::decode_canonical(&routed.opening)
                 .expect("and it is still canonical")
                 .space,
             space_bytes(&space_a)
@@ -1219,7 +1202,7 @@ mod tests {
             .await
             .unwrap();
 
-        let peer_b = crate::crypto::device_from_seed(&seed_b);
+        let peer_b = mechanics::actor::device_from_seed(&seed_b);
         let dialed = dial_session(&a_space_a, peer_b, &unknown).await;
 
         // The dialer learns only that it was closed.
@@ -1257,9 +1240,9 @@ mod tests {
             .await
             .unwrap();
 
-        let peer_b = crate::crypto::device_from_seed(&seed_b);
+        let peer_b = mechanics::actor::device_from_seed(&seed_b);
         let silent = a_space_a
-            .connect_session(peer_b, runtime::planes::FREIGHT_ALPN)
+            .connect_session(peer_b, runtime::plane::FREIGHT_ALPN)
             .await
             .expect("dial");
 
@@ -1299,7 +1282,7 @@ mod tests {
             "a shut-down Space answers None rather than parking"
         );
 
-        let peer_b = crate::crypto::device_from_seed(&seed_b);
+        let peer_b = mechanics::actor::device_from_seed(&seed_b);
         let dialed = dial_session(&a_space_a, peer_b, &space_a).await;
         tokio::time::timeout(Duration::from_secs(5), dialed.closed())
             .await
@@ -1309,8 +1292,8 @@ mod tests {
         assert!(
             a_space_a
                 .connect_session(
-                    crate::crypto::device_from_seed(&seed_b),
-                    runtime::planes::FREIGHT_ALPN
+                    mechanics::actor::device_from_seed(&seed_b),
+                    runtime::plane::FREIGHT_ALPN
                 )
                 .await
                 .is_err(),
@@ -1353,14 +1336,15 @@ mod tests {
             "one concrete endpoint is built per device identity, not per Space"
         );
 
-        let peer_b = crate::crypto::device_from_seed(&seed_b);
+        let peer_b = mechanics::actor::device_from_seed(&seed_b);
         let responder = peer_b.key_bytes().unwrap();
-        let hello = runtime::ContactHello::sign(
-            runtime::contact::CONTACT_PROTOCOL,
+        let hello = runtime::plane::contact::Offer::sign(
+            [0u8; 32],
+            runtime::plane::contact::CONTACT_PROTOCOL,
             space_bytes(&space_a),
             responder,
             [9; 32],
-            runtime::ContactId::from_bytes([7; 16]),
+            runtime::plane::contact::ContactId::from_bytes([7; 16]),
             [0; 32],
             0,
             [0; 32],
@@ -1369,7 +1353,7 @@ mod tests {
         .unwrap()
         .encode();
         let mut contact = a_space_a
-            .connect(peer_b.clone(), runtime::contact::CONTACT_ALPN)
+            .connect(peer_b.clone(), runtime::plane::contact::CONTACT_ALPN)
             .await
             .unwrap();
         contact.send(&hello).await.unwrap();
@@ -1378,7 +1362,7 @@ mod tests {
             .await
             .expect("Space A receives its Contact")
             .expect("Space A queue remains open");
-        assert_eq!(incoming.alpn, runtime::contact::CONTACT_ALPN);
+        assert_eq!(incoming.alpn, runtime::plane::contact::CONTACT_ALPN);
         assert_eq!(
             incoming.stream.recv().await.unwrap(),
             Some(hello),
@@ -1391,8 +1375,8 @@ mod tests {
             "Space B must not consume Space A's Contact"
         );
 
-        let probe = runtime::PresenceProbe::sign(
-            runtime::PRESENCE_PROTOCOL,
+        let probe = runtime::neighbor::PresenceProbe::sign(
+            runtime::neighbor::PRESENCE_PROTOCOL,
             space_bytes(&space_b),
             responder,
             [8; 32],
@@ -1401,7 +1385,7 @@ mod tests {
         .unwrap()
         .encode();
         let mut presence = a_space_b
-            .connect(peer_b, runtime::PRESENCE_ALPN)
+            .connect(peer_b, runtime::neighbor::PRESENCE_ALPN)
             .await
             .unwrap();
         presence.send(&probe).await.unwrap();
@@ -1454,15 +1438,15 @@ mod tests {
             .to_string()
             .contains("already has an active Station"));
 
-        let peer_b = crate::crypto::device_from_seed(&seed_b);
+        let peer_b = mechanics::actor::device_from_seed(&seed_b);
         let responder = peer_b.key_bytes().unwrap();
         let _slow = a_space_a
-            .connect(peer_b.clone(), runtime::contact::CONTACT_ALPN)
+            .connect(peer_b.clone(), runtime::plane::contact::CONTACT_ALPN)
             .await
             .unwrap();
 
-        let probe = runtime::PresenceProbe::sign(
-            runtime::PRESENCE_PROTOCOL,
+        let probe = runtime::neighbor::PresenceProbe::sign(
+            runtime::neighbor::PRESENCE_PROTOCOL,
             space_bytes(&space_b),
             responder,
             [6; 32],
@@ -1471,7 +1455,7 @@ mod tests {
         .unwrap()
         .encode();
         let mut presence = a_space_b
-            .connect(peer_b.clone(), runtime::PRESENCE_ALPN)
+            .connect(peer_b.clone(), runtime::neighbor::PRESENCE_ALPN)
             .await
             .unwrap();
         presence.send(&probe).await.unwrap();
@@ -1483,13 +1467,13 @@ mod tests {
         a_space_a.shutdown().await;
         assert!(
             a_space_a
-                .connect(peer_b.clone(), runtime::PRESENCE_ALPN)
+                .connect(peer_b.clone(), runtime::neighbor::PRESENCE_ALPN)
                 .await
                 .is_err(),
             "a dormant Space cannot keep dialing"
         );
         let mut next = a_space_b
-            .connect(peer_b, runtime::PRESENCE_ALPN)
+            .connect(peer_b, runtime::neighbor::PRESENCE_ALPN)
             .await
             .expect("the sibling Space retains the shared endpoint");
         next.send(&probe).await.unwrap();

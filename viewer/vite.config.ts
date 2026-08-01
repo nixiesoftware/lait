@@ -49,7 +49,7 @@ export default defineConfig({
         target: `http://127.0.0.1:${process.env.LAIT_PORT || "7717"}`,
         // Rewrites Host to the target, so the loopback-authority check passes.
         changeOrigin: true,
-        // The bridge upgrades under `/api/session`, and an upgrade is not an
+        // The socket upgrades under `/api/session`, and an upgrade is not an
         // ordinary proxied request — without this, the handshake is not
         // forwarded at all and the socket never opens in dev.
         ws: true,

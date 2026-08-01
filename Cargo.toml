@@ -6,7 +6,6 @@ members = [
     "crates/comms",
     "crates/replica",
     "crates/runtime",
-    "crates/world-bridge",
     "crates/world-interface",
     "products/issues",
     "products/issues-app",
@@ -92,7 +91,6 @@ fabric = { path = "crates/fabric" }
 # is the S5c adoption edge: the root application depends on the new crates.
 runtime = { path = "crates/runtime" }
 replica = { path = "crates/replica" }
-world-bridge = { path = "crates/world-bridge" }
 world-interface = { path = "crates/world-interface" }
 # The network adapter — how independently held replicas exchange their material.
 # `iroh` is intentionally absent from THIS manifest: the app composes the seam
@@ -101,7 +99,7 @@ world-interface = { path = "crates/world-interface" }
 comms = { path = "crates/comms" }
 # The canonical bundled product. Its semantic World, schemas, DTOs, and ids are
 # independently packaged; this root owns only the application shell and local
-# control adapters that compose it into LaitDaemon.
+# control adapters that compose it into Daemon.
 issues = { package = "lait-issues", path = "products/issues" }
 issues-app = { package = "lait-issues-app", path = "products/issues-app" }
 # randomness for ULID minting (app-minted DocId/ProjectId/… ids).
@@ -162,8 +160,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # hyper + tower + http, all three of which are already in the tree transitively
 # (iroh, self_update), so the adapter buys routing and SSE rather than a new
 # stack. `tokio-stream`'s `sync` feature is the `broadcast::Receiver` -> `Stream`
-# bridge the doorbell multiplex needs.
-# `ws` is on for the browser bridge (`src/serve/bridge.rs`). It pulls
+# multiplex the doorbell stream needs.
+# `ws` is on for the browser socket (`src/serve/socket.rs`). It pulls
 # tokio-tungstenite; nothing else in the tree does, so the feature is genuinely
 # additive rather than unified in from another crate. `http2` stays off — it buys
 # nothing without TLS, and this surface is loopback plaintext by design.
@@ -223,6 +221,9 @@ windows-sys = { version = "0.61", features = [
 ] }
 
 [dev-dependencies]
+mechanics = { path = "crates/mechanics", features = ["fault-injection"] }
+replica = { path = "crates/replica", features = ["fault-injection"] }
+issues-app = { package = "lait-issues-app", path = "products/issues-app", features = ["fault-injection"] }
 # A zero-wiring test entrypoint: a `#[cfg(test)] #[ctor]` scrubs ambient `LAIT_*`
 # env at unit-test process load, *before* any test runs, so a developer's
 # inherited `$LAIT_HOME`/`$LAIT_STORE` can never silently redirect store/identity
@@ -242,8 +243,6 @@ syn = { version = "2", features = ["full", "visit", "parsing"] }
 ed25519-dalek = "2"
 frost-ed25519 = "3"
 rand_core = { version = "0.6", features = ["getrandom"] }
-# property-based convergence testing (random op sequences across N peers).
-proptest = "1"
 # `ServiceExt::oneshot` — drive `serve`'s real router in-process, so the gate's
 # ordering and precedence are tested through the thing that implements them
 # rather than a copy of it. No port, no daemon.
@@ -276,3 +275,7 @@ opt-level = 3
 [profile.dist]
 inherits = "release"
 lto = "thin"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }

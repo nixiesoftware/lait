@@ -1,3 +1,12 @@
+// Command dispatch validates clap shapes before indexing and uses bounded display
+// arithmetic. `process::exit` is confined to explicit CLI outcome boundaries.
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    clippy::exit,
+    clippy::indexing_slicing
+)]
+
 //! Binary entry point logic: parse the CLI and dispatch. Lives in the lib (not
 //! `main.rs`) so integration tests and doctests can drive the same command
 //! surface the binary exposes. `main.rs` is a thin shim over [`run`].
@@ -23,7 +32,7 @@ use crate::{
     config::{self, load_or_create_identity},
     control::{Request, Response},
     install::{self, Client, Scope},
-    mcp, spaces,
+    mcp, orbits,
 };
 
 fn now_secs() -> u64 {
@@ -56,7 +65,7 @@ fn resolve_orbit_selector(sel: &str) -> Result<std::path::PathBuf> {
         };
         return Ok(store);
     }
-    let entries = spaces::list();
+    let entries = orbits::list();
     let matches: Vec<_> = if sel.starts_with("orb_") {
         entries
             .iter()
@@ -80,7 +89,7 @@ fn resolve_orbit_selector(sel: &str) -> Result<std::path::PathBuf> {
     match matches.len() {
         1 => {
             let e = matches[0];
-            if spaces::presence(e) == spaces::StorePresence::Missing {
+            if orbits::presence(e) == orbits::Presence::Missing {
                 return Err(anyhow!(
                     "Orbit '{}' is registered at {} but the store is gone — run `lait orbits prune`",
                     sel,
@@ -102,7 +111,7 @@ fn resolve_orbit_selector(sel: &str) -> Result<std::path::PathBuf> {
                 .collect();
             // A selector that resolved to nothing: exit `2`, the same answer the
             // daemon already gives for a missing ref / user / label.
-            Err(crate::cli::CliError::not_found(format!(
+            Err(crate::cli::Failure::not_found(format!(
                 "no Orbit matches '{sel}' — known: {} (see `lait orbits`)",
                 if known.is_empty() {
                     "(none)".to_string()
@@ -251,7 +260,9 @@ async fn dispatch(specs: &[cmdspec::Spec], matches: &ArgMatches, out: Out) -> Re
     // a packager running them in a clean sandbox never mints a key or store.
     match &leaf.dispatch {
         Dispatch::Special(Special::Completions) => {
-            let shell = *m.get_one::<Shell>("shell").expect("shell is required");
+            let shell = *m
+                .get_one::<Shell>("shell")
+                .ok_or_else(|| anyhow!("completion shell is required"))?;
             let mut cmd = cmdspec::build_cli(specs);
             let name = cmd.get_name().to_string();
             generate(shell, &mut cmd, name, &mut std::io::stdout());
@@ -340,7 +351,7 @@ async fn dispatch(specs: &[cmdspec::Spec], matches: &ArgMatches, out: Out) -> Re
         }
         Dispatch::Special(Special::OrbitsForget) => {
             let sel = m.get_one::<String>("sel").cloned().unwrap_or_default();
-            let removed = spaces::forget(&sel)?;
+            let removed = orbits::forget(&sel)?;
             if removed.is_empty() {
                 eprintln!("nothing in the registry matches '{sel}'");
                 std::process::exit(2);
@@ -354,7 +365,7 @@ async fn dispatch(specs: &[cmdspec::Spec], matches: &ArgMatches, out: Out) -> Re
             return Ok(());
         }
         Dispatch::Special(Special::OrbitsPrune) => {
-            let removed = spaces::prune()?;
+            let removed = orbits::prune()?;
             crate::cli::emit_ok(
                 &format!(
                     "pruned {} missing entr{}",
@@ -409,7 +420,7 @@ async fn dispatch(specs: &[cmdspec::Spec], matches: &ArgMatches, out: Out) -> Re
             let action = crate::client_action::ClientAction::from_legacy(f(m)?);
             let req = action
                 .request()
-                .expect("legacy command registry emitted a WorldCall unexpectedly");
+                .ok_or_else(|| anyhow!("command registry emitted a World call as a host action"))?;
             use std::io::IsTerminal;
             // Ask before destroying (delete / member remove / key rotate). Gated
             // on the Request, so the list lives in one place; everything else
@@ -429,7 +440,7 @@ async fn dispatch(specs: &[cmdspec::Spec], matches: &ArgMatches, out: Out) -> Re
         Dispatch::Special(s) => match s {
             Special::Id => {
                 let seed = load_or_create_identity(&config::identity_dir()?)?;
-                crate::cli::emit_text(crate::crypto::device_from_seed(&seed).as_str(), out);
+                crate::cli::emit_text(mechanics::actor::device_from_seed(&seed).as_str(), out);
                 // The actor line (GOV-11): a pending joiner must be able to
                 // name their own actor to the approving admin, and the daemon
                 // resolves it from the actor plane even before admission.
@@ -449,7 +460,9 @@ async fn dispatch(specs: &[cmdspec::Spec], matches: &ArgMatches, out: Out) -> Re
                 mcp::run_mcp(&home).await?;
             }
             Special::InstallMcp => {
-                let client = *m.get_one::<Client>("client").expect("has default");
+                let client = *m
+                    .get_one::<Client>("client")
+                    .ok_or_else(|| anyhow!("MCP client selection is missing"))?;
                 let scope = m.get_one::<Scope>("scope").copied();
                 let name = m
                     .get_one::<String>("name")
@@ -510,9 +523,7 @@ async fn dispatch(specs: &[cmdspec::Spec], matches: &ArgMatches, out: Out) -> Re
             | Special::DeviceAccept
             | Special::Daemon
             | Special::Serve
-            | Special::Update => {
-                unreachable!("handled before home resolution")
-            }
+            | Special::Update => return Err(anyhow!("command escaped its pre-home dispatcher")),
         },
     }
 
@@ -599,16 +610,16 @@ async fn run_init(m: &ArgMatches, out: Out) -> Result<()> {
         cfg.save(&p)?;
     }
     let seed = load_or_create_identity(&config::identity_dir()?)?;
-    let me = crate::crypto::device_from_seed(&seed);
+    let me = mechanics::actor::device_from_seed(&seed);
     // Orbital formation: mechanics material + Runtime Orbit store + a seeded
     // default project, so `lait issues new` works on the next command.
     let (ws, project) = crate::orbital::found_space_cli(&home, &seed, &name)?;
     // Register the founder — this is what makes `lait orbits` complete.
-    if let Err(e) = spaces::upsert(spaces::SpaceEntry {
+    if let Err(e) = orbits::upsert(orbits::Entry {
         space: ws.to_string(),
         name: name.clone(),
         path: home.display().to_string(),
-        origin: spaces::Origin::Founded,
+        origin: orbits::Origin::Founded,
         host_nick: String::new(),
         last_opened: now_secs(),
         projects: vec![project.clone()],
@@ -646,7 +657,7 @@ fn run_device_accept(m: &ArgMatches, out: Out) -> Result<()> {
     let mut parts = token.split_whitespace();
     let actor = parts
         .next()
-        .and_then(crate::ids::ActorId::parse)
+        .and_then(issues::ids::ActorId::parse)
         .ok_or_else(|| anyhow!("invalid device token (expected `<actor_id> <space_id>`)"))?;
     let space = parts
         .next()
@@ -656,11 +667,11 @@ fn run_device_accept(m: &ArgMatches, out: Out) -> Result<()> {
     let seed = load_or_create_identity(&config::identity_dir()?)?;
     let mut nonce = [0u8; 16];
     getrandom::fill(&mut nonce).map_err(|e| anyhow!("getrandom: {e}"))?;
-    let binding = crate::actor::consent_sign(
+    let binding = mechanics::actor::consent_sign(
         &seed,
         &space,
         nonce,
-        &crate::actor::ConsentCtx::Member { actor: &actor },
+        &mechanics::actor::ConsentCtx::Member { actor: &actor },
     );
     let blob = data_encoding::HEXLOWER.encode(&postcard::to_stdvec(&binding)?);
     if out.json {
@@ -689,14 +700,14 @@ fn dir_display_name(home: &std::path::Path) -> String {
 
 /// `lait join <coordinates>`: the orbital join path. Bootstrap the joiner's
 /// orbital store from the invite link (`orbital::enter_space`), ask the Lait
-/// daemon to place its SpaceBridge, then drive Contact to the invite's approach
+/// daemon to place its StationHost, then drive Contact to the invite's approach
 /// Station until
 /// admission lands. The joiner's Contact registers it as a pending Neighbor on
 /// the inviter, whose driver reciprocally dials back to redeem the admission —
 /// so repeated joiner-side Connects converge to membership without a manual
 /// admin step (for an auto-approving invite).
 async fn run_join_orbital(m: &ArgMatches, link: &str, out: Out) -> Result<()> {
-    let coords = runtime::SignedCoordinates::parse_link(link.trim())
+    let coords = runtime::coordinates::SignedCoordinates::parse_link(link.trim())
         .map_err(|e| anyhow!("invalid invite link: {e}"))?;
     let verified = coords.verify().map_err(|e| anyhow!("invite: {e}"))?;
     let space = verified.space.as_str().to_string();
@@ -763,11 +774,11 @@ async fn run_join_orbital(m: &ArgMatches, link: &str, out: Out) -> Result<()> {
     }
 
     // Register the joiner store pre-daemon so `lait orbits` sees it.
-    if let Err(e) = spaces::upsert(spaces::SpaceEntry {
+    if let Err(e) = orbits::upsert(orbits::Entry {
         space: space.clone(),
         name: verified.approach_nick_hint.clone(),
         path: target.display().to_string(),
-        origin: spaces::Origin::Joined,
+        origin: orbits::Origin::Joined,
         host_nick: verified.approach_nick_hint.clone(),
         last_opened: now_secs(),
         projects: vec![],
@@ -862,16 +873,16 @@ async fn run_join_cli(m: &ArgMatches, out: Out) -> Result<()> {
 
     // Orbital is the only join path: a Coordinates v1 link joins. Anything else
     // — a pre-carve join ticket, an older/newer link, malformed bytes — is
-    // refused with the typed [`CoordinatesError`] (a pre-carve ticket surfaces
+    // refused with the typed [`runtime::coordinates::Invalid`] (a pre-carve ticket surfaces
     // as `UnsupportedVersion`), never a fallback to a legacy code path.
-    match runtime::SignedCoordinates::parse_link(ticket_str.trim()) {
+    match runtime::coordinates::SignedCoordinates::parse_link(ticket_str.trim()) {
         Ok(_) => run_join_orbital(m, &ticket_str, out).await,
-        Err(runtime::coordinates::CoordinatesError::UnsupportedVersion(v)) => Err(anyhow!(
+        Err(runtime::coordinates::Invalid::UnsupportedVersion(v)) => Err(anyhow!(
             "this invite is not a lait Coordinates link (version {v} — it looks like a \
              legacy space ticket from an older lait). Ask the inviter for a fresh \
              `lait invite` link."
         )),
-        Err(runtime::coordinates::CoordinatesError::BadLink) => Err(anyhow!(
+        Err(runtime::coordinates::Invalid::BadLink) => Err(anyhow!(
             "this invite does not decode as a lait Coordinates link: it contains \
              characters outside the ticket alphabet. Both the lait://join/<ticket> \
              form and the bare ticket work — the usual cause is a partial copy, so \
@@ -894,7 +905,7 @@ async fn run_config(dispatch: &Dispatch, m: &ArgMatches, out: Out) -> Result<()>
     let home = config::existing_home().filter(|h| crate::orbital::space_store_present(h));
     let which = match dispatch {
         Dispatch::Special(s) => *s,
-        _ => unreachable!(),
+        Dispatch::Action(_) => return Err(anyhow!("non-config action reached config dispatch")),
     };
     match which {
         Special::ConfigList => {
@@ -982,7 +993,7 @@ async fn run_config(dispatch: &Dispatch, m: &ArgMatches, out: Out) -> Result<()>
             crate::cli::emit_ok(&format!("{message}{applied}"), out);
             Ok(())
         }
-        _ => unreachable!(),
+        _ => Err(anyhow!("non-config command reached config dispatch")),
     }
 }
 

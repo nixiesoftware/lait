@@ -6,8 +6,8 @@
 use crate::{
     control::{ControlRoute, Request},
     daemon::OrbitAddress,
-    orbital::WorldCall,
 };
+use runtime::world::call::Call;
 
 /// The terminal orbital boundary selected by a client command.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -23,7 +23,7 @@ pub enum ClientTarget {
 /// A parsed command plus its already-determined orbital destination.
 ///
 /// Space/daemon compatibility calls remain typed while product packages emit
-/// opaque [`WorldCall`]s directly. The payload therefore fixes both destination
+/// opaque [`Call`]s directly. The payload therefore fixes both destination
 /// and wire shape at parse time; transport never reclassifies product intent.
 #[derive(Debug, Clone)]
 pub struct ClientAction {
@@ -36,7 +36,7 @@ pub enum ClientPayload {
     /// Space/daemon control surface.
     Control(Request),
     /// A product-owned application call.
-    World(WorldCall),
+    World(Call),
 }
 
 impl ClientAction {
@@ -54,7 +54,7 @@ impl ClientAction {
     }
 
     /// Construct a product action directly from its package-owned call.
-    pub fn world(call: WorldCall) -> Self {
+    pub fn world(call: Call) -> Self {
         Self {
             target: ClientTarget::World {
                 world: call.world().as_str().to_string(),
@@ -89,7 +89,7 @@ impl ClientAction {
     pub fn route(&self, address: OrbitAddress) -> ControlRoute {
         match &self.target {
             ClientTarget::Daemon => ControlRoute::Daemon,
-            ClientTarget::Space => ControlRoute::Space { address },
+            ClientTarget::Space => ControlRoute::Orbit { address },
             ClientTarget::World { world } => ControlRoute::World {
                 address,
                 world: world.clone(),
@@ -117,7 +117,7 @@ mod tests {
     fn an_action_materializes_the_route_it_selected_at_parse_time() {
         let address =
             OrbitAddress::for_store(Path::new("/tmp/lait-action"), SpaceId::from_digest([7; 16]));
-        let call = WorldCall::new(
+        let call = Call::new(
             crate::world::contract::world_id(),
             "issues.control",
             1,
@@ -133,7 +133,7 @@ mod tests {
 
     #[test]
     fn a_world_call_never_needs_request_classification() {
-        let call = WorldCall::new(
+        let call = Call::new(
             crate::world::contract::world_id(),
             "issues.control",
             1,

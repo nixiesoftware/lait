@@ -21,9 +21,9 @@ vi.mock("../api", () => ({ rpc: rpcMock, spaceRpc: spaceRpcMock }));
 /**
  * A socket that never opens.
  *
- * The live rail asks its question through the real bridge, which would otherwise
+ * The live rail asks its question through the real socket, which would otherwise
  * dial `ws://localhost/api/session`, fail, and leave a reconnect timer running
- * past the end of the test. Held at `CONNECTING` for the whole run: the bridge
+ * past the end of the test. Held at `CONNECTING` for the whole run: the socket
  * refuses to send on a socket that is not `OPEN`, so nothing leaves and nothing
  * schedules.
  */
@@ -180,7 +180,7 @@ describe("IssueDetail live rail", () => {
 
   function mount(live: LiveState, members: MemberDto[]): HTMLDivElement {
     const store = seededStore();
-    // Seeded, not pushed: the rail reads the slot the bridge writes, and seeding
+    // Seeded, not pushed: the rail reads the slot the socket writes, and seeding
     // it is what lets this test pin the rendering without a socket.
     //
     // Under the **doc id**, which is what the rail asks by. The fixture's `reff`

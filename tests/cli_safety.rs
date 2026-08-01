@@ -205,7 +205,7 @@ fn a_dead_daemon_is_reported_dead_and_a_live_one_is_not() {
     let mut child = lait::daemon_spawn::spawn(&exe, None, Some(&home)).expect("spawn live daemon");
     let runtime = tokio::runtime::Runtime::new().expect("runtime");
     runtime.block_on(async {
-        let client = lait::daemon::LaitDaemonClient::at(daemon_home.clone());
+        let client = lait::daemon::Client::at(daemon_home.clone());
         let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
         while !matches!(client.probe().await, lait::control::Probe::Healthy) {
             assert!(
@@ -245,7 +245,7 @@ fn a_dead_daemon_is_reported_dead_and_a_live_one_is_not() {
     );
 
     runtime.block_on(async {
-        let client = lait::daemon::LaitDaemonClient::at(daemon_home);
+        let client = lait::daemon::Client::at(daemon_home);
         client
             .request(
                 lait::control::ControlRoute::Daemon,

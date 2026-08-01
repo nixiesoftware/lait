@@ -13,39 +13,39 @@ boundary. Each device keeps its own durable participation and can activate it
 without a central server.
 
 ```text
-LaitDaemon
+daemon::Daemon
   ├─ identity-scoped local control endpoint
   ├─ injected WorldPackages
-  ├─ OrbitDirectory
-  └─ ControlRouter
+  ├─ orbits::Catalog
+  └─ orbits::Router
        ├─ IdentityTransportHubs (keyed by DeviceId)
        │    └─ concrete endpoint / protocol Router / gossip
        │         └─ SpaceTransportView (keyed by SpaceId)
        └─ OrbitOccupancy (keyed by local Orbit)
             ├─ vacant
-            └─ StationPlacement
+            └─ orbits::Placement
                  ├─ hosting
                  │    ├─ owned in-process
                  │    └─ attached compatibility process
-                 └─ sole SpaceBridge for the Orbit
+                 └─ sole StationHost for the Orbit
                       └─ Station occupying the Orbit
                            ├─ Mechanics
                            ├─ Replica
-                           │    └─ Fabric
+                           │    └─ Engine
                            ├─ Comms -> SpaceTransportView
                            ├─ Neighbor registry and Contact
-                           └─ WorldBridgeRegistry
-                                └─ WorldBridge
+                           └─ WorldRouter
+                                └─ WorldHost
                                      └─ docked Sessions
 
 lait serve
-  └─ HTTP/SSE adapter -> LaitDaemon
+  └─ HTTP/SSE adapter -> daemon::Daemon
 
 cwd CLI / pinned MCP
   └─ WorldClientRegistry
        ├─ shell/Mechanics surfaces
        └─ installed World client packages
-            └─ explicit Orbit/World route -> LaitDaemon
+            └─ explicit Orbit/World route -> daemon::Daemon
 ```
 
 An Orbit is one durable local participation in a Space. It persists whether it
@@ -53,8 +53,8 @@ is vacant or occupied. Activation acquires that Orbit's exclusive operational
 lease and places a Station into it; removing the Station drains its tasks and
 releases the lease without turning the Station into an Orbit. The current
 Runtime API transfers that lease through `Orbit::activate` and
-`Station::go_dormant`; those consuming handles express ownership transfer, not
-an ontological state conversion. A SpaceBridge is the sole product-side
+`Station::vacate`; those consuming handles express ownership transfer, not
+an ontological state conversion. A StationHost is the sole product-side
 entrance to the Station occupying one Orbit. There is never a second live
 Station, Replica, or product store for the same local Orbit.
 
@@ -97,29 +97,29 @@ Trusted cwd and MCP adapters derive a pinned `ClientScope`; the web adapter
 applies catalog identity policy. Web Space control and product calls use
 disjoint endpoints; a product request names its World/package route before its
 payload is decoded. Each adapter constructs an explicit route and opens the
-identity-scoped LaitDaemon endpoint. The daemon resolves the Orbit, validates
+identity-scoped daemon::Daemon endpoint. The daemon resolves the Orbit, validates
 its repeated Space expectation before activation, places or reuses its Station
 host, and dispatches to one terminal owner: lifecycle, Mechanics, Station,
-observation, or a WorldBridge. The receiving SpaceBridge independently
-validates its Orbit, Space, World, and terminal owner. `OrbitDirectory`
-discovers durable bindings; `StationPlacement` records where an active Station
+observation, or a WorldHost. The receiving StationHost independently
+validates its Orbit, Space, World, and terminal owner. `orbits::Catalog`
+discovers durable bindings; `orbits::Placement` records where an active Station
 is hosted; neither is a second lifecycle owner. The allowed Orbit set never
 rides on the wire as a client-controlled claim.
 
-Bridges are logical boundaries, not mandatory processes. The current deployment
-is one identity-scoped LaitDaemon routing to zero or more Station placements and
-their in-process SpaceBridges. A SpaceBridge or WorldBridge may move to a worker
+Service boundaries are logical boundaries, not mandatory processes. The current deployment
+is one identity-scoped daemon::Daemon routing to zero or more Station placements and
+their in-process StationHosts. A StationHost or WorldHost may move to a worker
 process for stronger fault or plugin isolation without changing its route or
-client contract. The ControlRouter hosts a vacant Orbit in-process and attaches,
+client contract. The orbits::Router hosts a vacant Orbit in-process and attaches,
 without taking ownership, when a compatible historical per-home daemon already
 holds that Orbit. Both placement modes retain the per-home socket for Space
 control and Observation compatibility, but owned World calls dispatch directly
-to the in-process bridge. An attached placement forwards the same opaque World
+to the in-process World host. An attached placement forwards the same opaque World
 call through that socket without translating its payload. CLI, MCP, and web
-requests enter through the one LaitDaemon endpoint.
+requests enter through the one daemon::Daemon endpoint.
 
-Catalog listing remains passive. The web adapter asks LaitDaemon for an
-`if_running` status; LaitDaemon may inspect an already-live per-Orbit
+Catalog listing remains passive. The web adapter asks daemon::Daemon for an
+`if_running` status; daemon::Daemon may inspect an already-live per-Orbit
 compatibility adapter, but it never places a vacant Orbit for that probe.
 
 Transport ownership follows device identity, not Orbit count. One
@@ -127,16 +127,16 @@ Transport ownership follows device identity, not Orbit count. One
 book, and gossip instance for a `DeviceId`. Each active Space gets a scoped
 transport view with its own inbound queue and gossip topic. The hub reads a
 bounded Contact Hello or presence probe only far enough to select its declared
-Space, then replays the exact frame to Runtime; the SpaceBridge still performs
+Space, then replays the exact frame to Runtime; the StationHost still performs
 canonical decoding, signature, negotiated-peer, protocol, and Space
 verification. Slow openers are bounded and dispatched concurrently.
 The concrete endpoint is daemon-scoped by design: unregistering the last Space
-route leaves the identity endpoint warm until explicit LaitDaemon shutdown.
+route leaves the identity endpoint warm until explicit daemon::Daemon shutdown.
 Dropping it on every last-Station transition would race concurrent placement
 and turn Station churn into identity/transport churn.
 An attached historical compatibility process retains its legacy endpoint until
 that migration placement exits; the identity-hub invariant governs Stations
-owned by LaitDaemon.
+owned by daemon::Daemon.
 
 Two active Stations with the same `(DeviceId, SpaceId)` are rejected even if
 they occupy distinct local Orbits: the remote address is the device key and the
@@ -149,8 +149,8 @@ Placement and shutdown are ordered:
 ```text
 request
   -> trusted adapter authorizes ClientScope
-  -> identity-scoped LaitDaemon endpoint
-  -> OrbitDirectory resolves
+  -> identity-scoped daemon::Daemon endpoint
+  -> orbits::Catalog resolves
   -> validate Orbit + expected Space before activation
   -> OrbitOccupancy single-flights by local Orbit
   -> healthy existing control channel: attach
@@ -158,18 +158,18 @@ request
 
 viewer shutdown
   -> stop HTTP and join its daemon event observer
-  -> LaitDaemon and Stations remain active
+  -> daemon::Daemon and Stations remain active
 
-explicit LaitDaemon shutdown
+explicit daemon::Daemon shutdown
   -> stop accepting process-control work
   -> close and join daemon client connections
-  -> gate ControlRouter against new placements
+  -> gate orbits::Router against new placements
   -> close and join doorbell observers
-  -> signal each owned SpaceBridge
+  -> signal each owned StationHost
   -> join control connections and Observation pumps
-  -> drop WorldBridgeRegistry/Sessions
+  -> drop WorldRouter/Sessions
   -> Contact driver emits dormancy and unregisters its SpaceTransportView
-  -> Station::go_dormant
+  -> Station::vacate
   -> release the Orbit lock
   -> after all owned placements join, gracefully stop each identity Router,
      gossip instance, and concrete endpoint
@@ -185,12 +185,12 @@ must complete dormancy before the Orbit is considered vacant.
 mechanics  signed Space authority, actors/devices, scoped policy,
            admission, custody, recovery, and ceremony state
 journal    semantics-free immutable-object/manifest durability and recovery
-fabric     canonical collaborative Body engine and Fabric journal integration
+Engine     canonical collaborative Body engine and Engine journal integration
 replica    Body transactions, protected material, Manifests, quotas,
            validation, and convergence
 comms      transport, streams, discovery, gossip, and presence mechanisms
 runtime    Orbit/Station lifecycle, Contacts, Worlds, Sessions, observations
-world-bridge
+runtime::world::call
            versioned opaque application calls and object-safe World handlers
 world-interface
            composable CLI mounts, MCP descriptors, and namespace validation
@@ -205,13 +205,13 @@ issues, projects, comments, roles, and workflows belong to the independently
 packaged `products/issues` and `products/issues-app` crates. The outer `lait`
 shell mounts those packages but does not declare their command grammar or MCP
 schemas.
-Mechanics does not interpret product roles. Fabric does not know authority,
+Mechanics does not interpret product roles. Engine does not know authority,
 transport, or product meaning. Comms moves bytes but cannot legitimize them.
 
-Only Fabric names Loro. One collaborative Body maps to one Loro document, but
-Loro is an implementation detail behind the generic `Fabric` contract. Replica
+Only Engine names Loro. One collaborative Body maps to one Loro document, but
+Loro is an implementation detail behind the generic `Engine` contract. Replica
 is the Body graph authority and is the only layer allowed to turn validated
-transactions into Fabric changes.
+transactions into Engine changes.
 
 ## 3. Mechanics and authority
 
@@ -245,7 +245,7 @@ Ceremony packets never enlarge ordinary authority frontiers. FROST is used only
 to produce explicit recovery/elevation/reshare authority, never for ordinary
 World transactions.
 
-## 4. Replica, Fabric, and durability
+## 4. Replica, Engine, and durability
 
 A Replica owns the protected Body graph for one Space. Its durable root is a
 signed Manifest whose entries bind Body identities to their constituent signed
@@ -261,7 +261,7 @@ signed World action
   -> Runtime contains the operations
   -> Mechanics authorizes and produces a bound receipt
   -> Replica commits transaction and replacement Manifest
-  -> Fabric applies collaborative changes
+  -> Engine applies collaborative changes
   -> durable acknowledgment
   -> Observation publication
 ```
@@ -276,7 +276,7 @@ An acknowledged mutation is durable before it is observed. If the filesystem
 cannot determine whether the authoritative rename became durable, the operation
 returns `OutcomeUnknown`; the Station must reopen and must not blindly retry.
 
-Fabric supplies generic collaborative primitives: registers, maps, stable-id
+Engine supplies generic collaborative primitives: registers, maps, stable-id
 lists, text, add-wins sets, counters, and atomic Bodies. Convergence of a
 primitive is not a product conflict policy. A World that chooses a register
 accepts its deterministic single-winner semantics. Causally significant product
@@ -295,53 +295,52 @@ facts. It cannot access storage, Loro, transport, custody secrets, or authority
 mutation. It returns declared Body operations and a non-empty authorization
 demand. Runtime validates World/schema containment before committing anything.
 
-A WorldBridge is the application-side entrance to one registered World in one
+A WorldHost is the application-side entrance to one registered World in one
 active Space. It owns the reviewed implementation identity and the Sessions
-docked for local identities. A WorldBridgeRegistry maps `WorldId` to distinct
-bridge objects; a Session can never be reused across Worlds.
+docked for local identities. A WorldRouter maps `WorldId` to distinct
+host objects; a Session can never be reused across Worlds.
 
 The application composition root supplies one compile-time `WorldPackages` set
-to LaitDaemon. Each `WorldPackage` keeps a Runtime registration, semantic World
+to daemon::Daemon. Each `WorldPackage` keeps a Runtime registration, semantic World
 implementation, reviewed implementation identity, and optional
 `WorldCallHandler` together. The same immutable package set is carried through
-ControlRouter placement into every SpaceBridge; daemon routing validates the
+orbits::Router placement into every StationHost; daemon routing validates the
 addressed World against that injected set and never names IssuesWorld.
 
-The `world-bridge` crate is the application-call boundary shared by a product
+The `runtime::world::call` namespace is the application-call boundary shared by a product
 and its host. `WorldCall { world, operation, version, payload }` and its bound
-`WorldReply` leave the payload opaque to LaitDaemon and SpaceBridge. The
+`WorldReply` leave the payload opaque to daemon::Daemon and StationHost. The
 registered handler—not the client—decodes the call and classifies it as a query
 or command before host policy runs. It owns product reference resolution, local
 id/time minting, transient retry, and product response construction. This is a
 compile-time package seam, not a promise of dynamic library loading or process
 isolation.
 
-For an owned Station placement, ControlRouter invokes the in-process
-SpaceBridge directly. The per-Orbit socket is not part of that World call stack.
-If LaitDaemon attaches to a standalone SpaceBridge, the same opaque
-`WorldClientRequest` crosses the socket and the receiving bridge invokes its
-registered handler. Protocol v5 deliberately retired v4 bridges and typed
+For an owned Station placement, orbits::Router invokes the in-process
+StationHost directly. The per-Orbit socket is not part of that World call stack.
+If daemon::Daemon attaches to a standalone StationHost, the same opaque
+`WorldClientRequest` crosses the socket and the receiving host invokes its
+registered handler. Protocol v5 deliberately retired v4 application-call adapters and typed
 product requests; protocol v6 removed the last product projection from root
 control, so every placement now has the same product-neutral boundary.
 
 IssuesWorld's semantic package lives at `products/issues` with no dependency on
 the `lait` application crate, local control protocol, daemon, filesystem, or
-process lifecycle. The root preserves `lait::world`, `lait::dto`, and
-`lait::ids` as compatibility re-exports. Moving that package to another
-repository changes the dependency locator, not Runtime or bridge ownership.
+process lifecycle. The root composes `lait::world`; product DTOs and identifiers
+remain under their owning `issues` package. Moving that package to another
+repository changes the dependency locator, not Runtime or host ownership.
 The outer `world::lifecycle` adapter owns only generic Orbit/Station
 materialization and invokes package lifecycle hooks with a docked Session.
 `issues-app` supplies the reviewed implementation policy, founder grants,
 initial-project policy, and crash-resumable signed `InitializeTracker` record.
-`orbital` retains compatibility re-exports but contains no Issues bootstrap
-implementation.
+`orbital` contains no Issues bootstrap implementation.
 
 The sibling `products/issues-app` package owns the `issues.control` v1 codec,
 query/command classification, `IssueRouter` execution adapter, product response
 schema, host-capability vocabulary, role-to-authority planning, formation
 policy, status/inbox/doorbell projections, `lait issues` command tree, and all
 38 Issues MCP descriptors. It depends on the semantic package and generic
-substrate/bridge/client interfaces, never back on `lait`.
+substrate/runtime/client interfaces, never back on `lait`.
 Most client operations become `WorldCall`s at parse time. Inbox watermark I/O,
 access assignment, git work-state behavior, attachment filesystem I/O, and
 implementation activation are explicit named host-capability calls: their
@@ -377,7 +376,7 @@ architectural path unavailable to another conforming World.
 
 Root control contains no issue command or response variants. The viewer, CLI,
 and MCP construct the Issues-owned application protocol and carry it in an
-opaque `WorldCall`; attached SpaceBridges receive that same envelope. The web
+opaque `WorldCall`; attached StationHosts receive that same envelope. The web
 viewer addresses `/worlds/issues/rpc`, so malformed product input cannot fall
 through into root control decoding. Local host capabilities are decoded and
 executed by the product package and may compose a World call with a
@@ -417,7 +416,7 @@ admission; redemption remains a verified Mechanics authority transition.
 
 ## 7. IssuesWorld conflict ownership
 
-Fabric defines convergence mechanics; IssuesWorld defines issue semantics.
+Engine defines convergence mechanics; IssuesWorld defines issue semantics.
 
 - Scalar fields may deliberately use deterministic register semantics where a
   single winner is acceptable.
@@ -431,12 +430,12 @@ Fabric defines convergence mechanics; IssuesWorld defines issue semantics.
   projection; engine oplogs are never a product history API.
 
 These are product-schema choices. They do not add issue-specific types to
-Fabric, Replica, Runtime, or Mechanics.
+Engine, Replica, Runtime, or Mechanics.
 
 The merged IssuesWorld still stores status in a register and comments in the
 Issue Body's event/list representation. Those converge, but they do not yet
 implement transition-head conflicts or first-class reply/reaction/edit semantics.
-This is a known IssuesWorld conformance gap, not a reason to change Fabric's
+This is a known IssuesWorld conformance gap, not a reason to change Engine's
 baseline algebra.
 
 ## 8. Security posture

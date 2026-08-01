@@ -10,7 +10,7 @@
 //! Two things follow, and they are the whole design:
 //!
 //! **This is a client of the host plane.** The browser is a picker over all
-//! registered Orbits. [`crate::daemon::OrbitDirectory`] supplies passive
+//! registered Orbits. [`crate::daemon::Catalog`] supplies passive
 //! discovery; the identity-scoped Lait daemon owns lazy Station placement,
 //! routing, and doorbell fan-in.
 //!
@@ -23,10 +23,10 @@
 //! remains the only network identity.
 
 pub mod auth;
-mod bridge;
 mod content;
+pub mod orbits;
 pub mod policy;
-pub mod spaces;
+mod socket;
 
 mod shell;
 
@@ -49,7 +49,8 @@ use serde::Deserialize;
 use tokio::net::TcpListener;
 
 use crate::control::{ErrorKind, Request};
-use crate::daemon::{LaitDaemonClient, OrbitDirectory, OrbitDoorbell, StationIdentity};
+use crate::daemon::{Client, OrbitDoorbell};
+use crate::orbits::{Catalog, StationIdentity};
 use auth::{Guard, Refusal};
 
 /// The default port. Fixed rather than ephemeral so the URL is predictable and
@@ -73,8 +74,8 @@ fn cookie_name(port: u16) -> String {
 
 struct App {
     guard: Guard,
-    directory: OrbitDirectory,
-    daemon: LaitDaemonClient,
+    directory: Catalog,
+    daemon: Client,
     doorbells: tokio::sync::broadcast::Sender<ViewerEvent>,
     cookie: String,
     /// Latched when this server begins shutting down.
@@ -84,10 +85,10 @@ struct App {
     stop: tokio::sync::watch::Sender<bool>,
     /// How many content transfers may be in flight at once.
     content_permits: content::ContentStreamPermits,
-    /// The bridge's own fan-out. Deliberately not `doorbells`: one ring for what
+    /// The session socket's own fan-out. Deliberately not `doorbells`: one ring for what
     /// every tab must see, one for what only the tab that started a transfer
     /// cares about.
-    bridge: bridge::BridgeHub,
+    socket: socket::Hub,
 }
 
 #[derive(Clone)]
@@ -111,7 +112,7 @@ enum ViewerEvent {
 /// The line is emitted **before** the server starts accepting, so a parent process
 /// can read one line and know it is safe to connect.
 pub async fn run(port: u16, open: bool, json: bool) -> Result<()> {
-    // Identity scoping, resolved once at startup. OrbitDirectory uses
+    // Identity scoping, resolved once at startup. Catalog uses
     // `$LAIT_HOME` as the self-contained identity boundary.
     let identity = crate::config::identity_dir()?;
     let self_contained = std::env::var_os("LAIT_HOME").is_some();
@@ -127,39 +128,39 @@ pub async fn run(port: u16, open: bool, json: bool) -> Result<()> {
         })?;
     let bound = listener.local_addr().context("read bound address")?;
 
-    let token = mint_token();
+    let token = mint_token()?;
     crate::cli::ensure_lait_daemon()
         .await
         .context("start Lait daemon")?;
-    let daemon = LaitDaemonClient::current()?;
+    let daemon = Client::current()?;
     let (doorbells, _) = tokio::sync::broadcast::channel(256);
     // Created before anything that has to watch it. Every long-lived response
     // and every background task selects on this one channel.
     let (stop, _) = tokio::sync::watch::channel(false);
     let app = Arc::new(App {
         guard: Guard::new(token.clone(), bound.port()),
-        directory: OrbitDirectory::new(identity, agents_base, self_contained),
+        directory: Catalog::new(identity, agents_base, self_contained),
         daemon: daemon.clone(),
         doorbells: doorbells.clone(),
         cookie: cookie_name(bound.port()),
         stop: stop.clone(),
         content_permits: content::ContentStreamPermits::new(),
-        bridge: bridge::BridgeHub::new(),
+        socket: socket::Hub::new(),
     });
     // The signal is fired before `shutdown_signal()` reaches axum, not after.
     // Graceful shutdown waits on in-flight responses, and this server has two
     // that never complete on their own: an SSE stream whose item type is
     // `Infallible` and whose broadcast receiver only ends when every sender
-    // drops, and (from the bridge onward) a WebSocket. Handing axum a shutdown
+    // drops, and (from the session socket onward) a WebSocket. Handing axum a shutdown
     // future while those are open is a wait with no end, so the signal has to
     // reach *them* first.
     let mut tasks = tokio::task::JoinSet::new();
     tasks.spawn(pump_daemon_events(daemon, doorbells, stop.subscribe()));
     // One reader of the transient view for the whole server, not one per tab:
     // the hub fans each answer out, and a question nobody is holding is never
-    // asked. See [`bridge::pump_transient`] for why the socket has an inbound
+    // asked. See [`socket::pump_transient`] for why the socket has an inbound
     // direction at all.
-    tasks.spawn(bridge::pump_transient(app.clone(), stop.subscribe()));
+    tasks.spawn(socket::pump_transient(app.clone(), stop.subscribe()));
 
     let url = format!("http://127.0.0.1:{}/?token={}", bound.port(), token);
     if json {
@@ -211,7 +212,7 @@ const PUMP_BACKOFF_FLOOR: std::time::Duration = std::time::Duration::from_millis
 const PUMP_BACKOFF_CEILING: std::time::Duration = std::time::Duration::from_secs(30);
 
 async fn pump_daemon_events(
-    daemon: LaitDaemonClient,
+    daemon: Client,
     doorbells: tokio::sync::broadcast::Sender<ViewerEvent>,
     mut stop: tokio::sync::watch::Receiver<bool>,
 ) {
@@ -262,25 +263,28 @@ async fn pump_daemon_events(
             _ = stop.changed() => return,
             _ = tokio::time::sleep(backoff) => {}
         }
-        backoff = (backoff * 2).min(PUMP_BACKOFF_CEILING);
+        backoff = backoff
+            .checked_mul(2)
+            .unwrap_or(PUMP_BACKOFF_CEILING)
+            .min(PUMP_BACKOFF_CEILING);
     }
 }
 
 /// Stop the viewer adapter without stopping the independently owned Lait daemon.
 async fn shutdown_signal() {
     let ctrl_c = async {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("install Ctrl+C handler");
+        let _ = tokio::signal::ctrl_c().await;
     };
 
     #[cfg(unix)]
     {
         let terminate = async {
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                .expect("install SIGTERM handler")
-                .recv()
-                .await;
+            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                Ok(mut signal) => {
+                    let _ = signal.recv().await;
+                }
+                Err(_) => std::future::pending::<()>().await,
+            }
         };
         tokio::select! {
             _ = ctrl_c => {}
@@ -364,8 +368,8 @@ enum Method {
     Head,
 }
 
-fn handler(route: &Route) -> axum::routing::MethodRouter<Arc<App>> {
-    match (route.path, route.method) {
+fn handler(route: &Route) -> Option<axum::routing::MethodRouter<Arc<App>>> {
+    Some(match (route.path, route.method) {
         ("/", _) => get(index),
         ("/api/spaces", _) => get(list_spaces),
         ("/api/spaces/{id}/rpc", _) => post(rpc),
@@ -374,15 +378,17 @@ fn handler(route: &Route) -> axum::routing::MethodRouter<Arc<App>> {
         ("/api/spaces/{id}/content", _) => post(content::upload),
         ("/api/spaces/{id}/content/{content}", Method::Head) => axum::routing::head(content::head),
         ("/api/spaces/{id}/content/{content}", _) => get(content::download),
-        ("/api/session", _) => get(bridge::session),
-        (other, _) => unreachable!("{other} is in ROUTES with no handler"),
-    }
+        ("/api/session", _) => get(socket::session),
+        _ => return None,
+    })
 }
 
 fn router(app: Arc<App>) -> Router {
     let mut router = Router::new();
     for route in ROUTES {
-        router = router.route(route.path, handler(route));
+        if let Some(method) = handler(route) {
+            router = router.route(route.path, method);
+        }
     }
     router
         // Everything else is the client: a real asset, or the SPA entry so the
@@ -396,10 +402,11 @@ fn router(app: Arc<App>) -> Router {
 }
 
 /// A 32-byte hex token, minted per run and never persisted.
-fn mint_token() -> String {
+fn mint_token() -> anyhow::Result<String> {
     let mut buf = [0u8; 32];
-    getrandom::fill(&mut buf).expect("getrandom");
-    data_encoding::HEXLOWER.encode(&buf)
+    getrandom::fill(&mut buf)
+        .map_err(|error| anyhow::anyhow!("system entropy unavailable: {error}"))?;
+    Ok(data_encoding::HEXLOWER.encode(&buf))
 }
 
 /// The gate every request passes: rebinding guard first, credential second.
@@ -559,7 +566,7 @@ async fn static_asset(uri: axum::http::Uri) -> Response {
 
 async fn list_spaces(State(app): State<Arc<App>>) -> Response {
     Json(serde_json::json!({
-        "spaces": spaces::list(&app.directory, &app.daemon).await
+        "spaces": orbits::list(&app.directory, &app.daemon).await
     }))
     .into_response()
 }
@@ -621,7 +628,7 @@ async fn world_rpc(
     };
     let registry = crate::world::client_packages();
     let package = registry.package_for_mount(&world).or_else(|| {
-        replica::ids::WorldId::parse(&world).and_then(|world| registry.package_for_world(&world))
+        replica::body::WorldId::parse(&world).and_then(|world| registry.package_for_world(&world))
     });
     let Some(package) = package.cloned() else {
         return (
@@ -890,13 +897,13 @@ mod tests {
         let nowhere = std::path::PathBuf::from("/nonexistent-for-tests");
         router(Arc::new(App {
             guard: Guard::new(token.into(), 7717),
-            directory: OrbitDirectory::new(nowhere.clone(), nowhere.clone(), true),
-            daemon: LaitDaemonClient::at(nowhere),
+            directory: Catalog::new(nowhere.clone(), nowhere.clone(), true),
+            daemon: Client::at(nowhere),
             doorbells: tokio::sync::broadcast::channel(1).0,
             cookie: cookie_name(7717),
             stop: tokio::sync::watch::channel(false).0,
             content_permits: content::ContentStreamPermits::new(),
-            bridge: bridge::BridgeHub::new(),
+            socket: socket::Hub::new(),
         }))
     }
 
@@ -1104,8 +1111,8 @@ mod tests {
 
     #[test]
     fn minted_tokens_are_64_hex_chars_and_not_repeated() {
-        let a = mint_token();
-        let b = mint_token();
+        let a = mint_token().expect("mint first token");
+        let b = mint_token().expect("mint second token");
         assert_eq!(a.len(), 64);
         assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
         assert_ne!(a, b, "a per-run token must not be deterministic");
@@ -1125,13 +1132,13 @@ mod gate_coverage {
         let nowhere = std::path::PathBuf::from("/nonexistent-for-tests");
         router(Arc::new(App {
             guard: Guard::new(TOKEN.into(), 7717),
-            directory: OrbitDirectory::new(nowhere.clone(), nowhere.clone(), true),
-            daemon: LaitDaemonClient::at(nowhere),
+            directory: Catalog::new(nowhere.clone(), nowhere.clone(), true),
+            daemon: Client::at(nowhere),
             doorbells: tokio::sync::broadcast::channel(1).0,
             cookie: cookie_name(7717),
             stop: tokio::sync::watch::channel(false).0,
             content_permits: content::ContentStreamPermits::new(),
-            bridge: bridge::BridgeHub::new(),
+            socket: socket::Hub::new(),
         }))
     }
 
@@ -1287,13 +1294,13 @@ mod gate_coverage {
         let doorbells = tokio::sync::broadcast::channel(4).0;
         let app = Arc::new(App {
             guard: Guard::new(TOKEN.into(), 7717),
-            directory: OrbitDirectory::new(nowhere.clone(), nowhere.clone(), true),
-            daemon: LaitDaemonClient::at(nowhere),
+            directory: Catalog::new(nowhere.clone(), nowhere.clone(), true),
+            daemon: Client::at(nowhere),
             doorbells: doorbells.clone(),
             cookie: cookie_name(7717),
             stop: stop.clone(),
             content_permits: content::ContentStreamPermits::new(),
-            bridge: bridge::BridgeHub::new(),
+            socket: socket::Hub::new(),
         });
         let response = router(app.clone())
             .oneshot(request(

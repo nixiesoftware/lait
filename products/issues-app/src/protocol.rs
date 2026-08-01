@@ -1,9 +1,9 @@
-//! Versioned application protocol carried inside an opaque [`WorldCall`].
+//! Versioned application protocol carried inside an opaque [`Call`].
 
+use runtime::world::call::{Access, Call, Code, Failure, Reply};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use world_bridge::{WorldCall, WorldCallAccess, WorldCallError, WorldCallErrorCode, WorldReply};
 
 pub const OPERATION: &str = "issues.control";
 pub const VERSION: u32 = 1;
@@ -46,7 +46,7 @@ pub struct AccessAssignment {
 /// Issues-owned application requests.
 ///
 /// The tagged JSON representation is also the Issues web-client contract. All
-/// native product clients carry this type inside a [`WorldCall`].
+/// native product clients carry this type inside a [`Call`].
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum IssuesRequest {
@@ -567,7 +567,7 @@ impl IssuesResponse {
 }
 
 impl IssuesRequest {
-    pub fn access(&self) -> WorldCallAccess {
+    pub fn access(&self) -> Access {
         use IssuesRequest::*;
         match self {
             Inbox { .. }
@@ -590,7 +590,7 @@ impl IssuesRequest {
             | RoleList
             | RoleShow { .. }
             | WorkflowShow { .. }
-            | WorkflowValidate { .. } => WorldCallAccess::Query,
+            | WorkflowValidate { .. } => Access::Query,
             IssueNew { .. }
             | IssueEdit { .. }
             | IssueMove { .. }
@@ -631,7 +631,7 @@ impl IssuesRequest {
             | RoleEdit { .. }
             | RoleDelete { .. }
             | RoleResolve { .. }
-            | WorkflowSet { .. } => WorldCallAccess::Command,
+            | WorkflowSet { .. } => Access::Command,
         }
     }
 
@@ -644,52 +644,41 @@ impl IssuesRequest {
     }
 }
 
-pub fn encode_call(request: &IssuesRequest) -> Result<WorldCall, WorldCallError> {
+pub fn encode_call(request: &IssuesRequest) -> Result<Call, Failure> {
     let payload = serde_json::to_vec(request).map_err(|error| {
-        WorldCallError::new(
-            WorldCallErrorCode::InvalidCall,
-            format!("encode Issues request: {error}"),
-        )
+        Failure::new(Code::InvalidCall, format!("encode Issues request: {error}"))
     })?;
-    WorldCall::new(issues::contract::world_id(), OPERATION, VERSION, payload)
+    Call::new(issues::contract::world_id(), OPERATION, VERSION, payload)
 }
 
-pub fn decode_call(call: &WorldCall) -> Result<IssuesRequest, WorldCallError> {
+pub fn decode_call(call: &Call) -> Result<IssuesRequest, Failure> {
     validate_contract(call)?;
-    serde_json::from_slice(call.payload()).map_err(|error| {
-        WorldCallError::new(
-            WorldCallErrorCode::InvalidCall,
-            format!("decode Issues request: {error}"),
-        )
-    })
+    serde_json::from_slice(call.payload())
+        .map_err(|error| Failure::new(Code::InvalidCall, format!("decode Issues request: {error}")))
 }
 
-pub fn encode_reply(call: &WorldCall, response: &Value) -> WorldReply {
+pub fn encode_reply(call: &Call, response: &Value) -> Reply {
     match serde_json::to_vec(response) {
-        Ok(payload) => WorldReply::ok(call, payload),
-        Err(error) => WorldReply::error(
+        Ok(payload) => Reply::ok(call, payload),
+        Err(error) => Reply::error(
             call,
-            WorldCallErrorCode::Internal,
+            Code::Internal,
             format!("encode Issues response: {error}"),
         ),
     }
 }
 
-pub fn decode_reply(call: &WorldCall, reply: WorldReply) -> Result<Value, WorldCallError> {
+pub fn decode_reply(call: &Call, reply: Reply) -> Result<Value, Failure> {
     reply.validate_for(call)?;
     let payload = reply.into_result()?;
-    serde_json::from_slice(&payload).map_err(|error| {
-        WorldCallError::new(
-            WorldCallErrorCode::Internal,
-            format!("decode Issues response: {error}"),
-        )
-    })
+    serde_json::from_slice(&payload)
+        .map_err(|error| Failure::new(Code::Internal, format!("decode Issues response: {error}")))
 }
 
-fn validate_contract(call: &WorldCall) -> Result<(), WorldCallError> {
+fn validate_contract(call: &Call) -> Result<(), Failure> {
     if call.world() != &issues::contract::world_id() {
-        return Err(WorldCallError::new(
-            WorldCallErrorCode::InvalidCall,
+        return Err(Failure::new(
+            Code::InvalidCall,
             format!(
                 "Issues call addresses World {}, not {}",
                 call.world(),
@@ -698,14 +687,14 @@ fn validate_contract(call: &WorldCall) -> Result<(), WorldCallError> {
         ));
     }
     if call.operation() != OPERATION {
-        return Err(WorldCallError::new(
-            WorldCallErrorCode::UnsupportedOperation,
+        return Err(Failure::new(
+            Code::UnsupportedOperation,
             format!("unsupported Issues operation '{}'", call.operation()),
         ));
     }
     if call.version() != VERSION {
-        return Err(WorldCallError::new(
-            WorldCallErrorCode::UnsupportedVersion,
+        return Err(Failure::new(
+            Code::UnsupportedVersion,
             format!(
                 "unsupported Issues protocol version {}; expected {VERSION}",
                 call.version()
@@ -752,14 +741,14 @@ mod tests {
                 reff: "ORB-1".into()
             }
             .access(),
-            WorldCallAccess::Query
+            Access::Query
         );
         assert_eq!(
             IssuesRequest::IssueDone {
                 reff: "ORB-1".into()
             }
             .access(),
-            WorldCallAccess::Command
+            Access::Command
         );
     }
 }

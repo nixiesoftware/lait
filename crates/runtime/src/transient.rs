@@ -1,3 +1,9 @@
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    clippy::expect_used,
+    reason = "transient material is size-bounded before fixed-layout derived serialization"
+)]
 //! Transient collaboration state: cursors, presence, typing, residency hints.
 //!
 //! Everything here is state a Station currently believes and will happily
@@ -13,7 +19,7 @@
 //! disappears without anyone saying so. Retirement is an optimisation on top of
 //! that, never a prerequisite.
 //!
-//! **Epochs are compared, never ordered.** A `session_epoch` is 16 random
+//! **Epochs are compared, never ordered.** A `connection_epoch` is 16 random
 //! bytes minted per reconnect. Two of them have no order, so "is this stale"
 //! can only be equality against the epoch this session was admitted at.
 //! Anything that looked like a comparison would be reading noise as sequence.
@@ -44,10 +50,13 @@ pub const MAX_TRANSIENT_ITEM_BYTES: usize = 4 * 1024;
 /// part of a container key inside the collaborative document.
 pub const MAX_SCOPE_FIELD_BYTES: usize = 128;
 
+/// Maximum scopes one Live connection may subscribe to at once.
+pub const MAX_SUBSCRIPTIONS: usize = slots::MAX_SUBSCRIBED_SCOPES_PER_CONNECTION;
+
 /// The longest encoded anchor a payload may carry.
 ///
-/// `FabricAnchor::decode_canonical` bounds its head set and enforces re-encode
-/// equality, and places no bound at all on `path` — while `CrdtFabric::resolve`
+/// `Anchor::decode_canonical` bounds its head set and enforces re-encode
+/// equality, and places no bound at all on `path` — while `Engine::resolve`
 /// feeds that path into loro's container namespace twice, once through
 /// `doc.get_text(typed_key("text", &path))` and once through a `ContainerID::Root`
 /// name. A mismatched Body is already safe there; the path is not. This is the
@@ -62,13 +71,13 @@ pub const MAX_ANCHOR_BYTES: usize = 2 * 1024;
 /// collide across documents of one activation, so that is not a lookup miss, it
 /// is a plausible and silently wrong answer.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub enum TransientScope {
+pub enum Target {
     /// Somebody is looking at this issue.
-    IssueView { world: String, body: [u8; 16] },
+    Body { world: String, body: [u8; 16] },
     /// Somebody is looking at this document.
-    DocumentView { world: String, body: [u8; 16] },
+    Material { world: String, body: [u8; 16] },
     /// Somebody's cursor is in this field of this Body.
-    TextCaret {
+    Field {
         world: String,
         body: [u8; 16],
         field: String,
@@ -81,21 +90,21 @@ pub enum TransientScope {
     },
     /// How much of this content a peer holds. A hint, never a promise —
     /// residency is answered by asking, and this only says who to ask first.
-    ContentResidency { content: [u8; 32] },
+    Content { content: [u8; 32] },
     /// A World's own scope. Opaque here: the substrate carries it and does not
     /// interpret it.
-    CustomWorld {
+    World {
         world: String,
         schema: String,
         key: String,
     },
 }
 
-impl TransientScope {
+impl Target {
     /// The field this scope names, when it names one.
     pub fn field(&self) -> Option<&str> {
         match self {
-            Self::TextCaret { field, .. } | Self::Typing { field, .. } => Some(field),
+            Self::Field { field, .. } | Self::Typing { field, .. } => Some(field),
             _ => None,
         }
     }
@@ -104,17 +113,17 @@ impl TransientScope {
     ///
     /// A signal carries a scope and has to check it before anything acts on it,
     /// and duplicating the rule would be two rules.
-    pub fn validate_wire(&self) -> Result<(), TransientError> {
+    pub fn validate_wire(&self) -> Result<(), Invalid> {
         self.validate()
     }
 
-    fn validate(&self) -> Result<(), TransientError> {
+    fn validate(&self) -> Result<(), Invalid> {
         // A field path is a name inside a Body's collaborative schema, so it has
         // no grammar of its own here — only a bound, which is load-bearing
         // because the path reaches loro's container namespace.
         let bounded = |value: &str| {
             if value.len() > MAX_SCOPE_FIELD_BYTES || value.is_empty() {
-                Err(TransientError::Bounds)
+                Err(Invalid::Bounds)
             } else {
                 Ok(())
             }
@@ -125,21 +134,20 @@ impl TransientScope {
         // shape, and something that is merely short is not therefore one. The
         // two World-facing shapes disagreeing about what a World id *is* is how
         // a scope and a signal about the same World stop matching.
-        let world_id =
-            |value: &str| replica::ids::WorldId::parse(value).ok_or(TransientError::Malformed);
+        let world_id = |value: &str| replica::body::WorldId::parse(value).ok_or(Invalid::Malformed);
         match self {
-            Self::IssueView { world, .. } | Self::DocumentView { world, .. } => {
+            Self::Body { world, .. } | Self::Material { world, .. } => {
                 world_id(world)?;
                 Ok(())
             }
-            Self::TextCaret { world, field, .. } | Self::Typing { world, field, .. } => {
+            Self::Field { world, field, .. } | Self::Typing { world, field, .. } => {
                 world_id(world)?;
                 bounded(field)
             }
-            Self::ContentResidency { .. } => Ok(()),
-            Self::CustomWorld { world, schema, key } => {
+            Self::Content { .. } => Ok(()),
+            Self::World { world, schema, key } => {
                 world_id(world)?;
-                replica::ids::SchemaId::parse(schema).ok_or(TransientError::Malformed)?;
+                replica::body::SchemaId::parse(schema).ok_or(Invalid::Malformed)?;
                 // The key is the World's own, so it gets a bound and no grammar
                 // — the substrate has no opinion about what a World calls its
                 // rows. What the World itself declared is enforced above this,
@@ -191,7 +199,7 @@ impl TransientPayload {
         }
     }
 
-    fn validate(&self, scope: &TransientScope) -> Result<(), TransientError> {
+    fn validate(&self, scope: &Target) -> Result<(), Invalid> {
         // The legality table. It is what makes `MAX_SLOTS_PER_CONNECTION =
         // MAX_SUBSCRIBED_SCOPES_PER_CONNECTION * 2` a fact rather than a hope:
         // no scope admits more than two kinds.
@@ -201,21 +209,21 @@ impl TransientPayload {
         // implied by an absence.
         #[allow(clippy::match_like_matches_macro)]
         let legal = match (scope, self.kind()) {
-            (TransientScope::IssueView { .. }, TransientKind::Presence) => true,
-            (TransientScope::DocumentView { .. }, TransientKind::Presence) => true,
-            (TransientScope::TextCaret { .. }, TransientKind::Caret) => true,
-            (TransientScope::TextCaret { .. }, TransientKind::Selection) => true,
-            (TransientScope::Typing { .. }, TransientKind::Typing) => true,
-            (TransientScope::ContentResidency { .. }, TransientKind::Residency) => true,
-            (TransientScope::CustomWorld { .. }, TransientKind::Presence) => true,
+            (Target::Body { .. }, TransientKind::Presence) => true,
+            (Target::Material { .. }, TransientKind::Presence) => true,
+            (Target::Field { .. }, TransientKind::Caret) => true,
+            (Target::Field { .. }, TransientKind::Selection) => true,
+            (Target::Typing { .. }, TransientKind::Typing) => true,
+            (Target::Content { .. }, TransientKind::Residency) => true,
+            (Target::World { .. }, TransientKind::Presence) => true,
             _ => false,
         };
         if !legal {
-            return Err(TransientError::IllegalForScope);
+            return Err(Invalid::IllegalForScope);
         }
         for anchor in self.anchors() {
             if anchor.len() > MAX_ANCHOR_BYTES {
-                return Err(TransientError::Bounds);
+                return Err(Invalid::Bounds);
             }
             // The path inside the anchor has to be the field the scope names.
             //
@@ -224,19 +232,19 @@ impl TransientPayload {
             // container a resolve touches. Binding it to the subscribed scope
             // means a peer can only ask about what it already said it was
             // watching.
-            let decoded = replica::FabricAnchor::decode_canonical(anchor)
-                .map_err(|_| TransientError::Malformed)?;
+            let decoded =
+                fabric::Anchor::decode_canonical(anchor).map_err(|_| Invalid::Malformed)?;
             if decoded.path.len() > MAX_SCOPE_FIELD_BYTES {
-                return Err(TransientError::Bounds);
+                return Err(Invalid::Bounds);
             }
             match scope.field() {
                 Some(field) if decoded.path == field => {}
-                _ => return Err(TransientError::AnchorOutsideScope),
+                _ => return Err(Invalid::AnchorOutsideScope),
             }
         }
         if let Self::Residency { chunks } = self {
             if chunks.len() > MAX_RESIDENCY_CHUNKS {
-                return Err(TransientError::Bounds);
+                return Err(Invalid::Bounds);
             }
         }
         Ok(())
@@ -263,9 +271,9 @@ pub const MAX_RESIDENCY_CHUNKS: usize = 256;
 /// claim.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TransientItem {
-    pub session_epoch: [u8; 16],
+    pub connection_epoch: [u8; 16],
     pub seq: u64,
-    pub scope: TransientScope,
+    pub scope: Target,
     pub payload: TransientPayload,
 }
 
@@ -280,33 +288,33 @@ impl TransientItem {
     /// same reasons: the outer ceiling first so no allocation is sized by a
     /// peer, then postcard, then re-encode equality so one item has one
     /// spelling, then the semantic checks.
-    pub fn decode_canonical(bytes: &[u8]) -> Result<Self, TransientError> {
+    pub fn decode_canonical(bytes: &[u8]) -> Result<Self, Invalid> {
         if bytes.len() > MAX_TRANSIENT_ITEM_BYTES {
-            return Err(TransientError::TooLarge);
+            return Err(Invalid::TooLarge);
         }
-        let item: Self = postcard::from_bytes(bytes).map_err(|_| TransientError::Malformed)?;
+        let item: Self = postcard::from_bytes(bytes).map_err(|_| Invalid::Malformed)?;
         if item.encode() != bytes {
-            return Err(TransientError::NonCanonical);
+            return Err(Invalid::NonCanonical);
         }
         item.validate()?;
         Ok(item)
     }
 
-    pub fn validate(&self) -> Result<(), TransientError> {
+    pub fn validate(&self) -> Result<(), Invalid> {
         self.scope.validate()?;
         self.payload.validate(&self.scope)
     }
 
     /// The table key. A scope plus a kind, because one peer may hold a caret
     /// and a selection in the same field without either replacing the other.
-    fn slot_key(&self) -> (TransientScope, u8) {
+    fn slot_key(&self) -> (Target, u8) {
         (self.scope.clone(), self.payload.kind() as u8)
     }
 }
 
 /// Why an item was refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TransientError {
+pub enum Invalid {
     TooLarge,
     Malformed,
     NonCanonical,
@@ -324,7 +332,7 @@ pub enum TransientError {
     NotDeclared,
 }
 
-impl std::fmt::Display for TransientError {
+impl std::fmt::Display for Invalid {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{self:?}")
     }
@@ -333,7 +341,7 @@ impl std::fmt::Display for TransientError {
 /// One live entry.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TransientSlot {
-    pub session_epoch: [u8; 16],
+    pub connection_epoch: [u8; 16],
     pub seq: u64,
     /// When this Station saw it. Ours, not theirs.
     pub arrived_at: Instant,
@@ -360,18 +368,18 @@ pub enum AdmitOutcome {
     Retired,
     /// The item is fine and there was no room. Costs a stale cursor.
     Evicted,
-    Refused(TransientError),
+    Refused(Invalid),
 }
 
 /// The bounded table of what peers currently believe.
 pub struct TransientStore {
-    slots: BTreeMap<(TransientScope, u8), TransientSlot>,
+    slots: BTreeMap<(Target, u8), TransientSlot>,
     /// Per slot key, the highest `(epoch, seq)` a retirement covered.
     ///
     /// Kept after the slot is gone, for a grace window, because retirement and
     /// a datagram already on the wire race by nature — and losing that race
     /// resurrects a cursor for a full TTL.
-    retired: BTreeMap<(TransientScope, u8), ([u8; 16], u64, Instant)>,
+    retired: BTreeMap<(Target, u8), ([u8; 16], u64, Instant)>,
     capacity: usize,
 }
 
@@ -406,12 +414,12 @@ impl TransientStore {
         if let Err(error) = item.validate() {
             return AdmitOutcome::Refused(error);
         }
-        if &item.session_epoch != admitted_epoch {
+        if &item.connection_epoch != admitted_epoch {
             return AdmitOutcome::WrongEpoch;
         }
         let key = item.slot_key();
         if let Some((epoch, seq, _)) = self.retired.get(&key) {
-            if epoch == &item.session_epoch && item.seq <= *seq {
+            if epoch == &item.connection_epoch && item.seq <= *seq {
                 return AdmitOutcome::Retired;
             }
         }
@@ -428,7 +436,7 @@ impl TransientStore {
         self.slots.insert(
             key,
             TransientSlot {
-                session_epoch: item.session_epoch,
+                connection_epoch: item.connection_epoch,
                 seq: item.seq,
                 arrived_at: now,
                 retired_at: None,
@@ -445,9 +453,9 @@ impl TransientStore {
     /// a full TTL after the peer said it was done.
     pub fn retire(
         &mut self,
-        scope: &TransientScope,
+        scope: &Target,
         kind: TransientKind,
-        session_epoch: [u8; 16],
+        connection_epoch: [u8; 16],
         seq: u64,
         now: Instant,
     ) {
@@ -462,11 +470,11 @@ impl TransientStore {
         let covered = self
             .slots
             .get(&key)
-            .is_none_or(|slot| slot.session_epoch != session_epoch || slot.seq <= seq);
+            .is_none_or(|slot| slot.connection_epoch != connection_epoch || slot.seq <= seq);
         if covered {
             self.slots.remove(&key);
         }
-        self.retired.insert(key, (session_epoch, seq, now));
+        self.retired.insert(key, (connection_epoch, seq, now));
     }
 
     /// Drop what has expired. Called on a beat; nothing depends on when.
@@ -474,9 +482,9 @@ impl TransientStore {
         let before = self.slots.len();
         self.slots.retain(|key, slot| {
             let ttl = match key.0 {
-                TransientScope::IssueView { .. }
-                | TransientScope::DocumentView { .. }
-                | TransientScope::CustomWorld { .. } => deadline::PRESENCE_TTL,
+                Target::Body { .. } | Target::Material { .. } | Target::World { .. } => {
+                    deadline::PRESENCE_TTL
+                }
                 _ => deadline::CURSOR_TTL,
             };
             now.duration_since(slot.arrived_at) < ttl
@@ -489,15 +497,15 @@ impl TransientStore {
     }
 
     /// Everything currently believed about a scope.
-    pub fn get(&self, scope: &TransientScope, kind: TransientKind) -> Option<&TransientSlot> {
+    pub fn get(&self, scope: &Target, kind: TransientKind) -> Option<&TransientSlot> {
         self.slots.get(&(scope.clone(), kind as u8))
     }
 
     /// Drop everything a session held. What a disconnect does.
-    pub fn forget_session(&mut self, session_epoch: &[u8; 16]) -> usize {
+    pub fn forget_session(&mut self, connection_epoch: &[u8; 16]) -> usize {
         let before = self.slots.len();
         self.slots
-            .retain(|_, slot| &slot.session_epoch != session_epoch);
+            .retain(|_, slot| &slot.connection_epoch != connection_epoch);
         before - self.slots.len()
     }
 }
@@ -512,9 +520,9 @@ impl Default for TransientStore {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LiveControl {
     /// Watch these scopes. Replaces the connection's subscription set.
-    Subscribe { scopes: Vec<TransientScope> },
+    Subscribe { scopes: Vec<Target> },
     /// Stop watching, and do not let anything already in flight undo it.
-    Retire { scope: TransientScope, seq: u64 },
+    Retire { scope: Target, seq: u64 },
 }
 
 impl LiveControl {
@@ -522,23 +530,23 @@ impl LiveControl {
         postcard::to_stdvec(self).expect("postcard live control")
     }
 
-    pub fn decode_canonical(bytes: &[u8]) -> Result<Self, TransientError> {
+    pub fn decode_canonical(bytes: &[u8]) -> Result<Self, Invalid> {
         if bytes.len() > MAX_TRANSIENT_ITEM_BYTES * 8 {
-            return Err(TransientError::TooLarge);
+            return Err(Invalid::TooLarge);
         }
-        let control: Self = postcard::from_bytes(bytes).map_err(|_| TransientError::Malformed)?;
+        let control: Self = postcard::from_bytes(bytes).map_err(|_| Invalid::Malformed)?;
         if control.encode() != bytes {
-            return Err(TransientError::NonCanonical);
+            return Err(Invalid::NonCanonical);
         }
         control.validate()?;
         Ok(control)
     }
 
-    pub fn validate(&self) -> Result<(), TransientError> {
+    pub fn validate(&self) -> Result<(), Invalid> {
         match self {
             Self::Subscribe { scopes } => {
                 if scopes.len() > slots::MAX_SUBSCRIBED_SCOPES_PER_CONNECTION {
-                    return Err(TransientError::Bounds);
+                    return Err(Invalid::Bounds);
                 }
                 for scope in scopes {
                     scope.validate()?;

@@ -32,13 +32,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
-use mechanics::crypto::AuthorizedBodyKey;
+use mechanics::authorization::AuthorizedBodyKey;
 use mechanics::ids::SpaceId;
+use replica::body::{BodyBinding, Op, StaticBodyKeys, SupportedSchemas, MUTATION_ATOMIC};
+use replica::body::{BodyId, BodyKey, EncodingId, SchemaId, WorldId};
 use replica::frontier::AuthorityFrontier;
-use replica::{
-    BodyBinding, BodyId, BodyKey, BodyOp, CommitAuthorization, CommitContext, EncodingId, Replica,
-    SchemaId, SeedSigner, StaticBodyKeys, SupportedSchemas, WorldId, MUTATION_ATOMIC,
-};
+use replica::transaction::{CommitAuthorization, CommitContext, SeedSigner};
+use replica::Replica;
 
 const WRITER_SEED: [u8; 32] = [61u8; 32];
 const EPOCH: [u8; 16] = [3u8; 16];
@@ -63,7 +63,7 @@ fn world() -> WorldId {
 }
 
 fn device() -> mechanics::ids::DeviceId {
-    mechanics::crypto::device_from_seed(&WRITER_SEED)
+    mechanics::actor::device_from_seed(&WRITER_SEED)
 }
 
 fn keys() -> Arc<StaticBodyKeys> {
@@ -94,10 +94,10 @@ fn supported() -> SupportedSchemas {
 }
 
 fn demand() -> Vec<u8> {
-    use mechanics::demand::{AuthorizationDemand, PolicyCapability, PolicyResource};
+    use mechanics::authorization::{AuthorizationDemand, PolicyCapability, Resource};
     AuthorizationDemand::require(
         PolicyCapability::new("com.example.notes", "write"),
-        PolicyResource::space("com.example.notes"),
+        Resource::root("com.example.notes"),
     )
     .encode_canonical()
     .expect("canonical demand")
@@ -118,7 +118,7 @@ fn request(n: u64) -> [u8; 16] {
 
 /// One durable commit of `ops` through the public signed path. The measured
 /// operation always passes a single op; corpus construction passes many.
-fn commit(replica: &mut Replica, seq: u64, ops: &[(BodyKey, BodyOp)]) {
+fn commit(replica: &mut Replica, seq: u64, ops: &[(BodyKey, Op)]) {
     let space = space();
     let signer = SeedSigner(&WRITER_SEED);
     let ctx = CommitContext {
@@ -136,7 +136,7 @@ fn commit(replica: &mut Replica, seq: u64, ops: &[(BodyKey, BodyOp)]) {
                 parent_manifest_root: [0u8; 32],
                 demand: demand(),
                 intent_digest: [7u8; 32],
-                authorizer: &replica::StaticAuthorizer {
+                authorizer: &replica::transaction::StaticAuthorizer {
                     world: world(),
                     implementation_id: [0u8; 32],
                 },
@@ -155,10 +155,10 @@ fn commit(replica: &mut Replica, seq: u64, ops: &[(BodyKey, BodyOp)]) {
         .expect("durable commit");
 }
 
-fn replace(key: &BodyKey, value: &[u8]) -> (BodyKey, BodyOp) {
+fn replace(key: &BodyKey, value: &[u8]) -> (BodyKey, Op) {
     (
         key.clone(),
-        BodyOp::ReplaceAtomic {
+        Op::ReplaceAtomic {
             value: value.to_vec(),
         },
     )
@@ -256,7 +256,7 @@ struct Measurement {
 /// Build `bodies` Bodies, then time `samples` further single-Body edits.
 fn measure(bodies: u64, samples: usize) -> Measurement {
     let dir = temp_store(&format!("{bodies}"));
-    let mut replica = Replica::open_journaled(&dir, keys()).expect("open store");
+    let mut replica = Replica::open(&dir, keys()).expect("open store");
     replica.set_supported(supported());
 
     let quota = *replica.quota();
@@ -272,7 +272,7 @@ fn measure(bodies: u64, samples: usize) -> Measurement {
     let mut seq = 0u64;
     while created < bodies {
         let batch = CORPUS_BATCH.min(bodies - created);
-        let ops: Vec<(BodyKey, BodyOp)> = (created..created + batch)
+        let ops: Vec<(BodyKey, Op)> = (created..created + batch)
             .map(|n| replace(&body(n), &payload))
             .collect();
         commit(&mut replica, seq, &ops);

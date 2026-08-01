@@ -1,3 +1,9 @@
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    clippy::indexing_slicing,
+    reason = "private finite-field share operations run only over facade-validated holder matrices"
+)]
 //! General-access Schnorr signing over a compiled access structure.
 //!
 //! The compiled access control is a monotone span program: a qualified leaf set
@@ -45,7 +51,7 @@ use curve25519_dalek::edwards::EdwardsPoint;
 use curve25519_dalek::scalar::Scalar;
 use curve25519_dalek::traits::Identity;
 
-use crate::authority::LeafId;
+use crate::authority::Holder;
 use crate::compile::{ReconstructionWitness, StructurallyValidatedCompiledPolicy};
 
 const CHALLENGE_DOMAIN: &[u8] = b"lait/space/1/gaccess/1/challenge";
@@ -65,7 +71,7 @@ fn random_scalar() -> Scalar {
 pub struct Dealing {
     secret: Scalar,
     public: EdwardsPoint,
-    shares: BTreeMap<LeafId, Scalar>,
+    shares: BTreeMap<Holder, Scalar>,
 }
 
 /// What signing needs from a key: the group public key and the caller's own
@@ -77,7 +83,7 @@ pub trait KeyShares {
     /// The group public key `Y = xG`, compressed.
     fn public_key(&self) -> [u8; 32];
     /// This holder's share for `leaf`, if it operates it.
-    fn share(&self, leaf: &LeafId) -> Option<Scalar>;
+    fn share(&self, leaf: &Holder) -> Option<Scalar>;
 }
 
 impl Dealing {
@@ -93,7 +99,7 @@ impl KeyShares for Dealing {
     fn public_key(&self) -> [u8; 32] {
         self.public.compress().to_bytes()
     }
-    fn share(&self, leaf: &LeafId) -> Option<Scalar> {
+    fn share(&self, leaf: &Holder) -> Option<Scalar> {
         self.shares.get(leaf).copied()
     }
 }
@@ -157,7 +163,7 @@ pub fn commit() -> (Nonce, Commitment) {
 }
 
 /// The per-signer binding factor `ρ_i = H(domain, leaf, msg, all commitments)`.
-fn binding_factor(leaf: &LeafId, msg: &[u8], commitments: &[(LeafId, Commitment)]) -> Scalar {
+fn binding_factor(leaf: &Holder, msg: &[u8], commitments: &[(Holder, Commitment)]) -> Scalar {
     let mut h = blake3::Hasher::new();
     h.update(BINDING_DOMAIN);
     h.update(leaf.as_str().as_bytes());
@@ -174,8 +180,8 @@ fn binding_factor(leaf: &LeafId, msg: &[u8], commitments: &[(LeafId, Commitment)
 /// The group nonce `R = Σ (D_i + ρ_i E_i)` and each signer's binding factor.
 fn group_nonce(
     msg: &[u8],
-    commitments: &[(LeafId, Commitment)],
-) -> (EdwardsPoint, BTreeMap<LeafId, Scalar>) {
+    commitments: &[(Holder, Commitment)],
+) -> (EdwardsPoint, BTreeMap<Holder, Scalar>) {
     let mut r = EdwardsPoint::identity();
     let mut factors = BTreeMap::new();
     for (leaf, c) in commitments {
@@ -213,12 +219,12 @@ pub struct Signature {
 /// One signer's contribution, given its nonce, its reconstruction coefficient
 /// `λ_i`, its share `s_i`, and the round-1 commitments.
 fn sign_share(
-    leaf: &LeafId,
+    leaf: &Holder,
     nonce: &Nonce,
     coeff: Scalar,
     share: Scalar,
     msg: &[u8],
-    commitments: &[(LeafId, Commitment)],
+    commitments: &[(Holder, Commitment)],
     y: &[u8; 32],
 ) -> Scalar {
     let (r, factors) = group_nonce(msg, commitments);
@@ -237,8 +243,8 @@ fn sign_share(
 pub fn sign_qualified<K: KeyShares>(
     witness: &ReconstructionWitness,
     key: &K,
-    nonces: &BTreeMap<LeafId, Nonce>,
-    commitments: &[(LeafId, Commitment)],
+    nonces: &BTreeMap<Holder, Nonce>,
+    commitments: &[(Holder, Commitment)],
     msg: &[u8],
 ) -> Option<Signature> {
     let y = key.public_key();
@@ -302,19 +308,19 @@ pub(crate) fn decompress_prime_order(bytes: &[u8; 32]) -> Option<EdwardsPoint> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::authority::PrincipalId;
+    use crate::authority::Principal;
     use crate::compile::{compile, StructurallyValidatedCompiledPolicy};
     use crate::expand::{expand, PrincipalCustody, PrincipalDescriptor};
     use crate::policy::OwnershipPolicy;
 
-    fn prin(n: u8) -> PrincipalId {
-        PrincipalId::of_device(&crate::crypto::device_from_seed(&[n; 32]))
+    fn prin(n: u8) -> Principal {
+        Principal::of_device(&crate::crypto::device_from_seed(&[n; 32]))
     }
     fn key(n: u8) -> OwnershipPolicy {
         OwnershipPolicy::Key(prin(n))
     }
-    fn resolver() -> impl Fn(&PrincipalId) -> Option<PrincipalDescriptor> {
-        |p: &PrincipalId| {
+    fn resolver() -> impl Fn(&Principal) -> Option<PrincipalDescriptor> {
+        |p: &Principal| {
             Some(PrincipalDescriptor {
                 id: p.clone(),
                 custody: PrincipalCustody::Direct {
@@ -323,7 +329,7 @@ mod tests {
             })
         }
     }
-    fn compiled(o: OwnershipPolicy) -> (StructurallyValidatedCompiledPolicy, Vec<LeafId>) {
+    fn compiled(o: OwnershipPolicy) -> (StructurallyValidatedCompiledPolicy, Vec<Holder>) {
         let canon = o.canonicalize().unwrap();
         let exp = expand(&canon, &resolver()).unwrap();
         let c = compile(&exp).unwrap();
@@ -336,7 +342,7 @@ mod tests {
     fn session(
         compiled: &StructurallyValidatedCompiledPolicy,
         dealing: &Dealing,
-        signers: &[LeafId],
+        signers: &[Holder],
         msg: &[u8],
     ) -> Option<bool> {
         let witness = compiled.reconstruct(signers)?; // None ⇒ unqualified

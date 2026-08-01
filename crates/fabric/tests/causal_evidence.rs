@@ -2,7 +2,7 @@
 //!
 //! Plan 13 F0 item 8 may not be closed by argument. These tests measure the
 //! pinned Loro 1.13.6 directly and record which of §5.2's three outcomes it
-//! reaches. They name `loro` because this is the fabric package, the one place
+//! reaches. They name `loro` because this is the Engine package, the one place
 //! the workspace permits it.
 //!
 //! The question: a fresh random peer id per writable Station activation grows
@@ -200,7 +200,7 @@ fn a_full_archive_readmits_pre_checkpoint_work() {
 
 #[test]
 fn a_frontier_outside_local_history_does_not_convert() {
-    // Why `FabricVersion` cannot be the wire input to a delta computation:
+    // Why `Version` cannot be the wire input to a delta computation:
     // expanding a frontier needs the DAG it names. A diverged peer cannot do it.
     let a = configured(1);
     a.get_text("body").insert(0, "a").expect("insert");

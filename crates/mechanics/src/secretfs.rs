@@ -1,3 +1,8 @@
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    reason = "platform FFI requires explicit pointer and ABI-width conversions after checked buffer construction"
+)]
 //! Creating secrets with an explicit private-storage boundary, on every platform.
 //!
 //! Key material (FROST shares, signing nonces, the break-glass recovery keys)
@@ -107,33 +112,33 @@ pub fn persist_replace(tmp: &Path, final_path: &Path) -> std::io::Result<()> {
 /// stored — for an N-of-N recovery group, the difference between a degraded
 /// holder and an unrecoverable space.
 #[derive(Debug)]
-pub enum SecretError {
+pub enum Failure {
     /// The file exists but could not be read.
     Io(std::io::Error),
     /// The file exists and is wrapped, but not for this account/machine.
     Undecryptable(String),
 }
 
-impl std::fmt::Display for SecretError {
+impl std::fmt::Display for Failure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SecretError::Io(e) => write!(f, "{e}"),
-            SecretError::Undecryptable(m) => write!(f, "{m}"),
+            Failure::Io(e) => write!(f, "{e}"),
+            Failure::Undecryptable(m) => write!(f, "{m}"),
         }
     }
 }
-impl std::error::Error for SecretError {}
+impl std::error::Error for Failure {}
 
 /// Read a file written by [`write_private`], unwrapping if needed.
 ///
 /// `Ok(None)` means **absent**. A file that exists but cannot be produced is an
 /// `Err`, never `None`, so callers can distinguish "no secret was ever stored"
 /// from "a secret is here and this identity cannot open it".
-pub fn read_private(path: &Path) -> std::result::Result<Option<Vec<u8>>, SecretError> {
+pub fn read_private(path: &Path) -> std::result::Result<Option<Vec<u8>>, Failure> {
     let raw = match std::fs::read(path) {
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(SecretError::Io(e)),
+        Err(e) => return Err(Failure::Io(e)),
     };
     match raw.strip_prefix(DPAPI_MAGIC) {
         Some(blob) => imp::unwrap(blob).map(Some),
@@ -172,8 +177,8 @@ mod imp {
     pub(super) fn wrap(bytes: &[u8]) -> Result<Vec<u8>> {
         Ok(bytes.to_vec())
     }
-    pub(super) fn unwrap(_blob: &[u8]) -> std::result::Result<Vec<u8>, SecretError> {
-        Err(SecretError::Undecryptable(
+    pub(super) fn unwrap(_blob: &[u8]) -> std::result::Result<Vec<u8>, Failure> {
+        Err(Failure::Undecryptable(
             "this secret is DPAPI-wrapped and can only be read on the Windows account that wrote it"
                 .into(),
         ))
@@ -415,7 +420,7 @@ mod imp {
         }
     }
 
-    pub(super) fn unwrap(blob: &[u8]) -> std::result::Result<Vec<u8>, SecretError> {
+    pub(super) fn unwrap(blob: &[u8]) -> std::result::Result<Vec<u8>, Failure> {
         unsafe {
             let input = CRYPT_INTEGER_BLOB {
                 cbData: blob.len() as u32,
@@ -435,7 +440,7 @@ mod imp {
                 &mut out,
             ) == 0
             {
-                return Err(SecretError::Undecryptable(format!(
+                return Err(Failure::Undecryptable(format!(
                     "this secret was protected under a different Windows account or machine ({})",
                     std::io::Error::last_os_error()
                 )));
@@ -582,7 +587,7 @@ mod tests {
         std::fs::write(&path, &corrupt).unwrap();
 
         match read_private(&path) {
-            Err(SecretError::Undecryptable(_)) => {}
+            Err(Failure::Undecryptable(_)) => {}
             other => panic!("expected Undecryptable, got {other:?}"),
         }
         // And it is emphatically not reported as missing.

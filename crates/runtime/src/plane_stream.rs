@@ -1,3 +1,9 @@
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    clippy::expect_used,
+    reason = "stream frame lengths are validated before allocation and conversion"
+)]
 //! One framing, and one way to find out what a stream is.
 //!
 //! Freight grew its own length-prefixed framing because it was the first plane
@@ -10,7 +16,7 @@
 //! before a buffer that size exists.** Reading first and checking after is not
 //! a bound, it is a bound-shaped comment on an allocation a peer already chose.
 //!
-//! The other half is `read_stream_kind`. `planes::stream_kind` distinguishes a
+//! The other half is `read_stream_kind`. `plane::stream_kind` distinguishes a
 //! kind this build does not implement *yet* from one it has never heard of, and
 //! that distinction had no reader. It matters: a reserved kind is a peer
 //! speaking a protocol we agreed to and have not finished, so the stream is
@@ -18,7 +24,7 @@
 //! something else, which is worth counting separately even though the immediate
 //! response is the same.
 
-use crate::planes::{bounds, stream_kind};
+use crate::plane::{bounds, stream_kind};
 
 /// The length prefix every framed message carries.
 ///
@@ -30,7 +36,7 @@ pub const FRAME_PREFIX: usize = 4;
 
 /// Why a framed read did not produce a message.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum StreamError {
+pub enum Invalid {
     /// The flow ended before the message did.
     Truncated,
     /// A declared length past what this side will allocate.
@@ -46,7 +52,7 @@ pub enum StreamError {
     UnknownKind(u8),
 }
 
-impl std::fmt::Display for StreamError {
+impl std::fmt::Display for Invalid {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{self:?}")
     }
@@ -65,21 +71,16 @@ pub fn frame(body: &[u8]) -> Vec<u8> {
 /// `max` is the caller's ceiling and is intersected with the plane-wide control
 /// bound rather than replacing it — a caller cannot raise the protocol's limit
 /// by asking, only lower it for its own use.
-pub async fn read_framed(
-    flow: &mut dyn comms::RecvFlow,
-    max: usize,
-) -> Result<Vec<u8>, StreamError> {
+pub async fn read_framed(flow: &mut dyn comms::RecvFlow, max: usize) -> Result<Vec<u8>, Invalid> {
     let header = flow
         .read_exact(FRAME_PREFIX)
         .await
-        .map_err(|_| StreamError::Truncated)?;
+        .map_err(|_| Invalid::Truncated)?;
     let len = u32::from_le_bytes(header.try_into().expect("four bytes")) as usize;
     if len > max.min(bounds::MAX_CONTROL_FRAME_BYTES) {
-        return Err(StreamError::TooLarge);
+        return Err(Invalid::TooLarge);
     }
-    flow.read_exact(len)
-        .await
-        .map_err(|_| StreamError::Truncated)
+    flow.read_exact(len).await.map_err(|_| Invalid::Truncated)
 }
 
 /// Read the one byte that says what a stream is.
@@ -93,18 +94,15 @@ pub async fn read_framed(
 /// - unknown: outside the vocabulary. Same immediate response, different
 ///   counter — one of these is a version skew and the other is noise, and an
 ///   operator looking at a Station wants to know which.
-pub async fn read_stream_kind(flow: &mut dyn comms::RecvFlow) -> Result<u8, StreamError> {
-    let byte = flow
-        .read_exact(1)
-        .await
-        .map_err(|_| StreamError::Truncated)?;
-    let kind = byte.first().copied().ok_or(StreamError::Truncated)?;
+pub async fn read_stream_kind(flow: &mut dyn comms::RecvFlow) -> Result<u8, Invalid> {
+    let byte = flow.read_exact(1).await.map_err(|_| Invalid::Truncated)?;
+    let kind = byte.first().copied().ok_or(Invalid::Truncated)?;
     if stream_kind::is_implemented(kind) {
         Ok(kind)
     } else if stream_kind::is_reserved(kind) {
-        Err(StreamError::ReservedKind(kind))
+        Err(Invalid::ReservedKind(kind))
     } else {
-        Err(StreamError::UnknownKind(kind))
+        Err(Invalid::UnknownKind(kind))
     }
 }
 
@@ -136,7 +134,7 @@ mod tests {
 
     #[test]
     fn a_reserved_kind_and_an_unknown_one_are_different_answers() {
-        // The distinction `planes::stream_kind` draws and nothing read until
+        // The distinction `plane::stream_kind` draws and nothing read until
         // now. A reserved kind is a peer using a reservation we published; an
         // unknown one is a peer speaking something else. Both reset the stream;
         // only one of them means a version skew.

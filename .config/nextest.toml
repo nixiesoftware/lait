@@ -62,7 +62,10 @@ slow-timeout = { period = "30s", terminate-after = 3 }
 # to allow. 5 × 120 s keeps a genuine wedge surfacing within ten minutes while
 # giving the slowest supported runner ~7× the measured single-machine time.
 [[profile.default.overrides]]
-filter = 'binary(ceremony_frontier_isolation) + binary(mechanics_sparse_ceremony)'
+filter = '''
+    binary(mechanics)
+    & (test(frontier_isolation_tests) + test(sparse_ceremony_tests))
+'''
 slow-timeout = { period = "120s", terminate-after = 5 }
 
 # The smoke-scale performance gate builds a ~500-request corpus through the
@@ -109,3 +112,121 @@ filter = '''
 '''
 test-group = 'network'
 retries = 1
+
+# ===========================================================================
+# Tiers
+# ===========================================================================
+# A test suite has more than one job, and the jobs want different budgets. The
+# profiles below name those jobs so the budget is a property of the tier rather
+# than something re-argued per workflow.
+#
+#   default        every test, no exclusions — local dev, and any job that
+#                  passes its own `-E` (a default-filter would silently narrow
+#                  such a filter, which is precisely the failure the named
+#                  gates exist to prevent).
+#   pr             Linux, every push. Everything the nightly tier does not own.
+#   pr-platform    Windows + macOS, every push. The OS seam only — see below.
+#   nightly        everything at full count, plus the suites whose value is
+#                  real rather than fast.
+#
+# What separates the tiers is not importance. It is whether the cost is paid
+# per push by someone waiting. A 10,000-iteration FROST gate is not less
+# important than a DTO fixture; it is a thing to learn about within a day
+# rather than within a minute.
+
+# The heavy set, measured on an idle 12-core dev box with dependencies built
+# optimized (the `[profile.dev.package."*"]` note in Cargo.toml):
+#
+#   mechanics frontier_isolation_tests  143 s
+#   mechanics sparse_ceremony_tests     133 s
+#   lait      commit_cost_baseline       80 s
+#   lait      issues_reference_perf     ~27 s, and restarts a real daemon twice
+#
+# Those four are ~85% of the suite's cost. The real-network suites join them
+# not for time but for dependence: they put traffic on a staging relay, they
+# carry `retries = 1` because that is nondeterministic by nature, and a relay
+# hiccup should not be able to red a PR that did not touch networking. iroh
+# itself draws this line the same way — netsim in CI, real relays sparingly.
+
+[profile.pr]
+# Linux, every push. `commit_cost_baseline` stays: it is 80 s on a dev box but
+# the Linux runner does the whole suite in ~1 min, and a commit-cost regression
+# is exactly the kind of thing that is cheap to catch now and expensive later.
+default-filter = '''
+    not (
+        binary(issues_reference_perf)
+        + (binary(mechanics) & (test(frontier_isolation_tests) + test(sparse_ceremony_tests)))
+        + binary(orbital_join_iroh)
+        + binary(contact_iroh)
+        + (package(comms) & kind(test))
+    )
+'''
+
+[profile.pr-platform]
+# Windows + macOS, every push. What these runners uniquely prove is that the
+# OS seam holds, and most of that proof is the COMPILER's: a `cargo check
+# --all-targets` is what fails the moment a `UnixStream` or `std::os::fd`
+# reaches the control/lock path. What is left for tests is the behaviour no
+# type check can see — a named pipe that binds, an advisory lock that excludes
+# a second instance, a path that survives NTFS, a device name that is not a
+# file, an fsync that lands.
+#
+# `kind(lib)` is that surface, and selecting it by KIND rather than by name is
+# deliberate: every `cfg(windows)` / `cfg(unix)` island in this workspace lives
+# in a crate's `src/`, so the unit tests of every crate cover the seam by
+# construction and keep covering it when someone adds an island tomorrow. A
+# hand-kept list of binary names would rot — the previous selector list rotting
+# is why the commit before this one exists.
+#
+# The named binaries are the end-to-end half: the daemon actually spawning,
+# actually binding its control channel, actually taking the single-instance
+# lock, over the real OS rather than in-process.
+#
+# Excluded from `kind(lib)`: the two mechanics ceremony gates, which are CPU
+# gates rather than platform gates — 10,000 iterations of real DKG proves the
+# same thing on every OS, and on a 2-core windows-latest it proves it slowly.
+default-filter = '''
+    (
+        kind(lib)
+        + binary(lait_daemon)
+        + binary(control_plane)
+        + binary(control_classification)
+        + binary(live_control)
+        + binary(restart_reconnect)
+        + binary(cli_safety)
+        + binary(cli_surfaces)
+        + binary(seed_registry)
+        + binary(station_lifecycle)
+        + binary(content_ipc)
+    )
+    - (binary(mechanics) & (test(frontier_isolation_tests) + test(sparse_ceremony_tests)))
+'''
+
+[profile.nightly]
+# Everything, at full count, where nobody is waiting on it. The heavy suites
+# get their own budgets here rather than inheriting a PR-shaped one; the
+# workflow additionally sets LAIT_COMMIT_BASELINE_FULL and a raised
+# PROPTEST_CASES, which are corpus-size knobs rather than nextest settings.
+retries = 1
+
+[[profile.nightly.overrides]]
+filter = '''
+    binary(issues_reference_perf)
+    + binary(commit_cost_baseline)
+    + (binary(mechanics) & (test(frontier_isolation_tests) + test(sparse_ceremony_tests)))
+'''
+slow-timeout = { period = "300s", terminate-after = 8 }
+
+[[profile.nightly.overrides]]
+filter = '''
+    binary(orbital_join_iroh)
+    + binary(restart_reconnect)
+    + binary(guided_join)
+    + binary(seed_registry)
+    + binary(control_plane)
+    + binary(cli_safety)
+    + binary(contact_iroh)
+    + (package(comms) & kind(test))
+'''
+test-group = 'network'
+retries = 2

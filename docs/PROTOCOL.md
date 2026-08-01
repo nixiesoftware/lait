@@ -9,7 +9,7 @@ the local daemon control channel. Rust type names are not wire specifications.
 - `SpaceId` identifies one cryptographic and replication boundary.
 - `ActorId` identifies a member within a Space.
 - `DeviceId` identifies an actor device key.
-- `StationId` identifies a device's active network endpoint.
+- `Key` identifies a device's active network endpoint.
 - `WorldId` identifies a semantic World.
 - `BodyId` is meaningful only with its World and Space.
 
@@ -109,7 +109,7 @@ The receiving Contact state machine still performs canonical decoding and all
 signature, peer, protocol, responder, and Space checks; local demultiplexing is
 not authority and changes no wire bytes. Presence probes follow the same rule.
 
-The Contact protocol field is currently version 2. The ALPN and individual
+The Contact protocol field is version 2. The ALPN and individual
 domain strings have their own versioning and must not be inferred from that
 field. A clean format break updates the affected bytes and fixtures atomically.
 
@@ -218,7 +218,7 @@ authorization.
 ## 10. Local control channel
 
 CLI, web, and MCP clients enter one local protocol. A request carries an
-explicit bridge route:
+explicit control route:
 
 - `daemon` for the process-level catalog and daemon lifecycle;
 - `space { orbit, space }` for Mechanics, Station, observations, and lifecycle
@@ -229,14 +229,14 @@ explicit bridge route:
 `space` is repeated as an expectation. Distinct local Orbits in the same Space
 therefore remain independently addressable, and a stale or confused binding
 fails before activation. A trusted client adapter validates the complete route
-against its `ClientScope`, the LaitDaemon resolves it through its own
-`OrbitDirectory`, and the receiving bridge independently validates its address.
+against its `ClientScope`, the daemon::Daemon resolves it through its own
+`orbits::Catalog`, and the receiving endpoint independently validates its address.
 The allowed set is never accepted as a claim in the request.
 
 A missing route is accepted only by the historical per-home adapter: its socket
 identifies one Orbit and the uniquely claiming bundled World package is
 selected. An absent or ambiguous package claim rejects. The identity-scoped
-LaitDaemon endpoint requires an explicit route. A version handshake precedes
+daemon::Daemon endpoint requires an explicit route. A version handshake precedes
 requests. The production request classifier assigns every historical typed
 request exactly one terminal owner; there is no wildcard product fallback.
 
@@ -248,7 +248,7 @@ the daemon from product payload shape.
 
 The optional `if_running: true` envelope field is reserved for passive,
 explicitly Space-routed status, identity display, and configuration reload.
-LaitDaemon resolves and validates the complete Orbit address, then queries only
+daemon::Daemon resolves and validates the complete Orbit address, then queries only
 an already-live compatibility adapter; it does not place a vacant Orbit. Other
 verbs and routes reject this mode. The field is omitted for ordinary dispatch,
 preserving the existing envelope shape.
@@ -271,13 +271,13 @@ client cannot grant itself read-only treatment with a wire flag. Replies repeat
 the exact `(world, operation, version)` tuple so a product codec cannot accept a
 reply for another contract.
 
-An owned Station receives the call directly through its in-process SpaceBridge.
-An attached SpaceBridge receives the identical opaque envelope through its
+An owned Station receives the call directly through its in-process StationHost.
+An attached StationHost receives the identical opaque envelope through its
 per-Orbit socket. Protocol v5 retired the typed product-request path;
 protocol v6 removed product host projections from root `Request`/`Response`.
 Older processes are outside the compatibility window and must restart before
 attachment. The issue-tracker application emits
-`com.lait.issues` / `issues.control` v1; LaitDaemon does not infer or hardcode
+`com.lait.issues` / `issues.control` v1; daemon::Daemon does not infer or hardcode
 either value.
 
 Product client packages decode `WorldReply.payload`, own presentation for CLI
@@ -294,11 +294,11 @@ to Space authority; inbox supplies a local watermark to an Issues query and
 advances it only after success. Root control never receives role, project, or
 product-response vocabulary.
 
-Product calls then reach the named World's registered handler, WorldBridge, and
+Product calls then reach the named World's registered handler, WorldHost, and
 docked Session.
 Membership, devices, custody, and ceremonies reach Mechanics. Neighbor and
 Contact operations reach Station. Lifecycle operations reach Runtime/Orbit/
-Station. Clients never open Replica or Fabric directly.
+Station. Clients never open Replica or Engine directly.
 
 JSON responses are strict versioned DTOs rather than serialized internal
 objects. Unknown fields reject where the schema says strict; decoded lengths and
@@ -347,7 +347,7 @@ from "never heard of it" would have an oracle for what a Space contains,
 answerable by guessing ids.
 
 An owned Station serves the call in process, so the body crosses from the socket
-to the sealer without leaving that address space. An attached SpaceBridge is
+to the sealer without leaving that address space. An attached StationHost is
 proxied byte for byte down its per-Orbit socket, never refused: `Attached` is a
 reachable placement, and a surface that works only when the Station happens to
 be in-process has a hidden precondition. Sealing runs on a blocking thread
@@ -370,7 +370,7 @@ is here. Three rules follow, and they shape everything else:
 - **Nothing has a goodbye.** A tab closing, a laptop sleeping and a network
   dropping all deliver exactly nothing, so every slot carries its own expiry.
   Retirement is an optimisation on top of that and never a prerequisite.
-- **Epochs are compared, never ordered.** A `session_epoch` is sixteen random
+- **Epochs are compared, never ordered.** A `connection_epoch` is sixteen random
   bytes minted per reconnect, so two of them have no order. The only answerable
   question is whether an item's epoch is the one this session was admitted at.
 - **The table is bounded and everything in it is evictable**, because nothing in
@@ -512,7 +512,7 @@ answer has a boundary inside it.
 before the client finishes its handshake, and the client's initial bytes can be
 replayed by an attacker who intercepts handshake packets. A replayed opening
 must not allocate a second session, consume a budget twice, or mint state the
-first one already minted; `session_id` and `session_epoch` together are what
+first one already minted; `connection_id` and `connection_epoch` together are what
 make a replay recognisable. No lane whose demand has an effect may dispatch on
 0.5-RTT data — reads and availability answers are idempotent and safe, anything
 that writes waits for a completed handshake.

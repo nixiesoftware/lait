@@ -571,7 +571,7 @@ pub struct CommentAnchorDto {
 /// number that was right once, and every edit made after the comment is a
 /// chance for it to become the silently wrong index the anchor algebra exists
 /// to rule out. The transient plane states the same rule for carets
-/// (`runtime::live::CaretState`); this is the durable half, where the window
+/// (`runtime::plane::live::CaretState`); this is the durable half, where the window
 /// for going stale is the lifetime of the issue rather than a few seconds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]

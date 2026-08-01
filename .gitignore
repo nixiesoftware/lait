@@ -16,3 +16,8 @@ viewer/dist/
 /docs/SCHEMA.md
 /docs/SERVE.md
 /docs/RELEASE-SIGNING-RUNBOOK.local.md
+
+# The coverage manifest check writes this beside the committed file so CI can
+# upload it as an artifact; it is the ANSWER, never the record.
+ci/coverage-manifest.txt.actual
+ci/coverage-manifest.txt.new

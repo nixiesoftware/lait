@@ -70,7 +70,7 @@ fn topic_id(t: Topic) -> TopicId {
 /// One wire frame: u32 big-endian body length, then the body verbatim.
 fn encode_frame(body: &[u8]) -> Result<Vec<u8>> {
     let len = u32::try_from(body.len()).map_err(|_| anyhow!("frame too large"))?;
-    let mut buf = Vec::with_capacity(4 + body.len());
+    let mut buf = Vec::with_capacity(4usize.saturating_add(body.len()));
     buf.extend_from_slice(&len.to_be_bytes());
     buf.extend_from_slice(body);
     Ok(buf)
@@ -249,6 +249,7 @@ impl ProtocolHandler for SessionHandler {
                 connection: Box::new(IrohConnection {
                     alpn: self.alpn.to_vec(),
                     peer: from,
+                    datagram_capacity: conn.max_datagram_size(),
                     conn,
                 }),
                 opening: Vec::new(),
@@ -262,6 +263,7 @@ impl ProtocolHandler for SessionHandler {
 struct IrohConnection {
     alpn: Vec<u8>,
     peer: PeerId,
+    datagram_capacity: Option<usize>,
     conn: Connection,
 }
 
@@ -286,10 +288,11 @@ impl super::Connection for IrohConnection {
 
     async fn accept_bi(&self) -> Result<Option<(Box<dyn SendFlow>, Box<dyn RecvFlow>)>> {
         match self.conn.accept_bi().await {
-            Ok((send, recv)) => Ok(Some((
-                Box::new(IrohSendFlow(send)) as Box<dyn SendFlow>,
-                Box::new(IrohRecvFlow(recv)) as Box<dyn RecvFlow>,
-            ))),
+            Ok((send, recv)) => {
+                let send: Box<dyn SendFlow> = Box::new(IrohSendFlow(send));
+                let recv: Box<dyn RecvFlow> = Box::new(IrohRecvFlow(recv));
+                Ok(Some((send, recv)))
+            }
             Err(e) if is_clean_end(&e) => Ok(None),
             Err(e) => Err(anyhow!("accept bidirectional flow: {e}")),
         }
@@ -302,13 +305,22 @@ impl super::Connection for IrohConnection {
 
     async fn accept_uni(&self) -> Result<Option<Box<dyn RecvFlow>>> {
         match self.conn.accept_uni().await {
-            Ok(recv) => Ok(Some(Box::new(IrohRecvFlow(recv)) as Box<dyn RecvFlow>)),
+            Ok(recv) => {
+                let recv: Box<dyn RecvFlow> = Box::new(IrohRecvFlow(recv));
+                Ok(Some(recv))
+            }
             Err(e) if is_clean_end(&e) => Ok(None),
             Err(e) => Err(anyhow!("accept flow: {e}")),
         }
     }
 
     fn send_datagram(&self, payload: &[u8]) -> Result<()> {
+        if self
+            .datagram_capacity
+            .is_some_and(|capacity| payload.len() > capacity)
+        {
+            anyhow::bail!("datagram exceeds the current path capacity");
+        }
         self.conn
             .send_datagram(payload.to_vec().into())
             .map_err(|e| anyhow!("send datagram: {e}"))
@@ -323,7 +335,7 @@ impl super::Connection for IrohConnection {
     }
 
     fn datagram_capacity(&self) -> Option<usize> {
-        self.conn.max_datagram_size()
+        self.datagram_capacity
     }
 
     fn close(&self, code: u32, reason: &[u8]) {
@@ -442,7 +454,9 @@ impl IrohStream {
             };
             self.bi = Some(pair);
         }
-        Ok(self.bi.as_mut().expect("just set"))
+        self.bi
+            .as_mut()
+            .ok_or_else(|| anyhow!("bidirectional stream was not established"))
     }
 }
 
@@ -463,7 +477,8 @@ impl Stream for IrohStream {
     /// than the legacy `read_msg`, which mapped every read error to a quiet
     /// end: exactly the silent-partial-sync failure mode).
     async fn recv(&mut self) -> Result<Option<Vec<u8>>> {
-        self.recv_bounded(MAX_FRAME as usize).await
+        self.recv_bounded(usize::try_from(MAX_FRAME).unwrap_or(usize::MAX))
+            .await
     }
 
     async fn recv_bounded(&mut self, max: usize) -> Result<Option<Vec<u8>>> {
@@ -477,12 +492,13 @@ impl Stream for IrohStream {
         }
         let len = u32::from_be_bytes(len_buf);
         check_frame_len(len)?;
-        if len as usize > max {
+        let len = usize::try_from(len).map_err(|_| anyhow!("frame length is not addressable"))?;
+        if len > max {
             return Err(anyhow!(
                 "frame length {len} exceeds protocol limit of {max} bytes"
             ));
         }
-        let mut buf = vec![0u8; len as usize];
+        let mut buf = vec![0u8; len];
         recv.read_exact(&mut buf).await.context("read frame body")?;
         Ok(Some(buf))
     }
@@ -620,6 +636,7 @@ impl Transport for IrohTransport {
         Ok(Box::new(IrohConnection {
             alpn: alpn.to_vec(),
             peer,
+            datagram_capacity: conn.max_datagram_size(),
             conn,
         }))
     }
@@ -729,7 +746,7 @@ mod tests {
     /// conversions at this edge are exact inverses.
     #[test]
     fn id_topic_conversions() {
-        let device = mechanics::crypto::device_from_seed(&[7u8; 32]);
+        let device = mechanics::actor::device_from_seed(&[7u8; 32]);
         let ep = endpoint_id(&device).expect("a lait device id is a valid endpoint id");
         assert_eq!(peer_id(ep), device, "peer_id ∘ endpoint_id = identity");
 

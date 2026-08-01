@@ -1,20 +1,20 @@
-//! `ProtectedBodyPayload` — the canonical plaintext a protected Body object
+//! `Material` — the canonical plaintext a protected Body object
 //! seals, and the key-source seam Replica consults to seal/open it.
 //!
 //! The canonical plaintext is a versioned tuple scoped to **exactly one Body**:
 //! its mutation model, its canonical payload (an atomic Body's application
-//! bytes, or a collaborative Body's canonical per-Body Fabric export — never a
+//! bytes, or a collaborative Body's canonical per-Body Engine export — never a
 //! whole-engine or cross-Body snapshot), and the base/resulting Replica
 //! frontiers of the transaction that produced it. The persisted envelope is
 //! exactly `epoch_id[16] || nonce[12] || ciphertext_and_tag` (the existing
 //! construction — no new cryptography), produced by
-//! [`mechanics::crypto::body_seal`] under an opaque
-//! [`mechanics::crypto::AuthorizedBodyKey`] capability that mechanics-side
+//! [`mechanics::authorization::body_seal`] under an opaque
+//! [`mechanics::authorization::AuthorizedBodyKey`] capability that mechanics-side
 //! policy mints. Replica selects the capability under Space policy and passes
 //! it only to seal/open; nothing here decides epoch legitimacy.
 
 use fabric::BodyExport;
-use mechanics::crypto::{AuthorizedBodyKey, BODY_ENVELOPE_OVERHEAD, BODY_EPOCH_ID_LEN};
+use mechanics::authorization::{AuthorizedBodyKey, BODY_ENVELOPE_OVERHEAD, BODY_EPOCH_ID_LEN};
 use serde::{Deserialize, Serialize};
 
 use crate::frontier::ReplicaFrontier;
@@ -35,7 +35,7 @@ pub const MUTATION_COLLABORATIVE: u8 = 2;
 /// The canonical protected-Body plaintext. `version` is exactly 1 and
 /// `mutation_model` must agree with the payload variant.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProtectedBodyPayload {
+pub struct Material {
     pub version: u8,
     pub mutation_model: u8,
     pub payload: BodyExport,
@@ -44,10 +44,10 @@ pub struct ProtectedBodyPayload {
 }
 
 /// Why a protected payload failed. Commitment and AEAD failures share
-/// [`ProtectedError::InvalidProtectedBody`] deliberately — no oracle
+/// [`Invalid::InvalidProtectedBody`] deliberately — no oracle
 /// distinguishes them.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ProtectedError {
+pub enum Invalid {
     /// Malformed envelope, wrong key, failed authentication, non-canonical
     /// plaintext, or a model/variant disagreement.
     InvalidProtectedBody,
@@ -57,16 +57,19 @@ pub enum ProtectedError {
     UnsupportedVersion(u8),
     /// No authorized key material is available for a local write.
     BodyKeyUnavailable,
+    /// An accepted local protection operation could not obtain entropy or
+    /// produce ciphertext.
+    Protection(mechanics::authorization::Failure),
 }
 
-impl std::fmt::Display for ProtectedError {
+impl std::fmt::Display for Invalid {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{self:?}")
     }
 }
-impl std::error::Error for ProtectedError {}
+impl std::error::Error for Invalid {}
 
-impl ProtectedBodyPayload {
+impl Material {
     /// Build the canonical plaintext for one Body's export.
     pub fn new(
         payload: BodyExport,
@@ -87,22 +90,26 @@ impl ProtectedBodyPayload {
     }
 
     pub fn encode(&self) -> Vec<u8> {
+        #[allow(
+            clippy::expect_used,
+            reason = "derived serialization of this bounded protected material is infallible"
+        )]
         postcard::to_stdvec(self).expect("postcard protected payload")
     }
 
     /// Decode canonical plaintext bytes: size-bounded **before** decode, exact
     /// decode/re-encode equality, version and model/variant agreement.
-    pub fn decode_canonical(bytes: &[u8]) -> Result<Self, ProtectedError> {
+    pub fn decode_canonical(bytes: &[u8]) -> Result<Self, Invalid> {
         if bytes.len() > MAX_PROTECTED_PLAINTEXT {
-            return Err(ProtectedError::BodyTooLarge);
+            return Err(Invalid::BodyTooLarge);
         }
         let payload: Self =
-            postcard::from_bytes(bytes).map_err(|_| ProtectedError::InvalidProtectedBody)?;
+            postcard::from_bytes(bytes).map_err(|_| Invalid::InvalidProtectedBody)?;
         if payload.encode() != bytes {
-            return Err(ProtectedError::InvalidProtectedBody);
+            return Err(Invalid::InvalidProtectedBody);
         }
         if payload.version != 1 {
-            return Err(ProtectedError::UnsupportedVersion(payload.version));
+            return Err(Invalid::UnsupportedVersion(payload.version));
         }
         let model_ok = matches!(
             (&payload.payload, payload.mutation_model),
@@ -110,33 +117,33 @@ impl ProtectedBodyPayload {
                 | (BodyExport::Collaborative(_), MUTATION_COLLABORATIVE)
         );
         if !model_ok {
-            return Err(ProtectedError::InvalidProtectedBody);
+            return Err(Invalid::InvalidProtectedBody);
         }
         Ok(payload)
     }
 
     /// Seal the canonical plaintext under an authorized key epoch. The result
     /// is the persisted/transferred envelope.
-    pub fn seal(&self, key: &AuthorizedBodyKey) -> Result<Vec<u8>, ProtectedError> {
+    pub fn seal(&self, key: &AuthorizedBodyKey) -> Result<Vec<u8>, Invalid> {
         let plaintext = self.encode();
         if plaintext.len() > MAX_PROTECTED_PLAINTEXT {
-            return Err(ProtectedError::BodyTooLarge);
+            return Err(Invalid::BodyTooLarge);
         }
-        Ok(mechanics::crypto::body_seal(key, &plaintext))
+        mechanics::authorization::body_seal(key, &plaintext).map_err(Invalid::Protection)
     }
 
     /// Open a protected envelope with the capability for its epoch. Bounds are
     /// checked before any allocation; a commitment/authentication failure and a
     /// malformed envelope are indistinguishable.
-    pub fn open(key: &AuthorizedBodyKey, envelope: &[u8]) -> Result<Self, ProtectedError> {
+    pub fn open(key: &AuthorizedBodyKey, envelope: &[u8]) -> Result<Self, Invalid> {
         if envelope.len() > MAX_BODY_BYTES {
-            return Err(ProtectedError::BodyTooLarge);
+            return Err(Invalid::BodyTooLarge);
         }
         if envelope.len() < BODY_EPOCH_ID_LEN {
-            return Err(ProtectedError::InvalidProtectedBody);
+            return Err(Invalid::InvalidProtectedBody);
         }
-        let plaintext = mechanics::crypto::body_open(key, envelope)
-            .ok_or(ProtectedError::InvalidProtectedBody)?;
+        let plaintext = mechanics::authorization::body_open(key, envelope)
+            .ok_or(Invalid::InvalidProtectedBody)?;
         Self::decode_canonical(&plaintext)
     }
 }
@@ -147,7 +154,7 @@ impl ProtectedBodyPayload {
 pub trait BodyKeySource: Send + Sync {
     /// The capability for sealing **new** local material: the current
     /// authorized epoch's key. `None` when no authorized epoch key is held —
-    /// a local write then fails [`ProtectedError::BodyKeyUnavailable`].
+    /// a local write then fails [`Invalid::BodyKeyUnavailable`].
     fn sealing_key(&self) -> Option<AuthorizedBodyKey>;
 
     /// The capability for opening material sealed under `epoch`. `None` when
@@ -184,8 +191,8 @@ mod tests {
         AuthorizedBodyKey::for_authorized_epoch([7u8; 16], [9u8; 32])
     }
 
-    fn payload() -> ProtectedBodyPayload {
-        ProtectedBodyPayload::new(
+    fn payload() -> Material {
+        Material::new(
             BodyExport::Atomic(b"the canonical application bytes".to_vec()),
             ReplicaFrontier::EMPTY,
             ReplicaFrontier::new([1u8; 32], 1),
@@ -199,7 +206,7 @@ mod tests {
         // epoch_id[16] || nonce[12] || ciphertext_and_tag
         assert_eq!(&envelope[..16], &[7u8; 16]);
         assert_eq!(envelope.len(), p.encode().len() + BODY_ENVELOPE_OVERHEAD);
-        assert_eq!(ProtectedBodyPayload::open(&key(), &envelope).unwrap(), p);
+        assert_eq!(Material::open(&key(), &envelope).unwrap(), p);
     }
 
     #[test]
@@ -221,22 +228,22 @@ mod tests {
         // Wrong epoch on the capability.
         let other = AuthorizedBodyKey::for_authorized_epoch([8u8; 16], [9u8; 32]);
         assert_eq!(
-            ProtectedBodyPayload::open(&other, &envelope),
-            Err(ProtectedError::InvalidProtectedBody)
+            Material::open(&other, &envelope),
+            Err(Invalid::InvalidProtectedBody)
         );
         // Wrong key material under the right epoch.
         let wrong_key = AuthorizedBodyKey::for_authorized_epoch([7u8; 16], [1u8; 32]);
         assert_eq!(
-            ProtectedBodyPayload::open(&wrong_key, &envelope),
-            Err(ProtectedError::InvalidProtectedBody)
+            Material::open(&wrong_key, &envelope),
+            Err(Invalid::InvalidProtectedBody)
         );
         // A flipped ciphertext byte fails authentication with the SAME error.
         let mut tampered = envelope.clone();
         let last = tampered.len() - 1;
         tampered[last] ^= 0xff;
         assert_eq!(
-            ProtectedBodyPayload::open(&key(), &tampered),
-            Err(ProtectedError::InvalidProtectedBody)
+            Material::open(&key(), &tampered),
+            Err(Invalid::InvalidProtectedBody)
         );
     }
 
@@ -245,8 +252,8 @@ mod tests {
         let mut p = payload();
         p.mutation_model = MUTATION_COLLABORATIVE; // payload is Atomic
         assert_eq!(
-            ProtectedBodyPayload::decode_canonical(&p.encode()),
-            Err(ProtectedError::InvalidProtectedBody)
+            Material::decode_canonical(&p.encode()),
+            Err(Invalid::InvalidProtectedBody)
         );
     }
 
@@ -255,8 +262,8 @@ mod tests {
         let mut p = payload();
         p.version = 2;
         assert_eq!(
-            ProtectedBodyPayload::decode_canonical(&p.encode()),
-            Err(ProtectedError::UnsupportedVersion(2))
+            Material::decode_canonical(&p.encode()),
+            Err(Invalid::UnsupportedVersion(2))
         );
     }
 
@@ -265,13 +272,13 @@ mod tests {
         // An over-bound input is refused by length alone (no decode attempt).
         let huge = vec![0u8; MAX_PROTECTED_PLAINTEXT + 1];
         assert_eq!(
-            ProtectedBodyPayload::decode_canonical(&huge),
-            Err(ProtectedError::BodyTooLarge)
+            Material::decode_canonical(&huge),
+            Err(Invalid::BodyTooLarge)
         );
         let huge_envelope = vec![0u8; MAX_BODY_BYTES + 1];
         assert_eq!(
-            ProtectedBodyPayload::open(&key(), &huge_envelope),
-            Err(ProtectedError::BodyTooLarge)
+            Material::open(&key(), &huge_envelope),
+            Err(Invalid::BodyTooLarge)
         );
     }
 

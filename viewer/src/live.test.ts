@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import type { Bridge, BridgeEvent, Question } from "./bridge";
+import type { Socket, SocketEvent, Question } from "./socket";
 import { WorldViewStore } from "./core/worldViewStore";
 import {
   applyLive,
@@ -418,7 +418,7 @@ describe("LivePlane", () => {
   interface Wired {
     plane: LivePlane;
     store: WorldViewStore;
-    push: (event: BridgeEvent) => void;
+    push: (event: SocketEvent) => void;
     declared: Question[];
   }
 
@@ -426,8 +426,8 @@ describe("LivePlane", () => {
   function socket(): Wired {
     const store = new WorldViewStore();
     const declared: Question[] = [];
-    let push: (event: BridgeEvent) => void = () => undefined;
-    const open = (onEvent: (event: BridgeEvent) => void): Bridge => {
+    let push: (event: SocketEvent) => void = () => undefined;
+    const open = (onEvent: (event: SocketEvent) => void): Socket => {
       push = onEvent;
       return {
         watch: (question: Question) => declared.push(question),

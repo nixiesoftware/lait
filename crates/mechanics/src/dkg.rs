@@ -1,3 +1,10 @@
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "the private DKG backend receives validated sets and serializes only fixed, derived transcript records"
+)]
 //! FROST distributed key generation & threshold signing — the ceremony that
 //! produces the `lait/space/1` recovery **group key** and the group signatures
 //! that authorize a `Recover`/`Rotate`.
@@ -19,9 +26,7 @@ use anyhow::{anyhow, Result};
 use frost_ed25519 as frost;
 use serde::{Deserialize, Serialize};
 
-use crate::authority::{
-    AuthorityConfiguration, AuthorityId, AuthorityScheme, FrostThresholdConfig, PrincipalId,
-};
+use crate::authority::{Authority, Config, FrostThresholdConfig, Principal, Scheme};
 use crate::ids::{DeviceId, SpaceId};
 use crate::sigdag::{self, SignedNode};
 
@@ -232,7 +237,7 @@ impl CeremonyOp {
 /// Scheme-neutral on purpose. The lifecycle — propose, authorize, generate,
 /// install — is identical whether the outcome is a flat threshold or, later, a
 /// compiled policy, so the proposal carries an opaque
-/// [`AuthorityConfiguration`] rather than threshold fields. Adding a backend
+/// [`Config`] rather than threshold fields. Adding a backend
 /// must not reshape the ceremony around it.
 ///
 /// The proposal's signed-node hash is its transcript identity, and that hash
@@ -245,7 +250,7 @@ pub struct KeyCeremonyProposal {
     /// Uniqueness. Ed25519 signing is deterministic (RFC 8032), so without it a
     /// device re-proposing an identical ceremony would collide on hash.
     pub nonce: [u8; 16],
-    pub configuration: AuthorityConfiguration,
+    pub configuration: Config,
     pub transition: ProposedTransition,
 }
 
@@ -258,7 +263,7 @@ pub struct KeyCeremonyProposal {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProposedTransition {
     /// Create a new key under a new arrangement, replacing `current`.
-    RotateKey { current: AuthorityId },
+    RotateKey { current: Authority },
     /// Redistribute the **same** key under a new arrangement (Desmedt–Jajodia
     /// share redistribution over the standing Shamir shares; the secret is
     /// never reconstructed). The proposal carries the standing arrangement and
@@ -270,10 +275,10 @@ pub enum ProposedTransition {
     /// `RotateKey`).
     Reshare {
         /// The standing authority (key + arrangement id) being redistributed.
-        authority: AuthorityId,
+        authority: Authority,
         /// The standing arrangement, whole; must hash to
         /// `authority.configuration`.
-        current_configuration: AuthorityConfiguration,
+        current_configuration: Config,
         /// The standing group's serialized public-key package; its derived
         /// group key must equal `authority.public_key`.
         old_public_package: Vec<u8>,
@@ -292,7 +297,7 @@ pub struct ReshareContext {
     /// The OLD participant devices, in canonical index order.
     pub old_devices: Vec<DeviceId>,
     /// The standing authority being redistributed.
-    pub authority: AuthorityId,
+    pub authority: Authority,
     /// The standing group's serialized public-key package (validated to
     /// derive `authority.public_key`).
     pub old_public_package: Vec<u8>,
@@ -303,7 +308,7 @@ impl KeyCeremonyProposal {
     /// formed. For a `Reshare` this is the NEW arrangement; the reshare's
     /// additional bindings are validated by [`Self::reshare_context`].
     pub fn frost_config(&self) -> Option<FrostThresholdConfig> {
-        if self.configuration.scheme != AuthorityScheme::FrostThreshold
+        if self.configuration.scheme != Scheme::FrostThreshold
             || !self.configuration.is_well_formed()
         {
             return None;
@@ -312,7 +317,7 @@ impl KeyCeremonyProposal {
     }
 
     /// The authority this proposal replaces or reshares.
-    pub fn current_authority(&self) -> &AuthorityId {
+    pub fn current_authority(&self) -> &Authority {
         match &self.transition {
             ProposedTransition::RotateKey { current } => current,
             ProposedTransition::Reshare { authority, .. } => authority,
@@ -336,7 +341,7 @@ impl KeyCeremonyProposal {
         let new_config = self.frost_config()?;
         let new_devices = self.frost_devices()?;
         if current_configuration.id() != authority.configuration
-            || current_configuration.scheme != AuthorityScheme::FrostThreshold
+            || current_configuration.scheme != Scheme::FrostThreshold
             || !current_configuration.is_well_formed()
         {
             return None;
@@ -406,15 +411,12 @@ pub type SignedAuthorityGrant = SignedNode;
 pub fn frost_rotation_proposal(
     nonce: [u8; 16],
     k: u16,
-    participants: Vec<PrincipalId>,
-    current: AuthorityId,
+    participants: Vec<Principal>,
+    current: Authority,
 ) -> KeyCeremonyProposal {
     KeyCeremonyProposal {
         nonce,
-        configuration: AuthorityConfiguration::frost_threshold(&FrostThresholdConfig {
-            k,
-            participants,
-        }),
+        configuration: Config::frost_threshold(&FrostThresholdConfig { k, participants }),
         transition: ProposedTransition::RotateKey { current },
     }
 }
@@ -822,7 +824,7 @@ pub struct DkgManifest {
     /// for any scheme, and so resolving "what governs the standing key" does not
     /// have to re-derive acceptance — which is what made that resolution
     /// mutually recursive with acceptance itself.
-    pub configuration: AuthorityConfiguration,
+    pub configuration: Config,
 }
 
 /// The canonical description of one signing attempt: who signs, over what, with
@@ -842,11 +844,11 @@ pub struct DkgManifest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SigningPlan {
     pub signing: TranscriptId,
-    pub authority: crate::authority::AuthorityId,
+    pub authority: crate::authority::Authority,
     /// `blake3` of the exact message. The message itself is re-derived locally
     /// by every signer, so the plan commits to it without being trusted for it.
     pub message_commitment: [u8; 32],
-    pub signers: Vec<crate::authority::LeafId>,
+    pub signers: Vec<crate::authority::Holder>,
     /// The frozen commitment map, keyed by participant index.
     pub commitments: Packages,
     pub witness: AccessWitness,
@@ -865,7 +867,7 @@ pub enum AccessWitness {
     /// reconstruction coefficients it implies. Reserved for general-access signing.
     LinearReconstruction {
         policy: [u8; 32],
-        leaves: Vec<crate::authority::LeafId>,
+        leaves: Vec<crate::authority::Holder>,
         coefficient_commitment: [u8; 32],
     },
 }
@@ -1281,7 +1283,8 @@ pub fn reshare_deal(old_key_share: &[u8], new_k: u16, new_n: u16) -> Result<(Vec
     let mut sigma = vec![s_i];
     for _ in 1..new_k {
         let mut wide = [0u8; 64];
-        getrandom::fill(&mut wide).expect("getrandom");
+        getrandom::fill(&mut wide)
+            .map_err(|error| anyhow!("OS randomness unavailable: {error}"))?;
         sigma.push(Scalar::from_bytes_mod_order_wide(&wide));
     }
     let commitments: Vec<EdwardsPoint> = sigma.iter().map(|s| BASE * s).collect();
@@ -1575,15 +1578,15 @@ mod tests {
     /// participant list rather than stated separately, so it cannot disagree
     /// with it.
     fn test_proposal(nonce: [u8; 16], k: u16, participants: Vec<DeviceId>) -> KeyCeremonyProposal {
-        let mut principals: Vec<PrincipalId> =
-            participants.iter().map(PrincipalId::of_device).collect();
+        let mut principals: Vec<Principal> =
+            participants.iter().map(Principal::of_device).collect();
         principals.sort();
         principals.dedup();
         frost_rotation_proposal(
             nonce,
             k,
             principals,
-            crate::authority::AuthorityId::single(crate::crypto::device_from_seed(&[200u8; 32])),
+            crate::authority::Authority::single(crate::crypto::device_from_seed(&[200u8; 32])),
         )
     }
 
@@ -1958,18 +1961,16 @@ mod tests {
         let indices: Vec<u16> = commitments.keys().copied().collect();
         SigningPlan {
             signing,
-            authority: crate::authority::AuthorityId::single(crate::crypto::device_from_seed(
+            authority: crate::authority::Authority::single(crate::crypto::device_from_seed(
                 &[201u8; 32],
             )),
             message_commitment: [0u8; 32],
             signers: indices
                 .iter()
                 .map(|i| {
-                    crate::authority::LeafId::of_principal(
-                        &crate::authority::PrincipalId::of_device(
-                            &crate::crypto::device_from_seed(&[*i as u8; 32]),
-                        ),
-                    )
+                    crate::authority::Holder::of_principal(&crate::authority::Principal::of_device(
+                        &crate::crypto::device_from_seed(&[*i as u8; 32]),
+                    ))
                 })
                 .collect(),
             commitments,
@@ -2020,7 +2021,7 @@ mod tests {
         // A different authority over the same commitments.
         let mut other_authority = test_plan(a, commitments.clone());
         other_authority.authority =
-            crate::authority::AuthorityId::single(crate::crypto::device_from_seed(&[202u8; 32]));
+            crate::authority::Authority::single(crate::crypto::device_from_seed(&[202u8; 32]));
         assert_ne!(
             base,
             nonce_binding(&a, b"msg", &other_authority),

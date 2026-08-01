@@ -12,13 +12,13 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use mechanics::crypto::AuthorizedBodyKey;
+use mechanics::authorization::AuthorizedBodyKey;
 use mechanics::ids::SpaceId;
+use replica::body::{BodyBinding, Op, StaticBodyKeys, SupportedSchemas, MUTATION_COLLABORATIVE};
+use replica::body::{BodyId, BodyKey, EncodingId, SchemaId, WorldId};
 use replica::frontier::AuthorityFrontier;
-use replica::{
-    BodyBinding, BodyId, BodyKey, BodyOp, CommitAuthorization, CommitContext, EncodingId, Replica,
-    SchemaId, SeedSigner, StaticBodyKeys, SupportedSchemas, WorldId, MUTATION_COLLABORATIVE,
-};
+use replica::transaction::{CommitAuthorization, CommitContext, SeedSigner};
+use replica::Replica;
 
 const WRITER_SEED: [u8; 32] = [62u8; 32];
 const EPOCH: [u8; 16] = [3u8; 16];
@@ -41,17 +41,17 @@ fn keys() -> Arc<StaticBodyKeys> {
 fn world() -> WorldId {
     WorldId::parse("com.example.notes").unwrap()
 }
-fn test_auth() -> replica::StaticAuthorizer {
-    replica::StaticAuthorizer {
+fn test_auth() -> replica::transaction::StaticAuthorizer {
+    replica::transaction::StaticAuthorizer {
         world: world(),
         implementation_id: [0u8; 32],
     }
 }
 fn test_demand() -> Vec<u8> {
-    use mechanics::demand::{AuthorizationDemand, PolicyCapability, PolicyResource};
+    use mechanics::authorization::{AuthorizationDemand, PolicyCapability, Resource};
     AuthorizationDemand::require(
         PolicyCapability::new("com.example.notes", "write"),
-        PolicyResource::space("com.example.notes"),
+        Resource::root("com.example.notes"),
     )
     .encode_canonical()
     .expect("canonical demand")
@@ -79,7 +79,7 @@ fn supported() -> SupportedSchemas {
     s
 }
 fn device() -> mechanics::ids::DeviceId {
-    mechanics::crypto::device_from_seed(&WRITER_SEED)
+    mechanics::actor::device_from_seed(&WRITER_SEED)
 }
 
 fn edit(r: &mut Replica, n: u16, key: &BodyKey) {
@@ -110,7 +110,7 @@ fn edit(r: &mut Replica, n: u16, key: &BodyKey) {
         "op",
         &[(
             key.clone(),
-            BodyOp::TextSplice {
+            Op::TextSplice {
                 path: "body".into(),
                 index: 0,
                 delete: 0,
@@ -134,7 +134,7 @@ fn editing_one_body_does_not_grow_the_required_set() {
     // an index node is kept by reachability, so superseding one removes it
     // from the set the moment the new root lands.
     let dir = temp_store("required");
-    let mut r = Replica::open_journaled(&dir, keys()).unwrap();
+    let mut r = Replica::open(&dir, keys()).unwrap();
     r.set_supported(supported());
     for n in 0..20u16 {
         edit(&mut r, n, &body(1));
@@ -159,7 +159,7 @@ fn editing_one_body_does_not_grow_the_required_set() {
     // A reopen must agree. A restart that reclaims something is a session that
     // was holding it for no reason.
     drop(r);
-    let reopened = Replica::open_journaled(&dir, keys()).unwrap();
+    let reopened = Replica::open(&dir, keys()).unwrap();
     assert_eq!(
         reopened.required_object_count().expect("durable"),
         after_eighty
@@ -172,7 +172,7 @@ fn collecting_returns_the_store_to_live_state() {
     // what matters is that collecting reclaims them, and that a restart then
     // finds nothing left to do.
     let dir = temp_store("collect");
-    let mut r = Replica::open_journaled(&dir, keys()).unwrap();
+    let mut r = Replica::open(&dir, keys()).unwrap();
     r.set_supported(supported());
     for n in 0..20u16 {
         edit(&mut r, n, &body(1));
@@ -196,7 +196,7 @@ fn collecting_returns_the_store_to_live_state() {
     );
 
     drop(r);
-    let reopened = Replica::open_journaled(&dir, keys()).unwrap();
+    let reopened = Replica::open(&dir, keys()).unwrap();
     assert_eq!(
         object_count(&dir),
         after_eighty,

@@ -1,6 +1,6 @@
 //! W4 — the Beacon initiative's acceptance harness (docket 06).
 //!
-//! Real process-backed SpaceBridges over their control sockets on an in-memory transport,
+//! Real process-backed StationHosts over their control sockets on an in-memory transport,
 //! proving the plane the initiative exists for:
 //!
 //! 1. **Steady-state convergence without re-join** (exit criterion 1 /
@@ -25,13 +25,13 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use async_trait::async_trait;
+use comms::mem::MemNet;
+use comms::policy::Network;
+use comms::{Transport, TransportFactory};
 use issues_app::IssuesResponse as IssueResponse;
+use lait::control::OrbitAddress;
 use lait::control::{request, subscribe, ControlRoute, Request, Response};
-use lait::daemon::OrbitAddress;
-use lait::net::Network;
-use lait::orbital::run_space_bridge_with;
-use lait::transport::mem::MemNet;
-use lait::transport::{Transport, TransportFactory};
+use lait::orbital::run_station_process_with;
 
 const FOUNDER_SEED: [u8; 32] = [221u8; 32];
 const MEMBER_A_SEED: [u8; 32] = [222u8; 32];
@@ -50,7 +50,8 @@ impl TransportFactory for MemFactory {
         _protocols: comms::Protocols<'_>,
     ) -> Result<Arc<dyn Transport>> {
         Ok(Arc::new(
-            self.0.peer(lait::crypto::device_from_seed(identity_seed)),
+            self.0
+                .peer(mechanics::actor::device_from_seed(identity_seed)),
         ))
     }
 }
@@ -112,7 +113,7 @@ fn spawn_daemon(home: PathBuf, seed: [u8; 32], net: MemNet) -> std::thread::Join
     std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async move {
-            if let Err(e) = run_space_bridge_with(home, seed, &MemFactory(net)).await {
+            if let Err(e) = run_station_process_with(home, seed, &MemFactory(net)).await {
                 eprintln!("DAEMON ERR: {e:#}");
             }
         });
@@ -177,7 +178,7 @@ fn a_fresh_write_converges_with_no_rejoin_and_presence_surfaces_agree() {
     admit(&client, &member_home, &MEMBER_A_SEED, &founder_home);
     let member_handle = spawn_daemon(member_home.clone(), MEMBER_A_SEED, net.clone());
     wait_online(&client, &member_home);
-    let founder_device = lait::crypto::device_from_seed(&FOUNDER_SEED).to_string();
+    let founder_device = mechanics::actor::device_from_seed(&FOUNDER_SEED).to_string();
     drive_admission(&client, &member_home, &founder_device);
 
     // ---- Exit criterion 1: steady-state convergence, hands off. ----
@@ -337,7 +338,7 @@ fn a_peers_change_rings_a_doorbell_that_names_what_moved() {
     admit(&client, &member_home, &MEMBER_A_SEED, &founder_home);
     let member_handle = spawn_daemon(member_home.clone(), MEMBER_A_SEED, net.clone());
     wait_online(&client, &member_home);
-    let founder_device = lait::crypto::device_from_seed(&FOUNDER_SEED).to_string();
+    let founder_device = mechanics::actor::device_from_seed(&FOUNDER_SEED).to_string();
     drive_admission(&client, &member_home, &founder_device);
 
     issue_req(
@@ -467,7 +468,7 @@ fn a_peers_admission_rings_a_doorbell_at_the_other_members() {
     let founder_handle = spawn_daemon(founder_home.clone(), FOUNDER_SEED, net.clone());
     let client = tokio::runtime::Runtime::new().unwrap();
     wait_online(&client, &founder_home);
-    let founder_device = lait::crypto::device_from_seed(&FOUNDER_SEED).to_string();
+    let founder_device = mechanics::actor::device_from_seed(&FOUNDER_SEED).to_string();
 
     let a_home = temp_home("acl-a");
     admit(&client, &a_home, &MEMBER_A_SEED, &founder_home);
@@ -564,7 +565,7 @@ fn surviving_members_converge_after_the_approach_station_dies() {
     let founder_handle = spawn_daemon(founder_home.clone(), FOUNDER_SEED, net.clone());
     let client = tokio::runtime::Runtime::new().unwrap();
     wait_online(&client, &founder_home);
-    let founder_device = lait::crypto::device_from_seed(&FOUNDER_SEED).to_string();
+    let founder_device = mechanics::actor::device_from_seed(&FOUNDER_SEED).to_string();
 
     // Two members, admitted one after the other through the founder.
     let a_home = temp_home("a");

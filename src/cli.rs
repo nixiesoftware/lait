@@ -1,3 +1,12 @@
+// Human-facing rendering operates on validated command shapes and bounded terminal
+// dimensions. Exits here are deliberate, documented CLI status outcomes.
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    clippy::exit,
+    clippy::string_slice
+)]
+
 //! CLI client: builds control requests, auto-spawns the daemon, prints results.
 //!
 //! CLI and MCP are Layer-B clients of the daemon (`docs/UI.md`); the web
@@ -20,7 +29,7 @@ use crate::{
     control::{self, request, ControlRoute, ErrorKind, Event, EventKind, Request, Response},
     daemon::{ClientScope, LocalOrbitId, OrbitAddress},
     diagnose::{DiagnosisView, GateState},
-    spaces::{self, SpaceEntry, StorePresence},
+    orbits::{self, Entry, Presence},
 };
 
 /// Output mode threaded from the global `--json` / `--no-color` / `--yes` flags.
@@ -51,18 +60,18 @@ impl Default for Out {
 /// exactly what that rule exists to prevent. Plain `anyhow` errors stay code `1`,
 /// so classifying is opt-in and nothing has to be reclassified at once.
 #[derive(Debug)]
-pub struct CliError {
+pub struct Failure {
     /// The documented exit code for this failure.
     pub code: i32,
     pub message: String,
 }
 
-impl CliError {
+impl Failure {
     /// `2` — a selector resolved to nothing. Matches what the daemon already
     /// returns for a missing ref, user, or label, so a missing *space* doesn't
     /// answer differently to the same kind of mistake.
     pub fn not_found(message: impl Into<String>) -> Self {
-        CliError {
+        Failure {
             code: 2,
             message: message.into(),
         }
@@ -70,20 +79,20 @@ impl CliError {
 
     /// `3` — the daemon could not be reached, or could not be understood.
     pub fn unreachable(message: impl Into<String>) -> Self {
-        CliError {
+        Failure {
             code: 3,
             message: message.into(),
         }
     }
 }
 
-impl std::fmt::Display for CliError {
+impl std::fmt::Display for Failure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.message)
     }
 }
 
-impl std::error::Error for CliError {}
+impl std::error::Error for Failure {}
 
 /// The exit code represented by a client-side error. Split from
 /// [`report_error`] so the mapping is testable without a process to exit —
@@ -92,7 +101,7 @@ impl std::error::Error for CliError {}
 /// An unclassified error is `1`, so the classification is additive: a plain
 /// `anyhow!` keeps behaving exactly as it did.
 fn exit_code_for_error(e: &anyhow::Error) -> i32 {
-    if let Some(c) = e.downcast_ref::<CliError>() {
+    if let Some(c) = e.downcast_ref::<Failure>() {
         return c.code;
     }
     // Something is listening and no request will ever get through to it: `3`,
@@ -313,7 +322,7 @@ pub async fn ensure_daemon(home: &Path) -> Result<()> {
 /// Ensure the current identity's process-level Lait daemon without selecting
 /// or activating an Orbit. The web viewer uses this even for an empty catalog.
 pub async fn ensure_lait_daemon() -> Result<()> {
-    let client = crate::daemon::LaitDaemonClient::current()?;
+    let client = crate::daemon::Client::current()?;
     let daemon_home = client.home();
     match client.probe().await {
         control::Probe::Healthy => return Ok(()),
@@ -368,7 +377,7 @@ pub async fn ensure_lait_daemon() -> Result<()> {
             return Err(daemon_exited_error(status, &log_path));
         }
     }
-    Err(CliError::unreachable(format!(
+    Err(Failure::unreachable(format!(
         "Lait daemon did not come online within 20s — it is running but not answering.\n\
          see {log}, or run `lait daemon` in the foreground to watch it start.",
         log = log_path.display(),
@@ -465,7 +474,7 @@ pub async fn stop_daemon_verified(_home: &Path) -> Result<()> {
     // Read the pid before asking — a daemon that honours `stop` takes its lock
     // file with it, and we'd rather have the signal target than race for it.
     let pid = crate::config::daemon_pid(&daemon_home);
-    let daemon = crate::daemon::LaitDaemonClient::at(daemon_home.clone());
+    let daemon = crate::daemon::Client::at(daemon_home.clone());
     let _ = daemon
         .request(ControlRoute::Daemon, &Request::Stop, None)
         .await;
@@ -580,7 +589,7 @@ pub fn orbit_address_for_home(home: &Path) -> Result<OrbitAddress> {
 /// Send through a caller scope derived by a trusted client adapter.
 ///
 /// The allowed set never rides on the wire: authorizing locally chooses an
-/// explicit Orbit route, and the receiving SpaceBridge independently validates
+/// explicit Orbit route, and the receiving StationHost independently validates
 /// that it occupies the named Orbit and Space.
 pub async fn client_as_scoped(
     home: &Path,
@@ -601,7 +610,7 @@ pub async fn client_action_as_scoped(
     let address = orbit_address_for_home(home)?;
     scope.authorize(&address)?;
     ensure_daemon(home).await?;
-    let daemon = crate::daemon::LaitDaemonClient::current()?;
+    let daemon = crate::daemon::Client::current()?;
     // The process endpoint answered the probe a moment ago, so a failure here
     // is the transport giving out mid-exchange: `3`, daemon unreachable.
     match action.payload() {
@@ -610,7 +619,7 @@ pub async fn client_action_as_scoped(
             daemon
                 .request(route, request, act_as)
                 .await
-                .map_err(|e| CliError::unreachable(format!("{e:#}")).into())
+                .map_err(|e| Failure::unreachable(format!("{e:#}")).into())
         }
         ClientPayload::World(_) => Err(anyhow!(
             "World actions must be dispatched through their client package"
@@ -643,12 +652,12 @@ impl world_interface::ClientHost for PackageClientHost {
 
     fn call_world<'a>(
         &'a self,
-        call: crate::orbital::WorldCall,
-    ) -> world_interface::ClientFuture<'a, crate::orbital::WorldReply> {
+        call: runtime::world::call::Call,
+    ) -> world_interface::ClientFuture<'a, runtime::world::call::Reply> {
         Box::pin(async move {
             world_reply_as_scoped(&self.home, call, &self.scope, self.act_as.as_deref())
                 .await
-                .map_err(|error| world_interface::InterfaceError::new(format!("{error:#}")))
+                .map_err(|error| world_interface::Failure::new(format!("{error:#}")))
         })
     }
 
@@ -686,11 +695,9 @@ impl world_interface::ClientHost for PackageClientHost {
             let response =
                 client_as_scoped(&self.home, request, &self.scope, self.act_as.as_deref())
                     .await
-                    .map_err(|error| world_interface::InterfaceError::new(format!("{error:#}")))?;
+                    .map_err(|error| world_interface::Failure::new(format!("{error:#}")))?;
             serde_json::to_value(response).map_err(|error| {
-                world_interface::InterfaceError::new(format!(
-                    "encode host control response: {error}"
-                ))
+                world_interface::Failure::new(format!("encode host control response: {error}"))
             })
         })
     }
@@ -700,14 +707,13 @@ impl world_interface::ClientHost for PackageClientHost {
         request: world_interface::HostContentRequest,
     ) -> world_interface::ClientFuture<'a, serde_json::Value> {
         Box::pin(async move {
-            let fail =
-                |error: anyhow::Error| world_interface::InterfaceError::new(format!("{error:#}"));
+            let fail = |error: anyhow::Error| world_interface::Failure::new(format!("{error:#}"));
             let address = orbit_address_for_home(&self.home).map_err(&fail)?;
             self.scope
                 .authorize(&address)
                 .map_err(|error| fail(anyhow!("{error:#}")))?;
             ensure_daemon(&self.home).await.map_err(&fail)?;
-            let daemon = crate::daemon::LaitDaemonClient::current().map_err(&fail)?;
+            let daemon = crate::daemon::Client::current().map_err(&fail)?;
             let route = crate::control::station_route(address);
             match request {
                 world_interface::HostContentRequest::Write { path } => {
@@ -734,10 +740,10 @@ async fn content_write(
     home: &Path,
     route: crate::control::ControlRoute,
     path: &Path,
-) -> Result<serde_json::Value, world_interface::InterfaceError> {
+) -> Result<serde_json::Value, world_interface::Failure> {
     use tokio::io::AsyncReadExt;
 
-    let fail = |message: String| world_interface::InterfaceError::new(message);
+    let fail = |message: String| world_interface::Failure::new(message);
     let mut file = tokio::fs::File::open(path)
         .await
         .map_err(|e| fail(format!("could not read {}: {e}", path.display())))?;
@@ -766,8 +772,11 @@ async fn content_write(
         if read == 0 {
             break;
         }
+        let chunk = buffer
+            .get(..read)
+            .ok_or_else(|| fail("file reader returned an invalid byte count".to_string()))?;
         upload
-            .push(&buffer[..read])
+            .push(chunk)
             .await
             .map_err(|e| fail(format!("{e:#}")))?;
     }
@@ -791,10 +800,10 @@ async fn content_read(
     route: crate::control::ControlRoute,
     content: &str,
     destination: &Path,
-) -> Result<serde_json::Value, world_interface::InterfaceError> {
+) -> Result<serde_json::Value, world_interface::Failure> {
     use tokio::io::AsyncWriteExt;
 
-    let fail = |message: String| world_interface::InterfaceError::new(message);
+    let fail = |message: String| world_interface::Failure::new(message);
     let temporary = destination.with_extension("lait-partial");
     let mut file = tokio::fs::File::create(&temporary)
         .await
@@ -808,7 +817,7 @@ async fn content_read(
                 crate::control::ContentCall::Read {
                     content: content.to_string(),
                     offset,
-                    len: runtime::content_host::MAX_RANGE_BYTES as u64,
+                    len: runtime::plane::freight::content::MAX_RANGE_BYTES as u64,
                 },
             ),
         )
@@ -851,8 +860,8 @@ async fn content_stat(
     home: &Path,
     route: crate::control::ControlRoute,
     content: &str,
-) -> Result<serde_json::Value, world_interface::InterfaceError> {
-    let fail = |message: String| world_interface::InterfaceError::new(message);
+) -> Result<serde_json::Value, world_interface::Failure> {
+    let fail = |message: String| world_interface::Failure::new(message);
     let (reply, _) = crate::control::content_call(
         home,
         &crate::control::content_request(
@@ -893,10 +902,10 @@ pub fn print_presentation(presentation: &world_interface::Presentation) -> i32 {
 /// Send one package-owned call without decoding its opaque reply in the shell.
 pub async fn world_reply_as_scoped(
     home: &Path,
-    call: crate::orbital::WorldCall,
+    call: runtime::world::call::Call,
     scope: &ClientScope,
     act_as: Option<&str>,
-) -> Result<crate::orbital::WorldReply> {
+) -> Result<runtime::world::call::Reply> {
     let address = orbit_address_for_home(home)?;
     scope.authorize(&address)?;
     let route = ControlRoute::World {
@@ -904,10 +913,10 @@ pub async fn world_reply_as_scoped(
         world: call.world().as_str().to_string(),
     };
     ensure_daemon(home).await?;
-    crate::daemon::LaitDaemonClient::current()?
+    crate::daemon::Client::current()?
         .call_world(route, call, act_as)
         .await
-        .map_err(|error| CliError::unreachable(format!("{error:#}")).into())
+        .map_err(|error| Failure::unreachable(format!("{error:#}")).into())
 }
 
 /// Send through the current Lait daemon only if it is already running.
@@ -924,7 +933,7 @@ pub async fn request_running(home: &Path, req: &Request, act_as: Option<&str>) -
     scope.authorize(&address)?;
     let action = ClientAction::from_legacy(req.clone());
     let route = action.route(address);
-    let daemon = crate::daemon::LaitDaemonClient::current()?;
+    let daemon = crate::daemon::Client::current()?;
     if !matches!(daemon.probe().await, control::Probe::Healthy) {
         return Err(anyhow!("Lait daemon is not running"));
     }
@@ -947,7 +956,7 @@ pub async fn run_action(home: &Path, action: ClientAction, out: Out) -> Result<(
             Ok(())
         }
         // Propagate rather than reporting here: `client` errors are already
-        // classified (`CliError::unreachable`), and the top-level reporter is what
+        // classified (`Failure::unreachable`), and the top-level reporter is what
         // honours `--json`. This arm used to print and `exit(3)` itself, which
         // hardcoded "daemon unreachable" onto conditions that weren't — including
         // `ensure_daemon`'s "no space at …", a missing store.
@@ -1023,7 +1032,7 @@ pub async fn run_join(home: &Path, ticket: String, out: Out) -> Result<()> {
     // Parse client-side to recover the intended space before the link is
     // moved into the request. A malformed link simply yields no expectation;
     // the daemon returns the real parse error.
-    let parsed = runtime::SignedCoordinates::parse_link(ticket.trim())
+    let parsed = runtime::coordinates::SignedCoordinates::parse_link(ticket.trim())
         .ok()
         .and_then(|c| c.verify().ok());
     // An admission-carrying link admits automatically within seconds, so a
@@ -1157,7 +1166,7 @@ pub async fn print_context(home: Option<PathBuf>, source: &str, out: Out) -> Res
                     },
                     "orbit": orbit,
                     "worlds": worlds,
-                    "known_orbits": spaces::list().len(),
+                    "known_orbits": orbits::list().len(),
                 }
             }))
             .unwrap_or_else(|_| "{}".into())
@@ -1185,7 +1194,7 @@ pub async fn print_context(home: Option<PathBuf>, source: &str, out: Out) -> Res
         }
     );
     if source == "none" {
-        let known = spaces::list().len();
+        let known = orbits::list().len();
         if known == 0 {
             println!();
             println!("found a Space with `lait init`, or enter one with `lait join <link>`.");
@@ -1228,8 +1237,8 @@ pub fn print_worlds(out: Out) {
 /// Live status of one registry entry: `missing` (store gone from disk), `up`
 /// (a daemon answers on its control channel), or `idle` (store present, no
 /// daemon). The probe is a short-deadline `Status` round-trip — never a spawn.
-async fn orbit_status(e: &SpaceEntry) -> &'static str {
-    if spaces::presence(e) == StorePresence::Missing {
+async fn orbit_status(e: &Entry) -> &'static str {
+    if orbits::presence(e) == Presence::Missing {
         return "missing";
     }
     let up = tokio::time::timeout(
@@ -1248,7 +1257,7 @@ async fn orbit_status(e: &SpaceEntry) -> &'static str {
 
 /// `lait orbits`: every durable local participation known on this machine.
 pub async fn print_orbits(out: Out) {
-    let entries = spaces::list();
+    let entries = orbits::list();
     let mut statuses = Vec::with_capacity(entries.len());
     for e in &entries {
         statuses.push(orbit_status(e).await);
@@ -1325,7 +1334,7 @@ pub async fn print_orbits(out: Out) {
 /// minted decoy store. Points at the creation verbs and every known space.
 pub fn err_no_store_here(out: Out) {
     eprintln!("no lait space in this directory (nothing is created implicitly).");
-    let known = spaces::list();
+    let known = orbits::list();
     if !known.is_empty() {
         eprintln!();
         eprintln!("local Orbits on this machine:");
@@ -1499,10 +1508,14 @@ pub fn print_response(resp: &Response, out: Out) -> i32 {
             // when break-glass is attempted: by then it is too late to fix.
             for h in &s.degraded_recovery {
                 let why = match &h.reason {
-                    mechanics::ceremony::RecoveryArtifactFailure::Undecryptable(_) => {
+                    mechanics::recovery::artifact::Failure::WrongProtector => {
                         "it was protected under another Windows account or machine"
                     }
-                    mechanics::ceremony::RecoveryArtifactFailure::Io(_) => {
+                    mechanics::recovery::artifact::Failure::PermissionDenied => {
+                        "permission to read it was denied"
+                    }
+                    mechanics::recovery::artifact::Failure::Corrupt => "it is present but corrupt",
+                    mechanics::recovery::artifact::Failure::Io(_) => {
                         "it is present but could not be read"
                     }
                 };
@@ -2001,11 +2014,11 @@ pub async fn watch(
     let scope = scope_for_home(home);
     let address = orbit_address_for_home(home)?;
     scope.authorize(&address)?;
-    let space_route = ControlRoute::Space {
+    let space_route = ControlRoute::Orbit {
         address: address.clone(),
     };
     ensure_daemon(home).await?;
-    let daemon = crate::daemon::LaitDaemonClient::current()?;
+    let daemon = crate::daemon::Client::current()?;
     // Default to the current high-water: `watch` follows from now, not from the
     // start of the daemon's history.
     let mut cursor = match since {
@@ -2083,17 +2096,17 @@ pub async fn watch(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ids::SpaceId;
+    use issues::ids::SpaceId;
 
     #[test]
     fn client_side_exit_codes_come_from_the_type_not_the_prose() {
         // Classified errors carry their documented code.
         assert_eq!(
-            exit_code_for_error(&CliError::not_found("no space matches 'x'").into()),
+            exit_code_for_error(&Failure::not_found("no space matches 'x'").into()),
             2,
         );
         assert_eq!(
-            exit_code_for_error(&CliError::unreachable("daemon is deaf").into()),
+            exit_code_for_error(&Failure::unreachable("daemon is deaf").into()),
             3,
         );
         // ...and anything unclassified stays 1, so this is additive rather than a
@@ -2102,7 +2115,7 @@ mod tests {
         // The code must survive `.context()`: callers add context freely, and a
         // wrapped not-found is still a not-found. (This is the whole reason the
         // class is a type and not a prefix on the message.)
-        let wrapped = Err::<(), _>(anyhow::Error::from(CliError::not_found("gone")))
+        let wrapped = Err::<(), _>(anyhow::Error::from(Failure::not_found("gone")))
             .context("while resolving --orbit")
             .unwrap_err();
         assert_eq!(exit_code_for_error(&wrapped), 2);

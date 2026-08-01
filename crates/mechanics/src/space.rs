@@ -1,3 +1,7 @@
+#![allow(
+    clippy::arithmetic_side_effects,
+    reason = "space transition generations are bounded and validated before advancing"
+)]
 //! `lait/space/1` — the **self-certifying space** and its **root lifecycle**.
 //!
 //! Membership made *identity* self-certifying (`ActorId = H(inception)`); this
@@ -41,10 +45,25 @@ use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::actor::{self, SignedEvent};
-use crate::authority::AuthorityConfigurationId;
-use crate::genesis::Genesis;
+use crate::authority::ConfigId;
 use crate::ids::{ActorId, DeviceId, SpaceId};
 use crate::sigdag::{self, SignedNode};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Randomness {
+    Unavailable,
+}
+
+impl std::fmt::Display for Randomness {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("OS randomness unavailable")
+    }
+}
+
+impl std::error::Error for Randomness {}
+
+pub use crate::genesis::Genesis;
+pub use crate::ledger::{Authority, Effect, Failure, Invalid, Refusal};
 
 /// Domain separator for the space-id derivation.
 const SPACE_DOMAIN: &[u8] = b"lait/space/1";
@@ -72,10 +91,9 @@ pub fn recovery_pub_of(seed: &[u8; 32]) -> DeviceId {
 /// Mint a fresh solo (1-of-1) recovery keypair: returns `(pubkey, secret seed)`.
 /// The secret is stored offline; a threshold group key is instead produced by a
 /// FROST DKG among the holders and installed via [`SpaceOp::Rotate`].
-pub fn mint_recovery_key() -> (DeviceId, [u8; 32]) {
-    let mut seed = [0u8; 32];
-    getrandom::fill(&mut seed).expect("getrandom");
-    (recovery_pub_of(&seed), seed)
+pub fn mint_recovery_key() -> Result<(DeviceId, [u8; 32]), Randomness> {
+    let seed = crate::crypto::random_seed().map_err(|_| Randomness::Unavailable)?;
+    Ok((recovery_pub_of(&seed), seed))
 }
 
 fn hex32(s: &str) -> Option<[u8; 32]> {
@@ -95,7 +113,7 @@ fn hex32(s: &str) -> Option<[u8; 32]> {
 ///
 /// The plane commits to the **complete** standing authority: its public key
 /// (via `recovery_commit`) and the *arrangement operating it* (via an opaque
-/// [`AuthorityConfigurationId`]). The plane never decodes the configuration — it
+/// [`ConfigId`]). The plane never decodes the configuration — it
 /// carries a 32-byte commitment and stays blind to signing topology, exactly as
 /// it is blind to the threshold behind a group key. What the commitment buys is
 /// that **every replica, holder or not, learns the standing arrangement by
@@ -135,7 +153,7 @@ pub enum SpaceOp {
         /// to decode and be skipped in replay — never silently mis-read as a
         /// valid rotate with a bogus configuration (pinned by
         /// `an_old_two_field_rotate_does_not_misdecode`).
-        next_configuration: AuthorityConfigurationId,
+        next_configuration: ConfigId,
     },
     /// Reshare the **same key** under a new arrangement — the standing key is
     /// unchanged, only the configuration operating it changes.
@@ -146,7 +164,7 @@ pub enum SpaceOp {
     /// round-trips but is refused). The plane applying it is not the same as the
     /// product performing it.
     Reshare {
-        next_configuration: AuthorityConfigurationId,
+        next_configuration: ConfigId,
         gen: u32,
     },
 }
@@ -159,6 +177,10 @@ impl SpaceOp {
             | SpaceOp::Reshare { gen, .. } => *gen,
         }
     }
+    #[allow(
+        clippy::expect_used,
+        reason = "derived postcard serialization of SpaceOp has no fallible fields"
+    )]
     fn encode(&self) -> Vec<u8> {
         postcard::to_stdvec(self).expect("encode space op")
     }
@@ -191,10 +213,10 @@ pub struct RootState {
     /// The commitment to the current recovery key (rotated by each `Rotate`).
     pub recovery_commit: [u8; 32],
     /// The **standing arrangement** operating the recovery key. Genesis is
-    /// [`AuthorityConfigurationId::single`]; each `Rotate`/`Reshare` sets it. The
+    /// [`ConfigId::single`]; each `Rotate`/`Reshare` sets it. The
     /// plane never decodes it — it is the opaque commitment other layers read to
     /// learn the authority's topology without holding a share.
-    pub configuration: AuthorityConfigurationId,
+    pub configuration: ConfigId,
     /// Generation of the last applied op (0 at birth).
     pub gen: u32,
     /// Whether any break-glass `Recover` has been applied.
@@ -249,7 +271,7 @@ pub fn replay(genesis: &Genesis, ws_id: &SpaceId, events: &[SignedSpaceEvent]) -
         root: genesis.founding_actors.clone(),
         recovery_commit: genesis.recovery_root,
         // Every space is born a solo authority; a `Rotate`/`Reshare` moves it.
-        configuration: AuthorityConfigurationId::single(),
+        configuration: ConfigId::single(),
         gen: 0,
         recovered: false,
     };
@@ -404,7 +426,7 @@ mod tests {
         // Solo→solo rotate: the new key is another solo key, so Single.
         let rotate = SpaceOp::Rotate {
             new_recovery_key: recovery_pub_of(&r2),
-            next_configuration: AuthorityConfigurationId::single(),
+            next_configuration: ConfigId::single(),
             gen: 1,
         };
         let recover = SpaceOp::Recover {
@@ -434,9 +456,7 @@ mod tests {
 
     #[test]
     fn genesis_is_a_solo_authority_and_a_configured_rotate_moves_it() {
-        use crate::authority::{
-            AuthorityConfiguration, AuthorityConfigurationId, FrostThresholdConfig, PrincipalId,
-        };
+        use crate::authority::{Config, ConfigId, FrostThresholdConfig, Principal};
         let r1 = [21u8; 32];
         let r2 = [22u8; 32];
         let rc1 = recovery_commit(&recovery_pub_of(&r1)).unwrap();
@@ -444,18 +464,15 @@ mod tests {
         let genesis = genesis_with(&ws, &founder, [9u8; 16], rc1);
 
         // Born solo.
-        assert_eq!(
-            replay(&genesis, &ws, &[]).configuration,
-            AuthorityConfigurationId::single()
-        );
+        assert_eq!(replay(&genesis, &ws, &[]).configuration, ConfigId::single());
 
         // A rotate that names a 2-of-3 group arrangement moves the standing
         // configuration to it — visible to any replayer, holder or not.
-        let mut members: Vec<PrincipalId> = (30..33u8)
-            .map(|n| PrincipalId::of_device(&recovery_pub_of(&[n; 32])))
+        let mut members: Vec<Principal> = (30..33u8)
+            .map(|n| Principal::of_device(&recovery_pub_of(&[n; 32])))
             .collect();
         members.sort();
-        let cfg = AuthorityConfiguration::frost_threshold(&FrostThresholdConfig {
+        let cfg = Config::frost_threshold(&FrostThresholdConfig {
             k: 2,
             participants: members,
         });
@@ -508,19 +525,17 @@ mod tests {
 
     #[test]
     fn a_reshare_changes_the_arrangement_without_changing_the_key() {
-        use crate::authority::{
-            AuthorityConfiguration, AuthorityConfigurationId, FrostThresholdConfig, PrincipalId,
-        };
+        use crate::authority::{Config, ConfigId, FrostThresholdConfig, Principal};
         let r = [21u8; 32];
         let rc = recovery_commit(&recovery_pub_of(&r)).unwrap();
         let (ws, _i, founder) = founding([7u8; 32], [9u8; 16], rc);
         let genesis = genesis_with(&ws, &founder, [9u8; 16], rc);
 
-        let mut members: Vec<PrincipalId> = (30..33u8)
-            .map(|n| PrincipalId::of_device(&recovery_pub_of(&[n; 32])))
+        let mut members: Vec<Principal> = (30..33u8)
+            .map(|n| Principal::of_device(&recovery_pub_of(&[n; 32])))
             .collect();
         members.sort();
-        let cfg = AuthorityConfiguration::frost_threshold(&FrostThresholdConfig {
+        let cfg = Config::frost_threshold(&FrostThresholdConfig {
             k: 2,
             participants: members,
         });
@@ -531,11 +546,7 @@ mod tests {
         let st = replay(&genesis, &ws, &[sign_op(&r, &reshare, vec![], &ws)]);
         assert_eq!(st.configuration, cfg.id(), "arrangement moved");
         assert_eq!(st.recovery_commit, rc, "but the KEY is unchanged");
-        assert_ne!(
-            st.configuration,
-            AuthorityConfigurationId::single(),
-            "no longer solo"
-        );
+        assert_ne!(st.configuration, ConfigId::single(), "no longer solo");
     }
 
     #[test]

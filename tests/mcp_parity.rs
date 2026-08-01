@@ -6,12 +6,12 @@
 //! the build gate if a replica `Request` is added without a corresponding MCP
 //! tool, or if a `Response` DTO stops round-tripping (a silent contract break).
 
-use issues_app::IssuesResponse as Response;
-use lait::dto::{
+use issues::dto::{
     ActivityEvent, BoardColumn, BoardView, IssueView, Priority, ProjectDto, Row, WorkflowState,
     SCHEMA_VERSION,
 };
-use lait::ids::{DocId, ProjectId, SpaceId, SystemUlidSource};
+use issues::ids::{DocId, ProjectId, SpaceId, SystemUlidSource};
+use issues_app::IssuesResponse as Response;
 use lait::mcp::{MCP_TOOL_NAMES, REQUIRED_TRACKER_COMMANDS};
 
 /// Every replica command an agent must drive has exactly one MCP tool. Adding a
@@ -85,8 +85,8 @@ fn response_dtos_round_trip() {
         priority: Priority::High,
         assignee_summary: "you +1".into(),
         assignees: vec![
-            lait::ids::ActorId::from_incept_hash(&"a".repeat(64)),
-            lait::ids::ActorId::from_incept_hash(&"b".repeat(64)),
+            issues::ids::ActorId::from_incept_hash(&"a".repeat(64)),
+            issues::ids::ActorId::from_incept_hash(&"b".repeat(64)),
         ],
         tombstone: false,
         provisional: false,
@@ -109,7 +109,7 @@ fn response_dtos_round_trip() {
                 state: WorkflowState {
                     id: "backlog".into(),
                     name: "Backlog".into(),
-                    category: lait::dto::StatusCategory::Backlog,
+                    category: issues::dto::StatusCategory::Backlog,
                     color: "gray".into(),
                 },
                 rows: vec![row.clone()],
@@ -133,7 +133,7 @@ fn response_dtos_round_trip() {
             labels: vec![],
             label_names: vec!["bug".into()],
             comments: vec![],
-            created_by: lait::ids::ActorId::from_incept_hash(&"a".repeat(64)),
+            created_by: issues::ids::ActorId::from_incept_hash(&"a".repeat(64)),
             created_at: 1000,
             followers: vec![],
             milestone: None,
@@ -197,7 +197,7 @@ fn issue_response_status_field_survives_the_kind_tag() {
         labels: vec![],
         label_names: vec![],
         comments: vec![],
-        created_by: lait::ids::ActorId::from_incept_hash(&"a".repeat(64)),
+        created_by: issues::ids::ActorId::from_incept_hash(&"a".repeat(64)),
         created_at: 0,
         followers: vec![],
         milestone: None,

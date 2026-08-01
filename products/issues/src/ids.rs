@@ -2,7 +2,9 @@
 //! Issues product owns. App-minted ids are `<prefix>_<ULID>` — see
 //! [`mechanics::ids`] for the grammar and minting sources.
 
-pub use mechanics::ids::*;
+pub use mechanics::ids::{
+    mint_ulid, valid_ulid, ActorId, DeviceId, SpaceId, SystemUlidSource, UlidSource,
+};
 
 mechanics::prefixed_id!(
     /// Issue document id — app-minted, content-independent, the key in the

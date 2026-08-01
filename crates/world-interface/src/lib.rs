@@ -1,6 +1,25 @@
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects,
+        clippy::unreachable,
+        clippy::unimplemented,
+        clippy::unchecked_time_subtraction,
+        clippy::todo,
+        clippy::string_slice,
+        clippy::panic_in_result_fn,
+        clippy::panic,
+        clippy::exit,
+        clippy::as_conversions
+    )
+)]
+
 //! Client-facing application interfaces supplied by a World package.
 //!
-//! Runtime and [`world_bridge`] deliberately know nothing about presentation.
+//! Runtime's World-call boundary deliberately knows nothing about presentation.
 //! This crate is the outer compile-time seam: a product declares its CLI mount
 //! and MCP tools, while the Lait shell supplies process lifecycle, Orbit
 //! selection, transport, and output policy.
@@ -14,37 +33,63 @@ use std::path::Path;
 use std::pin::Pin;
 
 use clap::{ArgMatches, Command};
-use replica::ids::WorldId;
+use replica::body::WorldId;
+use runtime::world::call::{Call, Reply};
 use serde_json::Value;
-use world_bridge::{WorldCall, WorldReply};
 
-/// A client-surface declaration or dispatch failure.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InterfaceError {
-    message: String,
+/// A typed client-surface failure.
+///
+/// Concrete adapter diagnostics are logged at conversion and are deliberately
+/// not retained in this public value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Failure {
+    /// A declaration, invocation, or returned value was invalid.
+    Invalid,
+    /// A valid operation was refused by the selected surface.
+    Refusal,
+    /// An accepted operation could not be completed.
+    Operation,
+    /// An established client operation ended before completion.
+    Interruption,
 }
 
-impl InterfaceError {
-    pub fn new(message: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-        }
+impl Failure {
+    pub fn new(message: impl fmt::Display) -> Self {
+        tracing::warn!(diagnostic = %message, "World client adapter rejected an operation");
+        Self::Invalid
+    }
+
+    pub const fn refusal() -> Self {
+        Self::Refusal
+    }
+
+    pub const fn operation() -> Self {
+        Self::Operation
+    }
+
+    pub const fn interruption() -> Self {
+        Self::Interruption
     }
 }
 
-impl fmt::Display for InterfaceError {
+impl fmt::Display for Failure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.message)
+        f.write_str(match self {
+            Self::Invalid => "invalid client operation",
+            Self::Refusal => "client operation refused",
+            Self::Operation => "client operation failed",
+            Self::Interruption => "client operation interrupted",
+        })
     }
 }
 
-impl std::error::Error for InterfaceError {}
+impl std::error::Error for Failure {}
 
 /// The complete externally visible effect of one client invocation.
 ///
 /// This classifies the whole package-owned operation, including caller-local
 /// effects such as advancing a watermark or writing an attachment. It is not a
-/// substitute for the daemon's independent [`world_bridge::WorldCallAccess`]
+/// substitute for the daemon's independent [`runtime::world::call::Access`]
 /// classification of an opaque World call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClientAccess {
@@ -62,7 +107,7 @@ pub struct LocalInvocation {
 /// The target selected by a parsed product invocation.
 #[derive(Debug, Clone)]
 pub enum ClientInvocationKind {
-    World(WorldCall),
+    World(Call),
     Local(LocalInvocation),
 }
 
@@ -81,11 +126,7 @@ pub struct ClientInvocation {
 }
 
 impl ClientInvocation {
-    pub fn world(
-        call: WorldCall,
-        access: ClientAccess,
-        confirmation_question: Option<String>,
-    ) -> Self {
+    pub fn world(call: Call, access: ClientAccess, confirmation_question: Option<String>) -> Self {
         Self {
             world: call.world().clone(),
             access,
@@ -140,7 +181,7 @@ impl ClientInvocation {
 }
 
 pub type CliCommandFactory = fn() -> Command;
-pub type CliParser = fn(&ArgMatches) -> Result<ClientInvocation, InterfaceError>;
+pub type CliParser = fn(&ArgMatches) -> Result<ClientInvocation, Failure>;
 
 /// One root-level CLI namespace mounted by a World application.
 #[derive(Clone)]
@@ -167,17 +208,16 @@ impl CliMount {
         (self.command)()
     }
 
-    pub fn parse(&self, matches: &ArgMatches) -> Result<ClientInvocation, InterfaceError> {
+    pub fn parse(&self, matches: &ArgMatches) -> Result<ClientInvocation, Failure> {
         (self.parse)(matches)
     }
 }
 
 pub type McpSchemaFactory = fn() -> Value;
-pub type McpCallFactory = fn(Value) -> Result<ClientInvocation, InterfaceError>;
-pub type WorldReplyDecoder = fn(&WorldCall, WorldReply) -> Result<Value, InterfaceError>;
-pub type WorldReplyPresenter =
-    fn(Value, PresentationOptions) -> Result<Presentation, InterfaceError>;
-pub type WebParser = fn(Value) -> Result<ClientInvocation, InterfaceError>;
+pub type McpCallFactory = fn(Value) -> Result<ClientInvocation, Failure>;
+pub type ReplyDecoder = fn(&Call, Reply) -> Result<Value, Failure>;
+pub type ReplyPresenter = fn(Value, PresentationOptions) -> Result<Presentation, Failure>;
+pub type WebParser = fn(Value) -> Result<ClientInvocation, Failure>;
 
 /// Output policy supplied by the navigation shell to a product presenter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -282,7 +322,7 @@ pub struct HostAssignment {
 }
 
 /// Boxed future used to keep the host interface dyn-compatible.
-pub type ClientFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, InterfaceError>> + Send + 'a>>;
+pub type ClientFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, Failure>> + Send + 'a>>;
 
 /// Facilities supplied by a trusted native client host to a World package.
 ///
@@ -291,7 +331,7 @@ pub type ClientFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, InterfaceEr
 /// authority. `local_root` is caller-local state, never replicated World state.
 pub trait ClientHost: Send + Sync {
     fn local_root(&self) -> &Path;
-    fn call_world<'a>(&'a self, call: WorldCall) -> ClientFuture<'a, WorldReply>;
+    fn call_world<'a>(&'a self, call: Call) -> ClientFuture<'a, Reply>;
     fn call_control<'a>(&'a self, request: HostControlRequest) -> ClientFuture<'a, Value>;
     /// Move bytes on and off the content plane.
     ///
@@ -353,7 +393,7 @@ impl McpTool {
         (self.schema)()
     }
 
-    pub fn call(&self, input: Value) -> Result<ClientInvocation, InterfaceError> {
+    pub fn call(&self, input: Value) -> Result<ClientInvocation, Failure> {
         (self.call)(input)
     }
 }
@@ -365,8 +405,8 @@ pub struct WorldClientPackage {
     cli: CliMount,
     mcp_tools: Vec<McpTool>,
     mcp_instructions: &'static str,
-    decode_reply: WorldReplyDecoder,
-    present_reply: Option<WorldReplyPresenter>,
+    decode_reply: ReplyDecoder,
+    present_reply: Option<ReplyPresenter>,
     local_handler: Option<LocalInvocationHandler>,
     web_parser: Option<WebParser>,
     confirmation: Option<ConfirmationResolver>,
@@ -378,14 +418,14 @@ impl WorldClientPackage {
         cli: CliMount,
         mcp_tools: Vec<McpTool>,
         mcp_instructions: &'static str,
-        decode_reply: WorldReplyDecoder,
-    ) -> Result<Self, InterfaceError> {
+        decode_reply: ReplyDecoder,
+    ) -> Result<Self, Failure> {
         validate_name("CLI mount", cli.name())?;
         let mut local_tools = BTreeSet::new();
         for tool in &mcp_tools {
             validate_name("MCP tool", tool.name())?;
             if !local_tools.insert(tool.name()) {
-                return Err(InterfaceError::new(format!(
+                return Err(Failure::new(format!(
                     "World '{}' declares duplicate MCP tool '{}'",
                     world,
                     tool.name()
@@ -405,7 +445,7 @@ impl WorldClientPackage {
         })
     }
 
-    pub fn with_presenter(mut self, presenter: WorldReplyPresenter) -> Self {
+    pub fn with_presenter(mut self, presenter: ReplyPresenter) -> Self {
         self.present_reply = Some(presenter);
         self
     }
@@ -441,11 +481,7 @@ impl WorldClientPackage {
         self.mcp_instructions
     }
 
-    pub fn decode_reply(
-        &self,
-        call: &WorldCall,
-        reply: WorldReply,
-    ) -> Result<Value, InterfaceError> {
+    pub fn decode_reply(&self, call: &Call, reply: Reply) -> Result<Value, Failure> {
         (self.decode_reply)(call, reply)
     }
 
@@ -453,15 +489,15 @@ impl WorldClientPackage {
         &self,
         value: Value,
         options: PresentationOptions,
-    ) -> Result<Option<Presentation>, InterfaceError> {
+    ) -> Result<Option<Presentation>, Failure> {
         self.present_reply
             .map(|presenter| presenter(value, options))
             .transpose()
     }
 
-    pub fn parse_web(&self, input: Value) -> Result<ClientInvocation, InterfaceError> {
+    pub fn parse_web(&self, input: Value) -> Result<ClientInvocation, Failure> {
         let parser = self.web_parser.ok_or_else(|| {
-            InterfaceError::new(format!(
+            Failure::new(format!(
                 "World '{}' does not expose a web client interface",
                 self.world
             ))
@@ -512,7 +548,7 @@ impl WorldClientPackage {
                 }
                 ClientInvocationKind::Local(local) => {
                     let handler = self.local_handler.ok_or_else(|| {
-                        InterfaceError::new(format!(
+                        Failure::new(format!(
                             "World '{}' does not expose local client operations",
                             self.world
                         ))
@@ -523,11 +559,11 @@ impl WorldClientPackage {
         })
     }
 
-    fn validate_invocation(&self, invocation: &ClientInvocation) -> Result<(), InterfaceError> {
+    fn validate_invocation(&self, invocation: &ClientInvocation) -> Result<(), Failure> {
         if invocation.world_id() == &self.world {
             Ok(())
         } else {
-            Err(InterfaceError::new(format!(
+            Err(Failure::new(format!(
                 "World '{}' client package cannot execute an invocation for '{}'",
                 self.world,
                 invocation.world_id()
@@ -555,11 +591,11 @@ impl WorldClientRegistry {
         Self::default()
     }
 
-    pub fn with_package(mut self, package: WorldClientPackage) -> Result<Self, InterfaceError> {
+    pub fn with_package(mut self, package: WorldClientPackage) -> Result<Self, Failure> {
         let world = package.world().as_str().to_string();
         let command_name = package.cli().command().get_name().to_string();
         if command_name != package.cli().name() {
-            return Err(InterfaceError::new(format!(
+            return Err(Failure::new(format!(
                 "World '{}' CLI factory produced command '{}' for mount '{}'",
                 world,
                 command_name,
@@ -567,12 +603,12 @@ impl WorldClientRegistry {
             )));
         }
         if self.packages.contains_key(&world) {
-            return Err(InterfaceError::new(format!(
+            return Err(Failure::new(format!(
                 "duplicate client package for World '{world}'"
             )));
         }
         if let Some(existing) = self.mounts.get(package.cli().name()) {
-            return Err(InterfaceError::new(format!(
+            return Err(Failure::new(format!(
                 "CLI mount '{}' is claimed by Worlds '{}' and '{}'",
                 package.cli().name(),
                 existing,
@@ -588,12 +624,12 @@ impl WorldClientRegistry {
         &self,
         reserved_cli: impl IntoIterator<Item = &'a str>,
         reserved_mcp: impl IntoIterator<Item = &'a str>,
-    ) -> Result<(), InterfaceError> {
+    ) -> Result<(), Failure> {
         let reserved_cli: BTreeSet<_> = reserved_cli.into_iter().collect();
         let reserved_mcp: BTreeSet<_> = reserved_mcp.into_iter().collect();
         for package in self.packages.values() {
             if reserved_cli.contains(package.cli().name()) {
-                return Err(InterfaceError::new(format!(
+                return Err(Failure::new(format!(
                     "World '{}' CLI mount '{}' collides with a shell command",
                     package.world(),
                     package.cli().name()
@@ -601,7 +637,7 @@ impl WorldClientRegistry {
             }
             for mounted in mounted_tools(package) {
                 if reserved_mcp.contains(mounted.public_name.as_str()) {
-                    return Err(InterfaceError::new(format!(
+                    return Err(Failure::new(format!(
                         "World '{}' MCP tool '{}' collides with a shell tool",
                         package.world(),
                         mounted.public_name
@@ -638,7 +674,7 @@ fn mounted_tools(package: &WorldClientPackage) -> impl Iterator<Item = MountedMc
     })
 }
 
-fn validate_name(kind: &str, name: &str) -> Result<(), InterfaceError> {
+fn validate_name(kind: &str, name: &str) -> Result<(), Failure> {
     let valid = !name.is_empty()
         && name.bytes().all(|byte| {
             byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-')
@@ -646,7 +682,7 @@ fn validate_name(kind: &str, name: &str) -> Result<(), InterfaceError> {
     if valid {
         Ok(())
     } else {
-        Err(InterfaceError::new(format!(
+        Err(Failure::new(format!(
             "{kind} '{name}' must use lowercase ASCII letters, digits, '_' or '-'"
         )))
     }
@@ -660,17 +696,17 @@ mod tests {
         serde_json::json!({"type": "object", "additionalProperties": false})
     }
 
-    fn files_call(_: Value) -> Result<WorldCall, InterfaceError> {
-        WorldCall::new(
+    fn files_call(_: Value) -> Result<Call, Failure> {
+        Call::new(
             WorldId::parse("com.example.files").unwrap(),
             "files.list",
             1,
             vec![],
         )
-        .map_err(|error| InterfaceError::new(error.to_string()))
+        .map_err(|error| Failure::new(error.to_string()))
     }
 
-    fn files_invocation(input: Value) -> Result<ClientInvocation, InterfaceError> {
+    fn files_invocation(input: Value) -> Result<ClientInvocation, Failure> {
         files_call(input).map(|call| ClientInvocation::world(call, ClientAccess::Query, None))
     }
 
@@ -678,7 +714,7 @@ mod tests {
         Command::new("files").subcommand(Command::new("list"))
     }
 
-    fn files_parse(_: &ArgMatches) -> Result<ClientInvocation, InterfaceError> {
+    fn files_parse(_: &ArgMatches) -> Result<ClientInvocation, Failure> {
         Ok(ClientInvocation::world(
             files_call(Value::Null)?,
             ClientAccess::Query,
@@ -686,17 +722,17 @@ mod tests {
         ))
     }
 
-    fn notes_call(_: Value) -> Result<WorldCall, InterfaceError> {
-        WorldCall::new(
+    fn notes_call(_: Value) -> Result<Call, Failure> {
+        Call::new(
             WorldId::parse("com.example.notes").unwrap(),
             "notes.list",
             1,
             vec![],
         )
-        .map_err(|error| InterfaceError::new(error.to_string()))
+        .map_err(|error| Failure::new(error.to_string()))
     }
 
-    fn notes_invocation(input: Value) -> Result<ClientInvocation, InterfaceError> {
+    fn notes_invocation(input: Value) -> Result<ClientInvocation, Failure> {
         notes_call(input).map(|call| ClientInvocation::world(call, ClientAccess::Query, None))
     }
 
@@ -704,7 +740,7 @@ mod tests {
         Command::new("notes").subcommand(Command::new("list"))
     }
 
-    fn notes_parse(_: &ArgMatches) -> Result<ClientInvocation, InterfaceError> {
+    fn notes_parse(_: &ArgMatches) -> Result<ClientInvocation, Failure> {
         Ok(ClientInvocation::world(
             notes_call(Value::Null)?,
             ClientAccess::Query,
@@ -712,15 +748,15 @@ mod tests {
         ))
     }
 
-    fn decode_json_reply(call: &WorldCall, reply: WorldReply) -> Result<Value, InterfaceError> {
+    fn decode_json_reply(call: &Call, reply: Reply) -> Result<Value, Failure> {
         reply
             .validate_for(call)
-            .map_err(|error| InterfaceError::new(error.to_string()))?;
+            .map_err(|error| Failure::new(error.to_string()))?;
         let payload = reply
             .into_result()
-            .map_err(|error| InterfaceError::new(error.to_string()))?;
+            .map_err(|error| Failure::new(error.to_string()))?;
         serde_json::from_slice(&payload)
-            .map_err(|error| InterfaceError::new(format!("decode reply: {error}")))
+            .map_err(|error| Failure::new(format!("decode reply: {error}")))
     }
 
     fn package(world: &str, mount: &'static str) -> WorldClientPackage {
@@ -761,7 +797,7 @@ mod tests {
         assert_eq!(tools, vec!["files_list", "notes_list"]);
 
         let call = files_call(Value::Null).unwrap();
-        let reply = WorldReply::ok(
+        let reply = Reply::ok(
             &call,
             serde_json::to_vec(&serde_json::json!(["a.txt"])).unwrap(),
         );

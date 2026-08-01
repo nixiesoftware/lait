@@ -1,7 +1,26 @@
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects,
+        clippy::unreachable,
+        clippy::unimplemented,
+        clippy::unchecked_time_subtraction,
+        clippy::todo,
+        clippy::string_slice,
+        clippy::panic_in_result_fn,
+        clippy::panic,
+        clippy::exit,
+        clippy::as_conversions
+    )
+)]
+
 //! **The network adapter** — how independently held replicas exchange their
 //! material, and the only crate that names a concrete network.
 //!
-//! Kernel determines legitimacy and Fabric maintains the shared world; those two
+//! Kernel determines legitimacy and Engine maintains the shared world; those two
 //! are lait's substrate. This crate is neither: it is the replaceable mechanism
 //! that moves their bytes between peers. The application composes all three.
 //!
@@ -57,7 +76,7 @@ pub type Alpn = &'static [u8];
 /// protocol. Whoever takes it owns everything arriving on that protocol and
 /// nothing that does not — which is the only shape under which "one driver per
 /// plane" is a fact rather than an intention.
-pub type SessionQueue = tokio::sync::mpsc::Receiver<IncomingConnection>;
+pub type ConnectionQueue = tokio::sync::mpsc::Receiver<IncomingConnection>;
 
 /// Which protocols a transport accepts, and how each one is delivered.
 ///
@@ -301,7 +320,7 @@ pub trait Transport: Send + Sync {
     ///
     /// The default is `None`: a transport with one undivided session door says
     /// so, and its caller keeps using `accept_connection`.
-    fn take_session_queue(&self, _alpn: Alpn) -> Option<SessionQueue> {
+    fn take_session_queue(&self, _alpn: Alpn) -> Option<ConnectionQueue> {
         None
     }
 

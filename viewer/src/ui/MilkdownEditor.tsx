@@ -76,7 +76,7 @@ export default function MilkdownEditor({
   onChange,
   onCommit,
 }: {
-  /** The stored markdown. Read at mount; see `Bridge` for later changes. */
+  /** The stored markdown. Read at mount; see `Socket` for later changes. */
   value: string;
   readOnly?: boolean;
   placeholder?: string;

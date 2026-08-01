@@ -1,3 +1,11 @@
+// The control wire codec validates frame lengths before bounded byte operations;
+// these conversions preserve the existing versioned JSON and content encodings.
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    clippy::indexing_slicing
+)]
+
 //! Layer B — the local control protocol. Newline-delimited JSON over
 //! the cross-platform local IPC channel (a Unix-domain socket on unix, a named
 //! pipe on Windows; see [`control_name`]). One request → one response, plus the
@@ -6,10 +14,13 @@
 //!
 //! This is the stable, versioned host façade for daemon, Space, Mechanics,
 //! Station, Observation, and lifecycle operations. Product commands and
-//! responses travel separately in opaque [`WorldCall`] / [`WorldReply`]
+//! responses travel separately in opaque [`Call`] / [`Reply`]
 //! envelopes owned by installed client packages.
 
 use std::path::Path;
+use std::sync::Arc;
+
+pub use crate::daemon::scope::OrbitAddress;
 
 use anyhow::{anyhow, Context, Result};
 use interprocess::local_socket::{
@@ -19,10 +30,34 @@ use interprocess::local_socket::{
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-use crate::daemon::OrbitAddress;
 use crate::diagnose::DiagnosisView;
-use crate::dto::{MemberDto, MemberLogEntry, SeedDto};
-use crate::orbital::{WorldCall, WorldReply};
+use issues::dto::{MemberDto, MemberLogEntry, SeedDto};
+use runtime::world::call::{Call, Reply};
+
+/// The identity-scoped local control service.
+///
+/// `Endpoint` owns listener framing, connection tasks, content streaming, and
+/// delegation. Orbit catalog, placement, Station, and World state remain owned
+/// by [`crate::orbits::Router`].
+pub struct Endpoint {
+    listener: Arc<crate::daemon::host::Listener>,
+}
+
+impl Endpoint {
+    pub(crate) fn new(router: Arc<crate::orbits::Router>) -> Self {
+        Self {
+            listener: Arc::new(crate::daemon::host::Listener::new(router)),
+        }
+    }
+
+    pub(crate) fn begin_stop(&self) {
+        self.listener.begin_stop();
+    }
+
+    pub(crate) async fn serve(&self, home: &Path) -> Result<()> {
+        self.listener.clone().serve(home).await
+    }
+}
 
 /// The control-plane protocol version this build **speaks** — CLI, web, and MCP
 /// ↔ daemon channel, exchanged in the [`Request::Hello`] handshake.
@@ -48,10 +83,10 @@ use crate::orbital::{WorldCall, WorldReply};
 /// its socket, which cannot address two local Orbits in the same Space through
 /// one future daemon endpoint.
 ///
-/// **v4:** product calls use a versioned opaque [`WorldCall`] envelope at the
+/// **v4:** product calls use a versioned opaque [`Call`] envelope at the
 /// identity-scoped daemon.
 ///
-/// **v5:** attached SpaceBridge processes accept that same opaque envelope
+/// **v5:** attached StationHost processes accept that same opaque envelope
 /// directly. Typed product requests and the root-owned compatibility codec are
 /// retired, so v4 processes cannot remain attached across this boundary.
 ///
@@ -71,9 +106,9 @@ pub const CONTROL_PROTOCOL_VERSION: u32 = 7;
 /// version; the gap to [`CONTROL_PROTOCOL_VERSION`] is the mixed-version window.
 ///
 /// Protocol v7 is a deliberate compatibility cutoff. A v6 process attached as a
-/// SpaceBridge would accept a content request's header line and then read the
+/// StationHost would accept a content request's header line and then read the
 /// raw body as a second request, so leaving the minimum at 6 would let
-/// `StationPlacement::establish` attach a process that cannot frame content and
+/// `orbits::Placement::establish` attach a process that cannot frame content and
 /// will desynchronise the channel the first time someone uploads.
 pub const MIN_SUPPORTED_CONTROL_PROTOCOL: u32 = 7;
 
@@ -438,7 +473,7 @@ pub enum Request {
     },
 }
 
-/// An explicit path through the local bridge hierarchy.
+/// An explicit path through local orchestration.
 ///
 /// `None` on [`ClientRequest::route`] is the legacy per-home path: the socket
 /// already identifies one Space. The general Lait daemon uses an explicit
@@ -450,7 +485,8 @@ pub enum ControlRoute {
     /// Address the process-level Orbit directory/control router.
     Daemon,
     /// Address Space mechanics, Station, observations, or Space lifecycle.
-    Space {
+    #[serde(rename = "space")]
+    Orbit {
         #[serde(flatten)]
         address: OrbitAddress,
     },
@@ -462,7 +498,7 @@ pub enum ControlRoute {
     },
 }
 
-/// The wire envelope a client sends: a [`Request`], an optional bridge
+/// The wire envelope a client sends: a [`Request`], an optional routing
 /// [`ControlRoute`], passive-dispatch intent, and an optional **acting
 /// identity** selector.
 ///
@@ -472,7 +508,7 @@ pub enum ControlRoute {
 /// to exactly the bare `{"cmd":…}` shape.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClientRequest {
-    /// The bridge path this request is allowed to traverse.
+    /// The route this request is allowed to traverse.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub route: Option<ControlRoute>,
     /// Ask the identity-scoped host to dispatch only when the addressed
@@ -508,7 +544,7 @@ impl ClientRequest {
         }
     }
 
-    /// A request with an explicit bridge path.
+    /// A request with an explicit route.
     pub fn routed(request: Request, route: ControlRoute, act_as: Option<String>) -> Self {
         Self {
             route: Some(route),
@@ -532,18 +568,18 @@ impl ClientRequest {
 /// Product-neutral request sent to the identity-scoped daemon.
 ///
 /// The identity daemon forwards this same envelope unchanged to an attached
-/// SpaceBridge. Its explicit `call` field keeps every routing layer independent
+/// StationHost. Its explicit `call` field keeps every routing layer independent
 /// of the product payload and protocol.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorldClientRequest {
     pub route: ControlRoute,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub act_as: Option<String>,
-    pub call: WorldCall,
+    pub call: Call,
 }
 
 impl WorldClientRequest {
-    pub fn new(route: ControlRoute, call: WorldCall, act_as: Option<String>) -> Self {
+    pub fn new(route: ControlRoute, call: Call, act_as: Option<String>) -> Self {
         Self {
             route,
             act_as,
@@ -787,7 +823,7 @@ pub fn classify(req: &Request) -> RequestOwner {
 /// client surface itself; this helper covers requests whose owner lives behind
 /// a Station.
 pub fn station_route(address: OrbitAddress) -> ControlRoute {
-    ControlRoute::Space { address }
+    ControlRoute::Orbit { address }
 }
 
 /// One representative instance per `Request` variant — the enumeration the
@@ -930,7 +966,7 @@ pub enum Response {
     },
     /// Effective scoped assignments (reply to [`Request::AssignmentList`]).
     Assignments {
-        rows: Vec<crate::dto::AssignmentDto>,
+        rows: Vec<issues::dto::AssignmentDto>,
     },
     /// The membership audit log (reply to [`Request::MemberLog`]).
     MemberLog {
@@ -996,7 +1032,7 @@ pub enum Response {
         dropped: u64,
     },
     /// The one-shot identity + standing + view-completeness projection.
-    Whoami(crate::dto::WhoamiDto),
+    Whoami(issues::dto::WhoamiDto),
     /// The result of a `sync`: whether the view is now whole, and the same loud
     /// divergence lines `whoami` reports (empty when converged and complete).
     Sync {
@@ -1102,7 +1138,7 @@ pub struct Doorbell {
 
 /// The catalog dirty-set vocabulary lives with the projections it describes —
 /// the World produces it, the control plane only carries it.
-pub use crate::dto::{CatalogScope, DirtyProject, ProjectRef};
+pub use issues::dto::{CatalogScope, DirtyProject, ProjectRef};
 
 /// A presence or transport log entry kept in the daemon's ring buffer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1134,7 +1170,7 @@ pub struct PresenceEntry {
 }
 
 /// What a transient item is about — the wire mirror of
-/// `runtime::transient::TransientScope`.
+/// `runtime::transient::Target`.
 ///
 /// Ids are rendered, not raw. This channel is JSON, where a `[u8; 16]` arrives
 /// as a list of sixteen numbers; a Body takes the lowercase base32 the rest of
@@ -1143,12 +1179,15 @@ pub struct PresenceEntry {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "scope", rename_all = "snake_case")]
 pub enum LiveScope {
-    /// Somebody is looking at this issue.
-    IssueView { world: String, body: String },
-    /// Somebody is looking at this document.
-    DocumentView { world: String, body: String },
+    /// Somebody is looking at this Body.
+    #[serde(rename = "issue_view")]
+    Body { world: String, body: String },
+    /// Somebody is looking at this materialized Body.
+    #[serde(rename = "document_view")]
+    Material { world: String, body: String },
     /// Somebody's cursor is in this field of this Body.
-    TextCaret {
+    #[serde(rename = "text_caret")]
+    Field {
         world: String,
         body: String,
         field: String,
@@ -1161,9 +1200,11 @@ pub enum LiveScope {
     },
     /// How much of this content a peer holds. A hint about who to ask first,
     /// never a promise.
-    ContentResidency { content: String },
+    #[serde(rename = "content_residency")]
+    Content { content: String },
     /// A World's own scope, uninterpreted here.
-    CustomWorld {
+    #[serde(rename = "custom_world")]
+    World {
         world: String,
         schema: String,
         key: String,
@@ -1171,7 +1212,7 @@ pub enum LiveScope {
 }
 
 /// Where a peer's cursor is, as of this read — the wire mirror of
-/// `runtime::live::CaretState`.
+/// `runtime::plane::live::CaretState`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "caret", rename_all = "snake_case")]
 pub enum CaretPosition {
@@ -1187,7 +1228,7 @@ pub enum CaretPosition {
 }
 
 /// One thing a peer is currently doing — the wire mirror of
-/// `runtime::live::LiveEntry`.
+/// `runtime::plane::live::LiveEntry`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LiveEntry {
     /// The **actor**, resolved daemon-side through the Station's authority view.
@@ -1214,7 +1255,7 @@ pub struct LiveEntry {
     pub focus: Option<CaretPosition>,
 }
 
-/// What a signal says — the wire mirror of `runtime::planes::Signal`.
+/// What a signal says — the wire mirror of `runtime::plane::Signal`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "signal", rename_all = "snake_case")]
 pub enum SignalBody {
@@ -1257,8 +1298,8 @@ pub struct SignalEntry {
     /// The session it arrived on, 32-hex. Two of these are compared and never
     /// ordered — the only answerable question is whether this is still the open
     /// one.
-    pub session_id: String,
-    pub session_epoch: String,
+    pub connection_id: String,
+    pub connection_epoch: String,
     pub signal: SignalBody,
 }
 
@@ -1296,12 +1337,12 @@ pub struct StatusInfo {
     /// learn their founder share is unusable *before* the day they need it,
     /// which is exactly the day it is too late to fix.
     #[serde(default)]
-    pub degraded_recovery: Vec<mechanics::ceremony::DegradedRecoveryHolder>,
+    pub degraded_recovery: Vec<mechanics::recovery::DegradedHolder>,
     /// This device's recovery readiness: the standing authority's shape and our
     /// own custody standing. Reports what THIS node knows; it deliberately makes
     /// no claim about whether other holders still have their shares.
     #[serde(default)]
-    pub recovery: Option<mechanics::ceremony::RecoveryStatus>,
+    pub recovery: Option<mechanics::recovery::State>,
 }
 
 /// What probing a home's control channel found. These three must be told apart
@@ -1473,12 +1514,12 @@ pub async fn request_as(home: &Path, req: &Request, act_as: Option<&str>) -> Res
     request_as_routed(home, req, None, act_as).await
 }
 
-/// Send a request through an explicit bridge path.
+/// Send a request through an explicit route.
 pub async fn request_routed(home: &Path, req: &Request, route: ControlRoute) -> Result<Response> {
     request_as_routed(home, req, Some(route), None).await
 }
 
-/// Send a request with both an explicit bridge path and acting identity.
+/// Send a request with both an explicit route and acting identity.
 pub async fn request_as_routed(
     home: &Path,
     req: &Request,
@@ -1515,9 +1556,9 @@ pub async fn request_routed_if_running(
 pub async fn call_world(
     home: &Path,
     route: ControlRoute,
-    call: WorldCall,
+    call: Call,
     act_as: Option<&str>,
-) -> Result<WorldReply> {
+) -> Result<Reply> {
     let name = control_name(home)?;
     let stream = Stream::connect(name)
         .await
@@ -1564,7 +1605,7 @@ async fn exchange_raw<T: Serialize>(stream: Stream, env: &T) -> Result<String> {
 ///
 /// For calls whose answer is bounded: a status, a forget, or a range read,
 /// which one call may never return more than
-/// [`runtime::content_host::MAX_RANGE_BYTES`] of. An upload does not come
+/// [`runtime::plane::freight::content::MAX_RANGE_BYTES`] of. An upload does not come
 /// through here — see [`ContentUpload`], which streams.
 ///
 /// The caller builds the whole envelope rather than passing a call and having
@@ -1719,11 +1760,11 @@ async fn read_content_reply(
     let ContentReply::ContentStream { len } = reply else {
         return Ok((reply, Vec::new()));
     };
-    if len > runtime::content_host::MAX_RANGE_BYTES as u64 {
+    if len > runtime::plane::freight::content::MAX_RANGE_BYTES as u64 {
         return Err(anyhow!(
             "the daemon offered {len} bytes in one answer, past the {} this \
              channel carries",
-            runtime::content_host::MAX_RANGE_BYTES
+            runtime::plane::freight::content::MAX_RANGE_BYTES
         ));
     }
     let mut body = vec![0u8; len as usize];
@@ -1945,10 +1986,10 @@ mod tests {
             Request::Status,
             Request::Whoami,
         ] {
-            let route = ControlRoute::Space {
+            let route = ControlRoute::Orbit {
                 address: OrbitAddress::for_store(
                     Path::new("/tmp/test-orbit"),
-                    crate::ids::SpaceId::from_digest([4; 16]),
+                    issues::ids::SpaceId::from_digest([4; 16]),
                 ),
             };
             let env = ClientRequest::routed(req.clone(), route.clone(), Some("agent-x".into()));
@@ -1986,10 +2027,10 @@ mod tests {
 
     #[test]
     fn passive_dispatch_intent_is_explicit_and_round_trips() {
-        let route = ControlRoute::Space {
+        let route = ControlRoute::Orbit {
             address: OrbitAddress::for_store(
                 Path::new("/tmp/passive-orbit"),
-                crate::ids::SpaceId::from_digest([5; 16]),
+                issues::ids::SpaceId::from_digest([5; 16]),
             ),
         };
         let env = ClientRequest::routed_if_running(Request::Status, route.clone());
@@ -2145,7 +2186,7 @@ mod tests {
     fn live_rows_name_an_actor_and_tag_every_nested_union() {
         let entry = LiveEntry {
             actor: "act_ab".into(),
-            scope: LiveScope::TextCaret {
+            scope: LiveScope::Field {
                 world: "com.lait.issues".into(),
                 body: "aaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
                 field: "description".into(),
@@ -2178,8 +2219,8 @@ mod tests {
         let json = serde_json::to_value(Response::Signals {
             signals: vec![SignalEntry {
                 actor: "act_ab".into(),
-                session_id: "00".repeat(16),
-                session_epoch: "11".repeat(16),
+                connection_id: "00".repeat(16),
+                connection_epoch: "11".repeat(16),
                 signal: SignalBody::FileOffer {
                     content: "22".repeat(32),
                     plaintext_len: 9,

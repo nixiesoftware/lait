@@ -61,7 +61,7 @@ pub struct TransferProgress {
 
 /// Why a transfer could not be registered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TransferError {
+pub enum Refusal {
     /// An operation by that id is already in flight. Two handles over one id
     /// would release each other's leases.
     DuplicateOperation,
@@ -106,12 +106,12 @@ struct Entry {
 /// that admits them, and completed ones by [`MAX_COMPLETED`].
 #[derive(Debug)]
 pub struct TransferRegistry {
-    inner: Mutex<Registry>,
+    inner: Mutex<Catalog>,
     updates: tokio::sync::watch::Sender<u64>,
 }
 
 #[derive(Debug, Default)]
-struct Registry {
+struct Catalog {
     active: BTreeMap<[u8; 16], Entry>,
     completed: VecDeque<TransferProgress>,
     version: u64,
@@ -126,7 +126,7 @@ impl Default for TransferRegistry {
 impl TransferRegistry {
     pub fn new() -> Self {
         Self {
-            inner: Mutex::new(Registry::default()),
+            inner: Mutex::new(Catalog::default()),
             updates: tokio::sync::watch::Sender::new(0),
         }
     }
@@ -154,13 +154,13 @@ impl TransferRegistry {
         operation: [u8; 16],
         content: ContentRef,
         now: Instant,
-    ) -> Result<(), TransferError> {
+    ) -> Result<(), Refusal> {
         let mut guard = self.lock();
         if guard.active.contains_key(&operation) {
-            return Err(TransferError::DuplicateOperation);
+            return Err(Refusal::DuplicateOperation);
         }
         if guard.active.len() >= MAX_ACTIVE {
-            return Err(TransferError::TooManyActive);
+            return Err(Refusal::TooManyActive);
         }
         guard.active.insert(
             operation,
@@ -197,11 +197,9 @@ impl TransferRegistry {
         entry.published_state = state;
 
         if state.is_terminal() {
-            let finished = guard
-                .active
-                .remove(operation)
-                .expect("present a line above")
-                .progress;
+            let Some(finished) = guard.active.remove(operation).map(|entry| entry.progress) else {
+                return;
+            };
             if guard.completed.len() >= MAX_COMPLETED {
                 guard.completed.pop_front();
             }
@@ -249,7 +247,7 @@ impl TransferRegistry {
         self.lock().active.keys().copied().collect()
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, Registry> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Catalog> {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
     }
 
@@ -259,7 +257,7 @@ impl TransferRegistry {
     /// its `Ref` across an await would then be blocking a lock this registry
     /// takes on every update. Computing under the lock and sending after it is
     /// what keeps this a leaf.
-    fn bump(&self, guard: std::sync::MutexGuard<'_, Registry>) {
+    fn bump(&self, guard: std::sync::MutexGuard<'_, Catalog>) {
         let version = guard.version.saturating_add(1);
         let mut guard = guard;
         guard.version = version;
@@ -279,7 +277,7 @@ impl TransferRegistry {
 /// immediately visible.
 pub struct TransferHandle {
     registry: Arc<TransferRegistry>,
-    cache: Arc<replica::journal::cache::ResidentCache>,
+    cache: Arc<replica::content::Residency>,
     operation: [u8; 16],
     armed: bool,
 }
@@ -293,11 +291,11 @@ impl TransferHandle {
     /// failure.
     pub fn new(
         registry: Arc<TransferRegistry>,
-        cache: Arc<replica::journal::cache::ResidentCache>,
+        cache: Arc<replica::content::Residency>,
         operation: [u8; 16],
         content: ContentRef,
         now: Instant,
-    ) -> Result<Self, TransferError> {
+    ) -> Result<Self, Refusal> {
         registry.begin(operation, content, now)?;
         Ok(Self {
             registry,

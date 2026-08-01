@@ -578,8 +578,8 @@ fn comment_single_arg_is_the_body_with_explicit_ref_still_working() {
         },
     );
     // One positional: it's the BODY; the ref must come from the git branch.
-    // Off a KEY-n branch that inference fails with a teaching error (this test
-    // runs on arbitrary branches, so pin only the failure shape).
+    // Off a KEY-n branch that inference fails as invalid client input (this
+    // test runs on arbitrary branches, so pin only the semantic category).
     match parse_issues(&["lait", "issues", "comment", "just a body, no ref"]) {
         Ok(IssuesRequest::Comment { reff, body, .. }) => {
             // On a KEY-n branch the inference kicks in — body must be intact.
@@ -587,9 +587,9 @@ fn comment_single_arg_is_the_body_with_explicit_ref_still_working() {
             assert!(reff.contains('-'), "inferred ref is a KEY-n: {reff}");
         }
         Ok(other) => panic!("wrong request: {other:?}"),
-        Err(e) => assert!(
-            e.to_string().contains("inferred from the git branch"),
-            "teaching error expected, got: {e}"
+        Err(e) => assert_eq!(
+            e.downcast_ref::<world_interface::Failure>(),
+            Some(&world_interface::Failure::Invalid)
         ),
     }
 }
