@@ -1,5 +1,6 @@
 mod admission_fixtures;
 mod budget_fixtures;
+mod contact_frame_fuzz;
 mod content_host;
 mod convergence_simulation;
 mod dto_schema;

@@ -6,9 +6,9 @@
 # reviewed like one, not discovered when a gate goes red on a refactor.
 
 [tiers]
-pr             1267
-pr-platform    939
-nightly        1296
+pr             1274
+pr-platform    946
+nightly        1303
 
 [gates]
 orbital-boundaries           6
@@ -1028,6 +1028,13 @@ runtime internal_tests::budget_fixtures::an_eviction_ledger_does_not_forgive_the
 runtime internal_tests::budget_fixtures::ordinary_traffic_at_the_permitted_rate_is_never_closed
 runtime internal_tests::budget_fixtures::the_deadlines_layer_so_a_timeout_names_one_side
 runtime internal_tests::budget_fixtures::the_slot_ceilings_are_consistent_with_each_other
+runtime internal_tests::contact_frame_fuzz::a_flipped_byte_is_survivable
+runtime internal_tests::contact_frame_fuzz::a_frame_over_the_cap_is_refused_by_size
+runtime internal_tests::contact_frame_fuzz::an_unassigned_tag_is_refused
+runtime internal_tests::contact_frame_fuzz::arbitrary_bytes_never_panic_the_frame_decoder
+runtime internal_tests::contact_frame_fuzz::arbitrary_bytes_never_panic_the_handshake_decoders
+runtime internal_tests::contact_frame_fuzz::every_frame_round_trips
+runtime internal_tests::contact_frame_fuzz::trailing_bytes_are_not_ignored
 runtime internal_tests::content_host::a_hole_in_the_span_is_reported_before_any_chunk_is_opened
 runtime internal_tests::content_host::a_pin_is_reported_by_stat
 runtime internal_tests::content_host::a_provider_serves_a_chunk_and_a_receiver_installs_it_verified

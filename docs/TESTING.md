@@ -54,6 +54,21 @@ A failure writes its shrunk seed to `crates/fabric/proptest-regressions/`.
 **Commit that file** — the counterexample then replays on every later run,
 including the per-push tier.
 
+The other generated suite at this tier is the parser:
+`crates/runtime/src/internal_tests/contact_frame_fuzz.rs`. `ContactFrame`,
+`Offer` and `Proof` all decode bytes from a peer *before* any signature is
+checked — they have to, because the signature is inside the thing being
+decoded — which makes them the outermost attack surface here, reachable by
+anyone who can open a connection. It asserts that no input panics, that every
+frame variant round-trips, that a frame must decode to exactly the bytes it
+came from, and that a single flipped byte is survivable.
+
+This is proptest rather than `cargo-fuzz` on purpose: `cargo-fuzz` needs
+nightly and its own CI job, and a structure-aware generator on stable buys most
+of the coverage for none of that. What it gives up is coverage-guided
+exploration. If this file starts finding things it cannot explain, that is when
+to make the case for the nightly job.
+
 ### T1 — the contracts
 
 Golden files and fixtures that pin the wire format, plus `ci/validate-dto-schema.py`,
@@ -248,9 +263,12 @@ a surprise.
   making uncontrolled syscalls all leaked through. This workspace has ~180
   `Instant::now`, 9 `SystemTime::now` and 31 `tokio::time::sleep` call sites
   that would need a seam first.
-- **No fuzzing.** Loro fuzzes its own CRDT core; lait's encode/decode boundary
-  (`postcard`, the Contact frames) has no `cargo-fuzz` target. The frame parser
-  is the obvious first one.
+- **No coverage-guided fuzzing.** The Contact decoders have a structure-aware
+  property test (see T0), which is most of the value on stable. What is missing
+  is `cargo-fuzz`'s coverage feedback — it needs nightly and its own CI job, and
+  the argument for paying that is a finding the property test cannot explain.
+  Nothing else that parses untrusted bytes is covered: the Beacon and Signal
+  wire formats are the next ones.
 - **No mutation testing in CI.** T0 and T3 were each mutation-tested by hand
   when written — that is how we know the assertions fail when the system
   breaks — but nothing keeps them honest automatically.

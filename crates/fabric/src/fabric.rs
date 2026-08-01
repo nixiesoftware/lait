@@ -502,15 +502,52 @@ impl Engine {
     /// type tag may already hold state at this path. Containers live at doc
     /// ROOTS (name-identified — see the struct docs); a register is a key in
     /// the `body` root map.
+    ///
+    /// The sibling tags are checked against the roots the document ACTUALLY
+    /// has, from `get_value`, before any accessor is called. That ordering is
+    /// the whole point. `doc.get_movable_list(name)` and its siblings CREATE
+    /// the root they name — root containers need no operation to exist — so
+    /// asking "is this path already a list?" the direct way made it one.
+    ///
+    /// Every typed write probed five siblings, so every path permanently
+    /// materialised four empty phantom roots, and they replicated: a Body with
+    /// a single counter path `votes` projected as also having a map, a list, a
+    /// text and a set named `votes`, on every peer that imported it. Measured,
+    /// that was a 5x inflated projection and ~150% snapshot overhead at 512
+    /// paths (415 -> 295 bytes at one path, 25,206 -> 9,988 at 512).
+    ///
+    /// `has_container` is not the check to use here: a `ContainerID::Root` is
+    /// implicit, so it answers true for every name that could exist. The root
+    /// listing is what distinguishes a container that was written from one that
+    /// was merely named — and it keeps distinguishing correctly for a container
+    /// that was written and then emptied, which stays in the listing.
     fn check_path_type(doc: &loro::LoroDoc, tag: &str, path: &str) -> Result<(), Failure> {
         let body = doc.get_map(BODY_MAP);
+        // Shallow: the root names and their values, without walking into the
+        // containers. A register lookup still needs `body`, which is a root this
+        // Body always has.
+        let roots = doc.get_value();
+        let existing = match &roots {
+            loro::LoroValue::Map(map) => Some(map),
+            _ => None,
+        };
         for other in TYPE_TAGS {
             if other == tag {
                 continue;
             }
             let name = typed_key(other, path);
+            if other == "reg" {
+                if body.get(&name).is_some() {
+                    return Err(Failure::TypeConflict);
+                }
+                continue;
+            }
+            // Not a root this document has: nothing is bound here, and asking
+            // any harder would bind it.
+            if !existing.is_some_and(|map| map.contains_key(name.as_str())) {
+                continue;
+            }
             let bound = match other {
-                "reg" => body.get(&name).is_some(),
                 "list" => !doc.get_movable_list(name.as_str()).is_empty(),
                 "text" => !doc.get_text(name.as_str()).is_empty(),
                 _ => !doc.get_map(name.as_str()).is_empty(),

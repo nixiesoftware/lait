@@ -4731,6 +4731,7 @@ dependencies = [
  "journal",
  "mechanics",
  "postcard",
+ "proptest",
  "regex",
  "replica",
  "schemars",

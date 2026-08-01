@@ -59,6 +59,11 @@ nursery = { level = "warn", priority = -1 }
 
 [dev-dependencies]
 regex = "1.13.1"
+# The Contact wire decoders run BEFORE a signature is checked — they have to,
+# because the signature is inside the thing being decoded — so the parser is
+# the outermost attack surface here. `contact_frame_fuzz` generates malformed
+# input structurally rather than waiting for a peer to send some.
+proptest = "1"
 # `comms::Connection` is an `#[async_trait]`, so a test stub of it needs the
 # same macro. Only a stub needs one — production code holds `Box<dyn Connection>`
 # and never implements the trait.
