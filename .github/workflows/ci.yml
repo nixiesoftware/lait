@@ -261,8 +261,16 @@ jobs:
           # baseline. Each is a claim the docket makes about the substrate;
           # each fails loudly if it stops being true. The application-level
           # clean-break refusal remains covered by orbital-adoption.
+          #
+          # `convergence_laws_tests` is the generated half of that ground. The
+          # fixtures in `collaborative_convergence` say what the algebra MEANS;
+          # this says the meaning survives op sequences nobody wrote down —
+          # convergence, order-independence, idempotence, over random programs
+          # across 2-4 replicas. It belongs to this gate rather than a nightly
+          # one because it is cheap (64 cases, well under a second) and because
+          # a convergence regression is not something to learn about tomorrow.
           - job: core-fabric-foundations
-            filter: "binary(causal_evidence) + binary(history_growth) + binary(commit_cost_baseline) + binary(causal_contract) + binary(batch_atomicity) + binary(store_growth) + (binary(fabric) & test(algebra_reservation_tests))"
+            filter: "binary(causal_evidence) + binary(history_growth) + binary(commit_cost_baseline) + binary(causal_contract) + binary(batch_atomicity) + binary(store_growth) + (binary(fabric) & (test(algebra_reservation_tests) + test(convergence_laws_tests)))"
           # Plan 14 S0-S2: the frozen delivery-plane shapes, the transport
           # posture gate, the cross-implementation flow contract, and Freight —
           # admission, budgets, transfer bookkeeping, the provider on the wire,
