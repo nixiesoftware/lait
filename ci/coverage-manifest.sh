@@ -48,6 +48,14 @@
 #
 #   bash ci/coverage-manifest.sh --check    # CI: regenerate and diff
 #   bash ci/coverage-manifest.sh --update   # Linux: accept the new coverage
+#
+# ## Selector shape
+#
+# Every package's integration tests live in one `tests/it/` target, so a former
+# per-file binary is now a module prefix on the test name:
+# `binary(orbital_boundaries)` became
+# `binary_id(lait::it) & test(orbital_boundaries::)`. A bare `binary(mechanics)`
+# still names a crate's LIB target — its unit tests — and is unrelated.
 set -euo pipefail
 
 MANIFEST="ci/coverage-manifest.txt"
@@ -62,19 +70,19 @@ esac
 # substrate, and each must keep selecting tests. Kept here rather than in the
 # workflow so the filters and the recording of what they select live together.
 GATES=(
-  "orbital-boundaries|binary(orbital_boundaries)"
-  "orbital-clean-break|binary(orbital_clean_break) + binary(semantic_type_names) + binary(mixed_root_guard)"
-  "orbital-authority|binary(authority_history) + binary(world_policy) + (binary(mechanics) & (test(authority_checkpoint_tests) + test(frontier_isolation_tests)))"
-  "orbital-formats|binary(product_schema) + binary(coordinates_fixtures) + binary(contact_fixtures) + binary(beacon_presence_fixtures) + binary(transaction_marker_fixtures) + binary(canonical_ids) + binary(algebra_fixtures) + (binary(runtime) & (test(internal_tests::dto_schema) + test(internal_tests::content_host))) + (binary(replica) & (test(manifest_fixture_tests) + test(canonical_store_tests) + test(content_fixture_tests) + test(content_plane_tests) + test(cache_tests))) + (binary(journal) & (test(index_tests) + test(reconciliation_tests)))"
-  "core-fabric-foundations|binary(causal_evidence) + binary(history_growth) + binary(commit_cost_baseline) + binary(causal_contract) + binary(batch_atomicity) + binary(store_growth) + (binary(fabric) & (test(algebra_reservation_tests) + test(convergence_laws_tests)))"
-  "core-plane-shapes|binary(plane_fixtures) + binary(transport_capabilities) + binary(flows) + (binary(runtime) & (test(internal_tests::budget_fixtures) + test(internal_tests::admission_fixtures) + test(internal_tests::freight_transfer) + test(internal_tests::freight_wire) + test(internal_tests::freight_two_node)))"
-  "orbital-faults|binary(orbital_catalog) + binary(concurrent_heads) + (binary(journal) & (test(fault_tests) + test(crash_tests))) + (binary(replica) & test(manifest_atomicity_tests))"
-  "orbital-contact-real|binary(contact_iroh) + binary(contact_mem)"
-  "orbital-bootstrap-real|binary(orbital_join_iroh) + binary(orbital_admission) + binary(orbital_concurrent_catalog)"
-  "orbital-ceremonies|binary(orbital_ceremonies) + (binary(mechanics) & test(sparse_ceremony_tests))"
-  "orbital-independent-world|binary(independent_world) + binary(orbital_adoption)"
+  "orbital-boundaries|(binary_id(lait::it) & test(orbital_boundaries::))"
+  "orbital-clean-break|(binary_id(lait::it) & test(orbital_clean_break::)) + (binary_id(lait::it) & test(semantic_type_names::)) + (binary_id(lait::it) & test(mixed_root_guard::))"
+  "orbital-authority|(binary_id(lait::it) & test(authority_history::)) + (binary_id(mechanics::it) & test(world_policy::)) + (binary(mechanics) & (test(authority_checkpoint_tests) + test(frontier_isolation_tests)))"
+  "orbital-formats|(binary_id(lait::it) & test(product_schema::)) + (binary_id(runtime::it) & test(coordinates_fixtures::)) + (binary_id(runtime::it) & test(contact_fixtures::)) + (binary_id(runtime::it) & test(beacon_presence_fixtures::)) + (binary_id(replica::it) & test(transaction_marker_fixtures::)) + (binary_id(replica::it) & test(canonical_ids::)) + (binary_id(replica::it) & test(algebra_fixtures::)) + (binary(runtime) & (test(internal_tests::dto_schema) + test(internal_tests::content_host))) + (binary(replica) & (test(manifest_fixture_tests) + test(canonical_store_tests) + test(content_fixture_tests) + test(content_plane_tests) + test(cache_tests))) + (binary(journal) & (test(index_tests) + test(reconciliation_tests)))"
+  "core-fabric-foundations|(binary_id(fabric::it) & test(causal_evidence::)) + (binary_id(fabric::it) & test(history_growth::)) + (binary_id(lait::it) & test(commit_cost_baseline::)) + (binary_id(fabric::it) & test(causal_contract::)) + (binary_id(replica::it) & test(batch_atomicity::)) + (binary_id(replica::it) & test(store_growth::)) + (binary(fabric) & (test(algebra_reservation_tests) + test(convergence_laws_tests)))"
+  "core-plane-shapes|(binary_id(runtime::it) & test(plane_fixtures::)) + (binary_id(comms::it) & test(transport_capabilities::)) + (binary_id(comms::it) & test(flows::)) + (binary(runtime) & (test(internal_tests::budget_fixtures) + test(internal_tests::admission_fixtures) + test(internal_tests::freight_transfer) + test(internal_tests::freight_wire) + test(internal_tests::freight_two_node)))"
+  "orbital-faults|(binary_id(lait::it) & test(orbital_catalog::)) + (binary_id(replica::it) & test(concurrent_heads::)) + (binary(journal) & (test(fault_tests) + test(crash_tests))) + (binary(replica) & test(manifest_atomicity_tests))"
+  "orbital-contact-real|(binary_id(runtime::it) & test(contact_iroh::)) + (binary_id(runtime::it) & test(contact_mem::))"
+  "orbital-bootstrap-real|(binary_id(lait::it) & test(orbital_join_iroh::)) + (binary_id(lait::it) & test(orbital_admission::)) + (binary_id(lait::it) & test(orbital_concurrent_catalog::))"
+  "orbital-ceremonies|(binary_id(lait::it) & test(orbital_ceremonies::)) + (binary(mechanics) & test(sparse_ceremony_tests))"
+  "orbital-independent-world|(binary_id(runtime::it) & test(independent_world::)) + (binary_id(lait::it) & test(orbital_adoption::))"
   "convergence-simulation|binary(runtime) & test(internal_tests::convergence_simulation)"
-  "orbital-product-parity|binary(orbital_product_parity) + binary(issues_policy_designer) + binary(lait_daemon) + binary(control_classification) + binary(mcp_parity) + binary(viewer_parity)"
+  "orbital-product-parity|(binary_id(lait::it) & test(orbital_product_parity::)) + (binary_id(lait::it) & test(issues_policy_designer::)) + (binary_id(lait::it) & test(lait_daemon::)) + (binary_id(lait::it) & test(control_classification::)) + (binary_id(lait::it) & test(mcp_parity::)) + (binary_id(lait::it) & test(viewer_parity::))"
 )
 
 TIERS=(pr pr-platform nightly)

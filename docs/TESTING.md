@@ -136,6 +136,50 @@ Nightly (`nightly.yml`) and weekly (`perf.yml`):
 attributed to the commit that caused it rather than discovered by whoever
 pushes next.
 
+## One test binary per package
+
+Cargo compiles every `.rs` directly under `tests/` into its **own executable**,
+and each one statically links the whole dependency graph — iroh, loro, frost,
+rustls. At 70 files that was 70 links for one `cargo test`.
+
+A directory containing `main.rs` is a *single* target, so every package's
+integration tests live in `tests/it/` and are declared as modules:
+
+```
+tests/
+  it/
+    main.rs              <- mod cli_safety; mod lait_daemon; ...
+    cli_safety.rs
+    lait_daemon.rs
+  clean_break_allowlist.tsv   <- data files stay put
+```
+
+Measured on a 12-core Windows box:
+
+| | before | after |
+|---|---|---|
+| test targets in the workspace | 81 | **18** |
+| rebuild after a one-line change in `replica` | 111 s | **32 s** |
+| live test executables on disk | 3.3 GB | **238 MB** |
+
+**Test isolation is unchanged.** nextest runs every test in its own process
+regardless of which binary it came from, so tests that manipulate `LAIT_HOME`,
+take the single-instance lock, or spawn a daemon are as isolated as they were
+when each file was its own executable. (This would *not* be true under plain
+`cargo test`, which runs a binary's tests in threads — one more reason nextest
+is the runner here.)
+
+A former per-file binary is now a module prefix on the test name, which is what
+selectors say:
+
+```
+binary(orbital_boundaries)                     # before
+binary_id(lait::it) & test(orbital_boundaries::)   # after
+```
+
+A bare `binary(mechanics)` still names a crate's **lib** target — its unit
+tests — and is unrelated to any of this.
+
 ## Running a tier
 
 The nextest profiles in `.config/nextest.toml` **are** the tier definitions, so
@@ -181,8 +225,10 @@ A diff here is a coverage change. It should be reviewed like one.
 - **A new law or invariant about the algebra** → T0, as a property.
 - **A new wire shape** → T1, with a golden file, and re-run the manifest.
 - **A new behaviour** → T2, next to its subject as a `#[cfg(test)]` module in
-  the crate that owns it. Integration binaries under `tests/` are the older
-  layout; each one is a separate link against the whole dependency graph.
+  the crate that owns it. If it genuinely needs the package's public surface
+  from outside, add a file to that package's `tests/it/` and declare it in
+  `tests/it/main.rs` — **not** a loose `tests/*.rs`, which cargo would compile
+  into its own binary.
 - **A new failure mode in delivery** → T3, as a fault the simulation can inject.
 - **Anything that takes minutes, or touches a relay** → T4, and say so in
   `.config/nextest.toml` so the tier profiles keep it off the PR path.
@@ -208,7 +254,5 @@ a surprise.
 - **No mutation testing in CI.** T0 and T3 were each mutation-tested by hand
   when written — that is how we know the assertions fail when the system
   breaks — but nothing keeps them honest automatically.
-- **Test binaries are not consolidated.** ~70 files under `tests/` are ~70
-  separate links against iroh + loro + frost, and `target/debug/deps` holds
-  2.3 GB of test executables. Consolidating into one binary per directory is a
-  known 2-4× on build time and has not been done.
+- **Time is not simulated anywhere.** See T3 above; this is the largest
+  remaining gap and the most expensive to close.

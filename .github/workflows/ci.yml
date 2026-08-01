@@ -80,12 +80,17 @@ jobs:
   # on a green run, `check (windows-latest)` took 19 min of a 20 min workflow —
   # build 6.6 min, test 10.4 min — while the Linux leg did identical work in 3.
   #
-  # Windows is not slow because the tests are hard. It is slow because a hosted
-  # windows-latest links eighty test binaries against iroh + loro + frost on two
-  # cores. Paying that per push bought one thing: proof that the OS seam holds.
-  # That proof is worth keeping and is available far more cheaply, so the two
-  # jobs below buy it separately — `test` runs the suite where it is fast, and
-  # `platform` runs the seam where the seam lives.
+  # Windows was not slow because the tests are hard. It was slow because a
+  # hosted windows-latest linked eighty test binaries against iroh + loro +
+  # frost on two cores. Paying that per push bought one thing: proof that the
+  # OS seam holds. That proof is worth keeping and is available far more
+  # cheaply, so the two jobs below buy it separately — `test` runs the suite
+  # where it is fast, and `platform` runs the seam where the seam lives.
+  #
+  # The eighty is now eighteen: every package's integration tests were folded
+  # into a single `tests/it/` target, so the workspace links seventeen test
+  # binaries plus the bin rather than eighty-one. That change is what makes a
+  # one-line edit rebuild in 32 s locally instead of 111 s.
   #
   # The full cross-platform suite has not been deleted. It moved to `nightly.yml`
   # and to the merge path, where its latency is nobody's.
@@ -177,9 +182,8 @@ jobs:
   # advisory lock that excludes a second instance, a path that survives NTFS, a
   # device name that is not a file, an fsync that lands. That set is
   # `[profile.pr-platform]` — every crate's unit tests (where every cfg-gated
-  # island in this workspace lives) plus the integration binaries that drive a
-  # real daemon over a real control channel. 932 tests; 23 s on a 12-core
-  # Windows dev box.
+  # island in this workspace lives) plus the integration tests that drive a
+  # real daemon over a real control channel. 935 tests, eleven binaries.
   platform:
     name: platform (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -223,18 +227,21 @@ jobs:
       - name: Typecheck (all targets, this OS)
         run: cargo check --workspace --all-targets --all-features --locked
 
-      # `ci/platform-seam-targets.sh` derives the cargo target flags from
-      # `[profile.pr-platform]` so the BUILD is restricted to the seam as well
-      # as the run — twenty test binaries instead of eighty. The list is
-      # derived rather than written twice on purpose; a second hand-kept copy
-      # of a selector list is exactly what went stale and reddened five gates.
-      - name: Test (OS seam)
-        shell: bash
-        run: |
-          set -euo pipefail
-          targets="$(bash ci/platform-seam-targets.sh)"
-          echo "seam targets: $targets"
-          cargo nextest run --workspace --locked --all-features --profile pr-platform $targets
+      # Two invocations so the BUILD is restricted to the seam as well as the
+      # run: eleven test binaries instead of eighteen. `[profile.pr-platform]`
+      # decides what RUNS in both, so the tier stays defined in one place.
+      #
+      # This used to derive a ten-name target list from that profile with a
+      # script, because writing the list twice was how five gates went stale.
+      # Consolidating the integration tests removed the list: every package now
+      # has exactly one `it` binary, so "all the unit tests, plus lait's
+      # integration binary" is a structural statement rather than a roster that
+      # can rot.
+      - name: Test (OS seam — unit tests, every crate)
+        run: cargo nextest run --workspace --locked --all-features --profile pr-platform --lib
+
+      - name: Test (OS seam — daemon, control channel, single-instance lock)
+        run: cargo nextest run -p lait --locked --all-features --profile pr-platform --test it
 
       - name: Portability guard (no unix-only APIs in control/lock path)
         shell: bash

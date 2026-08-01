@@ -54,7 +54,14 @@ jobs:
     # 12-core dev box and share cores with ~1300 other tests here; a hosted
     # two-core windows-latest needs room for that without the job being killed
     # mid-suite and reporting nothing.
-    timeout-minutes: 90
+    #
+    # Sized for the FIRST run, which is the one at risk. `Swatinem/rust-cache`
+    # keys on job name, so `full suite (windows-latest)` starts with no cache
+    # however warm ci.yml's `platform` job is — and cold Windows measured ~42 min
+    # for a SUBSET of this suite. A timeout that kills the run mid-suite reports
+    # nothing at all, which is the worst outcome for a job nobody is watching;
+    # once a cache exists this is slack rather than budget.
+    timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
