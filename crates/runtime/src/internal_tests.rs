@@ -10,5 +10,7 @@ mod freight_wire;
 mod live_fixtures;
 mod live_transient;
 mod observations;
+mod paused_clock;
+mod presence_wire_fuzz;
 mod public_lifecycle_api;
 mod signal_schemas;

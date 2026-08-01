@@ -70,4 +70,22 @@ proptest = "1"
 async-trait = "0.1"
 # The real-iroh Contact gate test builds two loopback endpoints on a
 # multi-thread runtime that outlives the Stations driving them.
-tokio = { version = "1", features = ["rt-multi-thread", "time", "macros"] }
+# `test-util` is what makes the clock seam real: with it, `tokio::time::pause()`
+# freezes `tokio::time::Instant::now()` for every call site at once, so a test
+# can advance a sweep interval or a probation window without waiting for one.
+#
+# Declared here even though it is ALREADY ON: `n0-future`, which iroh depends
+# on, enables `tokio/test-util` unconditionally, so every build of this
+# workspace — release included — already has it. Naming it in dev-dependencies
+# is belt-and-braces, so the seam does not silently stop working if iroh's
+# dependency tree changes under us. If it ever did, `tokio::time::pause` would
+# cease to exist and the time-driven tests would fail to COMPILE, which is the
+# right way for this to break.
+#
+# What that costs in release: `tokio::time::Instant::now()` is an `Acquire` load
+# of a "has anyone paused?" flag followed by `std::time::Instant::now()`, rather
+# than the bare call. That was already true of the `tokio::time::Instant` sites
+# in src/app.rs, src/cli.rs and src/daemon/host.rs; this makes it true of the
+# runtime drivers too. Next to the network I/O these loops are doing, it does
+# not register.
+tokio = { version = "1", features = ["rt-multi-thread", "time", "macros", "test-util"] }

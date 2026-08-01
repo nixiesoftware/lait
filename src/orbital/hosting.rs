@@ -134,7 +134,7 @@ pub struct StationHost {
     active_conns: std::sync::atomic::AtomicU64,
     /// When the last control connection was accepted or completed — the idle
     /// clock's reference point.
-    last_activity: Mutex<std::time::Instant>,
+    last_activity: Mutex<tokio::time::Instant>,
     /// The undrained tail of the Live plane's signal broadcast.
     ///
     /// Subscribed once, at activation, rather than per request: a signal is an
@@ -228,7 +228,7 @@ impl Drop for StationHostActivity<'_> {
         use std::sync::atomic::Ordering;
         self.0.active_conns.fetch_sub(1, Ordering::SeqCst);
         if let Ok(mut activity) = self.0.last_activity.lock() {
-            *activity = std::time::Instant::now();
+            *activity = tokio::time::Instant::now();
         }
     }
 }
@@ -512,7 +512,7 @@ impl StationHost {
             stop_tx: tokio::sync::watch::channel(false).0,
             observations: ObservationHub::new(),
             active_conns: std::sync::atomic::AtomicU64::new(0),
-            last_activity: Mutex::new(std::time::Instant::now()),
+            last_activity: Mutex::new(tokio::time::Instant::now()),
             signals,
         })
     }
@@ -1545,7 +1545,7 @@ impl StationHost {
             Some((world, body)) => runtime::plane::live::LiveNarrow::Body { world, body: *body },
             None => runtime::plane::live::LiveNarrow::Everything,
         };
-        let view = handle.view_narrowed(narrow, std::time::Instant::now());
+        let view = handle.view_narrowed(narrow, tokio::time::Instant::now());
         let entries: Vec<_> = view.entries.iter().collect();
 
         // Equality and never an ordering: the counter wraps. It is also not the

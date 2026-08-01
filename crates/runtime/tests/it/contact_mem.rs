@@ -419,13 +419,13 @@ fn a_beacon_drives_fully_automatic_convergence() {
 
     // No manual contact: A's periodic Beacon reaches B over gossip, the
     // registry queues the Neighbor, and the scheduler dials + incorporates.
-    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     loop {
         if read_kv(&station_b, "auto") == b"converged" {
             break;
         }
         assert!(
-            std::time::Instant::now() < deadline,
+            tokio::time::Instant::now() < deadline,
             "automatic convergence never happened"
         );
         std::thread::sleep(Duration::from_millis(50));

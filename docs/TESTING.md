@@ -63,11 +63,15 @@ anyone who can open a connection. It asserts that no input panics, that every
 frame variant round-trips, that a frame must decode to exactly the bytes it
 came from, and that a single flipped byte is survivable.
 
+`presence_wire_fuzz.rs` does the same for the Beacon and presence decoders,
+which are more exposed still: a Contact frame arrives on a connection someone
+chose to open, while a Beacon arrives from anyone gossiping on the topic.
+
 This is proptest rather than `cargo-fuzz` on purpose: `cargo-fuzz` needs
 nightly and its own CI job, and a structure-aware generator on stable buys most
 of the coverage for none of that. What it gives up is coverage-guided
-exploration. If this file starts finding things it cannot explain, that is when
-to make the case for the nightly job.
+exploration. If these files start finding things they cannot explain, that is
+when to make the case for the nightly job.
 
 ### T1 — the contracts
 
@@ -120,11 +124,11 @@ replayable if it has exactly one source of entropy, and a crate that seeds
 itself from the OS — or a `HashMap` iteration order — silently reintroduces the
 nondeterminism the seed exists to remove.
 
-**Time is not simulated.** The schedule is the order of operations, so there is
-nothing for a clock to perturb at this seam. Time-dependent behaviour lives in
-the plane driver above it, and simulating that means intercepting `Instant::now`
-across the workspace — 180 call sites — which is a deliberate project, not a
-side effect of this one. See "What this suite does not do" below.
+**Time is not simulated *here*.** The schedule is the order of operations, so
+there is nothing for a clock to perturb at this seam. Time-dependent behaviour
+lives in the plane driver above it — and that is now controllable in its own
+right; see "The clock seam" below. Joining the two, so a simulated schedule and
+a simulated clock advance together, is the next step and has not been taken.
 
 ```sh
 cargo test -p runtime --lib convergence_simulation      # 24 seeds
@@ -211,6 +215,51 @@ cargo nextest run --workspace                                  # default: also e
 gets exactly what it asked for. A default filter there would silently narrow
 such a filter, which is the failure the coverage manifest exists to prevent.
 
+## The clock seam
+
+The runtime drivers take their clock from `tokio::time::Instant`, not
+`std::time::Instant`. That one-word difference is the whole mechanism:
+
+- **Without** the `test-util` feature, `tokio::time::Instant::now()` compiles to
+  `std::time::Instant::now()` — the same call, no indirection.
+- **With** it, `tokio::time::pause()` freezes every call site at once and
+  `advance()` moves them together.
+
+So a test can drive a 30-second maintenance beat, a probation window, or a
+connection deadline in microseconds, deterministically:
+
+```rust
+#[tokio::test(start_paused = true)]
+async fn a_deadline_expires_when_the_clock_says() {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    tokio::time::advance(Duration::from_secs(15)).await;
+    assert!(Instant::now() >= deadline);
+}
+```
+
+`crates/runtime/src/internal_tests/paused_clock.rs` is the worked example.
+
+Three things worth knowing:
+
+- **`test-util` is already on**, workspace-wide, in release too — `n0-future`
+  (an iroh dependency) enables it unconditionally. `runtime` declares it in
+  dev-dependencies anyway, so the seam does not silently break if that changes;
+  if it did, `tokio::time::pause` would stop existing and the tests would fail to
+  compile, which is the right way for it to break.
+- **It costs an atomic load.** `Instant::now()` reads a "has anyone paused?"
+  flag before falling through to the real clock. Next to the network I/O these
+  loops do, it does not register — and it was already true of the
+  `tokio::time::Instant` call sites in `src/`.
+- **Not everything is covered.** `crates/replica` has no tokio dependency and
+  keeps `std::time::Instant`, taking `now` as a parameter instead;
+  `crates/comms` has one timing measurement; CLI deadlines in `src/` are not
+  worth simulating. `SystemTime::now` is a separate problem — see the gaps
+  below.
+
+Code that takes `now` as a parameter — `Gate::check(now)`, `budget.admit(now)`,
+`replica.retained_content(now)` — was already testable and did not need any of
+this. The seam is for code that asks the clock itself.
+
 ## The coverage manifest
 
 `ci/coverage-manifest.txt` records every test id in the workspace, what each
@@ -256,13 +305,16 @@ Written down because a gap you know about is a decision, and a gap you don't is
 a surprise.
 
 - **No whole-system deterministic simulation.** T3 is deterministic at the
-  Replica/convergence seam, where there is no I/O. Extending it through `comms`
-  means controlling time and entropy for the whole process — `madsim`-style
-  libc interception, or `turmoil` plus the same. S2 found turmoil alone
-  insufficient: timestamps in packets, `HashMap` ordering, and dependencies
-  making uncontrolled syscalls all leaked through. This workspace has ~180
-  `Instant::now`, 9 `SystemTime::now` and 31 `tokio::time::sleep` call sites
-  that would need a seam first.
+  Replica/convergence seam, where there is no I/O. The clock is now controllable
+  in `crates/runtime` (see "The clock seam"), which is the piece that was
+  missing; what remains is entropy and network scheduling. Extending through
+  `comms` for real means `madsim`-style libc interception — S2 found `turmoil`
+  alone insufficient, because timestamps in packets, `HashMap` ordering, and
+  dependencies making uncontrolled syscalls all leaked through.
+- **`SystemTime::now` is not seamed** (9 production sites). tokio does not mock
+  wall-clock time and has an open issue for it, so record timestamps are still
+  taken from the real clock. They are timestamps rather than control flow, which
+  is why this has not mattered yet.
 - **No coverage-guided fuzzing.** The Contact decoders have a structure-aware
   property test (see T0), which is most of the value on stable. What is missing
   is `cargo-fuzz`'s coverage feedback — it needs nightly and its own CI job, and

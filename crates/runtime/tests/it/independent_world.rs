@@ -688,13 +688,13 @@ fn beacons_contact_and_opaque_forwarding_across_three_stations() {
     // Beacon ingestion rides the Station driver: poll (bounded) for the
     // registry to reflect it.
     let b_station = Key::from_device(&mechanics::actor::device_from_seed(&STATION_B_SEED)).unwrap();
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
         if station_c.neighbors().iter().any(|n| n.station == b_station) {
             break;
         }
         assert!(
-            std::time::Instant::now() < deadline,
+            tokio::time::Instant::now() < deadline,
             "the verified Beacon never reached the registry"
         );
         std::thread::sleep(Duration::from_millis(20));
@@ -703,13 +703,13 @@ fn beacons_contact_and_opaque_forwarding_across_three_stations() {
     // scheduler pulls B on its own — the forwarded (opaque-at-B) material
     // converges into C with no explicit dial at all.
     let session_c = station_c.dock(&world_id(), &writer()).unwrap();
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
         if query_json(&session_c, serde_json::json!({"q":"entry","k":"routed"})) == b"through-b" {
             break;
         }
         assert!(
-            std::time::Instant::now() < deadline,
+            tokio::time::Instant::now() < deadline,
             "C never auto-converged the material B could only forward"
         );
         std::thread::sleep(Duration::from_millis(25));
@@ -780,7 +780,7 @@ fn the_eclipse_fence_quarantines_unadmitted_beacon_emitters() {
     let b_station = Key::from_device(&mechanics::actor::device_from_seed(&STATION_B_SEED)).unwrap();
     let stranger_station =
         Key::from_device(&mechanics::actor::device_from_seed(&STRANGER_SEED)).unwrap();
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
         let neighbors = station_c.neighbors();
         assert!(
@@ -791,7 +791,7 @@ fn the_eclipse_fence_quarantines_unadmitted_beacon_emitters() {
             break;
         }
         assert!(
-            std::time::Instant::now() < deadline,
+            tokio::time::Instant::now() < deadline,
             "the admitted beacon never landed — the pipeline was not live"
         );
         std::thread::sleep(Duration::from_millis(20));
