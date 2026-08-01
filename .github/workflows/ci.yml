@@ -63,17 +63,37 @@ jobs:
             exit 1
           fi
 
-  # Build, lint (fmt + clippy), test, smoke-run, and the TLS-backend
-  # guard on every supported OS. This is the portability gate: everything must
-  # be green on all three, not just unix. clippy runs per-OS so the cfg-gated
-  # control channel (unix socket vs named pipe) is linted on both.
-  check:
-    name: check (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [namespace-profile-nixiesoftware, macos-latest, windows-latest]
+      # Naming is not a Rust-only rule: the viewer declares the same DTO shapes
+      # in TypeScript. `semantic_type_names` walks the Rust tree with syn; this
+      # walks the TypeScript tree with tsc's own parser. Both must be green for
+      # the rule to mean what it says. It lives here rather than in its own job
+      # because this job has already paid for `npm ci`.
+      - name: Semantic naming (TypeScript)
+        run: npm run naming-gate
+        working-directory: viewer
+
+  # ===========================================================================
+  # The PR path. Two jobs, split by what each one uniquely proves.
+  # ===========================================================================
+  # This used to be one matrix running the entire workspace suite on three
+  # operating systems. It was thorough and it was also the whole wait: measured
+  # on a green run, `check (windows-latest)` took 19 min of a 20 min workflow —
+  # build 6.6 min, test 10.4 min — while the Linux leg did identical work in 3.
+  #
+  # Windows is not slow because the tests are hard. It is slow because a hosted
+  # windows-latest links eighty test binaries against iroh + loro + frost on two
+  # cores. Paying that per push bought one thing: proof that the OS seam holds.
+  # That proof is worth keeping and is available far more cheaply, so the two
+  # jobs below buy it separately — `test` runs the suite where it is fast, and
+  # `platform` runs the seam where the seam lives.
+  #
+  # The full cross-platform suite has not been deleted. It moved to `nightly.yml`
+  # and to the merge path, where its latency is nobody's.
+
+  # Linux, every push: the whole suite except what the nightly tier owns.
+  test:
+    name: test (linux)
+    runs-on: namespace-profile-nixiesoftware
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
@@ -114,182 +134,134 @@ jobs:
       # (interprocess, fs2, and the `ring` TLS backend) can't drift under CI.
       # --workspace is load-bearing on every cargo invocation in this job: the
       # root package plus six concept crates form the workspace, and a bare
-      # `cargo test`/`nextest run` covers ONLY the root package (218 of 706
-      # tests at the time this comment was written) — silently skipping every
-      # mechanics/fabric/replica/runtime/comms/journal suite.
+      # `cargo test`/`nextest run` covers ONLY the root package — silently
+      # skipping every mechanics/fabric/replica/runtime/comms/journal suite.
       - name: Build
         run: cargo build --workspace --locked --all-targets --all-features
 
-      # nextest parallelizes across test binaries (the `Build` step above already
-      # compiled `--all-targets`, so examples/bins are covered there).
-      #
-      # The reference performance gate does not run here. It asserts an absolute
-      # wall-clock ceiling (`warm focus p95` <= 50 ms), and no CI runner holds it
-      # reliably: 66 ms on windows-latest, 59 ms on the Linux runner, and a pass on
-      # that same runner minutes earlier. The family measures 8-10 ms on a developer
-      # box and is unchanged against main, so what the gate reports on shared
-      # hardware is the hardware.
-      #
-      # The real gate is `perf.yml`: the FULL frozen corpus, weekly and on demand,
-      # on the pinned runner image, with every sample uploaded and p95 regressions
-      # gated once baselines are frozen. That is where an absolute budget can mean
-      # something. Running a 0.002-scale copy of it on three wildly different
-      # machines every push bought noise, not coverage.
-      # The reference performance gate is excluded here and runs in its own job
-      # below. It asserts an absolute wall-clock ceiling, and this matrix spans
-      # three runners of wildly different speed — `warm focus p95` measures 8-10 ms
-      # on a developer machine and 66 ms on a hosted windows-latest, so the leg
-      # that failed was the runner, not the code. `benchmarks/issues-reference.json`
-      # says the budgets are calibrated on "the pinned CI runner image", and this
-      # is what honouring that means: measure it in one place, consistently.
+      # The `pr` profile in .config/nextest.toml is the tier definition: the
+      # whole suite minus the four heavy gates and the real-network suites,
+      # which `nightly.yml` runs at full count. Naming a PROFILE rather than an
+      # inline `-E` keeps the tier reproducible locally with one command —
+      # `cargo nextest run --profile pr` is what CI runs.
       - name: Test
-        run: cargo nextest run --workspace --locked --all-features -E 'not binary(issues_reference_perf)'
+        run: cargo nextest run --workspace --locked --all-features --profile pr
 
       # nextest does not run doctests; run them explicitly so documented examples
       # (and the DTO/parity doc examples) can't rot.
       - name: Doctests
         run: cargo test --workspace --locked --doc --all-features
 
-      # Portability guard: the control channel + single-instance lock MUST stay
-      # cross-platform. Fail if a unix-only primitive is named outside an
-      # explicit #[cfg(unix)] island in those paths. The Windows job compiling is
-      # the primary gate; this catches a regression at review time on any OS.
       - name: Portability guard (no unix-only APIs in control/lock path)
         shell: bash
         run: bash ci/portability-guard.sh
 
-      # End-to-end smoke against the REAL binary (no network): drive the P0
-      # tracker flow — create a project + issues, render the board, edit an
-      # issue, and read the activity feed — asserting on observed output. Proves
-      # the daemon + control channel + Loro store + CLI all work on this OS.
-      # Grows per phase (P1: two nodes converge + a TUI client rebaselines on
-      # Reset; P3: a non-member sees only ciphertext).
       - name: Smoke run (P0 tracker flow)
         shell: bash
-        run: |
-          set -euo pipefail
-          export LAIT_HOME="$(mktemp -d)"
-          export LAIT_IDLE_SECS=0
-          # Capture output into a variable rather than piping into `grep -q`: an
-          # early-closing reader (grep -q, head) would send SIGPIPE to the CLI —
-          # which now resets SIGPIPE to default for clean interactive piping — and
-          # under `pipefail` that races the smoke. Capturing drains stdout fully,
-          # so the assertions are deterministic regardless of buffering/timing.
-          # Invoke the built binary directly. `cargo run` would re-enter cargo
-          # for every one of these ~15 calls — workspace discovery, lockfile
-          # check, and fingerprinting each time — for a binary the Build step
-          # already produced. This is still the real binary, which is the point
-          # of a smoke test; it just stops paying cargo's startup per command.
-          LAIT_BIN="target/debug/lait"
-          [ -x "$LAIT_BIN" ] || LAIT_BIN="target/debug/lait.exe"
-          [ -x "$LAIT_BIN" ] || { echo "::error::no built lait binary at target/debug"; exit 1; }
-          LAIT_BIN="$(cd "$(dirname "$LAIT_BIN")" && pwd)/$(basename "$LAIT_BIN")"
-          bin() { "$LAIT_BIN" "$@"; }
-          has() { case "$1" in *"$2"*) : ;; *) echo "::error::expected '$2' in:"; echo "$1"; exit 1 ;; esac; }
-          # id is 64 lowercase hex chars
-          id_out="$(bin id)"
-          [[ "$id_out" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::bad id: $id_out"; exit 1; }
-          # spaces are founded explicitly (no lazy mint); founding seeds a project
-          bin init --name Smoke
-          # Product verbs live under their World's namespace (`lait issues ...`);
-          # the root shell navigates identities, Orbits, Spaces and Worlds.
-          bin issues projects add ENG Engineering
-          bin issues new "fix login race" -p ENG -P high >/dev/null
-          bin issues new "add dark mode"  -p ENG -P low  >/dev/null
-          # board shows both issues in Backlog
-          board="$(bin issues board ENG)"; has "$board" "fix login race"; has "$board" "add dark mode"
-          # the work loop: start assigns + activates; done completes (S§5.7)
-          start_out="$(bin issues start ENG-1 --no-branch)"; has "$start_out" "in_progress"
-          board="$(bin issues board ENG)"; has "$board" "In Progress"; has "$board" "fix login race"
-          bin issues done ENG-2 >/dev/null
-          ls_out="$(bin issues ls)"; has "$ls_out" "fix login race"
-          # activity feed records the transitions
-          act="$(bin issues activity)"; has "$act" "created"; has "$act" "started"
-          # the machine registry lists the founded space
-          orbits_out="$(bin orbits)"; has "$orbits_out" "Smoke"
-          bin shutdown || true
-          echo "P0 smoke flow OK on ${{ matrix.os }}"
+        run: bash ci/smoke-p0.sh linux
 
-      # Defense-in-depth beyond the cargo-deny ban: fail if the aws-lc-* rustls
-      # backend is actually LINKED on THIS platform (a backend swap can be
-      # per-target). We assert on real linkage, not mere Cargo.lock presence:
-      # `cargo tree -i <crate>` prints the reverse-dependency tree to STDOUT only
-      # when the crate is genuinely in the build graph. A crate that is only
-      # pinned in Cargo.lock as an inactive optional dependency (e.g. rustls
-      # records aws-lc-rs's version even when the `ring` provider is the one
-      # selected) yields empty stdout — its "nothing to print" note goes to
-      # stderr — and must pass, because nothing C is compiled or linked.
       - name: Assert portable TLS backend (no aws-lc-*)
         shell: bash
-        run: |
-          set -euo pipefail
-          bad=0
-          for crate in aws-lc-rs aws-lc-sys aws-lc-fips-sys; do
-            if [ -n "$(cargo tree --locked -e no-dev -i "$crate" 2>/dev/null)" ]; then
-              echo "::error::$crate is linked into the build — the build must use the portable 'ring' rustls backend."
-              bad=1
-            fi
-          done
-          exit "$bad"
+        run: bash ci/assert-portable-tls.sh
 
-  # ---------------------------------------------------------------------------
-  # Orbital release gates (plan 50): each named job proves one mandatory
-  # artifact family from the verification matrix, on a clean checkout of the
-  # identical commit. The full workspace suite in `check` subsumes these tests;
-  # naming them as separate required jobs is the point — a deleted or renamed
-  # gate turns a green aggregate red instead of silently narrowing coverage.
-  # nextest filters match test binaries and owner-crate unit-test modules across
-  # the whole workspace, and an expression that matches nothing fails the run
-  # rather than skipping.
-  orbital-gates:
-    name: ${{ matrix.job }}
-    runs-on: namespace-profile-nixiesoftware
+  # Windows + macOS, every push: the OS seam.
+  #
+  # Two steps carry this job. `Typecheck` compiles every target in the
+  # workspace WITHOUT linking test binaries, and that is the portability gate
+  # proper — a `UnixStream`, an `std::os::fd`, an `flock(2)` reaching the
+  # control/lock path fails to compile here, which is what the guard script has
+  # always said is the primary mechanism. On the old matrix that step took
+  # 1.3 min while the link-everything build took 6.6.
+  #
+  # `Test` then runs what no type check can see: a named pipe that binds, an
+  # advisory lock that excludes a second instance, a path that survives NTFS, a
+  # device name that is not a file, an fsync that lands. That set is
+  # `[profile.pr-platform]` — every crate's unit tests (where every cfg-gated
+  # island in this workspace lives) plus the integration binaries that drive a
+  # real daemon over a real control channel. 932 tests; 23 s on a 12-core
+  # Windows dev box.
+  platform:
+    name: platform (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - job: orbital-boundaries
-            filter: "binary(orbital_boundaries)"
-          - job: orbital-clean-break
-            filter: "binary(orbital_clean_break) + binary(semantic_type_names) + binary(mixed_root_guard)"
-          - job: orbital-authority
-            filter: "binary(authority_history) + binary(world_policy) + (binary(mechanics) & (test(authority_checkpoint_tests) + test(frontier_isolation_tests)))"
-          - job: orbital-formats
-            filter: "binary(product_schema) + binary(coordinates_fixtures) + binary(contact_fixtures) + binary(beacon_presence_fixtures) + binary(transaction_marker_fixtures) + binary(canonical_ids) + binary(algebra_fixtures) + (binary(runtime) & (test(internal_tests::dto_schema) + test(internal_tests::content_host))) + (binary(replica) & (test(manifest_fixture_tests) + test(canonical_store_tests) + test(content_fixture_tests) + test(content_plane_tests) + test(cache_tests))) + (binary(journal) & (test(index_tests) + test(reconciliation_tests)))"
-          # Plan 13's frozen ground: the causal evidence §5.2 rests on, the
-          # algebra reservation a seventh type depends on, and the commit-cost
-          # baseline. Each is a claim the docket makes about the substrate;
-          # each fails loudly if it stops being true. The application-level
-          # clean-break refusal remains covered by orbital-adoption.
-          #
-          # `convergence_laws_tests` is the generated half of that ground. The
-          # fixtures in `collaborative_convergence` say what the algebra MEANS;
-          # this says the meaning survives op sequences nobody wrote down —
-          # convergence, order-independence, idempotence, over random programs
-          # across 2-4 replicas. It belongs to this gate rather than a nightly
-          # one because it is cheap (64 cases, well under a second) and because
-          # a convergence regression is not something to learn about tomorrow.
-          - job: core-fabric-foundations
-            filter: "binary(causal_evidence) + binary(history_growth) + binary(commit_cost_baseline) + binary(causal_contract) + binary(batch_atomicity) + binary(store_growth) + (binary(fabric) & (test(algebra_reservation_tests) + test(convergence_laws_tests)))"
-          # Plan 14 S0-S2: the frozen delivery-plane shapes, the transport
-          # posture gate, the cross-implementation flow contract, and Freight —
-          # admission, budgets, transfer bookkeeping, the provider on the wire,
-          # and two Stations moving real bytes. Acceptances 1, 2, 3, 8, 11 and
-          # 12 live in this job.
-          - job: core-plane-shapes
-            filter: "binary(plane_fixtures) + binary(transport_capabilities) + binary(flows) + (binary(runtime) & (test(internal_tests::budget_fixtures) + test(internal_tests::admission_fixtures) + test(internal_tests::freight_transfer) + test(internal_tests::freight_wire) + test(internal_tests::freight_two_node)))"
-          - job: orbital-faults
-            filter: "binary(orbital_catalog) + binary(concurrent_heads) + (binary(journal) & (test(fault_tests) + test(crash_tests))) + (binary(replica) & test(manifest_atomicity_tests))"
-          - job: orbital-contact-real
-            filter: "binary(contact_iroh) + binary(contact_mem)"
-          - job: orbital-bootstrap-real
-            filter: "binary(orbital_join_iroh) + binary(orbital_admission) + binary(orbital_concurrent_catalog)"
-          - job: orbital-ceremonies
-            filter: "binary(orbital_ceremonies) + (binary(mechanics) & test(sparse_ceremony_tests))"
-          - job: orbital-independent-world
-            filter: "binary(independent_world) + binary(orbital_adoption)"
-          - job: orbital-product-parity
-            filter: "binary(orbital_product_parity) + binary(issues_policy_designer) + binary(lait_daemon) + binary(control_classification) + binary(mcp_parity) + binary(viewer_parity)"
+        os: [macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Install Rust (stable + clippy)
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          toolchain: stable
+          components: clippy
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+
+      - name: Install nextest
+        uses: taiki-e/install-action@e658debeddbabf20b2b866d9235eb08a2375b1ad
+        with:
+          tool: nextest
+
+      # The portability gate. `--all-targets` matters: it type-checks the test
+      # targets too, so a unix-only API cannot enter through a test helper that
+      # production code later reaches for.
+      - name: Typecheck (all targets, this OS)
+        run: cargo clippy --workspace --all-targets --all-features --locked
+
+      # `ci/platform-seam-targets.sh` derives the cargo target flags from
+      # `[profile.pr-platform]` so the BUILD is restricted to the seam as well
+      # as the run — twenty test binaries instead of eighty. The list is
+      # derived rather than written twice on purpose; a second hand-kept copy
+      # of a selector list is exactly what went stale and reddened five gates.
+      - name: Test (OS seam)
+        shell: bash
+        run: |
+          set -euo pipefail
+          targets="$(bash ci/platform-seam-targets.sh)"
+          echo "seam targets: $targets"
+          cargo nextest run --workspace --locked --all-features --profile pr-platform $targets
+
+      - name: Portability guard (no unix-only APIs in control/lock path)
+        shell: bash
+        run: bash ci/portability-guard.sh
+
+      # The smoke needs the real binary, which the seam build above does not
+      # produce (it builds test targets, not the bin). One link, and it is the
+      # link that matters most on this OS.
+      - name: Build the binary
+        run: cargo build --locked --all-features --bin lait
+
+      - name: Smoke run (P0 tracker flow)
+        shell: bash
+        run: bash ci/smoke-p0.sh "${{ matrix.os }}"
+
+      - name: Assert portable TLS backend (no aws-lc-*)
+        shell: bash
+        run: bash ci/assert-portable-tls.sh
+
+  # ===========================================================================
+  # Coverage integrity, without re-running the suite to prove it.
+  # ===========================================================================
+  # Twelve `orbital-*` jobs used to live here, each re-running a named slice of
+  # the suite that `check` had already run minutes earlier. Their own comment
+  # said so: "the full workspace suite in `check` subsumes these tests". The
+  # reason to keep them anyway was real — a deleted or renamed gate should turn
+  # a green aggregate red rather than silently narrowing coverage.
+  #
+  # Re-executing tests is an expensive way to assert that tests EXIST: twelve
+  # jobs, ~23 runner-minutes per push. It was also weaker than it looked. The
+  # mechanism was nextest's exit-4 "filter matched nothing", so deleting one
+  # test from a module that still had others left every gate green.
+  #
+  # `ci/coverage-manifest.sh` asserts the property directly and catches that
+  # case: it records every test id in the workspace plus what each tier and
+  # each named gate selects, and fails when the recording stops matching. A
+  # coverage change becomes a reviewable diff instead of a surprise.
+  coverage-manifest:
+    name: coverage manifest
+    runs-on: namespace-profile-nixiesoftware
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - name: Install Rust (stable)
@@ -302,55 +274,40 @@ jobs:
         uses: taiki-e/install-action@e658debeddbabf20b2b866d9235eb08a2375b1ad
         with:
           tool: nextest
-      # Only the clean-break gate needs Node — it runs the TypeScript half of
-      # the semantic-naming rule below. Every other gate skips this.
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        if: matrix.job == 'orbital-clean-break'
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: viewer/package-lock.json
-      # --workspace is load-bearing: without it cargo builds only the root
-      # package, so filters naming crate-level binaries (runtime::dto_schema,
-      # mechanics::ceremony_frontier_isolation, …) silently select nothing —
-      # nextest's no-tests failure (exit 4) is what catches that, and partial
-      # matches would be worse: a gate that runs SOME of its binaries reads as
-      # green while skipping the rest. The list step makes the selection
-      # visible in the log before anything runs.
-      - name: List selected tests
-        run: cargo nextest list --workspace --locked --all-features -E '${{ matrix.filter }}'
-      - name: Run gate
-        run: cargo nextest run --workspace --locked --all-features -E '${{ matrix.filter }}'
-      # The formats gate additionally replays the committed schema examples
-      # through a NON-Rust JSON Schema 2020-12 validator, so the external
-      # contract is proven language-neutral, not merely serde-consistent.
+      # `nextest list` compiles the test targets but runs nothing, so this
+      # costs a build and seconds of walking, not a suite.
+      - name: Assert the coverage manifest is current
+        shell: bash
+        run: bash ci/coverage-manifest.sh --check
+
+  # The formats gate carried one thing the workspace suite does not: it replays
+  # the committed schema examples through a NON-Rust JSON Schema 2020-12
+  # validator, so the external contract is proven language-neutral rather than
+  # merely serde-consistent. That is real extra coverage, so it survives the
+  # collapse above as its own job.
+  schema-contract:
+    name: schema contract (language-neutral)
+    runs-on: namespace-profile-nixiesoftware
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      # A venv, not system pip: PEP-668 "externally-managed" images (e.g. the
+      # Namespace Ubuntu 24.04 runners) refuse bare `pip install`.
       - name: Language-neutral schema validation
-        if: matrix.job == 'orbital-formats'
-        # A venv, not system pip: PEP-668 "externally-managed" images (e.g.
-        # the Namespace Ubuntu 24.04 runners) refuse bare `pip install`.
         run: |
           python3 -m venv .schema-venv
           .schema-venv/bin/pip install --quiet "jsonschema>=4"
           .schema-venv/bin/python ci/validate-dto-schema.py
-      # The clean-break gate owns semantic naming, and naming is not a
-      # Rust-only rule: the viewer declares the same DTO shapes in TypeScript.
-      # `semantic_type_names` walks the Rust tree with syn; this walks the
-      # TypeScript tree with tsc's own parser. Both must be green for the gate
-      # to mean what it says.
-      - name: Semantic naming (TypeScript)
-        if: matrix.job == 'orbital-clean-break'
-        working-directory: viewer
-        run: |
-          npm ci --no-audit --no-fund
-          npm run naming-gate
 
-  # Aggregate required check: green only when every orbital gate (and the
-  # cross-platform workspace matrix) is green. Branch protection points here so
-  # a skipped or cancelled gate can never satisfy the release bar.
+  # Aggregate required check: green only when every PR-path job is green.
+  # Branch protection points HERE, at this exact name, so a skipped or
+  # cancelled job can never satisfy the release bar. The name is load-bearing
+  # for that reason — renaming it silently disarms branch protection, which is
+  # why it survives a restructuring that replaced most of what it used to
+  # depend on.
   orbital-complete:
     name: orbital-complete
     runs-on: namespace-profile-nixiesoftware
-    needs: [check, orbital-gates, viewer]
+    needs: [test, platform, viewer, coverage-manifest, schema-contract]
     if: always()
     steps:
       - name: Assert every dependency succeeded

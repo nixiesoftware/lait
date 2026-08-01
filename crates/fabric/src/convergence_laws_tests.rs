@@ -385,12 +385,27 @@ fn view_of(replica: &Engine) -> CollaborativeView {
         .expect("a collaborative Body projects")
 }
 
+/// 64 cases rather than proptest's default 256: this tier runs on every push,
+/// and each case builds and merges up to four real Loro documents. Coverage
+/// comes from accumulating distinct seeds across runs, not from one exhaustive
+/// run — the nightly tier raises `PROPTEST_CASES`.
+///
+/// Written this way rather than as `ProptestConfig::with_cases(64)` because
+/// that helper takes the default config and then OVERWRITES `cases`, which
+/// would silently discard the environment variable and leave the nightly depth
+/// knob doing nothing. `ProptestConfig::default()` already reads
+/// `PROPTEST_CASES`; the only thing to change is the value when nobody asked.
+fn config() -> ProptestConfig {
+    let from_env = std::env::var("PROPTEST_CASES").is_ok();
+    let default = ProptestConfig::default();
+    ProptestConfig {
+        cases: if from_env { default.cases } else { 64 },
+        ..default
+    }
+}
+
 proptest! {
-    // 64 rather than proptest's default 256: this tier runs on every push, and
-    // each case builds and merges up to four real Loro documents. Coverage
-    // comes from accumulating distinct seeds across runs, not from one
-    // exhaustive run — raise PROPTEST_CASES in the nightly tier.
-    #![proptest_config(ProptestConfig::with_cases(64))]
+    #![proptest_config(config())]
 
     /// **Convergence.** Replicas that fork, edit concurrently, and then
     /// exchange everything must project identical views.
