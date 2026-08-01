@@ -64,28 +64,40 @@ COMMON=(--workspace --locked --all-features --message-format json)
 # Count the testcases a filterset actually SELECTS. nextest's top-level
 # `test-count` counts the whole inventory it walked, mismatches included, so
 # reading that number would report the same value for every filter.
+# Both helpers write through `sys.stdout.buffer`, which is binary and performs
+# no newline translation. Python's `print` would emit CRLF on Windows, and this
+# manifest is generated on whatever machine a developer has and then diffed
+# byte-for-byte on Linux CI — a Windows regeneration would differ on every line
+# at once and report "coverage changed" when nothing had. `.gitattributes`
+# pins the committed file too; this is the half that makes `--check` correct
+# locally rather than only after a round-trip through git.
+emit() {
+  python3 -c "$1"
+}
+
 count_matches() {
-  python3 -c '
+  emit '
 import json, sys
 d = json.load(sys.stdin)
-print(sum(
+n = sum(
     1
     for suite in d.get("rust-suites", {}).values()
     for tc in suite.get("testcases", {}).values()
     if tc.get("filter-match", {}).get("status") == "matches"
-))'
+)
+sys.stdout.buffer.write(str(n).encode())'
 }
 
 list_test_ids() {
-  python3 -c '
+  emit '
 import json, sys
 d = json.load(sys.stdin)
-ids = [
+ids = sorted(
     suite["binary-id"] + " " + name
     for suite in d.get("rust-suites", {}).values()
     for name in suite.get("testcases", {})
-]
-print("\n".join(sorted(ids)))'
+)
+sys.stdout.buffer.write(("\n".join(ids) + "\n").encode())'
 }
 
 generate() {

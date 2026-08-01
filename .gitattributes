@@ -28,3 +28,9 @@ src/serve/assets/*.woff2 binary
 viewer/index.html text eol=lf
 # `npm ci` needs the lockfile byte-stable across platforms.
 viewer/package-lock.json text eol=lf
+# The coverage manifest is generated on a developer's machine and diffed
+# byte-for-byte on Linux CI, so it is the same trap as the entries above: a
+# manifest regenerated on Windows would differ from CI's on every line at once
+# and say "coverage changed" when nothing had. The generator also pins its own
+# output to LF; this is the half that survives someone editing it by hand.
+ci/coverage-manifest.txt text eol=lf
