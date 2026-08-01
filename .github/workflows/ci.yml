@@ -190,11 +190,10 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
-      - name: Install Rust (stable + clippy)
+      - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
         with:
           toolchain: stable
-          components: clippy
 
       - name: Cache cargo build
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
@@ -207,8 +206,22 @@ jobs:
       # The portability gate. `--all-targets` matters: it type-checks the test
       # targets too, so a unix-only API cannot enter through a test helper that
       # production code later reaches for.
+      #
+      # `check`, not `clippy`. This step exists to answer "does every target
+      # compile on this OS", which is a type-resolution question — a
+      # `UnixStream` or `std::os::fd` on Windows fails here exactly as it would
+      # under clippy, and `check` stops at metadata instead of running the lint
+      # driver over the whole graph. It also stops paying for a full second
+      # build: clippy's artifacts carry a different fingerprint from rustc's, so
+      # `clippy --all-targets` followed by `nextest run` compiles the workspace
+      # twice. Measured cold on macOS, that was 4.2 min of typecheck followed by
+      # 8.7 min of test, most of it the same crates compiled again.
+      #
+      # Per-OS LINTING still has value — a clippy lint inside a `cfg(windows)`
+      # island is invisible to the Linux job — but it is a nightly concern, not
+      # something to pay for on every push. nightly.yml's full matrix runs it.
       - name: Typecheck (all targets, this OS)
-        run: cargo clippy --workspace --all-targets --all-features --locked
+        run: cargo check --workspace --all-targets --all-features --locked
 
       # `ci/platform-seam-targets.sh` derives the cargo target flags from
       # `[profile.pr-platform]` so the BUILD is restricted to the seam as well

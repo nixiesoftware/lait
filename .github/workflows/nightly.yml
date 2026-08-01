@@ -62,10 +62,11 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
-      - name: Install Rust (stable)
+      - name: Install Rust (stable + clippy)
         uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
         with:
           toolchain: stable
+          components: clippy
 
       - name: Cache cargo build
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
@@ -74,6 +75,15 @@ jobs:
         uses: taiki-e/install-action@e658debeddbabf20b2b866d9235eb08a2375b1ad
         with:
           tool: nextest
+
+      # Per-OS linting. The PR path's `platform` job type-checks with `cargo
+      # check` rather than clippy, because clippy's artifacts do not share
+      # fingerprints with rustc's and running both compiles the workspace twice
+      # — a cost worth avoiding per push and worth paying nightly. What it buys
+      # is the lint that only exists on one OS: a `clippy::unwrap_used` inside a
+      # `cfg(windows)` island is invisible to the Linux job.
+      - name: Clippy (this OS)
+        run: cargo clippy --workspace --all-targets --all-features --locked
 
       - name: Build
         run: cargo build --workspace --locked --all-targets --all-features
