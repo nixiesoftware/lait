@@ -6,9 +6,10 @@
 # reviewed like one, not discovered when a gate goes red on a refactor.
 
 [tiers]
-pr             1287
-pr-platform    959
-nightly        1316
+pr             1293
+pr-platform    965
+nightly        1322
+mutants        80
 
 [gates]
 orbital-boundaries           6
@@ -787,6 +788,9 @@ mechanics transition::tests::a_stale_generation_ack_does_not_count
 mechanics transition::tests::abandoned_and_superseded_are_terminal
 mechanics transition::tests::events_for_other_transitions_are_ignored
 mechanics transition::tests::the_lifecycle_advances_through_its_states
+mechanics wallclock::tests::a_frozen_clock_does_not_move_and_thaws_on_drop
+mechanics wallclock::tests::a_running_clock_reports_the_real_time
+mechanics wallclock::tests::seconds_are_milliseconds_divided_not_rounded
 mechanics::it world_policy::delegation_permits_granting_but_not_meta_capability
 mechanics::it world_policy::historical_grant_then_removal_evaluated_at_each_frontier
 mechanics::it world_policy::implementation_pin_refuses_unapproved_id
@@ -1056,6 +1060,9 @@ runtime internal_tests::content_host::the_host_surface_names_no_path
 runtime internal_tests::convergence_simulation::the_fleet_converges_across_many_schedules
 runtime internal_tests::convergence_simulation::the_fleet_converges_on_a_known_seed
 runtime internal_tests::convergence_simulation::the_fleet_refuses_a_stranger
+runtime internal_tests::driver_beat::a_cancelled_driver_stops_within_one_poll
+runtime internal_tests::driver_beat::a_suspended_process_does_not_wake_up_owing_maintenance
+runtime internal_tests::driver_beat::an_idle_driver_maintains_on_the_slow_beat
 runtime internal_tests::dto_schema::a_signed_submit_dto_validates_every_spelled_coordinate
 runtime internal_tests::dto_schema::canonical_negative_examples_are_each_rejected_for_their_stated_reason
 runtime internal_tests::dto_schema::canonical_positive_examples_roundtrip_bidirectionally

@@ -3,6 +3,7 @@ mod budget_fixtures;
 mod contact_frame_fuzz;
 mod content_host;
 mod convergence_simulation;
+mod driver_beat;
 mod dto_schema;
 mod freight_transfer;
 mod freight_two_node;

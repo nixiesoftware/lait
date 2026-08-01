@@ -85,7 +85,7 @@ GATES=(
   "orbital-product-parity|(binary_id(lait::it) & test(orbital_product_parity::)) + (binary_id(lait::it) & test(issues_policy_designer::)) + (binary_id(lait::it) & test(lait_daemon::)) + (binary_id(lait::it) & test(control_classification::)) + (binary_id(lait::it) & test(mcp_parity::)) + (binary_id(lait::it) & test(viewer_parity::))"
 )
 
-TIERS=(pr pr-platform nightly)
+TIERS=(pr pr-platform nightly mutants)
 
 COMMON=(--workspace --locked --all-features --message-format json)
 

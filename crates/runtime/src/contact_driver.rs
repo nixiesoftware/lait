@@ -35,7 +35,7 @@ use std::sync::{Arc, Mutex};
 // indirection — so production pays nothing. With it, `tokio::time::pause()`
 // stops the clock for every site at once, which is what lets a test drive a
 // sweep interval or a probation window without waiting for one.
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 use tokio::time::Instant;
 
 use mechanics::{ids::SpaceId, station::Key};
@@ -71,10 +71,7 @@ pub const MAX_QUARANTINE: usize = 64;
 
 /// Milliseconds since the unix epoch (receiver-local wall clock).
 pub(crate) fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+    mechanics::wallclock::now_millis()
 }
 
 /// The mechanics seam the Contact plane needs, supplied at activation by the

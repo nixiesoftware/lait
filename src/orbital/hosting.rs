@@ -2762,11 +2762,11 @@ fn signal_body(signal: &runtime::plane::Signal) -> crate::control::SignalBody {
     }
 }
 
+/// Unix seconds now. Delegates to `mechanics::wallclock` so tests can
+/// freeze it, and so the pre-epoch decision lives in one place rather
+/// than in four copies of this function.
 fn now_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::SystemTime::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+    mechanics::wallclock::now_secs()
 }
 
 /// Where a co-located sponsored agent's identity seed lives: `agents/<name>/

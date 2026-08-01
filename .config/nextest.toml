@@ -230,3 +230,25 @@ filter = '''
 '''
 test-group = 'network'
 retries = 2
+
+[profile.mutants]
+# The suite cargo-mutants runs against each surviving mutant.
+#
+# Mutation testing runs the tests once PER MUTANT, so what it costs is the
+# suite's runtime multiplied by a few hundred. The default profile would put
+# the two 140-second ceremony gates and the commit-cost baseline inside that
+# multiplication, which turns a twenty-minute job into a week.
+#
+# What is left is the tests that could plausibly kill a mutant in the code being
+# mutated — the generated suites and the fixtures around them. A mutant that
+# only a real-network test would catch is a mutant this reports as surviving,
+# and that is the honest answer: it means nothing deterministic covers it.
+default-filter = '''
+    (binary_id(fabric) + binary_id(fabric::it))
+    + (binary_id(runtime) & (
+        test(internal_tests::contact_frame_fuzz)
+        + test(internal_tests::presence_wire_fuzz)
+        + test(internal_tests::convergence_simulation)
+        + test(internal_tests::freight_wire)
+    ))
+'''

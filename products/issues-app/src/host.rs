@@ -113,11 +113,11 @@ pub fn write_inbox_watermark(home: &Path, timestamp: u64) -> std::io::Result<()>
     std::fs::write(home.join("inbox-read.json"), timestamp.to_string())
 }
 
+/// Unix seconds now. Delegates to `mechanics::wallclock` so tests can
+/// freeze it, and so the pre-epoch decision lives in one place rather
+/// than in four copies of this function.
 pub fn now_seconds() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::SystemTime::UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0)
+    mechanics::wallclock::now_secs()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

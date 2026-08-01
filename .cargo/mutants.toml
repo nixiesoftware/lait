@@ -1,0 +1,58 @@
+# Mutation testing: does the suite actually fail when the code is wrong?
+#
+# T0 (the CRDT laws), T3 (the convergence simulation) and the two parser suites
+# were each mutation-tested BY HAND when they were written — that is how we know
+# a peer that discards material fails the agreement assertion, and that deleting
+# `decode_canonical`'s re-encode fails the canonicity case. Nothing kept them
+# honest afterwards. This does.
+#
+# ## Why the scope is narrow
+#
+# Mutation testing runs the test suite once per viable mutant, so its cost is
+# the suite multiplied by a few hundred. Pointed at the whole workspace it would
+# take a week and mostly rediscover that example-based tests do not cover every
+# branch, which nobody disputes.
+#
+# So it is pointed at the four files whose tests make a STRONG claim — generated
+# inputs, adversarial verification — because those are the claims worth
+# automating. A surviving mutant here is interesting: it means a generated suite
+# that says it explores a space has a hole in it. A surviving mutant in, say,
+# CLI argument plumbing would mean much less.
+#
+# Globs are matched per-package, so these are `**/`-anchored rather than
+# workspace-relative; the job passes `--workspace` so every package is walked.
+examine_globs = [
+    # The collaborative algebra. `convergence_laws_tests` claims convergence,
+    # commutativity/associativity and idempotence over random programs; a
+    # mutant that survives is a law the generator does not actually reach.
+    "**/fabric/src/fabric.rs",
+    # The three decoders that parse bytes from an unauthenticated peer.
+    "**/runtime/src/plane/contact.rs",
+    "**/runtime/src/beacon.rs",
+    "**/runtime/src/neighbor_presence.rs",
+]
+
+# Test code is not the subject. Mutating an assertion proves nothing about the
+# system, and mutating a generator produces mutants no test can kill by
+# construction.
+exclude_globs = [
+    "**/tests/**",
+    "**/*_tests.rs",
+    "**/internal_tests/**",
+]
+
+# nextest, matching the rest of this workspace: it runs each test in its own
+# process, which matters here because a mutant can hang or abort and must not
+# take the rest of the shard with it.
+test_tool = "nextest"
+
+# `[profile.mutants]` in .config/nextest.toml is the tier — the generated
+# suites and the fixtures around them, without the ceremony gates whose
+# 140 seconds each would be inside the per-mutant multiplication.
+additional_cargo_test_args = ["--profile", "mutants"]
+
+# A mutant that removes a loop bound turns a fast test into a hang, and the
+# only way to tell that from a slow machine is a timeout. Generous, because a
+# false "timeout" reads as a killed mutant and would flatter the score.
+minimum_test_timeout = 60
+timeout_multiplier = 5.0

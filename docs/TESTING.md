@@ -260,6 +260,45 @@ Code that takes `now` as a parameter — `Gate::check(now)`, `budget.admit(now)`
 `replica.retained_content(now)` — was already testable and did not need any of
 this. The seam is for code that asks the clock itself.
 
+## Mutation testing
+
+`nightly.yml`'s `mutants` job runs `cargo-mutants`: it breaks the code on
+purpose — flips a comparison, returns a default, deletes a branch — and reports
+which breakages the suite fails to notice.
+
+It exists because the generated suites were each mutation-tested **by hand**
+when written, and nothing kept them honest afterwards. That is how we know a
+peer that discards material fails T3's agreement assertion, and that deleting
+`decode_canonical`'s re-encode fails the canonicity case. Those checks were a
+moment in time; this is the standing version.
+
+`.cargo/mutants.toml` scopes it to four files:
+
+| file | the claim its tests make |
+|---|---|
+| `crates/fabric/src/fabric.rs` | convergence, commutativity, idempotence over random programs |
+| `crates/runtime/src/plane/contact.rs` | the Contact decoder never panics and is canonical |
+| `crates/runtime/src/beacon.rs` | same, for announcements from anyone on the topic |
+| `crates/runtime/src/neighbor_presence.rs` | same, for the presence challenge |
+
+459 mutants, ~4 s build + ~4 s test each, across 8 shards. Pointed at the whole
+workspace it would take a week and mostly rediscover that example-based tests do
+not cover every branch, which nobody disputes. A surviving mutant *here* is
+interesting: it means a suite that claims to explore a space has a hole in it.
+
+`[profile.mutants]` in `.config/nextest.toml` is the suite it runs — the
+generated tests and the fixtures around them, without the ceremony gates whose
+140 seconds each would be inside a per-mutant multiplication.
+
+**It reports rather than gates.** Survivors are uploaded as an artifact to be
+read and argued with. Making the score a build failure is a decision to take
+once there is a baseline worth holding.
+
+```sh
+cargo mutants --workspace --list          # what would be mutated
+cargo mutants --workspace --shard 0/8     # one shard, as CI runs it
+```
+
 ## The coverage manifest
 
 `ci/coverage-manifest.txt` records every test id in the workspace, what each
@@ -311,18 +350,18 @@ a surprise.
   `comms` for real means `madsim`-style libc interception — S2 found `turmoil`
   alone insufficient, because timestamps in packets, `HashMap` ordering, and
   dependencies making uncontrolled syscalls all leaked through.
-- **`SystemTime::now` is not seamed** (9 production sites). tokio does not mock
-  wall-clock time and has an open issue for it, so record timestamps are still
-  taken from the real clock. They are timestamps rather than control flow, which
-  is why this has not mattered yet.
+- **One `SystemTime::now` is deliberately unseamed**: `fabric`'s entropy
+  fallback hashes the clock into a substitute RNG when the OS entropy source
+  fails. That is not a timestamp read and freezing it would defeat the point.
 - **No coverage-guided fuzzing.** The Contact decoders have a structure-aware
   property test (see T0), which is most of the value on stable. What is missing
   is `cargo-fuzz`'s coverage feedback — it needs nightly and its own CI job, and
   the argument for paying that is a finding the property test cannot explain.
   Nothing else that parses untrusted bytes is covered: the Beacon and Signal
   wire formats are the next ones.
-- **No mutation testing in CI.** T0 and T3 were each mutation-tested by hand
-  when written — that is how we know the assertions fail when the system
-  breaks — but nothing keeps them honest automatically.
+- **Mutation testing reports, it does not gate.** `mutants` in `nightly.yml`
+  breaks the code on purpose and lists what the suite fails to notice. Turning
+  a score into a build failure is a decision to take once there is a baseline
+  to hold; a gate that fails on day one is a job someone turns off.
 - **Time is not simulated anywhere.** See T3 above; this is the largest
   remaining gap and the most expensive to close.

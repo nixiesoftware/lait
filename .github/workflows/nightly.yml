@@ -16,6 +16,9 @@
 #                 and 100k Bodies, and the CRDT laws at many times the per-push
 #                 case count. This is the tier that BUYS something by running
 #                 longer rather than merely re-proving the same thing slower.
+#   mutants       mutation testing: breaks the code on purpose and reports which
+#                 breakages the suite fails to notice. Reports rather than
+#                 gates — see the job.
 #
 # `perf.yml` remains separate and weekly: the full reference corpus is hours of
 # daemon traffic and has its own baseline-freezing story.
@@ -188,3 +191,77 @@ jobs:
         run: |
           cargo nextest run --workspace --locked --all-features --profile nightly \
             -E 'binary(orbital_join_iroh) + binary(contact_iroh) + (package(comms) & kind(test))'
+
+  # Does the suite actually fail when the code is wrong?
+  #
+  # T0, T3 and the two parser suites were each mutation-tested BY HAND when they
+  # were written — that is how we know a peer that discards material fails the
+  # agreement assertion, and that deleting `decode_canonical`'s re-encode fails
+  # the canonicity case. Nothing kept them honest afterwards. This does.
+  #
+  # `.cargo/mutants.toml` scopes it to the four files whose tests make a strong
+  # claim (generated inputs, adversarial verification), because pointing it at
+  # the workspace would take a week and mostly rediscover that example-based
+  # tests do not cover every branch. Measured: 459 mutants, ~4 s build + ~4 s
+  # test each.
+  #
+  # It REPORTS, it does not gate. A mutation score that fails the build on day
+  # one is a job someone turns off; the survivors are uploaded so they can be
+  # read, argued with, and turned into tests deliberately. Making it a gate is a
+  # decision to take once there is a baseline to hold.
+  mutants:
+    name: mutation (shard ${{ matrix.shard }})
+    runs-on: namespace-profile-nixiesoftware
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          toolchain: stable
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: Install nextest
+        uses: taiki-e/install-action@e658debeddbabf20b2b866d9235eb08a2375b1ad
+        with:
+          tool: nextest
+      - name: Install cargo-mutants
+        uses: taiki-e/install-action@e658debeddbabf20b2b866d9235eb08a2375b1ad
+        with:
+          tool: cargo-mutants
+
+      # The shards skip the baseline — running it eight times proves the same
+      # thing eight times — so it is proven once, here. Every shard must use the
+      # same denominator or the results mean nothing.
+      - name: Baseline (this shard's tests must pass unmutated)
+        if: matrix.shard == 0
+        run: cargo nextest run --workspace --locked --all-features --profile mutants
+
+      - name: Mutate
+        run: |
+          cargo mutants --workspace --shard ${{ matrix.shard }}/8             --baseline=skip --in-place --output mutants-out || true
+
+      - name: Report
+        if: always()
+        run: |
+          set -euo pipefail
+          for f in caught missed timeout unviable; do
+            path="mutants-out/$f.txt"
+            [ -f "$path" ] && echo "$f: $(grep -c '' "$path")" || echo "$f: 0"
+          done
+          if [ -s mutants-out/missed.txt ]; then
+            echo "::warning::mutants survived — see the uploaded artifact"
+            cat mutants-out/missed.txt
+          fi
+
+      - name: Upload survivors
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: mutants-shard-${{ matrix.shard }}
+          path: mutants-out/
+          if-no-files-found: ignore
