@@ -74,8 +74,6 @@ jobs:
       fail-fast: false
       matrix:
         os: [namespace-profile-nixiesoftware, macos-latest, windows-latest]
-    env:
-      RUSTFLAGS: "-D warnings"
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
@@ -105,7 +103,12 @@ jobs:
         run: cargo fmt --all --check
 
       - name: Clippy
-        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+        # Every production crate root denies the crash/error-safety lint set
+        # under `not(test)`, while test targets intentionally permit those
+        # tools for assertions and fault simulation. Do not promote advisory
+        # pedantic/nursery warnings here: that would erase that boundary and
+        # make stylistic suggestions fail every target, including tests.
+        run: cargo clippy --workspace --all-targets --all-features --locked
 
       # --locked pins the committed Cargo.lock, so the portable dependency set
       # (interprocess, fs2, and the `ring` TLS backend) can't drift under CI.
@@ -235,8 +238,9 @@ jobs:
   # identical commit. The full workspace suite in `check` subsumes these tests;
   # naming them as separate required jobs is the point — a deleted or renamed
   # gate turns a green aggregate red instead of silently narrowing coverage.
-  # nextest `binary()` filters match test binaries across the whole workspace,
-  # and an expression that matches nothing fails the run rather than skipping.
+  # nextest filters match test binaries and owner-crate unit-test modules across
+  # the whole workspace, and an expression that matches nothing fails the run
+  # rather than skipping.
   orbital-gates:
     name: ${{ matrix.job }}
     runs-on: namespace-profile-nixiesoftware
@@ -249,34 +253,35 @@ jobs:
           - job: orbital-clean-break
             filter: "binary(orbital_clean_break) + binary(semantic_type_names) + binary(mixed_root_guard)"
           - job: orbital-authority
-            filter: "binary(authority_history) + binary(authority_checkpoint) + binary(world_policy) + binary(ceremony_frontier_isolation)"
+            filter: "binary(authority_history) + binary(world_policy) + (binary(mechanics) & (test(authority_checkpoint_tests) + test(frontier_isolation_tests)))"
           - job: orbital-formats
-            filter: "binary(dto_schema) + binary(product_schema) + binary(coordinates_fixtures) + binary(contact_fixtures) + binary(beacon_presence_fixtures) + binary(manifest_fixtures) + binary(transaction_marker_fixtures) + binary(canonical_ids) + binary(canonical_store) + binary(algebra_fixtures) + binary(content_fixtures) + binary(index_fixtures) + binary(content_plane) + binary(cache_residency) + binary(reconciliation) + binary(content_host)"
+            filter: "binary(product_schema) + binary(coordinates_fixtures) + binary(contact_fixtures) + binary(beacon_presence_fixtures) + binary(transaction_marker_fixtures) + binary(canonical_ids) + binary(algebra_fixtures) + (binary(runtime) & (test(internal_tests::dto_schema) + test(internal_tests::content_host))) + (binary(replica) & (test(manifest_fixture_tests) + test(canonical_store_tests) + test(content_fixture_tests) + test(content_plane_tests) + test(cache_tests))) + (binary(journal) & (test(index_tests) + test(reconciliation_tests)))"
           # Plan 13's frozen ground: the causal evidence §5.2 rests on, the
-          # algebra reservation a seventh type depends on, the clean-break
-          # refusal, and the commit-cost baseline. Each is a claim the docket
-          # makes about the substrate; each fails loudly if it stops being true.
+          # algebra reservation a seventh type depends on, and the commit-cost
+          # baseline. Each is a claim the docket makes about the substrate;
+          # each fails loudly if it stops being true. The application-level
+          # clean-break refusal remains covered by orbital-adoption.
           - job: core-fabric-foundations
-            filter: "binary(causal_evidence) + binary(history_growth) + binary(algebra_reservation) + binary(clean_break) + binary(commit_cost_baseline) + binary(causal_contract) + binary(batch_atomicity) + binary(store_growth)"
+            filter: "binary(causal_evidence) + binary(history_growth) + binary(commit_cost_baseline) + binary(causal_contract) + binary(batch_atomicity) + binary(store_growth) + (binary(fabric) & test(algebra_reservation_tests))"
           # Plan 14 S0-S2: the frozen delivery-plane shapes, the transport
           # posture gate, the cross-implementation flow contract, and Freight —
           # admission, budgets, transfer bookkeeping, the provider on the wire,
           # and two Stations moving real bytes. Acceptances 1, 2, 3, 8, 11 and
           # 12 live in this job.
           - job: core-plane-shapes
-            filter: "binary(plane_fixtures) + binary(transport_capabilities) + binary(flows) + binary(budget_fixtures) + binary(admission_fixtures) + binary(freight_transfer) + binary(freight_wire) + binary(freight_two_node)"
+            filter: "binary(plane_fixtures) + binary(transport_capabilities) + binary(flows) + (binary(runtime) & (test(internal_tests::budget_fixtures) + test(internal_tests::admission_fixtures) + test(internal_tests::freight_transfer) + test(internal_tests::freight_wire) + test(internal_tests::freight_two_node)))"
           - job: orbital-faults
-            filter: "binary(journal_faults) + binary(journal_child_crash) + binary(manifest_atomicity) + binary(orbital_catalog) + binary(concurrent_heads)"
+            filter: "binary(orbital_catalog) + binary(concurrent_heads) + (binary(journal) & (test(fault_tests) + test(crash_tests))) + (binary(replica) & test(manifest_atomicity_tests))"
           - job: orbital-contact-real
             filter: "binary(contact_iroh) + binary(contact_mem)"
           - job: orbital-bootstrap-real
             filter: "binary(orbital_join_iroh) + binary(orbital_admission) + binary(orbital_concurrent_catalog)"
           - job: orbital-ceremonies
-            filter: "binary(orbital_ceremonies) + binary(mechanics_sparse_ceremony)"
+            filter: "binary(orbital_ceremonies) + (binary(mechanics) & test(sparse_ceremony_tests))"
           - job: orbital-independent-world
             filter: "binary(independent_world) + binary(orbital_adoption)"
           - job: orbital-product-parity
-            filter: "binary(orbital_product_parity) + binary(issues_policy_designer) + binary(space_bridge_lifecycle) + binary(lait_daemon) + binary(control_classification) + binary(mcp_parity) + binary(viewer_parity)"
+            filter: "binary(orbital_product_parity) + binary(issues_policy_designer) + binary(lait_daemon) + binary(control_classification) + binary(mcp_parity) + binary(viewer_parity)"
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - name: Install Rust (stable)

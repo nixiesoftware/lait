@@ -42,3 +42,10 @@ nursery = { level = "warn", priority = -1 }
 [dev-dependencies]
 # a membership test constructs a raw signing key to forge an op author.
 ed25519-dalek = "2"
+# The CRDT laws (`convergence_laws_tests`) are generated, not enumerated: random
+# op programs across N replicas, asserting convergence, order-independence, and
+# idempotence. This lives here rather than at the workspace root because the
+# algebra it exercises is this crate's — `fabric::Op` over `fabric::Engine` — and
+# a dev-dependency declared where nothing uses it is a dependency that compiles
+# on every platform and generates nothing.
+proptest = "1"

@@ -62,7 +62,10 @@ slow-timeout = { period = "30s", terminate-after = 3 }
 # to allow. 5 × 120 s keeps a genuine wedge surfacing within ten minutes while
 # giving the slowest supported runner ~7× the measured single-machine time.
 [[profile.default.overrides]]
-filter = 'binary(ceremony_frontier_isolation) + binary(mechanics_sparse_ceremony)'
+filter = '''
+    binary(mechanics)
+    & (test(frontier_isolation_tests) + test(sparse_ceremony_tests))
+'''
 slow-timeout = { period = "120s", terminate-after = 5 }
 
 # The smoke-scale performance gate builds a ~500-request corpus through the

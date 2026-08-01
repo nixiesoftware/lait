@@ -243,8 +243,6 @@ syn = { version = "2", features = ["full", "visit", "parsing"] }
 ed25519-dalek = "2"
 frost-ed25519 = "3"
 rand_core = { version = "0.6", features = ["getrandom"] }
-# property-based convergence testing (random op sequences across N peers).
-proptest = "1"
 # `ServiceExt::oneshot` — drive `serve`'s real router in-process, so the gate's
 # ordering and precedence are tested through the thing that implements them
 # rather than a copy of it. No port, no daemon.

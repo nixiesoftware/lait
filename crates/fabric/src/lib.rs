@@ -34,6 +34,8 @@
 
 #[cfg(test)]
 mod algebra_reservation_tests;
+#[cfg(test)]
+mod convergence_laws_tests;
 mod fabric;
 mod loro_ext;
 mod op;
