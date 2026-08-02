@@ -985,3 +985,199 @@ async fn housekeeping_reclaims_dead_staging_and_reports_what_it_cannot() {
     );
     drop(live);
 }
+
+// ===========================================================================
+// The driver, under a fault schedule and a stopped clock, at the same time.
+// ===========================================================================
+//
+// Everything above runs the real drivers on real OS threads under a
+// multi-thread runtime, which is the right shape for testing that bytes move.
+// It is the wrong shape for a simulation: `tokio::time::pause` requires the
+// current_thread runtime, so a driver on its own thread cannot have its clock
+// stopped.
+//
+// So this is the same stack, assembled differently — every driver cooperating
+// on ONE thread inside a `LocalSet`, which is what lets a test hold the clock
+// still while a lossy network drops things.
+//
+// It is the piece the other simulations do not have. `convergence_simulation`
+// controls a schedule with no clock; `paused_clock` and `driver_beat` control a
+// clock with no faults; `network_simulation_tests` controls faults with no
+// driver. This controls all three, over the real `plane_driver::drive`.
+//
+// ## Where the faults reach, and where they do not
+//
+// `MemNet` decides per CONNECTION, not per frame: `connect`, `connect_session`
+// and gossip delivery are gated, and the byte stream inside an established
+// connection is not. Measured — a whole fetch shows `sent=1`, because the
+// transfer happens within one admitted session.
+//
+// That bound is worth naming rather than quietly living with, and it is also
+// why per-frame faults are not the obvious next thing to build: what they would
+// buy is partial-transfer-under-loss, and
+// `an_interrupted_transfer_resumes_and_installs_only_after_verification` above
+// already covers resume by removing the provider mid-fetch. The uncovered
+// ground is narrower than it looks.
+
+/// One station's parts, without the driver started.
+///
+/// `node()` above spawns its pump and driver onto OS threads. That is exactly
+/// what cannot happen here, so this hands the caller the pieces and lets it
+/// `spawn_local` them into whichever `LocalSet` is holding the clock.
+struct LocalStation {
+    node: Node,
+    context: PlaneContext,
+    service: FreightService,
+}
+
+fn local_station(net: &comms::mem::MemNet, tag: &str, seed: [u8; 32]) -> LocalStation {
+    let node = node(net, tag, seed, false);
+    let context = PlaneContext {
+        plane: Plane::Freight,
+        space: space(),
+        local_station: node.station.clone(),
+        authority: Arc::new(Everyone),
+        policy: PlanePolicy::default(),
+        cancel: node.cancel.clone(),
+        drain_deadline: runtime::lifecycle::DEFAULT_DRAIN_DEADLINE,
+        authority_tick: None,
+    };
+    let service = FreightService::new(
+        node.host.clone(),
+        Arc::new(TransferRegistry::new()),
+        Arc::new(Keys),
+        space(),
+        u64::MAX,
+    );
+    LocalStation {
+        node,
+        context,
+        service,
+    }
+}
+
+/// Start a station's inbound pump and plane driver on the current `LocalSet`.
+///
+/// The pump is what `TransportHub` does in production — split inbound
+/// connections per plane. A bare `MemTransport` has one undivided door, so a
+/// test does the same job with six lines, exactly as `node()` does with a
+/// thread.
+fn spawn_local_station(station: LocalStation) -> Node {
+    let (queue_tx, queue_rx) = tokio::sync::mpsc::channel(16);
+    let transport = station.node.transport.clone();
+    tokio::task::spawn_local(async move {
+        while let Some(incoming) = transport.accept_connection().await {
+            if queue_tx.send(incoming).await.is_err() {
+                break;
+            }
+        }
+    });
+    tokio::task::spawn_local(runtime::plane_driver::drive(
+        station.context,
+        queue_rx,
+        station.service,
+    ));
+    station.node
+}
+
+/// A fetch completes over a network that is dropping things, with the clock
+/// held still.
+///
+/// The clock matters as much as the faults. Freight's retries and deadlines are
+/// written in `Duration`, so a lossy transfer only finishes if time advances —
+/// and against a real clock that means either a slow test or a flaky one. Here
+/// time advances because the test says so, in steps, and the whole thing runs
+/// in milliseconds.
+///
+/// `Faults::PERFECT` first: a simulation that has never been watched succeed is
+/// a simulation nobody can trust to fail meaningfully.
+#[tokio::test(start_paused = true)]
+async fn a_fetch_completes_under_a_paused_clock() {
+    let net = comms::mem::MemNet::seeded(0xD12E, comms::mem::Faults::PERFECT);
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let holder = spawn_local_station(local_station(&net, "sim-holder", [21u8; 32]));
+            let seeker = spawn_local_station(local_station(&net, "sim-seeker", [22u8; 32]));
+            tokio::task::yield_now().await;
+
+            let content = seed_content(&holder, 1, b"bytes crossing a stopped clock");
+            learn_descriptor(&seeker, &holder, &content);
+
+            let provider = connect_provider(
+                seeker.transport.as_ref(),
+                &space(),
+                &seeker.station,
+                &holder.station,
+                [1u8; 16],
+            )
+            .await
+            .expect("the provider admits the seeker");
+
+            let fetched = fetcher(&seeker)
+                .fetch(&content, [1u8; 16], std::slice::from_ref(&provider))
+                .await;
+            assert!(
+                fetched.is_ok(),
+                "a fetch over a perfect network should complete: {fetched:?}"
+            );
+
+            holder.cancel.cancel();
+            seeker.cancel.cancel();
+            tokio::time::advance(Duration::from_millis(100)).await;
+        })
+        .await;
+}
+
+/// A dropped dial is reported as unreachable — not a hang, not a silent
+/// success.
+///
+/// This is the design decision in `MemNet::connect_session` observed from
+/// above. A dropped dial there returns a live handle nobody holds the other end
+/// of, because that is what a lost SYN looks like to a dialer: no error, no
+/// answer. The question this settles is whether the layer above turns that into
+/// something a caller can act on, and it does — `connect_provider` reports
+/// `Unreachable` rather than parking forever on a peer that will never speak.
+///
+/// Seed 4242 drops the dial; the counters are asserted so the test cannot pass
+/// because nothing was dropped at all.
+#[tokio::test(start_paused = true)]
+async fn a_dropped_dial_is_unreachable_rather_than_a_hang() {
+    let net = comms::mem::MemNet::seeded(2, comms::mem::Faults::LOSSY);
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let holder = spawn_local_station(local_station(&net, "drop-holder", [31u8; 32]));
+            let seeker = spawn_local_station(local_station(&net, "drop-seeker", [32u8; 32]));
+            tokio::task::yield_now().await;
+
+            let content = seed_content(&holder, 1, b"bytes nobody will reach");
+            learn_descriptor(&seeker, &holder, &content);
+
+            let provider = connect_provider(
+                seeker.transport.as_ref(),
+                &space(),
+                &seeker.station,
+                &holder.station,
+                [1u8; 16],
+            )
+            .await;
+
+            let delivered = net.delivered();
+            assert!(
+                delivered.dropped > 0,
+                "this seed is supposed to drop the dial; it dropped nothing, so                  the assertion below would prove nothing"
+            );
+            // `Provider` has no Debug, so match rather than format the Ok side.
+            match provider {
+                Err(runtime::fetch::ProviderRefusal::Unreachable) => {}
+                Err(other) => panic!("expected Unreachable, got {other:?}"),
+                Ok(_) => panic!("the dial was dropped; it must not have succeeded"),
+            }
+
+            holder.cancel.cancel();
+            seeker.cancel.cancel();
+            tokio::time::advance(Duration::from_millis(100)).await;
+        })
+        .await;
+}

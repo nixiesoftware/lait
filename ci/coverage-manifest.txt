@@ -6,9 +6,9 @@
 # reviewed like one, not discovered when a gate goes red on a refactor.
 
 [tiers]
-pr             1306
-pr-platform    978
-nightly        1335
+pr             1308
+pr-platform    980
+nightly        1337
 mutants        87
 
 [gates]
@@ -17,7 +17,7 @@ orbital-clean-break          14
 orbital-authority            18
 orbital-formats              212
 core-fabric-foundations      52
-core-plane-shapes            75
+core-plane-shapes            77
 orbital-faults               27
 orbital-contact-real         4
 orbital-bootstrap-real       15
@@ -1090,6 +1090,8 @@ runtime internal_tests::freight_transfer::the_active_set_is_bounded_because_a_ca
 runtime internal_tests::freight_transfer::the_completed_tail_is_bounded_and_keeps_the_recent_end
 runtime internal_tests::freight_transfer::two_operations_over_one_content_do_not_collect_each_others_staged_bytes
 runtime internal_tests::freight_two_node::a_descriptor_that_arrived_without_bytes_fetches_only_what_is_missing
+runtime internal_tests::freight_two_node::a_dropped_dial_is_unreachable_rather_than_a_hang
+runtime internal_tests::freight_two_node::a_fetch_completes_under_a_paused_clock
 runtime internal_tests::freight_two_node::a_fetch_that_would_cross_the_quota_is_refused_before_anything_is_staged
 runtime internal_tests::freight_two_node::a_fetch_without_a_descriptor_cannot_start
 runtime internal_tests::freight_two_node::a_restart_re_fetches_at_chunk_granularity
