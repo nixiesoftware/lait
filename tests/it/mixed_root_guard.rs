@@ -163,19 +163,36 @@ fn any_product_cache_must_register_with_a_mixed_root_proof() {
     );
 }
 
+/// Every `.rs` under `dir`, concatenated. Recursive, because `tests/**` is what
+/// this guard has always claimed to search — it only ever read the top level,
+/// which was indistinguishable from correct while every test was a loose file
+/// directly under `tests/`. Consolidating them into `tests/it/` moved the files
+/// one level down and the guard found nothing, passing vacuously would have
+/// been the worse outcome.
+fn concat_rs_sources(dir: &std::path::Path, out: &mut String) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            concat_rs_sources(&path, out);
+        } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+            out.push_str(&std::fs::read_to_string(&path).unwrap_or_default());
+        }
+    }
+}
+
 #[test]
 fn every_registered_cache_names_a_real_test() {
     // A registration must point at a test that exists somewhere in tests/**;
     // a dangling name would let the registry rot into prose.
-    let tests_dir = workspace_root().join("tests");
     let mut all_tests = String::new();
-    if let Ok(entries) = std::fs::read_dir(&tests_dir) {
-        for entry in entries.flatten() {
-            if entry.path().extension().and_then(|e| e.to_str()) == Some("rs") {
-                all_tests.push_str(&std::fs::read_to_string(entry.path()).unwrap_or_default());
-            }
-        }
-    }
+    concat_rs_sources(&workspace_root().join("tests"), &mut all_tests);
+    assert!(
+        !all_tests.is_empty(),
+        "found no test sources under tests/ — this guard cannot pass vacuously"
+    );
     for (id, keyed_by, test) in REGISTERED_CACHES {
         assert!(
             !keyed_by.is_empty(),

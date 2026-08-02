@@ -78,6 +78,7 @@ mod sigdag;
 pub mod space;
 pub mod station;
 mod transition;
+pub mod wallclock;
 
 #[cfg(test)]
 extern crate self as mechanics;

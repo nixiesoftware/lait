@@ -35,11 +35,11 @@ use crate::{
     mcp, orbits,
 };
 
+/// Unix seconds now. Delegates to `mechanics::wallclock` so tests can
+/// freeze it, and so the pre-epoch decision lives in one place rather
+/// than in four copies of this function.
 fn now_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+    mechanics::wallclock::now_secs()
 }
 
 /// Resolve a `--orbit <SEL>` selector to a store path via the local catalog:

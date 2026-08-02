@@ -16,6 +16,13 @@
 #                 and 100k Bodies, and the CRDT laws at many times the per-push
 #                 case count. This is the tier that BUYS something by running
 #                 longer rather than merely re-proving the same thing slower.
+#   mutants       mutation testing: breaks the code on purpose and reports which
+#                 breakages the suite fails to notice. Reports rather than
+#                 gates — see the job.
+#   fuzz          coverage-guided fuzzing of the pre-auth decoders, ten minutes
+#                 per target. Linux only; see the job for why.
+#   determinism   the whole stack replaying from a seed, entropy and clock both
+#                 closed at compile time. This is what makes a seed shareable.
 #
 # `perf.yml` remains separate and weekly: the full reference corpus is hours of
 # daemon traffic and has its own baseline-freezing story.
@@ -54,7 +61,14 @@ jobs:
     # 12-core dev box and share cores with ~1300 other tests here; a hosted
     # two-core windows-latest needs room for that without the job being killed
     # mid-suite and reporting nothing.
-    timeout-minutes: 90
+    #
+    # Sized for the FIRST run, which is the one at risk. `Swatinem/rust-cache`
+    # keys on job name, so `full suite (windows-latest)` starts with no cache
+    # however warm ci.yml's `platform` job is — and cold Windows measured ~42 min
+    # for a SUBSET of this suite. A timeout that kills the run mid-suite reports
+    # nothing at all, which is the worst outcome for a job nobody is watching;
+    # once a cache exists this is slack rather than budget.
+    timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
@@ -154,10 +168,10 @@ jobs:
       # the interleaving space — four peers authoring concurrently through a
       # network that drops, duplicates, reorders and partitions.
       #
-      # A failure names its seed. That seed reproduces the schedule exactly, on
-      # any machine, because the simulation's only entropy is the seed itself —
-      # so turn a nightly failure into a permanent case by pinning the seed in
-      # `the_fleet_converges_on_a_known_seed`.
+      # A failure names its seed, and that seed reproduces the run — verified
+      # across runs and across Windows/Linux. So a nightly failure is
+      # actionable: pin the seed in `the_fleet_converges_on_a_known_seed` and it
+      # replays on every later run, including the per-push tier.
       - name: Convergence simulation (deep)
         env:
           LAIT_SIM_SEEDS: "512"
@@ -181,3 +195,195 @@ jobs:
         run: |
           cargo nextest run --workspace --locked --all-features --profile nightly \
             -E 'binary(orbital_join_iroh) + binary(contact_iroh) + (package(comms) & kind(test))'
+
+  # Does the suite actually fail when the code is wrong?
+  #
+  # T0, T3 and the two parser suites were each mutation-tested BY HAND when they
+  # were written — that is how we know a peer that discards material fails the
+  # agreement assertion, and that deleting `decode_canonical`'s re-encode fails
+  # the canonicity case. Nothing kept them honest afterwards. This does.
+  #
+  # `.cargo/mutants.toml` scopes it to the four files whose tests make a strong
+  # claim (generated inputs, adversarial verification), because pointing it at
+  # the workspace would take a week and mostly rediscover that example-based
+  # tests do not cover every branch. Measured: 459 mutants, ~4 s build + ~4 s
+  # test each.
+  #
+  # It REPORTS, it does not gate. A mutation score that fails the build on day
+  # one is a job someone turns off; the survivors are uploaded so they can be
+  # read, argued with, and turned into tests deliberately. Making it a gate is a
+  # decision to take once there is a baseline to hold.
+  mutants:
+    name: mutation (shard ${{ matrix.shard }})
+    runs-on: namespace-profile-nixiesoftware
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          toolchain: stable
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: Install nextest
+        uses: taiki-e/install-action@e658debeddbabf20b2b866d9235eb08a2375b1ad
+        with:
+          tool: nextest
+      - name: Install cargo-mutants
+        uses: taiki-e/install-action@e658debeddbabf20b2b866d9235eb08a2375b1ad
+        with:
+          tool: cargo-mutants
+
+      # The shards skip the baseline — running it eight times proves the same
+      # thing eight times — so it is proven once, here. Every shard must use the
+      # same denominator or the results mean nothing.
+      - name: Baseline (this shard's tests must pass unmutated)
+        if: matrix.shard == 0
+        run: cargo nextest run --workspace --locked --all-features --profile mutants
+
+      - name: Mutate
+        run: |
+          cargo mutants --workspace --shard ${{ matrix.shard }}/8             --baseline=skip --in-place --output mutants-out || true
+
+      - name: Report
+        if: always()
+        run: |
+          set -euo pipefail
+          for f in caught missed timeout unviable; do
+            path="mutants-out/$f.txt"
+            [ -f "$path" ] && echo "$f: $(grep -c '' "$path")" || echo "$f: 0"
+          done
+          if [ -s mutants-out/missed.txt ]; then
+            echo "::warning::mutants survived — see the uploaded artifact"
+            cat mutants-out/missed.txt
+          fi
+
+      - name: Upload survivors
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: mutants-shard-${{ matrix.shard }}
+          path: mutants-out/
+          if-no-files-found: ignore
+
+  # Coverage-guided fuzzing of the decoders that read untrusted bytes.
+  #
+  # The property is the same one `contact_frame_fuzz` and `presence_wire_fuzz`
+  # assert on every push — decoding must return a Result, never unwind. What
+  # differs is the search: libFuzzer watches which branches an input reached and
+  # mutates toward the ones it has not, which finds inputs a blind generator
+  # would need a very long time to stumble into.
+  #
+  # Byte-slice targets, so there are no generators to duplicate. This is also
+  # why cargo-fuzz rather than bolero: bolero would unify the property test and
+  # the fuzz target under one harness, but only by rewriting the generators in
+  # its own API — and for a parser the coverage-guided value is in the raw-bytes
+  # path, which needs no generator at all.
+  #
+  # `RUSTUP_TOOLCHAIN` overrides rust-toolchain.toml's `channel = "stable"`,
+  # which is the same mechanism ci.yml's `msrv (1.91)` job uses to pin downward.
+  # The `fuzz/` package is excluded from the workspace, so nothing else in the
+  # build ever sees nightly.
+  #
+  # LINUX ONLY, and not by preference: `cargo fuzz build` fails to link `irpc`
+  # and `iroh-relay` under MSVC, with and without sanitizers. Both are
+  # transitive iroh dependencies built as DLLs, and cargo-fuzz's link arguments
+  # do not suit a DLL. The targets type-check on stable Windows; it is the
+  # libFuzzer link that cannot happen there.
+  fuzz:
+    name: fuzz (${{ matrix.target }})
+    runs-on: namespace-profile-nixiesoftware
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [contact_frame, handshake, beacon, presence]
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - name: Install Rust (nightly)
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          toolchain: nightly
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: fuzz
+      - name: Install cargo-fuzz
+        uses: taiki-e/install-action@e658debeddbabf20b2b866d9235eb08a2375b1ad
+        with:
+          tool: cargo-fuzz
+
+      # Split from the run so a build failure is attributable. A combined step
+      # would report "fuzzing failed" for a compile error, which is the wrong
+      # thing to go looking for.
+      - name: Build the target
+        env:
+          RUSTUP_TOOLCHAIN: nightly
+        run: cargo fuzz build ${{ matrix.target }}
+
+      # Ten minutes per target. A fuzzing campaign is open-ended by nature, so
+      # the budget is the honest knob: this is a nightly sweep for shallow
+      # crashes, not a serious campaign. A finding here is worth far more than
+      # the budget suggests, because it is reachable pre-authentication.
+      - name: Fuzz for ten minutes
+        env:
+          RUSTUP_TOOLCHAIN: nightly
+        run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=600 -print_final_stats=1
+
+      # A crash artifact is the whole output. Uploading it means the next step
+      # is writing a regression test from real bytes rather than reproducing
+      # from a description.
+      - name: Upload any crash
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: fuzz-crash-${{ matrix.target }}
+          path: fuzz/artifacts/
+          if-no-files-found: ignore
+
+  # Whole-stack determinism: is a seed a real reproduction?
+  #
+  # `runtime`'s convergence simulation replays its SCHEDULE, which is enough to
+  # hand a colleague a seed and have them watch the same assertion fail. This
+  # asks the harder question — do the same BYTES come out? Same transaction
+  # commitments, same sealed payloads, same minted ids.
+  #
+  # It needs two doors shut, and `sim/.cargo/config.toml` shuts both at compile
+  # time: `getrandom_backend="custom"` routes every random byte in the whole
+  # dependency graph through a seeded generator (including FROST's
+  # `rand_core::OsRng`, which sits on getrandom), and `lait_simulation` stops
+  # Loro recording a wall-clock second into every change.
+  #
+  # Neither can reach a release binary. Cargo reads config from the current
+  # directory upward and never downward, so a build at the repo root cannot see
+  # that file, and `sim` is excluded from the workspace besides.
+  #
+  # nextest specifically, not `cargo test`: the seeded generator is one counter
+  # per process, so tests sharing a process would consume each other's stream.
+  # Process-per-test is also what makes a seed shareable in the first place —
+  # a colleague's fresh process starts where yours did.
+  determinism:
+    name: whole-stack determinism
+    runs-on: namespace-profile-nixiesoftware
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          toolchain: stable
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: sim
+      - name: Install nextest
+        uses: taiki-e/install-action@e658debeddbabf20b2b866d9235eb08a2375b1ad
+        with:
+          tool: nextest
+      - name: The stack replays from a seed
+        working-directory: sim
+        run: cargo nextest run

@@ -25,7 +25,12 @@
 //! Freight lane.
 
 use std::rc::Rc;
-use std::time::Instant;
+// `tokio::time::Instant`, not `tokio::time::Instant`. Without the `test-util`
+// feature it IS `tokio::time::Instant::now()` — same call, same value, no
+// indirection — so production pays nothing. With it, `tokio::time::pause()`
+// stops the clock for every site at once, which is what lets a test drive a
+// sweep interval or a probation window without waiting for one.
+use tokio::time::Instant;
 
 use replica::content::ContentRef;
 

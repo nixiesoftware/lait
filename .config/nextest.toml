@@ -77,7 +77,7 @@ slow-timeout = { period = "120s", terminate-after = 5 }
 # measured single-machine time. The FULL corpus never runs under nextest —
 # the orbital-perf workflow invokes this binary directly with its own budget.
 [[profile.default.overrides]]
-filter = 'binary(issues_reference_perf)'
+filter = '(binary_id(lait::it) & test(issues_reference_perf::))'
 slow-timeout = { period = "120s", terminate-after = 5 }
 
 # Plan 13's commit-cost baseline builds a durable Replica corpus at each small
@@ -96,18 +96,18 @@ slow-timeout = { period = "120s", terminate-after = 5 }
 # `LAIT_COMMIT_BASELINE_FULL` and belongs to the perf workflow, which sets its
 # own budget.
 [[profile.default.overrides]]
-filter = 'binary(commit_cost_baseline)'
+filter = '(binary_id(lait::it) & test(commit_cost_baseline::))'
 slow-timeout = { period = "120s", terminate-after = 5 }
 
 [[profile.default.overrides]]
 filter = '''
-    binary(orbital_join_iroh)
-    + binary(restart_reconnect)
-    + binary(guided_join)
-    + binary(seed_registry)
-    + binary(control_plane)
-    + binary(cli_safety)
-    + binary(contact_iroh)
+    (binary_id(lait::it) & test(orbital_join_iroh::))
+    + (binary_id(lait::it) & test(restart_reconnect::))
+    + (binary_id(lait::it) & test(guided_join::))
+    + (binary_id(lait::it) & test(seed_registry::))
+    + (binary_id(lait::it) & test(control_plane::))
+    + (binary_id(lait::it) & test(cli_safety::))
+    + (binary_id(runtime::it) & test(contact_iroh::))
     + (package(comms) & kind(test))
 '''
 test-group = 'network'
@@ -154,10 +154,10 @@ retries = 1
 # is exactly the kind of thing that is cheap to catch now and expensive later.
 default-filter = '''
     not (
-        binary(issues_reference_perf)
+        (binary_id(lait::it) & test(issues_reference_perf::))
         + (binary(mechanics) & (test(frontier_isolation_tests) + test(sparse_ceremony_tests)))
-        + binary(orbital_join_iroh)
-        + binary(contact_iroh)
+        + (binary_id(lait::it) & test(orbital_join_iroh::))
+        + (binary_id(runtime::it) & test(contact_iroh::))
         + (package(comms) & kind(test))
     )
 '''
@@ -188,16 +188,16 @@ default-filter = '''
 default-filter = '''
     (
         kind(lib)
-        + binary(lait_daemon)
-        + binary(control_plane)
-        + binary(control_classification)
-        + binary(live_control)
-        + binary(restart_reconnect)
-        + binary(cli_safety)
-        + binary(cli_surfaces)
-        + binary(seed_registry)
-        + binary(station_lifecycle)
-        + binary(content_ipc)
+        + (binary_id(lait::it) & test(lait_daemon::))
+        + (binary_id(lait::it) & test(control_plane::))
+        + (binary_id(lait::it) & test(control_classification::))
+        + (binary_id(lait::it) & test(live_control::))
+        + (binary_id(lait::it) & test(restart_reconnect::))
+        + (binary_id(lait::it) & test(cli_safety::))
+        + (binary_id(lait::it) & test(cli_surfaces::))
+        + (binary_id(lait::it) & test(seed_registry::))
+        + (binary_id(lait::it) & test(station_lifecycle::))
+        + (binary_id(lait::it) & test(content_ipc::))
     )
     - (binary(mechanics) & (test(frontier_isolation_tests) + test(sparse_ceremony_tests)))
 '''
@@ -211,22 +211,44 @@ retries = 1
 
 [[profile.nightly.overrides]]
 filter = '''
-    binary(issues_reference_perf)
-    + binary(commit_cost_baseline)
+    (binary_id(lait::it) & test(issues_reference_perf::))
+    + (binary_id(lait::it) & test(commit_cost_baseline::))
     + (binary(mechanics) & (test(frontier_isolation_tests) + test(sparse_ceremony_tests)))
 '''
 slow-timeout = { period = "300s", terminate-after = 8 }
 
 [[profile.nightly.overrides]]
 filter = '''
-    binary(orbital_join_iroh)
-    + binary(restart_reconnect)
-    + binary(guided_join)
-    + binary(seed_registry)
-    + binary(control_plane)
-    + binary(cli_safety)
-    + binary(contact_iroh)
+    (binary_id(lait::it) & test(orbital_join_iroh::))
+    + (binary_id(lait::it) & test(restart_reconnect::))
+    + (binary_id(lait::it) & test(guided_join::))
+    + (binary_id(lait::it) & test(seed_registry::))
+    + (binary_id(lait::it) & test(control_plane::))
+    + (binary_id(lait::it) & test(cli_safety::))
+    + (binary_id(runtime::it) & test(contact_iroh::))
     + (package(comms) & kind(test))
 '''
 test-group = 'network'
 retries = 2
+
+[profile.mutants]
+# The suite cargo-mutants runs against each surviving mutant.
+#
+# Mutation testing runs the tests once PER MUTANT, so what it costs is the
+# suite's runtime multiplied by a few hundred. The default profile would put
+# the two 140-second ceremony gates and the commit-cost baseline inside that
+# multiplication, which turns a twenty-minute job into a week.
+#
+# What is left is the tests that could plausibly kill a mutant in the code being
+# mutated — the generated suites and the fixtures around them. A mutant that
+# only a real-network test would catch is a mutant this reports as surviving,
+# and that is the honest answer: it means nothing deterministic covers it.
+default-filter = '''
+    (binary_id(fabric) + binary_id(fabric::it))
+    + (binary_id(runtime) & (
+        test(internal_tests::contact_frame_fuzz)
+        + test(internal_tests::presence_wire_fuzz)
+        + test(internal_tests::convergence_simulation)
+        + test(internal_tests::freight_wire)
+    ))
+'''

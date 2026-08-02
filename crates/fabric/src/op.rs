@@ -38,6 +38,16 @@ static FALLBACK_ENTROPY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 /// Fill an internal identity buffer. OS entropy is preferred; the fallback
 /// combines process-local monotonic state with time and hashes it so an entropy
 /// outage cannot crash an activation or reuse the same value within a process.
+///
+/// No simulation seam here, deliberately — one was built and then measured out
+/// again. Making these ids seedable did NOT make the convergence simulation
+/// reproducible, because entropy also enters through sealing nonces, minted
+/// content ids, and FROST's own `OsRng`. That is why madsim intercepts
+/// `getrandom` process-wide rather than seaming call sites: at this layer there
+/// is no single door. The simulation reproduces instead by making its SCHEDULE
+/// independent of how much material the system produces, which needs nothing
+/// from this module. A process-global override on identity minting that buys
+/// nothing is a hazard with no payer.
 pub(crate) fn fill_identity(raw: &mut [u8]) {
     if let Err(source) = getrandom::fill(raw) {
         tracing::error!(error = %source, "OS entropy unavailable while minting Fabric identity");
@@ -45,14 +55,31 @@ pub(crate) fn fill_identity(raw: &mut [u8]) {
         let elapsed = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default();
-        let mut hash = blake3::Hasher::new();
-        hash.update(b"lait.fabric.identity-fallback.v1\0");
-        hash.update(&std::process::id().to_le_bytes());
-        hash.update(&sequence.to_le_bytes());
-        hash.update(&elapsed.as_secs().to_le_bytes());
-        hash.update(&elapsed.subsec_nanos().to_le_bytes());
-        hash.finalize_xof().fill(raw);
+        fill_from_fallback(raw, std::process::id(), sequence, elapsed);
     }
+}
+
+/// The fallback itself, over its inputs rather than over the world.
+///
+/// Split out because otherwise it is unreachable: `getrandom::fill` fails only
+/// on a real entropy outage, so no test has ever executed these lines. That is
+/// a bad place for dead-by-default code — this is identity minting, and this
+/// module explains why it matters that two activations never mint the same
+/// value ("silent divergence rather than a detected equivocation"). The path
+/// taken when entropy is ALREADY misbehaving is the last one that should be
+/// untested.
+///
+/// Not a seam for injection: production still reads the real pid and clock two
+/// lines up. This is the body, given its inputs, so its properties can be
+/// asserted.
+fn fill_from_fallback(raw: &mut [u8], pid: u32, sequence: u64, elapsed: std::time::Duration) {
+    let mut hash = blake3::Hasher::new();
+    hash.update(b"lait.fabric.identity-fallback.v1\0");
+    hash.update(&pid.to_le_bytes());
+    hash.update(&sequence.to_le_bytes());
+    hash.update(&elapsed.as_secs().to_le_bytes());
+    hash.update(&elapsed.subsec_nanos().to_le_bytes());
+    hash.finalize_xof().fill(raw);
 }
 
 /// Engine configuration applied before any op is written or imported.
@@ -61,7 +88,13 @@ pub(crate) fn fill_identity(raw: &mut [u8]) {
 /// and never persisted. `None` leaves Loro's random choice in place, which is
 /// correct for a read-only or scratch document that will never author.
 pub(crate) fn configure(doc: &LoroDoc, peer: Option<u64>) {
-    doc.set_record_timestamp(true);
+    // Off under `--cfg lait_simulation`, which only `sim/` sets. The recorded
+    // second lands in the change, the change lands in the export, and the
+    // export lands in a transaction commitment — so a simulation that records
+    // it reproduces only within one second of wall clock. Nothing else depends
+    // on it: `set_change_merge_interval(-1)` below is what stops consecutive
+    // changes fusing, which is the reason the timestamp was turned on.
+    doc.set_record_timestamp(!cfg!(lait_simulation));
     doc.set_change_merge_interval(-1);
     if let Some(p) = peer {
         // Only fails with uncommitted pending ops; constructors call this first.
@@ -80,4 +113,71 @@ pub fn mint_activation_peer() -> u64 {
     fill_identity(&mut raw);
     // Loro reserves u64::MAX as a sentinel.
     u64::from_le_bytes(raw) & (u64::MAX >> 1)
+}
+
+#[cfg(test)]
+mod fallback_tests {
+    use super::fill_from_fallback;
+    use std::collections::BTreeSet;
+    use std::time::Duration;
+
+    fn eight(pid: u32, sequence: u64, elapsed: Duration) -> [u8; 8] {
+        let mut raw = [0u8; 8];
+        fill_from_fallback(&mut raw, pid, sequence, elapsed);
+        raw
+    }
+
+    /// The sequence counter alone must separate two activations, because the
+    /// clock is exactly what cannot be relied on here: two activations inside
+    /// one millisecond read the same `SystemTime`, and a machine whose entropy
+    /// has failed is not a machine whose clock is above suspicion either.
+    #[test]
+    fn the_sequence_alone_separates_activations() {
+        let clock = Duration::from_secs(1_700_000_000);
+        let mut seen = BTreeSet::new();
+        for sequence in 0..1_000u64 {
+            assert!(
+                seen.insert(eight(4242, sequence, clock)),
+                "sequence {sequence} repeated a value at a frozen clock"
+            );
+        }
+    }
+
+    /// Two processes that lose entropy at the same instant must not agree.
+    /// Colliding peer ids across processes is the failure this whole path
+    /// exists to avoid.
+    #[test]
+    fn two_processes_do_not_collide() {
+        let clock = Duration::from_secs(1_700_000_000);
+        assert_ne!(eight(1, 0, clock), eight(2, 0, clock));
+    }
+
+    /// Never all-zero. A buffer the hash failed to fill would look like an
+    /// ordinary peer id and collide with every other such failure.
+    #[test]
+    fn the_fallback_never_yields_zero() {
+        for sequence in 0..256u64 {
+            assert_ne!(
+                eight(0, sequence, Duration::ZERO),
+                [0u8; 8],
+                "sequence {sequence} produced all zeros"
+            );
+        }
+    }
+
+    /// It fills whatever length it is given — callers ask for 8 and 16.
+    #[test]
+    fn it_fills_every_length_its_callers_use() {
+        for len in [8usize, 16, 32] {
+            let mut a = vec![0u8; len];
+            let mut b = vec![0u8; len];
+            fill_from_fallback(&mut a, 7, 1, Duration::ZERO);
+            fill_from_fallback(&mut b, 7, 2, Duration::ZERO);
+            assert_ne!(a, b, "length {len} did not vary with the sequence");
+            assert!(
+                a.iter().any(|byte| *byte != 0),
+                "length {len} was all zeros"
+            );
+        }
+    }
 }

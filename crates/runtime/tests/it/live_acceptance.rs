@@ -13,7 +13,8 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::time::Instant;
 
 use mechanics::authorization::AuthorizedBodyKey;
 use mechanics::{
@@ -388,7 +389,7 @@ fn dormancy_joins_the_drivers_it_started() {
     }
     assert_eq!(live.view(None, now).entries.len(), 5);
 
-    let started = std::time::Instant::now();
+    let started = tokio::time::Instant::now();
     let orbit = station.vacate().expect("drained inside the deadline");
     // Inside the deadline, not merely eventually. A drain that ran long would
     // still return — it leaks rather than blocking — so the elapsed time is

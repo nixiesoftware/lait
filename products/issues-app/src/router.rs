@@ -73,10 +73,7 @@ impl IssuesCallHandler {
             actor: context.actor.to_string(),
             project_hint: std::env::var("LAIT_PROJECT_HINT").ok(),
             default_project: None,
-            now: std::time::SystemTime::now()
-                .duration_since(std::time::SystemTime::UNIX_EPOCH)
-                .map(|duration| duration.as_secs())
-                .unwrap_or(0),
+            now: mechanics::wallclock::now_secs(),
         };
         for _ in 0..=3 {
             let response = router.route(request.clone(), &facts).0;

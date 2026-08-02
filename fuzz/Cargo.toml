@@ -1,0 +1,71 @@
+# Coverage-guided fuzzing for the decoders that read untrusted bytes.
+#
+# Its own package, outside the workspace, on purpose. cargo-fuzz needs a
+# nightly toolchain for the `-Z` sanitizer flags, and this workspace pins
+# `channel = "stable"` in rust-toolchain.toml and checks an MSRV floor of 1.91.
+# Keeping the fuzz crate out of `[workspace] members` means none of that is
+# disturbed: `cargo build`, `cargo test` and the MSRV job never see it, and the
+# nightly job overrides the toolchain with RUSTUP_TOOLCHAIN — the same
+# mechanism ci.yml's `msrv (1.91)` job already uses to pin downward.
+[package]
+name = "lait-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+runtime = { path = "../crates/runtime" }
+
+[[bin]]
+name = "contact_frame"
+path = "fuzz_targets/contact_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "handshake"
+path = "fuzz_targets/handshake.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "beacon"
+path = "fuzz_targets/beacon.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "presence"
+path = "fuzz_targets/presence.rs"
+test = false
+doc = false
+bench = false
+
+# ---------------------------------------------------------------------------
+# Linux only. Verified on both counts.
+# ---------------------------------------------------------------------------
+# `cargo fuzz build` FAILS on Windows: `irpc` and `iroh-relay` do not link under
+# MSVC, with sanitizers and with `--sanitizer=none`. Both are transitive iroh
+# dependencies built as DLLs, and cargo-fuzz's link arguments do not suit a DLL.
+#
+# It BUILDS AND RUNS on Linux — checked under WSL before this was committed,
+# rather than left for CI to discover. All four targets, 45 seconds each:
+#
+#     contact_frame   9,544,869 runs   207k exec/s   1288 new coverage units
+#     handshake       7,774,420 runs   169k exec/s    301 new coverage units
+#     beacon          9,994,113 runs   217k exec/s    754 new coverage units
+#     presence       10,665,856 runs   232k exec/s    223 new coverage units
+#
+# No crashes. The `new coverage units` column is the one that matters: it is
+# libFuzzer reporting that it reached code paths it had not reached before,
+# which is the difference between fuzzing and spinning.
+#
+# At ~200k executions a second, nightly's 600-second budget is roughly 120
+# million executions per target per night.

@@ -26,7 +26,13 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+// `tokio::time::Instant`, not `tokio::time::Instant`. Without the `test-util`
+// feature it IS `tokio::time::Instant::now()` — same call, same value, no
+// indirection — so production pays nothing. With it, `tokio::time::pause()`
+// stops the clock for every site at once, which is what lets a test drive a
+// sweep interval or a probation window without waiting for one.
+use std::time::Duration;
+use tokio::time::Instant;
 
 use mechanics::{
     ids::SpaceId,

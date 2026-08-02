@@ -5,7 +5,8 @@
 //! properties the delivery planes actually depend on: that ordinary traffic is
 //! never closed, and that a flood always is, whatever shape it arrives in.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::time::Instant;
 
 use runtime::budget::{deadline, gates, slots, ByteGate, Evictions, Gate, Pace, Verdict};
 

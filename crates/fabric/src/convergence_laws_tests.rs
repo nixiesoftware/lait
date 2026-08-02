@@ -507,3 +507,96 @@ proptest! {
         prop_assert_eq!(settled, view_of(&merged), "re-delivery moved the view");
     }
 }
+
+/// What happens to Bodies written before `check_path_type` stopped creating the
+/// roots it asked about.
+///
+/// The fix stops NEW phantoms. It cannot remove the ones already written,
+/// because at rest a phantom root is byte-for-byte a container that was written
+/// and then emptied — the same empty root, with no operations distinguishing
+/// them. Dropping empty roots would silently delete legitimately-empty lists;
+/// keeping them means an old Body still projects paths under types it never
+/// really had.
+///
+/// Neither option is free, so the choice is written down and pinned here rather
+/// than left to be rediscovered. A reader who sees an old Body projecting a
+/// `list` at a counter's path should find this test, not a mystery.
+#[cfg(test)]
+mod legacy_phantom_roots {
+    use crate::{BodyExport, Engine, Key, Op, Transaction};
+    use loro::{ExportMode, LoroDoc};
+
+    fn key() -> Key {
+        Key::from_bytes(b"legacy".to_vec())
+    }
+
+    /// A Body as a pre-fix build would have left it: a real counter at `votes`,
+    /// plus the four empty roots the old sibling probe created by asking.
+    fn body_written_before_the_fix() -> BodyExport {
+        let doc = LoroDoc::new();
+        doc.set_record_timestamp(true);
+        doc.set_change_merge_interval(-1);
+        doc.set_peer_id(4242).expect("fresh doc");
+        doc.get_map("body").insert("k", "v").expect("body root");
+        doc.get_map("cnt:votes")
+            .insert("4242", 1i64)
+            .expect("the real counter");
+        // The probe's side effect, reproduced exactly: accessing a root creates
+        // it, so the old `check_path_type` left one behind per sibling tag.
+        doc.get_map("map:votes");
+        doc.get_movable_list("list:votes");
+        doc.get_text("text:votes");
+        doc.get_map("set:votes");
+        doc.commit();
+        BodyExport::Collaborative(doc.export(ExportMode::Snapshot).expect("export"))
+    }
+
+    #[test]
+    fn an_old_body_still_projects_its_phantoms_and_that_is_tolerated() {
+        let mut engine = Engine::new();
+        engine
+            .import_body(&key(), &body_written_before_the_fix())
+            .expect("an old Body still imports");
+        let view = engine
+            .read_collaborative(&key())
+            .expect("and still projects");
+
+        // The real data is intact — that is the part that matters.
+        assert_eq!(view.counters.get("votes"), Some(&1));
+
+        // And the phantoms are still there, because nothing can safely remove
+        // them. Asserted rather than lamented: if a future change DOES clean
+        // them up, this test fails and forces the cleanup to be deliberate.
+        assert!(
+            view.lists.contains_key("votes"),
+            "an old Body keeps the empty roots the probe created"
+        );
+        assert!(view.maps.contains_key("votes"));
+        assert!(view.texts.contains_key("votes"));
+        assert!(view.sets.contains_key("votes"));
+    }
+
+    #[test]
+    fn a_body_written_after_the_fix_has_none() {
+        let mut engine = Engine::new();
+        engine
+            .commit(Transaction::new(
+                "c",
+                vec![
+                    Op::CreateBody { key: key() },
+                    Op::CounterAdd {
+                        key: key(),
+                        path: "votes".into(),
+                        delta: 1,
+                    },
+                ],
+            ))
+            .expect("commits");
+        let view = engine.read_collaborative(&key()).expect("projects");
+        assert_eq!(view.counters.get("votes"), Some(&1));
+        assert!(view.lists.is_empty(), "no phantom list");
+        assert!(view.maps.is_empty(), "no phantom map");
+        assert!(view.texts.is_empty(), "no phantom text");
+        assert!(view.sets.is_empty(), "no phantom set");
+    }
+}

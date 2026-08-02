@@ -134,7 +134,7 @@ pub struct StationHost {
     active_conns: std::sync::atomic::AtomicU64,
     /// When the last control connection was accepted or completed — the idle
     /// clock's reference point.
-    last_activity: Mutex<std::time::Instant>,
+    last_activity: Mutex<tokio::time::Instant>,
     /// The undrained tail of the Live plane's signal broadcast.
     ///
     /// Subscribed once, at activation, rather than per request: a signal is an
@@ -228,7 +228,7 @@ impl Drop for StationHostActivity<'_> {
         use std::sync::atomic::Ordering;
         self.0.active_conns.fetch_sub(1, Ordering::SeqCst);
         if let Ok(mut activity) = self.0.last_activity.lock() {
-            *activity = std::time::Instant::now();
+            *activity = tokio::time::Instant::now();
         }
     }
 }
@@ -512,7 +512,7 @@ impl StationHost {
             stop_tx: tokio::sync::watch::channel(false).0,
             observations: ObservationHub::new(),
             active_conns: std::sync::atomic::AtomicU64::new(0),
-            last_activity: Mutex::new(std::time::Instant::now()),
+            last_activity: Mutex::new(tokio::time::Instant::now()),
             signals,
         })
     }
@@ -1545,7 +1545,7 @@ impl StationHost {
             Some((world, body)) => runtime::plane::live::LiveNarrow::Body { world, body: *body },
             None => runtime::plane::live::LiveNarrow::Everything,
         };
-        let view = handle.view_narrowed(narrow, std::time::Instant::now());
+        let view = handle.view_narrowed(narrow, tokio::time::Instant::now());
         let entries: Vec<_> = view.entries.iter().collect();
 
         // Equality and never an ordering: the counter wraps. It is also not the
@@ -2762,11 +2762,11 @@ fn signal_body(signal: &runtime::plane::Signal) -> crate::control::SignalBody {
     }
 }
 
+/// Unix seconds now. Delegates to `mechanics::wallclock` so tests can
+/// freeze it, and so the pre-epoch decision lives in one place rather
+/// than in four copies of this function.
 fn now_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::SystemTime::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+    mechanics::wallclock::now_secs()
 }
 
 /// Where a co-located sponsored agent's identity seed lives: `agents/<name>/

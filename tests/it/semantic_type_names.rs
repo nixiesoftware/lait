@@ -559,6 +559,12 @@ fn concept_crates_expose_only_their_semantic_namespaces() {
                 "recovery",
                 "space",
                 "station",
+                // Wall-clock time, with a freeze seam for tests. Public because
+                // `lait` and `lait-issues-app` both need it and `mechanics` is
+                // the crate they share — it replaced four private copies of the
+                // same `now_secs()`. tokio's clock covers `Instant` and not
+                // `SystemTime`, which is why this exists separately.
+                "wallclock",
             ],
         ),
         (

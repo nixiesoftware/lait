@@ -297,7 +297,7 @@ impl ObservationStream {
         &mut self,
         timeout: std::time::Duration,
     ) -> Result<Option<Observation>, Interruption> {
-        let deadline = std::time::Instant::now() + timeout;
+        let deadline = tokio::time::Instant::now() + timeout;
         let broadcaster = self.broadcaster.clone();
         let mut state = broadcaster.state.lock().unwrap_or_else(|p| p.into_inner());
         loop {
@@ -308,7 +308,7 @@ impl ObservationStream {
                 self.position = Some(record.sequence);
                 return Ok(Some(record));
             }
-            let now = std::time::Instant::now();
+            let now = tokio::time::Instant::now();
             if now >= deadline {
                 return Ok(None);
             }

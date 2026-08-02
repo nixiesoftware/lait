@@ -247,11 +247,9 @@ fn bootstrap_tracker_inner(
             let project =
                 initial_project.unwrap_or_else(|| InitialProject::for_space(display_name));
             let project_id = ProjectId::mint(&SystemUlidSource).as_str().to_string();
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::SystemTime::UNIX_EPOCH)
-                .map(|duration| duration.as_secs())
-                .unwrap_or(1)
-                .max(1);
+            // `.max(1)`: this feeds a tracker's creation stamp, and zero reads
+            // as "unknown" downstream.
+            let now = mechanics::wallclock::now_secs().max(1);
             let intent_payload = issues::contract::initialize_tracker_intent(
                 display_name,
                 now,

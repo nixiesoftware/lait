@@ -32,11 +32,12 @@ pub struct SystemUlidSource;
 
 impl UlidSource for SystemUlidSource {
     fn now_ms(&self) -> u64 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .ok()
-            .and_then(|duration| u64::try_from(duration.as_millis()).ok())
-            .unwrap_or(0)
+        // Through `wallclock` so a frozen clock reaches ULID minting too. A
+        // test that wants deterministic ids should still supply its own
+        // `UlidSource` — that seam is narrower and does not touch a global —
+        // but a test freezing the wall clock for other reasons should not find
+        // identifiers still marching forward underneath it.
+        crate::wallclock::now_millis()
     }
     fn rand80(&self) -> u128 {
         static FALLBACK_COUNTER: AtomicU64 = AtomicU64::new(0);

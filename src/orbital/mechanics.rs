@@ -657,12 +657,11 @@ pub(super) fn fence_epoch(
     Ok(())
 }
 
-/// Unix seconds now.
+/// Unix seconds now. Delegates to `mechanics::wallclock` so tests can
+/// freeze it, and so the pre-epoch decision lives in one place rather
+/// than in four copies of this function.
 fn now_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::SystemTime::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+    mechanics::wallclock::now_secs()
 }
 
 /// Author a GrantCapability for an arbitrary actor (used by redemption to

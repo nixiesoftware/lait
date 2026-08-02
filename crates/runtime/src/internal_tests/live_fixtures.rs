@@ -5,7 +5,8 @@
 //! the properties that matter are all about what a peer can make this Station
 //! do, and none of them need a network to demonstrate.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::time::Instant;
 
 use runtime::budget::{deadline, slots};
 use runtime::transient::{

@@ -23,7 +23,12 @@
 
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Instant;
+// `tokio::time::Instant`, not `tokio::time::Instant`. Without the `test-util`
+// feature it IS `tokio::time::Instant::now()` — same call, same value, no
+// indirection — so production pays nothing. With it, `tokio::time::pause()`
+// stops the clock for every site at once, which is what lets a test drive a
+// sweep interval or a probation window without waiting for one.
+use tokio::time::Instant;
 
 use mechanics::{ids::SpaceId, station::Key};
 
@@ -110,7 +115,12 @@ where
     local.block_on(&runtime, drive(context, queue, service));
 }
 
-async fn drive<S>(context: PlaneContext, mut queue: comms::ConnectionQueue, service: S)
+/// `pub(crate)` rather than private so the crate's own tests can run the real
+/// loop instead of a copy of it. `run_driver` above is the public entry point
+/// and builds its own current-thread runtime, which a `#[tokio::test]` cannot
+/// nest inside; a test needs the future itself so it can drive it under a
+/// paused clock.
+pub(crate) async fn drive<S>(context: PlaneContext, mut queue: comms::ConnectionQueue, service: S)
 where
     S: PlaneService + 'static,
 {

@@ -282,9 +282,14 @@ impl ContentHost {
         // finishing a write. The hold is what buys that window, and it lapses
         // on its own so an upload nobody ever attaches is still collectable.
         let _ = self.core.with_replica(|replica| {
+            // `into_std` at the crate boundary: Replica has no tokio dependency
+            // and should not grow one for a deadline type. The conversion is
+            // free and, importantly, does not lose the simulation — the VALUE
+            // still comes from tokio's clock, so a paused test moves this hold's
+            // expiry along with everything else. Only the type is std here.
             replica.hold_content(
                 &ingested.content_ref,
-                std::time::Instant::now() + PENDING_DECLARATION_TTL,
+                (tokio::time::Instant::now() + PENDING_DECLARATION_TTL).into_std(),
             );
             Ok(())
         });

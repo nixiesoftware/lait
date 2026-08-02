@@ -1,7 +1,9 @@
 mod admission_fixtures;
 mod budget_fixtures;
+mod contact_frame_fuzz;
 mod content_host;
 mod convergence_simulation;
+mod driver_beat;
 mod dto_schema;
 mod freight_transfer;
 mod freight_two_node;
@@ -9,5 +11,7 @@ mod freight_wire;
 mod live_fixtures;
 mod live_transient;
 mod observations;
+mod paused_clock;
+mod presence_wire_fuzz;
 mod public_lifecycle_api;
 mod signal_schemas;

@@ -1,0 +1,30 @@
+# Seeds that once failed. Replayed on every run, forever.
+#
+# This is the loop that makes a nightly finding permanent. Without it, the
+# sequence is: nightly explores seeds nobody has tried, finds one that breaks,
+# somebody fixes the bug — and the seed is never run again, so a regression
+# reintroduces it silently. With it, every past failure is a standing test.
+#
+# It is proptest's `proptest-regressions/` idea applied to schedules rather than
+# to values, and TigerBeetle's seed corpus applied to a smaller system. Both
+# reached the same shape independently, which is a decent sign it is the right
+# one.
+#
+# ## Adding one
+#
+# When a run fails, it prints the seed. Add a line here with the date and one
+# sentence on what broke. Do it BEFORE fixing the bug: a corpus entry that never
+# failed is a line nobody trusts, and adding it first means you watch it go red,
+# then green.
+#
+#   <seed>    # YYYY-MM-DD  what it caught
+#
+# ## Pair a shared seed with a commit
+#
+# A seed indexes into a schedule THIS code generates. Change the simulation and
+# the same number means something else — so when handing one to someone, hand
+# them the commit too. TigerBeetle states the same rule: the reproduction unit
+# is the seed and the git hash together, never the seed alone.
+#
+# Empty for now, deliberately. Nothing has failed yet, and seeding this file
+# with numbers that never caught anything would make it decoration.

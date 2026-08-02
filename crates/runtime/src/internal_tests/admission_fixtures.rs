@@ -5,7 +5,8 @@
 //! that is not ours, a generation we do not speak, an opening arriving twice —
 //! and none of them need a network to happen.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::time::Instant;
 
 use mechanics::{
     ids::{ActorId, DeviceId, SpaceId},
