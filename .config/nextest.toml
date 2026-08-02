@@ -203,10 +203,20 @@ default-filter = '''
 '''
 
 [profile.nightly]
-# Everything, at full count, where nobody is waiting on it. The heavy suites
-# get their own budgets here rather than inheriting a PR-shaped one; the
-# workflow additionally sets LAIT_COMMIT_BASELINE_FULL and a raised
-# PROPTEST_CASES, which are corpus-size knobs rather than nextest settings.
+# Everything, at full count, where nobody is waiting on it — except the one
+# thing no shared runner can hold.
+#
+# `issues_reference_perf` asserts an ABSOLUTE wall-clock ceiling (warm focus p95
+# <= 50 ms). The comment in ci.yml already recorded that no CI machine holds it:
+# "66 ms on windows-latest, 59 ms on the Linux runner, and a pass on that same
+# runner minutes earlier". Moving it to nightly did not change that — the first
+# nightly run failed on windows-latest at exactly 59 ms — because the problem is
+# shared hardware, not the time of day.
+#
+# `perf.yml` is where it belongs and already runs it: full corpus, weekly, one
+# pinned runner image, samples uploaded, p95 gated against frozen baselines.
+# That is the only arrangement in which an absolute budget means anything.
+default-filter = 'not (binary_id(lait::it) & test(issues_reference_perf::))'
 retries = 1
 
 [[profile.nightly.overrides]]
@@ -216,6 +226,25 @@ filter = '''
     + (binary(mechanics) & (test(frontier_isolation_tests) + test(sparse_ceremony_tests)))
 '''
 slow-timeout = { period = "300s", terminate-after = 8 }
+
+# The deep tier runs long ON PURPOSE — that is what separates it from the
+# per-push one — so its budget has to say so.
+#
+# The first nightly run terminated the 512-seed sweep at 90 s, and the reason is
+# worth writing down because it is not obvious: a profile INHERITS `default`'s
+# slow-timeout for anything its own overrides do not name. Passing
+# `--profile nightly` therefore changed nothing for these two, which is exactly
+# the kind of configuration that looks correct in a diff.
+#
+# Measured: 64 seeds is 32 s, so 512 is around four minutes. 600 s x 6 leaves
+# room for a slower runner and still surfaces a genuine wedge inside ten
+# minutes.
+[[profile.nightly.overrides]]
+filter = '''
+    (binary_id(fabric) & test(convergence_laws_tests))
+    + (binary_id(runtime) & test(internal_tests::convergence_simulation))
+'''
+slow-timeout = { period = "600s", terminate-after = 6 }
 
 [[profile.nightly.overrides]]
 filter = '''

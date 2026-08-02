@@ -8,7 +8,7 @@
 [tiers]
 pr             1308
 pr-platform    980
-nightly        1337
+nightly        1335
 mutants        87
 
 [gates]
