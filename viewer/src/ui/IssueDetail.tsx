@@ -46,7 +46,15 @@ import {
   type NameResolver,
 } from "../core/activity";
 import { codeUnitSpan } from "../core/anchor";
-import { caretPhrase, carets, typists, useLiveTable, watching } from "../live";
+import {
+  caretPhrase,
+  carets,
+  typists,
+  useLiveAwareness,
+  useLiveTable,
+  watching,
+  type LiveState,
+} from "../live";
 import type { Field as PredictField } from "../core/overlay";
 import type { IssueField } from "../core/registry";
 import { inverseWorkAction, workTarget } from "../core/workflow";
@@ -70,10 +78,11 @@ import {
 } from "../types";
 import { Avatar, AvatarStack, memberName as nameOf, stackFor } from "./Avatar";
 import { LoadingState } from "./AppState";
-import { catalogColor } from "./colors";
+import { avatarColor, catalogColor } from "./colors";
 import { PriorityIcon, ProgressRing, StatusIcon } from "./icons";
 import { Markdown } from "./Markdown";
 import { MarkdownEditor } from "./MarkdownEditor";
+import type { RemoteCursor } from "./MilkdownEditor";
 import { DatePicker } from "./DatePicker";
 import { NewLabelDialog } from "./NewLabel";
 import { Combobox, type Option } from "./Picker";
@@ -151,6 +160,8 @@ export function IssueDetail({
   const projectStore = useProjectViewerStore();
   const detail = useIssueDetail(spaceId, reff);
   const issue = detail.issue;
+  const live = useLiveTable(spaceId, issue?.doc_id ?? null);
+  const publishAwareness = useLiveAwareness(issue?.doc_id ?? "");
   const events = detail.history.data ?? [];
   const graph = detail.graph.data ?? null;
   const milestones = detail.milestones.data ?? [];
@@ -834,8 +845,7 @@ export function IssueDetail({
           </RailSection>
 
           <LiveRail
-            spaceId={spaceId}
-            docId={issue.doc_id}
+            live={live}
             members={members}
             memberOf={memberOf}
           />
@@ -845,6 +855,28 @@ export function IssueDetail({
           draftKey={{ spaceId: canonicalSpaceId, reff }}
           value={issue.description}
           readOnly={locked}
+          remoteCursors={carets(live.entries)
+            .filter((mark) => mark.field === "description" && mark.position.caret === "at")
+            .map<RemoteCursor>((mark) => ({
+              actor: mark.actor,
+              name: nameOf(mark.actor, memberOf(mark.actor)),
+              color: avatarColor(mark.actor),
+              anchor: mark.position.caret === "at" ? mark.position.position : 0,
+              ...(mark.focus?.caret === "at" ? { focus: mark.focus.position } : {}),
+              uncertain: mark.uncertain,
+            }))}
+          onAwareness={(anchor, focus, typing) =>
+            publishAwareness({
+              cursor: anchor === null
+                ? null
+                : {
+                    field: "description",
+                    anchor,
+                    ...(focus === null ? {} : { focus }),
+                  },
+              typing,
+            })
+          }
           onSave={(description) => void edit({ description })}
         />
 
@@ -1170,26 +1202,15 @@ function FollowToggle({
  * make every glance somebody takes at a document cost every open tab a re-read.
  */
 function LiveRail({
-  spaceId,
-  docId,
+  live,
   members,
   memberOf,
 }: {
-  spaceId: string;
-  /**
-   * The `iss_` doc id, and not the `reff` every verb on this page takes.
-   *
-   * The Live plane keys its scopes by a Body id derived from the doc id, and
-   * that derivation is a hash of whatever string it is handed: a project alias
-   * hashes to a Body nothing publishes under, so the rail would answer an empty
-   * table for ever and draw nothing, on every issue, with nothing to say about it.
-   */
-  docId: string;
+  live: LiveState;
   /** The ACL array itself, because `stackFor` caches its index on that identity. */
   members: MemberDto[];
   memberOf: (key: string) => MemberDto | undefined;
 }) {
-  const live = useLiveTable(spaceId, docId);
   const here = watching(live.entries);
   const marks = carets(live.entries);
   const typing = typists(live.entries);
@@ -2524,8 +2545,8 @@ function EventGlyph({
 }
 
 /**
- * Description: a draft you commit, not a field that saves per keystroke — a
- * doorbell mid-typing would otherwise fight the cursor.
+ * Description: a recoverable draft streamed in short batches, not one durable
+ * operation per keystroke. Blur flushes the last batch immediately.
  *
  * There is no edit mode left. The body is a live Markdown document: typing
  * `## ` makes a heading where the caret is, and the markup never appears as
@@ -2542,16 +2563,28 @@ function Description({
   value,
   readOnly,
   onSave,
+  remoteCursors,
+  onAwareness,
 }: {
   draftKey: { spaceId: string; reff: string };
   value: string;
   readOnly: boolean;
   onSave: (v: string) => void;
+  remoteCursors: RemoteCursor[];
+  onAwareness: (anchor: number | null, focus: number | null, typing: boolean) => void;
 }) {
   const [draft, setDraft] = useState(
     () => loadDraft(draftKey.spaceId, draftKey.reff, "description") || value,
   );
   const dirty = useRef(draft !== value);
+  const streamTimer = useRef<number | null>(null);
+
+  useEffect(
+    () => () => {
+      if (streamTimer.current !== null) window.clearTimeout(streamTimer.current);
+    },
+    [],
+  );
 
   useEffect(() => {
     if (dirty.current && draft !== value) {
@@ -2572,11 +2605,28 @@ function Description({
       value={value}
       placeholder="Add description…"
       className="min-h-ctl-xl py-2"
+      remoteCursors={remoteCursors}
+      onAwareness={onAwareness}
       onChange={(markdown) => {
         dirty.current = true;
         setDraft(markdown);
+        // Linear's document model does not wait for blur: a short quiet window
+        // batches a burst of keystrokes into one CRDT splice, while keeping the
+        // words visibly moving for everybody else in the document.
+        if (streamTimer.current !== null) window.clearTimeout(streamTimer.current);
+        streamTimer.current = window.setTimeout(() => {
+          streamTimer.current = null;
+          if (!dirty.current) return;
+          dirty.current = false;
+          clearDraft(draftKey.spaceId, draftKey.reff, "description");
+          onSave(markdown);
+        }, 350);
       }}
       onCommit={() => {
+        if (streamTimer.current !== null) {
+          window.clearTimeout(streamTimer.current);
+          streamTimer.current = null;
+        }
         if (!dirty.current) return;
         dirty.current = false;
         clearDraft(draftKey.spaceId, draftKey.reff, "description");

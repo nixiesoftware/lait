@@ -52,6 +52,7 @@
 //! and requires an Origin rather than admitting an absent one.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -154,13 +155,14 @@ const CONTROL_QUEUE: usize = 256;
 /// losing the only thing anybody wants from it, which is the latest number.
 const PROGRESS_TICK: std::time::Duration = std::time::Duration::from_millis(500);
 
-/// How often the transient view is re-read, for the whole server.
-///
-/// Person-scale, and deliberately far above the daemon's cursor coalescing
-/// window: this answers "who is here", which nobody reads eighty times a second.
-/// A caret that has to move at typing speed is a different surface and would
-/// need a different rate.
-const TRANSIENT_TICK: std::time::Duration = std::time::Duration::from_secs(1);
+/// How often a changed Live generation may reach the editor. The daemon answers
+/// unchanged generations with one integer comparison, so a stationary room is
+/// cheap while a moving caret stays below the threshold where it feels laggy.
+const TRANSIENT_TICK: std::time::Duration = std::time::Duration::from_millis(80);
+
+/// Presence declarations and destructive signal drains remain person-scale.
+/// They do not become twelve times more frequent merely because carets do.
+const TRANSIENT_HOUSEKEEPING: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Which lane a frame belongs to.
 ///
@@ -314,13 +316,32 @@ pub struct Watch {
 /// A declaration and not a subscription: it replaces whatever this socket said
 /// last. It arrives on the Transient lane because that is what it is — a piece
 /// of state superseded by the next one, rather than a fact acted on once.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct WatchRequest {
     /// Absent stops the watch.
     #[serde(default)]
     space: Option<String>,
     #[serde(default)]
     issue: Option<String>,
+    #[serde(default)]
+    cursor: Option<BrowserCursor>,
+    #[serde(default)]
+    typing: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct BrowserCursor {
+    field: String,
+    anchor: u64,
+    #[serde(default)]
+    focus: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BrowserAwareness {
+    watch: Watch,
+    cursor: Option<BrowserCursor>,
+    typing: bool,
 }
 
 /// The session socket's fan-out, held on `App`.
@@ -348,6 +369,10 @@ pub struct Hub {
     /// until some peer happens to move. Naming the question here forces the
     /// next poll to ask for the whole table and broadcast it.
     fresh: Mutex<BTreeSet<Watch>>,
+    next_session: AtomicU64,
+    awareness: Mutex<BTreeMap<u64, BrowserAwareness>>,
+    awareness_generation: AtomicU64,
+    awareness_dirty: Mutex<BTreeSet<String>>,
 }
 
 impl Hub {
@@ -358,6 +383,10 @@ impl Hub {
             control: Mutex::new(Vec::new()),
             watched: Mutex::new(BTreeMap::new()),
             fresh: Mutex::new(BTreeSet::new()),
+            next_session: AtomicU64::new(1),
+            awareness: Mutex::new(BTreeMap::new()),
+            awareness_generation: AtomicU64::new(0),
+            awareness_dirty: Mutex::new(BTreeSet::new()),
         }
     }
 
@@ -474,6 +503,60 @@ impl Hub {
             .cloned()
             .collect()
     }
+
+    fn attach_session(&self) -> u64 {
+        self.next_session.fetch_add(1, Ordering::Relaxed)
+    }
+
+    fn set_awareness(&self, session: u64, awareness: Option<BrowserAwareness>) {
+        let mut held = self
+            .awareness
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let previous_space = held.get(&session).map(|held| held.watch.space.clone());
+        let next_space = awareness.as_ref().map(|held| held.watch.space.clone());
+        let changed = match awareness {
+            Some(awareness) => held.insert(session, awareness.clone()).as_ref() != Some(&awareness),
+            None => held.remove(&session).is_some(),
+        };
+        if changed {
+            drop(held);
+            let mut dirty = self
+                .awareness_dirty
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(space) = previous_space {
+                dirty.insert(space);
+            }
+            if let Some(space) = next_space {
+                dirty.insert(space);
+            }
+            self.awareness_generation.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    fn awareness_generation(&self) -> u64 {
+        self.awareness_generation.load(Ordering::SeqCst)
+    }
+
+    fn take_awareness_spaces(&self) -> BTreeSet<String> {
+        std::mem::take(
+            &mut *self
+                .awareness_dirty
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+    }
+
+    fn awareness(&self, space: &str) -> Vec<BrowserAwareness> {
+        self.awareness
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .filter(|awareness| awareness.watch.space == space)
+            .cloned()
+            .collect()
+    }
 }
 
 impl Default for Hub {
@@ -584,6 +667,10 @@ pub(super) async fn pump_transient(app: Arc<App>, mut stop: tokio::sync::watch::
     // first read after a daemon restart is a whole table rather than an
     // "unchanged" about a view this process never saw.
     let mut held: BTreeMap<Watch, u64> = BTreeMap::new();
+    let mut declared_awareness = u64::MAX;
+    let mut housekeeping = Instant::now()
+        .checked_sub(TRANSIENT_HOUSEKEEPING)
+        .unwrap_or_else(Instant::now);
     loop {
         tokio::select! {
             biased;
@@ -593,21 +680,32 @@ pub(super) async fn pump_transient(app: Arc<App>, mut stop: tokio::sync::watch::
         tokio::select! {
             biased;
             _ = stop.changed() => return,
-            () = sweep(&app, &mut held) => {}
+            () = sweep_live(&app, &mut held) => {}
+        }
+        let awareness = app.socket.awareness_generation();
+        if awareness != declared_awareness {
+            declare_all_watching(&app).await;
+            declared_awareness = awareness;
+        }
+        if housekeeping.elapsed() >= TRANSIENT_HOUSEKEEPING {
+            housekeeping = Instant::now();
+            tokio::select! {
+                biased;
+                _ = stop.changed() => return,
+                () = sweep_housekeeping(&app) => {}
+            }
         }
     }
 }
 
-async fn sweep(app: &App, held: &mut BTreeMap<Watch, u64>) {
+async fn sweep_live(app: &App, held: &mut BTreeMap<Watch, u64>) {
     // Taken before the declarations are sampled. The other order loses a
     // question declared between the two reads: it would be marked and then not
     // found, and the mark it needed would be gone.
     let fresh = app.socket.take_fresh();
     let watched = app.socket.watched();
     held.retain(|question, _| watched.contains(question));
-    let mut spaces: BTreeSet<&str> = BTreeSet::new();
     for question in &watched {
-        spaces.insert(question.space.as_str());
         // A declaration with no issue is a tab saying which room it is in. It
         // is what the drain below runs on, and there is no live view to poll
         // for it: an unscoped one carries Body ids a browser cannot name.
@@ -619,13 +717,24 @@ async fn sweep(app: &App, held: &mut BTreeMap<Watch, u64>) {
         }
         poll_live(app, question, held).await;
     }
+}
+
+async fn sweep_housekeeping(app: &App) {
+    let watched = app.socket.watched();
+    let mut spaces: BTreeSet<&str> = BTreeSet::new();
+    for question in &watched {
+        spaces.insert(question.space.as_str());
+    }
     for space in spaces {
-        // Told once per space per tick, with that space's whole set. Sent even
-        // when nothing changed: the engine compares before it acts, and a pump
-        // that tried to remember what it had already said would be a second
-        // copy of state the engine already holds.
-        declare_watching(app, space, &watched).await;
         drain_signals(app, space).await;
+    }
+}
+
+async fn declare_all_watching(app: &App) {
+    let watched = app.socket.watched();
+    let spaces = app.socket.take_awareness_spaces();
+    for space in spaces {
+        declare_watching(app, &space, &watched).await;
     }
 }
 
@@ -648,13 +757,42 @@ async fn declare_watching(app: &App, space: &str, watched: &[Watch]) {
         .filter(|question| question.space == space)
         .filter_map(|question| question.issue.clone())
         .collect();
+    let mut carets = Vec::new();
+    let mut typing = Vec::new();
+    for awareness in app.socket.awareness(space) {
+        let Some(issue) = awareness.watch.issue else {
+            continue;
+        };
+        if let Some(cursor) = awareness.cursor {
+            carets.push(crate::control::WatchingCaret {
+                issue: issue.clone(),
+                field: cursor.field.clone(),
+                anchor: cursor.anchor,
+                focus: cursor.focus,
+            });
+        }
+        if awareness.typing {
+            typing.push(crate::control::WatchingTyping {
+                issue,
+                field: "description".into(),
+            });
+        }
+    }
     let route = crate::control::station_route(resolved.address);
     // Failure is not reported. The declaration is lossy by nature — the next
     // tick carries the current set again — and a pump that logged every miss
     // would say the same thing twice a second while a daemon restarted.
     let _ = app
         .daemon
-        .request(route, &Request::Watching { issues }, None)
+        .request(
+            route,
+            &Request::Watching {
+                issues,
+                carets,
+                typing,
+            },
+            None,
+        )
         .await;
 }
 
@@ -758,16 +896,18 @@ pub(super) async fn session(
 /// One connected browser, until it goes away or the server stops.
 async fn serve_socket(socket: WebSocket, app: Arc<App>) {
     let mut watching: Option<Watch> = None;
-    run_socket(socket, &app, &mut watching).await;
+    let session = app.socket.attach_session();
+    run_socket(socket, &app, session, &mut watching).await;
     // Every exit lands here, including the several that leave by returning. A
     // declaration outliving its socket would keep the pump asking a question
     // nobody is listening to the answer of.
     if let Some(question) = watching {
         app.socket.unwatch(&question);
     }
+    app.socket.set_awareness(session, None);
 }
 
-async fn run_socket(mut socket: WebSocket, app: &App, watching: &mut Option<Watch>) {
+async fn run_socket(mut socket: WebSocket, app: &App, session: u64, watching: &mut Option<Watch>) {
     // One task owns the socket and both directions. Splitting it would need a
     // stream-combinator dependency for the two halves, and buys nothing here:
     // this connection sends on a tick and receives rarely, so there is no
@@ -876,7 +1016,7 @@ async fn run_socket(mut socket: WebSocket, app: &App, watching: &mut Option<Watc
                                 // frame that does not.
                                 return;
                             };
-                            declare(app, watching, declared);
+                            declare(app, session, watching, declared);
                         }
                         // Nothing else takes an inbound message. Control is
                         // outbound only — a signal is delivered by the Live
@@ -903,11 +1043,17 @@ async fn run_socket(mut socket: WebSocket, app: &App, watching: &mut Option<Watc
 }
 
 /// Replace this socket's standing declaration.
-fn declare(app: &App, watching: &mut Option<Watch>, declared: WatchRequest) {
+fn declare(app: &App, session: u64, watching: &mut Option<Watch>, declared: WatchRequest) {
     let next = declared.space.map(|space| Watch {
         space,
-        issue: declared.issue,
+        issue: declared.issue.clone(),
     });
+    let awareness = next.clone().map(|watch| BrowserAwareness {
+        watch,
+        cursor: declared.cursor,
+        typing: declared.typing,
+    });
+    app.socket.set_awareness(session, awareness);
     if next == *watching {
         return;
     }
@@ -1355,6 +1501,52 @@ mod tests {
             });
         }
         assert_eq!(hub.watched().len(), 2);
+    }
+
+    #[test]
+    fn browser_awareness_is_replace_all_and_marks_both_rooms_when_moved() {
+        let hub = Hub::new();
+        let session = hub.attach_session();
+        let first = BrowserAwareness {
+            watch: Watch {
+                space: "orb_a".into(),
+                issue: Some("iss_1".into()),
+            },
+            cursor: Some(BrowserCursor {
+                field: "description".into(),
+                anchor: 4,
+                focus: Some(9),
+            }),
+            typing: true,
+        };
+        hub.set_awareness(session, Some(first.clone()));
+        let generation = hub.awareness_generation();
+        assert_eq!(hub.awareness("orb_a"), vec![first.clone()]);
+        assert_eq!(
+            hub.take_awareness_spaces(),
+            BTreeSet::from(["orb_a".into()])
+        );
+
+        hub.set_awareness(session, Some(first));
+        assert_eq!(hub.awareness_generation(), generation, "an echo is cheap");
+        assert!(hub.take_awareness_spaces().is_empty());
+
+        hub.set_awareness(
+            session,
+            Some(BrowserAwareness {
+                watch: Watch {
+                    space: "orb_b".into(),
+                    issue: Some("iss_2".into()),
+                },
+                cursor: None,
+                typing: false,
+            }),
+        );
+        assert_eq!(
+            hub.take_awareness_spaces(),
+            BTreeSet::from(["orb_a".into(), "orb_b".into()]),
+            "the old Station must be told to retire its publication too"
+        );
     }
 
     #[test]

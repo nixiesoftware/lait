@@ -165,7 +165,7 @@ impl Target {
 }
 
 /// What is being said about a scope.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TransientPayload {
     /// Somebody is here. Carries nothing but the fact.
     Presence,

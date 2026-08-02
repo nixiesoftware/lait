@@ -36,7 +36,13 @@
 
 import { useCallback, useEffect, useMemo } from "react";
 
-import { openSocket, type Socket, type SocketEvent, type Question } from "./socket";
+import {
+  openSocket,
+  type BrowserCursor,
+  type Socket,
+  type SocketEvent,
+  type Question,
+} from "./socket";
 import { useWorldResource, useWorldViewStore } from "./core/worldViewReact";
 import type { ResourceKey, WorldViewStore } from "./core/worldViewStore";
 import type { CaretPosition, LiveEntry, LiveScope, Response, SignalEntry } from "./types";
@@ -158,6 +164,8 @@ export interface CaretRow {
    *  a second vocabulary between the daemon's scope and what anybody reads. */
   field: string;
   position: CaretPosition;
+  /** A selection's far end; null for a collapsed caret. */
+  focus: CaretPosition | null;
   uncertain: boolean;
 }
 
@@ -185,13 +193,20 @@ export function carets(entries: LiveEntry[]): CaretRow[] {
       actor: entry.actor,
       field,
       position,
+      focus: entry.focus,
       uncertain: entry.uncertain,
       age: entry.age_ms,
     });
   }
   return [...freshest.values()]
     .sort((a, b) => a.age - b.age || a.actor.localeCompare(b.actor) || a.field.localeCompare(b.field))
-    .map(({ actor, field, position, uncertain }) => ({ actor, field, position, uncertain }));
+    .map(({ actor, field, position, focus, uncertain }) => ({
+      actor,
+      field,
+      position,
+      focus,
+      uncertain,
+    }));
 }
 
 /** Only two scopes name a field; the rest are about a document, not a place in
@@ -293,6 +308,13 @@ export const liveSilenceMs = 15_000;
 
 /** How often the sweep runs. */
 export const liveSweepMs = 5_000;
+/** Matches the daemon's caret coalescing window. */
+export const cursorPublishMs = 80;
+
+export interface EditorAwareness {
+  cursor: BrowserCursor | null;
+  typing: boolean;
+}
 
 /**
  * The transient tables, held where every other projection is held.
@@ -428,6 +450,8 @@ export class LivePlane {
    */
   private attached: string | null = null;
   private question: Question = null;
+  private awareness: EditorAwareness = { cursor: null, typing: false };
+  private awarenessTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
     store: WorldViewStore,
@@ -446,13 +470,46 @@ export class LivePlane {
 
   /** Ask for one issue's live table. `null` stops asking without leaving. */
   ask(question: Question): void {
+    const changed = this.question?.space !== question?.space || this.question?.issue !== question?.issue;
     this.question = question;
+    if (changed) {
+      this.awareness = { cursor: null, typing: false };
+      if (this.awarenessTimer !== null) clearTimeout(this.awarenessTimer);
+      this.awarenessTimer = null;
+    }
     this.declare();
   }
 
+  /** Publish editor-local state on the same standing declaration. Cursor motion
+   * is coalesced; blur/retirement is immediate so a departed caret does not
+   * linger for a network round. */
+  aware(issue: string, awareness: EditorAwareness): void {
+    if (!this.question || this.question.issue !== issue) return;
+    this.awareness = awareness;
+    if (awareness.cursor === null && !awareness.typing) {
+      if (this.awarenessTimer !== null) clearTimeout(this.awarenessTimer);
+      this.awarenessTimer = null;
+      this.declare();
+      return;
+    }
+    // A throttle with a latest-value slot, not a debounce. Continuous typing
+    // must still emit motion every window; restarting the timer for every input
+    // would keep a fast typist invisible until they stopped.
+    if (this.awarenessTimer !== null) return;
+    this.awarenessTimer = setTimeout(() => {
+      this.awarenessTimer = null;
+      this.declare();
+    }, cursorPublishMs);
+  }
+
   private declare(): void {
-    const declared =
-      this.question ?? (this.attached === null ? null : { space: this.attached });
+    const declared = this.question
+      ? {
+          ...this.question,
+          ...(this.awareness.cursor ? { cursor: this.awareness.cursor } : {}),
+          ...(this.awareness.typing ? { typing: true } : {}),
+        }
+      : (this.attached === null ? null : { space: this.attached });
     this.slots.ask(this.question);
     // A tab that has named nothing at all does not open a socket to say so.
     if (this.socket === null && declared === null) return;
@@ -529,6 +586,19 @@ export function useLiveTable(space: string, issue: string | null): LiveState {
   }, [plane]);
 
   return slot.data ?? emptyLive;
+}
+
+/** The write half of the issue's Live declaration. It deliberately shares the
+ * plane used by `useLiveTable`: reading and publishing two independent room
+ * declarations would let the last socket frame erase the first. */
+export function useLiveAwareness(issue: string): (awareness: EditorAwareness) => void {
+  const store = useWorldViewStore();
+  const plane = useMemo(() => planeFor(store), [store]);
+  useEffect(
+    () => () => plane.aware(issue, { cursor: null, typing: false }),
+    [plane, issue],
+  );
+  return useCallback((awareness) => plane.aware(issue, awareness), [plane, issue]);
 }
 
 /** What one space has delivered, and how to say it has been dealt with. */

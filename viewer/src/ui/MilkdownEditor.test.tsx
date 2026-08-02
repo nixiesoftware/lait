@@ -1,10 +1,17 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { Editor, defaultValueCtx, remarkStringifyOptionsCtx, rootCtx } from "@milkdown/kit/core";
+import {
+  Editor,
+  defaultValueCtx,
+  editorViewCtx,
+  remarkStringifyOptionsCtx,
+  rootCtx,
+  serializerCtx,
+} from "@milkdown/kit/core";
 import { commonmark } from "@milkdown/kit/preset/commonmark";
 import { gfm } from "@milkdown/kit/preset/gfm";
 import { getMarkdown } from "@milkdown/kit/utils";
 
-import { SERIALIZE } from "./MilkdownEditor";
+import { markdownOffsetAt, proseMirrorPositionAt, SERIALIZE } from "./MilkdownEditor";
 
 /**
  * The whole reason Milkdown was chosen over Tiptap and Lexical: the document is
@@ -102,5 +109,29 @@ describe("Milkdown round-trip", () => {
     const out = await roundTrip("> [!WARNING]\n> Do not do this.");
     expect(out).toContain("[!WARNING]");
     expect(out).toContain("Do not do this.");
+  });
+
+  it("maps a rich-tree caret to Unicode-scalar Markdown coordinates and back", async () => {
+    const root = document.createElement("div");
+    document.body.append(root);
+    editor = await Editor.make()
+      .config((ctx) => {
+        ctx.set(rootCtx, root);
+        ctx.set(defaultValueCtx, "## Héllo");
+        ctx.set(remarkStringifyOptionsCtx, SERIALIZE);
+      })
+      .use(commonmark)
+      .use(gfm)
+      .create();
+
+    editor.action((ctx) => {
+      const view = ctx.get(editorViewCtx);
+      const serialize = ctx.get(serializerCtx);
+      // ProseMirror position 3 is after `Hé`; Markdown has the `## ` prefix,
+      // and `é` is one scalar even though it occupies two UTF-8 bytes.
+      expect(markdownOffsetAt(view, serialize, 3)).toBe(5);
+      expect(proseMirrorPositionAt(view, serialize, 5)).toBe(3);
+    });
+    root.remove();
   });
 });

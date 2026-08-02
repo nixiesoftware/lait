@@ -1219,7 +1219,7 @@ mod flooding {
 /// two-person issue shows one face on each screen.
 mod publishing {
     use super::*;
-    use runtime::plane::live::LiveHandle;
+    use runtime::plane::live::{LiveHandle, LocalPublication};
 
     fn scopes(bodies: &[u8]) -> Vec<Target> {
         bodies.iter().map(|b| issue_scope(*b)).collect()
@@ -1282,6 +1282,29 @@ mod publishing {
             "declaring is not recording"
         );
     }
+
+    #[test]
+    fn moving_a_caret_moves_the_local_generation_without_changing_its_scope() {
+        let handle = LiveHandle::new(None);
+        let scope = caret_scope(1);
+        handle.declare_local_publications(vec![LocalPublication {
+            scope: scope.clone(),
+            payload: TransientPayload::Caret {
+                anchor: anchor_bytes("text", 1),
+            },
+        }]);
+        let first = handle.local_generation();
+        assert_eq!(handle.declared(), vec![scope.clone()]);
+
+        handle.declare_local_publications(vec![LocalPublication {
+            scope: scope.clone(),
+            payload: TransientPayload::Caret {
+                anchor: anchor_bytes("text", 2),
+            },
+        }]);
+        assert_ne!(handle.local_generation(), first);
+        assert_eq!(handle.declared(), vec![scope]);
+    }
 }
 
 /// Two Stations, and one of them looking at something.
@@ -1298,7 +1321,7 @@ mod two_node_presence {
     use comms::Transport;
     use runtime::admission::AdmittedPeer;
     use runtime::lifecycle::CancelToken;
-    use runtime::plane::live::{serve_session, Context, LiveHandle};
+    use runtime::plane::live::{serve_session, Context, LiveHandle, LocalPublication};
 
     fn actor() -> mechanics::ids::ActorId {
         mechanics::ids::ActorId::parse(&format!("act_{}", "cd".repeat(32))).expect("actor")
@@ -1413,6 +1436,40 @@ mod two_node_presence {
         assert_eq!(
             seen.entries[0].kind,
             runtime::transient::TransientKind::Presence
+        );
+
+        // Cursor payloads use the same replace-all declaration. A collapsed
+        // caret becoming a selection changes the payload kind on one scope;
+        // the old kind is retired before the new one is published, so B never
+        // settles with both decorations for A.
+        a_handle.declare_local_publications(vec![LocalPublication {
+            scope: caret_scope(3),
+            payload: TransientPayload::Caret {
+                anchor: anchor_bytes("text", 1),
+            },
+        }]);
+        assert!(
+            wait_for(&b_handle, Duration::from_secs(10), |view| {
+                view.entries.len() == 1
+                    && view.entries[0].kind == runtime::transient::TransientKind::Caret
+            })
+            .await,
+            "B never saw A's caret"
+        );
+        a_handle.declare_local_publications(vec![LocalPublication {
+            scope: caret_scope(3),
+            payload: TransientPayload::Selection {
+                anchor: anchor_bytes("text", 1),
+                focus: anchor_bytes("text", 2),
+            },
+        }]);
+        assert!(
+            wait_for(&b_handle, Duration::from_secs(10), |view| {
+                view.entries.len() == 1
+                    && view.entries[0].kind == runtime::transient::TransientKind::Selection
+            })
+            .await,
+            "B never replaced A's caret with its selection"
         );
 
         // And A does not see itself: two maps, so a viewer never draws its own

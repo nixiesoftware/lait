@@ -162,6 +162,28 @@ pub struct AssignmentSpec {
     pub resource: Vec<String>,
 }
 
+/// One browser caret in a document field.
+///
+/// Positions are Unicode-scalar offsets in the World's collaborative text, not
+/// DOM or UTF-16 offsets. The Station turns them into CRDT-relative anchors
+/// before the Live plane sends them to peers; the declaration itself remains
+/// transient and is never journaled.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct WatchingCaret {
+    pub issue: String,
+    pub field: String,
+    pub anchor: u64,
+    #[serde(default)]
+    pub focus: Option<u64>,
+}
+
+/// One coarse browser typing declaration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct WatchingTyping {
+    pub issue: String,
+    pub field: String,
+}
+
 /// A request from a client to the daemon.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
@@ -411,6 +433,12 @@ pub enum Request {
         /// nothing reads and nobody sees a face.
         #[serde(default)]
         issues: Vec<String>,
+        /// Current browser selections, aggregated across this server's tabs.
+        #[serde(default)]
+        carets: Vec<WatchingCaret>,
+        /// Fields in which a browser has produced input recently.
+        #[serde(default)]
+        typing: Vec<WatchingTyping>,
     },
     Live {
         /// The generation the caller already holds. When it still stands the

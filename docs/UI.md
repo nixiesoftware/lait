@@ -170,6 +170,15 @@ that draws `drifted` as its last known offset points confidently at the wrong
 character, and one that draws `drifted` and `unresolved` the same way reports a
 live caret as lost.
 
+In the web document editor, a resolved caret is drawn at its anchored position
+in the body itself, with the actor's name and stable colour. A non-collapsed
+selection tints its exact range. The activity rail remains a summary rather
+than the only place cursor state is visible. The browser publishes cursor
+motion and typing on the transient lane, coalesced to 80 ms; clearing focus is
+immediate so a departed caret is retired promptly. Text edits use a separate
+350 ms quiet window and the durable issue-edit path, with blur flushing the
+last batch.
+
 Network nicknames are self-asserted display data. Local petnames are preferred
 for familiar rendering, but security-sensitive selection and confirmation show
 stable identifiers. A name alone never selects a recovery target or grants
@@ -234,15 +243,18 @@ three lanes:
   stream with a hole in it.
 - **progress** — a local transfer's byte count, which predates both.
 
-A socket declares one thing — a space, and optionally an issue — on the
-transient lane, and the server acts on every declaration once per tick for the
-whole server. Two tabs on one issue cost one read; a question nobody holds is
-never asked, which is what keeps an open browser from placing a Station for
-every Orbit on the machine. Because the drain empties the queue, the server is
-the only thing that may drain a space a browser is watching, and it skips an
-agent's space entirely: that space is observable through the browser and not
-operable, and taking an agent's signals out from under it because somebody left
-a tab open is the same write the RPC surface refuses at the door.
+A socket declares a space, optionally an issue, and optionally the active
+document cursor/selection and typing flag on the transient lane. The server
+coalesces all browser declarations for a Space into the Station's replace-all
+Live publication and acts on changes on an 80 ms beat; housekeeping and signal
+draining remain on a one-second beat. Two tabs on one issue cost one read; a
+question nobody holds is never asked, which is what keeps an open browser from
+placing a Station for every Orbit on the machine. Because the drain empties the
+queue, the server is the only thing that may drain a space a browser is
+watching, and it skips an agent's space entirely: that space is observable
+through the browser and not operable, and taking an agent's signals out from
+under it because somebody left a tab open is the same write the RPC surface
+refuses at the door.
 
 The two lanes run off different halves of that declaration. `live` is polled per
 *question*, so a declaration naming no issue costs no read — it says which space

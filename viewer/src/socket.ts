@@ -85,7 +85,19 @@ export type SocketEvent =
  * this tab is in, which is what the engine drains signals for, and asks no live
  * question at all.
  */
-export type Question = { space: string; issue?: string } | null;
+export interface BrowserCursor {
+  field: string;
+  /** Unicode-scalar offsets in the stored Markdown, never UTF-16 DOM offsets. */
+  anchor: number;
+  focus?: number;
+}
+
+export type Question = {
+  space: string;
+  issue?: string;
+  cursor?: BrowserCursor;
+  typing?: boolean;
+} | null;
 
 /**
  * Decode one frame.

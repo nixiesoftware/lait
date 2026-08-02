@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import type { Socket, SocketEvent, Question } from "./socket";
 import { WorldViewStore } from "./core/worldViewStore";
@@ -467,6 +467,37 @@ describe("LivePlane", () => {
       { space: "orb_a", issue: "iss_1" },
       { space: "orb_a" },
     ]);
+  });
+
+  it("coalesces cursor motion and retires awareness immediately", () => {
+    vi.useFakeTimers();
+    try {
+      const { plane, declared } = socket();
+      plane.attach("orb_a");
+      plane.ask({ space: "orb_a", issue: "iss_1" });
+      plane.aware("iss_1", {
+        cursor: { field: "description", anchor: 4, focus: 9 },
+        typing: true,
+      });
+      expect(declared.at(-1)).toEqual({ space: "orb_a", issue: "iss_1" });
+      vi.advanceTimersByTime(40);
+      plane.aware("iss_1", {
+        cursor: { field: "description", anchor: 6, focus: 11 },
+        typing: true,
+      });
+      vi.advanceTimersByTime(40);
+      expect(declared.at(-1)).toEqual({
+        space: "orb_a",
+        issue: "iss_1",
+        cursor: { field: "description", anchor: 6, focus: 11 },
+        typing: true,
+      });
+
+      plane.aware("iss_1", { cursor: null, typing: false });
+      expect(declared.at(-1)).toEqual({ space: "orb_a", issue: "iss_1" });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("blanks its tables when the socket stops answering, and keeps the signals", () => {

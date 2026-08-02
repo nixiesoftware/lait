@@ -1314,17 +1314,97 @@ impl StationHost {
     /// string as given, so every string is a legal input and an unresolvable one
     /// names a Body nothing publishes under. That is an empty answer rather than
     /// an error, and it is what a stale link should get.
-    fn watching(&self, issues: &[String]) -> Response {
+    fn watching(
+        &self,
+        issues: &[String],
+        carets: &[crate::control::WatchingCaret],
+        typing: &[crate::control::WatchingTyping],
+    ) -> Response {
+        use runtime::plane::live::LocalPublication;
+        use runtime::transient::{Target, TransientPayload};
+
         let world = crate::world::contract::world_id().as_str().to_string();
-        let scopes = issues
-            .iter()
-            .take(runtime::transient::MAX_SUBSCRIPTIONS)
-            .map(|doc| runtime::transient::Target::Body {
+        // Cursor state is the most perishable declaration, so admit it before
+        // the passive Body scopes. A tab collection at the subscription ceiling
+        // should lose an old facepile entry before it loses the caret currently
+        // moving under somebody's hands.
+        let mut candidates = Vec::new();
+        let issue_set: std::collections::BTreeSet<_> = issues.iter().map(String::as_str).collect();
+        for caret in carets {
+            if !issue_set.contains(caret.issue.as_str()) || caret.field != "description" {
+                continue;
+            }
+            let body = crate::world::contract::issue_body_id(&caret.issue).as_bytes();
+            let Some(anchor) = self
+                .station
+                .live()
+                .anchor(&world, body, &caret.field, caret.anchor)
+            else {
+                continue;
+            };
+            let payload = match caret.focus.filter(|focus| *focus != caret.anchor) {
+                Some(focus) => {
+                    let Some(focus) = self
+                        .station
+                        .live()
+                        .anchor(&world, body, &caret.field, focus)
+                    else {
+                        continue;
+                    };
+                    TransientPayload::Selection { anchor, focus }
+                }
+                None => TransientPayload::Caret { anchor },
+            };
+            candidates.push(LocalPublication {
+                scope: Target::Field {
+                    world: world.clone(),
+                    body,
+                    field: caret.field.clone(),
+                },
+                payload,
+            });
+        }
+        for active in typing {
+            if !issue_set.contains(active.issue.as_str()) || active.field != "description" {
+                continue;
+            }
+            candidates.push(LocalPublication {
+                scope: Target::Typing {
+                    world: world.clone(),
+                    body: crate::world::contract::issue_body_id(&active.issue).as_bytes(),
+                    field: active.field.clone(),
+                },
+                payload: TransientPayload::Typing,
+            });
+        }
+        candidates.extend(issues.iter().map(|doc| LocalPublication {
+            scope: Target::Body {
                 world: world.clone(),
                 body: crate::world::contract::issue_body_id(doc).as_bytes(),
-            })
-            .collect();
-        self.station.live().declare_local(scopes);
+            },
+            payload: TransientPayload::Presence,
+        }));
+
+        // A subscription is counted by Target, not by payload. Keep at most one
+        // publication for each scope (the first browser session wins when this
+        // Station has two tabs in one field) and never let distinct scopes cross
+        // the wire ceiling. The receiver rejects an oversize set as a whole.
+        let mut admitted = std::collections::BTreeSet::new();
+        let mut publications = Vec::new();
+        for publication in candidates {
+            if admitted.contains(&publication.scope) {
+                continue;
+            }
+            if admitted.len() >= runtime::transient::MAX_SUBSCRIPTIONS {
+                break;
+            }
+            admitted.insert(publication.scope.clone());
+            publications.push(publication);
+        }
+        publications.sort_by(|a, b| {
+            (&a.scope, a.payload.kind() as u8).cmp(&(&b.scope, b.payload.kind() as u8))
+        });
+        self.station.live().declare_local_publications(publications);
         Response::Ok { message: None }
     }
 
@@ -1337,7 +1417,11 @@ impl StationHost {
                 since_generation,
                 issue,
             } => self.live(since_generation, issue.as_deref()),
-            Request::Watching { issues } => self.watching(&issues),
+            Request::Watching {
+                issues,
+                carets,
+                typing,
+            } => self.watching(&issues, &carets, &typing),
             Request::Signals => self.drain_signals(),
             Request::Sync => self.sync(),
             other => Response::err(format!("request is not a Station operation: {other:?}")),
