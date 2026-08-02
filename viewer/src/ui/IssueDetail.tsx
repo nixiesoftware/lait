@@ -37,7 +37,7 @@ import {
 
 import { rpc } from "../api";
 import { downloadUrl, upload as uploadContent } from "../content";
-import { useIssueDetail, useProjectViewerStore } from "../projectStore";
+import { useIssueDetail, useProjectBaselines, useProjectViewerStore } from "../projectStore";
 import { clearDraft, loadDraft, saveDraft } from "../core/drafts";
 import {
   describeEventRich,
@@ -73,9 +73,11 @@ import {
   type LabelDto,
   type MemberDto,
   type Packet,
+  type PacketSpec,
   type ProjectDto,
   type WorkflowState,
 } from "../types";
+import { conflictPhrase, sourcePhrase } from "../core/specs";
 import { Avatar, AvatarStack, memberName as nameOf, stackFor } from "./Avatar";
 import { LoadingState } from "./AppState";
 import { avatarColor, catalogColor } from "./colors";
@@ -92,6 +94,7 @@ import {
   HeaderActions,
   MenuContent,
   MenuItem,
+  MenuSeparator,
   RailRow,
   RailSection,
   Toast,
@@ -128,6 +131,7 @@ export function IssueDetail({
   onDelete,
   onPredict,
   onNavigate,
+  onOpenSpec,
   onClose,
   onPrevious,
   onNext,
@@ -153,6 +157,8 @@ export function IssueDetail({
   onPredict: (doc: string, field: PredictField, value: string, send: () => Promise<unknown>) => Promise<boolean>;
   /** Select another issue — following a graph edge (parent, sub-issue, blocker). */
   onNavigate: (reff: string) => void;
+  /** Open a Spec named by the effective brief, on its own surface. */
+  onOpenSpec?: ((spec: string) => void) | undefined;
   onClose: () => void;
   onPrevious?: () => void;
   onNext?: () => void;
@@ -880,7 +886,13 @@ export function IssueDetail({
           onSave={(description) => void edit({ description })}
         />
 
-        <SpecPacket spaceId={spaceId} reff={issue.reff} />
+        <SpecPacket
+          spaceId={spaceId}
+          reff={issue.reff}
+          projectId={issue.project_id}
+          readOnly={locked}
+          onOpenSpec={onOpenSpec}
+        />
 
         <Attachments
           spaceId={spaceId}
@@ -1026,9 +1038,37 @@ export function IssueDetail({
   );
 }
 
-function SpecPacket({ spaceId, reff }: { spaceId: string; reff: string }) {
+/**
+ * The work brief — what governs this issue, derived rather than written.
+ *
+ * A projection, never a second source of truth: nothing here is editable, no
+ * body text is copied in, and the sections are the engine's own classification
+ * rather than a reading of it. What the block adds is the part a reader cannot
+ * compute — *why* each item is in force, and whether the brief is whole.
+ *
+ * Governing leads and stays open. The rest carry counts and expand on demand,
+ * because "what must I satisfy" is the question an issue is being worked to
+ * answer, and guidance, evidence and records are the ones asked afterwards.
+ */
+function SpecPacket({
+  spaceId,
+  reff,
+  projectId,
+  readOnly,
+  onOpenSpec,
+}: {
+  spaceId: string;
+  reff: string;
+  projectId: string;
+  readOnly: boolean;
+  onOpenSpec?: ((spec: string) => void) | undefined;
+}) {
+  const store = useProjectViewerStore();
   const [packet, setPacket] = useState<Packet | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [reload, setReload] = useState(0);
+  const [binding, setBinding] = useState(false);
+  const baselines = useProjectBaselines(spaceId, projectId).data ?? [];
 
   useEffect(() => {
     let alive = true;
@@ -1042,57 +1082,188 @@ function SpecPacket({ spaceId, reff }: { spaceId: string; reff: string }) {
         if (alive) setError(reason instanceof Error ? reason.message : String(reason));
       });
     return () => { alive = false; };
-  }, [spaceId, reff]);
+  }, [spaceId, reff, reload]);
 
-  if (!packet && !error) return null;
+  // Only issued sets can be pinned: binding to a draft would pin something
+  // nobody has agreed to, and the pin is the agreement.
+  const issuedBaselines = baselines.filter((candidate) => candidate.issued.length === 1);
+  const bind = (baseline: { baseline: string; revision: string } | null) => {
+    setBinding(false);
+    void store
+      .bindBaseline(spaceId, reff, baseline)
+      .then(() => setReload((n) => n + 1))
+      .catch((reason: unknown) =>
+        setError(reason instanceof Error ? reason.message : String(reason)),
+      );
+  };
+
+  // Unlike the sections below, the binding control is drawn even with nothing
+  // bound — "this issue is governed by no agreed set" is a fact worth being able
+  // to see and change, not an absence.
+  const offerBinding = !readOnly && issuedBaselines.length > 0;
+  if (!packet && !error && !offerBinding) return null;
   const sections = packet ? [
     ["Governing", packet.governing],
     ["Guidance", packet.guidance],
     ["Proof", packet.proof],
     ["Record", packet.record],
   ] as const : [];
+  // Genuinely empty — no baseline, nothing governing directly, nothing wrong —
+  // is the only state that draws nothing. An unreadable packet is an error, and
+  // an incomplete one is a warning; neither may render as "there is nothing".
   const empty = packet && sections.every(([, specs]) => specs.length === 0)
     && packet.conflicts.length === 0 && !packet.baseline;
-  if (empty) return null;
+  if (empty && !offerBinding) return null;
+
+  const conflicts = (packet?.conflicts ?? []).map(conflictPhrase);
+  const waiting = conflicts.filter((conflict) => conflict.kind === "missing").length;
 
   return (
     <section className="border-line mx-6 border-t py-5">
-      <div className="mb-3 flex items-center gap-2">
-        <h2 className="text-sm font-semibold">Spec packet</h2>
+      <div className="mb-1 flex flex-wrap items-center gap-2">
+        <h2 className="text-sm font-semibold">Effective for this issue</h2>
         {packet?.baseline && (
-          <code className="text-mute text-2xs" title={`${packet.baseline.baseline}@${packet.baseline.revision}`}>
-            {packet.baseline.baseline} · {short(packet.baseline.revision)}
+          <code
+            className="text-mute text-2xs"
+            title={`${packet.baseline.baseline}@${packet.baseline.revision}`}
+          >
+            {baselines.find((row) => row.baseline === packet.baseline!.baseline)?.body.name ??
+              packet.baseline.baseline}{" "}
+            · {short(packet.baseline.revision)}
           </code>
         )}
+        {offerBinding && (
+          <DropdownMenu.Root open={binding} onOpenChange={setBinding}>
+            <DropdownMenu.Trigger asChild>
+              <Button size="md" variant="outline" className="ml-auto">
+                {packet?.baseline ? "Change baseline" : "Bind a baseline"}
+              </Button>
+            </DropdownMenu.Trigger>
+            <DropdownMenu.Portal>
+              <MenuContent align="end">
+                {issuedBaselines.map((candidate) => (
+                  <MenuItem
+                    key={candidate.baseline}
+                    onSelect={() =>
+                      bind({ baseline: candidate.baseline, revision: candidate.issued[0]! })
+                    }
+                  >
+                    <span className="flex-1">{candidate.body.name}</span>
+                    {/* The exact revision, because that is what gets pinned —
+                        not the baseline, and not whatever it becomes later. */}
+                    <code className="text-mute text-2xs">{short(candidate.issued[0]!)}</code>
+                  </MenuItem>
+                ))}
+                {packet?.baseline && (
+                  <>
+                    <MenuSeparator />
+                    <MenuItem danger onSelect={() => bind(null)}>
+                      Clear binding
+                    </MenuItem>
+                  </>
+                )}
+              </MenuContent>
+            </DropdownMenu.Portal>
+          </DropdownMenu.Root>
+        )}
       </div>
+      {offerBinding && !packet?.baseline && (
+        <p className="text-mute mb-2 text-2xs">
+          No agreed set is pinned to this issue. What governs it is whatever names it directly.
+        </p>
+      )}
+      {/* The integrity line, before the content it qualifies. "Waiting" and
+          "unresolved" are different remedies — one arrives with a sync, the
+          other needs somebody to decide — so they are counted apart. */}
+      {conflicts.length > 0 && (
+        <p className="text-mute mb-2 text-2xs">
+          {waiting > 0 && `${waiting} referenced ${waiting === 1 ? "record has" : "records have"} not arrived here yet. `}
+          {conflicts.length > waiting && `${conflicts.length - waiting} need a decision.`}
+        </p>
+      )}
       {error && <p className="text-danger text-xs">{error}</p>}
-      {packet?.conflicts.map((conflict) => (
-        <p key={conflict} className="text-warn mb-2 flex items-start gap-2 text-xs">
+      {conflicts.map((conflict) => (
+        <p key={conflict.text} className="text-warn mb-2 flex items-start gap-2 text-xs">
           <AlertTriangle className="mt-0.5 size-icon-xs shrink-0" />
-          {conflict}
+          {conflict.text}
         </p>
       ))}
-      <div className="grid gap-3 @lg:grid-cols-2">
+      <div className="flex flex-col gap-3">
         {sections.map(([title, specs]) => specs.length > 0 && (
-          <div key={title}>
-            <h3 className="text-mute mb-1 text-2xs font-semibold tracking-wider uppercase">{title}</h3>
-            <ul className="flex flex-col gap-1.5">
-              {specs.map((spec) => (
-                <li key={`${spec.spec}@${spec.revision}`} className="border-line rounded-surface border px-2.5 py-2 text-xs">
-                  <div className="flex items-center gap-2">
-                    <span className="font-medium">{spec.title}</span>
-                    <span className="text-mute ml-auto capitalize">{spec.kind}</span>
-                  </div>
-                  <div className="text-mute mt-0.5 truncate font-mono text-2xs" title={`${spec.spec}@${spec.revision}`}>
-                    {spec.spec}@{short(spec.revision)} · {spec.source}
-                  </div>
-                </li>
-              ))}
-            </ul>
-          </div>
+          <PacketSection
+            key={title}
+            title={title}
+            specs={specs}
+            open={title === "Governing"}
+            onOpenSpec={onOpenSpec}
+          />
         ))}
       </div>
     </section>
+  );
+}
+
+function PacketSection({
+  title,
+  specs,
+  open,
+  onOpenSpec,
+}: {
+  title: string;
+  specs: readonly PacketSpec[];
+  open: boolean;
+  onOpenSpec?: ((spec: string) => void) | undefined;
+}) {
+  const [expanded, setExpanded] = useState(open);
+  return (
+    <div>
+      <button
+        type="button"
+        onClick={() => setExpanded((was) => !was)}
+        aria-expanded={expanded}
+        className="text-mute hover:text-fg mb-1 flex w-full items-center gap-1.5 text-2xs font-semibold tracking-wider uppercase"
+      >
+        <ChevronRight className={`size-icon-2xs transition-transform ${expanded ? "rotate-90" : ""}`} />
+        {title}
+        <span className="tabular-nums normal-case">{specs.length}</span>
+      </button>
+      {expanded && (
+        <ul className="flex flex-col gap-1.5">
+          {specs.map((spec) => (
+            <li
+              key={`${spec.spec}@${spec.revision}`}
+              className="border-line rounded-surface border px-2.5 py-2 text-xs"
+            >
+              <div className="flex items-center gap-2">
+                {onOpenSpec ? (
+                  <button
+                    type="button"
+                    className="hover:text-accent min-w-0 truncate text-left font-medium"
+                    onClick={() => onOpenSpec(spec.spec)}
+                  >
+                    {spec.title}
+                  </button>
+                ) : (
+                  <span className="min-w-0 truncate font-medium">{spec.title}</span>
+                )}
+                <span className="text-mute ml-auto shrink-0 capitalize">{spec.kind}</span>
+              </div>
+              {/* The source route in plain words, not behind a disclosure: an
+                  incorporated Guide sits in the governing set beside the
+                  requirements, and this line is the only thing that stops it
+                  reading as one. */}
+              <div className="text-mute mt-0.5 text-2xs">{sourcePhrase(spec.source)}</div>
+              <div
+                className="text-mute mt-0.5 truncate font-mono text-2xs"
+                title={`${spec.spec}@${spec.revision}`}
+              >
+                {spec.spec}@{short(spec.revision)}
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
   );
 }
 

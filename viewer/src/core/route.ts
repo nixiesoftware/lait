@@ -18,6 +18,9 @@ export interface ViewerRoute {
   /** The open Spec, on the Specs register. Absent rather than null when closed,
    *  so a route without one compares equal to a route that never had the key. */
   spec?: string;
+  /** The open Baseline. A separate key rather than a second meaning for `spec`:
+   *  they are different nouns and a link should say which one it opens. */
+  baseline?: string;
   filter?: FilterState;
 }
 
@@ -89,6 +92,7 @@ export function parseRoute(location: Pick<Location, "pathname" | "search">): Vie
   // dropped rather than rejected: old links still open the issue they name.
   const issue = displaysIssue(view) ? clean(query.get("issue")) : null;
   const spec = view === "specs" ? clean(query.get("spec")) : null;
+  const baseline = view === "specs" ? clean(query.get("baseline")) : null;
 
   return {
     spaceId: parts[1],
@@ -96,6 +100,7 @@ export function parseRoute(location: Pick<Location, "pathname" | "search">): Vie
     view: legacyOverview ? "overview" : view,
     issue,
     ...(spec ? { spec } : {}),
+    ...(baseline ? { baseline } : {}),
     ...(carriesFilter(view) && isActive(filter) ? { filter } : {}),
   };
 }
@@ -109,6 +114,9 @@ export function formatRoute(route: ViewerRoute): string {
   }
   if (route.spec && route.view === "specs") {
     query.set("spec", route.spec);
+  }
+  if (route.baseline && route.view === "specs") {
+    query.set("baseline", route.baseline);
   }
   if (carriesFilter(route.view) && route.filter && isActive(route.filter)) {
     if (route.filter.text.trim()) query.set("q", route.filter.text.trim());
@@ -135,6 +143,7 @@ export function sameRoute(a: ViewerRoute, b: ViewerRoute): boolean {
     a.view === b.view &&
     a.issue === b.issue &&
     (a.spec ?? null) === (b.spec ?? null) &&
+    (a.baseline ?? null) === (b.baseline ?? null) &&
     JSON.stringify(a.filter ?? EMPTY_FILTER) === JSON.stringify(b.filter ?? EMPTY_FILTER)
   );
 }

@@ -142,6 +142,9 @@ export function App() {
   const [openSpec, setOpenSpec] = useState<string | null>(initialRoute.spec ?? null);
   /** The Spec composer: a kind to seed it with, `"any"` to let it ask. */
   const [composingSpec, setComposingSpec] = useState<SpecKind | "any" | null>(null);
+  /** The open Baseline. Its own state rather than a second meaning for
+   *  `openSpec`: they are different nouns with different readers. */
+  const [openBaseline, setOpenBaseline] = useState<string | null>(initialRoute.baseline ?? null);
   const [modal, setModal] = useState<Modal>(null);
   const [error, setError] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
@@ -293,6 +296,7 @@ export function App() {
     setView(route.view);
     setSelection(route.issue);
     setOpenSpec(route.spec ?? null);
+    setOpenBaseline(route.baseline ?? null);
     setFilter(route.filter ?? EMPTY_FILTER);
     setDetail(route.issue !== null);
   }, []);
@@ -317,6 +321,7 @@ export function App() {
       view,
       issue: detail ? selection : null,
       ...(openSpec ? { spec: openSpec } : {}),
+      ...(openBaseline ? { baseline: openBaseline } : {}),
       filter,
     };
     const href = formatRoute(route);
@@ -324,7 +329,7 @@ export function App() {
       window.history.replaceState(null, "", href);
     }
     saveLastRoute(route);
-  }, [routeSpace, project, view, selection, detail, openSpec, filter]);
+  }, [routeSpace, project, view, selection, detail, openSpec, openBaseline, filter]);
 
   // Settings is a page state, not a panel: its own left rail owns the hierarchy,
   // so the workspace sidebar steps aside while it's open and returns as you left
@@ -789,6 +794,7 @@ export function App() {
         // the way back out of a document, which a tab that returned you to
         // whatever you were last reading would not be.
         setOpenSpec(null);
+        setOpenBaseline(null);
         setComposingSpec(null);
         if (scoped !== filter) setFilter(scoped);
       },
@@ -1434,6 +1440,13 @@ export function App() {
           onDelete={api.deleteIssue}
           onPredict={api.predict}
           onNavigate={api.select}
+          // A brief names the documents it is derived from, and following one
+          // is a hop to a different surface — so it goes through `goto` rather
+          // than opening a Spec inside an issue.
+          onOpenSpec={(spec) => {
+            api.goto("specs");
+            setOpenSpec(spec);
+          }}
           onClose={() => {
             api.select(null);
             setDetail(false);
@@ -1654,7 +1667,7 @@ export function App() {
               {/* No chord: `C` is the issue composer's everywhere, and a key that
                   makes a different kind of document depending on which tab is
                   lit is worse than a key that only makes issues. */}
-              {projectShell && !readOnly && current && view === "specs" && !openSpec && (
+              {projectShell && !readOnly && current && view === "specs" && !openSpec && !openBaseline && (
                 <IconButton label="New spec" variant="outline" onClick={() => setComposingSpec("any")}>
                   <Plus className="size-icon-sm" />
                 </IconButton>
@@ -1796,9 +1809,12 @@ export function App() {
               projectName={activeProject?.name ?? project ?? "this project"}
               readOnly={readOnly}
               spec={openSpec}
+              baseline={openBaseline}
+              members={members}
               composing={composingSpec}
               onCompose={setComposingSpec}
               onOpen={setOpenSpec}
+              onOpenBaseline={setOpenBaseline}
               onError={setError}
             />
           ) : view === "activity" && board ? (

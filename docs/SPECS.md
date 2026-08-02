@@ -69,13 +69,33 @@ protocol and MCP tools. The browser issue detail renders the effective Packet.
 A project's Specs are a destination of their own, at
 `/spaces/:space/projects/:project/specs`, with an open document at `?spec=spc_…`.
 
-The surface draws what has happened to a document and nothing else. Today that
-is its kind, title, body and author: a Spec is created, read, and revised there,
-and each commit writes a new immutable revision against the head the reader was
-showing. Lifecycle state, the revision trail, exact coordinates, Baselines and
-traceability are real facts in the engine that this surface does not yet draw —
-each arrives with the affordance that reads it, rather than as a column reserved
-for a document that has not entered it.
+The surface draws what has happened to a document and nothing else. A fresh
+draft is a kind, a title and a body; each further fact brings exactly one
+affordance with it and takes it away again when it goes.
+
+- **Register.** One list, two nouns. Specs group by kind in the order the chain
+  runs; Baselines are their own row shape. A row says nothing about its
+  lifecycle until it has one, then says it as a word — `Issued`,
+  `Issued · draft ahead`, `Concurrent heads`. An issued requirement nothing
+  verifies reads `unverified`.
+- **Reader.** Kind, an authority sentence, the title, the lifecycle control that
+  *is* the transition, and the body. A second revision brings the rail; an issued
+  predecessor under a draft head brings the line that says so; concurrent heads
+  bring a banner and suppress every transition.
+- **Compare and resolve.** Two revisions diff by line over title, body and typed
+  links, against their common ancestor when neither descends from the other.
+  Resolution writes one draft whose predecessors are every head.
+- **Baselines.** A member schedule of exact issued revisions, a compare against
+  the predecessor before issuing, and bind/replace/clear on an Issue.
+- **Packet.** The derived brief on Issue detail: the bound set, an integrity line
+  separating what will arrive on its own from what needs a decision, and each
+  item's source route in words — which is what keeps an incorporated Guide from
+  reading as an order.
+
+Authority is legible because it is enforced: `spec.write` rides the contributor
+demand, so any writing member drafts and sends for review, while `spec.issue`
+needs a project grant or `space.admin`. A transition the actor cannot take stays
+visible and disabled, naming the capability it wants.
 
 This is a schema cutoff. The Spec and Baseline Bodies begin at their current
 schema; there is no legacy markdown importer, compatibility adapter, or staged
