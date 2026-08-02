@@ -6,9 +6,9 @@
 # reviewed like one, not discovered when a gate goes red on a refactor.
 
 [tiers]
-pr             1327
-pr-platform    998
-nightly        1354
+pr             1336
+pr-platform    1006
+nightly        1363
 mutants        87
 
 [gates]
@@ -24,7 +24,7 @@ orbital-bootstrap-real       15
 orbital-ceremonies           12
 orbital-independent-world    6
 convergence-simulation       6
-orbital-product-parity       18
+orbital-product-parity       19
 
 [tests]
 comms iroh::tests::framing_golden_bytes
@@ -238,6 +238,11 @@ lait diagnose::tests::space_mismatch_is_the_first_blocker
 lait diagnose::tests::synced_member_offline_is_not_blocked
 lait diagnose::tests::unsynced_member_offline_blocks_on_peer
 lait diagnose::tests::view_round_trips_through_json
+lait install::tests::claude_warns_about_shadowing_the_plugin
+lait install::tests::derived_agent_names_stay_lowercase_plain_identifiers
+lait install::tests::each_known_client_brings_its_own_agent_identity
+lait install::tests::entry_pins_nothing_machine_specific
+lait install::tests::naming_an_agent_adds_only_that
 lait list_picker::tests::window_handles_headers_and_small_lists
 lait list_picker::tests::window_keeps_selection_visible
 lait mcp::scope_tests::an_mcp_server_is_pinned_to_the_home_it_was_constructed_for
@@ -327,6 +332,7 @@ lait serve::socket::tests::a_socket_that_stops_reading_the_control_lane_is_let_g
 lait serve::socket::tests::a_tab_from_another_build_is_told_once_and_not_negotiated_with
 lait serve::socket::tests::a_transient_flood_does_not_delay_a_control_frame
 lait serve::socket::tests::appending_a_lane_left_the_two_before_it_where_they_were
+lait serve::socket::tests::browser_awareness_is_replace_all_and_marks_both_rooms_when_moved
 lait serve::socket::tests::garbage_is_malformed_rather_than_panicking
 lait serve::socket::tests::one_question_held_by_two_tabs_is_polled_once
 lait serve::socket::tests::progress_coalesces_to_the_newest_value_per_transfer
@@ -411,6 +417,7 @@ lait-issues-app presentation::tests::json_errors_keep_typed_exit_semantics
 lait-issues-app presentation::tests::priority_badges_are_owned_by_the_product_presenter
 lait-issues-app protocol::tests::codec_round_trips_without_root_control_types
 lait-issues-app protocol::tests::request_classification_is_package_owned
+lait-issues-app protocol::tests::spec_replies_do_not_collide_with_the_response_tag
 lait-issues-app router::tests::due_dates_parse_as_utc_midnight_and_unix_passthrough
 lait-issues::it package_boundary::semantic_package_has_no_shell_or_process_dependency
 lait-issues::it package_boundary::the_implementation_id_is_pinned_and_moving_it_is_deliberate
@@ -516,6 +523,7 @@ lait::it mcp_parity::issue_response_status_field_survives_the_kind_tag
 lait::it mcp_parity::mcp_tool_names_are_unique
 lait::it mcp_parity::onboarding_and_transport_tools_stay_wired
 lait::it mcp_parity::response_dtos_round_trip
+lait::it mcp_parity::the_served_tool_list_matches_the_declared_surface
 lait::it mixed_root_guard::any_product_cache_must_register_with_a_mixed_root_proof
 lait::it mixed_root_guard::every_registered_cache_names_a_real_test
 lait::it mixed_root_guard::the_detector_has_teeth
@@ -1179,6 +1187,7 @@ runtime internal_tests::live_transient::presence_carries_no_position_and_costs_n
 runtime internal_tests::live_transient::publishing::a_declaration_replaces_rather_than_accumulates
 runtime internal_tests::live_transient::publishing::an_empty_declaration_is_how_presence_stops
 runtime internal_tests::live_transient::publishing::declaring_what_is_already_declared_moves_nothing
+runtime internal_tests::live_transient::publishing::moving_a_caret_moves_the_local_generation_without_changing_its_scope
 runtime internal_tests::live_transient::publishing::what_this_station_publishes_is_not_in_its_own_view
 runtime internal_tests::live_transient::residency::a_station_with_no_content_answers_absent_rather_than_failing
 runtime internal_tests::live_transient::residency::asking_about_nothing_is_absent_and_costs_nothing
