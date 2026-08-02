@@ -152,7 +152,10 @@ jobs:
       - name: CRDT laws (deep)
         env:
           PROPTEST_CASES: "4096"
-        run: cargo nextest run -p fabric --locked --all-features -E 'test(convergence_laws_tests)'
+        # `--profile nightly` is load-bearing, not decoration. Without it these
+        # inherit `[profile.default]`, whose slow-timeout is 30s x 3 — and the
+        # whole point of this job is running far longer than the per-push tier.
+        run: cargo nextest run -p fabric --locked --all-features --profile nightly -E 'test(convergence_laws_tests)'
 
       - name: Upload any shrunk counterexamples
         if: failure()
@@ -175,7 +178,7 @@ jobs:
       - name: Convergence simulation (deep)
         env:
           LAIT_SIM_SEEDS: "512"
-        run: cargo nextest run -p runtime --locked --all-features -E 'test(internal_tests::convergence_simulation)'
+        run: cargo nextest run -p runtime --locked --all-features --profile nightly -E 'test(internal_tests::convergence_simulation)'
 
       # The 50k and 100k Body points. `commit_cost_baseline`'s own docs call
       # these opt-in and note the store-manifest commit cost they measure is an
