@@ -533,13 +533,12 @@ Then `bash ci/coverage-manifest.sh --update` and commit the manifest with it.
 Written down because a gap you know about is a decision, and a gap you don't is
 a surprise.
 
-- **No whole-system deterministic simulation.** T3 is deterministic at the
-  Replica/convergence seam, where there is no I/O. The clock is now controllable
-  in `crates/runtime` (see "The clock seam"), which is the piece that was
-  missing; what remains is entropy and network scheduling. Extending through
-  `comms` for real means `madsim`-style libc interception — S2 found `turmoil`
-  alone insufficient, because timestamps in packets, `HashMap` ordering, and
-  dependencies making uncontrolled syscalls all leaked through.
+- **`MemNet` injects faults per connection, not per frame.** `connect`,
+  `connect_session` and gossip delivery are gated; the byte stream inside an
+  established session is not — measured, a whole fetch shows `sent=1`. What
+  per-frame faults would buy is partial-transfer-under-loss, and
+  `an_interrupted_transfer_resumes_and_installs_only_after_verification` already
+  covers resume by removing the provider mid-fetch.
 - **One `SystemTime::now` is deliberately unseamed**: `fabric`'s entropy
   fallback hashes the clock into a substitute RNG when the OS entropy source
   fails. That is not a timestamp read and freezing it would defeat the point.
@@ -552,5 +551,12 @@ a surprise.
   breaks the code on purpose and lists what the suite fails to notice. Turning
   a score into a build failure is a decision to take once there is a baseline
   to hold; a gate that fails on day one is a job someone turns off.
-- **Time is not simulated anywhere.** See T3 above; this is the largest
-  remaining gap and the most expensive to close.
+- **`sim/`'s determinism does not extend to the drivers.** The whole-stack tier
+  closes entropy and clock for an authoring workload; the driver-layer
+  simulation in `freight_two_node.rs` runs against the real clock seam and a
+  seeded network, but not under `sim/`'s cfgs. Running the two together is
+  possible and has not been needed.
+- **T3's envelope counts do not replay**, only its schedule and outcome. The
+  counts depend on how much material `export_material` yields, which varies with
+  entropy the workspace build does not close — `sim/` is where bit-exactness
+  lives.
