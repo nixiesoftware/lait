@@ -400,6 +400,10 @@ async fn dispatch(specs: &[cmdspec::Spec], matches: &ArgMatches, out: Out) -> Re
         Dispatch::Special(Special::Init) => return run_init(m, out).await,
         Dispatch::Special(Special::Join) => return run_join_cli(m, out).await,
         Dispatch::Special(Special::DeviceAccept) => return run_device_accept(m, out),
+        // Writes a client's config file and reads no store. Requiring one would
+        // mean a space had to exist before an agent could be pointed at lait,
+        // which inverts the order people actually install things in.
+        Dispatch::Special(Special::InstallMcp) => return run_install_mcp(m),
         _ => {}
     }
     // Everything else binds an existing store or gets the guided error —
@@ -458,19 +462,6 @@ async fn dispatch(specs: &[cmdspec::Spec], matches: &ArgMatches, out: Out) -> Re
             }
             Special::Mcp => {
                 mcp::run_mcp(&home).await?;
-            }
-            Special::InstallMcp => {
-                let client = *m
-                    .get_one::<Client>("client")
-                    .ok_or_else(|| anyhow!("MCP client selection is missing"))?;
-                let scope = m.get_one::<Scope>("scope").copied();
-                let name = m
-                    .get_one::<String>("name")
-                    .cloned()
-                    .unwrap_or_else(|| "lait".into());
-                let print = m.get_flag("print");
-                let out_s = install::install_mcp(client, scope, &name, print)?;
-                println!("{out_s}");
             }
             Special::Invite => {
                 let email = m.get_one::<String>("email").cloned();
@@ -542,6 +533,7 @@ async fn dispatch(specs: &[cmdspec::Spec], matches: &ArgMatches, out: Out) -> Re
             | Special::Init
             | Special::Join
             | Special::DeviceAccept
+            | Special::InstallMcp
             | Special::Daemon
             | Special::Serve
             | Special::Update => return Err(anyhow!("command escaped its pre-home dispatcher")),
@@ -601,6 +593,24 @@ async fn dispatch_world_client(
 /// `lait init`: found a space rooted at `cwd/.lait` (or `$LAIT_HOME`).
 /// Explicit creation is the ONLY way a space comes into existence besides
 /// `join` — nothing is minted as a side effect of other commands.
+/// `install-mcp`: merge the lait MCP server into a client's config. Store-free
+/// by construction — see the dispatch note above.
+fn run_install_mcp(m: &ArgMatches) -> Result<()> {
+    let client = *m
+        .get_one::<Client>("client")
+        .ok_or_else(|| anyhow!("MCP client selection is missing"))?;
+    let scope = m.get_one::<Scope>("scope").copied();
+    let name = m
+        .get_one::<String>("name")
+        .cloned()
+        .unwrap_or_else(|| "lait".into());
+    let agent = m.get_one::<String>("agent").cloned();
+    let print = m.get_flag("print");
+    let out_s = install::install_mcp(client, scope, &name, agent.as_deref(), print)?;
+    println!("{out_s}");
+    Ok(())
+}
+
 async fn run_init(m: &ArgMatches, out: Out) -> Result<()> {
     // Refuse when discovery already binds an initialized store: one directory
     // (tree) holds one space — legacy or orbital.
