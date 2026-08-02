@@ -10,6 +10,13 @@ members = [
     "products/issues",
     "products/issues-app",
 ]
+# `fuzz/` is a package but NOT a member. cargo-fuzz needs a nightly toolchain
+# for its `-Z` sanitizer flags, and this workspace pins `channel = "stable"` in
+# rust-toolchain.toml with an MSRV floor the CI checks. Excluding it means
+# `cargo build`, `cargo test`, `cargo clippy` and the MSRV job never see it —
+# the nightly job overrides the toolchain for itself with RUSTUP_TOOLCHAIN, the
+# same mechanism the `msrv (1.91)` job uses to pin downward.
+exclude = ["fuzz"]
 # Pin resolver 2 explicitly: the release binary's non-linkage of the dev-only
 # `test-utils` feature (which would flip presets::N0 from prod to staging relays)
 # depends on it, and must not silently regress to v1 if this ever becomes a

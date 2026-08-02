@@ -266,6 +266,81 @@ Code that takes `now` as a parameter — `Gate::check(now)`, `budget.admit(now)`
 `replica.retained_content(now)` — was already testable and did not need any of
 this. The seam is for code that asks the clock itself.
 
+## The network simulator
+
+`comms::mem::MemNet` is an in-process transport — the whole network over
+channels, no iroh, no sockets. `MemNet::new()` delivers everything;
+`MemNet::seeded(seed, Faults)` loses and doubles deliveries from one seeded
+generator, and `partition(a, b)` / `heal()` cut and restore a pair.
+
+The default is untouched on purpose. A fault injector that changes what
+`MemNet::new()` does silently rewrites what thirty existing tests mean.
+
+Gossip is judged at the **receiver**, direct connections at the **sender**. A
+broadcast goes to a bus and the sender cannot know who is listening; filtering
+per subscriber is also the more faithful model, because a partition means each
+side independently stops hearing the other rather than the message never being
+spoken.
+
+A dropped dial returns a live handle nobody holds the other end of, rather than
+an error — that is what a lost SYN looks like to a dialer. Returning `Err`
+would be easier code and the wrong model.
+
+**The test that matters is the one about the harness.** Seeding is worth having
+because a failure replays, and that is a claim about the simulator rather than
+the system — the one most likely to be quietly false. One `HashMap` iteration,
+one unseeded generator, and the seed determines nothing while every test still
+passes. So `the_same_seed_replays_exactly` runs one seed twice and compares a
+trace of every delivery decision line by line, not by count: two runs that drop
+the same *number* of messages and different messages are not the same run. Its
+companion asserts a different seed diverges, because otherwise the seed could be
+ignored rather than honoured and the first test could not tell.
+
+**Delay is not modelled**, deliberately. Drop, duplicate and partition are
+decided synchronously at the delivery point, which is what keeps the decision
+order a function of the seed. Delay needs a timer per message and a task per
+timer, and once deliveries race on the scheduler the seed stops determining the
+order. It is buildable against a paused clock, but it is a second mechanism
+rather than a knob on this one.
+
+## Fuzzing
+
+Two layers, same property, different search.
+
+`contact_frame_fuzz.rs` and `presence_wire_fuzz.rs` generate structured inputs
+with proptest and run on every push. `fuzz/` holds byte-slice targets that
+`nightly.yml` runs under libFuzzer for ten minutes each — libFuzzer watches
+which branches an input reached and mutates toward the ones it has not, finding
+inputs a blind generator would need a very long time to stumble into.
+
+| target | decoder |
+|---|---|
+| `contact_frame` | `ContactFrame::decode` |
+| `handshake` | `Offer::decode`, `Proof::decode` |
+| `beacon` | `SignedBeacon::decode_canonical` |
+| `presence` | `PresenceProbe::decode`, `PresenceAck::decode` |
+
+Byte-slice targets, so there are no generators to duplicate. That is also why
+`cargo-fuzz` rather than `bolero`: bolero would unify the property test and the
+fuzz target under one harness, but only by rewriting the generators in its own
+API — and for a parser the coverage-guided value is in the raw-bytes path,
+which needs no generator at all.
+
+`fuzz/` is a package but **not** a workspace member. cargo-fuzz needs nightly
+for its `-Z` sanitizer flags, and this workspace pins `channel = "stable"` with
+an MSRV floor CI checks; excluding it means `cargo build`, `cargo test`,
+`cargo clippy` and the MSRV job never see it. The nightly job overrides its own
+toolchain with `RUSTUP_TOOLCHAIN`, the same mechanism `msrv (1.91)` uses to pin
+downward.
+
+```sh
+cargo fuzz list                                    # the targets
+RUSTUP_TOOLCHAIN=nightly cargo fuzz run beacon     # Linux; see the gap below
+```
+
+A crash artifact is the output worth having: it is real bytes, so the next step
+is a regression test rather than a reproduction from a description.
+
 ## Mutation testing
 
 `nightly.yml`'s `mutants` job runs `cargo-mutants`: it breaks the code on
@@ -359,12 +434,12 @@ a surprise.
 - **One `SystemTime::now` is deliberately unseamed**: `fabric`'s entropy
   fallback hashes the clock into a substitute RNG when the OS entropy source
   fails. That is not a timestamp read and freezing it would defeat the point.
-- **No coverage-guided fuzzing.** The Contact decoders have a structure-aware
-  property test (see T0), which is most of the value on stable. What is missing
-  is `cargo-fuzz`'s coverage feedback — it needs nightly and its own CI job, and
-  the argument for paying that is a finding the property test cannot explain.
-  Nothing else that parses untrusted bytes is covered: the Beacon and Signal
-  wire formats are the next ones.
+- **Coverage-guided fuzzing does not run on Windows.** Verified rather than
+  assumed: `cargo fuzz build` fails to link `irpc` and `iroh-relay` under MSVC,
+  with and without sanitizers — both are transitive iroh dependencies built as
+  DLLs, and cargo-fuzz's link arguments do not suit a DLL. The targets
+  type-check on stable Windows; the libFuzzer link is what cannot happen there.
+  Nightly runs it on Linux.
 - **Mutation testing reports, it does not gate.** `mutants` in `nightly.yml`
   breaks the code on purpose and lists what the suite fails to notice. Turning
   a score into a build failure is a decision to take once there is a baseline

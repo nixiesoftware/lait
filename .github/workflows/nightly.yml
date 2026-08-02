@@ -19,6 +19,8 @@
 #   mutants       mutation testing: breaks the code on purpose and reports which
 #                 breakages the suite fails to notice. Reports rather than
 #                 gates — see the job.
+#   fuzz          coverage-guided fuzzing of the pre-auth decoders, ten minutes
+#                 per target. Linux only; see the job for why.
 #
 # `perf.yml` remains separate and weekly: the full reference corpus is hours of
 # daemon traffic and has its own baseline-freezing story.
@@ -264,4 +266,79 @@ jobs:
         with:
           name: mutants-shard-${{ matrix.shard }}
           path: mutants-out/
+          if-no-files-found: ignore
+
+  # Coverage-guided fuzzing of the decoders that read untrusted bytes.
+  #
+  # The property is the same one `contact_frame_fuzz` and `presence_wire_fuzz`
+  # assert on every push — decoding must return a Result, never unwind. What
+  # differs is the search: libFuzzer watches which branches an input reached and
+  # mutates toward the ones it has not, which finds inputs a blind generator
+  # would need a very long time to stumble into.
+  #
+  # Byte-slice targets, so there are no generators to duplicate. This is also
+  # why cargo-fuzz rather than bolero: bolero would unify the property test and
+  # the fuzz target under one harness, but only by rewriting the generators in
+  # its own API — and for a parser the coverage-guided value is in the raw-bytes
+  # path, which needs no generator at all.
+  #
+  # `RUSTUP_TOOLCHAIN` overrides rust-toolchain.toml's `channel = "stable"`,
+  # which is the same mechanism ci.yml's `msrv (1.91)` job uses to pin downward.
+  # The `fuzz/` package is excluded from the workspace, so nothing else in the
+  # build ever sees nightly.
+  #
+  # LINUX ONLY, and not by preference: `cargo fuzz build` fails to link `irpc`
+  # and `iroh-relay` under MSVC, with and without sanitizers. Both are
+  # transitive iroh dependencies built as DLLs, and cargo-fuzz's link arguments
+  # do not suit a DLL. The targets type-check on stable Windows; it is the
+  # libFuzzer link that cannot happen there.
+  fuzz:
+    name: fuzz (${{ matrix.target }})
+    runs-on: namespace-profile-nixiesoftware
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [contact_frame, handshake, beacon, presence]
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - name: Install Rust (nightly)
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          toolchain: nightly
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: fuzz
+      - name: Install cargo-fuzz
+        uses: taiki-e/install-action@e658debeddbabf20b2b866d9235eb08a2375b1ad
+        with:
+          tool: cargo-fuzz
+
+      # Split from the run so a build failure is attributable. A combined step
+      # would report "fuzzing failed" for a compile error, which is the wrong
+      # thing to go looking for.
+      - name: Build the target
+        env:
+          RUSTUP_TOOLCHAIN: nightly
+        run: cargo fuzz build ${{ matrix.target }}
+
+      # Ten minutes per target. A fuzzing campaign is open-ended by nature, so
+      # the budget is the honest knob: this is a nightly sweep for shallow
+      # crashes, not a serious campaign. A finding here is worth far more than
+      # the budget suggests, because it is reachable pre-authentication.
+      - name: Fuzz for ten minutes
+        env:
+          RUSTUP_TOOLCHAIN: nightly
+        run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=600 -print_final_stats=1
+
+      # A crash artifact is the whole output. Uploading it means the next step
+      # is writing a regression test from real bytes rather than reproducing
+      # from a description.
+      - name: Upload any crash
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: fuzz-crash-${{ matrix.target }}
+          path: fuzz/artifacts/
           if-no-files-found: ignore

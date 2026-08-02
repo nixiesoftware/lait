@@ -1,0 +1,62 @@
+# Coverage-guided fuzzing for the decoders that read untrusted bytes.
+#
+# Its own package, outside the workspace, on purpose. cargo-fuzz needs a
+# nightly toolchain for the `-Z` sanitizer flags, and this workspace pins
+# `channel = "stable"` in rust-toolchain.toml and checks an MSRV floor of 1.91.
+# Keeping the fuzz crate out of `[workspace] members` means none of that is
+# disturbed: `cargo build`, `cargo test` and the MSRV job never see it, and the
+# nightly job overrides the toolchain with RUSTUP_TOOLCHAIN — the same
+# mechanism ci.yml's `msrv (1.91)` job already uses to pin downward.
+[package]
+name = "lait-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+runtime = { path = "../crates/runtime" }
+
+[[bin]]
+name = "contact_frame"
+path = "fuzz_targets/contact_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "handshake"
+path = "fuzz_targets/handshake.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "beacon"
+path = "fuzz_targets/beacon.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "presence"
+path = "fuzz_targets/presence.rs"
+test = false
+doc = false
+bench = false
+
+# ---------------------------------------------------------------------------
+# Known limitation: this does not build on Windows.
+# ---------------------------------------------------------------------------
+# Verified, not assumed: `cargo fuzz build` fails linking `irpc` and
+# `iroh-relay` under the MSVC toolchain, with and without `--sanitizer=none`.
+# Both are transitive iroh dependencies whose build artifacts are linked as
+# DLLs, and cargo-fuzz's link arguments do not suit a DLL.
+#
+# The targets themselves are fine — `cargo check` inside `fuzz/` passes on
+# stable Windows, which is what proves the imports and the API calls are right.
+# What cannot be exercised there is the libFuzzer link, so the nightly job on
+# Linux is where this actually runs.
