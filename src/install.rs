@@ -21,6 +21,28 @@ pub enum Client {
     Generic,
 }
 
+impl Client {
+    /// The agent identity a client signs its work as, by default.
+    ///
+    /// Naming the client already names the agent, so `--client claude` is enough
+    /// to get attribution: the tools act as a sponsored member called `claude`
+    /// rather than as the human whose home hosts the daemon. The name is also
+    /// what the browser draws the agent by — a local petname matching a known
+    /// coding tool gets that tool's brand mark (`viewer/src/ui/agentLogos.ts`),
+    /// so a client-derived name is what makes an agent legible as itself instead
+    /// of as an unnamed key.
+    ///
+    /// `Generic` has no native name to derive — the caller must say who it is.
+    const fn agent_name(self) -> Option<&'static str> {
+        match self {
+            Self::Claude => Some("claude"),
+            Self::Cursor => Some("cursor"),
+            Self::Windsurf => Some("windsurf"),
+            Self::Generic => None,
+        }
+    }
+}
+
 /// Where to write the config: shared across a machine, or local to a project.
 #[derive(Clone, Copy, Debug, clap::ValueEnum)]
 #[value(rename_all = "snake_case")]
@@ -58,18 +80,49 @@ fn config_path(client: Client, scope: Scope) -> Result<PathBuf> {
     })
 }
 
-/// Build the `mcpServers` entry for this binary: an absolute path so it runs
-/// even when `lait` isn't on PATH, carrying LAIT_HOME if it's set.
-fn server_entry() -> Result<Value> {
-    let exe = std::env::current_exe().context("locate lait binary")?;
-    let exe = exe.canonicalize().unwrap_or(exe);
+/// Build the `mcpServers` entry.
+///
+/// Deliberately portable: `lait` off PATH rather than a snapshot of
+/// `current_exe()`, and no `$LAIT_HOME` capture. The server then discovers its
+/// Orbit exactly as the CLI does — walking up from the client's working
+/// directory for a `.lait/` — so one entry serves every space on the machine
+/// and never needs repointing.
+///
+/// Both of the things this *stopped* doing were silent-failure generators. A
+/// pinned absolute path goes stale the moment the binary moves or the control
+/// protocol advances (the daemon handshake then refuses a CLI whose version
+/// string is unchanged). A captured `$LAIT_HOME` outlives the shell that set
+/// it, and because a home is created on demand it resolves to a freshly-made
+/// empty directory — reported as "no local Orbit here", which reads like a
+/// broken store rather than a stale config.
+fn server_entry(agent: Option<&str>) -> Value {
     let mut entry = Map::new();
-    entry.insert("command".into(), json!(exe.to_string_lossy()));
+    entry.insert("command".into(), json!("lait"));
     entry.insert("args".into(), json!(["mcp"]));
-    if let Some(h) = std::env::var_os("LAIT_HOME") {
-        entry.insert("env".into(), json!({ "LAIT_HOME": h.to_string_lossy() }));
+    if let Some(a) = agent {
+        entry.insert("env".into(), json!({ "LAIT_AGENT": a }));
     }
-    Ok(Value::Object(entry))
+    Value::Object(entry)
+}
+
+/// Client-specific note appended to the success message. `--client` is required
+/// precisely so this can be accurate: the shapes are portable and identical,
+/// but what a written entry *means* differs by client.
+fn advice(client: Client, name: &str) -> Option<String> {
+    match client {
+        // The bundled Claude Code plugin already declares this server. A second
+        // declaration under the same name shadows it, which is how a plugin
+        // that needs no configuration acquires configuration that can rot.
+        Client::Claude => Some(format!(
+            "Note: the lait Claude Code plugin already provides an MCP server named 'lait'.\n\
+             If you use the plugin, you do not need this entry — and a server named '{name}'\n\
+             will shadow the plugin's. Install it only for a Claude Code without the plugin."
+        )),
+        Client::Windsurf => {
+            Some("Note: Windsurf reads one global config; there is no project scope.".into())
+        }
+        Client::Cursor | Client::Generic => None,
+    }
 }
 
 /// Register (or update) the lait MCP server in `client`'s config. With
@@ -78,10 +131,19 @@ pub fn install_mcp(
     client: Client,
     scope: Option<Scope>,
     name: &str,
+    agent: Option<&str>,
+    no_agent: bool,
     print: bool,
 ) -> Result<String> {
     let scope = scope.unwrap_or_else(|| default_scope(client));
     let path = config_path(client, scope)?;
+    // The named client picks its own agent identity; `--agent` overrides it and
+    // `--no-agent` declines one, leaving the work signed by the human.
+    let agent = if no_agent {
+        None
+    } else {
+        agent.or_else(|| client.agent_name())
+    };
 
     let mut root: Value = if path.exists() {
         let data = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
@@ -102,20 +164,120 @@ pub fn install_mcp(
         .as_object_mut()
         .ok_or_else(|| anyhow!("mcpServers in {} is not an object", path.display()))?;
     let existed = servers.contains_key(name);
-    servers.insert(name.to_string(), server_entry()?);
+    servers.insert(name.to_string(), server_entry(agent));
 
     let pretty = serde_json::to_string_pretty(&root)? + "\n";
     if print {
+        // stdout stays the file and nothing else, so `--print` remains pipeable;
+        // the caveat still has to reach a human previewing the change.
+        if let Some(note) = advice(client, name) {
+            eprintln!("{note}\n");
+        }
         return Ok(pretty);
     }
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
     fs::write(&path, &pretty).with_context(|| format!("write {}", path.display()))?;
-    Ok(format!(
+
+    let mut msg = format!(
         "{} MCP server '{}' in {}\nRestart your agent (or reload its MCP servers) to pick it up.",
         if existed { "updated" } else { "added" },
         name,
         path.display()
-    ))
+    );
+    match agent {
+        // Naming an agent is the whole of Architecture B from the config side;
+        // the identity itself is still a deliberate, human-sponsored act.
+        Some(a) => msg.push_str(&format!(
+            "\n\nWork will be attributed to the agent identity '{a}'. Provision it once with:\n  \
+             lait members agent --new {a}"
+        )),
+        None => msg.push_str(
+            "\n\nWork will be attributed to you, not to the agent. Pass --agent <name> to sign \
+             its work\nas a sponsored identity of its own.",
+        ),
+    }
+    if let Some(note) = advice(client, name) {
+        msg.push_str("\n\n");
+        msg.push_str(&note);
+    }
+    Ok(msg)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The written entry must stay portable. Both regressions this guards
+    /// against shipped once: an absolute `current_exe()` that outlived the
+    /// binary it named, and a `$LAIT_HOME` snapshot that outlived the shell
+    /// that set it and then resolved to an empty directory.
+    #[test]
+    fn entry_pins_nothing_machine_specific() {
+        let e = server_entry(None);
+        assert_eq!(e["command"], json!("lait"));
+        assert_eq!(e["args"], json!(["mcp"]));
+        assert!(
+            e.get("env").is_none(),
+            "no agent named, so no env block at all: {e}"
+        );
+        assert!(
+            !e.to_string().contains("LAIT_HOME"),
+            "must never capture a home: {e}"
+        );
+        let cmd = e["command"].as_str().expect("command is a string");
+        assert!(
+            !cmd.contains(['/', '\\', ':']),
+            "must be a bare PATH lookup, not a path: {cmd}"
+        );
+    }
+
+    #[test]
+    fn naming_an_agent_adds_only_that() {
+        let e = server_entry(Some("claude"));
+        assert_eq!(e["env"], json!({ "LAIT_AGENT": "claude" }));
+        assert_eq!(e["command"], json!("lait"));
+    }
+
+    /// Naming the client names the agent. The identity is what the browser draws
+    /// an agent by, so a client that derives one is the difference between an
+    /// agent that appears as itself and one that appears as an unnamed key.
+    #[test]
+    fn each_known_client_brings_its_own_agent_identity() {
+        assert_eq!(Client::Claude.agent_name(), Some("claude"));
+        assert_eq!(Client::Cursor.agent_name(), Some("cursor"));
+        assert_eq!(Client::Windsurf.agent_name(), Some("windsurf"));
+        // Nothing to derive from, so the caller has to say who it is rather than
+        // have a wrong name chosen for them.
+        assert_eq!(Client::Generic.agent_name(), None);
+    }
+
+    /// The agent names shipped above are the ones the viewer's logo table knows
+    /// (`viewer/src/ui/agentLogos.ts`); a rename on either side that silences the
+    /// brand mark should be a deliberate, visible one.
+    #[test]
+    fn derived_agent_names_stay_lowercase_plain_identifiers() {
+        for client in [Client::Claude, Client::Cursor, Client::Windsurf] {
+            let name = client.agent_name().expect("a native name");
+            assert!(
+                !name.is_empty()
+                    && name
+                        .chars()
+                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
+                // It also becomes a directory segment under the home.
+                "{name} must be a plain lowercase identifier"
+            );
+        }
+    }
+
+    /// Claude Code ships the server in its plugin, so a written entry shadows
+    /// it. Saying so is the reason `--client` is required rather than defaulted.
+    #[test]
+    fn claude_warns_about_shadowing_the_plugin() {
+        let note = advice(Client::Claude, "lait").expect("claude gets a note");
+        assert!(note.contains("plugin"), "{note}");
+        assert!(note.contains("shadow"), "{note}");
+        assert!(advice(Client::Cursor, "lait").is_none());
+    }
 }

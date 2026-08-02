@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "command -v lait >/dev/null 2>&1 || echo 'lait plugin: the `lait` binary is not on your PATH, so its MCP server cannot start. Install it from the latest release (the lait-installer.sh asset at https://github.com/Nixie-Tech-LLC/lait/releases/latest), then run: lait install-mcp --client claude'"
+            "command": "if ! command -v lait >/dev/null 2>&1; then echo 'lait plugin: the `lait` binary is not on your PATH, so its MCP server cannot start. Install it from the latest release (the lait-installer.sh asset at https://github.com/Nixie-Tech-LLC/lait/releases/latest).'; elif ! ctx=$(lait context 2>&1); then echo \"lait plugin: $ctx\"; else store=$(printf '%s\\n' \"$ctx\" | sed -n 's/^path  *//p' | tr '\\\\' '/'); if [ -z \"$store\" ]; then echo 'lait plugin: no lait space is visible from this directory, so the MCP tools have nothing to bind to. Open a directory inside a space, or found one with `lait init`.'; elif [ -n \"${LAIT_AGENT:-}\" ] && [ ! -f \"$store/agents/${LAIT_AGENT}/secret.key\" ]; then echo \"lait plugin: no local agent identity '${LAIT_AGENT}' on this node. The MCP tools will refuse rather than quietly sign the agent's work as you. Provision it once with: lait members agent --new ${LAIT_AGENT}\"; fi; fi"
           }
         ]
       }

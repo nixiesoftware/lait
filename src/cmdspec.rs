@@ -1042,12 +1042,15 @@ pub fn specs() -> Vec<Spec> {
             Special::InstallMcp,
         )
         .customize(|c| {
+            // Required, not defaulted: the written entry lands in a different
+            // file per client, and for Claude Code it can shadow the bundled
+            // plugin's own server. A default silently picked that consequence.
             c.arg(
                 Arg::new("client")
                     .long("client")
                     .value_parser(clap::value_parser!(Client))
-                    .default_value("claude")
-                    .help("Target agent client."),
+                    .required(true)
+                    .help("Target agent client (required — the config differs per client)."),
             )
             .arg(
                 Arg::new("scope")
@@ -1060,6 +1063,22 @@ pub fn specs() -> Vec<Spec> {
                     .long("name")
                     .default_value("lait")
                     .help("Server name in the client config."),
+            )
+            .arg(
+                Arg::new("agent")
+                    .long("agent")
+                    .conflicts_with("no-agent")
+                    .help(
+                        "Sponsored agent identity to sign the agent's work as. \
+                         Defaults to the client's own name (provision it with \
+                         `lait members agent --new <name>`).",
+                    ),
+            )
+            .arg(
+                Arg::new("no-agent")
+                    .long("no-agent")
+                    .action(clap::ArgAction::SetTrue)
+                    .help("Decline an agent identity: the work is signed as you."),
             )
         }),
         Spec::req("status", "Show node and space status.", vec![], |_| {

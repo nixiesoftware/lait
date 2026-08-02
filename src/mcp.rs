@@ -139,12 +139,15 @@ pub const MCP_TOOL_NAMES: &[&str] = &[
     "issues_workflow_set",
     "issues_spec_list",
     "issues_spec_show",
+    "issues_spec_history",
+    "issues_spec_links",
     "issues_spec_new",
     "issues_spec_revise",
     "issues_spec_state",
     "issues_spec_resolve",
     "issues_baseline_list",
     "issues_baseline_show",
+    "issues_baseline_history",
     "issues_baseline_new",
     "issues_baseline_revise",
     "issues_baseline_state",
@@ -228,7 +231,12 @@ pub struct LaitMcp {
     /// identity, the pre-B behavior. The human sponsors the agent once
     /// (`lait members agent --new <name>`); MCP attaches as it thereafter.
     act_as: Option<String>,
-    #[allow(dead_code)]
+    /// Shell tools merged with the World packages' namespaced tools. The
+    /// `tool_handler` attribute on the `ServerHandler` impl must name this field
+    /// explicitly, because its default is the macro-generated
+    /// `Self::tool_router()`, which knows only the shell half. Left to that
+    /// default, the merge below still runs and the field is simply never read:
+    /// every `issues_*` tool is built, then dropped at serve time.
     tool_router: ToolRouter<LaitMcp>,
 }
 
@@ -521,7 +529,7 @@ impl LaitMcp {
     }
 }
 
-#[tool_handler]
+#[tool_handler(router = self.tool_router)]
 impl ServerHandler for LaitMcp {
     fn get_info(&self) -> ServerInfo {
         let product_instructions = crate::world::client_packages()

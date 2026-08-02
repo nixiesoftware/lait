@@ -1539,6 +1539,12 @@ impl StationHost {
             Ok(actor) => {
                 let device = mechanics::actor::device_from_seed(&seed);
                 let did = mechanics::actor::did_key_from_device(&device).unwrap_or_default();
+                // Name it here, where the name is already known. Without this the
+                // one command that creates an agent leaves it `unnamed` on the one
+                // surface built to show agents — and the browser draws a coding
+                // tool's brand mark off this petname, so an unnamed agent is also
+                // an unrecognisable one.
+                let _ = write_alias(&self.home, actor.as_str(), name);
                 Response::Ok {
                     message: Some(format!(
                         "provisioned + sponsored agent '{name}'\nactor {}\n{did}\n\
@@ -1836,7 +1842,25 @@ impl StationHost {
     /// Set (or clear, with an empty name) a local petname for a key. Local to
     /// this node, never broadcast, never part of the signed authority.
     fn set_alias(&self, who: &str, name: &str) -> Response {
-        match write_alias(&self.home, who, name) {
+        // Store the canonical actor id, never the fragment that was typed. The
+        // read path matches a stored key against the *full* `act_…` id, so an
+        // entry keyed by a bare hex prefix can never match anything: the write
+        // succeeds, the confirmation prints, and the name never appears. Resolve
+        // first, and say so when nothing answers.
+        let resolved = self.resolve_member_key(who);
+        let key = match (&resolved, name.trim().is_empty()) {
+            (Some(k), _) => k.clone(),
+            // Clearing may legitimately target an entry no longer backed by a
+            // member — including a dead one written before this resolved.
+            (None, true) => who.trim().to_string(),
+            (None, false) => {
+                return Response::err(format!(
+                    "no member here matches '{who}' — name one by its full actor id or a \
+                     prefix of it (`lait members` lists them)"
+                ))
+            }
+        };
+        match write_alias(&self.home, &key, name) {
             Ok(()) if name.trim().is_empty() => Response::Ok {
                 message: Some(format!("cleared the local name for {who}")),
             },
@@ -1845,6 +1869,29 @@ impl StationHost {
             },
             Err(e) => Response::err(format!("set alias: {e}")),
         }
+    }
+
+    /// The full actor id for a who-ref: an exact key, a prefix of one (with or
+    /// without the `act_` namespace), or an existing petname.
+    fn resolve_member_key(&self, who: &str) -> Option<String> {
+        let who = who.trim();
+        if who.is_empty() {
+            return None;
+        }
+        let members = self.mechanics.members();
+        let bare = who.strip_prefix("act_").unwrap_or(who);
+        let prefixed = format!("act_{bare}");
+        if let Some(m) = members
+            .iter()
+            .find(|m| m.key == who || m.key.starts_with(who) || m.key.starts_with(&prefixed))
+        {
+            return Some(m.key.clone());
+        }
+        let aliases = read_aliases(&self.home);
+        aliases
+            .iter()
+            .find(|(_, v)| v.eq_ignore_ascii_case(who))
+            .map(|(k, _)| k.clone())
     }
 
     /// The guided-join verifier: project live daemon state into the ordered

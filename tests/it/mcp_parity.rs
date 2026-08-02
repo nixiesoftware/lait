@@ -42,6 +42,102 @@ fn onboarding_and_transport_tools_stay_wired() {
     }
 }
 
+/// What the server actually **serves**, asked of the running binary over stdio.
+///
+/// Every other guard in this file compares one constant against another, which
+/// is why the declared surface and the served surface were free to diverge in
+/// silence: `#[tool_handler]` defaults to the macro-generated `Self::tool_router()`,
+/// which knows only the shell half, so the router merged with the World packages
+/// was built, stored, and never read. All 56 `issues_*` tools vanished from the
+/// wire — the whole product surface — while every constant-level assertion here
+/// stayed green. A list is not a wire; this test asks the wire.
+#[test]
+fn the_served_tool_list_matches_the_declared_surface() {
+    use std::io::{Read, Write};
+    use std::process::{Command, Stdio};
+
+    let bin = env!("CARGO_BIN_EXE_lait");
+    let root = std::env::temp_dir().join(format!("lait-served-{}", std::process::id()));
+    std::fs::remove_dir_all(&root).ok();
+    let home = root.join("home");
+    let cfg = root.join("cfg");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&cfg).unwrap();
+
+    let init = Command::new(bin)
+        .env("LAIT_CONFIG_ROOT", &cfg)
+        .env("LAIT_IDLE_SECS", "0")
+        .args(["--home", home.to_str().unwrap()])
+        .args(["init", "--name", "PROJ", "--nick", "Probe"])
+        .output()
+        .expect("spawn init");
+    assert!(
+        init.status.success(),
+        "init failed: {}",
+        String::from_utf8_lossy(&init.stderr)
+    );
+
+    let mut child = Command::new(bin)
+        .env("LAIT_CONFIG_ROOT", &cfg)
+        .env("LAIT_IDLE_SECS", "0")
+        .env_remove("LAIT_AGENT")
+        .args(["--home", home.to_str().unwrap(), "mcp"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn mcp");
+    {
+        let stdin = child.stdin.as_mut().expect("stdin");
+        for line in [
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"parity","version":"0"}}}"#,
+            r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#,
+        ] {
+            writeln!(stdin, "{line}").expect("write request");
+        }
+    }
+    // Dropping stdin ends the session, so the server flushes and exits.
+    drop(child.stdin.take());
+    let mut out = String::new();
+    child
+        .stdout
+        .as_mut()
+        .expect("stdout")
+        .read_to_string(&mut out)
+        .expect("read stdout");
+    child.wait().ok();
+
+    let reply = out
+        .lines()
+        .find(|l| l.contains("\"id\":2"))
+        .unwrap_or_else(|| panic!("no tools/list reply in:\n{out}"));
+    let value: serde_json::Value = serde_json::from_str(reply).expect("parse reply");
+    let served: std::collections::BTreeSet<String> = value["result"]["tools"]
+        .as_array()
+        .expect("tools array")
+        .iter()
+        .map(|t| t["name"].as_str().expect("tool name").to_string())
+        .collect();
+    let declared: std::collections::BTreeSet<String> =
+        MCP_TOOL_NAMES.iter().map(|s| (*s).to_string()).collect();
+
+    let missing: Vec<_> = declared.difference(&served).collect();
+    let extra: Vec<_> = served.difference(&declared).collect();
+    assert!(
+        missing.is_empty() && extra.is_empty(),
+        "the served MCP surface drifted from the declared one\n  \
+         declared but not served: {missing:?}\n  served but not declared: {extra:?}"
+    );
+
+    Command::new(bin)
+        .env("LAIT_CONFIG_ROOT", &cfg)
+        .args(["--home", home.to_str().unwrap(), "shutdown"])
+        .output()
+        .ok();
+    std::fs::remove_dir_all(&root).ok();
+}
+
 /// The MCP tool-name list has no duplicates (a copy-paste guard).
 #[test]
 fn mcp_tool_names_are_unique() {
