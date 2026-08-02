@@ -323,10 +323,22 @@ jobs:
       # Split from the run so a build failure is attributable. A combined step
       # would report "fuzzing failed" for a compile error, which is the wrong
       # thing to go looking for.
+      # `--target` is explicit, and it has to be. `taiki-e/install-action` ships
+      # a musl-linked cargo-fuzz for portability, and cargo-fuzz infers its
+      # build target from its own binary's triple — so it tried to build for
+      # `x86_64-unknown-linux-musl`, which statically links libc, which the
+      # sanitizer cannot use:
+      #
+      #   error: sanitizer is incompatible with statically linked libc
+      #
+      # Naming the gnu target stops the inference. Worth noting how this got
+      # through: the targets were verified building and running under WSL before
+      # they shipped, and WSL is a different Linux from the runner. Verifying on
+      # A Linux is not verifying on THE Linux.
       - name: Build the target
         env:
           RUSTUP_TOOLCHAIN: nightly
-        run: cargo fuzz build ${{ matrix.target }}
+        run: cargo fuzz build --target x86_64-unknown-linux-gnu ${{ matrix.target }}
 
       # Ten minutes per target. A fuzzing campaign is open-ended by nature, so
       # the budget is the honest knob: this is a nightly sweep for shallow
@@ -335,7 +347,7 @@ jobs:
       - name: Fuzz for ten minutes
         env:
           RUSTUP_TOOLCHAIN: nightly
-        run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=600 -print_final_stats=1
+        run: cargo fuzz run --target x86_64-unknown-linux-gnu ${{ matrix.target }} -- -max_total_time=600 -print_final_stats=1
 
       # A crash artifact is the whole output. Uploading it means the next step
       # is writing a regression test from real bytes rather than reproducing
