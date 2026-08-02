@@ -613,6 +613,52 @@ fn the_fleet_converges_on_a_known_seed() {
 /// Many seeds, shallow. Distinct schedules are what buys coverage here, so
 /// breadth beats depth per unit of time on the per-push tier.
 ///
+/// Seeds that once failed, replayed on every run.
+///
+/// The corpus is the loop that makes a nightly finding permanent: without it, a
+/// seed that breaks something gets fixed and then never runs again, so a
+/// regression reintroduces the bug in silence. proptest reached this shape for
+/// values (`proptest-regressions/`) and TigerBeetle for schedules; this is the
+/// same idea for ours.
+///
+/// Parsed from a committed text file rather than a `const` array so adding one
+/// is a data change with a date and a sentence beside it, not a code edit.
+fn corpus() -> Vec<u64> {
+    include_str!("simulation-seeds.txt")
+        .lines()
+        .filter_map(|line| {
+            let line = line.split('#').next().unwrap_or("").trim();
+            if line.is_empty() {
+                return None;
+            }
+            Some(line.parse::<u64>().unwrap_or_else(|_| {
+                panic!("simulation-seeds.txt: `{line}` is not a seed");
+            }))
+        })
+        .collect()
+}
+
+/// Every seed that has ever failed still passes.
+///
+/// Separate from the sweep so its failure reads differently: a sweep failure is
+/// a discovery, and this one is a regression — the same schedule that was fixed
+/// once has broken again.
+#[test]
+fn every_seed_that_once_failed_still_passes() {
+    for seed in corpus() {
+        if let Err(failure) = run(seed, 150) {
+            panic!(
+                "REGRESSION at seed {seed}: {failure}\n\
+                 \n\
+                 this seed is in simulation-seeds.txt: it failed once already, \
+                 and is failing again.\n\
+                 \n\
+                 LAIT_SIM_SEED={seed} cargo test -p runtime --lib convergence_simulation"
+            );
+        }
+    }
+}
+
 /// Two knobs, a letter apart, and it matters which:
 ///
 /// - `LAIT_SIM_SEED` (singular) runs **exactly one** schedule. This is the
@@ -640,6 +686,12 @@ fn the_fleet_converges_across_many_schedules() {
         .and_then(|value| value.parse().ok())
         .unwrap_or(24);
     for seed in 1000..(1000 + count) {
+        // Printed BEFORE the run, not after a failure. A seed that only appears
+        // when an assertion fires is no help when the run hangs or the harness
+        // is killed by a timeout — which is exactly the case where knowing
+        // which schedule was executing matters most. nextest captures this and
+        // shows it on failure.
+        println!("simulation seed {seed}");
         if let Err(failure) = run(seed, 150) {
             panic!(
                 "seed {seed}: {failure}\n\n\

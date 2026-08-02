@@ -163,6 +163,26 @@ Note the singular. `LAIT_SIM_SEED` is one seed; `LAIT_SIM_SEEDS` is a *count*.
 They are a letter apart, which is why the failure prints the command rather
 than leaving anyone to work out which takes what.
 
+**Pair a shared seed with a commit.** A seed indexes into a schedule *this
+code* generates; change the simulation and the same number means something
+else. TigerBeetle states the same rule — the reproduction unit is the seed and
+the git hash together, never the seed alone.
+
+**Then put it in the corpus.** `simulation-seeds.txt` holds every seed that has
+ever failed, and `every_seed_that_once_failed_still_passes` replays all of them
+on every run. Without it the loop is: nightly finds a seed, someone fixes the
+bug, the seed is never run again, and a regression reintroduces it in silence.
+
+Add the seed *before* fixing, so you watch it go red and then green — a corpus
+entry that was never seen to fail is a line nobody trusts. Its failure reads
+differently from a sweep's on purpose: a sweep failure is a discovery, a corpus
+failure is a regression.
+
+The sweep also prints each seed **before** running it, not only on failure. A
+seed that appears only when an assertion fires is no help when the run hangs or
+the harness is killed by a timeout — which is exactly when knowing the schedule
+matters most.
+
 ### T4 — reality
 
 Nightly (`nightly.yml`) and weekly (`perf.yml`):
