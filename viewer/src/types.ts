@@ -884,7 +884,10 @@ export type Response =
   | ({ kind: "status" } & StatusInfo)
   | { kind: "diagnosis"; [k: string]: unknown }
   | { kind: "text"; text: string }
-  | ({ kind: "spec" } & SpecView)
+  /** Named, not flattened: a `SpecView` has a `kind` of its own, and a spread
+   *  would put it where the response tag lives — `JSON.parse` keeps the last
+   *  duplicate, so the reply would arrive claiming to be a `requirement`. */
+  | { kind: "spec"; spec: SpecView }
   | { kind: "specs"; specs: SpecView[] }
   | ({ kind: "baseline" } & BaselineView)
   | { kind: "baselines"; baselines: BaselineView[] }

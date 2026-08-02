@@ -306,7 +306,7 @@ pub fn render(response: &IssuesResponse, options: PresentationOptions) -> Presen
             &format!("attachment {name} ({mime}) — use `lait issues attachment get` to save it"),
         ),
         IssuesResponse::Text { text } => line(&mut stdout, text),
-        IssuesResponse::Spec(spec) => render_spec(&mut stdout, spec),
+        IssuesResponse::Spec { spec } => render_spec(&mut stdout, spec),
         IssuesResponse::Specs { specs } => {
             if specs.is_empty() {
                 line(&mut stdout, "(no specs)");

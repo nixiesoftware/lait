@@ -1929,7 +1929,12 @@ impl<'a> IssueRouter<'a> {
                 let spec = self
                     .query(&IssueQuery::Spec { spec })
                     .map_err(Self::effect_err)?;
-                Ok((Response::Spec(Box::new(spec)), false))
+                Ok((
+                    Response::Spec {
+                        spec: Box::new(spec),
+                    },
+                    false,
+                ))
             }
             Request::SpecNew {
                 project,
@@ -1957,7 +1962,12 @@ impl<'a> IssueRouter<'a> {
                 let view = self
                     .query(&IssueQuery::Spec { spec })
                     .map_err(Self::effect_err)?;
-                Ok((Response::Spec(Box::new(view)), true))
+                Ok((
+                    Response::Spec {
+                        spec: Box::new(view),
+                    },
+                    true,
+                ))
             }
             Request::SpecRevise {
                 spec,
@@ -1980,7 +1990,12 @@ impl<'a> IssueRouter<'a> {
                 let view = self
                     .query(&IssueQuery::Spec { spec })
                     .map_err(Self::effect_err)?;
-                Ok((Response::Spec(Box::new(view)), true))
+                Ok((
+                    Response::Spec {
+                        spec: Box::new(view),
+                    },
+                    true,
+                ))
             }
             Request::SpecState {
                 spec,
@@ -1999,7 +2014,12 @@ impl<'a> IssueRouter<'a> {
                 let view = self
                     .query(&IssueQuery::Spec { spec })
                     .map_err(Self::effect_err)?;
-                Ok((Response::Spec(Box::new(view)), true))
+                Ok((
+                    Response::Spec {
+                        spec: Box::new(view),
+                    },
+                    true,
+                ))
             }
             Request::SpecResolve {
                 spec,
@@ -2018,7 +2038,12 @@ impl<'a> IssueRouter<'a> {
                 let view = self
                     .query(&IssueQuery::Spec { spec })
                     .map_err(Self::effect_err)?;
-                Ok((Response::Spec(Box::new(view)), true))
+                Ok((
+                    Response::Spec {
+                        spec: Box::new(view),
+                    },
+                    true,
+                ))
             }
             Request::BaselineList { project } => {
                 let project = project
