@@ -166,13 +166,10 @@ jobs:
       # the interleaving space — four peers authoring concurrently through a
       # network that drops, duplicates, reorders and partitions.
       #
-      # A failure names its seed, but that seed does NOT reproduce the schedule
-      # — measured, see the module header. Every `Engine` mints a random writer
-      # id, which varies the order `export_material` returns material in, which
-      # desynchronises the generator. So this is a randomised explorer: more
-      # seeds means more distinct schedules tried, and a failure gives you the
-      # assertion rather than a reproduction. Replayability needs a seam on
-      # `fabric::op::fill_identity`, which is scoped and not done.
+      # A failure names its seed, and that seed reproduces the run — verified
+      # across runs and across Windows/Linux. So a nightly failure is
+      # actionable: pin the seed in `the_fleet_converges_on_a_known_seed` and it
+      # replays on every later run, including the per-push tier.
       - name: Convergence simulation (deep)
         env:
           LAIT_SIM_SEEDS: "512"

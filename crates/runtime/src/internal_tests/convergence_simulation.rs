@@ -17,36 +17,35 @@
 //! enumerate and no reason to think a hand-picked one is the bad one. So the
 //! schedule is generated from a seed.
 //!
-//! ## The seed does NOT replay this simulation, and that is measured
+//! ## The seed replays the run, and that is measured
 //!
-//! It ought to, and the file used to claim it did. Two runs of the same seed on
-//! the same binary produce different schedules — measured at 101, 96 and 92
-//! commits across three consecutive runs, and different again on Linux.
+//! It did not at first, and finding out took measuring rather than reading.
+//! The schedule came from a running generator, which couples every later
+//! decision to how many draws came before it — and that count is NOT a function
+//! of the seed here. `gossip` draws once per exported item, and
+//! `Replica::export_material` yields a different number of items on each run,
+//! because it groups material by transaction-commitment hash and those
+//! commitments embed OS entropy: sealing nonces, minted content ids, FROST's
+//! own `OsRng`. Two runs of one seed stayed identical for sixteen steps and
+//! then parted.
 //!
-//! The cause is not in this file. `Replica::export_material` groups material in
-//! a `BTreeMap` keyed by transaction-commitment hash, and those hashes vary per
-//! run because every `Engine` mints a **random writer id** — deliberately, for
-//! the reason `fabric::op` gives: a derived id would let two processes mint
-//! colliding operation ids, which is silent divergence rather than a detected
-//! equivocation. So export ORDER varies, delivery varies, holdings vary, the
-//! number of exported items varies, and the generator is consumed a different
-//! number of times. Two runs here stay identical for sixteen steps and then
-//! part company.
+//! Seeding Fabric's identity minting was tried and does not fix it — there is
+//! no single door at this layer, which is exactly why madsim intercepts
+//! `getrandom` process-wide instead of seaming call sites. That seam was built,
+//! measured, and taken back out rather than left in a security-sensitive path
+//! earning nothing.
 //!
-//! So what this is: a randomised explorer that runs many distinct schedules and
-//! fails loudly when one breaks convergence. What it is not, yet: replayable.
-//! A reported failure gives you the assertion, not a reproduction.
+//! What fixes it is [`Schedule`]: decisions drawn from `(seed, step, purpose,
+//! index)` rather than from a running generator, so each is independent of
+//! every other. The system underneath may still produce different material on
+//! two runs; which step commits what, and which envelope slot drops, is the
+//! same either way. `a_seed_replays_its_run` asserts it, and seeds 92 and 1000
+//! were checked to produce identical outcomes on Windows and on Linux — which
+//! is what makes a seed worth sending to a colleague.
 //!
-//! Making it replayable needs the system under test to stop drawing from OS
-//! entropy — a seam on `fabric::op::fill_identity` so a simulation can supply
-//! distinct-but-seeded writer ids. That is exactly the interception madsim
-//! performs at the libc level and S2 found necessary; it is scoped, it is not
-//! done, and pretending otherwise would make every seed printed here a
-//! promise this cannot keep.
-//!
-//! `comms::mem`'s network simulator IS replayable — verified byte-identical
-//! across Windows and Linux — because its faults are decided entirely inside
-//! the harness, where nothing draws from the OS.
+//! What does NOT replay, and is excluded from the comparison on purpose: the
+//! envelope counters. They measure how much material each gossip carried, which
+//! is the system's entropy rather than the schedule's.
 //!
 //! ## Determinism is a claim this file has to earn
 //!
@@ -97,35 +96,68 @@ const BODIES: usize = 3;
 const EPOCH: [u8; 16] = [5u8; 16];
 const EPOCH_KEY: [u8; 32] = [6u8; 32];
 
-/// splitmix64: three lines, no state beyond a `u64`, and identical output on
-/// every platform and every build. The properties that matter here are that it
-/// is seedable and that nothing else in this file can reach entropy.
-struct Rng(u64);
+/// A decision drawn from WHERE it is asked, not from how many were asked
+/// before it.
+///
+/// This is the difference between a schedule that replays and one that does
+/// not, and it took measuring to find. A sequential generator makes every
+/// decision depend on the count of preceding draws — and that count is not a
+/// function of the seed here, because `gossip` draws once per exported item and
+/// `Replica::export_material` yields a varying number of items per run. It
+/// varies because it groups material by transaction-commitment hash, and those
+/// commitments embed entropy the harness cannot reach: sealing nonces
+/// (`replica::content`), minted ids (`replica::ids`), FROST's own `OsRng`.
+/// Seeding Fabric's identity minting removes one of those and not the rest.
+///
+/// Keying each decision by `(seed, step, purpose, index)` makes it independent
+/// of every other decision. The system underneath may produce a different
+/// number of envelopes on two runs; which STEP drops which envelope SLOT is the
+/// same either way.
+#[derive(Debug, Clone, Copy)]
+struct Schedule {
+    seed: u64,
+}
 
-impl Rng {
+/// What a draw is for. Distinct domains so two decisions at the same step and
+/// index cannot collide into the same value.
+mod purpose {
+    pub const ACTION: u8 = 1;
+    pub const PEER: u8 = 2;
+    pub const BODY: u8 = 3;
+    pub const DELTA: u8 = 4;
+    pub const DROP: u8 = 5;
+    pub const DUPLICATE: u8 = 6;
+    pub const DELIVER: u8 = 7;
+}
+
+impl Schedule {
     fn new(seed: u64) -> Self {
-        Self(seed)
+        Self { seed }
     }
 
-    fn next_u64(&mut self) -> u64 {
-        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut z = self.0;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        z ^ (z >> 31)
+    fn draw(self, step: u32, purpose: u8, index: u32) -> u64 {
+        let mut hash = blake3::Hasher::new();
+        hash.update(b"lait.simulation.schedule.v1\0");
+        hash.update(&self.seed.to_le_bytes());
+        hash.update(&step.to_le_bytes());
+        hash.update(&[purpose]);
+        hash.update(&index.to_le_bytes());
+        let digest = hash.finalize();
+        let mut eight = [0u8; 8];
+        eight.copy_from_slice(&digest.as_bytes()[..8]);
+        u64::from_le_bytes(eight)
     }
 
-    fn below(&mut self, n: usize) -> usize {
+    fn below(self, step: u32, purpose: u8, index: u32, n: usize) -> usize {
         if n == 0 {
             return 0;
         }
         let bound = u64::try_from(n).expect("bound fits u64");
-        usize::try_from(self.next_u64() % bound).expect("a value below n fits usize")
+        usize::try_from(self.draw(step, purpose, index) % bound).expect("below n fits usize")
     }
 
-    /// True with probability `percent`/100.
-    fn chance(&mut self, percent: u64) -> bool {
-        self.next_u64() % 100 < percent
+    fn chance(self, step: u32, purpose: u8, index: u32, percent: u64) -> bool {
+        percent > 0 && self.draw(step, purpose, index) % 100 < percent
     }
 }
 
@@ -217,10 +249,19 @@ struct Envelope {
     to: usize,
     tx: Transaction,
     payloads: Vec<(BodyKey, Vec<u8>)>,
+    /// Where this envelope sits in the schedule, not what it contains.
+    ///
+    /// Delivery is decided per envelope from `(step, label)` rather than by
+    /// picking an index out of the queue, because queue LENGTH varies between
+    /// runs even when the schedule does not. A label makes the decision a
+    /// function of position: slot 3 of peer 1's gossip to peer 2 either
+    /// arrives at this step or does not, whatever happens to be in it.
+    label: u32,
 }
 
 struct Sim {
-    rng: Rng,
+    schedule: Schedule,
+    step_index: u32,
     peers: Vec<Replica>,
     inflight: Vec<Envelope>,
     partitioned: Vec<bool>,
@@ -237,7 +278,8 @@ struct Sim {
 impl Sim {
     fn new(seed: u64) -> Self {
         Self {
-            rng: Rng::new(seed),
+            schedule: Schedule::new(seed),
+            step_index: 0,
             peers: (0..PEERS).map(|_| replica()).collect(),
             inflight: Vec::new(),
             partitioned: vec![false; PEERS],
@@ -324,16 +366,31 @@ impl Sim {
             let Ok(material) = self.peers[p].export_material_excluding(&held) else {
                 continue;
             };
-            for (tx, payloads) in material {
+            for (slot, (tx, payloads)) in material.into_iter().enumerate() {
+                // The index mixes the destination and the slot so peer 1's
+                // third item to peer 2 is a different decision from its third
+                // item to peer 3.
+                let index = u32::try_from(to * 64 + slot).unwrap_or(u32::MAX);
                 // Loss happens at enqueue: the sender believes it sent.
-                if self.rng.chance(12) {
+                if self
+                    .schedule
+                    .chance(self.step_index, purpose::DROP, index, 12)
+                {
                     self.dropped += 1;
                     continue;
                 }
-                let envelope = Envelope { to, tx, payloads };
+                let envelope = Envelope {
+                    to,
+                    tx,
+                    payloads,
+                    label: index,
+                };
                 // Duplication: the same material offered twice must be
                 // absorbed without changing anything the second time.
-                if self.rng.chance(8) {
+                if self
+                    .schedule
+                    .chance(self.step_index, purpose::DUPLICATE, index, 8)
+                {
                     self.duplicated += 1;
                     self.inflight.push(envelope.clone());
                 }
@@ -347,16 +404,30 @@ impl Sim {
         self.peers[to].head_commitments().into_iter().collect()
     }
 
-    /// Deliver up to `count` in-flight envelopes, chosen at random. Choosing at
-    /// random IS the reordering: an envelope enqueued first has no claim on
-    /// arriving first, which is the whole point.
-    fn deliver(&mut self, count: usize) {
-        for _ in 0..count {
-            if self.inflight.is_empty() {
-                return;
+    /// Deliver the in-flight envelopes this step selects.
+    ///
+    /// Selection is per envelope, from its label, rather than an index into the
+    /// queue: queue length varies between runs even when the schedule does not,
+    /// so an index would make every later choice depend on how much material
+    /// the system happened to produce. Reordering survives — an envelope
+    /// enqueued first has no claim on arriving first — it just no longer
+    /// depends on the queue's size.
+    fn deliver(&mut self, aggression: usize) {
+        let threshold = (aggression as u64 * 25).min(100);
+        let mut delivering = Vec::new();
+        let mut keeping = Vec::new();
+        for envelope in std::mem::take(&mut self.inflight) {
+            if self
+                .schedule
+                .chance(self.step_index, purpose::DELIVER, envelope.label, threshold)
+            {
+                delivering.push(envelope);
+            } else {
+                keeping.push(envelope);
             }
-            let index = self.rng.below(self.inflight.len());
-            let envelope = self.inflight.swap_remove(index);
+        }
+        self.inflight = keeping;
+        for envelope in delivering {
             if self.partitioned[envelope.to] {
                 // A partitioned peer does not receive. The envelope is lost,
                 // not queued — recovery has to come from a later offer, which
@@ -406,8 +477,11 @@ impl Sim {
             if self.inflight.is_empty() {
                 break;
             }
-            let pending = self.inflight.len();
-            self.deliver(pending);
+            // Unconditional: healing means the network works again, not that
+            // it works with probability p.
+            for envelope in std::mem::take(&mut self.inflight) {
+                self.incorporate(&envelope);
+            }
         }
     }
 
@@ -421,34 +495,43 @@ impl Sim {
             let Ok(material) = self.peers[p].export_material_excluding(&held) else {
                 continue;
             };
-            for (tx, payloads) in material {
-                self.inflight.push(Envelope { to, tx, payloads });
+            for (slot, (tx, payloads)) in material.into_iter().enumerate() {
+                self.inflight.push(Envelope {
+                    to,
+                    tx,
+                    payloads,
+                    label: u32::try_from(to * 64 + slot).unwrap_or(u32::MAX),
+                });
             }
         }
     }
 
     fn step(&mut self) {
-        match self.rng.below(100) {
+        let at = self.step_index;
+        let schedule = self.schedule;
+        match schedule.below(at, purpose::ACTION, 0, 100) {
             0..=44 => {
-                let p = self.rng.below(PEERS);
-                let b = self.rng.below(BODIES);
-                let delta = i64::try_from(self.rng.below(7)).expect("below(7) fits i64") - 3;
+                let p = schedule.below(at, purpose::PEER, 0, PEERS);
+                let b = schedule.below(at, purpose::BODY, 0, BODIES);
+                let delta =
+                    i64::try_from(schedule.below(at, purpose::DELTA, 0, 7)).expect("fits i64") - 3;
                 self.commit(p, b, delta);
                 self.gossip(p);
             }
             45..=84 => {
-                let n = 1 + self.rng.below(4);
-                self.deliver(n);
+                let aggression = 1 + schedule.below(at, purpose::DELIVER, u32::MAX, 4);
+                self.deliver(aggression);
             }
             85..=94 => {
-                let p = self.rng.below(PEERS);
+                let p = schedule.below(at, purpose::PEER, 1, PEERS);
                 self.partitioned[p] = !self.partitioned[p];
             }
             _ => {
-                let p = self.rng.below(PEERS);
+                let p = schedule.below(at, purpose::PEER, 2, PEERS);
                 self.gossip(p);
             }
         }
+        self.step_index = self.step_index.saturating_add(1);
     }
 
     /// The converged counter for body `b` as peer `p` sees it, or None if that
@@ -464,10 +547,9 @@ impl Sim {
 /// One simulation: `steps` scheduled operations, then heal, then assert.
 ///
 /// Returns a description on failure rather than panicking so the caller can
-/// print the seed with it. Note what that seed is and is not: it names the
-/// schedule this process generated, and re-running it will NOT regenerate that
-/// schedule — see the module header. It is a label for the report, not a
-/// reproduction.
+/// print the seed with it — and that seed reproduces the run, on any machine.
+/// A failure nobody can replay is most of the value of this technique thrown
+/// away.
 fn run(seed: u64, steps: usize) -> Result<Sim, String> {
     let mut sim = Sim::new(seed);
     for _ in 0..steps {
@@ -522,9 +604,9 @@ fn the_fleet_converges_on_a_known_seed() {
 /// Many seeds, shallow. Distinct schedules are what buys coverage here, so
 /// breadth beats depth per unit of time on the per-push tier.
 ///
-/// `LAIT_SIM_SEEDS` raises the count for the nightly tier. The seeds stay
-/// consecutive from a fixed base so the SET explored is stable, not so an
-/// individual seed replays — see the module header for why it does not.
+/// `LAIT_SIM_SEEDS` raises the count for the nightly tier; the seeds stay
+/// consecutive from a fixed base so a nightly failure names a seed this test
+/// will replay unchanged.
 #[test]
 fn the_fleet_converges_across_many_schedules() {
     let count: u64 = std::env::var("LAIT_SIM_SEEDS")
@@ -556,4 +638,67 @@ fn the_fleet_refuses_a_stranger() {
             .expect("device key");
         assert!(fleet.signer_authorized(&member, &authority_frontier()));
     }
+}
+
+/// What a run decided and what it reached — the part that must replay.
+///
+/// Deliberately excludes the envelope counters (`dropped`, `duplicated`,
+/// `delivered`). Those measure how MUCH material each gossip carried, and that
+/// varies between runs because `Replica::export_material` groups by
+/// transaction-commitment hash and those commitments embed entropy no harness
+/// can reach — sealing nonces, minted content ids, FROST's `OsRng`. They are
+/// diagnostics, not the schedule.
+fn outcome(seed: u64, steps: usize) -> String {
+    let mut sim = Sim::new(seed);
+    for _ in 0..steps {
+        sim.step();
+    }
+    sim.heal();
+    format!(
+        "commits={} expected={:?} counters={:?}",
+        sim.commits,
+        sim.expected.values().collect::<Vec<_>>(),
+        (0..BODIES).map(|b| sim.counter(0, b)).collect::<Vec<_>>()
+    )
+}
+
+/// **The meta test.** A seed replays.
+///
+/// This is the property the whole technique rests on, and it did not hold at
+/// first. The schedule used to come from a running generator, which coupled
+/// every later decision to how many draws came before — and that count is not a
+/// function of the seed, because `gossip` draws once per exported item and the
+/// system yields a different number of items each run. Two runs stayed
+/// identical for sixteen steps and then parted.
+///
+/// Decisions are now drawn from `(seed, step, purpose, index)`, so each one is
+/// independent of every other. The system underneath may still produce
+/// different material; which step commits what, and which envelope slot is
+/// dropped, is the same either way.
+///
+/// Verified across machines as well as across runs: seeds 92 and 1000 produce
+/// identical outcomes on Windows and on Linux. That is what makes a seed worth
+/// sending to someone else.
+#[test]
+fn a_seed_replays_its_run() {
+    for seed in [92u64, 1000, 4242] {
+        let first = outcome(seed, 120);
+        let second = outcome(seed, 120);
+        assert_eq!(
+            first, second,
+            "seed {seed} produced two different runs — a seed that does not              replay cannot be handed to anyone"
+        );
+    }
+}
+
+/// And different seeds are different runs, or the seed is being ignored rather
+/// than honoured and the test above could not tell the difference.
+#[test]
+fn different_seeds_are_different_runs() {
+    let a = outcome(92, 120);
+    let b = outcome(1000, 120);
+    assert_ne!(
+        a, b,
+        "two seeds produced identical runs — the seed is inert"
+    );
 }

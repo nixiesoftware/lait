@@ -6,10 +6,10 @@
 # reviewed like one, not discovered when a gate goes red on a refactor.
 
 [tiers]
-pr             1303
-pr-platform    975
-nightly        1332
-mutants        84
+pr             1305
+pr-platform    977
+nightly        1334
+mutants        86
 
 [gates]
 orbital-boundaries           6
@@ -23,7 +23,7 @@ orbital-contact-real         4
 orbital-bootstrap-real       15
 orbital-ceremonies           12
 orbital-independent-world    6
-convergence-simulation       3
+convergence-simulation       5
 orbital-product-parity       17
 
 [tests]
@@ -1067,6 +1067,8 @@ runtime internal_tests::content_host::installing_one_staged_chunk_leaves_the_res
 runtime internal_tests::content_host::removing_locally_keeps_the_name_and_drops_the_bytes
 runtime internal_tests::content_host::serving_a_chunk_is_authorized_and_costs_only_this_content
 runtime internal_tests::content_host::the_host_surface_names_no_path
+runtime internal_tests::convergence_simulation::a_seed_replays_its_run
+runtime internal_tests::convergence_simulation::different_seeds_are_different_runs
 runtime internal_tests::convergence_simulation::the_fleet_converges_across_many_schedules
 runtime internal_tests::convergence_simulation::the_fleet_converges_on_a_known_seed
 runtime internal_tests::convergence_simulation::the_fleet_refuses_a_stranger

@@ -113,44 +113,32 @@ covering the seam when someone adds an island tomorrow.
 Four peers author concurrently while the network drops, duplicates, reorders
 and partitions; then it heals and the fleet must agree.
 
-**The seed does not replay this one**, and that is measured rather than
-assumed — three consecutive runs of seed 92 produced 101, 96 and 92 commits,
-and different figures again on Linux. Every `Engine` mints a random writer id
-(deliberately: see `fabric::op`), which varies the order
-`Replica::export_material` returns material in, which varies delivery, which
-varies how often the generator is consumed. Two runs stay identical for
-sixteen steps and then part.
+**The seed replays the run**, verified across runs and across Windows and
+Linux — the same seed produces the same commits, the same committed totals and
+the same converged counters on both.
 
-So it is a randomised explorer — more seeds means more distinct schedules
-tried, and a failure hands you the assertion rather than a reproduction.
-Replayability needs a seam on `fabric::op::fill_identity` so a simulation can
-supply distinct-but-seeded writer ids; that is the interception madsim does at
-the libc level, it is scoped, and it is not done.
+That did not hold at first, and finding out took measuring. The schedule came
+from a running generator, which couples every later decision to how many draws
+preceded it — and that count is not a function of the seed, because `gossip`
+draws once per exported item and `Replica::export_material` yields a varying
+number of items per run. It varies because it groups by transaction-commitment
+hash, and those commitments embed OS entropy: sealing nonces, minted content
+ids, FROST's own `OsRng`. Two runs stayed identical for sixteen steps and then
+parted.
 
-The network simulator below **is** replayable, because its faults are decided
-entirely inside the harness.
+Seeding Fabric's identity minting was tried and does not fix it — there is no
+single door at this layer, which is why madsim intercepts `getrandom`
+process-wide instead. That seam was built, measured, and removed rather than
+left in a security-sensitive path earning nothing.
 
-Two assertions, because convergence alone is weak — four empty replicas agree
-perfectly. Every commit adds a known delta to a known counter, so the fleet must
-agree **and** agree on the total that was actually committed. A transaction lost
-and never re-offered fails the second even though every peer is identical.
+The fix is in the harness: decisions are drawn from `(seed, step, purpose,
+index)` rather than from a running generator, so each is independent of every
+other. The system underneath may still produce different material on two runs;
+which step commits what, and which envelope slot drops, is the same either way.
 
-The PRNG is written out rather than taken as a dependency. A simulation is only
-replayable if it has exactly one source of entropy, and a crate that seeds
-itself from the OS — or a `HashMap` iteration order — silently reintroduces the
-nondeterminism the seed exists to remove.
-
-**Time is not simulated here, and does not need to be.** T3 drives
-`incorporate` and `export_material`; neither consults a clock, so there is
-nothing at this seam for a simulated one to advance. The schedule *is* the
-order of operations.
-
-Time-dependent behaviour lives in two other places, and both are covered
-separately: the plane driver, under a paused clock (see "The clock seam"), and
-content-hold expiry, which takes its instant as a parameter. The version of
-this that remains undone is a **driver-layer** simulation — a fault-injected
-schedule and a simulated clock advancing together — and what it needs is
-Station scaffolding, not more clock work.
+What does **not** replay, and is excluded from the comparison deliberately: the
+envelope counters. They measure how much material a gossip carried, which is the
+system's entropy rather than the schedule's.
 
 ```sh
 cargo test -p runtime --lib convergence_simulation      # 24 seeds

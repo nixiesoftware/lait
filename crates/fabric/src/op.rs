@@ -38,6 +38,16 @@ static FALLBACK_ENTROPY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 /// Fill an internal identity buffer. OS entropy is preferred; the fallback
 /// combines process-local monotonic state with time and hashes it so an entropy
 /// outage cannot crash an activation or reuse the same value within a process.
+///
+/// No simulation seam here, deliberately — one was built and then measured out
+/// again. Making these ids seedable did NOT make the convergence simulation
+/// reproducible, because entropy also enters through sealing nonces, minted
+/// content ids, and FROST's own `OsRng`. That is why madsim intercepts
+/// `getrandom` process-wide rather than seaming call sites: at this layer there
+/// is no single door. The simulation reproduces instead by making its SCHEDULE
+/// independent of how much material the system produces, which needs nothing
+/// from this module. A process-global override on identity minting that buys
+/// nothing is a hazard with no payer.
 pub(crate) fn fill_identity(raw: &mut [u8]) {
     if let Err(source) = getrandom::fill(raw) {
         tracing::error!(error = %source, "OS entropy unavailable while minting Fabric identity");
