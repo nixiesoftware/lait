@@ -341,6 +341,21 @@ RUSTUP_TOOLCHAIN=nightly cargo fuzz run beacon     # Linux; see the gap below
 A crash artifact is the output worth having: it is real bytes, so the next step
 is a regression test rather than a reproduction from a description.
 
+Measured under WSL before this shipped, 45 seconds per target — around 200,000
+executions a second, no crashes, and every target reporting new coverage units,
+which is what distinguishes fuzzing from spinning:
+
+| target | runs | new coverage units |
+|---|---|---|
+| `contact_frame` | 9,544,869 | 1288 |
+| `handshake` | 7,774,420 | 301 |
+| `beacon` | 9,994,113 | 754 |
+| `presence` | 10,665,856 | 223 |
+
+At that rate nightly's 600-second budget is roughly 120 million executions per
+target. **Windows cannot run this** — see the gap list — so WSL is the local
+route.
+
 ## Mutation testing
 
 `nightly.yml`'s `mutants` job runs `cargo-mutants`: it breaks the code on
@@ -434,12 +449,11 @@ a surprise.
 - **One `SystemTime::now` is deliberately unseamed**: `fabric`'s entropy
   fallback hashes the clock into a substitute RNG when the OS entropy source
   fails. That is not a timestamp read and freezing it would defeat the point.
-- **Coverage-guided fuzzing does not run on Windows.** Verified rather than
-  assumed: `cargo fuzz build` fails to link `irpc` and `iroh-relay` under MSVC,
-  with and without sanitizers — both are transitive iroh dependencies built as
-  DLLs, and cargo-fuzz's link arguments do not suit a DLL. The targets
-  type-check on stable Windows; the libFuzzer link is what cannot happen there.
-  Nightly runs it on Linux.
+- **Coverage-guided fuzzing does not run on Windows.** `cargo fuzz build` fails
+  to link `irpc` and `iroh-relay` under MSVC, with and without sanitizers —
+  both are transitive iroh dependencies built as DLLs, and cargo-fuzz's link
+  arguments do not suit a DLL. It builds and runs on Linux; a Windows developer
+  wanting to run it locally needs WSL.
 - **Mutation testing reports, it does not gate.** `mutants` in `nightly.yml`
   breaks the code on purpose and lists what the suite fails to notice. Turning
   a score into a build failure is a decision to take once there is a baseline
