@@ -293,6 +293,31 @@ opt-level = 3
 inherits = "release"
 lto = "thin"
 
-[lints.clippy]
+# The single definition of the workspace lint policy. Every member inherits it
+# with `[lints] workspace = true`; the block used to be copy-pasted into all
+# eleven manifests, which made any change to the policy an eleven-file edit and
+# is why the policy never changed.
+#
+# Advisory only, on purpose. `pedantic`/`nursery` are stylistic suggestions, and
+# CI runs clippy without `-D warnings` so they cannot fail a build. The lints
+# that *do* fail are the crash/error-safety set each crate root denies under
+# `not(test)` (see `src/lib.rs`) — promoting these to deny would erase that
+# boundary by making style suggestions fatal on test targets too.
+#
+# `fuzz/` and `sim/` are workspace `exclude`s, not members, so they cannot
+# inherit this and carry no lint policy of their own.
+[workspace.lints.rust]
+# `lait_simulation` is set only by the out-of-workspace `sim/` package, which
+# needs Loro's wall-clock timestamp off to be reproducible. Declared so the
+# unexpected-cfg lint does not flag it. `sim/.cargo/config.toml` puts the flag
+# on RUSTFLAGS, so it reaches every crate in the graph, not just the one that
+# reads it — declaring it here rather than in `fabric` alone matches that. Its
+# only consumer is still `crates/fabric/src/op.rs`.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(lait_simulation)'] }
+
+[workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }
 nursery = { level = "warn", priority = -1 }
+
+[lints]
+workspace = true

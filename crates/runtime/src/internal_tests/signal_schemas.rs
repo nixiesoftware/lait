@@ -277,9 +277,8 @@ mod declarations {
     use runtime::world::{Declaration, Refusal};
     use runtime::world::{ScopeSchema, SignalSchema};
     use runtime::{
-        world::Builder, world::Context, world::Descriptor, world::Effect, world::Intent,
-        world::Limits, world::Projection, world::Query, world::Rejection, world::Version,
-        world::World,
+        world::Builder, world::Context, world::Effect, world::Intent, world::Projection,
+        world::Query, world::Rejection, world::World,
     };
 
     const WORLD: &str = "com.example.notes";

@@ -9,9 +9,8 @@ license = "MIT OR Apache-2.0"
 # of lait's internal boundaries made runnable, not a library surface.
 publish = false
 
-[lints.clippy]
-pedantic = { level = "warn", priority = -1 }
-nursery = { level = "warn", priority = -1 }
+[lints]
+workspace = true
 
 [[bin]]
 name = "lait-relay"

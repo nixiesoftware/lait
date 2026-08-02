@@ -29,10 +29,9 @@ fn any_demand() -> Vec<u8> {
 }
 use runtime::session::{Failure as SessionFailure, Interruption};
 use runtime::{
-    plane::Activation, world::Builder, world::Context, world::Descriptor, world::Effect,
-    world::Intent, world::Limits, world::LocalIdentity, world::ObservationCursor,
-    world::Projection, world::Query, world::Rejection, world::RequestId, world::Version,
-    world::World, Runtime, Session, Station,
+    plane::Activation, world::Builder, world::Context, world::Effect, world::Intent,
+    world::LocalIdentity, world::ObservationCursor, world::Projection, world::Query,
+    world::Rejection, world::RequestId, world::World, Runtime, Session, Station,
 };
 
 const WRITER_SEED: [u8; 32] = [55u8; 32];
@@ -170,14 +169,6 @@ impl runtime::world::AuthorityView for WriterOnly {
 
 fn runtime_at(root: &std::path::Path) -> Runtime {
     let world = KvWorld::new();
-    let reg = Descriptor {
-        id: world.id(),
-        implementation_version: Version(1),
-        schemas: world.schemas().to_vec(),
-        limits: Limits::default(),
-        scope_schemas: Vec::new(),
-        signal_schemas: Vec::new(),
-    };
     let registry = Builder::new().register(Arc::new(world)).build().unwrap();
     Runtime::open(
         root.to_path_buf(),

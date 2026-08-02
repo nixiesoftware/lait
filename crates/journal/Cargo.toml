@@ -17,8 +17,7 @@ blake3 = "1"
 data-encoding = "2.6"
 tracing = "0.1"
 
-[lints.clippy]
-pedantic = { level = "warn", priority = -1 }
-nursery = { level = "warn", priority = -1 }
+[lints]
+workspace = true
 
 [dev-dependencies]

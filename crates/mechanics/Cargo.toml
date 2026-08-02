@@ -17,11 +17,11 @@ publish = false
 [features]
 fault-injection = ["journal/fault-injection"]
 
-[lints.rust]
 # Nothing from a scaffold may be named here. This crate lists neither loro nor
 # iroh in its manifest, so a CRDT or transport reference cannot compile — the
 # boundary is the dependency edge, enforced by rustc, not by review.
-
+# (This note used to hang off an empty `[lints.rust]` table, which a manifest
+# inheriting the workspace lints may not also carry.)
 [dependencies]
 # The semantics-free crash-safe object/manifest journal the authority ledger
 # commits through (the same machinery Fabric's Body store uses).
@@ -50,9 +50,8 @@ anyhow = "1"
 # Ceremony-engine diagnostics (per-transcript fault isolation logs).
 tracing = "0.1"
 
-[lints.clippy]
-pedantic = { level = "warn", priority = -1 }
-nursery = { level = "warn", priority = -1 }
+[lints]
+workspace = true
 
 # `secretfs`: custody secret material (FROST shares, signing nonces, recovery
 # keys) is created with an explicit owner-only DACL and optional DPAPI wrap on

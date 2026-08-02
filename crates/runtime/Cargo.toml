@@ -53,9 +53,8 @@ tokio = { version = "1", features = ["rt", "time", "sync", "macros"] }
 getrandom = "0.3"
 anyhow = "1"
 
-[lints.clippy]
-pedantic = { level = "warn", priority = -1 }
-nursery = { level = "warn", priority = -1 }
+[lints]
+workspace = true
 
 [dev-dependencies]
 regex = "1.13.1"

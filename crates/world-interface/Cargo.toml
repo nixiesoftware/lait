@@ -17,6 +17,5 @@ tracing = "0.1"
 [dev-dependencies]
 schemars = "1"
 
-[lints.clippy]
-pedantic = { level = "warn", priority = -1 }
-nursery = { level = "warn", priority = -1 }
+[lints]
+workspace = true

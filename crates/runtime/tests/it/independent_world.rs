@@ -36,10 +36,9 @@ fn any_demand() -> Vec<u8> {
 use runtime::world::{Conflict, Failure as SessionFailure, Interruption};
 use runtime::{
     coordinates::SignedCoordinates, plane::contact::Authority, plane::Activation,
-    plane::CommsOptions, world::Builder, world::Context, world::Descriptor, world::Effect,
-    world::Intent, world::Limits, world::LocalIdentity, world::ObservationCursor,
-    world::Projection, world::Query, world::Rejection, world::RequestId, world::Version,
-    world::World, Runtime, Session,
+    plane::CommsOptions, world::Builder, world::Context, world::Effect, world::Intent,
+    world::LocalIdentity, world::ObservationCursor, world::Projection, world::Query,
+    world::Rejection, world::RequestId, world::World, Runtime, Session,
 };
 
 const FOUNDER_SEED: [u8; 32] = [7u8; 32];
@@ -361,14 +360,6 @@ fn registry(with_world: bool) -> runtime::world::Catalog {
     let mut builder = Builder::new();
     if with_world {
         let world = MultiWorld::new();
-        let reg = Descriptor {
-            id: world.id(),
-            implementation_version: Version(1),
-            schemas: world.schemas().to_vec(),
-            limits: Limits::default(),
-            scope_schemas: Vec::new(),
-            signal_schemas: Vec::new(),
-        };
         builder = builder.register(Arc::new(world));
     }
     builder.build().unwrap()

@@ -27,10 +27,9 @@ fn any_demand() -> Vec<u8> {
 }
 use runtime::Error as Failure;
 use runtime::{
-    plane::Activation, world::AuthorityView, world::Builder, world::Context, world::Descriptor,
-    world::Effect, world::Intent, world::Limits, world::LocalIdentity, world::PrincipalResolution,
-    world::Projection, world::Query, world::Rejection, world::Version, world::World,
-    RemovalConfirmation, Runtime,
+    plane::Activation, world::AuthorityView, world::Builder, world::Context, world::Effect,
+    world::Intent, world::LocalIdentity, world::PrincipalResolution, world::Projection,
+    world::Query, world::Rejection, world::World, RemovalConfirmation, Runtime,
 };
 
 /// The consumer's writing device; a second device resolves with no grants.
@@ -199,14 +198,6 @@ impl World for KvWorld {
 
 fn kv_runtime(root: &std::path::Path) -> Runtime {
     let world = KvWorld::new();
-    let reg = Descriptor {
-        id: world.id(),
-        implementation_version: Version(1),
-        schemas: world.schemas().to_vec(),
-        limits: Limits::default(),
-        scope_schemas: Vec::new(),
-        signal_schemas: Vec::new(),
-    };
     let registry = Builder::new().register(Arc::new(world)).build().unwrap();
     Runtime::open(
         root.to_path_buf(),
