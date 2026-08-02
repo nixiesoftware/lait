@@ -187,7 +187,7 @@ jobs:
       - name: Commit-cost baseline (full corpus)
         env:
           LAIT_COMMIT_BASELINE_FULL: "1"
-        run: cargo nextest run --locked --all-features -E 'binary(commit_cost_baseline)' --profile nightly
+        run: cargo nextest run --locked --all-features -E '(binary_id(lait::it) & test(commit_cost_baseline::))' --profile nightly
 
       # Real relays, real discovery. Excluded from the PR path not for time but
       # for dependence: these carry retries because they are nondeterministic
