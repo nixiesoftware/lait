@@ -605,8 +605,9 @@ fn run_install_mcp(m: &ArgMatches) -> Result<()> {
         .cloned()
         .unwrap_or_else(|| "lait".into());
     let agent = m.get_one::<String>("agent").cloned();
+    let no_agent = m.get_flag("no-agent");
     let print = m.get_flag("print");
-    let out_s = install::install_mcp(client, scope, &name, agent.as_deref(), print)?;
+    let out_s = install::install_mcp(client, scope, &name, agent.as_deref(), no_agent, print)?;
     println!("{out_s}");
     Ok(())
 }

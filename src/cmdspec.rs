@@ -1067,10 +1067,18 @@ pub fn specs() -> Vec<Spec> {
             .arg(
                 Arg::new("agent")
                     .long("agent")
+                    .conflicts_with("no-agent")
                     .help(
-                        "Sponsored agent identity to sign the agent's work as \
-                         (provision with `lait members agent --new <name>`).",
+                        "Sponsored agent identity to sign the agent's work as. \
+                         Defaults to the client's own name (provision it with \
+                         `lait members agent --new <name>`).",
                     ),
+            )
+            .arg(
+                Arg::new("no-agent")
+                    .long("no-agent")
+                    .action(clap::ArgAction::SetTrue)
+                    .help("Decline an agent identity: the work is signed as you."),
             )
         }),
         Spec::req("status", "Show node and space status.", vec![], |_| {

@@ -21,6 +21,28 @@ pub enum Client {
     Generic,
 }
 
+impl Client {
+    /// The agent identity a client signs its work as, by default.
+    ///
+    /// Naming the client already names the agent, so `--client claude` is enough
+    /// to get attribution: the tools act as a sponsored member called `claude`
+    /// rather than as the human whose home hosts the daemon. The name is also
+    /// what the browser draws the agent by — a local petname matching a known
+    /// coding tool gets that tool's brand mark (`viewer/src/ui/agentLogos.ts`),
+    /// so a client-derived name is what makes an agent legible as itself instead
+    /// of as an unnamed key.
+    ///
+    /// `Generic` has no native name to derive — the caller must say who it is.
+    const fn agent_name(self) -> Option<&'static str> {
+        match self {
+            Self::Claude => Some("claude"),
+            Self::Cursor => Some("cursor"),
+            Self::Windsurf => Some("windsurf"),
+            Self::Generic => None,
+        }
+    }
+}
+
 /// Where to write the config: shared across a machine, or local to a project.
 #[derive(Clone, Copy, Debug, clap::ValueEnum)]
 #[value(rename_all = "snake_case")]
@@ -110,10 +132,18 @@ pub fn install_mcp(
     scope: Option<Scope>,
     name: &str,
     agent: Option<&str>,
+    no_agent: bool,
     print: bool,
 ) -> Result<String> {
     let scope = scope.unwrap_or_else(|| default_scope(client));
     let path = config_path(client, scope)?;
+    // The named client picks its own agent identity; `--agent` overrides it and
+    // `--no-agent` declines one, leaving the work signed by the human.
+    let agent = if no_agent {
+        None
+    } else {
+        agent.or_else(|| client.agent_name())
+    };
 
     let mut root: Value = if path.exists() {
         let data = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
@@ -208,6 +238,37 @@ mod tests {
         let e = server_entry(Some("claude"));
         assert_eq!(e["env"], json!({ "LAIT_AGENT": "claude" }));
         assert_eq!(e["command"], json!("lait"));
+    }
+
+    /// Naming the client names the agent. The identity is what the browser draws
+    /// an agent by, so a client that derives one is the difference between an
+    /// agent that appears as itself and one that appears as an unnamed key.
+    #[test]
+    fn each_known_client_brings_its_own_agent_identity() {
+        assert_eq!(Client::Claude.agent_name(), Some("claude"));
+        assert_eq!(Client::Cursor.agent_name(), Some("cursor"));
+        assert_eq!(Client::Windsurf.agent_name(), Some("windsurf"));
+        // Nothing to derive from, so the caller has to say who it is rather than
+        // have a wrong name chosen for them.
+        assert_eq!(Client::Generic.agent_name(), None);
+    }
+
+    /// The agent names shipped above are the ones the viewer's logo table knows
+    /// (`viewer/src/ui/agentLogos.ts`); a rename on either side that silences the
+    /// brand mark should be a deliberate, visible one.
+    #[test]
+    fn derived_agent_names_stay_lowercase_plain_identifiers() {
+        for client in [Client::Claude, Client::Cursor, Client::Windsurf] {
+            let name = client.agent_name().expect("a native name");
+            assert!(
+                !name.is_empty()
+                    && name
+                        .chars()
+                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
+                // It also becomes a directory segment under the home.
+                "{name} must be a plain lowercase identifier"
+            );
+        }
     }
 
     /// Claude Code ships the server in its plugin, so a written entry shadows
