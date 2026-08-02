@@ -197,7 +197,7 @@ jobs:
       - name: Real-network suites
         run: |
           cargo nextest run --workspace --locked --all-features --profile nightly \
-            -E 'binary(orbital_join_iroh) + binary(contact_iroh) + (package(comms) & kind(test))'
+            -E '(binary_id(lait::it) & test(orbital_join_iroh::)) + (binary_id(runtime::it) & test(contact_iroh::)) + (package(comms) & kind(test))'
 
   # Does the suite actually fail when the code is wrong?
   #
