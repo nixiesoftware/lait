@@ -5,8 +5,11 @@ of collecting them in one table is that they are *not* one version: a store can
 be rewritten while the wire holds still, and a wire generation can move without
 touching a byte on disk.
 
-There is no legacy fallback anywhere in this table. An unsupported version is
-refused, not interpreted.
+There is no legacy fallback in any normal reader in this table. An unsupported
+version is refused, not guessed or opened in place. A bounded prior reader may
+exist only as input to an explicit generation build: it validates a committed
+source, constructs the current representation elsewhere, proves logical
+equivalence, and atomically activates the complete result.
 
 ## 1. How a version is enforced
 
@@ -34,6 +37,7 @@ kind of bump and the one that needs feature bits to avoid.
 | Surface | Constant | Value | Gate |
 |---|---|---|---|
 | Store marker | `replica::marker::STORE_VERSION` | 1 | leading field |
+| Orbit generation pointer | `runtime::generation` | 1 | magic + canonical body + checksum |
 | Store manifest | `journal::STORE_FORMAT_VERSION` | 2 | leading field |
 | Replica store meta | `replica::STORE_META_FORMAT_VERSION` | 2 | leading field |
 | Manifest root | `replica::manifest::MANIFEST_FORMAT_VERSION` | 2 | leading field + `lait/manifest/2` |
@@ -50,6 +54,16 @@ independently: the marker identifies the *store layout* — what files exist and
 where — while the manifest version identifies *what a commit records*. Replacing
 the paged manifest with an authenticated index changed the second and not the
 first.
+
+The generation pointer versions neither semantic facts nor either component's
+store format. It selects one immutable pair of Mechanics and Replica
+materializations. Its source generation and equivalence evidence are part of
+the canonical pointer body, and activation is serialized and compare-and-swap
+checked. This is the compatibility boundary for a representation rewrite: old
+bytes remain inactive rather than being destructively rewritten or taught to
+every future reader. `lait rebuild` is the application composition of the
+currently supported prior-to-current recipe and requires the Orbit to be
+vacant.
 
 The descriptor is the only row whose version is chosen by the record's content
 rather than by the build that wrote it. A descriptor emits 1 when it declares no

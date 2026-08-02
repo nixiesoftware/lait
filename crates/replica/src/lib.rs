@@ -66,4 +66,4 @@ mod manifest_atomicity_tests;
 #[cfg(test)]
 mod manifest_fixture_tests;
 
-pub use replica::Replica;
+pub use replica::{generation, Replica};

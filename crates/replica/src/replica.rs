@@ -49,6 +49,8 @@ use crate::protected::{BodyKeySource, Invalid as BodyInvalid, Material, MAX_BODY
 use crate::receipt::RequestReceipt;
 use crate::transaction::{AuthoritySource, Core, Descriptor, SignRequest, Signer, Transaction};
 
+pub mod generation;
+
 /// Domain separator for deriving a Engine key from a Body key.
 const BODY_KEY_DOMAIN: &[u8] = b"lait/fabric-key/1";
 /// Domain separator for advancing the semantic frontier from a commit receipt.

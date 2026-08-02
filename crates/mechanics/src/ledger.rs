@@ -38,6 +38,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+pub mod generation;
+
 use crate::acl::{self, AclState, ReplayCheckpoint, SignedOp};
 use crate::actor::{self, Directory, SignedEvent};
 use crate::genesis::Genesis;

@@ -301,12 +301,17 @@ impl OrbitStore {
         }
     }
 
-    /// The store directory. The Engine journaled store (`counter`,
-    /// `current-manifest`, `objects/`, `journal/`) lives inside it, alongside
-    /// the runtime-owned lifecycle files (`marker`, `epoch`, `lock`) — the two
-    /// touch disjoint names.
+    /// The stable Orbit directory. Identity, lifecycle, neighbor, and cache
+    /// material live here across every derived generation.
     pub fn dir(&self) -> &Path {
         &self.dir
+    }
+
+    /// The Replica component selected by the Orbit's one generation pointer.
+    pub fn replica_dir(&self) -> Result<PathBuf, Failure> {
+        crate::generation::Active::read(&self.dir)
+            .map(|active| active.path(crate::generation::Component::Replica))
+            .map_err(|_| Failure::Integrity(Integrity::Replica))
     }
 
     /// Destroy the store directory. The caller must hold the lock (i.e. be the

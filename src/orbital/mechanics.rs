@@ -938,8 +938,27 @@ impl SpaceAuthority {
     /// Open existing mechanics material for a Space.
     pub fn open(root: &Path, space: &SpaceId, device_seed: &[u8; 32]) -> Result<Self> {
         let dir = Self::dir_for(root, space);
-        let ledger =
-            Authority::open(dir.join(LEDGER_DIR)).map_err(|e| anyhow!("authority ledger: {e}"))?;
+        let generation = runtime::generation::Active::read(&dir)
+            .map_err(|e| anyhow!("orbit generation: {e}"))?;
+        Self::open_material(
+            dir,
+            generation.path(runtime::generation::Component::Mechanics),
+            space,
+            device_seed,
+        )
+    }
+
+    /// Open stable Orbit-local secrets around an explicitly selected Mechanics
+    /// materialization. Generation construction uses this before activation so
+    /// Replica verification can resolve authorized Body keys without making a
+    /// half-built generation active.
+    pub(crate) fn open_material(
+        dir: PathBuf,
+        ledger_dir: PathBuf,
+        space: &SpaceId,
+        device_seed: &[u8; 32],
+    ) -> Result<Self> {
+        let ledger = Authority::open(ledger_dir).map_err(|e| anyhow!("authority ledger: {e}"))?;
         if ledger.space() != space {
             return Err(anyhow!("authority ledger belongs to another Space"));
         }

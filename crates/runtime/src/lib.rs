@@ -58,6 +58,7 @@ pub mod coordinates;
 mod dispatch_tests;
 mod dto;
 mod fetch;
+pub mod generation;
 mod implementation;
 #[cfg(test)]
 mod internal_tests;

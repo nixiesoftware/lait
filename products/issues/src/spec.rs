@@ -299,7 +299,11 @@ impl Spec {
 
     pub fn one_head(&self) -> Option<&Revision> {
         let heads = self.heads();
-        (heads.len() == 1).then(|| heads[0])
+        if heads.len() == 1 {
+            heads.first().copied()
+        } else {
+            None
+        }
     }
 
     /// The currently effective issued revision. Draft/review descendants do
@@ -435,7 +439,11 @@ impl Baseline {
 
     pub fn one_head(&self) -> Option<&BaselineRevision> {
         let heads = self.heads();
-        (heads.len() == 1).then(|| heads[0])
+        if heads.len() == 1 {
+            heads.first().copied()
+        } else {
+            None
+        }
     }
 
     pub fn issued(&self) -> BaselineIssued<'_> {
@@ -551,7 +559,7 @@ pub fn build_revision(mut body: Body, mut predecessors: Vec<[u8; 32]>) -> Result
     let body_json = canonical_json(&body)?;
     let revision = data_encoding::HEXLOWER.encode(&blake3::derive_key(
         SPEC_REVISION_CONTEXT,
-        &preimage(&body.spec, &predecessors, &body_json),
+        &preimage(&body.spec, &predecessors, &body_json)?,
     ));
     Ok(Revision {
         revision,
@@ -573,7 +581,7 @@ pub fn build_baseline_revision(
     let body_json = canonical_json(&body)?;
     let revision = data_encoding::HEXLOWER.encode(&blake3::derive_key(
         BASELINE_REVISION_CONTEXT,
-        &preimage(&body.baseline, &predecessors, &body_json),
+        &preimage(&body.baseline, &predecessors, &body_json)?,
     ));
     Ok(BaselineRevision {
         revision,
@@ -644,19 +652,23 @@ fn sort_json(value: serde_json::Value) -> serde_json::Value {
     }
 }
 
-fn preimage(id: &str, predecessors: &[[u8; 32]], body: &[u8]) -> Vec<u8> {
-    let mut out =
-        Vec::with_capacity(2 + 2 + id.len() + 2 + predecessors.len() * 32 + 4 + body.len());
+fn preimage(id: &str, predecessors: &[[u8; 32]], body: &[u8]) -> Result<Vec<u8>, String> {
+    let id_len = u16::try_from(id.len()).map_err(|_| "document id is too long".to_string())?;
+    let predecessor_count = u16::try_from(predecessors.len())
+        .map_err(|_| "too many predecessor revisions".to_string())?;
+    let body_len =
+        u32::try_from(body.len()).map_err(|_| "revision body is too long".to_string())?;
+    let mut out = Vec::new();
     out.extend_from_slice(&1u16.to_be_bytes());
-    out.extend_from_slice(&(id.len() as u16).to_be_bytes());
+    out.extend_from_slice(&id_len.to_be_bytes());
     out.extend_from_slice(id.as_bytes());
-    out.extend_from_slice(&(predecessors.len() as u16).to_be_bytes());
+    out.extend_from_slice(&predecessor_count.to_be_bytes());
     for predecessor in predecessors {
         out.extend_from_slice(predecessor);
     }
-    out.extend_from_slice(&(body.len() as u32).to_be_bytes());
+    out.extend_from_slice(&body_len.to_be_bytes());
     out.extend_from_slice(body);
-    out
+    Ok(out)
 }
 
 fn heads<'a, T, F>(items: &'a [T], parts: F) -> Vec<&'a T>
