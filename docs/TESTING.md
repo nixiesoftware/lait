@@ -141,9 +141,27 @@ envelope counters. They measure how much material a gossip carried, which is the
 system's entropy rather than the schedule's.
 
 ```sh
-cargo test -p runtime --lib convergence_simulation      # 24 seeds
-LAIT_SIM_SEEDS=512 cargo test -p runtime --lib convergence_simulation
+cargo test -p runtime --lib convergence_simulation           # 24 seeds, ~12 s
+LAIT_SIM_SEEDS=512 cargo test -p runtime --lib ...           # a wider sweep
+LAIT_SIM_SEED=1327 cargo test -p runtime --lib ...           # ONE seed, ~2 s
 ```
+
+**Sharing a seed.** The sweep prints the replay command on failure:
+
+```
+seed 1327: body 0: peer 0 sees Some(9), peer 2 sees Some(0) — the fleet did not converge
+
+replay this exact run:
+  LAIT_SIM_SEED=1327 cargo test -p runtime --lib convergence_simulation
+it reproduces on any machine — that is what the seed is for.
+```
+
+Paste that line to a colleague and they get your failure. Verified end to end
+with an injected bug: identical message on Windows and Linux.
+
+Note the singular. `LAIT_SIM_SEED` is one seed; `LAIT_SIM_SEEDS` is a *count*.
+They are a letter apart, which is why the failure prints the command rather
+than leaving anyone to work out which takes what.
 
 ### T4 — reality
 

@@ -47,22 +47,31 @@
 //! envelope counters. They measure how much material each gossip carried, which
 //! is the system's entropy rather than the schedule's.
 //!
+//! ## Replaying one
+//!
+//! `LAIT_SIM_SEED=1327 cargo test -p runtime --lib convergence_simulation`
+//!
+//! One seed, nothing else, about two seconds. The sweep prints that line on
+//! failure, so a seed from nightly or from a colleague is a command rather than
+//! an instruction to go and edit a test. Note the singular: `LAIT_SIM_SEEDS`
+//! with an S is a COUNT, which is why the failure prints the command instead of
+//! leaving anyone to work out which name takes what.
+//!
 //! ## Determinism is a claim this file has to earn
 //!
-//! A simulation is only replayable if NOTHING it touches draws entropy the
-//! harness does not control. The generator below satisfies its half —
-//! The PRNG below is written out rather than taken as a dependency for that
-//! reason: a crate that seeds itself from the OS, or iterates a `HashMap`,
-//! silently reintroduces the nondeterminism the seed is supposed to remove,
-//! and the failure mode is a bug report nobody can reproduce. Everything here
-//! is `BTreeMap`/`Vec` and every choice comes from `Rng`.
+//! [`Schedule`] is written out rather than taken as a dependency for the same
+//! reason it is positional: a generator crate that seeds itself from the OS, or
+//! a `HashMap` iterated anywhere, silently reintroduces the nondeterminism a
+//! seed exists to remove — and the failure mode is a bug report nobody can
+//! reproduce. Everything here is `BTreeMap`/`Vec`, and every choice comes from
+//! `Schedule`.
 //!
 //! What is NOT simulated is time: no wall clock, no sleeps, no async. The
 //! schedule is the order of operations, so there is nothing for a clock to
-//! perturb. Time-dependent behaviour lives in the plane driver above this
-//! seam, and simulating it would mean intercepting `Instant::now` across the
-//! workspace — a much larger change than this, and one worth doing separately
-//! rather than half-doing here.
+//! perturb at this seam. Time-dependent behaviour lives in the plane driver
+//! above it and is simulated separately — `paused_clock` and `driver_beat` do
+//! that with tokio's virtual clock. Driving both a fault schedule and a clock
+//! together is the piece nobody has built.
 //!
 //! ## What it asserts
 //!
@@ -604,18 +613,40 @@ fn the_fleet_converges_on_a_known_seed() {
 /// Many seeds, shallow. Distinct schedules are what buys coverage here, so
 /// breadth beats depth per unit of time on the per-push tier.
 ///
-/// `LAIT_SIM_SEEDS` raises the count for the nightly tier; the seeds stay
-/// consecutive from a fixed base so a nightly failure names a seed this test
-/// will replay unchanged.
+/// Two knobs, a letter apart, and it matters which:
+///
+/// - `LAIT_SIM_SEED` (singular) runs **exactly one** schedule. This is the
+///   replay path — a failing seed from nightly or from a colleague is a
+///   command, not an instruction to go and edit a test.
+/// - `LAIT_SIM_SEEDS` (plural) is a **count**, raising how many consecutive
+///   seeds the sweep explores.
+///
+/// Because those names are one character apart, the failure below prints the
+/// command instead of leaving anyone to work out which takes what.
 #[test]
 fn the_fleet_converges_across_many_schedules() {
+    if let Some(seed) = std::env::var("LAIT_SIM_SEED")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+    {
+        if let Err(failure) = run(seed, 150) {
+            panic!("seed {seed}: {failure}");
+        }
+        return;
+    }
+
     let count: u64 = std::env::var("LAIT_SIM_SEEDS")
         .ok()
-        .and_then(|v| v.parse().ok())
+        .and_then(|value| value.parse().ok())
         .unwrap_or(24);
     for seed in 1000..(1000 + count) {
         if let Err(failure) = run(seed, 150) {
-            panic!("seed {seed}: {failure}\nreplay with LAIT_SIM_SEEDS and this seed");
+            panic!(
+                "seed {seed}: {failure}\n\n\
+                 replay this exact run:\n  \
+                 LAIT_SIM_SEED={seed} cargo test -p runtime --lib convergence_simulation\n\
+                 it reproduces on any machine — that is what the seed is for."
+            );
         }
     }
 }
