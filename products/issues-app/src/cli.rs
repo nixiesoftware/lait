@@ -127,6 +127,12 @@ pub fn command() -> Command {
         .subcommand(role_command())
         .subcommand(access_command())
         .subcommand(workflow_command())
+        .subcommand(spec_command())
+        .subcommand(baseline_command())
+        .subcommand(ref_command(
+            "packet",
+            "Show the effective Spec packet for an issue.",
+        ))
         .subcommand(
             leaf("activity", "Space-wide recent transitions.")
                 .arg(option("since", "Only events after this sequence.").default_value("0")),
@@ -384,6 +390,17 @@ pub fn parse(matches: &ArgMatches) -> Result<CliInvocation, Failure> {
             );
         }
         ["workflow", verb] => parse_workflow(verb, m)?,
+        ["spec"] | ["spec", "ls"] => IssuesRequest::SpecList {
+            project: opt(m, "project"),
+        },
+        ["spec", verb] => parse_spec(verb, m)?,
+        ["baseline"] | ["baseline", "ls"] => IssuesRequest::BaselineList {
+            project: opt(m, "project"),
+        },
+        ["baseline", verb] => parse_baseline(verb, m)?,
+        ["packet"] => IssuesRequest::Packet {
+            reff: resolve_reff(m)?,
+        },
         ["activity"] => IssuesRequest::Activity {
             since: req(m, "since")
                 .parse()
@@ -730,6 +747,90 @@ fn parse_workflow(verb: &str, m: &ArgMatches) -> Result<IssuesRequest, Failure> 
             body_json: read_file(m, "file")?,
         },
         _ => return Err(Failure::new("unknown workflow command")),
+    })
+}
+
+fn parse_spec(verb: &str, m: &ArgMatches) -> Result<IssuesRequest, Failure> {
+    Ok(match verb {
+        "show" => IssuesRequest::SpecShow {
+            spec: req(m, "spec"),
+        },
+        "new" => IssuesRequest::SpecNew {
+            project: req(m, "project"),
+            kind: issues::spec::Kind::parse(&req(m, "kind"))
+                .ok_or_else(|| Failure::new("unknown Spec kind"))?,
+            title: req(m, "title"),
+            text: opt(m, "text").unwrap_or_default(),
+            links: parse_json_many(m, "link")?,
+        },
+        "revise" => IssuesRequest::SpecRevise {
+            spec: req(m, "spec"),
+            expected: req(m, "expect"),
+            title: opt(m, "title"),
+            text: opt(m, "text"),
+            links: yes(m, "replace-links")
+                .then(|| parse_json_many(m, "link"))
+                .transpose()?,
+        },
+        "review" | "issue" | "withdraw" => IssuesRequest::SpecState {
+            spec: req(m, "spec"),
+            expected: req(m, "expect"),
+            state: match verb {
+                "review" => issues::spec::State::Review,
+                "issue" => issues::spec::State::Issued,
+                _ => issues::spec::State::Withdrawn,
+            },
+        },
+        "resolve" => IssuesRequest::SpecResolve {
+            spec: req(m, "spec"),
+            expected_heads: many(m, "expect-head"),
+            body_json: read_file(m, "file")?,
+        },
+        _ => return Err(Failure::new("unknown spec command")),
+    })
+}
+
+fn parse_baseline(verb: &str, m: &ArgMatches) -> Result<IssuesRequest, Failure> {
+    Ok(match verb {
+        "show" => IssuesRequest::BaselineShow {
+            baseline: req(m, "baseline"),
+        },
+        "new" => IssuesRequest::BaselineNew {
+            project: req(m, "project"),
+            name: req(m, "name"),
+            members: parse_spec_refs(m, "member")?,
+        },
+        "revise" => IssuesRequest::BaselineRevise {
+            baseline: req(m, "baseline"),
+            expected: req(m, "expect"),
+            name: opt(m, "name"),
+            members: yes(m, "replace-members")
+                .then(|| parse_spec_refs(m, "member"))
+                .transpose()?,
+        },
+        "review" | "issue" | "withdraw" => IssuesRequest::BaselineState {
+            baseline: req(m, "baseline"),
+            expected: req(m, "expect"),
+            state: match verb {
+                "review" => issues::spec::State::Review,
+                "issue" => issues::spec::State::Issued,
+                _ => issues::spec::State::Withdrawn,
+            },
+        },
+        "resolve" => IssuesRequest::BaselineResolve {
+            baseline: req(m, "baseline"),
+            expected_heads: many(m, "expect-head"),
+            body_json: read_file(m, "file")?,
+        },
+        "bind" => IssuesRequest::IssueBaseline {
+            reff: req(m, "reff"),
+            baseline: Some(parse_baseline_ref(&req(m, "coordinate"))?),
+        },
+        "clear" => IssuesRequest::IssueBaseline {
+            reff: req(m, "reff"),
+            baseline: None,
+        },
+        _ => return Err(Failure::new("unknown baseline command")),
     })
 }
 
@@ -1104,6 +1205,94 @@ fn workflow_command() -> Command {
         )
 }
 
+fn spec_command() -> Command {
+    group("spec", "Author versioned project truth.")
+        .subcommand(leaf("ls", "List Specs.").arg(project_option("Filter to a project.")))
+        .subcommand(leaf("show", "Show one Spec.").arg(pos("spec", "Spec id.")))
+        .subcommand(
+            leaf("new", "Create a draft Spec.")
+                .arg(pos("project", "Project ref."))
+                .arg(pos("kind", "Goal, requirement, plan, design, order, guide, proof, verdict, waiver, or record."))
+                .arg(pos("title", "Spec title."))
+                .arg(option("text", "Spec body."))
+                .arg(option_many("link", "Typed Link JSON (repeatable).")),
+        )
+        .subcommand(
+            leaf("revise", "Create a draft successor.")
+                .arg(pos("spec", "Spec id."))
+                .arg(option("expect", "Expected head revision.").required(true))
+                .arg(option("title", "Replacement title."))
+                .arg(option("text", "Replacement body."))
+                .arg(option_many("link", "Replacement typed Link JSON."))
+                .arg(flag("replace-links", "Replace links, including with an empty set.")),
+        )
+        .subcommand(state_command("review", "Send a Spec head to review.", "spec"))
+        .subcommand(state_command("issue", "Issue a governing Spec revision.", "spec"))
+        .subcommand(state_command("withdraw", "Withdraw effective Spec truth.", "spec"))
+        .subcommand(
+            leaf("resolve", "Resolve concurrent Spec heads.")
+                .arg(pos("spec", "Spec id."))
+                .arg(option_many("expect-head", "Expected head revision.").required(true))
+                .arg(option("file", "Complete Spec body JSON.").required(true)),
+        )
+}
+
+fn baseline_command() -> Command {
+    group("baseline", "Issue exact sets of Spec revisions.")
+        .subcommand(leaf("ls", "List Baselines.").arg(project_option("Filter to a project.")))
+        .subcommand(leaf("show", "Show one Baseline.").arg(pos("baseline", "Baseline id.")))
+        .subcommand(
+            leaf("new", "Create a draft Baseline.")
+                .arg(pos("project", "Project ref."))
+                .arg(pos("name", "Baseline name."))
+                .arg(option_many("member", "Exact SPEC@REVISION member.").required(true)),
+        )
+        .subcommand(
+            leaf("revise", "Create a draft Baseline successor.")
+                .arg(pos("baseline", "Baseline id."))
+                .arg(option("expect", "Expected head revision.").required(true))
+                .arg(option("name", "Replacement name."))
+                .arg(option_many("member", "Replacement SPEC@REVISION member."))
+                .arg(flag(
+                    "replace-members",
+                    "Replace members, including with an empty set.",
+                )),
+        )
+        .subcommand(state_command(
+            "review",
+            "Send a Baseline to review.",
+            "baseline",
+        ))
+        .subcommand(state_command(
+            "issue",
+            "Issue a Baseline revision.",
+            "baseline",
+        ))
+        .subcommand(state_command(
+            "withdraw",
+            "Withdraw a Baseline.",
+            "baseline",
+        ))
+        .subcommand(
+            leaf("resolve", "Resolve concurrent Baseline heads.")
+                .arg(pos("baseline", "Baseline id."))
+                .arg(option_many("expect-head", "Expected head revision.").required(true))
+                .arg(option("file", "Complete Baseline body JSON.").required(true)),
+        )
+        .subcommand(
+            leaf("bind", "Pin an issued Baseline revision to an Issue.")
+                .arg(pos("reff", "Issue ref."))
+                .arg(pos("coordinate", "Exact BASELINE@REVISION coordinate.")),
+        )
+        .subcommand(leaf("clear", "Clear an Issue's Baseline pin.").arg(pos("reff", "Issue ref.")))
+}
+
+fn state_command(name: &'static str, about: &'static str, noun: &'static str) -> Command {
+    leaf(name, about)
+        .arg(pos(noun, "Stable id."))
+        .arg(option("expect", "Expected head revision.").required(true))
+}
+
 fn leaf(name: &'static str, about: &'static str) -> Command {
     Command::new(name).about(about)
 }
@@ -1209,6 +1398,44 @@ fn csv(value: Option<String>) -> Vec<String> {
 fn read_file(m: &ArgMatches, id: &str) -> Result<String, Failure> {
     let path = req(m, id);
     std::fs::read_to_string(&path).map_err(|error| Failure::new(format!("read {path}: {error}")))
+}
+
+fn parse_json_many<T: serde::de::DeserializeOwned>(
+    m: &ArgMatches,
+    id: &str,
+) -> Result<Vec<T>, Failure> {
+    many(m, id)
+        .into_iter()
+        .map(|raw| {
+            serde_json::from_str(&raw)
+                .map_err(|error| Failure::new(format!("invalid --{id} JSON: {error}")))
+        })
+        .collect()
+}
+
+fn parse_spec_refs(m: &ArgMatches, id: &str) -> Result<Vec<issues::spec::SpecRef>, Failure> {
+    many(m, id)
+        .into_iter()
+        .map(|coordinate| {
+            let (spec, revision) = coordinate.split_once('@').ok_or_else(|| {
+                Failure::new(format!("--{id} must be an exact SPEC@REVISION coordinate"))
+            })?;
+            Ok(issues::spec::SpecRef {
+                spec: spec.into(),
+                revision: revision.into(),
+            })
+        })
+        .collect()
+}
+
+fn parse_baseline_ref(coordinate: &str) -> Result<issues::spec::BaselineRef, Failure> {
+    let (baseline, revision) = coordinate
+        .split_once('@')
+        .ok_or_else(|| Failure::new("baseline must be an exact BASELINE@REVISION coordinate"))?;
+    Ok(issues::spec::BaselineRef {
+        baseline: baseline.into(),
+        revision: revision.into(),
+    })
 }
 
 fn title_case(key: &str) -> String {

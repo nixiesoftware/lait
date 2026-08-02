@@ -306,6 +306,62 @@ pub fn render(response: &IssuesResponse, options: PresentationOptions) -> Presen
             &format!("attachment {name} ({mime}) — use `lait issues attachment get` to save it"),
         ),
         IssuesResponse::Text { text } => line(&mut stdout, text),
+        IssuesResponse::Spec(spec) => render_spec(&mut stdout, spec),
+        IssuesResponse::Specs { specs } => {
+            if specs.is_empty() {
+                line(&mut stdout, "(no specs)");
+            }
+            for spec in specs {
+                line(
+                    &mut stdout,
+                    &format!(
+                        "{}  {:<11} {:<9} {}  @{}",
+                        spec.spec,
+                        spec.kind.as_str(),
+                        spec.state.as_str(),
+                        spec.title,
+                        short_revision(&spec.revision)
+                    ),
+                );
+            }
+        }
+        IssuesResponse::Baseline(baseline) => {
+            line(
+                &mut stdout,
+                &format!(
+                    "{}  {}  [{}]  @{}",
+                    baseline.baseline,
+                    baseline.name,
+                    baseline.state.as_str(),
+                    baseline.revision
+                ),
+            );
+            for member in &baseline.body.members {
+                line(
+                    &mut stdout,
+                    &format!("  {}@{}", member.spec, member.revision),
+                );
+            }
+        }
+        IssuesResponse::Baselines { baselines } => {
+            if baselines.is_empty() {
+                line(&mut stdout, "(no baselines)");
+            }
+            for baseline in baselines {
+                line(
+                    &mut stdout,
+                    &format!(
+                        "{}  {:<9} {}  {} member(s)  @{}",
+                        baseline.baseline,
+                        baseline.state.as_str(),
+                        baseline.name,
+                        baseline.body.members.len(),
+                        short_revision(&baseline.revision)
+                    ),
+                );
+            }
+        }
+        IssuesResponse::Packet(packet) => render_packet(&mut stdout, packet),
         IssuesResponse::Error { message, .. } => {
             line(&mut stderr, &format!("error: {message}"));
         }
@@ -318,6 +374,71 @@ pub fn render(response: &IssuesResponse, options: PresentationOptions) -> Presen
         exit_code,
         failure,
         failure_message: error_message(response),
+    }
+}
+
+fn render_spec(output: &mut String, spec: &issues::spec::SpecView) {
+    line(
+        output,
+        &format!(
+            "{}  {}  [{}]  @{}",
+            spec.spec,
+            spec.title,
+            spec.state.as_str(),
+            spec.revision
+        ),
+    );
+    line(output, &format!("kind: {}", spec.kind.as_str()));
+    if spec.heads.len() > 1 {
+        line(
+            output,
+            &format!("conflict heads: {}", spec.heads.join(", ")),
+        );
+    }
+    if !spec.issued.is_empty() {
+        line(output, &format!("issued: {}", spec.issued.join(", ")));
+    }
+    if !spec.body.text.is_empty() {
+        line(output, "");
+        line(output, &spec.body.text);
+    }
+}
+
+fn short_revision(revision: &str) -> &str {
+    revision.get(..12).unwrap_or(revision)
+}
+
+fn render_packet(output: &mut String, packet: &issues::spec::Packet) {
+    line(output, &format!("packet for {}", packet.issue));
+    if let Some(baseline) = &packet.baseline {
+        line(
+            output,
+            &format!("baseline: {}@{}", baseline.baseline, baseline.revision),
+        );
+    }
+    let sections = [
+        ("governing", &packet.governing),
+        ("guidance", &packet.guidance),
+        ("proof", &packet.proof),
+        ("record", &packet.record),
+    ];
+    for (name, specs) in sections {
+        if specs.is_empty() {
+            continue;
+        }
+        line(output, &format!("{name}:"));
+        for spec in specs {
+            line(
+                output,
+                &format!(
+                    "  {}@{}  {}  ({})",
+                    spec.spec, spec.revision, spec.title, spec.source
+                ),
+            );
+        }
+    }
+    for conflict in &packet.conflicts {
+        line(output, &format!("conflict: {conflict}"));
     }
 }
 
@@ -677,6 +798,7 @@ mod tests {
             followers: Vec::new(),
             milestone: None,
             cycle: None,
+            baseline: None,
             attachments: Vec::new(),
             provisional: false,
             corrupt_records: Vec::new(),

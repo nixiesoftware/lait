@@ -16,7 +16,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use issues::dto::{BoardView, GraphView, IssueView, LabelDto, ProjectDto, Row, StatusCategory};
-use issues::ids::{ActorId, DeviceId, DocId, LabelId, ProjectId, SystemUlidSource};
+use issues::ids::{
+    ActorId, BaselineId, DeviceId, DocId, LabelId, ProjectId, SpecId, SystemUlidSource,
+};
 use lait::world::contract::{self, IssueIntent, IssueQuery, Pos, WorkAction};
 use lait::world::IssuesWorld;
 use mechanics::authorization::AuthorizedBodyKey;
@@ -256,6 +258,123 @@ fn seed_space(driver: &mut Driver) -> (String, String, String) {
 }
 
 #[test]
+fn an_issue_packet_stays_pinned_while_the_next_spec_revision_is_drafted() {
+    let root = temp_root("spec-packet");
+    let (_rt, station) = setup(&root);
+    let mut driver = Driver::dock(&station);
+    let (project, doc, _) = seed_space(&mut driver);
+    let spec = SpecId::mint(&SystemUlidSource).as_str().to_string();
+
+    let ts = driver.ts();
+    driver
+        .submit(&IssueIntent::SpecCreate {
+            spec: spec.clone(),
+            project: project.clone(),
+            kind: issues::spec::Kind::Requirement,
+            title: "Login is race-free".into(),
+            text: "A login creates at most one active session.".into(),
+            links: vec![],
+            actor: my_actor().as_str().into(),
+            device: my_device().as_str().into(),
+            ts,
+        })
+        .unwrap();
+    let draft: issues::spec::SpecView = driver.query(&IssueQuery::Spec { spec: spec.clone() });
+
+    let ts = driver.ts();
+    driver
+        .submit(&IssueIntent::SpecState {
+            spec: spec.clone(),
+            expected: draft.revision,
+            state: issues::spec::State::Issued,
+            actor: my_actor().as_str().into(),
+            device: my_device().as_str().into(),
+            ts,
+        })
+        .unwrap();
+    let issued: issues::spec::SpecView = driver.query(&IssueQuery::Spec { spec: spec.clone() });
+    assert_eq!(issued.state, issues::spec::State::Issued);
+
+    let baseline = BaselineId::mint(&SystemUlidSource).as_str().to_string();
+    let ts = driver.ts();
+    driver
+        .submit(&IssueIntent::BaselineCreate {
+            baseline: baseline.clone(),
+            project: project.clone(),
+            name: "Login v1".into(),
+            members: vec![issues::spec::SpecRef {
+                spec: spec.clone(),
+                revision: issued.revision.clone(),
+            }],
+            actor: my_actor().as_str().into(),
+            device: my_device().as_str().into(),
+            ts,
+        })
+        .unwrap();
+    let draft_baseline: issues::spec::BaselineView = driver.query(&IssueQuery::Baseline {
+        baseline: baseline.clone(),
+    });
+
+    let ts = driver.ts();
+    driver
+        .submit(&IssueIntent::BaselineState {
+            baseline: baseline.clone(),
+            expected: draft_baseline.revision,
+            state: issues::spec::State::Issued,
+            actor: my_actor().as_str().into(),
+            device: my_device().as_str().into(),
+            ts,
+        })
+        .unwrap();
+    let issued_baseline: issues::spec::BaselineView = driver.query(&IssueQuery::Baseline {
+        baseline: baseline.clone(),
+    });
+
+    let binding = issues::spec::BaselineRef {
+        baseline,
+        revision: issued_baseline.revision,
+    };
+    let ts = driver.ts();
+    driver
+        .submit(&IssueIntent::IssueBaseline {
+            doc: doc.clone(),
+            baseline: Some(binding.clone()),
+            device: my_device().as_str().into(),
+            ts,
+        })
+        .unwrap();
+
+    let before: issues::spec::Packet = driver.query(&IssueQuery::Packet { doc: doc.clone() });
+    assert_eq!(before.baseline, Some(binding.clone()));
+    assert_eq!(before.governing.len(), 1);
+    assert_eq!(before.governing[0].revision, issued.revision);
+    assert!(before.conflicts.is_empty());
+
+    let ts = driver.ts();
+    driver
+        .submit(&IssueIntent::SpecRevise {
+            spec: spec.clone(),
+            expected: issued.revision.clone(),
+            title: None,
+            text: Some("A login creates exactly one active session.".into()),
+            links: None,
+            actor: my_actor().as_str().into(),
+            device: my_device().as_str().into(),
+            ts,
+        })
+        .unwrap();
+    let current: issues::spec::SpecView = driver.query(&IssueQuery::Spec { spec });
+    assert_eq!(current.state, issues::spec::State::Draft);
+    assert_eq!(current.issued, vec![issued.revision.clone()]);
+
+    let after: issues::spec::Packet = driver.query(&IssueQuery::Packet { doc });
+    assert_eq!(after.baseline, Some(binding));
+    assert_eq!(after.governing.len(), 1);
+    assert_eq!(after.governing[0].revision, issued.revision);
+    assert!(after.conflicts.is_empty());
+}
+
+#[test]
 fn the_full_issue_surface_round_trips_with_legacy_shapes() {
     let root = temp_root("surface");
     let (_rt, station) = setup(&root);
@@ -271,7 +390,7 @@ fn the_full_issue_surface_round_trips_with_legacy_shapes() {
         doc: doc.clone(),
         me: Some(my_actor().as_str().to_string()),
     });
-    assert_eq!(view.schema_version, 3);
+    assert_eq!(view.schema_version, 4);
     assert_eq!(view.title, "First issue");
     assert_eq!(view.description, "the description");
     assert_eq!(view.status, "backlog");
@@ -321,7 +440,7 @@ fn the_full_issue_surface_round_trips_with_legacy_shapes() {
         project: project.clone(),
         me: None,
     });
-    assert_eq!(board.schema_version, 3);
+    assert_eq!(board.schema_version, 4);
     assert_eq!(board.columns.len(), 4);
     let backlog = &board.columns[0];
     assert_eq!(backlog.state.id, "backlog");

@@ -59,15 +59,17 @@ reason the section table exists: adding a section kind must not move the id of a
 World that declares nothing of that kind, which two more fields in a fixed-order
 tuple would have done to every id in the system.
 
-**`com.lait.issues` is in that set, and its id moved.** It declares two signal
-schemas — `assigned` and `commented` — so its descriptor is version 2 and its identity is
-`142d7a76f8d7f1c559225004fe0e70c9e9cecf86b4a53d232604b6f42c0d344c`, pinned by
-`products/issues/tests/package_boundary.rs`. A Space formed against an earlier
-build activated a different id and will see this one as an implementation it
-never approved until it is activated again. That is the mechanism working: a
-World whose declared signals changed is a World whose reviewed surface changed,
-and the identity is what says so. It is recorded here rather than left for
-somebody to meet in the field.
+**`com.lait.issues` is in that set, and its id moved.** The Spec lifecycle cutoff
+adds the `spec` and `baseline` collaborative schemas, extends the capability
+registry, and advances the World implementation to version 2. Its descriptor is
+version 2 because it also declares the `assigned` and `commented` signal schemas;
+its reviewed identity is
+`069e7ad1061fe2e864a31aa806060d953270b6a57d4d5d8c7e4c835e90c0cff0`, pinned by
+`products/issues/tests/it/package_boundary.rs`. There is deliberately no
+predecessor schema or migration adapter. A Space formed against an earlier build
+activated a different id and refuses this one until the new implementation is
+explicitly activated. That is the mechanism working: the reviewed surface
+changed, and the identity says so.
 
 Worlds that declare nothing keep the ids they had, which the same test asserts by
 construction — a zero-section descriptor is byte-identical to what shipped before

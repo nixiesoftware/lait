@@ -185,12 +185,54 @@ export interface IssueView {
   milestone?: string | null;
   /** Scheduled cycle id (BOARD-11). */
   cycle?: string | null;
+  /** Exact issued Baseline pinned to this Issue. */
+  baseline?: BaselineRef | null;
   /** Attachment metadata (CREATE-5). */
   attachments?: AttachmentMetaDto[];
   provisional: boolean;
   /** Malformed stored records, kept beside the valid projection rather than
    * silently dropped or laundered into sentinel values. */
   corrupt_records?: CorruptRecord[];
+}
+
+export type SpecKind =
+  | "goal" | "requirement" | "plan" | "design" | "order"
+  | "guide" | "proof" | "verdict" | "waiver" | "record";
+export type SpecState = "draft" | "review" | "issued" | "withdrawn";
+export type SpecRel =
+  | "derives" | "decomposes" | "implements" | "governs" | "amends"
+  | "supersedes" | "clarifies" | "incorporates" | "references"
+  | "verifies" | "validates" | "waives" | "records" | "conflicts" | "depends";
+export type SpecTarget =
+  | { kind: "spec"; spec: string; revision: string }
+  | { kind: "baseline"; baseline: string; revision: string }
+  | { kind: "issue"; issue: string };
+export interface SpecLink { rel: SpecRel; target: SpecTarget }
+export interface SpecRef { spec: string; revision: string }
+export interface BaselineRef { baseline: string; revision: string }
+export interface SpecBody {
+  spec: string; project: string; kind: SpecKind; title: string; text: string;
+  state: SpecState; links: SpecLink[]; author: string; ts: number;
+}
+export interface SpecView {
+  spec: string; project: string; kind: SpecKind; title: string; state: SpecState;
+  revision: string; heads: string[]; issued: string[]; body: SpecBody;
+}
+export interface BaselineBody {
+  baseline: string; project: string; name: string; state: SpecState;
+  members: SpecRef[]; author: string; ts: number;
+}
+export interface BaselineView {
+  baseline: string; project: string; name: string; state: SpecState;
+  revision: string; heads: string[]; issued: string[]; body: BaselineBody;
+}
+export interface PacketSpec {
+  spec: string; revision: string; kind: SpecKind; title: string; state: SpecState;
+  source: string; links: SpecLink[];
+}
+export interface Packet {
+  issue: string; baseline?: BaselineRef | null; governing: PacketSpec[];
+  guidance: PacketSpec[]; proof: PacketSpec[]; record: PacketSpec[]; conflicts: string[];
 }
 
 /** Attachment metadata on an issue (CREATE-5) — payloads via `attachment_get`. */
@@ -739,6 +781,20 @@ export type Request =
   /** Reply is `text` — the revision as pretty JSON (same shape the CLI prints). */
   | { cmd: "workflow_show"; project: string }
   | { cmd: "workflow_set"; project: string; expect_heads: string[]; body_json: string }
+  | { cmd: "spec_list"; project?: string | null }
+  | { cmd: "spec_show"; spec: string }
+  | { cmd: "spec_new"; project: string; kind: SpecKind; title: string; text?: string; links?: SpecLink[] }
+  | { cmd: "spec_revise"; spec: string; expected: string; title?: string | null; text?: string | null; links?: SpecLink[] | null }
+  | { cmd: "spec_state"; spec: string; expected: string; state: SpecState }
+  | { cmd: "spec_resolve"; spec: string; expected_heads: string[]; body_json: string }
+  | { cmd: "baseline_list"; project?: string | null }
+  | { cmd: "baseline_show"; baseline: string }
+  | { cmd: "baseline_new"; project: string; name: string; members: SpecRef[] }
+  | { cmd: "baseline_revise"; baseline: string; expected: string; name?: string | null; members?: SpecRef[] | null }
+  | { cmd: "baseline_state"; baseline: string; expected: string; state: SpecState }
+  | { cmd: "baseline_resolve"; baseline: string; expected_heads: string[]; body_json: string }
+  | { cmd: "issue_baseline"; reff: string; baseline?: BaselineRef | null }
+  | { cmd: "packet"; reff: string }
   /** Reply is `text` — every role definition as pretty JSON. */
   | { cmd: "role_list" }
   /** Reply is `assignments` — effective scoped grants, optionally one actor. */
@@ -828,6 +884,11 @@ export type Response =
   | ({ kind: "status" } & StatusInfo)
   | { kind: "diagnosis"; [k: string]: unknown }
   | { kind: "text"; text: string }
+  | ({ kind: "spec" } & SpecView)
+  | { kind: "specs"; specs: SpecView[] }
+  | ({ kind: "baseline" } & BaselineView)
+  | { kind: "baselines"; baselines: BaselineView[] }
+  | ({ kind: "packet" } & Packet)
   | { kind: "events"; events: Event[]; last: number }
   | { kind: "who"; peers: PresenceEntry[] }
   /** `partial` means this node is not hearing from everyone it could be.

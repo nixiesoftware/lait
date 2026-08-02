@@ -64,6 +64,7 @@ import {
   type IssueView,
   type LabelDto,
   type MemberDto,
+  type Packet,
   type ProjectDto,
   type WorkflowState,
 } from "../types";
@@ -847,6 +848,8 @@ export function IssueDetail({
           onSave={(description) => void edit({ description })}
         />
 
+        <SpecPacket spaceId={spaceId} reff={issue.reff} />
+
         <Attachments
           spaceId={spaceId}
           reff={issue.reff}
@@ -988,6 +991,76 @@ export function IssueDetail({
         />
       )}
     </aside>
+  );
+}
+
+function SpecPacket({ spaceId, reff }: { spaceId: string; reff: string }) {
+  const [packet, setPacket] = useState<Packet | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    setPacket(null);
+    setError(null);
+    void rpc(spaceId, { cmd: "packet", reff })
+      .then((response) => {
+        if (alive && response.kind === "packet") setPacket(response);
+      })
+      .catch((reason) => {
+        if (alive) setError(reason instanceof Error ? reason.message : String(reason));
+      });
+    return () => { alive = false; };
+  }, [spaceId, reff]);
+
+  if (!packet && !error) return null;
+  const sections = packet ? [
+    ["Governing", packet.governing],
+    ["Guidance", packet.guidance],
+    ["Proof", packet.proof],
+    ["Record", packet.record],
+  ] as const : [];
+  const empty = packet && sections.every(([, specs]) => specs.length === 0)
+    && packet.conflicts.length === 0 && !packet.baseline;
+  if (empty) return null;
+
+  return (
+    <section className="border-line mx-6 border-t py-5">
+      <div className="mb-3 flex items-center gap-2">
+        <h2 className="text-sm font-semibold">Spec packet</h2>
+        {packet?.baseline && (
+          <code className="text-mute text-2xs" title={`${packet.baseline.baseline}@${packet.baseline.revision}`}>
+            {packet.baseline.baseline} · {short(packet.baseline.revision)}
+          </code>
+        )}
+      </div>
+      {error && <p className="text-danger text-xs">{error}</p>}
+      {packet?.conflicts.map((conflict) => (
+        <p key={conflict} className="text-warn mb-2 flex items-start gap-2 text-xs">
+          <AlertTriangle className="mt-0.5 size-icon-xs shrink-0" />
+          {conflict}
+        </p>
+      ))}
+      <div className="grid gap-3 @lg:grid-cols-2">
+        {sections.map(([title, specs]) => specs.length > 0 && (
+          <div key={title}>
+            <h3 className="text-mute mb-1 text-2xs font-semibold tracking-wider uppercase">{title}</h3>
+            <ul className="flex flex-col gap-1.5">
+              {specs.map((spec) => (
+                <li key={`${spec.spec}@${spec.revision}`} className="border-line rounded-surface border px-2.5 py-2 text-xs">
+                  <div className="flex items-center gap-2">
+                    <span className="font-medium">{spec.title}</span>
+                    <span className="text-mute ml-auto capitalize">{spec.kind}</span>
+                  </div>
+                  <div className="text-mute mt-0.5 truncate font-mono text-2xs" title={`${spec.spec}@${spec.revision}`}>
+                    {spec.spec}@{short(spec.revision)} · {spec.source}
+                  </div>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ))}
+      </div>
+    </section>
   );
 }
 

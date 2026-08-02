@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub const OPERATION: &str = "issues.control";
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "at", rename_all = "snake_case")]
@@ -439,6 +439,80 @@ pub enum IssuesRequest {
         expect_heads: Vec<String>,
         body_json: String,
     },
+    SpecList {
+        #[serde(default)]
+        project: Option<String>,
+    },
+    SpecShow {
+        spec: String,
+    },
+    SpecNew {
+        project: String,
+        kind: issues::spec::Kind,
+        title: String,
+        #[serde(default)]
+        text: String,
+        #[serde(default)]
+        links: Vec<issues::spec::Link>,
+    },
+    SpecRevise {
+        spec: String,
+        expected: String,
+        #[serde(default)]
+        title: Option<String>,
+        #[serde(default)]
+        text: Option<String>,
+        #[serde(default)]
+        links: Option<Vec<issues::spec::Link>>,
+    },
+    SpecState {
+        spec: String,
+        expected: String,
+        state: issues::spec::State,
+    },
+    SpecResolve {
+        spec: String,
+        expected_heads: Vec<String>,
+        body_json: String,
+    },
+    BaselineList {
+        #[serde(default)]
+        project: Option<String>,
+    },
+    BaselineShow {
+        baseline: String,
+    },
+    BaselineNew {
+        project: String,
+        name: String,
+        members: Vec<issues::spec::SpecRef>,
+    },
+    BaselineRevise {
+        baseline: String,
+        expected: String,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        members: Option<Vec<issues::spec::SpecRef>>,
+    },
+    BaselineState {
+        baseline: String,
+        expected: String,
+        state: issues::spec::State,
+    },
+    BaselineResolve {
+        baseline: String,
+        expected_heads: Vec<String>,
+        body_json: String,
+    },
+    IssueBaseline {
+        reff: String,
+        #[serde(default)]
+        baseline: Option<issues::spec::BaselineRef>,
+    },
+    Packet {
+        reff: String,
+    },
 }
 
 /// Issues-owned application responses.
@@ -519,6 +593,15 @@ pub enum IssuesResponse {
     Text {
         text: String,
     },
+    Spec(Box<issues::spec::SpecView>),
+    Specs {
+        specs: Vec<issues::spec::SpecView>,
+    },
+    Baseline(Box<issues::spec::BaselineView>),
+    Baselines {
+        baselines: Vec<issues::spec::BaselineView>,
+    },
+    Packet(Box<issues::spec::Packet>),
     Error {
         message: String,
         #[serde(default)]
@@ -590,7 +673,12 @@ impl IssuesRequest {
             | RoleList
             | RoleShow { .. }
             | WorkflowShow { .. }
-            | WorkflowValidate { .. } => Access::Query,
+            | WorkflowValidate { .. }
+            | SpecList { .. }
+            | SpecShow { .. }
+            | BaselineList { .. }
+            | BaselineShow { .. }
+            | Packet { .. } => Access::Query,
             IssueNew { .. }
             | IssueEdit { .. }
             | IssueMove { .. }
@@ -631,7 +719,16 @@ impl IssuesRequest {
             | RoleEdit { .. }
             | RoleDelete { .. }
             | RoleResolve { .. }
-            | WorkflowSet { .. } => Access::Command,
+            | WorkflowSet { .. }
+            | SpecNew { .. }
+            | SpecRevise { .. }
+            | SpecState { .. }
+            | SpecResolve { .. }
+            | BaselineNew { .. }
+            | BaselineRevise { .. }
+            | BaselineState { .. }
+            | BaselineResolve { .. }
+            | IssueBaseline { .. } => Access::Command,
         }
     }
 
