@@ -4087,7 +4087,7 @@ impl World for IssuesWorld {
                 Ok(projection(serde_json::to_vec(&entries).expect("inbox")))
             }
             IssueQuery::RingDigest => Ok(projection(
-                serde_json::to_vec(&ring_digest(catalog)).expect("ring digest json"),
+                serde_json::to_vec(&ring_digest(ctx, catalog)).expect("ring digest json"),
             )),
             IssueQuery::Projects => {
                 let projects: Vec<crate::dto::ProjectDto> = catalog
@@ -4226,6 +4226,48 @@ impl World for IssuesWorld {
                 });
                 Ok(projection(
                     serde_json::to_vec(&revisions).expect("spec history json"),
+                ))
+            }
+            IssueQuery::SpecReferences { project } => {
+                let mut references: Vec<crate::spec::SpecReference> = Vec::new();
+                for spec in all_specs(ctx) {
+                    let heads: std::collections::BTreeSet<&str> = spec
+                        .heads()
+                        .into_iter()
+                        .map(|revision| revision.revision.as_str())
+                        .collect();
+                    let issued: std::collections::BTreeSet<&str> = match spec.issued() {
+                        crate::spec::Issued::One(revision) => {
+                            [revision.revision.as_str()].into_iter().collect()
+                        }
+                        // A conflict has no effective revision, so none of the
+                        // candidates may claim to be it.
+                        crate::spec::Issued::Conflict(_) | crate::spec::Issued::None => {
+                            std::collections::BTreeSet::new()
+                        }
+                    };
+                    for revision in &spec.revisions {
+                        if project
+                            .as_ref()
+                            .is_some_and(|project| &revision.body.project != project)
+                        {
+                            continue;
+                        }
+                        for link in &revision.body.links {
+                            references.push(crate::spec::SpecReference {
+                                spec: revision.body.spec.clone(),
+                                revision: revision.revision.clone(),
+                                kind: revision.body.kind,
+                                title: revision.body.title.clone(),
+                                link: link.clone(),
+                                head: heads.contains(revision.revision.as_str()),
+                                issued: issued.contains(revision.revision.as_str()),
+                            });
+                        }
+                    }
+                }
+                Ok(projection(
+                    serde_json::to_vec(&references).expect("spec references json"),
                 ))
             }
             IssueQuery::BaselineHistory { baseline } => {
@@ -4603,7 +4645,7 @@ fn graph_view(
 /// equal state always digests equal. A plane absent from the map digests as its
 /// empty form rather than being omitted — "emptied" has to be distinguishable
 /// from "unchanged".
-fn ring_digest(catalog: &CatalogState) -> contract::RingDigestView {
+fn ring_digest(ctx: &Context<'_>, catalog: &CatalogState) -> contract::RingDigestView {
     let mut planes: Vec<contract::PlaneDigest> = Vec::new();
     let mut plane = |plane: CatalogScope, value: serde_json::Value| {
         let bytes = serde_json::to_vec(&value).expect("plane json");
@@ -4655,6 +4697,19 @@ fn ring_digest(catalog: &CatalogState) -> contract::RingDigestView {
             serde_json::json!(&catalog.parents)
         ]),
     );
+    // The one plane whose contents are not in the catalog. Specs and Baselines
+    // are Bodies of their own, so there is no region here to hash — but a Body's
+    // version stamp moves exactly when the Body does, and reading stamps costs
+    // no decode. Digesting `(key, stamp)` pairs gets the same "did this plane
+    // move" answer for the price of an enumeration.
+    let mut stamps: Vec<(String, Option<Vec<u8>>)> = Vec::new();
+    for schema in [contract::spec_schema(), contract::baseline_schema()] {
+        for key in ctx.bodies_with_schema(&contract::world_id(), &schema) {
+            stamps.push((key.body.render(), ctx.body_stamp(&key)));
+        }
+    }
+    stamps.sort();
+    plane(CatalogScope::Specs, serde_json::json!(stamps));
 
     // Per-project planes, and the doc index, from the same pinned catalog: one
     // pass, one root. Each names the project by its stable id AND its display

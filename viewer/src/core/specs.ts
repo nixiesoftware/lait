@@ -5,6 +5,7 @@ import type {
   SpecBody,
   SpecKind,
   SpecLink,
+  SpecReference,
   SpecRel,
   SpecRevision,
   SpecState,
@@ -238,18 +239,40 @@ export function authorityPhrase(kind: SpecKind, state: SpecState): string {
  * Only for issued enforcing material. Before issuance "nothing verifies this" is
  * noise about a document still being written; after it, it is the gap a coverage
  * matrix exists to find, and it is the one absence worth drawing.
+ *
+ * Read from the reference set rather than from head bodies. A Proof whose head
+ * dropped the link while its *issued* revision still asserts it would look like
+ * a gap, and one whose superseded revision asserted it would look like coverage
+ * — both wrong, and wrong in the direction that matters. An edge only counts
+ * here when the revision asserting it is current or governing.
  */
-export function verificationGap(spec: SpecView, everySpec: readonly SpecView[]): boolean {
+export function verificationGap(
+  spec: SpecView,
+  references: readonly SpecReference[],
+): boolean {
   const enforcing = spec.kind === "requirement" || spec.kind === "design";
   if (!enforcing || spec.issued.length !== 1) return false;
-  return !everySpec.some((candidate) =>
-    candidate.spec !== spec.spec &&
-    candidate.body.links.some(
-      (link) =>
-        (link.rel === "verifies" || link.rel === "validates") &&
-        link.target.kind === "spec" &&
-        link.target.spec === spec.spec,
-    ),
+  return !references.some(
+    (reference) =>
+      (reference.head || reference.issued) &&
+      reference.spec !== spec.spec &&
+      (reference.link.rel === "verifies" || reference.link.rel === "validates") &&
+      reference.link.target.kind === "spec" &&
+      reference.link.target.spec === spec.spec,
+  );
+}
+
+/** The assertions pointing at this document that anyone still stands behind. */
+export function incomingFor(
+  spec: string,
+  references: readonly SpecReference[],
+): SpecReference[] {
+  return references.filter(
+    (reference) =>
+      reference.spec !== spec &&
+      (reference.head || reference.issued) &&
+      reference.link.target.kind === "spec" &&
+      reference.link.target.spec === spec,
   );
 }
 

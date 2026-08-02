@@ -226,6 +226,24 @@ export interface BaselineView {
   baseline: string; project: string; name: string; state: SpecState;
   revision: string; heads: string[]; issued: string[]; body: BaselineBody;
 }
+/**
+ * One typed assertion seen from the far end — `spec.rs` `SpecReference`.
+ *
+ * Links live on the revision that asserts them, so incoming edges cannot be
+ * derived from the target and a head-only scan loses any edge asserted by an
+ * issued predecessor. `head`/`issued` describe the *asserting* revision, which
+ * is what separates a current claim from one nobody stands behind any more.
+ */
+export interface SpecReference {
+  spec: string;
+  revision: string;
+  kind: SpecKind;
+  title: string;
+  link: SpecLink;
+  head: boolean;
+  issued: boolean;
+}
+
 /** One immutable revision and the revisions it descends from. */
 export interface SpecRevision {
   revision: string;
@@ -645,6 +663,9 @@ export type CatalogPlane =
   | "teams"
   | "triage"
   | "roles"
+  /** Specs and Baselines. Not a region of the catalog at all — they are Bodies
+   *  of their own, digested by version stamp. */
+  | "specs"
   /** The row index: which docs exist, their aliases and seqs, what is deleted. */
   | "docs"
   /** Issue links and parentage. */
@@ -821,6 +842,8 @@ export type Request =
   | { cmd: "spec_show"; spec: string }
   /** Reply is `spec_revisions` — the whole DAG, oldest first. */
   | { cmd: "spec_history"; spec: string }
+  /** Reply is spec_references — every typed link in scope, and who asserts it. */
+  | { cmd: "spec_references"; project?: string | null }
   | { cmd: "baseline_history"; baseline: string }
   | { cmd: "spec_new"; project: string; kind: SpecKind; title: string; text?: string; links?: SpecLink[] }
   | { cmd: "spec_revise"; spec: string; expected: string; title?: string | null; text?: string | null; links?: SpecLink[] | null }
@@ -929,6 +952,7 @@ export type Response =
   | { kind: "spec"; spec: SpecView }
   | { kind: "specs"; specs: SpecView[] }
   | { kind: "spec_revisions"; revisions: SpecRevision[] }
+  | { kind: "spec_references"; references: SpecReference[] }
   | { kind: "baseline_revisions"; revisions: BaselineRevisionDto[] }
   | ({ kind: "baseline" } & BaselineView)
   | { kind: "baselines"; baselines: BaselineView[] }

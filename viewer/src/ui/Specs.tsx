@@ -8,6 +8,7 @@ import {
   diffBodies,
   groupByKind,
   holds,
+  incomingFor,
   linkPhrase,
   SPEC_KIND_LABEL,
   SPEC_KIND_PLURAL,
@@ -28,6 +29,7 @@ import {
   useProjectBaselines,
   useProjectSpecs,
   useProjectViewerStore,
+  useSpecReferences,
   useSpec,
   useSpecHistory,
 } from "../projectStore";
@@ -38,6 +40,7 @@ import type {
   SpecKind,
   SpecLink,
   SpecRef,
+  SpecReference,
   SpecRel,
   SpecRevision,
   SpecView,
@@ -217,6 +220,7 @@ function Register({
 }) {
   const specs = useProjectSpecs(spaceId, project);
   const baselines = useProjectBaselines(spaceId, project).data ?? [];
+  const references = useSpecReferences(spaceId, project).data ?? [];
 
   if (specs.error) {
     return (
@@ -314,7 +318,7 @@ function Register({
               <SpecRow
                 key={row.spec}
                 spec={row}
-                gap={verificationGap(row, specs.data!)}
+                gap={verificationGap(row, references)}
                 onOpen={onOpen}
               />
             ))}
@@ -647,51 +651,53 @@ function BaselineReader({
 function Relations({
   view,
   everySpec,
+  references,
   onOpen,
 }: {
   view: SpecView;
   everySpec: SpecView[];
+  references: SpecReference[];
   onOpen: (spec: string) => void;
 }) {
   const titles = new Map(everySpec.map((candidate) => [candidate.spec, candidate]));
   const outgoing = groupLinks(view.body.links.map((link) => ({ link, from: null })));
   const incoming = groupLinks(
-    everySpec.flatMap((candidate) =>
-      candidate.spec === view.spec
-        ? []
-        : candidate.body.links
-            .filter((link) => link.target.kind === "spec" && link.target.spec === view.spec)
-            .map((link) => ({ link, from: candidate })),
-    ),
+    incomingFor(view.spec, references).map((reference) => ({
+      link: reference.link,
+      from: titles.get(reference.spec) ?? null,
+      title: reference.title,
+      source: reference.spec,
+      revision: reference.revision,
+    })),
   );
   if (outgoing.length === 0 && incoming.length === 0) return null;
 
-  const row = (entry: { link: SpecLink; from: SpecView | null }, direction: "in" | "out") => {
-    const target =
+  const row = (entry: LinkEntry, direction: "in" | "out") => {
+    const open =
       direction === "out" && entry.link.target.kind === "spec"
-        ? titles.get(entry.link.target.spec)
-        : entry.from;
-    const label = target?.title ?? targetLabel(entry.link.target);
+        ? entry.link.target.spec
+        : entry.source;
+    const label =
+      direction === "out"
+        ? (entry.link.target.kind === "spec"
+            ? titles.get(entry.link.target.spec)?.title
+            : undefined) ?? targetLabel(entry.link.target)
+        : (entry.from?.title ?? entry.title ?? entry.source ?? "");
+    const coordinate =
+      direction === "out"
+        ? targetLabel(entry.link.target)
+        : `${entry.source}@${short(entry.revision ?? "")}`;
     return (
-      <li key={`${direction}-${linkPhrase(entry.link)}-${entry.from?.spec ?? ""}`}>
-        {target ? (
-          <button
-            type="button"
-            className="hover:text-accent text-left"
-            onClick={() => onOpen(target.spec)}
-          >
+      <li key={`${direction}-${linkPhrase(entry.link)}-${entry.source ?? ""}`}>
+        {open ? (
+          <button type="button" className="hover:text-accent text-left" onClick={() => onOpen(open)}>
             {label}
           </button>
         ) : (
           <span>{label}</span>
         )}
-        <code
-          className="text-mute ml-2 text-2xs"
-          title={targetLabel(direction === "out" ? entry.link.target : { kind: "spec", spec: entry.from!.spec, revision: entry.from!.revision })}
-        >
-          {direction === "out"
-            ? targetLabel(entry.link.target)
-            : `${entry.from!.spec}@${short(entry.from!.revision)}`}
+        <code className="text-mute ml-2 text-2xs" title={coordinate}>
+          {coordinate}
         </code>
       </li>
     );
@@ -736,10 +742,18 @@ function Relations({
   );
 }
 
-function groupLinks(
-  entries: { link: SpecLink; from: SpecView | null }[],
-): [SpecRel, { link: SpecLink; from: SpecView | null }[]][] {
-  const byRel = new Map<SpecRel, { link: SpecLink; from: SpecView | null }[]>();
+/** One row of the relations block. Outgoing rows carry only the link; incoming
+ *  rows additionally carry who asserted it, since that is not on the link. */
+interface LinkEntry {
+  link: SpecLink;
+  from: SpecView | null;
+  title?: string;
+  source?: string;
+  revision?: string;
+}
+
+function groupLinks(entries: LinkEntry[]): [SpecRel, LinkEntry[]][] {
+  const byRel = new Map<SpecRel, LinkEntry[]>();
   for (const entry of entries) {
     byRel.set(entry.link.rel, [...(byRel.get(entry.link.rel) ?? []), entry]);
   }
@@ -1158,6 +1172,7 @@ function SpecReader({
   // an incoming edge the reader hid because its author sat elsewhere would be
   // the one case where "what relies on this" quietly lied.
   const everySpec = useProjectSpecs(spaceId, null).data ?? [];
+  const references = useSpecReferences(spaceId, null).data ?? [];
   const grants = useGrants(spaceId).data ?? [];
   const admin = members.some((member) => member.me && member.role === "admin");
   const view = resource.data;
@@ -1425,7 +1440,14 @@ function SpecReader({
         {/* After the document, not beside it: a relation is something you look
             up once you have read the thing, and a rail of them next to the prose
             competes with the prose for the reader. */}
-        {!past && <Relations view={view} everySpec={everySpec} onOpen={onOpen} />}
+        {!past && (
+          <Relations
+            view={view}
+            everySpec={everySpec}
+            references={references}
+            onOpen={onOpen}
+          />
+        )}
       </article>
     </div>
   );

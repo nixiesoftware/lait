@@ -449,6 +449,10 @@ pub enum IssuesRequest {
     SpecHistory {
         spec: String,
     },
+    SpecReferences {
+        #[serde(default)]
+        project: Option<String>,
+    },
     SpecNew {
         project: String,
         kind: issues::spec::Kind,
@@ -602,6 +606,9 @@ pub enum IssuesResponse {
     SpecRevisions {
         revisions: Vec<issues::spec::Revision>,
     },
+    SpecReferences {
+        references: Vec<issues::spec::SpecReference>,
+    },
     BaselineRevisions {
         revisions: Vec<issues::spec::BaselineRevision>,
     },
@@ -697,6 +704,7 @@ impl IssuesRequest {
             | SpecList { .. }
             | SpecShow { .. }
             | SpecHistory { .. }
+            | SpecReferences { .. }
             | BaselineList { .. }
             | BaselineShow { .. }
             | BaselineHistory { .. }

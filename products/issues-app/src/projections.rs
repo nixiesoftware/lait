@@ -194,7 +194,15 @@ pub fn observation(
             None => planes.extend(state.planes.keys().cloned()),
         }
         *baseline = Some(state.planes);
-        if missed && !planes.contains(&CatalogScope::Docs) {
+        // A changed Body that is not an issue row leaves `missed` set. That used
+        // to mean "ring the row index and hope", which was right while every
+        // non-catalog Body *was* an issue — and became a lie once Specs arrived,
+        // since every spec write then invalidated boards, rows and status too.
+        //
+        // A plane that moved already explains the miss, so the fallback is for
+        // the case where nothing does: an unrecognised Body, where ringing
+        // coarsely is still the honest answer.
+        if missed && planes.is_empty() {
             planes.push(CatalogScope::Docs);
         }
     }

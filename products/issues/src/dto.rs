@@ -1017,6 +1017,10 @@ pub enum CatalogScope {
     Teams,
     Triage,
     Roles,
+    /// Specs and Baselines — the only plane whose contents are not in the
+    /// catalog at all. They are Bodies of their own, so this digests their
+    /// version stamps rather than a region of `CatalogState`.
+    Specs,
     /// The row index: which docs exist, their aliases and seqs, what is deleted.
     Docs,
     /// Issue links and parentage.

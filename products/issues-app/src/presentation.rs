@@ -362,6 +362,31 @@ pub fn render(response: &IssuesResponse, options: PresentationOptions) -> Presen
             }
         }
         IssuesResponse::SpecRevisions { revisions } => render_revisions(&mut stdout, revisions),
+        IssuesResponse::SpecReferences { references } => {
+            if references.is_empty() {
+                line(&mut stdout, "(no typed links)");
+            }
+            for reference in references {
+                let standing = if reference.issued {
+                    " [issued]"
+                } else if reference.head {
+                    ""
+                } else {
+                    " [superseded]"
+                };
+                line(
+                    &mut stdout,
+                    &format!(
+                        "{}@{}{}  {}  {}",
+                        reference.spec,
+                        short_revision(&reference.revision),
+                        standing,
+                        reference.link.rel.as_str(),
+                        target_phrase(&reference.link.target),
+                    ),
+                );
+            }
+        }
         IssuesResponse::BaselineRevisions { revisions } => {
             if revisions.is_empty() {
                 line(&mut stdout, "(no revisions)");
@@ -460,6 +485,18 @@ fn render_packet(output: &mut String, packet: &issues::spec::Packet) {
     }
     for conflict in &packet.conflicts {
         line(output, &format!("conflict: {}", conflict_phrase(conflict)));
+    }
+}
+
+fn target_phrase(target: &issues::spec::Target) -> String {
+    match target {
+        issues::spec::Target::Spec { spec, revision } => {
+            format!("{spec}@{}", short_revision(revision))
+        }
+        issues::spec::Target::Baseline { baseline, revision } => {
+            format!("{baseline}@{}", short_revision(revision))
+        }
+        issues::spec::Target::Issue { issue } => issue.clone(),
     }
 }
 

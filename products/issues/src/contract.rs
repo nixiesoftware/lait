@@ -1243,6 +1243,17 @@ pub enum IssueQuery {
     BaselineHistory {
         baseline: String,
     },
+    /// Every typed Link asserted anywhere in scope, with the standing of the
+    /// revision asserting it.
+    ///
+    /// The whole edge set rather than one document's neighbourhood: incoming
+    /// edges cannot be derived from the target, coverage is a question about all
+    /// of them at once, and answering either one document at a time is a query
+    /// per row. Bounded by revisions × links, which is the same order the Packet
+    /// derivation already walks.
+    SpecReferences {
+        project: Option<String>,
+    },
     /// The deterministic effective brief for one Issue.
     Packet {
         doc: String,

@@ -8,6 +8,7 @@ import {
   diffLines,
   groupByKind,
   holds,
+  incomingFor,
   linkPhrase,
   standing,
   sourcePhrase,
@@ -15,7 +16,14 @@ import {
   transitions,
   verificationGap,
 } from "./specs";
-import type { AssignmentDto, SpecKind, SpecRevision, SpecState, SpecView } from "../types";
+import type {
+  AssignmentDto,
+  SpecKind,
+  SpecReference,
+  SpecRevision,
+  SpecState,
+  SpecView,
+} from "../types";
 
 function spec(
   patch: Partial<SpecView> & { spec?: string; links?: SpecView["body"]["links"] } = {},
@@ -238,8 +246,21 @@ describe("authority", () => {
 describe("verification coverage", () => {
   const requirement = spec({ spec: "spc_req", kind: "requirement", issued: ["rev_head"] });
 
+  const reference = (
+    rel: SpecView["body"]["links"][number]["rel"],
+    standing: { head?: boolean; issued?: boolean } = { head: true },
+  ): SpecReference => ({
+    spec: "spc_proof",
+    revision: "rev_p",
+    kind: "proof",
+    title: "Login test run",
+    link: { rel, target: { kind: "spec", spec: "spc_req", revision: "rev_head" } },
+    head: standing.head ?? false,
+    issued: standing.issued ?? false,
+  });
+
   it("reports a gap only once something is actually in force", () => {
-    expect(verificationGap(requirement, [requirement])).toBe(true);
+    expect(verificationGap(requirement, [])).toBe(true);
     // A draft nobody has issued is a document being written, not a gap.
     expect(verificationGap(spec({ kind: "requirement" }), [])).toBe(false);
     // Guidance is not the kind of thing proof attaches to.
@@ -247,21 +268,31 @@ describe("verification coverage", () => {
   });
 
   it("closes once anything verifies or validates it", () => {
-    const proof = spec({
-      spec: "spc_proof",
-      kind: "proof",
-      links: [{ rel: "verifies", target: { kind: "spec", spec: "spc_req", revision: "rev_head" } }],
-    });
-    expect(verificationGap(requirement, [requirement, proof])).toBe(false);
+    expect(verificationGap(requirement, [reference("verifies")])).toBe(false);
+    expect(verificationGap(requirement, [reference("validates")])).toBe(false);
   });
 
   it("does not count a mere reference as verification", () => {
-    const mention = spec({
-      spec: "spc_guide",
-      kind: "guide",
-      links: [{ rel: "references", target: { kind: "spec", spec: "spc_req", revision: "rev_head" } }],
-    });
-    expect(verificationGap(requirement, [requirement, mention])).toBe(true);
+    expect(verificationGap(requirement, [reference("references")])).toBe(true);
+  });
+
+  /**
+   * The bug the reverse-edge query exists to fix. A Proof whose head dropped the
+   * link still verifies through its issued revision, and a Proof that asserted
+   * one only in a superseded revision does not verify at all — neither is
+   * answerable from head bodies, and both are wrong in the direction that
+   * matters for a coverage indicator.
+   */
+  it("counts the revision that governs, not merely the newest one", () => {
+    expect(verificationGap(requirement, [reference("verifies", { issued: true })])).toBe(false);
+    expect(
+      verificationGap(requirement, [reference("verifies", { head: false, issued: false })]),
+    ).toBe(true);
+  });
+
+  it("gives the same standing rule to incoming edges", () => {
+    expect(incomingFor("spc_req", [reference("verifies")])).toHaveLength(1);
+    expect(incomingFor("spc_req", [reference("verifies", { head: false })])).toHaveLength(0);
   });
 });
 

@@ -604,6 +604,7 @@ impl<'a> IssueRouter<'a> {
                 | Request::SpecList { .. }
                 | Request::SpecShow { .. }
                 | Request::SpecHistory { .. }
+                | Request::SpecReferences { .. }
                 | Request::BaselineHistory { .. }
                 | Request::SpecNew { .. }
                 | Request::SpecRevise { .. }
@@ -1943,6 +1944,19 @@ impl<'a> IssueRouter<'a> {
                     .query(&IssueQuery::SpecHistory { spec })
                     .map_err(Self::effect_err)?;
                 Ok((Response::SpecRevisions { revisions }, false))
+            }
+            Request::SpecReferences { project } => {
+                let project = project
+                    .map(|project| {
+                        snapshot
+                            .resolve_project(&project)
+                            .ok_or_else(|| Response::not_found("no such project"))
+                    })
+                    .transpose()?;
+                let references = self
+                    .query(&IssueQuery::SpecReferences { project })
+                    .map_err(Self::effect_err)?;
+                Ok((Response::SpecReferences { references }, false))
             }
             Request::BaselineHistory { baseline } => {
                 let revisions = self

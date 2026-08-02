@@ -758,6 +758,9 @@ fn parse_spec(verb: &str, m: &ArgMatches) -> Result<IssuesRequest, Failure> {
         "history" => IssuesRequest::SpecHistory {
             spec: req(m, "spec"),
         },
+        "links" => IssuesRequest::SpecReferences {
+            project: opt(m, "project"),
+        },
         "new" => IssuesRequest::SpecNew {
             project: req(m, "project"),
             kind: issues::spec::Kind::parse(&req(m, "kind"))
@@ -1218,6 +1221,10 @@ fn spec_command() -> Command {
         .subcommand(
             leaf("history", "Every revision of one Spec, oldest first.")
                 .arg(pos("spec", "Spec id.")),
+        )
+        .subcommand(
+            leaf("links", "Every typed link asserted in scope, and who asserts it.")
+                .arg(project_option("Filter to a project.")),
         )
         .subcommand(
             leaf("new", "Create a draft Spec.")

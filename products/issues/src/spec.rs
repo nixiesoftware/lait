@@ -576,6 +576,33 @@ pub enum PacketConflict {
     },
 }
 
+/// One typed assertion, as seen from the far end of it.
+///
+/// Links live on the revision that asserts them, so "what verifies this
+/// requirement" is only answerable by looking at every other document — and
+/// specifically at every *revision* of them, not just the heads. The revision
+/// that governs need not be the head, so an edge asserted by an issued
+/// predecessor is live truth that a head-only scan silently loses.
+///
+/// `head` and `issued` describe the asserting revision, which is what lets a
+/// reader tell a current claim from one a superseded revision made and nobody
+/// stands behind any more.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SpecReference {
+    /// The Spec asserting it.
+    pub spec: String,
+    /// The exact revision asserting it.
+    pub revision: String,
+    pub kind: Kind,
+    pub title: String,
+    pub link: Link,
+    /// The asserting revision is a current head.
+    pub head: bool,
+    /// The asserting revision is the effective issued one.
+    pub issued: bool,
+}
+
 /// One exact Spec revision as it appears in an Issue Packet.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]

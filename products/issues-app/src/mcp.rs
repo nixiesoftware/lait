@@ -428,6 +428,11 @@ pub fn tools() -> Vec<McpTool> {
         ),
         tool::<ProjectArgs>("spec_list", "List Specs, optionally by project.", spec_list),
         tool::<SpecArgs>("spec_show", "Read one versioned Spec.", spec_show),
+        tool::<ProjectArgs>(
+            "spec_links",
+            "Every typed link asserted in scope, with the standing of the revision asserting it.",
+            spec_links,
+        ),
         tool::<SpecArgs>(
             "spec_history",
             "Every revision of one Spec, oldest first, with its predecessors.",
@@ -831,6 +836,11 @@ fn spec_show(input: Value) -> Result<CliInvocation, Failure> {
     world(IssuesRequest::SpecShow { spec: a.spec })
 }
 
+fn spec_links(input: Value) -> Result<CliInvocation, Failure> {
+    let a: ProjectArgs = args(input)?;
+    world(IssuesRequest::SpecReferences { project: a.project })
+}
+
 fn spec_history(input: Value) -> Result<CliInvocation, Failure> {
     let a: SpecArgs = args(input)?;
     world(IssuesRequest::SpecHistory { spec: a.spec })
@@ -1114,7 +1124,7 @@ mod tests {
     #[test]
     fn tools_are_package_local_and_emit_world_calls() {
         let tools = tools();
-        assert_eq!(tools.len(), 55);
+        assert_eq!(tools.len(), 56);
         assert!(tools.iter().all(|tool| !tool.name().starts_with("issues_")));
         let invocation = tools
             .iter()
