@@ -111,8 +111,24 @@ covering the seam when someone adds an island tomorrow.
 `crates/runtime/src/internal_tests/convergence_simulation.rs`.
 
 Four peers author concurrently while the network drops, duplicates, reorders
-and partitions; then it heals and the fleet must agree. The schedule comes from
-a seed, so a failure reproduces exactly.
+and partitions; then it heals and the fleet must agree.
+
+**The seed does not replay this one**, and that is measured rather than
+assumed — three consecutive runs of seed 92 produced 101, 96 and 92 commits,
+and different figures again on Linux. Every `Engine` mints a random writer id
+(deliberately: see `fabric::op`), which varies the order
+`Replica::export_material` returns material in, which varies delivery, which
+varies how often the generator is consumed. Two runs stay identical for
+sixteen steps and then part.
+
+So it is a randomised explorer — more seeds means more distinct schedules
+tried, and a failure hands you the assertion rather than a reproduction.
+Replayability needs a seam on `fabric::op::fill_identity` so a simulation can
+supply distinct-but-seeded writer ids; that is the interception madsim does at
+the libc level, it is scoped, and it is not done.
+
+The network simulator below **is** replayable, because its faults are decided
+entirely inside the harness.
 
 Two assertions, because convergence alone is weak — four empty replicas agree
 perfectly. Every commit adds a known delta to a known counter, so the fleet must
@@ -295,6 +311,12 @@ trace of every delivery decision line by line, not by count: two runs that drop
 the same *number* of messages and different messages are not the same run. Its
 companion asserts a different seed diverges, because otherwise the seed could be
 ignored rather than honoured and the first test could not tell.
+
+**Verified across machines**, not just across runs: seed `0xA11CE` produces a
+byte-identical 28-line trace on Windows and on Linux. That is what makes a seed
+shareable — a teammate given one reproduces the run. It holds here because
+every fault decision is made inside `MemNet`, where nothing reaches the OS.
+Contrast T3 above, where the system under test draws its own entropy.
 
 **Delay is not modelled**, deliberately. Drop, duplicate and partition are
 decided synchronously at the delivery point, which is what keeps the decision

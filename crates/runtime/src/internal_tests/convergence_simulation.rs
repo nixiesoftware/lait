@@ -15,13 +15,43 @@
 //! is in an interleaving: this transaction arriving before that one, at this
 //! peer, while that peer was partitioned. There are too many interleavings to
 //! enumerate and no reason to think a hand-picked one is the bad one. So the
-//! schedule is generated from a seed, and the seed is printed on failure —
-//! which makes any failure exactly reproducible, the property the whole
-//! technique rests on (`TigerBeetle`'s VOPR, madsim, turmoil all start here).
+//! schedule is generated from a seed.
+//!
+//! ## The seed does NOT replay this simulation, and that is measured
+//!
+//! It ought to, and the file used to claim it did. Two runs of the same seed on
+//! the same binary produce different schedules — measured at 101, 96 and 92
+//! commits across three consecutive runs, and different again on Linux.
+//!
+//! The cause is not in this file. `Replica::export_material` groups material in
+//! a `BTreeMap` keyed by transaction-commitment hash, and those hashes vary per
+//! run because every `Engine` mints a **random writer id** — deliberately, for
+//! the reason `fabric::op` gives: a derived id would let two processes mint
+//! colliding operation ids, which is silent divergence rather than a detected
+//! equivocation. So export ORDER varies, delivery varies, holdings vary, the
+//! number of exported items varies, and the generator is consumed a different
+//! number of times. Two runs here stay identical for sixteen steps and then
+//! part company.
+//!
+//! So what this is: a randomised explorer that runs many distinct schedules and
+//! fails loudly when one breaks convergence. What it is not, yet: replayable.
+//! A reported failure gives you the assertion, not a reproduction.
+//!
+//! Making it replayable needs the system under test to stop drawing from OS
+//! entropy — a seam on `fabric::op::fill_identity` so a simulation can supply
+//! distinct-but-seeded writer ids. That is exactly the interception madsim
+//! performs at the libc level and S2 found necessary; it is scoped, it is not
+//! done, and pretending otherwise would make every seed printed here a
+//! promise this cannot keep.
+//!
+//! `comms::mem`'s network simulator IS replayable — verified byte-identical
+//! across Windows and Linux — because its faults are decided entirely inside
+//! the harness, where nothing draws from the OS.
 //!
 //! ## Determinism is a claim this file has to earn
 //!
-//! A simulation is only replayable if it has exactly one source of entropy.
+//! A simulation is only replayable if NOTHING it touches draws entropy the
+//! harness does not control. The generator below satisfies its half —
 //! The PRNG below is written out rather than taken as a dependency for that
 //! reason: a crate that seeds itself from the OS, or iterates a `HashMap`,
 //! silently reintroduces the nondeterminism the seed is supposed to remove,
@@ -434,8 +464,10 @@ impl Sim {
 /// One simulation: `steps` scheduled operations, then heal, then assert.
 ///
 /// Returns a description on failure rather than panicking so the caller can
-/// print the seed with it — a failure nobody can replay is most of the value
-/// of this technique thrown away.
+/// print the seed with it. Note what that seed is and is not: it names the
+/// schedule this process generated, and re-running it will NOT regenerate that
+/// schedule — see the module header. It is a label for the report, not a
+/// reproduction.
 fn run(seed: u64, steps: usize) -> Result<Sim, String> {
     let mut sim = Sim::new(seed);
     for _ in 0..steps {
@@ -490,9 +522,9 @@ fn the_fleet_converges_on_a_known_seed() {
 /// Many seeds, shallow. Distinct schedules are what buys coverage here, so
 /// breadth beats depth per unit of time on the per-push tier.
 ///
-/// `LAIT_SIM_SEEDS` raises the count for the nightly tier; the seeds stay
-/// consecutive from a fixed base so a nightly failure names a seed this test
-/// will replay unchanged.
+/// `LAIT_SIM_SEEDS` raises the count for the nightly tier. The seeds stay
+/// consecutive from a fixed base so the SET explored is stable, not so an
+/// individual seed replays — see the module header for why it does not.
 #[test]
 fn the_fleet_converges_across_many_schedules() {
     let count: u64 = std::env::var("LAIT_SIM_SEEDS")
