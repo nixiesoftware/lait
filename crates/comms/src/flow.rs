@@ -21,6 +21,8 @@
 //! and a datagram capacity is a number that may have changed since you last
 //! asked.
 
+use std::time::Duration;
+
 use anyhow::Result;
 use async_trait::async_trait;
 
@@ -149,11 +151,122 @@ pub trait Connection: Send + Sync {
     /// datagram support, which is a refusal rather than an unlimited path.
     fn datagram_capacity(&self) -> Option<usize>;
 
+    /// What the selected path is doing right now.
+    ///
+    /// The default is [`PathQuality::unknown`], and that is the honest answer
+    /// for a transport that keeps no path statistics: a caller reading
+    /// `Unknown` has to degrade rather than assume, which is the behaviour a
+    /// zero would have hidden.
+    fn quality(&self) -> PathQuality {
+        PathQuality::unknown()
+    }
+
     /// Close the connection, telling the peer why in a code it can act on.
     fn close(&self, code: u32, reason: &[u8]);
 
     /// Park until the connection is gone.
     async fn closed(&self);
+}
+
+/// How a connection currently reaches its peer.
+///
+/// The distinction is not diagnostic colour. A direct path is one hop and its
+/// capacity is the two peers' own; a relayed path is two hops through a machine
+/// somebody pays for, and the difference between them is large enough that a
+/// sender choosing a bitrate must know which it is on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PathKind {
+    /// Peer to peer. What holepunching earns.
+    Direct,
+    /// Through a relay — reachable everywhere, at somebody's expense.
+    Relay,
+    /// The transport reports no path, or does not report paths at all.
+    #[default]
+    Unknown,
+}
+
+/// What the connection's selected path is doing, as of this read.
+///
+/// **A snapshot, never a stored value.** Every field here moves with holepunching,
+/// relay fallback and congestion, so a cached one is a number that was true once —
+/// the same rule [`CaretState`] follows in the Live plane, for the same reason.
+///
+/// This exists because a realtime sender has to choose a bitrate, and
+/// [`datagram_capacity`] is not enough to choose one from: it says what fits in
+/// one packet, not what the path will carry per second or how long a frame
+/// takes to arrive. Everything here is an observation the transport already
+/// keeps for its own congestion control; **nothing here is a control.** lait
+/// reads these to decide what to encode, and never to override what QUIC
+/// decides to send.
+///
+/// Every field is optional for the same reason `datagram_capacity` is: an
+/// absent number is a transport declining to answer, which a caller can handle,
+/// and a fabricated one is not.
+///
+/// [`CaretState`]: https://docs.rs/lait
+/// [`datagram_capacity`]: Connection::datagram_capacity
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PathQuality {
+    /// How the selected path reaches the peer.
+    pub via: PathKind,
+    /// How many paths are open at all.
+    ///
+    /// Two means holepunching has succeeded and the relay is still there as a
+    /// fallback — which is a different state from one direct path, and the
+    /// difference is what a probe measuring promotion latency is looking for.
+    pub open_paths: usize,
+    /// Smoothed round-trip time on the selected path.
+    pub rtt: Option<Duration>,
+    /// Bytes the congestion controller will currently allow in flight.
+    ///
+    /// The closest thing to a rate the transport will state. `cwnd / rtt` is a
+    /// throughput estimate a rate controller can start from — a floor to
+    /// believe, not a ceiling to fill.
+    pub congestion_window: Option<u64>,
+    /// Packets declared lost on this path, cumulatively.
+    pub lost_packets: Option<u64>,
+    /// Datagrams sent on this path, cumulatively. The denominator for
+    /// [`lost_packets`](Self::lost_packets).
+    pub sent_packets: Option<u64>,
+    /// Times the congestion controller backed off, cumulatively.
+    pub congestion_events: Option<u64>,
+}
+
+impl PathQuality {
+    /// A transport that reports nothing. Distinct from a path with zeroed
+    /// counters, which is a real path that has lost nothing yet.
+    pub const fn unknown() -> Self {
+        Self {
+            via: PathKind::Unknown,
+            open_paths: 0,
+            rtt: None,
+            congestion_window: None,
+            lost_packets: None,
+            sent_packets: None,
+            congestion_events: None,
+        }
+    }
+
+    /// Loss as a fraction of packets sent, when both halves are known.
+    ///
+    /// `None` rather than zero when nothing has been sent yet: "no loss
+    /// observed" and "no observations" are the same number and different facts,
+    /// and a rate controller that cannot tell them apart ramps into a path it
+    /// has never measured.
+    #[allow(
+        clippy::as_conversions,
+        clippy::arithmetic_side_effects,
+        reason = "a counter-to-float widening guarded against a zero denominator; \
+                  u64 -> f64 has no lossless From and the precision lost past 2^53 \
+                  packets is not a precision a loss ratio needs"
+    )]
+    pub fn loss_ratio(&self) -> Option<f64> {
+        let (lost, sent) = (self.lost_packets?, self.sent_packets?);
+        if sent == 0 {
+            return None;
+        }
+        Some(lost as f64 / sent as f64)
+    }
 }
 
 /// An accepted inbound connection, before any flow has been read.

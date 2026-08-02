@@ -51,6 +51,10 @@ pub mod mem;
 #[cfg(test)]
 mod network_simulation_tests;
 pub mod policy;
+/// Hosting a relay — the server half of [`policy::Network::Local`]. Behind the
+/// `relay` feature, because hosting one is a server role a client never plays.
+#[cfg(feature = "relay")]
+pub mod relay;
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -63,7 +67,7 @@ use mechanics::ids::{DeviceId, SpaceId};
 /// else — no consumer names it, and the module behind these is private.
 pub use iroh::{IrohFactory as DefaultFactory, IrohTransport as DefaultTransport};
 
-pub use flow::{Connection, IncomingConnection, RecvFlow, SendFlow};
+pub use flow::{Connection, IncomingConnection, PathKind, PathQuality, RecvFlow, SendFlow};
 
 /// A peer's stable identity — its ed25519 public key. Same 32 bytes iroh calls an
 /// `EndpointId`; lait names it a `DeviceId` everywhere above the transport edge.

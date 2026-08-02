@@ -4,6 +4,7 @@ members = [
     "crates/mechanics",
     "crates/fabric",
     "crates/comms",
+    "crates/relay",
     "crates/replica",
     "crates/runtime",
     "crates/world-interface",

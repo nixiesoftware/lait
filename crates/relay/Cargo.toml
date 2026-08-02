@@ -1,0 +1,27 @@
+[package]
+name = "lait-relay"
+version = "0.6.1"
+edition = "2021"
+rust-version = "1.91"
+description = "Stand up a relay for a lait space. The server half of LAIT_NETWORK=local."
+license = "MIT OR Apache-2.0"
+# Not published, for the same reason the crates it sits on are not: this is one
+# of lait's internal boundaries made runnable, not a library surface.
+publish = false
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+
+[[bin]]
+name = "lait-relay"
+path = "src/main.rs"
+
+[dependencies]
+# The whole binary is a command-line front for `comms::relay`. It names no
+# network type of its own — the seal stays in `crates/comms/Cargo.toml`, which is
+# the point of putting the server there rather than here.
+comms = { path = "../comms", features = ["relay"] }
+
+anyhow = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
