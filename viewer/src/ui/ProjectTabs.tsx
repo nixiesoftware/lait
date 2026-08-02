@@ -1,10 +1,15 @@
-import { PROJECT_VIEW_LABEL, type ProjectView } from "../core/registry";
+import { isIssueMode, PROJECT_VIEW_LABEL, type ProjectView } from "../core/registry";
 import { Button } from "./primitives";
 
 /** The faces a project offers as tabs. Board and Calendar are absent on purpose:
  *  they are LAYOUTS of Issues, chosen beside grouping and ordering, so they live
- *  behind the display control rather than as destinations of their own. */
-const TABS: readonly ProjectView[] = ["overview", "activity", "list"];
+ *  behind the display control rather than as destinations of their own.
+ *
+ *  Specs earns a tab by the same rule that denies Board one: it is a different
+ *  NOUN with its own query, not another drawing of the issues. It sits beside
+ *  Issues because that is what it is beside — the work, and what the work is
+ *  meant to satisfy. */
+const TABS: readonly ProjectView[] = ["overview", "activity", "list", "specs"];
 
 /**
  * The project's tab strip.
@@ -40,7 +45,7 @@ export function ProjectTabs({
         // Board and Calendar are Issues wearing a different layout, so the
         // Issues tab stays lit under all three. Letting it go dark on a board
         // would say you had left the issues, when you are looking at them.
-        const current = tab === "list" ? view !== "overview" && view !== "activity" : view === tab;
+        const current = tab === "list" ? isIssueMode(view) : view === tab;
         return (
           <Button
             key={tab}

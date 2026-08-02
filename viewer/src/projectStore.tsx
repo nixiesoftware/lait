@@ -26,6 +26,8 @@ import type {
   Row,
   SpaceDoorbell,
   SpaceRequest,
+  SpecKind,
+  SpecView,
   StatusInfo,
   WorldRequest,
 } from "./types";
@@ -43,6 +45,8 @@ export const projectKeys = {
   graph: (space: string, reff: string) => `${prefix(space)}graph:${part(reff)}`,
   history: (space: string, reff: string) => `${prefix(space)}history:${part(reff)}`,
   milestones: (space: string, project: string) => `${prefix(space)}milestones:${part(project)}`,
+  specs: (space: string, project: string | null) => `${prefix(space)}specs:${part(project)}`,
+  spec: (space: string, spec: string) => `${prefix(space)}spec:${part(spec)}`,
   updates: (space: string, project: string) => `${prefix(space)}updates:${part(project)}`,
   labels: (space: string) => `${prefix(space)}labels`,
   members: (space: string) => `${prefix(space)}members`,
@@ -398,6 +402,92 @@ export class ProjectViewerStore {
       // `project` is the `prj_` id the ring matches on, so posting in ENG does
       // not refetch DSN's feed.
     }, { catalog: [{ plane: "updates", projectId: project }] }, force);
+  }
+
+  ensureSpecs(space: string, project: string | null, force = false): Promise<SpecView[]> {
+    return this.load(projectKeys.specs(space, project), async () => {
+      const result = await this.rpc(space, { cmd: "spec_list", project });
+      if (result.kind !== "specs") throw new Error("Expected specs response");
+      for (const spec of result.specs) this.resources.set(projectKeys.spec(space, spec.spec), spec);
+      return result.specs;
+      // `docs`, and it is the honest answer rather than a lazy one. A Spec is
+      // its own Body — not a catalog plane, not an issue row — so when one is
+      // written the daemon cannot name it in `dirty_by_project` (that index maps
+      // issue docs to projects) and falls through to the plane digest, which
+      // reports the row index as moved. Coarse: issuing a Spec also refetches
+      // this register in a project it has nothing to do with. Correct, though,
+      // and over-fetching a list is a cost; a register that silently stopped
+      // updating when a peer wrote is a lie. It sharpens when Specs get a plane
+      // of their own.
+    }, { catalog: ["docs"] }, force);
+  }
+
+  ensureSpec(space: string, spec: string, force = false): Promise<SpecView> {
+    return this.load(projectKeys.spec(space, spec), async () => {
+      const result = await this.rpc(space, { cmd: "spec_show", spec });
+      if (result.kind !== "spec") throw new Error("Expected spec response");
+      return result.spec;
+      // Same plane as the register above, for the same reason — and the reader
+      // must have its own resource rather than picking its row out of the list:
+      // a deep link opens on a Spec before any register has loaded.
+    }, { catalog: ["docs"] }, force);
+  }
+
+  /**
+   * Create a Spec, and land its view where the reader will look for it.
+   *
+   * The reply is the new Spec's own view, so the reader does not have to fetch
+   * what it was just handed. The register is refreshed rather than patched: it
+   * is a server-ordered list, and inserting locally would guess an order the
+   * next doorbell overwrites.
+   */
+  async createSpec(
+    space: string,
+    project: string,
+    kind: SpecKind,
+    title: string,
+  ): Promise<SpecView> {
+    const result = await this.rpc(space, { cmd: "spec_new", project, kind, title });
+    if (result.kind !== "spec") throw new Error("Expected spec response");
+    this.resources.set(projectKeys.spec(space, result.spec.spec), result.spec);
+    await this.refreshSpecRegisters(space);
+    return result.spec;
+  }
+
+  /**
+   * Revise a Spec — the only way its content changes.
+   *
+   * `expected` is the head the edit was written against, and the engine rejects
+   * anything else as a conflict rather than merging. Storing the reply matters
+   * for more than freshness: the *next* edit needs the revision this one just
+   * created, and a reader still holding the old head would write against a
+   * predecessor and be refused.
+   */
+  async reviseSpec(
+    space: string,
+    spec: string,
+    expected: string,
+    patch: { title?: string; text?: string },
+  ): Promise<SpecView> {
+    const result = await this.rpc(space, { cmd: "spec_revise", spec, expected, ...patch });
+    if (result.kind !== "spec") throw new Error("Expected spec response");
+    this.resources.set(projectKeys.spec(space, spec), result.spec);
+    await this.refreshSpecRegisters(space);
+    return result.spec;
+  }
+
+  /**
+   * Re-read whichever registers are on screen.
+   *
+   * Not `ensureSpecs(space, project)` — a register is keyed by the project
+   * handle the *caller* had (a KEY, or `null` for the whole space), and a Spec
+   * view reports the resolved `prj_` id, which is a third string. Refreshing by
+   * what is registered sidesteps having to reconcile them.
+   */
+  private refreshSpecRegisters(space: string): Promise<void> {
+    return this.refreshActive(
+      [...this.loaders.keys()].filter((key) => key.startsWith(`${prefix(space)}specs:`)),
+    );
   }
 
   ensureLabels(space: string, force = false): Promise<LabelDto[]> {
@@ -778,6 +868,38 @@ export function useProjectMilestones(
       [projectId, space, store],
     ),
   );
+}
+
+/**
+ * A project's Specs, live.
+ *
+ * Keyed on the project **KEY**, unlike milestones — `spec_list` resolves a
+ * project reference the way every other command does, and the register knows the
+ * key it is drawing. `null` is the whole space, which is what the request means
+ * by an absent project rather than a placeholder for one we could not find.
+ */
+export function useProjectSpecs(
+  space: string,
+  project: string | null,
+): ResourceSnapshot<SpecView[]> {
+  const store = useProjectViewerStore();
+  return useWorldResource<SpecView[]>(
+    projectKeys.specs(space, project),
+    useCallback(() => store.ensureSpecs(space, project), [project, space, store]),
+  );
+}
+
+/** One Spec, live — the reader's own resource, so a deep link does not wait on
+ *  a register it may never draw. */
+export function useSpec(space: string, spec: string | null): ResourceSnapshot<SpecView> {
+  const store = useProjectViewerStore();
+  const load = useCallback(
+    () => store.ensureSpec(space, spec ?? ""),
+    [space, spec, store],
+  );
+  // No spec open parks on a key nothing fetches, rather than asking the daemon
+  // about the empty string.
+  return useWorldResource<SpecView>(projectKeys.spec(space, spec ?? "_none"), spec ? load : undefined);
 }
 
 /** A project's status-update feed, live. Same id-not-key rule as above. */

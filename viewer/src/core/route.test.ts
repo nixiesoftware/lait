@@ -111,6 +111,35 @@ describe("viewer routes", () => {
     ).toBe("/spaces/ws_1/my-issues");
   });
 
+  it("round-trips an open spec under its project's register", () => {
+    const href = formatRoute({
+      spaceId: "ws_1",
+      project: "WEB",
+      view: "specs",
+      issue: null,
+      spec: "spc_01JV0IUE",
+    });
+    expect(href).toBe("/spaces/ws_1/projects/WEB/specs?spec=spc_01JV0IUE");
+    expect(parseRoute(new URL(href, "http://lait.local"))).toEqual({
+      spaceId: "ws_1",
+      project: "WEB",
+      view: "specs",
+      issue: null,
+      spec: "spc_01JV0IUE",
+    });
+  });
+
+  it("does not carry a spec selection onto surfaces that cannot display it", () => {
+    // The key is absent rather than null when nothing is open, so a register
+    // with no document open is the same route as one that never had a spec.
+    expect(
+      parseRoute({ pathname: "/spaces/ws_1/projects/WEB/issues", search: "?spec=spc_1" }),
+    ).toEqual({ spaceId: "ws_1", project: "WEB", view: "list", issue: null });
+    expect(
+      formatRoute({ spaceId: "ws_1", project: "WEB", view: "list", issue: null, spec: "spc_1" }),
+    ).toBe("/spaces/ws_1/projects/WEB/issues");
+  });
+
   it("redirects legacy members routes into the settings shell", () => {
     expect(
       parseRoute({ pathname: "/spaces/ws_1/members", search: "?project=WEB" }),

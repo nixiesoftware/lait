@@ -64,6 +64,19 @@ lait issues packet ENG-42
 The same operations and typed schemas are exposed by the Issues application
 protocol and MCP tools. The browser issue detail renders the effective Packet.
 
+## Web
+
+A project's Specs are a destination of their own, at
+`/spaces/:space/projects/:project/specs`, with an open document at `?spec=spc_…`.
+
+The surface draws what has happened to a document and nothing else. Today that
+is its kind, title, body and author: a Spec is created, read, and revised there,
+and each commit writes a new immutable revision against the head the reader was
+showing. Lifecycle state, the revision trail, exact coordinates, Baselines and
+traceability are real facts in the engine that this surface does not yet draw —
+each arrives with the affordance that reads it, rather than as a column reserved
+for a document that has not entered it.
+
 This is a schema cutoff. The Spec and Baseline Bodies begin at their current
 schema; there is no legacy markdown importer, compatibility adapter, or staged
 migration path.
