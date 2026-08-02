@@ -695,13 +695,17 @@ fn validate_spec_links(ctx: &Context<'_>, links: &[crate::spec::Link]) -> Result
 fn packet(ctx: &Context<'_>, doc: &str) -> Result<crate::spec::Packet, Rejection> {
     let issue = issue_state(ctx, doc).ok_or(Rejection::InvalidRequest)?;
     let specs = all_specs(ctx);
-    let mut exact: BTreeMap<(String, String), (&crate::spec::Revision, String, bool)> =
-        BTreeMap::new();
+    let mut exact: BTreeMap<
+        (String, String),
+        (&crate::spec::Revision, crate::spec::PacketSource, bool),
+    > = BTreeMap::new();
     let mut conflicts = Vec::new();
 
     if let Some(binding) = &issue.baseline {
         let Some(baseline) = baseline_state(ctx, &binding.baseline) else {
-            conflicts.push(format!("missing baseline {}", binding.baseline));
+            conflicts.push(crate::spec::PacketConflict::MissingBaseline {
+                baseline: binding.baseline.clone(),
+            });
             return Ok(crate::spec::Packet {
                 issue: doc.into(),
                 baseline: issue.baseline,
@@ -713,10 +717,10 @@ fn packet(ctx: &Context<'_>, doc: &str) -> Result<crate::spec::Packet, Rejection
             });
         };
         let Some(revision) = baseline.revision(&binding.revision) else {
-            conflicts.push(format!(
-                "missing baseline revision {}@{}",
-                binding.baseline, binding.revision
-            ));
+            conflicts.push(crate::spec::PacketConflict::MissingBaselineRevision {
+                baseline: binding.baseline.clone(),
+                revision: binding.revision.clone(),
+            });
             return Ok(crate::spec::Packet {
                 issue: doc.into(),
                 baseline: issue.baseline,
@@ -728,10 +732,10 @@ fn packet(ctx: &Context<'_>, doc: &str) -> Result<crate::spec::Packet, Rejection
             });
         };
         if revision.body.state != crate::spec::State::Issued {
-            conflicts.push(format!(
-                "baseline {}@{} is not issued",
-                binding.baseline, binding.revision
-            ));
+            conflicts.push(crate::spec::PacketConflict::BaselineNotIssued {
+                baseline: binding.baseline.clone(),
+                revision: binding.revision.clone(),
+            });
         }
         for member in &revision.body.members {
             let Some(spec) = specs.iter().find(|candidate| {
@@ -740,19 +744,27 @@ fn packet(ctx: &Context<'_>, doc: &str) -> Result<crate::spec::Packet, Rejection
                     .first()
                     .is_some_and(|revision| revision.body.spec == member.spec)
             }) else {
-                conflicts.push(format!("missing spec {}", member.spec));
+                conflicts.push(crate::spec::PacketConflict::MissingSpec {
+                    spec: member.spec.clone(),
+                });
                 continue;
             };
             let Some(revision) = spec.revision(&member.revision) else {
-                conflicts.push(format!(
-                    "missing spec revision {}@{}",
-                    member.spec, member.revision
-                ));
+                conflicts.push(crate::spec::PacketConflict::MissingSpecRevision {
+                    spec: member.spec.clone(),
+                    revision: member.revision.clone(),
+                });
                 continue;
             };
             exact.insert(
                 (member.spec.clone(), member.revision.clone()),
-                (revision, format!("baseline {}", binding.baseline), false),
+                (
+                    revision,
+                    crate::spec::PacketSource::Baseline {
+                        baseline: binding.baseline.clone(),
+                    },
+                    false,
+                ),
             );
         }
     }
@@ -768,7 +780,7 @@ fn packet(ctx: &Context<'_>, doc: &str) -> Result<crate::spec::Packet, Rejection
                 }) {
                     exact.insert(
                         (revision.body.spec.clone(), revision.revision.clone()),
-                        (revision, "direct".into(), false),
+                        (revision, crate::spec::PacketSource::Direct, false),
                     );
                 }
             }
@@ -783,7 +795,7 @@ fn packet(ctx: &Context<'_>, doc: &str) -> Result<crate::spec::Packet, Rejection
                         .first()
                         .map(|revision| revision.body.spec.clone())
                         .unwrap_or_else(|| "unknown".into());
-                    conflicts.push(format!("issued spec conflict {id}"));
+                    conflicts.push(crate::spec::PacketConflict::IssuedSpecConflict { spec: id });
                 }
             }
             crate::spec::Issued::None => {}
@@ -815,19 +827,20 @@ fn packet(ctx: &Context<'_>, doc: &str) -> Result<crate::spec::Packet, Rejection
                     .find_map(|candidate| candidate.revision(target_revision))
                     .filter(|candidate| candidate.body.spec == *spec)
                 else {
-                    conflicts.push(format!(
-                        "missing incorporated spec {spec}@{target_revision}"
-                    ));
+                    conflicts.push(crate::spec::PacketConflict::MissingIncorporated {
+                        spec: spec.clone(),
+                        revision: target_revision.clone(),
+                    });
                     continue;
                 };
                 exact.insert(
                     (spec.clone(), target_revision.clone()),
                     (
                         target,
-                        format!(
-                            "incorporated by {}@{}",
-                            revision.body.spec, revision.revision
-                        ),
+                        crate::spec::PacketSource::Incorporated {
+                            spec: revision.body.spec.clone(),
+                            revision: revision.revision.clone(),
+                        },
                         true,
                     ),
                 );
@@ -4202,6 +4215,27 @@ impl World for IssuesWorld {
                 let spec = spec_state(ctx, &spec).ok_or(Rejection::InvalidRequest)?;
                 let view = spec_view(&spec).ok_or(Rejection::InvalidRequest)?;
                 Ok(projection(serde_json::to_vec(&view).expect("spec json")))
+            }
+            IssueQuery::SpecHistory { spec } => {
+                let spec = spec_state(ctx, &spec).ok_or(Rejection::InvalidRequest)?;
+                // Oldest first. `Spec::from_view` sorts by revision id, which is
+                // a stable order but not a readable one; predecessors give the
+                // real one, and a client that wants the DAG still has it.
+                let revisions = crate::spec::ordered(&spec.revisions, |revision| {
+                    (&revision.revision, &revision.predecessors)
+                });
+                Ok(projection(
+                    serde_json::to_vec(&revisions).expect("spec history json"),
+                ))
+            }
+            IssueQuery::BaselineHistory { baseline } => {
+                let baseline = baseline_state(ctx, &baseline).ok_or(Rejection::InvalidRequest)?;
+                let revisions = crate::spec::ordered(&baseline.revisions, |revision| {
+                    (&revision.revision, &revision.predecessors)
+                });
+                Ok(projection(
+                    serde_json::to_vec(&revisions).expect("baseline history json"),
+                ))
             }
             IssueQuery::Baselines { project } => {
                 let mut baselines: Vec<crate::spec::BaselineView> = all_baselines(ctx)

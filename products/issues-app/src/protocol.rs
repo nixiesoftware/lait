@@ -446,6 +446,9 @@ pub enum IssuesRequest {
     SpecShow {
         spec: String,
     },
+    SpecHistory {
+        spec: String,
+    },
     SpecNew {
         project: String,
         kind: issues::spec::Kind,
@@ -480,6 +483,9 @@ pub enum IssuesRequest {
         project: Option<String>,
     },
     BaselineShow {
+        baseline: String,
+    },
+    BaselineHistory {
         baseline: String,
     },
     BaselineNew {
@@ -593,6 +599,12 @@ pub enum IssuesResponse {
     Text {
         text: String,
     },
+    SpecRevisions {
+        revisions: Vec<issues::spec::Revision>,
+    },
+    BaselineRevisions {
+        revisions: Vec<issues::spec::BaselineRevision>,
+    },
     /// Named rather than flattened, unlike its Baseline and Packet neighbours.
     /// This enum is internally tagged on `kind` and a `SpecView` carries a
     /// `kind` of its own, so a newtype variant would emit the key twice: Rust
@@ -684,8 +696,10 @@ impl IssuesRequest {
             | WorkflowValidate { .. }
             | SpecList { .. }
             | SpecShow { .. }
+            | SpecHistory { .. }
             | BaselineList { .. }
             | BaselineShow { .. }
+            | BaselineHistory { .. }
             | Packet { .. } => Access::Query,
             IssueNew { .. }
             | IssueEdit { .. }

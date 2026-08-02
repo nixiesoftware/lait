@@ -361,6 +361,24 @@ pub fn render(response: &IssuesResponse, options: PresentationOptions) -> Presen
                 );
             }
         }
+        IssuesResponse::SpecRevisions { revisions } => render_revisions(&mut stdout, revisions),
+        IssuesResponse::BaselineRevisions { revisions } => {
+            if revisions.is_empty() {
+                line(&mut stdout, "(no revisions)");
+            }
+            for revision in revisions {
+                line(
+                    &mut stdout,
+                    &format!(
+                        "{}  {}  [{}]  {} member(s)",
+                        short_revision(&revision.revision),
+                        revision.body.name,
+                        revision.body.state.as_str(),
+                        revision.body.members.len(),
+                    ),
+                );
+            }
+        }
         IssuesResponse::Packet(packet) => render_packet(&mut stdout, packet),
         IssuesResponse::Error { message, .. } => {
             line(&mut stderr, &format!("error: {message}"));
@@ -432,13 +450,75 @@ fn render_packet(output: &mut String, packet: &issues::spec::Packet) {
                 output,
                 &format!(
                     "  {}@{}  {}  ({})",
-                    spec.spec, spec.revision, spec.title, spec.source
+                    spec.spec,
+                    spec.revision,
+                    spec.title,
+                    source_phrase(&spec.source)
                 ),
             );
         }
     }
     for conflict in &packet.conflicts {
-        line(output, &format!("conflict: {conflict}"));
+        line(output, &format!("conflict: {}", conflict_phrase(conflict)));
+    }
+}
+
+/// The terminal's wording for a Packet source. The wire carries the typed fact;
+/// this is one presentation of it, and the browser has its own.
+fn source_phrase(source: &issues::spec::PacketSource) -> String {
+    match source {
+        issues::spec::PacketSource::Baseline { baseline } => format!("baseline {baseline}"),
+        issues::spec::PacketSource::Direct => "direct".into(),
+        issues::spec::PacketSource::Incorporated { spec, revision } => {
+            format!("incorporated by {spec}@{revision}")
+        }
+    }
+}
+
+fn conflict_phrase(conflict: &issues::spec::PacketConflict) -> String {
+    match conflict {
+        issues::spec::PacketConflict::MissingBaseline { baseline } => {
+            format!("missing baseline {baseline}")
+        }
+        issues::spec::PacketConflict::MissingBaselineRevision { baseline, revision } => {
+            format!("missing baseline revision {baseline}@{revision}")
+        }
+        issues::spec::PacketConflict::BaselineNotIssued { baseline, revision } => {
+            format!("baseline {baseline}@{revision} is not issued")
+        }
+        issues::spec::PacketConflict::MissingSpec { spec } => format!("missing spec {spec}"),
+        issues::spec::PacketConflict::MissingSpecRevision { spec, revision } => {
+            format!("missing spec revision {spec}@{revision}")
+        }
+        issues::spec::PacketConflict::IssuedSpecConflict { spec } => {
+            format!("issued spec conflict {spec}")
+        }
+        issues::spec::PacketConflict::MissingIncorporated { spec, revision } => {
+            format!("missing incorporated spec {spec}@{revision}")
+        }
+    }
+}
+
+fn render_revisions(output: &mut String, revisions: &[issues::spec::Revision]) {
+    if revisions.is_empty() {
+        line(output, "(no revisions)");
+    }
+    for revision in revisions {
+        line(
+            output,
+            &format!(
+                "{}  {}  [{}]  {}",
+                short_revision(&revision.revision),
+                revision.body.title,
+                revision.body.state.as_str(),
+                revision
+                    .predecessors
+                    .iter()
+                    .map(|predecessor| short_revision(predecessor))
+                    .collect::<Vec<_>>()
+                    .join("+"),
+            ),
+        );
     }
 }
 

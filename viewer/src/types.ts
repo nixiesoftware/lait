@@ -226,13 +226,49 @@ export interface BaselineView {
   baseline: string; project: string; name: string; state: SpecState;
   revision: string; heads: string[]; issued: string[]; body: BaselineBody;
 }
+/** One immutable revision and the revisions it descends from. */
+export interface SpecRevision {
+  revision: string;
+  predecessors: string[];
+  body: SpecBody;
+}
+export interface BaselineRevisionDto {
+  revision: string;
+  predecessors: string[];
+  body: BaselineBody;
+}
+
+/**
+ * How an exact revision reached a Packet — `spec.rs` `PacketSource`.
+ *
+ * Typed rather than prose because the reader has to act on the difference: an
+ * incorporated Guide lands in the governing set, and the only thing that keeps
+ * it from reading as an order is being able to say what pulled it in.
+ */
+export type PacketSource =
+  | { route: "baseline"; baseline: string }
+  | { route: "direct" }
+  | { route: "incorporated"; spec: string; revision: string };
+
+/** Why a Packet is not whole — `spec.rs` `PacketConflict`. Distinct variants
+ *  because "missing" waits for a sync and "not issued" waits for a person. */
+export type PacketConflict =
+  | { reason: "missing_baseline"; baseline: string }
+  | { reason: "missing_baseline_revision"; baseline: string; revision: string }
+  | { reason: "baseline_not_issued"; baseline: string; revision: string }
+  | { reason: "missing_spec"; spec: string }
+  | { reason: "missing_spec_revision"; spec: string; revision: string }
+  | { reason: "issued_spec_conflict"; spec: string }
+  | { reason: "missing_incorporated"; spec: string; revision: string };
+
 export interface PacketSpec {
   spec: string; revision: string; kind: SpecKind; title: string; state: SpecState;
-  source: string; links: SpecLink[];
+  source: PacketSource; links: SpecLink[];
 }
 export interface Packet {
   issue: string; baseline?: BaselineRef | null; governing: PacketSpec[];
-  guidance: PacketSpec[]; proof: PacketSpec[]; record: PacketSpec[]; conflicts: string[];
+  guidance: PacketSpec[]; proof: PacketSpec[]; record: PacketSpec[];
+  conflicts: PacketConflict[];
 }
 
 /** Attachment metadata on an issue (CREATE-5) — payloads via `attachment_get`. */
@@ -783,6 +819,9 @@ export type Request =
   | { cmd: "workflow_set"; project: string; expect_heads: string[]; body_json: string }
   | { cmd: "spec_list"; project?: string | null }
   | { cmd: "spec_show"; spec: string }
+  /** Reply is `spec_revisions` — the whole DAG, oldest first. */
+  | { cmd: "spec_history"; spec: string }
+  | { cmd: "baseline_history"; baseline: string }
   | { cmd: "spec_new"; project: string; kind: SpecKind; title: string; text?: string; links?: SpecLink[] }
   | { cmd: "spec_revise"; spec: string; expected: string; title?: string | null; text?: string | null; links?: SpecLink[] | null }
   | { cmd: "spec_state"; spec: string; expected: string; state: SpecState }
@@ -889,6 +928,8 @@ export type Response =
    *  duplicate, so the reply would arrive claiming to be a `requirement`. */
   | { kind: "spec"; spec: SpecView }
   | { kind: "specs"; specs: SpecView[] }
+  | { kind: "spec_revisions"; revisions: SpecRevision[] }
+  | { kind: "baseline_revisions"; revisions: BaselineRevisionDto[] }
   | ({ kind: "baseline" } & BaselineView)
   | { kind: "baselines"; baselines: BaselineView[] }
   | ({ kind: "packet" } & Packet)

@@ -603,6 +603,8 @@ impl<'a> IssueRouter<'a> {
                 | Request::WorkflowSet { .. }
                 | Request::SpecList { .. }
                 | Request::SpecShow { .. }
+                | Request::SpecHistory { .. }
+                | Request::BaselineHistory { .. }
                 | Request::SpecNew { .. }
                 | Request::SpecRevise { .. }
                 | Request::SpecState { .. }
@@ -1935,6 +1937,18 @@ impl<'a> IssueRouter<'a> {
                     },
                     false,
                 ))
+            }
+            Request::SpecHistory { spec } => {
+                let revisions = self
+                    .query(&IssueQuery::SpecHistory { spec })
+                    .map_err(Self::effect_err)?;
+                Ok((Response::SpecRevisions { revisions }, false))
+            }
+            Request::BaselineHistory { baseline } => {
+                let revisions = self
+                    .query(&IssueQuery::BaselineHistory { baseline })
+                    .map_err(Self::effect_err)?;
+                Ok((Response::BaselineRevisions { revisions }, false))
             }
             Request::SpecNew {
                 project,

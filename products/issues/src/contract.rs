@@ -1221,12 +1221,26 @@ pub enum IssueQuery {
     Spec {
         spec: String,
     },
+    /// Every revision of one Spec, with its predecessors and its body.
+    ///
+    /// The whole DAG, not a page of it: a client cannot show which revision
+    /// governs, compare two heads, or find their common ancestor from a view
+    /// that only ever carries the newest body — and a Spec's history is bounded
+    /// by how often people revise a document, not by machine traffic.
+    SpecHistory {
+        spec: String,
+    },
     /// Every Baseline, optionally restricted to one project.
     Baselines {
         project: Option<String>,
     },
     /// One Baseline including its current heads.
     Baseline {
+        baseline: String,
+    },
+    /// Every revision of one Baseline — the same argument as [`Self::SpecHistory`],
+    /// and additionally what a pre-issue compare of member sets reads.
+    BaselineHistory {
         baseline: String,
     },
     /// The deterministic effective brief for one Issue.

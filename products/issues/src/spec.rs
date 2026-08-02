@@ -519,6 +519,63 @@ pub struct BaselineView {
     pub body: BaselineBody,
 }
 
+/// How an exact revision reached a Packet.
+///
+/// A typed fact rather than a sentence, because a client has to *act* on the
+/// difference: material pinned by a Baseline, material a Spec pulled in by
+/// incorporation, and material aimed at one Issue directly are three different
+/// claims about why this governs, and the reader must be able to say which
+/// without parsing prose that a later reword would silently break.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "route", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PacketSource {
+    /// Pinned by the Baseline the Issue binds.
+    Baseline { baseline: String },
+    /// An issued Spec that governs this Issue by its own `governs` Link.
+    Direct,
+    /// Pulled in by an exact `incorporates` Link on another revision in the set.
+    Incorporated { spec: String, revision: String },
+}
+
+/// Why a Packet is not whole.
+///
+/// Each variant is a different remedy — a missing Body will arrive with a sync,
+/// an unissued Baseline needs issuing, concurrent issued revisions need a
+/// resolution — so a client that has to tell them apart cannot be handed one
+/// string. `missing` and `not issued` in particular are the difference between
+/// "wait" and "act".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "reason", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PacketConflict {
+    MissingBaseline {
+        baseline: String,
+    },
+    MissingBaselineRevision {
+        baseline: String,
+        revision: String,
+    },
+    BaselineNotIssued {
+        baseline: String,
+        revision: String,
+    },
+    MissingSpec {
+        spec: String,
+    },
+    MissingSpecRevision {
+        spec: String,
+        revision: String,
+    },
+    /// Concurrent issued revisions of a Spec that governs this Issue. Nothing
+    /// is effective until they are resolved.
+    IssuedSpecConflict {
+        spec: String,
+    },
+    MissingIncorporated {
+        spec: String,
+        revision: String,
+    },
+}
+
 /// One exact Spec revision as it appears in an Issue Packet.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -528,7 +585,7 @@ pub struct PacketSpec {
     pub kind: Kind,
     pub title: String,
     pub state: State,
-    pub source: String,
+    pub source: PacketSource,
     #[serde(default)]
     pub links: Vec<Link>,
 }
@@ -549,7 +606,7 @@ pub struct Packet {
     #[serde(default)]
     pub record: Vec<PacketSpec>,
     #[serde(default)]
-    pub conflicts: Vec<String>,
+    pub conflicts: Vec<PacketConflict>,
 }
 
 pub fn build_revision(mut body: Body, mut predecessors: Vec<[u8; 32]>) -> Result<Revision, String> {
@@ -669,6 +726,50 @@ fn preimage(id: &str, predecessors: &[[u8; 32]], body: &[u8]) -> Result<Vec<u8>,
     out.extend_from_slice(&body_len.to_be_bytes());
     out.extend_from_slice(body);
     Ok(out)
+}
+
+/// Every revision, predecessors before successors.
+///
+/// The stored order is by revision id, which is stable but arbitrary — ids are
+/// content hashes, so "sorted" says nothing about what came first. A rail that
+/// listed them that way would show a document's history shuffled. Ties inside a
+/// generation still fall back to the id, so concurrent branches interleave
+/// deterministically rather than by whatever the map iterated.
+pub fn ordered<'a, T, F>(items: &'a [T], parts: F) -> Vec<&'a T>
+where
+    F: Fn(&T) -> (&String, &Vec<String>),
+{
+    let known: BTreeSet<&str> = items.iter().map(|item| parts(item).0.as_str()).collect();
+    let mut pending: Vec<&T> = items.iter().collect();
+    pending.sort_by(|a, b| parts(a).0.cmp(parts(b).0));
+    let mut placed: BTreeSet<&str> = BTreeSet::new();
+    let mut out: Vec<&T> = Vec::with_capacity(items.len());
+    while !pending.is_empty() {
+        let mut deferred: Vec<&T> = Vec::new();
+        let before = out.len();
+        for item in pending {
+            let (id, predecessors) = parts(item);
+            // A predecessor this store does not hold cannot be waited for. It
+            // is a partial replica, not a broken order.
+            let ready = predecessors.iter().all(|predecessor| {
+                !known.contains(predecessor.as_str()) || placed.contains(predecessor.as_str())
+            });
+            if ready {
+                placed.insert(id.as_str());
+                out.push(item);
+            } else {
+                deferred.push(item);
+            }
+        }
+        if out.len() == before {
+            // Predecessors are content hashes, so a cycle cannot be authored —
+            // but a corrupt store must not spin here. Emit the rest in id order.
+            out.extend(deferred);
+            break;
+        }
+        pending = deferred;
+    }
+    out
 }
 
 fn heads<'a, T, F>(items: &'a [T], parts: F) -> Vec<&'a T>

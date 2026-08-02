@@ -755,6 +755,9 @@ fn parse_spec(verb: &str, m: &ArgMatches) -> Result<IssuesRequest, Failure> {
         "show" => IssuesRequest::SpecShow {
             spec: req(m, "spec"),
         },
+        "history" => IssuesRequest::SpecHistory {
+            spec: req(m, "spec"),
+        },
         "new" => IssuesRequest::SpecNew {
             project: req(m, "project"),
             kind: issues::spec::Kind::parse(&req(m, "kind"))
@@ -793,6 +796,9 @@ fn parse_spec(verb: &str, m: &ArgMatches) -> Result<IssuesRequest, Failure> {
 fn parse_baseline(verb: &str, m: &ArgMatches) -> Result<IssuesRequest, Failure> {
     Ok(match verb {
         "show" => IssuesRequest::BaselineShow {
+            baseline: req(m, "baseline"),
+        },
+        "history" => IssuesRequest::BaselineHistory {
             baseline: req(m, "baseline"),
         },
         "new" => IssuesRequest::BaselineNew {
@@ -1210,6 +1216,10 @@ fn spec_command() -> Command {
         .subcommand(leaf("ls", "List Specs.").arg(project_option("Filter to a project.")))
         .subcommand(leaf("show", "Show one Spec.").arg(pos("spec", "Spec id.")))
         .subcommand(
+            leaf("history", "Every revision of one Spec, oldest first.")
+                .arg(pos("spec", "Spec id.")),
+        )
+        .subcommand(
             leaf("new", "Create a draft Spec.")
                 .arg(pos("project", "Project ref."))
                 .arg(pos("kind", "Goal, requirement, plan, design, order, guide, proof, verdict, waiver, or record."))
@@ -1241,6 +1251,10 @@ fn baseline_command() -> Command {
     group("baseline", "Issue exact sets of Spec revisions.")
         .subcommand(leaf("ls", "List Baselines.").arg(project_option("Filter to a project.")))
         .subcommand(leaf("show", "Show one Baseline.").arg(pos("baseline", "Baseline id.")))
+        .subcommand(
+            leaf("history", "Every revision of one Baseline, oldest first.")
+                .arg(pos("baseline", "Baseline id.")),
+        )
         .subcommand(
             leaf("new", "Create a draft Baseline.")
                 .arg(pos("project", "Project ref."))

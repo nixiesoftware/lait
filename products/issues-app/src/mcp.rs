@@ -428,6 +428,11 @@ pub fn tools() -> Vec<McpTool> {
         ),
         tool::<ProjectArgs>("spec_list", "List Specs, optionally by project.", spec_list),
         tool::<SpecArgs>("spec_show", "Read one versioned Spec.", spec_show),
+        tool::<SpecArgs>(
+            "spec_history",
+            "Every revision of one Spec, oldest first, with its predecessors.",
+            spec_history,
+        ),
         tool::<SpecNewArgs>("spec_new", "Create a draft Spec.", spec_new),
         tool::<SpecReviseArgs>("spec_revise", "Create a draft Spec successor.", spec_revise),
         tool::<SpecStateArgs>(
@@ -446,6 +451,11 @@ pub fn tools() -> Vec<McpTool> {
             baseline_list,
         ),
         tool::<BaselineArgs>("baseline_show", "Read one Baseline.", baseline_show),
+        tool::<BaselineArgs>(
+            "baseline_history",
+            "Every revision of one Baseline, oldest first.",
+            baseline_history,
+        ),
         tool::<BaselineNewArgs>(
             "baseline_new",
             "Create a draft Baseline of exact Spec revisions.",
@@ -821,6 +831,11 @@ fn spec_show(input: Value) -> Result<CliInvocation, Failure> {
     world(IssuesRequest::SpecShow { spec: a.spec })
 }
 
+fn spec_history(input: Value) -> Result<CliInvocation, Failure> {
+    let a: SpecArgs = args(input)?;
+    world(IssuesRequest::SpecHistory { spec: a.spec })
+}
+
 fn spec_new(input: Value) -> Result<CliInvocation, Failure> {
     let a: SpecNewArgs = args(input)?;
     world(IssuesRequest::SpecNew {
@@ -869,6 +884,13 @@ fn baseline_list(input: Value) -> Result<CliInvocation, Failure> {
 fn baseline_show(input: Value) -> Result<CliInvocation, Failure> {
     let a: BaselineArgs = args(input)?;
     world(IssuesRequest::BaselineShow {
+        baseline: a.baseline,
+    })
+}
+
+fn baseline_history(input: Value) -> Result<CliInvocation, Failure> {
+    let a: BaselineArgs = args(input)?;
+    world(IssuesRequest::BaselineHistory {
         baseline: a.baseline,
     })
 }
@@ -1092,7 +1114,7 @@ mod tests {
     #[test]
     fn tools_are_package_local_and_emit_world_calls() {
         let tools = tools();
-        assert_eq!(tools.len(), 53);
+        assert_eq!(tools.len(), 55);
         assert!(tools.iter().all(|tool| !tool.name().starts_with("issues_")));
         let invocation = tools
             .iter()
