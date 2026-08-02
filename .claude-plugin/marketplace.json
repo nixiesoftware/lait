@@ -5,14 +5,14 @@
     "email": "omar@onnixi.com"
   },
   "metadata": {
-    "description": "A local-first, peer-to-peer node built on iroh — the foundation for a P2P issue tracker.",
+    "description": "A local-first, peer-to-peer issue tracker built on iroh + Loro CRDTs.",
     "version": "0.2.2"
   },
   "plugins": [
     {
       "name": "lait",
       "source": ".",
-      "description": "A peer-to-peer node built on iroh: a signed-gossip room with presence, exposed as connect/wait/who MCP tools — the foundation for a local-first P2P issue tracker. Requires the `lait` binary on PATH.",
+      "description": "A local-first, peer-to-peer issue tracker. Exposes the full issue surface over MCP — create/edit/move/assign/label/comment, boards, lists, activity, and versioned Specs, Baselines and Packets — plus membership and transport. Requires the `lait` binary on PATH.",
       "category": "developer-tools"
     }
   ]

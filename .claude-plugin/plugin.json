@@ -14,7 +14,8 @@
   "mcpServers": {
     "lait": {
       "command": "lait",
-      "args": ["mcp"]
+      "args": ["mcp"],
+      "env": { "LAIT_AGENT": "claude" }
     }
   },
   "hooks": "./hooks/hooks.json"
