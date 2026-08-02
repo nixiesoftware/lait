@@ -88,7 +88,13 @@ fn fill_from_fallback(raw: &mut [u8], pid: u32, sequence: u64, elapsed: std::tim
 /// and never persisted. `None` leaves Loro's random choice in place, which is
 /// correct for a read-only or scratch document that will never author.
 pub(crate) fn configure(doc: &LoroDoc, peer: Option<u64>) {
-    doc.set_record_timestamp(true);
+    // Off under `--cfg lait_simulation`, which only `sim/` sets. The recorded
+    // second lands in the change, the change lands in the export, and the
+    // export lands in a transaction commitment — so a simulation that records
+    // it reproduces only within one second of wall clock. Nothing else depends
+    // on it: `set_change_merge_interval(-1)` below is what stops consecutive
+    // changes fusing, which is the reason the timestamp was turned on.
+    doc.set_record_timestamp(!cfg!(lait_simulation));
     doc.set_change_merge_interval(-1);
     if let Some(p) = peer {
         // Only fails with uncommitted pending ops; constructors call this first.

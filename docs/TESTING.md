@@ -423,6 +423,52 @@ cargo mutants --workspace --list          # what would be mutated
 cargo mutants --workspace --shard 0/8     # one shard, as CI runs it
 ```
 
+## Whole-stack determinism
+
+`runtime`'s convergence simulation replays its **schedule**. `sim/` replays the
+**bytes** — same transaction commitments, same sealed payloads, same minted ids,
+verified byte-identical across Windows and Linux.
+
+That needs two doors shut, and `sim/.cargo/config.toml` shuts both at compile
+time:
+
+| flag | closes |
+|---|---|
+| `getrandom_backend="custom"` | every random byte in the whole dependency graph — lait's own calls, Replica's sealing nonces, Mechanics' key material, and FROST's `rand_core::OsRng`, which sits on getrandom |
+| `lait_simulation` | Loro recording a wall-clock second into every change |
+
+**Why below the code rather than inside it.** A seam was tried first, on
+`fabric::op`'s identity minting, and removed again: it covered one entropy
+source of four, and it put a runtime switch in the middle of security-critical
+code. There is no single door *inside* the stack. There is one underneath, and
+getrandom is it.
+
+**Why it cannot reach production.** These are rustc cfgs in a package's own
+config file. Cargo reads configuration from the current directory upward and
+never downward, so a build at the repo root cannot see them, and `sim` is
+excluded from the workspace besides. There is no runtime switch, no feature to
+enable by accident.
+
+**Why a seeded nonce is not a vulnerability here.** AEAD needs nonce
+*uniqueness*, which the generator provides — it never repeats within a run.
+What it gives up is unpredictability, which matters for material an adversary
+sees; a simulation's temporary store outlives nothing.
+
+**nextest, not `cargo test`.** The generator is one counter per process, so
+tests sharing a process consume each other's stream. Process-per-test isolation
+is also what makes a seed shareable at all: a colleague's fresh process starts
+where yours did.
+
+```sh
+cd sim && cargo nextest run          # the whole stack, from a seed
+```
+
+One near-miss worth keeping in mind. With entropy seeded but the clock still
+recorded, the determinism test *passed* — because both runs happened inside the
+same second. `a_second_of_wall_clock_does_not_change_the_bytes` sleeps 1.5 s
+between runs for exactly that reason. A reproducibility claim that holds only
+within one second is not one.
+
 ## The coverage manifest
 
 `ci/coverage-manifest.txt` records every test id in the workspace, what each

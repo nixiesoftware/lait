@@ -1,0 +1,16 @@
+# Whole-stack deterministic simulation.
+#
+# Its own package, outside the workspace, for the same reason `fuzz/` is: it
+# needs a build flag the rest of the workspace must never see. `cargo build`,
+# `cargo test` and the MSRV job at the repo root do not know this exists.
+[package]
+name = "lait-sim"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[dependencies]
+getrandom = "0.3"
+mechanics = { path = "../crates/mechanics" }
+replica = { path = "../crates/replica" }
+blake3 = "1"

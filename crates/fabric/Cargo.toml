@@ -35,6 +35,12 @@ anyhow = "1"
 getrandom = "0.3"
 tracing = "0.1"
 
+[lints.rust]
+# `lait_simulation` is set only by the out-of-workspace `sim/` package, which
+# needs Loro's wall-clock timestamp off to be reproducible. Declared so the
+# unexpected-cfg lint does not flag it and so its one consumer is findable.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(lait_simulation)'] }
+
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }
 nursery = { level = "warn", priority = -1 }

@@ -1,0 +1,30 @@
+# The entropy door, closed at compile time.
+#
+# `getrandom_backend="custom"` tells the getrandom crate to call
+# `__getrandom_v03_custom` (defined in src/lib.rs) instead of the OS. Because it
+# is a rustc cfg rather than a Cargo feature, it applies to the WHOLE dependency
+# graph of this build — lait's own `getrandom::fill` calls, Replica's sealing
+# nonces, Mechanics' key material, and FROST's `rand_core::OsRng`, which routes
+# through getrandom too. One flag, every source.
+#
+# It lives HERE rather than in the workspace root on purpose. Cargo reads config
+# from the current directory upward, never downward, so this file is invisible
+# to `cargo build` at the repo root and cannot reach a release binary. That
+# compile-time separation is why this is safe and why the earlier attempt — a
+# runtime atomic inside `fabric::op` — was not: a runtime switch is a switch
+# somebody can flip.
+# `lait_simulation` closes the OTHER door. Loro records a wall-clock second on
+# every change, and that second reaches the sealed payload and therefore the
+# transaction commitment — so two runs of one seed agree only if they happen
+# inside the same second, and disagree across machines. Measured, after the
+# entropy door was already shut: same seed, same draw count, different bytes.
+#
+# Under this cfg `fabric` stops recording the timestamp. It can afford to:
+# `set_change_merge_interval(-1)` is what actually keeps consecutive changes
+# from fusing, and the timestamp is informational. Losing it costs a simulation
+# nothing and buys reproducibility.
+[build]
+rustflags = [
+    '--cfg', 'getrandom_backend="custom"',
+    '--cfg', 'lait_simulation',
+]

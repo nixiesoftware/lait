@@ -10,13 +10,22 @@ members = [
     "products/issues",
     "products/issues-app",
 ]
-# `fuzz/` is a package but NOT a member. cargo-fuzz needs a nightly toolchain
-# for its `-Z` sanitizer flags, and this workspace pins `channel = "stable"` in
-# rust-toolchain.toml with an MSRV floor the CI checks. Excluding it means
-# `cargo build`, `cargo test`, `cargo clippy` and the MSRV job never see it —
-# the nightly job overrides the toolchain for itself with RUSTUP_TOOLCHAIN, the
-# same mechanism the `msrv (1.91)` job uses to pin downward.
-exclude = ["fuzz"]
+# Two packages live in this repository but are NOT members, each because it
+# needs a build setting the rest of the workspace must never see.
+#
+# `fuzz/` needs a nightly toolchain for cargo-fuzz's `-Z` sanitizer flags, and
+# this workspace pins `channel = "stable"` with an MSRV floor CI checks.
+#
+# `sim/` needs `--cfg getrandom_backend="custom"`, which replaces the operating
+# system's entropy with a seeded generator across the whole dependency graph.
+# That is exactly right for a deterministic simulation and catastrophic in a
+# release binary, so it is set in `sim/.cargo/config.toml` — cargo reads config
+# upward from the current directory and never downward, so a build at this root
+# cannot see it.
+#
+# Excluding both means `cargo build`, `cargo test`, `cargo clippy` and the MSRV
+# job never encounter either.
+exclude = ["fuzz", "sim"]
 # Pin resolver 2 explicitly: the release binary's non-linkage of the dev-only
 # `test-utils` feature (which would flip presets::N0 from prod to staging relays)
 # depends on it, and must not silently regress to v1 if this ever becomes a

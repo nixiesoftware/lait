@@ -21,6 +21,8 @@
 #                 gates — see the job.
 #   fuzz          coverage-guided fuzzing of the pre-auth decoders, ten minutes
 #                 per target. Linux only; see the job for why.
+#   determinism   the whole stack replaying from a seed, entropy and clock both
+#                 closed at compile time. This is what makes a seed shareable.
 #
 # `perf.yml` remains separate and weekly: the full reference corpus is hours of
 # daemon traffic and has its own baseline-freezing story.
@@ -342,3 +344,46 @@ jobs:
           name: fuzz-crash-${{ matrix.target }}
           path: fuzz/artifacts/
           if-no-files-found: ignore
+
+  # Whole-stack determinism: is a seed a real reproduction?
+  #
+  # `runtime`'s convergence simulation replays its SCHEDULE, which is enough to
+  # hand a colleague a seed and have them watch the same assertion fail. This
+  # asks the harder question — do the same BYTES come out? Same transaction
+  # commitments, same sealed payloads, same minted ids.
+  #
+  # It needs two doors shut, and `sim/.cargo/config.toml` shuts both at compile
+  # time: `getrandom_backend="custom"` routes every random byte in the whole
+  # dependency graph through a seeded generator (including FROST's
+  # `rand_core::OsRng`, which sits on getrandom), and `lait_simulation` stops
+  # Loro recording a wall-clock second into every change.
+  #
+  # Neither can reach a release binary. Cargo reads config from the current
+  # directory upward and never downward, so a build at the repo root cannot see
+  # that file, and `sim` is excluded from the workspace besides.
+  #
+  # nextest specifically, not `cargo test`: the seeded generator is one counter
+  # per process, so tests sharing a process would consume each other's stream.
+  # Process-per-test is also what makes a seed shareable in the first place —
+  # a colleague's fresh process starts where yours did.
+  determinism:
+    name: whole-stack determinism
+    runs-on: namespace-profile-nixiesoftware
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          toolchain: stable
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: sim
+      - name: Install nextest
+        uses: taiki-e/install-action@e658debeddbabf20b2b866d9235eb08a2375b1ad
+        with:
+          tool: nextest
+      - name: The stack replays from a seed
+        working-directory: sim
+        run: cargo nextest run
