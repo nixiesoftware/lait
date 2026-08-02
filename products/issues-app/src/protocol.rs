@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub const OPERATION: &str = "issues.control";
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "at", rename_all = "snake_case")]
@@ -439,6 +439,90 @@ pub enum IssuesRequest {
         expect_heads: Vec<String>,
         body_json: String,
     },
+    SpecList {
+        #[serde(default)]
+        project: Option<String>,
+    },
+    SpecShow {
+        spec: String,
+    },
+    SpecHistory {
+        spec: String,
+    },
+    SpecReferences {
+        #[serde(default)]
+        project: Option<String>,
+    },
+    SpecNew {
+        project: String,
+        kind: issues::spec::Kind,
+        title: String,
+        #[serde(default)]
+        text: String,
+        #[serde(default)]
+        links: Vec<issues::spec::Link>,
+    },
+    SpecRevise {
+        spec: String,
+        expected: String,
+        #[serde(default)]
+        title: Option<String>,
+        #[serde(default)]
+        text: Option<String>,
+        #[serde(default)]
+        links: Option<Vec<issues::spec::Link>>,
+    },
+    SpecState {
+        spec: String,
+        expected: String,
+        state: issues::spec::State,
+    },
+    SpecResolve {
+        spec: String,
+        expected_heads: Vec<String>,
+        body_json: String,
+    },
+    BaselineList {
+        #[serde(default)]
+        project: Option<String>,
+    },
+    BaselineShow {
+        baseline: String,
+    },
+    BaselineHistory {
+        baseline: String,
+    },
+    BaselineNew {
+        project: String,
+        name: String,
+        members: Vec<issues::spec::SpecRef>,
+    },
+    BaselineRevise {
+        baseline: String,
+        expected: String,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        members: Option<Vec<issues::spec::SpecRef>>,
+    },
+    BaselineState {
+        baseline: String,
+        expected: String,
+        state: issues::spec::State,
+    },
+    BaselineResolve {
+        baseline: String,
+        expected_heads: Vec<String>,
+        body_json: String,
+    },
+    IssueBaseline {
+        reff: String,
+        #[serde(default)]
+        baseline: Option<issues::spec::BaselineRef>,
+    },
+    Packet {
+        reff: String,
+    },
 }
 
 /// Issues-owned application responses.
@@ -519,6 +603,32 @@ pub enum IssuesResponse {
     Text {
         text: String,
     },
+    SpecRevisions {
+        revisions: Vec<issues::spec::Revision>,
+    },
+    SpecReferences {
+        references: Vec<issues::spec::SpecReference>,
+    },
+    BaselineRevisions {
+        revisions: Vec<issues::spec::BaselineRevision>,
+    },
+    /// Named rather than flattened, unlike its Baseline and Packet neighbours.
+    /// This enum is internally tagged on `kind` and a `SpecView` carries a
+    /// `kind` of its own, so a newtype variant would emit the key twice: Rust
+    /// reads the first occurrence and survives, `JSON.parse` keeps the last and
+    /// decodes the reply as a Spec *kind* it has never heard of. A named payload
+    /// is the only shape where both readers agree.
+    Spec {
+        spec: Box<issues::spec::SpecView>,
+    },
+    Specs {
+        specs: Vec<issues::spec::SpecView>,
+    },
+    Baseline(Box<issues::spec::BaselineView>),
+    Baselines {
+        baselines: Vec<issues::spec::BaselineView>,
+    },
+    Packet(Box<issues::spec::Packet>),
     Error {
         message: String,
         #[serde(default)]
@@ -590,7 +700,15 @@ impl IssuesRequest {
             | RoleList
             | RoleShow { .. }
             | WorkflowShow { .. }
-            | WorkflowValidate { .. } => Access::Query,
+            | WorkflowValidate { .. }
+            | SpecList { .. }
+            | SpecShow { .. }
+            | SpecHistory { .. }
+            | SpecReferences { .. }
+            | BaselineList { .. }
+            | BaselineShow { .. }
+            | BaselineHistory { .. }
+            | Packet { .. } => Access::Query,
             IssueNew { .. }
             | IssueEdit { .. }
             | IssueMove { .. }
@@ -631,7 +749,16 @@ impl IssuesRequest {
             | RoleEdit { .. }
             | RoleDelete { .. }
             | RoleResolve { .. }
-            | WorkflowSet { .. } => Access::Command,
+            | WorkflowSet { .. }
+            | SpecNew { .. }
+            | SpecRevise { .. }
+            | SpecState { .. }
+            | SpecResolve { .. }
+            | BaselineNew { .. }
+            | BaselineRevise { .. }
+            | BaselineState { .. }
+            | BaselineResolve { .. }
+            | IssueBaseline { .. } => Access::Command,
         }
     }
 
@@ -732,6 +859,52 @@ mod tests {
             decode_call(&call).unwrap(),
             IssuesRequest::IssueNew { title, .. } if title == "Carve the product"
         ));
+    }
+
+    /// A `Spec` reply must carry exactly one `kind`, and it must be the tag.
+    ///
+    /// `IssuesResponse` is internally tagged on `kind`, and a `SpecView` has a
+    /// `kind` field of its own — a newtype variant would flatten the view beside
+    /// the tag and emit the key twice. Rust survives that by reading the first
+    /// occurrence; `JSON.parse` keeps the last, so the browser would decode the
+    /// reply as a Spec *kind* and never recognise the response at all. The
+    /// variant therefore names its payload, and this pins that it stays named.
+    #[test]
+    fn spec_replies_do_not_collide_with_the_response_tag() {
+        let body = issues::spec::Body {
+            spec: "spc_01JV0IUE".into(),
+            project: "prj_01JUM4INOC41PRQOF2B082EB87".into(),
+            kind: issues::spec::Kind::Requirement,
+            title: "Login is race-free".into(),
+            text: String::new(),
+            state: issues::spec::State::Draft,
+            links: vec![],
+            author: "act_1".into(),
+            ts: 1,
+        };
+        let view = issues::spec::SpecView {
+            spec: body.spec.clone(),
+            project: body.project.clone(),
+            kind: body.kind,
+            title: body.title.clone(),
+            state: body.state,
+            revision: "rev_1".into(),
+            heads: vec!["rev_1".into()],
+            issued: vec![],
+            body,
+        };
+        let text = serde_json::to_string(&IssuesResponse::Spec {
+            spec: Box::new(view),
+        })
+        .unwrap();
+        // The reply's own keys are the tag and the payload, and nothing else.
+        // Flattening would put the view's nine fields up here beside a second
+        // `kind`, which is exactly the shape a browser cannot read.
+        assert_eq!(text.matches("\"kind\":\"spec\"").count(), 1, "{text}");
+        let json: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(json.as_object().unwrap().len(), 2, "{text}");
+        assert_eq!(json["kind"], "spec");
+        assert_eq!(json["spec"]["kind"], "requirement");
     }
 
     #[test]

@@ -505,6 +505,27 @@ async fn dispatch(specs: &[cmdspec::Spec], matches: &ArgMatches, out: Out) -> Re
                 let notify = m.get_flag("notify");
                 crate::cli::watch(&home, since, exec, notify).await?
             }
+            Special::Rebuild => {
+                let seed = load_or_create_identity(&config::identity_dir()?)?;
+                let rebuilt = crate::orbital::generation::rebuild_prior(&home, &seed)?;
+                if out.json {
+                    println!(
+                        "{}",
+                        serde_json::to_string(&serde_json::json!({
+                            "generation": rebuilt.generation.to_string(),
+                            "effects": rebuilt.effects,
+                            "bodies": rebuilt.bodies,
+                            "receipts": rebuilt.receipts,
+                            "evidence": data_encoding::HEXLOWER.encode(&rebuilt.evidence),
+                        }))?
+                    );
+                } else {
+                    println!(
+                        "activated generation {} ({} authority effects, {} Bodies, {} receipts)",
+                        rebuilt.generation, rebuilt.effects, rebuilt.bodies, rebuilt.receipts
+                    );
+                }
+            }
             Special::Completions
             | Special::Man
             | Special::Profiles

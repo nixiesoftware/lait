@@ -36,8 +36,8 @@ use n0_future::StreamExt;
 use tokio::sync::{mpsc, watch, Mutex as TokioMutex};
 
 use super::{
-    Alpn, GossipEvent, GossipReceiver, GossipSender, Incoming, IncomingConnection, PeerId,
-    Protocols, RecvFlow, SendFlow, Stream, Topic, Transport, MAX_FRAME,
+    Alpn, GossipEvent, GossipReceiver, GossipSender, Incoming, IncomingConnection, PathKind,
+    PathQuality, PeerId, Protocols, RecvFlow, SendFlow, Stream, Topic, Transport, MAX_FRAME,
 };
 use mechanics::ids::DeviceId;
 
@@ -336,6 +336,56 @@ impl super::Connection for IrohConnection {
 
     fn datagram_capacity(&self) -> Option<usize> {
         self.datagram_capacity
+    }
+
+    /// Read from the path currently carrying application data.
+    ///
+    /// A connection typically opens relayed and gains a direct path once
+    /// holepunching succeeds, so both are open at once for a while and only one
+    /// of them is selected. Reporting the *selected* one is the whole point:
+    /// during that window the relay leg is what the bytes are actually
+    /// travelling over, and a sender that read "a direct path exists" would
+    /// raise its bitrate onto a path it is not using.
+    ///
+    /// Before anything is selected, the sole open path is reported instead —
+    /// that is the relay leg at the start of every connection, and calling it
+    /// `Unknown` would hide the state the probe exists to measure.
+    fn quality(&self) -> PathQuality {
+        let paths = self.conn.paths();
+        let open_paths = paths.len();
+        let Some(path) = paths
+            .iter()
+            .find(|path| path.is_selected())
+            .or_else(|| paths.iter().next())
+        else {
+            return PathQuality {
+                open_paths,
+                ..PathQuality::unknown()
+            };
+        };
+
+        // `is_relay`/`is_ip` are not each other's negation: `TransportAddr` has
+        // a third, custom variant. A transport lait does not recognise is
+        // `Unknown` rather than assumed direct — the assumption that would be
+        // wrong in the expensive direction.
+        let via = if path.is_relay() {
+            PathKind::Relay
+        } else if path.is_ip() {
+            PathKind::Direct
+        } else {
+            PathKind::Unknown
+        };
+
+        let stats = path.stats();
+        PathQuality {
+            via,
+            open_paths,
+            rtt: Some(stats.rtt),
+            congestion_window: Some(stats.cwnd),
+            lost_packets: Some(stats.lost_packets),
+            sent_packets: Some(stats.udp_tx.datagrams),
+            congestion_events: Some(stats.congestion_events),
+        }
     }
 
     fn close(&self, code: u32, reason: &[u8]) {

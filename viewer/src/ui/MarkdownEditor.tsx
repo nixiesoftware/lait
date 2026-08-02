@@ -1,6 +1,7 @@
 import { lazy, Suspense } from "react";
 
 import { Markdown } from "./Markdown";
+import type { RemoteCursor } from "./MilkdownEditor";
 
 /**
  * The live editor, off the critical path.
@@ -24,6 +25,8 @@ export function MarkdownEditor(props: {
   className?: string;
   onChange: (markdown: string) => void;
   onCommit: () => void;
+  remoteCursors?: RemoteCursor[];
+  onAwareness?: (anchor: number | null, focus: number | null, typing: boolean) => void;
 }) {
   return (
     <Suspense

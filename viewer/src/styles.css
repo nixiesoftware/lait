@@ -754,6 +754,50 @@
   border-top-color: var(--color-fg);
 }
 
+/* Multiplayer awareness lives in the document, where the action is. The
+   widget has no width and therefore never reflows prose; its label follows the
+   compact name flag Linear uses and the selection tint shares that identity
+   colour without obscuring syntax or the native local selection. */
+.milkdown .remote-caret {
+  display: inline-block;
+  position: relative;
+  width: 0;
+  height: 1.15em;
+  margin-left: -1px;
+  border-left: 2px solid var(--remote-color);
+  vertical-align: text-bottom;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.milkdown .remote-caret-label {
+  position: absolute;
+  left: -2px;
+  bottom: calc(100% + 2px);
+  max-width: 10rem;
+  overflow: hidden;
+  padding: 1px 5px;
+  border-radius: 4px 4px 4px 0;
+  background: var(--remote-color);
+  color: white;
+  font-family: var(--font-sans);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.45;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  user-select: none;
+}
+
+.milkdown .remote-caret-uncertain {
+  opacity: 0.55;
+}
+
+.milkdown .remote-selection {
+  background: color-mix(in oklab, var(--remote-color) 22%, transparent);
+  border-radius: 2px;
+}
+
 /* GFM tables are editable here, so they get cell borders the read-only renderer
    does not need — you have to see the cell you are in. */
 .milkdown .ProseMirror table {

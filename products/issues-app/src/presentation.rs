@@ -306,6 +306,105 @@ pub fn render(response: &IssuesResponse, options: PresentationOptions) -> Presen
             &format!("attachment {name} ({mime}) — use `lait issues attachment get` to save it"),
         ),
         IssuesResponse::Text { text } => line(&mut stdout, text),
+        IssuesResponse::Spec { spec } => render_spec(&mut stdout, spec),
+        IssuesResponse::Specs { specs } => {
+            if specs.is_empty() {
+                line(&mut stdout, "(no specs)");
+            }
+            for spec in specs {
+                line(
+                    &mut stdout,
+                    &format!(
+                        "{}  {:<11} {:<9} {}  @{}",
+                        spec.spec,
+                        spec.kind.as_str(),
+                        spec.state.as_str(),
+                        spec.title,
+                        short_revision(&spec.revision)
+                    ),
+                );
+            }
+        }
+        IssuesResponse::Baseline(baseline) => {
+            line(
+                &mut stdout,
+                &format!(
+                    "{}  {}  [{}]  @{}",
+                    baseline.baseline,
+                    baseline.name,
+                    baseline.state.as_str(),
+                    baseline.revision
+                ),
+            );
+            for member in &baseline.body.members {
+                line(
+                    &mut stdout,
+                    &format!("  {}@{}", member.spec, member.revision),
+                );
+            }
+        }
+        IssuesResponse::Baselines { baselines } => {
+            if baselines.is_empty() {
+                line(&mut stdout, "(no baselines)");
+            }
+            for baseline in baselines {
+                line(
+                    &mut stdout,
+                    &format!(
+                        "{}  {:<9} {}  {} member(s)  @{}",
+                        baseline.baseline,
+                        baseline.state.as_str(),
+                        baseline.name,
+                        baseline.body.members.len(),
+                        short_revision(&baseline.revision)
+                    ),
+                );
+            }
+        }
+        IssuesResponse::SpecRevisions { revisions } => render_revisions(&mut stdout, revisions),
+        IssuesResponse::SpecReferences { references } => {
+            if references.is_empty() {
+                line(&mut stdout, "(no typed links)");
+            }
+            for reference in references {
+                let standing = if reference.issued {
+                    " [issued]"
+                } else if reference.head {
+                    ""
+                } else {
+                    " [superseded]"
+                };
+                line(
+                    &mut stdout,
+                    &format!(
+                        "{}@{}{}  {}  {}",
+                        reference.spec,
+                        short_revision(&reference.revision),
+                        standing,
+                        reference.link.rel.as_str(),
+                        target_phrase(&reference.link.target),
+                    ),
+                );
+            }
+        }
+        IssuesResponse::BaselineRevisions { revisions } => {
+            if revisions.is_empty() {
+                line(&mut stdout, "(no revisions)");
+            }
+            for revision in revisions {
+                line(
+                    &mut stdout,
+                    &format!(
+                        "{}  {}  [{}]  {} member(s)",
+                        short_revision(&revision.revision),
+                        revision.body.name,
+                        revision.body.state.as_str(),
+                        revision.body.members.len(),
+                    ),
+                );
+            }
+        }
+        IssuesResponse::Packet(packet) => render_packet(&mut stdout, packet),
         IssuesResponse::Error { message, .. } => {
             line(&mut stderr, &format!("error: {message}"));
         }
@@ -318,6 +417,145 @@ pub fn render(response: &IssuesResponse, options: PresentationOptions) -> Presen
         exit_code,
         failure,
         failure_message: error_message(response),
+    }
+}
+
+fn render_spec(output: &mut String, spec: &issues::spec::SpecView) {
+    line(
+        output,
+        &format!(
+            "{}  {}  [{}]  @{}",
+            spec.spec,
+            spec.title,
+            spec.state.as_str(),
+            spec.revision
+        ),
+    );
+    line(output, &format!("kind: {}", spec.kind.as_str()));
+    if spec.heads.len() > 1 {
+        line(
+            output,
+            &format!("conflict heads: {}", spec.heads.join(", ")),
+        );
+    }
+    if !spec.issued.is_empty() {
+        line(output, &format!("issued: {}", spec.issued.join(", ")));
+    }
+    if !spec.body.text.is_empty() {
+        line(output, "");
+        line(output, &spec.body.text);
+    }
+}
+
+fn short_revision(revision: &str) -> &str {
+    revision.get(..12).unwrap_or(revision)
+}
+
+fn render_packet(output: &mut String, packet: &issues::spec::Packet) {
+    line(output, &format!("packet for {}", packet.issue));
+    if let Some(baseline) = &packet.baseline {
+        line(
+            output,
+            &format!("baseline: {}@{}", baseline.baseline, baseline.revision),
+        );
+    }
+    let sections = [
+        ("governing", &packet.governing),
+        ("guidance", &packet.guidance),
+        ("proof", &packet.proof),
+        ("record", &packet.record),
+    ];
+    for (name, specs) in sections {
+        if specs.is_empty() {
+            continue;
+        }
+        line(output, &format!("{name}:"));
+        for spec in specs {
+            line(
+                output,
+                &format!(
+                    "  {}@{}  {}  ({})",
+                    spec.spec,
+                    spec.revision,
+                    spec.title,
+                    source_phrase(&spec.source)
+                ),
+            );
+        }
+    }
+    for conflict in &packet.conflicts {
+        line(output, &format!("conflict: {}", conflict_phrase(conflict)));
+    }
+}
+
+fn target_phrase(target: &issues::spec::Target) -> String {
+    match target {
+        issues::spec::Target::Spec { spec, revision } => {
+            format!("{spec}@{}", short_revision(revision))
+        }
+        issues::spec::Target::Baseline { baseline, revision } => {
+            format!("{baseline}@{}", short_revision(revision))
+        }
+        issues::spec::Target::Issue { issue } => issue.clone(),
+    }
+}
+
+/// The terminal's wording for a Packet source. The wire carries the typed fact;
+/// this is one presentation of it, and the browser has its own.
+fn source_phrase(source: &issues::spec::PacketSource) -> String {
+    match source {
+        issues::spec::PacketSource::Baseline { baseline } => format!("baseline {baseline}"),
+        issues::spec::PacketSource::Direct => "direct".into(),
+        issues::spec::PacketSource::Incorporated { spec, revision } => {
+            format!("incorporated by {spec}@{revision}")
+        }
+    }
+}
+
+fn conflict_phrase(conflict: &issues::spec::PacketConflict) -> String {
+    match conflict {
+        issues::spec::PacketConflict::MissingBaseline { baseline } => {
+            format!("missing baseline {baseline}")
+        }
+        issues::spec::PacketConflict::MissingBaselineRevision { baseline, revision } => {
+            format!("missing baseline revision {baseline}@{revision}")
+        }
+        issues::spec::PacketConflict::BaselineNotIssued { baseline, revision } => {
+            format!("baseline {baseline}@{revision} is not issued")
+        }
+        issues::spec::PacketConflict::MissingSpec { spec } => format!("missing spec {spec}"),
+        issues::spec::PacketConflict::MissingSpecRevision { spec, revision } => {
+            format!("missing spec revision {spec}@{revision}")
+        }
+        issues::spec::PacketConflict::IssuedSpecConflict { spec } => {
+            format!("issued spec conflict {spec}")
+        }
+        issues::spec::PacketConflict::MissingIncorporated { spec, revision } => {
+            format!("missing incorporated spec {spec}@{revision}")
+        }
+    }
+}
+
+fn render_revisions(output: &mut String, revisions: &[issues::spec::Revision]) {
+    if revisions.is_empty() {
+        line(output, "(no revisions)");
+    }
+    for revision in revisions {
+        line(
+            output,
+            &format!(
+                "{}  {}  [{}]  {}",
+                short_revision(&revision.revision),
+                revision.body.title,
+                revision.body.state.as_str(),
+                revision
+                    .predecessors
+                    .iter()
+                    .map(|predecessor| short_revision(predecessor))
+                    .collect::<Vec<_>>()
+                    .join("+"),
+            ),
+        );
     }
 }
 
@@ -677,6 +915,7 @@ mod tests {
             followers: Vec::new(),
             milestone: None,
             cycle: None,
+            baseline: None,
             attachments: Vec::new(),
             provisional: false,
             corrupt_records: Vec::new(),

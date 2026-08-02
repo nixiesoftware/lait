@@ -651,6 +651,8 @@ pub struct IssueView {
     /// The scheduled cycle id (BOARD-11). Additive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cycle: Option<String>,
+    /// Exact issued Baseline pinned to this Issue.
+    pub baseline: Option<crate::spec::BaselineRef>,
     /// Attachment metadata (CREATE-5) — payloads come from `attachment get`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<AttachmentMetaDto>,
@@ -1015,6 +1017,10 @@ pub enum CatalogScope {
     Teams,
     Triage,
     Roles,
+    /// Specs and Baselines — the only plane whose contents are not in the
+    /// catalog at all. They are Bodies of their own, so this digests their
+    /// version stamps rather than a region of `CatalogState`.
+    Specs,
     /// The row index: which docs exist, their aliases and seqs, what is deleted.
     Docs,
     /// Issue links and parentage.

@@ -30,6 +30,7 @@ pub mod ids;
 mod implementation;
 mod rank;
 pub mod roles;
+pub mod spec;
 pub mod views;
 pub mod workflow;
 

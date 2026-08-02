@@ -64,6 +64,12 @@ describe("IssueDetail loading", () => {
       if (request.cmd === "milestone_list") {
         return Promise.resolve({ kind: "milestones", milestones: [] });
       }
+      if (request.cmd === "packet") {
+        return Promise.resolve({
+          kind: "packet", issue: issue.doc_id, governing: [], guidance: [],
+          proof: [], record: [], conflicts: [],
+        });
+      }
       if (request.cmd === "history" || request.cmd === "issue_graph") return never;
       throw new Error(`Unexpected request: ${request.cmd}`);
     });
@@ -156,7 +162,7 @@ describe("IssueDetail live rail", () => {
     // assertions, outside `act`.
     const never = new Promise<never>(() => undefined);
     rpcMock.mockImplementation((_space: string, request: { cmd: string }) => {
-      const known = ["issue_view", "milestone_list", "history", "issue_graph"];
+      const known = ["issue_view", "milestone_list", "history", "issue_graph", "packet"];
       if (known.includes(request.cmd)) return never;
       throw new Error(`Unexpected request: ${request.cmd}`);
     });

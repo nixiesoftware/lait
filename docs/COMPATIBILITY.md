@@ -5,8 +5,11 @@ of collecting them in one table is that they are *not* one version: a store can
 be rewritten while the wire holds still, and a wire generation can move without
 touching a byte on disk.
 
-There is no legacy fallback anywhere in this table. An unsupported version is
-refused, not interpreted.
+There is no legacy fallback in any normal reader in this table. An unsupported
+version is refused, not guessed or opened in place. A bounded prior reader may
+exist only as input to an explicit generation build: it validates a committed
+source, constructs the current representation elsewhere, proves logical
+equivalence, and atomically activates the complete result.
 
 ## 1. How a version is enforced
 
@@ -34,6 +37,7 @@ kind of bump and the one that needs feature bits to avoid.
 | Surface | Constant | Value | Gate |
 |---|---|---|---|
 | Store marker | `replica::marker::STORE_VERSION` | 1 | leading field |
+| Orbit generation pointer | `runtime::generation` | 1 | magic + canonical body + checksum |
 | Store manifest | `journal::STORE_FORMAT_VERSION` | 2 | leading field |
 | Replica store meta | `replica::STORE_META_FORMAT_VERSION` | 2 | leading field |
 | Manifest root | `replica::manifest::MANIFEST_FORMAT_VERSION` | 2 | leading field + `lait/manifest/2` |
@@ -51,6 +55,16 @@ where — while the manifest version identifies *what a commit records*. Replaci
 the paged manifest with an authenticated index changed the second and not the
 first.
 
+The generation pointer versions neither semantic facts nor either component's
+store format. It selects one immutable pair of Mechanics and Replica
+materializations. Its source generation and equivalence evidence are part of
+the canonical pointer body, and activation is serialized and compare-and-swap
+checked. This is the compatibility boundary for a representation rewrite: old
+bytes remain inactive rather than being destructively rewritten or taught to
+every future reader. `lait rebuild` is the application composition of the
+currently supported prior-to-current recipe and requires the Orbit to be
+vacant.
+
 The descriptor is the only row whose version is chosen by the record's content
 rather than by the build that wrote it. A descriptor emits 1 when it declares no
 sections and 2 when it declares any, so the set of implementation ids this bump
@@ -59,15 +73,17 @@ reason the section table exists: adding a section kind must not move the id of a
 World that declares nothing of that kind, which two more fields in a fixed-order
 tuple would have done to every id in the system.
 
-**`com.lait.issues` is in that set, and its id moved.** It declares two signal
-schemas — `assigned` and `commented` — so its descriptor is version 2 and its identity is
-`142d7a76f8d7f1c559225004fe0e70c9e9cecf86b4a53d232604b6f42c0d344c`, pinned by
-`products/issues/tests/package_boundary.rs`. A Space formed against an earlier
-build activated a different id and will see this one as an implementation it
-never approved until it is activated again. That is the mechanism working: a
-World whose declared signals changed is a World whose reviewed surface changed,
-and the identity is what says so. It is recorded here rather than left for
-somebody to meet in the field.
+**`com.lait.issues` is in that set, and its id moved.** The Spec lifecycle cutoff
+adds the `spec` and `baseline` collaborative schemas, extends the capability
+registry, and advances the World implementation to version 2. Its descriptor is
+version 2 because it also declares the `assigned` and `commented` signal schemas;
+its reviewed identity is
+`069e7ad1061fe2e864a31aa806060d953270b6a57d4d5d8c7e4c835e90c0cff0`, pinned by
+`products/issues/tests/it/package_boundary.rs`. There is deliberately no
+predecessor schema or migration adapter. A Space formed against an earlier build
+activated a different id and refuses this one until the new implementation is
+explicitly activated. That is the mechanism working: the reviewed surface
+changed, and the identity says so.
 
 Worlds that declare nothing keep the ids they had, which the same test asserts by
 construction — a zero-section descriptor is byte-identical to what shipped before

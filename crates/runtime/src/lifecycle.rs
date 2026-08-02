@@ -544,8 +544,8 @@ impl Orbit {
         // state), and from then on every acknowledged commit has completed the
         // full journal protocol before `submit` returns. A crash, kill, or
         // `wait` exit after an acknowledged commit loses nothing.
-        let mut replica =
-            replica::Replica::open(self.store.dir(), self.keys.clone()).map_err(|e| match e {
+        let mut replica = replica::Replica::open(self.store.replica_dir()?, self.keys.clone())
+            .map_err(|e| match e {
                 replica::transaction::commit::Failure::Integrity(_) => {
                     Failure::Integrity(Integrity::Replica)
                 }

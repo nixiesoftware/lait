@@ -6,9 +6,9 @@
 # reviewed like one, not discovered when a gate goes red on a refactor.
 
 [tiers]
-pr             1308
-pr-platform    980
-nightly        1335
+pr             1327
+pr-platform    998
+nightly        1354
 mutants        87
 
 [gates]
@@ -24,7 +24,7 @@ orbital-bootstrap-real       15
 orbital-ceremonies           12
 orbital-independent-world    6
 convergence-simulation       6
-orbital-product-parity       17
+orbital-product-parity       18
 
 [tests]
 comms iroh::tests::framing_golden_bytes
@@ -40,6 +40,11 @@ comms network_simulation_tests::the_default_network_loses_nothing
 comms network_simulation_tests::the_same_seed_replays_exactly
 comms policy::tests::from_env_default_is_public_and_trims
 comms policy::tests::peerbook_registers_under_local_and_noops_without_a_relay
+comms relay::tests::a_plain_relay_advertises_http
+comms relay::tests::an_automatic_certificate_advertises_its_first_domain
+comms relay::tests::an_explicit_advertise_wins_over_the_bind_address
+comms relay::tests::an_operator_written_scheme_is_left_alone
+comms relay::tests::quic_without_tls_is_refused_rather_than_ignored
 comms::it flows::a_bidirectional_flow_carries_bytes_both_ways
 comms::it flows::a_connection_names_its_peer_and_its_generation
 comms::it flows::a_datagram_that_fits_arrives_and_one_that_does_not_is_refused
@@ -159,6 +164,8 @@ journal index_tests::repeating_a_key_in_one_batch_takes_the_last_change
 journal index_tests::shrinking_a_branch_below_the_leaf_threshold_merges_it
 journal index_tests::the_spine_is_small_relative_to_the_entry_set
 journal index_tests::validation_accepts_what_the_builder_produces
+journal prior::tests::reads_only_a_complete_valid_prior_commit
+journal prior::tests::refuses_missing_or_corrupt_material_and_an_active_journal
 journal reconciliation_tests::a_blank_peer_learns_the_whole_set
 journal reconciliation_tests::a_changed_value_at_a_known_key_is_reported
 journal reconciliation_tests::a_hundred_divergent_entries_cost_far_less_than_the_store
@@ -372,6 +379,11 @@ lait-issues roles::tests::admission_evidence_always_contains_the_read_baseline
 lait-issues roles::tests::built_in_bodies_and_revision_ids_are_golden
 lait-issues roles::tests::framed_preimage_resists_concatenation_collisions
 lait-issues roles::tests::revision_bounds_reject
+lait-issues spec::tests::a_draft_successor_does_not_unissue_its_parent
+lait-issues spec::tests::a_later_issue_supersedes_the_prior_issue
+lait-issues spec::tests::baseline_draft_preserves_issue_and_withdrawal_ends_it
+lait-issues spec::tests::canonical_links_make_equal_revisions
+lait-issues spec::tests::concurrent_issued_successors_are_a_visible_conflict
 lait-issues views::tests::completed_issue_keeps_alias_from_authoritative_project
 lait-issues workflow::tests::frozen_canonical_json_tags
 lait-issues workflow::tests::invalid_bodies_reject
@@ -548,6 +560,7 @@ lait::it orbital_concurrent_catalog::concurrent_issue_creation_converges_across_
 lait::it orbital_join::form_invite_join_autoapprove_and_e2ee_convergence
 lait::it orbital_join_iroh::coordinates_only_two_endpoint_bootstrap_over_real_iroh
 lait::it orbital_product_parity::a_denied_or_invalid_request_commits_and_publishes_nothing
+lait::it orbital_product_parity::an_issue_packet_stays_pinned_while_the_next_spec_revision_is_drafted
 lait::it orbital_product_parity::due_dates_estimates_and_comment_reactions_round_trip
 lait::it orbital_product_parity::the_full_issue_surface_round_trips_with_legacy_shapes
 lait::it orbital_product_parity::two_stations_converge_product_issues_over_the_contact_plane
@@ -928,6 +941,7 @@ replica receipt::tests::receipt_roundtrips_canonically
 replica receipt::tests::scope_key_distinguishes_every_component
 replica receipt::tests::trailing_bytes_are_non_canonical
 replica receipt::tests::unknown_version_is_rejected_not_negotiated
+replica replica::generation::tests::an_empty_prior_replica_becomes_a_verified_current_store
 replica::it algebra_fixtures::body_op_variant_tags_are_frozen
 replica::it algebra_fixtures::every_variant_roundtrips
 replica::it algebra_fixtures::trailing_bytes_break_canonical_reencoding
@@ -1003,6 +1017,11 @@ runtime dto::tests::encodings_are_validated_by_decoded_length_not_text_length
 runtime dto::tests::every_dto_roundtrips
 runtime dto::tests::invalid_identifiers_are_rejected
 runtime dto::tests::over_long_strings_are_bounded
+runtime generation::tests::activation_is_a_compare_and_swap
+runtime generation::tests::an_interrupted_unverified_build_can_restart
+runtime generation::tests::an_orbit_without_a_pointer_is_the_implicit_generation
+runtime generation::tests::build_verify_activate_switches_both_components_together
+runtime generation::tests::corrupt_or_noncanonical_pointer_is_refused
 runtime implementation::tests::a_declaration_and_its_bound_are_both_in_the_id
 runtime implementation::tests::a_declaring_world_builds_its_sections_from_its_registration
 runtime implementation::tests::a_list_no_count_word_can_describe_refuses_instead_of_wrapping

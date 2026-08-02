@@ -189,6 +189,8 @@ fn the_live_view_and_the_signal_drain_are_served_rather_than_unreachable() {
         &home,
         Request::Watching {
             issues: vec!["iss_01jz0000000000000000000000".into()],
+            carets: Vec::new(),
+            typing: Vec::new(),
         },
     );
     assert!(
@@ -207,6 +209,8 @@ fn the_live_view_and_the_signal_drain_are_served_rather_than_unreachable() {
         &home,
         Request::Watching {
             issues: vec!["not-a-doc-id".into(), String::new()],
+            carets: Vec::new(),
+            typing: Vec::new(),
         },
     );
     assert!(
@@ -217,7 +221,15 @@ fn the_live_view_and_the_signal_drain_are_served_rather_than_unreachable() {
     // The empty declaration, which is how presence stops. Not a no-op and not an
     // error: a node looking at nothing is a real state — every tab closed — and
     // it has to be expressible, or presence could only ever grow.
-    let nothing = req(&client, &home, Request::Watching { issues: Vec::new() });
+    let nothing = req(
+        &client,
+        &home,
+        Request::Watching {
+            issues: Vec::new(),
+            carets: Vec::new(),
+            typing: Vec::new(),
+        },
+    );
     assert!(
         matches!(nothing, Response::Ok { .. }),
         "expected an empty declaration to be served, got {nothing:?}"

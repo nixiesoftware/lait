@@ -32,8 +32,9 @@ use crate::dto::{ActivityEvent, CatalogScope, FieldChange, Priority, StatusCateg
 use crate::ids::{ActorId, DocId};
 
 use super::contract::{
-    self, board_path, catalog_key, issue_key, EventChange, IssueEffect, IssueEvent, IssueIntent,
-    IssueQuery, Pos, StoredComment, WorkAction, DEFAULT_STATUS, LINK_KINDS, VIEW_SCHEMA_VERSION,
+    self, baseline_key, board_path, catalog_key, issue_key, spec_key, EventChange, IssueEffect,
+    IssueEvent, IssueIntent, IssueQuery, Pos, StoredComment, WorkAction, DEFAULT_STATUS,
+    LINK_KINDS, VIEW_SCHEMA_VERSION,
 };
 use super::rank;
 use super::views::{
@@ -212,6 +213,20 @@ impl IssuesWorld {
                     readable_predecessors: vec![],
                 },
                 Schema {
+                    id: contract::spec_schema(),
+                    version: contract::SPEC_SCHEMA_VERSION,
+                    encoding: contract::spec_encoding(),
+                    mutation: MutationModel::Collaborative(CollaborativeSchema::default()),
+                    readable_predecessors: vec![],
+                },
+                Schema {
+                    id: contract::baseline_schema(),
+                    version: contract::BASELINE_SCHEMA_VERSION,
+                    encoding: contract::baseline_encoding(),
+                    mutation: MutationModel::Collaborative(CollaborativeSchema::default()),
+                    readable_predecessors: vec![],
+                },
+                Schema {
                     id: contract::catalog_schema(),
                     version: contract::CATALOG_SCHEMA_VERSION,
                     encoding: contract::catalog_encoding(),
@@ -229,9 +244,9 @@ impl IssuesWorld {
         let world = Self::new();
         runtime::world::Implementation::from_registration(
             &world.descriptor(),
-            1,
-            *blake3::hash(b"lait.issues.policy-table.v1").as_bytes(),
-            *blake3::hash(b"lait.issues.artifact.v1").as_bytes(),
+            2,
+            *blake3::hash(b"lait.issues.policy-table.v2").as_bytes(),
+            *blake3::hash(b"lait.issues.spec-lifecycle.v2").as_bytes(),
         )
     }
 }
@@ -307,6 +322,34 @@ impl Staging {
         }
     }
 
+    fn declare_spec(&mut self, key: &BodyKey) {
+        if !self
+            .declarations
+            .iter()
+            .any(|declaration| &declaration.key == key)
+        {
+            self.declarations.push(BodyDeclaration {
+                key: key.clone(),
+                schema: contract::spec_schema(),
+                schema_version: contract::SPEC_SCHEMA_VERSION,
+            });
+        }
+    }
+
+    fn declare_baseline(&mut self, key: &BodyKey) {
+        if !self
+            .declarations
+            .iter()
+            .any(|declaration| &declaration.key == key)
+        {
+            self.declarations.push(BodyDeclaration {
+                key: key.clone(),
+                schema: contract::baseline_schema(),
+                schema_version: contract::BASELINE_SCHEMA_VERSION,
+            });
+        }
+    }
+
     fn issue(&mut self, key: &BodyKey, op: Op) {
         if matches!(op, Op::Create) {
             self.declare_issue(key);
@@ -326,6 +369,26 @@ impl Staging {
             self.bodies.push(key.clone());
         }
         self.ops.push((key, op));
+    }
+
+    fn spec(&mut self, key: &BodyKey, op: Op) {
+        if matches!(op, Op::Create) {
+            self.declare_spec(key);
+        }
+        if !self.bodies.contains(key) {
+            self.bodies.push(key.clone());
+        }
+        self.ops.push((key.clone(), op));
+    }
+
+    fn baseline(&mut self, key: &BodyKey, op: Op) {
+        if matches!(op, Op::Create) {
+            self.declare_baseline(key);
+        }
+        if !self.bodies.contains(key) {
+            self.bodies.push(key.clone());
+        }
+        self.ops.push((key.clone(), op));
     }
 
     /// Set the demand this mutation requires (an admin-only intent overrides
@@ -478,6 +541,352 @@ fn issue_state(ctx: &Context<'_>, doc: &str) -> Option<IssueState> {
     ctx.read_collaborative(&issue_key(doc))
         .ok()
         .map(|v| IssueState::from_view(&v))
+}
+
+fn spec_state(ctx: &Context<'_>, spec: &str) -> Option<crate::spec::Spec> {
+    ctx.read_collaborative(&spec_key(spec))
+        .ok()
+        .map(|view| crate::spec::Spec::from_view(&view))
+}
+
+fn baseline_state(ctx: &Context<'_>, baseline: &str) -> Option<crate::spec::Baseline> {
+    ctx.read_collaborative(&baseline_key(baseline))
+        .ok()
+        .map(|view| crate::spec::Baseline::from_view(&view))
+}
+
+fn all_specs(ctx: &Context<'_>) -> Vec<crate::spec::Spec> {
+    let mut specs: Vec<_> = ctx
+        .bodies_with_schema(&contract::world_id(), &contract::spec_schema())
+        .iter()
+        .filter_map(|key| ctx.read_collaborative(key).ok())
+        .map(|view| crate::spec::Spec::from_view(&view))
+        .filter(|spec| !spec.revisions.is_empty())
+        .collect();
+    specs.sort_by(|a, b| {
+        let a = a
+            .revisions
+            .first()
+            .map(|revision| revision.body.spec.as_str());
+        let b = b
+            .revisions
+            .first()
+            .map(|revision| revision.body.spec.as_str());
+        a.cmp(&b)
+    });
+    specs
+}
+
+fn all_baselines(ctx: &Context<'_>) -> Vec<crate::spec::Baseline> {
+    let mut baselines: Vec<_> = ctx
+        .bodies_with_schema(&contract::world_id(), &contract::baseline_schema())
+        .iter()
+        .filter_map(|key| ctx.read_collaborative(key).ok())
+        .map(|view| crate::spec::Baseline::from_view(&view))
+        .filter(|baseline| !baseline.revisions.is_empty())
+        .collect();
+    baselines.sort_by(|a, b| {
+        let a = a
+            .revisions
+            .first()
+            .map(|revision| revision.body.baseline.as_str());
+        let b = b
+            .revisions
+            .first()
+            .map(|revision| revision.body.baseline.as_str());
+        a.cmp(&b)
+    });
+    baselines
+}
+
+fn spec_view(spec: &crate::spec::Spec) -> Option<crate::spec::SpecView> {
+    let heads = spec.heads();
+    let selected = heads.first().copied()?;
+    let issued = match spec.issued() {
+        crate::spec::Issued::None => vec![],
+        crate::spec::Issued::One(revision) => vec![revision.revision.clone()],
+        crate::spec::Issued::Conflict(revisions) => revisions
+            .into_iter()
+            .map(|revision| revision.revision.clone())
+            .collect(),
+    };
+    Some(crate::spec::SpecView {
+        spec: selected.body.spec.clone(),
+        project: selected.body.project.clone(),
+        kind: selected.body.kind,
+        title: selected.body.title.clone(),
+        state: selected.body.state,
+        revision: selected.revision.clone(),
+        heads: heads
+            .into_iter()
+            .map(|revision| revision.revision.clone())
+            .collect(),
+        issued,
+        body: selected.body.clone(),
+    })
+}
+
+fn baseline_view(baseline: &crate::spec::Baseline) -> Option<crate::spec::BaselineView> {
+    let heads = baseline.heads();
+    let selected = heads.first().copied()?;
+    let issued = match baseline.issued() {
+        crate::spec::BaselineIssued::None => vec![],
+        crate::spec::BaselineIssued::One(revision) => vec![revision.revision.clone()],
+        crate::spec::BaselineIssued::Conflict(revisions) => revisions
+            .into_iter()
+            .map(|revision| revision.revision.clone())
+            .collect(),
+    };
+    Some(crate::spec::BaselineView {
+        baseline: selected.body.baseline.clone(),
+        project: selected.body.project.clone(),
+        name: selected.body.name.clone(),
+        state: selected.body.state,
+        revision: selected.revision.clone(),
+        heads: heads
+            .into_iter()
+            .map(|revision| revision.revision.clone())
+            .collect(),
+        issued,
+        body: selected.body.clone(),
+    })
+}
+
+fn validate_spec_ref(
+    ctx: &Context<'_>,
+    member: &crate::spec::SpecRef,
+    project: &str,
+) -> Result<(), Rejection> {
+    let spec = spec_state(ctx, &member.spec).ok_or(Rejection::InvalidRequest)?;
+    let revision = spec
+        .revision(&member.revision)
+        .ok_or(Rejection::InvalidRequest)?;
+    if revision.body.project != project || revision.body.state != crate::spec::State::Issued {
+        return Err(Rejection::InvalidRequest);
+    }
+    Ok(())
+}
+
+fn validate_spec_links(ctx: &Context<'_>, links: &[crate::spec::Link]) -> Result<(), Rejection> {
+    for link in links {
+        match &link.target {
+            crate::spec::Target::Spec { spec, revision } => {
+                let target = spec_state(ctx, spec).ok_or(Rejection::InvalidRequest)?;
+                if target.revision(revision).is_none() {
+                    return Err(Rejection::InvalidRequest);
+                }
+            }
+            crate::spec::Target::Baseline { baseline, revision } => {
+                let target = baseline_state(ctx, baseline).ok_or(Rejection::InvalidRequest)?;
+                if target.revision(revision).is_none() {
+                    return Err(Rejection::InvalidRequest);
+                }
+            }
+            crate::spec::Target::Issue { issue } => {
+                if issue_state(ctx, issue).is_none() {
+                    return Err(Rejection::InvalidRequest);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn packet(ctx: &Context<'_>, doc: &str) -> Result<crate::spec::Packet, Rejection> {
+    let issue = issue_state(ctx, doc).ok_or(Rejection::InvalidRequest)?;
+    let specs = all_specs(ctx);
+    let mut exact: BTreeMap<
+        (String, String),
+        (&crate::spec::Revision, crate::spec::PacketSource, bool),
+    > = BTreeMap::new();
+    let mut conflicts = Vec::new();
+
+    if let Some(binding) = &issue.baseline {
+        let Some(baseline) = baseline_state(ctx, &binding.baseline) else {
+            conflicts.push(crate::spec::PacketConflict::MissingBaseline {
+                baseline: binding.baseline.clone(),
+            });
+            return Ok(crate::spec::Packet {
+                issue: doc.into(),
+                baseline: issue.baseline,
+                governing: vec![],
+                guidance: vec![],
+                proof: vec![],
+                record: vec![],
+                conflicts,
+            });
+        };
+        let Some(revision) = baseline.revision(&binding.revision) else {
+            conflicts.push(crate::spec::PacketConflict::MissingBaselineRevision {
+                baseline: binding.baseline.clone(),
+                revision: binding.revision.clone(),
+            });
+            return Ok(crate::spec::Packet {
+                issue: doc.into(),
+                baseline: issue.baseline,
+                governing: vec![],
+                guidance: vec![],
+                proof: vec![],
+                record: vec![],
+                conflicts,
+            });
+        };
+        if revision.body.state != crate::spec::State::Issued {
+            conflicts.push(crate::spec::PacketConflict::BaselineNotIssued {
+                baseline: binding.baseline.clone(),
+                revision: binding.revision.clone(),
+            });
+        }
+        for member in &revision.body.members {
+            let Some(spec) = specs.iter().find(|candidate| {
+                candidate
+                    .revisions
+                    .first()
+                    .is_some_and(|revision| revision.body.spec == member.spec)
+            }) else {
+                conflicts.push(crate::spec::PacketConflict::MissingSpec {
+                    spec: member.spec.clone(),
+                });
+                continue;
+            };
+            let Some(revision) = spec.revision(&member.revision) else {
+                conflicts.push(crate::spec::PacketConflict::MissingSpecRevision {
+                    spec: member.spec.clone(),
+                    revision: member.revision.clone(),
+                });
+                continue;
+            };
+            exact.insert(
+                (member.spec.clone(), member.revision.clone()),
+                (
+                    revision,
+                    crate::spec::PacketSource::Baseline {
+                        baseline: binding.baseline.clone(),
+                    },
+                    false,
+                ),
+            );
+        }
+    }
+
+    // Issued Specs may supplement one Issue directly. Concurrent controlling
+    // revisions remain a visible conflict; no timestamp winner is selected.
+    for spec in &specs {
+        match spec.issued() {
+            crate::spec::Issued::One(revision) => {
+                if revision.body.links.iter().any(|link| {
+                    link.rel == crate::spec::Rel::Governs
+                        && matches!(&link.target, crate::spec::Target::Issue { issue } if issue == doc)
+                }) {
+                    exact.insert(
+                        (revision.body.spec.clone(), revision.revision.clone()),
+                        (revision, crate::spec::PacketSource::Direct, false),
+                    );
+                }
+            }
+            crate::spec::Issued::Conflict(revisions) => {
+                if revisions.iter().any(|revision| {
+                    revision.body.links.iter().any(|link| {
+                        link.rel == crate::spec::Rel::Governs
+                            && matches!(&link.target, crate::spec::Target::Issue { issue } if issue == doc)
+                    })
+                }) {
+                    let id = revisions
+                        .first()
+                        .map(|revision| revision.body.spec.clone())
+                        .unwrap_or_else(|| "unknown".into());
+                    conflicts.push(crate::spec::PacketConflict::IssuedSpecConflict { spec: id });
+                }
+            }
+            crate::spec::Issued::None => {}
+        }
+    }
+
+    // Incorporation, unlike reference, pulls the exact target into the
+    // governing set. Traverse to a fixed point over exact revisions.
+    loop {
+        let mut added = false;
+        let snapshot: Vec<_> = exact.values().map(|(revision, _, _)| *revision).collect();
+        for revision in snapshot {
+            for link in &revision.body.links {
+                if link.rel != crate::spec::Rel::Incorporates {
+                    continue;
+                }
+                let crate::spec::Target::Spec {
+                    spec,
+                    revision: target_revision,
+                } = &link.target
+                else {
+                    continue;
+                };
+                if exact.contains_key(&(spec.clone(), target_revision.clone())) {
+                    continue;
+                }
+                let Some(target) = specs
+                    .iter()
+                    .find_map(|candidate| candidate.revision(target_revision))
+                    .filter(|candidate| candidate.body.spec == *spec)
+                else {
+                    conflicts.push(crate::spec::PacketConflict::MissingIncorporated {
+                        spec: spec.clone(),
+                        revision: target_revision.clone(),
+                    });
+                    continue;
+                };
+                exact.insert(
+                    (spec.clone(), target_revision.clone()),
+                    (
+                        target,
+                        crate::spec::PacketSource::Incorporated {
+                            spec: revision.body.spec.clone(),
+                            revision: revision.revision.clone(),
+                        },
+                        true,
+                    ),
+                );
+                added = true;
+            }
+        }
+        if !added {
+            break;
+        }
+    }
+
+    let mut governing = Vec::new();
+    let mut guidance = Vec::new();
+    let mut proof = Vec::new();
+    let mut record = Vec::new();
+    for (_, (revision, source, incorporated)) in exact {
+        let item = crate::spec::PacketSpec {
+            spec: revision.body.spec.clone(),
+            revision: revision.revision.clone(),
+            kind: revision.body.kind,
+            title: revision.body.title.clone(),
+            state: revision.body.state,
+            source,
+            links: revision.body.links.clone(),
+        };
+        if incorporated || revision.body.kind.governs() {
+            governing.push(item);
+        } else {
+            match revision.body.kind {
+                crate::spec::Kind::Goal | crate::spec::Kind::Plan | crate::spec::Kind::Guide => {
+                    guidance.push(item)
+                }
+                crate::spec::Kind::Proof | crate::spec::Kind::Verdict => proof.push(item),
+                _ => record.push(item),
+            }
+        }
+    }
+    Ok(crate::spec::Packet {
+        issue: doc.into(),
+        baseline: issue.baseline,
+        governing,
+        guidance,
+        proof,
+        record,
+        conflicts,
+    })
 }
 
 /// The preconditions both comment verbs share, and the issue they hold for.
@@ -986,7 +1395,7 @@ impl World for IssuesWorld {
     fn descriptor(&self) -> runtime::world::Descriptor {
         runtime::world::Descriptor {
             id: self.id.clone(),
-            implementation_version: runtime::world::Version(1),
+            implementation_version: runtime::world::Version(2),
             schemas: self.schemas.clone(),
             limits: runtime::world::Limits::default(),
             scope_schemas: Vec::new(),
@@ -2218,6 +2627,480 @@ impl World for IssuesWorld {
                 staging.require(contract::demand_space_any("catalog.workflow.configure"));
                 Ok(staging.into_effect(None))
             }
+            IssueIntent::SpecCreate {
+                spec,
+                project,
+                kind,
+                title,
+                text,
+                links,
+                actor,
+                device: _,
+                ts,
+            } => {
+                if crate::ids::SpecId::parse(&spec).is_none()
+                    || ActorId::parse(&actor).is_none()
+                    || !catalog.projects.contains_key(&project)
+                    || spec_state(ctx, &spec).is_some()
+                {
+                    return Err(Rejection::InvalidRequest);
+                }
+                validate_spec_links(ctx, &links)?;
+                let revision = crate::spec::build_revision(
+                    crate::spec::Body {
+                        spec: spec.clone(),
+                        project: project.clone(),
+                        kind,
+                        title,
+                        text,
+                        state: crate::spec::State::Draft,
+                        links,
+                        author: actor,
+                        ts,
+                    },
+                    vec![],
+                )
+                .map_err(|_| Rejection::InvalidRequest)?;
+                let key = spec_key(&spec);
+                staging.spec(&key, Op::Create);
+                staging.spec(
+                    &key,
+                    map_set(
+                        "revisions",
+                        revision.revision.clone(),
+                        serde_json::to_vec(&revision).expect("Spec revision JSON"),
+                    ),
+                );
+                staging.require(contract::demand_project_work("spec.write", &project));
+                Ok(staging.into_effect(Some(spec)))
+            }
+            IssueIntent::SpecRevise {
+                spec,
+                expected,
+                title,
+                text,
+                links,
+                actor,
+                device: _,
+                ts,
+            } => {
+                if ActorId::parse(&actor).is_none() {
+                    return Err(Rejection::InvalidRequest);
+                }
+                let current = spec_state(ctx, &spec).ok_or(Rejection::InvalidRequest)?;
+                let heads = current.heads();
+                if heads.len() != 1 || heads[0].revision != expected {
+                    return Err(Rejection::Conflict);
+                }
+                let head = heads[0];
+                let mut body = head.body.clone();
+                if let Some(title) = title {
+                    body.title = title;
+                }
+                if let Some(text) = text {
+                    body.text = text;
+                }
+                if let Some(links) = links {
+                    validate_spec_links(ctx, &links)?;
+                    body.links = links;
+                }
+                body.state = crate::spec::State::Draft;
+                body.author = actor;
+                body.ts = ts;
+                let predecessor =
+                    crate::spec::decode_revision(&expected).ok_or(Rejection::InvalidRequest)?;
+                let revision = crate::spec::build_revision(body, vec![predecessor])
+                    .map_err(|_| Rejection::InvalidRequest)?;
+                let key = spec_key(&spec);
+                staging.spec(
+                    &key,
+                    map_set(
+                        "revisions",
+                        revision.revision.clone(),
+                        serde_json::to_vec(&revision).expect("Spec revision JSON"),
+                    ),
+                );
+                staging.require(contract::demand_project_work(
+                    "spec.write",
+                    &head.body.project,
+                ));
+                Ok(staging.into_effect(Some(spec)))
+            }
+            IssueIntent::SpecState {
+                spec,
+                expected,
+                state,
+                actor,
+                device: _,
+                ts,
+            } => {
+                if ActorId::parse(&actor).is_none() || state == crate::spec::State::Draft {
+                    return Err(Rejection::InvalidRequest);
+                }
+                let current = spec_state(ctx, &spec).ok_or(Rejection::InvalidRequest)?;
+                let heads = current.heads();
+                if heads.len() != 1 || heads[0].revision != expected {
+                    return Err(Rejection::Conflict);
+                }
+                let head = heads[0];
+                let valid = match state {
+                    crate::spec::State::Review => head.body.state == crate::spec::State::Draft,
+                    crate::spec::State::Issued => matches!(
+                        head.body.state,
+                        crate::spec::State::Draft | crate::spec::State::Review
+                    ),
+                    crate::spec::State::Withdrawn => {
+                        !matches!(current.issued(), crate::spec::Issued::None)
+                    }
+                    crate::spec::State::Draft => false,
+                };
+                if !valid {
+                    return Err(Rejection::InvalidRequest);
+                }
+                let mut body = head.body.clone();
+                body.state = state;
+                body.author = actor;
+                body.ts = ts;
+                let predecessor =
+                    crate::spec::decode_revision(&expected).ok_or(Rejection::InvalidRequest)?;
+                let revision = crate::spec::build_revision(body, vec![predecessor])
+                    .map_err(|_| Rejection::InvalidRequest)?;
+                let key = spec_key(&spec);
+                staging.spec(
+                    &key,
+                    map_set(
+                        "revisions",
+                        revision.revision.clone(),
+                        serde_json::to_vec(&revision).expect("Spec revision JSON"),
+                    ),
+                );
+                let capability = if state == crate::spec::State::Review {
+                    "spec.write"
+                } else {
+                    "spec.issue"
+                };
+                let demand = if state == crate::spec::State::Review {
+                    contract::demand_project_work(capability, &head.body.project)
+                } else {
+                    contract::demand_project_any(capability, &head.body.project)
+                };
+                staging.require(demand);
+                Ok(staging.into_effect(Some(spec)))
+            }
+            IssueIntent::SpecResolve {
+                spec,
+                expected_heads,
+                body_json,
+                actor,
+                device: _,
+                ts,
+            } => {
+                if ActorId::parse(&actor).is_none() {
+                    return Err(Rejection::InvalidRequest);
+                }
+                let current = spec_state(ctx, &spec).ok_or(Rejection::InvalidRequest)?;
+                let mut heads: Vec<String> = current
+                    .heads()
+                    .into_iter()
+                    .map(|revision| revision.revision.clone())
+                    .collect();
+                heads.sort();
+                let mut expected = expected_heads;
+                expected.sort();
+                expected.dedup();
+                if heads.is_empty() || heads != expected {
+                    return Err(Rejection::Conflict);
+                }
+                let mut body: crate::spec::Body =
+                    serde_json::from_str(&body_json).map_err(|_| Rejection::InvalidRequest)?;
+                let first = current.revisions.first().ok_or(Rejection::InvalidRequest)?;
+                if body.spec != spec
+                    || body.project != first.body.project
+                    || body.kind != first.body.kind
+                {
+                    return Err(Rejection::InvalidRequest);
+                }
+                validate_spec_links(ctx, &body.links)?;
+                body.state = crate::spec::State::Draft;
+                body.author = actor;
+                body.ts = ts;
+                let predecessors = expected
+                    .iter()
+                    .map(|revision| {
+                        crate::spec::decode_revision(revision).ok_or(Rejection::InvalidRequest)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let revision = crate::spec::build_revision(body, predecessors)
+                    .map_err(|_| Rejection::InvalidRequest)?;
+                let key = spec_key(&spec);
+                staging.spec(
+                    &key,
+                    map_set(
+                        "revisions",
+                        revision.revision.clone(),
+                        serde_json::to_vec(&revision).expect("Spec revision JSON"),
+                    ),
+                );
+                staging.require(contract::demand_project_work(
+                    "spec.write",
+                    &first.body.project,
+                ));
+                Ok(staging.into_effect(Some(spec)))
+            }
+            IssueIntent::BaselineCreate {
+                baseline,
+                project,
+                name,
+                members,
+                actor,
+                device: _,
+                ts,
+            } => {
+                if crate::ids::BaselineId::parse(&baseline).is_none()
+                    || ActorId::parse(&actor).is_none()
+                    || !catalog.projects.contains_key(&project)
+                    || baseline_state(ctx, &baseline).is_some()
+                {
+                    return Err(Rejection::InvalidRequest);
+                }
+                for member in &members {
+                    validate_spec_ref(ctx, member, &project)?;
+                }
+                let revision = crate::spec::build_baseline_revision(
+                    crate::spec::BaselineBody {
+                        baseline: baseline.clone(),
+                        project: project.clone(),
+                        name,
+                        state: crate::spec::State::Draft,
+                        members,
+                        author: actor,
+                        ts,
+                    },
+                    vec![],
+                )
+                .map_err(|_| Rejection::InvalidRequest)?;
+                let key = baseline_key(&baseline);
+                staging.baseline(&key, Op::Create);
+                staging.baseline(
+                    &key,
+                    map_set(
+                        "revisions",
+                        revision.revision.clone(),
+                        serde_json::to_vec(&revision).expect("Baseline revision JSON"),
+                    ),
+                );
+                staging.require(contract::demand_project_work("baseline.write", &project));
+                Ok(staging.into_effect(Some(baseline)))
+            }
+            IssueIntent::BaselineRevise {
+                baseline,
+                expected,
+                name,
+                members,
+                actor,
+                device: _,
+                ts,
+            } => {
+                if ActorId::parse(&actor).is_none() {
+                    return Err(Rejection::InvalidRequest);
+                }
+                let current = baseline_state(ctx, &baseline).ok_or(Rejection::InvalidRequest)?;
+                let heads = current.heads();
+                if heads.len() != 1 || heads[0].revision != expected {
+                    return Err(Rejection::Conflict);
+                }
+                let head = heads[0];
+                let mut body = head.body.clone();
+                if let Some(name) = name {
+                    body.name = name;
+                }
+                if let Some(members) = members {
+                    for member in &members {
+                        validate_spec_ref(ctx, member, &body.project)?;
+                    }
+                    body.members = members;
+                }
+                body.state = crate::spec::State::Draft;
+                body.author = actor;
+                body.ts = ts;
+                let predecessor =
+                    crate::spec::decode_revision(&expected).ok_or(Rejection::InvalidRequest)?;
+                let revision = crate::spec::build_baseline_revision(body, vec![predecessor])
+                    .map_err(|_| Rejection::InvalidRequest)?;
+                let key = baseline_key(&baseline);
+                staging.baseline(
+                    &key,
+                    map_set(
+                        "revisions",
+                        revision.revision.clone(),
+                        serde_json::to_vec(&revision).expect("Baseline revision JSON"),
+                    ),
+                );
+                staging.require(contract::demand_project_work(
+                    "baseline.write",
+                    &head.body.project,
+                ));
+                Ok(staging.into_effect(Some(baseline)))
+            }
+            IssueIntent::BaselineState {
+                baseline,
+                expected,
+                state,
+                actor,
+                device: _,
+                ts,
+            } => {
+                if ActorId::parse(&actor).is_none() || state == crate::spec::State::Draft {
+                    return Err(Rejection::InvalidRequest);
+                }
+                let current = baseline_state(ctx, &baseline).ok_or(Rejection::InvalidRequest)?;
+                let heads = current.heads();
+                if heads.len() != 1 || heads[0].revision != expected {
+                    return Err(Rejection::Conflict);
+                }
+                let head = heads[0];
+                let valid = match state {
+                    crate::spec::State::Review => head.body.state == crate::spec::State::Draft,
+                    crate::spec::State::Issued => matches!(
+                        head.body.state,
+                        crate::spec::State::Draft | crate::spec::State::Review
+                    ),
+                    crate::spec::State::Withdrawn => {
+                        !matches!(current.issued(), crate::spec::BaselineIssued::None)
+                    }
+                    crate::spec::State::Draft => false,
+                };
+                if !valid {
+                    return Err(Rejection::InvalidRequest);
+                }
+                if state == crate::spec::State::Issued {
+                    for member in &head.body.members {
+                        validate_spec_ref(ctx, member, &head.body.project)?;
+                    }
+                }
+                let mut body = head.body.clone();
+                body.state = state;
+                body.author = actor;
+                body.ts = ts;
+                let predecessor =
+                    crate::spec::decode_revision(&expected).ok_or(Rejection::InvalidRequest)?;
+                let revision = crate::spec::build_baseline_revision(body, vec![predecessor])
+                    .map_err(|_| Rejection::InvalidRequest)?;
+                let key = baseline_key(&baseline);
+                staging.baseline(
+                    &key,
+                    map_set(
+                        "revisions",
+                        revision.revision.clone(),
+                        serde_json::to_vec(&revision).expect("Baseline revision JSON"),
+                    ),
+                );
+                let demand = if state == crate::spec::State::Review {
+                    contract::demand_project_work("baseline.write", &head.body.project)
+                } else {
+                    contract::demand_project_any("baseline.issue", &head.body.project)
+                };
+                staging.require(demand);
+                Ok(staging.into_effect(Some(baseline)))
+            }
+            IssueIntent::BaselineResolve {
+                baseline,
+                expected_heads,
+                body_json,
+                actor,
+                device: _,
+                ts,
+            } => {
+                if ActorId::parse(&actor).is_none() {
+                    return Err(Rejection::InvalidRequest);
+                }
+                let current = baseline_state(ctx, &baseline).ok_or(Rejection::InvalidRequest)?;
+                let mut heads: Vec<String> = current
+                    .heads()
+                    .into_iter()
+                    .map(|revision| revision.revision.clone())
+                    .collect();
+                heads.sort();
+                let mut expected = expected_heads;
+                expected.sort();
+                expected.dedup();
+                if heads.is_empty() || heads != expected {
+                    return Err(Rejection::Conflict);
+                }
+                let mut body: crate::spec::BaselineBody =
+                    serde_json::from_str(&body_json).map_err(|_| Rejection::InvalidRequest)?;
+                let first = current.revisions.first().ok_or(Rejection::InvalidRequest)?;
+                if body.baseline != baseline || body.project != first.body.project {
+                    return Err(Rejection::InvalidRequest);
+                }
+                for member in &body.members {
+                    validate_spec_ref(ctx, member, &body.project)?;
+                }
+                body.state = crate::spec::State::Draft;
+                body.author = actor;
+                body.ts = ts;
+                let predecessors = expected
+                    .iter()
+                    .map(|revision| {
+                        crate::spec::decode_revision(revision).ok_or(Rejection::InvalidRequest)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let revision = crate::spec::build_baseline_revision(body, predecessors)
+                    .map_err(|_| Rejection::InvalidRequest)?;
+                let key = baseline_key(&baseline);
+                staging.baseline(
+                    &key,
+                    map_set(
+                        "revisions",
+                        revision.revision.clone(),
+                        serde_json::to_vec(&revision).expect("Baseline revision JSON"),
+                    ),
+                );
+                staging.require(contract::demand_project_work(
+                    "baseline.write",
+                    &first.body.project,
+                ));
+                Ok(staging.into_effect(Some(baseline)))
+            }
+            IssueIntent::IssueBaseline {
+                doc,
+                baseline,
+                device,
+                ts,
+            } => {
+                let issue = issue_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
+                if let Some(binding) = &baseline {
+                    let baseline_state =
+                        baseline_state(ctx, &binding.baseline).ok_or(Rejection::InvalidRequest)?;
+                    let revision = baseline_state
+                        .revision(&binding.revision)
+                        .ok_or(Rejection::InvalidRequest)?;
+                    if revision.body.project != issue.project
+                        || revision.body.state != crate::spec::State::Issued
+                    {
+                        return Err(Rejection::InvalidRequest);
+                    }
+                }
+                staging.issue(
+                    &issue_key(&doc),
+                    reg(
+                        "baseline",
+                        baseline
+                            .as_ref()
+                            .map(|binding| {
+                                serde_json::to_vec(binding).expect("Baseline binding JSON")
+                            })
+                            .unwrap_or_default(),
+                    ),
+                );
+                staging.require(contract::demand_project_any("issue.bind", &issue.project));
+                let mut event = event("baseline", &device, ts);
+                event.x = baseline
+                    .map(|binding| format!("{}@{}", binding.baseline, binding.revision))
+                    .unwrap_or_default();
+                push_event(&mut staging, ctx, &doc, &event);
+                Ok(staging.into_effect(Some(doc)))
+            }
             IssueIntent::ProjectDelete {
                 id,
                 device: _,
@@ -3204,7 +4087,7 @@ impl World for IssuesWorld {
                 Ok(projection(serde_json::to_vec(&entries).expect("inbox")))
             }
             IssueQuery::RingDigest => Ok(projection(
-                serde_json::to_vec(&ring_digest(catalog)).expect("ring digest json"),
+                serde_json::to_vec(&ring_digest(ctx, catalog)).expect("ring digest json"),
             )),
             IssueQuery::Projects => {
                 let projects: Vec<crate::dto::ProjectDto> = catalog
@@ -3313,6 +4196,119 @@ impl World for IssuesWorld {
                 });
                 Ok(projection(
                     serde_json::to_vec(&view).expect("workflow json"),
+                ))
+            }
+            IssueQuery::Specs { project } => {
+                let mut specs: Vec<crate::spec::SpecView> = all_specs(ctx)
+                    .into_iter()
+                    .filter_map(|spec| spec_view(&spec))
+                    .filter(|spec| {
+                        project
+                            .as_ref()
+                            .is_none_or(|project| &spec.project == project)
+                    })
+                    .collect();
+                specs.sort_by(|a, b| a.title.cmp(&b.title).then_with(|| a.spec.cmp(&b.spec)));
+                Ok(projection(serde_json::to_vec(&specs).expect("specs json")))
+            }
+            IssueQuery::Spec { spec } => {
+                let spec = spec_state(ctx, &spec).ok_or(Rejection::InvalidRequest)?;
+                let view = spec_view(&spec).ok_or(Rejection::InvalidRequest)?;
+                Ok(projection(serde_json::to_vec(&view).expect("spec json")))
+            }
+            IssueQuery::SpecHistory { spec } => {
+                let spec = spec_state(ctx, &spec).ok_or(Rejection::InvalidRequest)?;
+                // Oldest first. `Spec::from_view` sorts by revision id, which is
+                // a stable order but not a readable one; predecessors give the
+                // real one, and a client that wants the DAG still has it.
+                let revisions = crate::spec::ordered(&spec.revisions, |revision| {
+                    (&revision.revision, &revision.predecessors)
+                });
+                Ok(projection(
+                    serde_json::to_vec(&revisions).expect("spec history json"),
+                ))
+            }
+            IssueQuery::SpecReferences { project } => {
+                let mut references: Vec<crate::spec::SpecReference> = Vec::new();
+                for spec in all_specs(ctx) {
+                    let heads: std::collections::BTreeSet<&str> = spec
+                        .heads()
+                        .into_iter()
+                        .map(|revision| revision.revision.as_str())
+                        .collect();
+                    let issued: std::collections::BTreeSet<&str> = match spec.issued() {
+                        crate::spec::Issued::One(revision) => {
+                            [revision.revision.as_str()].into_iter().collect()
+                        }
+                        // A conflict has no effective revision, so none of the
+                        // candidates may claim to be it.
+                        crate::spec::Issued::Conflict(_) | crate::spec::Issued::None => {
+                            std::collections::BTreeSet::new()
+                        }
+                    };
+                    for revision in &spec.revisions {
+                        if project
+                            .as_ref()
+                            .is_some_and(|project| &revision.body.project != project)
+                        {
+                            continue;
+                        }
+                        for link in &revision.body.links {
+                            references.push(crate::spec::SpecReference {
+                                spec: revision.body.spec.clone(),
+                                revision: revision.revision.clone(),
+                                kind: revision.body.kind,
+                                title: revision.body.title.clone(),
+                                link: link.clone(),
+                                head: heads.contains(revision.revision.as_str()),
+                                issued: issued.contains(revision.revision.as_str()),
+                            });
+                        }
+                    }
+                }
+                Ok(projection(
+                    serde_json::to_vec(&references).expect("spec references json"),
+                ))
+            }
+            IssueQuery::BaselineHistory { baseline } => {
+                let baseline = baseline_state(ctx, &baseline).ok_or(Rejection::InvalidRequest)?;
+                let revisions = crate::spec::ordered(&baseline.revisions, |revision| {
+                    (&revision.revision, &revision.predecessors)
+                });
+                Ok(projection(
+                    serde_json::to_vec(&revisions).expect("baseline history json"),
+                ))
+            }
+            IssueQuery::Baselines { project } => {
+                let mut baselines: Vec<crate::spec::BaselineView> = all_baselines(ctx)
+                    .into_iter()
+                    .filter_map(|baseline| baseline_view(&baseline))
+                    .filter(|baseline| {
+                        project
+                            .as_ref()
+                            .is_none_or(|project| &baseline.project == project)
+                    })
+                    .collect();
+                baselines.sort_by(|a, b| {
+                    a.name
+                        .cmp(&b.name)
+                        .then_with(|| a.baseline.cmp(&b.baseline))
+                });
+                Ok(projection(
+                    serde_json::to_vec(&baselines).expect("baselines json"),
+                ))
+            }
+            IssueQuery::Baseline { baseline } => {
+                let baseline = baseline_state(ctx, &baseline).ok_or(Rejection::InvalidRequest)?;
+                let view = baseline_view(&baseline).ok_or(Rejection::InvalidRequest)?;
+                Ok(projection(
+                    serde_json::to_vec(&view).expect("baseline json"),
+                ))
+            }
+            IssueQuery::Packet { doc } => {
+                let packet = packet(ctx, &doc)?;
+                Ok(projection(
+                    serde_json::to_vec(&packet).expect("packet json"),
                 ))
             }
             IssueQuery::Milestones { project } => {
@@ -3566,6 +4562,7 @@ fn provisional_view(
         followers: vec![],
         milestone: None,
         cycle: None,
+        baseline: None,
         attachments: vec![],
         provisional: true,
         corrupt_records: vec![],
@@ -3648,7 +4645,7 @@ fn graph_view(
 /// equal state always digests equal. A plane absent from the map digests as its
 /// empty form rather than being omitted — "emptied" has to be distinguishable
 /// from "unchanged".
-fn ring_digest(catalog: &CatalogState) -> contract::RingDigestView {
+fn ring_digest(ctx: &Context<'_>, catalog: &CatalogState) -> contract::RingDigestView {
     let mut planes: Vec<contract::PlaneDigest> = Vec::new();
     let mut plane = |plane: CatalogScope, value: serde_json::Value| {
         let bytes = serde_json::to_vec(&value).expect("plane json");
@@ -3700,6 +4697,19 @@ fn ring_digest(catalog: &CatalogState) -> contract::RingDigestView {
             serde_json::json!(&catalog.parents)
         ]),
     );
+    // The one plane whose contents are not in the catalog. Specs and Baselines
+    // are Bodies of their own, so there is no region here to hash — but a Body's
+    // version stamp moves exactly when the Body does, and reading stamps costs
+    // no decode. Digesting `(key, stamp)` pairs gets the same "did this plane
+    // move" answer for the price of an enumeration.
+    let mut stamps: Vec<(String, Option<Vec<u8>>)> = Vec::new();
+    for schema in [contract::spec_schema(), contract::baseline_schema()] {
+        for key in ctx.bodies_with_schema(&contract::world_id(), &schema) {
+            stamps.push((key.body.render(), ctx.body_stamp(&key)));
+        }
+    }
+    stamps.sort();
+    plane(CatalogScope::Specs, serde_json::json!(stamps));
 
     // Per-project planes, and the doc index, from the same pinned catalog: one
     // pass, one root. Each names the project by its stable id AND its display

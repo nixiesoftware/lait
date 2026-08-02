@@ -298,10 +298,17 @@ pub struct LiveHandle {
     offers: std::sync::Mutex<crate::signal::OfferQueue>,
 }
 
+/// One thing this Station currently wants its peers to see.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalPublication {
+    pub scope: Target,
+    pub payload: crate::transient::TransientPayload,
+}
+
 /// What this Station is doing, as the thing that decides it sees it.
 #[derive(Default)]
 struct LocalPresence {
-    scopes: Vec<Target>,
+    publications: Vec<LocalPublication>,
     generation: u64,
 }
 
@@ -369,11 +376,25 @@ impl LiveHandle {
     /// carries the epoch of the connection it crosses and two sessions do not
     /// share one.
     pub fn declare_local(&self, scopes: Vec<Target>) {
+        self.declare_local_publications(
+            scopes
+                .into_iter()
+                .map(|scope| LocalPublication {
+                    scope,
+                    payload: crate::transient::TransientPayload::Presence,
+                })
+                .collect(),
+        );
+    }
+
+    /// Replace everything this Station publishes: presence, carets, selections,
+    /// and typing. The caller has already minted anchors and bounded the set.
+    pub fn declare_local_publications(&self, publications: Vec<LocalPublication>) {
         let mut local = self.local();
-        if local.scopes == scopes {
+        if local.publications == publications {
             return;
         }
-        local.scopes = scopes;
+        local.publications = publications;
         // A counter a session can compare against cheaply. Without it every
         // session would clone and compare the whole set on every beat, at the
         // beat rate, for a set that changes when somebody opens a tab.
@@ -382,7 +403,7 @@ impl LiveHandle {
 
     /// The number that moves when the declaration changes.
     ///
-    /// Separate from [`Self::declared`] so the common case — a beat on which
+    /// Separate from `local_publications` so the common case — a beat on which
     /// nothing changed — costs a `u64` read rather than cloning the whole scope
     /// set, which is the cost the counter was added to avoid and which reading
     /// them together reintroduced.
@@ -390,9 +411,21 @@ impl LiveHandle {
         self.local().generation
     }
 
-    /// What this Station is looking at.
+    /// Which scopes this Station is looking at.
+    ///
+    /// Kept as the scope-only inspection API it was before cursors became a
+    /// local publication. Session code uses `local_publications` to retain the
+    /// payload paired with each scope.
     pub fn declared(&self) -> Vec<Target> {
-        self.local().scopes.clone()
+        self.local()
+            .publications
+            .iter()
+            .map(|publication| publication.scope.clone())
+            .collect()
+    }
+
+    fn local_publications(&self) -> Vec<LocalPublication> {
+        self.local().publications.clone()
     }
 
     fn local(&self) -> std::sync::MutexGuard<'_, LocalPresence> {
@@ -1038,7 +1071,10 @@ pub async fn serve_session(
     // scopes at different sequence numbers under different epochs, so the
     // difference between "what we are doing" and "what this peer has been told"
     // is a fact about the connection and belongs with it.
-    let mut published: std::collections::BTreeSet<Target> = std::collections::BTreeSet::new();
+    let mut published: std::collections::BTreeMap<
+        (Target, u8),
+        crate::transient::TransientPayload,
+    > = std::collections::BTreeMap::new();
     let mut published_generation = u64::MAX;
     // `Instant::now() - PRESENCE_REFRESH` panics when the machine has been up for
     // less than the refresh interval, which is a real state on a freshly booted
@@ -1095,7 +1131,20 @@ pub async fn serve_session(
             let generation = handle.local_generation();
             let due = refreshed_at.elapsed() >= deadline::PRESENCE_REFRESH;
             if generation != published_generation || due {
-                let want: std::collections::BTreeSet<_> = handle.declared().into_iter().collect();
+                let want: std::collections::BTreeMap<_, _> = handle
+                    .local_publications()
+                    .into_iter()
+                    .map(|publication| {
+                        (
+                            (publication.scope, publication.payload.kind() as u8),
+                            publication.payload,
+                        )
+                    })
+                    .collect();
+                let want_scopes: std::collections::BTreeSet<_> =
+                    want.keys().map(|(scope, _)| scope.clone()).collect();
+                let published_scopes: std::collections::BTreeSet<_> =
+                    published.keys().map(|(scope, _)| scope.clone()).collect();
                 // The subscription *is* the declaration, and it has to go first.
                 // A receiver drops a datagram for a scope this connection never
                 // subscribed to — that is what stops a peer making a Station
@@ -1122,45 +1171,53 @@ pub async fn serve_session(
                 // only thing in this loop that sleeps is the `select!` below, so
                 // continuing past it turned a connection whose subscribe fails
                 // fast into a busy spin for the whole idle timeout.
-                let subscribed = !(want != published || due)
-                    || subscribe_remotely(connection.as_ref(), &want).await;
+                let subscribed = !(want_scopes != published_scopes || due)
+                    || subscribe_remotely(connection.as_ref(), &want_scopes).await;
                 if subscribed {
-                    for scope in want.difference(&published) {
+                    // Retirement is scope-wide. When a collapsed caret becomes a
+                    // selection (or back), retire the old kind first and then
+                    // republish the current one so a peer never draws both.
+                    let changed_kinds: std::collections::BTreeSet<_> = want_scopes
+                        .intersection(&published_scopes)
+                        .filter(|scope| {
+                            let wanted: Vec<_> = want
+                                .keys()
+                                .filter(|(held, _)| held == *scope)
+                                .map(|(_, kind)| *kind)
+                                .collect();
+                            let sent: Vec<_> = published
+                                .keys()
+                                .filter(|(held, _)| held == *scope)
+                                .map(|(_, kind)| *kind)
+                                .collect();
+                            wanted != sent
+                        })
+                        .cloned()
+                        .collect();
+                    for scope in published_scopes
+                        .difference(&want_scopes)
+                        .chain(changed_kinds.iter())
+                    {
                         outbound_seq += 1;
-                        publish_presence(
-                            connection.as_ref(),
-                            scope,
-                            &epoch,
-                            outbound_seq,
-                            &mut session.borrow_mut().counters,
-                        );
+                        retire_remotely(connection.as_ref(), scope, outbound_seq).await;
                     }
-                    if due {
-                        // A refresh re-sends what the peer already has, which is the
-                        // only way a slot's TTL is renewed — the receiver keys a
-                        // slot by scope and kind, so this replaces rather than
-                        // duplicates.
-                        for scope in want.intersection(&published) {
+                    for ((scope, _), payload) in &want {
+                        let changed =
+                            published.get(&(scope.clone(), payload.kind() as u8)) != Some(payload);
+                        if due || changed || changed_kinds.contains(scope) {
                             outbound_seq += 1;
-                            publish_presence(
+                            publish_payload(
                                 connection.as_ref(),
                                 scope,
+                                payload,
                                 &epoch,
                                 outbound_seq,
                                 &mut session.borrow_mut().counters,
                             );
                         }
-                        refreshed_at = Instant::now();
                     }
-                    // What we stopped looking at. Retirement is an optimisation on
-                    // top of expiry and never a prerequisite — the module doc is
-                    // blunt that nothing has a goodbye — but the difference a
-                    // person sees is a face vanishing when a tab closes rather than
-                    // ninety seconds later.
-                    let gone: Vec<_> = published.difference(&want).cloned().collect();
-                    for scope in gone {
-                        outbound_seq += 1;
-                        retire_remotely(connection.as_ref(), &scope, outbound_seq).await;
+                    if due {
+                        refreshed_at = Instant::now();
                     }
                     published = want;
                     published_generation = generation;
@@ -1177,11 +1234,12 @@ pub async fn serve_session(
                 && settled_at.elapsed() >= deadline::TYPING_COALESCE
             {
                 settled_at = Instant::now();
-                for scope in &published {
+                for ((scope, _), payload) in &published {
                     outbound_seq += 1;
-                    publish_presence(
+                    publish_payload(
                         connection.as_ref(),
                         scope,
+                        payload,
                         &epoch,
                         outbound_seq,
                         &mut session.borrow_mut().counters,
@@ -1639,12 +1697,13 @@ async fn retire_remotely(connection: &dyn comms::Connection, scope: &Target, seq
 
 /// Tell one peer this Station is looking at something.
 ///
-/// A failure is not reported anywhere and that is deliberate: the item is
-/// presence, the next refresh carries it again, and a transient send that
+/// A failure is not reported anywhere and that is deliberate: a newer
+/// transient item or the next refresh supersedes it, and a transient send that
 /// retried would be a transient send with a queue.
-fn publish_presence(
+fn publish_payload(
     connection: &dyn comms::Connection,
     scope: &Target,
+    payload: &crate::transient::TransientPayload,
     epoch: &[u8; 16],
     seq: u64,
     counters: &mut TransientCounters,
@@ -1653,7 +1712,7 @@ fn publish_presence(
         connection_epoch: *epoch,
         seq,
         scope: scope.clone(),
-        payload: crate::transient::TransientPayload::Presence,
+        payload: payload.clone(),
     };
     publish(connection, &item, counters);
 }

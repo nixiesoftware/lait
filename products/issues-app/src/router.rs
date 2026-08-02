@@ -601,6 +601,23 @@ impl<'a> IssueRouter<'a> {
                 | Request::WorkflowShow { .. }
                 | Request::WorkflowValidate { .. }
                 | Request::WorkflowSet { .. }
+                | Request::SpecList { .. }
+                | Request::SpecShow { .. }
+                | Request::SpecHistory { .. }
+                | Request::SpecReferences { .. }
+                | Request::BaselineHistory { .. }
+                | Request::SpecNew { .. }
+                | Request::SpecRevise { .. }
+                | Request::SpecState { .. }
+                | Request::SpecResolve { .. }
+                | Request::BaselineList { .. }
+                | Request::BaselineShow { .. }
+                | Request::BaselineNew { .. }
+                | Request::BaselineRevise { .. }
+                | Request::BaselineState { .. }
+                | Request::BaselineResolve { .. }
+                | Request::IssueBaseline { .. }
+                | Request::Packet { .. }
         )
     }
 
@@ -1897,6 +1914,289 @@ impl<'a> IssueRouter<'a> {
                     },
                     true,
                 ))
+            }
+            Request::SpecList { project } => {
+                let project = project
+                    .map(|project| {
+                        snapshot
+                            .resolve_project(&project)
+                            .ok_or_else(|| Response::not_found("no such project"))
+                    })
+                    .transpose()?;
+                let specs = self
+                    .query(&IssueQuery::Specs { project })
+                    .map_err(Self::effect_err)?;
+                Ok((Response::Specs { specs }, false))
+            }
+            Request::SpecShow { spec } => {
+                let spec = self
+                    .query(&IssueQuery::Spec { spec })
+                    .map_err(Self::effect_err)?;
+                Ok((
+                    Response::Spec {
+                        spec: Box::new(spec),
+                    },
+                    false,
+                ))
+            }
+            Request::SpecHistory { spec } => {
+                let revisions = self
+                    .query(&IssueQuery::SpecHistory { spec })
+                    .map_err(Self::effect_err)?;
+                Ok((Response::SpecRevisions { revisions }, false))
+            }
+            Request::SpecReferences { project } => {
+                let project = project
+                    .map(|project| {
+                        snapshot
+                            .resolve_project(&project)
+                            .ok_or_else(|| Response::not_found("no such project"))
+                    })
+                    .transpose()?;
+                let references = self
+                    .query(&IssueQuery::SpecReferences { project })
+                    .map_err(Self::effect_err)?;
+                Ok((Response::SpecReferences { references }, false))
+            }
+            Request::BaselineHistory { baseline } => {
+                let revisions = self
+                    .query(&IssueQuery::BaselineHistory { baseline })
+                    .map_err(Self::effect_err)?;
+                Ok((Response::BaselineRevisions { revisions }, false))
+            }
+            Request::SpecNew {
+                project,
+                kind,
+                title,
+                text,
+                links,
+            } => {
+                let project = snapshot
+                    .resolve_project(&project)
+                    .ok_or_else(|| Response::not_found("no such project"))?;
+                let spec = issues::ids::mint_spec_id(self.clock);
+                self.submit(&IssueIntent::SpecCreate {
+                    spec: spec.clone(),
+                    project,
+                    kind,
+                    title,
+                    text,
+                    links,
+                    actor: facts.actor.clone(),
+                    device: facts.device.clone(),
+                    ts: facts.now,
+                })
+                .map_err(Self::effect_err)?;
+                let view = self
+                    .query(&IssueQuery::Spec { spec })
+                    .map_err(Self::effect_err)?;
+                Ok((
+                    Response::Spec {
+                        spec: Box::new(view),
+                    },
+                    true,
+                ))
+            }
+            Request::SpecRevise {
+                spec,
+                expected,
+                title,
+                text,
+                links,
+            } => {
+                self.submit(&IssueIntent::SpecRevise {
+                    spec: spec.clone(),
+                    expected,
+                    title,
+                    text,
+                    links,
+                    actor: facts.actor.clone(),
+                    device: facts.device.clone(),
+                    ts: facts.now,
+                })
+                .map_err(Self::effect_err)?;
+                let view = self
+                    .query(&IssueQuery::Spec { spec })
+                    .map_err(Self::effect_err)?;
+                Ok((
+                    Response::Spec {
+                        spec: Box::new(view),
+                    },
+                    true,
+                ))
+            }
+            Request::SpecState {
+                spec,
+                expected,
+                state,
+            } => {
+                self.submit(&IssueIntent::SpecState {
+                    spec: spec.clone(),
+                    expected,
+                    state,
+                    actor: facts.actor.clone(),
+                    device: facts.device.clone(),
+                    ts: facts.now,
+                })
+                .map_err(Self::effect_err)?;
+                let view = self
+                    .query(&IssueQuery::Spec { spec })
+                    .map_err(Self::effect_err)?;
+                Ok((
+                    Response::Spec {
+                        spec: Box::new(view),
+                    },
+                    true,
+                ))
+            }
+            Request::SpecResolve {
+                spec,
+                expected_heads,
+                body_json,
+            } => {
+                self.submit(&IssueIntent::SpecResolve {
+                    spec: spec.clone(),
+                    expected_heads,
+                    body_json,
+                    actor: facts.actor.clone(),
+                    device: facts.device.clone(),
+                    ts: facts.now,
+                })
+                .map_err(Self::effect_err)?;
+                let view = self
+                    .query(&IssueQuery::Spec { spec })
+                    .map_err(Self::effect_err)?;
+                Ok((
+                    Response::Spec {
+                        spec: Box::new(view),
+                    },
+                    true,
+                ))
+            }
+            Request::BaselineList { project } => {
+                let project = project
+                    .map(|project| {
+                        snapshot
+                            .resolve_project(&project)
+                            .ok_or_else(|| Response::not_found("no such project"))
+                    })
+                    .transpose()?;
+                let baselines = self
+                    .query(&IssueQuery::Baselines { project })
+                    .map_err(Self::effect_err)?;
+                Ok((Response::Baselines { baselines }, false))
+            }
+            Request::BaselineShow { baseline } => {
+                let baseline = self
+                    .query(&IssueQuery::Baseline { baseline })
+                    .map_err(Self::effect_err)?;
+                Ok((Response::Baseline(Box::new(baseline)), false))
+            }
+            Request::BaselineNew {
+                project,
+                name,
+                members,
+            } => {
+                let project = snapshot
+                    .resolve_project(&project)
+                    .ok_or_else(|| Response::not_found("no such project"))?;
+                let baseline = issues::ids::mint_baseline_id(self.clock);
+                self.submit(&IssueIntent::BaselineCreate {
+                    baseline: baseline.clone(),
+                    project,
+                    name,
+                    members,
+                    actor: facts.actor.clone(),
+                    device: facts.device.clone(),
+                    ts: facts.now,
+                })
+                .map_err(Self::effect_err)?;
+                let view = self
+                    .query(&IssueQuery::Baseline { baseline })
+                    .map_err(Self::effect_err)?;
+                Ok((Response::Baseline(Box::new(view)), true))
+            }
+            Request::BaselineRevise {
+                baseline,
+                expected,
+                name,
+                members,
+            } => {
+                self.submit(&IssueIntent::BaselineRevise {
+                    baseline: baseline.clone(),
+                    expected,
+                    name,
+                    members,
+                    actor: facts.actor.clone(),
+                    device: facts.device.clone(),
+                    ts: facts.now,
+                })
+                .map_err(Self::effect_err)?;
+                let view = self
+                    .query(&IssueQuery::Baseline { baseline })
+                    .map_err(Self::effect_err)?;
+                Ok((Response::Baseline(Box::new(view)), true))
+            }
+            Request::BaselineState {
+                baseline,
+                expected,
+                state,
+            } => {
+                self.submit(&IssueIntent::BaselineState {
+                    baseline: baseline.clone(),
+                    expected,
+                    state,
+                    actor: facts.actor.clone(),
+                    device: facts.device.clone(),
+                    ts: facts.now,
+                })
+                .map_err(Self::effect_err)?;
+                let view = self
+                    .query(&IssueQuery::Baseline { baseline })
+                    .map_err(Self::effect_err)?;
+                Ok((Response::Baseline(Box::new(view)), true))
+            }
+            Request::BaselineResolve {
+                baseline,
+                expected_heads,
+                body_json,
+            } => {
+                self.submit(&IssueIntent::BaselineResolve {
+                    baseline: baseline.clone(),
+                    expected_heads,
+                    body_json,
+                    actor: facts.actor.clone(),
+                    device: facts.device.clone(),
+                    ts: facts.now,
+                })
+                .map_err(Self::effect_err)?;
+                let view = self
+                    .query(&IssueQuery::Baseline { baseline })
+                    .map_err(Self::effect_err)?;
+                Ok((Response::Baseline(Box::new(view)), true))
+            }
+            Request::IssueBaseline { reff, baseline } => {
+                let doc = self.resolve(&snapshot, &reff)?;
+                self.submit(&IssueIntent::IssueBaseline {
+                    doc,
+                    baseline,
+                    device: facts.device.clone(),
+                    ts: facts.now,
+                })
+                .map_err(Self::effect_err)?;
+                Ok((
+                    Response::Ok {
+                        message: Some(format!("updated baseline for {reff}")),
+                    },
+                    true,
+                ))
+            }
+            Request::Packet { reff } => {
+                let doc = self.resolve(&snapshot, &reff)?;
+                let packet = self
+                    .query(&IssueQuery::Packet { doc })
+                    .map_err(Self::effect_err)?;
+                Ok((Response::Packet(Box::new(packet)), false))
             } // Ownership is fixed by the production classifier; the agreement
               // gate (control_classification) proves every Session-owned request
               // has an arm above, so a foreign request here is a caller bug,

@@ -717,6 +717,7 @@ dependencies = [
  "iroh-relay",
  "mechanics",
  "n0-future",
+ "rustls",
  "tokio",
  "tracing",
 ]
@@ -2985,6 +2986,15 @@ dependencies = [
  "serde",
  "serde_json",
  "world-interface",
+]
+
+[[package]]
+name = "lait-relay"
+version = "0.6.1"
+dependencies = [
+ "anyhow",
+ "comms",
+ "tokio",
 ]
 
 [[package]]

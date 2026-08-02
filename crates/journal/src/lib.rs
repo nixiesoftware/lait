@@ -68,6 +68,9 @@
 //! the crash matrix is testable; see [`Store::with_fault_injector`].
 
 mod index;
+mod prior;
+
+pub use prior::Store as GenerationSource;
 
 #[cfg(test)]
 extern crate self as journal;

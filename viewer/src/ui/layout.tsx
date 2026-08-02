@@ -12,6 +12,7 @@ import {
   Bot,
   Calendar,
   ChevronRight,
+  FileText,
   Folder,
   FolderKanban,
   GanttChart,
@@ -342,6 +343,23 @@ export function IssueCrumb({ id, title }: { id: string; title?: string | undefin
   );
 }
 
+/**
+ * A Spec: the kind is the identity, the title is the document.
+ *
+ * Same two-part shape as an issue's crumb, and for the same reason — but where
+ * an issue leads with a key you can quote, a Spec leads with what it *is*. There
+ * is no per-project alias to put there, and the revision coordinate that does
+ * identify it exactly has no business in a header bar.
+ */
+export function SpecCrumb({ kind, title }: { kind: string; title?: string | undefined }) {
+  return (
+    <>
+      <span className="text-mute shrink-0">{kind}</span>
+      {title && <span className="line-clamp-2 min-w-0">{title}</span>}
+    </>
+  );
+}
+
 /** A workspace destination — its own root, carrying the sidebar's icon for it. */
 export function DestinationCrumb({ icon, label }: { icon?: React.ReactNode; label: string }) {
   return (
@@ -360,6 +378,7 @@ export const PROJECT_VIEW_ICON: Record<ProjectView, React.ReactElement> = {
   board: <SquareKanban />,
   calendar: <Calendar />,
   activity: <Activity />,
+  specs: <FileText />,
 };
 
 /** One icon per destination, shared by the sidebar and the header crumb so the two

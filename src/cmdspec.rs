@@ -64,6 +64,7 @@ pub enum Special {
     ConfigList,
     Context,
     Worlds,
+    Rebuild,
     Update,
     /// New-machine side of device enrollment: consume a `device invite` token
     /// and print a consent blob (no daemon, no store — just this identity).
@@ -968,6 +969,12 @@ pub fn specs() -> Vec<Spec> {
             "List the semantic World packages installed in this Lait application.",
             vec![],
             Special::Worlds,
+        ),
+        Spec::special(
+            "rebuild",
+            "Build, verify, and atomically activate the current representation as a new Orbit generation.",
+            vec![],
+            Special::Rebuild,
         ),
         Spec {
             subs: vec![

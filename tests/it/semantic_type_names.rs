@@ -584,6 +584,10 @@ fn concept_crates_expose_only_their_semantic_namespaces() {
             &[
                 "beacon",
                 "coordinates",
+                // Immutable Orbit materializations. The namespace keeps the
+                // lifecycle sharp: Generation -> Build -> Verification ->
+                // Activation, without prefix-stuttering every public type.
+                "generation",
                 "neighbor",
                 "plane",
                 "signal",

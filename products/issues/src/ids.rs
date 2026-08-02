@@ -71,6 +71,14 @@ mechanics::prefixed_id!(
     /// Attachment id — key in an issue Body's `attachments` map.
     AttachmentId, "att_"
 );
+mechanics::prefixed_id!(
+    /// Specification id — one versioned lifecycle document Body.
+    SpecId, "spc_"
+);
+mechanics::prefixed_id!(
+    /// Baseline id — one versioned collection of exact Spec revisions.
+    BaselineId, "bas_"
+);
 
 /// Mint a canonical (lowercase) comment id.
 pub fn mint_comment_id(clock: &dyn UlidSource) -> String {
@@ -98,6 +106,8 @@ mint_lower!(
     mint_team_id => TeamId,
     mint_triage_id => TriageId,
     mint_attachment_id => AttachmentId,
+    mint_spec_id => SpecId,
+    mint_baseline_id => BaselineId,
 );
 
 #[cfg(test)]

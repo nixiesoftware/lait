@@ -36,6 +36,7 @@ import { neighbourState, workTarget } from "./core/workflow";
 import { loadFavoriteProjects, toggleFavoriteProject } from "./core/personalNav";
 import { loadRailOpen, saveRailOpen } from "./core/railState";
 import { loadSavedViews, type SavedView } from "./core/savedViews";
+import { SPEC_KIND_LABEL } from "./core/specs";
 import { Activity } from "./ui/Activity";
 import { classifyFailure, EmptyState, InlineError, recoveryForError, TrustPopover } from "./ui/AppState";
 import { Board } from "./ui/Board";
@@ -59,6 +60,7 @@ import {
   HeaderSlotProvider,
   IssueCrumb,
   ProjectCrumb,
+  SpecCrumb,
   SurfaceHeader,
   Toolbar,
   type BreadcrumbItem,
@@ -72,6 +74,7 @@ import { NewIssue } from "./ui/NewIssue";
 import { NewProject } from "./ui/NewProject";
 import { Palette } from "./ui/Palette";
 import { Shortcuts } from "./ui/Shortcuts";
+import { Specs } from "./ui/Specs";
 import { catalogColor } from "./ui/colors";
 import * as ask from "./ui/dialogs";
 import { DialogHost } from "./ui/dialogs";
@@ -92,12 +95,14 @@ import {
   useProjectMilestones,
   useProjectRegistry,
   useProjectViewerStore,
+  useSpec,
 } from "./projectStore";
 import {
   isReadOnly,
   type BoardPos,
   type Row,
   type SpaceRow,
+  type SpecKind,
   type StatusInfo,
   type WorkflowState,
 } from "./types";
@@ -132,6 +137,14 @@ export function App() {
   const [routeSpace, setRouteSpace] = useState<string | null>(initialRoute.spaceId);
   const [current, setCurrent] = useState<string | null>(null);
   const [selection, setSelection] = useState<string | null>(initialRoute.issue);
+  /** The open Spec on the Specs register. A document, not a row: there is no
+   *  cursor-versus-open distinction to make, so one piece of state says both. */
+  const [openSpec, setOpenSpec] = useState<string | null>(initialRoute.spec ?? null);
+  /** The Spec composer: a kind to seed it with, `"any"` to let it ask. */
+  const [composingSpec, setComposingSpec] = useState<SpecKind | "any" | null>(null);
+  /** The open Baseline. Its own state rather than a second meaning for
+   *  `openSpec`: they are different nouns with different readers. */
+  const [openBaseline, setOpenBaseline] = useState<string | null>(initialRoute.baseline ?? null);
   const [modal, setModal] = useState<Modal>(null);
   const [error, setError] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
@@ -282,6 +295,8 @@ export function App() {
     setProject(route.project);
     setView(route.view);
     setSelection(route.issue);
+    setOpenSpec(route.spec ?? null);
+    setOpenBaseline(route.baseline ?? null);
     setFilter(route.filter ?? EMPTY_FILTER);
     setDetail(route.issue !== null);
   }, []);
@@ -300,13 +315,21 @@ export function App() {
   // `selection` alone: a highlighted row you have not opened is cursor position,
   // not a destination, and reloading its address must not put you inside it.
   useEffect(() => {
-    const route = { spaceId: routeSpace, project, view, issue: detail ? selection : null, filter };
+    const route = {
+      spaceId: routeSpace,
+      project,
+      view,
+      issue: detail ? selection : null,
+      ...(openSpec ? { spec: openSpec } : {}),
+      ...(openBaseline ? { baseline: openBaseline } : {}),
+      filter,
+    };
     const href = formatRoute(route);
     if (`${window.location.pathname}${window.location.search}` !== href) {
       window.history.replaceState(null, "", href);
     }
     saveLastRoute(route);
-  }, [routeSpace, project, view, selection, detail, filter]);
+  }, [routeSpace, project, view, selection, detail, openSpec, openBaseline, filter]);
 
   // Settings is a page state, not a panel: its own left rail owns the hierarchy,
   // so the workspace sidebar steps aside while it's open and returns as you left
@@ -767,6 +790,12 @@ export function App() {
         // your place; the reading surface does not follow you between views.
         setSelection(null);
         setDetail(false);
+        // Same rule, same reason: the Specs tab means the register. It is also
+        // the way back out of a document, which a tab that returned you to
+        // whatever you were last reading would not be.
+        setOpenSpec(null);
+        setOpenBaseline(null);
+        setComposingSpec(null);
         if (scoped !== filter) setFilter(scoped);
       },
       /**
@@ -1290,7 +1319,10 @@ export function App() {
   /** The layout showing, when one is — `null` on Overview, Activity and the
    *  workspace destinations. Narrowed once so every gate below reads the same. */
   const issueMode = isIssueMode(view) ? view : null;
-  const belowProject = Boolean(openRow);
+  /** The Spec being read, when one is. Its own resource, so a deep link resolves
+   *  the title for the trail without the register having loaded. */
+  const readingSpec = useSpec(current ?? "", view === "specs" ? openSpec : null).data ?? null;
+  const belowProject = Boolean(openRow) || Boolean(readingSpec);
 
   const trail: BreadcrumbItem[] = projectShell
     ? [
@@ -1375,6 +1407,13 @@ export function App() {
     });
   }
 
+  if (readingSpec) {
+    trail.push({
+      key: readingSpec.spec,
+      content: <SpecCrumb kind={SPEC_KIND_LABEL[readingSpec.kind]} title={readingSpec.title} />,
+    });
+  }
+
   /** The open issue. It has one home: the work area, at full width. */
   const issuePane =
     detailVisible && selection && current && routeSpace && board ? (
@@ -1401,6 +1440,13 @@ export function App() {
           onDelete={api.deleteIssue}
           onPredict={api.predict}
           onNavigate={api.select}
+          // A brief names the documents it is derived from, and following one
+          // is a hop to a different surface — so it goes through `goto` rather
+          // than opening a Spec inside an issue.
+          onOpenSpec={(spec) => {
+            api.goto("specs");
+            setOpenSpec(spec);
+          }}
           onClose={() => {
             api.select(null);
             setDetail(false);
@@ -1618,6 +1664,14 @@ export function App() {
                   <Plus className="size-icon-sm" />
                 </IconButton>
               )}
+              {/* No chord: `C` is the issue composer's everywhere, and a key that
+                  makes a different kind of document depending on which tab is
+                  lit is worse than a key that only makes issues. */}
+              {projectShell && !readOnly && current && view === "specs" && !openSpec && !openBaseline && (
+                <IconButton label="New spec" variant="outline" onClick={() => setComposingSpec("any")}>
+                  <Plus className="size-icon-sm" />
+                </IconButton>
+              )}
               {/* Last in the band, because it acts on the band's neighbour
                   rather than on the rows: everything to its left changes what
                   the list shows, this changes whether the console is beside it. */}
@@ -1746,6 +1800,21 @@ export function App() {
               project={activeProject}
               members={members}
               readOnly={readOnly}
+              onError={setError}
+            />
+          ) : view === "specs" ? (
+            <Specs
+              spaceId={current}
+              project={activeProject?.key ?? project}
+              projectName={activeProject?.name ?? project ?? "this project"}
+              readOnly={readOnly}
+              spec={openSpec}
+              baseline={openBaseline}
+              members={members}
+              composing={composingSpec}
+              onCompose={setComposingSpec}
+              onOpen={setOpenSpec}
+              onOpenBaseline={setOpenBaseline}
               onError={setError}
             />
           ) : view === "activity" && board ? (

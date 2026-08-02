@@ -257,6 +257,90 @@ struct WorkflowSetArgs {
     body_json: String,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ProjectArgs {
+    #[serde(default)]
+    project: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct SpecArgs {
+    spec: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct SpecNewArgs {
+    project: String,
+    kind: issues::spec::Kind,
+    title: String,
+    #[serde(default)]
+    text: String,
+    #[serde(default)]
+    links: Vec<issues::spec::Link>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct SpecReviseArgs {
+    spec: String,
+    expected: String,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    links: Option<Vec<issues::spec::Link>>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct SpecStateArgs {
+    spec: String,
+    expected: String,
+    state: issues::spec::State,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ResolveArgs {
+    id: String,
+    expected_heads: Vec<String>,
+    body_json: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct BaselineArgs {
+    baseline: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct BaselineNewArgs {
+    project: String,
+    name: String,
+    members: Vec<issues::spec::SpecRef>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct BaselineReviseArgs {
+    baseline: String,
+    expected: String,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    members: Option<Vec<issues::spec::SpecRef>>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct BaselineStateArgs {
+    baseline: String,
+    expected: String,
+    state: issues::spec::State,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct IssueBaselineArgs {
+    reff: String,
+    #[serde(default)]
+    baseline: Option<issues::spec::BaselineRef>,
+}
+
 pub fn tools() -> Vec<McpTool> {
     vec![
         tool::<IssueNewArgs>(
@@ -341,6 +425,71 @@ pub fn tools() -> Vec<McpTool> {
             "workflow_set",
             "Replace a project's workflow.",
             workflow_set,
+        ),
+        tool::<ProjectArgs>("spec_list", "List Specs, optionally by project.", spec_list),
+        tool::<SpecArgs>("spec_show", "Read one versioned Spec.", spec_show),
+        tool::<ProjectArgs>(
+            "spec_links",
+            "Every typed link asserted in scope, with the standing of the revision asserting it.",
+            spec_links,
+        ),
+        tool::<SpecArgs>(
+            "spec_history",
+            "Every revision of one Spec, oldest first, with its predecessors.",
+            spec_history,
+        ),
+        tool::<SpecNewArgs>("spec_new", "Create a draft Spec.", spec_new),
+        tool::<SpecReviseArgs>("spec_revise", "Create a draft Spec successor.", spec_revise),
+        tool::<SpecStateArgs>(
+            "spec_state",
+            "Review, issue, or withdraw a Spec head.",
+            spec_state,
+        ),
+        tool::<ResolveArgs>(
+            "spec_resolve",
+            "Resolve concurrent Spec heads.",
+            spec_resolve,
+        ),
+        tool::<ProjectArgs>(
+            "baseline_list",
+            "List Baselines, optionally by project.",
+            baseline_list,
+        ),
+        tool::<BaselineArgs>("baseline_show", "Read one Baseline.", baseline_show),
+        tool::<BaselineArgs>(
+            "baseline_history",
+            "Every revision of one Baseline, oldest first.",
+            baseline_history,
+        ),
+        tool::<BaselineNewArgs>(
+            "baseline_new",
+            "Create a draft Baseline of exact Spec revisions.",
+            baseline_new,
+        ),
+        tool::<BaselineReviseArgs>(
+            "baseline_revise",
+            "Create a draft Baseline successor.",
+            baseline_revise,
+        ),
+        tool::<BaselineStateArgs>(
+            "baseline_state",
+            "Review, issue, or withdraw a Baseline head.",
+            baseline_state,
+        ),
+        tool::<ResolveArgs>(
+            "baseline_resolve",
+            "Resolve concurrent Baseline heads.",
+            baseline_resolve,
+        ),
+        tool::<IssueBaselineArgs>(
+            "issue_baseline",
+            "Pin or clear an exact issued Baseline on an Issue.",
+            issue_baseline,
+        ),
+        tool::<RefArgs>(
+            "packet",
+            "Read the effective deterministic Spec packet for an Issue.",
+            packet,
         ),
     ]
 }
@@ -677,6 +826,135 @@ fn workflow_set(input: Value) -> Result<CliInvocation, Failure> {
     })
 }
 
+fn spec_list(input: Value) -> Result<CliInvocation, Failure> {
+    let a: ProjectArgs = args(input)?;
+    world(IssuesRequest::SpecList { project: a.project })
+}
+
+fn spec_show(input: Value) -> Result<CliInvocation, Failure> {
+    let a: SpecArgs = args(input)?;
+    world(IssuesRequest::SpecShow { spec: a.spec })
+}
+
+fn spec_links(input: Value) -> Result<CliInvocation, Failure> {
+    let a: ProjectArgs = args(input)?;
+    world(IssuesRequest::SpecReferences { project: a.project })
+}
+
+fn spec_history(input: Value) -> Result<CliInvocation, Failure> {
+    let a: SpecArgs = args(input)?;
+    world(IssuesRequest::SpecHistory { spec: a.spec })
+}
+
+fn spec_new(input: Value) -> Result<CliInvocation, Failure> {
+    let a: SpecNewArgs = args(input)?;
+    world(IssuesRequest::SpecNew {
+        project: a.project,
+        kind: a.kind,
+        title: a.title,
+        text: a.text,
+        links: a.links,
+    })
+}
+
+fn spec_revise(input: Value) -> Result<CliInvocation, Failure> {
+    let a: SpecReviseArgs = args(input)?;
+    world(IssuesRequest::SpecRevise {
+        spec: a.spec,
+        expected: a.expected,
+        title: a.title,
+        text: a.text,
+        links: a.links,
+    })
+}
+
+fn spec_state(input: Value) -> Result<CliInvocation, Failure> {
+    let a: SpecStateArgs = args(input)?;
+    world(IssuesRequest::SpecState {
+        spec: a.spec,
+        expected: a.expected,
+        state: a.state,
+    })
+}
+
+fn spec_resolve(input: Value) -> Result<CliInvocation, Failure> {
+    let a: ResolveArgs = args(input)?;
+    world(IssuesRequest::SpecResolve {
+        spec: a.id,
+        expected_heads: a.expected_heads,
+        body_json: a.body_json,
+    })
+}
+
+fn baseline_list(input: Value) -> Result<CliInvocation, Failure> {
+    let a: ProjectArgs = args(input)?;
+    world(IssuesRequest::BaselineList { project: a.project })
+}
+
+fn baseline_show(input: Value) -> Result<CliInvocation, Failure> {
+    let a: BaselineArgs = args(input)?;
+    world(IssuesRequest::BaselineShow {
+        baseline: a.baseline,
+    })
+}
+
+fn baseline_history(input: Value) -> Result<CliInvocation, Failure> {
+    let a: BaselineArgs = args(input)?;
+    world(IssuesRequest::BaselineHistory {
+        baseline: a.baseline,
+    })
+}
+
+fn baseline_new(input: Value) -> Result<CliInvocation, Failure> {
+    let a: BaselineNewArgs = args(input)?;
+    world(IssuesRequest::BaselineNew {
+        project: a.project,
+        name: a.name,
+        members: a.members,
+    })
+}
+
+fn baseline_revise(input: Value) -> Result<CliInvocation, Failure> {
+    let a: BaselineReviseArgs = args(input)?;
+    world(IssuesRequest::BaselineRevise {
+        baseline: a.baseline,
+        expected: a.expected,
+        name: a.name,
+        members: a.members,
+    })
+}
+
+fn baseline_state(input: Value) -> Result<CliInvocation, Failure> {
+    let a: BaselineStateArgs = args(input)?;
+    world(IssuesRequest::BaselineState {
+        baseline: a.baseline,
+        expected: a.expected,
+        state: a.state,
+    })
+}
+
+fn baseline_resolve(input: Value) -> Result<CliInvocation, Failure> {
+    let a: ResolveArgs = args(input)?;
+    world(IssuesRequest::BaselineResolve {
+        baseline: a.id,
+        expected_heads: a.expected_heads,
+        body_json: a.body_json,
+    })
+}
+
+fn issue_baseline(input: Value) -> Result<CliInvocation, Failure> {
+    let a: IssueBaselineArgs = args(input)?;
+    world(IssuesRequest::IssueBaseline {
+        reff: a.reff,
+        baseline: a.baseline,
+    })
+}
+
+fn packet(input: Value) -> Result<CliInvocation, Failure> {
+    let a: RefArgs = args(input)?;
+    world(IssuesRequest::Packet { reff: a.reff })
+}
+
 fn parse_position(value: &str) -> Option<BoardPos> {
     match value {
         "top" => Some(BoardPos::Top),
@@ -716,20 +994,31 @@ mod tests {
 
     /// The smallest instance a schema's own required fields accept.
     fn minimal_instance(schema: &Value) -> Value {
+        fn placeholder(root: &Value, schema: &Value, name: &str) -> Value {
+            let schema = schema["$ref"]
+                .as_str()
+                .and_then(|reff| reff.strip_prefix('#'))
+                .and_then(|pointer| root.pointer(pointer))
+                .unwrap_or(schema);
+            if let Some(value) = schema["enum"].as_array().and_then(|values| values.first()) {
+                return value.clone();
+            }
+            match schema["type"].as_str() {
+                Some("string") => json!("x"),
+                Some("integer" | "number") => json!(0),
+                Some("boolean") => json!(false),
+                Some("array") => json!([]),
+                other => panic!("no placeholder for a required `{name}` of type {other:?}"),
+            }
+        }
+
         let properties = &schema["properties"];
         let required = schema["required"].as_array().cloned().unwrap_or_default();
         let object = required
             .iter()
             .filter_map(Value::as_str)
             .map(|name| {
-                let property = &properties[name];
-                let value = match property["type"].as_str() {
-                    Some("string") => json!("x"),
-                    Some("integer" | "number") => json!(0),
-                    Some("boolean") => json!(false),
-                    Some("array") => json!([]),
-                    other => panic!("no placeholder for a required `{name}` of type {other:?}"),
-                };
+                let value = placeholder(schema, &properties[name], name);
                 (name.to_string(), value)
             })
             .collect();
@@ -835,7 +1124,7 @@ mod tests {
     #[test]
     fn tools_are_package_local_and_emit_world_calls() {
         let tools = tools();
-        assert_eq!(tools.len(), 39);
+        assert_eq!(tools.len(), 56);
         assert!(tools.iter().all(|tool| !tool.name().starts_with("issues_")));
         let invocation = tools
             .iter()

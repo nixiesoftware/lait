@@ -21,13 +21,21 @@ pub const PRODUCT_WORLD: &str = "com.lait.issues";
 pub const ISSUE_SCHEMA: &str = "issue";
 pub const ISSUE_SCHEMA_VERSION: u32 = 1;
 pub const ISSUE_ENCODING: &str = "lait.issue.v1";
+/// The specification Body schema (one Body per Spec).
+pub const SPEC_SCHEMA: &str = "spec";
+pub const SPEC_SCHEMA_VERSION: u32 = 1;
+pub const SPEC_ENCODING: &str = "lait.spec.v1";
+/// The baseline Body schema (one Body per Baseline).
+pub const BASELINE_SCHEMA: &str = "baseline";
+pub const BASELINE_SCHEMA_VERSION: u32 = 1;
+pub const BASELINE_ENCODING: &str = "lait.baseline.v1";
 /// The catalog Body schema (one Body per Space).
 pub const CATALOG_SCHEMA: &str = "catalog";
 pub const CATALOG_SCHEMA_VERSION: u32 = 1;
 pub const CATALOG_ENCODING: &str = "lait.catalog.v1";
 
 /// The legacy projection schema version carried by every view DTO.
-pub const VIEW_SCHEMA_VERSION: u32 = 3;
+pub const VIEW_SCHEMA_VERSION: u32 = 4;
 
 /// The link kinds, frozen.
 pub const LINK_KINDS: [&str; 3] = ["blocks", "relates", "duplicates"];
@@ -141,6 +149,23 @@ pub fn demand_project_any(capability: &str, project: &str) -> Vec<u8> {
     .expect("canonical project-any demand")
 }
 
+/// `Any(Require(<capability>, Project), contributor, admin)` — draft and
+/// evidence authoring. Issuing governing material deliberately uses
+/// [`demand_project_any`] instead, so ordinary contribution cannot silently
+/// become project direction.
+pub fn demand_project_work(capability: &str, project: &str) -> Vec<u8> {
+    AuthorizationDemand::Any(vec![
+        AuthorizationDemand::require(
+            space_cap(capability),
+            Resource::segments(PRODUCT_WORLD, [project]).expect("validated project resource"),
+        ),
+        AuthorizationDemand::require(space_cap("space.contributor"), space_resource()),
+        AuthorizationDemand::require(space_cap("space.admin"), space_resource()),
+    ])
+    .encode_canonical()
+    .expect("canonical project-work demand")
+}
+
 /// `Require(space.issue.read, Space)` — every query's read demand.
 pub fn demand_read() -> Vec<u8> {
     AuthorizationDemand::require(space_cap("space.issue.read"), space_resource())
@@ -248,9 +273,12 @@ pub const SPACE_CAPABILITIES: [&str; 8] = [
 
 /// The Project-scoped capability ids, sorted. `workflow.transition.<id>` is a
 /// qualified family validated by grammar, not enumerated here.
-pub const PROJECT_CAPABILITIES: [&str; 14] = [
+pub const PROJECT_CAPABILITIES: [&str; 19] = [
+    "baseline.issue",
+    "baseline.write",
     "comment.create",
     "issue.assign",
+    "issue.bind",
     "issue.create",
     "issue.delete",
     "issue.edit",
@@ -262,6 +290,8 @@ pub const PROJECT_CAPABILITIES: [&str; 14] = [
     "issue.restore",
     "project.configure",
     "project.delete",
+    "spec.issue",
+    "spec.write",
     "workflow.transition",
 ];
 
@@ -323,12 +353,28 @@ pub fn catalog_schema() -> SchemaId {
     SchemaId::parse(CATALOG_SCHEMA).expect("catalog schema id")
 }
 
+pub fn spec_schema() -> SchemaId {
+    SchemaId::parse(SPEC_SCHEMA).expect("spec schema id")
+}
+
+pub fn baseline_schema() -> SchemaId {
+    SchemaId::parse(BASELINE_SCHEMA).expect("baseline schema id")
+}
+
 pub fn issue_encoding() -> EncodingId {
     EncodingId::parse(ISSUE_ENCODING).expect("issue encoding id")
 }
 
 pub fn catalog_encoding() -> EncodingId {
     EncodingId::parse(CATALOG_ENCODING).expect("catalog encoding id")
+}
+
+pub fn spec_encoding() -> EncodingId {
+    EncodingId::parse(SPEC_ENCODING).expect("spec encoding id")
+}
+
+pub fn baseline_encoding() -> EncodingId {
+    EncodingId::parse(BASELINE_ENCODING).expect("baseline encoding id")
 }
 
 /// The ONE deterministic catalog Body per Space: the first 16 bytes of the
@@ -360,12 +406,39 @@ pub fn issue_body_id(doc: &str) -> BodyId {
     BodyId::from_bytes(raw)
 }
 
+/// The Body id of a Spec: derived deterministically from its `spc_` id.
+pub fn spec_body_id(spec: &str) -> BodyId {
+    named_body_id(b"lait/spec-body/1", spec)
+}
+
+/// The Body id of a Baseline: derived deterministically from its `bas_` id.
+pub fn baseline_body_id(baseline: &str) -> BodyId {
+    named_body_id(b"lait/baseline-body/1", baseline)
+}
+
+fn named_body_id(domain: &[u8], id: &str) -> BodyId {
+    let mut h = blake3::Hasher::new();
+    h.update(domain);
+    h.update(id.as_bytes());
+    let mut raw = [0u8; 16];
+    raw.copy_from_slice(&h.finalize().as_bytes()[..16]);
+    BodyId::from_bytes(raw)
+}
+
 pub fn catalog_key(space: &mechanics::ids::SpaceId) -> BodyKey {
     BodyKey::new(world_id(), catalog_body_id(space))
 }
 
 pub fn issue_key(doc: &str) -> BodyKey {
     BodyKey::new(world_id(), issue_body_id(doc))
+}
+
+pub fn spec_key(spec: &str) -> BodyKey {
+    BodyKey::new(world_id(), spec_body_id(spec))
+}
+
+pub fn baseline_key(baseline: &str) -> BodyKey {
+    BodyKey::new(world_id(), baseline_body_id(baseline))
 }
 
 /// The catalog board list path for a project.
@@ -938,6 +1011,95 @@ pub enum IssueIntent {
         device: String,
         ts: u64,
     },
+    /// Create one draft Spec Body with its first immutable revision.
+    SpecCreate {
+        spec: String,
+        project: String,
+        kind: crate::spec::Kind,
+        title: String,
+        text: String,
+        links: Vec<crate::spec::Link>,
+        actor: String,
+        device: String,
+        ts: u64,
+    },
+    /// Create a draft successor to the one expected Spec head. An issued
+    /// predecessor remains effective until another issued/withdrawn successor
+    /// replaces it.
+    SpecRevise {
+        spec: String,
+        expected: String,
+        title: Option<String>,
+        text: Option<String>,
+        links: Option<Vec<crate::spec::Link>>,
+        actor: String,
+        device: String,
+        ts: u64,
+    },
+    /// Move the one expected Spec head through review/issue/withdraw. The
+    /// transition itself is another immutable revision.
+    SpecState {
+        spec: String,
+        expected: String,
+        state: crate::spec::State,
+        actor: String,
+        device: String,
+        ts: u64,
+    },
+    /// Resolve concurrent Spec heads with one complete replacement body.
+    SpecResolve {
+        spec: String,
+        expected_heads: Vec<String>,
+        body_json: String,
+        actor: String,
+        device: String,
+        ts: u64,
+    },
+    /// Create one draft Baseline pinning exact Spec revisions.
+    BaselineCreate {
+        baseline: String,
+        project: String,
+        name: String,
+        members: Vec<crate::spec::SpecRef>,
+        actor: String,
+        device: String,
+        ts: u64,
+    },
+    /// Create a draft successor to the one expected Baseline head.
+    BaselineRevise {
+        baseline: String,
+        expected: String,
+        name: Option<String>,
+        members: Option<Vec<crate::spec::SpecRef>>,
+        actor: String,
+        device: String,
+        ts: u64,
+    },
+    /// Move a Baseline through review/issue/withdraw.
+    BaselineState {
+        baseline: String,
+        expected: String,
+        state: crate::spec::State,
+        actor: String,
+        device: String,
+        ts: u64,
+    },
+    /// Resolve concurrent Baseline heads with one complete replacement body.
+    BaselineResolve {
+        baseline: String,
+        expected_heads: Vec<String>,
+        body_json: String,
+        actor: String,
+        device: String,
+        ts: u64,
+    },
+    /// Pin one exact issued Baseline revision to an Issue, or clear the pin.
+    IssueBaseline {
+        doc: String,
+        baseline: Option<crate::spec::BaselineRef>,
+        device: String,
+        ts: u64,
+    },
 }
 
 /// Build the canonical `InitializeTracker` intent from captured formation
@@ -1050,6 +1212,51 @@ pub enum IssueQuery {
     /// A project's workflow revision head(s).
     Workflow {
         project: String,
+    },
+    /// Every Spec, optionally restricted to one project.
+    Specs {
+        project: Option<String>,
+    },
+    /// One Spec including its current heads and issued coordinate.
+    Spec {
+        spec: String,
+    },
+    /// Every revision of one Spec, with its predecessors and its body.
+    ///
+    /// The whole DAG, not a page of it: a client cannot show which revision
+    /// governs, compare two heads, or find their common ancestor from a view
+    /// that only ever carries the newest body — and a Spec's history is bounded
+    /// by how often people revise a document, not by machine traffic.
+    SpecHistory {
+        spec: String,
+    },
+    /// Every Baseline, optionally restricted to one project.
+    Baselines {
+        project: Option<String>,
+    },
+    /// One Baseline including its current heads.
+    Baseline {
+        baseline: String,
+    },
+    /// Every revision of one Baseline — the same argument as [`Self::SpecHistory`],
+    /// and additionally what a pre-issue compare of member sets reads.
+    BaselineHistory {
+        baseline: String,
+    },
+    /// Every typed Link asserted anywhere in scope, with the standing of the
+    /// revision asserting it.
+    ///
+    /// The whole edge set rather than one document's neighbourhood: incoming
+    /// edges cannot be derived from the target, coverage is a question about all
+    /// of them at once, and answering either one document at a time is a query
+    /// per row. Bounded by revisions × links, which is the same order the Packet
+    /// derivation already walks.
+    SpecReferences {
+        project: Option<String>,
+    },
+    /// The deterministic effective brief for one Issue.
+    Packet {
+        doc: String,
     },
     /// A project's milestones with derived progress (SCOPE-1).
     Milestones {

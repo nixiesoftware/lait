@@ -18,6 +18,11 @@ publish = false
 pedantic = { level = "warn", priority = -1 }
 nursery = { level = "warn", priority = -1 }
 
+[features]
+# Host a relay, rather than merely use one. Off by default: see the dependency
+# note on `iroh-relay`.
+relay = ["dep:iroh-relay", "dep:rustls"]
+
 [dependencies]
 # lait's roots. The seam speaks `DeviceId` and nothing else of lait's: a peer is
 # its ed25519 key, so identity crosses this boundary already self-certifying.
@@ -29,6 +34,15 @@ mechanics = { path = "../mechanics" }
 iroh = "=1.0.0-rc.1"
 iroh-base = "=1.0.0-rc.1"
 iroh-gossip = "0.100"
+# The server half of `policy::Network::Local`, behind the `relay` feature.
+# Optional because hosting a relay is a *server role*: it pulls ACME, a
+# websocket stack and certificate reloading, and a laptop running the client has
+# no use for any of it. `crates/relay` turns the feature on; nothing else does.
+iroh-relay = { version = "=1.0.0-rc.1", features = ["server"], optional = true }
+# Named only to hand `iroh-relay` an ACME server-config builder. Version tracks
+# iroh's own pin — cargo unifies them, and a mismatch here is a type error at the
+# `CertConfig::LetsEncrypt` call rather than anything subtle.
+rustls = { version = "0.23", default-features = false, optional = true }
 
 anyhow = "1"
 async-trait = "0.1"

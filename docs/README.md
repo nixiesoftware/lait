@@ -13,6 +13,7 @@ contract or operate a deployment.
 |---|---|
 | Install lait | [`INSTALL.md`](./INSTALL.md) |
 | Learn the commands and client behavior | [`UI.md`](./UI.md) |
+| Author deterministic plans and governing truth | [`SPECS.md`](./SPECS.md) |
 | Run the local web application | [`UI.md`](./UI.md#3-web) |
 | Diagnose joining and onboarding | [`UI.md`](./UI.md#7-joining) |
 

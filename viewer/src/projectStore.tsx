@@ -11,6 +11,7 @@ import { useWorldResource } from "./core/worldViewReact";
 import { type ResourceSnapshot, WorldViewStore } from "./core/worldViewStore";
 import type {
   ActivityEvent,
+  AssignmentDto,
   BoardView,
   CatalogPlane,
   CatalogScope,
@@ -25,7 +26,17 @@ import type {
   Response,
   Row,
   SpaceDoorbell,
+  BaselineRef,
+  BaselineRevisionDto,
+  BaselineView,
   SpaceRequest,
+  SpecBody,
+  SpecKind,
+  SpecRef,
+  SpecReference,
+  SpecRevision,
+  SpecState,
+  SpecView,
   StatusInfo,
   WorldRequest,
 } from "./types";
@@ -43,6 +54,16 @@ export const projectKeys = {
   graph: (space: string, reff: string) => `${prefix(space)}graph:${part(reff)}`,
   history: (space: string, reff: string) => `${prefix(space)}history:${part(reff)}`,
   milestones: (space: string, project: string) => `${prefix(space)}milestones:${part(project)}`,
+  specs: (space: string, project: string | null) => `${prefix(space)}specs:${part(project)}`,
+  spec: (space: string, spec: string) => `${prefix(space)}spec:${part(spec)}`,
+  specHistory: (space: string, spec: string) => `${prefix(space)}spec-history:${part(spec)}`,
+  specReferences: (space: string, project: string | null) =>
+    `${prefix(space)}spec-references:${part(project)}`,
+  baselines: (space: string, project: string | null) => `${prefix(space)}baselines:${part(project)}`,
+  baseline: (space: string, baseline: string) => `${prefix(space)}baseline:${part(baseline)}`,
+  baselineHistory: (space: string, baseline: string) =>
+    `${prefix(space)}baseline-history:${part(baseline)}`,
+  grants: (space: string) => `${prefix(space)}grants`,
   updates: (space: string, project: string) => `${prefix(space)}updates:${part(project)}`,
   labels: (space: string) => `${prefix(space)}labels`,
   members: (space: string) => `${prefix(space)}members`,
@@ -398,6 +419,279 @@ export class ProjectViewerStore {
       // `project` is the `prj_` id the ring matches on, so posting in ENG does
       // not refetch DSN's feed.
     }, { catalog: [{ plane: "updates", projectId: project }] }, force);
+  }
+
+  ensureSpecs(space: string, project: string | null, force = false): Promise<SpecView[]> {
+    return this.load(projectKeys.specs(space, project), async () => {
+      const result = await this.rpc(space, { cmd: "spec_list", project });
+      if (result.kind !== "specs") throw new Error("Expected specs response");
+      for (const spec of result.specs) this.resources.set(projectKeys.spec(space, spec.spec), spec);
+      return result.specs;
+      // Specs and Baselines are Bodies of their own rather than a region of the
+      // catalog, so their plane is digested from Body version stamps. Coarse in
+      // one direction only — space-wide rather than per-project — because naming
+      // the project would mean reading every Spec on every doorbell, and the
+      // cost of that outweighs one register refetch in a quiet project.
+    }, { catalog: ["specs"] }, force);
+  }
+
+  ensureSpec(space: string, spec: string, force = false): Promise<SpecView> {
+    return this.load(projectKeys.spec(space, spec), async () => {
+      const result = await this.rpc(space, { cmd: "spec_show", spec });
+      if (result.kind !== "spec") throw new Error("Expected spec response");
+      return result.spec;
+      // Same plane as the register above — and the reader needs its own resource
+      // rather than picking its row out of the list: a deep link opens on a Spec
+      // before any register has loaded.
+    }, { catalog: ["specs"] }, force);
+  }
+
+  /**
+   * Create a Spec, and land its view where the reader will look for it.
+   *
+   * The reply is the new Spec's own view, so the reader does not have to fetch
+   * what it was just handed. The register is refreshed rather than patched: it
+   * is a server-ordered list, and inserting locally would guess an order the
+   * next doorbell overwrites.
+   */
+  async createSpec(
+    space: string,
+    project: string,
+    kind: SpecKind,
+    title: string,
+  ): Promise<SpecView> {
+    const result = await this.rpc(space, { cmd: "spec_new", project, kind, title });
+    if (result.kind !== "spec") throw new Error("Expected spec response");
+    this.resources.set(projectKeys.spec(space, result.spec.spec), result.spec);
+    await this.refreshSpecRegisters(space);
+    return result.spec;
+  }
+
+  /**
+   * Revise a Spec — the only way its content changes.
+   *
+   * `expected` is the head the edit was written against, and the engine rejects
+   * anything else as a conflict rather than merging. Storing the reply matters
+   * for more than freshness: the *next* edit needs the revision this one just
+   * created, and a reader still holding the old head would write against a
+   * predecessor and be refused.
+   */
+  async reviseSpec(
+    space: string,
+    spec: string,
+    expected: string,
+    patch: { title?: string; text?: string },
+  ): Promise<SpecView> {
+    const result = await this.rpc(space, { cmd: "spec_revise", spec, expected, ...patch });
+    if (result.kind !== "spec") throw new Error("Expected spec response");
+    this.resources.set(projectKeys.spec(space, spec), result.spec);
+    await this.refreshSpecRegisters(space);
+    return result.spec;
+  }
+
+  /**
+   * Move a Spec through its lifecycle.
+   *
+   * `expected` is the head the transition was composed against, exactly as a
+   * revision is — the engine refuses a state change aimed at a head that has
+   * moved, and refuses one at all while several heads exist.
+   */
+  async setSpecState(
+    space: string,
+    spec: string,
+    expected: string,
+    state: SpecState,
+  ): Promise<SpecView> {
+    const result = await this.rpc(space, { cmd: "spec_state", spec, expected, state });
+    if (result.kind !== "spec") throw new Error("Expected spec response");
+    this.resources.set(projectKeys.spec(space, spec), result.spec);
+    await this.refreshSpecRegisters(space);
+    return result.spec;
+  }
+
+  /**
+   * Resolve concurrent heads into one successor.
+   *
+   * `expectedHeads` must be the complete current head set — the engine compares
+   * it as a sorted set and refuses anything else, which is what stops a
+   * resolution composed against two heads from landing after a third appears.
+   * The result is a new draft whose predecessors are all of them; no branch is
+   * deleted and none is declared the winner.
+   */
+  async resolveSpec(
+    space: string,
+    spec: string,
+    expectedHeads: string[],
+    body: SpecBody,
+  ): Promise<SpecView> {
+    const result = await this.rpc(space, {
+      cmd: "spec_resolve",
+      spec,
+      expected_heads: expectedHeads,
+      body_json: JSON.stringify(body),
+    });
+    if (result.kind !== "spec") throw new Error("Expected spec response");
+    this.resources.set(projectKeys.spec(space, spec), result.spec);
+    await Promise.all([
+      this.ensureSpecHistory(space, spec, true).catch(() => undefined),
+      this.refreshSpecRegisters(space),
+    ]);
+    return result.spec;
+  }
+
+  ensureSpecHistory(space: string, spec: string, force = false): Promise<SpecRevision[]> {
+    return this.load(projectKeys.specHistory(space, spec), async () => {
+      const result = await this.rpc(space, { cmd: "spec_history", spec });
+      if (result.kind !== "spec_revisions") throw new Error("Expected spec revisions response");
+      return result.revisions;
+    }, { catalog: ["specs"] }, force);
+  }
+
+  ensureBaselines(space: string, project: string | null, force = false): Promise<BaselineView[]> {
+    return this.load(projectKeys.baselines(space, project), async () => {
+      const result = await this.rpc(space, { cmd: "baseline_list", project });
+      if (result.kind !== "baselines") throw new Error("Expected baselines response");
+      for (const baseline of result.baselines) {
+        this.resources.set(projectKeys.baseline(space, baseline.baseline), baseline);
+      }
+      return result.baselines;
+    }, { catalog: ["specs"] }, force);
+  }
+
+  ensureBaseline(space: string, baseline: string, force = false): Promise<BaselineView> {
+    return this.load(projectKeys.baseline(space, baseline), async () => {
+      const result = await this.rpc(space, { cmd: "baseline_show", baseline });
+      if (result.kind !== "baseline") throw new Error("Expected baseline response");
+      return result;
+    }, { catalog: ["specs"] }, force);
+  }
+
+  ensureBaselineHistory(
+    space: string,
+    baseline: string,
+    force = false,
+  ): Promise<BaselineRevisionDto[]> {
+    return this.load(projectKeys.baselineHistory(space, baseline), async () => {
+      const result = await this.rpc(space, { cmd: "baseline_history", baseline });
+      if (result.kind !== "baseline_revisions") {
+        throw new Error("Expected baseline revisions response");
+      }
+      return result.revisions;
+    }, { catalog: ["specs"] }, force);
+  }
+
+  async createBaseline(
+    space: string,
+    project: string,
+    name: string,
+    members: SpecRef[],
+  ): Promise<BaselineView> {
+    const result = await this.rpc(space, { cmd: "baseline_new", project, name, members });
+    if (result.kind !== "baseline") throw new Error("Expected baseline response");
+    this.resources.set(projectKeys.baseline(space, result.baseline), result);
+    await this.refreshBaselineRegisters(space);
+    return result;
+  }
+
+  /**
+   * Revise a Baseline — the only way its member set changes.
+   *
+   * Removing or replacing a member does not edit the issued set; it writes a
+   * successor draft, exactly as revising a Spec does. An issued set that could
+   * be edited in place would not be a set anyone could have agreed to.
+   */
+  async reviseBaseline(
+    space: string,
+    baseline: string,
+    expected: string,
+    patch: { name?: string; members?: SpecRef[] },
+  ): Promise<BaselineView> {
+    const result = await this.rpc(space, { cmd: "baseline_revise", baseline, expected, ...patch });
+    if (result.kind !== "baseline") throw new Error("Expected baseline response");
+    this.resources.set(projectKeys.baseline(space, baseline), result);
+    await Promise.all([
+      this.ensureBaselineHistory(space, baseline, true).catch(() => undefined),
+      this.refreshBaselineRegisters(space),
+    ]);
+    return result;
+  }
+
+  async setBaselineState(
+    space: string,
+    baseline: string,
+    expected: string,
+    state: SpecState,
+  ): Promise<BaselineView> {
+    const result = await this.rpc(space, { cmd: "baseline_state", baseline, expected, state });
+    if (result.kind !== "baseline") throw new Error("Expected baseline response");
+    this.resources.set(projectKeys.baseline(space, baseline), result);
+    await Promise.all([
+      this.ensureBaselineHistory(space, baseline, true).catch(() => undefined),
+      this.refreshBaselineRegisters(space),
+    ]);
+    return result;
+  }
+
+  /** Pin an exact issued Baseline revision to an Issue, or clear the pin. */
+  async bindBaseline(
+    space: string,
+    reff: string,
+    baseline: BaselineRef | null,
+  ): Promise<void> {
+    await this.rpc(space, { cmd: "issue_baseline", reff, baseline });
+  }
+
+  private refreshBaselineRegisters(space: string): Promise<void> {
+    return this.refreshActive(
+      [...this.loaders.keys()].filter((key) => key.startsWith(`${prefix(space)}baselines:`)),
+    );
+  }
+
+  /**
+   * Every typed link in scope, and who asserts it.
+   *
+   * One resource for two questions that look different and are not: "what
+   * verifies this document" and "which issued requirements have nothing behind
+   * them" are both reads of the same edge set. Asking either one document at a
+   * time would be a query per row.
+   */
+  ensureSpecReferences(
+    space: string,
+    project: string | null,
+    force = false,
+  ): Promise<SpecReference[]> {
+    return this.load(projectKeys.specReferences(space, project), async () => {
+      const result = await this.rpc(space, { cmd: "spec_references", project });
+      if (result.kind !== "spec_references") {
+        throw new Error("Expected spec references response");
+      }
+      return result.references;
+    }, { catalog: ["specs"] }, force);
+  }
+
+  ensureGrants(space: string, force = false): Promise<AssignmentDto[]> {
+    return this.load(projectKeys.grants(space), async () => {
+      const result = await this.rpc(space, { cmd: "access_list" });
+      if (result.kind !== "assignments") throw new Error("Expected assignments response");
+      return result.rows;
+      // Scoped capability assignments converge as signed authority records, not
+      // as catalog structure — the same plane membership rides, and the same one
+      // a revocation moves.
+    }, { authority: true }, force);
+  }
+
+  /**
+   * Re-read whichever registers are on screen.
+   *
+   * Not `ensureSpecs(space, project)` — a register is keyed by the project
+   * handle the *caller* had (a KEY, or `null` for the whole space), and a Spec
+   * view reports the resolved `prj_` id, which is a third string. Refreshing by
+   * what is registered sidesteps having to reconcile them.
+   */
+  private refreshSpecRegisters(space: string): Promise<void> {
+    return this.refreshActive(
+      [...this.loaders.keys()].filter((key) => key.startsWith(`${prefix(space)}specs:`)),
+    );
   }
 
   ensureLabels(space: string, force = false): Promise<LabelDto[]> {
@@ -778,6 +1072,120 @@ export function useProjectMilestones(
       [projectId, space, store],
     ),
   );
+}
+
+/**
+ * A project's Specs, live.
+ *
+ * Keyed on the project **KEY**, unlike milestones — `spec_list` resolves a
+ * project reference the way every other command does, and the register knows the
+ * key it is drawing. `null` is the whole space, which is what the request means
+ * by an absent project rather than a placeholder for one we could not find.
+ */
+export function useProjectSpecs(
+  space: string,
+  project: string | null,
+): ResourceSnapshot<SpecView[]> {
+  const store = useProjectViewerStore();
+  return useWorldResource<SpecView[]>(
+    projectKeys.specs(space, project),
+    useCallback(() => store.ensureSpecs(space, project), [project, space, store]),
+  );
+}
+
+/** This node's effective scoped grants, live. One resource for the whole Space:
+ *  the reply is already every assignment, so a per-project key would be four
+ *  fetches of the same rows. */
+export function useGrants(space: string): ResourceSnapshot<AssignmentDto[]> {
+  const store = useProjectViewerStore();
+  return useWorldResource<AssignmentDto[]>(
+    projectKeys.grants(space),
+    useCallback(() => store.ensureGrants(space), [space, store]),
+  );
+}
+
+/** A project's Baselines, live. Same handle rule as the Spec register. */
+export function useProjectBaselines(
+  space: string,
+  project: string | null,
+): ResourceSnapshot<BaselineView[]> {
+  const store = useProjectViewerStore();
+  return useWorldResource<BaselineView[]>(
+    projectKeys.baselines(space, project),
+    useCallback(() => store.ensureBaselines(space, project), [project, space, store]),
+  );
+}
+
+export function useBaseline(
+  space: string,
+  baseline: string | null,
+): ResourceSnapshot<BaselineView> {
+  const store = useProjectViewerStore();
+  const load = useCallback(
+    () => store.ensureBaseline(space, baseline ?? ""),
+    [space, baseline, store],
+  );
+  return useWorldResource<BaselineView>(
+    projectKeys.baseline(space, baseline ?? "_none"),
+    baseline ? load : undefined,
+  );
+}
+
+export function useBaselineHistory(
+  space: string,
+  baseline: string | null,
+): ResourceSnapshot<BaselineRevisionDto[]> {
+  const store = useProjectViewerStore();
+  const load = useCallback(
+    () => store.ensureBaselineHistory(space, baseline ?? ""),
+    [space, baseline, store],
+  );
+  return useWorldResource<BaselineRevisionDto[]>(
+    projectKeys.baselineHistory(space, baseline ?? "_none"),
+    baseline ? load : undefined,
+  );
+}
+
+/** Every typed link in scope, live — the incoming half of the graph, and what
+ *  coverage is computed from. */
+export function useSpecReferences(
+  space: string,
+  project: string | null,
+): ResourceSnapshot<SpecReference[]> {
+  const store = useProjectViewerStore();
+  return useWorldResource<SpecReference[]>(
+    projectKeys.specReferences(space, project),
+    useCallback(() => store.ensureSpecReferences(space, project), [project, space, store]),
+  );
+}
+
+/** One Spec's whole revision DAG, live. */
+export function useSpecHistory(
+  space: string,
+  spec: string | null,
+): ResourceSnapshot<SpecRevision[]> {
+  const store = useProjectViewerStore();
+  const load = useCallback(
+    () => store.ensureSpecHistory(space, spec ?? ""),
+    [space, spec, store],
+  );
+  return useWorldResource<SpecRevision[]>(
+    projectKeys.specHistory(space, spec ?? "_none"),
+    spec ? load : undefined,
+  );
+}
+
+/** One Spec, live — the reader's own resource, so a deep link does not wait on
+ *  a register it may never draw. */
+export function useSpec(space: string, spec: string | null): ResourceSnapshot<SpecView> {
+  const store = useProjectViewerStore();
+  const load = useCallback(
+    () => store.ensureSpec(space, spec ?? ""),
+    [space, spec, store],
+  );
+  // No spec open parks on a key nothing fetches, rather than asking the daemon
+  // about the empty string.
+  return useWorldResource<SpecView>(projectKeys.spec(space, spec ?? "_none"), spec ? load : undefined);
 }
 
 /** A project's status-update feed, live. Same id-not-key rule as above. */

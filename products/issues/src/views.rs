@@ -486,6 +486,8 @@ pub struct IssueState {
     pub milestone: Option<String>,
     /// The cycle this issue is scheduled in (BOARD-11).
     pub cycle: Option<String>,
+    /// Exact issued Baseline revision governing this work, when pinned.
+    pub baseline: Option<crate::spec::BaselineRef>,
     pub labels: Vec<String>,
     pub comments: Vec<StoredComment>,
     /// comment id -> sorted `(emoji, actor)` pairs, parsed from the
@@ -636,6 +638,7 @@ impl IssueState {
             followers,
             milestone: reg_str(view, "milestone").filter(|m| !m.is_empty()),
             cycle: reg_str(view, "cycle").filter(|c| !c.is_empty()),
+            baseline: reg_str(view, "baseline").and_then(|raw| serde_json::from_str(&raw).ok()),
             labels,
             comments,
             reactions,
@@ -917,6 +920,7 @@ pub fn issue_view(
         followers: issue.followers.clone(),
         milestone: issue.milestone.clone(),
         cycle: issue.cycle.clone(),
+        baseline: issue.baseline.clone(),
         attachments: issue
             .attachments
             .iter()

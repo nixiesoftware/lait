@@ -102,6 +102,7 @@ pub fn open_orbital_runtime(
 }
 
 pub mod ceremony;
+pub mod generation;
 pub(crate) mod hosting;
 pub mod mechanics;
 mod worlds;

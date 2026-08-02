@@ -1,0 +1,985 @@
+//! Versioned project specifications and their issued baselines.
+//!
+//! The module supplies the context, so the durable nouns stay sharp:
+//! [`Spec`], [`Revision`], [`Baseline`], [`Link`], and the derived [`Packet`].
+//! An Issue remains work. A Spec says why or what governs that work; a
+//! Baseline pins exact revisions; a Packet is the effective read model for one
+//! Issue and is never replicated truth.
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
+pub const MAX_TITLE_BYTES: usize = 256;
+pub const MAX_TEXT_BYTES: usize = 1024 * 1024;
+pub const MAX_LINKS: usize = 256;
+pub const MAX_MEMBERS: usize = 1024;
+pub const MAX_PREDECESSORS: usize = 8;
+
+const SPEC_REVISION_CONTEXT: &str = "lait.issues.spec-revision.v1";
+const BASELINE_REVISION_CONTEXT: &str = "lait.issues.baseline-revision.v1";
+
+/// What one Spec contributes to the lifecycle.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum Kind {
+    Goal,
+    Requirement,
+    Plan,
+    Design,
+    Order,
+    Guide,
+    Proof,
+    Verdict,
+    Waiver,
+    Record,
+}
+
+impl Kind {
+    pub const ALL: [Self; 10] = [
+        Self::Goal,
+        Self::Requirement,
+        Self::Plan,
+        Self::Design,
+        Self::Order,
+        Self::Guide,
+        Self::Proof,
+        Self::Verdict,
+        Self::Waiver,
+        Self::Record,
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Goal => "goal",
+            Self::Requirement => "requirement",
+            Self::Plan => "plan",
+            Self::Design => "design",
+            Self::Order => "order",
+            Self::Guide => "guide",
+            Self::Proof => "proof",
+            Self::Verdict => "verdict",
+            Self::Waiver => "waiver",
+            Self::Record => "record",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|kind| kind.as_str() == raw)
+    }
+
+    /// Advice and evidence remain visible in a Packet but never enter its
+    /// governing set merely because they were issued.
+    pub const fn governs(self) -> bool {
+        matches!(
+            self,
+            Self::Requirement | Self::Design | Self::Order | Self::Waiver
+        )
+    }
+}
+
+/// Review state of one immutable revision.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum State {
+    Draft,
+    Review,
+    Issued,
+    Withdrawn,
+}
+
+impl State {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Draft => "draft",
+            Self::Review => "review",
+            Self::Issued => "issued",
+            Self::Withdrawn => "withdrawn",
+        }
+    }
+}
+
+/// The meaning of one exact directed relation.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum Rel {
+    Derives,
+    Decomposes,
+    Implements,
+    Governs,
+    Amends,
+    Supersedes,
+    Clarifies,
+    Incorporates,
+    References,
+    Verifies,
+    Validates,
+    Waives,
+    Records,
+    Conflicts,
+    Depends,
+}
+
+impl Rel {
+    pub const ALL: [Self; 15] = [
+        Self::Derives,
+        Self::Decomposes,
+        Self::Implements,
+        Self::Governs,
+        Self::Amends,
+        Self::Supersedes,
+        Self::Clarifies,
+        Self::Incorporates,
+        Self::References,
+        Self::Verifies,
+        Self::Validates,
+        Self::Waives,
+        Self::Records,
+        Self::Conflicts,
+        Self::Depends,
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Derives => "derives",
+            Self::Decomposes => "decomposes",
+            Self::Implements => "implements",
+            Self::Governs => "governs",
+            Self::Amends => "amends",
+            Self::Supersedes => "supersedes",
+            Self::Clarifies => "clarifies",
+            Self::Incorporates => "incorporates",
+            Self::References => "references",
+            Self::Verifies => "verifies",
+            Self::Validates => "validates",
+            Self::Waives => "waives",
+            Self::Records => "records",
+            Self::Conflicts => "conflicts",
+            Self::Depends => "depends",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|rel| rel.as_str() == raw)
+    }
+}
+
+/// An exact Spec revision.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SpecRef {
+    pub spec: String,
+    pub revision: String,
+}
+
+/// An exact Baseline revision.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BaselineRef {
+    pub baseline: String,
+    pub revision: String,
+}
+
+/// What a Link names. Spec and Baseline targets always pin an exact revision;
+/// an Issue is already a stable identity whose changing work state is not a
+/// governing document revision.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Target {
+    Spec { spec: String, revision: String },
+    Baseline { baseline: String, revision: String },
+    Issue { issue: String },
+}
+
+/// One typed relation carried by the revision that asserts it.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Link {
+    pub rel: Rel,
+    pub target: Target,
+}
+
+/// Canonical content of one Spec revision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Body {
+    pub spec: String,
+    pub project: String,
+    pub kind: Kind,
+    pub title: String,
+    #[serde(default)]
+    pub text: String,
+    pub state: State,
+    #[serde(default)]
+    pub links: Vec<Link>,
+    pub author: String,
+    pub ts: u64,
+}
+
+impl Body {
+    pub fn canonicalize(&mut self) {
+        self.links.sort();
+        self.links.dedup();
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if crate::ids::SpecId::parse(&self.spec).is_none() {
+            return Err("invalid Spec id".into());
+        }
+        if crate::ids::ProjectId::parse(&self.project).is_none() {
+            return Err("invalid Project id".into());
+        }
+        let title = self.title.trim();
+        if title.is_empty() || self.title.len() > MAX_TITLE_BYTES {
+            return Err("Spec title is empty or too long".into());
+        }
+        if self.text.len() > MAX_TEXT_BYTES {
+            return Err("Spec text is too long".into());
+        }
+        if mechanics::ids::ActorId::parse(&self.author).is_none() {
+            return Err("invalid Spec author".into());
+        }
+        if self.links.len() > MAX_LINKS {
+            return Err("too many Spec links".into());
+        }
+        let mut canonical = self.links.clone();
+        canonical.sort();
+        canonical.dedup();
+        if canonical != self.links {
+            return Err("Spec links are not sorted and unique".into());
+        }
+        for link in &self.links {
+            validate_target(&link.target)?;
+        }
+        Ok(())
+    }
+}
+
+/// One immutable Spec revision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Revision {
+    pub revision: String,
+    #[serde(default)]
+    pub predecessors: Vec<String>,
+    pub body: Body,
+}
+
+/// Parsed state of one Spec Body.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Spec {
+    pub revisions: Vec<Revision>,
+}
+
+impl Spec {
+    pub fn from_view(view: &fabric::CollaborativeView) -> Self {
+        let mut revisions: Vec<Revision> = view
+            .maps
+            .get("revisions")
+            .into_iter()
+            .flat_map(|map| map.values())
+            .filter_map(|raw| serde_json::from_slice(raw).ok())
+            .collect();
+        revisions.sort_by(|a, b| a.revision.cmp(&b.revision));
+        Self { revisions }
+    }
+
+    pub fn heads(&self) -> Vec<&Revision> {
+        heads(&self.revisions, |revision| {
+            (&revision.revision, &revision.predecessors)
+        })
+    }
+
+    pub fn one_head(&self) -> Option<&Revision> {
+        let heads = self.heads();
+        if heads.len() == 1 {
+            heads.first().copied()
+        } else {
+            None
+        }
+    }
+
+    /// The currently effective issued revision. Draft/review descendants do
+    /// not invalidate it. A later issued revision supersedes it; a later
+    /// withdrawal ends it. Concurrent controlling revisions are a conflict.
+    pub fn issued(&self) -> Issued<'_> {
+        let controls: Vec<&Revision> = self
+            .revisions
+            .iter()
+            .filter(|revision| matches!(revision.body.state, State::Issued | State::Withdrawn))
+            .collect();
+        let maximal: Vec<&Revision> = controls
+            .iter()
+            .copied()
+            .filter(|candidate| {
+                !controls.iter().any(|other| {
+                    other.revision != candidate.revision
+                        && descends(
+                            &self.revisions,
+                            &other.revision,
+                            &candidate.revision,
+                            |revision| (&revision.revision, &revision.predecessors),
+                        )
+                })
+            })
+            .collect();
+        match maximal.as_slice() {
+            [] => Issued::None,
+            [one] if one.body.state == State::Issued => Issued::One(one),
+            [one] if one.body.state == State::Withdrawn => Issued::None,
+            _ => Issued::Conflict(maximal),
+        }
+    }
+
+    pub fn revision(&self, id: &str) -> Option<&Revision> {
+        self.revisions
+            .iter()
+            .find(|revision| revision.revision == id)
+    }
+}
+
+pub enum Issued<'a> {
+    None,
+    One(&'a Revision),
+    Conflict(Vec<&'a Revision>),
+}
+
+/// Canonical content of one Baseline revision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BaselineBody {
+    pub baseline: String,
+    pub project: String,
+    pub name: String,
+    pub state: State,
+    #[serde(default)]
+    pub members: Vec<SpecRef>,
+    pub author: String,
+    pub ts: u64,
+}
+
+impl BaselineBody {
+    pub fn canonicalize(&mut self) {
+        self.members.sort();
+        self.members.dedup();
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if crate::ids::BaselineId::parse(&self.baseline).is_none() {
+            return Err("invalid Baseline id".into());
+        }
+        if crate::ids::ProjectId::parse(&self.project).is_none() {
+            return Err("invalid Project id".into());
+        }
+        if self.name.trim().is_empty() || self.name.len() > MAX_TITLE_BYTES {
+            return Err("Baseline name is empty or too long".into());
+        }
+        if mechanics::ids::ActorId::parse(&self.author).is_none() {
+            return Err("invalid Baseline author".into());
+        }
+        if self.members.len() > MAX_MEMBERS {
+            return Err("too many Baseline members".into());
+        }
+        let mut canonical = self.members.clone();
+        canonical.sort();
+        canonical.dedup();
+        if canonical != self.members {
+            return Err("Baseline members are not sorted and unique".into());
+        }
+        for member in &self.members {
+            if crate::ids::SpecId::parse(&member.spec).is_none()
+                || decode_revision(&member.revision).is_none()
+            {
+                return Err("invalid Baseline member".into());
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BaselineRevision {
+    pub revision: String,
+    #[serde(default)]
+    pub predecessors: Vec<String>,
+    pub body: BaselineBody,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Baseline {
+    pub revisions: Vec<BaselineRevision>,
+}
+
+impl Baseline {
+    pub fn from_view(view: &fabric::CollaborativeView) -> Self {
+        let mut revisions: Vec<BaselineRevision> = view
+            .maps
+            .get("revisions")
+            .into_iter()
+            .flat_map(|map| map.values())
+            .filter_map(|raw| serde_json::from_slice(raw).ok())
+            .collect();
+        revisions.sort_by(|a, b| a.revision.cmp(&b.revision));
+        Self { revisions }
+    }
+
+    pub fn heads(&self) -> Vec<&BaselineRevision> {
+        heads(&self.revisions, |revision| {
+            (&revision.revision, &revision.predecessors)
+        })
+    }
+
+    pub fn one_head(&self) -> Option<&BaselineRevision> {
+        let heads = self.heads();
+        if heads.len() == 1 {
+            heads.first().copied()
+        } else {
+            None
+        }
+    }
+
+    pub fn issued(&self) -> BaselineIssued<'_> {
+        let controls: Vec<&BaselineRevision> = self
+            .revisions
+            .iter()
+            .filter(|revision| matches!(revision.body.state, State::Issued | State::Withdrawn))
+            .collect();
+        let maximal: Vec<&BaselineRevision> = controls
+            .iter()
+            .copied()
+            .filter(|candidate| {
+                !controls.iter().any(|other| {
+                    other.revision != candidate.revision
+                        && descends(
+                            &self.revisions,
+                            &other.revision,
+                            &candidate.revision,
+                            |revision| (&revision.revision, &revision.predecessors),
+                        )
+                })
+            })
+            .collect();
+        match maximal.as_slice() {
+            [] => BaselineIssued::None,
+            [one] if one.body.state == State::Issued => BaselineIssued::One(one),
+            [one] if one.body.state == State::Withdrawn => BaselineIssued::None,
+            _ => BaselineIssued::Conflict(maximal),
+        }
+    }
+
+    pub fn revision(&self, id: &str) -> Option<&BaselineRevision> {
+        self.revisions
+            .iter()
+            .find(|revision| revision.revision == id)
+    }
+}
+
+pub enum BaselineIssued<'a> {
+    None,
+    One(&'a BaselineRevision),
+    Conflict(Vec<&'a BaselineRevision>),
+}
+
+/// Stable external view of one Spec and all current coordinates.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SpecView {
+    pub spec: String,
+    pub project: String,
+    pub kind: Kind,
+    pub title: String,
+    pub state: State,
+    pub revision: String,
+    pub heads: Vec<String>,
+    #[serde(default)]
+    pub issued: Vec<String>,
+    pub body: Body,
+}
+
+/// Stable external view of one Baseline.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BaselineView {
+    pub baseline: String,
+    pub project: String,
+    pub name: String,
+    pub state: State,
+    pub revision: String,
+    pub heads: Vec<String>,
+    #[serde(default)]
+    pub issued: Vec<String>,
+    pub body: BaselineBody,
+}
+
+/// How an exact revision reached a Packet.
+///
+/// A typed fact rather than a sentence, because a client has to *act* on the
+/// difference: material pinned by a Baseline, material a Spec pulled in by
+/// incorporation, and material aimed at one Issue directly are three different
+/// claims about why this governs, and the reader must be able to say which
+/// without parsing prose that a later reword would silently break.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "route", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PacketSource {
+    /// Pinned by the Baseline the Issue binds.
+    Baseline { baseline: String },
+    /// An issued Spec that governs this Issue by its own `governs` Link.
+    Direct,
+    /// Pulled in by an exact `incorporates` Link on another revision in the set.
+    Incorporated { spec: String, revision: String },
+}
+
+/// Why a Packet is not whole.
+///
+/// Each variant is a different remedy — a missing Body will arrive with a sync,
+/// an unissued Baseline needs issuing, concurrent issued revisions need a
+/// resolution — so a client that has to tell them apart cannot be handed one
+/// string. `missing` and `not issued` in particular are the difference between
+/// "wait" and "act".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "reason", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PacketConflict {
+    MissingBaseline {
+        baseline: String,
+    },
+    MissingBaselineRevision {
+        baseline: String,
+        revision: String,
+    },
+    BaselineNotIssued {
+        baseline: String,
+        revision: String,
+    },
+    MissingSpec {
+        spec: String,
+    },
+    MissingSpecRevision {
+        spec: String,
+        revision: String,
+    },
+    /// Concurrent issued revisions of a Spec that governs this Issue. Nothing
+    /// is effective until they are resolved.
+    IssuedSpecConflict {
+        spec: String,
+    },
+    MissingIncorporated {
+        spec: String,
+        revision: String,
+    },
+}
+
+/// One typed assertion, as seen from the far end of it.
+///
+/// Links live on the revision that asserts them, so "what verifies this
+/// requirement" is only answerable by looking at every other document — and
+/// specifically at every *revision* of them, not just the heads. The revision
+/// that governs need not be the head, so an edge asserted by an issued
+/// predecessor is live truth that a head-only scan silently loses.
+///
+/// `head` and `issued` describe the asserting revision, which is what lets a
+/// reader tell a current claim from one a superseded revision made and nobody
+/// stands behind any more.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SpecReference {
+    /// The Spec asserting it.
+    pub spec: String,
+    /// The exact revision asserting it.
+    pub revision: String,
+    pub kind: Kind,
+    pub title: String,
+    pub link: Link,
+    /// The asserting revision is a current head.
+    pub head: bool,
+    /// The asserting revision is the effective issued one.
+    pub issued: bool,
+}
+
+/// One exact Spec revision as it appears in an Issue Packet.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PacketSpec {
+    pub spec: String,
+    pub revision: String,
+    pub kind: Kind,
+    pub title: String,
+    pub state: State,
+    pub source: PacketSource,
+    #[serde(default)]
+    pub links: Vec<Link>,
+}
+
+/// Derived effective brief for one Issue.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Packet {
+    pub issue: String,
+    #[serde(default)]
+    pub baseline: Option<BaselineRef>,
+    #[serde(default)]
+    pub governing: Vec<PacketSpec>,
+    #[serde(default)]
+    pub guidance: Vec<PacketSpec>,
+    #[serde(default)]
+    pub proof: Vec<PacketSpec>,
+    #[serde(default)]
+    pub record: Vec<PacketSpec>,
+    #[serde(default)]
+    pub conflicts: Vec<PacketConflict>,
+}
+
+pub fn build_revision(mut body: Body, mut predecessors: Vec<[u8; 32]>) -> Result<Revision, String> {
+    body.canonicalize();
+    body.validate()?;
+    canonical_predecessors(&mut predecessors)?;
+    let body_json = canonical_json(&body)?;
+    let revision = data_encoding::HEXLOWER.encode(&blake3::derive_key(
+        SPEC_REVISION_CONTEXT,
+        &preimage(&body.spec, &predecessors, &body_json)?,
+    ));
+    Ok(Revision {
+        revision,
+        predecessors: predecessors
+            .iter()
+            .map(|id| data_encoding::HEXLOWER.encode(id))
+            .collect(),
+        body,
+    })
+}
+
+pub fn build_baseline_revision(
+    mut body: BaselineBody,
+    mut predecessors: Vec<[u8; 32]>,
+) -> Result<BaselineRevision, String> {
+    body.canonicalize();
+    body.validate()?;
+    canonical_predecessors(&mut predecessors)?;
+    let body_json = canonical_json(&body)?;
+    let revision = data_encoding::HEXLOWER.encode(&blake3::derive_key(
+        BASELINE_REVISION_CONTEXT,
+        &preimage(&body.baseline, &predecessors, &body_json)?,
+    ));
+    Ok(BaselineRevision {
+        revision,
+        predecessors: predecessors
+            .iter()
+            .map(|id| data_encoding::HEXLOWER.encode(id))
+            .collect(),
+        body,
+    })
+}
+
+pub fn decode_revision(raw: &str) -> Option<[u8; 32]> {
+    let bytes = data_encoding::HEXLOWER.decode(raw.as_bytes()).ok()?;
+    <[u8; 32]>::try_from(bytes.as_slice()).ok()
+}
+
+fn validate_target(target: &Target) -> Result<(), String> {
+    match target {
+        Target::Spec { spec, revision } => {
+            if crate::ids::SpecId::parse(spec).is_none() || decode_revision(revision).is_none() {
+                return Err("invalid Spec link target".into());
+            }
+        }
+        Target::Baseline { baseline, revision } => {
+            if crate::ids::BaselineId::parse(baseline).is_none()
+                || decode_revision(revision).is_none()
+            {
+                return Err("invalid Baseline link target".into());
+            }
+        }
+        Target::Issue { issue } => {
+            if crate::ids::DocId::parse(issue).is_none() {
+                return Err("invalid Issue link target".into());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn canonical_predecessors(predecessors: &mut Vec<[u8; 32]>) -> Result<(), String> {
+    if predecessors.len() > MAX_PREDECESSORS {
+        return Err("too many revision predecessors".into());
+    }
+    predecessors.sort();
+    predecessors.dedup();
+    Ok(())
+}
+
+fn canonical_json<T: Serialize>(value: &T) -> Result<Vec<u8>, String> {
+    let value = serde_json::to_value(value).map_err(|error| error.to_string())?;
+    let value = sort_json(value);
+    serde_json::to_vec(&value).map_err(|error| error.to_string())
+}
+
+fn sort_json(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => {
+            let sorted: BTreeMap<_, _> = map
+                .into_iter()
+                .map(|(key, value)| (key, sort_json(value)))
+                .collect();
+            serde_json::Value::Object(sorted.into_iter().collect())
+        }
+        serde_json::Value::Array(values) => {
+            serde_json::Value::Array(values.into_iter().map(sort_json).collect())
+        }
+        other => other,
+    }
+}
+
+fn preimage(id: &str, predecessors: &[[u8; 32]], body: &[u8]) -> Result<Vec<u8>, String> {
+    let id_len = u16::try_from(id.len()).map_err(|_| "document id is too long".to_string())?;
+    let predecessor_count = u16::try_from(predecessors.len())
+        .map_err(|_| "too many predecessor revisions".to_string())?;
+    let body_len =
+        u32::try_from(body.len()).map_err(|_| "revision body is too long".to_string())?;
+    let mut out = Vec::new();
+    out.extend_from_slice(&1u16.to_be_bytes());
+    out.extend_from_slice(&id_len.to_be_bytes());
+    out.extend_from_slice(id.as_bytes());
+    out.extend_from_slice(&predecessor_count.to_be_bytes());
+    for predecessor in predecessors {
+        out.extend_from_slice(predecessor);
+    }
+    out.extend_from_slice(&body_len.to_be_bytes());
+    out.extend_from_slice(body);
+    Ok(out)
+}
+
+/// Every revision, predecessors before successors.
+///
+/// The stored order is by revision id, which is stable but arbitrary — ids are
+/// content hashes, so "sorted" says nothing about what came first. A rail that
+/// listed them that way would show a document's history shuffled. Ties inside a
+/// generation still fall back to the id, so concurrent branches interleave
+/// deterministically rather than by whatever the map iterated.
+pub fn ordered<'a, T, F>(items: &'a [T], parts: F) -> Vec<&'a T>
+where
+    F: Fn(&T) -> (&String, &Vec<String>),
+{
+    let known: BTreeSet<&str> = items.iter().map(|item| parts(item).0.as_str()).collect();
+    let mut pending: Vec<&T> = items.iter().collect();
+    pending.sort_by(|a, b| parts(a).0.cmp(parts(b).0));
+    let mut placed: BTreeSet<&str> = BTreeSet::new();
+    let mut out: Vec<&T> = Vec::with_capacity(items.len());
+    while !pending.is_empty() {
+        let mut deferred: Vec<&T> = Vec::new();
+        let before = out.len();
+        for item in pending {
+            let (id, predecessors) = parts(item);
+            // A predecessor this store does not hold cannot be waited for. It
+            // is a partial replica, not a broken order.
+            let ready = predecessors.iter().all(|predecessor| {
+                !known.contains(predecessor.as_str()) || placed.contains(predecessor.as_str())
+            });
+            if ready {
+                placed.insert(id.as_str());
+                out.push(item);
+            } else {
+                deferred.push(item);
+            }
+        }
+        if out.len() == before {
+            // Predecessors are content hashes, so a cycle cannot be authored —
+            // but a corrupt store must not spin here. Emit the rest in id order.
+            out.extend(deferred);
+            break;
+        }
+        pending = deferred;
+    }
+    out
+}
+
+fn heads<'a, T, F>(items: &'a [T], parts: F) -> Vec<&'a T>
+where
+    F: Fn(&T) -> (&String, &Vec<String>),
+{
+    let predecessors: BTreeSet<&str> = items
+        .iter()
+        .flat_map(|item| parts(item).1.iter().map(String::as_str))
+        .collect();
+    let mut result: Vec<&T> = items
+        .iter()
+        .filter(|item| !predecessors.contains(parts(item).0.as_str()))
+        .collect();
+    result.sort_by(|a, b| parts(a).0.cmp(parts(b).0));
+    result
+}
+
+fn descends<T, F>(revisions: &[T], descendant: &str, ancestor: &str, parts: F) -> bool
+where
+    F: Fn(&T) -> (&String, &Vec<String>),
+{
+    let mut stack = vec![descendant];
+    let mut seen = BTreeSet::new();
+    while let Some(current) = stack.pop() {
+        if !seen.insert(current) {
+            continue;
+        }
+        let Some(revision) = revisions
+            .iter()
+            .find(|revision| parts(revision).0 == current)
+        else {
+            continue;
+        };
+        for predecessor in parts(revision).1 {
+            if predecessor == ancestor {
+                return true;
+            }
+            stack.push(predecessor);
+        }
+    }
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn actor() -> String {
+        mechanics::ids::ActorId::from_incept_hash(&"07".repeat(32)).to_string()
+    }
+
+    fn body(spec: &str, state: State, ts: u64) -> Body {
+        Body {
+            spec: spec.into(),
+            project: "prj_01k1k8q6c6t0g0000000000000".into(),
+            kind: Kind::Requirement,
+            title: "A requirement".into(),
+            text: "The system shall be deterministic.".into(),
+            state,
+            links: vec![],
+            author: actor(),
+            ts,
+        }
+    }
+
+    fn baseline_body(state: State, ts: u64) -> BaselineBody {
+        BaselineBody {
+            baseline: "bas_01k1k8q6c6t0g0000000000000".into(),
+            project: "prj_01k1k8q6c6t0g0000000000000".into(),
+            name: "Issued set".into(),
+            state,
+            members: vec![],
+            author: actor(),
+            ts,
+        }
+    }
+
+    #[test]
+    fn a_draft_successor_does_not_unissue_its_parent() {
+        let first = build_revision(
+            body("spc_01k1k8q6c6t0g0000000000000", State::Issued, 1),
+            vec![],
+        )
+        .expect("issued revision");
+        let second = build_revision(
+            body("spc_01k1k8q6c6t0g0000000000000", State::Draft, 2),
+            vec![decode_revision(&first.revision).expect("revision id")],
+        )
+        .expect("draft revision");
+        let spec = Spec {
+            revisions: vec![first.clone(), second],
+        };
+        assert!(matches!(spec.issued(), Issued::One(rev) if rev.revision == first.revision));
+    }
+
+    #[test]
+    fn a_later_issue_supersedes_the_prior_issue() {
+        let first = build_revision(
+            body("spc_01k1k8q6c6t0g0000000000000", State::Issued, 1),
+            vec![],
+        )
+        .expect("issued revision");
+        let second = build_revision(
+            body("spc_01k1k8q6c6t0g0000000000000", State::Issued, 2),
+            vec![decode_revision(&first.revision).expect("revision id")],
+        )
+        .expect("issued revision");
+        let spec = Spec {
+            revisions: vec![first, second.clone()],
+        };
+        assert!(matches!(spec.issued(), Issued::One(rev) if rev.revision == second.revision));
+    }
+
+    #[test]
+    fn canonical_links_make_equal_revisions() {
+        let mut left = body("spc_01k1k8q6c6t0g0000000000000", State::Draft, 1);
+        let target = Target::Issue {
+            issue: "iss_01k1k8q6c6t0g0000000000000".into(),
+        };
+        left.links = vec![
+            Link {
+                rel: Rel::References,
+                target: target.clone(),
+            },
+            Link {
+                rel: Rel::Governs,
+                target,
+            },
+        ];
+        let mut right = left.clone();
+        right.links.reverse();
+        let left = build_revision(left, vec![]).expect("left");
+        let right = build_revision(right, vec![]).expect("right");
+        assert_eq!(left.revision, right.revision);
+    }
+
+    #[test]
+    fn concurrent_issued_successors_are_a_visible_conflict() {
+        let root = build_revision(
+            body("spc_01k1k8q6c6t0g0000000000000", State::Draft, 1),
+            vec![],
+        )
+        .expect("root");
+        let predecessor = decode_revision(&root.revision).expect("revision id");
+        let left = build_revision(
+            body("spc_01k1k8q6c6t0g0000000000000", State::Issued, 2),
+            vec![predecessor],
+        )
+        .expect("left");
+        let right = build_revision(
+            body("spc_01k1k8q6c6t0g0000000000000", State::Issued, 3),
+            vec![predecessor],
+        )
+        .expect("right");
+        let spec = Spec {
+            revisions: vec![root, left, right],
+        };
+        assert!(matches!(spec.issued(), Issued::Conflict(heads) if heads.len() == 2));
+    }
+
+    #[test]
+    fn baseline_draft_preserves_issue_and_withdrawal_ends_it() {
+        let issued = build_baseline_revision(baseline_body(State::Issued, 1), vec![])
+            .expect("issued Baseline");
+        let predecessor = decode_revision(&issued.revision).expect("revision id");
+        let draft = build_baseline_revision(baseline_body(State::Draft, 2), vec![predecessor])
+            .expect("draft Baseline");
+        let current = Baseline {
+            revisions: vec![issued.clone(), draft.clone()],
+        };
+        assert!(
+            matches!(current.issued(), BaselineIssued::One(revision) if revision.revision == issued.revision)
+        );
+
+        let withdrawn = build_baseline_revision(
+            baseline_body(State::Withdrawn, 3),
+            vec![decode_revision(&draft.revision).expect("revision id")],
+        )
+        .expect("withdrawn Baseline");
+        let current = Baseline {
+            revisions: vec![issued, draft, withdrawn],
+        };
+        assert!(matches!(current.issued(), BaselineIssued::None));
+    }
+}

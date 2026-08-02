@@ -185,12 +185,108 @@ export interface IssueView {
   milestone?: string | null;
   /** Scheduled cycle id (BOARD-11). */
   cycle?: string | null;
+  /** Exact issued Baseline pinned to this Issue. */
+  baseline?: BaselineRef | null;
   /** Attachment metadata (CREATE-5). */
   attachments?: AttachmentMetaDto[];
   provisional: boolean;
   /** Malformed stored records, kept beside the valid projection rather than
    * silently dropped or laundered into sentinel values. */
   corrupt_records?: CorruptRecord[];
+}
+
+export type SpecKind =
+  | "goal" | "requirement" | "plan" | "design" | "order"
+  | "guide" | "proof" | "verdict" | "waiver" | "record";
+export type SpecState = "draft" | "review" | "issued" | "withdrawn";
+export type SpecRel =
+  | "derives" | "decomposes" | "implements" | "governs" | "amends"
+  | "supersedes" | "clarifies" | "incorporates" | "references"
+  | "verifies" | "validates" | "waives" | "records" | "conflicts" | "depends";
+export type SpecTarget =
+  | { kind: "spec"; spec: string; revision: string }
+  | { kind: "baseline"; baseline: string; revision: string }
+  | { kind: "issue"; issue: string };
+export interface SpecLink { rel: SpecRel; target: SpecTarget }
+export interface SpecRef { spec: string; revision: string }
+export interface BaselineRef { baseline: string; revision: string }
+export interface SpecBody {
+  spec: string; project: string; kind: SpecKind; title: string; text: string;
+  state: SpecState; links: SpecLink[]; author: string; ts: number;
+}
+export interface SpecView {
+  spec: string; project: string; kind: SpecKind; title: string; state: SpecState;
+  revision: string; heads: string[]; issued: string[]; body: SpecBody;
+}
+export interface BaselineBody {
+  baseline: string; project: string; name: string; state: SpecState;
+  members: SpecRef[]; author: string; ts: number;
+}
+export interface BaselineView {
+  baseline: string; project: string; name: string; state: SpecState;
+  revision: string; heads: string[]; issued: string[]; body: BaselineBody;
+}
+/**
+ * One typed assertion seen from the far end — `spec.rs` `SpecReference`.
+ *
+ * Links live on the revision that asserts them, so incoming edges cannot be
+ * derived from the target and a head-only scan loses any edge asserted by an
+ * issued predecessor. `head`/`issued` describe the *asserting* revision, which
+ * is what separates a current claim from one nobody stands behind any more.
+ */
+export interface SpecReference {
+  spec: string;
+  revision: string;
+  kind: SpecKind;
+  title: string;
+  link: SpecLink;
+  head: boolean;
+  issued: boolean;
+}
+
+/** One immutable revision and the revisions it descends from. */
+export interface SpecRevision {
+  revision: string;
+  predecessors: string[];
+  body: SpecBody;
+}
+export interface BaselineRevisionDto {
+  revision: string;
+  predecessors: string[];
+  body: BaselineBody;
+}
+
+/**
+ * How an exact revision reached a Packet — `spec.rs` `PacketSource`.
+ *
+ * Typed rather than prose because the reader has to act on the difference: an
+ * incorporated Guide lands in the governing set, and the only thing that keeps
+ * it from reading as an order is being able to say what pulled it in.
+ */
+export type PacketSource =
+  | { route: "baseline"; baseline: string }
+  | { route: "direct" }
+  | { route: "incorporated"; spec: string; revision: string };
+
+/** Why a Packet is not whole — `spec.rs` `PacketConflict`. Distinct variants
+ *  because "missing" waits for a sync and "not issued" waits for a person. */
+export type PacketConflict =
+  | { reason: "missing_baseline"; baseline: string }
+  | { reason: "missing_baseline_revision"; baseline: string; revision: string }
+  | { reason: "baseline_not_issued"; baseline: string; revision: string }
+  | { reason: "missing_spec"; spec: string }
+  | { reason: "missing_spec_revision"; spec: string; revision: string }
+  | { reason: "issued_spec_conflict"; spec: string }
+  | { reason: "missing_incorporated"; spec: string; revision: string };
+
+export interface PacketSpec {
+  spec: string; revision: string; kind: SpecKind; title: string; state: SpecState;
+  source: PacketSource; links: SpecLink[];
+}
+export interface Packet {
+  issue: string; baseline?: BaselineRef | null; governing: PacketSpec[];
+  guidance: PacketSpec[]; proof: PacketSpec[]; record: PacketSpec[];
+  conflicts: PacketConflict[];
 }
 
 /** Attachment metadata on an issue (CREATE-5) — payloads via `attachment_get`. */
@@ -567,6 +663,9 @@ export type CatalogPlane =
   | "teams"
   | "triage"
   | "roles"
+  /** Specs and Baselines. Not a region of the catalog at all — they are Bodies
+   *  of their own, digested by version stamp. */
+  | "specs"
   /** The row index: which docs exist, their aliases and seqs, what is deleted. */
   | "docs"
   /** Issue links and parentage. */
@@ -739,6 +838,25 @@ export type Request =
   /** Reply is `text` — the revision as pretty JSON (same shape the CLI prints). */
   | { cmd: "workflow_show"; project: string }
   | { cmd: "workflow_set"; project: string; expect_heads: string[]; body_json: string }
+  | { cmd: "spec_list"; project?: string | null }
+  | { cmd: "spec_show"; spec: string }
+  /** Reply is `spec_revisions` — the whole DAG, oldest first. */
+  | { cmd: "spec_history"; spec: string }
+  /** Reply is spec_references — every typed link in scope, and who asserts it. */
+  | { cmd: "spec_references"; project?: string | null }
+  | { cmd: "baseline_history"; baseline: string }
+  | { cmd: "spec_new"; project: string; kind: SpecKind; title: string; text?: string; links?: SpecLink[] }
+  | { cmd: "spec_revise"; spec: string; expected: string; title?: string | null; text?: string | null; links?: SpecLink[] | null }
+  | { cmd: "spec_state"; spec: string; expected: string; state: SpecState }
+  | { cmd: "spec_resolve"; spec: string; expected_heads: string[]; body_json: string }
+  | { cmd: "baseline_list"; project?: string | null }
+  | { cmd: "baseline_show"; baseline: string }
+  | { cmd: "baseline_new"; project: string; name: string; members: SpecRef[] }
+  | { cmd: "baseline_revise"; baseline: string; expected: string; name?: string | null; members?: SpecRef[] | null }
+  | { cmd: "baseline_state"; baseline: string; expected: string; state: SpecState }
+  | { cmd: "baseline_resolve"; baseline: string; expected_heads: string[]; body_json: string }
+  | { cmd: "issue_baseline"; reff: string; baseline?: BaselineRef | null }
+  | { cmd: "packet"; reff: string }
   /** Reply is `text` — every role definition as pretty JSON. */
   | { cmd: "role_list" }
   /** Reply is `assignments` — effective scoped grants, optionally one actor. */
@@ -828,6 +946,17 @@ export type Response =
   | ({ kind: "status" } & StatusInfo)
   | { kind: "diagnosis"; [k: string]: unknown }
   | { kind: "text"; text: string }
+  /** Named, not flattened: a `SpecView` has a `kind` of its own, and a spread
+   *  would put it where the response tag lives — `JSON.parse` keeps the last
+   *  duplicate, so the reply would arrive claiming to be a `requirement`. */
+  | { kind: "spec"; spec: SpecView }
+  | { kind: "specs"; specs: SpecView[] }
+  | { kind: "spec_revisions"; revisions: SpecRevision[] }
+  | { kind: "spec_references"; references: SpecReference[] }
+  | { kind: "baseline_revisions"; revisions: BaselineRevisionDto[] }
+  | ({ kind: "baseline" } & BaselineView)
+  | { kind: "baselines"; baselines: BaselineView[] }
+  | ({ kind: "packet" } & Packet)
   | { kind: "events"; events: Event[]; last: number }
   | { kind: "who"; peers: PresenceEntry[] }
   /** `partial` means this node is not hearing from everyone it could be.

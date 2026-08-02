@@ -522,6 +522,45 @@ fn doorbell_names_the_dirty_project_and_doc() {
             );
         }
 
+        // A Spec is a Body of its own, in no project's row index — so the
+        // translation used to fall through to "something changed that I cannot
+        // name" and ring the row index. That was right while every non-catalog
+        // Body was an issue, and became a lie the moment Specs existed: writing
+        // one invalidated every board, every row and the status counts.
+        issues_request(
+            &home,
+            issues_app::IssuesRequest::SpecNew {
+                project: "ENG".into(),
+                kind: issues::spec::Kind::Requirement,
+                title: "Login is race-free".into(),
+                text: String::new(),
+                links: vec![],
+            },
+        )
+        .await
+        .expect("spec new");
+
+        let ring = sub
+            .next()
+            .await
+            .expect("read spec doorbell")
+            .expect("spec doorbell present");
+        assert!(
+            ring.dirty_catalog.contains(&CatalogScope::Specs),
+            "a spec write must ring its own plane, got {ring:?}"
+        );
+        assert!(
+            !ring.dirty_catalog.contains(&CatalogScope::Docs),
+            "a spec write must not ring the issue row index, got {ring:?}"
+        );
+        assert!(
+            !ring
+                .dirty_catalog
+                .iter()
+                .any(|scope| matches!(scope, CatalogScope::Boards { .. })),
+            "a spec write must not ring any board, got {ring:?}"
+        );
+
         let _ = request(&home, &Request::Stop).await;
     });
 

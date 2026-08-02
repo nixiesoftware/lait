@@ -24,7 +24,10 @@ Bodies from one Manifest with policy or Bodies from another.
 
 Each Space participation has one orbital store. Its marker identifies the store
 format before any mutable file is trusted. Unknown, foreign, truncated, or
-unsupported formats fail closed; there is no legacy-store interpretation.
+unsupported formats fail closed in every normal open path. Prior-format
+interpretation exists only inside an explicit generation builder; it can read a
+committed prior representation but can never make that representation appear
+current in place.
 
 Durability uses immutable content-addressed objects plus an atomically replaced
 manifest:
@@ -43,6 +46,31 @@ cache miss or an invitation to reconstruct guesses.
 
 Mechanics and Engine reuse the semantics-free journal mechanism but maintain
 separate semantic manifests. A journal is not replicated product state.
+
+An Orbit separates durable facts from their current local materialization.
+Representation changes use this lifecycle:
+
+```text
+committed source facts -> Build -> immutable Generation -> Verify -> Activate
+```
+
+`Build` writes both the Mechanics and Replica components under an isolated
+generation directory. Mechanics verifies the signed effect set and frontier;
+Replica verifies the Body and receipt catalogs and reopens the result through
+the current transaction, protected-material, index, receipt, and Manifest
+validators. Their evidence digests commit to logical facts, not checkpoint or
+index layout. `Activate` then compare-and-swaps one canonical
+`active-generation` pointer. The switch therefore selects both components or
+neither; a process can never observe new authority material with an old Replica
+materialization.
+
+No pointer means the original implicit generation. Once an explicit generation
+is active, normal Mechanics and Replica opens resolve through the same pointer.
+Identity secrets, marker, epoch, lock, neighbours, and content cache remain at
+the stable Orbit root. A local representation activation authors no Space
+authority effect and changes no World implementation identity. Conversely, a
+semantic World change still requires its own reviewed implementation activation
+and cannot be smuggled through a store rebuild.
 
 Not everything under a store directory is journaled. An Orbit's directory also
 holds `content-cache/`, a sibling of the journal rather than a part of it,

@@ -15,6 +15,12 @@ export interface ViewerRoute {
   project: string | null;
   view: View;
   issue: string | null;
+  /** The open Spec, on the Specs register. Absent rather than null when closed,
+   *  so a route without one compares equal to a route that never had the key. */
+  spec?: string;
+  /** The open Baseline. A separate key rather than a second meaning for `spec`:
+   *  they are different nouns and a link should say which one it opens. */
+  baseline?: string;
   filter?: FilterState;
 }
 
@@ -35,6 +41,7 @@ const VIEWS = new Set<View>([
   "inbox",
   "my-issues",
   "activity",
+  "specs",
   "settings",
 ]);
 const LAST_ROUTE = "lait.last-route";
@@ -84,12 +91,16 @@ export function parseRoute(location: Pick<Location, "pathname" | "search">): Vie
   // more — an open issue is always full width — so the parameter is accepted and
   // dropped rather than rejected: old links still open the issue they name.
   const issue = displaysIssue(view) ? clean(query.get("issue")) : null;
+  const spec = view === "specs" ? clean(query.get("spec")) : null;
+  const baseline = view === "specs" ? clean(query.get("baseline")) : null;
 
   return {
     spaceId: parts[1],
     project: projectCandidate ?? legacyOverview ?? (isProjectDestination(view) ? clean(query.get("project")) : null),
     view: legacyOverview ? "overview" : view,
     issue,
+    ...(spec ? { spec } : {}),
+    ...(baseline ? { baseline } : {}),
     ...(carriesFilter(view) && isActive(filter) ? { filter } : {}),
   };
 }
@@ -100,6 +111,12 @@ export function formatRoute(route: ViewerRoute): string {
   const query = new URLSearchParams();
   if (route.issue && displaysIssue(route.view)) {
     query.set("issue", route.issue);
+  }
+  if (route.spec && route.view === "specs") {
+    query.set("spec", route.spec);
+  }
+  if (route.baseline && route.view === "specs") {
+    query.set("baseline", route.baseline);
   }
   if (carriesFilter(route.view) && route.filter && isActive(route.filter)) {
     if (route.filter.text.trim()) query.set("q", route.filter.text.trim());
@@ -125,6 +142,8 @@ export function sameRoute(a: ViewerRoute, b: ViewerRoute): boolean {
     a.project === b.project &&
     a.view === b.view &&
     a.issue === b.issue &&
+    (a.spec ?? null) === (b.spec ?? null) &&
+    (a.baseline ?? null) === (b.baseline ?? null) &&
     JSON.stringify(a.filter ?? EMPTY_FILTER) === JSON.stringify(b.filter ?? EMPTY_FILTER)
   );
 }
@@ -173,7 +192,7 @@ function decode(value: string): string {
 /** Project-home destinations carry structural project identity; workspace
  * destinations must never inherit stale project state. */
 function isProjectDestination(view: View): boolean {
-  return view === "overview" || view === "list" || view === "board" || view === "calendar" || view === "activity";
+  return view === "overview" || view === "list" || view === "board" || view === "calendar" || view === "activity" || view === "specs";
 }
 
 /** Whether this view draws rows a filter can narrow. */
@@ -195,7 +214,8 @@ function projectView(segment: string | undefined): View | null {
   return segment === "overview" ||
     segment === "board" ||
     segment === "calendar" ||
-    segment === "activity"
+    segment === "activity" ||
+    segment === "specs"
     ? segment
     : null;
 }

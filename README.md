@@ -299,6 +299,7 @@ Registries + node:
 | `issues activity [--since N]` | Space-wide recent transitions |
 | `serve [--port N] [--open]` | Open your spaces in a browser (loopback-only) |
 | `status` · `id` · `shutdown` | Node/space status · endpoint id · stop the daemon |
+| `rebuild` | Build and verify the current local representation as one immutable Orbit generation, then atomically activate it (Orbit must be vacant) |
 | `invite [--role R] [--reusable] [--ttl-hours N]` · `join <link> [--dir D]` | Invite a teammate; `join` creates the joiner's store (cwd or `--dir`) and accepting the invite admits them automatically with the invited role's exact capabilities |
 | `who` · `watch` | Peers online · follow the event stream |
 | `profiles` / `resume <name>` | List profiles / switch to a named profile (each a separate identity + store) |

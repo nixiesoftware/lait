@@ -463,6 +463,9 @@ removed device. Detailed claims and non-goals live in `THREAT-MODEL.md`.
   domains, ALPNs, schema metadata, and store markers.
 - Unknown signed, wire, or store versions fail closed.
 - Backward compatibility is explicit policy, never an accidental fallback.
+- Local representation changes build immutable Mechanics + Replica generations,
+  verify logical equivalence, and activate both through one atomic Orbit pointer.
+  They do not change World meaning or author Space authority.
 - Canonical encodings, domains, hashes, bounds, and tie-breaks are protocol.
 - Product conflict semantics belong to the World that selects the primitive.
 - Historical migration plans are not normative documentation.

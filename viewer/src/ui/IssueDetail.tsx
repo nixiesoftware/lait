@@ -37,7 +37,7 @@ import {
 
 import { rpc } from "../api";
 import { downloadUrl, upload as uploadContent } from "../content";
-import { useIssueDetail, useProjectViewerStore } from "../projectStore";
+import { useIssueDetail, useProjectBaselines, useProjectViewerStore } from "../projectStore";
 import { clearDraft, loadDraft, saveDraft } from "../core/drafts";
 import {
   describeEventRich,
@@ -46,7 +46,15 @@ import {
   type NameResolver,
 } from "../core/activity";
 import { codeUnitSpan } from "../core/anchor";
-import { caretPhrase, carets, typists, useLiveTable, watching } from "../live";
+import {
+  caretPhrase,
+  carets,
+  typists,
+  useLiveAwareness,
+  useLiveTable,
+  watching,
+  type LiveState,
+} from "../live";
 import type { Field as PredictField } from "../core/overlay";
 import type { IssueField } from "../core/registry";
 import { inverseWorkAction, workTarget } from "../core/workflow";
@@ -64,15 +72,19 @@ import {
   type IssueView,
   type LabelDto,
   type MemberDto,
+  type Packet,
+  type PacketSpec,
   type ProjectDto,
   type WorkflowState,
 } from "../types";
+import { conflictPhrase, sourcePhrase } from "../core/specs";
 import { Avatar, AvatarStack, memberName as nameOf, stackFor } from "./Avatar";
 import { LoadingState } from "./AppState";
-import { catalogColor } from "./colors";
+import { avatarColor, catalogColor } from "./colors";
 import { PriorityIcon, ProgressRing, StatusIcon } from "./icons";
 import { Markdown } from "./Markdown";
 import { MarkdownEditor } from "./MarkdownEditor";
+import type { RemoteCursor } from "./MilkdownEditor";
 import { DatePicker } from "./DatePicker";
 import { NewLabelDialog } from "./NewLabel";
 import { Combobox, type Option } from "./Picker";
@@ -82,6 +94,7 @@ import {
   HeaderActions,
   MenuContent,
   MenuItem,
+  MenuSeparator,
   RailRow,
   RailSection,
   Toast,
@@ -118,6 +131,7 @@ export function IssueDetail({
   onDelete,
   onPredict,
   onNavigate,
+  onOpenSpec,
   onClose,
   onPrevious,
   onNext,
@@ -143,6 +157,8 @@ export function IssueDetail({
   onPredict: (doc: string, field: PredictField, value: string, send: () => Promise<unknown>) => Promise<boolean>;
   /** Select another issue — following a graph edge (parent, sub-issue, blocker). */
   onNavigate: (reff: string) => void;
+  /** Open a Spec named by the effective brief, on its own surface. */
+  onOpenSpec?: ((spec: string) => void) | undefined;
   onClose: () => void;
   onPrevious?: () => void;
   onNext?: () => void;
@@ -150,6 +166,8 @@ export function IssueDetail({
   const projectStore = useProjectViewerStore();
   const detail = useIssueDetail(spaceId, reff);
   const issue = detail.issue;
+  const live = useLiveTable(spaceId, issue?.doc_id ?? null);
+  const publishAwareness = useLiveAwareness(issue?.doc_id ?? "");
   const events = detail.history.data ?? [];
   const graph = detail.graph.data ?? null;
   const milestones = detail.milestones.data ?? [];
@@ -833,8 +851,7 @@ export function IssueDetail({
           </RailSection>
 
           <LiveRail
-            spaceId={spaceId}
-            docId={issue.doc_id}
+            live={live}
             members={members}
             memberOf={memberOf}
           />
@@ -844,7 +861,37 @@ export function IssueDetail({
           draftKey={{ spaceId: canonicalSpaceId, reff }}
           value={issue.description}
           readOnly={locked}
+          remoteCursors={carets(live.entries)
+            .filter((mark) => mark.field === "description" && mark.position.caret === "at")
+            .map<RemoteCursor>((mark) => ({
+              actor: mark.actor,
+              name: nameOf(mark.actor, memberOf(mark.actor)),
+              color: avatarColor(mark.actor),
+              anchor: mark.position.caret === "at" ? mark.position.position : 0,
+              ...(mark.focus?.caret === "at" ? { focus: mark.focus.position } : {}),
+              uncertain: mark.uncertain,
+            }))}
+          onAwareness={(anchor, focus, typing) =>
+            publishAwareness({
+              cursor: anchor === null
+                ? null
+                : {
+                    field: "description",
+                    anchor,
+                    ...(focus === null ? {} : { focus }),
+                  },
+              typing,
+            })
+          }
           onSave={(description) => void edit({ description })}
+        />
+
+        <SpecPacket
+          spaceId={spaceId}
+          reff={issue.reff}
+          projectId={issue.project_id}
+          readOnly={locked}
+          onOpenSpec={onOpenSpec}
         />
 
         <Attachments
@@ -991,6 +1038,235 @@ export function IssueDetail({
   );
 }
 
+/**
+ * The work brief — what governs this issue, derived rather than written.
+ *
+ * A projection, never a second source of truth: nothing here is editable, no
+ * body text is copied in, and the sections are the engine's own classification
+ * rather than a reading of it. What the block adds is the part a reader cannot
+ * compute — *why* each item is in force, and whether the brief is whole.
+ *
+ * Governing leads and stays open. The rest carry counts and expand on demand,
+ * because "what must I satisfy" is the question an issue is being worked to
+ * answer, and guidance, evidence and records are the ones asked afterwards.
+ */
+function SpecPacket({
+  spaceId,
+  reff,
+  projectId,
+  readOnly,
+  onOpenSpec,
+}: {
+  spaceId: string;
+  reff: string;
+  projectId: string;
+  readOnly: boolean;
+  onOpenSpec?: ((spec: string) => void) | undefined;
+}) {
+  const store = useProjectViewerStore();
+  const [packet, setPacket] = useState<Packet | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [reload, setReload] = useState(0);
+  const [binding, setBinding] = useState(false);
+  const baselines = useProjectBaselines(spaceId, projectId).data ?? [];
+
+  useEffect(() => {
+    let alive = true;
+    setPacket(null);
+    setError(null);
+    void rpc(spaceId, { cmd: "packet", reff })
+      .then((response) => {
+        if (alive && response.kind === "packet") setPacket(response);
+      })
+      .catch((reason) => {
+        if (alive) setError(reason instanceof Error ? reason.message : String(reason));
+      });
+    return () => { alive = false; };
+  }, [spaceId, reff, reload]);
+
+  // Only issued sets can be pinned: binding to a draft would pin something
+  // nobody has agreed to, and the pin is the agreement.
+  const issuedBaselines = baselines.filter((candidate) => candidate.issued.length === 1);
+  const bind = (baseline: { baseline: string; revision: string } | null) => {
+    setBinding(false);
+    void store
+      .bindBaseline(spaceId, reff, baseline)
+      .then(() => setReload((n) => n + 1))
+      .catch((reason: unknown) =>
+        setError(reason instanceof Error ? reason.message : String(reason)),
+      );
+  };
+
+  // Unlike the sections below, the binding control is drawn even with nothing
+  // bound — "this issue is governed by no agreed set" is a fact worth being able
+  // to see and change, not an absence.
+  const offerBinding = !readOnly && issuedBaselines.length > 0;
+  if (!packet && !error && !offerBinding) return null;
+  const sections = packet ? [
+    ["Governing", packet.governing],
+    ["Guidance", packet.guidance],
+    ["Proof", packet.proof],
+    ["Record", packet.record],
+  ] as const : [];
+  // Genuinely empty — no baseline, nothing governing directly, nothing wrong —
+  // is the only state that draws nothing. An unreadable packet is an error, and
+  // an incomplete one is a warning; neither may render as "there is nothing".
+  const empty = packet && sections.every(([, specs]) => specs.length === 0)
+    && packet.conflicts.length === 0 && !packet.baseline;
+  if (empty && !offerBinding) return null;
+
+  const conflicts = (packet?.conflicts ?? []).map(conflictPhrase);
+  const waiting = conflicts.filter((conflict) => conflict.kind === "missing").length;
+
+  return (
+    <section className="border-line mx-6 border-t py-5">
+      <div className="mb-1 flex flex-wrap items-center gap-2">
+        <h2 className="text-sm font-semibold">Effective for this issue</h2>
+        {packet?.baseline && (
+          <code
+            className="text-mute text-2xs"
+            title={`${packet.baseline.baseline}@${packet.baseline.revision}`}
+          >
+            {baselines.find((row) => row.baseline === packet.baseline!.baseline)?.body.name ??
+              packet.baseline.baseline}{" "}
+            · {short(packet.baseline.revision)}
+          </code>
+        )}
+        {offerBinding && (
+          <DropdownMenu.Root open={binding} onOpenChange={setBinding}>
+            <DropdownMenu.Trigger asChild>
+              <Button size="md" variant="outline" className="ml-auto">
+                {packet?.baseline ? "Change baseline" : "Bind a baseline"}
+              </Button>
+            </DropdownMenu.Trigger>
+            <DropdownMenu.Portal>
+              <MenuContent align="end">
+                {issuedBaselines.map((candidate) => (
+                  <MenuItem
+                    key={candidate.baseline}
+                    onSelect={() =>
+                      bind({ baseline: candidate.baseline, revision: candidate.issued[0]! })
+                    }
+                  >
+                    <span className="flex-1">{candidate.body.name}</span>
+                    {/* The exact revision, because that is what gets pinned —
+                        not the baseline, and not whatever it becomes later. */}
+                    <code className="text-mute text-2xs">{short(candidate.issued[0]!)}</code>
+                  </MenuItem>
+                ))}
+                {packet?.baseline && (
+                  <>
+                    <MenuSeparator />
+                    <MenuItem danger onSelect={() => bind(null)}>
+                      Clear binding
+                    </MenuItem>
+                  </>
+                )}
+              </MenuContent>
+            </DropdownMenu.Portal>
+          </DropdownMenu.Root>
+        )}
+      </div>
+      {offerBinding && !packet?.baseline && (
+        <p className="text-mute mb-2 text-2xs">
+          No agreed set is pinned to this issue. What governs it is whatever names it directly.
+        </p>
+      )}
+      {/* The integrity line, before the content it qualifies. "Waiting" and
+          "unresolved" are different remedies — one arrives with a sync, the
+          other needs somebody to decide — so they are counted apart. */}
+      {conflicts.length > 0 && (
+        <p className="text-mute mb-2 text-2xs">
+          {waiting > 0 && `${waiting} referenced ${waiting === 1 ? "record has" : "records have"} not arrived here yet. `}
+          {conflicts.length > waiting && `${conflicts.length - waiting} need a decision.`}
+        </p>
+      )}
+      {error && <p className="text-danger text-xs">{error}</p>}
+      {conflicts.map((conflict) => (
+        <p key={conflict.text} className="text-warn mb-2 flex items-start gap-2 text-xs">
+          <AlertTriangle className="mt-0.5 size-icon-xs shrink-0" />
+          {conflict.text}
+        </p>
+      ))}
+      <div className="flex flex-col gap-3">
+        {sections.map(([title, specs]) => specs.length > 0 && (
+          <PacketSection
+            key={title}
+            title={title}
+            specs={specs}
+            open={title === "Governing"}
+            onOpenSpec={onOpenSpec}
+          />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function PacketSection({
+  title,
+  specs,
+  open,
+  onOpenSpec,
+}: {
+  title: string;
+  specs: readonly PacketSpec[];
+  open: boolean;
+  onOpenSpec?: ((spec: string) => void) | undefined;
+}) {
+  const [expanded, setExpanded] = useState(open);
+  return (
+    <div>
+      <button
+        type="button"
+        onClick={() => setExpanded((was) => !was)}
+        aria-expanded={expanded}
+        className="text-mute hover:text-fg mb-1 flex w-full items-center gap-1.5 text-2xs font-semibold tracking-wider uppercase"
+      >
+        <ChevronRight className={`size-icon-2xs transition-transform ${expanded ? "rotate-90" : ""}`} />
+        {title}
+        <span className="tabular-nums normal-case">{specs.length}</span>
+      </button>
+      {expanded && (
+        <ul className="flex flex-col gap-1.5">
+          {specs.map((spec) => (
+            <li
+              key={`${spec.spec}@${spec.revision}`}
+              className="border-line rounded-surface border px-2.5 py-2 text-xs"
+            >
+              <div className="flex items-center gap-2">
+                {onOpenSpec ? (
+                  <button
+                    type="button"
+                    className="hover:text-accent min-w-0 truncate text-left font-medium"
+                    onClick={() => onOpenSpec(spec.spec)}
+                  >
+                    {spec.title}
+                  </button>
+                ) : (
+                  <span className="min-w-0 truncate font-medium">{spec.title}</span>
+                )}
+                <span className="text-mute ml-auto shrink-0 capitalize">{spec.kind}</span>
+              </div>
+              {/* The source route in plain words, not behind a disclosure: an
+                  incorporated Guide sits in the governing set beside the
+                  requirements, and this line is the only thing that stops it
+                  reading as one. */}
+              <div className="text-mute mt-0.5 text-2xs">{sourcePhrase(spec.source)}</div>
+              <div
+                className="text-mute mt-0.5 truncate font-mono text-2xs"
+                title={`${spec.spec}@${spec.revision}`}
+              >
+                {spec.spec}@{short(spec.revision)}
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 function IssueOverflow({
   issueRef,
   active,
@@ -1097,26 +1373,15 @@ function FollowToggle({
  * make every glance somebody takes at a document cost every open tab a re-read.
  */
 function LiveRail({
-  spaceId,
-  docId,
+  live,
   members,
   memberOf,
 }: {
-  spaceId: string;
-  /**
-   * The `iss_` doc id, and not the `reff` every verb on this page takes.
-   *
-   * The Live plane keys its scopes by a Body id derived from the doc id, and
-   * that derivation is a hash of whatever string it is handed: a project alias
-   * hashes to a Body nothing publishes under, so the rail would answer an empty
-   * table for ever and draw nothing, on every issue, with nothing to say about it.
-   */
-  docId: string;
+  live: LiveState;
   /** The ACL array itself, because `stackFor` caches its index on that identity. */
   members: MemberDto[];
   memberOf: (key: string) => MemberDto | undefined;
 }) {
-  const live = useLiveTable(spaceId, docId);
   const here = watching(live.entries);
   const marks = carets(live.entries);
   const typing = typists(live.entries);
@@ -2451,8 +2716,8 @@ function EventGlyph({
 }
 
 /**
- * Description: a draft you commit, not a field that saves per keystroke — a
- * doorbell mid-typing would otherwise fight the cursor.
+ * Description: a recoverable draft streamed in short batches, not one durable
+ * operation per keystroke. Blur flushes the last batch immediately.
  *
  * There is no edit mode left. The body is a live Markdown document: typing
  * `## ` makes a heading where the caret is, and the markup never appears as
@@ -2469,16 +2734,28 @@ function Description({
   value,
   readOnly,
   onSave,
+  remoteCursors,
+  onAwareness,
 }: {
   draftKey: { spaceId: string; reff: string };
   value: string;
   readOnly: boolean;
   onSave: (v: string) => void;
+  remoteCursors: RemoteCursor[];
+  onAwareness: (anchor: number | null, focus: number | null, typing: boolean) => void;
 }) {
   const [draft, setDraft] = useState(
     () => loadDraft(draftKey.spaceId, draftKey.reff, "description") || value,
   );
   const dirty = useRef(draft !== value);
+  const streamTimer = useRef<number | null>(null);
+
+  useEffect(
+    () => () => {
+      if (streamTimer.current !== null) window.clearTimeout(streamTimer.current);
+    },
+    [],
+  );
 
   useEffect(() => {
     if (dirty.current && draft !== value) {
@@ -2499,11 +2776,28 @@ function Description({
       value={value}
       placeholder="Add description…"
       className="min-h-ctl-xl py-2"
+      remoteCursors={remoteCursors}
+      onAwareness={onAwareness}
       onChange={(markdown) => {
         dirty.current = true;
         setDraft(markdown);
+        // Linear's document model does not wait for blur: a short quiet window
+        // batches a burst of keystrokes into one CRDT splice, while keeping the
+        // words visibly moving for everybody else in the document.
+        if (streamTimer.current !== null) window.clearTimeout(streamTimer.current);
+        streamTimer.current = window.setTimeout(() => {
+          streamTimer.current = null;
+          if (!dirty.current) return;
+          dirty.current = false;
+          clearDraft(draftKey.spaceId, draftKey.reff, "description");
+          onSave(markdown);
+        }, 350);
       }}
       onCommit={() => {
+        if (streamTimer.current !== null) {
+          window.clearTimeout(streamTimer.current);
+          streamTimer.current = null;
+        }
         if (!dirty.current) return;
         dirty.current = false;
         clearDraft(draftKey.spaceId, draftKey.reff, "description");

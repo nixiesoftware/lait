@@ -38,6 +38,7 @@ export type View =
   | "inbox"
   | "my-issues"
   | "activity"
+  | "specs"
   | "settings";
 
 /** The work-view render modes a saved view / the switcher toggles between —
@@ -50,7 +51,7 @@ export function isWorkView(v: View): v is WorkView {
 
 /** Surfaces owned by one project home. Workspace destinations must never retain
  * one of these routes without a canonical project key. */
-export const PROJECT_VIEWS = ["overview", "list", "board", "calendar", "activity"] as const;
+export const PROJECT_VIEWS = ["overview", "list", "board", "calendar", "activity", "specs"] as const;
 export type ProjectView = (typeof PROJECT_VIEWS)[number];
 
 /**
@@ -77,7 +78,7 @@ export const ISSUE_MODE_LABEL: Record<IssueMode, string> = {
 
 /** The faces the sidebar tree lists, and the hops the trail can name. Board and
  *  Calendar are layouts of Issues, so they collapse into it. */
-export const PROJECT_NAV_VIEWS = ["overview", "list", "activity"] as const;
+export const PROJECT_NAV_VIEWS = ["overview", "list", "specs", "activity"] as const;
 
 /** The nav face a route belongs to: a board is somewhere inside Issues. */
 export function navViewFor(v: ProjectView): ProjectView {
@@ -92,6 +93,7 @@ export const PROJECT_VIEW_LABEL: Record<ProjectView, string> = {
   board: "Board",
   calendar: "Calendar",
   activity: "Activity",
+  specs: "Specs",
 };
 export function isProjectView(v: View): v is ProjectView {
   return (PROJECT_VIEWS as readonly string[]).includes(v);
