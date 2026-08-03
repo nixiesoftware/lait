@@ -129,8 +129,8 @@ describe("local trust summary", () => {
       name: "Viewer",
       online_peers: 0,
       space: "ws_viewer",
-      issues: 89,
-      projects: 13,
+      items: 89,
+      scopes: 13,
       membership: "admin",
       recovery: {
         authority: null,

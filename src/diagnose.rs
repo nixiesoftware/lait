@@ -107,8 +107,10 @@ pub struct DiagnoseInput<'a> {
     pub membership: &'a str,
     /// Count of currently-online peers.
     pub online_peers: usize,
-    pub projects: usize,
-    pub issues: usize,
+    /// Aggregate item count reported by installed Worlds.
+    pub items: usize,
+    /// Aggregate container count reported by installed Worlds.
+    pub scopes: usize,
     /// The space the caller *intended* to be in — supplied by the `join` tail
     /// (from the invite ticket) so a directory/store mismatch is caught. `None`
     /// for a standalone `doctor`, which can't know intent.
@@ -181,7 +183,7 @@ pub fn diagnose(input: DiagnoseInput<'_>) -> DiagnosisView {
     // joiner has it once the catalog converges. Either way there's nothing left to
     // wait *for*, which is what decides whether an offline `peer` actually blocks.
     let is_admin = input.membership == "admin";
-    let has_board = input.projects > 0 || input.issues > 0;
+    let has_world_state = input.scopes > 0 || input.items > 0;
 
     // 4. peer — someone to sync *with*. This only **blocks** a joiner who still
     //    needs the board (member, not yet synced): for them an offline inviter is
@@ -202,7 +204,7 @@ pub fn diagnose(input: DiagnoseInput<'_>) -> DiagnosisView {
             GateState::Skip,
             "no coworker online yet — share an invite so your team can join",
         )
-    } else if is_member && has_board {
+    } else if is_member && has_world_state {
         DiagnosisGate::new(
             "peer",
             "peer",
@@ -237,12 +239,12 @@ pub fn diagnose(input: DiagnoseInput<'_>) -> DiagnosisView {
             GateState::Skip,
             "board stays encrypted until you're approved",
         )
-    } else if is_admin || has_board {
+    } else if is_admin || has_world_state {
         DiagnosisGate::new(
             "synced",
             "synced",
             GateState::Pass,
-            format!("{} project(s), {} issue(s)", input.projects, input.issues),
+            format!("{} scope(s), {} item(s)", input.scopes, input.items),
         )
     } else {
         DiagnosisGate::new(
@@ -299,7 +301,7 @@ pub fn diagnose(input: DiagnoseInput<'_>) -> DiagnosisView {
     let gates = vec![space, daemon, membership, peer, synced, keys];
     let blocked = gates.iter().find(|g| g.state.is_blocking());
     let blocked_on = blocked.map(|g| g.id.clone());
-    let summary = summarize(blocked, input.projects, input.issues);
+    let summary = summarize(blocked, input.scopes, input.items);
 
     DiagnosisView {
         schema_version: DIAGNOSIS_SCHEMA_VERSION,
@@ -318,10 +320,10 @@ fn peers_phrase(n: usize) -> String {
 }
 
 /// One-line summary keyed off the first blocking gate (or success).
-fn summarize(blocked: Option<&DiagnosisGate>, projects: usize, issues: usize) -> String {
+fn summarize(blocked: Option<&DiagnosisGate>, scopes: usize, items: usize) -> String {
     match blocked.map(|g| g.id.as_str()) {
         None => {
-            format!("you're in — {projects} project(s), {issues} issue(s) synced. get to work.")
+            format!("you're in — {scopes} scope(s), {items} item(s) synced. get to work.")
         }
         Some("space") => "wrong directory: this store is a different space than the invite. \
              cd to where you ran `lait join`, or run `lait orbits`."
@@ -347,8 +349,8 @@ mod tests {
             name: "lait",
             membership: "member",
             online_peers: 1,
-            projects: 2,
-            issues: 3,
+            scopes: 2,
+            items: 3,
             expected_space: None,
             degraded_recovery: &[],
             rekey_pending: None,
@@ -457,8 +459,8 @@ mod tests {
     fn pending_joiner_blocks_on_membership_and_skips_sync() {
         let v = diagnose(DiagnoseInput {
             membership: "pending",
-            projects: 0,
-            issues: 0,
+            scopes: 0,
+            items: 0,
             ..input()
         });
         assert_eq!(v.blocked_on.as_deref(), Some("membership"));
@@ -521,8 +523,8 @@ mod tests {
         let v = diagnose(DiagnoseInput {
             membership: "member",
             online_peers: 0,
-            projects: 2,
-            issues: 3,
+            scopes: 2,
+            items: 3,
             ..input()
         });
         assert_eq!(gate(&v, "peer").state, GateState::Skip);
@@ -537,8 +539,8 @@ mod tests {
         let v = diagnose(DiagnoseInput {
             membership: "member",
             online_peers: 0,
-            projects: 0,
-            issues: 0,
+            scopes: 0,
+            items: 0,
             ..input()
         });
         assert_eq!(gate(&v, "peer").state, GateState::Wait);
@@ -550,8 +552,8 @@ mod tests {
     fn member_online_but_unsynced_blocks_on_synced() {
         let v = diagnose(DiagnoseInput {
             membership: "member",
-            projects: 0,
-            issues: 0,
+            scopes: 0,
+            items: 0,
             ..input()
         });
         assert_eq!(gate(&v, "membership").state, GateState::Pass);

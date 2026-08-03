@@ -14,22 +14,20 @@
 
 # Phase D (permanent until the crate split) — THE composition root.
 # This is the one file in src/** that is allowed to name a product, and its
-# whole job is to. C1 moved these eight symbols here from src/world/mod.rs
-# unchanged - the gate reported them stale in one file and new in the other,
-# symbol for symbol, which is what proves it was a relocation and not a
-# laundering. When the shell becomes its own crate this file moves to the
-# binary and the library is product-free outright, at which point these rows go.
+# whole job is to. C1 moved the original symbols here from src/world/mod.rs;
+# C2 added the product side of the generic lifecycle hooks here and removed the
+# final production references from `src/world/lifecycle.rs`. When the shell
+# becomes its own crate this file moves to the binary and the library is
+# product-free outright, at which point these rows go.
 src/composition.rs	CatalogScope	D
+src/composition.rs	InitialProject	D
 src/composition.rs	IssuesCallHandler	D
+src/composition.rs	bootstrap_tracker	D
+src/composition.rs	for_space	D
+src/composition.rs	founder_policy	D
 src/composition.rs	implementation_id	D
 src/composition.rs	issues	D
-src/composition.rs	issues_app	D
 src/composition.rs	observation	D
 src/composition.rs	package	D
 src/composition.rs	ring_state	D
 src/composition.rs	status	D
-
-# Phase C2 — per-World lifecycle hooks, hardcoded to the Issues product.
-src/world/lifecycle.rs	InitialProject	C2
-src/world/lifecycle.rs	IssuesBootstrapRecord	C2
-src/world/lifecycle.rs	for_space	C2

@@ -112,14 +112,12 @@ pub use hosting::{
 };
 pub use mechanics::{AuthorityRecord, SpaceAuthority};
 pub use worlds::{
-    Invalidation, ObservationProjector, StatusProjection, WorldHost, WorldPackage, WorldPackages,
+    BootstrapContext, FounderGrant, InitialScope, Invalidation, ObservationProjector,
+    RoutedInvalidation, StatusProjection, WorldHost, WorldLifecycle, WorldPackage, WorldPackages,
     WorldRouter,
 };
 
-pub use crate::world::lifecycle::{
-    enter_space, form_space, found_space_cli, issues_implementation_id, read_bootstrap_record,
-    seed_founder_policy, BootstrapPhase, IssuesBootstrapRecord,
-};
+pub use crate::world::lifecycle::{enter_space, form_space, found_space_cli, seed_founder_policy};
 
 /// A random 16-byte value (salts, epoch ids, nonces).
 pub(crate) fn rand16() -> anyhow::Result<[u8; 16]> {

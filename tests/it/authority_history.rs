@@ -100,7 +100,7 @@ impl replica::transaction::TransactionAuthorizer for MechAuthorizer<'_> {
 
 /// The active IssuesWorld implementation id (matches what the founder seeds).
 fn impl_id() -> [u8; 32] {
-    lait::orbital::issues_implementation_id()
+    lait::world::implementation_id()
 }
 
 /// The actor a device seed speaks for in this mechanics Space.

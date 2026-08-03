@@ -448,7 +448,7 @@ impl LaitMcp {
 
     // ---- transport / presence ----
 
-    #[tool(description = "Show node + space status: id, nick, space, issue/project counts.")]
+    #[tool(description = "Show node + space status: id, nick, space, item/scope counts.")]
     async fn status(&self) -> Result<CallToolResult, McpError> {
         self.run(Request::Status).await
     }

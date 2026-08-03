@@ -161,6 +161,40 @@ fn collect_rs(dir: &Path, out: &mut Vec<PathBuf>) {
 /// Whether an item is compiled only for tests. Mirrors `semantic_type_names.rs`:
 /// an inline `#[cfg(test)] mod` inside `src/` is a test, and a test may name the
 /// bundled product because it has to test against *something*.
+/// Whether a cfg predicate can be true or false when `test` itself is false.
+/// Unknown target/feature predicates are conservatively allowed either value.
+fn cfg_without_test(meta: &syn::Meta) -> (bool, bool) {
+    match meta {
+        syn::Meta::Path(path) if path.is_ident("test") => (false, true),
+        syn::Meta::Path(_) | syn::Meta::NameValue(_) => (true, true),
+        syn::Meta::List(list) => {
+            let Ok(items) = list.parse_args_with(
+                syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
+            ) else {
+                return (true, true);
+            };
+            if list.path.is_ident("all") {
+                let values: Vec<_> = items.iter().map(cfg_without_test).collect();
+                (
+                    values.iter().all(|(can_true, _)| *can_true),
+                    values.iter().any(|(_, can_false)| *can_false),
+                )
+            } else if list.path.is_ident("any") {
+                let values: Vec<_> = items.iter().map(cfg_without_test).collect();
+                (
+                    values.iter().any(|(can_true, _)| *can_true),
+                    values.iter().all(|(_, can_false)| *can_false),
+                )
+            } else if list.path.is_ident("not") && items.len() == 1 {
+                let (can_true, can_false) = cfg_without_test(&items[0]);
+                (can_false, can_true)
+            } else {
+                (true, true)
+            }
+        }
+    }
+}
+
 fn test_gated(attrs: &[syn::Attribute]) -> bool {
     attrs.iter().any(|attr| {
         if attr.path().is_ident("test") {
@@ -169,14 +203,8 @@ fn test_gated(attrs: &[syn::Attribute]) -> bool {
         if !attr.path().is_ident("cfg") {
             return false;
         }
-        let mut gated = false;
-        let _ = attr.parse_nested_meta(|meta| {
-            if meta.path.is_ident("test") {
-                gated = true;
-            }
-            Ok(())
-        });
-        gated
+        attr.parse_args::<syn::Meta>()
+            .is_ok_and(|predicate| !cfg_without_test(&predicate).0)
     })
 }
 
@@ -295,7 +323,21 @@ impl Scanner {
                 .checked_sub(1)
                 .and_then(|prev| parts.get(prev))
                 .is_some_and(|prev| prev.ends_with("::"));
-            if !after_sep {
+            let local_path = if after_sep {
+                let mut root = index;
+                while root >= 2 && parts.get(root - 1).is_some_and(|part| part.ends_with("::")) {
+                    root -= 2;
+                }
+                parts.get(root).is_some_and(|part| {
+                    matches!(
+                        part.trim_matches(|c: char| !c.is_alphanumeric() && c != '_'),
+                        "crate" | "self" | "super"
+                    )
+                })
+            } else {
+                false
+            };
+            if !after_sep || local_path {
                 self.note_ident(token);
             }
             let qualified = parts
@@ -559,5 +601,22 @@ fn the_rule_has_teeth() {
     assert!(
         scan("#[cfg(test)] mod t { fn f() { let _ = issues::dto::MemberDto; } }").is_empty(),
         "a #[cfg(test)] fixture may name the bundled product"
+    );
+    assert!(
+        scan("#[cfg(all(test, unix))] mod t { fn f() { let _ = issues::dto::MemberDto; } }")
+            .is_empty(),
+        "a cfg that requires test is a test-only fixture"
+    );
+    assert!(
+        !scan("#[cfg(not(test))] fn f() { let _ = issues::dto::MemberDto; }").is_empty(),
+        "cfg(not(test)) is production code and must not bypass the gate"
+    );
+    assert!(
+        !scan("#[cfg(any(test, unix))] fn f() { let _ = issues::dto::MemberDto; }").is_empty(),
+        "a cfg that can compile without test must not bypass the gate"
+    );
+    assert!(
+        !scan("fn f() { tracing::debug!(\"{:?}\", crate::control::DirtyProject); }").is_empty(),
+        "a product type laundered through a local path inside a macro must be caught"
     );
 }

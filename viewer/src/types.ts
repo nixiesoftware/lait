@@ -580,8 +580,8 @@ export interface StatusInfo {
   description?: string;
   online_peers: number;
   space: string | null;
-  issues: number;
-  projects: number;
+  items: number;
+  scopes: number;
   /** True means zero counts are unavailable, not an empty space. */
   counts_unavailable?: boolean;
   /** `admin` | `member` | `pending`. */
@@ -692,6 +692,13 @@ export interface DirtyPlane {
   scope?: ScopeRef | null;
 }
 
+/** One product's invalidations, isolated under its stable World id. */
+export interface RoutedInvalidation {
+  world: string;
+  dirty: DirtyScope[];
+  planes: DirtyPlane[];
+}
+
 /**
  * A dirty-set frame, tagged with the space it rang for.
  *
@@ -708,8 +715,7 @@ export interface SpaceDoorbell {
   epoch: number;
   seq: number;
   reset: boolean;
-  dirty: DirtyScope[];
-  planes: DirtyPlane[];
+  invalidations: RoutedInvalidation[];
   /**
    * Membership, roles, devices or keys advanced. Its own flag, not a catalog
    * plane: authority is not in the catalog and can move with no Body touched.

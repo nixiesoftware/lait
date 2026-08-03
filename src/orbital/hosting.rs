@@ -534,6 +534,17 @@ impl StationHost {
             .is_ok()
     }
 
+    /// Attempt to dock every installed World, returning whether at least one
+    /// is usable. Do not short-circuit: each World owns an independent Session
+    /// that its projector and calls need even when an earlier World docked.
+    fn ensure_world_sessions(&self) -> bool {
+        let mut any_docked = false;
+        for world in self.worlds.world_ids() {
+            any_docked |= self.ensure_world_session(world);
+        }
+        any_docked
+    }
+
     fn track_activity(&self) -> StationHostActivity<'_> {
         use std::sync::atomic::Ordering;
         self.active_conns.fetch_add(1, Ordering::SeqCst);
@@ -1079,10 +1090,7 @@ impl StationHost {
     /// Ring the authority plane, if there is a docked Session to ring through.
     /// Before admission there is no Session and nothing is subscribed anyway.
     fn publish_authority_advanced(&self) {
-        let docked = self
-            .worlds
-            .world_ids()
-            .any(|world| self.ensure_world_session(world));
+        let docked = self.ensure_world_sessions();
         if !docked {
             return;
         }
@@ -1795,7 +1803,7 @@ impl StationHost {
         }
     }
 
-    /// The (issues, projects) counts from the docked Session's catalog
+    /// The aggregate (items, scopes) counts from docked World Sessions
     /// snapshot — `None` when the projection is UNAVAILABLE (undocked, or a
     /// query failed). Status reports the truth; it never converts an
     /// unavailable projection into false zeros.
@@ -1803,21 +1811,18 @@ impl StationHost {
         // A Station can start before this device is admitted. Once authority
         // advances, status must retry lazy docking; otherwise every projector
         // remains absent even after its replicated Bodies arrive.
-        let docked = self
-            .worlds
-            .world_ids()
-            .any(|world| self.ensure_world_session(world));
+        let docked = self.ensure_world_sessions();
         if !docked {
             return None;
         }
         self.worlds
             .status()
-            .map(|status| (status.items, status.groups, status.name, status.description))
+            .map(|status| (status.items, status.scopes, status.name, status.description))
     }
 
     fn status(&self) -> Response {
         let counts = self.counts();
-        let (issues, projects, name, description) =
+        let (items, scopes, name, description) =
             counts
                 .clone()
                 .unwrap_or((0, 0, String::new(), String::new()));
@@ -1829,8 +1834,8 @@ impl StationHost {
             online_peers: self.online_peers(),
             space: Some(self.station.space_id().as_str().to_string()),
             counts_unavailable: counts.is_none(),
-            issues,
-            projects,
+            items,
+            scopes,
             membership: if self.mechanics.am_i_member() {
                 "member".into()
             } else {
@@ -1960,7 +1965,7 @@ impl StationHost {
     /// onboarding gate list (`docs/UI.md`). Pure over the snapshot the daemon
     /// already computes — the same core the legacy node used.
     fn diagnose(&self, expected_space: Option<String>) -> Response {
-        let (issues, projects, _name, _description) =
+        let (items, scopes, _name, _description) =
             self.counts()
                 .unwrap_or((0, 0, String::new(), String::new()));
         let space = self.station.space_id().as_str().to_string();
@@ -1976,8 +1981,8 @@ impl StationHost {
             name: "",
             membership,
             online_peers: self.online_peers(),
-            projects,
-            issues,
+            scopes,
+            items,
             expected_space: expected_space.as_deref(),
             degraded_recovery: &degraded,
             rekey_pending: None,
@@ -2769,14 +2774,13 @@ impl StationHost {
     /// local commit and a peer's incorporated one arrive on the same stream, so
     /// both ring alike.
     fn frame_for(&self, record: &runtime::world::Observation) -> Doorbell {
-        let projected = self.worlds.project(self.station.space_id(), record);
-        let body_news = !projected.dirty.is_empty() || !projected.planes.is_empty();
+        let invalidations = self.worlds.project(self.station.space_id(), record);
+        let body_news = !invalidations.is_empty();
         Doorbell {
             epoch: record.epoch.as_u64(),
             seq: record.sequence,
             reset: record.reset,
-            dirty: projected.dirty,
-            planes: projected.planes,
+            invalidations,
             authority_advanced: record.authority,
             // Authority alone advances no feed: it is membership news, and
             // `Activity` projects the World's own history. One record can
@@ -2789,8 +2793,7 @@ impl StationHost {
     async fn stream_subscribe(self: &Arc<Self>, mut write_half: tokio::io::WriteHalf<LocalStream>) {
         // Without standing there is no Session to observe yet — emit the reset
         // and return; the client re-subscribes after admission.
-        let world = crate::world::contract::world_id();
-        if !self.ensure_world_session(&world) {
+        if !self.ensure_world_sessions() {
             let reset = Doorbell {
                 reset: true,
                 ..Default::default()
@@ -2807,7 +2810,7 @@ impl StationHost {
         self.ensure_doorbell_pump().await;
         let epoch = match self
             .worlds
-            .with_primary(&world, |session| session.epoch().as_u64())
+            .with_any_primary(|session| session.epoch().as_u64())
         {
             Some(epoch) => epoch,
             None => return,

@@ -410,6 +410,6 @@ fn the_mixed_version_window_is_empty_on_purpose() {
         lait::control::MIN_SUPPORTED_CONTROL_PROTOCOL,
         lait::control::CONTROL_PROTOCOL_VERSION,
     );
-    assert!(lait::control::check_control_protocol(7).is_err());
-    assert!(lait::control::check_control_protocol(8).is_ok());
+    assert!(lait::control::check_control_protocol(8).is_err());
+    assert!(lait::control::check_control_protocol(lait::control::CONTROL_PROTOCOL_VERSION).is_ok());
 }

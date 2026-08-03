@@ -12,11 +12,11 @@ export type Liveness = "connecting" | "live" | "retrying";
  * browser honest about a CRDT it does not hold.
  *
  * Note what this client does *not* yet do. §5's contract is per-*scope* re-reads —
- * intersect `dirty` with what is on screen and fetch only that. We re-read
- * everything a ring could plausibly have touched: correct, and wasteful. `dirty` is
- * read only to decide which optimistic guesses to retire, and `activity_advanced` /
- * `presence_advanced` are not read at all. Say so here rather than describe the
- * design we mean to have.
+ * intersect each World-tagged invalidation with what is on screen and fetch only
+ * that. We re-read everything a ring could plausibly have touched: correct, and
+ * wasteful. Invalidations are read only to decide which optimistic guesses to
+ * retire, and `activity_advanced` / `presence_advanced` are not read at all. Say so
+ * here rather than describe the design we mean to have.
  *
  * `lagged` means the server's broadcast dropped frames under load; its contract is
  * the same as `reset` or an `epoch` change — rebaseline rather than trust the view.

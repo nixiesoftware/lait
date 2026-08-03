@@ -104,14 +104,18 @@ impl Endpoint {
 /// one-shot `live` request but cannot provide the event-driven stream the web
 /// viewer now uses, so it must be replaced rather than silently leaving a room
 /// with no updates.
-pub const CONTROL_PROTOCOL_VERSION: u32 = 8;
+///
+/// **v9:** doorbell invalidations are World-declared and grouped by World id.
+/// A v8 frame uses Issues-specific field names, so accepting it would silently
+/// lose row refreshes instead of producing a useful incompatibility error.
+pub const CONTROL_PROTOCOL_VERSION: u32 = 9;
 
 /// The oldest control protocol a client still talks to. Raising this retires a
 /// version; the gap to [`CONTROL_PROTOCOL_VERSION`] is the mixed-version window.
 ///
-/// Protocol v8 is a deliberate compatibility cutoff: the web viewer relies on
-/// the standing Live stream and a v7 Station cannot answer it.
-pub const MIN_SUPPORTED_CONTROL_PROTOCOL: u32 = 8;
+/// Protocol v9 is a deliberate compatibility cutoff: v8 doorbells cannot carry
+/// multiple Worlds and spell their invalidations in product-specific fields.
+pub const MIN_SUPPORTED_CONTROL_PROTOCOL: u32 = 9;
 
 /// Whether this build can talk to a daemon advertising control protocol `peer`.
 ///
@@ -1172,19 +1176,10 @@ pub struct Doorbell {
     pub seq: u64,
     /// `true` means ignore the rest and rebaseline from a fresh snapshot.
     pub reset: bool,
-    /// Item plane: which items moved, in which container. Re-read those rows.
-    /// A list rather than a map keyed by container, because a container is
-    /// named by a stable id AND a mutable label and neither alone is a safe
-    /// map key.
-    ///
-    /// `default` for the same reason the flags below carry it: a frame from a
-    /// daemon that predates this vocabulary (stale across `lait update`)
-    /// decodes to an empty dirty-set rather than failing to decode at all.
+    /// Product invalidations grouped by stable World id. Container kinds and
+    /// plane names are only meaningful inside that boundary.
     #[serde(default)]
-    pub dirty: Vec<DirtyScope>,
-    /// Structural planes that moved, each optionally narrowed to one container.
-    #[serde(default)]
-    pub planes: Vec<DirtyPlane>,
+    pub invalidations: Vec<RoutedInvalidation>,
     /// Membership, roles, devices or keys advanced.
     ///
     /// Its own flag, not a catalog scope: authority is not in the catalog Body,
@@ -1207,7 +1202,7 @@ pub struct Doorbell {
 
 /// The dirty-set vocabulary is World-opaque and defined by `runtime`, so the
 /// control plane can carry a World it does not understand. It only carries it.
-pub use runtime::world::{DirtyPlane, DirtyScope, ScopeRef};
+pub use runtime::world::{DirtyPlane, DirtyScope, RoutedInvalidation, ScopeRef};
 
 /// A presence or transport log entry kept in the daemon's ring buffer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1406,9 +1401,9 @@ pub struct StatusInfo {
     pub description: String,
     pub online_peers: usize,
     pub space: Option<String>,
-    pub issues: usize,
-    pub projects: usize,
-    /// Whether the issue/project counts below are UNAVAILABLE (undocked or a
+    pub items: usize,
+    pub scopes: usize,
+    /// Whether the World counts below are UNAVAILABLE (undocked or a
     /// failed projection query). `true` means the zeros are not data — never
     /// read them as an empty space.
     #[serde(default)]

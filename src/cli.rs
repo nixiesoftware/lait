@@ -1456,11 +1456,11 @@ pub fn print_response(resp: &Response, out: Out) -> i32 {
             }
             if s.counts_unavailable {
                 // Never render an unavailable projection as an empty space.
-                println!("issues:    (unavailable)");
-                println!("projects:  (unavailable)");
+                println!("items:     (unavailable)");
+                println!("scopes:    (unavailable)");
             } else {
-                println!("issues:    {}", s.issues);
-                println!("projects:  {}", s.projects);
+                println!("items:     {}", s.items);
+                println!("scopes:    {}", s.scopes);
             }
             println!("online:    {} peer(s)", s.online_peers);
             // Directional nudges so neither side of a join stalls silently.

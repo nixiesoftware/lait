@@ -22,8 +22,10 @@
 use std::sync::Arc;
 
 use crate::orbital::{
-    Invalidation, ObservationProjector, StatusProjection, WorldPackage, WorldPackages,
+    BootstrapContext, FounderGrant, InitialScope, Invalidation, ObservationProjector,
+    StatusProjection, WorldLifecycle, WorldPackage, WorldPackages,
 };
+use runtime::poison::LockRecovering;
 use world_interface::WorldClientRegistry;
 
 pub use issues::{
@@ -42,6 +44,7 @@ pub fn package() -> WorldPackage {
     WorldPackage::new(Arc::new(IssuesWorld::new()), implementation_id())
         .with_control(control)
         .with_projector(projector)
+        .with_lifecycle(Arc::new(IssuesLifecycle))
 }
 
 /// Translates generic runtime Observations into the Issues doorbell dirty-set.
@@ -51,26 +54,29 @@ pub fn package() -> WorldPackage {
 /// observations would report every plane dirty on every ring.
 #[derive(Default)]
 struct IssuesProjector {
-    baseline:
-        std::sync::Mutex<Option<std::collections::BTreeMap<issues::dto::CatalogScope, String>>>,
+    baselines: std::sync::Mutex<
+        std::collections::BTreeMap<
+            String,
+            Option<std::collections::BTreeMap<issues::dto::CatalogScope, String>>,
+        >,
+    >,
 }
 
 impl ObservationProjector for IssuesProjector {
     fn status(&self, session: &runtime::Session) -> Option<StatusProjection> {
         issues_app::projections::status(session).map(|projection| StatusProjection {
             items: projection.issues,
-            groups: projection.projects,
+            scopes: projection.projects,
             name: projection.name,
             description: projection.description,
         })
     }
 
-    fn start(&self, session: &runtime::Session, _space: &mechanics::ids::SpaceId) {
+    fn start(&self, session: &runtime::Session, space: &mechanics::ids::SpaceId) {
         let baseline = issues_app::projections::ring_state(session).map(|state| state.planes);
-        *self
-            .baseline
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = baseline;
+        self.baselines
+            .lock_recovering()
+            .insert(space.as_str().to_string(), baseline);
     }
 
     fn project(
@@ -79,11 +85,67 @@ impl ObservationProjector for IssuesProjector {
         space: &mechanics::ids::SpaceId,
         observation: &runtime::world::Observation,
     ) -> Invalidation {
-        let mut baseline = self
-            .baseline
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        issues_app::projections::observation(session, space, &observation.bodies, &mut baseline)
+        let mut baselines = self.baselines.lock_recovering();
+        let baseline = baselines.entry(space.as_str().to_string()).or_default();
+        issues_app::projections::observation(session, space, &observation.bodies, baseline)
+    }
+}
+
+struct IssuesLifecycle;
+
+impl WorldLifecycle for IssuesLifecycle {
+    fn founder_grants(&self) -> anyhow::Result<Vec<FounderGrant>> {
+        let policy = issues_app::lifecycle::founder_policy();
+        if policy.world != PRODUCT_WORLD || policy.implementation != implementation_id() {
+            return Err(anyhow::anyhow!(
+                "Issues lifecycle policy does not match its bundled World package"
+            ));
+        }
+        Ok(policy
+            .grants
+            .into_iter()
+            .map(|grant| FounderGrant {
+                capability: grant.capability,
+                resource: grant.resource,
+                salt: grant.salt,
+            })
+            .collect())
+    }
+
+    fn initial_scope(&self, display_name: &str) -> Option<InitialScope> {
+        let project = issues_app::lifecycle::InitialProject::for_space(display_name);
+        Some(InitialScope {
+            kind: "project".into(),
+            key: project.key,
+            name: project.name,
+        })
+    }
+
+    fn bootstrap(&self, context: BootstrapContext<'_>) -> anyhow::Result<()> {
+        let initial_project = context
+            .initial_scope
+            .map(|scope| {
+                if scope.kind != "project" {
+                    return Err(anyhow::anyhow!(
+                        "Issues lifecycle expected an initial project, got '{}'",
+                        scope.kind
+                    ));
+                }
+                Ok(issues_app::lifecycle::InitialProject {
+                    name: scope.name.clone(),
+                    key: scope.key.clone(),
+                })
+            })
+            .transpose()?;
+        issues_app::lifecycle::bootstrap_tracker(
+            context.store_root,
+            context.space,
+            context.session,
+            context.identity,
+            context.device,
+            context.display_name,
+            initial_project,
+        )
     }
 }
 
@@ -109,19 +171,3 @@ pub fn bundled_client_packages() -> WorldClientRegistry {
 pub fn implementation_id() -> [u8; 32] {
     issues_app::lifecycle::implementation_id()
 }
-
-/// The bundled product's Space-lifecycle bindings: founder policy, bootstrap
-/// tracking, and the initial scope a freshly founded Space is seeded with.
-///
-/// Re-exported as a module rather than wrapped function by function, because
-/// this is a staging post, not a destination. `crate::world::lifecycle` still
-/// names three of these as *types* in its own signatures
-/// (`-> Option<IssuesBootstrapRecord>`, `InitialProject`, `BootstrapPhase`), and
-/// no amount of moving fixes that: a shell function whose return type is a
-/// product struct is product-shaped whichever module the path points at.
-///
-/// Closing that needs the World contract to carry lifecycle hooks — a generic
-/// bootstrap record and a generic "initial scope" a World declares for itself —
-/// which is a design change to the seam, not a relocation. This module is the
-/// complete, greppable list of what such a hook API has to cover.
-pub use issues_app::lifecycle as product_lifecycle;

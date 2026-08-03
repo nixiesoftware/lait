@@ -514,6 +514,19 @@ pub struct Invalidation {
     pub planes: Vec<DirtyPlane>,
 }
 
+/// One World's invalidation payload, tagged for routing by product clients.
+///
+/// `kind` and `plane` are deliberately only unique inside a World. Grouping
+/// under the stable [`WorldId`] prevents two installed Worlds that both use a
+/// word such as `document` or `catalog` from invalidating each other's views.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RoutedInvalidation {
+    pub world: WorldId,
+    pub dirty: Vec<DirtyScope>,
+    pub planes: Vec<DirtyPlane>,
+}
+
 /// What a World may know about one content: enough to render it, and nothing
 /// that would let it reach the bytes without asking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -140,6 +140,8 @@ interface Ring {
   readonly activity: boolean;
 }
 
+const ISSUES_WORLD = "com.lait.issues";
+
 /**
  * Does this ring's catalog dirt reach that resource?
  *
@@ -889,11 +891,14 @@ export class ProjectViewerStore {
       return;
     }
 
-    const dirty = doorbell.dirty.flatMap((s) => s.docs);
+    const invalidations = doorbell.invalidations.filter((entry) => entry.world === ISSUES_WORLD);
+    const scopes = invalidations.flatMap((entry) => entry.dirty);
+    const planes = invalidations.flatMap((entry) => entry.planes);
+    const dirty = scopes.flatMap((scope) => scope.docs);
     const ring: Ring = {
-      dirty: doorbell.dirty,
+      dirty: scopes,
       docs: new Set(dirty),
-      planes: doorbell.planes,
+      planes,
       authority: doorbell.authority_advanced,
       activity: doorbell.activity_advanced,
     };

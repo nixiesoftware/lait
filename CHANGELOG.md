@@ -24,7 +24,7 @@
 > It refuses rather than races if a Station is up.
 >
 > **Every node must be on 0.6.2.** Contact moved from `lait/contact/1` to
-> `lait/contact/2`, and the local control protocol from 6 to 8 with its minimum
+> `lait/contact/2`, and the local control protocol from 6 to 9 with its minimum
 > raised to match. Peers on different generations share no ALPN and never
 > connect; there is no half-speaking window to ride out and no in-band fallback.
 

@@ -90,12 +90,26 @@ fn issue_req(
 
 /// The docs a frame names under a scope label, in frame order.
 fn named_docs(frame: &lait::control::Doorbell, key: &str) -> Vec<String> {
-    frame
-        .dirty
-        .iter()
+    dirty(frame)
         .filter(|d| d.label.as_deref() == Some(key))
         .flat_map(|d| d.docs.clone())
         .collect()
+}
+
+fn dirty(frame: &lait::control::Doorbell) -> impl Iterator<Item = &lait::control::DirtyScope> {
+    frame
+        .invalidations
+        .iter()
+        .filter(|entry| entry.world.as_str() == issues::contract::PRODUCT_WORLD)
+        .flat_map(|entry| &entry.dirty)
+}
+
+fn planes(frame: &lait::control::Doorbell) -> impl Iterator<Item = &lait::control::DirtyPlane> {
+    frame
+        .invalidations
+        .iter()
+        .filter(|entry| entry.world.as_str() == issues::contract::PRODUCT_WORLD)
+        .flat_map(|entry| &entry.planes)
 }
 
 fn poll_until<T>(timeout: Duration, mut check: impl FnMut() -> Option<T>) -> Option<T> {
@@ -447,7 +461,7 @@ fn doorbell_names_the_dirty_project_and_doc() {
             "the edit doorbell must name the edited doc under its project, got {ring:?}"
         );
         assert!(
-            ring.planes.is_empty(),
+            planes(&ring).next().is_none(),
             "a field edit touches no catalog plane, got {ring:?}"
         );
 
@@ -487,11 +501,11 @@ fn doorbell_names_the_dirty_project_and_doc() {
         // board; it does not touch the label registry, the workflow, or any
         // other project. Ringing those would be the coarseness this replaced.
         assert!(
-            ring.planes.iter().any(|p| p.plane == "docs"),
+            planes(&ring).any(|p| p.plane == "docs"),
             "a create moves the row index, got {ring:?}"
         );
         assert!(
-            ring.planes.iter().any(|p| p.plane == "boards"
+            planes(&ring).any(|p| p.plane == "boards"
                 && p.scope
                     .as_ref()
                     .is_some_and(|s| s.label.as_deref() == Some("ENG"))),
@@ -500,7 +514,7 @@ fn doorbell_names_the_dirty_project_and_doc() {
         // A project is named by its stable id as well as its display key, so a
         // dependency can match on something a rename cannot move.
         assert!(
-            ring.planes.iter().any(|p| p.plane == "boards"
+            planes(&ring).any(|p| p.plane == "boards"
                 && p.scope
                     .as_ref()
                     .is_some_and(|s| s.kind == "project" && s.id.starts_with("prj_"))),
@@ -512,7 +526,7 @@ fn doorbell_names_the_dirty_project_and_doc() {
         );
         for untouched in ["labels", "workflow", "teams"] {
             assert!(
-                !ring.planes.iter().any(|p| p.plane == untouched),
+                !planes(&ring).any(|p| p.plane == untouched),
                 "a create rang {untouched:?}, which it does not touch: {ring:?}"
             );
         }
@@ -541,15 +555,15 @@ fn doorbell_names_the_dirty_project_and_doc() {
             .expect("read spec doorbell")
             .expect("spec doorbell present");
         assert!(
-            ring.planes.iter().any(|p| p.plane == "specs"),
+            planes(&ring).any(|p| p.plane == "specs"),
             "a spec write must ring its own plane, got {ring:?}"
         );
         assert!(
-            !ring.planes.iter().any(|p| p.plane == "docs"),
+            !planes(&ring).any(|p| p.plane == "docs"),
             "a spec write must not ring the issue row index, got {ring:?}"
         );
         assert!(
-            !ring.planes.iter().any(|p| p.plane == "boards"),
+            !planes(&ring).any(|p| p.plane == "boards"),
             "a spec write must not ring any board, got {ring:?}"
         );
 
@@ -605,12 +619,12 @@ fn every_subscriber_sees_the_same_frame_for_one_commit() {
         let fa = a.next().await.expect("A reads").expect("A has a frame");
         let fb = b.next().await.expect("B reads").expect("B has a frame");
         assert_eq!(
-            (fa.seq, &fa.dirty, &fa.planes),
-            (fb.seq, &fb.dirty, &fb.planes),
+            (fa.seq, &fa.invalidations),
+            (fb.seq, &fb.invalidations),
             "subscribers disagreed about one commit: A={fa:?} B={fb:?}"
         );
         assert!(
-            !fa.dirty.is_empty(),
+            dirty(&fa).next().is_some(),
             "both agreed, but on an empty dirty-set — that would pass for the \
              wrong reason: {fa:?}"
         );

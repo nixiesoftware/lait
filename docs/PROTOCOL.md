@@ -305,8 +305,13 @@ objects. Unknown fields reject where the schema says strict; decoded lengths and
 identifier grammars remain enforced after JSON decoding.
 
 `Subscribe` carries Observation doorbells with Station epoch, sequence, reset
-semantics, committed frontier, and dirty scopes. Frames may be coalesced. They
-are not state deltas; clients re-query after notification or reset.
+semantics, and invalidations grouped by stable World id. Inside each World,
+item scopes carry `{kind,id,label,docs}` and structural planes carry
+`{plane,scope?}`. The host never interprets those strings, and two Worlds that
+choose the same word cannot invalidate each other's clients. Frames may be
+coalesced. They are not state deltas; clients re-query after notification or
+reset. This is the v9 control shape; v8's Issues-specific doorbell fields are
+not accepted because decoding them as empty would silently leave clients stale.
 
 `LiveSubscribe` is the v8 standing projection for ephemeral presence, cursor,
 typing, and text-preview rows. Its first line is a complete Live snapshot;

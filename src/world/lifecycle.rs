@@ -1,8 +1,8 @@
-//! Host-side composition of Issues formation with the orbital lifecycle.
+//! Host-side composition of World packages with the orbital lifecycle.
 //!
-//! Generic Space/Station ownership remains here. Product policy, initial
-//! Catalog construction, and crash-resumable bootstrap persistence live in
-//! `issues-app`.
+//! Generic Space/Station ownership remains here. Each installed World package
+//! supplies its own founder policy, initial scopes, and crash-resumable
+//! bootstrap hook through [`WorldPackages`].
 
 use std::path::Path;
 use std::sync::Arc;
@@ -10,37 +10,40 @@ use std::sync::Arc;
 use anyhow::Result;
 use runtime::{plane::Activation, world::Catalog, Runtime};
 
-use crate::orbital::{discover_space_id, orbital_store_root, unsupported_store_at, SpaceAuthority};
+use crate::orbital::{
+    discover_space_id, orbital_store_root, unsupported_store_at, BootstrapContext, InitialScope,
+    SpaceAuthority, WorldPackages,
+};
 
-pub use crate::composition::product_lifecycle::{BootstrapPhase, IssuesBootstrapRecord};
-
-fn issues_registry() -> Result<Catalog> {
-    crate::world::packages()
+fn world_registry(packages: &WorldPackages) -> Result<Catalog> {
+    packages
         .build()
         .map(|(registry, _)| registry)
         .map_err(|error| anyhow::anyhow!("world registry: {error:?}"))
 }
 
-pub fn issues_implementation_id() -> [u8; 32] {
-    crate::composition::product_lifecycle::implementation_id()
-}
-
 /// Apply the product-supplied founder policy through the generic Mechanics
 /// authority host.
 pub fn seed_founder_policy(mechanics: &SpaceAuthority) -> Result<()> {
-    let policy = crate::composition::product_lifecycle::founder_policy();
-    mechanics.activate_implementation(policy.world, policy.implementation)?;
-    for grant in policy.grants {
-        mechanics.grant_self_capability(grant.capability, grant.resource, grant.salt)?;
+    seed_founder_policies(mechanics, &crate::world::packages())
+}
+
+fn seed_founder_policies(mechanics: &SpaceAuthority, packages: &WorldPackages) -> Result<()> {
+    for (world, implementation, grants) in packages.founder_policies()? {
+        mechanics.activate_implementation(world.as_str(), implementation)?;
+        for grant in grants {
+            mechanics.grant_self_capability(grant.capability, grant.resource, grant.salt)?;
+        }
     }
     Ok(())
 }
 
+#[cfg(test)]
 pub fn read_bootstrap_record(
     home: &Path,
     space: &mechanics::ids::SpaceId,
-) -> Option<IssuesBootstrapRecord> {
-    crate::composition::product_lifecycle::read_bootstrap_record(&orbital_store_root(home), space)
+) -> Option<issues_app::lifecycle::IssuesBootstrapRecord> {
+    issues_app::lifecycle::read_bootstrap_record(&orbital_store_root(home), space)
 }
 
 pub fn form_space(
@@ -48,16 +51,16 @@ pub fn form_space(
     device_seed: &[u8; 32],
     display_name: &str,
 ) -> Result<(SpaceAuthority, runtime::coordinates::SignedCoordinates)> {
-    form_space_project(home, device_seed, display_name, None)
+    form_space_with_scopes(home, device_seed, display_name, Vec::new())
 }
 
-/// Form or resume the generic orbital footprint, then hand the docked Session
-/// to the Issues package for its product bootstrap.
-fn form_space_project(
+/// Form or resume the generic orbital footprint, then hand each package its
+/// own docked Session for product bootstrap.
+fn form_space_with_scopes(
     home: &Path,
     device_seed: &[u8; 32],
     display_name: &str,
-    project: Option<(String, String)>,
+    initial_scopes: Vec<(replica::body::WorldId, InitialScope)>,
 ) -> Result<(SpaceAuthority, runtime::coordinates::SignedCoordinates)> {
     if let Some(error) = unsupported_store_at(home) {
         return Err(anyhow::anyhow!("{error}"));
@@ -73,11 +76,12 @@ fn form_space_project(
         None => SpaceAuthority::form(&root, device_seed, display_name, vec![])?,
     };
 
-    seed_founder_policy(&mechanics)?;
+    let packages = crate::world::packages();
+    seed_founder_policies(&mechanics, &packages)?;
 
     let runtime = Runtime::open(
         root.clone(),
-        issues_registry()?,
+        world_registry(&packages)?,
         Arc::new(mechanics.clone()),
         Arc::new(mechanics.clone()),
     );
@@ -88,20 +92,32 @@ fn form_space_project(
         .open(Activation::offline())
         .map_err(|error| anyhow::anyhow!("activate: {error:?}"))?;
     let identity = Runtime::identity_from_seed(device_seed);
-    let session = station
-        .dock(&crate::world::contract::world_id(), &identity)
-        .map_err(|error| anyhow::anyhow!("dock: {error:?}"))?;
-    let initial_project = project
-        .map(|(name, key)| crate::composition::product_lifecycle::InitialProject { name, key });
-    let bootstrap = crate::composition::product_lifecycle::bootstrap_tracker(
-        &root,
-        &mechanics.space(),
-        &session,
-        &identity,
-        mechanics::actor::device_from_seed(device_seed).as_str(),
-        display_name,
-        initial_project,
-    );
+    let bootstrap = packages
+        .lifecycle_world_ids()
+        .cloned()
+        .collect::<Vec<_>>()
+        .into_iter()
+        .try_for_each(|world| {
+            let session = station
+                .dock(&world, &identity)
+                .map_err(|error| anyhow::anyhow!("dock {world}: {error:?}"))?;
+            let initial_scope = initial_scopes
+                .iter()
+                .find(|(candidate, _)| candidate == &world)
+                .map(|(_, scope)| scope);
+            packages.bootstrap(
+                &world,
+                BootstrapContext {
+                    store_root: &root,
+                    space: &mechanics.space(),
+                    session: &session,
+                    identity: &identity,
+                    device: mechanics::actor::device_from_seed(device_seed).as_str(),
+                    display_name,
+                    initial_scope,
+                },
+            )
+        });
     let _ = station.vacate();
     bootstrap?;
     Ok((mechanics, coordinates))
@@ -131,7 +147,7 @@ fn form_space_with_fault(
     seed_founder_policy(&mechanics)?;
     let runtime = Runtime::open(
         root.clone(),
-        issues_registry()?,
+        world_registry(&crate::world::packages())?,
         Arc::new(mechanics.clone()),
         Arc::new(mechanics.clone()),
     );
@@ -165,18 +181,17 @@ pub fn found_space_cli(
     device_seed: &[u8; 32],
     display_name: &str,
 ) -> Result<(mechanics::ids::SpaceId, crate::orbits::ProjectBrief)> {
-    let project = issues_app::lifecycle::InitialProject::for_space(display_name);
-    let (mechanics, _) = form_space_project(
-        home,
-        device_seed,
-        display_name,
-        Some((project.name.clone(), project.key.clone())),
-    )?;
+    let initial_scopes = crate::world::packages().initial_scopes(display_name);
+    let primary = initial_scopes
+        .first()
+        .map(|(_, scope)| scope.clone())
+        .ok_or_else(|| anyhow::anyhow!("no bundled World declares an initial scope"))?;
+    let (mechanics, _) = form_space_with_scopes(home, device_seed, display_name, initial_scopes)?;
     Ok((
         mechanics.space(),
         crate::orbits::ProjectBrief {
-            key: project.key,
-            name: project.name,
+            key: primary.key,
+            name: primary.name,
         },
     ))
 }
@@ -197,7 +212,7 @@ pub fn enter_space(
     let mechanics = SpaceAuthority::enter(&root, device_seed, &coordinates)?;
     let runtime = Runtime::open(
         root,
-        issues_registry()?,
+        world_registry(&crate::world::packages())?,
         Arc::new(mechanics.clone()),
         Arc::new(mechanics.clone()),
     );
@@ -213,9 +228,9 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
 
-    use issues_app::lifecycle::Fault;
+    use issues_app::lifecycle::{BootstrapPhase, Fault};
 
-    use super::{form_space, form_space_with_fault, read_bootstrap_record, BootstrapPhase};
+    use super::{form_space, form_space_with_fault, read_bootstrap_record};
     use crate::orbital::{orbital_store_root, SpaceAuthority};
     use crate::world::contract;
 
