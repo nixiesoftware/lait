@@ -10,6 +10,7 @@
 //! A [`WorldRouter`] belongs to one active Station. It is not a process,
 //! does not own a listener, and has no autonomous background loop.
 
+use runtime::poison::LockRecovering;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
@@ -258,10 +259,7 @@ impl WorldHost {
         station: &Station,
         identity: &LocalIdentity,
     ) -> Result<(), RuntimeFailure> {
-        let mut session = self
-            .primary_session
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut session = self.primary_session.lock_recovering();
         if session.is_none() {
             *session = Some(station.dock(&self.world, identity)?);
         }
@@ -269,10 +267,7 @@ impl WorldHost {
     }
 
     pub fn with_primary<R>(&self, f: impl FnOnce(&Session) -> R) -> Option<R> {
-        let session = self
-            .primary_session
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let session = self.primary_session.lock_recovering();
         session.as_ref().map(f)
     }
 
@@ -283,10 +278,7 @@ impl WorldHost {
         identity: &LocalIdentity,
         f: impl FnOnce(&Session) -> R,
     ) -> Result<R, RuntimeFailure> {
-        let mut sessions = self
-            .agent_sessions
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut sessions = self.agent_sessions.lock_recovering();
         let device = identity.device().clone();
         if !sessions.contains_key(&device) {
             sessions.insert(device.clone(), station.dock(&self.world, identity)?);
@@ -355,10 +347,7 @@ impl WorldRouter {
     /// so Space-level adapters need exactly one Session to publish that plane.
     pub fn with_any_primary<R>(&self, f: impl FnOnce(&Session) -> R) -> Option<R> {
         for host in self.hosts.values() {
-            let session = host
-                .primary_session
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let session = host.primary_session.lock_recovering();
             if let Some(session) = session.as_ref() {
                 return Some(f(session));
             }
@@ -371,10 +360,7 @@ impl WorldRouter {
             let Some(projector) = host.projector.as_deref() else {
                 continue;
             };
-            let session = host
-                .primary_session
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let session = host.primary_session.lock_recovering();
             if let Some(session) = session.as_ref() {
                 projector.start(session, space);
             }
@@ -386,10 +372,7 @@ impl WorldRouter {
             let Some(projector) = host.projector.as_deref() else {
                 continue;
             };
-            let session = host
-                .primary_session
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let session = host.primary_session.lock_recovering();
             if let Some(status) = session
                 .as_ref()
                 .and_then(|session| projector.status(session))
@@ -410,10 +393,7 @@ impl WorldRouter {
             let Some(projector) = host.projector.as_deref() else {
                 continue;
             };
-            let session = host
-                .primary_session
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let session = host.primary_session.lock_recovering();
             let Some(session) = session.as_ref() else {
                 continue;
             };

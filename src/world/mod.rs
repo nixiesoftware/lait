@@ -3,6 +3,7 @@
 //!
 //! See `docs/plans/04-product-world-contract.md` for the normative mapping.
 
+use runtime::poison::LockRecovering;
 use std::sync::{Arc, LazyLock};
 
 use crate::orbital::{
@@ -49,10 +50,7 @@ impl ObservationProjector for IssuesProjector {
 
     fn start(&self, session: &runtime::Session, _space: &mechanics::ids::SpaceId) {
         let baseline = issues_app::projections::ring_state(session).map(|state| state.planes);
-        *self
-            .baseline
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = baseline;
+        *self.baseline.lock_recovering() = baseline;
     }
 
     fn project(
@@ -61,10 +59,7 @@ impl ObservationProjector for IssuesProjector {
         space: &mechanics::ids::SpaceId,
         observation: &runtime::world::Observation,
     ) -> Invalidation {
-        let mut baseline = self
-            .baseline
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut baseline = self.baseline.lock_recovering();
         let (dirty_by_project, dirty_catalog) = issues_app::projections::observation(
             session,
             space,

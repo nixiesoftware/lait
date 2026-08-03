@@ -205,6 +205,7 @@ pub fn prune() -> Result<Vec<Entry>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use runtime::poison::LockRecovering;
     use std::sync::{Mutex, MutexGuard};
 
     // `LAIT_CONFIG_ROOT` is process-global, so these tests can't run concurrently:
@@ -220,7 +221,7 @@ mod tests {
     }
     impl ScopedRoot {
         fn new(tag: &str) -> Self {
-            let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let guard = ENV_LOCK.lock_recovering();
             let dir =
                 std::env::temp_dir().join(format!("lait-wsreg-{}-{}", tag, std::process::id(),));
             let _ = std::fs::remove_dir_all(&dir);

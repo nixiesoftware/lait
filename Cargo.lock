@@ -4749,6 +4749,7 @@ dependencies = [
  "serde-byte-array",
  "serde_json",
  "tokio",
+ "tracing",
  "unicode-normalization",
 ]
 

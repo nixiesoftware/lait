@@ -23,6 +23,7 @@
 //! over the mechanics primitives; seeds, diagnose, and log are node-local
 //! lifecycle concerns. There is no catch-all refusal.
 
+use runtime::poison::LockRecovering;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -181,10 +182,7 @@ impl SignalInbox {
         mut actor_for: impl FnMut(&mechanics::station::Key) -> Option<String>,
     ) -> Response {
         use tokio::sync::broadcast::error::TryRecvError;
-        let mut queue = self
-            .receiver
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut queue = self.receiver.lock_recovering();
         let mut signals = Vec::new();
         let mut dropped = 0u64;
         loop {

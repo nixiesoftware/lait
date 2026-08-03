@@ -69,6 +69,7 @@ mod neighbors;
 pub mod plane;
 mod plane_driver;
 mod plane_stream;
+pub mod poison;
 mod registry;
 mod session;
 pub mod signal;

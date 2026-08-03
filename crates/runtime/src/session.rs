@@ -27,6 +27,7 @@
 //! the authority-frontier compare-and-swap under the writer lock, and durably
 //! commits. Success means recoverable, not merely applied in memory.
 
+use crate::poison::LockRecovering;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
@@ -212,7 +213,7 @@ impl Broadcaster {
     /// a scopeless record just to learn something the next one repeats. Scopes
     /// may span Worlds; `authority` may stand alone.
     pub(crate) fn publish(&self, bodies: Vec<BodyKey>, frontier: ReplicaFrontier, authority: bool) {
-        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        let mut state = self.state.lock_recovering();
         if state.closed {
             return;
         }
@@ -235,7 +236,7 @@ impl Broadcaster {
     }
 
     fn close(&self) {
-        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        let mut state = self.state.lock_recovering();
         state.closed = true;
         self.wake.notify_all();
     }
@@ -299,7 +300,7 @@ impl ObservationStream {
     ) -> Result<Option<Observation>, Interruption> {
         let deadline = tokio::time::Instant::now() + timeout;
         let broadcaster = self.broadcaster.clone();
-        let mut state = broadcaster.state.lock().unwrap_or_else(|p| p.into_inner());
+        let mut state = broadcaster.state.lock_recovering();
         loop {
             if state.closed {
                 return Err(Interruption::StationDormant);
@@ -401,7 +402,7 @@ impl StationCore {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, CoreInner> {
-        self.inner.lock().unwrap_or_else(|p| p.into_inner())
+        self.inner.lock_recovering()
     }
 
     pub(crate) fn frontier(&self) -> ReplicaFrontier {

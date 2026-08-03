@@ -51,6 +51,7 @@
 //! attaches our cookie — so `check_upgrade_origin` runs *inside* the handler,
 //! and requires an Origin rather than admitting an absent one.
 
+use runtime::poison::LockRecovering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -416,10 +417,7 @@ impl Hub {
     /// signal to lose, and there is no right answer to that question.
     pub fn attach_control(&self) -> tokio::sync::mpsc::Receiver<Arc<Vec<u8>>> {
         let (sink, queue) = tokio::sync::mpsc::channel(CONTROL_QUEUE);
-        let mut sinks = self
-            .control
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut sinks = self.control.lock_recovering();
         sinks.retain(|sink| !sink.is_closed());
         sinks.push(sink);
         queue
@@ -439,10 +437,7 @@ impl Hub {
         if bodies.is_empty() {
             return;
         }
-        let mut sinks = self
-            .control
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut sinks = self.control.lock_recovering();
         for body in bodies {
             // Kept only while it accepts. A closed queue is a socket that went
             // away; a full one is a socket that stopped reading, and this lane
@@ -454,10 +449,7 @@ impl Hub {
     }
 
     fn watch(&self, question: Watch) {
-        let mut watched = self
-            .watched
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut watched = self.watched.lock_recovering();
         let holders = watched.entry(question.clone()).or_insert(0);
         *holders = holders.saturating_add(1);
         drop(watched);
@@ -467,26 +459,15 @@ impl Hub {
     /// Say that somebody needs the whole answer to this question rather than
     /// the pump's opinion about what they already hold.
     fn refresh(&self, question: &Watch) {
-        self.fresh
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(question.clone());
+        self.fresh.lock_recovering().insert(question.clone());
     }
 
     fn take_fresh(&self) -> BTreeSet<Watch> {
-        std::mem::take(
-            &mut *self
-                .fresh
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-        )
+        std::mem::take(&mut *self.fresh.lock_recovering())
     }
 
     fn unwatch(&self, question: &Watch) {
-        let mut watched = self
-            .watched
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut watched = self.watched.lock_recovering();
         if let Some(holders) = watched.get_mut(question) {
             *holders = holders.saturating_sub(1);
             if *holders == 0 {
@@ -496,12 +477,7 @@ impl Hub {
     }
 
     fn watched(&self) -> Vec<Watch> {
-        self.watched
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .keys()
-            .cloned()
-            .collect()
+        self.watched.lock_recovering().keys().cloned().collect()
     }
 
     fn attach_session(&self) -> u64 {
@@ -509,10 +485,7 @@ impl Hub {
     }
 
     fn set_awareness(&self, session: u64, awareness: Option<BrowserAwareness>) {
-        let mut held = self
-            .awareness
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut held = self.awareness.lock_recovering();
         let previous_space = held.get(&session).map(|held| held.watch.space.clone());
         let next_space = awareness.as_ref().map(|held| held.watch.space.clone());
         let changed = match awareness {
@@ -521,10 +494,7 @@ impl Hub {
         };
         if changed {
             drop(held);
-            let mut dirty = self
-                .awareness_dirty
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut dirty = self.awareness_dirty.lock_recovering();
             if let Some(space) = previous_space {
                 dirty.insert(space);
             }
@@ -540,18 +510,12 @@ impl Hub {
     }
 
     fn take_awareness_spaces(&self) -> BTreeSet<String> {
-        std::mem::take(
-            &mut *self
-                .awareness_dirty
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-        )
+        std::mem::take(&mut *self.awareness_dirty.lock_recovering())
     }
 
     fn awareness(&self, space: &str) -> Vec<BrowserAwareness> {
         self.awareness
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .lock_recovering()
             .values()
             .filter(|awareness| awareness.watch.space == space)
             .cloned()

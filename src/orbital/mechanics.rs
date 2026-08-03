@@ -29,6 +29,7 @@
 //! capability) pulled by an admin over Contact, whose incorporator validates
 //! and redeems it (AddMember + epoch sealing).
 
+use runtime::poison::LockRecovering;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -699,7 +700,7 @@ pub struct SpaceAuthority {
 
 impl SpaceAuthority {
     pub(super) fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
-        self.inner.lock().unwrap_or_else(|p| p.into_inner())
+        self.inner.lock_recovering()
     }
 
     /// The directory this Space's mechanics material lives in.
