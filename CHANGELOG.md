@@ -1,5 +1,160 @@
 # Changelog
 
+## v0.6.2 — files move, cursors move, and work gets something to answer to
+
+> **Two delivery planes open, and an existing Space needs three steps to reach
+> them.** A Station now serves Freight (exact objects — files, content) and Live
+> (transient collaboration — cursors, presence, signals) on their own ALPNs, with
+> their own queues and their own drivers. Getting there moved the store's
+> manifest, the Contact generation, and the Issues World's reviewed identity, so
+> this build refuses a v0.6.1 store, a v0.6.1 peer, and a v0.6.1 World
+> implementation.
+>
+> Nothing is lost and nothing is re-init'd. The store migrates in place, verified,
+> as an explicit Orbit generation:
+>
+> ```
+> lait update                  # every node; this stops the local daemon too
+> lait rebuild                 # prior representation -> generation, equivalence-checked
+> lait issues world-upgrade    # activate this build's reviewed IssuesWorld
+> ```
+>
+> `lait rebuild` needs the Orbit vacant. `lait update` leaves it that way; if you
+> upgraded through Homebrew, Scoop, or winget instead, run `lait shutdown` first.
+> It refuses rather than races if a Station is up.
+>
+> **Every node must be on 0.6.2.** Contact moved from `lait/contact/1` to
+> `lait/contact/2`, and the local control protocol from 6 to 8 with its minimum
+> raised to match. Peers on different generations share no ALPN and never
+> connect; there is no half-speaking window to ride out and no in-band fallback.
+
+### Files are content, not fields
+
+- **The content plane.** Files live in an immutable, content-addressed store
+  beside the journal, reachable by a content id that carries its own descriptor.
+  A range read costs the range rather than the file, a resident cache holds what
+  this node has fetched under a quota it can forget, and a name a peer chose is
+  never a path this machine writes.
+- **Freight is mounted, not merely advertised.** `lait/freight/1` routes: an
+  admitted peer's availability question and ranged chunk request are served from
+  committed descriptors and validated proof sidecars. For two releases both
+  planes were advertised and unserved — the endpoint registered the ALPN, the
+  handshake completed, and the hub turned the opening away because no driver
+  owned the plane. `Orbit::activate` mounts both now.
+- **Attachments became content everywhere at once.** The write path is a clean
+  break — nothing emits the old inline `data_b64` shape, and the encoder that
+  produced it is deleted from both the engine and the viewer. The read path is
+  permanent: both shapes decode through one type, so every attachment ever
+  written stays readable. The old shape was bounded at 256 KiB by 8, so the worst
+  legacy Body is 2 MiB and needs no streaming reader.
+- **Files over the browser surface**, with uploads that are not garbage while
+  they wait to be attached, and a server that can be told to stop.
+
+### Collaboration you can see
+
+- **Realtime collaborative text editing.** CodeMirror replaces the previous
+  editor, with live carets and selections from everyone in the document.
+- **The Live plane** (`lait/session/1`) carries the transient view and a reliable
+  signal lane on the same connection. Transient state is non-durable by
+  construction — proved by running rather than by parsing — and the plane sends
+  what is true now rather than everything that was ever true.
+- **Presence decides who gets told.** "Who is here" used to mean "who has ever
+  been here"; it now means what it says, and a revocation is something a live
+  session can actually hear.
+- **Range-attached comments.** `lait issues comment <ref> --at START..END`
+  anchors a comment to a span of text, counted in Unicode scalars, and the
+  browser draws where it is attached.
+- **History names a person**, not the machine they were sitting at.
+
+### Specs: what the work answers to
+
+An Issue says what work is happening; a Spec says what that work is meant to
+satisfy. They are separate durable truths, and neither is stored inside the
+other's markdown. See `docs/SPECS.md`.
+
+- **`lait issues spec`** — `new`, `revise`, `review`, `issue`, `withdraw`,
+  `resolve`, `show`, `ls`, `history`, `links`. Kinds are `goal`, `requirement`,
+  `plan`, `design`, `order`, `guide`, `proof`, `verdict`, `waiver`, `record`.
+  Every state transition takes `--expect <revision>`, so two people moving the
+  same head cannot both win.
+- **Revisions are immutable with exact predecessors.** Concurrent successors stay
+  visible as conflict heads; they are never resolved by last-writer-wins.
+  Drafting a successor does not silently revoke its issued predecessor.
+- **`lait issues baseline`** freezes a named, reviewed set of exact issued Spec
+  revisions — the tracker's equivalent of an issued drawing set — and
+  `baseline bind ENG-42 bas_…@<revision>` pins an Issue to one.
+- **Packets.** `lait issues packet <ref>` derives the effective brief for one
+  Issue: governing truth, guidance, proof, records, and unresolved conflicts. It
+  is a projection, and the only supported way to answer "what governs this work
+  now?" without reimplementing the graph rules.
+- **The viewer draws all of it** — a project's Specs, the whole revision DAG, and
+  everything that happens to a spec.
+
+### Agents are members
+
+- **`lait install-mcp --agent <name>`** lets a named client bring its own agent
+  identity, so an agent's work is attributed to the agent rather than to the
+  human who sponsored it. `--no-agent` opts out.
+- **The plugin preflights the three things that stop the tools working**, and
+  writes a config that outlives the shell that made it.
+- **The MCP router serves the World tools.** A shell-only router was being served
+  in its place, which hid the entire `issues_*` surface.
+
+### The store keeps an index, not a page list
+
+The paged manifest and inline catalog are replaced by authenticated radix
+indexes over a journal that commits deltas. At 100,000 Bodies — the protocol
+maximum — changing one Body's head went from rewriting and fsyncing a 28.8 MB
+manifest to writing 177 bytes, and p50 commit latency went from 5.81 s to 206 ms.
+
+- Catalogs reconcile by descent rather than by comparing roots.
+- A causal contract in lait's own terms, with a bounded rollback.
+- `lait rebuild` builds the current representation from the prior one, proves
+  logical equivalence, and activates the complete result atomically. Old bytes
+  are left inactive rather than destructively rewritten or taught to every future
+  reader.
+- A Manifest root that declares content refs it cannot back is now refused. No
+  peer in the field is affected — nothing produced a content declaration before
+  this release, which is exactly why the rule lands now.
+
+`docs/COMPATIBILITY.md` is new and collects every versioned surface, what gates
+it, and what a bump costs.
+
+### Fixes
+
+- **Joining works.** The hub demuxed Contact's first frame as an Offer rather than
+  as the opening it actually sends, so joins died silently; and a finished
+  doorbell pump read as a dead Station, making a joiner rebuild its host dozens of
+  times per join. Both were join-fatal.
+- **A refusal can be heard.** Where an unreadable ledger used to answer, it now
+  refuses, and a poisoned lock says so once instead of repeatedly.
+- **The admission lock is no longer held across the refusal write.**
+- **A failed batch restores every Body it touched**, and the store keeps what it
+  holds rather than what it has ever done.
+- **The resident cache cannot half-exist, fail open, or scan itself.**
+- **The revision that governs is the one counted**, and the row index stops
+  ringing the doorbell.
+- **The type check no longer creates the roots it asks about.**
+- **The doorbell pump's backoff arithmetic is explicit.**
+
+### Under the hood
+
+- **A testing architecture, written down** (`docs/TESTING.md`): T0 laws
+  (properties over generated op programs), T1 contracts (golden files), T2
+  behaviour, T3 simulation (a seed replays a whole multi-peer schedule), T4
+  reality (real relays, nightly). Tiering the suite stopped the PR path paying
+  for all of it, and one test binary per package replaced roughly seventy.
+- **The whole stack replays from a seed**, with a controllable clock and a MemNet
+  that finally has the controllable delivery it always promised.
+- **Coverage-guided fuzzing for the pre-auth decoders**, with a seed corpus so a
+  nightly finding stays found.
+- **Lint policy is consolidated into `[workspace.lints]`**, with the clippy
+  pedantic and nursery groups curated by name, and the panic-shaped lints denied
+  outside tests.
+- **Substrate failure types are semantic and owner-qualified** — a semantic
+  rejection and a host failure are no longer the same type.
+- `crates/relay` joins the workspace; `world-bridge` is gone.
+
 ## v0.6.1 — the daily loop moves house, and the viewer grows up
 
 > **Every issue command now lives under `lait issues`.** The shell keeps the
