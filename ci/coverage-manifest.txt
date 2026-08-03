@@ -6,9 +6,9 @@
 # reviewed like one, not discovered when a gate goes red on a refactor.
 
 [tiers]
-pr             1336
+pr             1339
 pr-platform    1006
-nightly        1363
+nightly        1366
 mutants        87
 
 [gates]
@@ -579,6 +579,9 @@ lait::it orbital_two_node::the_inviter_reciprocates_so_a_joiner_side_only_connec
 lait::it orbital_two_node::two_station_hosts_join_admit_and_converge_over_the_socket
 lait::it product_features::a_follower_hears_about_an_issue_they_are_not_assigned
 lait::it product_features::milestones_cycles_initiatives_teams_triage_delete_and_attachments
+lait::it product_independence::allowlist_is_empty_when_the_shell_stops_depending_on_products
+lait::it product_independence::no_unallowlisted_product_references
+lait::it product_independence::the_rule_has_teeth
 lait::it product_schema::positive_examples_roundtrip_and_canonical_bytes_are_stable
 lait::it product_schema::the_committed_product_examples_match_the_rust_corpus
 lait::it product_schema::the_committed_product_schema_matches_the_rust_contract

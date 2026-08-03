@@ -30,7 +30,7 @@
 #             teeth: a deleted test is a deleted line, visible in review, and
 #             no count arithmetic can hide it.
 #
-# ## The manifest is a LINUX artifact
+# ## The manifest is a UNIX artifact
 #
 # Some tests do not exist on every platform — `#[cfg(unix)]` covers four of
 # them here, including the one that checks a Unix socket path fits in
@@ -38,8 +38,9 @@
 # than on Linux, and a manifest regenerated on the wrong OS reports coverage
 # loss that is really just cfg.
 #
-# Linux is the canonical platform because it is where the `pr` tier — the whole
-# suite — runs. Regenerating elsewhere is refused rather than silently wrong.
+# Any unix host is canonical: the distinction is `cfg(unix)`, which macOS
+# satisfies, so Linux and Darwin list the same ids. Windows is refused rather
+# than silently wrong.
 # When CI finds the manifest stale it uploads the corrected file as an
 # artifact, so a developer on another OS fixes it by downloading rather than by
 # finding a Linux box.
@@ -47,7 +48,7 @@
 # ## Usage
 #
 #   bash ci/coverage-manifest.sh --check    # CI: regenerate and diff
-#   bash ci/coverage-manifest.sh --update   # Linux: accept the new coverage
+#   bash ci/coverage-manifest.sh --update   # unix: accept the new coverage
 #
 # ## Selector shape
 #
@@ -61,9 +62,16 @@ set -euo pipefail
 MANIFEST="ci/coverage-manifest.txt"
 MODE="${1:---check}"
 
+# The platforms that produce the canonical set. The distinction that matters is
+# `cfg(unix)`, not Linux specifically — macOS satisfies it, so it lists exactly
+# the same test ids. (The two `cfg(target_os = "linux")` blocks in the suite sit
+# inside `peak_rss_bytes()` helper bodies, not around `#[test]` items, so they
+# move no ids either.) Verified by generating on Darwin and diffing: the only
+# deltas were genuinely added tests. Windows is the platform that really does
+# drop `cfg(unix)` tests, and it stays refused.
 case "$(uname -s)" in
-  Linux) CANONICAL=1 ;;
-  *)     CANONICAL=0 ;;
+  Linux | Darwin) CANONICAL=1 ;;
+  *)              CANONICAL=0 ;;
 esac
 
 # The named release gates. Each is a claim the docket makes about the
@@ -170,7 +178,7 @@ generate() {
 case "$MODE" in
   --update)
     if [ "$CANONICAL" -ne 1 ]; then
-      echo "::error::the coverage manifest is generated on Linux — see the header." >&2
+      echo "::error::the coverage manifest is generated on a unix host — see the header." >&2
       echo "  This machine is $(uname -s), where cfg(unix) tests do not exist, so" >&2
       echo "  regenerating here would record their absence as coverage loss." >&2
       echo "  Push and let CI produce the corrected file: the 'coverage manifest'" >&2
@@ -193,7 +201,7 @@ case "$MODE" in
       fi
       # Leave the .actual file in place: the CI job uploads it so the fix is a
       # download rather than a hunt for a Linux machine.
-      echo "::error::coverage changed. If intended, run 'bash ci/coverage-manifest.sh --update' on Linux and commit the result, or take the artifact this job uploaded."
+      echo "::error::coverage changed. If intended, run 'bash ci/coverage-manifest.sh --update' on a unix host and commit the result, or take the artifact this job uploaded."
       exit 1
     fi
     ;;
