@@ -697,68 +697,74 @@
 /* ---------------------------------------------------------------------------
    The live Markdown editor.
 
-   Milkdown is headless on purpose: it ships a ProseMirror document and no
-   opinion about how it looks, so the editing surface wears the same `.prose`
-   layer the read-only renderer does. The rules below are only the ones a
-   contenteditable needs and static prose does not.
-
-   `@milkdown/kit` ships ProseMirror's own stylesheet, but importing it would
-   pull in a set of colours and a caret style we have already decided; these
-   four declarations are the parts that actually matter. */
-.milkdown-host {
+   CodeMirror edits the exact Markdown string Lait stores. The active line
+   reveals syntax; inactive lines use transaction-mapped decorations for a
+   calmer live preview without creating a second rich document model. */
+.markdown-editor-host {
   position: relative;
 }
 
-.milkdown .ProseMirror {
-  outline: none;
-  /* The document keeps its measure while typing — the parent caps width, and a
-     contenteditable will happily grow past it on a long unbroken token. */
-  overflow-wrap: anywhere;
-  white-space: pre-wrap;
+.codemirror-markdown .cm-editor {
+  min-height: inherit;
 }
 
-/* An empty document has nothing to click, so it needs a line to aim at.
-   This used to key off `.is-empty` and read `attr()` from the first paragraph,
-   and it had never once rendered: nothing sets that class — Milkdown's
-   placeholder plugin is not installed — and the attribute is on the ROOT, which
-   is where `editorViewOptionsCtx.attributes` puts everything. `attr()` only
-   reads the element it sits on, so a pseudo-element on the paragraph was asking
-   the paragraph for a value it never had.
+.codemirror-markdown .cm-content {
+  min-height: inherit;
+}
 
-   Both halves are fixed here. The empty test is structural rather than a class
-   we do not control: one paragraph holding nothing but the trailing break
-   ProseMirror always keeps. And the pseudo-element moves to the root, where the
-   attribute is. The float with zero height is the same trick as before — it
-   takes no vertical room, so the caret still lands on the first line rather
-   than under the hint. */
-.milkdown
-  .ProseMirror[data-placeholder]:has(
-    > p:first-child:last-child > br.ProseMirror-trailingBreak:only-child
-  )::before {
-  content: attr(data-placeholder);
+.codemirror-markdown .cm-md-heading {
+  color: var(--color-fg);
+  font-weight: 650;
+  letter-spacing: -0.015em;
+}
+
+.codemirror-markdown .cm-md-h1 {
+  font-size: 1.75rem;
+  line-height: 1.3;
+}
+
+.codemirror-markdown .cm-md-h2 {
+  font-size: 1.4rem;
+  line-height: 1.35;
+}
+
+.codemirror-markdown .cm-md-h3 {
+  font-size: 1.15rem;
+  line-height: 1.45;
+}
+
+.codemirror-markdown .cm-md-strong {
+  font-weight: 700;
+}
+
+.codemirror-markdown .cm-md-emphasis {
+  font-style: italic;
+}
+
+.codemirror-markdown .cm-md-inline-code {
+  border-radius: var(--radius-sm);
+  background: color-mix(in oklab, var(--color-active) 45%, transparent);
+  padding: 0.08em 0.25em;
+  font-family: var(--font-mono);
+  font-size: 0.88em;
+}
+
+.codemirror-markdown .cm-md-code-block {
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+}
+
+.codemirror-markdown .cm-md-quote {
+  border-left: 3px solid var(--color-line-strong);
   color: var(--color-mute);
-  float: left;
-  height: 0;
-  pointer-events: none;
-}
-
-/* ProseMirror marks the node the caret is in; nothing should move when it does.
-   Milkdown's own presets assume a theme package for these, and without them a
-   selected image or an active list item silently inherits browser defaults. */
-.milkdown .ProseMirror .ProseMirror-selectednode {
-  outline: 2px solid var(--color-accent);
-  border-radius: var(--radius-md);
-}
-
-.milkdown .ProseMirror-gapcursor:after {
-  border-top-color: var(--color-fg);
+  padding-left: 12px;
 }
 
 /* Multiplayer awareness lives in the document, where the action is. The
    widget has no width and therefore never reflows prose; its label follows the
    compact name flag Linear uses and the selection tint shares that identity
    colour without obscuring syntax or the native local selection. */
-.milkdown .remote-caret {
+.codemirror-markdown .remote-caret {
   display: inline-block;
   position: relative;
   width: 0;
@@ -770,7 +776,7 @@
   z-index: 2;
 }
 
-.milkdown .remote-caret-label {
+.codemirror-markdown .remote-caret-label {
   position: absolute;
   left: -2px;
   bottom: calc(100% + 2px);
@@ -789,52 +795,63 @@
   user-select: none;
 }
 
-.milkdown .remote-caret-uncertain {
+.codemirror-markdown .remote-caret-uncertain {
   opacity: 0.55;
 }
 
-.milkdown .remote-selection {
+.codemirror-markdown .remote-selection {
   background: color-mix(in oklab, var(--remote-color) 22%, transparent);
   border-radius: 2px;
 }
 
-/* GFM tables are editable here, so they get cell borders the read-only renderer
-   does not need — you have to see the cell you are in. */
-.milkdown .ProseMirror table {
-  width: 100%;
-  border-collapse: collapse;
-  table-layout: fixed;
+/* Optimistic text is a display-only projection over the acknowledged document.
+   The hidden range and inserted widget make the remote result visible without
+   mutating CodeMirror's document, so a local edit can never be based on text the CRDT has
+   not accepted yet. */
+.codemirror-markdown .remote-preview-insert {
+  border-bottom: 2px solid color-mix(in oklab, var(--remote-color) 72%, transparent);
+  background: color-mix(in oklab, var(--remote-color) 12%, transparent);
+  border-radius: 2px;
+  color: inherit;
+  pointer-events: none;
+  white-space: pre-wrap;
 }
 
-.milkdown .ProseMirror th,
-.milkdown .ProseMirror td {
-  border: 1px solid var(--color-line);
-  padding: 6px 12px;
-  vertical-align: top;
+/* If a concurrent deletion invalidates the exact anchor, keep the person tied
+   to the document they are editing instead of silently dropping them. The
+   coloured edge is the same positional vocabulary as the inline caret, with a
+   compact label that does not claim an exact character. */
+.remote-contexts {
+  position: absolute;
+  z-index: 3;
+  top: 0;
+  right: 0;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 4px;
+  max-width: 70%;
+  pointer-events: none;
 }
 
-.milkdown .ProseMirror th {
-  background: color-mix(in oklab, var(--color-active) 30%, transparent);
+.remote-context {
+  overflow: hidden;
+  max-width: 10rem;
+  padding: 2px 6px 2px 5px;
+  border-left: 3px solid var(--remote-color);
+  border-radius: 4px;
+  background: color-mix(in oklab, var(--remote-color) 13%, var(--color-bg));
+  color: var(--color-fg);
+  font-family: var(--font-sans);
+  font-size: 10px;
   font-weight: 600;
-  text-align: left;
+  line-height: 1.45;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.milkdown .ProseMirror .selectedCell {
-  background: color-mix(in oklab, var(--color-accent) 12%, transparent);
-}
-
-/* A fenced block in the editor is still a `<pre>`, but it is being typed into,
-   so it takes the panel's shape without Shiki's colour — highlighting a buffer
-   under the caret would fight every keystroke. The read-only renderer keeps the
-   coloured version. */
-.milkdown .ProseMirror pre {
-  background: var(--color-bg);
-  border: 1px solid var(--color-line);
-  border-radius: var(--radius-lg);
-  padding: 12px;
-  font-family: var(--font-mono);
-  font-size: 0.8125rem;
-  overflow-x: auto;
+.remote-context-uncertain {
+  opacity: 0.55;
 }
 
 /* A focused issue becomes a document with a stable Linear-style property rail.

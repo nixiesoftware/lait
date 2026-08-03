@@ -15,10 +15,10 @@
  * the correct response is to stop asking and let every surface draw without
  * presence. `unavailable` is that state, and it is held rather than thrown.
  *
- * **This module does not read anything.** It folds. The engine polls the live
- * view once per tick for the whole server and pushes the answer down the
- * socket's transient lane, so a hundred tabs on one issue cost one read; a
- * second reader here would be a second poller asking the same question with its
+ * **This module does not read anything.** It folds. The engine subscribes to
+ * each live view once for the whole server and pushes changes down the socket's
+ * transient lane, so a hundred tabs on one issue cost one stream; a second
+ * reader here would be a second subscription asking the same question with its
  * own generation, and for `signals` it would be worse than duplication — that
  * request drains, so two callers split the set and neither sees the whole.
  *
@@ -39,13 +39,22 @@ import { useCallback, useEffect, useMemo } from "react";
 import {
   openSocket,
   type BrowserCursor,
+  type BrowserTextPreview,
   type Socket,
   type SocketEvent,
   type Question,
 } from "./socket";
 import { useWorldResource, useWorldViewStore } from "./core/worldViewReact";
 import type { ResourceKey, WorldViewStore } from "./core/worldViewStore";
-import type { CaretPosition, LiveEntry, LiveScope, Response, SignalEntry } from "./types";
+import type {
+  CaretPosition,
+  LiveEntry,
+  LiveScope,
+  Response,
+  SignalEntry,
+  TextPreview,
+  WorldRequest,
+} from "./types";
 
 /** What a surface draws from. */
 export interface LiveState {
@@ -209,10 +218,45 @@ export function carets(entries: LiveEntry[]): CaretRow[] {
     }));
 }
 
-/** Only two scopes name a field; the rest are about a document, not a place in
- *  one. */
+export interface PreviewRow {
+  actor: string;
+  field: string;
+  preview: TextPreview;
+  uncertain: boolean;
+}
+
+/** The newest cumulative preview per actor and field. Intermediate datagrams
+ * are intentionally irrelevant: every row starts from a durable revision. */
+export function previews(entries: LiveEntry[]): PreviewRow[] {
+  const freshest = new Map<string, PreviewRow & { age: number }>();
+  for (const entry of entries) {
+    if (entry.kind !== "preview" || !entry.preview) continue;
+    const field = fieldOf(entry.scope);
+    if (field === null) continue;
+    const key = `${entry.actor}\u0000${field}`;
+    const held = freshest.get(key);
+    if (held && held.age <= entry.age_ms) continue;
+    freshest.set(key, {
+      actor: entry.actor,
+      field,
+      preview: entry.preview,
+      uncertain: entry.uncertain,
+      age: entry.age_ms,
+    });
+  }
+  return [...freshest.values()]
+    .sort((a, b) => a.age - b.age || a.actor.localeCompare(b.actor))
+    .map(({ actor, field, preview, uncertain }) => ({ actor, field, preview, uncertain }));
+}
+
+/** The editor scopes name a field; the rest are about a document, not a place
+ * in one. */
 function fieldOf(scope: LiveScope): string | null {
-  if (scope.scope === "text_caret" || scope.scope === "typing") return scope.field;
+  if (
+    scope.scope === "text_caret"
+    || scope.scope === "text_preview"
+    || scope.scope === "typing"
+  ) return scope.field;
   return null;
 }
 
@@ -314,6 +358,25 @@ export const cursorPublishMs = 80;
 export interface EditorAwareness {
   cursor: BrowserCursor | null;
   typing: boolean;
+  preview?: BrowserTextPreview | null;
+  /** The editor position belongs to text that has not reached the local CRDT
+   * replica yet. Keep the last published anchor instead of minting this scalar
+   * offset against the wrong document revision. */
+  defer?: boolean;
+}
+
+/** Whether an absolute editor offset can be turned into a CRDT anchor now.
+ *
+ * A blur is always publishable because it retires a position. Every other
+ * state must describe the exact text the local replica has acknowledged, with
+ * no writes still queued between the two. */
+export function awarenessReadyFor(
+  snapshot: string,
+  settled: string,
+  pending: number,
+  retiring: boolean,
+): boolean {
+  return retiring || (pending === 0 && snapshot === settled);
 }
 
 /**
@@ -433,7 +496,7 @@ export type SocketOpener = (onEvent: (event: SocketEvent) => void) => Socket;
  * exactly right for a browser drawing one issue at a time.
  *
  * The space and the question are held apart because they fail apart. The
- * question is what the engine polls a live view for; the space is what it
+ * question is what the engine subscribes to a live view for; the space is what it
  * drains signals for, and a tab that closed a detail pane has stopped asking
  * who is on an issue without leaving the room it asked from.
  */
@@ -450,7 +513,7 @@ export class LivePlane {
    */
   private attached: string | null = null;
   private question: Question = null;
-  private awareness: EditorAwareness = { cursor: null, typing: false };
+  private awareness: EditorAwareness = { cursor: null, typing: false, preview: null };
   private awarenessTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
@@ -473,7 +536,7 @@ export class LivePlane {
     const changed = this.question?.space !== question?.space || this.question?.issue !== question?.issue;
     this.question = question;
     if (changed) {
-      this.awareness = { cursor: null, typing: false };
+      this.awareness = { cursor: null, typing: false, preview: null };
       if (this.awarenessTimer !== null) clearTimeout(this.awarenessTimer);
       this.awarenessTimer = null;
     }
@@ -485,7 +548,33 @@ export class LivePlane {
    * linger for a network round. */
   aware(issue: string, awareness: EditorAwareness): void {
     if (!this.question || this.question.issue !== issue) return;
-    this.awareness = awareness;
+    const nextPreview = awareness.preview ?? null;
+    const previewChanged = !samePreview(this.awareness.preview ?? null, nextPreview);
+    if (awareness.defer) {
+      // A transaction-driven selection update can beat the splice RPC that
+      // makes its scalar offset meaningful. Cancel any unsent offset, but keep
+      // the last declaration: its CRDT anchor remains valid while text moves.
+      if (this.awarenessTimer !== null) clearTimeout(this.awarenessTimer);
+      this.awarenessTimer = null;
+      if (previewChanged) {
+        this.awareness = { ...this.awareness, preview: nextPreview };
+        this.declare();
+      }
+      return;
+    }
+    this.awareness = {
+      cursor: awareness.cursor,
+      typing: awareness.typing,
+      preview: nextPreview,
+    };
+    // Preview traffic is already cumulative/coalesced by revision. Send it to
+    // the standing socket now; another 80 ms cursor window would be pure lag.
+    if (previewChanged) {
+      if (this.awarenessTimer !== null) clearTimeout(this.awarenessTimer);
+      this.awarenessTimer = null;
+      this.declare();
+      return;
+    }
     if (awareness.cursor === null && !awareness.typing) {
       if (this.awarenessTimer !== null) clearTimeout(this.awarenessTimer);
       this.awarenessTimer = null;
@@ -502,12 +591,21 @@ export class LivePlane {
     }, cursorPublishMs);
   }
 
+  /** Use the ordered control lane for editor durability as well as presence. */
+  mutate<R extends Response = Response>(space: string, request: WorldRequest): Promise<R> {
+    this.attach(space);
+    this.declare();
+    if (this.socket === null) return Promise.reject(new Error("the editor connection is unavailable"));
+    return this.socket.mutate<R>(space, request);
+  }
+
   private declare(): void {
     const declared = this.question
       ? {
           ...this.question,
           ...(this.awareness.cursor ? { cursor: this.awareness.cursor } : {}),
           ...(this.awareness.typing ? { typing: true } : {}),
+          ...(this.awareness.preview ? { preview: this.awareness.preview } : {}),
         }
       : (this.attached === null ? null : { space: this.attached });
     this.slots.ask(this.question);
@@ -534,6 +632,19 @@ export class LivePlane {
     // including the one that is about to work.
     if (event.liveness === "retrying" || event.liveness === "stale") this.slots.silence();
   }
+}
+
+function samePreview(a: BrowserTextPreview | null, b: BrowserTextPreview | null): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return a.field === b.field
+    && a.base === b.base
+    && a.result === b.result
+    && a.index === b.index
+    && a.delete === b.delete
+    && a.insert === b.insert
+    && a.anchor === b.anchor
+    && a.focus === b.focus;
 }
 
 const planes = new WeakMap<WorldViewStore, LivePlane>();
@@ -595,10 +706,24 @@ export function useLiveAwareness(issue: string): (awareness: EditorAwareness) =>
   const store = useWorldViewStore();
   const plane = useMemo(() => planeFor(store), [store]);
   useEffect(
-    () => () => plane.aware(issue, { cursor: null, typing: false }),
+    () => () => plane.aware(issue, { cursor: null, typing: false, preview: null }),
     [plane, issue],
   );
   return useCallback((awareness) => plane.aware(issue, awareness), [plane, issue]);
+}
+
+/** Ordered editor RPCs over the same native socket carrying Live updates. */
+export function useLiveMutation(): <R extends Response = Response>(
+  space: string,
+  request: WorldRequest,
+) => Promise<R> {
+  const store = useWorldViewStore();
+  const plane = useMemo(() => planeFor(store), [store]);
+  return useCallback(
+    <R extends Response = Response>(space: string, request: WorldRequest) =>
+      plane.mutate<R>(space, request),
+    [plane],
+  );
 }
 
 /** What one space has delivered, and how to say it has been dealt with. */

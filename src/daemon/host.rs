@@ -118,6 +118,14 @@ impl Client {
             reader: BufReader::new(stream),
         })
     }
+
+    pub async fn subscribe_live(
+        &self,
+        route: ControlRoute,
+        issue: Option<String>,
+    ) -> Result<control::LiveSubscription> {
+        control::subscribe_live_routed(&self.home, route, issue).await
+    }
 }
 
 /// A catalog-wide stream of Orbit-tagged invalidations.
@@ -490,10 +498,20 @@ impl Listener {
             (route @ ControlRoute::Orbit { .. }, Request::Subscribe { since }) => {
                 self.stream_space(write_half, route, since).await;
             }
+            (route @ ControlRoute::Orbit { .. }, Request::LiveSubscribe { issue }) => {
+                self.stream_live(write_half, route, issue).await;
+            }
             (ControlRoute::World { .. }, Request::Subscribe { .. }) => {
                 let _ = write_line(
                     &mut write_half,
                     &Response::err("subscriptions require a Space route"),
+                )
+                .await;
+            }
+            (ControlRoute::World { .. }, Request::LiveSubscribe { .. }) => {
+                let _ = write_line(
+                    &mut write_half,
+                    &Response::err("Live subscriptions require a Space route"),
                 )
                 .await;
             }
@@ -583,6 +601,57 @@ impl Listener {
                     Ok(None) => break,
                     Err(error) => {
                         tracing::warn!(%error, "proxied Space subscription ended");
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    async fn stream_live(
+        &self,
+        mut write_half: tokio::io::WriteHalf<LocalStream>,
+        route: ControlRoute,
+        issue: Option<String>,
+    ) {
+        let ControlRoute::Orbit { address } = &route else {
+            return;
+        };
+        let resolved = match self.router.place_address(address).await {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                let _ = write_line(&mut write_half, &Response::err(format!("{error:#}"))).await;
+                return;
+            }
+        };
+        let mut subscription =
+            match control::subscribe_live_routed(&resolved.home, route, issue).await {
+                Ok(subscription) => subscription,
+                Err(error) => {
+                    let _ = write_line(&mut write_half, &Response::err(format!("{error:#}"))).await;
+                    return;
+                }
+            };
+        let mut stop = self.stopping.subscribe();
+        loop {
+            if *stop.borrow() {
+                break;
+            }
+            tokio::select! {
+                changed = stop.changed() => {
+                    if changed.is_err() || *stop.borrow() {
+                        break;
+                    }
+                },
+                next = subscription.next() => match next {
+                    Ok(Some(view)) => {
+                        if write_line(&mut write_half, &view).await.is_err() {
+                            break;
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(error) => {
+                        tracing::warn!(%error, "proxied Live subscription ended");
                         break;
                     }
                 }

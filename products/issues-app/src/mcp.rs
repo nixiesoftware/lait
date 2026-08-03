@@ -1052,9 +1052,11 @@ mod tests {
     ///
     /// Two kinds, and both are named one by one rather than skipped by shape.
     /// `inbox` and `access_plan` are driven through a LOCAL invocation, so the
-    /// World call a tool ends up making is not the one it returns. The rest have
-    /// no agent surface at all: they shipped on the CLI and the web client and
-    /// were never given a tool.
+    /// World call a tool ends up making is not the one it returns. The text
+    /// splice and checkpoint commands are transport primitives for the live web
+    /// editor, not semantic agent actions. The rest have no agent surface at
+    /// all: they shipped on the CLI and the web client and were never given a
+    /// tool.
     ///
     /// Writing them out is what makes the guard work. A command added after this
     /// list is not on it, so it must arrive with a tool or fail the build — and
@@ -1072,6 +1074,8 @@ mod tests {
         "initiative_set",
         "issue_cycle",
         "issue_milestone",
+        "issue_text_checkpoint",
+        "issue_text_splice",
         "label_delete",
         "label_edit",
         "milestone_list",

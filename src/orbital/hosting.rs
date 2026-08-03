@@ -1328,6 +1328,7 @@ impl StationHost {
         issues: &[String],
         carets: &[crate::control::WatchingCaret],
         typing: &[crate::control::WatchingTyping],
+        previews: &[crate::control::WatchingPreview],
     ) -> Response {
         use runtime::plane::live::LocalPublication;
         use runtime::transient::{Target, TransientPayload};
@@ -1339,6 +1340,29 @@ impl StationHost {
         // moving under somebody's hands.
         let mut candidates = Vec::new();
         let issue_set: std::collections::BTreeSet<_> = issues.iter().map(String::as_str).collect();
+        for preview in previews {
+            if !issue_set.contains(preview.issue.as_str()) || preview.field != "description" {
+                continue;
+            }
+            candidates.push(LocalPublication {
+                scope: Target::Preview {
+                    world: world.clone(),
+                    body: crate::world::contract::issue_body_id(&preview.issue).as_bytes(),
+                    field: preview.field.clone(),
+                },
+                payload: TransientPayload::Preview {
+                    preview: runtime::transient::TextPreview {
+                        base: preview.base.clone(),
+                        result: preview.result.clone(),
+                        index: preview.index,
+                        delete: preview.delete,
+                        insert: preview.insert.clone(),
+                        anchor: preview.anchor,
+                        focus: preview.focus,
+                    },
+                },
+            });
+        }
         for caret in carets {
             if !issue_set.contains(caret.issue.as_str()) || caret.field != "description" {
                 continue;
@@ -1426,11 +1450,13 @@ impl StationHost {
                 since_generation,
                 issue,
             } => self.live(since_generation, issue.as_deref()),
+            Request::LiveSubscribe { .. } => Response::err("live_subscribe is a streaming request"),
             Request::Watching {
                 issues,
                 carets,
                 typing,
-            } => self.watching(&issues, &carets, &typing),
+                previews,
+            } => self.watching(&issues, &carets, &typing, &previews),
             Request::Signals => self.drain_signals(),
             Request::Sync => self.sync(),
             other => Response::err(format!("request is not a Station operation: {other:?}")),
@@ -1626,6 +1652,15 @@ impl StationHost {
     /// durable Neighbor registry's reachability, this is the Live plane's
     /// transient table, which nothing journals and nothing replays.
     fn live(&self, since_generation: Option<u64>, issue: Option<&str>) -> Response {
+        self.live_snapshot(since_generation, issue).0
+    }
+
+    /// One Live projection plus the next derived age/partial boundary.
+    fn live_snapshot(
+        &self,
+        since_generation: Option<u64>,
+        issue: Option<&str>,
+    ) -> (Response, Option<Duration>) {
         let handle = self.station.live();
         // The issue's Body id, by the same one-way derivation the Issues World
         // commits under. It only runs this direction, which is why an unscoped
@@ -1655,18 +1690,24 @@ impl StationHost {
         // nothing more can flip, and the cheap answer is true again.
         if since_generation == Some(view.generation) && entries.iter().all(|entry| entry.uncertain)
         {
-            return Response::LiveUnchanged {
+            return (
+                Response::LiveUnchanged {
+                    generation: view.generation,
+                },
+                view.refresh_in,
+            );
+        }
+        (
+            Response::Live {
                 generation: view.generation,
-            };
-        }
-        Response::Live {
-            generation: view.generation,
-            partial: view.partial,
-            entries: entries
-                .into_iter()
-                .filter_map(|entry| self.live_entry(entry))
-                .collect(),
-        }
+                partial: view.partial,
+                entries: entries
+                    .into_iter()
+                    .filter_map(|entry| self.live_entry(entry))
+                    .collect(),
+            },
+            view.refresh_in,
+        )
     }
 
     /// One transient row, or nothing when its Station names no actor here.
@@ -1682,6 +1723,18 @@ impl StationHost {
             uncertain: entry.uncertain,
             caret: entry.caret.map(caret_position),
             focus: entry.focus.map(caret_position),
+            preview: entry
+                .preview
+                .as_ref()
+                .map(|preview| crate::control::TextPreview {
+                    base: preview.base.clone(),
+                    result: preview.result.clone(),
+                    index: preview.index,
+                    delete: preview.delete,
+                    insert: preview.insert.clone(),
+                    anchor: preview.anchor,
+                    focus: preview.focus,
+                }),
         })
     }
 
@@ -2613,6 +2666,10 @@ impl StationHost {
             self.stream_subscribe(write_half).await;
             return;
         }
+        if let Request::LiveSubscribe { issue } = req {
+            self.stream_live(write_half, issue).await;
+            return;
+        }
         // Stop is a real teardown request: answer, then signal the serve loop
         // to return (the caller decides whether to exit the process).
         let stop = matches!(req, Request::Stop);
@@ -2795,6 +2852,43 @@ impl StationHost {
         }
     }
 
+    /// Stream the Live table on generation changes and on the exact derived
+    /// deadline where a row becomes uncertain or a partial marker clears.
+    async fn stream_live(
+        self: &Arc<Self>,
+        mut write_half: tokio::io::WriteHalf<LocalStream>,
+        issue: Option<String>,
+    ) {
+        let handle = self.station.live();
+        // Subscribe before the first snapshot, closing the read/subscribe gap.
+        let mut generations = handle.subscribe_generation();
+        let mut stop_rx = self.stop_tx.subscribe();
+        loop {
+            let (response, refresh_in) = self.live_snapshot(None, issue.as_deref());
+            if write_line_half(&mut write_half, &response).await.is_err() {
+                break;
+            }
+            tokio::select! {
+                changed = stop_rx.changed() => {
+                    if changed.is_err() || *stop_rx.borrow() {
+                        break;
+                    }
+                }
+                changed = generations.changed() => {
+                    if changed.is_err() {
+                        break;
+                    }
+                }
+                _ = async {
+                    match refresh_in {
+                        Some(delay) => tokio::time::sleep(delay).await,
+                        None => std::future::pending::<()>().await,
+                    }
+                } => {}
+            }
+        }
+    }
+
     /// Latch teardown: the atomic (for worker threads), the watch (for live
     /// subscriptions), and the serve loop's notify.
     fn begin_stop(&self) {
@@ -2834,6 +2928,11 @@ fn live_scope(scope: &runtime::transient::Target) -> crate::control::LiveScope {
             body: render_body(body),
             field: field.clone(),
         },
+        Target::Preview { world, body, field } => LiveScope::Preview {
+            world: world.clone(),
+            body: render_body(body),
+            field: field.clone(),
+        },
         Target::Typing { world, body, field } => LiveScope::Typing {
             world: world.clone(),
             body: render_body(body),
@@ -2866,6 +2965,7 @@ fn transient_kind(kind: runtime::transient::TransientKind) -> &'static str {
         TransientKind::Presence => "presence",
         TransientKind::Caret => "caret",
         TransientKind::Selection => "selection",
+        TransientKind::Preview => "preview",
         TransientKind::Typing => "typing",
         TransientKind::Residency => "residency",
     }

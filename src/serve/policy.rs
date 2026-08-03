@@ -29,6 +29,7 @@ pub fn is_read(req: &Request) -> bool {
         | Request::Log { .. }
         | Request::Who
         | Request::Live { .. }
+        | Request::LiveSubscribe { .. }
         // Declaring what you are looking at is a read, even though peers see the
         // result. Being present is a consequence of looking, and a reader who
         // cannot write is still in the room — Linear shows your cursor in a

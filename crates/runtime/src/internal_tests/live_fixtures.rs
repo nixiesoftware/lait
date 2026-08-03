@@ -10,8 +10,9 @@ use tokio::time::Instant;
 
 use runtime::budget::{deadline, slots};
 use runtime::transient::{
-    AdmitOutcome, Invalid, LiveControl, Target, TransientItem, TransientKind, TransientPayload,
-    TransientStore, MAX_ANCHOR_BYTES, MAX_SCOPE_FIELD_BYTES, MAX_TRANSIENT_ITEM_BYTES,
+    AdmitOutcome, Invalid, LiveControl, Target, TextPreview, TransientItem, TransientKind,
+    TransientPayload, TransientStore, MAX_ANCHOR_BYTES, MAX_PREVIEW_INSERT_BYTES,
+    MAX_SCOPE_FIELD_BYTES, MAX_TRANSIENT_ITEM_BYTES,
 };
 
 const EPOCH: [u8; 16] = [7u8; 16];
@@ -29,6 +30,28 @@ fn caret_scope(field: &str) -> Target {
         world: "com.example.notes".into(),
         body: [1u8; 16],
         field: field.into(),
+    }
+}
+
+fn preview_scope(field: &str) -> Target {
+    Target::Preview {
+        world: "com.example.notes".into(),
+        body: [1u8; 16],
+        field: field.into(),
+    }
+}
+
+fn preview(insert: String) -> TransientPayload {
+    TransientPayload::Preview {
+        preview: TextPreview {
+            base: "0".repeat(32),
+            result: "abcdef0123456789abcdef0123456789".into(),
+            index: 4,
+            delete: 1,
+            insert,
+            anchor: Some(5),
+            focus: Some(5),
+        },
     }
 }
 
@@ -122,6 +145,8 @@ fn a_payload_a_scope_cannot_carry_is_refused() {
         ),
         (caret_scope("text"), TransientPayload::Presence),
         (caret_scope("text"), TransientPayload::Typing),
+        (caret_scope("text"), preview("x".into())),
+        (preview_scope("text"), TransientPayload::Presence),
         (
             Target::Typing {
                 world: "com.example.notes".into(),
@@ -143,6 +168,40 @@ fn a_payload_a_scope_cannot_carry_is_refused() {
         );
     }
     assert!(store.is_empty());
+}
+
+#[test]
+fn a_text_preview_is_bounded_and_revision_keyed() {
+    let mut store = TransientStore::new();
+    let now = Instant::now();
+    let maximal = item(
+        preview_scope("text"),
+        preview("x".repeat(MAX_PREVIEW_INSERT_BYTES)),
+        1,
+    );
+    assert_eq!(store.admit(&maximal, &EPOCH, now), AdmitOutcome::Stored);
+    assert!(maximal.encode().len() <= MAX_TRANSIENT_ITEM_BYTES);
+
+    let oversized = item(
+        preview_scope("text"),
+        preview("x".repeat(MAX_PREVIEW_INSERT_BYTES + 1)),
+        2,
+    );
+    assert_eq!(
+        store.admit(&oversized, &EPOCH, now),
+        AdmitOutcome::Refused(Invalid::Bounds)
+    );
+
+    let mut malformed = preview("x".into());
+    let TransientPayload::Preview { preview } = &mut malformed else {
+        unreachable!()
+    };
+    preview.base = "ABCDEF0123456789ABCDEF0123456789".into();
+    assert_eq!(
+        store.admit(&item(preview_scope("text"), malformed, 3), &EPOCH, now),
+        AdmitOutcome::Refused(Invalid::Bounds),
+        "revision tokens have one lowercase-hex spelling"
+    );
 }
 
 #[test]

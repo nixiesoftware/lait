@@ -97,6 +97,24 @@ pub enum IssuesRequest {
         #[serde(default)]
         estimate: Option<String>,
     },
+    /// Apply one Unicode-scalar splice to the collaborative issue body.
+    ///
+    /// This is the live-editor write path. Unlike `IssueEdit.description`, it
+    /// preserves the user's local operation so concurrent insertions can be
+    /// merged by the text CRDT instead of being collapsed into competing
+    /// whole-document replacements.
+    IssueTextSplice {
+        reff: String,
+        index: u64,
+        delete: u64,
+        insert: String,
+    },
+    /// Record one human-readable history entry after a burst of live splices.
+    /// This is deliberately separate from replication: its quiet window must
+    /// never delay text reaching peers.
+    IssueTextCheckpoint {
+        reff: String,
+    },
     IssueMove {
         reff: String,
         #[serde(default)]
@@ -711,6 +729,8 @@ impl IssuesRequest {
             | Packet { .. } => Access::Query,
             IssueNew { .. }
             | IssueEdit { .. }
+            | IssueTextSplice { .. }
+            | IssueTextCheckpoint { .. }
             | IssueMove { .. }
             | Assign { .. }
             | Label { .. }
@@ -923,5 +943,41 @@ mod tests {
             .access(),
             Access::Command
         );
+        assert_eq!(
+            IssuesRequest::IssueTextSplice {
+                reff: "ORB-1".into(),
+                index: 4,
+                delete: 1,
+                insert: "🙂".into(),
+            }
+            .access(),
+            Access::Command
+        );
+    }
+
+    #[test]
+    fn live_text_commands_keep_unicode_scalar_coordinates_on_the_wire() {
+        let splice = IssuesRequest::IssueTextSplice {
+            reff: "ORB-1".into(),
+            index: 4,
+            delete: 1,
+            insert: "🙂".into(),
+        };
+        let json = serde_json::to_value(&splice).unwrap();
+        assert_eq!(json["cmd"], "issue_text_splice");
+        assert_eq!(json["index"], 4);
+        assert_eq!(json["delete"], 1);
+        assert_eq!(json["insert"], "🙂");
+        assert!(matches!(
+            serde_json::from_value(json).unwrap(),
+            IssuesRequest::IssueTextSplice { index: 4, delete: 1, insert, .. }
+                if insert == "🙂"
+        ));
+
+        let checkpoint = serde_json::to_value(IssuesRequest::IssueTextCheckpoint {
+            reff: "ORB-1".into(),
+        })
+        .unwrap();
+        assert_eq!(checkpoint["cmd"], "issue_text_checkpoint");
     }
 }

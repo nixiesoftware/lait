@@ -711,6 +711,46 @@ async fn world_rpc(
     }
 }
 
+/// Execute the latency-sensitive Issues editor calls through the exact same
+/// package adapter as the HTTP endpoint, but return its JSON body to the
+/// standing browser socket. Keeping this as a narrow allowlist means the
+/// socket cannot accidentally become a second, prompt-less RPC surface.
+async fn socket_editor_rpc(
+    app: Arc<App>,
+    space: String,
+    input: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
+    let command = input.get("cmd").and_then(serde_json::Value::as_str);
+    if !matches!(
+        command,
+        Some("issue_text_splice" | "issue_text_checkpoint" | "issue_view")
+    ) {
+        return (
+            StatusCode::FORBIDDEN,
+            err_json(
+                "the session socket accepts editor requests only",
+                ErrorKind::Error,
+            )
+            .0,
+        );
+    }
+    let response = world_rpc(
+        State(app),
+        Path((space, "issues".to_owned())),
+        Query(RpcQuery { confirm: false }),
+        Json(input),
+    )
+    .await;
+    let status = response.status();
+    let body = match axum::body::to_bytes(response.into_body(), socket::MAX_FRAME_BYTES).await {
+        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|_| {
+            err_json("the editor request returned invalid JSON", ErrorKind::Error).0
+        }),
+        Err(_) => err_json("the editor response was too large", ErrorKind::Error).0,
+    };
+    (status, body)
+}
+
 async fn rpc(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,
