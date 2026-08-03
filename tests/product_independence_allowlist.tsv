@@ -1,0 +1,35 @@
+# Product-independence allowlist — path<TAB>symbol<TAB>owning phase.
+#
+# The navigation shell hosts Worlds; it must not name one. Each row is one
+# product SYMBOL a shell file still names, owned by the phase that removes it.
+#
+# Rows are per-symbol, not per-file, for two reasons. A file-keyed row lets an
+# already-listed file absorb unlimited new references invisibly — and these are
+# exactly the files phases B/C are about to churn. And a symbol survives
+# re-export: laundering `issues::dto::DirtyProject` into
+# `crate::control::DirtyProject` decouples nothing and records the same row, so
+# the ratchet cannot be turned backwards by relabelling a path.
+#
+# The gate fails on a NEW row and on a STALE one, so this list only shrinks.
+
+# Phase D (permanent until the crate split) — THE composition root.
+# This is the one file in src/** that is allowed to name a product, and its
+# whole job is to. C1 moved these eight symbols here from src/world/mod.rs
+# unchanged - the gate reported them stale in one file and new in the other,
+# symbol for symbol, which is what proves it was a relocation and not a
+# laundering. When the shell becomes its own crate this file moves to the
+# binary and the library is product-free outright, at which point these rows go.
+src/composition.rs	CatalogScope	D
+src/composition.rs	IssuesCallHandler	D
+src/composition.rs	implementation_id	D
+src/composition.rs	issues	D
+src/composition.rs	issues_app	D
+src/composition.rs	observation	D
+src/composition.rs	package	D
+src/composition.rs	ring_state	D
+src/composition.rs	status	D
+
+# Phase C2 — per-World lifecycle hooks, hardcoded to the Issues product.
+src/world/lifecycle.rs	InitialProject	C2
+src/world/lifecycle.rs	IssuesBootstrapRecord	C2
+src/world/lifecycle.rs	for_space	C2

@@ -45,6 +45,7 @@ mod orbital_product_parity;
 mod orbital_router;
 mod orbital_two_node;
 mod product_features;
+mod product_independence;
 mod product_schema;
 mod restart_reconnect;
 mod seed_registry;
