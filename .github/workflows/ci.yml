@@ -297,20 +297,105 @@ jobs:
       # `nextest list` compiles the test targets but runs nothing, so this
       # costs a build and seconds of walking, not a suite.
       - name: Assert the coverage manifest is current
+        id: manifest
+        continue-on-error: true
         shell: bash
         run: bash ci/coverage-manifest.sh --check
 
       # The manifest is a Linux artifact — cfg(unix) tests do not exist on
       # Windows, so regenerating there records their absence as coverage loss.
-      # Rather than telling a developer on another OS to find a Linux box, hand
-      # them the file this job just computed.
+      # That made every test-adding PR from a non-Linux machine a two-round
+      # trip: push, watch this fail, download the artifact, commit, push again.
+      #
+      # So this job commits the file it already computed. Adding a test cannot
+      # narrow coverage, and the refresh lands as a diff in the PR like any
+      # other, so the property this gate exists for — a deleted test is a
+      # deleted line, visible in review — is untouched.
+      #
+      # The token is the App's, not `GITHUB_TOKEN`: pushes made with the latter
+      # deliberately do not trigger workflows, which would leave the PR head on
+      # a commit with no check runs and the required checks expected-but-never-
+      # reported. The App push re-runs CI, the manifest is then current, and the
+      # second run agrees and pushes nothing.
+      # `secrets` is not available in a step `if`, so the App's presence is
+      # read into an output first — the same shape `publish-scoop` uses.
+      - name: Can this run push the fix?
+        id: pushable
+        if: >-
+          steps.manifest.outcome == 'failure'
+          && github.event_name == 'pull_request'
+          && github.event.pull_request.head.repo.full_name == github.repository
+        shell: bash
+        env:
+          APP_ID: ${{ secrets.RUNNERS_APP_ID }}
+        run: |
+          if [ -n "${APP_ID:-}" ]; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::RUNNERS_APP_ID not set — leaving the corrected manifest as an artifact."
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Mint a token that can push to this PR's branch
+        id: token
+        if: steps.pushable.outputs.ok == 'true'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+        with:
+          app-id: ${{ secrets.RUNNERS_APP_ID }}
+          private-key: ${{ secrets.RUNNERS_APP_PRIVATE_KEY }}
+          owner: nixiesoftware
+          repositories: lait
+
+      - name: Refresh the coverage manifest on the branch
+        id: refresh
+        if: steps.token.outcome == 'success'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          BRANCH: ${{ github.event.pull_request.head.ref }}
+        run: |
+          set -euo pipefail
+          # The file was computed against the merge commit, which is what this
+          # gate judges everywhere — so that is what gets recorded.
+          corrected="$(mktemp)"
+          cp ci/coverage-manifest.txt.actual "$corrected"
+          git fetch --depth=1 origin "$BRANCH"
+          git checkout -B "$BRANCH" FETCH_HEAD
+          # A loop-stop that does not depend on the push not re-triggering:
+          # if the tip is already a refresh and the manifest is STILL stale,
+          # something is oscillating and a human should look.
+          if git log -1 --pretty=%s | grep -q '^test: refresh the coverage manifest$'; then
+            echo "::error::the manifest is still stale one commit after a refresh — not looping."
+            exit 1
+          fi
+          cp "$corrected" ci/coverage-manifest.txt
+          git config user.name  "nixie-runners[bot]"
+          git config user.email "nixie-runners[bot]@users.noreply.github.com"
+          git add ci/coverage-manifest.txt
+          git commit -m 'test: refresh the coverage manifest'
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:${BRANCH}"
+          echo "::notice::refreshed the coverage manifest on ${BRANCH} — pull before pushing again."
+
+      # Fork PRs cannot be pushed to, and a run with no App secret has no token
+      # to push with. Both keep the original path: hand over the file.
       - name: Upload the corrected manifest
-        if: failure()
+        if: steps.manifest.outcome == 'failure' && steps.refresh.outcome != 'success'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: coverage-manifest
           path: ci/coverage-manifest.txt.actual
           if-no-files-found: ignore
+
+      # The gate still fails the run that found it stale. The refresh above is
+      # a convenience, not an amnesty: this run tested a tree whose recorded
+      # coverage was wrong, and the run that matters is the one CI starts on
+      # the refreshed commit.
+      - name: Fail if the manifest was stale
+        if: steps.manifest.outcome == 'failure'
+        shell: bash
+        run: |
+          echo "::error::the coverage manifest was stale for this commit."
+          exit 1
 
   # The formats gate carried one thing the workspace suite does not: it replays
   # the committed schema examples through a NON-Rust JSON Schema 2020-12
