@@ -46,15 +46,20 @@ import {
   type NameResolver,
 } from "../core/activity";
 import { codeUnitSpan } from "../core/anchor";
+import { extendTextSplice, textRevision, textSplice } from "../core/textPreview";
 import {
+  awarenessReadyFor,
   caretPhrase,
   carets,
+  previews,
   typists,
   useLiveAwareness,
+  useLiveMutation,
   useLiveTable,
   watching,
   type LiveState,
 } from "../live";
+import type { BrowserTextPreview } from "../socket";
 import type { Field as PredictField } from "../core/overlay";
 import type { IssueField } from "../core/registry";
 import { inverseWorkAction, workTarget } from "../core/workflow";
@@ -84,7 +89,12 @@ import { avatarColor, catalogColor } from "./colors";
 import { PriorityIcon, ProgressRing, StatusIcon } from "./icons";
 import { Markdown } from "./Markdown";
 import { MarkdownEditor } from "./MarkdownEditor";
-import type { RemoteCursor } from "./MilkdownEditor";
+import type {
+  RemoteContext,
+  RemoteCursor,
+  RemoteTextPreview,
+  TextSplice,
+} from "./CodeMirrorEditor";
 import { DatePicker } from "./DatePicker";
 import { NewLabelDialog } from "./NewLabel";
 import { Combobox, type Option } from "./Picker";
@@ -168,6 +178,7 @@ export function IssueDetail({
   const issue = detail.issue;
   const live = useLiveTable(spaceId, issue?.doc_id ?? null);
   const publishAwareness = useLiveAwareness(issue?.doc_id ?? "");
+  const liveMutation = useLiveMutation();
   const events = detail.history.data ?? [];
   const graph = detail.graph.data ?? null;
   const milestones = detail.milestones.data ?? [];
@@ -222,17 +233,6 @@ export function IssueDetail({
     el.style.height = "auto";
     el.style.height = `${el.scrollHeight}px`;
   }, [draft]);
-
-  const edit = useCallback(
-    async (patch: { title?: string; description?: string }) => {
-      try {
-        await rpc(spaceId, { cmd: "issue_edit", reff, ...patch });
-      } catch (e) {
-        onError(e instanceof Error ? e.message : String(e));
-      }
-    },
-    [spaceId, reff, onError],
-  );
 
   /** Writes with no predictable row field — the doorbell is the only feedback. */
   const send = useCallback(
@@ -871,7 +871,30 @@ export function IssueDetail({
               ...(mark.focus?.caret === "at" ? { focus: mark.focus.position } : {}),
               uncertain: mark.uncertain,
             }))}
-          onAwareness={(anchor, focus, typing) =>
+          remoteContexts={carets(live.entries)
+            .filter((mark) => mark.field === "description" && mark.position.caret !== "at")
+            .map<RemoteContext>((mark) => ({
+              actor: mark.actor,
+              name: nameOf(mark.actor, memberOf(mark.actor)),
+              color: avatarColor(mark.actor),
+              uncertain: mark.uncertain,
+            }))}
+          remotePreviews={previews(live.entries)
+            .filter((mark) => mark.field === "description")
+            .map<RemoteTextPreview>((mark) => ({
+              actor: mark.actor,
+              name: nameOf(mark.actor, memberOf(mark.actor)),
+              color: avatarColor(mark.actor),
+              base: mark.preview.base,
+              result: mark.preview.result,
+              index: mark.preview.index,
+              delete: mark.preview.delete,
+              insert: mark.preview.insert,
+              ...(mark.preview.anchor === null ? {} : { anchor: mark.preview.anchor }),
+              ...(mark.preview.focus === null ? {} : { focus: mark.preview.focus }),
+              uncertain: mark.uncertain,
+            }))}
+          onAwareness={(anchor, focus, typing, ready, preview) =>
             publishAwareness({
               cursor: anchor === null
                 ? null
@@ -879,11 +902,24 @@ export function IssueDetail({
                     field: "description",
                     anchor,
                     ...(focus === null ? {} : { focus }),
-                  },
+              },
               typing,
+              preview,
+              ...(!ready ? { defer: true } : {}),
             })
           }
-          onSave={(description) => void edit({ description })}
+          onSplice={(splice) => liveMutation(spaceId, {
+            cmd: "issue_text_splice",
+            reff,
+            ...splice,
+          })}
+          onCheckpoint={() => liveMutation(spaceId, { cmd: "issue_text_checkpoint", reff })}
+          onReadLatest={async () => {
+            const response = await liveMutation(spaceId, { cmd: "issue_view", reff });
+            if (response.kind !== "issue") throw new Error("Issue description is unavailable");
+            return response.description;
+          }}
+          onError={onError}
         />
 
         <SpecPacket
@@ -2716,8 +2752,8 @@ function EventGlyph({
 }
 
 /**
- * Description: a recoverable draft streamed in short batches, not one durable
- * operation per keystroke. Blur flushes the last batch immediately.
+ * Description: a recoverable optimistic draft streamed as ordered CRDT splices.
+ * The quiet window groups activity history only; it never gates replication.
  *
  * There is no edit mode left. The body is a live Markdown document: typing
  * `## ` makes a heading where the caret is, and the markup never appears as
@@ -2733,29 +2769,83 @@ function Description({
   draftKey,
   value,
   readOnly,
-  onSave,
+  onSplice,
+  onCheckpoint,
+  onReadLatest,
+  onError,
   remoteCursors,
+  remoteContexts,
+  remotePreviews,
   onAwareness,
 }: {
   draftKey: { spaceId: string; reff: string };
   value: string;
   readOnly: boolean;
-  onSave: (v: string) => void;
+  onSplice: (splice: TextSplice) => Promise<unknown>;
+  onCheckpoint: () => Promise<unknown>;
+  onReadLatest: () => Promise<string>;
+  onError: (message: string) => void;
   remoteCursors: RemoteCursor[];
-  onAwareness: (anchor: number | null, focus: number | null, typing: boolean) => void;
+  remoteContexts: RemoteContext[];
+  remotePreviews: RemoteTextPreview[];
+  onAwareness: (
+    anchor: number | null,
+    focus: number | null,
+    typing: boolean,
+    ready: boolean,
+    preview: BrowserTextPreview | null,
+  ) => void;
 }) {
   const [draft, setDraft] = useState(
     () => loadDraft(draftKey.spaceId, draftKey.reff, "description") || value,
   );
+  const [authoritative, setAuthoritative] = useState(value);
+  const [pending, setPending] = useState(0);
   const dirty = useRef(draft !== value);
-  const streamTimer = useRef<number | null>(null);
+  const pendingRef = useRef(0);
+  const settledText = useRef(value);
+  const settledRevision = useRef(textRevision(value));
+  const previewMarkdown = useRef<string | null>(null);
+  const latestAwareness = useRef({
+    anchor: null as number | null,
+    focus: null as number | null,
+    typing: false,
+    markdown: value,
+  });
+  const writeQueue = useRef<Promise<unknown>>(Promise.resolve());
+  const checkpointTimer = useRef<number | null>(null);
+  const previewTimer = useRef<number | null>(null);
+  const preview = useRef<BrowserTextPreview | null>(null);
+  const uncheckpointed = useRef(false);
+
+  const report = useRef(onError);
+  report.current = onError;
+
+  const checkpoint = () => {
+    if (!uncheckpointed.current) return;
+    uncheckpointed.current = false;
+    const task = writeQueue.current.then(onCheckpoint);
+    writeQueue.current = task.catch(() => undefined);
+    void task.catch((error: unknown) => {
+      report.current(error instanceof Error ? error.message : String(error));
+    });
+  };
 
   useEffect(
     () => () => {
-      if (streamTimer.current !== null) window.clearTimeout(streamTimer.current);
+      if (checkpointTimer.current !== null) window.clearTimeout(checkpointTimer.current);
+      if (previewTimer.current !== null) window.clearTimeout(previewTimer.current);
     },
     [],
   );
+
+  useEffect(() => {
+    if (pendingRef.current === 0) {
+      settledText.current = value;
+      settledRevision.current = textRevision(value);
+      setAuthoritative(value);
+    }
+  }, [value]);
 
   useEffect(() => {
     if (dirty.current && draft !== value) {
@@ -2773,40 +2863,151 @@ function Description({
 
   return (
     <MarkdownEditor
-      value={value}
+      value={authoritative}
       placeholder="Add description…"
       className="min-h-ctl-xl py-2"
       remoteCursors={remoteCursors}
-      onAwareness={onAwareness}
-      onChange={(markdown) => {
+      remoteContexts={remoteContexts}
+      remotePreviews={remotePreviews}
+      acceptRemote={pending === 0}
+      onAwareness={(anchor, focus, typing, markdown) => {
+        const next = { anchor, focus, typing, markdown };
+        latestAwareness.current = next;
+        const retiring = anchor === null && !typing;
+        if (retiring) {
+          if (previewTimer.current !== null) window.clearTimeout(previewTimer.current);
+          previewTimer.current = null;
+          preview.current = null;
+          previewMarkdown.current = null;
+        } else if (preview.current && previewMarkdown.current === markdown && anchor !== null) {
+          const { anchor: _anchor, focus: _focus, ...rest } = preview.current;
+          preview.current = {
+            ...rest,
+            anchor,
+            ...(focus === null ? {} : { focus }),
+          };
+        }
+        onAwareness(
+          anchor,
+          focus,
+          typing,
+          awarenessReadyFor(markdown, settledText.current, pendingRef.current, retiring),
+          preview.current,
+        );
+      }}
+      onChange={(markdown, splice, change) => {
         dirty.current = true;
         setDraft(markdown);
-        // Linear's document model does not wait for blur: a short quiet window
-        // batches a burst of keystrokes into one CRDT splice, while keeping the
-        // words visibly moving for everybody else in the document.
-        if (streamTimer.current !== null) window.clearTimeout(streamTimer.current);
-        streamTimer.current = window.setTimeout(() => {
-          streamTimer.current = null;
-          if (!dirty.current) return;
-          dirty.current = false;
-          clearDraft(draftKey.spaceId, draftKey.reff, "description");
-          onSave(markdown);
+        saveDraft(draftKey.spaceId, draftKey.reff, "description", markdown);
+
+        const prior = preview.current;
+        const cumulative = prior
+          && prior.base === settledRevision.current
+          && prior.result === change.previousRevision
+          ? extendTextSplice(prior, splice) ?? textSplice(settledText.current, markdown)
+          : textSplice(settledText.current, markdown);
+        const held = latestAwareness.current;
+        if (cumulative && new TextEncoder().encode(cumulative.insert).byteLength <= 2 * 1024) {
+          const inserted = Array.from(cumulative.insert).length;
+          const anchor = held.markdown === markdown && held.anchor !== null
+            ? held.anchor
+            : cumulative.index + inserted;
+          const focus = held.markdown === markdown ? held.focus : anchor;
+          preview.current = {
+            field: "description",
+            base: settledRevision.current,
+            result: change.resultRevision,
+            ...cumulative,
+            anchor,
+            ...(focus === null ? {} : { focus }),
+          };
+          previewMarkdown.current = markdown;
+        } else {
+          preview.current = null;
+          previewMarkdown.current = null;
+        }
+
+        if (previewTimer.current !== null) window.clearTimeout(previewTimer.current);
+        previewTimer.current = window.setTimeout(() => {
+          previewTimer.current = null;
+          preview.current = null;
+          previewMarkdown.current = null;
+          const awareness = latestAwareness.current;
+          onAwareness(
+            awareness.anchor,
+            awareness.focus,
+            awareness.typing,
+            awarenessReadyFor(
+              awareness.markdown,
+              settledText.current,
+              pendingRef.current,
+              awareness.anchor === null && !awareness.typing,
+            ),
+            null,
+          );
+        }, 1_500);
+
+        pendingRef.current += 1;
+        setPending(pendingRef.current);
+        if (held.anchor !== null || held.typing) {
+          onAwareness(held.anchor, held.focus, held.typing, false, preview.current);
+        } else {
+          onAwareness(null, null, false, false, preview.current);
+        }
+        const task = writeQueue.current.then(() => onSplice(splice));
+        writeQueue.current = task.catch(() => undefined);
+        void task.then(async () => {
+          // The final acknowledgement reads the merged CRDT value directly.
+          // A new local keystroke that arrives during this read keeps the
+          // optimistic buffer held until its own acknowledgement completes.
+          const latest = pendingRef.current === 1 ? await onReadLatest() : null;
+          pendingRef.current -= 1;
+          setPending(pendingRef.current);
+          if (pendingRef.current === 0 && latest !== null) {
+            settledText.current = latest;
+            settledRevision.current = textRevision(latest);
+            setAuthoritative(latest);
+            dirty.current = false;
+            clearDraft(draftKey.spaceId, draftKey.reff, "description");
+            const awareness = latestAwareness.current;
+            // Once the exact optimistic result is durable, the preview becomes
+            // a revision-stamped caret. Keep it until blur so the UI never
+            // hands a line-boundary position back to an older CRDT anchor.
+            if (awareness.markdown === latest && preview.current !== null) {
+              if (previewTimer.current !== null) window.clearTimeout(previewTimer.current);
+              previewTimer.current = null;
+            }
+            onAwareness(
+              awareness.anchor,
+              awareness.focus,
+              awareness.typing,
+              awarenessReadyFor(
+                awareness.markdown,
+                latest,
+                0,
+                awareness.anchor === null && !awareness.typing,
+              ),
+              preview.current,
+            );
+          }
+        }).catch((error: unknown) => {
+          pendingRef.current = Math.max(0, pendingRef.current - 1);
+          setPending(pendingRef.current);
+          report.current(error instanceof Error ? error.message : String(error));
+        });
+
+        // Human-facing activity remains grouped without delaying the splice.
+        uncheckpointed.current = true;
+        if (checkpointTimer.current !== null) window.clearTimeout(checkpointTimer.current);
+        checkpointTimer.current = window.setTimeout(() => {
+          checkpointTimer.current = null;
+          checkpoint();
         }, 350);
       }}
       onCommit={() => {
-        if (streamTimer.current !== null) {
-          window.clearTimeout(streamTimer.current);
-          streamTimer.current = null;
-        }
-        if (!dirty.current) return;
-        dirty.current = false;
-        clearDraft(draftKey.spaceId, draftKey.reff, "description");
-        // `draft` is a keystroke behind on the very last character, so read the
-        // committed value from state at call time rather than closing over it.
-        setDraft((current) => {
-          if (current !== value) onSave(current);
-          return current;
-        });
+        if (checkpointTimer.current !== null) window.clearTimeout(checkpointTimer.current);
+        checkpointTimer.current = null;
+        checkpoint();
       }}
     />
   );

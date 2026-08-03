@@ -45,6 +45,10 @@ function frame(laneId: number, body: number[], version = socketProtocolVersion):
   return new Uint8Array([...varint(version), ...varint(laneId), ...varint(body.length), ...body]);
 }
 
+function jsonFrame(laneId: number, value: unknown): Uint8Array {
+  return frame(laneId, Array.from(new TextEncoder().encode(JSON.stringify(value))));
+}
+
 describe("socket protocol frames", () => {
   it("decodes a progress frame the engine would send", () => {
     const body = progressBody({
@@ -63,6 +67,23 @@ describe("socket protocol frames", () => {
         total: 1000,
         done: false,
       },
+    });
+  });
+
+  it("decodes an ordered editor acknowledgement on the control lane", () => {
+    expect(decodeFrame(jsonFrame(lane.control, {
+      kind: "mutation",
+      space: "orb_a",
+      request_id: "12",
+      ok: true,
+      status: 200,
+      response: { kind: "issue_text_spliced", reff: "ENG-1" },
+    }))).toMatchObject({
+      kind: "mutation",
+      space: "orb_a",
+      requestId: "12",
+      ok: true,
+      status: 200,
     });
   });
 

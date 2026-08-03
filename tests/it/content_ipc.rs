@@ -403,14 +403,13 @@ fn forgetting_keeps_the_name_and_drops_the_bytes() {
 
 #[test]
 fn the_mixed_version_window_is_empty_on_purpose() {
-    // A v6 process would accept a content header line and then read the raw
-    // body as a second request, desynchronising the channel the first time
-    // anyone uploaded. That is why the minimum moved with the version rather
-    // than trailing it.
+    // A process from before the current wire contract can misread a request
+    // added by the newer protocol and desynchronise the channel. That is why
+    // the minimum moves with the version rather than trailing it.
     assert_eq!(
         lait::control::MIN_SUPPORTED_CONTROL_PROTOCOL,
         lait::control::CONTROL_PROTOCOL_VERSION,
     );
-    assert!(lait::control::check_control_protocol(6).is_err());
-    assert!(lait::control::check_control_protocol(7).is_ok());
+    assert!(lait::control::check_control_protocol(7).is_err());
+    assert!(lait::control::check_control_protocol(8).is_ok());
 }

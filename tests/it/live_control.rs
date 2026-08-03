@@ -191,6 +191,7 @@ fn the_live_view_and_the_signal_drain_are_served_rather_than_unreachable() {
             issues: vec!["iss_01jz0000000000000000000000".into()],
             carets: Vec::new(),
             typing: Vec::new(),
+            previews: Vec::new(),
         },
     );
     assert!(
@@ -211,6 +212,7 @@ fn the_live_view_and_the_signal_drain_are_served_rather_than_unreachable() {
             issues: vec!["not-a-doc-id".into(), String::new()],
             carets: Vec::new(),
             typing: Vec::new(),
+            previews: Vec::new(),
         },
     );
     assert!(
@@ -228,6 +230,7 @@ fn the_live_view_and_the_signal_drain_are_served_rather_than_unreachable() {
             issues: Vec::new(),
             carets: Vec::new(),
             typing: Vec::new(),
+            previews: Vec::new(),
         },
     );
     assert!(

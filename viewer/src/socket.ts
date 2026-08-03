@@ -28,10 +28,10 @@
  * decoder for shapes that already have one, and the two would drift.
  */
 
-import type { Response } from "./types";
+import type { Response, WorldRequest } from "./types";
 
 /** Matches `SOCKET_PROTOCOL_VERSION` in `src/serve/socket.rs`. */
-export const socketProtocolVersion = 1;
+export const socketProtocolVersion = 2;
 
 /** Matches `MAX_SOCKET_FRAME_BYTES`. Checked before anything is allocated. */
 export const maxSocketFrameBytes = 64 * 1024;
@@ -74,6 +74,14 @@ export type SocketEvent =
    *  half the set each and neither sees the whole. A consumer that ignores one
    *  of these has destroyed it — the daemon's queue is already empty. */
   | { kind: "signals"; space: string; drained: SignalsReply }
+  | {
+      kind: "mutation";
+      space: string;
+      requestId: string;
+      ok: boolean;
+      status: number;
+      response: Response;
+    }
   | { kind: "liveness"; liveness: SocketLiveness };
 
 /**
@@ -92,11 +100,24 @@ export interface BrowserCursor {
   focus?: number;
 }
 
+/** A cumulative display-only splice from one acknowledged Markdown revision. */
+export interface BrowserTextPreview {
+  field: string;
+  base: string;
+  result: string;
+  index: number;
+  delete: number;
+  insert: string;
+  anchor?: number;
+  focus?: number;
+}
+
 export type Question = {
   space: string;
   issue?: string;
   cursor?: BrowserCursor;
   typing?: boolean;
+  preview?: BrowserTextPreview;
 } | null;
 
 /**
@@ -145,7 +166,15 @@ function decodeSpaceFrame(laneId: number, body: Uint8Array): SocketEvent | null 
     return null;
   }
   if (typeof parsed !== "object" || parsed === null) return null;
-  const framed = parsed as { space?: unknown; issue?: unknown; kind?: unknown };
+  const framed = parsed as {
+    space?: unknown;
+    issue?: unknown;
+    kind?: unknown;
+    request_id?: unknown;
+    ok?: unknown;
+    status?: unknown;
+    response?: unknown;
+  };
   if (typeof framed.space !== "string") return null;
   if (laneId === lane.transient && framed.kind === "live") {
     return {
@@ -157,6 +186,24 @@ function decodeSpaceFrame(laneId: number, body: Uint8Array): SocketEvent | null 
   }
   if (laneId === lane.control && framed.kind === "signals") {
     return { kind: "signals", space: framed.space, drained: parsed as SignalsReply };
+  }
+  if (
+    laneId === lane.control
+    && framed.kind === "mutation"
+    && typeof framed.request_id === "string"
+    && typeof framed.ok === "boolean"
+    && typeof framed.status === "number"
+    && typeof framed.response === "object"
+    && framed.response !== null
+  ) {
+    return {
+      kind: "mutation",
+      space: framed.space,
+      requestId: framed.request_id,
+      ok: framed.ok,
+      status: framed.status,
+      response: framed.response as Response,
+    };
   }
   return null;
 }
@@ -237,11 +284,13 @@ export interface Socket {
    *
    * A declaration, not a subscription: it replaces whatever was declared last,
    * and it is re-sent after every reconnect, because the engine holds it per
-   * socket and a reconnected socket is a new one. The engine asks each declared
-   * question once per tick for the whole server, so two tabs on one issue cost
-   * one read and a question nobody holds is never asked.
+   * socket and a reconnected socket is a new one. The engine holds one native
+   * subscription per declared question, so two tabs on one issue cost one
+   * stream and a question nobody holds is never asked.
    */
   watch(question: Question): void;
+  /** Execute an ordered editor request on this already-open connection. */
+  mutate<R extends Response = Response>(space: string, request: WorldRequest): Promise<R>;
   close(): void;
 }
 
@@ -259,6 +308,21 @@ export function openSocket(onEvent: (event: SocketEvent) => void): Socket {
   let backoff = reconnectFloorMs;
   let closed = false;
   let declared: Question = null;
+  let nextRequest = 1;
+  const pending = new Map<
+    string,
+    {
+      resolve: (response: Response) => void;
+      reject: (error: Error) => void;
+      body: Uint8Array;
+      sent: boolean;
+    }
+  >();
+
+  const rejectPending = (message: string): void => {
+    for (const request of pending.values()) request.reject(new Error(message));
+    pending.clear();
+  };
 
   const declare = (): void => {
     if (!socket || socket.readyState !== WebSocket.OPEN) return;
@@ -284,14 +348,32 @@ export function openSocket(onEvent: (event: SocketEvent) => void): Socket {
       // starts with none. Re-sending is what keeps a dropped connection from
       // silently ending the presence a surface is still drawing.
       declare();
+      for (const request of pending.values()) {
+        if (request.sent) continue;
+        next.send(encodeFrame(lane.control, request.body));
+        request.sent = true;
+      }
     };
     next.onmessage = (message: MessageEvent<ArrayBuffer | string>) => {
       if (typeof message.data === "string") return;
       const event = decodeFrame(new Uint8Array(message.data));
-      if (event) onEvent(event);
+      if (!event) return;
+      if (event.kind === "mutation") {
+        const request = pending.get(event.requestId);
+        if (!request) return;
+        pending.delete(event.requestId);
+        if (event.ok) request.resolve(event.response);
+        else {
+          const response = event.response as { message?: unknown };
+          request.reject(new Error(String(response.message ?? `editor request failed (${event.status})`)));
+        }
+        return;
+      }
+      onEvent(event);
     };
     next.onclose = (event: CloseEvent) => {
       if (closed) return;
+      rejectPending("the editor connection closed before acknowledgement");
       // 1002 is the engine saying this tab is from another build. Retrying
       // cannot fix that, and retrying forever would hide it.
       if (event.code === 1002) {
@@ -314,9 +396,39 @@ export function openSocket(onEvent: (event: SocketEvent) => void): Socket {
       declared = question;
       declare();
     },
+    mutate<R extends Response = Response>(space: string, request: WorldRequest): Promise<R> {
+      if (!socket || closed || socket.readyState >= WebSocket.CLOSING) {
+        return Promise.reject(new Error("the editor connection is not ready"));
+      }
+      const requestId = String(nextRequest++);
+      const body = new TextEncoder().encode(JSON.stringify({
+        request_id: requestId,
+        space,
+        request,
+      }));
+      return new Promise<R>((resolve, reject) => {
+        pending.set(requestId, {
+          resolve: (response) => resolve(response as R),
+          reject,
+          body,
+          sent: false,
+        });
+        if (socket?.readyState === WebSocket.OPEN) {
+          try {
+            socket.send(encodeFrame(lane.control, body));
+            const held = pending.get(requestId);
+            if (held) held.sent = true;
+          } catch (error) {
+            pending.delete(requestId);
+            reject(error instanceof Error ? error : new Error(String(error)));
+          }
+        }
+      });
+    },
     close() {
       closed = true;
       if (retry !== null) clearTimeout(retry);
+      rejectPending("the editor connection closed");
       socket?.close();
     },
   };

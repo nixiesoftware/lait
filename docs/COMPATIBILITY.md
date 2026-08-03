@@ -260,18 +260,17 @@ use is a slot held open for nothing.
 |---|---|---|---|
 | Local DTOs | `runtime::dto::DTO_PROTOCOL_VERSION` | 1 | loopback control plane and viewer |
 
-| Local control channel | `control::CONTROL_PROTOCOL_VERSION` | 7 | daemon socket; `MIN_SUPPORTED_CONTROL_PROTOCOL` is also 7, so the mixed-version window is currently empty |
+| Local control channel | `control::CONTROL_PROTOCOL_VERSION` | 8 | daemon socket; `MIN_SUPPORTED_CONTROL_PROTOCOL` is also 8, so the mixed-version window is currently empty |
 
 DTOs are a local contract between the engine and its own clients. They are
 versioned because a stale viewer bundle is a real situation, not because they
 cross a trust boundary.
 
-v7 moved the minimum with the version rather than leaving a window, and that is
-not the usual caution. A v6 process would accept a content request's header line
-and then read the raw body as a second request — so an attached StationHost on
-v6 does not fail the call, it desynchronises the channel the first time anyone
-uploads, and every later request on that connection reads someone else's bytes.
-A window whose only content is that outcome is not a window worth having.
+v7 moved the minimum because a v6 process would desynchronise on the new content
+envelope. v8 moves it again because the web viewer's Live delivery is now a
+standing subscription: a v7 Station can decode neither the request nor the
+stream and would leave collaboration silently stale. In both cases, accepting
+the older endpoint would promise a capability it cannot provide.
 
 ## 6. The pinned dependency
 

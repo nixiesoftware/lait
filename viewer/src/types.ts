@@ -484,6 +484,7 @@ export type LiveScope =
   | { scope: "issue_view"; world: string; body: string }
   | { scope: "document_view"; world: string; body: string }
   | { scope: "text_caret"; world: string; body: string; field: string }
+  | { scope: "text_preview"; world: string; body: string; field: string }
   | { scope: "typing"; world: string; body: string; field: string }
   | { scope: "content_residency"; content: string }
   | { scope: "custom_world"; world: string; schema: string; key: string };
@@ -500,6 +501,16 @@ export type CaretPosition =
   | { caret: "drifted" }
   | { caret: "unresolved" };
 
+export interface TextPreview {
+  base: string;
+  result: string;
+  index: number;
+  delete: number;
+  insert: string;
+  anchor: number | null;
+  focus: number | null;
+}
+
 /**
  * `control.rs` `LiveEntry` — one thing a peer is doing right now.
  *
@@ -511,13 +522,14 @@ export type CaretPosition =
 export interface LiveEntry {
   actor: string;
   scope: LiveScope;
-  kind: "presence" | "caret" | "selection" | "typing" | "residency";
+  kind: "presence" | "caret" | "selection" | "preview" | "typing" | "residency";
   /** How long ago the daemon saw it — its clock, not the peer's. */
   age_ms: number;
   /** Past the caret grace window: still shown, no longer known to be right. */
   uncertain: boolean;
   caret: CaretPosition | null;
   focus: CaretPosition | null;
+  preview?: TextPreview | null;
 }
 
 /** `control.rs` `SignalBody` — what one delivered signal says. */
@@ -757,6 +769,10 @@ export type Request =
   /** `due`: `YYYY-MM-DD` (UTC), unix seconds, or `"none"` to clear; `estimate`:
    *  a number as a string, or `"none"` to clear. Absent = untouched. */
   | { cmd: "issue_edit"; reff: string; title?: string | null; status?: string | null; priority?: string | null; description?: string | null; due?: string | null; estimate?: string | null }
+  /** Unicode-scalar offsets into the collaborative description text. */
+  | { cmd: "issue_text_splice"; reff: string; index: number; delete: number; insert: string }
+  /** Group a burst of live splices into one activity entry. */
+  | { cmd: "issue_text_checkpoint"; reff: string }
   | { cmd: "issue_move"; reff: string; project?: string | null; pos?: BoardPos | null }
   | { cmd: "assign"; reff: string; who: string[]; add?: boolean }
   | { cmd: "label"; reff: string; add?: string[]; remove?: string[] }

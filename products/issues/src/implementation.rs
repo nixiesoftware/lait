@@ -1781,6 +1781,38 @@ impl World for IssuesWorld {
                 push_event(&mut staging, ctx, &doc, &ev);
                 Ok(staging.into_effect(Some(doc)))
             }
+            IssueIntent::IssueTextSplice {
+                doc,
+                index,
+                delete,
+                insert,
+            } => {
+                issue_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
+                if delete == 0 && insert.is_empty() {
+                    return Err(Rejection::InvalidRequest);
+                }
+                staging.issue(
+                    &issue_key(&doc),
+                    Op::TextSplice {
+                        path: "description".into(),
+                        index,
+                        delete,
+                        insert,
+                    },
+                );
+                Ok(staging.into_effect(Some(doc)))
+            }
+            IssueIntent::IssueTextCheckpoint { doc, device, ts } => {
+                issue_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
+                let mut ev = event("edited", &device, ts);
+                ev.c.push(EventChange {
+                    f: "description".into(),
+                    from: None,
+                    to: None,
+                });
+                push_event(&mut staging, ctx, &doc, &ev);
+                Ok(staging.into_effect(Some(doc)))
+            }
             IssueIntent::IssueMove {
                 doc,
                 project,

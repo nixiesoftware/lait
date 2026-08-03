@@ -4,7 +4,8 @@
     clippy::expect_used,
     reason = "transient material is size-bounded before fixed-layout derived serialization"
 )]
-//! Transient collaboration state: cursors, presence, typing, residency hints.
+//! Transient collaboration state: cursors, text previews, presence, typing,
+//! residency hints.
 //!
 //! Everything here is state a Station currently believes and will happily
 //! forget. It is never journaled, never a Body, never an Observation, and never
@@ -43,11 +44,21 @@ use crate::budget::{deadline, slots};
 
 /// The largest encoded transient item this build will decode.
 ///
-/// A caret is a position and an anchor; a selection is two. Nothing here is
-/// user text — the payload names *where* something is, never *what* it says —
-/// so this is generous for what it carries and tight against a peer that would
-/// like it not to be.
+/// A caret is a position and an anchor; a selection is two. A text preview may
+/// carry a small unconfirmed insertion, separately bounded below. Four KiB is
+/// generous for those person-scale values and tight against a peer that would
+/// like a datagram decoder to allocate on its behalf.
 pub const MAX_TRANSIENT_ITEM_BYTES: usize = 4 * 1024;
+
+/// Maximum UTF-8 text one optimistic preview may carry.
+///
+/// A preview is cumulative from a durable base, so missing an intermediate
+/// datagram loses no state. Large pastes stay on Freight: pushing them through
+/// Live would turn a latency hint into a second bulk transport.
+pub const MAX_PREVIEW_INSERT_BYTES: usize = 2 * 1024;
+
+/// Browser text revisions are four lowercase-hex u32 lanes (128 bits).
+pub const TEXT_REVISION_HEX_BYTES: usize = 32;
 
 /// The longest field path a scope may name.
 ///
@@ -88,6 +99,13 @@ pub enum Target {
         body: [u8; 16],
         field: String,
     },
+    /// A display-only optimistic splice in this field. Separate from `Field`
+    /// so its one payload kind does not widen the per-scope slot bound.
+    Preview {
+        world: String,
+        body: [u8; 16],
+        field: String,
+    },
     /// Somebody is typing in this field.
     Typing {
         world: String,
@@ -110,7 +128,9 @@ impl Target {
     /// The field this scope names, when it names one.
     pub fn field(&self) -> Option<&str> {
         match self {
-            Self::Field { field, .. } | Self::Typing { field, .. } => Some(field),
+            Self::Field { field, .. }
+            | Self::Preview { field, .. }
+            | Self::Typing { field, .. } => Some(field),
             _ => None,
         }
     }
@@ -146,7 +166,9 @@ impl Target {
                 world_id(world)?;
                 Ok(())
             }
-            Self::Field { world, field, .. } | Self::Typing { world, field, .. } => {
+            Self::Field { world, field, .. }
+            | Self::Preview { world, field, .. }
+            | Self::Typing { world, field, .. } => {
                 world_id(world)?;
                 bounded(field)
             }
@@ -164,6 +186,23 @@ impl Target {
     }
 }
 
+/// One cumulative, display-only splice from a durable text revision.
+///
+/// The revisions are opaque equality tokens minted by the browser. A receiver
+/// applies the splice only when `base` matches its current durable Markdown and
+/// verifies the resulting `result`; otherwise it draws nothing and waits for
+/// normal CRDT convergence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TextPreview {
+    pub base: String,
+    pub result: String,
+    pub index: u64,
+    pub delete: u64,
+    pub insert: String,
+    pub anchor: Option<u64>,
+    pub focus: Option<u64>,
+}
+
 /// What is being said about a scope.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TransientPayload {
@@ -173,6 +212,8 @@ pub enum TransientPayload {
     Caret { anchor: Vec<u8> },
     /// A cursor with a range behind it.
     Selection { anchor: Vec<u8>, focus: Vec<u8> },
+    /// A lossy visual splice. Never incorporated into a Body.
+    Preview { preview: TextPreview },
     /// Somebody is typing. Coarse by design — "typing" has no intermediate
     /// values worth sending.
     Typing,
@@ -190,6 +231,7 @@ pub enum TransientKind {
     Presence,
     Caret,
     Selection,
+    Preview,
     Typing,
     Residency,
 }
@@ -200,6 +242,7 @@ impl TransientPayload {
             Self::Presence => TransientKind::Presence,
             Self::Caret { .. } => TransientKind::Caret,
             Self::Selection { .. } => TransientKind::Selection,
+            Self::Preview { .. } => TransientKind::Preview,
             Self::Typing => TransientKind::Typing,
             Self::Residency { .. } => TransientKind::Residency,
         }
@@ -219,6 +262,7 @@ impl TransientPayload {
             (Target::Material { .. }, TransientKind::Presence) => true,
             (Target::Field { .. }, TransientKind::Caret) => true,
             (Target::Field { .. }, TransientKind::Selection) => true,
+            (Target::Preview { .. }, TransientKind::Preview) => true,
             (Target::Typing { .. }, TransientKind::Typing) => true,
             (Target::Content { .. }, TransientKind::Residency) => true,
             (Target::World { .. }, TransientKind::Presence) => true,
@@ -250,6 +294,21 @@ impl TransientPayload {
         }
         if let Self::Residency { chunks } = self {
             if chunks.len() > MAX_RESIDENCY_CHUNKS {
+                return Err(Invalid::Bounds);
+            }
+        }
+        if let Self::Preview { preview } = self {
+            let revision = |value: &str| {
+                value.len() == TEXT_REVISION_HEX_BYTES
+                    && value
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            };
+            if !revision(&preview.base)
+                || !revision(&preview.result)
+                || preview.insert.len() > MAX_PREVIEW_INSERT_BYTES
+                || preview.index.checked_add(preview.delete).is_none()
+            {
                 return Err(Invalid::Bounds);
             }
         }
