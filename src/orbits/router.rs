@@ -299,7 +299,7 @@ impl Placement {
                         loop {
                             match subscription.next().await {
                                 Ok(Some(doorbell)) => {
-                                    carried += 1;
+                                    carried = carried.saturating_add(1);
                                     let _ = doorbells.send(OrbitDoorbell {
                                         orbit: orbit_for_pump.clone(),
                                         doorbell,
@@ -323,7 +323,7 @@ impl Placement {
                         backoff = if carried > 1 {
                             PUMP_BACKOFF_FLOOR
                         } else {
-                            (backoff * 2).min(PUMP_BACKOFF_CEILING)
+                            backoff.saturating_mul(2).min(PUMP_BACKOFF_CEILING)
                         };
                     }
                     // Nothing is accepting, or the connect parked past its
