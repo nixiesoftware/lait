@@ -10,8 +10,6 @@
 
 use serde::{Deserialize, Serialize};
 
-use issues::dto::SCHEMA_VERSION;
-
 /// The state of a single onboarding gate. `Skip` is *not* blocking (it means the
 /// gate doesn't apply yet — e.g. board-sync while still `pending`); `Wait`/`Fail`
 /// both block, the difference being whether time alone can clear it (`Wait`) or a
@@ -71,6 +69,19 @@ impl DiagnosisGate {
         }
     }
 }
+
+/// The version of the *diagnosis* DTO, owned by the shell that emits it.
+///
+/// This used to be the Issues product's `dto::SCHEMA_VERSION`, which made the
+/// shell's own onboarding readout advertise a product's schema number. With
+/// more than one World mounted that field has no coherent answer — whose
+/// version would it report? A World's schema version is a product concern for
+/// its own DTOs; the engine neither reads it nor speaks for it.
+///
+/// Starts at 3 rather than 1 deliberately: that is the value this field has
+/// been emitting, and the point of the change is to own the number going
+/// forward, not to renumber a live wire field.
+pub const DIAGNOSIS_SCHEMA_VERSION: u32 = 3;
 
 /// The versioned diagnosis DTO — what `Diagnose` returns on every surface.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -291,7 +302,7 @@ pub fn diagnose(input: DiagnoseInput<'_>) -> DiagnosisView {
     let summary = summarize(blocked, input.projects, input.issues);
 
     DiagnosisView {
-        schema_version: SCHEMA_VERSION,
+        schema_version: DIAGNOSIS_SCHEMA_VERSION,
         gates,
         blocked_on,
         summary,
