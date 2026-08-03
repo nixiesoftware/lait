@@ -422,9 +422,9 @@ fn a_peers_change_rings_a_doorbell_that_names_what_moved() {
             match tokio::time::timeout(remaining, sub.next()).await {
                 Ok(Ok(Some(frame))) => {
                     let named = frame
-                        .dirty_by_project
+                        .dirty
                         .iter()
-                        .any(|d| d.project_key == "BCN" && d.docs.contains(&doc));
+                        .any(|d| d.label.as_deref() == Some("BCN") && d.docs.contains(&doc));
                     if named {
                         break Some(frame);
                     }

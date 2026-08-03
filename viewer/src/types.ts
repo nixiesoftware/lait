@@ -643,50 +643,41 @@ export interface SpacesReply {
 /** An agent's space is observable, not operable — writes are refused server-side. */
 export const isReadOnly = (s: SpaceRow): boolean => s.identity.kind === "agent";
 
-// ---- the doorbell -----------------------------------------------------------
+// ---- the doorbell (delivery layer — world-opaque) --------------------------
+//
+// These types name no product and must not acquire one: the vocabulary in
+// `kind` and `plane` is declared by whichever World rang, and this layer only
+// carries it.
 
 /**
- * The catalog planes a doorbell can name. Closed on purpose: a resource declares
- * the planes it projects (`Derivation` in `projectStore`), and a plane the engine
- * does not emit should fail to compile rather than silently never fire.
+ * What a dirty scope or plane belongs to — a container the World names, which
+ * the delivery layer never interprets. `kind` and `id` are the World's own
+ * vocabulary.
+ *
+ * Named twice on purpose: `id` is the stable identity a dependency matches on;
+ * `label` is a mutable display alias a rename changes underneath you. Never
+ * match on `label`.
  */
-export type CatalogPlane =
-  | "space"
-  | "projects"
-  | "labels"
-  | "workflow"
-  | "boards"
-  | "milestones"
-  | "cycles"
-  | "updates"
-  | "initiatives"
-  | "teams"
-  | "triage"
-  | "roles"
-  /** Specs and Baselines. Not a region of the catalog at all — they are Bodies
-   *  of their own, digested by version stamp. */
-  | "specs"
-  /** The row index: which docs exist, their aliases and seqs, what is deleted. */
-  | "docs"
-  /** Issue links and parentage. */
-  | "relations";
-
-/**
- * The project a dirty plane belongs to, named twice on purpose: `project_id` is
- * the stable identity a dependency matches on, `project_key` is a mutable
- * display alias a rename changes underneath you.
- */
-export interface ProjectRef {
-  project_id: string;
-  project_key: string;
+export interface ScopeRef {
+  kind: string;
+  id: string;
+  label?: string | null;
 }
 
-/** A dirty catalog plane. The project-scoped planes carry a `ProjectRef`. */
-export type CatalogScope = { scope: CatalogPlane } & Partial<ProjectRef>;
-
-/** Which docs moved, in which project. */
-export interface DirtyProject extends ProjectRef {
+/** Which docs moved, under which scope — the item plane of a doorbell. */
+export interface DirtyScope extends ScopeRef {
+  /** The DocIds whose rows must be re-read. Item-level invalidation. */
   docs: string[];
+}
+
+/**
+ * A dirty structural plane. `plane` is a World-declared string the engine never
+ * interprets; `scope` is present when the plane is grouped by a container, so
+ * editing one project's milestones leaves another's alone.
+ */
+export interface DirtyPlane {
+  plane: string;
+  scope?: ScopeRef | null;
 }
 
 /**
@@ -705,8 +696,8 @@ export interface SpaceDoorbell {
   epoch: number;
   seq: number;
   reset: boolean;
-  dirty_by_project: DirtyProject[];
-  dirty_catalog: CatalogScope[];
+  dirty: DirtyScope[];
+  planes: DirtyPlane[];
   /**
    * Membership, roles, devices or keys advanced. Its own flag, not a catalog
    * plane: authority is not in the catalog and can move with no Body touched.

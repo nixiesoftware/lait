@@ -78,8 +78,8 @@ describe("ProjectViewerStore", () => {
       epoch: 1,
       seq: 1,
       reset: false,
-      dirty_by_project: [{ project_id: "prj_1", project_key: "ONE", docs: [row.doc_id] }],
-      dirty_catalog: [],
+      dirty: [{ kind: "project", id: "prj_1", label: "ONE", docs: [row.doc_id] }],
+      planes: [],
       authority_advanced: false,
       activity_advanced: false,
       presence_advanced: false,
@@ -93,7 +93,7 @@ describe("ProjectViewerStore", () => {
   it("refreshes catalog-derived resources on a ring that names no doc", async () => {
     // The case the old switch missed. A milestone write touches the catalog and
     // no issue body, so the frame carries catalog planes with an EMPTY
-    // `dirty_by_project` — and milestones used to be invalidated only when some
+    // `dirty` — and milestones used to be invalidated only when some
     // issue doc was dirty, so the list it belongs to never refreshed.
     let milestones = [{ id: "ms_1", project_id: "prj_1", name: "v1", tombstone: false, total: 0, done: 0 }];
     const rpc = vi.fn(async (_space: string, request: { cmd: string }) => {
@@ -110,8 +110,8 @@ describe("ProjectViewerStore", () => {
     milestones = [...milestones, { id: "ms_2", project_id: "prj_1", name: "v2", tombstone: false, total: 0, done: 0 }];
     await store.handleDoorbell({
       space: "local", epoch: 1, seq: 1, reset: false,
-      dirty_by_project: [],
-      dirty_catalog: [{ scope: "milestones", project_id: "prj_1", project_key: "ONE" }],
+      dirty: [],
+      planes: [{ plane: "milestones", scope: { kind: "project", id: "prj_1", label: "ONE" } }],
       authority_advanced: false, activity_advanced: false, presence_advanced: false,
     });
 
@@ -139,8 +139,8 @@ describe("ProjectViewerStore", () => {
     milestones = [{ id: "ms_1", project_id: "prj_1", name: "v1", tombstone: false, total: 2, done: 1 }];
     await store.handleDoorbell({
       space: "local", epoch: 1, seq: 1, reset: false,
-      dirty_by_project: [{ project_id: "prj_1", project_key: "ONE", docs: ["doc_1"] }],
-      dirty_catalog: [],
+      dirty: [{ kind: "project", id: "prj_1", label: "ONE", docs: ["doc_1"] }],
+      planes: [],
       authority_advanced: false, activity_advanced: false, presence_advanced: false,
     });
 
@@ -150,8 +150,8 @@ describe("ProjectViewerStore", () => {
     milestones = [{ id: "ms_1", project_id: "prj_1", name: "v1", tombstone: false, total: 2, done: 2 }];
     await store.handleDoorbell({
       space: "local", epoch: 1, seq: 2, reset: false,
-      dirty_by_project: [{ project_id: "prj_2", project_key: "TWO", docs: ["doc_9"] }],
-      dirty_catalog: [],
+      dirty: [{ kind: "project", id: "prj_2", label: "TWO", docs: ["doc_9"] }],
+      planes: [],
       authority_advanced: false, activity_advanced: false, presence_advanced: false,
     });
     expect(store.resources.read<typeof milestones>(key).data?.[0]?.done).toBe(1);
@@ -176,8 +176,8 @@ describe("ProjectViewerStore", () => {
     updates = [...updates, { id: "upd_2", author: "act_2", ts: 2, body: "second" }];
     await store.handleDoorbell({
       space: "local", epoch: 1, seq: 1, reset: false,
-      dirty_by_project: [],
-      dirty_catalog: [{ scope: "updates", project_id: "prj_1", project_key: "ONE" }],
+      dirty: [],
+      planes: [{ plane: "updates", scope: { kind: "project", id: "prj_1", label: "ONE" } }],
       authority_advanced: false, activity_advanced: false, presence_advanced: false,
     });
     expect(store.resources.read(key).data).toHaveLength(2);
@@ -185,8 +185,8 @@ describe("ProjectViewerStore", () => {
     const before = rpc.mock.calls.filter((c) => c[1].cmd === "project_updates").length;
     await store.handleDoorbell({
       space: "local", epoch: 1, seq: 2, reset: false,
-      dirty_by_project: [{ project_id: "prj_1", project_key: "ONE", docs: ["doc_1"] }],
-      dirty_catalog: [{ scope: "milestones", project_id: "prj_1", project_key: "ONE" }],
+      dirty: [{ kind: "project", id: "prj_1", label: "ONE", docs: ["doc_1"] }],
+      planes: [{ plane: "milestones", scope: { kind: "project", id: "prj_1", label: "ONE" } }],
       authority_advanced: false, activity_advanced: false, presence_advanced: false,
     });
     expect(rpc.mock.calls.filter((c) => c[1].cmd === "project_updates").length).toBe(before);
@@ -210,8 +210,8 @@ describe("ProjectViewerStore", () => {
 
     await store.handleDoorbell({
       space: "local", epoch: 1, seq: 1, reset: false,
-      dirty_by_project: [],
-      dirty_catalog: [{ scope: "milestones", project_id: "prj_1", project_key: "ONE" }],
+      dirty: [],
+      planes: [{ plane: "milestones", scope: { kind: "project", id: "prj_1", label: "ONE" } }],
       authority_advanced: false, activity_advanced: false, presence_advanced: false,
     });
 
@@ -238,9 +238,9 @@ describe("ProjectViewerStore", () => {
     milestones = [...milestones, { id: "ms_2", project_id: "prj_1", name: "v2", tombstone: false, total: 0, done: 0 }];
     await store.handleDoorbell({
       space: "local", epoch: 1, seq: 1, reset: false,
-      dirty_by_project: [],
+      dirty: [],
       // Same project, renamed since this resource was registered.
-      dirty_catalog: [{ scope: "milestones", project_id: "prj_1", project_key: "RENAMED" }],
+      planes: [{ plane: "milestones", scope: { kind: "project", id: "prj_1", label: "RENAMED" } }],
       authority_advanced: false, activity_advanced: false, presence_advanced: false,
     });
     expect(store.resources.read(key).data).toHaveLength(2);
@@ -249,8 +249,8 @@ describe("ProjectViewerStore", () => {
     milestones = [...milestones, { id: "ms_3", project_id: "prj_1", name: "v3", tombstone: false, total: 0, done: 0 }];
     await store.handleDoorbell({
       space: "local", epoch: 1, seq: 2, reset: false,
-      dirty_by_project: [],
-      dirty_catalog: [{ scope: "milestones", project_id: "prj_2", project_key: "ONE" }],
+      dirty: [],
+      planes: [{ plane: "milestones", scope: { kind: "project", id: "prj_2", label: "ONE" } }],
       authority_advanced: false, activity_advanced: false, presence_advanced: false,
     });
     expect(store.resources.read(key).data).toHaveLength(2);
@@ -275,7 +275,7 @@ describe("ProjectViewerStore", () => {
     }];
     await store.handleDoorbell({
       space: "local", epoch: 1, seq: 1, reset: false,
-      dirty_by_project: [], dirty_catalog: [],
+      dirty: [], planes: [],
       authority_advanced: true, activity_advanced: false, presence_advanced: true,
     });
     expect(store.resources.read(key).data).toHaveLength(2);
@@ -293,8 +293,8 @@ describe("ProjectViewerStore", () => {
     });
     await store.handleDoorbell({
       space: "local", epoch: 1, seq: 1, reset: false,
-      dirty_by_project: [{ project_id: "prj_1", project_key: "ONE", docs: [row.doc_id] }],
-      dirty_catalog: [], authority_advanced: false,
+      dirty: [{ kind: "project", id: "prj_1", label: "ONE", docs: [row.doc_id] }],
+      planes: [], authority_advanced: false,
       activity_advanced: false, presence_advanced: false,
     });
     expect(store.resources.read(projectKeys.issue("local", "iss_other")).state).toBe("ready");

@@ -13,9 +13,8 @@ import type {
   ActivityEvent,
   AssignmentDto,
   BoardView,
-  CatalogPlane,
-  CatalogScope,
-  DirtyProject,
+  DirtyPlane,
+  DirtyScope,
   GraphView,
   IssueView,
   LabelDto,
@@ -72,10 +71,33 @@ export const projectKeys = {
 };
 
 /**
- * A catalog plane this resource projects — optionally only that plane's slice
- * for one project, matched by the **stable id** rather than the display key.
+ * The catalog planes *this product* projects. Closed on purpose: the wire type
+ * is a World-declared `string`, so a plane the engine does not emit can no
+ * longer fail to compile there — it fails here instead, beside the loaders that
+ * declare it.
  */
-export type CatalogDependency = CatalogPlane | { plane: CatalogPlane; projectId: string };
+export type IssuesPlane =
+  | "space"
+  | "projects"
+  | "labels"
+  | "workflow"
+  | "boards"
+  | "milestones"
+  | "cycles"
+  | "updates"
+  | "initiatives"
+  | "teams"
+  | "triage"
+  | "roles"
+  | "specs"
+  | "docs"
+  | "relations";
+
+/**
+ * A catalog plane this resource projects — optionally only that plane's slice
+ * for one scope, matched by the **stable id** rather than the display label.
+ */
+export type CatalogDependency = IssuesPlane | { plane: IssuesPlane; scopeId: string };
 
 /**
  * Which issue bodies this resource is computed from.
@@ -86,7 +108,7 @@ export type CatalogDependency = CatalogPlane | { plane: CatalogPlane; projectId:
  * progress needs both; a board needs its own project's issues; a graph needs
  * neighbours it cannot enumerate in advance, so it takes `"any"`.
  */
-export type IssueDependency = "any" | { projectId: string } | { docs: readonly string[] };
+export type IssueDependency = "any" | { scopeId: string } | { docs: readonly string[] };
 
 /**
  * What a resource is derived from — the planes that can make it stale.
@@ -110,10 +132,10 @@ export interface Derivation {
 
 /** One doorbell, reduced to the things a `Derivation` asks about. */
 interface Ring {
-  readonly dirty: readonly DirtyProject[];
+  readonly dirty: readonly DirtyScope[];
   /** Every dirty doc, flattened — the `{ docs }` dependency asks about these. */
   readonly docs: ReadonlySet<string>;
-  readonly planes: readonly CatalogScope[];
+  readonly planes: readonly DirtyPlane[];
   readonly authority: boolean;
   readonly activity: boolean;
 }
@@ -121,27 +143,27 @@ interface Ring {
 /**
  * Does this ring's catalog dirt reach that resource?
  *
- * A scope carrying a project is one project's slice of a plane, and it reaches
- * only a dependency naming that same project — by **id**, because the key is a
+ * A plane carrying a scope is one container's slice of a plane, and it reaches
+ * only a dependency naming that same container — by **id**, because `label` is a
  * display alias a rename moves. A bare plane dependency takes the plane whole.
  */
 function planeIsStale(d: Derivation, ring: Ring): boolean {
   if (!d.catalog?.length) return false;
-  return ring.planes.some((scope) =>
+  return ring.planes.some((dirty) =>
     d.catalog!.some((dep) =>
       typeof dep === "string"
-        ? dep === scope.scope
-        : dep.plane === scope.scope &&
-          (scope.project_id == null || dep.projectId === scope.project_id)));
+        ? dep === dirty.plane
+        : dep.plane === dirty.plane &&
+          (dirty.scope == null || dep.scopeId === dirty.scope.id)));
 }
 
 /** Does this ring's issue dirt reach that resource? */
 function issuesAreStale(d: Derivation, ring: Ring): boolean {
   if (d.issues === undefined) return false;
   if (d.issues === "any") return ring.dirty.length > 0;
-  if ("projectId" in d.issues) {
-    const wanted = d.issues.projectId;
-    return ring.dirty.some((p) => p.project_id === wanted);
+  if ("scopeId" in d.issues) {
+    const wanted = d.issues.scopeId;
+    return ring.dirty.some((s) => s.id === wanted);
   }
   return d.issues.docs.some((doc) => ring.docs.has(doc));
 }
@@ -326,9 +348,9 @@ export class ProjectViewerStore {
         catalog: [
           "workflow",
           "docs",
-          ...(id ? [{ plane: "boards" as const, projectId: id }] : ["boards" as const]),
+          ...(id ? [{ plane: "boards" as const, scopeId: id }] : ["boards" as const]),
         ],
-        issues: id ? { projectId: id } : "any",
+        issues: id ? { scopeId: id } : "any",
       };
     }, force);
   }
@@ -402,8 +424,8 @@ export class ProjectViewerStore {
       // unlike the boards this is precise: ENG's issues do not refresh DSN's
       // milestone bars.
     }, {
-      catalog: [{ plane: "milestones", projectId: project }, "workflow"],
-      issues: { projectId: project },
+      catalog: [{ plane: "milestones", scopeId: project }, "workflow"],
+      issues: { scopeId: project },
     }, force);
   }
 
@@ -418,7 +440,7 @@ export class ProjectViewerStore {
       //
       // `project` is the `prj_` id the ring matches on, so posting in ENG does
       // not refetch DSN's feed.
-    }, { catalog: [{ plane: "updates", projectId: project }] }, force);
+    }, { catalog: [{ plane: "updates", scopeId: project }] }, force);
   }
 
   ensureSpecs(space: string, project: string | null, force = false): Promise<SpecView[]> {
@@ -867,11 +889,11 @@ export class ProjectViewerStore {
       return;
     }
 
-    const dirty = doorbell.dirty_by_project.flatMap((p) => p.docs);
+    const dirty = doorbell.dirty.flatMap((s) => s.docs);
     const ring: Ring = {
-      dirty: doorbell.dirty_by_project,
+      dirty: doorbell.dirty,
       docs: new Set(dirty),
-      planes: doorbell.dirty_catalog,
+      planes: doorbell.planes,
       authority: doorbell.authority_advanced,
       activity: doorbell.activity_advanced,
     };

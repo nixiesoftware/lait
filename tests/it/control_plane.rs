@@ -24,9 +24,7 @@ use comms::{Transport, TransportFactory};
 use issues::ids::SpaceId;
 use issues_app::IssuesResponse as IssueResponse;
 use lait::control::OrbitAddress;
-use lait::control::{
-    request, request_routed, subscribe, CatalogScope, ControlRoute, Request, Response,
-};
+use lait::control::{request, request_routed, subscribe, ControlRoute, Request, Response};
 use lait::orbital::run_station_process_with;
 
 const FOUNDER_SEED: [u8; 32] = [113u8; 32];
@@ -90,12 +88,12 @@ fn issue_req(
         .unwrap_or_else(|error| IssueResponse::err(format!("{error:#}")))
 }
 
-/// The docs a frame names under a project KEY, in frame order.
+/// The docs a frame names under a scope label, in frame order.
 fn named_docs(frame: &lait::control::Doorbell, key: &str) -> Vec<String> {
     frame
-        .dirty_by_project
+        .dirty
         .iter()
-        .filter(|d| d.project_key == key)
+        .filter(|d| d.label.as_deref() == Some(key))
         .flat_map(|d| d.docs.clone())
         .collect()
 }
@@ -449,7 +447,7 @@ fn doorbell_names_the_dirty_project_and_doc() {
             "the edit doorbell must name the edited doc under its project, got {ring:?}"
         );
         assert!(
-            ring.dirty_catalog.is_empty(),
+            ring.planes.is_empty(),
             "a field edit touches no catalog plane, got {ring:?}"
         );
 
@@ -489,35 +487,32 @@ fn doorbell_names_the_dirty_project_and_doc() {
         // board; it does not touch the label registry, the workflow, or any
         // other project. Ringing those would be the coarseness this replaced.
         assert!(
-            ring.dirty_catalog.contains(&CatalogScope::Docs),
+            ring.planes.iter().any(|p| p.plane == "docs"),
             "a create moves the row index, got {ring:?}"
         );
         assert!(
-            ring.dirty_catalog.iter().any(
-                |s| matches!(s, CatalogScope::Boards { project_key, .. } if project_key == "ENG")
-            ),
+            ring.planes.iter().any(|p| p.plane == "boards"
+                && p.scope
+                    .as_ref()
+                    .is_some_and(|s| s.label.as_deref() == Some("ENG"))),
             "a create puts the row on ENG's board, got {ring:?}"
         );
         // A project is named by its stable id as well as its display key, so a
         // dependency can match on something a rename cannot move.
         assert!(
-            ring.dirty_catalog.iter().any(|s| matches!(
-                s,
-                CatalogScope::Boards { project_id, .. } if project_id.starts_with("prj_")
-            )),
+            ring.planes.iter().any(|p| p.plane == "boards"
+                && p.scope
+                    .as_ref()
+                    .is_some_and(|s| s.kind == "project" && s.id.starts_with("prj_"))),
             "the board plane must carry the project's stable id, got {ring:?}"
         );
         assert!(
             !ring.authority_advanced,
             "a create moves no membership, got {ring:?}"
         );
-        for untouched in [
-            CatalogScope::Labels,
-            CatalogScope::Workflow,
-            CatalogScope::Teams,
-        ] {
+        for untouched in ["labels", "workflow", "teams"] {
             assert!(
-                !ring.dirty_catalog.contains(&untouched),
+                !ring.planes.iter().any(|p| p.plane == untouched),
                 "a create rang {untouched:?}, which it does not touch: {ring:?}"
             );
         }
@@ -546,18 +541,15 @@ fn doorbell_names_the_dirty_project_and_doc() {
             .expect("read spec doorbell")
             .expect("spec doorbell present");
         assert!(
-            ring.dirty_catalog.contains(&CatalogScope::Specs),
+            ring.planes.iter().any(|p| p.plane == "specs"),
             "a spec write must ring its own plane, got {ring:?}"
         );
         assert!(
-            !ring.dirty_catalog.contains(&CatalogScope::Docs),
+            !ring.planes.iter().any(|p| p.plane == "docs"),
             "a spec write must not ring the issue row index, got {ring:?}"
         );
         assert!(
-            !ring
-                .dirty_catalog
-                .iter()
-                .any(|scope| matches!(scope, CatalogScope::Boards { .. })),
+            !ring.planes.iter().any(|p| p.plane == "boards"),
             "a spec write must not ring any board, got {ring:?}"
         );
 
@@ -613,12 +605,12 @@ fn every_subscriber_sees_the_same_frame_for_one_commit() {
         let fa = a.next().await.expect("A reads").expect("A has a frame");
         let fb = b.next().await.expect("B reads").expect("B has a frame");
         assert_eq!(
-            (fa.seq, &fa.dirty_by_project, &fa.dirty_catalog),
-            (fb.seq, &fb.dirty_by_project, &fb.dirty_catalog),
+            (fa.seq, &fa.dirty, &fa.planes),
+            (fb.seq, &fb.dirty, &fb.planes),
             "subscribers disagreed about one commit: A={fa:?} B={fb:?}"
         );
         assert!(
-            !fa.dirty_by_project.is_empty(),
+            !fa.dirty.is_empty(),
             "both agreed, but on an empty dirty-set — that would pass for the \
              wrong reason: {fa:?}"
         );

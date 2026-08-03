@@ -1127,9 +1127,11 @@ impl Response {
 }
 
 /// The streamed frame: the repeated reply to [`Request::Subscribe`].
-/// A **batched, project-keyed dirty-set**, never state. The client
-/// re-reads the authoritative projection for each dirty scope; it never patches
-/// from a doorbell.
+/// A **batched, World-declared dirty-set**, never state. The client re-reads
+/// the authoritative projection for each dirty scope and plane; it never
+/// patches from a doorbell. The `kind` and `plane` strings are the hosting
+/// World's own vocabulary — the control plane carries them and does not
+/// interpret them.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Doorbell {
     /// Per-daemon-boot nonce; a change means restart and requires a `Reset`.
@@ -1138,12 +1140,19 @@ pub struct Doorbell {
     pub seq: u64,
     /// `true` means ignore the rest and rebaseline from a fresh snapshot.
     pub reset: bool,
-    /// Issue-row plane: which docs moved, in which project. Re-read these rows.
-    /// A list rather than a map keyed by project, because a project is named by
-    /// a stable id AND a mutable key and neither alone is a safe map key.
-    pub dirty_by_project: Vec<DirtyProject>,
-    /// Catalog-structure changes.
-    pub dirty_catalog: Vec<CatalogScope>,
+    /// Item plane: which items moved, in which container. Re-read those rows.
+    /// A list rather than a map keyed by container, because a container is
+    /// named by a stable id AND a mutable label and neither alone is a safe
+    /// map key.
+    ///
+    /// `default` for the same reason the flags below carry it: a frame from a
+    /// daemon that predates this vocabulary (stale across `lait update`)
+    /// decodes to an empty dirty-set rather than failing to decode at all.
+    #[serde(default)]
+    pub dirty: Vec<DirtyScope>,
+    /// Structural planes that moved, each optionally narrowed to one container.
+    #[serde(default)]
+    pub planes: Vec<DirtyPlane>,
     /// Membership, roles, devices or keys advanced.
     ///
     /// Its own flag, not a catalog scope: authority is not in the catalog Body,
@@ -1164,9 +1173,9 @@ pub struct Doorbell {
     pub presence_advanced: bool,
 }
 
-/// The catalog dirty-set vocabulary lives with the projections it describes —
-/// the World produces it, the control plane only carries it.
-pub use issues::dto::{CatalogScope, DirtyProject, ProjectRef};
+/// The dirty-set vocabulary is World-opaque and defined by `runtime`, so the
+/// control plane can carry a World it does not understand. It only carries it.
+pub use runtime::world::{DirtyPlane, DirtyScope, ScopeRef};
 
 /// A presence or transport log entry kept in the daemon's ring buffer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1400,15 +1409,6 @@ pub enum Probe {
     },
 }
 
-/// Probe a home's control channel without spawning anything.
-///
-/// Two deliberate choices make this survive the very skew it exists to detect:
-///
-/// * **Absent vs present is decided at the transport level.** Whether `connect`
-///   succeeds is a fact no protocol change can alter.
-/// * **The version is read as raw JSON, before any typed decode.** Probing with a
-///   typed request would mean a mismatched daemon fails on whatever field
-///   happened to change (it was `StatusInfo.name`) and reports *that* instead of
 /// A daemon is listening on this home that this build cannot talk to — in
 /// practice a version skew (the binary was upgraded, the daemon wasn't restarted).
 ///
@@ -1444,6 +1444,15 @@ impl std::fmt::Display for ForeignDaemon {
 
 impl std::error::Error for ForeignDaemon {}
 
+/// Probe a home's control channel without spawning anything.
+///
+/// Two deliberate choices make this survive the very skew it exists to detect:
+///
+/// * **Absent vs present is decided at the transport level.** Whether `connect`
+///   succeeds is a fact no protocol change can alter.
+/// * **The version is read as raw JSON, before any typed decode.** Probing with a
+///   typed request would mean a mismatched daemon fails on whatever field
+///   happened to change (it was `StatusInfo.name`) and reports *that* instead of
 ///   the version. Only `kind` and `protocol_version` need to hold still.
 pub async fn probe(home: &Path) -> Probe {
     // A probe that can hang defeats its own purpose: it exists to *diagnose* a

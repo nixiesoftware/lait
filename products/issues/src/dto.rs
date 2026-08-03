@@ -836,16 +836,6 @@ pub struct ProjectRef {
     pub project_key: String,
 }
 
-/// Which docs moved, in which project — the issue-row plane of a doorbell.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct DirtyProject {
-    pub project_id: String,
-    pub project_key: String,
-    /// The DocIds whose rows must be re-read.
-    pub docs: Vec<String>,
-}
-
 /// Identifies which catalog structure became dirty.
 ///
 /// One variant per plane of the catalog Body, because that Body holds every

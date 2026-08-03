@@ -34,7 +34,7 @@ pub fn package() -> WorldPackage {
 #[derive(Default)]
 struct IssuesProjector {
     baseline:
-        std::sync::Mutex<Option<std::collections::BTreeMap<crate::control::CatalogScope, String>>>,
+        std::sync::Mutex<Option<std::collections::BTreeMap<issues::dto::CatalogScope, String>>>,
 }
 
 impl ObservationProjector for IssuesProjector {
@@ -65,16 +65,7 @@ impl ObservationProjector for IssuesProjector {
             .baseline
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let (dirty_by_project, dirty_catalog) = issues_app::projections::observation(
-            session,
-            space,
-            &observation.bodies,
-            &mut baseline,
-        );
-        Invalidation {
-            dirty_by_project,
-            dirty_catalog,
-        }
+        issues_app::projections::observation(session, space, &observation.bodies, &mut baseline)
     }
 }
 

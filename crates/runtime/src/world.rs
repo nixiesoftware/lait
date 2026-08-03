@@ -439,6 +439,81 @@ pub struct Projection {
     pub demand: Vec<u8>,
 }
 
+/// A container a World groups its items by, named twice on purpose.
+///
+/// `id` is the stable identity a dependent matches on; `label` is a *mutable*
+/// display alias that a rename changes underneath you. Matching on the label is
+/// a latent bug waiting for the first rename, and dropping it would force every
+/// consumer to resolve one before it could route or render — so both travel
+/// together, with the roles stated.
+///
+/// `kind` is the World's own word for what the container is. Runtime carries it
+/// and never interprets it; a World with no containers never builds one.
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScopeRef {
+    /// World-declared container vocabulary. Opaque to Runtime.
+    pub kind: String,
+    /// The container's stable identity.
+    pub id: String,
+    /// A mutable human-facing alias, when the World has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+/// Which items moved inside one container.
+///
+/// Item-level, not container-level: a consumer re-reads exactly the ids named
+/// here rather than the whole container. The container is spelled inline rather
+/// than nested as a [`ScopeRef`] because `serde(flatten)` and
+/// `deny_unknown_fields` do not compose, and this type keeps the strictness.
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DirtyScope {
+    /// World-declared container vocabulary. Opaque to Runtime.
+    pub kind: String,
+    /// The container's stable identity.
+    pub id: String,
+    /// A mutable human-facing alias, when the World has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// The item ids whose rows must be re-read.
+    pub docs: Vec<String>,
+}
+
+/// A structural plane of a World that moved, optionally narrowed to one
+/// container.
+///
+/// Distinct from [`DirtyScope`] because there are two ideas here and collapsing
+/// them loses one: a plane names a *structure* to re-read whole and has no item
+/// ids to hand out, while a dirty scope names *which items* inside a container
+/// moved. A World that partitions a plane per container fills `scope`; a
+/// Space-wide plane leaves it `None`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DirtyPlane {
+    /// World-declared plane vocabulary. Opaque to Runtime.
+    pub plane: String,
+    /// The container this plane instance belongs to, if the World partitions it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<ScopeRef>,
+}
+
+/// What one World says an [`Observation`] invalidated, in that World's own
+/// vocabulary.
+///
+/// Both halves are World-opaque: Runtime and the host carry `kind`/`plane`
+/// strings and never route on them. A World with no containers returns only
+/// `planes`; a World with no structural planes returns only `dirty`. Neither
+/// half is a substitute for the other.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Invalidation {
+    /// Which items moved, grouped by the container the World groups them by.
+    pub dirty: Vec<DirtyScope>,
+    /// Which structural planes moved.
+    pub planes: Vec<DirtyPlane>,
+}
+
 /// What a World may know about one content: enough to render it, and nothing
 /// that would let it reach the bytes without asking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

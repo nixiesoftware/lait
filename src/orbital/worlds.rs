@@ -25,13 +25,11 @@ use runtime::world::call::{Access, Call, Code, Failure, Handler};
 #[cfg(test)]
 use runtime::world::call::{Context, Reply};
 
-/// Product-owned projection of a generic runtime Observation into the local
-/// invalidations understood by the shell protocol.
-#[derive(Debug, Default)]
-pub struct Invalidation {
-    pub dirty_by_project: Vec<issues::dto::DirtyProject>,
-    pub dirty_catalog: Vec<crate::control::CatalogScope>,
-}
+/// One World's Observation projection, in that World's own vocabulary.
+///
+/// Defined by `runtime` so a World supplied out of tree can name it without
+/// depending on this shell.
+pub use runtime::world::Invalidation;
 
 pub struct StatusProjection {
     pub items: usize,
@@ -42,6 +40,13 @@ pub struct StatusProjection {
 
 /// A World package's Observation projector. Implementations own their own
 /// baselines; the Station host only fans generic observations out.
+///
+/// The return type now lives in `runtime`, so the *vocabulary* half of this
+/// seam is World-opaque. The trait itself still lives here: relocating it into
+/// `runtime` is deferred behind de-producting [`StatusProjection`], whose
+/// `items`/`groups` are still an issue count and a project count wearing
+/// neutral names, and behind deciding whether `runtime::world::Catalog` /
+/// `Builder` should own projector registration.
 pub trait ObservationProjector: Send + Sync {
     fn status(&self, session: &Session) -> Option<StatusProjection>;
     fn start(&self, session: &Session, space: &mechanics::ids::SpaceId);
@@ -400,6 +405,14 @@ impl WorldRouter {
         None
     }
 
+    /// Fan one Observation out to every hosted World and concatenate what they
+    /// say moved.
+    ///
+    /// Two Worlds may both declare a `kind` or `plane` string, and this
+    /// concatenates without tagging the World that produced it. Harmless while
+    /// one package is installed; the fix is a per-World grouping in the frame,
+    /// which is a wire decision belonging with the multi-World work — not a
+    /// per-scope field added here.
     pub fn project(
         &self,
         space: &mechanics::ids::SpaceId,
@@ -418,8 +431,8 @@ impl WorldRouter {
                 continue;
             };
             let next = projector.project(session, space, observation);
-            projected.dirty_by_project.extend(next.dirty_by_project);
-            projected.dirty_catalog.extend(next.dirty_catalog);
+            projected.dirty.extend(next.dirty);
+            projected.planes.extend(next.planes);
         }
         projected
     }

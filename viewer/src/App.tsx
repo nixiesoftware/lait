@@ -573,7 +573,7 @@ export function App() {
         // On a rebaseline the space list is exactly as suspect as the board: a
         // daemon that restarted may have changed its own name, projects, or
         // whether it is up at all.
-        if (rebaseline || d.dirty_catalog.length) void loadSpaces();
+        if (rebaseline || d.planes.length) void loadSpaces();
       },
       [current, loadBoard, loadSpaces, projectStore],
     ),

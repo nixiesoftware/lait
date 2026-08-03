@@ -43,7 +43,7 @@ describe("the overlay", () => {
   });
 
   it("clears a whole doc, which is all the doorbell knows how to say", () => {
-    // The doorbell names docs, not fields — `dirty_by_project` is doc-ids. So
+    // The doorbell names docs, not fields — `dirty` is doc-ids. So
     // clearing has to be doc-granular or it couldn't be driven by it.
     const o = new Overlay();
     o.set("doc_1", "title", "a");

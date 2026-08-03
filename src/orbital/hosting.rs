@@ -2687,23 +2687,23 @@ impl StationHost {
 
     /// Translate one Observation into the frame every subscriber receives.
     ///
-    /// The Observation names Bodies; a client re-reads by project and doc.
-    /// This is what makes the frame actionable — and a local commit and a
-    /// peer's incorporated one arrive on the same stream, so both ring alike.
+    /// The Observation names Bodies; each hosted World says which of its own
+    /// scopes and planes moved. That is what makes the frame actionable — and a
+    /// local commit and a peer's incorporated one arrive on the same stream, so
+    /// both ring alike.
     fn frame_for(&self, record: &runtime::world::Observation) -> Doorbell {
         let projected = self.worlds.project(self.station.space_id(), record);
-        let dirty_by_project = projected.dirty_by_project;
-        let dirty_catalog = projected.dirty_catalog;
-        let body_news = !dirty_by_project.is_empty() || !dirty_catalog.is_empty();
+        let body_news = !projected.dirty.is_empty() || !projected.planes.is_empty();
         Doorbell {
             epoch: record.epoch.as_u64(),
             seq: record.sequence,
             reset: record.reset,
-            dirty_by_project,
-            dirty_catalog,
+            dirty: projected.dirty,
+            planes: projected.planes,
             authority_advanced: record.authority,
             // Authority alone advances no feed: it is membership news, and
-            // `Activity` projects issue history. One record can carry both.
+            // `Activity` projects the World's own history. One record can
+            // carry both.
             activity_advanced: body_news,
             presence_advanced: record.authority,
         }

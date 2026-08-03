@@ -11,10 +11,15 @@
 use std::collections::{BTreeMap, HashMap};
 
 use issues::contract::{self, IssueQuery, RingDigestView};
-use issues::dto::{CatalogScope, DirtyProject, InboxEntry, ProjectRef};
+use issues::dto::{CatalogScope, InboxEntry, ProjectRef};
 use issues::ids::SpaceId;
 use replica::body::{BodyId, BodyKey};
+use runtime::world::{DirtyPlane, DirtyScope, Invalidation, ScopeRef};
 use runtime::{world::Query, Session};
+
+/// Issues' one container kind. World-declared vocabulary: the host carries this
+/// string and never interprets it.
+const SCOPE_PROJECT: &str = "project";
 
 /// The Issues portion of a host status response.
 pub struct StatusProjection {
@@ -157,7 +162,7 @@ pub fn observation(
     space: &SpaceId,
     bodies: &[BodyKey],
     baseline: &mut Option<BTreeMap<CatalogScope, String>>,
-) -> (Vec<DirtyProject>, Vec<CatalogScope>) {
+) -> Invalidation {
     let catalog_body = contract::catalog_body_id(space);
     let mut catalog_dirty = false;
     let mut docs = Vec::new();
@@ -175,7 +180,7 @@ pub fn observation(
     let Some(state) = ring_state(session) else {
         return Default::default();
     };
-    let (by_project, missed) = resolve_docs(&state.docs, &docs);
+    let (dirty, missed) = resolve_docs(&state.docs, &docs);
     let mut planes = Vec::new();
     if catalog_dirty || missed {
         match baseline.as_ref() {
@@ -206,13 +211,16 @@ pub fn observation(
             planes.push(CatalogScope::Docs);
         }
     }
-    (by_project, planes)
+    Invalidation {
+        dirty,
+        planes: planes.into_iter().map(dirty_plane).collect(),
+    }
 }
 
 fn resolve_docs(
     index: &HashMap<BodyId, (String, ProjectRef)>,
     docs: &[&BodyId],
-) -> (Vec<DirtyProject>, bool) {
+) -> (Vec<DirtyScope>, bool) {
     let mut by_project: BTreeMap<ProjectRef, Vec<String>> = BTreeMap::new();
     let mut missed = false;
     for body in docs {
@@ -226,11 +234,57 @@ fn resolve_docs(
     }
     let dirty = by_project
         .into_iter()
-        .map(|(project, docs)| DirtyProject {
-            project_id: project.project_id,
-            project_key: project.project_key,
+        .map(|(project, docs)| DirtyScope {
+            kind: SCOPE_PROJECT.into(),
+            id: project.project_id,
+            label: Some(project.project_key),
             docs,
         })
         .collect();
     (dirty, missed)
+}
+
+/// Issues' catalog planes in the World-declared vocabulary the host carries.
+///
+/// An exhaustive match with no wildcard on purpose: a plane added to
+/// [`CatalogScope`] must fail to compile here rather than silently project
+/// nothing, which is a resource that never refreshes.
+fn dirty_plane(scope: CatalogScope) -> DirtyPlane {
+    let (plane, project) = match scope {
+        CatalogScope::Space => ("space", None),
+        CatalogScope::Projects => ("projects", None),
+        CatalogScope::Labels => ("labels", None),
+        CatalogScope::Workflow => ("workflow", None),
+        CatalogScope::Boards {
+            project_id,
+            project_key,
+        } => ("boards", Some((project_id, project_key))),
+        CatalogScope::Milestones {
+            project_id,
+            project_key,
+        } => ("milestones", Some((project_id, project_key))),
+        CatalogScope::Cycles {
+            project_id,
+            project_key,
+        } => ("cycles", Some((project_id, project_key))),
+        CatalogScope::Updates {
+            project_id,
+            project_key,
+        } => ("updates", Some((project_id, project_key))),
+        CatalogScope::Initiatives => ("initiatives", None),
+        CatalogScope::Teams => ("teams", None),
+        CatalogScope::Triage => ("triage", None),
+        CatalogScope::Roles => ("roles", None),
+        CatalogScope::Specs => ("specs", None),
+        CatalogScope::Docs => ("docs", None),
+        CatalogScope::Relations => ("relations", None),
+    };
+    DirtyPlane {
+        plane: plane.into(),
+        scope: project.map(|(id, key)| ScopeRef {
+            kind: SCOPE_PROJECT.into(),
+            id,
+            label: Some(key),
+        }),
+    }
 }
