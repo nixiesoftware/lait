@@ -9,6 +9,7 @@
 //! attached as an external placement. Per-home IPC remains an internal
 //! compatibility adapter behind the identity-scoped Lait daemon endpoint.
 
+use runtime::poison::LockRecovering;
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -150,8 +151,7 @@ impl Placement {
         }
         match &self.mode {
             PlacementMode::Owned { completion, .. } => completion
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
+                .lock_recovering()
                 .as_ref()
                 .is_some_and(|task| !task.is_finished()),
             PlacementMode::Attached => true,
@@ -365,11 +365,7 @@ impl Placement {
 
     async fn shutdown(&self) -> Result<()> {
         self.alive.store(false, Ordering::Release);
-        let pump = self
-            .doorbell_pump
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .take();
+        let pump = self.doorbell_pump.lock_recovering().take();
         if let Some(pump) = pump {
             pump.abort();
             let _ = pump.await;
@@ -382,10 +378,7 @@ impl Placement {
             return Ok(());
         };
         stop.stop();
-        let task = completion
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .take();
+        let task = completion.lock_recovering().take();
         let Some(task) = task else {
             return Ok(());
         };
@@ -407,12 +400,7 @@ impl Drop for Placement {
             // `shutdown` first and observes completion.
             stop.stop();
         }
-        if let Some(pump) = self
-            .doorbell_pump
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .take()
-        {
+        if let Some(pump) = self.doorbell_pump.lock_recovering().take() {
             pump.abort();
         }
     }
@@ -477,7 +465,7 @@ impl<T> OrbitOccupancy<T> {
         Fut: Future<Output = Result<T, E>>,
     {
         let slot = {
-            let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
+            let mut slots = self.slots.lock_recovering();
             slots
                 .entry(orbit)
                 .or_insert_with(|| Arc::new(Mutex::new(None)))
@@ -498,13 +486,7 @@ impl<T> OrbitOccupancy<T> {
     }
 
     async fn placements(&self) -> Vec<Arc<T>> {
-        let slots: Vec<_> = self
-            .slots
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .values()
-            .cloned()
-            .collect();
+        let slots: Vec<_> = self.slots.lock_recovering().values().cloned().collect();
         let mut placements = Vec::with_capacity(slots.len());
         for slot in slots {
             if let Some(placement) = slot.lock().await.clone() {

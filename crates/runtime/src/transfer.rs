@@ -11,6 +11,7 @@
 //! So it has its own channel, its own bound, and its own coalescing. A watcher
 //! that stalls falls behind on *progress* and nothing else.
 
+use crate::poison::LockRecovering;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex};
 // `tokio::time::Instant`, not `tokio::time::Instant`. Without the `test-util`
@@ -254,7 +255,7 @@ impl TransferRegistry {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Catalog> {
-        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+        self.inner.lock_recovering()
     }
 
     /// Publish, having let go of the lock.

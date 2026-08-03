@@ -26,6 +26,7 @@
 //! bound: a permit before the stream kind is read, the gate before the message,
 //! the message's declared length before its buffer.
 
+use crate::poison::LockRecovering;
 use std::cell::RefCell;
 use std::rc::Rc;
 // `tokio::time::Instant`, not `tokio::time::Instant`. Without the `test-util`
@@ -429,15 +430,14 @@ impl LiveHandle {
     }
 
     fn local(&self) -> std::sync::MutexGuard<'_, LocalPresence> {
-        self.local.lock().unwrap_or_else(|p| p.into_inner())
+        self.local.lock_recovering()
     }
 
     /// A session for this peer opened.
     pub fn arrived(&self, peer: &Key) {
         *self
             .connected
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
+            .lock_recovering()
             .entry(peer.clone())
             .or_insert(0) += 1;
     }
@@ -453,7 +453,7 @@ impl LiveHandle {
     /// half-maintained, which is exactly how it was.
     pub fn departed(&self, peer: &Key) {
         let gone = {
-            let mut connected = self.connected.lock().unwrap_or_else(|p| p.into_inner());
+            let mut connected = self.connected.lock_recovering();
             match connected.get_mut(peer) {
                 Some(count) => {
                     *count = count.saturating_sub(1);
@@ -468,10 +468,7 @@ impl LiveHandle {
             }
         };
         if gone {
-            self.outbox
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .remove(peer);
+            self.outbox.lock_recovering().remove(peer);
         }
     }
 
@@ -481,12 +478,7 @@ impl LiveHandle {
     /// currently holds a session with. That is the only set a signal can be
     /// delivered to, and the reason presence can gate delivery at all.
     pub fn present_stations(&self) -> Vec<Key> {
-        self.connected
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .keys()
-            .cloned()
-            .collect()
+        self.connected.lock_recovering().keys().cloned().collect()
     }
 
     /// Hand a signal to whichever session reaches that peer.
@@ -504,12 +496,7 @@ impl LiveHandle {
     /// The check is here and not only at the call site, because this is where the
     /// queue is. The doc said this for a while before the code did.
     pub fn nudge(&self, peer: &Key, signal: crate::plane::Signal) -> bool {
-        if !self
-            .connected
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .contains_key(peer)
-        {
+        if !self.connected.lock_recovering().contains_key(peer) {
             return false;
         }
         // An outbox is one-way by construction, and a signal that expects an
@@ -526,7 +513,7 @@ impl LiveHandle {
         }) {
             return false;
         }
-        let mut outbox = self.outbox.lock().unwrap_or_else(|p| p.into_inner());
+        let mut outbox = self.outbox.lock_recovering();
         let queued = outbox.entry(peer.clone()).or_default();
         if queued.len() >= MAX_OUTBOUND_SIGNALS {
             return false;
@@ -555,7 +542,7 @@ impl LiveHandle {
     ///
     /// Oldest first, and what is not taken stays queued for the next beat.
     fn take_outbound(&self, peer: &Key, max: usize) -> Vec<crate::plane::Signal> {
-        let mut outbox = self.outbox.lock().unwrap_or_else(|p| p.into_inner());
+        let mut outbox = self.outbox.lock_recovering();
         let Some(queued) = outbox.get_mut(peer) else {
             return Vec::new();
         };
@@ -596,7 +583,7 @@ impl LiveHandle {
     }
 
     fn offers(&self) -> std::sync::MutexGuard<'_, crate::signal::OfferQueue> {
-        self.offers.lock().unwrap_or_else(|p| p.into_inner())
+        self.offers.lock_recovering()
     }
 
     /// How much of a content this Station holds, for a peer that asked.
@@ -609,7 +596,7 @@ impl LiveHandle {
     }
 
     fn table(&self) -> std::sync::MutexGuard<'_, PublishTable> {
-        self.table.lock().unwrap_or_else(|p| p.into_inner())
+        self.table.lock_recovering()
     }
 
     /// Listen for signals this Station receives.

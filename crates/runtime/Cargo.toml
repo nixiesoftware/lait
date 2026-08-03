@@ -52,6 +52,12 @@ tokio = { version = "1", features = ["rt", "time", "sync", "macros"] }
 # Minting a fresh SpaceId digest at formation.
 getrandom = "0.3"
 anyhow = "1"
+# The engine's only way to say what it refused. Every failure below this line
+# is one a peer sees as a closed stream and an operator sees as nothing at all:
+# the drivers answer connections, judge admissions and persist the neighbour
+# registry on their own threads, with no caller left to return an error to. A
+# facade, not a subscriber — the binary decides where these go.
+tracing = "0.1"
 
 [lints]
 workspace = true

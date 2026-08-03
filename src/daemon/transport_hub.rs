@@ -7,6 +7,7 @@
 //! the queue, then replays it unchanged; Runtime remains the authority that
 //! verifies the protocol, peer, signature, and Space binding.
 
+use runtime::poison::LockRecovering;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -49,8 +50,7 @@ impl TransportHubFactory {
 
     fn slot(&self, identity: DeviceId) -> HubSlot {
         self.hubs
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
+            .lock_recovering()
             .entry(identity)
             .or_insert_with(|| Arc::new(Mutex::new(None)))
             .clone()
@@ -116,8 +116,7 @@ impl TransportFactory for TransportHubFactory {
         }
         let slots: Vec<_> = self
             .hubs
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
+            .lock_recovering()
             .drain()
             .map(|(_, slot)| slot)
             .collect();
@@ -216,18 +215,14 @@ impl IdentityTransportHub {
             hub.routes.clone(),
             hub.stopping.subscribe(),
         ));
-        *hub.accept_task
-            .lock()
-            .unwrap_or_else(|error| error.into_inner()) = Some(task);
+        *hub.accept_task.lock_recovering() = Some(task);
         let session_task = tokio::spawn(run_session_pump(
             transport,
             hub.routes.clone(),
             hub.session_alpns.clone(),
             hub.stopping.subscribe(),
         ));
-        *hub.session_task
-            .lock()
-            .unwrap_or_else(|error| error.into_inner()) = Some(session_task);
+        *hub.session_task.lock_recovering() = Some(session_task);
         hub
     }
 
@@ -272,10 +267,7 @@ impl IdentityTransportHub {
             session_lanes: lanes.into(),
             stopping: stopping.clone(),
         };
-        let mut routes = self
-            .routes
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let mut routes = self.routes.lock_recovering();
         if routes.contains_key(&space_bytes) {
             return Err(anyhow!(
                 "device {} already has an active Station in Space {}; \
@@ -299,10 +291,7 @@ impl IdentityTransportHub {
     }
 
     fn unregister(&self, space: SpaceBytes, token: u64) {
-        let mut routes = self
-            .routes
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let mut routes = self.routes.lock_recovering();
         if routes
             .get(&space)
             .is_some_and(|target| target.token == token)
@@ -319,8 +308,7 @@ impl IdentityTransportHub {
         }
         let targets: Vec<_> = self
             .routes
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
+            .lock_recovering()
             .drain()
             .map(|(_, target)| target)
             .collect();
@@ -332,14 +320,8 @@ impl IdentityTransportHub {
         // which is a task outliving the hub that owns it — the kind of leak
         // that only shows up as a Station that will not stop.
         let tasks = [
-            self.accept_task
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .take(),
-            self.session_task
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .take(),
+            self.accept_task.lock_recovering().take(),
+            self.session_task.lock_recovering().take(),
         ];
         for task in tasks.into_iter().flatten() {
             if let Err(error) = task.await {
@@ -449,6 +431,7 @@ async fn run_session_pump(
                     .find(|(alpn, _)| *alpn == incoming.alpn.as_slice())
                     .map(|(_, plane_permits)| plane_permits.clone())
                 else {
+                    dropped(&incoming.alpn, "unregistered session protocol");
                     incoming.connection.close(REFUSED_CODE, b"");
                     continue;
                 };
@@ -515,7 +498,13 @@ async fn dispatch_connection(
             read_opening(incoming.connection.as_ref()),
         ) => match read {
             Ok(Ok(opening)) => opening,
-            _ => {
+            Ok(Err(error)) => {
+                dropped(&incoming.alpn, &format!("the opening could not be read: {error:#}"));
+                incoming.connection.close(REFUSED_CODE, b"");
+                return;
+            }
+            Err(_) => {
+                dropped(&incoming.alpn, "no opening arrived within the deadline");
                 incoming.connection.close(REFUSED_CODE, b"");
                 return;
             }
@@ -523,17 +512,16 @@ async fn dispatch_connection(
     };
 
     let Some(space) = session_opening_space(&opening) else {
+        dropped(&incoming.alpn, "the opening did not decode");
         incoming.connection.close(REFUSED_CODE, b"");
         return;
     };
-    let target = routes
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .get(&space)
-        .cloned();
+    let target = routes.lock_recovering().get(&space).cloned();
     let Some(target) = target else {
-        // Coarse on purpose: telling an unadmitted peer apart from an unknown
-        // Space is an oracle for which Spaces this device holds.
+        // Coarse on purpose *to the peer*: telling an unadmitted peer apart
+        // from an unknown Space is an oracle for which Spaces this device
+        // holds. The operator is owed the distinction and gets it here.
+        dropped(&incoming.alpn, "no Station in that Space is placed here");
         incoming.connection.close(REFUSED_CODE, b"");
         return;
     };
@@ -542,12 +530,17 @@ async fn dispatch_connection(
     // peer's own assertion would turn a claim into a dispatch decision.
     // `judge` still refuses an opening whose plane disagrees with its ALPN.
     let Some(lane) = target.lane(&incoming.alpn).cloned() else {
+        dropped(
+            &incoming.alpn,
+            "that Space's Station serves no queue for this plane",
+        );
         incoming.connection.close(REFUSED_CODE, b"");
         return;
     };
 
     let mut route_stopping = target.stopping.subscribe();
     if *route_stopping.borrow() || *hub_stopping.borrow() {
+        dropped(&incoming.alpn, "the Station or the hub is stopping");
         incoming.connection.close(REFUSED_CODE, b"");
         return;
     }
@@ -566,6 +559,7 @@ async fn dispatch_connection(
     tokio::select! {
         sent = lane.send(routed) => {
             if let Err(refused) = sent {
+                dropped(&refused.0.alpn, "that plane's queue is closed");
                 refused.0.connection.close(REFUSED_CODE, b"");
             }
         }
@@ -669,8 +663,24 @@ async fn read_opening(connection: &dyn comms::Connection) -> Result<Vec<u8>> {
 }
 
 fn session_opening_space(opening: &[u8]) -> Option<SpaceBytes> {
-    let open = runtime::plane::Open::decode_canonical(opening).ok()?;
-    Some(open.space)
+    decoded_or_reported(runtime::plane::Open::decode_canonical(opening)).map(|open| open.space)
+}
+
+/// Keep the typed decode failure instead of `.ok()`-ing it away.
+///
+/// The variant is the whole diagnosis: `UnsupportedVersion` is a peer on
+/// another generation, `NonCanonical` is this build reading the wrong message,
+/// `TooLarge`/`Bounds` is a peer past a declared ceiling. All three arrive here
+/// as `None` and leave as the same silent close, so the one place they are
+/// still distinguishable is before the conversion.
+fn decoded_or_reported<T, E: std::fmt::Debug>(decoded: Result<T, E>) -> Option<T> {
+    match decoded {
+        Ok(value) => Some(value),
+        Err(error) => {
+            tracing::debug!(?error, "an opening did not decode");
+            None
+        }
+    }
 }
 
 async fn dispatch_incoming(
@@ -708,11 +718,7 @@ async fn dispatch_incoming(
         dropped(&incoming.alpn, "the opening did not decode");
         return;
     };
-    let target = routes
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .get(&space)
-        .cloned();
+    let target = routes.lock_recovering().get(&space).cloned();
     let Some(target) = target else {
         dropped(&incoming.alpn, "no Station in that Space is placed here");
         return;
@@ -755,12 +761,10 @@ fn opening_space(alpn: &[u8], first: &[u8]) -> Option<SpaceBytes> {
         // Contact's first frame is the plane *opening*, not the Offer that
         // follows it. Reading the wrong one here refuses every inbound Contact
         // — silently, and one layer below where anything could say so.
-        runtime::plane::Open::decode_canonical(first)
-            .ok()
+        decoded_or_reported(runtime::plane::Open::decode_canonical(first))
             .map(|opening| opening.space)
     } else if alpn == runtime::neighbor::PRESENCE_ALPN {
-        runtime::neighbor::PresenceProbe::decode(first)
-            .ok()
+        decoded_or_reported(runtime::neighbor::PresenceProbe::decode(first))
             .map(|probe| probe.space)
     } else {
         None
@@ -882,8 +886,7 @@ impl Transport for ScopedTransport {
 
     fn take_session_queue(&self, alpn: comms::Alpn) -> Option<comms::ConnectionQueue> {
         self.session_queues
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
+            .lock_recovering()
             .iter_mut()
             .find(|(lane, _)| *lane == alpn)
             .and_then(|(_, queue)| queue.take())

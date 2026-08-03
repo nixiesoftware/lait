@@ -28,6 +28,7 @@
 //! Station writer, and only then acknowledged to the caller. `TransferAck`
 //! means transcript receipt, never durable convergence.
 
+use crate::poison::LockRecovering;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 // `tokio::time::Instant`, not `tokio::time::Instant`. Without the `test-util`
@@ -202,12 +203,18 @@ async fn drive(ctx: DriverContext) {
     let mut gossip_sender: Option<Box<dyn comms::GossipSender>> = None;
     if let Some(gossip) = &ctx.options.gossip {
         let topic = beacon_topic(&ctx.space);
-        if let Ok((sender, mut receiver)) = ctx
+        // A failure here is not a degraded mode, it is silence: no Beacon is
+        // ever emitted or ingested, so the Station stays up, reports healthy,
+        // and simply never finds anyone.
+        let subscribed = ctx
             .options
             .transport
             .subscribe(topic, &gossip.bootstrap)
-            .await
-        {
+            .await;
+        if let Err(error) = &subscribed {
+            tracing::warn!(%error, "gossip subscribe failed — this Station will discover no peers");
+        }
+        if let Ok((sender, mut receiver)) = subscribed {
             gossip_sender = Some(sender);
             let ctx2 = ctx.clone();
             let emit2 = emit_state.clone();
@@ -223,15 +230,13 @@ async fn drive(ctx: DriverContext) {
                         comms::GossipEvent::NeighborUp(peer) => {
                             emit2.greet.set(true);
                             if let Some(station) = Key::from_device(&peer) {
-                                let mut registry =
-                                    ctx2.registry.lock().unwrap_or_else(|p| p.into_inner());
+                                let mut registry = ctx2.registry.lock_recovering();
                                 let _ = registry.note_swarm(&station, true, now_ms());
                             }
                         }
                         comms::GossipEvent::NeighborDown(peer) => {
                             if let Some(station) = Key::from_device(&peer) {
-                                let mut registry =
-                                    ctx2.registry.lock().unwrap_or_else(|p| p.into_inner());
+                                let mut registry = ctx2.registry.lock_recovering();
                                 let _ = registry.note_swarm(&station, false, now_ms());
                             }
                         }
@@ -258,10 +263,18 @@ async fn drive(ctx: DriverContext) {
                 let ctx3 = ctx2.clone();
                 tokio::task::spawn_local(async move {
                     let comms::Incoming { from, alpn, stream } = incoming;
+                    // The responder half answers to nobody: there is no caller
+                    // to return a `Failure` to, and the peer only ever sees the
+                    // stream close. Whatever this Station knew about why it
+                    // refused an inbound Contact ends here, so it is said here.
                     if alpn == CONTACT_ALPN {
-                        let _ = serve_contact(&ctx3, from, stream).await;
+                        if let Err(failure) = serve_contact(&ctx3, from.clone(), stream).await {
+                            tracing::debug!(peer = %from, ?failure, "served Contact failed");
+                        }
                     } else if alpn == PRESENCE_ALPN {
-                        let _ = serve_presence(&ctx3, from, stream).await;
+                        if let Err(failure) = serve_presence(&ctx3, from.clone(), stream).await {
+                            tracing::debug!(peer = %from, ?failure, "served presence probe failed");
+                        }
                     }
                 });
             }
@@ -329,7 +342,7 @@ async fn drive(ctx: DriverContext) {
                 // marks every known Neighbor pending, so loopback-scale
                 // convergence starts on this tick, not at the next floor.
                 if edge && last_emitted.is_some() {
-                    let mut registry = ctx.registry.lock().unwrap_or_else(|p| p.into_inner());
+                    let mut registry = ctx.registry.lock_recovering();
                     let _ = registry.mark_all_pending(now_ms());
                 }
                 last_beacon = Instant::now();
@@ -357,14 +370,19 @@ async fn drive(ctx: DriverContext) {
                 };
             }
         }
-        // Drain coalesced registry freshness writes.
+        // Drain coalesced registry freshness writes. An unwritable registry
+        // costs nothing until the next restart, at which point this Station has
+        // forgotten every peer it ever met — so the disk failure is worth
+        // hearing about while it is still only a disk failure.
         {
-            let mut registry = ctx.registry.lock().unwrap_or_else(|p| p.into_inner());
-            let _ = registry.flush(now_ms());
+            let mut registry = ctx.registry.lock_recovering();
+            if let Err(failure) = registry.flush(now_ms()) {
+                tracing::warn!(?failure, "the Neighbor registry could not be persisted");
+            }
         }
         // Scheduler: dial eligible Neighbors, fair order, bounded fan-out.
         let eligible = {
-            let registry = ctx.registry.lock().unwrap_or_else(|p| p.into_inner());
+            let registry = ctx.registry.lock_recovering();
             registry.eligible(now_ms())
         };
         for station in eligible {
@@ -409,8 +427,13 @@ async fn drive(ctx: DriverContext) {
         }
     }
     {
-        let mut registry = ctx.registry.lock().unwrap_or_else(|p| p.into_inner());
-        let _ = registry.flush_now(now_ms());
+        let mut registry = ctx.registry.lock_recovering();
+        if let Err(failure) = registry.flush_now(now_ms()) {
+            tracing::warn!(
+                ?failure,
+                "the Neighbor registry could not be persisted on the way down"
+            );
+        }
     }
     // End this Station's Space-scoped view. In a multi-Space host this
     // unregisters only the Space; the identity endpoint closes after every
@@ -426,11 +449,23 @@ fn beacon_topic(space: &SpaceId) -> comms::Topic {
 }
 
 fn ingest_beacon(ctx: &DriverContext, emit: &EmitState, bytes: &[u8]) {
-    let Ok(signed) = SignedBeacon::decode_canonical(bytes) else {
-        return;
+    // Both failures name a version skew — `UnsupportedProtocol`,
+    // `UnsupportedSignatureAlgorithm`, `TooManyRoutes` — and both decide
+    // whether a peer is registered at all. A swarm that silently ignores half
+    // its members looks exactly like a swarm with half as many members.
+    let signed = match SignedBeacon::decode_canonical(bytes) {
+        Ok(signed) => signed,
+        Err(error) => {
+            tracing::debug!(?error, "a gossiped Beacon did not decode");
+            return;
+        }
     };
-    let Ok(verified) = signed.verify() else {
-        return;
+    let verified = match signed.verify() {
+        Ok(verified) => verified,
+        Err(error) => {
+            tracing::debug!(?error, "a gossiped Beacon did not verify");
+            return;
+        }
     };
     // Never register ourselves.
     let station_key = verified.station().key_bytes();
@@ -478,7 +513,7 @@ fn ingest_beacon(ctx: &DriverContext, emit: &EmitState, bytes: &[u8]) {
         }
     }
     let frontier = ctx.core.frontier();
-    let mut registry = ctx.registry.lock().unwrap_or_else(|p| p.into_inner());
+    let mut registry = ctx.registry.lock_recovering();
     let _ = registry.observe_beacon(
         &verified,
         (&frontier.root, frontier.transaction_count),
@@ -498,7 +533,7 @@ fn ingest_beacon(ctx: &DriverContext, emit: &EmitState, bytes: &[u8]) {
 }
 
 fn record_result(ctx: &DriverContext, station: &Key, result: &Result<ContactOutcome, Failure>) {
-    let mut registry = ctx.registry.lock().unwrap_or_else(|p| p.into_inner());
+    let mut registry = ctx.registry.lock_recovering();
     match result {
         Ok(_) => {
             let _ = registry.record_success(station, now_ms());
@@ -541,12 +576,7 @@ async fn contact_neighbor(ctx: &DriverContext, station: &Key) -> Result<ContactO
     let signer = crate::world::LocalIdentity::from_seed(&ctx.options.station_seed);
     let frontier = (ctx.options.authority.frontier)();
     let attempted = {
-        let mut incorporator = ctx
-            .options
-            .authority
-            .incorporator
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let mut incorporator = ctx.options.authority.incorporator.lock_recovering();
         ctx.core
             .with_replica(|replica| {
                 let commit_ctx = replica::transaction::CommitContext {
@@ -831,7 +861,7 @@ async fn serve_contact(
     // the accept path already keeps: the `Accept` below goes out with no guard
     // held.
     let decision: Result<Accept, Refusal> = {
-        let mut accepted = ctx.accepted.lock().unwrap_or_else(|p| p.into_inner());
+        let mut accepted = ctx.accepted.lock_recovering();
         match accepted.lookup(&opening, Instant::now()) {
             Replay::Repeat(accept) => Ok(*accept),
             Replay::Fresh => match judge(
@@ -884,7 +914,7 @@ async fn serve_contact(
     // no background dials injected behind its assertions.
     if ctx.options.gossip.is_some() {
         let lease_ms = ctx.options.route_lease.as_millis() as u64;
-        let mut registry = ctx.registry.lock().unwrap_or_else(|p| p.into_inner());
+        let mut registry = ctx.registry.lock_recovering();
         let _ = registry.note_reciprocable(&transport_peer, now_ms(), lease_ms);
     }
     // Receive the holdings declaration the signed hello committed to; a

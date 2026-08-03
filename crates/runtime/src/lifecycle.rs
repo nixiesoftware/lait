@@ -22,6 +22,7 @@
 //! until completion package C2 (`docs/plans/02-runtime-world-carve.md`)
 //! delivers the persistent Neighbor registry and Contact orchestration.
 
+use crate::poison::LockRecovering;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -678,10 +679,7 @@ impl Orbit {
                 cancel: station.cancel.clone(),
             };
             station.spawn_tracked(move |_cancel| crate::contact_driver::run_driver(ctx))?;
-            *station
-                .driver
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(tx);
+            *station.driver.lock_recovering() = Some(tx);
 
             // The first plane driver in a shipped Station.
             //
@@ -777,8 +775,7 @@ impl Orbit {
                     transport: plane_transport.clone(),
                     candidates: Arc::new(move || {
                         neighbors
-                            .lock()
-                            .unwrap_or_else(|p| p.into_inner())
+                            .lock_recovering()
                             .snapshot()
                             .into_iter()
                             .map(|neighbor| neighbor.station)
@@ -1066,10 +1063,7 @@ impl Station {
         }
         let token = self.cancel.clone();
         let handle = std::thread::spawn(move || f(token));
-        self.handles
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .push(handle);
+        self.handles.lock_recovering().push(handle);
         Ok(())
     }
 
@@ -1144,10 +1138,7 @@ impl Station {
     /// registry (verified Beacon high-water, advisory reachability, retry
     /// state). Reachability is advisory and never standing.
     pub fn neighbors(&self) -> Vec<Neighbor> {
-        self.neighbor_registry
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .snapshot()
+        self.neighbor_registry.lock_recovering().snapshot()
     }
 
     /// Ingest raw Beacon bytes (e.g. received over an application gossip
@@ -1157,10 +1148,7 @@ impl Station {
         if !self.alive.load(Ordering::SeqCst) {
             return;
         }
-        let driver = self
-            .driver
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let driver = self.driver.lock_recovering();
         if let Some(tx) = driver.as_ref() {
             let _ = tx.send(crate::contact_driver::DriverCmd::Beacon(bytes.to_vec()));
             return;
@@ -1174,10 +1162,7 @@ impl Station {
             return;
         };
         let frontier = self.core.frontier();
-        let mut registry = self
-            .neighbor_registry
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let mut registry = self.neighbor_registry.lock_recovering();
         let _ = registry.observe_beacon(
             &verified,
             (&frontier.root, frontier.transaction_count),
@@ -1198,10 +1183,7 @@ impl Station {
         if !self.alive.load(Ordering::SeqCst) {
             return Err(crate::plane::contact::Failure::Interrupted);
         }
-        let driver = self
-            .driver
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let driver = self.driver.lock_recovering();
         let Some(tx) = driver.as_ref() else {
             return Err(crate::plane::contact::Failure::Unreachable);
         };
@@ -1220,12 +1202,7 @@ impl Station {
     /// Drain the tracked task set within `deadline`. Returns the join results of
     /// finished tasks and whether any task failed to finish in time.
     fn drain_tasks(&mut self, deadline: Instant) -> (bool, bool) {
-        let handles = std::mem::take(
-            &mut *self
-                .handles
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()),
-        );
+        let handles = std::mem::take(&mut *self.handles.lock_recovering());
         loop {
             if handles.iter().all(|h| h.is_finished()) {
                 break;
@@ -1294,12 +1271,7 @@ impl Station {
     /// durably written by the per-commit sink, and the core is closed (under the
     /// writer mutex) before the Orbit is returned.
     pub fn wait(mut self) -> Exit {
-        let handles = std::mem::take(
-            &mut *self
-                .handles
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()),
-        );
+        let handles = std::mem::take(&mut *self.handles.lock_recovering());
         let mut reason = None;
         for h in handles {
             if h.join().is_err() {
