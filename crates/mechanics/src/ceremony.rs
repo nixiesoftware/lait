@@ -1766,10 +1766,18 @@ impl Ceremony<'_> {
         );
         let authority = self.current_authority();
         let standing = self.standing_dkg_session();
-        let configuration = standing
-            .and_then(|id| self.dkg_manifest(&id))
-            .map(|m| m.configuration)
-            .unwrap_or_else(crate::authority::Config::single);
+        // `None` means a standing session governs the key and its manifest
+        // could not be read — we know a key is in force but not what governs
+        // it. `current_authority` refuses that same substitution below, for the
+        // reason given there; answering `Single` here happens to stay
+        // conservative today only because `Single` has no FROST threshold and
+        // so leaves `backed` empty. That is a coincidence of two other
+        // decisions, not a guarantee, and it is one edit away from becoming
+        // "one share satisfies a 3-of-5".
+        let configuration: Option<crate::authority::Config> = match standing {
+            Some(id) => self.dkg_manifest(&id).map(|m| m.configuration),
+            None => Some(crate::authority::Config::single()),
+        };
         // Consider every ceremony this device is a custodian of, not only the
         // standing one. A PENDING indispensable arrangement is precisely the
         // case worth reporting: its install is blocked on this device, and
@@ -1779,9 +1787,10 @@ impl Ceremony<'_> {
         let board = self.ceremony_board(&events);
         let mut backed = Vec::new();
         if let Some(id) = standing {
-            if let (Some(transcript), Some(flat)) =
-                (board.dkg.get(&id), configuration.as_frost_threshold())
-            {
+            if let (Some(transcript), Some(flat)) = (
+                board.dkg.get(&id),
+                configuration.as_ref().and_then(|c| c.as_frost_threshold()),
+            ) {
                 let acknowledgements = transcript.custody_acks();
                 backed.extend(flat.participants.iter().filter_map(|principal| {
                     principal
@@ -1797,12 +1806,18 @@ impl Ceremony<'_> {
                 ));
             }
         }
-        let satisfies_configuration = match configuration.scheme {
-            crate::authority::Scheme::Single => !backed.is_empty(),
-            crate::authority::Scheme::FrostThreshold => configuration
-                .as_frost_threshold()
-                .is_some_and(|flat| backed.len() >= flat.k as usize),
-            crate::authority::Scheme::GeneralAccess => false,
+        let satisfies_configuration = match configuration.as_ref() {
+            // Not "no", but "we cannot say" — reported as unsatisfied, because
+            // the operator acting on this is deciding whether recovery would
+            // work, and an unread arrangement is not evidence that it would.
+            None => false,
+            Some(config) => match config.scheme {
+                crate::authority::Scheme::Single => !backed.is_empty(),
+                crate::authority::Scheme::FrostThreshold => config
+                    .as_frost_threshold()
+                    .is_some_and(|flat| backed.len() >= flat.k as usize),
+                crate::authority::Scheme::GeneralAccess => false,
+            },
         };
         let mine: Vec<crate::dkg::TranscriptId> = board
             .dkg

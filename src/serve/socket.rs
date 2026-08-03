@@ -1,6 +1,8 @@
-// WebSocket framing validates lane lengths and sequence bounds before arithmetic;
-// conversions adapt the versioned wire representation.
-#![allow(clippy::arithmetic_side_effects, clippy::as_conversions)]
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    reason = "WebSocket framing validates lane lengths and sequence bounds before arithmetic; conversions adapt the versioned wire representation."
+)]
 
 //! The browser session socket: one WebSocket carrying lanes the doorbell stream cannot.
 //!

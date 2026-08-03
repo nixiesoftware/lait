@@ -1,9 +1,8 @@
-// Compatibility process framing validates byte boundaries and lengths before its
-// bounded codec operations; the encoding must remain byte-identical.
 #![allow(
     clippy::arithmetic_side_effects,
     clippy::as_conversions,
-    clippy::indexing_slicing
+    clippy::indexing_slicing,
+    reason = "Compatibility process framing validates byte boundaries and lengths before its bounded codec operations; the encoding must remain byte-identical."
 )]
 
 //! The identity-scoped Lait daemon and its single local control endpoint.

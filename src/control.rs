@@ -1,9 +1,8 @@
-// The control wire codec validates frame lengths before bounded byte operations;
-// these conversions preserve the existing versioned JSON and content encodings.
 #![allow(
     clippy::arithmetic_side_effects,
     clippy::as_conversions,
-    clippy::indexing_slicing
+    clippy::indexing_slicing,
+    reason = "The control wire codec validates frame lengths before bounded byte operations; these conversions preserve the existing versioned JSON and content encodings."
 )]
 
 //! Layer B — the local control protocol. Newline-delimited JSON over
