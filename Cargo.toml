@@ -347,6 +347,17 @@ nursery = { level = "warn", priority = -1 }
 # Adding an allow here is a decision about the whole workspace. Prefer a local
 # `#[allow(..., reason = "...")]` for a single justified site.
 
+# A std lock guard that is still live at an `.await`. Denied, not warned: the
+# drivers run on single-threaded `LocalSet`s with one task per connection, so a
+# guard held across a suspension parks the only thread there is and nothing can
+# release it — a self-deadlock, not contention. `await_holding_lock` is
+# warn-by-default and no workflow here sets `-D warnings`, so at `warn` this
+# lint is emitted and ignored; `deny` is what makes clippy exit non-zero.
+# Deliberately NOT gated on `not(test)` like the crash-safety set at each crate
+# root: `--all-targets` compiles the lib twice and the deny would be off in the
+# `cfg(test)` pass, which is where the connection-handling test doubles live.
+await_holding_lock = "deny"
+
 # Attribute completeness. This workspace annotates `#[must_use]` and `const`
 # where they carry meaning, not everywhere the compiler would tolerate them.
 must_use_candidate = "allow"                # 722

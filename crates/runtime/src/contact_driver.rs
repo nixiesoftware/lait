@@ -54,7 +54,7 @@ use crate::plane::contact::{
     InitiatorReceiver, Offer, OutboundTransfer, Progress, Proof, ReceivedMaterial, CONTACT_ALPN,
     CONTACT_PROTOCOL, MAX_FRAME,
 };
-use crate::plane::{Accept, Open, Plane};
+use crate::plane::{Accept, Open, Plane, Refusal};
 use crate::session::StationCore;
 
 /// The Contact scheduler's global in-flight bound.
@@ -813,10 +813,27 @@ async fn serve_contact(
         peer: transport_peer.clone(),
         plane: Plane::Contact,
     };
-    let accept = {
+    // Decide under the lock, answer the wire after it.
+    //
+    // `accepted` is a `std::sync::Mutex` and this driver is a single-threaded
+    // `LocalSet` (`run_driver`), with one `serve_contact` task spawned per
+    // inbound connection. A guard that is still live at an `.await` therefore
+    // parks the *thread* — the same thread that holds it — and no task can ever
+    // run to release it. `std::sync::Mutex` is not reentrant, so that is a
+    // self-deadlock, not contention, and it takes the whole driver with it:
+    // `Station::wait` joins this thread unbounded.
+    //
+    // Deciding first is safe because the refusal branch mutates nothing — a
+    // refused opening is never entered into the replay cache, so it is re-judged
+    // from scratch on every retry both before and after this change. The only
+    // mutations under the guard are `lookup`'s sweep and `remember`, and both
+    // stay under it. This also just makes the refusal path keep the discipline
+    // the accept path already keeps: the `Accept` below goes out with no guard
+    // held.
+    let decision: Result<Accept, Refusal> = {
         let mut accepted = ctx.accepted.lock().unwrap_or_else(|p| p.into_inner());
         match accepted.lookup(&opening, Instant::now()) {
-            Replay::Repeat(accept) => *accept,
+            Replay::Repeat(accept) => Ok(*accept),
             Replay::Fresh => match judge(
                 &opening,
                 &opening_context,
@@ -825,13 +842,17 @@ async fn serve_contact(
             ) {
                 Admission::Accept(accept, _) => {
                     accepted.remember(&opening, &accept, Instant::now());
-                    *accept
+                    Ok(*accept)
                 }
-                Admission::Refuse(refusal) => {
-                    let _ = step(deadline, progress, stream.send(&refusal.encode())).await;
-                    return Err(Failure::Admission);
-                }
+                Admission::Refuse(refusal) => Err(refusal),
             },
+        }
+    };
+    let accept = match decision {
+        Ok(accept) => accept,
+        Err(refusal) => {
+            let _ = step(deadline, progress, stream.send(&refusal.encode())).await;
+            return Err(Failure::Admission);
         }
     };
     step(deadline, progress, stream.send(&accept.encode()))
