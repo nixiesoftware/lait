@@ -6,9 +6,9 @@
 # reviewed like one, not discovered when a gate goes red on a refactor.
 
 [tiers]
-pr             1336
-pr-platform    1006
-nightly        1363
+pr             1339
+pr-platform    1009
+nightly        1366
 mutants        87
 
 [gates]
@@ -266,6 +266,9 @@ lait orbits::catalog::tests::global_identity_sees_own_stores_and_agents_with_ide
 lait orbits::catalog::tests::nested_agent_binding_keeps_owner_name_and_case
 lait orbits::catalog::tests::path_comparison_handles_platform_spelling_without_prefix_confusion
 lait orbits::catalog::tests::self_contained_identity_sees_only_itself
+lait orbits::router::tests::a_finished_doorbell_pump_does_not_mean_a_dead_placement
+lait orbits::router::tests::a_host_that_cannot_be_reached_is_declared_dead
+lait orbits::router::tests::a_placement_whose_doorbell_stream_ended_is_reused_not_rebuilt
 lait orbits::router::tests::attached_compatibility_process_is_not_stopped_by_router_shutdown
 lait orbits::router::tests::different_orbits_place_concurrently
 lait orbits::router::tests::failed_placement_leaves_orbit_vacant_for_retry
