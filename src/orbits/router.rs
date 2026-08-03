@@ -51,6 +51,35 @@ pub struct OrbitDoorbell {
     pub doorbell: Doorbell,
 }
 
+/// How long the doorbell pump waits between re-subscribe attempts, and the
+/// ceiling it backs off to.
+///
+/// The same policy the viewer's daemon pump runs (`crate::serve`), and
+/// deliberately the same numbers: both re-subscribe to a doorbell stream, and
+/// every re-subscribe costs a subscriber downstream a full rebaseline. Half a
+/// second makes a host restart look instant; thirty seconds is where a Station
+/// that is not answering stops costing anything.
+const PUMP_BACKOFF_FLOOR: Duration = Duration::from_millis(500);
+const PUMP_BACKOFF_CEILING: Duration = Duration::from_secs(30);
+
+/// How long one subscribe attempt may take before it counts as unreachable.
+///
+/// Matches `control::probe`'s bound, for the reason given there: connecting to
+/// a Windows named pipe with no free instance parks rather than erroring, so
+/// without this the pump can wait forever on a wedged host and never conclude
+/// anything — least of all that the host is gone.
+const SUBSCRIBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Clears the placement's reachability flag however the pump ends — return,
+/// panic, or abort.
+struct ReachabilityGuard(Arc<AtomicBool>);
+
+impl Drop for ReachabilityGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
 /// The live host-plane record for a Station occupying one Orbit.
 ///
 /// The placement may own an in-process runner or merely attach to a compatible
@@ -100,15 +129,23 @@ impl Placement {
         }
     }
 
+    /// Whether this placement can still be reached, so a caller may reuse it
+    /// instead of establishing the Station again.
+    ///
+    /// The doorbell subscription is deliberately not consulted. It is an event
+    /// stream, not a health probe, and it ends for reasons that say nothing
+    /// about the host: a Station with no standing yet closes it immediately by
+    /// design (`StationHost::stream_subscribe`), which is the state every
+    /// joiner is in until admission. Reading that as death rebuilt the whole
+    /// Station on every request of a join — tearing down its transport
+    /// registration mid-Contact — for as long as it took to be admitted.
+    ///
+    /// What the pump does report is *reachability*, through `alive`: it clears
+    /// that flag when it cannot connect to the host at all. For an attached
+    /// placement, whose host is in another process, that is the only liveness
+    /// signal there is.
     fn is_live(&self) -> bool {
-        if !self.alive.load(Ordering::Acquire)
-            || !self
-                .doorbell_pump
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .as_ref()
-                .is_some_and(|task| !task.is_finished())
-        {
+        if !self.alive.load(Ordering::Acquire) {
             return false;
         }
         match &self.mode {
@@ -221,37 +258,94 @@ impl Placement {
             address: resolved.address.clone(),
         });
         let alive = Arc::new(AtomicBool::new(true));
-        let pump_alive = alive.clone();
+        let alive_for_pump = alive.clone();
 
         let doorbell_pump = tokio::spawn(async move {
-            match control::subscribe_routed(&pump_home, 0, route).await {
-                Ok(mut subscription) => loop {
-                    match subscription.next().await {
-                        Ok(Some(doorbell)) => {
-                            let _ = doorbells.send(OrbitDoorbell {
-                                orbit: orbit_for_pump.clone(),
-                                doorbell,
-                            });
+            // The flag is cleared by dropping this guard rather than by a store
+            // on the way out, so a panic inside the loop reads as a dead
+            // placement too. It used to be `JoinHandle::is_finished` that
+            // covered a panicking pump, by accident; `is_live` no longer asks.
+            let _unreachable = ReachabilityGuard(alive_for_pump);
+            let mut backoff = PUMP_BACKOFF_FLOOR;
+            loop {
+                // An established subscription ending is NOT a dead host. It is
+                // what a Station with no standing does by design — see
+                // `StationHost::stream_subscribe`, which emits one reset and
+                // closes when the Station cannot dock yet. Every joiner is in
+                // exactly that state until admission, so ending the pump there
+                // would condemn the placement it was created for. A Station
+                // going dormant and a lagging fan-out close the stream too.
+                //
+                // Only being unable to REACH the host at all is death, and for
+                // an attached placement — whose host is in another process —
+                // this loop is the sole thing that ever notices.
+                let attempt = tokio::time::timeout(
+                    SUBSCRIBE_TIMEOUT,
+                    control::subscribe_routed(&pump_home, 0, route.clone()),
+                )
+                .await;
+                match attempt {
+                    Ok(Ok(mut subscription)) => {
+                        // Every subscription opens with a reset frame. One that
+                        // carries nothing else is a host saying "not yet" —
+                        // which is what a Station with no standing answers, on
+                        // repeat, until it is admitted. Re-subscribing to that
+                        // at the floor forever would forward a reset twice a
+                        // second, and a reset costs every subscriber downstream
+                        // a full rebaseline. So the floor is earned by a stream
+                        // that carried real news; a stream that did not backs
+                        // off toward the ceiling.
+                        let mut carried = 0u32;
+                        loop {
+                            match subscription.next().await {
+                                Ok(Some(doorbell)) => {
+                                    carried += 1;
+                                    let _ = doorbells.send(OrbitDoorbell {
+                                        orbit: orbit_for_pump.clone(),
+                                        doorbell,
+                                    });
+                                }
+                                Ok(None) => break,
+                                // A frame that will not decode is a peer on
+                                // another generation, not a host that has died.
+                                // Re-subscribing is the authoritative check, and
+                                // the backoff rate-limits it.
+                                Err(error) => {
+                                    tracing::debug!(
+                                        orbit = %orbit_for_pump,
+                                        %error,
+                                        "Orbit doorbell stream ended"
+                                    );
+                                    break;
+                                }
+                            }
                         }
-                        Ok(None) => break,
-                        Err(error) => {
-                            tracing::warn!(
-                                orbit = %orbit_for_pump,
-                                %error,
-                                "Orbit doorbell stream ended"
-                            );
-                            break;
-                        }
+                        backoff = if carried > 1 {
+                            PUMP_BACKOFF_FLOOR
+                        } else {
+                            (backoff * 2).min(PUMP_BACKOFF_CEILING)
+                        };
                     }
-                },
-                Err(error) => tracing::warn!(
+                    // Nothing is accepting, or the connect parked past its
+                    // bound. A Windows named pipe with no free instance parks
+                    // rather than erroring, so the timeout is what makes this
+                    // reachable at all.
+                    Ok(Err(_)) | Err(_) => {
+                        tracing::warn!(
+                            orbit = %orbit_for_pump,
+                            "Orbit doorbell subscription cannot reach its Station host"
+                        );
+                        break;
+                    }
+                }
+                tracing::debug!(
                     orbit = %orbit_for_pump,
-                    %error,
-                    "Orbit doorbell subscription failed"
-                ),
+                    ?backoff,
+                    "Orbit doorbell stream closed; re-subscribing"
+                );
+                tokio::time::sleep(backoff).await;
             }
 
-            pump_alive.store(false, Ordering::Release);
             let _ = doorbells.send(OrbitDoorbell {
                 orbit: orbit_for_pump,
                 doorbell: Doorbell {
@@ -808,6 +902,96 @@ mod tests {
         assert!(placements
             .windows(2)
             .all(|pair| Arc::ptr_eq(&pair[0], &pair[1])));
+    }
+
+    /// An attached placement whose doorbell pump has ended, the way a
+    /// pre-admission joiner's does within milliseconds of being placed.
+    /// Callers yield before asserting, so the handle really is finished.
+    fn placement_with_a_finished_pump() -> Placement {
+        Placement {
+            orbit: orbit("/finished-pump"),
+            mode: PlacementMode::Attached,
+            alive: Arc::new(AtomicBool::new(true)),
+            doorbell_pump: StdMutex::new(Some(tokio::spawn(async {}))),
+        }
+    }
+
+    /// A Station with no standing closes its doorbell stream at once and by
+    /// design, so the pump ending says nothing about the host.
+    #[tokio::test]
+    async fn a_finished_doorbell_pump_does_not_mean_a_dead_placement() {
+        let placement = placement_with_a_finished_pump();
+        // Let the replacement handle finish too, so the old `is_finished`
+        // clause would fire if it were still there.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            placement.is_live(),
+            "an ended doorbell subscription is not a dead Station"
+        );
+
+        placement.alive.store(false, Ordering::Release);
+        assert!(
+            !placement.is_live(),
+            "an unreachable host — what the pump actually reports — is dead"
+        );
+    }
+
+    /// The consequence the predicate exists for. This is the regression: a
+    /// joiner rebuilt its whole Station, transport registration and all, on
+    /// every request of its join loop.
+    #[tokio::test]
+    async fn a_placement_whose_doorbell_stream_ended_is_reused_not_rebuilt() {
+        let occupancy = OrbitOccupancy::<Placement>::default();
+        let id = orbit("/reused");
+        let builds = Arc::new(AtomicUsize::new(0));
+
+        let mut placed = Vec::new();
+        for _ in 0..2 {
+            let builds = builds.clone();
+            placed.push(
+                occupancy
+                    .get_or_try_place(id.clone(), Placement::is_live, || async move {
+                        builds.fetch_add(1, Ordering::SeqCst);
+                        Ok::<_, ()>(placement_with_a_finished_pump())
+                    })
+                    .await
+                    .unwrap(),
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        assert_eq!(
+            builds.load(Ordering::SeqCst),
+            1,
+            "the second request must reuse the placement, not establish a second Station"
+        );
+        assert!(Arc::ptr_eq(&placed[0], &placed[1]));
+    }
+
+    /// The risk the change above takes on: with the pump task no longer
+    /// consulted, an attached placement is only ever declared dead by the
+    /// pump failing to reach it. If that stops working, nothing else notices.
+    #[tokio::test]
+    async fn a_host_that_cannot_be_reached_is_declared_dead() {
+        let (home, catalog, id) = formed_directory("unreachable", &[41u8; 32]);
+        let resolved = catalog.resolve(&id).expect("resolve");
+
+        // The store is real, but no Station host was ever placed here, so
+        // nothing is listening on its control channel and nothing will be.
+        let placement =
+            Placement::observe(&resolved, PlacementMode::Attached, broadcast::channel(8).0)
+                .expect("observe");
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        while placement.is_live() && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(
+            !placement.is_live(),
+            "a placement whose host cannot be reached must not stay live forever"
+        );
+
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[tokio::test]
