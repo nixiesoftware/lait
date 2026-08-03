@@ -1,6 +1,7 @@
-// Clap's data registry uses enum discriminants and validated numeric ranges when
-// adapting its declarative command specification.
-#![allow(clippy::as_conversions)]
+#![allow(
+    clippy::as_conversions,
+    reason = "Clap's data registry uses enum discriminants and validated numeric ranges when adapting its declarative command specification."
+)]
 
 //! Programmatic clap command registry.
 //!

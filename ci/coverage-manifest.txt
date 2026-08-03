@@ -6,9 +6,9 @@
 # reviewed like one, not discovered when a gate goes red on a refactor.
 
 [tiers]
-pr             1341
-pr-platform    1011
-nightly        1368
+pr             1342
+pr-platform    1012
+nightly        1369
 mutants        87
 
 [gates]
@@ -609,6 +609,7 @@ mechanics acl::tests::a_discharged_fence_survives_its_minter_being_removed
 mechanics acl::tests::a_fenced_actor_with_an_independent_grant_keeps_their_seat
 mechanics acl::tests::a_fenced_eviction_raises_a_rekey_obligation
 mechanics acl::tests::a_mint_cannot_jump_the_generation
+mechanics acl::tests::an_unresolved_acl_state_refuses_where_an_empty_one_would_permit
 mechanics acl::tests::device_must_speak_for_the_claimed_actor
 mechanics acl::tests::empty_grants_member_is_view_only
 mechanics acl::tests::forged_signature_is_rejected

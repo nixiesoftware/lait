@@ -1,6 +1,8 @@
-// Hosting uses validated protocol counters and bounded scheduling arithmetic;
-// conversions adapt fixed-width durable and runtime identifiers.
-#![allow(clippy::arithmetic_side_effects, clippy::as_conversions)]
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    reason = "Hosting uses validated protocol counters and bounded scheduling arithmetic; conversions adapt fixed-width durable and runtime identifiers."
+)]
 
 //! Application hosting for one active Station.
 //!
@@ -380,8 +382,17 @@ impl StationHost {
         // entries holding an unexpired route lease. Identities only; the
         // eclipse fence governs everything learned after this.
         let my_id = retained_transport.my_id();
-        let mut bootstrap: Vec<issues::ids::DeviceId> =
-            load_seeds(home).into_iter().map(|s| s.id).collect();
+        // Starting with no pinned seeds is survivable — the ticket's approach
+        // Station and the persisted Neighbors below still bootstrap the swarm —
+        // but doing it because the registry would not parse is worth saying,
+        // since the symptom is a node that simply never finds anyone.
+        let mut bootstrap: Vec<issues::ids::DeviceId> = match load_seeds(home) {
+            Ok(seeds) => seeds.into_iter().map(|s| s.id).collect(),
+            Err(error) => {
+                tracing::warn!(%error, "starting with no pinned bootstrap seeds");
+                Vec::new()
+            }
+        };
         // The ticket's approach Station: teach the transport its signed direct
         // routes so the first dial resolves (Coordinates-only, no shared
         // registry), and bootstrap the swarm from it.
@@ -1935,14 +1946,17 @@ impl StationHost {
                 None => return Response::err("expected a device id or a Coordinates link to pin"),
             },
         };
-        let newly = upsert_seed(
+        let newly = match upsert_seed(
             &self.home,
             SeedRecord {
                 id: id.clone(),
                 nick: String::new(),
                 space,
             },
-        );
+        ) {
+            Ok(newly) => newly,
+            Err(error) => return Response::err(error),
+        };
         Response::Ok {
             message: Some(if newly {
                 format!("pinned seed {}", id.as_str())
@@ -1961,7 +1975,14 @@ impl StationHost {
             .iter()
             .map(|n| n.station.key_bytes())
             .collect();
-        let seeds = load_seeds(&self.home)
+        let loaded = match load_seeds(&self.home) {
+            Ok(seeds) => seeds,
+            // "You have pinned nothing" and "your seed file is broken" are
+            // different answers to `lait seed list`, and only one of them is
+            // actionable.
+            Err(error) => return Response::err(error),
+        };
+        let seeds = loaded
             .into_iter()
             .map(|s| {
                 // A seed is pinned by device id; a Neighbor is a Station id —
@@ -1985,10 +2006,11 @@ impl StationHost {
     /// Unpin seeds matching a full id, id-prefix, or nick.
     fn seed_remove(&self, needle: &str) -> Response {
         match remove_seed(&self.home, needle) {
-            0 => Response::err("no pinned seed matched that id/nick"),
-            n => Response::Ok {
+            Ok(0) => Response::err("no pinned seed matched that id/nick"),
+            Ok(n) => Response::Ok {
                 message: Some(format!("unpinned {n} seed(s)")),
             },
+            Err(error) => Response::err(error),
         }
     }
 
@@ -3067,14 +3089,35 @@ fn seeds_path(home: &Path) -> PathBuf {
 
 /// Load the pinned seed registry, dropping (at warn) any record whose id is not
 /// a device key so one bad row never unpins the rest.
-fn load_seeds(home: &Path) -> Vec<SeedRecord> {
-    let Ok(data) = std::fs::read_to_string(seeds_path(home)) else {
-        return Vec::new();
+///
+/// `Err` means the file is there and could not be read as a registry. That is
+/// deliberately not the same answer as an empty registry: the caller that
+/// *writes* must refuse, because it would otherwise save its empty guess over
+/// the seeds a user pinned, and a transient parse failure would become a
+/// permanent deletion. An absent file is genuinely no seeds, and is `Ok`.
+fn load_seeds(home: &Path) -> Result<Vec<SeedRecord>, String> {
+    let path = seeds_path(home);
+    let data = match std::fs::read_to_string(&path) {
+        Ok(data) => data,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(format!("{} is unreadable: {error}", path.display())),
     };
-    let rows: Vec<SeedRecord> = serde_json::from_str(&data).unwrap_or_default();
-    rows.into_iter()
+    let rows: Vec<SeedRecord> = serde_json::from_str(&data)
+        .map_err(|error| format!("{} is not a seed registry: {error}", path.display()))?;
+    let total = rows.len();
+    let kept: Vec<SeedRecord> = rows
+        .into_iter()
         .filter(|r| issues::ids::DeviceId::parse(r.id.as_str()).is_some())
-        .collect()
+        .collect();
+    // The warn this function's contract has always promised.
+    if kept.len() != total {
+        tracing::warn!(
+            dropped = total - kept.len(),
+            path = %path.display(),
+            "seed records whose id is not a device key were ignored"
+        );
+    }
+    Ok(kept)
 }
 
 fn save_seeds(home: &Path, seeds: &[SeedRecord]) {
@@ -3085,24 +3128,26 @@ fn save_seeds(home: &Path, seeds: &[SeedRecord]) {
 
 /// Upsert a seed keyed by id (nick/space refresh in place). Returns whether it
 /// was newly pinned.
-fn upsert_seed(home: &Path, rec: SeedRecord) -> bool {
-    let mut seeds = load_seeds(home);
+fn upsert_seed(home: &Path, rec: SeedRecord) -> Result<bool, String> {
+    // Refusing here is the point: pinning a seed must never be the operation
+    // that silently unpins every other one.
+    let mut seeds = load_seeds(home)?;
     if let Some(existing) = seeds.iter_mut().find(|s| s.id == rec.id) {
         existing.nick = rec.nick;
         existing.space = rec.space;
         save_seeds(home, &seeds);
-        false
+        Ok(false)
     } else {
         seeds.push(rec);
         save_seeds(home, &seeds);
-        true
+        Ok(true)
     }
 }
 
 /// Unpin seeds matching a full id, a ≥6-char id prefix, or a nick. Returns the
 /// count removed.
-fn remove_seed(home: &Path, needle: &str) -> usize {
-    let mut seeds = load_seeds(home);
+fn remove_seed(home: &Path, needle: &str) -> Result<usize, String> {
+    let mut seeds = load_seeds(home)?;
     let before = seeds.len();
     seeds.retain(|s| {
         let id = s.id.as_str();
@@ -3112,7 +3157,7 @@ fn remove_seed(home: &Path, needle: &str) -> usize {
     if removed > 0 {
         save_seeds(home, &seeds);
     }
-    removed
+    Ok(removed)
 }
 
 /// The local petname map (`aliases.json` beside the home).

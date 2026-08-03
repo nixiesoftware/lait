@@ -1,10 +1,9 @@
-// Command dispatch validates clap shapes before indexing and uses bounded display
-// arithmetic. `process::exit` is confined to explicit CLI outcome boundaries.
 #![allow(
     clippy::arithmetic_side_effects,
     clippy::as_conversions,
     clippy::exit,
-    clippy::indexing_slicing
+    clippy::indexing_slicing,
+    reason = "Command dispatch validates clap shapes before indexing and uses bounded display arithmetic. `process::exit` is confined to explicit CLI outcome boundaries."
 )]
 
 //! Binary entry point logic: parse the CLI and dispatch. Lives in the lib (not
