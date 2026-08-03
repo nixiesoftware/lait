@@ -12,7 +12,7 @@ use runtime::{plane::Activation, world::Catalog, Runtime};
 
 use crate::orbital::{discover_space_id, orbital_store_root, unsupported_store_at, SpaceAuthority};
 
-pub use issues_app::lifecycle::{BootstrapPhase, IssuesBootstrapRecord};
+pub use crate::composition::product_lifecycle::{BootstrapPhase, IssuesBootstrapRecord};
 
 fn issues_registry() -> Result<Catalog> {
     crate::world::packages()
@@ -22,13 +22,13 @@ fn issues_registry() -> Result<Catalog> {
 }
 
 pub fn issues_implementation_id() -> [u8; 32] {
-    issues_app::lifecycle::implementation_id()
+    crate::composition::product_lifecycle::implementation_id()
 }
 
 /// Apply the product-supplied founder policy through the generic Mechanics
 /// authority host.
 pub fn seed_founder_policy(mechanics: &SpaceAuthority) -> Result<()> {
-    let policy = issues_app::lifecycle::founder_policy();
+    let policy = crate::composition::product_lifecycle::founder_policy();
     mechanics.activate_implementation(policy.world, policy.implementation)?;
     for grant in policy.grants {
         mechanics.grant_self_capability(grant.capability, grant.resource, grant.salt)?;
@@ -40,7 +40,7 @@ pub fn read_bootstrap_record(
     home: &Path,
     space: &mechanics::ids::SpaceId,
 ) -> Option<IssuesBootstrapRecord> {
-    issues_app::lifecycle::read_bootstrap_record(&orbital_store_root(home), space)
+    crate::composition::product_lifecycle::read_bootstrap_record(&orbital_store_root(home), space)
 }
 
 pub fn form_space(
@@ -91,9 +91,9 @@ fn form_space_project(
     let session = station
         .dock(&crate::world::contract::world_id(), &identity)
         .map_err(|error| anyhow::anyhow!("dock: {error:?}"))?;
-    let initial_project =
-        project.map(|(name, key)| issues_app::lifecycle::InitialProject { name, key });
-    let bootstrap = issues_app::lifecycle::bootstrap_tracker(
+    let initial_project = project
+        .map(|(name, key)| crate::composition::product_lifecycle::InitialProject { name, key });
+    let bootstrap = crate::composition::product_lifecycle::bootstrap_tracker(
         &root,
         &mechanics.space(),
         &session,
