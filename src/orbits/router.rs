@@ -130,7 +130,7 @@ impl Placement {
         let mode = match control::probe(&resolved.home).await {
             control::Probe::Healthy => PlacementMode::Attached,
             control::Probe::Foreign { why, replaceable } => {
-                return Err(crate::cli::ForeignDaemon {
+                return Err(crate::control::ForeignDaemon {
                     home: resolved.home.clone(),
                     why,
                     replaceable,
@@ -154,7 +154,7 @@ impl Placement {
                                     )
                                 }
                                 control::Probe::Foreign { why, replaceable } => {
-                                    return Err(crate::cli::ForeignDaemon {
+                                    return Err(crate::control::ForeignDaemon {
                                         home: resolved.home.clone(),
                                         why,
                                         replaceable,

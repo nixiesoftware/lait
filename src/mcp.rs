@@ -572,7 +572,7 @@ pub async fn run_mcp(home: &Path) -> Result<()> {
 mod scope_tests {
     use super::*;
     use crate::control::OrbitAddress;
-    use issues::ids::SpaceId;
+    use mechanics::ids::SpaceId;
 
     #[test]
     fn an_mcp_server_is_pinned_to_the_home_it_was_constructed_for() {

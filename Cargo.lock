@@ -3298,6 +3298,7 @@ dependencies = [
  "journal",
  "postcard",
  "rand_core 0.6.4",
+ "schemars",
  "serde",
  "serde_json",
  "sha2 0.10.9",

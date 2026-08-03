@@ -38,7 +38,7 @@ pub fn seed_founder_policy(mechanics: &SpaceAuthority) -> Result<()> {
 
 pub fn read_bootstrap_record(
     home: &Path,
-    space: &issues::ids::SpaceId,
+    space: &mechanics::ids::SpaceId,
 ) -> Option<IssuesBootstrapRecord> {
     issues_app::lifecycle::read_bootstrap_record(&orbital_store_root(home), space)
 }
@@ -164,7 +164,7 @@ pub fn found_space_cli(
     home: &Path,
     device_seed: &[u8; 32],
     display_name: &str,
-) -> Result<(issues::ids::SpaceId, crate::orbits::ProjectBrief)> {
+) -> Result<(mechanics::ids::SpaceId, crate::orbits::ProjectBrief)> {
     let project = issues_app::lifecycle::InitialProject::for_space(display_name);
     let (mechanics, _) = form_space_project(
         home,

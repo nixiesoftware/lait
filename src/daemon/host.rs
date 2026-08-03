@@ -1022,7 +1022,7 @@ mod tests {
         let seed = [212; 32];
         let (base, daemon_home, directory, mut resolved) = formed_directory("scope", &seed);
         let orbit_home = resolved.home.clone();
-        resolved.address.space = issues::ids::SpaceId::from_digest([99; 16]);
+        resolved.address.space = mechanics::ids::SpaceId::from_digest([99; 16]);
         let runner = runner_with_factory(
             daemon_home.clone(),
             directory,

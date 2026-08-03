@@ -17,7 +17,7 @@ use anyhow::{anyhow, Result};
 use serde::Serialize;
 
 use crate::orbits::{self, Entry};
-use issues::ids::SpaceId;
+use mechanics::ids::SpaceId;
 
 use crate::daemon::{ClientScope, LocalOrbitId, OrbitAddress};
 

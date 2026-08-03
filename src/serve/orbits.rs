@@ -12,7 +12,7 @@ use serde::Serialize;
 use crate::control::{ControlRoute, Request, Response};
 use crate::daemon::{Client, LocalOrbitId, OrbitAddress};
 use crate::orbits::{self, Catalog, Entry, Presence, StationIdentity};
-use issues::ids::SpaceId;
+use mechanics::ids::SpaceId;
 
 /// One row of the browser's Orbit picker.
 #[derive(Debug, Clone, Serialize)]

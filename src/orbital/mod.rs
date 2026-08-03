@@ -45,7 +45,7 @@ pub fn space_store_present(home: &Path) -> bool {
 }
 
 /// The single orbital Space id under `home`, if any.
-pub fn discover_space_id(home: &Path) -> Option<issues::ids::SpaceId> {
+pub fn discover_space_id(home: &Path) -> Option<::mechanics::ids::SpaceId> {
     let root = orbital_store_root(home);
     let mut found = None;
     for entry in std::fs::read_dir(&root).ok()?.flatten() {
@@ -56,7 +56,7 @@ pub fn discover_space_id(home: &Path) -> Option<issues::ids::SpaceId> {
             .file_name()
             .to_str()
             .filter(|name| name.starts_with("ws_"))
-            .and_then(issues::ids::SpaceId::parse)
+            .and_then(::mechanics::ids::SpaceId::parse)
         {
             if found.replace(space).is_some() {
                 return None;

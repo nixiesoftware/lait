@@ -49,8 +49,8 @@ use ratatui::{
 
 use crate::cli::{client, ensure_daemon};
 use crate::control::{Request, Response};
+use crate::dto::MemberDto;
 use crate::list_picker::{row_line, window, Cell};
-use issues::dto::MemberDto;
 
 /// One selectable row: an existing member.
 #[derive(Clone)]

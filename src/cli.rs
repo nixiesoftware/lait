@@ -26,7 +26,9 @@ use anyhow::{anyhow, Context, Result};
 
 use crate::{
     client_action::{ClientAction, ClientPayload},
-    control::{self, request, ControlRoute, ErrorKind, Event, EventKind, Request, Response},
+    control::{
+        self, request, ControlRoute, ErrorKind, Event, EventKind, ForeignDaemon, Request, Response,
+    },
     daemon::{ClientScope, LocalOrbitId, OrbitAddress},
     diagnose::{DiagnosisView, GateState},
     orbits::{self, Entry, Presence},
@@ -503,35 +505,6 @@ pub async fn stop_daemon_verified(_home: &Path) -> Result<()> {
         "could not stop the daemon (pid {pid}) — kill it by hand and re-run"
     ))
 }
-
-/// A daemon is listening on this home that this build cannot talk to — in
-/// practice a version skew (the binary was upgraded, the daemon wasn't restarted).
-///
-/// Typed rather than a message, so the repair can be offered from the error path
-/// (see [`heal_from_error`]) instead of probing eagerly on every command that
-/// will never need it. Exit code `3`: unreachable in the sense that matters —
-/// something is there, and no request will ever get through to it.
-#[derive(Debug)]
-pub struct ForeignDaemon {
-    pub home: PathBuf,
-    /// The handshake's own diagnosis; already carries the way out.
-    pub why: String,
-    /// Whether replacing it is the right repair — false when it is ahead of us.
-    pub replaceable: bool,
-}
-
-impl std::fmt::Display for ForeignDaemon {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "the Lait daemon is already running, but {why}  (home: {home})",
-            why = self.why,
-            home = self.home.display(),
-        )
-    }
-}
-
-impl std::error::Error for ForeignDaemon {}
 
 /// The spawned daemon exited before answering — report its own last words rather
 /// than a timeout.
@@ -2096,7 +2069,7 @@ pub async fn watch(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use issues::ids::SpaceId;
+    use mechanics::ids::SpaceId;
 
     #[test]
     fn client_side_exit_codes_come_from_the_type_not_the_prose() {

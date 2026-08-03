@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 use crate::diagnose::DiagnosisView;
-use issues::dto::{MemberDto, MemberLogEntry, SeedDto};
+use crate::dto::{MemberDto, MemberLogEntry, SeedDto};
 use runtime::world::call::{Call, Reply};
 
 /// The identity-scoped local control service.
@@ -994,7 +994,7 @@ pub enum Response {
     },
     /// Effective scoped assignments (reply to [`Request::AssignmentList`]).
     Assignments {
-        rows: Vec<issues::dto::AssignmentDto>,
+        rows: Vec<mechanics::assignment::AssignmentDto>,
     },
     /// The membership audit log (reply to [`Request::MemberLog`]).
     MemberLog {
@@ -1060,7 +1060,7 @@ pub enum Response {
         dropped: u64,
     },
     /// The one-shot identity + standing + view-completeness projection.
-    Whoami(issues::dto::WhoamiDto),
+    Whoami(crate::dto::WhoamiDto),
     /// The result of a `sync`: whether the view is now whole, and the same loud
     /// divergence lines `whoami` reports (empty when converged and complete).
     Sync {
@@ -1409,6 +1409,41 @@ pub enum Probe {
 /// * **The version is read as raw JSON, before any typed decode.** Probing with a
 ///   typed request would mean a mismatched daemon fails on whatever field
 ///   happened to change (it was `StatusInfo.name`) and reports *that* instead of
+/// A daemon is listening on this home that this build cannot talk to — in
+/// practice a version skew (the binary was upgraded, the daemon wasn't restarted).
+///
+/// The error form of [`Probe::Foreign`], carrying the same diagnosis plus the
+/// home it came from. It lives here, beside the probe that produces it, rather
+/// than in a client renderer: the orbit router raises it too, and an error type
+/// owned by one presentation surface makes every other producer depend on that
+/// surface.
+///
+/// Typed rather than a message, so the repair can be offered from the error path
+/// (see `cli::heal_from_error`) instead of probing eagerly on every command that
+/// will never need it. Exit code `3`: unreachable in the sense that matters —
+/// something is there, and no request will ever get through to it.
+#[derive(Debug)]
+pub struct ForeignDaemon {
+    pub home: std::path::PathBuf,
+    /// The handshake's own diagnosis; already carries the way out.
+    pub why: String,
+    /// Whether replacing it is the right repair — false when it is ahead of us.
+    pub replaceable: bool,
+}
+
+impl std::fmt::Display for ForeignDaemon {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the Lait daemon is already running, but {why}  (home: {home})",
+            why = self.why,
+            home = self.home.display(),
+        )
+    }
+}
+
+impl std::error::Error for ForeignDaemon {}
+
 ///   the version. Only `kind` and `protocol_version` need to hold still.
 pub async fn probe(home: &Path) -> Probe {
     // A probe that can hang defeats its own purpose: it exists to *diagnose* a
@@ -2017,7 +2052,7 @@ mod tests {
             let route = ControlRoute::Orbit {
                 address: OrbitAddress::for_store(
                     Path::new("/tmp/test-orbit"),
-                    issues::ids::SpaceId::from_digest([4; 16]),
+                    mechanics::ids::SpaceId::from_digest([4; 16]),
                 ),
             };
             let env = ClientRequest::routed(req.clone(), route.clone(), Some("agent-x".into()));
@@ -2058,7 +2093,7 @@ mod tests {
         let route = ControlRoute::Orbit {
             address: OrbitAddress::for_store(
                 Path::new("/tmp/passive-orbit"),
-                issues::ids::SpaceId::from_digest([5; 16]),
+                mechanics::ids::SpaceId::from_digest([5; 16]),
             ),
         };
         let env = ClientRequest::routed_if_running(Request::Status, route.clone());

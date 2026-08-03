@@ -382,7 +382,7 @@ impl StationHost {
         // entries holding an unexpired route lease. Identities only; the
         // eclipse fence governs everything learned after this.
         let my_id = retained_transport.my_id();
-        let mut bootstrap: Vec<issues::ids::DeviceId> =
+        let mut bootstrap: Vec<mechanics::ids::DeviceId> =
             load_seeds(home).into_iter().map(|s| s.id).collect();
         // The ticket's approach Station: teach the transport its signed direct
         // routes so the first dial resolves (Coordinates-only, no shared
@@ -1492,7 +1492,7 @@ impl StationHost {
             }
             None => (None, "none".to_string(), false, false, vec![], false, None),
         };
-        Response::Whoami(issues::dto::WhoamiDto {
+        Response::Whoami(crate::dto::WhoamiDto {
             actor: actor_str,
             device: device.as_str().to_string(),
             did,
@@ -1927,7 +1927,7 @@ impl StationHost {
     /// Pin a bootstrap seed by device id (or an orbital Coordinates link's
     /// approach Station) into the node-local registry.
     fn seed_add(&self, arg: &str) -> Response {
-        let (id, space) = match issues::ids::DeviceId::parse(arg.trim()) {
+        let (id, space) = match mechanics::ids::DeviceId::parse(arg.trim()) {
             Some(id) => (id, String::new()),
             None => match runtime::coordinates::SignedCoordinates::parse_link(arg.trim())
                 .ok()
@@ -1972,7 +1972,7 @@ impl StationHost {
                     s.id.key_bytes()
                         .map(|k| online.contains(&k))
                         .unwrap_or(false);
-                issues::dto::SeedDto {
+                crate::dto::SeedDto {
                     id: s.id.as_str().to_string(),
                     nick: s.nick,
                     space: s.space,
@@ -2232,7 +2232,8 @@ impl StationHost {
         // peer's addresses changed. Coordinates *entry* (store bootstrap)
         // stays `lait join`'s job.
         let link = link.trim();
-        let station = match issues::ids::DeviceId::parse(link).and_then(|d| Key::from_device(&d)) {
+        let station = match mechanics::ids::DeviceId::parse(link).and_then(|d| Key::from_device(&d))
+        {
             Some(station) => Some(station),
             None => runtime::coordinates::SignedCoordinates::parse_link(link)
                 .ok()
@@ -2955,7 +2956,7 @@ fn comms_options(
     transport: Arc<dyn Transport>,
     seed: [u8; 32],
     mechanics: &SpaceAuthority,
-    bootstrap: Vec<issues::ids::DeviceId>,
+    bootstrap: Vec<mechanics::ids::DeviceId>,
     advertise: Vec<runtime::beacon::RouteHint>,
 ) -> CommsOptions {
     let export = mechanics.clone();
@@ -3056,7 +3057,7 @@ async fn write_line_half<T: serde::Serialize>(
 /// converges through. The id is the identity; nick/space are advisory.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct SeedRecord {
-    id: issues::ids::DeviceId,
+    id: mechanics::ids::DeviceId,
     #[serde(default)]
     nick: String,
     #[serde(default)]
@@ -3075,7 +3076,7 @@ fn load_seeds(home: &Path) -> Vec<SeedRecord> {
     };
     let rows: Vec<SeedRecord> = serde_json::from_str(&data).unwrap_or_default();
     rows.into_iter()
-        .filter(|r| issues::ids::DeviceId::parse(r.id.as_str()).is_some())
+        .filter(|r| mechanics::ids::DeviceId::parse(r.id.as_str()).is_some())
         .collect()
 }
 

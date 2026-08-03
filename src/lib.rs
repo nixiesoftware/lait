@@ -52,6 +52,7 @@ pub mod daemon;
 pub mod daemon_spawn;
 pub mod diagnose;
 pub mod install;
+pub mod dto;
 pub mod list_picker;
 pub mod mcp;
 pub mod members_ui;

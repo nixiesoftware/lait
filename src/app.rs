@@ -689,7 +689,7 @@ fn run_device_accept(m: &ArgMatches, out: Out) -> Result<()> {
     let mut parts = token.split_whitespace();
     let actor = parts
         .next()
-        .and_then(issues::ids::ActorId::parse)
+        .and_then(mechanics::ids::ActorId::parse)
         .ok_or_else(|| anyhow!("invalid device token (expected `<actor_id> <space_id>`)"))?;
     let space = parts
         .next()

@@ -22,7 +22,7 @@ use comms::{
     Alpn, GossipReceiver, GossipSender, Incoming, IncomingConnection, PeerId, Stream, Topic,
     Transport, TransportFactory,
 };
-use issues::ids::{DeviceId, SpaceId};
+use mechanics::ids::{DeviceId, SpaceId};
 
 const SPACE_INCOMING_BUFFER: usize = 16;
 const MAX_PENDING_OPENERS: usize = 64;
