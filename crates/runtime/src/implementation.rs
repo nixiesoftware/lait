@@ -471,12 +471,18 @@ impl Implementation {
     /// Strict decode of the canonical encoding.
     pub fn decode(bytes: &[u8]) -> Result<Self, Invalid> {
         let mut pos = 0usize;
+        // `n` is peer-supplied and reaches `u32::MAX` below. `*pos + n` wraps on
+        // a 32-bit target, and a wrapped sum passes a `bytes.len() <` guard and
+        // then indexes with a reversed range — a remotely-triggerable abort in
+        // a decoder. `SectionReader::take` in this same file gets this right;
+        // this closure is the copy that did not.
         let take = |pos: &mut usize, n: usize| -> Result<&[u8], Invalid> {
-            if bytes.len() < *pos + n {
+            let end = pos.checked_add(n).ok_or(Invalid::Truncated)?;
+            if end > bytes.len() {
                 return Err(Invalid::Truncated);
             }
-            let s = &bytes[*pos..*pos + n];
-            *pos += n;
+            let s = &bytes[*pos..end];
+            *pos = end;
             Ok(s)
         };
         let version = u16::from_be_bytes(take(&mut pos, 2)?.try_into().unwrap());

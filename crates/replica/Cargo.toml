@@ -1,6 +1,6 @@
 [package]
 name = "replica"
-version = "0.6.1"
+version = "0.6.2"
 edition = "2021"
 rust-version = "1.91"
 description = "LAIT Replica semantics: Body identity, schemas, descriptors, semantic frontiers, transaction plans, incorporation, and Convergence — above mechanics and Fabric, naming neither the CRDT engine nor any product/consumer type."
@@ -38,9 +38,8 @@ getrandom = "0.3"
 anyhow = "1"
 tracing = "0.1"
 
-[lints.clippy]
-pedantic = { level = "warn", priority = -1 }
-nursery = { level = "warn", priority = -1 }
+[lints]
+workspace = true
 
 [dev-dependencies]
 serde_json = "1"

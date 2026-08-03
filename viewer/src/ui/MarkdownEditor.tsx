@@ -1,32 +1,43 @@
 import { lazy, Suspense } from "react";
 
 import { Markdown } from "./Markdown";
-import type { RemoteCursor } from "./MilkdownEditor";
+import type {
+  RemoteContext,
+  RemoteCursor,
+  RemoteTextPreview,
+  TextChange,
+  TextSplice,
+} from "./CodeMirrorEditor";
 
 /**
  * The live editor, off the critical path.
  *
- * Milkdown brings ProseMirror, remark and unified with it — a little over
- * 460 kB raw, which is two thirds of everything else the viewer ships. Loading
- * that to draw a list of issues would be paying for an editor on every screen
- * that has no editor on it, so it arrives when a description does, exactly like
- * the Shiki grammars.
+ * CodeMirror and the Markdown grammar stay off list and board routes that never
+ * draw an editor, so source editing arrives only when a document does.
  *
  * The fallback is the read-only renderer, not a spinner: the words are already
  * known, and a blank rectangle where the body should be is a worse answer than
  * the body.
  */
-const Editor = lazy(() => import("./MilkdownEditor"));
+const Editor = lazy(() => import("./CodeMirrorEditor"));
 
 export function MarkdownEditor(props: {
   value: string;
   readOnly?: boolean;
   placeholder?: string;
   className?: string;
-  onChange: (markdown: string) => void;
+  onChange: (markdown: string, splice: TextSplice, change: TextChange) => void;
   onCommit: () => void;
   remoteCursors?: RemoteCursor[];
-  onAwareness?: (anchor: number | null, focus: number | null, typing: boolean) => void;
+  remoteContexts?: RemoteContext[];
+  remotePreviews?: RemoteTextPreview[];
+  acceptRemote?: boolean;
+  onAwareness?: (
+    anchor: number | null,
+    focus: number | null,
+    typing: boolean,
+    markdown: string,
+  ) => void;
 }) {
   return (
     <Suspense

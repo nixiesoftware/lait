@@ -1,9 +1,8 @@
-// Terminal geometry and member-row offsets are clamped to rendered collections;
-// conversions adapt ratatui/crossterm's fixed-width coordinate APIs.
 #![allow(
     clippy::arithmetic_side_effects,
     clippy::as_conversions,
-    clippy::indexing_slicing
+    clippy::indexing_slicing,
+    reason = "Terminal geometry and member-row offsets are clamped to rendered collections; conversions adapt ratatui/crossterm's fixed-width coordinate APIs."
 )]
 
 //! Interactive `lait members` selector: an **inline** picker, not a

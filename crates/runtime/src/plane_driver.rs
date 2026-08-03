@@ -263,12 +263,18 @@ async fn serve_connection<S>(
     } else {
         incoming.opening
     };
-    let Ok(open) = Open::decode_canonical(&raw) else {
-        // When a router did parse this to route it, a failure here means the
-        // two of us disagree — worth refusing rather than papering over,
-        // because everything downstream trusts this parse.
-        refuse(connection.as_ref(), Some(Refusal::Malformed)).await;
-        return;
+    let open = match Open::decode_canonical(&raw) {
+        Ok(open) => open,
+        Err(error) => {
+            // When a router did parse this to route it, a failure here means the
+            // two of us disagree — worth refusing rather than papering over,
+            // because everything downstream trusts this parse. The variant is
+            // the whole diagnosis of that disagreement, and it exists nowhere
+            // else: the peer is told only `Malformed`.
+            tracing::debug!(?error, "an opening the router accepted did not decode here");
+            refuse(connection.as_ref(), Some(Refusal::Malformed)).await;
+            return;
+        }
     };
 
     // Idempotent acceptance. 0.5-RTT data is replayable, so a replay must get

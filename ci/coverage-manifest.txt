@@ -6,9 +6,9 @@
 # reviewed like one, not discovered when a gate goes red on a refactor.
 
 [tiers]
-pr             1339
-pr-platform    1006
-nightly        1366
+pr             1349
+pr-platform    1016
+nightly        1376
 mutants        87
 
 [gates]
@@ -266,6 +266,9 @@ lait orbits::catalog::tests::global_identity_sees_own_stores_and_agents_with_ide
 lait orbits::catalog::tests::nested_agent_binding_keeps_owner_name_and_case
 lait orbits::catalog::tests::path_comparison_handles_platform_spelling_without_prefix_confusion
 lait orbits::catalog::tests::self_contained_identity_sees_only_itself
+lait orbits::router::tests::a_finished_doorbell_pump_does_not_mean_a_dead_placement
+lait orbits::router::tests::a_host_that_cannot_be_reached_is_declared_dead
+lait orbits::router::tests::a_placement_whose_doorbell_stream_ended_is_reused_not_rebuilt
 lait orbits::router::tests::attached_compatibility_process_is_not_stopped_by_router_shutdown
 lait orbits::router::tests::different_orbits_place_concurrently
 lait orbits::router::tests::failed_placement_leaves_orbit_vacant_for_retry
@@ -334,7 +337,7 @@ lait serve::socket::tests::a_transient_flood_does_not_delay_a_control_frame
 lait serve::socket::tests::appending_a_lane_left_the_two_before_it_where_they_were
 lait serve::socket::tests::browser_awareness_is_replace_all_and_marks_both_rooms_when_moved
 lait serve::socket::tests::garbage_is_malformed_rather_than_panicking
-lait serve::socket::tests::one_question_held_by_two_tabs_is_polled_once
+lait serve::socket::tests::one_question_held_by_two_tabs_is_subscribed_once
 lait serve::socket::tests::progress_coalesces_to_the_newest_value_per_transfer
 lait serve::socket::tests::progress_never_rides_the_doorbell_ring
 lait serve::socket::tests::the_control_lane_is_read_before_every_lane_that_may_drop
@@ -416,6 +419,7 @@ lait-issues-app presentation::tests::human_rows_are_owned_and_rendered_by_the_pr
 lait-issues-app presentation::tests::json_errors_keep_typed_exit_semantics
 lait-issues-app presentation::tests::priority_badges_are_owned_by_the_product_presenter
 lait-issues-app protocol::tests::codec_round_trips_without_root_control_types
+lait-issues-app protocol::tests::live_text_commands_keep_unicode_scalar_coordinates_on_the_wire
 lait-issues-app protocol::tests::request_classification_is_package_owned
 lait-issues-app protocol::tests::spec_replies_do_not_collide_with_the_response_tag
 lait-issues-app router::tests::due_dates_parse_as_utc_midnight_and_unix_passthrough
@@ -609,6 +613,7 @@ mechanics acl::tests::a_discharged_fence_survives_its_minter_being_removed
 mechanics acl::tests::a_fenced_actor_with_an_independent_grant_keeps_their_seat
 mechanics acl::tests::a_fenced_eviction_raises_a_rekey_obligation
 mechanics acl::tests::a_mint_cannot_jump_the_generation
+mechanics acl::tests::an_unresolved_acl_state_refuses_where_an_empty_one_would_permit
 mechanics acl::tests::device_must_speak_for_the_claimed_actor
 mechanics acl::tests::empty_grants_member_is_view_only
 mechanics acl::tests::forged_signature_is_rejected
@@ -1141,6 +1146,7 @@ runtime internal_tests::live_fixtures::a_maximal_selection_fits_the_item_ceiling
 runtime internal_tests::live_fixtures::a_payload_a_scope_cannot_carry_is_refused
 runtime internal_tests::live_fixtures::a_retirement_cannot_be_undone_by_a_datagram_already_in_flight
 runtime internal_tests::live_fixtures::a_subscription_cannot_name_more_scopes_than_the_connection_may_hold
+runtime internal_tests::live_fixtures::a_text_preview_is_bounded_and_revision_keyed
 runtime internal_tests::live_fixtures::a_watermark_does_not_outlive_the_flight_it_guards
 runtime internal_tests::live_fixtures::a_world_a_scope_names_is_parsed_rather_than_measured
 runtime internal_tests::live_fixtures::an_anchor_cannot_name_a_field_the_scope_did_not
@@ -1272,9 +1278,13 @@ runtime plane::live::tests::a_payload_the_path_cannot_carry_is_dropped_rather_th
 runtime plane::live::tests::a_peer_hears_only_about_what_it_subscribed_to
 runtime plane::live::tests::a_subscription_that_could_not_be_sent_says_so
 runtime plane::live::tests::every_drop_is_counted_because_dropped_and_counted_needs_a_reader
+runtime plane::live::tests::local_declarations_wake_sessions_without_waiting_for_the_driver_poll
+runtime plane::live::tests::table_changes_wake_local_live_subscriptions
 runtime plane_stream::tests::a_caller_can_lower_the_ceiling_and_not_raise_it
 runtime plane_stream::tests::a_frame_round_trips_through_its_own_prefix
 runtime plane_stream::tests::a_reserved_kind_and_an_unknown_one_are_different_answers
+runtime poison::tests::a_poisoned_lock_is_recovered_rather_than_propagated
+runtime poison::tests::an_unpoisoned_lock_is_taken_normally
 runtime registry::tests::contradictory_upgrade_claim_is_rejected
 runtime registry::tests::duplicate_schema_version_is_rejected
 runtime registry::tests::duplicate_world_id_is_rejected

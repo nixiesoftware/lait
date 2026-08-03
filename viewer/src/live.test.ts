@@ -5,6 +5,7 @@ import { WorldViewStore } from "./core/worldViewStore";
 import {
   applyLive,
   applySignals,
+  awarenessReadyFor,
   caretPhrase,
   carets,
   emptyLive,
@@ -17,6 +18,7 @@ import {
   maxHeldSignals,
   maxLiveSlots,
   noSignals,
+  previews,
   type SignalDrain,
   signalsKey,
   typists,
@@ -33,6 +35,20 @@ function ping(nonce: string): SignalEntry {
     signal: { signal: "ping", nonce },
   };
 }
+
+describe("revision-bound editor awareness", () => {
+  it("publishes movement on settled text and holds positions from pending text", () => {
+    expect(awarenessReadyFor("same", "same", 0, false)).toBe(true);
+    // The selection transaction may arrive before the change callback has even
+    // incremented `pending`; the snapshot mismatch is therefore load-bearing.
+    expect(awarenessReadyFor("same!", "same", 0, false)).toBe(false);
+    expect(awarenessReadyFor("same", "same", 1, false)).toBe(false);
+  });
+
+  it("never delays retirement behind a failed or pending write", () => {
+    expect(awarenessReadyFor("unsaved", "same", 1, true)).toBe(true);
+  });
+});
 
 function presence(actor: string, ageMs: number, body = "aaaa"): LiveEntry {
   return {
@@ -196,6 +212,43 @@ describe("carets", () => {
     // inside one, and there is nowhere honest to draw it.
     const scoped: LiveEntry = { ...presence("act_a", 5), caret: { caret: "at", position: 1 } };
     expect(carets([scoped])).toEqual([]);
+  });
+});
+
+describe("previews", () => {
+  const preview = (actor: string, ageMs: number, insert: string): LiveEntry => ({
+    actor,
+    scope: {
+      scope: "text_preview",
+      world: "com.lait.issues",
+      body: "aaaa",
+      field: "description",
+    },
+    kind: "preview",
+    age_ms: ageMs,
+    uncertain: false,
+    caret: null,
+    focus: null,
+    preview: {
+      base: "0".repeat(32),
+      result: "1".repeat(32),
+      index: 2,
+      delete: 0,
+      insert,
+      anchor: 3,
+      focus: 3,
+    },
+  });
+
+  it("keeps the newest cumulative preview per actor and field", () => {
+    expect(previews([
+      preview("act_a", 100, "old"),
+      preview("act_a", 5, "latest"),
+      preview("act_b", 10, "other"),
+    ]).map((row) => [row.actor, row.preview.insert])).toEqual([
+      ["act_a", "latest"],
+      ["act_b", "other"],
+    ]);
   });
 });
 
@@ -431,6 +484,7 @@ describe("LivePlane", () => {
       push = onEvent;
       return {
         watch: (question: Question) => declared.push(question),
+        mutate: async <R extends Response>() => ({ kind: "error", message: "unused" }) as R,
         close: () => undefined,
       };
     };
@@ -498,6 +552,78 @@ describe("LivePlane", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("keeps the last anchored caret while a newer document position is deferred", () => {
+    vi.useFakeTimers();
+    try {
+      const { plane, declared } = socket();
+      plane.attach("orb_a");
+      plane.ask({ space: "orb_a", issue: "iss_1" });
+      plane.aware("iss_1", {
+        cursor: { field: "description", anchor: 4 },
+        typing: false,
+      });
+      vi.advanceTimersByTime(80);
+      expect(declared.at(-1)).toMatchObject({
+        cursor: { field: "description", anchor: 4 },
+      });
+
+      plane.aware("iss_1", {
+        cursor: { field: "description", anchor: 9 },
+        typing: true,
+      });
+      plane.aware("iss_1", {
+        cursor: { field: "description", anchor: 10 },
+        typing: true,
+        defer: true,
+      });
+      vi.advanceTimersByTime(160);
+      expect(declared.at(-1)).toMatchObject({
+        cursor: { field: "description", anchor: 4 },
+      });
+
+      plane.aware("iss_1", {
+        cursor: { field: "description", anchor: 10 },
+        typing: true,
+      });
+      vi.advanceTimersByTime(80);
+      expect(declared.at(-1)).toMatchObject({
+        cursor: { field: "description", anchor: 10 },
+        typing: true,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("publishes a cumulative text preview immediately even while its caret is deferred", () => {
+    const { plane, declared } = socket();
+    plane.attach("orb_a");
+    plane.ask({ space: "orb_a", issue: "iss_1" });
+    const before = declared.length;
+    plane.aware("iss_1", {
+      cursor: { field: "description", anchor: 9 },
+      typing: true,
+      defer: true,
+      preview: {
+        field: "description",
+        base: "0".repeat(32),
+        result: "1".repeat(32),
+        index: 4,
+        delete: 0,
+        insert: "fast",
+        anchor: 8,
+        focus: 8,
+      },
+    });
+    expect(declared).toHaveLength(before + 1);
+    expect(declared.at(-1)).toMatchObject({
+      space: "orb_a",
+      issue: "iss_1",
+      preview: { insert: "fast", anchor: 8 },
+    });
+    expect(declared.at(-1)).not.toHaveProperty("cursor");
   });
 
   it("blanks its tables when the socket stops answering, and keeps the signals", () => {

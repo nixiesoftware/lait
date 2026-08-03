@@ -1,10 +1,9 @@
-// Human-facing rendering operates on validated command shapes and bounded terminal
-// dimensions. Exits here are deliberate, documented CLI status outcomes.
 #![allow(
     clippy::arithmetic_side_effects,
     clippy::as_conversions,
     clippy::exit,
-    clippy::string_slice
+    clippy::string_slice,
+    reason = "Human-facing rendering operates on validated command shapes and bounded terminal dimensions. Exits here are deliberate, documented CLI status outcomes."
 )]
 
 //! CLI client: builds control requests, auto-spawns the daemon, prints results.

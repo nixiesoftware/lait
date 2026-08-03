@@ -1,6 +1,8 @@
-// Mechanics composition adapts validated durable counters and bounded ceremony
-// state into fixed-width semantic types without changing their encodings.
-#![allow(clippy::arithmetic_side_effects, clippy::as_conversions)]
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    reason = "Mechanics composition adapts validated durable counters and bounded ceremony state into fixed-width semantic types without changing their encodings."
+)]
 
 //! The product's mechanics composition for the orbital plane.
 //!
@@ -29,6 +31,7 @@
 //! capability) pulled by an admin over Contact, whose incorporator validates
 //! and redeems it (AddMember + epoch sealing).
 
+use runtime::poison::LockRecovering;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -150,8 +153,23 @@ pub(super) struct Inner {
 }
 
 impl Inner {
+    /// The replayed authority state, or a stand-in that refuses.
+    ///
+    /// Thirty-odd predicates read this — `is_admin`, `can_write`, `is_member`,
+    /// `role_of`, admission redemption — and most are not fallible, so a
+    /// `Result` here would ripple through their signatures and out into the
+    /// product. The substitution is therefore kept, but it is no longer a
+    /// *clean slate*: `AclState::unresolved` fails closed on the two
+    /// predicates whose empty collections would otherwise read as permission.
     pub(super) fn acl(&mut self) -> AclState {
-        self.ledger.acl_state().unwrap_or_default()
+        self.ledger.acl_state().unwrap_or_else(|failure| {
+            tracing::error!(
+                ?failure,
+                "the authority ledger could not be replayed — refusing from an \
+                 unresolved ACL state rather than a clean slate"
+            );
+            AclState::unresolved()
+        })
     }
 
     pub(super) fn actor_plane(&self) -> actor::Directory {
@@ -548,7 +566,20 @@ pub(super) fn refresh_keyring_into(
     seed: &[u8; 32],
     me: &DeviceId,
 ) {
-    let acl_state = ledger.acl_state().unwrap_or_default();
+    // An unreplayable ledger here leaves the keyring empty, and an empty
+    // keyring is indistinguishable from "no epochs are authorized for me" —
+    // the node quietly cannot decrypt anything it holds. Say which one it is.
+    let acl_state = match ledger.acl_state() {
+        Ok(state) => state,
+        Err(failure) => {
+            tracing::error!(
+                ?failure,
+                "the authority ledger could not be replayed — the keyring is \
+                 left as it was rather than rebuilt from an empty epoch set"
+            );
+            return;
+        }
+    };
     for e in acl_state.epochs() {
         if keyring.contains_key(&e.id) {
             continue;
@@ -579,7 +610,9 @@ pub(super) fn rotate_epoch(
         .actor_of_device(me)
         .cloned()
         .ok_or_else(|| anyhow!("no actor identity"))?;
-    let acl_state = ledger.acl_state().unwrap_or_default();
+    // Minting the next epoch from a *guessed* empty epoch set would authorize
+    // it for nobody at generation 0, on top of history it could not read.
+    let acl_state = ledger.acl_state()?;
     let next_gen = acl_state
         .epochs()
         .into_iter()
@@ -649,7 +682,7 @@ pub(super) fn fence_epoch(
     let Some(actor) = ledger.actor_plane().actor_of_device(me).cloned() else {
         return Ok(());
     };
-    let acl_state = ledger.acl_state().unwrap_or_default();
+    let acl_state = ledger.acl_state()?;
     let has_active = !acl_state.epochs().is_empty();
     if acl_state.is_admin(&actor) && !has_active {
         rotate_epoch(ledger, keyring, seed, me)?;
@@ -699,7 +732,7 @@ pub struct SpaceAuthority {
 
 impl SpaceAuthority {
     pub(super) fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
-        self.inner.lock().unwrap_or_else(|p| p.into_inner())
+        self.inner.lock_recovering()
     }
 
     /// The directory this Space's mechanics material lives in.

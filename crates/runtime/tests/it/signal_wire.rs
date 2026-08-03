@@ -411,8 +411,8 @@ mod declared_schemas {
     use replica::body::{MutationModel, Schema};
     use runtime::world::SignalSchema;
     use runtime::{
-        world::Context, world::Descriptor, world::Effect, world::Intent, world::Limits,
-        world::Projection, world::Query, world::Rejection, world::Version, world::World,
+        world::Context, world::Effect, world::Intent, world::Projection, world::Query,
+        world::Rejection, world::World,
     };
 
     const WORLD: &str = "dev.example.pad";

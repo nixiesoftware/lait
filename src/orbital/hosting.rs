@@ -1,6 +1,8 @@
-// Hosting uses validated protocol counters and bounded scheduling arithmetic;
-// conversions adapt fixed-width durable and runtime identifiers.
-#![allow(clippy::arithmetic_side_effects, clippy::as_conversions)]
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    reason = "Hosting uses validated protocol counters and bounded scheduling arithmetic; conversions adapt fixed-width durable and runtime identifiers."
+)]
 
 //! Application hosting for one active Station.
 //!
@@ -23,6 +25,7 @@
 //! over the mechanics primitives; seeds, diagnose, and log are node-local
 //! lifecycle concerns. There is no catch-all refusal.
 
+use runtime::poison::LockRecovering;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -181,10 +184,7 @@ impl SignalInbox {
         mut actor_for: impl FnMut(&mechanics::station::Key) -> Option<String>,
     ) -> Response {
         use tokio::sync::broadcast::error::TryRecvError;
-        let mut queue = self
-            .receiver
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut queue = self.receiver.lock_recovering();
         let mut signals = Vec::new();
         let mut dropped = 0u64;
         loop {
@@ -382,8 +382,17 @@ impl StationHost {
         // entries holding an unexpired route lease. Identities only; the
         // eclipse fence governs everything learned after this.
         let my_id = retained_transport.my_id();
-        let mut bootstrap: Vec<mechanics::ids::DeviceId> =
-            load_seeds(home).into_iter().map(|s| s.id).collect();
+        // Starting with no pinned seeds is survivable — the ticket's approach
+        // Station and the persisted Neighbors below still bootstrap the swarm —
+        // but doing it because the registry would not parse is worth saying,
+        // since the symptom is a node that simply never finds anyone.
+        let mut bootstrap: Vec<mechanics::ids::DeviceId> = match load_seeds(home) {
+            Ok(seeds) => seeds.into_iter().map(|s| s.id).collect(),
+            Err(error) => {
+                tracing::warn!(%error, "starting with no pinned bootstrap seeds");
+                Vec::new()
+            }
+        };
         // The ticket's approach Station: teach the transport its signed direct
         // routes so the first dial resolves (Coordinates-only, no shared
         // registry), and bootstrap the swarm from it.
@@ -1319,6 +1328,7 @@ impl StationHost {
         issues: &[String],
         carets: &[crate::control::WatchingCaret],
         typing: &[crate::control::WatchingTyping],
+        previews: &[crate::control::WatchingPreview],
     ) -> Response {
         use runtime::plane::live::LocalPublication;
         use runtime::transient::{Target, TransientPayload};
@@ -1330,6 +1340,29 @@ impl StationHost {
         // moving under somebody's hands.
         let mut candidates = Vec::new();
         let issue_set: std::collections::BTreeSet<_> = issues.iter().map(String::as_str).collect();
+        for preview in previews {
+            if !issue_set.contains(preview.issue.as_str()) || preview.field != "description" {
+                continue;
+            }
+            candidates.push(LocalPublication {
+                scope: Target::Preview {
+                    world: world.clone(),
+                    body: crate::world::contract::issue_body_id(&preview.issue).as_bytes(),
+                    field: preview.field.clone(),
+                },
+                payload: TransientPayload::Preview {
+                    preview: runtime::transient::TextPreview {
+                        base: preview.base.clone(),
+                        result: preview.result.clone(),
+                        index: preview.index,
+                        delete: preview.delete,
+                        insert: preview.insert.clone(),
+                        anchor: preview.anchor,
+                        focus: preview.focus,
+                    },
+                },
+            });
+        }
         for caret in carets {
             if !issue_set.contains(caret.issue.as_str()) || caret.field != "description" {
                 continue;
@@ -1417,11 +1450,13 @@ impl StationHost {
                 since_generation,
                 issue,
             } => self.live(since_generation, issue.as_deref()),
+            Request::LiveSubscribe { .. } => Response::err("live_subscribe is a streaming request"),
             Request::Watching {
                 issues,
                 carets,
                 typing,
-            } => self.watching(&issues, &carets, &typing),
+                previews,
+            } => self.watching(&issues, &carets, &typing, &previews),
             Request::Signals => self.drain_signals(),
             Request::Sync => self.sync(),
             other => Response::err(format!("request is not a Station operation: {other:?}")),
@@ -1617,6 +1652,15 @@ impl StationHost {
     /// durable Neighbor registry's reachability, this is the Live plane's
     /// transient table, which nothing journals and nothing replays.
     fn live(&self, since_generation: Option<u64>, issue: Option<&str>) -> Response {
+        self.live_snapshot(since_generation, issue).0
+    }
+
+    /// One Live projection plus the next derived age/partial boundary.
+    fn live_snapshot(
+        &self,
+        since_generation: Option<u64>,
+        issue: Option<&str>,
+    ) -> (Response, Option<Duration>) {
         let handle = self.station.live();
         // The issue's Body id, by the same one-way derivation the Issues World
         // commits under. It only runs this direction, which is why an unscoped
@@ -1646,18 +1690,24 @@ impl StationHost {
         // nothing more can flip, and the cheap answer is true again.
         if since_generation == Some(view.generation) && entries.iter().all(|entry| entry.uncertain)
         {
-            return Response::LiveUnchanged {
+            return (
+                Response::LiveUnchanged {
+                    generation: view.generation,
+                },
+                view.refresh_in,
+            );
+        }
+        (
+            Response::Live {
                 generation: view.generation,
-            };
-        }
-        Response::Live {
-            generation: view.generation,
-            partial: view.partial,
-            entries: entries
-                .into_iter()
-                .filter_map(|entry| self.live_entry(entry))
-                .collect(),
-        }
+                partial: view.partial,
+                entries: entries
+                    .into_iter()
+                    .filter_map(|entry| self.live_entry(entry))
+                    .collect(),
+            },
+            view.refresh_in,
+        )
     }
 
     /// One transient row, or nothing when its Station names no actor here.
@@ -1673,6 +1723,18 @@ impl StationHost {
             uncertain: entry.uncertain,
             caret: entry.caret.map(caret_position),
             focus: entry.focus.map(caret_position),
+            preview: entry
+                .preview
+                .as_ref()
+                .map(|preview| crate::control::TextPreview {
+                    base: preview.base.clone(),
+                    result: preview.result.clone(),
+                    index: preview.index,
+                    delete: preview.delete,
+                    insert: preview.insert.clone(),
+                    anchor: preview.anchor,
+                    focus: preview.focus,
+                }),
         })
     }
 
@@ -1937,14 +1999,17 @@ impl StationHost {
                 None => return Response::err("expected a device id or a Coordinates link to pin"),
             },
         };
-        let newly = upsert_seed(
+        let newly = match upsert_seed(
             &self.home,
             SeedRecord {
                 id: id.clone(),
                 nick: String::new(),
                 space,
             },
-        );
+        ) {
+            Ok(newly) => newly,
+            Err(error) => return Response::err(error),
+        };
         Response::Ok {
             message: Some(if newly {
                 format!("pinned seed {}", id.as_str())
@@ -1963,7 +2028,14 @@ impl StationHost {
             .iter()
             .map(|n| n.station.key_bytes())
             .collect();
-        let seeds = load_seeds(&self.home)
+        let loaded = match load_seeds(&self.home) {
+            Ok(seeds) => seeds,
+            // "You have pinned nothing" and "your seed file is broken" are
+            // different answers to `lait seed list`, and only one of them is
+            // actionable.
+            Err(error) => return Response::err(error),
+        };
+        let seeds = loaded
             .into_iter()
             .map(|s| {
                 // A seed is pinned by device id; a Neighbor is a Station id —
@@ -1987,10 +2059,11 @@ impl StationHost {
     /// Unpin seeds matching a full id, id-prefix, or nick.
     fn seed_remove(&self, needle: &str) -> Response {
         match remove_seed(&self.home, needle) {
-            0 => Response::err("no pinned seed matched that id/nick"),
-            n => Response::Ok {
+            Ok(0) => Response::err("no pinned seed matched that id/nick"),
+            Ok(n) => Response::Ok {
                 message: Some(format!("unpinned {n} seed(s)")),
             },
+            Err(error) => Response::err(error),
         }
     }
 
@@ -2594,6 +2667,10 @@ impl StationHost {
             self.stream_subscribe(write_half).await;
             return;
         }
+        if let Request::LiveSubscribe { issue } = req {
+            self.stream_live(write_half, issue).await;
+            return;
+        }
         // Stop is a real teardown request: answer, then signal the serve loop
         // to return (the caller decides whether to exit the process).
         let stop = matches!(req, Request::Stop);
@@ -2776,6 +2853,43 @@ impl StationHost {
         }
     }
 
+    /// Stream the Live table on generation changes and on the exact derived
+    /// deadline where a row becomes uncertain or a partial marker clears.
+    async fn stream_live(
+        self: &Arc<Self>,
+        mut write_half: tokio::io::WriteHalf<LocalStream>,
+        issue: Option<String>,
+    ) {
+        let handle = self.station.live();
+        // Subscribe before the first snapshot, closing the read/subscribe gap.
+        let mut generations = handle.subscribe_generation();
+        let mut stop_rx = self.stop_tx.subscribe();
+        loop {
+            let (response, refresh_in) = self.live_snapshot(None, issue.as_deref());
+            if write_line_half(&mut write_half, &response).await.is_err() {
+                break;
+            }
+            tokio::select! {
+                changed = stop_rx.changed() => {
+                    if changed.is_err() || *stop_rx.borrow() {
+                        break;
+                    }
+                }
+                changed = generations.changed() => {
+                    if changed.is_err() {
+                        break;
+                    }
+                }
+                _ = async {
+                    match refresh_in {
+                        Some(delay) => tokio::time::sleep(delay).await,
+                        None => std::future::pending::<()>().await,
+                    }
+                } => {}
+            }
+        }
+    }
+
     /// Latch teardown: the atomic (for worker threads), the watch (for live
     /// subscriptions), and the serve loop's notify.
     fn begin_stop(&self) {
@@ -2815,6 +2929,11 @@ fn live_scope(scope: &runtime::transient::Target) -> crate::control::LiveScope {
             body: render_body(body),
             field: field.clone(),
         },
+        Target::Preview { world, body, field } => LiveScope::Preview {
+            world: world.clone(),
+            body: render_body(body),
+            field: field.clone(),
+        },
         Target::Typing { world, body, field } => LiveScope::Typing {
             world: world.clone(),
             body: render_body(body),
@@ -2847,6 +2966,7 @@ fn transient_kind(kind: runtime::transient::TransientKind) -> &'static str {
         TransientKind::Presence => "presence",
         TransientKind::Caret => "caret",
         TransientKind::Selection => "selection",
+        TransientKind::Preview => "preview",
         TransientKind::Typing => "typing",
         TransientKind::Residency => "residency",
     }
@@ -3070,14 +3190,35 @@ fn seeds_path(home: &Path) -> PathBuf {
 
 /// Load the pinned seed registry, dropping (at warn) any record whose id is not
 /// a device key so one bad row never unpins the rest.
-fn load_seeds(home: &Path) -> Vec<SeedRecord> {
-    let Ok(data) = std::fs::read_to_string(seeds_path(home)) else {
-        return Vec::new();
+///
+/// `Err` means the file is there and could not be read as a registry. That is
+/// deliberately not the same answer as an empty registry: the caller that
+/// *writes* must refuse, because it would otherwise save its empty guess over
+/// the seeds a user pinned, and a transient parse failure would become a
+/// permanent deletion. An absent file is genuinely no seeds, and is `Ok`.
+fn load_seeds(home: &Path) -> Result<Vec<SeedRecord>, String> {
+    let path = seeds_path(home);
+    let data = match std::fs::read_to_string(&path) {
+        Ok(data) => data,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(format!("{} is unreadable: {error}", path.display())),
     };
-    let rows: Vec<SeedRecord> = serde_json::from_str(&data).unwrap_or_default();
-    rows.into_iter()
+    let rows: Vec<SeedRecord> = serde_json::from_str(&data)
+        .map_err(|error| format!("{} is not a seed registry: {error}", path.display()))?;
+    let total = rows.len();
+    let kept: Vec<SeedRecord> = rows
+        .into_iter()
         .filter(|r| mechanics::ids::DeviceId::parse(r.id.as_str()).is_some())
-        .collect()
+        .collect();
+    // The warn this function's contract has always promised.
+    if kept.len() != total {
+        tracing::warn!(
+            dropped = total - kept.len(),
+            path = %path.display(),
+            "seed records whose id is not a device key were ignored"
+        );
+    }
+    Ok(kept)
 }
 
 fn save_seeds(home: &Path, seeds: &[SeedRecord]) {
@@ -3088,24 +3229,26 @@ fn save_seeds(home: &Path, seeds: &[SeedRecord]) {
 
 /// Upsert a seed keyed by id (nick/space refresh in place). Returns whether it
 /// was newly pinned.
-fn upsert_seed(home: &Path, rec: SeedRecord) -> bool {
-    let mut seeds = load_seeds(home);
+fn upsert_seed(home: &Path, rec: SeedRecord) -> Result<bool, String> {
+    // Refusing here is the point: pinning a seed must never be the operation
+    // that silently unpins every other one.
+    let mut seeds = load_seeds(home)?;
     if let Some(existing) = seeds.iter_mut().find(|s| s.id == rec.id) {
         existing.nick = rec.nick;
         existing.space = rec.space;
         save_seeds(home, &seeds);
-        false
+        Ok(false)
     } else {
         seeds.push(rec);
         save_seeds(home, &seeds);
-        true
+        Ok(true)
     }
 }
 
 /// Unpin seeds matching a full id, a ≥6-char id prefix, or a nick. Returns the
 /// count removed.
-fn remove_seed(home: &Path, needle: &str) -> usize {
-    let mut seeds = load_seeds(home);
+fn remove_seed(home: &Path, needle: &str) -> Result<usize, String> {
+    let mut seeds = load_seeds(home)?;
     let before = seeds.len();
     seeds.retain(|s| {
         let id = s.id.as_str();
@@ -3115,7 +3258,7 @@ fn remove_seed(home: &Path, needle: &str) -> usize {
     if removed > 0 {
         save_seeds(home, &seeds);
     }
-    removed
+    Ok(removed)
 }
 
 /// The local petname map (`aliases.json` beside the home).

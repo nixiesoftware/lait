@@ -21,11 +21,18 @@ network = { max-threads = 4 }
 retries = 0
 
 # Surface a wedged test (e.g. a daemon that never bound its control channel)
-# instead of hanging the job: warn at 30s, terminate after 3 periods (90s). No
-# real test comes close now — the slowest are the ~11s liveness probe and the
-# ~7s two-node convergence — so this is a margin, not a tuning knob. A test that
-# trips the 30s warning is almost certainly parked on a peer that will never
-# answer, which is the condition this is here to surface.
+# instead of hanging the job: warn at 30s, terminate after 3 periods (90s).
+#
+# This is the budget for the DETERMINISTIC majority, which finishes in
+# milliseconds and for which 90 s is a margin rather than a tuning knob. It is
+# no longer true that "no real test comes close": the multi-node end-to-end
+# suites legitimately run for tens of seconds, and a shared 2-core runner has
+# been measured at ~2x its own good days, so several of them cross 30 s there
+# without anything being wrong. Those suites carry explicit overrides below —
+# and the rule that keeps this honest is that a test which OUTGREW the default
+# gets a named override with its measurement written down, rather than the
+# default being widened for everyone. Widening it here would buy one test some
+# headroom at the cost of every genuinely wedged test taking longer to surface.
 #
 # This budget assumes DEPENDENCIES ARE BUILT OPTIMIZED — see
 # `[profile.dev.package."*"]` in Cargo.toml. Tests inherit the `dev` profile, and
@@ -97,6 +104,38 @@ slow-timeout = { period = "120s", terminate-after = 5 }
 # own budget.
 [[profile.default.overrides]]
 filter = '(binary_id(lait::it) & test(commit_cost_baseline::))'
+slow-timeout = { period = "120s", terminate-after = 5 }
+
+# The end-to-end ceremony suite: real DKG and threshold signing across three or
+# four in-process nodes, converged between every step. Same shape as the three
+# gates above — CPU-bound on curve25519, never waiting on a peer that might not
+# answer — and so on the same boundary.
+#
+# Measured evidence. The family's long pole is `resharing_replaces_a_participant`
+# — four nodes and two full DKGs, where the rest are three nodes and one — at
+# 13.7 s on an idle 12-core Windows dev box, dev profile with dependencies built
+# optimized. Then both windows-latest nightlies of 2026-08-03: the 07:59 run
+# passed it at 50.8 s, already the only test in the file tripping the 30 s
+# warning and at 56% of the default 90 s budget; the 11:35 run terminated it
+# twice at 90 s. Nothing about the ceremonies changed between those two runs —
+# the RUNNER was uniformly ~2x slower, which the rest of the suite records
+# independently: orbital_two_node 9.8 s -> 24.5 s, orbital_concurrent_catalog
+# 17.5 s -> 44.1 s, commit_cost_baseline 221 s -> 404 s. That last one survived
+# only because of its override above.
+#
+# So this is scoped to the whole `orbital_ceremonies::` family rather than to
+# the one test that lost. On the degraded runner `threshold_recovery` reached
+# 59.8 s and `indispensable_arrangement` 51.6 s — 66% and 57% of the old budget.
+# Naming only the failing test would have handed the next slow night to one of
+# those instead, which is the failure mode this comment exists to prevent.
+#
+# 5 x 120 s is the same budget the three gates above carry: ~44x the dev-box
+# measurement, ~12x the healthy runner, ~5x the degraded one, and a genuine
+# wedge — a ceremony parked on a participant that never posts its share — still
+# surfaces inside ten minutes. The extra nodes and the second DKG are what the
+# long pole is FOR, so the budget moves rather than the coverage.
+[[profile.default.overrides]]
+filter = '(binary_id(lait::it) & test(orbital_ceremonies::))'
 slow-timeout = { period = "120s", terminate-after = 5 }
 
 [[profile.default.overrides]]

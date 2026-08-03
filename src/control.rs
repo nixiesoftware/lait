@@ -1,9 +1,8 @@
-// The control wire codec validates frame lengths before bounded byte operations;
-// these conversions preserve the existing versioned JSON and content encodings.
 #![allow(
     clippy::arithmetic_side_effects,
     clippy::as_conversions,
-    clippy::indexing_slicing
+    clippy::indexing_slicing,
+    reason = "The control wire codec validates frame lengths before bounded byte operations; these conversions preserve the existing versioned JSON and content encodings."
 )]
 
 //! Layer B — the local control protocol. Newline-delimited JSON over
@@ -100,17 +99,19 @@ impl Endpoint {
 /// and then sends exactly that many raw bytes, in both directions. A v6 process
 /// cannot serve it — it would read the body as a malformed second request — so
 /// v6 is retired rather than tolerated.
-pub const CONTROL_PROTOCOL_VERSION: u32 = 7;
+///
+/// **v8:** Live views gain a standing subscription. A v7 Station can answer a
+/// one-shot `live` request but cannot provide the event-driven stream the web
+/// viewer now uses, so it must be replaced rather than silently leaving a room
+/// with no updates.
+pub const CONTROL_PROTOCOL_VERSION: u32 = 8;
 
 /// The oldest control protocol a client still talks to. Raising this retires a
 /// version; the gap to [`CONTROL_PROTOCOL_VERSION`] is the mixed-version window.
 ///
-/// Protocol v7 is a deliberate compatibility cutoff. A v6 process attached as a
-/// StationHost would accept a content request's header line and then read the
-/// raw body as a second request, so leaving the minimum at 6 would let
-/// `orbits::Placement::establish` attach a process that cannot frame content and
-/// will desynchronise the channel the first time someone uploads.
-pub const MIN_SUPPORTED_CONTROL_PROTOCOL: u32 = 7;
+/// Protocol v8 is a deliberate compatibility cutoff: the web viewer relies on
+/// the standing Live stream and a v7 Station cannot answer it.
+pub const MIN_SUPPORTED_CONTROL_PROTOCOL: u32 = 8;
 
 /// Whether this build can talk to a daemon advertising control protocol `peer`.
 ///
@@ -173,6 +174,22 @@ pub struct WatchingCaret {
     pub issue: String,
     pub field: String,
     pub anchor: u64,
+    #[serde(default)]
+    pub focus: Option<u64>,
+}
+
+/// One cumulative optimistic text preview from a browser's durable base.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct WatchingPreview {
+    pub issue: String,
+    pub field: String,
+    pub base: String,
+    pub result: String,
+    pub index: u64,
+    pub delete: u64,
+    pub insert: String,
+    #[serde(default)]
+    pub anchor: Option<u64>,
     #[serde(default)]
     pub focus: Option<u64>,
 }
@@ -439,6 +456,9 @@ pub enum Request {
         /// Fields in which a browser has produced input recently.
         #[serde(default)]
         typing: Vec<WatchingTyping>,
+        /// Display-only cumulative splices awaiting durable peer convergence.
+        #[serde(default)]
+        previews: Vec<WatchingPreview>,
     },
     Live {
         /// The generation the caller already holds. When it still stands the
@@ -471,6 +491,16 @@ pub enum Request {
         /// whole table, so a caller watching one issue is told to re-read when
         /// anything anywhere moves. That costs a wasted read and never a missed
         /// one, which is the right way round for a surface about who is here.
+        #[serde(default)]
+        issue: Option<String>,
+    },
+    /// Stream the current Live view and every superseding generation.
+    ///
+    /// This is the standing counterpart to [`Request::Live`]. It preserves the
+    /// same narrowing and response vocabulary while removing the adapter's
+    /// polling interval from cursor and optimistic-text delivery.
+    LiveSubscribe {
+        /// Narrow to one issue by its `iss_` doc id; `None` streams the table.
         #[serde(default)]
         issue: Option<String>,
     },
@@ -826,6 +856,7 @@ pub fn classify(req: &Request) -> RequestOwner {
         | Request::Who
         | Request::Sync
         | Request::Live { .. }
+        | Request::LiveSubscribe { .. }
         | Request::Watching { .. }
         | Request::Signals => Station,
 
@@ -943,6 +974,7 @@ pub fn representative_requests() -> Vec<Request> {
             since_generation: None,
             issue: None,
         },
+        Request::LiveSubscribe { issue: None },
         Request::Signals,
         Request::ConfigReload,
         Request::Stop,
@@ -1229,6 +1261,13 @@ pub enum LiveScope {
         body: String,
         field: String,
     },
+    /// A display-only optimistic splice in this field.
+    #[serde(rename = "text_preview")]
+    Preview {
+        world: String,
+        body: String,
+        field: String,
+    },
     /// Somebody is typing in this field.
     Typing {
         world: String,
@@ -1264,6 +1303,18 @@ pub enum CaretPosition {
     Unresolved,
 }
 
+/// A display-only optimistic text splice carried by Live.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TextPreview {
+    pub base: String,
+    pub result: String,
+    pub index: u64,
+    pub delete: u64,
+    pub insert: String,
+    pub anchor: Option<u64>,
+    pub focus: Option<u64>,
+}
+
 /// One thing a peer is currently doing — the wire mirror of
 /// `runtime::plane::live::LiveEntry`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1278,7 +1329,7 @@ pub struct LiveEntry {
     /// omitted rather than carried under an invented identity.
     pub actor: String,
     pub scope: LiveScope,
-    /// `presence` | `caret` | `selection` | `typing` | `residency`.
+    /// `presence` | `caret` | `selection` | `preview` | `typing` | `residency`.
     pub kind: String,
     /// How long ago **this** Station saw it. Ours, not theirs — a peer's clock
     /// is a peer's claim.
@@ -1290,6 +1341,8 @@ pub struct LiveEntry {
     pub caret: Option<CaretPosition>,
     /// A selection's far end.
     pub focus: Option<CaretPosition>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview: Option<TextPreview>,
 }
 
 /// What a signal says — the wire mirror of `runtime::plane::Signal`.
@@ -1973,6 +2026,29 @@ pub struct Subscription {
     reader: BufReader<Stream>,
 }
 
+/// A standing Live projection stream. Each frame is a complete [`Response::Live`]
+/// view, so a slow or reconnecting adapter can replace rather than replay.
+pub struct LiveSubscription {
+    reader: BufReader<Stream>,
+}
+
+impl LiveSubscription {
+    pub async fn next(&mut self) -> Result<Option<Response>> {
+        let mut line = String::new();
+        let n = self
+            .reader
+            .read_line(&mut line)
+            .await
+            .context("read Live view")?;
+        if n == 0 {
+            return Ok(None);
+        }
+        serde_json::from_str(line.trim())
+            .context("decode Live view")
+            .map(Some)
+    }
+}
+
 impl Subscription {
     /// Read the next [`Doorbell`] frame. Returns `None` at EOF (daemon stopped).
     pub async fn next(&mut self) -> Result<Option<Doorbell>> {
@@ -2017,6 +2093,32 @@ pub async fn subscribe_routed(
         .context("write subscribe")?;
     stream.flush().await.ok();
     Ok(Subscription {
+        reader: BufReader::new(stream),
+    })
+}
+
+/// Open an event-driven Live stream through an explicit Space route.
+pub async fn subscribe_live_routed(
+    home: &Path,
+    route: ControlRoute,
+    issue: Option<String>,
+) -> Result<LiveSubscription> {
+    let name = control_name(home)?;
+    let mut stream = Stream::connect(name).await.context("connect to daemon")?;
+    let envelope = ClientRequest {
+        route: Some(route),
+        if_running: false,
+        act_as: None,
+        request: Request::LiveSubscribe { issue },
+    };
+    let mut line = serde_json::to_string(&envelope).context("encode Live subscribe")?;
+    line.push('\n');
+    stream
+        .write_all(line.as_bytes())
+        .await
+        .context("write Live subscribe")?;
+    stream.flush().await.ok();
+    Ok(LiveSubscription {
         reader: BufReader::new(stream),
     })
 }
@@ -2268,6 +2370,7 @@ mod tests {
             uncertain: false,
             caret: Some(CaretPosition::At { position: 12 }),
             focus: Some(CaretPosition::Drifted),
+            preview: None,
         };
         let json = serde_json::to_value(Response::Live {
             generation: 1,

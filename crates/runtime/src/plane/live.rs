@@ -26,8 +26,10 @@
 //! bound: a permit before the stream kind is read, the gate before the message,
 //! the message's declared length before its buffer.
 
+use crate::poison::LockRecovering;
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::time::Duration;
 // `tokio::time::Instant`, not `tokio::time::Instant`. Without the `test-util`
 // feature it IS `tokio::time::Instant::now()` — same call, same value, no
 // indirection — so production pays nothing. With it, `tokio::time::pause()`
@@ -234,6 +236,9 @@ pub struct LiveEntry {
     pub caret: Option<CaretState>,
     /// A selection's far end.
     pub focus: Option<CaretState>,
+    /// A display-only text splice, resolved by the viewer against its durable
+    /// Markdown revision rather than by the CRDT anchor source.
+    pub preview: Option<crate::transient::TextPreview>,
 }
 
 /// What a Station currently believes about who is doing what.
@@ -251,6 +256,10 @@ pub struct LiveView {
     /// with no indication is telling a confident lie.
     pub partial: bool,
     pub entries: Vec<LiveEntry>,
+    /// The next age/partial transition that changes the projection without a
+    /// new item. A streaming reader sleeps exactly this long rather than
+    /// polling to discover that a caret became uncertain.
+    pub refresh_in: Option<Duration>,
 }
 
 /// The cross-thread half of the Live plane.
@@ -266,6 +275,7 @@ pub struct LiveView {
 /// take, which is a deadlock waiting for a busy afternoon.
 pub struct LiveHandle {
     table: std::sync::Mutex<PublishTable>,
+    table_updates: tokio::sync::watch::Sender<u64>,
     signals: SignalSink,
     anchors: Option<std::sync::Arc<dyn AnchorSource>>,
     residency: std::sync::Arc<dyn ResidencyOracle>,
@@ -275,6 +285,7 @@ pub struct LiveHandle {
     /// both would make "who is here" a question whose answer includes us, and
     /// every viewer would draw itself a second time.
     local: std::sync::Mutex<LocalPresence>,
+    local_updates: tokio::sync::watch::Sender<u64>,
     /// Peers holding a session right now, refcounted.
     ///
     /// Refcounted because `MAX_LIVE_SESSIONS_PER_STATION` is two: a peer with a
@@ -354,10 +365,12 @@ impl LiveHandle {
     ) -> Self {
         Self {
             table: std::sync::Mutex::new(PublishTable::default()),
+            table_updates: tokio::sync::watch::Sender::new(0),
             signals: tokio::sync::broadcast::channel(SIGNAL_QUEUE).0,
             anchors,
             residency,
             local: std::sync::Mutex::new(LocalPresence::default()),
+            local_updates: tokio::sync::watch::Sender::new(0),
             connected: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             outbox: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             offers: std::sync::Mutex::new(crate::signal::OfferQueue::new()),
@@ -399,6 +412,7 @@ impl LiveHandle {
         // session would clone and compare the whole set on every beat, at the
         // beat rate, for a set that changes when somebody opens a tab.
         local.generation = local.generation.wrapping_add(1);
+        self.local_updates.send_replace(local.generation);
     }
 
     /// The number that moves when the declaration changes.
@@ -409,6 +423,21 @@ impl LiveHandle {
     /// them together reintroduced.
     pub fn local_generation(&self) -> u64 {
         self.local().generation
+    }
+
+    /// Wake a Live session as soon as this Station's declaration changes.
+    pub fn subscribe_local_generation(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.local_updates.subscribe()
+    }
+
+    /// Wake a local projection as soon as a peer's Live table changes.
+    pub fn subscribe_generation(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.table_updates.subscribe()
+    }
+
+    fn bump_table(&self, table: &mut PublishTable) {
+        table.generation = table.generation.wrapping_add(1);
+        self.table_updates.send_replace(table.generation);
     }
 
     /// Which scopes this Station is looking at.
@@ -429,15 +458,14 @@ impl LiveHandle {
     }
 
     fn local(&self) -> std::sync::MutexGuard<'_, LocalPresence> {
-        self.local.lock().unwrap_or_else(|p| p.into_inner())
+        self.local.lock_recovering()
     }
 
     /// A session for this peer opened.
     pub fn arrived(&self, peer: &Key) {
         *self
             .connected
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
+            .lock_recovering()
             .entry(peer.clone())
             .or_insert(0) += 1;
     }
@@ -453,7 +481,7 @@ impl LiveHandle {
     /// half-maintained, which is exactly how it was.
     pub fn departed(&self, peer: &Key) {
         let gone = {
-            let mut connected = self.connected.lock().unwrap_or_else(|p| p.into_inner());
+            let mut connected = self.connected.lock_recovering();
             match connected.get_mut(peer) {
                 Some(count) => {
                     *count = count.saturating_sub(1);
@@ -468,10 +496,7 @@ impl LiveHandle {
             }
         };
         if gone {
-            self.outbox
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .remove(peer);
+            self.outbox.lock_recovering().remove(peer);
         }
     }
 
@@ -481,12 +506,7 @@ impl LiveHandle {
     /// currently holds a session with. That is the only set a signal can be
     /// delivered to, and the reason presence can gate delivery at all.
     pub fn present_stations(&self) -> Vec<Key> {
-        self.connected
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .keys()
-            .cloned()
-            .collect()
+        self.connected.lock_recovering().keys().cloned().collect()
     }
 
     /// Hand a signal to whichever session reaches that peer.
@@ -504,12 +524,7 @@ impl LiveHandle {
     /// The check is here and not only at the call site, because this is where the
     /// queue is. The doc said this for a while before the code did.
     pub fn nudge(&self, peer: &Key, signal: crate::plane::Signal) -> bool {
-        if !self
-            .connected
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .contains_key(peer)
-        {
+        if !self.connected.lock_recovering().contains_key(peer) {
             return false;
         }
         // An outbox is one-way by construction, and a signal that expects an
@@ -526,7 +541,7 @@ impl LiveHandle {
         }) {
             return false;
         }
-        let mut outbox = self.outbox.lock().unwrap_or_else(|p| p.into_inner());
+        let mut outbox = self.outbox.lock_recovering();
         let queued = outbox.entry(peer.clone()).or_default();
         if queued.len() >= MAX_OUTBOUND_SIGNALS {
             return false;
@@ -555,7 +570,7 @@ impl LiveHandle {
     ///
     /// Oldest first, and what is not taken stays queued for the next beat.
     fn take_outbound(&self, peer: &Key, max: usize) -> Vec<crate::plane::Signal> {
-        let mut outbox = self.outbox.lock().unwrap_or_else(|p| p.into_inner());
+        let mut outbox = self.outbox.lock_recovering();
         let Some(queued) = outbox.get_mut(peer) else {
             return Vec::new();
         };
@@ -596,7 +611,7 @@ impl LiveHandle {
     }
 
     fn offers(&self) -> std::sync::MutexGuard<'_, crate::signal::OfferQueue> {
-        self.offers.lock().unwrap_or_else(|p| p.into_inner())
+        self.offers.lock_recovering()
     }
 
     /// How much of a content this Station holds, for a peer that asked.
@@ -609,7 +624,7 @@ impl LiveHandle {
     }
 
     fn table(&self) -> std::sync::MutexGuard<'_, PublishTable> {
-        self.table.lock().unwrap_or_else(|p| p.into_inner())
+        self.table.lock_recovering()
     }
 
     /// Listen for signals this Station receives.
@@ -656,7 +671,7 @@ impl LiveHandle {
             table.dropped_until = Some(now + deadline::CURSOR_TTL);
             return false;
         }
-        table.generation = table.generation.wrapping_add(1);
+        self.bump_table(&mut table);
         table.slots.insert(
             key,
             crate::transient::TransientSlot {
@@ -689,7 +704,7 @@ impl LiveHandle {
         });
         let dropped = before - table.slots.len();
         if dropped > 0 {
-            table.generation = table.generation.wrapping_add(1);
+            self.bump_table(&mut table);
         }
         dropped
     }
@@ -704,7 +719,7 @@ impl LiveHandle {
         table.slots.retain(|(held, _, _), _| held != station);
         let dropped = before - table.slots.len();
         if dropped > 0 {
-            table.generation = table.generation.wrapping_add(1);
+            self.bump_table(&mut table);
         }
         dropped
     }
@@ -717,7 +732,7 @@ impl LiveHandle {
             .slots
             .retain(|(held, held_scope, _), _| held != station || held_scope != scope);
         if table.slots.len() != before {
-            table.generation = table.generation.wrapping_add(1);
+            self.bump_table(&mut table);
         }
     }
 
@@ -726,7 +741,7 @@ impl LiveHandle {
         let mut table = self.table();
         if table.accepting_capped != capped {
             table.accepting_capped = capped;
-            table.generation = table.generation.wrapping_add(1);
+            self.bump_table(&mut table);
         }
     }
 
@@ -735,7 +750,7 @@ impl LiveHandle {
         let mut table = self.table();
         if table.dialling_capped != capped {
             table.dialling_capped = capped;
-            table.generation = table.generation.wrapping_add(1);
+            self.bump_table(&mut table);
         }
     }
 
@@ -749,7 +764,7 @@ impl LiveHandle {
         let mut table = self.table();
         let until = now + deadline::CURSOR_TTL;
         if !table.partial(now) {
-            table.generation = table.generation.wrapping_add(1);
+            self.bump_table(&mut table);
         }
         table.dropped_until = Some(until);
     }
@@ -769,7 +784,7 @@ impl LiveHandle {
         });
         let dropped = before - table.slots.len();
         if dropped > 0 {
-            table.generation = table.generation.wrapping_add(1);
+            self.bump_table(&mut table);
         }
         dropped
     }
@@ -815,7 +830,7 @@ impl LiveHandle {
     pub fn view_narrowed(&self, narrow: LiveNarrow<'_>, now: Instant) -> LiveView {
         // Snapshotted, then the lock is released. Resolving under it would take
         // the commit lock while holding a lock the browser can take.
-        let (generation, partial, held) = {
+        let (generation, partial, held, refresh_in) = {
             let table = self.table();
             let held: Vec<_> = table
                 .slots
@@ -825,14 +840,32 @@ impl LiveHandle {
                     (station.clone(), held_scope.clone(), slot.clone())
                 })
                 .collect();
-            (table.generation, table.partial(now), held)
+            let age_refresh = table
+                .slots
+                .values()
+                .filter_map(|slot| {
+                    let age = now.saturating_duration_since(slot.arrived_at);
+                    deadline::CARET_GRACE
+                        .checked_sub(age)
+                        .map(|remaining| remaining + Duration::from_nanos(1))
+                })
+                .min();
+            let partial_refresh = table
+                .dropped_until
+                .and_then(|until| (until > now).then(|| until - now));
+            (
+                table.generation,
+                table.partial(now),
+                held,
+                age_refresh.into_iter().chain(partial_refresh).min(),
+            )
         };
 
         let entries = held
             .into_iter()
             .map(|(station, scope, slot)| {
                 let age = now.saturating_duration_since(slot.arrived_at);
-                let (caret, focus) = self.resolve(&scope, &slot.payload);
+                let (caret, focus, preview) = self.resolve(&scope, &slot.payload);
                 LiveEntry {
                     station,
                     kind: slot.payload.kind(),
@@ -841,6 +874,7 @@ impl LiveHandle {
                     uncertain: age > deadline::CARET_GRACE,
                     caret,
                     focus,
+                    preview,
                 }
             })
             .collect();
@@ -848,6 +882,7 @@ impl LiveHandle {
             generation,
             partial,
             entries,
+            refresh_in,
         }
     }
 
@@ -855,23 +890,32 @@ impl LiveHandle {
         &self,
         scope: &Target,
         payload: &crate::transient::TransientPayload,
-    ) -> (Option<CaretState>, Option<CaretState>) {
+    ) -> (
+        Option<CaretState>,
+        Option<CaretState>,
+        Option<crate::transient::TextPreview>,
+    ) {
         use crate::transient::TransientPayload;
         let (anchor, focus) = match payload {
             TransientPayload::Caret { anchor } => (Some(anchor), None),
             TransientPayload::Selection { anchor, focus } => (Some(anchor), Some(focus)),
-            _ => return (None, None),
+            TransientPayload::Preview { preview } => {
+                return (None, None, Some(preview.clone()));
+            }
+            _ => return (None, None, None),
         };
         let Some((world, body)) = scope_body(scope) else {
             return (
                 Some(CaretState::Unresolved),
                 focus.map(|_| CaretState::Unresolved),
+                None,
             );
         };
         let Some(key) = body_key(&world, body) else {
             return (
                 Some(CaretState::Unresolved),
                 focus.map(|_| CaretState::Unresolved),
+                None,
             );
         };
         let one = |raw: &Vec<u8>| -> CaretState {
@@ -889,7 +933,7 @@ impl LiveHandle {
                 fabric::AnchorResolution::Drifted => CaretState::Drifted,
             }
         };
-        (anchor.map(&one), focus.map(&one))
+        (anchor.map(&one), focus.map(&one), None)
     }
 }
 
@@ -899,6 +943,7 @@ fn scope_body(scope: &Target) -> Option<(String, [u8; 16])> {
         Target::Body { world, body }
         | Target::Material { world, body }
         | Target::Field { world, body, .. }
+        | Target::Preview { world, body, .. }
         | Target::Typing { world, body, .. } => Some((world.clone(), *body)),
         _ => None,
     }
@@ -1063,6 +1108,9 @@ pub async fn serve_session(
     let mut last_seen = Instant::now();
     let mut sweep_at = Instant::now();
     let mut revalidated_at = Instant::now();
+    let mut local_updates = handle
+        .as_ref()
+        .map(|handle| handle.subscribe_local_generation());
 
     // What this session has told its peer we are looking at, and the
     // declaration generation it was built from.
@@ -1555,6 +1603,7 @@ pub async fn serve_session(
                             crate::transient::TransientKind::Presence,
                             crate::transient::TransientKind::Caret,
                             crate::transient::TransientKind::Selection,
+                            crate::transient::TransientKind::Preview,
                             crate::transient::TransientKind::Typing,
                             crate::transient::TransientKind::Residency,
                         ] {
@@ -1567,6 +1616,21 @@ pub async fn serve_session(
                 }
             }
 
+            changed = async {
+                match local_updates.as_mut() {
+                    Some(updates) => updates.changed().await,
+                    None => std::future::pending::<
+                        Result<(), tokio::sync::watch::error::RecvError>
+                    >().await,
+                }
+            } => {
+                if changed.is_err() {
+                    break;
+                }
+            }
+
+            // Housekeeping fallback for signals, authority revalidation,
+            // expiry, and idle connections. Publication itself wakes above.
             _ = tokio::time::sleep(deadline::DRIVER_POLL) => {}
         }
     }
@@ -1902,6 +1966,30 @@ mod tests {
             world: "com.example.notes".into(),
             body: [n; 16],
         }
+    }
+
+    #[tokio::test]
+    async fn local_declarations_wake_sessions_without_waiting_for_the_driver_poll() {
+        let handle = LiveHandle::new(None);
+        let mut updates = handle.subscribe_local_generation();
+        handle.declare_local(vec![scope(1)]);
+        tokio::time::timeout(Duration::from_millis(10), updates.changed())
+            .await
+            .expect("declaration wake")
+            .expect("publisher remains open");
+        assert_eq!(*updates.borrow_and_update(), handle.local_generation());
+    }
+
+    #[tokio::test]
+    async fn table_changes_wake_local_live_subscriptions() {
+        let handle = LiveHandle::new(None);
+        let mut updates = handle.subscribe_generation();
+        handle.note_dropped(Instant::now());
+        tokio::time::timeout(Duration::from_millis(10), updates.changed())
+            .await
+            .expect("table wake")
+            .expect("publisher remains open");
+        assert_eq!(*updates.borrow_and_update(), handle.generation());
     }
 
     #[test]

@@ -1,6 +1,8 @@
-// WebSocket framing validates lane lengths and sequence bounds before arithmetic;
-// conversions adapt the versioned wire representation.
-#![allow(clippy::arithmetic_side_effects, clippy::as_conversions)]
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    reason = "WebSocket framing validates lane lengths and sequence bounds before arithmetic; conversions adapt the versioned wire representation."
+)]
 
 //! The browser session socket: one WebSocket carrying lanes the doorbell stream cannot.
 //!
@@ -39,11 +41,11 @@
 //! postcard either way, so the version and lane checks are the same for all
 //! three.
 //!
-//! The transient lane is fed by one poll for the whole server rather than one
-//! per tab: [`pump_transient`] asks each *question* a browser has declared an
-//! interest in once per tick, and [`Hub`] fans the answer out. That is
-//! also why this socket has an inbound direction at all. A poll has to name a
-//! Space, and polling every registered one would place a Station for every
+//! The transient lane is fed by one native Live subscription per question,
+//! never one per tab: [`pump_transient`] holds each stream browsers have declared
+//! an interest in, and [`Hub`] fans the answer out. That is
+//! also why this socket has an inbound direction at all. A subscription has to
+//! name a Space, and subscribing to every registered one would place a Station for every
 //! Orbit on the machine because somebody opened a browser.
 //!
 //! The upgrade is where the origin check matters most. A WebSocket handshake is
@@ -51,6 +53,7 @@
 //! attaches our cookie — so `check_upgrade_origin` runs *inside* the handler,
 //! and requires an Origin rather than admitting an absent one.
 
+use runtime::poison::LockRecovering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -73,7 +76,7 @@ use super::{err_json, App, ErrorKind};
 /// restart, holding a bundle from the previous build. Both halves ship in one
 /// binary, so this never negotiates — it detects, says so once, and the client
 /// reloads.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// The largest frame this build will decode.
 ///
@@ -154,11 +157,6 @@ const CONTROL_QUEUE: usize = 256;
 /// transfer on a tick turns an unbounded stream into a bounded one without
 /// losing the only thing anybody wants from it, which is the latest number.
 const PROGRESS_TICK: std::time::Duration = std::time::Duration::from_millis(500);
-
-/// How often a changed Live generation may reach the editor. The daemon answers
-/// unchanged generations with one integer comparison, so a stationary room is
-/// cheap while a moving caret stays below the threshold where it feels laggy.
-const TRANSIENT_TICK: std::time::Duration = std::time::Duration::from_millis(80);
 
 /// Presence declarations and destructive signal drains remain person-scale.
 /// They do not become twelve times more frequent merely because carets do.
@@ -305,7 +303,7 @@ pub struct Watch {
     ///
     /// Absent is not the whole table. It attaches the Space to the Control lane
     /// and asks no live question: an unscoped view carries Body ids a browser
-    /// cannot name, so polling one on its behalf would be a read per tick that
+    /// cannot name, so subscribing on its behalf would be a stream that
     /// nothing can draw. A tab looking at a board is in the room and is not
     /// asking who else is on any particular issue.
     pub issue: Option<String>,
@@ -327,6 +325,8 @@ struct WatchRequest {
     cursor: Option<BrowserCursor>,
     #[serde(default)]
     typing: bool,
+    #[serde(default)]
+    preview: Option<BrowserTextPreview>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -337,11 +337,35 @@ struct BrowserCursor {
     focus: Option<u64>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct BrowserTextPreview {
+    field: String,
+    base: String,
+    result: String,
+    index: u64,
+    delete: u64,
+    insert: String,
+    #[serde(default)]
+    anchor: Option<u64>,
+    #[serde(default)]
+    focus: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BrowserMutation {
+    request_id: String,
+    space: String,
+    request: serde_json::Value,
+}
+
+const MUTATION_QUEUE: usize = 64;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct BrowserAwareness {
     watch: Watch,
     cursor: Option<BrowserCursor>,
     typing: bool,
+    preview: Option<BrowserTextPreview>,
 }
 
 /// The session socket's fan-out, held on `App`.
@@ -358,7 +382,7 @@ pub struct Hub {
     /// right rule for a caret and the wrong one for an invitation.
     control: Mutex<Vec<tokio::sync::mpsc::Sender<Arc<Vec<u8>>>>>,
     /// What browsers have declared an interest in, refcounted so a hundred tabs
-    /// asking one question cost one poll.
+    /// asking one question cost one subscription.
     watched: Mutex<BTreeMap<Watch, usize>>,
     /// Questions somebody has just started listening to.
     ///
@@ -367,12 +391,16 @@ pub struct Hub {
     /// already holds would be answered "unchanged" on its behalf and sent
     /// nothing at all — a blank rail beside a tab drawing the room correctly,
     /// until some peer happens to move. Naming the question here forces the
-    /// next poll to ask for the whole table and broadcast it.
+    /// next subscription to send the whole table and broadcast it.
     fresh: Mutex<BTreeSet<Watch>>,
+    watch_wake: tokio::sync::Notify,
     next_session: AtomicU64,
     awareness: Mutex<BTreeMap<u64, BrowserAwareness>>,
     awareness_generation: AtomicU64,
     awareness_dirty: Mutex<BTreeSet<String>>,
+    /// Wakes the declaration half immediately; local input need not wait for
+    /// housekeeping before entering Live.
+    awareness_wake: tokio::sync::Notify,
 }
 
 impl Hub {
@@ -383,10 +411,12 @@ impl Hub {
             control: Mutex::new(Vec::new()),
             watched: Mutex::new(BTreeMap::new()),
             fresh: Mutex::new(BTreeSet::new()),
+            watch_wake: tokio::sync::Notify::new(),
             next_session: AtomicU64::new(1),
             awareness: Mutex::new(BTreeMap::new()),
             awareness_generation: AtomicU64::new(0),
             awareness_dirty: Mutex::new(BTreeSet::new()),
+            awareness_wake: tokio::sync::Notify::new(),
         }
     }
 
@@ -416,10 +446,7 @@ impl Hub {
     /// signal to lose, and there is no right answer to that question.
     pub fn attach_control(&self) -> tokio::sync::mpsc::Receiver<Arc<Vec<u8>>> {
         let (sink, queue) = tokio::sync::mpsc::channel(CONTROL_QUEUE);
-        let mut sinks = self
-            .control
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut sinks = self.control.lock_recovering();
         sinks.retain(|sink| !sink.is_closed());
         sinks.push(sink);
         queue
@@ -439,10 +466,7 @@ impl Hub {
         if bodies.is_empty() {
             return;
         }
-        let mut sinks = self
-            .control
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut sinks = self.control.lock_recovering();
         for body in bodies {
             // Kept only while it accepts. A closed queue is a socket that went
             // away; a full one is a socket that stopped reading, and this lane
@@ -454,10 +478,7 @@ impl Hub {
     }
 
     fn watch(&self, question: Watch) {
-        let mut watched = self
-            .watched
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut watched = self.watched.lock_recovering();
         let holders = watched.entry(question.clone()).or_insert(0);
         *holders = holders.saturating_add(1);
         drop(watched);
@@ -467,41 +488,28 @@ impl Hub {
     /// Say that somebody needs the whole answer to this question rather than
     /// the pump's opinion about what they already hold.
     fn refresh(&self, question: &Watch) {
-        self.fresh
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(question.clone());
+        self.fresh.lock_recovering().insert(question.clone());
+        self.watch_wake.notify_one();
     }
 
     fn take_fresh(&self) -> BTreeSet<Watch> {
-        std::mem::take(
-            &mut *self
-                .fresh
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-        )
+        std::mem::take(&mut *self.fresh.lock_recovering())
     }
 
     fn unwatch(&self, question: &Watch) {
-        let mut watched = self
-            .watched
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut watched = self.watched.lock_recovering();
         if let Some(holders) = watched.get_mut(question) {
             *holders = holders.saturating_sub(1);
             if *holders == 0 {
                 watched.remove(question);
             }
         }
+        drop(watched);
+        self.watch_wake.notify_one();
     }
 
     fn watched(&self) -> Vec<Watch> {
-        self.watched
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .keys()
-            .cloned()
-            .collect()
+        self.watched.lock_recovering().keys().cloned().collect()
     }
 
     fn attach_session(&self) -> u64 {
@@ -509,10 +517,7 @@ impl Hub {
     }
 
     fn set_awareness(&self, session: u64, awareness: Option<BrowserAwareness>) {
-        let mut held = self
-            .awareness
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut held = self.awareness.lock_recovering();
         let previous_space = held.get(&session).map(|held| held.watch.space.clone());
         let next_space = awareness.as_ref().map(|held| held.watch.space.clone());
         let changed = match awareness {
@@ -521,10 +526,7 @@ impl Hub {
         };
         if changed {
             drop(held);
-            let mut dirty = self
-                .awareness_dirty
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut dirty = self.awareness_dirty.lock_recovering();
             if let Some(space) = previous_space {
                 dirty.insert(space);
             }
@@ -532,6 +534,7 @@ impl Hub {
                 dirty.insert(space);
             }
             self.awareness_generation.fetch_add(1, Ordering::SeqCst);
+            self.awareness_wake.notify_one();
         }
     }
 
@@ -540,18 +543,12 @@ impl Hub {
     }
 
     fn take_awareness_spaces(&self) -> BTreeSet<String> {
-        std::mem::take(
-            &mut *self
-                .awareness_dirty
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-        )
+        std::mem::take(&mut *self.awareness_dirty.lock_recovering())
     }
 
     fn awareness(&self, space: &str) -> Vec<BrowserAwareness> {
         self.awareness
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .lock_recovering()
             .values()
             .filter(|awareness| awareness.watch.space == space)
             .cloned()
@@ -634,14 +631,14 @@ fn encode_body(space: &str, issue: Option<&str>, value: &Response) -> Option<Arc
 }
 
 /// Poll the live view and drain delivered signals for every declared question,
-/// once per tick, until the server stops.
+/// through one native stream per question, until the server stops.
 ///
-/// One poll per *question* rather than one per socket: a hundred tabs on one
+/// One subscription per *question* rather than one per socket: a hundred tabs on one
 /// issue are one `live` request, because the hub fans the answer out. A question
 /// nobody holds is not asked at all, which is what keeps this from placing a
 /// Station for every Orbit on the machine.
 ///
-/// The two halves run off different things. `live` is polled per question, so a
+/// The two halves run off different things. `live` streams per question, so a
 /// declaration that names no issue costs no read. The drain is per *Space*, so
 /// it runs for a tab on a board as much as for a tab on an issue: the Live
 /// plane's queue is bounded and overwrites its oldest, and gating a lane that
@@ -661,34 +658,32 @@ pub(super) async fn pump_transient(app: Arc<App>, mut stop: tokio::sync::watch::
     if *stop.borrow_and_update() {
         return;
     }
-    let mut tick = tokio::time::interval(TRANSIENT_TICK);
-    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    // The generation last seen per question. Forgotten on any failure, so the
-    // first read after a daemon restart is a whole table rather than an
-    // "unchanged" about a view this process never saw.
-    let mut held: BTreeMap<Watch, u64> = BTreeMap::new();
+    let mut streams: BTreeMap<Watch, tokio::task::JoinHandle<()>> = BTreeMap::new();
     let mut declared_awareness = u64::MAX;
-    let mut housekeeping = Instant::now()
-        .checked_sub(TRANSIENT_HOUSEKEEPING)
-        .unwrap_or_else(Instant::now);
+    let mut housekeeping = tokio::time::interval(TRANSIENT_HOUSEKEEPING);
+    housekeeping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
-        tokio::select! {
-            biased;
-            _ = stop.changed() => return,
-            _ = tick.tick() => {}
+        enum Wake {
+            Awareness,
+            Watches,
+            Housekeeping,
         }
-        tokio::select! {
+        let wake = tokio::select! {
             biased;
-            _ = stop.changed() => return,
-            () = sweep_live(&app, &mut held) => {}
-        }
+            _ = stop.changed() => break,
+            _ = app.socket.awareness_wake.notified() => Wake::Awareness,
+            _ = app.socket.watch_wake.notified() => Wake::Watches,
+            _ = housekeeping.tick() => Wake::Housekeeping,
+        };
         let awareness = app.socket.awareness_generation();
         if awareness != declared_awareness {
             declare_all_watching(&app).await;
             declared_awareness = awareness;
         }
-        if housekeeping.elapsed() >= TRANSIENT_HOUSEKEEPING {
-            housekeeping = Instant::now();
+        if matches!(wake, Wake::Watches | Wake::Housekeeping) {
+            reconcile_live_streams(&app, &mut streams);
+        }
+        if matches!(wake, Wake::Housekeeping) {
             tokio::select! {
                 biased;
                 _ = stop.changed() => return,
@@ -696,26 +691,78 @@ pub(super) async fn pump_transient(app: Arc<App>, mut stop: tokio::sync::watch::
             }
         }
     }
+    for (_, task) in streams {
+        task.abort();
+    }
 }
 
-async fn sweep_live(app: &App, held: &mut BTreeMap<Watch, u64>) {
-    // Taken before the declarations are sampled. The other order loses a
-    // question declared between the two reads: it would be marked and then not
-    // found, and the mark it needed would be gone.
+fn reconcile_live_streams(
+    app: &Arc<App>,
+    streams: &mut BTreeMap<Watch, tokio::task::JoinHandle<()>>,
+) {
     let fresh = app.socket.take_fresh();
-    let watched = app.socket.watched();
-    held.retain(|question, _| watched.contains(question));
-    for question in &watched {
-        // A declaration with no issue is a tab saying which room it is in. It
-        // is what the drain below runs on, and there is no live view to poll
-        // for it: an unscoped one carries Body ids a browser cannot name.
-        if question.issue.is_none() {
+    let watched: BTreeSet<_> = app
+        .socket
+        .watched()
+        .into_iter()
+        .filter(|question| question.issue.is_some())
+        .collect();
+    let removed: Vec<_> = streams
+        .keys()
+        .filter(|question| !watched.contains(*question) || fresh.contains(*question))
+        .cloned()
+        .collect();
+    for question in removed {
+        if let Some(task) = streams.remove(&question) {
+            task.abort();
+        }
+    }
+    for question in watched {
+        if streams.contains_key(&question) {
             continue;
         }
-        if fresh.contains(question) {
-            held.remove(question);
+        let task_app = app.clone();
+        let task_question = question.clone();
+        streams.insert(
+            question,
+            tokio::spawn(async move { stream_live(task_app, task_question).await }),
+        );
+    }
+}
+
+async fn stream_live(app: Arc<App>, question: Watch) {
+    let mut backoff = Duration::from_millis(100);
+    loop {
+        let Ok(resolved) = app.directory.resolve(&question.space) else {
+            return;
+        };
+        let route = crate::control::station_route(resolved.address);
+        match app
+            .daemon
+            .subscribe_live(route, question.issue.clone())
+            .await
+        {
+            Ok(mut subscription) => {
+                backoff = Duration::from_millis(100);
+                loop {
+                    match subscription.next().await {
+                        Ok(Some(view @ Response::Live { .. })) => app.socket.note_transient(
+                            &question.space,
+                            question.issue.as_deref(),
+                            &view,
+                        ),
+                        Ok(Some(other)) => {
+                            tracing::debug!(?other, "Live subscription returned a non-view");
+                            break;
+                        }
+                        Ok(None) | Err(_) => break,
+                    }
+                }
+            }
+            Err(error) => tracing::debug!(%error, "Live subscription did not open"),
         }
-        poll_live(app, question, held).await;
+        tokio::time::sleep(backoff).await;
+        backoff = (backoff * 2).min(Duration::from_secs(2));
     }
 }
 
@@ -740,7 +787,7 @@ async fn declare_all_watching(app: &App) {
 
 /// Tell the engine what this node is looking at, so peers can draw a face.
 ///
-/// Derived from the same declarations the transient poll runs on rather than
+/// Derived from the same declarations the transient subscriptions run on rather than
 /// from a separate client verb. A tab that is asking about an issue *is*
 /// looking at it, so there is nothing for a browser to say twice and nothing
 /// for the two answers to disagree about.
@@ -759,6 +806,7 @@ async fn declare_watching(app: &App, space: &str, watched: &[Watch]) {
         .collect();
     let mut carets = Vec::new();
     let mut typing = Vec::new();
+    let mut previews = Vec::new();
     for awareness in app.socket.awareness(space) {
         let Some(issue) = awareness.watch.issue else {
             continue;
@@ -773,8 +821,21 @@ async fn declare_watching(app: &App, space: &str, watched: &[Watch]) {
         }
         if awareness.typing {
             typing.push(crate::control::WatchingTyping {
-                issue,
+                issue: issue.clone(),
                 field: "description".into(),
+            });
+        }
+        if let Some(preview) = awareness.preview {
+            previews.push(crate::control::WatchingPreview {
+                issue,
+                field: preview.field,
+                base: preview.base,
+                result: preview.result,
+                index: preview.index,
+                delete: preview.delete,
+                insert: preview.insert,
+                anchor: preview.anchor,
+                focus: preview.focus,
             });
         }
     }
@@ -790,53 +851,11 @@ async fn declare_watching(app: &App, space: &str, watched: &[Watch]) {
                 issues,
                 carets,
                 typing,
+                previews,
             },
             None,
         )
         .await;
-}
-
-async fn poll_live(app: &App, question: &Watch, held: &mut BTreeMap<Watch, u64>) {
-    let Ok(resolved) = app.directory.resolve(&question.space) else {
-        return;
-    };
-    let request = Request::Live {
-        since_generation: held.get(question).copied(),
-        issue: question.issue.clone(),
-    };
-    let route = crate::control::station_route(resolved.address);
-    match app.daemon.request(route, &request, None).await {
-        Ok(Response::Live {
-            generation,
-            partial,
-            entries,
-        }) => {
-            held.insert(question.clone(), generation);
-            app.socket.note_transient(
-                &question.space,
-                question.issue.as_deref(),
-                &Response::Live {
-                    generation,
-                    partial,
-                    entries,
-                },
-            );
-        }
-        // The client is already holding this answer. Not sending is the whole
-        // point of the generation: a poll that finds nothing new costs a
-        // comparison here and no bytes at all on the socket.
-        Ok(Response::LiveUnchanged { generation }) => {
-            held.insert(question.clone(), generation);
-        }
-        answer => {
-            tracing::debug!(
-                space = question.space,
-                ?answer,
-                "the live view was not read"
-            );
-            held.remove(question);
-        }
-    }
 }
 
 async fn drain_signals(app: &App, space: &str) {
@@ -897,7 +916,19 @@ pub(super) async fn session(
 async fn serve_socket(socket: WebSocket, app: Arc<App>) {
     let mut watching: Option<Watch> = None;
     let session = app.socket.attach_session();
-    run_socket(socket, &app, session, &mut watching).await;
+    let (mutation_tx, mutation_rx) = tokio::sync::mpsc::channel(MUTATION_QUEUE);
+    let (reply_tx, mut reply_rx) = tokio::sync::mpsc::channel(MUTATION_QUEUE);
+    let worker = tokio::spawn(run_mutations(app.clone(), mutation_rx, reply_tx));
+    run_socket(
+        socket,
+        &app,
+        session,
+        &mut watching,
+        mutation_tx,
+        &mut reply_rx,
+    )
+    .await;
+    worker.abort();
     // Every exit lands here, including the several that leave by returning. A
     // declaration outliving its socket would keep the pump asking a question
     // nobody is listening to the answer of.
@@ -907,7 +938,14 @@ async fn serve_socket(socket: WebSocket, app: Arc<App>) {
     app.socket.set_awareness(session, None);
 }
 
-async fn run_socket(mut socket: WebSocket, app: &App, session: u64, watching: &mut Option<Watch>) {
+async fn run_socket(
+    mut socket: WebSocket,
+    app: &App,
+    session: u64,
+    watching: &mut Option<Watch>,
+    mutation_tx: tokio::sync::mpsc::Sender<BrowserMutation>,
+    mutation_replies: &mut tokio::sync::mpsc::Receiver<Arc<Vec<u8>>>,
+) {
     // One task owns the socket and both directions. Splitting it would need a
     // stream-combinator dependency for the two halves, and buys nothing here:
     // this connection sends on a tick and receives rarely, so there is no
@@ -955,6 +993,15 @@ async fn run_socket(mut socket: WebSocket, app: &App, session: u64, watching: &m
                 None => break,
             },
 
+            reply = mutation_replies.recv() => match reply {
+                Some(body) => {
+                    if send(&mut socket, Lane::Control, &body).await.is_err() {
+                        return;
+                    }
+                }
+                None => break,
+            },
+
             view = transient.recv() => match view {
                 Ok(body) => {
                     if send(&mut socket, Lane::Transient, &body).await.is_err() {
@@ -962,11 +1009,8 @@ async fn run_socket(mut socket: WebSocket, app: &App, session: u64, watching: &m
                     }
                 }
                 // Falling behind on a view costs nothing to report and
-                // everything to ignore. The next poll does *not* carry the
-                // current one: the pump recorded the generation it broadcast,
-                // so it would answer "unchanged" about a frame this socket
-                // never saw. Asking for the question again is what makes the
-                // superseding view actually arrive.
+                // everything to ignore. Restarting this question's subscription
+                // makes its initial full snapshot supersede what was lost.
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                     if let Some(question) = watching.as_ref() {
                         app.socket.refresh(question);
@@ -1018,10 +1062,18 @@ async fn run_socket(mut socket: WebSocket, app: &App, session: u64, watching: &m
                             };
                             declare(app, session, watching, declared);
                         }
-                        // Nothing else takes an inbound message. Control is
-                        // outbound only — a signal is delivered by the Live
-                        // plane, never posted by a browser — and progress is
-                        // this machine reporting on itself.
+                        Ok(frame) if frame.lane == Lane::Control => {
+                            let Ok(request) = serde_json::from_slice::<BrowserMutation>(&frame.body)
+                            else {
+                                return;
+                            };
+                            if request.request_id.is_empty()
+                                || request.request_id.len() > 64
+                                || mutation_tx.try_send(request).is_err()
+                            {
+                                return;
+                            }
+                        }
                         Ok(_) => {}
                         Err(Invalid::WrongVersion(v)) => {
                             let _ = socket
@@ -1042,6 +1094,31 @@ async fn run_socket(mut socket: WebSocket, app: &App, session: u64, watching: &m
     let _ = socket.send(Message::Close(None)).await;
 }
 
+async fn run_mutations(
+    app: Arc<App>,
+    mut requests: tokio::sync::mpsc::Receiver<BrowserMutation>,
+    replies: tokio::sync::mpsc::Sender<Arc<Vec<u8>>>,
+) {
+    while let Some(request) = requests.recv().await {
+        let (status, response) =
+            super::socket_editor_rpc(app.clone(), request.space.clone(), request.request).await;
+        let body = serde_json::json!({
+            "kind": "mutation",
+            "space": request.space,
+            "request_id": request.request_id,
+            "ok": status.is_success(),
+            "status": status.as_u16(),
+            "response": response,
+        });
+        let Ok(encoded) = serde_json::to_vec(&body) else {
+            continue;
+        };
+        if encoded.len() > MAX_BODY_BYTES || replies.send(Arc::new(encoded)).await.is_err() {
+            return;
+        }
+    }
+}
+
 /// Replace this socket's standing declaration.
 fn declare(app: &App, session: u64, watching: &mut Option<Watch>, declared: WatchRequest) {
     let next = declared.space.map(|space| Watch {
@@ -1052,6 +1129,7 @@ fn declare(app: &App, session: u64, watching: &mut Option<Watch>, declared: Watc
         watch,
         cursor: declared.cursor,
         typing: declared.typing,
+        preview: declared.preview,
     });
     app.socket.set_awareness(session, awareness);
     if next == *watching {
@@ -1465,7 +1543,7 @@ mod tests {
     }
 
     #[test]
-    fn one_question_held_by_two_tabs_is_polled_once() {
+    fn one_question_held_by_two_tabs_is_subscribed_once() {
         let hub = Hub::new();
         let question = Watch {
             space: "orb_a".into(),
@@ -1491,7 +1569,7 @@ mod tests {
     #[test]
     fn two_issues_in_one_space_are_two_questions() {
         // The daemon narrows the rows to an issue but counts generations for the
-        // whole table, so these cannot share a poll: one would be told
+        // whole table, so these cannot share a subscription: one would be told
         // "unchanged" about rows it has never seen.
         let hub = Hub::new();
         for issue in ["iss_1", "iss_2"] {
@@ -1518,6 +1596,7 @@ mod tests {
                 focus: Some(9),
             }),
             typing: true,
+            preview: None,
         };
         hub.set_awareness(session, Some(first.clone()));
         let generation = hub.awareness_generation();
@@ -1540,6 +1619,7 @@ mod tests {
                 },
                 cursor: None,
                 typing: false,
+                preview: None,
             }),
         );
         assert_eq!(
@@ -1564,7 +1644,7 @@ mod tests {
         assert!(hub.take_fresh().contains(&question));
         assert!(
             hub.take_fresh().is_empty(),
-            "a taken mark is spent, or every poll is a full table for ever"
+            "a taken mark is spent, or every subscription restarts for ever"
         );
 
         hub.watch(question.clone());

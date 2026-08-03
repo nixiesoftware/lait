@@ -543,6 +543,8 @@ impl<'a> IssueRouter<'a> {
                 | Request::AccessPlan { .. }
                 | Request::IssueNew { .. }
                 | Request::IssueEdit { .. }
+                | Request::IssueTextSplice { .. }
+                | Request::IssueTextCheckpoint { .. }
                 | Request::IssueMove { .. }
                 | Request::Assign { .. }
                 | Request::Label { .. }
@@ -744,6 +746,32 @@ impl<'a> IssueRouter<'a> {
                     description,
                     duedate,
                     estimate,
+                    device: facts.device.clone(),
+                    ts: facts.now,
+                })
+                .map_err(Self::effect_err)?;
+                Ok((self.ref_response(&doc), true))
+            }
+            Request::IssueTextSplice {
+                reff,
+                index,
+                delete,
+                insert,
+            } => {
+                let doc = self.resolve(&snapshot, &reff)?;
+                self.submit(&IssueIntent::IssueTextSplice {
+                    doc: doc.clone(),
+                    index,
+                    delete,
+                    insert,
+                })
+                .map_err(Self::effect_err)?;
+                Ok((self.ref_response(&doc), true))
+            }
+            Request::IssueTextCheckpoint { reff } => {
+                let doc = self.resolve(&snapshot, &reff)?;
+                self.submit(&IssueIntent::IssueTextCheckpoint {
+                    doc: doc.clone(),
                     device: facts.device.clone(),
                     ts: facts.now,
                 })

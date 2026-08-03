@@ -1581,8 +1581,8 @@ mod declared_scopes {
     use runtime::world::Builder;
     use runtime::world::ScopeSchema;
     use runtime::{
-        world::Context, world::Descriptor, world::Effect, world::Intent, world::Limits,
-        world::Projection, world::Query, world::Rejection, world::Version, world::World,
+        world::Context, world::Effect, world::Intent, world::Projection, world::Query,
+        world::Rejection, world::World,
     };
 
     const PAD: &str = "dev.example.pad";

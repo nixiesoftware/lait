@@ -1,6 +1,6 @@
 [package]
 name = "comms"
-version = "0.6.1"
+version = "0.6.2"
 edition = "2021"
 rust-version = "1.91"
 description = "The lait network adapter: lait's peer-to-peer seam, with iroh as the contractor behind it. The ONLY crate that names iroh."
@@ -14,9 +14,8 @@ license = "MIT OR Apache-2.0"
 # agree with it.
 publish = false
 
-[lints.clippy]
-pedantic = { level = "warn", priority = -1 }
-nursery = { level = "warn", priority = -1 }
+[lints]
+workspace = true
 
 [features]
 # Host a relay, rather than merely use one. Off by default: see the dependency

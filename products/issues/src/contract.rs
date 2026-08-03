@@ -600,6 +600,21 @@ pub enum IssueIntent {
         device: String,
         ts: u64,
     },
+    /// One editor-local operation against the issue description's text CRDT.
+    /// Offsets count Unicode scalar values, matching [`fabric::Op::TextSplice`].
+    IssueTextSplice {
+        doc: String,
+        index: u64,
+        delete: u64,
+        insert: String,
+    },
+    /// A grouped activity marker for a completed burst of description edits.
+    /// Text replication is intentionally not coupled to this bookkeeping op.
+    IssueTextCheckpoint {
+        doc: String,
+        device: String,
+        ts: u64,
+    },
     IssueMove {
         doc: String,
         project: Option<String>,

@@ -1,6 +1,8 @@
-// HTTP range/chunk arithmetic is validated against declared and observed lengths;
-// conversions preserve the existing content envelope and header encodings.
-#![allow(clippy::arithmetic_side_effects, clippy::as_conversions)]
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    reason = "HTTP range/chunk arithmetic is validated against declared and observed lengths; conversions preserve the existing content envelope and header encodings."
+)]
 
 //! Content over the local web surface: HEAD, ranged download, streaming upload.
 //!

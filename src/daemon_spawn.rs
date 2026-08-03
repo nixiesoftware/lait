@@ -1,6 +1,7 @@
-// OS process APIs require lossless platform-handle and flag conversions at this
-// private adapter boundary.
-#![allow(clippy::as_conversions)]
+#![allow(
+    clippy::as_conversions,
+    reason = "OS process APIs require lossless platform-handle and flag conversions at this private adapter boundary."
+)]
 
 //! Spawning the daemon without handing it anything else of ours.
 //!

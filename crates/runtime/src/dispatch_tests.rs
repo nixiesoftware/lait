@@ -505,7 +505,7 @@ fn an_acknowledged_commit_survives_a_crash_without_dormancy() {
     // dormancy models the kill (the OS releases the lock either way). The
     // acknowledged commit must still be there on the next activation, because
     // durability happened AT COMMIT, not at shutdown.
-    let (reg, world) = note_registration();
+    let (_, world) = note_registration();
     let registry = Builder::new().register(world).build().unwrap();
     let rt = Runtime::open(temp_root(), registry, Arc::new(SeedAuthority), test_keys());
     let world_id = WorldId::parse("com.example.notes").unwrap();
@@ -548,7 +548,7 @@ fn an_acknowledged_commit_survives_a_crash_without_dormancy() {
 fn commits_made_during_an_activation_survive_wait_exit() {
     // Finding #1's second scenario: Station::wait returns without a checkpoint.
     // Per-commit durability means nothing made during the activation is lost.
-    let (reg, world) = note_registration();
+    let (_, world) = note_registration();
     let registry = Builder::new().register(world).build().unwrap();
     let rt = Runtime::open(temp_root(), registry, Arc::new(SeedAuthority), test_keys());
     let world_id = WorldId::parse("com.example.notes").unwrap();
@@ -590,7 +590,7 @@ fn commits_made_during_an_activation_survive_wait_exit() {
 fn committed_bodies_survive_dormancy_and_reactivation() {
     // The full durable loop: form → activate → submit → vacate (checkpoint)
     // → re-acquire → activate → the committed Body is read back.
-    let (reg, world) = note_registration();
+    let (_, world) = note_registration();
     let registry = Builder::new().register(world).build().unwrap();
     let rt = Runtime::open(temp_root(), registry, Arc::new(SeedAuthority), test_keys());
     let world_id = WorldId::parse("com.example.notes").unwrap();
@@ -754,14 +754,6 @@ fn a_changed_authority_frontier_refuses_the_commit() {
     });
     let inner = NoteWorld::new();
     let id = inner.id();
-    let reg = Descriptor {
-        id: id.clone(),
-        implementation_version: Version(1),
-        schemas: inner.schemas().to_vec(),
-        limits: Limits::default(),
-        scope_schemas: Vec::new(),
-        signal_schemas: Vec::new(),
-    };
     let world: Arc<dyn World> = Arc::new(FlipDuringSubmit {
         inner,
         authority: authority.clone(),
@@ -902,14 +894,6 @@ impl World for BoardWorld {
 fn a_collaborative_world_commits_and_reads_through_the_session() {
     let world = BoardWorld::new();
     let id = world.id();
-    let reg = Descriptor {
-        id: id.clone(),
-        implementation_version: Version(1),
-        schemas: world.schemas().to_vec(),
-        limits: Limits::default(),
-        scope_schemas: Vec::new(),
-        signal_schemas: Vec::new(),
-    };
     let registry = Builder::new().register(Arc::new(world)).build().unwrap();
     let rt = Runtime::open(temp_root(), registry, Arc::new(SeedAuthority), test_keys());
     let orbit = rt.create().unwrap();

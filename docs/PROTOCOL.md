@@ -308,6 +308,12 @@ identifier grammars remain enforced after JSON decoding.
 semantics, committed frontier, and dirty scopes. Frames may be coalesced. They
 are not state deltas; clients re-query after notification or reset.
 
+`LiveSubscribe` is the v8 standing projection for ephemeral presence, cursor,
+typing, and text-preview rows. Its first line is a complete Live snapshot;
+later lines are emitted when the table generation changes or at the exact local
+deadline where an age-derived uncertainty/partial flag changes. It is a
+latest-state stream, not an event log.
+
 ### 10.1 The content envelope
 
 Protocol v7 adds a third envelope, the only one on this channel whose frames are

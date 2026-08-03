@@ -1,6 +1,6 @@
 [package]
 name = "world-interface"
-version = "0.6.1"
+version = "0.6.2"
 edition = "2021"
 rust-version = "1.91"
 description = "Composable CLI and MCP interfaces for LAIT World applications"
@@ -17,6 +17,5 @@ tracing = "0.1"
 [dev-dependencies]
 schemars = "1"
 
-[lints.clippy]
-pedantic = { level = "warn", priority = -1 }
-nursery = { level = "warn", priority = -1 }
+[lints]
+workspace = true

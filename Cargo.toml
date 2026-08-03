@@ -35,7 +35,7 @@ resolver = "2"
 
 [package]
 name = "lait"
-version = "0.6.1"
+version = "0.6.2"
 edition = "2021"
 # MSRV: driven by iroh 1.0.0-rc.1, which requires rustc 1.91.
 rust-version = "1.91"
@@ -293,6 +293,140 @@ opt-level = 3
 inherits = "release"
 lto = "thin"
 
-[lints.clippy]
+# The single definition of the workspace lint policy. Every member inherits it
+# with `[lints] workspace = true`; the block used to be copy-pasted into all
+# eleven manifests, which made any change to the policy an eleven-file edit and
+# is why the policy never changed.
+#
+# Advisory only, on purpose. `pedantic`/`nursery` are stylistic suggestions, and
+# CI runs clippy without `-D warnings` so they cannot fail a build. The lints
+# that *do* fail are the crash/error-safety set each crate root denies under
+# `not(test)` (see `src/lib.rs`) — promoting these to deny would erase that
+# boundary by making style suggestions fatal on test targets too.
+#
+# `fuzz/` and `sim/` are workspace `exclude`s, not members, so they cannot
+# inherit this and carry no lint policy of their own.
+[workspace.lints.rust]
+# `lait_simulation` is set only by the out-of-workspace `sim/` package, which
+# needs Loro's wall-clock timestamp off to be reproducible. Declared so the
+# unexpected-cfg lint does not flag it. `sim/.cargo/config.toml` puts the flag
+# on RUSTFLAGS, so it reaches every crate in the graph, not just the one that
+# reads it — declaring it here rather than in `fabric` alone matches that. Its
+# only consumer is still `crates/fabric/src/op.rs`.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(lait_simulation)'] }
+
+[workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }
 nursery = { level = "warn", priority = -1 }
+
+# The two groups above are enabled wholesale and then curated by name below.
+# That is how a lint group is meant to be used: turn it on, decide once which of
+# its opinions this codebase does not share, and keep what is left small enough
+# that somebody actually reads it.
+#
+# Uncurated, the groups emitted 3466 warnings — enough that `cargo clippy` was
+# useless as a local signal and a genuine finding could not be seen. The 56
+# allows below account for 2823 of those (81%), all of them style or convention
+# with no defect signal, leaving 643 that are worth looking at. Counts are as of
+# this commit and will drift; they are here to show the shape, not to be exact.
+#
+# What deliberately stays at `warn`, because in this workspace it is not style:
+#
+#   cast_possible_truncation/precision_loss/sign_loss/lossless  (220)
+#     `as_conversions` is denied under `not(test)`, but 64 production modules
+#     waive it at module level. In exactly those modules these are the only
+#     remaining check on a truncating cast.
+#   missing_panics_doc  (81, all in production code)
+#     Not a docs nit here. `panic`/`unwrap_used`/`expect_used` are denied under
+#     `not(test)`, so each of these marks a *public* function that can still
+#     panic inside a waived module — the audit trail for the crash-safety
+#     policy, and the list to work off when tightening it.
+#   redundant_clone (141), significant_drop_tightening (41), future_not_send (24)
+#     Cost and concurrency shape, not taste.
+#
+# Adding an allow here is a decision about the whole workspace. Prefer a local
+# `#[allow(..., reason = "...")]` for a single justified site.
+
+# A std lock guard that is still live at an `.await`. Denied, not warned: the
+# drivers run on single-threaded `LocalSet`s with one task per connection, so a
+# guard held across a suspension parks the only thread there is and nothing can
+# release it — a self-deadlock, not contention. `await_holding_lock` is
+# warn-by-default and no workflow here sets `-D warnings`, so at `warn` this
+# lint is emitted and ignored; `deny` is what makes clippy exit non-zero.
+# Deliberately NOT gated on `not(test)` like the crash-safety set at each crate
+# root: `--all-targets` compiles the lib twice and the deny would be off in the
+# `cfg(test)` pass, which is where the connection-handling test doubles live.
+await_holding_lock = "deny"
+
+# Attribute completeness. This workspace annotates `#[must_use]` and `const`
+# where they carry meaning, not everywhere the compiler would tolerate them.
+must_use_candidate = "allow"                # 722
+missing_const_for_fn = "allow"              # 258
+return_self_not_must_use = "allow"          # 22
+
+# Rustdoc section conventions. The docs here are long-form prose that explains
+# why a thing exists; they do not use clippy's `# Errors` section format, and
+# the first paragraph is a sentence rather than a summary line.
+missing_errors_doc = "allow"                # 397
+too_long_first_doc_paragraph = "allow"      # 166
+doc_markdown = "allow"                      # 136
+missing_fields_in_debug = "allow"           # 1
+
+# API shape. These argue against choices made on purpose: `pub(crate)` inside a
+# private module is what the sealed-façade layout produces by construction, and
+# by-value parameters are frequently how ownership is handed across a seam.
+too_many_lines = "allow"                    # 79
+needless_pass_by_value = "allow"            # 77
+redundant_pub_crate = "allow"               # 24
+unused_self = "allow"                       # 7
+derive_partial_eq_without_eq = "allow"      # 7
+trivially_copy_pass_by_ref = "allow"        # 5
+struct_excessive_bools = "allow"            # 3
+wrong_self_convention = "allow"             # 3
+
+# Expression and idiom preferences. Rewriting any of these changes how the code
+# reads and nothing about what it does.
+use_self = "allow"                          # 320
+redundant_closure_for_method_calls = "allow" # 124
+map_unwrap_or = "allow"                     # 67
+option_if_let_else = "allow"                # 56
+default_trait_access = "allow"              # 42
+items_after_statements = "allow"            # 40
+duration_suboptimal_units = "allow"         # 32
+ignored_unit_patterns = "allow"             # 31
+unreadable_literal = "allow"                # 29
+single_match_else = "allow"                 # 24
+semicolon_if_nothing_returned = "allow"     # 20
+match_same_arms = "allow"                   # 20
+unnested_or_patterns = "allow"              # 18
+similar_names = "allow"                     # 12
+manual_let_else = "allow"                   # 12
+explicit_iter_loop = "allow"                # 11
+elidable_lifetime_names = "allow"           # 8
+bool_assert_comparison = "allow"            # 8
+needless_continue = "allow"                 # 6
+match_wildcard_for_single_variants = "allow" # 6
+range_plus_one = "allow"                    # 3
+needless_raw_string_hashes = "allow"        # 3
+wildcard_imports = "allow"                  # 2
+nonminimal_bool = "allow"                   # 2
+needless_lifetimes = "allow"                # 2
+if_not_else = "allow"                       # 2
+enum_glob_use = "allow"                     # 2
+useless_let_if_seq = "allow"                # 1
+unnecessary_trailing_comma = "allow"        # 1
+uninlined_format_args = "allow"             # 1
+string_lit_as_bytes = "allow"               # 1
+single_option_map = "allow"                 # 1
+ref_option = "allow"                        # 1
+option_option = "allow"                     # 1
+many_single_char_names = "allow"            # 1
+manual_string_new = "allow"                 # 1
+manual_assert_eq = "allow"                  # 1
+from_iter_instead_of_collect = "allow"      # 1
+for_kv_map = "allow"                        # 1
+equatable_if_let = "allow"                  # 1
+enum_variant_names = "allow"                # 1
+
+[lints]
+workspace = true

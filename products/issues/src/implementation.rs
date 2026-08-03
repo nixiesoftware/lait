@@ -18,6 +18,7 @@
 //! atomic multi-Body transaction (issue + catalog together — the legacy split
 //! `persist_issue_and_row` failure mode does not exist here).
 
+use runtime::poison::LockRecovering;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -146,13 +147,13 @@ impl IssuesWorld {
         let root = ctx.manifest_root();
         let identified = root != [0u8; 32];
         if identified {
-            let cache = self.cache.lock().unwrap_or_else(|p| p.into_inner());
+            let cache = self.cache.lock_recovering();
             if let Some((_, snap)) = cache.roots.iter().find(|(r, _)| r == &root) {
                 return Ok(snap.clone());
             }
         }
         let catalog = Arc::new(catalog_state(ctx)?);
-        let mut cache = self.cache.lock().unwrap_or_else(|p| p.into_inner());
+        let mut cache = self.cache.lock_recovering();
         let mut issues: BTreeMap<String, Arc<IssueState>> = BTreeMap::new();
         for doc in catalog.doc_ids() {
             let stamp = ctx.body_stamp(&issue_key(&doc));
@@ -1777,6 +1778,38 @@ impl World for IssuesWorld {
                     // inside the operations digest the receipt binds.
                     ev.x = serde_json::to_string(evidence).expect("transition evidence json");
                 }
+                push_event(&mut staging, ctx, &doc, &ev);
+                Ok(staging.into_effect(Some(doc)))
+            }
+            IssueIntent::IssueTextSplice {
+                doc,
+                index,
+                delete,
+                insert,
+            } => {
+                issue_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
+                if delete == 0 && insert.is_empty() {
+                    return Err(Rejection::InvalidRequest);
+                }
+                staging.issue(
+                    &issue_key(&doc),
+                    Op::TextSplice {
+                        path: "description".into(),
+                        index,
+                        delete,
+                        insert,
+                    },
+                );
+                Ok(staging.into_effect(Some(doc)))
+            }
+            IssueIntent::IssueTextCheckpoint { doc, device, ts } => {
+                issue_state(ctx, &doc).ok_or(Rejection::InvalidRequest)?;
+                let mut ev = event("edited", &device, ts);
+                ev.c.push(EventChange {
+                    f: "description".into(),
+                    from: None,
+                    to: None,
+                });
                 push_event(&mut staging, ctx, &doc, &ev);
                 Ok(staging.into_effect(Some(doc)))
             }

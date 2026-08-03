@@ -503,22 +503,60 @@ pub struct AclState {
     /// count for an admission capability's reuse cap). A single-use nonce
     /// resolves to at most one after convergence.
     nonce_admits: BTreeMap<[u8; 16], BTreeSet<ActorId>>,
+    /// Set when this state stands in for a replay that did not happen.
+    ///
+    /// Half of this struct fails closed on its own: no members, no admins, no
+    /// authorized epochs. The other half does not — an empty `revoked_invites`
+    /// reads as "nothing revoked" and an empty `spent_nonces` as "nothing
+    /// spent", which are the permissive answers, and exactly the two an
+    /// unresolvable ledger must not give. The predicates below consult this.
+    #[serde(default)]
+    unresolved: bool,
 }
 
 impl AclState {
+    /// The state to use when the authority ledger could not be replayed.
+    ///
+    /// Not `default()`: that is a *valid* clean-slate state and every predicate
+    /// answers it politely. `Failure::MissingHistory` is documented as
+    /// retryable and never a fallback, so the substitute has to refuse rather
+    /// than say "nothing has been revoked and no nonce has been spent" about
+    /// history it cannot read.
+    #[must_use]
+    pub fn unresolved() -> Self {
+        Self {
+            unresolved: true,
+            ..Self::default()
+        }
+    }
+
+    /// Whether this state is a stand-in rather than a replay.
+    #[must_use]
+    pub fn is_unresolved(&self) -> bool {
+        self.unresolved
+    }
+
     /// The authorized key-epochs, sorted by id. Selection picks the highest
     /// `(gen, id)` among these (the deterministic active tip).
     pub fn epochs(&self) -> Vec<EpochAuth> {
         self.epochs.values().cloned().collect()
     }
     /// Whether an invite nonce has been revoked by an admin.
+    ///
+    /// An unresolved state answers yes: the kill switch for a leaked invite is
+    /// not something to guess about, and refusing an admission that would have
+    /// been fine costs a retry, while admitting one that was revoked cannot be
+    /// taken back.
     pub fn is_invite_revoked(&self, nonce: &[u8; 16]) -> bool {
-        self.revoked_invites.contains(nonce)
+        self.unresolved || self.revoked_invites.contains(nonce)
     }
     /// Whether a single-use invite nonce has already been spent by an authorized
     /// admission — the signed single-use guard.
+    ///
+    /// Unresolved answers yes, for the same reason: "single-use" is only true
+    /// if the spend can be seen.
     pub fn is_nonce_spent(&self, nonce: &[u8; 16]) -> bool {
-        self.spent_nonces.contains(nonce)
+        self.unresolved || self.spent_nonces.contains(nonce)
     }
     /// The actors currently admitted via `nonce` — the redemption count for a
     /// capability's reuse cap (single-use = at most one). Sorted, unique.
@@ -1809,6 +1847,10 @@ fn materialize_authorized(
         policy,
         policy_admins,
         nonce_admits,
+        // This function IS the replay, so its result is by construction the
+        // resolved one. `AclState::unresolved` is the only other way to make
+        // one, which is what keeps the distinction honest.
+        unresolved: false,
     }
 }
 
@@ -2926,5 +2968,35 @@ mod tests {
             st.is_member(f.a(2)),
             "a member admitted BEFORE the revoke keeps their seat"
         );
+    }
+
+    /// The substitution for an unreplayable ledger must not read as a clean
+    /// slate. A default `AclState` says "nothing revoked, nothing spent",
+    /// which are the two permissive answers, and `Failure::MissingHistory` is
+    /// documented as retryable and never a fallback.
+    #[test]
+    fn an_unresolved_acl_state_refuses_where_an_empty_one_would_permit() {
+        let nonce = [7u8; 16];
+
+        let clean = AclState::default();
+        assert!(!clean.is_unresolved());
+        assert!(!clean.is_invite_revoked(&nonce));
+        assert!(!clean.is_nonce_spent(&nonce));
+
+        let unknown = AclState::unresolved();
+        assert!(unknown.is_unresolved());
+        assert!(
+            unknown.is_invite_revoked(&nonce),
+            "an invite whose revocation cannot be checked must be treated as revoked"
+        );
+        assert!(
+            unknown.is_nonce_spent(&nonce),
+            "single-use is only true if the spend can be seen"
+        );
+
+        // The half that already failed closed still does.
+        let (_, actor) = incept(3, &SpaceId::mint(&SystemUlidSource));
+        assert!(!unknown.is_member(&actor));
+        assert!(unknown.epochs().is_empty());
     }
 }

@@ -590,6 +590,16 @@ fn concept_crates_expose_only_their_semantic_namespaces() {
                 "generation",
                 "neighbor",
                 "plane",
+                // The exception, and deliberately a visible one: every other
+                // name here is a concept this engine is *about*, and this one
+                // is a mechanism — one policy for reading state a panicked
+                // thread may have left half-written. It is public because the
+                // locks it governs are held in three crates and the whole
+                // point is that they answer alike; a second copy is how the
+                // previous idiom ended up with five spellings and no
+                // documentation. If this list grows a second mechanism, that
+                // is the signal to give them a crate of their own instead.
+                "poison",
                 "signal",
                 "transient",
                 "world",
