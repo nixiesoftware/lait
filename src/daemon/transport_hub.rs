@@ -646,6 +646,17 @@ impl comms::Connection for HeldConnection {
 /// admitted" from "shutting down" would tell a peer what this device holds.
 const REFUSED_CODE: u32 = 1;
 
+/// Say locally what the peer is deliberately not told.
+///
+/// The silence above is a policy about the *peer* — one close code, so a dialer
+/// cannot map this device's holdings by the reasons it gets back. It was never
+/// meant to be silence toward the operator: an unrouted connection is exactly
+/// the failure that reaches the other end as a bare transport close, so with no
+/// line here the only account of it lives on the machine that cannot see why.
+fn dropped(alpn: &[u8], why: &str) {
+    tracing::debug!(alpn = %String::from_utf8_lossy(alpn), why, "inbound connection dropped");
+}
+
 /// Read the opening from the connection's first flow, bounded before anything
 /// is allocated for it.
 async fn read_opening(connection: &dyn comms::Connection) -> Result<Vec<u8>> {
@@ -672,6 +683,7 @@ async fn dispatch_incoming(
         return;
     }
     let Some(opening_limit) = opening_limit(&incoming.alpn) else {
+        dropped(&incoming.alpn, "unregistered protocol");
         return;
     };
     let first = tokio::select! {
@@ -685,11 +697,15 @@ async fn dispatch_incoming(
         ) => {
             match received {
                 Ok(Ok(Some(frame))) => frame,
-                _ => return,
+                _ => {
+                    dropped(&incoming.alpn, "no opening frame arrived");
+                    return;
+                }
             }
         }
     };
     let Some(space) = opening_space(&incoming.alpn, &first) else {
+        dropped(&incoming.alpn, "the opening did not decode");
         return;
     };
     let target = routes
@@ -698,6 +714,7 @@ async fn dispatch_incoming(
         .get(&space)
         .cloned();
     let Some(target) = target else {
+        dropped(&incoming.alpn, "no Station in that Space is placed here");
         return;
     };
     incoming.stream = Box::new(ReplayStream {
@@ -735,9 +752,12 @@ fn opening_space(alpn: &[u8], first: &[u8]) -> Option<SpaceBytes> {
         if first.len() > runtime::plane::contact::MAX_FRAME {
             return None;
         }
-        runtime::plane::contact::Offer::decode(first)
+        // Contact's first frame is the plane *opening*, not the Offer that
+        // follows it. Reading the wrong one here refuses every inbound Contact
+        // — silently, and one layer below where anything could say so.
+        runtime::plane::Open::decode_canonical(first)
             .ok()
-            .map(|hello| hello.space)
+            .map(|opening| opening.space)
     } else if alpn == runtime::neighbor::PRESENCE_ALPN {
         runtime::neighbor::PresenceProbe::decode(first)
             .ok()
@@ -953,6 +973,26 @@ mod tests {
             framed: ALPNS,
             session: SESSION_ALPNS,
         }
+    }
+
+    /// The opening a Contact initiator actually sends first, built the way
+    /// `contact_driver::initiate` builds it.
+    fn contact_open(space: &SpaceId, initiator_seed: &[u8; 32], responder: [u8; 32]) -> Vec<u8> {
+        runtime::plane::Open {
+            plane: runtime::plane::Plane::Contact,
+            protocol_version: runtime::plane::contact::CONTACT_PROTOCOL,
+            features: 0,
+            space: space_bytes(space),
+            initiator_station: mechanics::actor::device_from_seed(initiator_seed)
+                .key_bytes()
+                .unwrap(),
+            responder_station: responder,
+            connection_id: [7u8; 16],
+            connection_epoch: [8u8; 16],
+            authority_frontier: Vec::new(),
+            requested_lanes: Vec::new(),
+        }
+        .encode()
     }
 
     fn session_open(space: &SpaceId) -> Vec<u8> {
@@ -1338,25 +1378,16 @@ mod tests {
 
         let peer_b = mechanics::actor::device_from_seed(&seed_b);
         let responder = peer_b.key_bytes().unwrap();
-        let hello = runtime::plane::contact::Offer::sign(
-            [0u8; 32],
-            runtime::plane::contact::CONTACT_PROTOCOL,
-            space_bytes(&space_a),
-            responder,
-            [9; 32],
-            runtime::plane::contact::ContactId::from_bytes([7; 16]),
-            [0; 32],
-            0,
-            [0; 32],
-            &seed_a,
-        )
-        .unwrap()
-        .encode();
+        // The frame a real Contact initiator sends first — the plane opening,
+        // not the Offer that follows it. Fabricating the later frame here is
+        // what let the hub read the wrong one and refuse every inbound Contact
+        // while this test passed.
+        let opening = contact_open(&space_a, &seed_a, responder);
         let mut contact = a_space_a
             .connect(peer_b.clone(), runtime::plane::contact::CONTACT_ALPN)
             .await
             .unwrap();
-        contact.send(&hello).await.unwrap();
+        contact.send(&opening).await.unwrap();
 
         let mut incoming = tokio::time::timeout(Duration::from_secs(1), b_space_a.accept())
             .await
@@ -1365,7 +1396,7 @@ mod tests {
         assert_eq!(incoming.alpn, runtime::plane::contact::CONTACT_ALPN);
         assert_eq!(
             incoming.stream.recv().await.unwrap(),
-            Some(hello),
+            Some(opening),
             "the hub replays the exact opening frame for Runtime verification"
         );
         assert!(
