@@ -31,9 +31,9 @@ fn any_demand() -> Vec<u8> {
 }
 use runtime::{
     coordinates::SignedCoordinates, neighbor::PRESENCE_ALPN, plane::contact::Authority,
-    plane::Activation, plane::CommsOptions, world::Builder, world::Context, world::Descriptor,
-    world::Effect, world::Intent, world::Limits, world::Projection, world::Query, world::Rejection,
-    world::RequestId, world::Version, world::World, Runtime, Station,
+    plane::Activation, plane::CommsOptions, world::Builder, world::Context, world::Effect,
+    world::Intent, world::Projection, world::Query, world::Rejection, world::RequestId,
+    world::World, Runtime, Station,
 };
 
 const FOUNDER_SEED: [u8; 32] = [7u8; 32];
@@ -183,14 +183,6 @@ impl replica::convergence::AuthorityIncorporator for AcceptingIncorporator {
 
 fn runtime_at(root: &std::path::Path) -> Runtime {
     let world = KvWorld::new();
-    let reg = Descriptor {
-        id: world.id(),
-        implementation_version: Version(1),
-        schemas: world.schemas().to_vec(),
-        limits: Limits::default(),
-        scope_schemas: Vec::new(),
-        signal_schemas: Vec::new(),
-    };
     let registry = Builder::new().register(Arc::new(world)).build().unwrap();
     Runtime::open(
         root.to_path_buf(),

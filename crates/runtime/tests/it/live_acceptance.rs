@@ -27,9 +27,8 @@ use replica::frontier::{AuthorityFrontier, ReplicaFrontier};
 use runtime::plane::live::LiveHandle;
 use runtime::transient::{Target, TransientItem, TransientPayload};
 use runtime::{
-    plane::Activation, world::Builder, world::Context, world::Descriptor, world::Effect,
-    world::Intent, world::Limits, world::Projection, world::Query, world::Rejection,
-    world::Version, world::World, Runtime, Station,
+    plane::Activation, world::Builder, world::Context, world::Effect, world::Intent,
+    world::Projection, world::Query, world::Rejection, world::World, Runtime, Station,
 };
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -163,14 +162,6 @@ fn station_with_comms(root: &std::path::Path, seed: [u8; 32]) -> Station {
     let transport: Arc<dyn comms::Transport> =
         Arc::new(net.peer(mechanics::actor::device_from_seed(&seed)));
     let world = Empty::new();
-    let registration = Descriptor {
-        id: world.id(),
-        implementation_version: Version(1),
-        schemas: world.schemas().to_vec(),
-        limits: Limits::default(),
-        scope_schemas: Vec::new(),
-        signal_schemas: Vec::new(),
-    };
     let registry = Builder::new().register(Arc::new(world)).build().unwrap();
     Runtime::open(
         root.to_path_buf(),
@@ -188,14 +179,6 @@ fn station_with_comms(root: &std::path::Path, seed: [u8; 32]) -> Station {
 
 fn station_at(root: &std::path::Path) -> Station {
     let world = Empty::new();
-    let registration = Descriptor {
-        id: world.id(),
-        implementation_version: Version(1),
-        schemas: world.schemas().to_vec(),
-        limits: Limits::default(),
-        scope_schemas: Vec::new(),
-        signal_schemas: Vec::new(),
-    };
     let registry = Builder::new().register(Arc::new(world)).build().unwrap();
     Runtime::open(
         root.to_path_buf(),

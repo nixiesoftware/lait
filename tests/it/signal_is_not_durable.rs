@@ -192,10 +192,9 @@ mod behaviour {
     use runtime::plane::Signal;
     use runtime::signal::DeliveredSignal;
     use runtime::{
-        plane::Activation, world::Builder, world::Context, world::Descriptor, world::Effect,
-        world::Intent, world::Limits, world::LocalIdentity, world::Projection, world::Query,
-        world::Rejection, world::RequestId, world::Version, world::World, Runtime, Session,
-        Station,
+        plane::Activation, world::Builder, world::Context, world::Effect, world::Intent,
+        world::LocalIdentity, world::Projection, world::Query, world::Rejection, world::RequestId,
+        world::World, Runtime, Session, Station,
     };
 
     const WRITER_SEED: [u8; 32] = [55u8; 32];
@@ -293,14 +292,6 @@ mod behaviour {
 
     fn runtime_at(root: &std::path::Path) -> Runtime {
         let world = KvWorld::new();
-        let registration = Descriptor {
-            id: world.id(),
-            implementation_version: Version(1),
-            schemas: world.schemas().to_vec(),
-            limits: Limits::default(),
-            scope_schemas: Vec::new(),
-            signal_schemas: Vec::new(),
-        };
         let registry = Builder::new().register(Arc::new(world)).build().unwrap();
         Runtime::open(
             root.to_path_buf(),

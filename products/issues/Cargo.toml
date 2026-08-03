@@ -6,9 +6,8 @@ rust-version = "1.91"
 description = "LAIT's canonical IssuesWorld product: schemas, semantic model, DTOs, and product identifiers"
 license = "MIT OR Apache-2.0"
 
-[lints.clippy]
-pedantic = { level = "warn", priority = -1 }
-nursery = { level = "warn", priority = -1 }
+[lints]
+workspace = true
 
 [dependencies]
 mechanics = { path = "../../crates/mechanics" }

@@ -13,9 +13,9 @@ use std::sync::Arc;
 use lait::orbital::{open_orbital_runtime, orbital_store_root, WorldPackages};
 use mechanics::ids::{ActorId, DeviceId};
 use runtime::{
-    plane::Activation, world::AuthorityView, world::Builder, world::Context, world::Descriptor,
-    world::Effect, world::Intent, world::Limits, world::PrincipalResolution, world::Projection,
-    world::Query, world::Rejection, world::Version, world::World, Runtime,
+    plane::Activation, world::AuthorityView, world::Builder, world::Context, world::Effect,
+    world::Intent, world::PrincipalResolution, world::Projection, world::Query, world::Rejection,
+    world::World, Runtime,
 };
 
 use ::replica::body::{BodyId, BodyKey, EncodingId, SchemaId, WorldId};
@@ -129,17 +129,6 @@ impl World for TallyWorld {
     }
 }
 
-fn registration(world: &TallyWorld) -> Descriptor {
-    Descriptor {
-        id: world.id(),
-        implementation_version: Version(1),
-        schemas: world.schemas().to_vec(),
-        limits: Limits::default(),
-        scope_schemas: Vec::new(),
-        signal_schemas: Vec::new(),
-    }
-}
-
 /// Sign and submit an intent through the frozen public action API.
 fn submit_as(
     session: &runtime::Session,
@@ -154,7 +143,6 @@ fn the_product_composes_the_orbital_runtime_for_an_independent_world() {
     let home = temp_home();
     let world = TallyWorld::new();
     let world_id = world.id();
-    let reg = registration(&world);
     let registry = Builder::new().register(Arc::new(world)).build().unwrap();
 
     // The product's composition seam: store-root convention + supplied parts.
