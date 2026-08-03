@@ -6,9 +6,9 @@
 # reviewed like one, not discovered when a gate goes red on a refactor.
 
 [tiers]
-pr             1339
-pr-platform    1009
-nightly        1366
+pr             1341
+pr-platform    1011
+nightly        1368
 mutants        87
 
 [gates]
@@ -1275,6 +1275,8 @@ runtime plane::live::tests::every_drop_is_counted_because_dropped_and_counted_ne
 runtime plane_stream::tests::a_caller_can_lower_the_ceiling_and_not_raise_it
 runtime plane_stream::tests::a_frame_round_trips_through_its_own_prefix
 runtime plane_stream::tests::a_reserved_kind_and_an_unknown_one_are_different_answers
+runtime poison::tests::a_poisoned_lock_is_recovered_rather_than_propagated
+runtime poison::tests::an_unpoisoned_lock_is_taken_normally
 runtime registry::tests::contradictory_upgrade_claim_is_rejected
 runtime registry::tests::duplicate_schema_version_is_rejected
 runtime registry::tests::duplicate_world_id_is_rejected
