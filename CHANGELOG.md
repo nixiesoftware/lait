@@ -1,6 +1,13 @@
 # Changelog
 
-## Unreleased
+## v0.7.1 — the control channel stops paying for what it carries
+
+> **Upgrading:** `host_update` then `host_restart` on the host plane, or re-run
+> the installer. Nothing on disk, on the peer wire, or in any World
+> implementation moves, so an existing Space opens as it is and v0.7.0 peers
+> still converge. The one version that moves is the **local** control protocol
+> (9 → 10), which reaches exactly one thing: the daemon still running under your
+> old binary. The launcher identifies it as older and takes over.
 
 ### The local control channel stops paying for what it carries
 
@@ -37,6 +44,16 @@ it while idle, so nothing was delivered. A connection opened by the call itself
 gets no such licence. What makes a half-written framed call undelivered is the
 receiver rather than the ordering: a World call is dispatched only after its
 declared bytes are read in full.
+
+### Also fixed
+
+- **The coverage-manifest CI job could not push its own fix.** It computes the
+  refreshed manifest correctly and then 403s, because `actions/checkout`
+  persists the default token as a git `extraheader` that authenticates the push
+  even when the URL carries an App token — so it went out as
+  `github-actions[bot]`, which has no write permission. The header is now
+  dropped before the push. Every test-adding PR was a manual round trip until
+  this.
 
 ## v0.7.0 — lait is not a command surface
 
