@@ -214,6 +214,15 @@ windows-sys = { version = "0.61", features = [
     "Win32_Security_Cryptography",
 ] }
 
+# apple-only, tests: the plan-13 commit-cost baseline reads peak RSS, and Darwin
+# is the one target with no other route to it — Linux reads /proc and Windows
+# calls GetProcessMemoryInfo. `libc` was a direct dependency until the CLI's
+# SIGPIPE reset went with the command surface; this is what still needs it, and
+# it needs it only here. Neither a Windows nor a Linux build compiles the arm
+# that uses it, so nothing but the macOS job can catch its absence.
+[target.'cfg(target_vendor = "apple")'.dev-dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 mechanics = { path = "crates/mechanics", features = ["fault-injection"] }
 replica = { path = "crates/replica", features = ["fault-injection"] }

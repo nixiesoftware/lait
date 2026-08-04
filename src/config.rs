@@ -75,7 +75,11 @@ fn find_store_dir(start: &Path) -> Option<PathBuf> {
 /// Reachable from the host plane because admission is keyed on the same digest:
 /// a caller-supplied spelling of a served store must resolve to the Orbit that
 /// store is registered under, or a custody check aimed at it misses.
-pub(crate) fn canonical(p: &Path) -> PathBuf {
+///
+/// `pub` for the integration suite, which hand-builds the paths the daemon
+/// reaches through [`Selection`] and has to agree with it about which directory
+/// a spelling names — a CI runner's temp dir sits under an 8.3 alias.
+pub fn canonical(p: &Path) -> PathBuf {
     resolved(p).unwrap_or_else(|| p.to_path_buf())
 }
 

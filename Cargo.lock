@@ -2816,6 +2816,7 @@ dependencies = [
  "interprocess",
  "lait-issues",
  "lait-issues-app",
+ "libc",
  "mechanics",
  "n0-future",
  "postcard",

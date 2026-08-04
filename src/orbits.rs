@@ -175,7 +175,20 @@ pub fn upsert(mut entry: Entry) -> Result<()> {
 /// disk. Returns the removed entries.
 pub fn forget(sel: &str) -> Result<Vec<Entry>> {
     let entries = list();
-    let exact = |e: &Entry| e.path == sel || e.space == sel;
+    // Two spellings can name one directory, and a row is written canonicalized
+    // while a caller names the store however they reached it — under an 8.3
+    // alias or a symlinked temp dir those strings never compare equal. String
+    // equality stays first and stays authoritative: a row whose store is gone
+    // resolves to nothing, and deregistering exactly that row is what `forget`
+    // is for.
+    let target = crate::config::resolved(Path::new(sel));
+    let exact = |e: &Entry| {
+        e.path == sel
+            || e.space == sel
+            || target
+                .as_deref()
+                .is_some_and(|t| crate::config::resolved(Path::new(&e.path)).as_deref() == Some(t))
+    };
     let matches_exact = entries.iter().filter(|e| exact(e)).count();
     let prefix_hits = entries
         .iter()
@@ -272,13 +285,18 @@ pub fn select(selector: &str) -> std::result::Result<PathBuf, Unresolved> {
     // Path form: explicit separators or an existing directory. Accept either
     // the `.lait` dir itself or its parent.
     if selector.contains('/') || selector.contains('\\') || Path::new(selector).is_dir() {
+        // Resolved, not echoed back as spelled. Registration writes the row
+        // through `prepare_store_dir`, which canonicalizes — so handing a
+        // caller's spelling straight to a registry lookup finds nothing the
+        // moment the two differ, which on Windows is any path under an 8.3
+        // alias (`RUNNER~1`) and on macOS any path through a symlinked temp dir.
         let candidate = Path::new(selector);
         if crate::orbital::space_store_present(candidate) {
-            return Ok(candidate.to_path_buf());
+            return Ok(crate::config::canonical(candidate));
         }
         let nested = candidate.join(".lait");
         if crate::orbital::space_store_present(&nested) {
-            return Ok(nested);
+            return Ok(crate::config::canonical(&nested));
         }
         return Err(Unresolved::NoStoreAt {
             selector: selector.to_string(),

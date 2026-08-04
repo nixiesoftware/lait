@@ -78,14 +78,16 @@ impl Catalog {
         self_contained: bool,
         load_bindings: Arc<dyn Fn() -> Vec<Entry> + Send + Sync>,
     ) -> Self {
-        // Resolved once, here, because custody is decided by comparing these two
-        // against paths that arrive from three different places (a registry row,
-        // a wire-supplied home, this process's own config). One spelling drift
-        // between them silently reclassifies an Orbit's owner, so the comparison
-        // must not depend on how any caller happened to spell it.
+        // Deliberately stored as spelled, not canonicalized. Resolving these two
+        // here while registry rows arrive as written is drift, not a cure for it:
+        // on a volume with 8.3 aliasing (`RUNNER~1`) or through a symlinked temp
+        // dir, `entry.path` and a resolved `identity` stop matching and every
+        // binding disappears behind "no such space". Spelling is reconciled where
+        // the two are compared — see `agent_name` — so both operands always move
+        // together.
         Self {
-            identity: crate::config::canonical(&identity),
-            agents_base: crate::config::canonical(&agents_base),
+            identity,
+            agents_base,
             self_contained,
             load_bindings,
         }
@@ -237,10 +239,15 @@ fn visible_bindings(
 
 /// The first component below `agents_base`, retaining its display case.
 fn agent_name(path: &Path, agents_base: &Path) -> Option<String> {
-    // The base is already resolved (see `Catalog::with_loader`); resolve the
-    // candidate too so the two are compared in the same spelling.
-    let resolved = crate::config::resolved(path);
-    let path = resolved.as_deref().unwrap_or(path);
+    // Both operands move together or neither does. Resolving only one is worse
+    // than resolving neither: on a volume with 8.3 aliasing a resolved candidate
+    // stops starting with an unresolved base, and an agent's home would answer
+    // "not an agent" — a custody question failing open.
+    let pair = crate::config::resolved(path).zip(crate::config::resolved(agents_base));
+    let (path, agents_base) = match &pair {
+        Some((p, b)) => (p.as_path(), b.as_path()),
+        None => (path, agents_base),
+    };
     if !under(path, agents_base) {
         return None;
     }

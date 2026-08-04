@@ -57,6 +57,16 @@ fn tmp_home(tag: &str) -> std::path::PathBuf {
     let d = std::env::temp_dir().join(format!("lt-{}-{}", tag, std::process::id()));
     std::fs::remove_dir_all(&d).ok();
     std::fs::create_dir_all(&d).unwrap();
+    // Windows only, and deliberately: these tests hand-build paths the daemon
+    // resolves through `Selection`, which canonicalizes. A CI runner's temp dir
+    // sits under an 8.3 alias (`RUNNER~1`), so the two spellings name one
+    // directory and compare unequal — the daemon binds its socket under one and
+    // the probe waits out its deadline on the other. Not done on unix: the
+    // control socket lives in here and `sun_path` caps at 104 bytes, which is
+    // why this path is short in the first place, and macOS canonicalization
+    // prepends `/private` to every temp path.
+    #[cfg(windows)]
+    let d = lait::config::canonical(&d);
     d
 }
 
