@@ -82,6 +82,51 @@ is the one predicate; `serve::borrowed_key_refusal` is the one refusal.
   `docs/SPECS.md`, `docs/THREAT-MODEL.md`, `docs/COMPATIBILITY.md`,
   `docs/README.md`, `viewer/README.md`, the packaging manifests, and the bundled
   skills were swept for CLI invocations; each one now names what to do instead.
+## v0.6.3 — a cache miss is not a corrupt ledger
+
+> **A one-fix release.** If v0.6.2 opens your Space, this changes nothing you
+> can see. If it told you `authority ledger corrupt`, this release opens it and
+> loses nothing — no re-init, no re-join, no `lait rebuild`.
+>
+> ```
+> lait update
+> ```
+
+### The fix
+
+`Authority::open` decoded every indexed checkpoint and treated a decode failure
+as a corrupt ledger. A checkpoint carries no fact the signed effects do not
+already carry — it is a cache of their deterministic replay — so the only thing
+that failure mode cost was the ability to open a store whose every effect was
+intact.
+
+The semantics version could not rescue it. `semantics` is the checkpoint's first
+field precisely so a stale one can be discarded, but the whole struct is decoded
+before that comparison is reached. A layout change to `ReplayCheckpoint` — or to
+anything it holds, such as `AclState` or `PolicyPass` — that lands without a
+`LEDGER_SEMANTICS_VERSION` bump therefore made every store already carrying a
+checkpoint refuse to open, permanently, with nothing actually wrong with it.
+
+Such a checkpoint is now discarded and rebuilt from the signed effects, exactly
+as a stale-semantics one already was.
+
+**This does not weaken "corruption is an integrity failure."** Damaged bytes fail
+their content address in the journal before any decode is attempted and remain an
+integrity failure. What is newly tolerated is the opposite case: bytes that hash
+correctly and describe a layout this build no longer speaks. The two were
+conflated; they are now distinguished.
+
+### Reading the failure
+
+Worth knowing if you ever meet this class of error: `lait status` printed only
+`authority ledger corrupt`, because tracing initializes in the daemon process
+rather than the CLI. The diagnostic underneath — here
+`checkpoint: Found a bool that wasn't 0 or 1` — is visible by running the daemon
+directly:
+
+```
+RUST_LOG=mechanics=debug lait daemon
+```
 
 ## v0.6.2 — files move, cursors move, and work gets something to answer to
 

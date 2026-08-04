@@ -671,7 +671,7 @@ dependencies = [
 
 [[package]]
 name = "comms"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1450,7 +1450,7 @@ dependencies = [
 
 [[package]]
 name = "fabric"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "anyhow",
  "blake3",
@@ -2795,7 +2795,7 @@ dependencies = [
 
 [[package]]
 name = "lait"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2842,7 +2842,7 @@ dependencies = [
 
 [[package]]
 name = "lait-issues"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "blake3",
  "data-encoding",
@@ -2858,7 +2858,7 @@ dependencies = [
 
 [[package]]
 name = "lait-issues-app"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "anyhow",
  "data-encoding",
@@ -2875,7 +2875,7 @@ dependencies = [
 
 [[package]]
 name = "lait-relay"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "anyhow",
  "comms",
@@ -3154,7 +3154,7 @@ checksum = "490cc448043f947bae3cbee9c203358d62dbee0db12107a74be5c30ccfd09771"
 
 [[package]]
 name = "mechanics"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "anyhow",
  "argon2",
@@ -4450,7 +4450,7 @@ dependencies = [
 
 [[package]]
 name = "replica"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "anyhow",
  "blake3",
@@ -4565,7 +4565,7 @@ dependencies = [
 
 [[package]]
 name = "runtime"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6657,7 +6657,7 @@ dependencies = [
 
 [[package]]
 name = "world-interface"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "replica",
  "runtime",

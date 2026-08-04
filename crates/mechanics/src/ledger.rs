@@ -756,13 +756,34 @@ impl Authority {
         for (digest, obj) in &meta.checkpoints {
             // Verify readability + semantics version now; decode lazily later.
             let bytes = store.read_object(obj)?;
-            let cp: CheckpointObject = postcard::from_bytes(&bytes)
-                .map_err(|e| Failure::corrupt(format!("checkpoint: {e}")))?;
-            if cp.semantics == semantics {
-                checkpoint_refs.insert(*digest, *obj);
+            // A checkpoint is a cache of the signed effects' deterministic
+            // replay — it introduces no fact the effects do not already carry.
+            // So an unreadable one is a cache miss, not a corrupt ledger, and
+            // it is dropped from the index exactly like a stale-semantics one.
+            //
+            // Failing the open here instead would make any layout change to
+            // `ReplayCheckpoint` — or to anything it holds, such as `AclState`
+            // or `PolicyPass` — unopenable for every store already carrying a
+            // checkpoint, with every effect intact and the state fully
+            // rebuildable. The semantics version cannot rescue that case: the
+            // whole struct is decoded before `semantics` is ever compared, so a
+            // layout change that lands without a version bump is undecodable
+            // rather than merely stale.
+            match postcard::from_bytes::<CheckpointObject>(&bytes) {
+                Ok(cp) if cp.semantics == semantics => {
+                    checkpoint_refs.insert(*digest, *obj);
+                }
+                // A stale-semantics checkpoint is dropped from the index: state
+                // is rebuilt from the signed effects on demand.
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(
+                        diagnostic = %e,
+                        "Discarding an undecodable authority checkpoint; \
+                         rebuilding it from the signed effects"
+                    );
+                }
             }
-            // A stale-semantics checkpoint is dropped from the index: state is
-            // rebuilt from the signed effects on demand.
         }
         let mut ceremony: Vec<(u64, String, SignedSpaceEvent)> = Vec::new();
         let mut ceremony_refs = BTreeMap::new();
@@ -1395,11 +1416,22 @@ impl Authority {
         }
         if let Some(obj) = self.checkpoint_refs.get(&digest) {
             let bytes = self.store.read_object(obj)?;
-            let cp: CheckpointObject = postcard::from_bytes(&bytes)
-                .map_err(|e| Failure::corrupt(format!("checkpoint: {e}")))?;
-            if cp.semantics == self.semantics && cp.frontier == frontier_bytes {
-                self.cache_checkpoint(digest, cp.clone());
-                return Ok(cp);
+            // Same rule as `open`: a checkpoint that will not decode is a cache
+            // miss, so fall through and rebuild it from the signed effects
+            // rather than refusing to serve a frontier the effects can answer.
+            match postcard::from_bytes::<CheckpointObject>(&bytes) {
+                Ok(cp) if cp.semantics == self.semantics && cp.frontier == frontier_bytes => {
+                    self.cache_checkpoint(digest, cp.clone());
+                    return Ok(cp);
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(
+                        diagnostic = %e,
+                        "Discarding an undecodable authority checkpoint; \
+                         rebuilding it from the signed effects"
+                    );
+                }
             }
         }
         // Build from the signed effects at the exact closure.
@@ -1536,6 +1568,33 @@ impl Authority {
                 Err(e.into())
             }
         }
+    }
+
+    /// Replace the indexed checkpoint for `frontier_bytes` with an arbitrary
+    /// payload — the test seam standing in for a checkpoint written by a build
+    /// whose [`crate::acl::ReplayCheckpoint`] layout differed. The payload is
+    /// stored under its true content address, so this models a structurally
+    /// intact object this build cannot decode, never a damaged one: damaged
+    /// bytes are caught by the journal's content-address check well before any
+    /// decode is attempted, and stay an integrity failure.
+    #[doc(hidden)]
+    pub fn overwrite_checkpoint_payload_for_test(
+        &mut self,
+        frontier_bytes: &[u8],
+        payload: &[u8],
+    ) -> Result<(), Failure> {
+        let digest = frontier_digest(&self.genesis.space_id, frontier_bytes);
+        let obj = Object {
+            hash: journal::object_content_hash(payload),
+            len: payload.len() as u64,
+        };
+        self.checkpoint_refs.insert(digest, obj);
+        self.checkpoint_cache.remove(&digest);
+        let (mut keep, meta) = self.assemble_meta();
+        keep.retain(|r| r.hash != obj.hash);
+        self.store
+            .commit_required_set(&[payload.to_vec()], &keep, meta)?;
+        Ok(())
     }
 
     /// The complete meta index + keep set over everything currently indexed.
