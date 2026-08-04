@@ -16,8 +16,9 @@
 //! responses travel separately in opaque [`Call`] / [`Reply`]
 //! envelopes owned by installed client packages.
 
-use std::path::Path;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock, Mutex};
 
 pub use crate::daemon::scope::OrbitAddress;
 
@@ -31,6 +32,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 use crate::diagnose::DiagnosisView;
 use crate::dto::{MemberDto, MemberLogEntry, SeedDto};
+use runtime::poison::LockRecovering;
 use runtime::world::call::{Call, Reply};
 
 /// The identity-scoped local control service.
@@ -2035,8 +2037,173 @@ pub async fn request_as_routed(
 /// envelope once and lending it is what keeps the retry off the happy path's
 /// bill.
 pub async fn send(home: &Path, env: &ClientRequest) -> Result<Response> {
-    let stream = connect_bounded(home).await?;
-    exchange(stream, env).await
+    let line = exchange_pooled(home, env).await?;
+    serde_json::from_str(line.trim()).context("decode response")
+}
+
+/// How long the daemon leaves a connection open with nothing on it.
+///
+/// Read by both sides from here: the client's reuse window
+/// ([`MAX_IDLE_AGE`]) is deliberately a fraction of it, and a fraction of a
+/// number is only meaningful next to the number itself.
+pub const IDLE_CONNECTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// How long a connection may sit idle here before it is replaced rather than
+/// reused.
+///
+/// Well under [`IDLE_CONNECTION_TIMEOUT`], and the gap is the point. If the
+/// client could hand out a connection at the moment the daemon was reaping it,
+/// every such race would surface as a request whose re-send has to be judged —
+/// and that judgement is exactly what cannot be made safely from here. A
+/// connect is cheaper than a wrong answer to it.
+pub const MAX_IDLE_AGE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Idle connections one home keeps. Concurrent requests each need their own
+/// stream — nothing multiplexes on this wire — so this is the fan-out the pool
+/// absorbs before a request pays for a connect.
+const MAX_IDLE_PER_HOME: usize = 4;
+
+/// Control connections parked for reuse, keyed by the home they reach.
+///
+/// A head answers a browser that fans out — board, status, members, inbox, all
+/// at once, then again on the next doorbell — and each of those used to open
+/// its own socket. The daemon now serves many requests per connection, so the
+/// connection is worth keeping.
+///
+/// `std::sync::Mutex`, not tokio's: every critical section is one `Vec` push or
+/// pop with no await inside it, and an async mutex would add a scheduler hop to
+/// the path that exists to remove one.
+static IDLE_CONNECTIONS: LazyLock<Mutex<HashMap<PathBuf, Vec<Idle>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// One parked connection and when it was parked.
+struct Idle {
+    io: BufReader<Stream>,
+    since: std::time::Instant,
+}
+
+/// A connection to send on, and whether it has already carried a request.
+///
+/// That flag is the whole reason this is not just a connect: it is what
+/// licenses the one re-send below, and it must never be set on a connection
+/// this call opened itself.
+async fn checkout(home: &Path) -> Result<(BufReader<Stream>, bool)> {
+    match take_idle(home) {
+        Some(io) => Ok((io, true)),
+        None => Ok((BufReader::new(connect_bounded(home).await?), false)),
+    }
+}
+
+fn take_idle(home: &Path) -> Option<BufReader<Stream>> {
+    let mut pool = IDLE_CONNECTIONS.lock_recovering();
+    let parked = pool.get_mut(home)?;
+    while let Some(idle) = parked.pop() {
+        if idle.since.elapsed() < MAX_IDLE_AGE {
+            return Some(idle.io);
+        }
+        // Past the reuse window. Dropping it closes it, which is what we want:
+        // the daemon is about to do the same from its side.
+    }
+    None
+}
+
+/// Park a connection that answered cleanly. One that did not is dropped, because
+/// a stream whose framing may be mid-response poisons every request after it.
+fn checkin(home: &Path, io: BufReader<Stream>) {
+    let mut pool = IDLE_CONNECTIONS.lock_recovering();
+    let parked = pool.entry(home.to_path_buf()).or_default();
+    if parked.len() < MAX_IDLE_PER_HOME {
+        parked.push(Idle {
+            io,
+            since: std::time::Instant::now(),
+        });
+    }
+}
+
+/// Where a round trip stopped — which is the only question that matters when
+/// the connection was reused.
+enum Interrupted {
+    /// The request never landed. Nothing on the far side has seen it.
+    Undelivered(anyhow::Error),
+    /// The daemon closed without writing a byte.
+    Closed,
+    /// The daemon was written to and the read then failed. Whether it ran is
+    /// unknown, so this is never re-sent.
+    Failed(anyhow::Error),
+}
+
+impl Interrupted {
+    /// The error a caller sees. Only [`Interrupted::Undelivered`] becomes the
+    /// [`Undelivered`] type, because only it is a licence to re-send.
+    fn into_error(self) -> anyhow::Error {
+        match self {
+            Interrupted::Undelivered(error) => Undelivered(format!("{error:#}")).into(),
+            Interrupted::Closed => {
+                anyhow!("the daemon closed the connection without answering")
+            }
+            Interrupted::Failed(error) => error,
+        }
+    }
+}
+
+/// One request and one response on a connection the caller owns.
+async fn round_trip<T: Serialize>(
+    io: &mut BufReader<Stream>,
+    env: &T,
+) -> std::result::Result<String, Interrupted> {
+    let mut line = match serde_json::to_string(env) {
+        Ok(line) => line,
+        // Re-encoding will fail identically, but nothing was written, and the
+        // caller's licence is about the wire rather than about the retry.
+        Err(error) => return Err(Interrupted::Undelivered(anyhow!("encode request: {error}"))),
+    };
+    line.push('\n');
+    if let Err(error) = io.write_all(line.as_bytes()).await {
+        return Err(Interrupted::Undelivered(anyhow!("write request: {error}")));
+    }
+    if let Err(error) = io.flush().await {
+        return Err(Interrupted::Undelivered(anyhow!("flush request: {error}")));
+    }
+    let mut response = String::new();
+    match io.read_line(&mut response).await {
+        Ok(0) => Err(Interrupted::Closed),
+        Ok(_) => Ok(response),
+        Err(error) => Err(Interrupted::Failed(anyhow!("read response: {error}"))),
+    }
+}
+
+/// A round trip on a pooled connection, with one re-send if a *reused* one was
+/// already gone.
+///
+/// The re-send is the same rule an HTTP client applies to a keep-alive
+/// connection, and it rests on the same fact: a connection this process parked
+/// and the daemon then closed never carried the request, so sending it again
+/// cannot repeat anything. A connection opened by *this* call gets no such
+/// licence — its failure is a real failure and is reported as one, exactly as
+/// before the pool existed.
+async fn exchange_pooled<T: Serialize>(home: &Path, env: &T) -> Result<String> {
+    let (mut io, reused) = checkout(home).await?;
+    match round_trip(&mut io, env).await {
+        Ok(line) => {
+            checkin(home, io);
+            return Ok(line);
+        }
+        Err(interrupted) => {
+            let retryable = matches!(
+                interrupted,
+                Interrupted::Undelivered(_) | Interrupted::Closed
+            );
+            if !reused || !retryable {
+                return Err(interrupted.into_error());
+            }
+        }
+    }
+    let mut io = BufReader::new(connect_bounded(home).await?);
+    let line = round_trip(&mut io, env)
+        .await
+        .map_err(Interrupted::into_error)?;
+    checkin(home, io);
+    Ok(line)
 }
 
 /// Open the control channel, or give up saying so.
@@ -2077,12 +2244,8 @@ pub async fn request_routed_if_running(
     req: &Request,
     route: ControlRoute,
 ) -> Result<Response> {
-    let stream = connect_bounded(home).await?;
-    exchange(
-        stream,
-        &ClientRequest::routed_if_running(req.clone(), route),
-    )
-    .await
+    let line = exchange_pooled(home, &ClientRequest::routed_if_running(req.clone(), route)).await?;
+    serde_json::from_str(line.trim()).context("decode response")
 }
 
 /// Send one product-neutral World call through the identity-scoped daemon.
@@ -2105,15 +2268,8 @@ pub async fn call_world(
 /// call payload just to hold a spare for a retry it will almost certainly not
 /// need. See [`send`] for the same reasoning on the control path.
 pub async fn call_world_envelope(home: &Path, env: &WorldClientRequest) -> Result<Reply> {
-    let stream = connect_bounded(home).await?;
-    let line = exchange_raw(stream, env).await?;
+    let line = exchange_pooled(home, env).await?;
     serde_json::from_str(line.trim()).context("decode World reply")
-}
-
-/// Write one request and read one response on an already-open stream.
-async fn exchange(stream: Stream, env: &ClientRequest) -> Result<Response> {
-    let line = exchange_raw(stream, env).await?;
-    serde_json::from_str(line.trim()).context("decode response")
 }
 
 /// The same round trip, stopping at the raw response line.

@@ -168,6 +168,20 @@ impl OrbitSubscription {
     }
 }
 
+/// What a served request leaves behind: a connection ready for the next one, or
+/// nothing.
+///
+/// The halves ride inside `Next` because an operation that takes one of them —
+/// a content upload owns the read half, a subscription owns the write half —
+/// cannot hand it back, and the type is what makes that impossible to forget.
+enum Flow {
+    Next(
+        BufReader<tokio::io::ReadHalf<LocalStream>>,
+        tokio::io::WriteHalf<LocalStream>,
+    ),
+    Close,
+}
+
 /// The identity-scoped local listener and control-protocol service.
 ///
 /// It owns framing, connection tasks, streaming, and delegation. Placement
@@ -362,20 +376,64 @@ impl Listener {
         }
     }
 
+    /// Serve a connection until the client stops sending or an operation takes
+    /// the stream over.
+    ///
+    /// One connection carries many requests. It used to carry exactly one, so a
+    /// head answering a browser paid a fresh connect for the board, another for
+    /// status, another for members — every time. Clients now park a connection
+    /// between requests, which only works if this side keeps reading; the
+    /// framing already allowed it, because a request is one bounded line and a
+    /// response is one line.
     async fn handle_conn(self: Arc<Self>, stream: LocalStream) {
+        let (read_half, write_half) = tokio::io::split(stream);
+        let (mut reader, mut writer) = (BufReader::new(read_half), write_half);
+        loop {
+            match self.clone().serve_one(reader, writer).await {
+                Flow::Next(next_reader, next_writer) => {
+                    (reader, writer) = (next_reader, next_writer)
+                }
+                Flow::Close => return,
+            }
+        }
+    }
+
+    /// One request, and what the connection does afterwards.
+    ///
+    /// The halves travel in and out by value because some operations *take*
+    /// them: a content upload owns the read half for the length of the body, a
+    /// subscription owns the write half until the client goes away. Those
+    /// answer [`Flow::Close`] and the loop above ends, which is the same thing
+    /// that used to happen by returning.
+    async fn serve_one(
+        self: Arc<Self>,
+        mut reader: BufReader<tokio::io::ReadHalf<LocalStream>>,
+        mut write_half: tokio::io::WriteHalf<LocalStream>,
+    ) -> Flow {
         use tokio::io::AsyncReadExt;
 
-        let (read_half, mut write_half) = tokio::io::split(stream);
-        let mut reader = BufReader::new(read_half);
         let mut line = String::new();
         {
             // Bounded, because a request header is a bounded thing. An
             // unbounded `read_line` grows until it finds a newline or the
             // sender stops, so a client that opens the socket and sends no
             // newline is a memory attack that needs no authorization.
+            //
+            // Timed, because a parked connection and an abandoned one look
+            // identical until one of them speaks. A client's reuse window is a
+            // quarter of this timeout, so a connection reaped here is one no
+            // client still intends to use.
             let mut bounded = (&mut reader).take(control::MAX_CONTROL_LINE_BYTES);
-            if bounded.read_line(&mut line).await.is_err() {
-                return;
+            match tokio::time::timeout(
+                control::IDLE_CONNECTION_TIMEOUT,
+                bounded.read_line(&mut line),
+            )
+            .await
+            {
+                // EOF, a read error, or a client that stopped speaking: there
+                // is nothing to answer and nothing to keep open for.
+                Ok(Ok(0)) | Ok(Err(_)) | Err(_) => return Flow::Close,
+                Ok(Ok(_)) => {}
             }
         }
         let value = match serde_json::from_str::<serde_json::Value>(line.trim()) {
@@ -386,7 +444,10 @@ impl Listener {
                     &Response::err(format!("bad request: {error}")),
                 )
                 .await;
-                return;
+                // Malformed input ends the connection rather than continuing on
+                // it: a sender that cannot frame a request is not one whose
+                // next bytes should be trusted to start where this one stopped.
+                return Flow::Close;
             }
         };
 
@@ -402,11 +463,12 @@ impl Listener {
                         ),
                     )
                     .await;
-                    return;
+                    return Flow::Close;
                 }
             };
+            // Takes the read half for the length of the body.
             self.serve_content(reader, write_half, request).await;
-            return;
+            return Flow::Close;
         }
 
         if value.get("call").is_some() {
@@ -422,7 +484,7 @@ impl Listener {
                         &Response::err(format!("bad World call: {error}")),
                     )
                     .await;
-                    return;
+                    return Flow::Close;
                 }
             };
             let reply = self
@@ -433,7 +495,7 @@ impl Listener {
                     Reply::error(&call, Code::InvalidCall, format!("{error:#}"))
                 });
             let _ = write_line(&mut write_half, &reply).await;
-            return;
+            return Flow::Next(reader, write_half);
         }
 
         let ClientRequest {
@@ -449,7 +511,7 @@ impl Listener {
                     &Response::err(format!("bad request: {error}")),
                 )
                 .await;
-                return;
+                return Flow::Close;
             }
         };
 
@@ -461,7 +523,7 @@ impl Listener {
                 },
             )
             .await;
-            return;
+            return Flow::Next(reader, write_half);
         }
 
         let Some(route) = route else {
@@ -470,7 +532,7 @@ impl Listener {
                 &Response::err("the Lait daemon requires an explicit control route"),
             )
             .await;
-            return;
+            return Flow::Close;
         };
 
         if if_running {
@@ -489,7 +551,7 @@ impl Listener {
                 ),
             };
             let _ = write_line(&mut write_half, &response).await;
-            return;
+            return Flow::Next(reader, write_half);
         }
 
         match (route, request) {
@@ -502,6 +564,7 @@ impl Listener {
                 )
                 .await;
                 self.begin_stop();
+                Flow::Close
             }
             // Answer first, then go. The head that sent this stands a fresh
             // daemon up on its next send, so the reply has to be on the wire
@@ -515,9 +578,11 @@ impl Listener {
                 )
                 .await;
                 self.begin_stop();
+                Flow::Close
             }
             (ControlRoute::Daemon, Request::Subscribe { .. }) => {
                 self.stream_catalog(write_half).await;
+                Flow::Close
             }
             // The host plane: formation, node-local state, orientation. It is
             // served here rather than behind a Station because most of it runs
@@ -528,12 +593,15 @@ impl Listener {
                     .await
                     .unwrap_or_else(|| Response::err("request has no daemon-scoped handler"));
                 let _ = write_line(&mut write_half, &response).await;
+                Flow::Next(reader, write_half)
             }
             (route @ ControlRoute::Orbit { .. }, Request::Subscribe { since }) => {
                 self.stream_space(write_half, route, since).await;
+                Flow::Close
             }
             (route @ ControlRoute::Orbit { .. }, Request::LiveSubscribe { issue }) => {
                 self.stream_live(write_half, route, issue).await;
+                Flow::Close
             }
             (ControlRoute::World { .. }, Request::Subscribe { .. }) => {
                 let _ = write_line(
@@ -541,6 +609,7 @@ impl Listener {
                     &Response::err("subscriptions require a Space route"),
                 )
                 .await;
+                Flow::Next(reader, write_half)
             }
             (ControlRoute::World { .. }, Request::LiveSubscribe { .. }) => {
                 let _ = write_line(
@@ -548,6 +617,7 @@ impl Listener {
                     &Response::err("Live subscriptions require a Space route"),
                 )
                 .await;
+                Flow::Next(reader, write_half)
             }
             (route, request) => {
                 let response = self
@@ -556,6 +626,7 @@ impl Listener {
                     .await
                     .unwrap_or_else(|error| Response::err(format!("{error:#}")));
                 let _ = write_line(&mut write_half, &response).await;
+                Flow::Next(reader, write_half)
             }
         }
     }
