@@ -4,11 +4,12 @@
 //! boundary exposes the complete old or complete new ledger; checkpoint and
 //! effect-set commitments agree; linear-suffix continuation and branch/merge
 //! arrival permutations are equivalent to the complete `acl::replay`;
-//! corruption is an integrity failure (never a silent repair); a
-//! semantics-version bump is an explicit verified rebuild from the signed
-//! effects; the decoded-checkpoint cache is bounded; and 10,000 ordinary
-//! historical-authorization reads against the pinned checkpoint perform zero
-//! authority journal writes.
+//! corruption is an integrity failure (never a silent repair), while a
+//! structurally intact checkpoint this build cannot decode is a cache miss
+//! rebuilt from the signed effects; a semantics-version bump is an explicit
+//! verified rebuild from the signed effects; the decoded-checkpoint cache is
+//! bounded; and 10,000 ordinary historical-authorization reads against the
+//! pinned checkpoint perform zero authority journal writes.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -383,6 +384,55 @@ fn semantics_version_bump_rebuilds_from_signed_effects() {
     let expected = acl::replay(&fx.genesis, &rebuilt.actor_events(), &rebuilt.acl_ops());
     assert_eq!(rebuilt.acl_state().unwrap(), expected);
     assert!(expected.can_write(&fx.actors[&2].1));
+    cleanup(&dir);
+}
+
+/// A checkpoint this build cannot decode is a cache miss, not a corrupt
+/// ledger. A checkpoint introduces no fact the signed effects do not already
+/// carry, so an intact object written under a different `ReplayCheckpoint`
+/// layout is discarded and rebuilt — the ledger opens and materializes state
+/// equal to the complete replay.
+///
+/// This is the case the semantics version cannot reach on its own: the whole
+/// struct decodes before `semantics` is ever compared, so a layout change that
+/// lands without a version bump is undecodable rather than merely stale. It is
+/// distinct from `corrupt_objects_fail_open_as_integrity` above, which still
+/// holds — damaged bytes fail their content address before any decode.
+#[test]
+fn undecodable_checkpoint_rebuilds_from_signed_effects() {
+    let dir = tempdir("undecodable");
+    let fx = fx(&[2]);
+    let frontier;
+    {
+        let mut ledger = Authority::create(&dir, fx.genesis.clone()).unwrap();
+        ledger
+            .commit_batch(
+                &[
+                    Effect::Actor(fx.founder_incept.clone()).encode(),
+                    Effect::Actor(fx.actors[&2].0.clone()).encode(),
+                ],
+                &[],
+            )
+            .unwrap();
+        let add = add_op(&fx, &ledger, &fx.actors[&2].1, vec![Standing::Write]);
+        ledger
+            .commit_batch(&[Effect::Acl(add).encode()], &[])
+            .unwrap();
+        frontier = ledger.frontier();
+        // Materialize once so a checkpoint for this frontier is indexed, then
+        // replace its payload with bytes that hash correctly but decode as no
+        // `CheckpointObject` this build knows.
+        ledger.acl_state().unwrap();
+        ledger
+            .overwrite_checkpoint_payload_for_test(&frontier, &[0xFF; 48])
+            .unwrap();
+    }
+
+    let mut reopened = Authority::open(&dir).expect("an undecodable checkpoint must not fail open");
+    let expected = acl::replay(&fx.genesis, &reopened.actor_events(), &reopened.acl_ops());
+    assert_eq!(reopened.acl_state().unwrap(), expected);
+    assert!(expected.can_write(&fx.actors[&2].1));
+    assert_eq!(reopened.frontier(), frontier, "the frontier is unchanged");
     cleanup(&dir);
 }
 
