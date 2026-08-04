@@ -28,7 +28,17 @@ permissions:
 jobs:
   homebrew:
     name: push formula to tap
-    runs-on: namespace-profile-nixiesoftware
+    # GitHub-hosted, deliberately, while every other job in this repo is on the
+    # self-hosted fleet. On v0.7.0 the fleet took the Scoop, SBOM, and signature
+    # publishes and never took this one; the run sat queued for the better part
+    # of an hour, so the tap kept serving v0.6.3 and `brew upgrade` had nothing
+    # to find. A job that never starts is indistinguishable from a job with
+    # nothing to do — and `timeout-minutes` cannot rescue it, because queue time
+    # is not job time. This job downloads two assets and pushes one file, so the
+    # fleet buys it nothing, while an always-available runner buys it the one
+    # property that matters: the tap moves when the release does.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     # Only a manual dispatch, or a successful Release run for a version tag.
     if: >-
       github.event_name == 'workflow_dispatch' ||
@@ -76,6 +86,45 @@ jobs:
           set -euo pipefail
           gh release download "$TAG" --repo "${{ github.repository }}" --pattern 'lait.rb' --output lait.rb --clobber
           test -s lait.rb
+
+      # cargo-dist generates the formula with `url` and no `sha256` — it archives
+      # in our own build job (`build-local-artifacts = false`), so it never sees
+      # the bytes it is writing a formula for. Homebrew treats a missing checksum
+      # as a warning, not an error, so every install so far has verified nothing
+      # it downloaded. The per-archive `.sha256` sidecars are already on the
+      # release; this pairs each one with its url before the formula is published.
+      #
+      # Fails closed: an asset with no sidecar aborts the publish rather than
+      # pushing an unverifiable formula.
+      - name: Pair each url with its published checksum
+        if: steps.gate.outputs.ok == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.gate.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p sums
+          gh release download "$TAG" --repo "${{ github.repository }}" \
+            --pattern '*.tar.gz.sha256' --pattern '*.zip.sha256' --dir sums --clobber
+          : > lait.rb.checked
+          while IFS= read -r line; do
+            printf '%s\n' "$line" >> lait.rb.checked
+            case "$line" in
+              *url\ \"*releases/download/*)
+                asset="${line##*/}"; asset="${asset%\"}"
+                sidecar="sums/$asset.sha256"
+                if [ ! -f "$sidecar" ]; then
+                  echo "::error::no published checksum for $asset"; exit 1
+                fi
+                printf '%ssha256 "%s"\n' "${line%%url*}" "$(awk '{print $1}' "$sidecar")" \
+                  >> lait.rb.checked
+                ;;
+            esac
+          done < lait.rb
+          grep -q '^\s*sha256 "' lait.rb.checked || { echo "::error::no url matched"; exit 1; }
+          mv lait.rb.checked lait.rb
+          echo "--- formula being published ---"; cat lait.rb
 
       - name: Push to homebrew-tap
         if: steps.gate.outputs.ok == 'true'
