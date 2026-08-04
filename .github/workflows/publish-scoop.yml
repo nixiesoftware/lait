@@ -28,7 +28,7 @@ permissions:
 jobs:
   scoop:
     name: update scoop-bucket
-    runs-on: namespace-profile-nixiesoftware
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.conclusion == 'success' &&
