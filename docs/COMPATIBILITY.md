@@ -262,7 +262,7 @@ use is a slot held open for nothing.
 |---|---|---|---|
 | Local DTOs | `runtime::dto::DTO_PROTOCOL_VERSION` | 1 | loopback control plane and viewer |
 
-| Local control channel | `control::CONTROL_PROTOCOL_VERSION` | 9 | daemon socket; `MIN_SUPPORTED_CONTROL_PROTOCOL` is also 9, so the mixed-version window is currently empty |
+| Local control channel | `control::CONTROL_PROTOCOL_VERSION` | 10 | daemon socket; `MIN_SUPPORTED_CONTROL_PROTOCOL` is also 10, so the mixed-version window is currently empty |
 
 DTOs are a local contract between the engine and its own clients. They are
 versioned because a stale viewer bundle is a real situation, not because they
@@ -272,8 +272,12 @@ v7 moved the minimum because a v6 process would desynchronise on the new content
 envelope. v8 moved it again because the web viewer's Live delivery became a
 standing subscription. v9 replaces the Issues-specific doorbell fields with
 World-tagged invalidation groups; accepting a v8 endpoint would decode a moved
-field as its empty default and silently miss refreshes. In each case, accepting
-the older endpoint would promise a capability it cannot provide.
+field as its empty default and silently miss refreshes. v10 frames World call
+payloads the way v7 already framed content — a declared length, then the bytes —
+and a v9 endpoint would read those bytes as a malformed second request, which on
+a channel that now reuses connections desynchronises everything after it rather
+than failing once. In each case, accepting the older endpoint would promise a
+capability it cannot provide.
 
 ## 6. The pinned dependency
 

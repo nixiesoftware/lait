@@ -119,6 +119,115 @@ async fn a_daemon_that_hangs_up_is_reconnected_to() {
     listener.abort();
 }
 
+/// A World call carries its payload behind the header, and that second write is
+/// where a reaped connection actually shows itself: the first write into a
+/// closed pipe can succeed, so the failure surfaces on the payload rather than
+/// on the header.
+///
+/// This is a regression test with a specific history. Treating that failure as
+/// delivered — on the reasoning that the header was already sent — turned every
+/// reaped connection into a failed request under load, intermittently, in
+/// whichever test happened to be running. What makes it undelivered is the
+/// receiver, not the ordering: a World call is dispatched only after its
+/// declared bytes are read in full, so a header that arrives without its
+/// payload runs nothing.
+#[tokio::test]
+async fn a_framed_call_survives_a_reaped_connection() {
+    let home = home("framed");
+    let (accepts, listener) = framed_fake_daemon(&home, 1);
+
+    for _ in 0..3 {
+        let call = runtime::world::call::Call::new(
+            replica::body::WorldId::parse("com.example.notes").expect("world id"),
+            "read",
+            1,
+            b"{}".to_vec(),
+        )
+        .expect("build call");
+        let reply = control::call_world(
+            &home,
+            control::ControlRoute::World {
+                address: control::OrbitAddress::for_store(
+                    &home,
+                    mechanics::ids::SpaceId::from_digest([9u8; 16]),
+                ),
+                world: "com.example.notes".into(),
+            },
+            call,
+            None,
+        )
+        .await
+        .expect("a reaped connection must not surface as a failed World call");
+        assert_eq!(reply.into_result().expect("payload"), b"pong".to_vec());
+    }
+
+    assert_eq!(accepts.load(Ordering::SeqCst), 3);
+    listener.abort();
+}
+
+/// A listener that speaks the framed World-call protocol: read the header, read
+/// exactly the bytes it declared, answer in the same shape.
+fn framed_fake_daemon(
+    home: &std::path::Path,
+    requests_per_connection: usize,
+) -> (Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+    use tokio::io::AsyncReadExt;
+
+    let name = control::control_name(home).expect("control name");
+    #[cfg(unix)]
+    let _ = std::fs::remove_file(lait::config::socket_path(home));
+    let listener = ListenerOptions::new()
+        .name(name)
+        .create_tokio()
+        .expect("bind fake daemon");
+    let accepts = Arc::new(AtomicUsize::new(0));
+    let counter = accepts.clone();
+    let task = tokio::spawn(async move {
+        loop {
+            let Ok(stream) = listener.accept().await else {
+                return;
+            };
+            counter.fetch_add(1, Ordering::SeqCst);
+            let (read_half, mut write_half) = tokio::io::split(stream);
+            let mut reader = BufReader::new(read_half);
+            for _ in 0..requests_per_connection {
+                let mut header = String::new();
+                match reader.read_line(&mut header).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+                let Ok(frame) = serde_json::from_str::<control::WorldCallFrame>(header.trim())
+                else {
+                    break;
+                };
+                let mut payload = vec![0u8; frame.call.len as usize];
+                if reader.read_exact(&mut payload).await.is_err() {
+                    break;
+                }
+                let body = b"pong";
+                let reply = control::ReplyFrame {
+                    world: frame.call.world.clone(),
+                    operation: frame.call.operation.clone(),
+                    version: frame.call.version,
+                    outcome: control::ReplyFrameOutcome::Ok {
+                        len: body.len() as u64,
+                    },
+                };
+                let mut line = serde_json::to_string(&reply).expect("encode reply");
+                line.push('\n');
+                if write_half.write_all(line.as_bytes()).await.is_err() {
+                    break;
+                }
+                if write_half.write_all(body).await.is_err() {
+                    break;
+                }
+                let _ = write_half.flush().await;
+            }
+        }
+    });
+    (accepts, task)
+}
+
 /// The two timers must not race.
 ///
 /// The client's licence to re-send a request rests entirely on "a connection I

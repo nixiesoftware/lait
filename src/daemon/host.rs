@@ -472,12 +472,39 @@ impl Listener {
         }
 
         if value.get("call").is_some() {
-            let WorldClientRequest {
+            let control::WorldCallFrame {
                 route,
                 act_as,
-                call,
+                call: header,
             } = match serde_json::from_value(value) {
                 Ok(request) => request,
+                Err(error) => {
+                    let _ = write_line(
+                        &mut write_half,
+                        &Response::err(format!("bad World call: {error}")),
+                    )
+                    .await;
+                    return Flow::Close;
+                }
+            };
+            // The payload rides behind the header. Every failure from here to
+            // the end of the read closes the connection rather than answering
+            // on it: the declared bytes are either consumed exactly or the
+            // stream's position is unknown, and there is no third state a
+            // reused connection could survive.
+            let want = match control::refuse_oversized_payload(header.len) {
+                Ok(want) => want,
+                Err(error) => {
+                    let _ = write_line(&mut write_half, &Response::err(format!("{error:#}"))).await;
+                    return Flow::Close;
+                }
+            };
+            let mut payload = vec![0u8; want];
+            if reader.read_exact(&mut payload).await.is_err() {
+                return Flow::Close;
+            }
+            let call = match Call::new(header.world, header.operation, header.version, payload) {
+                Ok(call) => call,
                 Err(error) => {
                     let _ = write_line(
                         &mut write_half,
@@ -494,7 +521,14 @@ impl Listener {
                 .unwrap_or_else(|error| {
                     Reply::error(&call, Code::InvalidCall, format!("{error:#}"))
                 });
-            let _ = write_line(&mut write_half, &reply).await;
+            let (frame, payload) = control::frame_reply(reply);
+            if write_line(&mut write_half, &frame).await.is_err() {
+                return Flow::Close;
+            }
+            if write_half.write_all(&payload).await.is_err() {
+                return Flow::Close;
+            }
+            let _ = write_half.flush().await;
             return Flow::Next(reader, write_half);
         }
 

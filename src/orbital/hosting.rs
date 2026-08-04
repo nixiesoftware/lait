@@ -2615,12 +2615,38 @@ impl StationHost {
             return;
         }
         if value.get("call").is_some() {
-            let crate::control::WorldClientRequest {
+            let crate::control::WorldCallFrame {
                 route,
                 act_as,
-                call,
+                call: header,
             } = match serde_json::from_value(value) {
                 Ok(request) => request,
+                Err(error) => {
+                    let _ = write_line(
+                        write_half,
+                        &Response::err(format!("bad World call: {error}")),
+                    )
+                    .await;
+                    return;
+                }
+            };
+            // The payload follows the header, exactly as long as it said.
+            let want = match crate::control::refuse_oversized_payload(header.len) {
+                Ok(want) => want,
+                Err(error) => {
+                    let _ = write_line(write_half, &Response::err(format!("{error:#}"))).await;
+                    return;
+                }
+            };
+            let mut payload = vec![0u8; want];
+            {
+                use tokio::io::AsyncReadExt;
+                if reader.read_exact(&mut payload).await.is_err() {
+                    return;
+                }
+            }
+            let call = match Call::new(header.world, header.operation, header.version, payload) {
+                Ok(call) => call,
                 Err(error) => {
                     let _ = write_line(
                         write_half,
@@ -2652,7 +2678,8 @@ impl StationHost {
                     "World call requires an explicit World route",
                 ),
             };
-            let _ = write_line(write_half, &reply).await;
+            let (frame, payload) = crate::control::frame_reply(reply);
+            let _ = write_framed(write_half, &frame, &payload).await;
             return;
         }
         let crate::control::ClientRequest {
@@ -3191,6 +3218,20 @@ async fn write_line<T: serde::Serialize>(
     value: &T,
 ) -> std::io::Result<()> {
     write_line_half(&mut write_half, value).await
+}
+
+/// A framed answer: the header line, then exactly the bytes it declared.
+async fn write_framed<T: serde::Serialize>(
+    mut write_half: tokio::io::WriteHalf<LocalStream>,
+    header: &T,
+    payload: &[u8],
+) -> std::io::Result<()> {
+    let mut out = serde_json::to_string(header)
+        .unwrap_or_else(|_| "{\"kind\":\"error\",\"message\":\"encode failure\"}".to_string());
+    out.push('\n');
+    write_half.write_all(out.as_bytes()).await?;
+    write_half.write_all(payload).await?;
+    write_half.flush().await
 }
 
 async fn write_line_half<T: serde::Serialize>(

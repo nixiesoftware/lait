@@ -110,14 +110,24 @@ impl Endpoint {
 /// **v9:** doorbell invalidations are World-declared and grouped by World id.
 /// A v8 frame uses Issues-specific field names, so accepting it would silently
 /// lose row refreshes instead of producing a useful incompatibility error.
-pub const CONTROL_PROTOCOL_VERSION: u32 = 9;
+///
+/// **v10:** World calls are framed the way content already was — a header line
+/// declaring a byte length, then exactly those bytes — instead of base64'd into
+/// the header itself. The encoding was costing a third more bytes and two
+/// passes each way over every board, list, and comment on the channel. A v9
+/// process reads the payload that follows as a malformed second request, which
+/// is precisely why this cannot be tolerated across the boundary: the failure
+/// would not be a decode error, it would be a desynchronised connection.
+pub const CONTROL_PROTOCOL_VERSION: u32 = 10;
 
 /// The oldest control protocol a client still talks to. Raising this retires a
 /// version; the gap to [`CONTROL_PROTOCOL_VERSION`] is the mixed-version window.
 ///
-/// Protocol v9 is a deliberate compatibility cutoff: v8 doorbells cannot carry
-/// multiple Worlds and spell their invalidations in product-specific fields.
-pub const MIN_SUPPORTED_CONTROL_PROTOCOL: u32 = 9;
+/// Protocol v10 is a deliberate compatibility cutoff: a v9 process cannot read
+/// a framed World call, and connections are reused now, so a single
+/// misinterpreted payload would poison every request that followed it rather
+/// than failing once.
+pub const MIN_SUPPORTED_CONTROL_PROTOCOL: u32 = 10;
 
 /// Whether this build can talk to a daemon advertising control protocol `peer`.
 ///
@@ -797,6 +807,119 @@ impl WorldClientRequest {
             call,
         }
     }
+}
+
+/// The header of a framed World call: everything except the payload, which
+/// follows it as raw bytes.
+///
+/// [`WorldClientRequest`] still encodes the payload inside its JSON, because a
+/// [`Call`] must be serializable wherever one is written down. On *this*
+/// channel it is not written down, it is carried — and a channel that can
+/// declare a length has no reason to spend a base64 pass and a third more bytes
+/// to smuggle bytes through a format that cannot hold them.
+///
+/// The discriminant is unchanged: this still has a `call` field, which is what
+/// tells a reader it is looking at a World call rather than a control request.
+/// Only that field's shape moved, which is why it costs a protocol version.
+///
+/// This mirrors `ContentReply::ContentStream`, the other framed thing on this
+/// wire, deliberately: header line declaring a length, then exactly that many
+/// bytes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorldCallFrame {
+    pub route: ControlRoute,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub act_as: Option<String>,
+    pub call: CallFrame,
+}
+
+/// A [`Call`] with its payload replaced by that payload's length.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CallFrame {
+    pub world: replica::body::WorldId,
+    pub operation: String,
+    pub version: u32,
+    /// How many bytes follow the header line.
+    pub len: u64,
+}
+
+impl CallFrame {
+    /// Describe a call without moving its payload.
+    pub fn of(call: &Call) -> Self {
+        Self {
+            world: call.world().clone(),
+            operation: call.operation().to_string(),
+            version: call.version(),
+            len: call.payload().len() as u64,
+        }
+    }
+}
+
+/// A [`Reply`] with its payload replaced by that payload's length.
+///
+/// An error carries no bytes and declares no length — the failure *is* the
+/// answer, and a length of zero would be a second way to say so.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReplyFrame {
+    pub world: replica::body::WorldId,
+    pub operation: String,
+    pub version: u32,
+    #[serde(flatten)]
+    pub outcome: ReplyFrameOutcome,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ReplyFrameOutcome {
+    Ok {
+        len: u64,
+    },
+    Error {
+        error: runtime::world::call::Failure,
+    },
+}
+
+/// The framed form of a reply, and the bytes that follow it.
+pub fn frame_reply(reply: Reply) -> (ReplyFrame, Vec<u8>) {
+    let (world, operation, version, outcome) = reply.into_parts();
+    match outcome {
+        Ok(payload) => (
+            ReplyFrame {
+                world,
+                operation,
+                version,
+                outcome: ReplyFrameOutcome::Ok {
+                    len: payload.len() as u64,
+                },
+            },
+            payload,
+        ),
+        Err(error) => (
+            ReplyFrame {
+                world,
+                operation,
+                version,
+                outcome: ReplyFrameOutcome::Error { error },
+            },
+            Vec::new(),
+        ),
+    }
+}
+
+/// A declared payload length this channel will not allocate for.
+///
+/// Checked *before* the allocation, against the same ceiling the payload itself
+/// is bound by, so a header claiming more than a reply may ever contain is
+/// refused rather than believed.
+pub fn refuse_oversized_payload(len: u64) -> Result<usize> {
+    let ceiling = runtime::world::call::MAX_WORLD_REPLY_PAYLOAD;
+    if len > ceiling as u64 {
+        return Err(anyhow!(
+            "a World payload of {len} bytes was declared, past the {ceiling} this \
+             channel carries"
+        ));
+    }
+    usize::try_from(len).map_err(|_| anyhow!("a World payload of {len} bytes does not fit here"))
 }
 
 fn is_false(value: &bool) -> bool {
@@ -2189,11 +2312,7 @@ async fn exchange_pooled<T: Serialize>(home: &Path, env: &T) -> Result<String> {
             return Ok(line);
         }
         Err(interrupted) => {
-            let retryable = matches!(
-                interrupted,
-                Interrupted::Undelivered(_) | Interrupted::Closed
-            );
-            if !reused || !retryable {
+            if !may_resend(reused, &interrupted) {
                 return Err(interrupted.into_error());
             }
         }
@@ -2204,6 +2323,121 @@ async fn exchange_pooled<T: Serialize>(home: &Path, env: &T) -> Result<String> {
         .map_err(Interrupted::into_error)?;
     checkin(home, io);
     Ok(line)
+}
+
+/// Whether this failure licenses sending the same request a second time.
+///
+/// The whole rule, in one place, because both pooled paths must answer it
+/// identically and because it is the only thing standing between a re-send and
+/// a repeated mutation.
+fn may_resend(reused: bool, interrupted: &Interrupted) -> bool {
+    reused
+        && matches!(
+            interrupted,
+            Interrupted::Undelivered(_) | Interrupted::Closed
+        )
+}
+
+/// One framed World call: header line, payload bytes, and the same in return.
+///
+/// Mirrors [`exchange_pooled`] — same pool, same one re-send under
+/// [`may_resend`] — and differs only in what crosses the wire between the
+/// newlines.
+async fn exchange_framed(
+    home: &Path,
+    frame: &WorldCallFrame,
+    payload: &[u8],
+) -> Result<(ReplyFrame, Vec<u8>)> {
+    let (mut io, reused) = checkout(home).await?;
+    match framed_round_trip(&mut io, frame, payload).await {
+        Ok(answer) => {
+            checkin(home, io);
+            return Ok(answer);
+        }
+        Err(interrupted) => {
+            if !may_resend(reused, &interrupted) {
+                return Err(interrupted.into_error());
+            }
+        }
+    }
+    let mut io = BufReader::new(connect_bounded(home).await?);
+    let answer = framed_round_trip(&mut io, frame, payload)
+        .await
+        .map_err(Interrupted::into_error)?;
+    checkin(home, io);
+    Ok(answer)
+}
+
+/// A framed call and its framed answer on a connection the caller owns.
+///
+/// **Nothing here may return early between the header and its bytes.** A
+/// connection is parked for reuse only on the `Ok` path, so a framing mistake
+/// costs one connection rather than every request that would have followed on
+/// it — which is the hazard that arrived the moment connections started being
+/// reused, and the reason the length is checked before it is believed.
+async fn framed_round_trip(
+    io: &mut BufReader<Stream>,
+    frame: &WorldCallFrame,
+    payload: &[u8],
+) -> std::result::Result<(ReplyFrame, Vec<u8>), Interrupted> {
+    use tokio::io::AsyncReadExt;
+
+    let mut line = match serde_json::to_string(frame) {
+        Ok(line) => line,
+        Err(error) => {
+            return Err(Interrupted::Undelivered(anyhow!(
+                "encode World call: {error}"
+            )))
+        }
+    };
+    line.push('\n');
+    if let Err(error) = io.write_all(line.as_bytes()).await {
+        return Err(Interrupted::Undelivered(anyhow!(
+            "write World call: {error}"
+        )));
+    }
+    if let Err(error) = io.write_all(payload).await {
+        // Undelivered, and the receiver is what makes that true rather than the
+        // ordering here: a World call is dispatched only after its declared
+        // bytes have been read in full, so a header that arrives without its
+        // payload is read, found short, and dropped. Nothing ran.
+        //
+        // Getting this wrong is not theoretical. Classifying it as delivered
+        // made every parked-connection reap on a *write* surface as a failed
+        // request — "the pipe is being closed" — because a first write into a
+        // closed pipe can succeed and only the second one reports it.
+        return Err(Interrupted::Undelivered(anyhow!(
+            "write World payload: {error}"
+        )));
+    }
+    if let Err(error) = io.flush().await {
+        return Err(Interrupted::Undelivered(anyhow!(
+            "flush World call: {error}"
+        )));
+    }
+
+    let mut header = String::new();
+    {
+        let mut bounded = (&mut *io).take(MAX_CONTROL_LINE_BYTES);
+        match bounded.read_line(&mut header).await {
+            Ok(0) => return Err(Interrupted::Closed),
+            Ok(_) => {}
+            Err(error) => return Err(Interrupted::Failed(anyhow!("read World reply: {error}"))),
+        }
+    }
+    let reply: ReplyFrame = match serde_json::from_str(header.trim()) {
+        Ok(reply) => reply,
+        Err(error) => return Err(Interrupted::Failed(anyhow!("decode World reply: {error}"))),
+    };
+    let ReplyFrameOutcome::Ok { len } = reply.outcome else {
+        return Ok((reply, Vec::new()));
+    };
+    let len = refuse_oversized_payload(len).map_err(Interrupted::Failed)?;
+    let mut payload = vec![0u8; len];
+    if let Err(error) = io.read_exact(&mut payload).await {
+        return Err(Interrupted::Failed(anyhow!("read World payload: {error}")));
+    }
+    Ok((reply, payload))
 }
 
 /// Open the control channel, or give up saying so.
@@ -2268,8 +2502,18 @@ pub async fn call_world(
 /// call payload just to hold a spare for a retry it will almost certainly not
 /// need. See [`send`] for the same reasoning on the control path.
 pub async fn call_world_envelope(home: &Path, env: &WorldClientRequest) -> Result<Reply> {
-    let line = exchange_pooled(home, env).await?;
-    serde_json::from_str(line.trim()).context("decode World reply")
+    let frame = WorldCallFrame {
+        route: env.route.clone(),
+        act_as: env.act_as.clone(),
+        call: CallFrame::of(&env.call),
+    };
+    let (reply, payload) = exchange_framed(home, &frame, env.call.payload()).await?;
+    let outcome = match reply.outcome {
+        ReplyFrameOutcome::Ok { .. } => Ok(payload),
+        ReplyFrameOutcome::Error { error } => Err(error),
+    };
+    Reply::from_parts(reply.world, reply.operation, reply.version, outcome)
+        .map_err(|error| anyhow!("decode World reply: {error}"))
 }
 
 /// The same round trip, stopping at the raw response line.
