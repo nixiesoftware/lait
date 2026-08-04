@@ -380,31 +380,97 @@ fn against_fake_daemon(tag: &str, reply: &'static [u8]) -> (String, Option<i32>,
     )
 }
 
-/// A daemon this build can't talk to must be reported as *present and foreign* —
-/// promptly — not as absent.
+/// Start the head against a fake daemon and wait for its readiness line.
+///
+/// The sibling harness above waits for *exit*, which only answers when the
+/// launcher refuses. A launcher that takes over and comes up is a service: it
+/// never exits, so `output()` would block until the harness killed it. This one
+/// reads the one line `--json` promises and then stops the process.
+#[cfg(unix)]
+fn takes_over_fake_daemon(tag: &str, reply: &'static [u8]) -> (String, Duration) {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixListener;
+    use std::sync::mpsc;
+
+    let home = tmp_home(tag);
+    let daemon_home = home.join("daemon");
+    std::fs::create_dir_all(&daemon_home).expect("daemon home");
+
+    let sock = lait::config::socket_path(&daemon_home);
+    std::fs::remove_file(&sock).ok();
+    let listener = UnixListener::bind(&sock).expect("bind fake daemon");
+    std::thread::spawn(move || {
+        for stream in listener.incoming().take(8) {
+            let Ok(mut s) = stream else { continue };
+            let mut line = String::new();
+            BufReader::new(s.try_clone().unwrap())
+                .read_line(&mut line)
+                .ok();
+            s.write_all(reply).ok();
+            s.write_all(b"\n").ok();
+        }
+    });
+
+    let started = Instant::now();
+    let mut child = Command::new(bin())
+        .env("LAIT_HOME", &home)
+        .env("LAIT_CONFIG_ROOT", config_root(&home))
+        .args(["--json", "--port", "0"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn lait");
+
+    // On its own thread with a deadline: the point of the test is that this
+    // arrives *promptly*, so a hang has to fail the assertion rather than the
+    // suite's 90s timeout.
+    let mut out = BufReader::new(child.stdout.take().expect("stdout"));
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        let _ = out.read_line(&mut line);
+        let _ = tx.send(line);
+    });
+    let line = rx.recv_timeout(Duration::from_secs(30)).unwrap_or_default();
+    let elapsed = started.elapsed();
+
+    child.kill().ok();
+    child.wait().ok();
+    std::fs::remove_file(&sock).ok();
+    std::fs::remove_dir_all(&home).ok();
+    (line, elapsed)
+}
+
+/// A daemon *behind* this build is taken over promptly — not waited out.
+///
+/// The reply here is a pre-handshake daemon (v0.4.8): it has no `hello`, so
+/// serde rejects the request as an unknown variant, and that rejection is the
+/// identification. `control::probe` calls that one `replaceable`, so the
+/// launcher replaces it and carries on rather than refusing — which is why this
+/// asserts on the readiness line and its sibling below asserts on an exit. The
+/// promise both share is the timing: the old path spawned a doomed second daemon
+/// over the held lock and polled a full 20s before blaming the timeout.
 #[cfg(unix)]
 #[test]
-fn a_foreign_daemon_is_named_not_timed_out() {
-    // A pre-handshake daemon (v0.4.8): it has no `hello`, so serde rejects the
-    // request as an unknown variant. That rejection is the identification.
-    let (stderr, code, elapsed) = against_fake_daemon(
-        "foreign",
+fn an_older_daemon_is_taken_over_not_timed_out() {
+    let (line, elapsed) = takes_over_fake_daemon(
+        "older",
         br#"{"kind":"error","message":"bad request: unknown variant `hello`","error_kind":"error"}"#,
     );
 
-    // The old path spawned a doomed daemon and polled for a full 20s first.
     assert!(
-        elapsed < Duration::from_secs(10),
-        "a foreign daemon must be diagnosed promptly, took {elapsed:?}",
+        elapsed < Duration::from_secs(20),
+        "an older daemon must be taken over promptly, took {elapsed:?}",
     );
-    assert_ne!(code, Some(0), "must not report success; stderr: {stderr}");
+    let v: serde_json::Value = serde_json::from_str(line.trim())
+        .unwrap_or_else(|e| panic!("readiness line {line:?}: {e}"));
     assert!(
-        stderr.contains("already running"),
-        "must say a daemon is there, not imply none is; got: {stderr}",
+        v.get("token").and_then(|t| t.as_str()).is_some(),
+        "the head must come up and announce itself; got: {line}",
     );
     assert!(
-        !stderr.contains("did not come online"),
-        "must not blame a timeout for a daemon that answered instantly; got: {stderr}",
+        v.get("port").and_then(|p| p.as_u64()).is_some(),
+        "the readiness line is what dev.mjs parses; got: {line}",
     );
 }
 

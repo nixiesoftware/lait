@@ -6,15 +6,15 @@
 # reviewed like one, not discovered when a gate goes red on a refactor.
 
 [tiers]
-pr             1320
-pr-platform    1004
-nightly        1347
+pr             1330
+pr-platform    1014
+nightly        1357
 mutants        87
 
 [gates]
 orbital-boundaries           6
 orbital-clean-break          14
-orbital-authority            18
+orbital-authority            19
 orbital-formats              212
 core-fabric-foundations      52
 core-plane-shapes            77
@@ -231,12 +231,13 @@ lait host_client::tests::a_directory_selected_scope_cannot_address_a_sibling_orb
 lait host_client::tests::a_not_found_stays_a_not_found_across_the_dto
 lait host_client::tests::client_side_exit_codes_come_from_the_type_not_the_prose
 lait host_client::tests::destructive_verbs_ask_and_the_rest_do_not
-lait host_client::tests::only_a_freshly_started_daemon_licenses_a_resend
+lait host_client::tests::only_a_request_that_never_went_out_licenses_a_resend
 lait install::tests::claude_warns_about_shadowing_the_plugin
 lait install::tests::derived_agent_names_stay_lowercase_plain_identifiers
 lait install::tests::each_known_client_brings_its_own_agent_identity
 lait install::tests::entry_pins_nothing_machine_specific
 lait install::tests::naming_an_agent_adds_only_that
+lait install::tests::printing_never_returns_the_file_it_would_have_written
 lait mcp::scope_tests::an_mcp_server_is_pinned_to_the_home_it_was_constructed_for
 lait mcp::scope_tests::the_live_router_composes_shell_and_namespaced_world_tools
 lait orbital::hosting::nudge_delivery::a_nudge_reaches_only_sessions_belonging_to_the_actor_it_names
@@ -250,8 +251,12 @@ lait orbital::hosting::tests::narrowing_to_an_issue_keeps_every_scope_over_its_b
 lait orbital::worlds::tests::call_handlers_are_owned_by_the_registered_package
 lait orbital::worlds::tests::duplicate_worlds_still_fail_through_the_runtime_registry_contract
 lait orbital::worlds::tests::one_space_has_one_host_per_registered_world
+lait orbits::bootstrap::tests::a_formation_target_is_resolved_before_it_is_gated
 lait orbits::bootstrap::tests::a_misaimed_formation_is_a_lookup_answer_and_an_occupied_one_is_not
+lait orbits::bootstrap::tests::a_settings_request_cannot_name_a_directory_this_daemon_does_not_serve
 lait orbits::bootstrap::tests::an_unset_key_is_a_lookup_answer_and_an_unknown_one_is_a_usage_error
+lait orbits::bootstrap::tests::founding_into_a_home_this_daemon_only_hosts_is_refused
+lait orbits::bootstrap::tests::re_entering_a_store_this_daemon_only_hosts_is_refused
 lait orbits::catalog::tests::custody_asks_which_key_would_sign_and_nothing_about_the_holder
 lait orbits::catalog::tests::global_identity_sees_own_stores_and_agents_with_identity_preserved
 lait orbits::catalog::tests::nested_agent_binding_keeps_owner_name_and_case
@@ -336,10 +341,14 @@ lait serve::socket::tests::progress_never_rides_the_doorbell_ring
 lait serve::socket::tests::the_control_lane_is_read_before_every_lane_that_may_drop
 lait serve::socket::tests::the_upgrade_bounds_a_message_before_the_decoder_is_asked_about_it
 lait serve::socket::tests::two_issues_in_one_space_are_two_questions
+lait serve::tests::a_content_upload_to_a_hosted_identitys_station_is_refused
+lait serve::tests::a_control_write_to_a_hosted_identitys_station_is_refused
 lait serve::tests::a_fresh_url_token_beats_a_stale_cookie
 lait serve::tests::a_fresh_url_token_beats_a_stale_cookie_over_http
+lait serve::tests::a_world_write_to_a_hosted_identitys_station_is_refused
 lait serve::tests::bearer_outranks_everything_and_cookie_is_the_fallback
 lait serve::tests::cookie_name_is_per_port_so_two_runs_do_not_share_a_jar_entry
+lait serve::tests::declaring_presence_on_a_hosted_identitys_station_is_refused
 lait serve::tests::minted_tokens_are_64_hex_chars_and_not_repeated
 lait serve::tests::query_param_finds_only_an_exact_key
 lait serve::tests::the_gate_refuses_and_admits_over_real_http
@@ -485,9 +494,9 @@ lait::it issues_world_cache::the_issues_world_cache_never_serves_across_roots
 lait::it issues_world_cache::the_per_issue_memo_honors_the_version_stamp
 lait::it lait_daemon::two_orbits_share_one_lait_daemon_process
 lait::it launcher_safety::a_dead_daemon_is_reported_dead_and_a_live_one_is_not
-lait::it launcher_safety::a_foreign_daemon_is_named_not_timed_out
 lait::it launcher_safety::a_newer_daemon_is_named_and_never_replaced
 lait::it launcher_safety::a_spawned_daemon_does_not_hold_our_stdout_open
+lait::it launcher_safety::an_older_daemon_is_taken_over_not_timed_out
 lait::it launcher_safety::an_unresolvable_orbit_is_refused_in_one_voice
 lait::it launcher_safety::anything_that_is_not_a_mode_is_refused_by_name
 lait::it launcher_safety::the_launcher_reports_its_build_without_starting_anything
@@ -629,6 +638,7 @@ mechanics authority_checkpoint_tests::faults_at_every_journal_boundary_expose_ol
 mechanics authority_checkpoint_tests::semantics_version_bump_rebuilds_from_signed_effects
 mechanics authority_checkpoint_tests::strict_descendant_continuation_is_equivalent_to_complete_replay
 mechanics authority_checkpoint_tests::ten_thousand_reads_write_nothing
+mechanics authority_checkpoint_tests::undecodable_checkpoint_rebuilds_from_signed_effects
 mechanics ceremony::tests::a_fenced_generation_signing_transcript_is_terminal
 mechanics ceremony::tests::an_active_next_generation_transcript_is_retained
 mechanics compile::tests::a_forged_witness_over_an_unqualified_set_fails_verification
