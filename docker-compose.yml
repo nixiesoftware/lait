@@ -5,10 +5,20 @@
 #
 # Quick start:
 #   docker compose up -d --build
-#   docker compose exec seed lait id                 # copy the node id
-#   # from an admin node: lait members add <that-id> # let the seed hold history
-#   docker compose exec seed lait seed add <ticket>  # adopt a space to serve
-#   # then share this seed in your invite tickets so cold clients backfill from it
+#
+# The container runs `lait daemon` — headless, and deliberately so: lait has no
+# command surface, so there is nothing to type at inside it. Binding this node to
+# a space is a one-time act performed through a head, and a head binds LOOPBACK
+# ONLY, so one started inside the container is unreachable from the host. Give
+# the node a bind-mounted home and bootstrap it from the host instead:
+#
+#   # docker-compose.override.yml:  services: { seed: { volumes: ["./seed-home:/data"] } }
+#   docker compose stop seed              # the store takes one writer
+#   LAIT_HOME=./seed-home lait --open     # Welcome → "Use an invite", paste the link
+#   docker compose start seed
+#
+# Then share this seed in your invite tickets so cold clients backfill from it.
+# Admitting the seed to the space happens from the inviter's own app.
 #
 # iroh handles NAT traversal via relays, so no inbound port is strictly required.
 # Publishing a stable UDP port (below) lets peers form direct connections faster.
@@ -23,7 +33,7 @@ services:
     image: ghcr.io/nixiesoftware/lait:latest
     container_name: lait-seed
     restart: unless-stopped
-    # Persist the node identity + git-backed store across restarts.
+    # Persist the node identity + content-addressed store across restarts.
     volumes:
       - lait-seed-data:/data
     # Optional: expose a stable UDP port for faster direct (non-relayed) dials.

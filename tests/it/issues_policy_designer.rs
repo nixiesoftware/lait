@@ -18,7 +18,7 @@ use comms::{Transport, TransportFactory};
 use issues_app::IssuesResponse as IssueResponse;
 use lait::control::OrbitAddress;
 use lait::control::{request, AssignmentSpec, ControlRoute, Request, Response};
-use lait::orbital::run_station_process;
+use lait::orbital::run_station_process_with;
 
 const FOUNDER_SEED: [u8; 32] = [111u8; 32];
 
@@ -60,7 +60,9 @@ fn issue_req(
     request: issues_app::IssuesRequest,
 ) -> IssueResponse {
     rt.block_on(async {
-        let space = lait::orbital::discover_space_id(home).expect("test Space");
+        let space = lait::orbital::discover_space(home)
+            .single()
+            .expect("test Space");
         let call = issues_app::encode_call(&request)?;
         let reply = lait::control::call_world(
             home,
@@ -133,7 +135,6 @@ fn err_msg(resp: &IssueResponse) -> &str {
 }
 
 fn write_identity(home: &Path, seed: &[u8; 32]) {
-    std::env::set_var("LAIT_HOME", home);
     std::fs::write(
         home.join("secret.key"),
         data_encoding::HEXLOWER.encode(seed),
@@ -154,7 +155,9 @@ fn role_access_and_workflow_authoring_round_trip_over_the_daemon() {
     let handle = std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async move {
-            if let Err(e) = run_station_process(daemon_home, &MemFactory(daemon_net)).await {
+            if let Err(e) =
+                run_station_process_with(daemon_home, FOUNDER_SEED, &MemFactory(daemon_net)).await
+            {
                 eprintln!("DAEMON ERR: {e:#}");
             }
         });
@@ -163,7 +166,10 @@ fn role_access_and_workflow_authoring_round_trip_over_the_daemon() {
     let online = {
         let start = Instant::now();
         loop {
-            if matches!(req(&rt, &home, Request::Status), Response::Status(_)) {
+            if matches!(
+                req(&rt, &home, Request::Status),
+                Response::Status(status) if !status.counts_unavailable
+            ) {
                 break true;
             }
             if start.elapsed() > Duration::from_secs(20) {

@@ -3,8 +3,8 @@
  *
  * This file is the whole backend. The previous viewer had a `server/` directory —
  * a Vite middleware that spawned `lait --json` once per request and re-parsed its
- * stdout — because there was no other way in. `lait serve` exposes the control
- * plane directly, so all of that collapses to `fetch`.
+ * stdout — because there was no other way in. Bare `lait` runs the HTTP head,
+ * which exposes the control plane directly, so all of that collapses to `fetch`.
  *
  * Everything is same-origin: the page is served by the engine itself, so the
  * `HttpOnly` cookie rides along and no token is ever visible to script. In dev the
@@ -12,7 +12,7 @@
  * origin guard.
  */
 
-import type { Response, SpaceRequest, SpacesReply, WorldRequest } from "./types";
+import type { HostRequest, Response, SpaceRequest, SpacesReply, WorldRequest } from "./types";
 
 /** A refusal from the engine, carrying its own words. */
 export class LaitError extends Error {
@@ -82,6 +82,22 @@ export async function rpc<R extends Response = Response>(
   );
 }
 
+/**
+ * Send one host-plane request — the plane that answers before any Space exists.
+ *
+ * Its own function rather than a `spaceRpc` with no space, because that is the
+ * whole point of the route: founding a Space and entering one from an invite
+ * have no space id to put in a path, so `/api/spaces/{id}/rpc` is unreachable at
+ * exactly the moment they matter. Without a caller here, a machine with no store
+ * opens a page that cannot bring one into existence.
+ */
+export async function hostRpc<R extends Response = Response>(
+  request: HostRequest,
+  opts: { signal?: AbortSignal } = {},
+): Promise<R> {
+  return send("/api/host/rpc", request, opts);
+}
+
 /** Send one generic Space-control request to the selected Orbit. */
 export async function spaceRpc<R extends Response = Response>(
   space: string,
@@ -93,7 +109,7 @@ export async function spaceRpc<R extends Response = Response>(
 
 async function send<R extends Response = Response>(
   endpoint: string,
-  request: WorldRequest | SpaceRequest,
+  request: WorldRequest | SpaceRequest | HostRequest,
   opts: { confirm?: boolean; signal?: AbortSignal },
 ): Promise<R> {
   const qs = opts.confirm ? "?confirm=true" : "";

@@ -1,8 +1,9 @@
 //! What a request may do, and to whose space.
 //!
-//! `lait serve` exposes both installed World packages and root control. The
-//! browser is as privileged as the CLI for the same selected identity; this
-//! module classifies only the remaining root-control half.
+//! The local app's HTTP head exposes both installed World packages and root
+//! control. There is no second, more privileged surface behind it — the head is
+//! how this identity acts — so this module classifies the root-control half:
+//! what only reads, and what belongs to the daemon-scoped host plane.
 
 use crate::control::Request;
 
@@ -30,12 +31,15 @@ pub fn is_read(req: &Request) -> bool {
         | Request::Who
         | Request::Live { .. }
         | Request::LiveSubscribe { .. }
-        // Declaring what you are looking at is a read, even though peers see the
-        // result. Being present is a consequence of looking, and a reader who
-        // cannot write is still in the room — Linear shows your cursor in a
-        // document you have no permission to edit, for the same reason.
-        | Request::Watching { .. }
         | Request::AssignmentList { .. }
+        // Host-plane reads: node-local settings and orientation. They sign
+        // nothing and change nothing, so they carry the same weight through a
+        // browser as through a terminal. A settings read still names a store
+        // layer, and is admitted against this daemon's catalog like the write
+        // beside it — being a read is not a licence to name a directory.
+        | Request::HostConfigList { .. }
+        | Request::HostConfigGet { .. }
+        | Request::HostContext
         | Request::Hello { .. } => true,
 
         Request::AgentAdd { .. }
@@ -48,6 +52,14 @@ pub fn is_read(req: &Request) -> bool {
         | Request::InviteRevoke { .. }
         | Request::DeviceAdd { .. }
         | Request::DeviceRevoke { .. }
+        // The recovery-authority ceremonies. Classified, routable, and
+        // deliberately **not on any head yet**: each is a multi-party threshold
+        // exchange (mint a request, collect approvals from a quorum of
+        // holders, then apply), and a one-shot button per step is how a half-run
+        // ceremony leaves a Space with an authority nobody can complete. They
+        // wait on a flow design, not on a route. Device enrolment and custody
+        // export/import — the parts a single operator finishes alone — are on
+        // the local app, which is why they are not in this note.
         | Request::Recover
         | Request::SpaceRecover
         | Request::SpaceElevate { .. }
@@ -55,8 +67,7 @@ pub fn is_read(req: &Request) -> bool {
         | Request::SpaceElevateApprove { .. }
         | Request::SpaceReshare { .. }
         // …and custody, which handles a holder's own key material and a
-        // passphrase, so it belongs to the operator at the machine and not to a
-        // browser session…
+        // passphrase…
         | Request::SpaceCustodyExport { .. }
         | Request::SpaceCustodyImport { .. }
         // …joining and inviting, which act *as* an identity on the wire…
@@ -65,6 +76,14 @@ pub fn is_read(req: &Request) -> bool {
         | Request::Connect { .. }
         // …sync drives convergence on the wire (like connect), not a read…
         | Request::Sync
+        // …declaring what you are looking at *publishes* — carets, a typing
+        // flag, presence and the uncommitted text of a preview go into the
+        // Space as whoever signs for that Station. Looking is a read; saying
+        // "I am here, and this is what I am typing" is not, and on an identity
+        // this daemon merely hosts it is a claim made in somebody else's name.
+        // The browser's own presence goes through `GET /api/session`, which
+        // asks custody before it declares (`serve::socket`)…
+        | Request::Watching { .. }
         | Request::SeedAdd { .. }
         | Request::SeedRemove { .. }
         | Request::AssignmentGrant { .. }
@@ -74,6 +93,23 @@ pub fn is_read(req: &Request) -> bool {
         // act on — the signals are addressed to that identity, not to whoever
         // has its space open in a browser…
         | Request::Signals
+        // …forming or entering a Space, which mints key material and writes a
+        // store, and signing device consent, which signs as this identity…
+        | Request::HostSpaceFound { .. }
+        | Request::HostSpaceEnter { .. }
+        | Request::HostDeviceConsent { .. }
+        // …settings writes and registry edits, which change what every other
+        // caller on this machine subsequently reads…
+        | Request::HostConfigSet { .. }
+        | Request::HostConfigUnset { .. }
+        | Request::HostOrbitForget { .. }
+        | Request::HostOrbitPrune
+        | Request::HostOrbitRebuild { .. }
+        // …writing an agent client's config file, swapping this node's own
+        // binary, and stopping the daemon that swap has to outlive…
+        | Request::HostInstallMcp { .. }
+        | Request::HostUpdate
+        | Request::HostRestart
         // …and node control.
         | Request::ConfigReload
         | Request::Stop => false,
@@ -84,9 +120,143 @@ pub fn is_read(req: &Request) -> bool {
     }
 }
 
+/// Whether `req` belongs to the daemon-scoped host plane.
+///
+/// The gate on `POST /api/host/rpc`. That route exists because formation has no
+/// space id yet, not because the daemon route is a second door into everything
+/// the daemon can do — `Stop` is daemon-scoped too, and a page that could send
+/// it would be able to shut down the server it is talking to.
+///
+/// What passing this gate grants, stated plainly, because it is wider than the
+/// Space routes and reading the list does not make that obvious. Founding into a
+/// caller-named directory, signing device consent, writing an agent client's
+/// config file and setting a global key are all here, and nothing narrower
+/// stands behind them: this is the only surface that can do any of it, and its
+/// loopback token stands for the whole identity. Where each request may point is
+/// *not* uniform, and the split is the part a new variant has to be classified
+/// against:
+///
+/// * **A caller-named directory, by design.** `HostSpaceFound` creates the
+///   directory it is given and writes a store into it. It cannot address an
+///   *existing* store that way — that is the whole situation it exists for — so
+///   it is not admitted against the catalog, and a caller holding this token can
+///   therefore create a directory anywhere this process can write.
+/// * **An existing store, admitted first.** `HostConfigSet`/`HostConfigUnset`
+///   and `HostConfigList`/`HostConfigGet` name a store layer, and
+///   `HostOrbitRebuild` names an Orbit; every one of them goes through
+///   `orbits::bootstrap::admit`, which refuses a path this daemon does not serve
+///   and a store whose Station signs with a key this daemon merely hosts.
+/// * **A caller-named directory, checked for custody.** `HostSpaceEnter` writes
+///   `<home>/config.json` and then drives `Connect` from the Station that signs
+///   for that home, and `HostSpaceFound` plants a store and a `config.json` in
+///   whatever directory it is handed, so
+///   `orbits::bootstrap::admit_formation_target` runs on both before either
+///   writes. It asks only whose key the directory holds — not whether a Space is
+///   in it yet, because a provisioned agent home holds its seed first and would
+///   otherwise read as blank. A directory holding neither a Space nor a foreign
+///   identity passes, which is what keeps founding into `spaces_root()` or any
+///   blank browser-proposed path working.
+/// * **A caller-named directory this daemon may not even own.**
+///   `HostInstallMcp` writes an MCP client config, and its `dir` is an editor's
+///   project directory, which need not hold a store — so it is not admitted and
+///   must not become a way to *read*. Note what `dir` does **not** control:
+///   under `scope: user` (and for Windsurf under either scope) it is ignored
+///   entirely and a fixed file in the daemon user's home is rewritten —
+///   `~/.claude.json`, `~/.cursor/mcp.json`,
+///   `~/.codeium/windsurf/mcp_config.json`. `print` answers with the entry that
+///   would be written, never with the contents of the file at that path.
+/// * **No path at all.** Device consent mints and signs with this identity's own
+///   seed; the registry, update, restart and context requests name no directory.
+///
+/// A `Host*` variant added later inherits nothing from this list. If it carries a
+/// path that addresses an existing store, it goes through `admit` before it
+/// touches the filesystem.
+///
+/// Exhaustive for the same reason [`is_read`] is: a variant added later must be
+/// classified before it can reach a route, rather than inherit one by default.
+pub fn is_host_plane(req: &Request) -> bool {
+    match req {
+        Request::HostSpaceFound { .. }
+        | Request::HostSpaceEnter { .. }
+        | Request::HostDeviceConsent { .. }
+        | Request::HostConfigList { .. }
+        | Request::HostConfigGet { .. }
+        | Request::HostConfigSet { .. }
+        | Request::HostConfigUnset { .. }
+        | Request::HostOrbitForget { .. }
+        | Request::HostOrbitPrune
+        | Request::HostOrbitRebuild { .. }
+        | Request::HostInstallMcp { .. }
+        | Request::HostUpdate
+        // …and the restart that makes an update take effect. Admitting it here
+        // and not `Stop` is the whole distinction: this one names the daemon
+        // *under* the server, which survives to stand a fresh one up.
+        | Request::HostRestart
+        | Request::HostContext => true,
+
+        Request::MemberAdd { .. }
+        | Request::MemberRemove { .. }
+        | Request::MemberSetRole { .. }
+        | Request::MemberAlias { .. }
+        | Request::Members
+        | Request::MemberLog
+        | Request::AgentAdd { .. }
+        | Request::AgentProvision { .. }
+        | Request::KeyRotate
+        | Request::InviteRevoke { .. }
+        | Request::DeviceInvite
+        | Request::DeviceAdd { .. }
+        | Request::DeviceRevoke { .. }
+        | Request::DeviceList
+        | Request::SpaceRecover
+        | Request::SpaceElevate { .. }
+        | Request::SpaceRecoverApprove { .. }
+        | Request::SpaceElevateApprove { .. }
+        | Request::SpaceReshare { .. }
+        | Request::SpaceCustodyExport { .. }
+        | Request::SpaceCustodyImport { .. }
+        | Request::Recover
+        | Request::AssignmentList { .. }
+        | Request::AssignmentGrant { .. }
+        | Request::AssignmentRevoke { .. }
+        | Request::WorldActivate { .. }
+        | Request::Subscribe { .. }
+        | Request::Status
+        | Request::Diagnose { .. }
+        | Request::Id
+        | Request::Whoami
+        | Request::Sync
+        | Request::Invite { .. }
+        | Request::Join { .. }
+        | Request::Connect { .. }
+        | Request::SeedAdd { .. }
+        | Request::SeedList
+        | Request::SeedRemove { .. }
+        | Request::Log { .. }
+        | Request::Who
+        | Request::Watching { .. }
+        | Request::Live { .. }
+        | Request::LiveSubscribe { .. }
+        | Request::Signals
+        | Request::ConfigReload
+        | Request::Stop
+        | Request::Hello { .. } => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_host_route_takes_the_host_plane_and_nothing_else() {
+        assert!(is_host_plane(&Request::HostContext));
+        assert!(is_host_plane(&Request::HostOrbitPrune));
+        // The one that matters: daemon-scoped, and not the host plane. A page
+        // that could send it would be able to stop the server serving it.
+        assert!(!is_host_plane(&Request::Stop));
+        assert!(!is_host_plane(&Request::Status));
+    }
 
     #[test]
     fn reads_are_reads() {

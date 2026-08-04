@@ -18,9 +18,9 @@ novel ceremony code remain unaudited.
 ## Trust boundaries
 
 The LAIT process, operating-system account, trusted native World code, and
-readable local secret files are inside the device trust boundary. Local CLI,
-web, and MCP clients receive only the authority of the local control capability
-and selected identity; they do not receive storage access.
+readable local secret files are inside the device trust boundary. Local web and
+MCP clients receive only the authority of the local control capability and
+selected identity; they do not receive storage access.
 
 Remote peers, gossip participants, Contacts, relays, discovery services,
 replicated bytes, display names, clocks, routes, and network paths are untrusted.
@@ -251,8 +251,8 @@ receipts provide the attribution boundary.
 
 Product data authored by a peer is not a path. An attachment's display name is
 the clearest case: it converges from whoever attached the file, it is what a
-person naturally saves the file as, and the CLI's own output invites exactly
-that command — so untreated it is an arbitrary-path write of peer-supplied
+person naturally saves the file as, and the app's save affordance invites
+exactly that — so untreated it is an arbitrary-path write of peer-supplied
 bytes, triggered by a local user doing something that reads like a read.
 
 The name is treated at both ends, differently, because the proposer differs. At
@@ -349,10 +349,22 @@ plainly unavailable.
 
 ## Local web surface
 
-`lait serve` binds to loopback and uses a per-run bearer capability with origin
-and rebinding defenses. Listing local Spaces must not activate all Stations.
-Attaching to a Space preserves the selected local identity. The browser is a
-local client, not an iroh peer or Space member.
+The head bare `lait` serves binds to loopback and uses a per-run bearer
+capability with origin and rebinding defenses. Listing local Spaces must not
+activate all Stations. Attaching to a Space preserves the selected local
+identity. The browser is a local client, not an iroh peer or Space member. The
+full posture is in [`SERVE.md`](./SERVE.md).
+
+Because it is now the *only* general interface, two consequences are explicit.
+The token this head mints stands for the identity a terminal would have acted
+as, and the host plane's reach matches: a caller holding it can create a store
+directory anywhere this process can write. And a write that would have to be
+signed with a key this daemon merely hosts — an agent-held Orbit — is refused
+before signing, on custody grounds rather than on standing. Mechanics would
+approve that write, correctly, because it evaluates the signer's grants and the
+signer would be the agent; the head is the only place the custody question is
+asked, so the answer must stay no however wide anybody's grants become. Reads
+are never refused: observing signs nothing.
 
 ### Files on the local web surface
 

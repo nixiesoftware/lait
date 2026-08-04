@@ -10,8 +10,8 @@
 //! The host owns no Space state directly. It owns one [`crate::orbits::Router`], which
 //! lazily places Stations into addressed Orbits and keeps their StationHosts
 //! inside this process. Historical per-home control sockets remain behind those
-//! process hosts as compatibility adapters, but new CLI, MCP, and web requests enter
-//! through this endpoint first.
+//! process hosts as compatibility adapters, but every request a head sends
+//! enters through this endpoint first.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Weak};
@@ -45,9 +45,15 @@ pub struct Client {
 }
 
 impl Client {
-    pub fn current() -> Result<Self> {
+    /// The daemon for an explicitly selected identity.
+    ///
+    /// There is deliberately no ambient constructor. A head serving several
+    /// identities out of one process cannot address more than one daemon if the
+    /// home comes from process-global environment, so the home is an argument
+    /// on every path that reaches a daemon.
+    pub fn for_selection(selection: &crate::config::Selection) -> Result<Self> {
         Ok(Self {
-            home: crate::config::lait_daemon_home()?,
+            home: selection.daemon_home()?,
         })
     }
 
@@ -72,6 +78,12 @@ impl Client {
         control::request_as_routed(&self.home, request, Some(route), act_as).await
     }
 
+    /// Send an envelope the caller already owns, so a caller that may have to
+    /// re-send does not clone the request to keep a copy.
+    pub async fn send(&self, envelope: &ClientRequest) -> Result<Response> {
+        control::send(&self.home, envelope).await
+    }
+
     /// Send a product-neutral call without importing that product's request or
     /// response schema into the daemon protocol.
     pub async fn call_world(
@@ -81,6 +93,12 @@ impl Client {
         act_as: Option<&str>,
     ) -> Result<Reply> {
         control::call_world(&self.home, route, call, act_as).await
+    }
+
+    /// The World counterpart of [`Client::send`]. The World-call path is the
+    /// latency-critical one; it must not copy a call payload for a retry.
+    pub async fn call_world_envelope(&self, envelope: &WorldClientRequest) -> Result<Reply> {
+        control::call_world_envelope(&self.home, envelope).await
     }
 
     /// Query an already-running Station without placing a vacant Orbit.
@@ -485,15 +503,31 @@ impl Listener {
                 .await;
                 self.begin_stop();
             }
+            // Answer first, then go. The head that sent this stands a fresh
+            // daemon up on its next send, so the reply has to be on the wire
+            // before the socket closes or the restart looks like a crash.
+            (ControlRoute::Daemon, Request::HostRestart) => {
+                let _ = write_line(
+                    &mut write_half,
+                    &Response::Host(crate::control::HostReply::Restarting {
+                        pid: Some(std::process::id()),
+                    }),
+                )
+                .await;
+                self.begin_stop();
+            }
             (ControlRoute::Daemon, Request::Subscribe { .. }) => {
                 self.stream_catalog(write_half).await;
             }
-            (ControlRoute::Daemon, _) => {
-                let _ = write_line(
-                    &mut write_half,
-                    &Response::err("request has no daemon-scoped handler"),
-                )
-                .await;
+            // The host plane: formation, node-local state, orientation. It is
+            // served here rather than behind a Station because most of it runs
+            // before a Station could exist — and because running it in this
+            // process is what stops it racing this process for the store lock.
+            (ControlRoute::Daemon, request) => {
+                let response = crate::orbits::bootstrap::dispatch(&self.router, request)
+                    .await
+                    .unwrap_or_else(|| Response::err("request has no daemon-scoped handler"));
+                let _ = write_line(&mut write_half, &response).await;
             }
             (route @ ControlRoute::Orbit { .. }, Request::Subscribe { since }) => {
                 self.stream_space(write_half, route, since).await;
@@ -734,13 +768,21 @@ impl Runner {
     }
 }
 
-/// Run the current identity's always-on Lait daemon.
-pub async fn run_lait_daemon(packages: WorldPackages) -> Result<()> {
-    let identity = crate::config::identity_dir()?;
+/// Run the always-on Lait daemon for one identity.
+///
+/// `selection` names which identity, as a value rather than through the process
+/// environment: the daemon is spawned with `--home`, and turning that flag back
+/// into an env var made the choice a property of the process instead of of the
+/// call.
+pub async fn run_lait_daemon(
+    packages: WorldPackages,
+    selection: crate::config::Selection,
+) -> Result<()> {
+    let identity = selection.identity_dir()?;
     let config_root = crate::config::config_root()?;
-    let self_contained = std::env::var_os("LAIT_HOME").is_some();
+    let self_contained = selection.self_contained();
     let agents_base = crate::registry::agents_base(&config_root);
-    let home = crate::config::lait_daemon_home()?;
+    let home = selection.daemon_home()?;
     let router = Arc::new(Router::new(
         Catalog::new(identity, agents_base, self_contained),
         packages,
@@ -1090,7 +1132,7 @@ mod tests {
         let seed = [212; 32];
         let (base, daemon_home, directory, mut resolved) = formed_directory("scope", &seed);
         let orbit_home = resolved.home.clone();
-        resolved.address.space = issues::ids::SpaceId::from_digest([99; 16]);
+        resolved.address.space = mechanics::ids::SpaceId::from_digest([99; 16]);
         let runner = runner_with_factory(
             daemon_home.clone(),
             directory,

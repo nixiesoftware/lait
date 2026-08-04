@@ -35,7 +35,7 @@ fn semantic_package_has_no_shell_or_process_dependency() {
         "crate::control",
         "crate::orbital",
         "crate::serve",
-        "crate::cli",
+        "crate::host_client",
         "crate::mcp",
         "std::fs",
         "std::process",

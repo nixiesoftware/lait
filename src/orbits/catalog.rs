@@ -17,7 +17,7 @@ use anyhow::{anyhow, Result};
 use serde::Serialize;
 
 use crate::orbits::{self, Entry};
-use issues::ids::SpaceId;
+use mechanics::ids::SpaceId;
 
 use crate::daemon::{ClientScope, LocalOrbitId, OrbitAddress};
 
@@ -78,6 +78,13 @@ impl Catalog {
         self_contained: bool,
         load_bindings: Arc<dyn Fn() -> Vec<Entry> + Send + Sync>,
     ) -> Self {
+        // Deliberately stored as spelled, not canonicalized. Resolving these two
+        // here while registry rows arrive as written is drift, not a cure for it:
+        // on a volume with 8.3 aliasing (`RUNNER~1`) or through a symlinked temp
+        // dir, `entry.path` and a resolved `identity` stop matching and every
+        // binding disappears behind "no such space". Spelling is reconciled where
+        // the two are compared — see `agent_name` — so both operands always move
+        // together.
         Self {
             identity,
             agents_base,
@@ -101,6 +108,14 @@ impl Catalog {
         )
     }
 
+    /// The directory holding the seed this directory's own Stations sign with.
+    ///
+    /// Formation needs it before any Orbit exists to resolve it from, which is
+    /// the whole reason the daemon can host `HostSpaceFound` at all.
+    pub fn identity(&self) -> &Path {
+        &self.identity
+    }
+
     /// Return the Orbits visible to this daemon identity, preserving registry
     /// order. Human observability includes named agents; self-contained
     /// identities see only their own home. No control channel is opened and no
@@ -112,6 +127,50 @@ impl Catalog {
             &self.agents_base,
             self.self_contained,
         )
+    }
+
+    /// Whether a Station placed in this Orbit signs with the seed this
+    /// directory's own callers already hold, rather than with a separate one
+    /// this daemon merely hosts.
+    ///
+    /// A custody question, deliberately not a question about what kind of
+    /// member the Orbit belongs to. Whether a holder may write is decided by
+    /// their grants; this decides only whose *key* would make the signature,
+    /// and a key that is not the caller's is not theirs to spend however
+    /// generous their grants become.
+    pub fn signs_with_own_seed(&self, resolved: &ResolvedOrbit) -> bool {
+        same_path(&resolved.identity_dir, &self.identity)
+    }
+
+    /// The same custody question asked of a bare path, before any registry row
+    /// exists to resolve.
+    ///
+    /// Formation is the one caller that needs it a step early. Entering a store
+    /// is what *registers* it, so a re-entry aimed at an unregistered home has
+    /// no binding to ask about — and by the time one exists, that home's config
+    /// has been written and its seed is about to sign a `Connect` on the wire.
+    /// Where a home lives is what decides whose key it holds, and that is
+    /// knowable without the registry.
+    ///
+    /// *Where* a directory lives is a question about the filesystem, not about
+    /// the string a caller spelled it with, so a spelling the filesystem cannot
+    /// resolve is refused rather than compared. `<home>/nope/../agents/scout`
+    /// does not start with `agents/` as text and is that agent's home on disk;
+    /// answering from the text let a caller-named path walk past this gate and
+    /// then be materialized into the very directory it names. A caller with a
+    /// directory that does not exist yet materializes it first — which is what
+    /// [`crate::orbits::bootstrap`] does — so the gate and the write cannot
+    /// disagree about which directory they mean.
+    pub fn path_signs_with_own_seed(&self, home: &Path) -> bool {
+        let Some(home) = crate::config::resolved(home) else {
+            return false;
+        };
+        if self.self_contained {
+            // A self-contained identity is visible only to itself, so any other
+            // directory is somebody else's regardless of where it sits.
+            return same_path(&home, &crate::config::canonical(&self.identity));
+        }
+        agent_name(&home, &crate::config::canonical(&self.agents_base)).is_none()
     }
 
     /// Resolve and authorize a stable local Orbit id.
@@ -180,6 +239,15 @@ fn visible_bindings(
 
 /// The first component below `agents_base`, retaining its display case.
 fn agent_name(path: &Path, agents_base: &Path) -> Option<String> {
+    // Both operands move together or neither does. Resolving only one is worse
+    // than resolving neither: on a volume with 8.3 aliasing a resolved candidate
+    // stops starting with an unresolved base, and an agent's home would answer
+    // "not an agent" — a custody question failing open.
+    let pair = crate::config::resolved(path).zip(crate::config::resolved(agents_base));
+    let (path, agents_base) = match &pair {
+        Some((p, b)) => (p.as_path(), b.as_path()),
+        None => (path, agents_base),
+    };
     if !under(path, agents_base) {
         return None;
     }
@@ -290,6 +358,41 @@ mod tests {
                 name: "Scout".into()
             }
         );
+    }
+
+    /// Whose key would make the signature — asked about the key, not about the
+    /// kind of member the Orbit belongs to. A holder's grants decide what they
+    /// may do; they never make somebody else's seed theirs to spend.
+    #[test]
+    fn custody_asks_which_key_would_sign_and_nothing_about_the_holder() {
+        let catalog = Catalog::with_entries(
+            PathBuf::from("/home/u/.config/lait"),
+            PathBuf::from("/home/u/.config/lait/agents"),
+            false,
+            Vec::new(),
+        );
+        let store = Path::new("/home/u/proj/.lait");
+        let resolved = |identity_dir: &str, identity: StationIdentity| ResolvedOrbit {
+            home: store.to_path_buf(),
+            identity_dir: PathBuf::from(identity_dir),
+            address: OrbitAddress::for_store(store, SpaceId::from_digest([7; 16])),
+            identity,
+        };
+
+        assert!(
+            catalog.signs_with_own_seed(&resolved("/home/u/.config/lait", StationIdentity::Own))
+        );
+        // Spelling drift is not a different key.
+        assert!(
+            catalog.signs_with_own_seed(&resolved("/home/u/.config/lait/", StationIdentity::Own))
+        );
+        // A seed this daemon merely hosts is somebody else's to spend.
+        assert!(!catalog.signs_with_own_seed(&resolved(
+            "/home/u/.config/lait/agents/scout",
+            StationIdentity::Agent {
+                name: "scout".into()
+            }
+        )));
     }
 
     #[test]

@@ -1,7 +1,7 @@
 # lait's web client
 
 A keyboard-first board over the local control plane. This directory builds into
-`../src/serve/assets`, which `lait serve` embeds and serves.
+`../src/serve/assets`, which the binary embeds and serves.
 
 If you are extending lait — a theme, extra commands, a different frontend against the
 same control plane — this is the reference. The whole client is a **projection of a
@@ -15,7 +15,8 @@ npm install
 npm run dev          # → http://localhost:5178
 ```
 
-That one command does everything: it starts the engine (`lait serve --json`), reads
+That one command does everything: it starts the engine (`lait --json`, the default
+mode), reads
 the run's token off its first line, and launches Vite with the token wired into the
 dev proxy. Edit `src/`, see it in the browser. No token to copy, no second terminal.
 
@@ -37,7 +38,7 @@ Set `LAIT_TOKEN` and the script won't spawn one — it uses yours. Get the token
 the engine you started:
 
 ```bash
-lait serve --json      # → {"url":"…","token":"…","port":7717}
+lait --json            # → {"url":"…","token":"…","port":7717}
 LAIT_TOKEN=<that-token> npm run dev
 ```
 
@@ -47,7 +48,7 @@ manage the engine entirely by hand.
 ### Why a token at all — the one thing worth understanding
 
 Vite serves the client on `:5178`; the engine listens on `:7717`. **Two origins.**
-`lait serve` refuses cross-origin requests on purpose — a strict `Host`/`Origin`
+The head refuses cross-origin requests on purpose — a strict `Host`/`Origin`
 allowlist is what stops a hostile web page from reaching your loopback engine via DNS
 rebinding (`src/serve/auth.rs`). Relaxing that guard for dev convenience would make it
 stop meaning anything.
@@ -70,7 +71,7 @@ directory is committed to git.** This looks wrong until three facts line up:
 
 So the bundle cannot be built during `cargo build` (that would need npm) and cannot
 live in `viewer/` (that never reaches crates.io). Committing the built output under
-`src/` is what keeps `lait serve` a single self-contained binary for people who
+`src/` is what keeps `lait` a single self-contained binary for people who
 install from source. CI diffs a fresh rebuild against the committed one, so a stale
 bundle fails the build rather than shipping silently.
 
@@ -79,7 +80,7 @@ bundle fails the build rather than shipping silently.
 | You want | Do |
 |---|---|
 | Fast iteration with HMR | `npm run dev` (nothing else) |
-| The change inside a real `lait serve` | `npm run build && cargo build && lait serve` |
+| The change inside a real head | `npm run build && cargo build && lait` |
 | CI to accept the branch | commit the rebuilt `../src/serve/assets` |
 
 `cargo build` picks up an asset change on its own now — `build.rs` tells cargo the

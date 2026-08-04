@@ -48,21 +48,27 @@ may pin an exact issued Baseline. Its Packet is the only supported way for a
 client or agent to answer “what governs this work now?” without reimplementing
 the graph rules.
 
-## CLI
+## Driving it
 
-```console
-lait issues spec new ENG requirement "Login is race-free" --text "…"
-lait issues spec review spc_… --expect <revision>
-lait issues spec issue spc_… --expect <revision>
+```http
+POST /api/spaces/{id}/worlds/issues/rpc
+{"cmd":"spec_new","project":"ENG","kind":"requirement","title":"Login is race-free","text":"…"}
+{"cmd":"spec_state","spec":"spc_…","expected":"<revision>","state":"review"}
+{"cmd":"spec_state","spec":"spc_…","expected":"<revision>","state":"issued"}
 
-lait issues baseline new ENG "Login v1" --member spc_…@<revision>
-lait issues baseline issue bas_… --expect <revision>
-lait issues baseline bind ENG-42 bas_…@<revision>
-lait issues packet ENG-42
+{"cmd":"baseline_new","project":"ENG","name":"Login v1",
+ "members":[{"spec":"spc_…","revision":"<revision>"}]}
+{"cmd":"baseline_state","baseline":"bas_…","expected":"<revision>","state":"issued"}
+{"cmd":"issue_baseline","reff":"ENG-42","baseline":{"baseline":"bas_…","revision":"<revision>"}}
+{"cmd":"packet","reff":"ENG-42"}
 ```
 
-The same operations and typed schemas are exposed by the Issues application
-protocol and MCP tools. The browser issue detail renders the effective Packet.
+`expected` is a compare-and-swap on the document's current revision: a stale
+one is refused rather than silently overwritten.
+
+The same operations are the `issues_spec_*`, `issues_baseline_*`,
+`issues_issue_baseline` and `issues_packet` MCP tools. The browser issue detail
+renders the effective Packet.
 
 ## Web
 

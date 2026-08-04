@@ -12,9 +12,11 @@
 
 use runtime::poison::LockRecovering;
 use std::collections::{BTreeMap, HashMap};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use mechanics::ids::DeviceId;
+use mechanics::authorization::{PolicyCapability, Resource};
+use mechanics::ids::{DeviceId, SpaceId};
 use replica::body::WorldId;
 use runtime::world::Refusal as RegistrationRefusal;
 use runtime::Error as RuntimeFailure;
@@ -26,23 +28,26 @@ use runtime::world::call::{Access, Call, Code, Failure, Handler};
 #[cfg(test)]
 use runtime::world::call::{Context, Reply};
 
-/// Product-owned projection of a generic runtime Observation into the local
-/// invalidations understood by the shell protocol.
-#[derive(Debug, Default)]
-pub struct Invalidation {
-    pub dirty_by_project: Vec<issues::dto::DirtyProject>,
-    pub dirty_catalog: Vec<crate::control::CatalogScope>,
-}
+/// One World's Observation projection, in that World's own vocabulary.
+///
+/// Defined by `runtime` so a World supplied out of tree can name it without
+/// depending on this shell.
+pub use runtime::world::{Invalidation, RoutedInvalidation};
 
 pub struct StatusProjection {
     pub items: usize,
-    pub groups: usize,
+    pub scopes: usize,
     pub name: String,
     pub description: String,
 }
 
 /// A World package's Observation projector. Implementations own their own
 /// baselines; the Station host only fans generic observations out.
+///
+/// The invalidation vocabulary lives in `runtime`, so an out-of-tree World can
+/// project without depending on this shell. The trait stays application-side
+/// because it combines World projection with shell-facing status metadata and
+/// projector registration.
 pub trait ObservationProjector: Send + Sync {
     fn status(&self, session: &Session) -> Option<StatusProjection>;
     fn start(&self, session: &Session, space: &mechanics::ids::SpaceId);
@@ -54,6 +59,51 @@ pub trait ObservationProjector: Send + Sync {
     ) -> Invalidation;
 }
 
+/// One founder capability declared by a World package.
+///
+/// The shell installs these generic Mechanics facts without knowing the
+/// product role or policy that produced them.
+#[derive(Debug, Clone)]
+pub struct FounderGrant {
+    pub capability: PolicyCapability,
+    pub resource: Resource,
+    pub salt: [u8; 16],
+}
+
+/// A human-facing container a World wants created with a new Space.
+///
+/// `kind` is World-owned vocabulary. `key` and `name` are carried back to the
+/// navigation catalog; the lifecycle host never interprets either one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InitialScope {
+    pub kind: String,
+    pub key: String,
+    pub name: String,
+}
+
+/// The generic resources supplied to one World's formation hook.
+pub struct BootstrapContext<'a> {
+    pub store_root: &'a Path,
+    pub space: &'a SpaceId,
+    pub session: &'a Session,
+    pub identity: &'a LocalIdentity,
+    pub device: &'a str,
+    pub display_name: &'a str,
+    pub initial_scope: Option<&'a InitialScope>,
+}
+
+/// Product-owned policy invoked by the generic Space lifecycle.
+///
+/// Implementations are bound in the application composition root. The host
+/// forms the Space, applies the returned Mechanics grants, docks the package's
+/// own World, and supplies that Session here; it never names the product or
+/// constructs one of its DTOs.
+pub trait WorldLifecycle: Send + Sync {
+    fn founder_grants(&self) -> anyhow::Result<Vec<FounderGrant>>;
+    fn initial_scope(&self, display_name: &str) -> Option<InitialScope>;
+    fn bootstrap(&self, context: BootstrapContext<'_>) -> anyhow::Result<()>;
+}
+
 /// One product package available to the application build.
 #[derive(Clone)]
 pub struct WorldPackage {
@@ -62,6 +112,7 @@ pub struct WorldPackage {
     reviewed_implementation: [u8; 32],
     control: Option<Arc<dyn Handler>>,
     projector: Option<Arc<dyn ObservationProjector>>,
+    lifecycle: Option<Arc<dyn WorldLifecycle>>,
 }
 
 impl std::fmt::Debug for WorldPackage {
@@ -86,6 +137,7 @@ impl WorldPackage {
             reviewed_implementation,
             control: None,
             projector: None,
+            lifecycle: None,
         }
     }
 
@@ -96,6 +148,11 @@ impl WorldPackage {
 
     pub fn with_projector(mut self, projector: Arc<dyn ObservationProjector>) -> Self {
         self.projector = Some(projector);
+        self
+    }
+
+    pub fn with_lifecycle(mut self, lifecycle: Arc<dyn WorldLifecycle>) -> Self {
+        self.lifecycle = Some(lifecycle);
         self
     }
 
@@ -147,6 +204,63 @@ impl WorldPackages {
         self.packages
             .iter()
             .any(|package| package.world_id() == world)
+    }
+
+    pub fn reviewed_implementation(&self, world: &WorldId) -> Option<[u8; 32]> {
+        self.packages
+            .iter()
+            .find(|package| package.world_id() == world)
+            .map(|package| package.reviewed_implementation)
+    }
+
+    pub fn founder_policies(&self) -> anyhow::Result<Vec<(WorldId, [u8; 32], Vec<FounderGrant>)>> {
+        self.packages
+            .iter()
+            .filter_map(|package| {
+                package.lifecycle.as_deref().map(|lifecycle| {
+                    lifecycle.founder_grants().map(|grants| {
+                        (
+                            package.world.clone(),
+                            package.reviewed_implementation,
+                            grants,
+                        )
+                    })
+                })
+            })
+            .collect()
+    }
+
+    pub fn initial_scopes(&self, display_name: &str) -> Vec<(WorldId, InitialScope)> {
+        self.packages
+            .iter()
+            .filter_map(|package| {
+                package.lifecycle.as_deref().and_then(|lifecycle| {
+                    lifecycle
+                        .initial_scope(display_name)
+                        .map(|scope| (package.world.clone(), scope))
+                })
+            })
+            .collect()
+    }
+
+    pub fn lifecycle_world_ids(&self) -> impl Iterator<Item = &WorldId> {
+        self.packages
+            .iter()
+            .filter(|package| package.lifecycle.is_some())
+            .map(WorldPackage::world_id)
+    }
+
+    pub fn bootstrap(&self, world: &WorldId, context: BootstrapContext<'_>) -> anyhow::Result<()> {
+        let package = self
+            .packages
+            .iter()
+            .find(|package| package.world_id() == world)
+            .ok_or_else(|| anyhow::anyhow!("World '{world}' is not bundled"))?;
+        let lifecycle = package
+            .lifecycle
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("World '{world}' has no formation lifecycle"))?;
+        lifecycle.bootstrap(context)
     }
 
     pub fn accepts_call(&self, call: &Call) -> bool {
@@ -368,27 +482,40 @@ impl WorldRouter {
     }
 
     pub fn status(&self) -> Option<StatusProjection> {
+        let mut combined: Option<StatusProjection> = None;
         for host in self.hosts.values() {
             let Some(projector) = host.projector.as_deref() else {
                 continue;
             };
             let session = host.primary_session.lock_recovering();
-            if let Some(status) = session
+            let status = session
                 .as_ref()
-                .and_then(|session| projector.status(session))
-            {
-                return Some(status);
+                .and_then(|session| projector.status(session))?;
+            match &mut combined {
+                Some(total) => {
+                    total.items = total.items.saturating_add(status.items);
+                    total.scopes = total.scopes.saturating_add(status.scopes);
+                    if total.name.is_empty() {
+                        total.name = status.name;
+                    }
+                    if total.description.is_empty() {
+                        total.description = status.description;
+                    }
+                }
+                None => combined = Some(status),
             }
         }
-        None
+        combined
     }
 
+    /// Fan one Observation out to every hosted World, preserving the World
+    /// boundary around each package's vocabulary.
     pub fn project(
         &self,
         space: &mechanics::ids::SpaceId,
         observation: &runtime::world::Observation,
-    ) -> Invalidation {
-        let mut projected = Invalidation::default();
+    ) -> Vec<RoutedInvalidation> {
+        let mut projected = Vec::new();
         for host in self.hosts.values() {
             let Some(projector) = host.projector.as_deref() else {
                 continue;
@@ -398,8 +525,13 @@ impl WorldRouter {
                 continue;
             };
             let next = projector.project(session, space, observation);
-            projected.dirty_by_project.extend(next.dirty_by_project);
-            projected.dirty_catalog.extend(next.dirty_catalog);
+            if !next.dirty.is_empty() || !next.planes.is_empty() {
+                projected.push(RoutedInvalidation {
+                    world: host.world.clone(),
+                    dirty: next.dirty,
+                    planes: next.planes,
+                });
+            }
         }
         projected
     }

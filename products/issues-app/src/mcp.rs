@@ -7,9 +7,9 @@
 use schemars::JsonSchema;
 use serde::{de::DeserializeOwned, Deserialize};
 use serde_json::{json, Value};
-use world_interface::{ClientInvocation as CliInvocation, Failure, McpTool};
+use world_interface::{ClientInvocation, Failure, McpTool};
 
-use crate::cli::{LOCAL_ACCESS, LOCAL_INBOX};
+use crate::host::{LOCAL_ACCESS, LOCAL_ATTACH, LOCAL_ATTACHMENT_GET, LOCAL_INBOX};
 use crate::{BoardPos, Filter, IssuesRequest};
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
@@ -341,6 +341,24 @@ struct IssueBaselineArgs {
     baseline: Option<issues::spec::BaselineRef>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+struct AttachFileArgs {
+    reff: String,
+    /// Path on the machine this tool runs on.
+    file: String,
+    #[serde(default)]
+    comment: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct AttachmentSaveArgs {
+    reff: String,
+    id: String,
+    /// Where to write it. Defaults to the attachment's own name, sanitized.
+    #[serde(default)]
+    out: Option<String>,
+}
+
 pub fn tools() -> Vec<McpTool> {
     vec![
         tool::<IssueNewArgs>(
@@ -491,13 +509,24 @@ pub fn tools() -> Vec<McpTool> {
             "Read the effective deterministic Spec packet for an Issue.",
             packet,
         ),
+        tool::<AttachFileArgs>(
+            "attach_file",
+            "Attach a file from this machine's filesystem to an issue. The file \
+             is streamed onto the content plane, never read into memory.",
+            attach_file,
+        ),
+        tool::<AttachmentSaveArgs>(
+            "attachment_save",
+            "Save one of an issue's attachments to a local path.",
+            attachment_save,
+        ),
     ]
 }
 
 fn tool<T: JsonSchema>(
     name: &'static str,
     description: &'static str,
-    call: fn(Value) -> Result<CliInvocation, Failure>,
+    call: fn(Value) -> Result<ClientInvocation, Failure>,
 ) -> McpTool {
     McpTool::new(name, description, schema::<T>, call)
 }
@@ -512,15 +541,15 @@ fn args<T: DeserializeOwned>(input: Value) -> Result<T, Failure> {
         .map_err(|error| Failure::new(format!("invalid tool arguments: {error}")))
 }
 
-fn world(request: IssuesRequest) -> Result<CliInvocation, Failure> {
+fn world(request: IssuesRequest) -> Result<ClientInvocation, Failure> {
     crate::host::world_invocation(request)
 }
 
-fn local(operation: &str, input: Value) -> Result<CliInvocation, Failure> {
+fn local(operation: &str, input: Value) -> Result<ClientInvocation, Failure> {
     crate::host::invocation(operation, input)
 }
 
-fn issue_new(input: Value) -> Result<CliInvocation, Failure> {
+fn issue_new(input: Value) -> Result<ClientInvocation, Failure> {
     let a: IssueNewArgs = args(input)?;
     world(IssuesRequest::IssueNew {
         title: a.title,
@@ -535,27 +564,27 @@ fn issue_new(input: Value) -> Result<CliInvocation, Failure> {
     })
 }
 
-fn issue_start(input: Value) -> Result<CliInvocation, Failure> {
+fn issue_start(input: Value) -> Result<ClientInvocation, Failure> {
     let a: RefArgs = args(input)?;
     world(IssuesRequest::IssueStart { reff: a.reff })
 }
 
-fn issue_done(input: Value) -> Result<CliInvocation, Failure> {
+fn issue_done(input: Value) -> Result<ClientInvocation, Failure> {
     let a: RefArgs = args(input)?;
     world(IssuesRequest::IssueDone { reff: a.reff })
 }
 
-fn issue_stop(input: Value) -> Result<CliInvocation, Failure> {
+fn issue_stop(input: Value) -> Result<ClientInvocation, Failure> {
     let a: RefArgs = args(input)?;
     world(IssuesRequest::IssueStop { reff: a.reff })
 }
 
-fn inbox(input: Value) -> Result<CliInvocation, Failure> {
+fn inbox(input: Value) -> Result<ClientInvocation, Failure> {
     let a: InboxArgs = args(input)?;
     local(LOCAL_INBOX, json!({ "clear": a.clear }))
 }
 
-fn issue_edit(input: Value) -> Result<CliInvocation, Failure> {
+fn issue_edit(input: Value) -> Result<ClientInvocation, Failure> {
     let a: IssueEditArgs = args(input)?;
     world(IssuesRequest::IssueEdit {
         reff: a.reff,
@@ -568,7 +597,7 @@ fn issue_edit(input: Value) -> Result<CliInvocation, Failure> {
     })
 }
 
-fn issue_move(input: Value) -> Result<CliInvocation, Failure> {
+fn issue_move(input: Value) -> Result<ClientInvocation, Failure> {
     let a: IssueMoveArgs = args(input)?;
     world(IssuesRequest::IssueMove {
         reff: a.reff,
@@ -577,7 +606,7 @@ fn issue_move(input: Value) -> Result<CliInvocation, Failure> {
     })
 }
 
-fn assign(input: Value) -> Result<CliInvocation, Failure> {
+fn assign(input: Value) -> Result<ClientInvocation, Failure> {
     let a: AssignArgs = args(input)?;
     world(IssuesRequest::Assign {
         reff: a.reff,
@@ -586,7 +615,7 @@ fn assign(input: Value) -> Result<CliInvocation, Failure> {
     })
 }
 
-fn label(input: Value) -> Result<CliInvocation, Failure> {
+fn label(input: Value) -> Result<ClientInvocation, Failure> {
     let a: LabelArgs = args(input)?;
     world(IssuesRequest::Label {
         reff: a.reff,
@@ -595,7 +624,7 @@ fn label(input: Value) -> Result<CliInvocation, Failure> {
     })
 }
 
-fn comment(input: Value) -> Result<CliInvocation, Failure> {
+fn comment(input: Value) -> Result<ClientInvocation, Failure> {
     let a: CommentArgs = args(input)?;
     world(IssuesRequest::Comment {
         reff: a.reff,
@@ -604,7 +633,7 @@ fn comment(input: Value) -> Result<CliInvocation, Failure> {
     })
 }
 
-fn comment_at(input: Value) -> Result<CliInvocation, Failure> {
+fn comment_at(input: Value) -> Result<ClientInvocation, Failure> {
     let a: CommentAtArgs = args(input)?;
     world(IssuesRequest::CommentAt {
         reff: a.reff,
@@ -616,7 +645,7 @@ fn comment_at(input: Value) -> Result<CliInvocation, Failure> {
     })
 }
 
-fn react(input: Value) -> Result<CliInvocation, Failure> {
+fn react(input: Value) -> Result<ClientInvocation, Failure> {
     let a: ReactArgs = args(input)?;
     world(IssuesRequest::React {
         reff: a.reff,
@@ -626,17 +655,17 @@ fn react(input: Value) -> Result<CliInvocation, Failure> {
     })
 }
 
-fn issue_delete(input: Value) -> Result<CliInvocation, Failure> {
+fn issue_delete(input: Value) -> Result<ClientInvocation, Failure> {
     let a: RefArgs = args(input)?;
     world(IssuesRequest::IssueDelete { reff: a.reff })
 }
 
-fn issue_restore(input: Value) -> Result<CliInvocation, Failure> {
+fn issue_restore(input: Value) -> Result<ClientInvocation, Failure> {
     let a: RefArgs = args(input)?;
     world(IssuesRequest::IssueRestore { reff: a.reff })
 }
 
-fn issue_link(input: Value) -> Result<CliInvocation, Failure> {
+fn issue_link(input: Value) -> Result<ClientInvocation, Failure> {
     let a: LinkArgs = args(input)?;
     world(IssuesRequest::IssueLink {
         reff: a.reff,
@@ -645,7 +674,7 @@ fn issue_link(input: Value) -> Result<CliInvocation, Failure> {
     })
 }
 
-fn issue_unlink(input: Value) -> Result<CliInvocation, Failure> {
+fn issue_unlink(input: Value) -> Result<ClientInvocation, Failure> {
     let a: LinkArgs = args(input)?;
     world(IssuesRequest::IssueUnlink {
         reff: a.reff,
@@ -654,7 +683,7 @@ fn issue_unlink(input: Value) -> Result<CliInvocation, Failure> {
     })
 }
 
-fn issue_parent(input: Value) -> Result<CliInvocation, Failure> {
+fn issue_parent(input: Value) -> Result<ClientInvocation, Failure> {
     let a: ParentArgs = args(input)?;
     world(IssuesRequest::IssueParent {
         reff: a.reff,
@@ -662,17 +691,17 @@ fn issue_parent(input: Value) -> Result<CliInvocation, Failure> {
     })
 }
 
-fn issue_graph(input: Value) -> Result<CliInvocation, Failure> {
+fn issue_graph(input: Value) -> Result<ClientInvocation, Failure> {
     let a: RefArgs = args(input)?;
     world(IssuesRequest::IssueGraph { reff: a.reff })
 }
 
-fn issue_view(input: Value) -> Result<CliInvocation, Failure> {
+fn issue_view(input: Value) -> Result<ClientInvocation, Failure> {
     let a: RefArgs = args(input)?;
     world(IssuesRequest::IssueView { reff: a.reff })
 }
 
-fn list(input: Value) -> Result<CliInvocation, Failure> {
+fn list(input: Value) -> Result<ClientInvocation, Failure> {
     let a: ListArgs = args(input)?;
     world(IssuesRequest::List {
         project: a.project,
@@ -686,7 +715,7 @@ fn list(input: Value) -> Result<CliInvocation, Failure> {
     })
 }
 
-fn board(input: Value) -> Result<CliInvocation, Failure> {
+fn board(input: Value) -> Result<ClientInvocation, Failure> {
     let a: BoardArgs = args(input)?;
     world(IssuesRequest::Board {
         project: a.project,
@@ -694,12 +723,12 @@ fn board(input: Value) -> Result<CliInvocation, Failure> {
     })
 }
 
-fn history(input: Value) -> Result<CliInvocation, Failure> {
+fn history(input: Value) -> Result<ClientInvocation, Failure> {
     let a: RefArgs = args(input)?;
     world(IssuesRequest::History { reff: a.reff })
 }
 
-fn project_new(input: Value) -> Result<CliInvocation, Failure> {
+fn project_new(input: Value) -> Result<ClientInvocation, Failure> {
     let a: ProjectNewArgs = args(input)?;
     world(IssuesRequest::ProjectNew {
         name: a.name,
@@ -708,12 +737,12 @@ fn project_new(input: Value) -> Result<CliInvocation, Failure> {
     })
 }
 
-fn project_list(input: Value) -> Result<CliInvocation, Failure> {
+fn project_list(input: Value) -> Result<ClientInvocation, Failure> {
     let _: EmptyArgs = args(input)?;
     world(IssuesRequest::ProjectList)
 }
 
-fn label_new(input: Value) -> Result<CliInvocation, Failure> {
+fn label_new(input: Value) -> Result<ClientInvocation, Failure> {
     let a: LabelNewArgs = args(input)?;
     world(IssuesRequest::LabelNew {
         name: a.name,
@@ -721,27 +750,27 @@ fn label_new(input: Value) -> Result<CliInvocation, Failure> {
     })
 }
 
-fn label_list(input: Value) -> Result<CliInvocation, Failure> {
+fn label_list(input: Value) -> Result<ClientInvocation, Failure> {
     let _: EmptyArgs = args(input)?;
     world(IssuesRequest::LabelList)
 }
 
-fn activity(input: Value) -> Result<CliInvocation, Failure> {
+fn activity(input: Value) -> Result<ClientInvocation, Failure> {
     let a: ActivityArgs = args(input)?;
     world(IssuesRequest::Activity { since: a.since })
 }
 
-fn role_list(input: Value) -> Result<CliInvocation, Failure> {
+fn role_list(input: Value) -> Result<ClientInvocation, Failure> {
     let _: EmptyArgs = args(input)?;
     world(IssuesRequest::RoleList)
 }
 
-fn role_show(input: Value) -> Result<CliInvocation, Failure> {
+fn role_show(input: Value) -> Result<ClientInvocation, Failure> {
     let a: RoleShowArgs = args(input)?;
     world(IssuesRequest::RoleShow { role: a.role })
 }
 
-fn role_create(input: Value) -> Result<CliInvocation, Failure> {
+fn role_create(input: Value) -> Result<ClientInvocation, Failure> {
     let a: RoleCreateArgs = args(input)?;
     world(IssuesRequest::RoleCreate {
         name: a.name,
@@ -751,7 +780,7 @@ fn role_create(input: Value) -> Result<CliInvocation, Failure> {
     })
 }
 
-fn role_edit(input: Value) -> Result<CliInvocation, Failure> {
+fn role_edit(input: Value) -> Result<ClientInvocation, Failure> {
     let a: RoleEditArgs = args(input)?;
     world(IssuesRequest::RoleEdit {
         role: a.role,
@@ -762,7 +791,7 @@ fn role_edit(input: Value) -> Result<CliInvocation, Failure> {
     })
 }
 
-fn role_delete(input: Value) -> Result<CliInvocation, Failure> {
+fn role_delete(input: Value) -> Result<ClientInvocation, Failure> {
     let a: RoleDeleteArgs = args(input)?;
     world(IssuesRequest::RoleDelete {
         role: a.role,
@@ -770,7 +799,7 @@ fn role_delete(input: Value) -> Result<CliInvocation, Failure> {
     })
 }
 
-fn role_resolve(input: Value) -> Result<CliInvocation, Failure> {
+fn role_resolve(input: Value) -> Result<ClientInvocation, Failure> {
     let a: RoleResolveArgs = args(input)?;
     world(IssuesRequest::RoleResolve {
         role: a.role,
@@ -779,12 +808,12 @@ fn role_resolve(input: Value) -> Result<CliInvocation, Failure> {
     })
 }
 
-fn access_list(input: Value) -> Result<CliInvocation, Failure> {
+fn access_list(input: Value) -> Result<ClientInvocation, Failure> {
     let a: AccessListArgs = args(input)?;
     local(LOCAL_ACCESS, json!({ "action": "ls", "actor": a.actor }))
 }
 
-fn access_grant(input: Value) -> Result<CliInvocation, Failure> {
+fn access_grant(input: Value) -> Result<ClientInvocation, Failure> {
     let a: AccessGrantArgs = args(input)?;
     local(
         LOCAL_ACCESS,
@@ -797,7 +826,7 @@ fn access_grant(input: Value) -> Result<CliInvocation, Failure> {
     )
 }
 
-fn access_revoke(input: Value) -> Result<CliInvocation, Failure> {
+fn access_revoke(input: Value) -> Result<ClientInvocation, Failure> {
     let a: AccessRevokeArgs = args(input)?;
     local(
         LOCAL_ACCESS,
@@ -805,19 +834,19 @@ fn access_revoke(input: Value) -> Result<CliInvocation, Failure> {
     )
 }
 
-fn workflow_show(input: Value) -> Result<CliInvocation, Failure> {
+fn workflow_show(input: Value) -> Result<ClientInvocation, Failure> {
     let a: WorkflowShowArgs = args(input)?;
     world(IssuesRequest::WorkflowShow { project: a.project })
 }
 
-fn workflow_validate(input: Value) -> Result<CliInvocation, Failure> {
+fn workflow_validate(input: Value) -> Result<ClientInvocation, Failure> {
     let a: WorkflowValidateArgs = args(input)?;
     world(IssuesRequest::WorkflowValidate {
         body_json: a.body_json,
     })
 }
 
-fn workflow_set(input: Value) -> Result<CliInvocation, Failure> {
+fn workflow_set(input: Value) -> Result<ClientInvocation, Failure> {
     let a: WorkflowSetArgs = args(input)?;
     world(IssuesRequest::WorkflowSet {
         project: a.project,
@@ -826,27 +855,27 @@ fn workflow_set(input: Value) -> Result<CliInvocation, Failure> {
     })
 }
 
-fn spec_list(input: Value) -> Result<CliInvocation, Failure> {
+fn spec_list(input: Value) -> Result<ClientInvocation, Failure> {
     let a: ProjectArgs = args(input)?;
     world(IssuesRequest::SpecList { project: a.project })
 }
 
-fn spec_show(input: Value) -> Result<CliInvocation, Failure> {
+fn spec_show(input: Value) -> Result<ClientInvocation, Failure> {
     let a: SpecArgs = args(input)?;
     world(IssuesRequest::SpecShow { spec: a.spec })
 }
 
-fn spec_links(input: Value) -> Result<CliInvocation, Failure> {
+fn spec_links(input: Value) -> Result<ClientInvocation, Failure> {
     let a: ProjectArgs = args(input)?;
     world(IssuesRequest::SpecReferences { project: a.project })
 }
 
-fn spec_history(input: Value) -> Result<CliInvocation, Failure> {
+fn spec_history(input: Value) -> Result<ClientInvocation, Failure> {
     let a: SpecArgs = args(input)?;
     world(IssuesRequest::SpecHistory { spec: a.spec })
 }
 
-fn spec_new(input: Value) -> Result<CliInvocation, Failure> {
+fn spec_new(input: Value) -> Result<ClientInvocation, Failure> {
     let a: SpecNewArgs = args(input)?;
     world(IssuesRequest::SpecNew {
         project: a.project,
@@ -857,7 +886,7 @@ fn spec_new(input: Value) -> Result<CliInvocation, Failure> {
     })
 }
 
-fn spec_revise(input: Value) -> Result<CliInvocation, Failure> {
+fn spec_revise(input: Value) -> Result<ClientInvocation, Failure> {
     let a: SpecReviseArgs = args(input)?;
     world(IssuesRequest::SpecRevise {
         spec: a.spec,
@@ -868,7 +897,7 @@ fn spec_revise(input: Value) -> Result<CliInvocation, Failure> {
     })
 }
 
-fn spec_state(input: Value) -> Result<CliInvocation, Failure> {
+fn spec_state(input: Value) -> Result<ClientInvocation, Failure> {
     let a: SpecStateArgs = args(input)?;
     world(IssuesRequest::SpecState {
         spec: a.spec,
@@ -877,7 +906,7 @@ fn spec_state(input: Value) -> Result<CliInvocation, Failure> {
     })
 }
 
-fn spec_resolve(input: Value) -> Result<CliInvocation, Failure> {
+fn spec_resolve(input: Value) -> Result<ClientInvocation, Failure> {
     let a: ResolveArgs = args(input)?;
     world(IssuesRequest::SpecResolve {
         spec: a.id,
@@ -886,26 +915,26 @@ fn spec_resolve(input: Value) -> Result<CliInvocation, Failure> {
     })
 }
 
-fn baseline_list(input: Value) -> Result<CliInvocation, Failure> {
+fn baseline_list(input: Value) -> Result<ClientInvocation, Failure> {
     let a: ProjectArgs = args(input)?;
     world(IssuesRequest::BaselineList { project: a.project })
 }
 
-fn baseline_show(input: Value) -> Result<CliInvocation, Failure> {
+fn baseline_show(input: Value) -> Result<ClientInvocation, Failure> {
     let a: BaselineArgs = args(input)?;
     world(IssuesRequest::BaselineShow {
         baseline: a.baseline,
     })
 }
 
-fn baseline_history(input: Value) -> Result<CliInvocation, Failure> {
+fn baseline_history(input: Value) -> Result<ClientInvocation, Failure> {
     let a: BaselineArgs = args(input)?;
     world(IssuesRequest::BaselineHistory {
         baseline: a.baseline,
     })
 }
 
-fn baseline_new(input: Value) -> Result<CliInvocation, Failure> {
+fn baseline_new(input: Value) -> Result<ClientInvocation, Failure> {
     let a: BaselineNewArgs = args(input)?;
     world(IssuesRequest::BaselineNew {
         project: a.project,
@@ -914,7 +943,7 @@ fn baseline_new(input: Value) -> Result<CliInvocation, Failure> {
     })
 }
 
-fn baseline_revise(input: Value) -> Result<CliInvocation, Failure> {
+fn baseline_revise(input: Value) -> Result<ClientInvocation, Failure> {
     let a: BaselineReviseArgs = args(input)?;
     world(IssuesRequest::BaselineRevise {
         baseline: a.baseline,
@@ -924,7 +953,7 @@ fn baseline_revise(input: Value) -> Result<CliInvocation, Failure> {
     })
 }
 
-fn baseline_state(input: Value) -> Result<CliInvocation, Failure> {
+fn baseline_state(input: Value) -> Result<ClientInvocation, Failure> {
     let a: BaselineStateArgs = args(input)?;
     world(IssuesRequest::BaselineState {
         baseline: a.baseline,
@@ -933,7 +962,7 @@ fn baseline_state(input: Value) -> Result<CliInvocation, Failure> {
     })
 }
 
-fn baseline_resolve(input: Value) -> Result<CliInvocation, Failure> {
+fn baseline_resolve(input: Value) -> Result<ClientInvocation, Failure> {
     let a: ResolveArgs = args(input)?;
     world(IssuesRequest::BaselineResolve {
         baseline: a.id,
@@ -942,7 +971,7 @@ fn baseline_resolve(input: Value) -> Result<CliInvocation, Failure> {
     })
 }
 
-fn issue_baseline(input: Value) -> Result<CliInvocation, Failure> {
+fn issue_baseline(input: Value) -> Result<ClientInvocation, Failure> {
     let a: IssueBaselineArgs = args(input)?;
     world(IssuesRequest::IssueBaseline {
         reff: a.reff,
@@ -950,9 +979,28 @@ fn issue_baseline(input: Value) -> Result<CliInvocation, Failure> {
     })
 }
 
-fn packet(input: Value) -> Result<CliInvocation, Failure> {
+fn packet(input: Value) -> Result<ClientInvocation, Failure> {
     let a: RefArgs = args(input)?;
     world(IssuesRequest::Packet { reff: a.reff })
+}
+
+/// Attaching from a path is a LOCAL operation, not the World `attach` command:
+/// the World call takes bytes that are already on the content plane, and
+/// getting them there is what needs a filesystem. Same for saving one back.
+fn attach_file(input: Value) -> Result<ClientInvocation, Failure> {
+    let a: AttachFileArgs = args(input)?;
+    local(
+        LOCAL_ATTACH,
+        json!({ "reff": a.reff, "file": a.file, "comment": a.comment }),
+    )
+}
+
+fn attachment_save(input: Value) -> Result<ClientInvocation, Failure> {
+    let a: AttachmentSaveArgs = args(input)?;
+    local(
+        LOCAL_ATTACHMENT_GET,
+        json!({ "reff": a.reff, "id": a.id, "out": a.out }),
+    )
 }
 
 fn parse_position(value: &str) -> Option<BoardPos> {
@@ -1051,11 +1099,12 @@ mod tests {
     /// The commands no tool emits, as of this build.
     ///
     /// Two kinds, and both are named one by one rather than skipped by shape.
-    /// `inbox` and `access_plan` are driven through a LOCAL invocation, so the
-    /// World call a tool ends up making is not the one it returns. The text
-    /// splice and checkpoint commands are transport primitives for the live web
-    /// editor, not semantic agent actions. The rest have no agent surface at
-    /// all: they shipped on the CLI and the web client and were never given a
+    /// `inbox`, `access_plan`, `attach` and `attachment_get` are driven through
+    /// a LOCAL invocation — `attach_file` and `attachment_save` are their tools
+    /// — so the World call a tool ends up making is not the one it returns. The
+    /// text splice and checkpoint commands are transport primitives for the
+    /// live web editor, not semantic agent actions. The rest have no agent
+    /// surface at all: they shipped on the web client and were never given a
     /// tool.
     ///
     /// Writing them out is what makes the guard work. A command added after this
@@ -1128,7 +1177,7 @@ mod tests {
     #[test]
     fn tools_are_package_local_and_emit_world_calls() {
         let tools = tools();
-        assert_eq!(tools.len(), 56);
+        assert_eq!(tools.len(), 58);
         assert!(tools.iter().all(|tool| !tool.name().starts_with("issues_")));
         let invocation = tools
             .iter()

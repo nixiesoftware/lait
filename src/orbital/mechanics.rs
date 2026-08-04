@@ -39,11 +39,11 @@ use std::sync::{Arc, Mutex};
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 
-use issues::ids::{ActorId, DeviceId, SpaceId};
 use mechanics::actor;
 use mechanics::actor::device_from_seed;
 use mechanics::authorization::SealedKeyRecord;
 use mechanics::authorization::{self as crypto, SpaceKey};
+use mechanics::ids::{ActorId, DeviceId, SpaceId};
 use mechanics::membership::{self as acl, AclAction, AclOp, AclState};
 use mechanics::space::Genesis;
 use mechanics::space::{Authority, Effect};
@@ -1215,7 +1215,7 @@ impl SpaceAuthority {
             if !held.contains(&e.id) {
                 lines.push(format!(
                     "authorized key epoch gen {} ({}) is not sealed to this device — \
-                     content under it is invisible here; run `lait sync`",
+                     content under it is invisible here; sync with a peer first",
                     e.gen,
                     data_encoding::HEXLOWER.encode(&e.id),
                 ));
@@ -1253,7 +1253,7 @@ impl SpaceAuthority {
     /// `sponsor` names the human whose standing seats it. Sponsorship is
     /// rendered as information — a badge + link the viewer draws — never a
     /// distinct actor class.
-    pub fn members(&self) -> Vec<issues::dto::MemberDto> {
+    pub fn members(&self) -> Vec<crate::dto::MemberDto> {
         let mut inner = self.lock();
         let acl = inner.acl();
         let plane = inner.actor_plane();
@@ -1270,7 +1270,7 @@ impl SpaceAuthority {
                     .into_iter()
                     .min()
                     .and_then(|d| mechanics::actor::did_key_from_device(&d));
-                issues::dto::MemberDto {
+                crate::dto::MemberDto {
                     key: actor.as_str().to_string(),
                     role: acl::role_label(&grants).to_string(),
                     did,
@@ -1283,7 +1283,7 @@ impl SpaceAuthority {
     }
 
     /// The signed ACL DAG replayed as an audit log.
-    pub fn member_log(&self) -> Vec<issues::dto::MemberLogEntry> {
+    pub fn member_log(&self) -> Vec<crate::dto::MemberLogEntry> {
         let inner = self.lock();
         let genesis = inner.ledger.genesis().clone();
         let events = inner.ledger.actor_events();
@@ -1291,7 +1291,7 @@ impl SpaceAuthority {
         let (_, audit) = acl::replay_with_audit(&genesis, &events, &ops);
         audit
             .into_iter()
-            .map(|entry| issues::dto::MemberLogEntry {
+            .map(|entry| crate::dto::MemberLogEntry {
                 op: entry.hash,
                 actor: entry.by.map(|a| a.as_str().to_string()).unwrap_or_default(),
                 kind: entry.kind.to_string(),
@@ -1314,7 +1314,7 @@ impl SpaceAuthority {
             None if ActorId::parse(actor_str).is_some() => {
                 return Err(anyhow!(
                     "that actor's identity is not known locally yet — has the joiner \
-                     reached this node? (`lait connect` from their side carries it)"
+                     reached this node? (a Contact from their side carries it)"
                 ))
             }
             None => {
@@ -1381,6 +1381,9 @@ impl SpaceAuthority {
     ///
     /// Refuses to demote the last admin, and to promote an agent (agents hold
     /// no membership authority by construction). Idempotent per layer.
+    ///
+    /// The agent refusal is one of the three things a re-granting feature would
+    /// have to change; `mechanics::acl::sponsored_agent_grants` lists them all.
     pub fn member_set_role(&self, actor_str: &str, admin: bool) -> Result<ActorId> {
         // Phase 1 (locked): resolve, gate, flip ACL standing, and collect the
         // admin-capability grant ids to revoke on demotion.
@@ -1718,7 +1721,7 @@ impl SpaceAuthority {
             let agent = inner.resolve_actor(key).ok_or_else(|| {
                 anyhow!(
                     "that agent's identity is not known here yet — the agent must reach this \
-                     node once so its self-inception lands (run `lait connect` from the agent's \
+                     node once so its self-inception lands (a Contact from the agent's \
                      side, or share an invite it connects with); then `members agent <key>` \
                      sponsors it"
                 )
@@ -2007,7 +2010,10 @@ impl SpaceAuthority {
     }
 
     /// The effective scoped assignments (all members, or one actor's).
-    pub fn assignment_rows(&self, actor: Option<&ActorId>) -> Vec<issues::dto::AssignmentDto> {
+    pub fn assignment_rows(
+        &self,
+        actor: Option<&ActorId>,
+    ) -> Vec<mechanics::assignment::AssignmentDto> {
         let mut inner = self.lock();
         let acl_state = inner.acl();
         let subjects: Vec<ActorId> = match actor {
@@ -2017,7 +2023,7 @@ impl SpaceAuthority {
         let mut rows = Vec::new();
         for subject in subjects {
             for (id, grant) in acl_state.effective_assignments(&subject) {
-                rows.push(issues::dto::AssignmentDto {
+                rows.push(mechanics::assignment::AssignmentDto {
                     grant_id: data_encoding::HEXLOWER.encode(&id),
                     actor: subject.as_str().to_string(),
                     world: grant.capability.world.clone(),

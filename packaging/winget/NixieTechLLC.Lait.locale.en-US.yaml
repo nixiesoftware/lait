@@ -11,15 +11,16 @@ ShortDescription: A local-first, peer-to-peer, end-to-end-encrypted issue tracke
 Description: |-
   lait is a decentralized, offline-first alternative to Linear. Issues are Loro
   CRDT documents synced peer-to-peer over iroh (QUIC + NAT traversal) with no
-  central server, backed by a durable local git store, with end-to-end
-  encryption gated by a signed membership graph. It exposes CLI, TUI, and MCP
-  (AI-agent) surfaces over one git-backed daemon.
+  central server, backed by a durable local content-addressed store, with
+  end-to-end encryption gated by a signed membership graph. There is no command
+  surface: the binary is a launcher that serves a local web app on loopback, and
+  exposes the same operations to AI agents over MCP.
 Tags:
   - issue-tracker
   - p2p
   - crdt
   - local-first
   - iroh
-  - cli
+  - mcp
 ManifestType: defaultLocale
 ManifestVersion: 1.6.0

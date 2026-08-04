@@ -17,7 +17,7 @@
  * theme switch, would otherwise be the alternative.
  *
  * **The JavaScript engine, and a fixed grammar list.** Shiki's default engine
- * is Oniguruma compiled to WASM, which the runtime fetches. `lait serve` embeds
+ * is Oniguruma compiled to WASM, which the runtime fetches. The HTTP head embeds
  * its bundle in the binary and answers on loopback with no network beyond it, so
  * a fetched `.wasm` is a broken code block on an air-gapped machine. The JS
  * engine is pure bundle. The grammars are listed explicitly for the same reason

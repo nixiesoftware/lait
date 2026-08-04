@@ -3,12 +3,11 @@ name = "world-interface"
 version = "0.6.3"
 edition = "2021"
 rust-version = "1.91"
-description = "Composable CLI and MCP interfaces for LAIT World applications"
+description = "Composable client interfaces for LAIT World applications"
 license = "MIT OR Apache-2.0"
 publish = false
 
 [dependencies]
-clap = "4"
 replica = { path = "../replica" }
 runtime = { path = "../runtime" }
 serde_json = "1"

@@ -122,13 +122,6 @@ issues-app = { package = "lait-issues-app", path = "products/issues-app" }
 # randomness for ULID minting (app-minted DocId/ProjectId/… ids).
 getrandom = "0.3"
 
-# Terminal rendering for the inline `lait members` picker (`members_ui`), and the
-# width probe the invite QR uses. The full-screen TUI these were introduced for is
-# gone — the browser is the interactive surface now (`docs/UI.md`) — but the
-# members picker is a CLI ergonomic in its own right, so both stay.
-ratatui = "0.29"
-crossterm = { version = "0.28", features = ["event-stream"] }
-
 # E2EE (P3) is the KERNEL's job now: ed25519 signing, X25519 sealed boxes, and
 # the ChaCha20-Poly1305 envelope all live in `mechanics::crypto`, which is the
 # only crate that names those primitives. The app deliberately lists NONE of
@@ -138,17 +131,6 @@ crossterm = { version = "0.28", features = ["event-stream"] }
 # async runtime + streams
 tokio = { version = "1", features = ["full"] }
 n0-future = "0.3"
-
-# cli
-clap = { version = "4", features = ["derive"] }
-# terminal QR for `lait invite --qr`. Pure-Rust; default features off to avoid
-# pulling the `image` crate (we only render unicode half-blocks).
-qrcode = { version = "0.14", default-features = false }
-# `lait completions <shell>` and `lait man` — generated at runtime from the same
-# clap command tree, so packagers (Homebrew/Scoop/etc.) can emit shell
-# completions and a man page during install with no separate spec to drift.
-clap_complete = "4"
-clap_mangen = "0.2"
 
 # serialization: serde_json for state/control protocol, postcard for wire messages
 serde = { version = "1", features = ["derive"] }
@@ -160,7 +142,7 @@ data-encoding = "2.6"
 blake3 = "1"
 
 # cross-platform local IPC for the daemon control channel: a Unix-domain socket
-# on unix, a named pipe on Windows — same API, so the daemon/CLI/MCP are portable.
+# on unix, a named pipe on Windows — same API, so the daemon and its heads are portable.
 interprocess = { version = "2", features = ["tokio"] }
 # cross-platform advisory file lock for the single-instance daemon guard
 # (replaces the unix-only flock(2)).
@@ -173,9 +155,9 @@ directories = "5"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-# `lait serve` — the local HTTP surface (SERVE.md). axum is a thin router over
-# hyper + tower + http, all three of which are already in the tree transitively
-# (iroh, self_update), so the adapter buys routing and SSE rather than a new
+# The local app's HTTP surface (docs/SERVE.md), which bare `lait` launches. axum
+# is a thin router over hyper + tower + http, all three already in the tree
+# transitively (iroh, self_update), so the adapter buys routing and SSE not a new
 # stack. `tokio-stream`'s `sync` feature is the `broadcast::Receiver` -> `Stream`
 # multiplex the doorbell stream needs.
 # `ws` is on for the browser socket (`src/serve/socket.rs`). It pulls
@@ -199,21 +181,16 @@ rmcp = { version = "1.7", features = ["server", "macros", "transport-io"] }
 # trusting it. Same "generate/check, don't hand-maintain twice" rule as
 # `mcp_parity.rs`.
 schemars = "1"
-# Native `lait update`: GitHub-release self-updater. `ureq` backend + `rustls`
-# keeps it pure-Rust (no reqwest/native-tls/OpenSSL C dep); gzip/zip extraction
-# only (no xz), matching the `.tar.gz` release archives.
+# The self-updater behind `Request::HostUpdate` (`src/update.rs`): a
+# GitHub-release fetch + atomic self-replace. `ureq` backend + `rustls` keeps it
+# pure-Rust (no reqwest/native-tls/OpenSSL C dep); gzip/zip extraction only (no
+# xz), matching the `.tar.gz` release archives.
 self_update = { version = "0.44.0", default-features = false, features = ["ureq", "rustls", "archive-tar", "archive-zip", "compression-flate2", "compression-zip-deflate"] }
-
-# unix-only: reset SIGPIPE to default so piping CLI output to head/less/grep
-# exits cleanly instead of panicking (Rust ignores SIGPIPE by default). Already
-# present transitively (tokio); declared directly for the startup reset in app.rs.
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
 
 # windows-only: keep our handles ours. `CreateProcess` inherits all-or-nothing,
 # so the daemon we spawn would otherwise come up holding a captured caller's
 # stdout pipe and never let it see EOF. Needs `SetHandleInformation` (clear the
-# inherit flag on our own stdio — `disinherit_stdio` in app.rs) and
+# inherit flag on our own stdio — `process::disinherit_stdio`) and
 # `CreateProcessW` + `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` (inherit exactly the
 # three handles we name — `daemon_spawn`), which std only exposes as an unstable
 # feature. Already present transitively (iroh/tokio); declared directly for those.
@@ -236,6 +213,15 @@ windows-sys = { version = "0.61", features = [
     # DPAPI wrap for device-bound secrets (never for portable recovery keys).
     "Win32_Security_Cryptography",
 ] }
+
+# apple-only, tests: the plan-13 commit-cost baseline reads peak RSS, and Darwin
+# is the one target with no other route to it — Linux reads /proc and Windows
+# calls GetProcessMemoryInfo. `libc` was a direct dependency until the CLI's
+# SIGPIPE reset went with the command surface; this is what still needs it, and
+# it needs it only here. Neither a Windows nor a Linux build compiles the arm
+# that uses it, so nothing but the macOS job can catch its absence.
+[target.'cfg(target_vendor = "apple")'.dev-dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 mechanics = { path = "crates/mechanics", features = ["fault-injection"] }

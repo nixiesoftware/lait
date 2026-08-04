@@ -26,7 +26,7 @@
 //! lifecycle concerns. There is no catch-all refusal.
 
 use runtime::poison::LockRecovering;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -63,7 +63,12 @@ fn discover_space(home: &Path) -> Result<SpaceId> {
     let root = orbital_store_root(home);
     let mut found = None;
     for entry in std::fs::read_dir(&root)
-        .with_context(|| format!("no orbital store at {} — run `lait init`", root.display()))?
+        .with_context(|| {
+            format!(
+                "no orbital store at {} — found a Space here first",
+                root.display()
+            )
+        })?
         .flatten()
     {
         if let Some(name) = entry.file_name().to_str() {
@@ -76,7 +81,12 @@ fn discover_space(home: &Path) -> Result<SpaceId> {
             }
         }
     }
-    found.ok_or_else(|| anyhow!("no Space under {} — run `lait init`", root.display()))
+    found.ok_or_else(|| {
+        anyhow!(
+            "no Space under {} — found a Space here first",
+            root.display()
+        )
+    })
 }
 
 /// The sole product-side entrance to one active Space.
@@ -386,7 +396,7 @@ impl StationHost {
         // Station and the persisted Neighbors below still bootstrap the swarm —
         // but doing it because the registry would not parse is worth saying,
         // since the symptom is a node that simply never finds anyone.
-        let mut bootstrap: Vec<issues::ids::DeviceId> = match load_seeds(home) {
+        let mut bootstrap: Vec<mechanics::ids::DeviceId> = match load_seeds(home) {
             Ok(seeds) => seeds.into_iter().map(|s| s.id).collect(),
             Err(error) => {
                 tracing::warn!(%error, "starting with no pinned bootstrap seeds");
@@ -477,8 +487,9 @@ impl StationHost {
         // The implementation self-check. Receipts pin whichever implementation
         // id is ACTIVE in the ledger — not this build's — so a build whose
         // descriptor has moved on would silently attest an implementation it
-        // is not. Say so at open; `lait issues world-upgrade` (admin) activates this
-        // build's id.
+        // is not. Say so at open; an admin activates this build's id with the
+        // World's own upgrade operation (`{"cmd":"world_upgrade"}` on the
+        // Issues RPC route).
         {
             use runtime::world::AuthorityView;
             let device = mechanics::actor::device_from_seed(&device_seed);
@@ -532,6 +543,17 @@ impl StationHost {
         self.worlds
             .ensure_primary(&self.station, world, &self.identity)
             .is_ok()
+    }
+
+    /// Attempt to dock every installed World, returning whether at least one
+    /// is usable. Do not short-circuit: each World owns an independent Session
+    /// that its projector and calls need even when an earlier World docked.
+    fn ensure_world_sessions(&self) -> bool {
+        let mut any_docked = false;
+        for world in self.worlds.world_ids() {
+            any_docked |= self.ensure_world_session(world);
+        }
+        any_docked
     }
 
     fn track_activity(&self) -> StationHostActivity<'_> {
@@ -774,7 +796,7 @@ impl StationHost {
                 return Reply::error(
                     call,
                     Code::Unavailable,
-                    "not admitted to this space yet — run `lait connect` to reach an admin \
+                    "not admitted to this space yet — reach an admin from the local app \
                      and complete admission before using this World",
                 );
             }
@@ -801,7 +823,7 @@ impl StationHost {
                     call,
                     Code::Denied,
                     "this agent identity holds no standing in the space yet — a human member \
-                     must sponsor it (`lait members agent <key>`) before it can author. \
+                     must sponsor it from the members view before it can author. \
                      Nothing was changed.",
                 ),
             }
@@ -961,7 +983,7 @@ impl StationHost {
             Some(name) => load_agent_seed(&self.home, name).map_err(|e| {
                 Response::denied(format!(
                     "no local agent identity '{name}' on this node — provision one with \
-                     `lait members agent --new {name}` (it self-incepts + is sponsored in \
+                     sponsoring `{name}` from the members view (it self-incepts + is sponsored in \
                      one step), then act as it: {e}"
                 ))
             }),
@@ -1079,10 +1101,7 @@ impl StationHost {
     /// Ring the authority plane, if there is a docked Session to ring through.
     /// Before admission there is no Session and nothing is subscribed anyway.
     fn publish_authority_advanced(&self) {
-        let docked = self
-            .worlds
-            .world_ids()
-            .any(|world| self.ensure_world_session(world));
+        let docked = self.ensure_world_sessions();
         if !docked {
             return;
         }
@@ -1489,7 +1508,7 @@ impl StationHost {
     }
 
     /// The one-shot identity + standing + view-completeness projection
-    /// (`lait whoami`, the MCP `whoami` tool). Every fact resolved once: actor,
+    /// (the MCP `whoami` tool, the viewer's identity panel). Every fact resolved once: actor,
     /// device, `did:key`, space, role, capabilities, sponsor, and the loud
     /// partial-view signal — so "who am I / what may I do / is my view complete"
     /// is a glance, never a deduction (`docs/plans/09` §3.4).
@@ -1527,7 +1546,7 @@ impl StationHost {
             }
             None => (None, "none".to_string(), false, false, vec![], false, None),
         };
-        Response::Whoami(issues::dto::WhoamiDto {
+        Response::Whoami(crate::dto::WhoamiDto {
             actor: actor_str,
             device: device.as_str().to_string(),
             did,
@@ -1550,14 +1569,10 @@ impl StationHost {
     /// step. Afterwards a client acts as it via `--as <name>` / MCP.
     fn agent_provision(&self, name: &str) -> Response {
         // The name becomes a directory under the home; keep it a plain segment.
-        if name.is_empty()
-            || name.contains(['/', '\\'])
-            || name.contains("..")
-            || name.contains(':')
-        {
-            return Response::err(
-                "an agent name must be a plain identifier (no path separators or '..')",
-            );
+        // Said here so the refusal names the verb, and enforced again wherever
+        // the name is joined into a path.
+        if !is_plain_agent_name(name) {
+            return Response::err(AGENT_NAME_RULE);
         }
         // Only a human member may sponsor; surface it before minting a seed.
         if !self.mechanics.am_i_member() {
@@ -1795,7 +1810,7 @@ impl StationHost {
         }
     }
 
-    /// The (issues, projects) counts from the docked Session's catalog
+    /// The aggregate (items, scopes) counts from docked World Sessions
     /// snapshot — `None` when the projection is UNAVAILABLE (undocked, or a
     /// query failed). Status reports the truth; it never converts an
     /// unavailable projection into false zeros.
@@ -1803,21 +1818,18 @@ impl StationHost {
         // A Station can start before this device is admitted. Once authority
         // advances, status must retry lazy docking; otherwise every projector
         // remains absent even after its replicated Bodies arrive.
-        let docked = self
-            .worlds
-            .world_ids()
-            .any(|world| self.ensure_world_session(world));
+        let docked = self.ensure_world_sessions();
         if !docked {
             return None;
         }
         self.worlds
             .status()
-            .map(|status| (status.items, status.groups, status.name, status.description))
+            .map(|status| (status.items, status.scopes, status.name, status.description))
     }
 
     fn status(&self) -> Response {
         let counts = self.counts();
-        let (issues, projects, name, description) =
+        let (items, scopes, name, description) =
             counts
                 .clone()
                 .unwrap_or((0, 0, String::new(), String::new()));
@@ -1829,8 +1841,8 @@ impl StationHost {
             online_peers: self.online_peers(),
             space: Some(self.station.space_id().as_str().to_string()),
             counts_unavailable: counts.is_none(),
-            issues,
-            projects,
+            items,
+            scopes,
             membership: if self.mechanics.am_i_member() {
                 "member".into()
             } else {
@@ -1918,7 +1930,7 @@ impl StationHost {
             (None, false) => {
                 return Response::err(format!(
                     "no member here matches '{who}' — name one by its full actor id or a \
-                     prefix of it (`lait members` lists them)"
+                     prefix of it (the members view lists them)"
                 ))
             }
         };
@@ -1960,7 +1972,7 @@ impl StationHost {
     /// onboarding gate list (`docs/UI.md`). Pure over the snapshot the daemon
     /// already computes — the same core the legacy node used.
     fn diagnose(&self, expected_space: Option<String>) -> Response {
-        let (issues, projects, _name, _description) =
+        let (items, scopes, _name, _description) =
             self.counts()
                 .unwrap_or((0, 0, String::new(), String::new()));
         let space = self.station.space_id().as_str().to_string();
@@ -1976,8 +1988,8 @@ impl StationHost {
             name: "",
             membership,
             online_peers: self.online_peers(),
-            projects,
-            issues,
+            scopes,
+            items,
             expected_space: expected_space.as_deref(),
             degraded_recovery: &degraded,
             rekey_pending: None,
@@ -1989,7 +2001,7 @@ impl StationHost {
     /// Pin a bootstrap seed by device id (or an orbital Coordinates link's
     /// approach Station) into the node-local registry.
     fn seed_add(&self, arg: &str) -> Response {
-        let (id, space) = match issues::ids::DeviceId::parse(arg.trim()) {
+        let (id, space) = match mechanics::ids::DeviceId::parse(arg.trim()) {
             Some(id) => (id, String::new()),
             None => match runtime::coordinates::SignedCoordinates::parse_link(arg.trim())
                 .ok()
@@ -2031,8 +2043,8 @@ impl StationHost {
         let loaded = match load_seeds(&self.home) {
             Ok(seeds) => seeds,
             // "You have pinned nothing" and "your seed file is broken" are
-            // different answers to `lait seed list`, and only one of them is
-            // actionable.
+            // different answers to `Request::SeedList`, and only one of them
+            // is actionable.
             Err(error) => return Response::err(error),
         };
         let seeds = loaded
@@ -2044,7 +2056,7 @@ impl StationHost {
                     s.id.key_bytes()
                         .map(|k| online.contains(&k))
                         .unwrap_or(false);
-                issues::dto::SeedDto {
+                crate::dto::SeedDto {
                     id: s.id.as_str().to_string(),
                     nick: s.nick,
                     space: s.space,
@@ -2303,9 +2315,10 @@ impl StationHost {
         // to dial, or a Coordinates link — whose signed approach routes are
         // taught to the transport first, so the dial resolves even after the
         // peer's addresses changed. Coordinates *entry* (store bootstrap)
-        // stays `lait join`'s job.
+        // stays `HostSpaceEnter`'s job.
         let link = link.trim();
-        let station = match issues::ids::DeviceId::parse(link).and_then(|d| Key::from_device(&d)) {
+        let station = match mechanics::ids::DeviceId::parse(link).and_then(|d| Key::from_device(&d))
+        {
             Some(station) => Some(station),
             None => runtime::coordinates::SignedCoordinates::parse_link(link)
                 .ok()
@@ -2763,23 +2776,22 @@ impl StationHost {
 
     /// Translate one Observation into the frame every subscriber receives.
     ///
-    /// The Observation names Bodies; a client re-reads by project and doc.
-    /// This is what makes the frame actionable — and a local commit and a
-    /// peer's incorporated one arrive on the same stream, so both ring alike.
+    /// The Observation names Bodies; each hosted World says which of its own
+    /// scopes and planes moved. That is what makes the frame actionable — and a
+    /// local commit and a peer's incorporated one arrive on the same stream, so
+    /// both ring alike.
     fn frame_for(&self, record: &runtime::world::Observation) -> Doorbell {
-        let projected = self.worlds.project(self.station.space_id(), record);
-        let dirty_by_project = projected.dirty_by_project;
-        let dirty_catalog = projected.dirty_catalog;
-        let body_news = !dirty_by_project.is_empty() || !dirty_catalog.is_empty();
+        let invalidations = self.worlds.project(self.station.space_id(), record);
+        let body_news = !invalidations.is_empty();
         Doorbell {
             epoch: record.epoch.as_u64(),
             seq: record.sequence,
             reset: record.reset,
-            dirty_by_project,
-            dirty_catalog,
+            invalidations,
             authority_advanced: record.authority,
             // Authority alone advances no feed: it is membership news, and
-            // `Activity` projects issue history. One record can carry both.
+            // `Activity` projects the World's own history. One record can
+            // carry both.
             activity_advanced: body_news,
             presence_advanced: record.authority,
         }
@@ -2788,8 +2800,7 @@ impl StationHost {
     async fn stream_subscribe(self: &Arc<Self>, mut write_half: tokio::io::WriteHalf<LocalStream>) {
         // Without standing there is no Session to observe yet — emit the reset
         // and return; the client re-subscribes after admission.
-        let world = crate::world::contract::world_id();
-        if !self.ensure_world_session(&world) {
+        if !self.ensure_world_sessions() {
             let reset = Doorbell {
                 reset: true,
                 ..Default::default()
@@ -2806,7 +2817,7 @@ impl StationHost {
         self.ensure_doorbell_pump().await;
         let epoch = match self
             .worlds
-            .with_primary(&world, |session| session.epoch().as_u64())
+            .with_any_primary(|session| session.epoch().as_u64())
         {
             Some(epoch) => epoch,
             None => return,
@@ -3023,15 +3034,36 @@ fn now_secs() -> u64 {
 /// Where a co-located sponsored agent's identity seed lives: `agents/<name>/
 /// secret.key` under the daemon's home. Per-agent, tiny (64 hex bytes), beside
 /// the one shared store — Architecture B: N signing identities, O(1) storage.
-fn agent_seed_path(home: &Path, name: &str) -> PathBuf {
-    home.join("agents").join(name).join("secret.key")
+fn agent_seed_path(home: &Path, name: &str) -> Result<PathBuf> {
+    if !is_plain_agent_name(name) {
+        return Err(anyhow!("{AGENT_NAME_RULE}"));
+    }
+    Ok(home.join("agents").join(name).join("secret.key"))
 }
+
+/// Whether an agent name is a single path segment.
+///
+/// The name is wire-supplied — `act_as` carries it from a client — and it
+/// becomes a directory under this home, so it is checked wherever it is joined
+/// into a path and not only where an agent is created. Provisioning validated
+/// it; loading did not, and loading is the site a client can aim.
+fn is_plain_agent_name(name: &str) -> bool {
+    // Asked structurally rather than by substring: a plain name is exactly one
+    // ordinary path component. Spelling this as a character blocklist let "."
+    // through — it holds no separator and no "..", yet names the parent
+    // directory, so a seed path built from it escapes the agents base.
+    let mut parts = Path::new(name).components();
+    matches!(parts.next(), Some(Component::Normal(_))) && parts.next().is_none()
+}
+
+const AGENT_NAME_RULE: &str =
+    "an agent name must be a plain identifier (no path separators or '..')";
 
 /// Create (first call) or load a co-located agent identity seed under `home`.
 /// The seed is the agent's identity — self-certifying, reconstructable, and
 /// persisted outside any working-directory sandbox (§10 finding 1).
 fn load_or_create_agent_seed(home: &Path, name: &str) -> Result<[u8; 32]> {
-    let path = agent_seed_path(home, name);
+    let path = agent_seed_path(home, name)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -3046,7 +3078,7 @@ fn load_or_create_agent_seed(home: &Path, name: &str) -> Result<[u8; 32]> {
 
 /// Load an existing co-located agent identity seed; errors if none is provisioned.
 fn load_agent_seed(home: &Path, name: &str) -> Result<[u8; 32]> {
-    let path = agent_seed_path(home, name);
+    let path = agent_seed_path(home, name)?;
     let hex = std::fs::read_to_string(&path)
         .with_context(|| format!("no agent identity '{name}' provisioned"))?;
     let raw = data_encoding::HEXLOWER_PERMISSIVE
@@ -3075,7 +3107,7 @@ fn comms_options(
     transport: Arc<dyn Transport>,
     seed: [u8; 32],
     mechanics: &SpaceAuthority,
-    bootstrap: Vec<issues::ids::DeviceId>,
+    bootstrap: Vec<mechanics::ids::DeviceId>,
     advertise: Vec<runtime::beacon::RouteHint>,
 ) -> CommsOptions {
     let export = mechanics.clone();
@@ -3176,7 +3208,7 @@ async fn write_line_half<T: serde::Serialize>(
 /// converges through. The id is the identity; nick/space are advisory.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct SeedRecord {
-    id: issues::ids::DeviceId,
+    id: mechanics::ids::DeviceId,
     #[serde(default)]
     nick: String,
     #[serde(default)]
@@ -3207,7 +3239,7 @@ fn load_seeds(home: &Path) -> Result<Vec<SeedRecord>, String> {
     let total = rows.len();
     let kept: Vec<SeedRecord> = rows
         .into_iter()
-        .filter(|r| issues::ids::DeviceId::parse(r.id.as_str()).is_some())
+        .filter(|r| mechanics::ids::DeviceId::parse(r.id.as_str()).is_some())
         .collect();
     // The warn this function's contract has always promised.
     if kept.len() != total {

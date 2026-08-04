@@ -1,5 +1,87 @@
 # Changelog
 
+## Unreleased — lait is not a command surface
+
+> **The CLI is gone.** Not deprecated, not hidden behind a flag — deleted. `lait`
+> is now a launcher that picks one of three processes and starts it, and every
+> operation that used to be a verb is a request one of those three carries.
+>
+> ```
+> lait                                            # the local app, and the daemon under it
+>   [--json] [--port N] [--orbit SEL] [--open]
+> lait daemon [--home <dir>]                      # the identity-scoped host, headless
+> lait mcp                                        # the stdio head an agent speaks
+> lait --version                                  # which build this is
+> ```
+>
+> Anything else exits `1` and says what the three modes are. There is no
+> grammar left to parse: no `init`, `join`, `invite`, `issues …`, `members`,
+> `orbits`, `config`, `serve`, `watch`, `status`, `doctor`, `rebuild`,
+> `install-mcp`, `update`, `completions`, or `man`.
+
+### Where everything went
+
+- **The app is the interface.** Bare `lait` starts the daemon and serves the
+  browser client on `127.0.0.1:7717`, which is now the default rather than a
+  `serve` subcommand. `--json` prints one readiness line — `{url, token, port}` —
+  before the listener accepts, so a parent process can read one line and know
+  the port is live.
+- **Founding and joining are a screen, not a command.** With no space on this
+  machine you land on **Welcome**: *Found a space* (`host_space_found`) or *Use
+  an invite* (`host_space_enter`). Nothing is created implicitly, so the first
+  act is still deliberate.
+- **Bootstrap lives on the identity-scoped daemon**, behind `POST /api/host/rpc`:
+  formation, device consent, local config, the Orbit registry
+  (`host_orbit_forget` / `host_orbit_prune` / `host_orbit_rebuild`), MCP install,
+  self-update and restart, and orientation (`host_context`). That route exists
+  because founding a Space is precisely the state in which there is no space id
+  to put in a path — every other `/api` route is `/api/spaces/{id}/…`.
+- **Devices and recovery got a home.** A new Settings tab covers device
+  enrolment, revocation, listing, and the space custody share — the enrolment
+  half that runs on a machine with no membership anywhere (`host_device_consent`)
+  is on the host plane for the same reason formation is.
+- **Self-update is node maintenance.** `host_update` swaps the binary (the
+  daemon is the process that knows which build it is running), and `host_restart`
+  stops the daemon *under* a head so the swap takes effect; the head stands a
+  fresh one back up on the next send. `Stop` is deliberately not on the host
+  plane — a page able to send it could kill the server answering it.
+- **`watch --exec` became a stream.** `GET /api/events` is the doorbell SSE
+  stream; presence, carets, and drained signals ride the `/api/session` socket.
+- **Scripting is HTTP.** There is no `--json` on a verb because there are no
+  verbs; the three planes return the same versioned DTOs the MCP tools do.
+  `ci/smoke-p0.sh` now drives the head instead of the CLI, which makes the smoke
+  test an executable specification of the interface.
+
+### Removed behaviour, stated plainly
+
+- **Branch inference is gone.** lait no longer reads the issue off your git
+  branch, and `issue_start` no longer cuts one. Those were properties of a shell
+  running inside your checkout; the app does not run inside anything.
+- **Shell completions and the man page are gone**, along with the command tree
+  they were generated from.
+
+### Custody, restated because it now has one enforcement point
+
+A sponsored agent is **not** read-only and never was second-class: it holds
+`Standing::Write`, and through its own node (`lait mcp`) it files, comments,
+closes, and deletes issues like any contributor. What the head refuses is a
+write routed *into* an agent-held Orbit by somebody else — a Station carrying
+its own identity directory signs with that seed, so such a write would go out
+over the agent's signature, and Mechanics would approve it because it evaluates
+the signer's grants. That refusal is about **custody, not standing**: it must
+stay no however wide anybody's grants become. Reads are never refused —
+observing a hosted identity's board signs nothing. `Catalog::signs_with_own_seed`
+is the one predicate; `serve::borrowed_key_refusal` is the one refusal.
+
+### Docs
+
+- New [`docs/SERVE.md`](docs/SERVE.md): the three planes, the Bearer/Origin
+  posture, and the custody fence.
+- `README.md`, `CLAUDE.md`, `docs/ARCHITECTURE.md`, `docs/UI.md`,
+  `docs/AGENT-EXPERIENCE.md`, `docs/INSTALL.md`, `docs/PROTOCOL.md`,
+  `docs/SPECS.md`, `docs/THREAT-MODEL.md`, `docs/COMPATIBILITY.md`,
+  `docs/README.md`, `viewer/README.md`, the packaging manifests, and the bundled
+  skills were swept for CLI invocations; each one now names what to do instead.
 ## v0.6.3 — a cache miss is not a corrupt ledger
 
 > **A one-fix release.** If v0.6.2 opens your Space, this changes nothing you
@@ -70,7 +152,7 @@ RUST_LOG=mechanics=debug lait daemon
 > It refuses rather than races if a Station is up.
 >
 > **Every node must be on 0.6.2.** Contact moved from `lait/contact/1` to
-> `lait/contact/2`, and the local control protocol from 6 to 8 with its minimum
+> `lait/contact/2`, and the local control protocol from 6 to 9 with its minimum
 > raised to match. Peers on different generations share no ALPN and never
 > connect; there is no half-speaking window to ride out and no in-band fallback.
 

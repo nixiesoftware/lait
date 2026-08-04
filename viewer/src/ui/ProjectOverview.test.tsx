@@ -97,8 +97,7 @@ describe("ProjectOverview", () => {
     await act(async () => {
       await store.handleDoorbell({
         space: "local", epoch: 1, seq: 1, reset: false,
-        dirty_by_project: [{ project_id: project.id, project_key: project.key, docs: ["doc_1"] }],
-        dirty_catalog: [],
+        invalidations: [{ world: "com.lait.issues", dirty: [{ kind: "project", id: project.id, label: project.key, docs: ["doc_1"] }], planes: [] }],
         authority_advanced: false, activity_advanced: false, presence_advanced: false,
       });
       await new Promise((resolve) => setTimeout(resolve, 0));

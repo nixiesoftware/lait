@@ -21,7 +21,10 @@ impl LocalOrbitId {
     ///
     /// Registry paths are absolute, but the normalization also makes separator
     /// and Windows case drift harmless. It does not canonicalize through the
-    /// filesystem, so an id remains derivable after the store goes missing.
+    /// filesystem, so an id remains derivable after the store goes missing —
+    /// which makes it the *caller's* job to hand over a canonical path.
+    /// [`crate::config::Selection`] is where that happens for every store this
+    /// node binds; two spellings of one directory are two Orbits here.
     pub fn for_store(path: &Path) -> Self {
         let normalized = normalize(path);
         let digest = blake3::derive_key("lait.local-orbit-id.v1", normalized.as_bytes());
@@ -97,9 +100,9 @@ impl OrbitAddress {
 /// The local Orbits one client is allowed to address.
 ///
 /// This is intentionally not serialized in `ClientRequest`: a caller cannot
-/// grant itself access by asserting a larger set. CLI/MCP construct a pinned
-/// scope from their resolved home. The web adapter applies its broader identity
-/// visibility policy before constructing a catalog-resolved route. The
+/// grant itself access by asserting a larger set. The MCP head constructs a
+/// pinned scope from its resolved home; the web head applies its broader
+/// identity visibility policy before constructing a catalog-resolved route. The
 /// Daemon resolves every explicit address through its own Catalog
 /// and never accepts an allowed set as a wire claim.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -109,7 +112,7 @@ pub struct ClientScope {
 }
 
 impl ClientScope {
-    /// A single-Orbit scope for a cwd-bound CLI or MCP server.
+    /// A single-Orbit scope for a cwd-bound head, such as the MCP server.
     pub fn pinned(orbit: LocalOrbitId) -> Self {
         Self {
             default_orbit: Some(orbit.clone()),

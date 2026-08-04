@@ -19,18 +19,20 @@
 
 //! lait: an orbital shell for local-first, peer-to-peer collaboration.
 //!
-//! One binary, four roles:
+//! One binary, three processes — and no command surface. Everything a verb used
+//! to do is a request one of these carries:
 //!   * `lait daemon` is the identity-scoped host: one local process endpoint,
 //!     an Orbit directory/router, identity-keyed transport hubs, and zero or
 //!     more in-process StationHosts.
-//!   * `lait <cmd>` is the cwd-scoped navigation client, selecting an Orbit and
-//!     driving the daemon or one installed World over an explicit route.
-//!   * `lait serve` binds that same façade to loopback HTTP + SSE so a browser
-//!     can be a client too ([`serve`], `docs/UI.md`). It owns no Station.
-//!   * `lait mcp` exposes the same Layer-B façade as MCP tools for an agent.
+//!   * `lait mcp` exposes the Layer-B façade as MCP tools for an agent.
+//!   * bare `lait` binds that same façade to loopback HTTP + SSE so a browser
+//!     can be a client too ([`serve`], `docs/UI.md`), and starts the daemon
+//!     under it. It owns no Station.
 //!
-//! The crate is split lib + bin so integration tests, doctests, and the MCP/DTO
-//! parity check can exercise the same code the binary runs. See `docs/`.
+//! The two heads are *clients* — see [`host_client`] for the plumbing they
+//! share. The crate is split lib + bin so integration tests, doctests, and the
+//! MCP/DTO parity check can exercise the same code the binary runs; the binary
+//! itself is only a launcher. See `docs/`.
 //!
 //! Layering (see `docs/ARCHITECTURE.md` and `docs/DATA-CONTRACT.md`):
 //!   * **The substrate** (`mechanics`, `fabric`, `replica`, `comms`,
@@ -42,25 +44,33 @@
 //!     versioned, hand-maintained projection over the local socket. Never a
 //!     dump of storage internals.
 
-pub mod app;
-pub mod cli;
+/// This build, in the form releases are identified by: `<version>` for a
+/// tagged build, `<version>-dev+<sha> (<date>)` for anything else (`build.rs`).
+///
+/// One constant so the launcher's `--version` and the host plane's orientation
+/// reply can never disagree about which binary is running — the question
+/// support has to answer first the moment two builds are in the field.
+pub const VERSION: &str = env!("LAIT_VERSION_LONG");
+
 pub mod client_action;
-pub mod cmdspec;
+pub mod composition;
 pub mod config;
 pub mod control;
 pub mod daemon;
 pub mod daemon_spawn;
 pub mod diagnose;
+pub mod dto;
+pub mod host_client;
 pub mod install;
-pub mod list_picker;
 pub mod mcp;
-pub mod members_ui;
 /// The product's adoption of the orbital lifecycle (hosts a World, drives
 /// Sessions through the public `runtime` API).
 pub mod orbital;
 pub mod orbits;
+pub mod process;
 pub mod registry;
 pub mod serve;
+pub mod update;
 /// The composition adapter for independently packaged Worlds.
 pub mod world;
 

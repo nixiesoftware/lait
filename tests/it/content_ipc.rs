@@ -82,7 +82,7 @@ fn node(tag: &str) -> Node {
     let net = MemNet::new();
     let home = temp_home(tag);
     lait::orbital::form_space(&home, &FOUNDER_SEED, "Content Space").unwrap();
-    let space = lait::orbital::discover_space_id(&home).unwrap();
+    let space = lait::orbital::discover_space(&home).single().unwrap();
     let route = ControlRoute::Orbit {
         address: OrbitAddress::for_store(&home, space),
     };
@@ -410,6 +410,6 @@ fn the_mixed_version_window_is_empty_on_purpose() {
         lait::control::MIN_SUPPORTED_CONTROL_PROTOCOL,
         lait::control::CONTROL_PROTOCOL_VERSION,
     );
-    assert!(lait::control::check_control_protocol(7).is_err());
-    assert!(lait::control::check_control_protocol(8).is_ok());
+    assert!(lait::control::check_control_protocol(8).is_err());
+    assert!(lait::control::check_control_protocol(lait::control::CONTROL_PROTOCOL_VERSION).is_ok());
 }

@@ -6,7 +6,7 @@
 //! is Rust-only, and `build.rs` deliberately never shells out to git so a plain
 //! `cargo install lait` stays reproducible with no external toolchain. Building
 //! the bundle during `cargo build` would need npm; leaving it in `viewer/` would
-//! mean crates.io users get a `lait serve` with no UI. So it lives here, in git.
+//! mean crates.io users get a head with no UI. So it lives here, in git.
 //!
 //! The honest cost is build output under version control, kept fresh by
 //! `npm run build` (which writes straight here) and guarded by CI diffing a

@@ -5,8 +5,8 @@
 //! *handling* it is not: every `dispatch_*` in the StationHost ends in
 //! `unreachable!("misclassified …")`, so a variant that is classified and never
 //! dispatched panics the connection task the first time anybody sends it. The
-//! client sees a closed socket and no reason. Both new verbs are answered here,
-//! over the same IPC channel the CLI, `lait serve`, and MCP use.
+//! client sees a closed socket and no reason. Both are answered here, over the
+//! same IPC channel the local app and MCP heads use.
 //!
 //! A lone node with no Live sessions is the interesting case rather than a
 //! degenerate one: an empty transient table is the truth about a node nobody is

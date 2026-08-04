@@ -371,7 +371,7 @@ fn rules_have_teeth() {
         ("legacy-module", "src/replica/mod.rs", ""),
         (
             "space-ticket",
-            "src/app.rs",
+            "src/main.rs",
             "let t = SpaceTicket::parse(x);",
         ),
         (
@@ -379,7 +379,11 @@ fn rules_have_teeth() {
             "src/control.rs",
             "Request::MemberApprove { .. }",
         ),
-        ("member-approval", "src/cli.rs", "if require_approval {"),
+        (
+            "member-approval",
+            "src/host_client.rs",
+            "if require_approval {",
+        ),
         (
             "peers-json",
             "src/node.rs",
@@ -412,7 +416,7 @@ fn rules_have_teeth() {
         ),
         (
             "dual-mode-selection",
-            "src/app.rs",
+            "src/main.rs",
             "if is_orbital_home(&home) {",
         ),
         (

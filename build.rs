@@ -43,11 +43,11 @@ fn main() {
 
     // A VALID-semver form for the self-updater's version comparison. A dev build
     // uses a PRERELEASE identifier (`X.Y.Z-dev.<sha>`), which semver orders BELOW
-    // the stable `X.Y.Z` — so `lait update` on a dev node correctly sees the
+    // the stable `X.Y.Z` — so a self-update on a dev node correctly sees the
     // stable release as newer and heals onto it. LAIT_VERSION_LONG can't be used
     // here: its ` (<date>)` suffix is not valid semver, and the bare
     // CARGO_PKG_VERSION would make a dev node report itself as the stable version
-    // (so `lait update` saw "already up to date" and stranded it on the dev build).
+    // (so the updater saw "already up to date" and stranded it on the dev build).
     let semver = if sha.is_empty() {
         base
     } else {
@@ -67,7 +67,7 @@ fn main() {
 /// So cargo has never known those files exist.
 ///
 /// The symptom is the worst kind: `npm run build` writes a new `app.js`, `cargo
-/// build` prints **Finished** without recompiling, and `lait serve` cheerfully
+/// build` prints **Finished** without recompiling, and the head cheerfully
 /// serves the previous bundle. Nothing errors. It looks exactly like your change not
 /// working, and the folk remedy — `touch src/serve/shell.rs` — is a ritual nobody
 /// should have to learn.

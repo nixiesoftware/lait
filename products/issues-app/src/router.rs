@@ -71,7 +71,10 @@ impl IssuesCallHandler {
         let facts = RouterFacts {
             device: context.device.to_string(),
             actor: context.actor.to_string(),
-            project_hint: std::env::var("LAIT_PROJECT_HINT").ok(),
+            // A hint travels on the request (`IssuesRequest::IssueNew.project_hint`)
+            // where a head that knows the working tree can put one. Nothing has
+            // ever set the environment variable this used to read.
+            project_hint: None,
             default_project: None,
             now: mechanics::wallclock::now_secs(),
         };
@@ -500,7 +503,7 @@ impl<'a> IssueRouter<'a> {
         match e {
             SessionFailure::Rejected(Rejection::Denied) => Response::denied(
                 "you lack write standing in this space — a sponsored agent needs a \
-                 human member to grant it write access (`lait agent add`), and a \
+                 human member to grant it write access, and a \
                  view-only member needs an admin to grant it; nothing was changed",
             ),
             SessionFailure::Rejected(Rejection::Conflict)

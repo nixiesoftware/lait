@@ -61,9 +61,11 @@ materializations. Its source generation and equivalence evidence are part of
 the canonical pointer body, and activation is serialized and compare-and-swap
 checked. This is the compatibility boundary for a representation rewrite: old
 bytes remain inactive rather than being destructively rewritten or taught to
-every future reader. `lait rebuild` is the application composition of the
-currently supported prior-to-current recipe and requires the Orbit to be
-vacant.
+every future reader. `HostOrbitRebuild` (`{"cmd":"host_orbit_rebuild"}` on the
+host plane) is the application composition of the currently supported
+prior-to-current recipe. The daemon releases its own placement for that Orbit
+first — the rebuild requires the Orbit to be vacant, and running it from a
+separate client was a store-lock race against whatever the daemon had open.
 
 The descriptor is the only row whose version is chosen by the record's content
 rather than by the build that wrote it. A descriptor emits 1 when it declares no
@@ -260,16 +262,17 @@ use is a slot held open for nothing.
 |---|---|---|---|
 | Local DTOs | `runtime::dto::DTO_PROTOCOL_VERSION` | 1 | loopback control plane and viewer |
 
-| Local control channel | `control::CONTROL_PROTOCOL_VERSION` | 8 | daemon socket; `MIN_SUPPORTED_CONTROL_PROTOCOL` is also 8, so the mixed-version window is currently empty |
+| Local control channel | `control::CONTROL_PROTOCOL_VERSION` | 9 | daemon socket; `MIN_SUPPORTED_CONTROL_PROTOCOL` is also 9, so the mixed-version window is currently empty |
 
 DTOs are a local contract between the engine and its own clients. They are
 versioned because a stale viewer bundle is a real situation, not because they
 cross a trust boundary.
 
 v7 moved the minimum because a v6 process would desynchronise on the new content
-envelope. v8 moves it again because the web viewer's Live delivery is now a
-standing subscription: a v7 Station can decode neither the request nor the
-stream and would leave collaboration silently stale. In both cases, accepting
+envelope. v8 moved it again because the web viewer's Live delivery became a
+standing subscription. v9 replaces the Issues-specific doorbell fields with
+World-tagged invalidation groups; accepting a v8 endpoint would decode a moved
+field as its empty default and silently miss refreshes. In each case, accepting
 the older endpoint would promise a capability it cannot provide.
 
 ## 6. The pinned dependency

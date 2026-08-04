@@ -1,5 +1,5 @@
-//! Loopback authentication for `lait serve` — re-establishing in userspace what
-//! the control socket got from the OS for free.
+//! Loopback authentication for the local app's HTTP head — re-establishing in
+//! userspace what the control socket got from the OS for free.
 //!
 //! [`crate::control`] has never carried authentication, and correctly so: a Unix
 //! socket is gated by filesystem permissions and a Windows named pipe by its
@@ -75,7 +75,7 @@ impl Refusal {
             Refusal::ForeignHost => {
                 "Host is not this server's loopback authority (DNS-rebinding guard)"
             }
-            Refusal::ForeignOrigin => "Origin is cross-site; lait serve is same-origin only",
+            Refusal::ForeignOrigin => "Origin is cross-site; this server is same-origin only",
             Refusal::BadToken => "missing or invalid token",
         }
     }

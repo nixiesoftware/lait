@@ -19,10 +19,16 @@
 
 //! Client-facing application interfaces supplied by a World package.
 //!
-//! Runtime's World-call boundary deliberately knows nothing about presentation.
-//! This crate is the outer compile-time seam: a product declares its CLI mount
-//! and MCP tools, while the Lait shell supplies process lifecycle, Orbit
-//! selection, transport, and output policy.
+//! Runtime's World-call boundary deliberately knows nothing about how an answer
+//! is displayed, and neither does this crate. It is the outer compile-time
+//! seam: a product declares its mount name, its MCP tools, and how to decode a
+//! reply into a value; the application composing lait supplies process
+//! lifecycle, Orbit selection, transport, and every byte a human eventually
+//! reads.
+//!
+//! Nothing here renders. A head that wants a table, a terminal line, or an HTML
+//! page builds it from the [`serde_json::Value`] an invocation answers with —
+//! which is why executing one costs a decode and nothing else.
 
 pub mod destination;
 
@@ -32,7 +38,6 @@ use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
 
-use clap::{ArgMatches, Command};
 use replica::body::WorldId;
 use runtime::world::call::{Call, Reply};
 use serde_json::Value;
@@ -85,12 +90,26 @@ impl fmt::Display for Failure {
 
 impl std::error::Error for Failure {}
 
-/// The complete externally visible effect of one client invocation.
+/// The externally visible effect of one parsed invocation, classified by the
+/// package that parsed it.
 ///
-/// This classifies the whole package-owned operation, including caller-local
-/// effects such as advancing a watermark or writing an attachment. It is not a
-/// substitute for the daemon's independent [`runtime::world::call::Access`]
-/// classification of an opaque World call.
+/// Every invocation carries one, including a World call: the package derives it
+/// from the very request it then encodes, so it costs nothing and cannot
+/// disagree with the bytes. It exists so a *head* can apply its own policy —
+/// "this route serves reads only" — without decoding the call a second time on
+/// the request path.
+///
+/// It is not the authorization answer, and no grant is ever checked against it.
+/// The daemon re-classifies every World call through
+/// [`runtime::world::call::Access`] on its own side of the boundary, and that
+/// classification is the one authorization consults. Treating this one as
+/// authoritative would be trusting a value computed before the call left the
+/// process that made it.
+///
+/// For a local operation there is no such second answer: local operations —
+/// advancing a read watermark, writing an attachment to disk, committing a
+/// grant through Space authority — never reach a World Handler, so the package
+/// that implements one is the only code that can classify it at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClientAccess {
     Query,
@@ -157,6 +176,8 @@ impl ClientInvocation {
         &self.world
     }
 
+    /// What this invocation would do, as its own package classifies it. See
+    /// [`ClientAccess`] for what a head may and may not conclude from it.
     pub fn access(&self) -> ClientAccess {
         self.access
     }
@@ -180,91 +201,23 @@ impl ClientInvocation {
     }
 }
 
-pub type CliCommandFactory = fn() -> Command;
-pub type CliParser = fn(&ArgMatches) -> Result<ClientInvocation, Failure>;
-
-/// One root-level CLI namespace mounted by a World application.
-#[derive(Clone)]
-pub struct CliMount {
-    name: &'static str,
-    command: CliCommandFactory,
-    parse: CliParser,
-}
-
-impl CliMount {
-    pub fn new(name: &'static str, command: CliCommandFactory, parse: CliParser) -> Self {
-        Self {
-            name,
-            command,
-            parse,
-        }
-    }
-
-    pub fn name(&self) -> &'static str {
-        self.name
-    }
-
-    pub fn command(&self) -> Command {
-        (self.command)()
-    }
-
-    pub fn parse(&self, matches: &ArgMatches) -> Result<ClientInvocation, Failure> {
-        (self.parse)(matches)
-    }
-}
-
 pub type McpSchemaFactory = fn() -> Value;
 pub type McpCallFactory = fn(Value) -> Result<ClientInvocation, Failure>;
 pub type ReplyDecoder = fn(&Call, Reply) -> Result<Value, Failure>;
-pub type ReplyPresenter = fn(Value, PresentationOptions) -> Result<Presentation, Failure>;
 pub type WebParser = fn(Value) -> Result<ClientInvocation, Failure>;
 
-/// Output policy supplied by the navigation shell to a product presenter.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PresentationOptions {
-    pub json: bool,
-    pub color: bool,
-}
-
-/// How a product-classified failure should surface to an agent client.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PresentationFailure {
-    InvalidRequest,
-    Internal,
-}
-
-/// A complete product-owned rendering result.
+/// Read a product-classified failure out of an answer that was *delivered*.
 ///
-/// The shell writes these strings to their named streams and uses the exit code;
-/// it never needs to decode or match the product response itself.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Presentation {
-    pub stdout: String,
-    pub stderr: String,
-    pub exit_code: i32,
-    pub failure: Option<PresentationFailure>,
-    pub failure_message: Option<String>,
-}
-
-/// A package execution result shared by CLI, MCP, and web adapters.
+/// A World call answering `{"kind": "error", ...}` succeeded at every layer
+/// below the product: the call was routed, authorized, executed, and replied
+/// to. Only the product knows that value reports a failure, and only the
+/// product knows which kind. A head that speaks a typed protocol — MCP error
+/// classes, HTTP status — asks through here rather than pattern-matching a
+/// schema it does not own.
 ///
-/// `value` is the lossless machine result. `presentation` is optional
-/// product-owned terminal/error policy; native clients render it while web
-/// clients return `value` directly.
-#[derive(Debug, Clone)]
-pub struct ClientOutput {
-    pub value: Value,
-    pub presentation: Option<Presentation>,
-}
-
-impl ClientOutput {
-    pub fn new(value: Value, presentation: Option<Presentation>) -> Self {
-        Self {
-            value,
-            presentation,
-        }
-    }
-}
+/// Implementations must be a peek, not a decode. This runs on answers that are
+/// fine, which is nearly all of them.
+pub type FailureClassifier = fn(&Value) -> Option<(Failure, String)>;
 
 /// One generic Space/host facility available to an application package.
 ///
@@ -342,11 +295,8 @@ pub trait ClientHost: Send + Sync {
     fn call_content<'a>(&'a self, request: HostContentRequest) -> ClientFuture<'a, Value>;
 }
 
-pub type LocalInvocationHandler = for<'a> fn(
-    &'a dyn ClientHost,
-    LocalInvocation,
-    PresentationOptions,
-) -> ClientFuture<'a, ClientOutput>;
+pub type LocalInvocationHandler =
+    for<'a> fn(&'a dyn ClientHost, LocalInvocation) -> ClientFuture<'a, Value>;
 
 /// Resolve the confirmation prompt for one invocation, with a host available.
 ///
@@ -356,8 +306,8 @@ pub type LocalInvocationHandler = for<'a> fn(
 pub type ConfirmationResolver =
     for<'a> fn(&'a dyn ClientHost, &'a ClientInvocation) -> ClientFuture<'a, Option<String>>;
 
-/// One product-local MCP tool. The registry prefixes `name` with the CLI mount,
-/// so independently developed Worlds cannot both publish a global `list`.
+/// One product-local MCP tool. The registry prefixes `name` with the package's
+/// mount, so independently developed Worlds cannot both publish a global `list`.
 #[derive(Clone)]
 pub struct McpTool {
     name: &'static str,
@@ -402,25 +352,32 @@ impl McpTool {
 #[derive(Clone)]
 pub struct WorldClientPackage {
     world: WorldId,
-    cli: CliMount,
+    mount: &'static str,
     mcp_tools: Vec<McpTool>,
     mcp_instructions: &'static str,
     decode_reply: ReplyDecoder,
-    present_reply: Option<ReplyPresenter>,
+    classify_failure: Option<FailureClassifier>,
     local_handler: Option<LocalInvocationHandler>,
     web_parser: Option<WebParser>,
     confirmation: Option<ConfirmationResolver>,
 }
 
 impl WorldClientPackage {
+    /// Declare one package under `mount`, the single namespace key every head
+    /// addresses it by.
+    ///
+    /// `mount` is not decoration. It prefixes every public MCP tool name and it
+    /// is the `{world}` segment of the HTTP RPC route, so changing it renames
+    /// every tool an agent has learned and breaks every URL a head has built.
+    /// Treat it as published.
     pub fn new(
         world: WorldId,
-        cli: CliMount,
+        mount: &'static str,
         mcp_tools: Vec<McpTool>,
         mcp_instructions: &'static str,
         decode_reply: ReplyDecoder,
     ) -> Result<Self, Failure> {
-        validate_name("CLI mount", cli.name())?;
+        validate_name("mount", mount)?;
         let mut local_tools = BTreeSet::new();
         for tool in &mcp_tools {
             validate_name("MCP tool", tool.name())?;
@@ -434,19 +391,19 @@ impl WorldClientPackage {
         }
         Ok(Self {
             world,
-            cli,
+            mount,
             mcp_tools,
             mcp_instructions,
             decode_reply,
-            present_reply: None,
+            classify_failure: None,
             local_handler: None,
             web_parser: None,
             confirmation: None,
         })
     }
 
-    pub fn with_presenter(mut self, presenter: ReplyPresenter) -> Self {
-        self.present_reply = Some(presenter);
+    pub fn with_failure_classifier(mut self, classifier: FailureClassifier) -> Self {
+        self.classify_failure = Some(classifier);
         self
     }
 
@@ -469,8 +426,10 @@ impl WorldClientPackage {
         &self.world
     }
 
-    pub fn cli(&self) -> &CliMount {
-        &self.cli
+    /// The namespace key every head addresses this package by — the MCP tool
+    /// prefix and the `{world}` route segment. See [`Self::new`].
+    pub fn mount(&self) -> &'static str {
+        self.mount
     }
 
     pub fn mcp_tools(&self) -> &[McpTool] {
@@ -485,14 +444,10 @@ impl WorldClientPackage {
         (self.decode_reply)(call, reply)
     }
 
-    pub fn present_reply(
-        &self,
-        value: Value,
-        options: PresentationOptions,
-    ) -> Result<Option<Presentation>, Failure> {
-        self.present_reply
-            .map(|presenter| presenter(value, options))
-            .transpose()
+    /// Ask the package whether a delivered answer reports a failure, and of
+    /// what class. See [`FailureClassifier`].
+    pub fn classify_failure(&self, value: &Value) -> Option<(Failure, String)> {
+        self.classify_failure.and_then(|classify| classify(value))
     }
 
     pub fn parse_web(&self, input: Value) -> Result<ClientInvocation, Failure> {
@@ -530,21 +485,31 @@ impl WorldClientPackage {
         })
     }
 
-    /// Execute one invocation through its owning package.
+    /// Execute one invocation through its owning package and answer with the
+    /// decoded value — one decode per call, and nothing else.
+    ///
+    /// It used to cost three. Every World call cloned the decoded value, handed
+    /// the clone to a product presenter that parsed it back into a typed
+    /// response, and re-serialized that response into a `String` — a full
+    /// deep-copy, decode, and encode of the whole payload. Every head then
+    /// dropped the string: the HTTP surface returned `value` and never looked
+    /// at it, and MCP re-encoded `value` itself. So a board with a thousand rows
+    /// paid three passes over a thousand rows to produce text nobody read.
+    ///
+    /// The presenter is gone and a head renders from the value it is handed.
+    /// This is the World-call path; work removed here is removed from every
+    /// request the product serves.
     pub fn execute<'a>(
         &'a self,
         host: &'a dyn ClientHost,
         invocation: ClientInvocation,
-        options: PresentationOptions,
-    ) -> ClientFuture<'a, ClientOutput> {
+    ) -> ClientFuture<'a, Value> {
         Box::pin(async move {
             self.validate_invocation(&invocation)?;
             match invocation.into_kind() {
                 ClientInvocationKind::World(call) => {
                     let reply = host.call_world(call.clone()).await?;
-                    let value = self.decode_reply(&call, reply)?;
-                    let presentation = self.present_reply(value.clone(), options)?;
-                    Ok(ClientOutput::new(value, presentation))
+                    self.decode_reply(&call, reply)
                 }
                 ClientInvocationKind::Local(local) => {
                     let handler = self.local_handler.ok_or_else(|| {
@@ -553,7 +518,7 @@ impl WorldClientPackage {
                             self.world
                         ))
                     })?;
-                    handler(host, local, options).await
+                    handler(host, local).await
                 }
             }
         })
@@ -593,48 +558,35 @@ impl WorldClientRegistry {
 
     pub fn with_package(mut self, package: WorldClientPackage) -> Result<Self, Failure> {
         let world = package.world().as_str().to_string();
-        let command_name = package.cli().command().get_name().to_string();
-        if command_name != package.cli().name() {
-            return Err(Failure::new(format!(
-                "World '{}' CLI factory produced command '{}' for mount '{}'",
-                world,
-                command_name,
-                package.cli().name()
-            )));
-        }
         if self.packages.contains_key(&world) {
             return Err(Failure::new(format!(
                 "duplicate client package for World '{world}'"
             )));
         }
-        if let Some(existing) = self.mounts.get(package.cli().name()) {
+        if let Some(existing) = self.mounts.get(package.mount()) {
             return Err(Failure::new(format!(
-                "CLI mount '{}' is claimed by Worlds '{}' and '{}'",
-                package.cli().name(),
+                "mount '{}' is claimed by Worlds '{}' and '{}'",
+                package.mount(),
                 existing,
                 world
             )));
         }
-        self.mounts.insert(package.cli().name(), world.clone());
+        self.mounts.insert(package.mount(), world.clone());
         self.packages.insert(world, package);
         Ok(self)
     }
 
+    /// Refuse a build whose product tool names collide with a host's own.
+    ///
+    /// Composition time is the only honest place to find this: two tools with
+    /// one public name means whichever the router registered last silently wins,
+    /// and an agent calling the loser gets the winner's behavior.
     pub fn validate_reserved<'a>(
         &self,
-        reserved_cli: impl IntoIterator<Item = &'a str>,
         reserved_mcp: impl IntoIterator<Item = &'a str>,
     ) -> Result<(), Failure> {
-        let reserved_cli: BTreeSet<_> = reserved_cli.into_iter().collect();
         let reserved_mcp: BTreeSet<_> = reserved_mcp.into_iter().collect();
         for package in self.packages.values() {
-            if reserved_cli.contains(package.cli().name()) {
-                return Err(Failure::new(format!(
-                    "World '{}' CLI mount '{}' collides with a shell command",
-                    package.world(),
-                    package.cli().name()
-                )));
-            }
             for mounted in mounted_tools(package) {
                 if reserved_mcp.contains(mounted.public_name.as_str()) {
                     return Err(Failure::new(format!(
@@ -669,7 +621,7 @@ impl WorldClientRegistry {
 fn mounted_tools(package: &WorldClientPackage) -> impl Iterator<Item = MountedMcpTool<'_>> {
     package.mcp_tools().iter().map(|tool| MountedMcpTool {
         world: package.world(),
-        public_name: format!("{}_{}", package.cli().name(), tool.name()),
+        public_name: format!("{}_{}", package.mount(), tool.name()),
         tool,
     })
 }
@@ -710,18 +662,6 @@ mod tests {
         files_call(input).map(|call| ClientInvocation::world(call, ClientAccess::Query, None))
     }
 
-    fn files_command() -> Command {
-        Command::new("files").subcommand(Command::new("list"))
-    }
-
-    fn files_parse(_: &ArgMatches) -> Result<ClientInvocation, Failure> {
-        Ok(ClientInvocation::world(
-            files_call(Value::Null)?,
-            ClientAccess::Query,
-            None,
-        ))
-    }
-
     fn notes_call(_: Value) -> Result<Call, Failure> {
         Call::new(
             WorldId::parse("com.example.notes").unwrap(),
@@ -736,18 +676,6 @@ mod tests {
         notes_call(input).map(|call| ClientInvocation::world(call, ClientAccess::Query, None))
     }
 
-    fn notes_command() -> Command {
-        Command::new("notes").subcommand(Command::new("list"))
-    }
-
-    fn notes_parse(_: &ArgMatches) -> Result<ClientInvocation, Failure> {
-        Ok(ClientInvocation::world(
-            notes_call(Value::Null)?,
-            ClientAccess::Query,
-            None,
-        ))
-    }
-
     fn decode_json_reply(call: &Call, reply: Reply) -> Result<Value, Failure> {
         reply
             .validate_for(call)
@@ -760,20 +688,14 @@ mod tests {
     }
 
     fn package(world: &str, mount: &'static str) -> WorldClientPackage {
-        let (cli, call) = if mount == "notes" {
-            (
-                CliMount::new(mount, notes_command, notes_parse),
-                notes_invocation as McpCallFactory,
-            )
+        let call = if mount == "notes" {
+            notes_invocation as McpCallFactory
         } else {
-            (
-                CliMount::new(mount, files_command, files_parse),
-                files_invocation as McpCallFactory,
-            )
+            files_invocation as McpCallFactory
         };
         WorldClientPackage::new(
             WorldId::parse(world).unwrap(),
-            cli,
+            mount,
             vec![McpTool::new("list", "List objects.", empty_schema, call)],
             "Work with files.",
             decode_json_reply,
@@ -782,19 +704,28 @@ mod tests {
     }
 
     #[test]
-    fn a_second_world_mounts_without_shell_specific_code() {
+    fn a_second_world_mounts_without_host_specific_code() {
         let registry = WorldClientRegistry::new()
             .with_package(package("com.example.files", "files"))
             .unwrap()
             .with_package(package("com.example.notes", "notes"))
             .unwrap();
-        let mounts: Vec<_> = registry
-            .packages()
-            .map(|package| package.cli().name())
-            .collect();
+        let mounts: Vec<_> = registry.packages().map(WorldClientPackage::mount).collect();
         assert_eq!(mounts, vec!["files", "notes"]);
+        // The mount is the tool namespace: two independently written Worlds
+        // both publish `list`, and neither shadows the other.
         let tools: Vec<_> = registry.mcp_tools().map(|tool| tool.public_name).collect();
         assert_eq!(tools, vec!["files_list", "notes_list"]);
+        // And it is the route key a head resolves a request path through.
+        assert_eq!(
+            registry
+                .package_for_mount("notes")
+                .unwrap()
+                .world()
+                .as_str(),
+            "com.example.notes"
+        );
+        assert!(registry.package_for_mount("ledger").is_none());
 
         let call = files_call(Value::Null).unwrap();
         let reply = Reply::ok(
@@ -822,7 +753,25 @@ mod tests {
         let registry = WorldClientRegistry::new()
             .with_package(package("com.example.files", "files"))
             .unwrap();
-        assert!(registry.validate_reserved(["files"], []).is_err());
-        assert!(registry.validate_reserved([], ["files_list"]).is_err());
+        assert!(registry.validate_reserved(["files_list"]).is_err());
+        assert!(registry.validate_reserved(["files"]).is_ok());
+    }
+
+    /// Both kinds classify themselves, so a head's own policy never has to
+    /// choose between guessing and refusing everything it cannot see into.
+    #[test]
+    fn every_invocation_declares_an_access_class() {
+        let world =
+            ClientInvocation::world(files_call(Value::Null).unwrap(), ClientAccess::Query, None);
+        assert_eq!(world.access(), ClientAccess::Query);
+
+        let local = ClientInvocation::local(
+            WorldId::parse("com.example.files").unwrap(),
+            "files.mark_read",
+            Value::Null,
+            ClientAccess::Command,
+            None,
+        );
+        assert_eq!(local.access(), ClientAccess::Command);
     }
 }

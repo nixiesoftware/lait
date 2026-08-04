@@ -11,11 +11,12 @@
 //! the three `Stdio` slots we named. Windows has no such default —
 //! `CreateProcess` takes a single `bInheritHandles` switch, and `TRUE` means
 //! *every* inheritable handle in this process, not just the ones in
-//! `STARTUPINFO`. A daemon spawned from a captured `lait issues new` therefore came up
-//! owning a write-end of that command's stdout, and the command's caller waited
-//! forever on an EOF that could not arrive (see `app::disinherit_stdio`, which
-//! covers our *own* stdio — this module covers everything else, including the
-//! handles we inherited from our parent and never knew about).
+//! `STARTUPINFO`. A daemon spawned from a head whose stdout somebody captured
+//! therefore came up owning a write-end of that pipe, and whoever was reading it
+//! waited forever on an EOF that could not arrive (see
+//! `process::disinherit_stdio`, which covers our *own* stdio — this module
+//! covers everything else, including the handles we inherited from our parent
+//! and never knew about).
 //!
 //! `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` is the only way to say "inherit exactly
 //! these" — so the Windows path drives `CreateProcessW` itself. std exposes the

@@ -3,10 +3,10 @@
 //! socket with an in-memory transport (no network sockets). See
 //! `docs/PROTOCOL.md`.
 //!
-//! Formation is `orbital::form_space` (the `lait init` heir); the StationHost
-//! then serves `control::Request`/`Response` — including the `Subscribe`
-//! doorbell stream sourced from the Station's `ObservationStream` — exactly as
-//! the CLI/serve/MCP clients speak it. Two behaviors are proven: a wildly stale
+//! Formation is `orbital::form_space`, the engine half of `HostSpaceFound`;
+//! the StationHost then serves `control::Request`/`Response` — including the
+//! `Subscribe` doorbell stream sourced from the Station's `ObservationStream` —
+//! exactly as the local app and MCP heads speak it. Two behaviors are proven: a wildly stale
 //! `since` still rebaselines with a `Reset` first frame and a later live edit
 //! rings a real (non-reset) doorbell; and a rejected write (validate-then-commit)
 //! rings nothing at all.
@@ -24,9 +24,7 @@ use comms::{Transport, TransportFactory};
 use issues::ids::SpaceId;
 use issues_app::IssuesResponse as IssueResponse;
 use lait::control::OrbitAddress;
-use lait::control::{
-    request, request_routed, subscribe, CatalogScope, ControlRoute, Request, Response,
-};
+use lait::control::{request, request_routed, subscribe, ControlRoute, Request, Response};
 use lait::orbital::run_station_process_with;
 
 const FOUNDER_SEED: [u8; 32] = [113u8; 32];
@@ -64,7 +62,9 @@ fn req(rt: &tokio::runtime::Runtime, home: &Path, r: Request) -> Response {
 }
 
 async fn issues_request(home: &Path, request: issues_app::IssuesRequest) -> Result<IssueResponse> {
-    let space = lait::orbital::discover_space_id(home).expect("test Space");
+    let space = lait::orbital::discover_space(home)
+        .single()
+        .expect("test Space");
     let call = issues_app::encode_call(&request)?;
     let reply = lait::control::call_world(
         home,
@@ -90,14 +90,28 @@ fn issue_req(
         .unwrap_or_else(|error| IssueResponse::err(format!("{error:#}")))
 }
 
-/// The docs a frame names under a project KEY, in frame order.
+/// The docs a frame names under a scope label, in frame order.
 fn named_docs(frame: &lait::control::Doorbell, key: &str) -> Vec<String> {
-    frame
-        .dirty_by_project
-        .iter()
-        .filter(|d| d.project_key == key)
+    dirty(frame)
+        .filter(|d| d.label.as_deref() == Some(key))
         .flat_map(|d| d.docs.clone())
         .collect()
+}
+
+fn dirty(frame: &lait::control::Doorbell) -> impl Iterator<Item = &lait::control::DirtyScope> {
+    frame
+        .invalidations
+        .iter()
+        .filter(|entry| entry.world.as_str() == issues::contract::PRODUCT_WORLD)
+        .flat_map(|entry| &entry.dirty)
+}
+
+fn planes(frame: &lait::control::Doorbell) -> impl Iterator<Item = &lait::control::DirtyPlane> {
+    frame
+        .invalidations
+        .iter()
+        .filter(|entry| entry.world.as_str() == issues::contract::PRODUCT_WORLD)
+        .flat_map(|entry| &entry.planes)
 }
 
 fn poll_until<T>(timeout: Duration, mut check: impl FnMut() -> Option<T>) -> Option<T> {
@@ -140,7 +154,7 @@ fn explicit_routes_cannot_cross_space_or_world_boundaries() {
     let net = MemNet::new();
     let home = temp_home("routes");
     lait::orbital::form_space(&home, &FOUNDER_SEED, "Route Space").unwrap();
-    let space = lait::orbital::discover_space_id(&home).unwrap();
+    let space = lait::orbital::discover_space(&home).single().unwrap();
     let address = OrbitAddress::for_store(&home, space.clone());
     let handle = spawn_daemon(home.clone(), FOUNDER_SEED, net);
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -449,7 +463,7 @@ fn doorbell_names_the_dirty_project_and_doc() {
             "the edit doorbell must name the edited doc under its project, got {ring:?}"
         );
         assert!(
-            ring.dirty_catalog.is_empty(),
+            planes(&ring).next().is_none(),
             "a field edit touches no catalog plane, got {ring:?}"
         );
 
@@ -489,35 +503,32 @@ fn doorbell_names_the_dirty_project_and_doc() {
         // board; it does not touch the label registry, the workflow, or any
         // other project. Ringing those would be the coarseness this replaced.
         assert!(
-            ring.dirty_catalog.contains(&CatalogScope::Docs),
+            planes(&ring).any(|p| p.plane == "docs"),
             "a create moves the row index, got {ring:?}"
         );
         assert!(
-            ring.dirty_catalog.iter().any(
-                |s| matches!(s, CatalogScope::Boards { project_key, .. } if project_key == "ENG")
-            ),
+            planes(&ring).any(|p| p.plane == "boards"
+                && p.scope
+                    .as_ref()
+                    .is_some_and(|s| s.label.as_deref() == Some("ENG"))),
             "a create puts the row on ENG's board, got {ring:?}"
         );
         // A project is named by its stable id as well as its display key, so a
         // dependency can match on something a rename cannot move.
         assert!(
-            ring.dirty_catalog.iter().any(|s| matches!(
-                s,
-                CatalogScope::Boards { project_id, .. } if project_id.starts_with("prj_")
-            )),
+            planes(&ring).any(|p| p.plane == "boards"
+                && p.scope
+                    .as_ref()
+                    .is_some_and(|s| s.kind == "project" && s.id.starts_with("prj_"))),
             "the board plane must carry the project's stable id, got {ring:?}"
         );
         assert!(
             !ring.authority_advanced,
             "a create moves no membership, got {ring:?}"
         );
-        for untouched in [
-            CatalogScope::Labels,
-            CatalogScope::Workflow,
-            CatalogScope::Teams,
-        ] {
+        for untouched in ["labels", "workflow", "teams"] {
             assert!(
-                !ring.dirty_catalog.contains(&untouched),
+                !planes(&ring).any(|p| p.plane == untouched),
                 "a create rang {untouched:?}, which it does not touch: {ring:?}"
             );
         }
@@ -546,18 +557,15 @@ fn doorbell_names_the_dirty_project_and_doc() {
             .expect("read spec doorbell")
             .expect("spec doorbell present");
         assert!(
-            ring.dirty_catalog.contains(&CatalogScope::Specs),
+            planes(&ring).any(|p| p.plane == "specs"),
             "a spec write must ring its own plane, got {ring:?}"
         );
         assert!(
-            !ring.dirty_catalog.contains(&CatalogScope::Docs),
+            !planes(&ring).any(|p| p.plane == "docs"),
             "a spec write must not ring the issue row index, got {ring:?}"
         );
         assert!(
-            !ring
-                .dirty_catalog
-                .iter()
-                .any(|scope| matches!(scope, CatalogScope::Boards { .. })),
+            !planes(&ring).any(|p| p.plane == "boards"),
             "a spec write must not ring any board, got {ring:?}"
         );
 
@@ -571,8 +579,8 @@ fn doorbell_names_the_dirty_project_and_doc() {
 /// Two subscribers, one commit, identical frames.
 ///
 /// The dirty-set is computed once per Observation and fanned out, not recomputed
-/// per subscriber. That is an efficiency win today — a viewer and a `lait watch`
-/// used to cost two full catalog reads per commit — and a correctness
+/// per subscriber. That is an efficiency win today — two open viewers used to
+/// cost two full catalog reads per commit — and a correctness
 /// requirement the moment the translation holds any state carried between rings:
 /// two subscribers each advancing one shared baseline would leave the second
 /// seeing nothing changed.
@@ -613,12 +621,12 @@ fn every_subscriber_sees_the_same_frame_for_one_commit() {
         let fa = a.next().await.expect("A reads").expect("A has a frame");
         let fb = b.next().await.expect("B reads").expect("B has a frame");
         assert_eq!(
-            (fa.seq, &fa.dirty_by_project, &fa.dirty_catalog),
-            (fb.seq, &fb.dirty_by_project, &fb.dirty_catalog),
+            (fa.seq, &fa.invalidations),
+            (fb.seq, &fb.invalidations),
             "subscribers disagreed about one commit: A={fa:?} B={fb:?}"
         );
         assert!(
-            !fa.dirty_by_project.is_empty(),
+            dirty(&fa).next().is_some(),
             "both agreed, but on an empty dirty-set — that would pass for the \
              wrong reason: {fa:?}"
         );

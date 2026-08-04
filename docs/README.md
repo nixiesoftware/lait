@@ -1,8 +1,9 @@
 # lait documentation
 
-lait is a local-first, peer-to-peer issue tracker. One binary provides a CLI,
-a local web application, and MCP tools for agents; every surface talks to the
-same local control plane and receives the same versioned projections.
+lait is a local-first, peer-to-peer issue tracker. One binary provides a local
+web application and MCP tools for agents; both surfaces talk to the same local
+control plane and receive the same versioned projections. The binary itself is a
+launcher, not a command surface — it picks a mode and starts a process.
 
 Start with the product, then go deeper only when you need to understand a
 contract or operate a deployment.
@@ -12,23 +13,28 @@ contract or operate a deployment.
 | Need | Read |
 |---|---|
 | Install lait | [`INSTALL.md`](./INSTALL.md) |
-| Learn the commands and client behavior | [`UI.md`](./UI.md) |
+| Learn the request surface and client behavior | [`UI.md`](./UI.md) |
+| Drive or script the HTTP head | [`SERVE.md`](./SERVE.md) |
 | Author deterministic plans and governing truth | [`SPECS.md`](./SPECS.md) |
 | Run the local web application | [`UI.md`](./UI.md#3-web) |
 | Diagnose joining and onboarding | [`UI.md`](./UI.md#7-joining) |
+| Give an agent its own identity | [`AGENT-EXPERIENCE.md`](./AGENT-EXPERIENCE.md) |
 
 The normal product model is deliberately small:
 
-- `lait init` founds a Space and local Orbit; `lait join` creates a recoverable
-  Orbit from signed Coordinates. Other commands never create stores implicitly.
-- `lait <verb>` is the scriptable and interactive CLI. `--json` returns the
-  same versioned DTOs used by other clients.
-- `lait daemon` is the identity-scoped process host. It lazily places Stations
-  for addressed Orbits, shares one transport endpoint per device identity, and
-  remains independent of any viewer.
-- `lait serve` is a client adapter exposing the same daemon contract over a
-  loopback-only HTTP/SSE surface.
-- `lait mcp` exposes the same command contract to agents.
+- Bare `lait` is the product: it starts the daemon and serves a loopback-only
+  HTTP/SSE head, which is the browser app *and* the scriptable surface.
+  `--json` prints one readiness line, `{url, token, port}`, before it accepts.
+- `lait daemon` is the identity-scoped process host, headless. It lazily places
+  Stations for addressed Orbits, shares one transport endpoint per device
+  identity, and remains independent of any head.
+- `lait mcp` exposes the same request contract to agents over stdio, pinned to
+  one Orbit.
+- `lait --version` answers the one question that must be answerable with nothing
+  running. Anything else exits 1.
+- Founding a Space and entering one from an invite are `host_space_found` and
+  `host_space_enter` on `POST /api/host/rpc` — the app's Welcome screen. Nothing
+  creates a store implicitly.
 - The daemon::Daemon places a Station-backed StationHost in each addressed local
   Orbit. Each WorldHost owns that World's docked Sessions. Clients submit
   intents and re-read Manifest-pinned projections after Observation
@@ -43,6 +49,7 @@ not carry authority.
 | Document | Authority |
 |---|---|
 | [`ARCHITECTURE.md`](./ARCHITECTURE.md) | Orbital ownership, crate boundaries, trust model, and World composition. |
+| [`SERVE.md`](./SERVE.md) | The HTTP head: the three planes, the credential and origin posture, and the custody fence. |
 | [`DATA-CONTRACT.md`](./DATA-CONTRACT.md) | Journals, authority, transactions, Manifests, Bodies, convergence, and projections. |
 | [`PROTOCOL.md`](./PROTOCOL.md) | Coordinates, Beacon/presence, Contact, convergence, and local-control compatibility. |
 | [`THREAT-MODEL.md`](./THREAT-MODEL.md) | Assets, adversaries, security claims, and explicit non-goals. |
@@ -61,7 +68,7 @@ numbers or historical review labels.
 
 | Document | Covers |
 |---|---|
-| [`INSTALL.md`](./INSTALL.md) | Supported installation channels, completions, and verification. |
+| [`INSTALL.md`](./INSTALL.md) | Supported installation channels, upgrade, and verification. |
 | [`RELEASES.md`](./RELEASES.md) | Release provenance, current signing status, and consumer verification. |
 
 Per-release changes belong in [`CHANGELOG.md`](../CHANGELOG.md), not in the

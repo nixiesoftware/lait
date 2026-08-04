@@ -96,6 +96,29 @@ pub fn membership_grants(admin: bool) -> Vec<Standing> {
 /// `world-flat-standing` clean-break gate (which forbids `Standing::` literals in
 /// `src/orbital/`, `src/world/`, `crates/runtime/`) stays satisfied and the
 /// "agents get content authority only" policy lives in exactly one place.
+///
+/// # What widening an agent's standing would actually take
+///
+/// Recorded because the obvious guess is wrong, not because the feature is
+/// planned. [`AclAction::AddAgent`] already carries a `grants` field and
+/// [`is_sponsorable_grant_set`] already admits any non-admin set, so the wire
+/// format needs nothing: it is *this constant* that makes sponsorship one-shape,
+/// and every caller passes it. A re-granting feature would therefore change
+/// three things and no others —
+///
+/// * this function's callers, so a sponsor can name a grant set rather than
+///   inherit the default (the default itself is policy and should not move);
+/// * `orbital::mechanics::member_set_role`, which refuses an actor
+///   `acl().is_agent` holds — that refusal is what makes "agents hold no
+///   membership authority" true at the head, and re-granting *content* standing
+///   would need its own path rather than a relaxation of this one;
+/// * `orbital::mechanics::agent_add`, which refuses an actor that is already a
+///   principal, so today re-sponsoring cannot be spelled as a second `AddAgent`.
+///
+/// **The custody fences are not on that list.** `orbits::bootstrap::admit` and
+/// `serve::borrowed_key_refusal` ask whose *key* would make a signature, never
+/// what standing the holder has, so they neither loosen nor need revisiting
+/// however wide a sponsored agent's grants become.
 pub fn sponsored_agent_grants() -> Vec<Standing> {
     vec![Standing::Write]
 }
@@ -802,7 +825,7 @@ impl AclState {
     }
 }
 
-/// One rendered row of the membership audit log (`lait members log`): the op
+/// One rendered row of the membership audit log: the op
 /// in deterministic causal order, with its replay verdict.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuditEntry {

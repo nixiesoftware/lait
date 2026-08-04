@@ -3,8 +3,12 @@
 `lait` is a single self-contained binary. Native builds ship for **Linux** and
 **macOS** (arm64 + x86_64) and **Windows** (x86_64 — arm64 Windows runs the
 x86_64 build under the OS's built-in emulation). Pick whichever channel fits your
-platform — they all land the same `lait` executable. Upgrade any install in place with `lait update`
-(a native self-updater), regardless of how you installed it.
+platform — they all land the same `lait` executable. Upgrading is node
+maintenance rather than a command: the running daemon knows which build it is,
+so `{"cmd":"host_update"}` on the host plane (see [`SERVE.md`](./SERVE.md))
+pulls the latest release and atomically swaps the binary, and
+`{"cmd":"host_restart"}` makes the swap take effect. Re-running the installer for
+your channel works just as well.
 
 > **Heads-up on the crypto:** lait's end-to-end encryption is research-grade and
 > **not yet independently audited** — don't trust it with sensitive data yet. See
@@ -86,10 +90,32 @@ admin admits it.
 
 ```sh
 docker compose up -d --build          # from the repo root
-docker compose exec seed lait id      # copy the node id
-# from an admin node:  lait members add <that-id>
-docker compose exec seed lait join <invite-ticket>     # bootstrap the space to serve
 ```
+
+The container runs `lait daemon`, which is headless on purpose — there is no
+command surface inside it to type at. Binding it to a space is a one-time act
+performed by a head pointed at the same node home, and the head **binds
+loopback only**, so it cannot be reached from outside the container it runs in.
+The practical shape is therefore: give the node a bind-mounted home instead of
+an anonymous volume, and bootstrap it with a head on the host.
+
+```yaml
+# docker-compose.override.yml
+services:
+  seed:
+    volumes:
+      - ./seed-home:/data
+```
+
+```sh
+docker compose stop seed                       # the store takes one writer
+LAIT_HOME=./seed-home lait --open              # Welcome → Use an invite
+docker compose start seed
+```
+
+Paste the `lait://join/…` link into Welcome. The store is then bound to the
+space, and the long-running `seed` service serves it from there. Admitting the
+seed is the inviter's side of the same flow, from their own app.
 
 See [`docker-compose.yml`](../docker-compose.yml) for details. iroh handles NAT
 traversal via relays, so no inbound port is required (publishing a UDP port just
@@ -108,32 +134,35 @@ sha256sum -c lait-x86_64-unknown-linux-gnu.tar.gz.sha256
 
 ## Shell completions & man page
 
-lait generates both at runtime from its own command tree:
+There are none, and there is nothing for them to complete. `lait` is a launcher
+with three modes, not a command tree:
 
 ```sh
-lait completions bash > ~/.local/share/bash-completion/completions/lait
-lait completions zsh  > "${fpath[1]}/_lait"
-lait completions fish > ~/.config/fish/completions/lait.fish
-lait completions powershell | Out-String | Invoke-Expression   # current session
-lait man > lait.1     # roff man page
+lait                       # the local app, and the daemon under it
+lait daemon                # the identity-scoped host, headless
+lait mcp                   # the stdio head an agent speaks
+lait --version             # which build this is
 ```
-
-Supported shells: `bash`, `zsh`, `fish`, `powershell`, `elvish`.
 
 ## After installing
 
 ```sh
-cd your-project
-lait init                                  # found a space here (seeds a project)
-lait issues new "fix login race" -P high --start  # file it + claim it + branch
-lait serve --open                          # the board, in your browser
+lait --open
 ```
 
-Joining a teammate's space instead? `lait join <their-invite-link>` — it creates
-the store and verifies the whole handshake. See the README's scenarios.
+That starts the daemon, serves the app on `127.0.0.1:7717`, and opens it. With
+no space on this machine yet you land on **Welcome**: *Found a space* mints a
+new one, *Use an invite* pastes a teammate's `lait://join/…` link and bootstraps
+your store from it. Nothing is created implicitly, so the first act is always
+deliberate.
 
-Register the MCP server with an AI agent in one step:
+Register the MCP server with an AI agent from the host plane — see
+[`AGENT-EXPERIENCE.md`](./AGENT-EXPERIENCE.md) for the two-step version with a
+sponsored identity:
 
 ```sh
-lait install-mcp --client claude    # or: cursor | windsurf | generic
+# $PORT and $TOKEN come from the head's readiness line — `lait --json`
+curl -sS --fail-with-body -X POST "http://127.0.0.1:$PORT/api/host/rpc" \
+  -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+  -d '{"cmd":"host_install_mcp","client":"claude","name":"lait","dir":"'"$PWD"'"}'
 ```

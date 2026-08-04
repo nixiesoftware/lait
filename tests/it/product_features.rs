@@ -60,7 +60,9 @@ fn issue_req(
     request: issues_app::IssuesRequest,
 ) -> IssueResponse {
     rt.block_on(async {
-        let space = lait::orbital::discover_space_id(home).expect("test Space");
+        let space = lait::orbital::discover_space(home)
+            .single()
+            .expect("test Space");
         let call = issues_app::encode_call(&request)?;
         let reply = lait::control::call_world(
             home,
@@ -104,7 +106,9 @@ fn filler(seed: u64, len: usize) -> Vec<u8> {
 }
 
 fn content_route(home: &Path) -> lait::control::ControlRoute {
-    let space = lait::orbital::discover_space_id(home).expect("test Space");
+    let space = lait::orbital::discover_space(home)
+        .single()
+        .expect("test Space");
     lait::control::station_route(OrbitAddress::for_store(home, space))
 }
 

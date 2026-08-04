@@ -1,7 +1,7 @@
 //! Guards parity between the versioned DTO contract and the MCP surface.
 //!
-//! The MCP tools return the **same** versioned control `Response` DTO the
-//! CLI `--json` emits, so agent and human surfaces never drift. These tests are
+//! The MCP tools return the **same** versioned control `Response` DTO the local
+//! app's HTTP surface emits, so the agent and human heads never drift. These tests are
 //! the "check" half of "generate/check, don't hand-maintain twice": they fail
 //! the build gate if a replica `Request` is added without a corresponding MCP
 //! tool, or if a `Response` DTO stops round-tripping (a silent contract break).
@@ -53,72 +53,26 @@ fn onboarding_and_transport_tools_stay_wired() {
 /// stayed green. A list is not a wire; this test asks the wire.
 #[test]
 fn the_served_tool_list_matches_the_declared_surface() {
-    use std::io::{Read, Write};
-    use std::process::{Command, Stdio};
+    use crate::head::{temp_root, Head, Mcp};
 
-    let bin = env!("CARGO_BIN_EXE_lait");
-    let root = std::env::temp_dir().join(format!("lait-served-{}", std::process::id()));
-    std::fs::remove_dir_all(&root).ok();
+    let root = temp_root("served");
+    let config = root.join("cfg");
     let home = root.join("home");
-    let cfg = root.join("cfg");
-    std::fs::create_dir_all(&home).unwrap();
-    std::fs::create_dir_all(&cfg).unwrap();
+    std::fs::create_dir_all(&home).expect("home dir");
 
-    let init = Command::new(bin)
-        .env("LAIT_CONFIG_ROOT", &cfg)
-        .env("LAIT_IDLE_SECS", "0")
-        .args(["--home", home.to_str().unwrap()])
-        .args(["init", "--name", "PROJ", "--nick", "Probe"])
-        .output()
-        .expect("spawn init");
-    assert!(
-        init.status.success(),
-        "init failed: {}",
-        String::from_utf8_lossy(&init.stderr)
-    );
+    // A store first: `lait mcp` binds one Orbit before it can serve a tool.
+    let head = Head::start(&config, Some(&home));
+    let (status, founded) = head.host(serde_json::json!({
+        "cmd": "host_space_found",
+        "home": home.display().to_string(),
+        "name": "PROJ",
+        "nick": "Probe",
+    }));
+    assert_eq!(status, 200, "found: {founded}");
 
-    let mut child = Command::new(bin)
-        .env("LAIT_CONFIG_ROOT", &cfg)
-        .env("LAIT_IDLE_SECS", "0")
-        .env_remove("LAIT_AGENT")
-        .args(["--home", home.to_str().unwrap(), "mcp"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn mcp");
-    {
-        let stdin = child.stdin.as_mut().expect("stdin");
-        for line in [
-            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"parity","version":"0"}}}"#,
-            r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
-            r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#,
-        ] {
-            writeln!(stdin, "{line}").expect("write request");
-        }
-    }
-    // Dropping stdin ends the session, so the server flushes and exits.
-    drop(child.stdin.take());
-    let mut out = String::new();
-    child
-        .stdout
-        .as_mut()
-        .expect("stdout")
-        .read_to_string(&mut out)
-        .expect("read stdout");
-    child.wait().ok();
-
-    let reply = out
-        .lines()
-        .find(|l| l.contains("\"id\":2"))
-        .unwrap_or_else(|| panic!("no tools/list reply in:\n{out}"));
-    let value: serde_json::Value = serde_json::from_str(reply).expect("parse reply");
-    let served: std::collections::BTreeSet<String> = value["result"]["tools"]
-        .as_array()
-        .expect("tools array")
-        .iter()
-        .map(|t| t["name"].as_str().expect("tool name").to_string())
-        .collect();
+    let mut mcp = Mcp::start(&config, &home, None);
+    let served: std::collections::BTreeSet<String> = mcp.tool_names().into_iter().collect();
+    mcp.stop();
     let declared: std::collections::BTreeSet<String> =
         MCP_TOOL_NAMES.iter().map(|s| (*s).to_string()).collect();
 
@@ -126,15 +80,12 @@ fn the_served_tool_list_matches_the_declared_surface() {
     let extra: Vec<_> = served.difference(&declared).collect();
     assert!(
         missing.is_empty() && extra.is_empty(),
-        "the served MCP surface drifted from the declared one\n  \
-         declared but not served: {missing:?}\n  served but not declared: {extra:?}"
+        "the served MCP surface drifted from the declared one
+           declared but not served: {missing:?}
+  served but not declared: {extra:?}"
     );
 
-    Command::new(bin)
-        .env("LAIT_CONFIG_ROOT", &cfg)
-        .args(["--home", home.to_str().unwrap(), "shutdown"])
-        .output()
-        .ok();
+    head.stop();
     std::fs::remove_dir_all(&root).ok();
 }
 

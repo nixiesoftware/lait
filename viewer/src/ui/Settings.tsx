@@ -3,6 +3,8 @@ import {
   ArrowLeft,
   Cog,
   Hash,
+  KeyRound,
+  Laptop,
   Palette,
   ShieldCheck,
   ShieldPlus,
@@ -25,7 +27,7 @@ import { Members } from "./Members";
 import { Combobox } from "./Picker";
 import { Button, cn, IconButton, Input, navigationItem, Textarea } from "./primitives";
 
-type Tab = "general" | "members" | "labels" | "workflow" | "access";
+type Tab = "general" | "members" | "devices" | "labels" | "workflow" | "access";
 
 /**
  * The settings surface — the place a space is administered like an application.
@@ -65,7 +67,9 @@ export function Settings({
   const [tab, setTabState] = useState<Tab>(() => {
     if (window.location.pathname.split("/").filter(Boolean).at(-1) === "members") return "members";
     const t = new URLSearchParams(window.location.search).get("tab");
-    return t === "members" || t === "labels" || t === "workflow" || t === "access" ? t : "general";
+    return t === "members" || t === "devices" || t === "labels" || t === "workflow" || t === "access"
+      ? t
+      : "general";
   });
   const setTab = (next: Tab) => {
     setTabState(next);
@@ -78,7 +82,15 @@ export function Settings({
   useEffect(() => {
     const onNav = (event: Event) => {
       const t = (event as CustomEvent).detail?.tab;
-      if (t === "general" || t === "members" || t === "labels" || t === "workflow" || t === "access") setTab(t);
+      if (
+        t === "general" ||
+        t === "members" ||
+        t === "devices" ||
+        t === "labels" ||
+        t === "workflow" ||
+        t === "access"
+      )
+        setTab(t);
     };
     window.addEventListener("lait:nav", onNav as EventListener);
     return () => window.removeEventListener("lait:nav", onNav as EventListener);
@@ -86,6 +98,7 @@ export function Settings({
   const tabs: { id: Tab; label: string; icon: React.ReactNode }[] = [
     { id: "general", label: "General", icon: <SlidersHorizontal className="size-icon-sm" /> },
     { id: "members", label: "Members", icon: <Users className="size-icon-sm" /> },
+    { id: "devices", label: "Devices & recovery", icon: <Laptop className="size-icon-sm" /> },
     { id: "labels", label: "Labels", icon: <Tag className="size-icon-sm" /> },
     { id: "workflow", label: "Workflow", icon: <Palette className="size-icon-sm" /> },
     { id: "access", label: "Roles & access", icon: <ShieldCheck className="size-icon-sm" /> },
@@ -153,6 +166,14 @@ export function Settings({
                 readOnly={readOnly}
                 onError={onError}
                 embedded
+              />
+            )}
+            {tab === "devices" && (
+              <DevicesPanel
+                spaceId={spaceId}
+                readOnly={readOnly}
+                revision={revision}
+                onError={onError}
               />
             )}
             {tab === "labels" && (
@@ -277,6 +298,260 @@ function GeneralPanel({
           {spaceId}
         </div>
       </Section>
+    </>
+  );
+}
+
+/**
+ * Devices and recovery custody — the operator's half of a Space.
+ *
+ * Both halves were unreachable from every head until now, and each was a half
+ * flow on its own. Enrolment has three steps on two machines: this one mints a
+ * token, the new machine signs it (`host_device_consent`, the host plane —
+ * store-free, because a machine joining an actor is a member of nothing yet),
+ * and this one adds the signed blob. Shipping only the middle step meant nothing
+ * could mint the token it consumes or add the blob it produces.
+ *
+ * Custody is the remedy the status panel's own warning demands: "Share
+ * unreadable" / "Backup unverified" are read straight off `status.recovery`, and
+ * a warning naming a repair no surface offers is worse than no warning.
+ *
+ * Every path here is a path on the machine running lait, not in the browser's
+ * file picker: the daemon reads and writes it, and a share is key material that
+ * deliberately never travels through this page.
+ */
+function DevicesPanel({
+  spaceId,
+  readOnly,
+  revision,
+  onError,
+}: {
+  spaceId: string;
+  readOnly: boolean;
+  revision: number;
+  onError: (message: string) => void;
+}) {
+  const [devices, setDevices] = useState<string[]>([]);
+  const [token, setToken] = useState<string | null>(null);
+  const [busy, setBusy] = useState("");
+  const [custodyPath, setCustodyPath] = useState("");
+  const [passphrase, setPassphrase] = useState("");
+  const [note, setNote] = useState("");
+
+  const load = useCallback(async () => {
+    try {
+      const reply = await spaceRpc(spaceId, { cmd: "device_list" });
+      if (reply.kind === "text") {
+        // "no devices" is prose, not a row — rendering it would offer a revoke
+        // button for a device that is not there.
+        const rows = reply.text.split("\n").filter((line) => line.trim() !== "");
+        setDevices(rows.length === 1 && rows[0] === "no devices" ? [] : rows);
+      }
+    } catch (e) {
+      onError(e instanceof Error ? e.message : String(e));
+    }
+  }, [spaceId, onError]);
+
+  useEffect(() => {
+    void load();
+  }, [load, revision]);
+
+  const act = async (key: string, fn: () => Promise<string | null>) => {
+    setBusy(key);
+    setNote("");
+    try {
+      const said = await fn();
+      if (said) setNote(said);
+      await load();
+    } catch (e) {
+      onError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy("");
+    }
+  };
+
+  return (
+    <>
+      <Section
+        title="Your devices"
+        hint="Every machine that signs as you in this space. Each holds its own key; none of them is a copy of another."
+      >
+        {devices.length === 0 ? (
+          <p className="text-mute text-sm">Only this device.</p>
+        ) : (
+          <ul className="border-line divide-line divide-y rounded-surface border">
+            {devices.map((line) => (
+              <li key={line} className="flex items-center gap-2 p-2.5 text-sm">
+                <Laptop className="text-mute size-icon-sm shrink-0" />
+                <code className="min-w-0 flex-1 truncate">{line}</code>
+                {!readOnly && !line.includes("(this device)") && (
+                  <IconButton
+                    label="Revoke this device"
+                    variant="danger"
+                    disabled={busy !== ""}
+                    onClick={() =>
+                      void act("revoke", async () => {
+                        const device = line.trim().split(/\s+/)[0] ?? "";
+                        if (
+                          !(await ask.confirm({
+                            title: `Revoke device ${device}?`,
+                            body: "It stops signing as you. Content it already holds stays readable until an admin rotates the space key.",
+                            confirmText: "Revoke",
+                            danger: true,
+                          }))
+                        )
+                          return null;
+                        const reply = await spaceRpc(spaceId, { cmd: "device_revoke", device });
+                        return reply.kind === "ok" ? reply.message : null;
+                      })
+                    }
+                  >
+                    <Trash2 className="size-icon-sm" />
+                  </IconButton>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+      </Section>
+
+      {!readOnly && (
+        <Section
+          title="Add a device"
+          hint="Three steps, two machines. Nothing here leaves this space unencrypted."
+        >
+          <ol className="text-dim flex flex-col gap-3 text-sm">
+            <li>
+              <div className="flex items-center gap-2">
+                <span className="flex-1">Mint an enrolment token on this machine.</span>
+                <Button
+                  size="md"
+                  loading={busy === "invite"}
+                  disabled={busy !== ""}
+                  onClick={() =>
+                    void act("invite", async () => {
+                      const reply = await spaceRpc(spaceId, { cmd: "device_invite" });
+                      if (reply.kind === "text") setToken(reply.text.trim());
+                      return null;
+                    })
+                  }
+                >
+                  <KeyRound className="size-icon-sm" />
+                  Mint token
+                </Button>
+              </div>
+              {token && (
+                <code className="border-line bg-raised mt-2 block rounded-surface border p-2 font-mono text-xs break-all">
+                  {token}
+                </code>
+              )}
+            </li>
+            <li>
+              Open lait on the other machine and give it that token — it signs its consent without
+              needing a store or a membership of its own.
+            </li>
+            <li>
+              <div className="flex items-center gap-2">
+                <span className="flex-1">Paste the signed consent it hands back.</span>
+                <Button
+                  size="md"
+                  loading={busy === "add"}
+                  disabled={busy !== ""}
+                  onClick={() =>
+                    void act("add", async () => {
+                      const consent = await ask.prompt({
+                        title: "Signed device consent",
+                        body: "The hex blob the other machine produced from the token above.",
+                        label: "Consent",
+                      });
+                      if (!consent?.trim()) return null;
+                      const reply = await spaceRpc(spaceId, {
+                        cmd: "device_add",
+                        consent: consent.trim(),
+                      });
+                      setToken(null);
+                      return reply.kind === "ok" ? reply.message : null;
+                    })
+                  }
+                >
+                  Add device
+                </Button>
+              </div>
+            </li>
+          </ol>
+        </Section>
+      )}
+
+      {!readOnly && (
+        <Section
+          title="Recovery custody"
+          hint="Your share of this space's recovery authority, sealed with a passphrase. Export it somewhere you will still have when this machine is gone; import it when the status panel says the share is missing or unreadable."
+        >
+          <div className="flex max-w-lg flex-col gap-2">
+            <Input
+              value={custodyPath}
+              placeholder="Path on the machine running lait"
+              aria-label="Custody file path"
+              onChange={(e) => setCustodyPath(e.target.value)}
+            />
+            <Input
+              type="password"
+              value={passphrase}
+              placeholder="Passphrase"
+              aria-label="Custody passphrase"
+              onChange={(e) => setPassphrase(e.target.value)}
+            />
+            <div className="flex items-center gap-2">
+              <Button
+                size="md"
+                loading={busy === "export"}
+                disabled={busy !== "" || !custodyPath.trim() || passphrase === ""}
+                onClick={() =>
+                  void act("export", async () => {
+                    const reply = await spaceRpc(spaceId, {
+                      cmd: "space_custody_export",
+                      path: custodyPath.trim(),
+                      passphrase,
+                    });
+                    setPassphrase("");
+                    return reply.kind === "ok" ? reply.message : null;
+                  })
+                }
+              >
+                Export share
+              </Button>
+              <Button
+                size="md"
+                loading={busy === "import"}
+                disabled={busy !== "" || !custodyPath.trim() || passphrase === ""}
+                onClick={() =>
+                  void act("import", async () => {
+                    const reply = await spaceRpc(spaceId, {
+                      cmd: "space_custody_import",
+                      path: custodyPath.trim(),
+                      passphrase,
+                      // Never blind: replacing a share that is merely unreadable
+                      // by *this* build is how a recoverable space becomes an
+                      // unrecoverable one.
+                      force: await ask.confirm({
+                        title: "Replace an existing share?",
+                        body: "Answer yes only if this machine's current share is the broken one. Otherwise the import is refused when a share is already here, which is the safe answer.",
+                        confirmText: "Replace it",
+                        danger: true,
+                      }),
+                    });
+                    setPassphrase("");
+                    return reply.kind === "ok" ? reply.message : null;
+                  })
+                }
+              >
+                Import share
+              </Button>
+            </div>
+            {note && <p className="text-dim text-sm">{note}</p>}
+          </div>
+        </Section>
+      )}
     </>
   );
 }
@@ -657,7 +932,7 @@ function roleName(r: RoleWire): string {
  * / `access_revoke`); until now it was terminal-only, so a browser-first admin
  * could see a *membership* role on the Members page but never grant a scoped
  * capability. This surfaces the role catalogue read-only (authoring a role is a
- * CAS ceremony best left to the CLI) and makes the *assignment* verbs — grant a
+ * CAS ceremony with its own conflict flow) and makes the *assignment* verbs — grant a
  * role's capabilities to an actor, revoke one — first-class here.
  *
  * A grant expands a role into one assignment per capability, each with its own
@@ -772,7 +1047,7 @@ function AccessPanel({
     <>
       <Section
         title="Roles"
-        hint="Named capability sets from the signed policy. Authoring a role is a CAS ceremony — create and edit them with lait issues role create/edit."
+        hint="Named capability sets from the signed policy. Authoring a role is a CAS ceremony — create and edit them with the issues_role_create and issues_role_edit tools."
       >
         {!roles && <p className="text-mute text-sm">Loading…</p>}
         <ul className="flex flex-col gap-2">

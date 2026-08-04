@@ -18,7 +18,7 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # The web client (`lait serve`'s UI). Its build output is COMMITTED under
+  # The web client (the UI bare `lait` serves). Its build output is COMMITTED under
   # src/serve/assets because `include_dir!` embeds it at compile time and
   # `cargo install lait` must not need npm (docs/SERVE.md). Committed build output
   # goes stale the first time someone edits viewer/ and forgets to rebuild — and
@@ -503,13 +503,13 @@ jobs:
   # The self-updater's in-archive binary path is a claim about cargo-dist's
   # layout, and the unit tests can only check it against our MODEL of that
   # layout. The model was wrong twice — v0.4.8 and v0.5.0 shipped a Windows path
-  # of `lait.exe.exe`, so `lait update` was dead on Windows for every user, and
+  # of `lait.exe.exe`, so self-update was dead on Windows for every user, and
   # nothing caught it because the test just restated the code. This job closes
   # the loop against reality: it downloads the archives users actually download
   # and asserts the path self_update would extract is really in them.
   #
   # It validates the CURRENT tree's updater against the LATEST release — exactly
-  # the operation `lait update` performs — so a cargo-dist layout change breaks
+  # the operation `Request::HostUpdate` performs — so a cargo-dist layout change breaks
   # CI here rather than stranding users on a binary that cannot update itself.
   updater-contract:
     name: self-updater archive contract
@@ -548,7 +548,7 @@ jobs:
         shell: bash
         env:
           LAIT_RELEASE_ARCHIVES: release-archives
-        run: cargo test --lib -- --ignored --exact app::tests::update_bin_path_is_a_real_entry_in_the_published_archives
+        run: cargo test --lib -- --ignored --exact update::tests::update_bin_path_is_a_real_entry_in_the_published_archives
 
   # Packaging manifests (Scoop + winget) are hand-maintained templates that the
   # release CD (publish-scoop / publish-winget) stamps with each release's real

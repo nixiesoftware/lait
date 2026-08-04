@@ -300,8 +300,8 @@ Three things worth knowing:
   `tokio::time::Instant` call sites in `src/`.
 - **Not everything is covered.** `crates/replica` has no tokio dependency and
   keeps `std::time::Instant`, taking `now` as a parameter instead;
-  `crates/comms` has one timing measurement; CLI deadlines in `src/` are not
-  worth simulating. `SystemTime::now` is a separate problem — see the gaps
+  `crates/comms` has one timing measurement; the head's own deadlines in `src/`
+  are not worth simulating. `SystemTime::now` is a separate problem — see the gaps
   below.
 
 Code that takes `now` as a parameter — `Gate::check(now)`, `budget.admit(now)`,

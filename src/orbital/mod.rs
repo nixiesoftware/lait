@@ -39,16 +39,48 @@ impl std::fmt::Display for UnsupportedStoreVersion {
 
 impl std::error::Error for UnsupportedStoreVersion {}
 
-/// Whether `home` holds one formed/entered orbital Space store.
-pub fn space_store_present(home: &Path) -> bool {
-    discover_space_id(home).is_some()
+/// What the orbital store root under a home holds.
+///
+/// Three answers, not two, because "nothing here" and "more than one here" are
+/// opposites that a single `Option` used to spell the same way. A home binds one
+/// Space; a directory holding two is the one thing no caller may treat as the
+/// blank target formation is aimed at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SpaceStore {
+    /// No orbital Space store here.
+    Absent,
+    /// The one Space this home is bound to.
+    One(::mechanics::ids::SpaceId),
+    /// Several Space stores under one home — never formed by this build, and
+    /// nothing that reads a home's Space can act on it.
+    Several,
 }
 
-/// The single orbital Space id under `home`, if any.
-pub fn discover_space_id(home: &Path) -> Option<issues::ids::SpaceId> {
+impl SpaceStore {
+    /// The single Space, for callers that have already answered the other two
+    /// cases and only need the id.
+    pub fn single(self) -> Option<::mechanics::ids::SpaceId> {
+        match self {
+            SpaceStore::One(space) => Some(space),
+            _ => None,
+        }
+    }
+}
+
+/// Whether `home` holds an orbital Space store at all — including the ambiguous
+/// one, which is emphatically not an empty directory.
+pub fn space_store_present(home: &Path) -> bool {
+    !matches!(discover_space(home), SpaceStore::Absent)
+}
+
+/// What `home`'s orbital store root is bound to.
+pub fn discover_space(home: &Path) -> SpaceStore {
     let root = orbital_store_root(home);
+    let Ok(entries) = std::fs::read_dir(&root) else {
+        return SpaceStore::Absent;
+    };
     let mut found = None;
-    for entry in std::fs::read_dir(&root).ok()?.flatten() {
+    for entry in entries.flatten() {
         if !entry.path().is_dir() {
             continue;
         }
@@ -56,14 +88,17 @@ pub fn discover_space_id(home: &Path) -> Option<issues::ids::SpaceId> {
             .file_name()
             .to_str()
             .filter(|name| name.starts_with("ws_"))
-            .and_then(issues::ids::SpaceId::parse)
+            .and_then(::mechanics::ids::SpaceId::parse)
         {
             if found.replace(space).is_some() {
-                return None;
+                return SpaceStore::Several;
             }
         }
     }
-    found
+    match found {
+        Some(space) => SpaceStore::One(space),
+        None => SpaceStore::Absent,
+    }
 }
 
 /// Detect a pre-orbital (v0.x) store. A fresh Orbit is never created beside it.
@@ -112,14 +147,12 @@ pub use hosting::{
 };
 pub use mechanics::{AuthorityRecord, SpaceAuthority};
 pub use worlds::{
-    Invalidation, ObservationProjector, StatusProjection, WorldHost, WorldPackage, WorldPackages,
+    BootstrapContext, FounderGrant, InitialScope, Invalidation, ObservationProjector,
+    RoutedInvalidation, StatusProjection, WorldHost, WorldLifecycle, WorldPackage, WorldPackages,
     WorldRouter,
 };
 
-pub use crate::world::lifecycle::{
-    enter_space, form_space, found_space_cli, issues_implementation_id, read_bootstrap_record,
-    seed_founder_policy, BootstrapPhase, IssuesBootstrapRecord,
-};
+pub use crate::world::lifecycle::{enter_space, form_space, found_space, seed_founder_policy};
 
 /// A random 16-byte value (salts, epoch ids, nonces).
 pub(crate) fn rand16() -> anyhow::Result<[u8; 16]> {

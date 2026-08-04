@@ -70,7 +70,9 @@ fn req(rt: &tokio::runtime::Runtime, home: &Path, r: Request) -> Response {
 }
 
 async fn issues_request(home: &Path, request: issues_app::IssuesRequest) -> Result<IssueResponse> {
-    let space = lait::orbital::discover_space_id(home).expect("test Space");
+    let space = lait::orbital::discover_space(home)
+        .single()
+        .expect("test Space");
     let call = issues_app::encode_call(&request)?;
     let reply = lait::control::call_world(
         home,
@@ -132,7 +134,7 @@ fn wait_online(rt: &tokio::runtime::Runtime, home: &Path) {
 }
 
 /// Mint a single-use invite at the founder and bootstrap `home`'s store from
-/// it (the `lait join` store entry; the caller spawns the daemon after).
+/// it (what `HostSpaceEnter` does; the caller spawns the daemon after).
 fn admit(client: &tokio::runtime::Runtime, home: &Path, seed: &[u8; 32], founder_home: &Path) {
     let Response::Ref { reff: invite } = req(
         client,
@@ -422,9 +424,11 @@ fn a_peers_change_rings_a_doorbell_that_names_what_moved() {
             match tokio::time::timeout(remaining, sub.next()).await {
                 Ok(Ok(Some(frame))) => {
                     let named = frame
-                        .dirty_by_project
+                        .invalidations
                         .iter()
-                        .any(|d| d.project_key == "BCN" && d.docs.contains(&doc));
+                        .filter(|entry| entry.world.as_str() == issues::contract::PRODUCT_WORLD)
+                        .flat_map(|entry| &entry.dirty)
+                        .any(|d| d.label.as_deref() == Some("BCN") && d.docs.contains(&doc));
                     if named {
                         break Some(frame);
                     }

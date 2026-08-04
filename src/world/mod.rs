@@ -1,96 +1,39 @@
-//! The product's orbital World adapter (C4): the frozen contract packet, the
-//! parsed state/projection layer, and the registered `IssuesWorld`.
+//! The shell's World-hosting surface: which packages this application mounts,
+//! for the host side and the client side.
+//!
+//! It names no World. The bundled set comes from [`crate::composition`], the
+//! single file that knows which products this build ships — so adding,
+//! removing, or swapping a World is an edit there and nowhere else.
 //!
 //! See `docs/plans/04-product-world-contract.md` for the normative mapping.
 
-use runtime::poison::LockRecovering;
-use std::sync::{Arc, LazyLock};
+use std::sync::LazyLock;
 
-use crate::orbital::{
-    Invalidation, ObservationProjector, StatusProjection, WorldPackage, WorldPackages,
-};
+use crate::orbital::WorldPackages;
 use world_interface::WorldClientRegistry;
 
 pub mod lifecycle;
 
-pub use issues::{
-    contract, roles, views, workflow, IssueEffect, IssueIntent, IssueQuery, IssuesWorld,
-    PRODUCT_WORLD,
+// The product's semantic vocabulary, re-exported through the module the rest of
+// the shell already reaches for. The names cross this seam; the dependency does
+// not — every one of them resolves through the composition root, so swapping the
+// bundled World changes one file rather than every call site.
+pub use crate::composition::{
+    contract, implementation_id, package, roles, views, workflow, IssueEffect, IssueIntent,
+    IssueQuery, IssuesWorld, PRODUCT_WORLD,
 };
 
-/// The issue tracker's complete compile-time World package.
-///
-/// Keeping semantic implementation, reviewed identity, and application control
-/// adapter in one value makes this module the product composition root. The
-/// daemon and StationHost receive packages by injection and do not construct or
-/// name IssuesWorld themselves.
-pub fn package() -> WorldPackage {
-    let control = Arc::new(issues_app::IssuesCallHandler);
-    let projector = Arc::new(IssuesProjector::default());
-    WorldPackage::new(Arc::new(IssuesWorld::new()), implementation_id())
-        .with_control(control)
-        .with_projector(projector)
-}
-
-#[derive(Default)]
-struct IssuesProjector {
-    baseline:
-        std::sync::Mutex<Option<std::collections::BTreeMap<crate::control::CatalogScope, String>>>,
-}
-
-impl ObservationProjector for IssuesProjector {
-    fn status(&self, session: &runtime::Session) -> Option<StatusProjection> {
-        issues_app::projections::status(session).map(|projection| StatusProjection {
-            items: projection.issues,
-            groups: projection.projects,
-            name: projection.name,
-            description: projection.description,
-        })
-    }
-
-    fn start(&self, session: &runtime::Session, _space: &mechanics::ids::SpaceId) {
-        let baseline = issues_app::projections::ring_state(session).map(|state| state.planes);
-        *self.baseline.lock_recovering() = baseline;
-    }
-
-    fn project(
-        &self,
-        session: &runtime::Session,
-        space: &mechanics::ids::SpaceId,
-        observation: &runtime::world::Observation,
-    ) -> Invalidation {
-        let mut baseline = self.baseline.lock_recovering();
-        let (dirty_by_project, dirty_catalog) = issues_app::projections::observation(
-            session,
-            space,
-            &observation.bodies,
-            &mut baseline,
-        );
-        Invalidation {
-            dirty_by_project,
-            dirty_catalog,
-        }
-    }
-}
-
-/// Every product World bundled by the issue-tracker application.
+/// Every product World bundled by this application, for the host side.
 pub fn packages() -> WorldPackages {
-    WorldPackages::new().with_package(package())
+    crate::composition::bundled_packages()
 }
 
-static CLIENT_PACKAGES: LazyLock<WorldClientRegistry> = LazyLock::new(|| {
-    issues_app::package()
-        .ok()
-        .and_then(|package| WorldClientRegistry::new().with_package(package).ok())
-        .unwrap_or_default()
-});
+/// Built once per process: a registry is a fixed property of the build, and
+/// every head resolves mounts against the same one.
+static CLIENT_PACKAGES: LazyLock<WorldClientRegistry> =
+    LazyLock::new(crate::composition::bundled_client_packages);
 
 /// Every client-facing World package mounted by the navigation shell.
 pub fn client_packages() -> &'static WorldClientRegistry {
     &CLIENT_PACKAGES
-}
-
-/// The reviewed IssuesWorld implementation id shipped by this build.
-pub fn implementation_id() -> [u8; 32] {
-    issues_app::lifecycle::implementation_id()
 }

@@ -1,4 +1,4 @@
-//! `lait serve` — the local HTTP surface, and the browser's Layer-B client.
+//! The local app: bare `lait`'s HTTP surface, and the browser's Layer-B client.
 //!
 //! The daemon's contract has always been [`crate::control`]: a versioned,
 //! hand-maintained imperative façade over the CRDT, spoken over a Unix socket or
@@ -50,12 +50,12 @@ use tokio::net::TcpListener;
 
 use crate::control::{ErrorKind, Request};
 use crate::daemon::{Client, OrbitDoorbell};
-use crate::orbits::{Catalog, StationIdentity};
+use crate::orbits::{Catalog, ResolvedOrbit, StationIdentity};
 use auth::{Guard, Refusal};
 
 /// The default port. Fixed rather than ephemeral so the URL is predictable and
 /// the `Origin` allowlist has something stable to name; a collision is reported
-/// rather than silently worked around, because a `lait serve` that lands on a
+/// rather than silently worked around, because a server that lands on a
 /// *different* port than it was asked for is a footgun for anything that
 /// bookmarked it.
 pub const DEFAULT_PORT: u16 = 7717;
@@ -64,7 +64,7 @@ pub const DEFAULT_PORT: u16 = 7717;
 ///
 /// Named per-port, because **cookies ignore the port**: `127.0.0.1:7717` and
 /// `127.0.0.1:7801` are the same cookie origin, so a fixed name would have two
-/// concurrent `lait serve` runs silently clobbering each other's credential —
+/// concurrent runs silently clobbering each other's credential —
 /// whichever loaded last wins, and the other tab starts 401ing. The port is not a
 /// security boundary here (the token is); it is what keeps two runs from being the
 /// same jar entry.
@@ -76,6 +76,9 @@ struct App {
     guard: Guard,
     directory: Catalog,
     daemon: Client,
+    /// Which identity this server serves, carried rather than re-derived from
+    /// the environment on every request that has to reach its daemon.
+    selection: crate::config::Selection,
     doorbells: tokio::sync::broadcast::Sender<ViewerEvent>,
     cookie: String,
     /// Latched when this server begins shutting down.
@@ -111,11 +114,16 @@ enum ViewerEvent {
 /// is the first caller; an editor plugin that wants to embed the client is the next.
 /// The line is emitted **before** the server starts accepting, so a parent process
 /// can read one line and know it is safe to connect.
-pub async fn run(port: u16, open: bool, json: bool) -> Result<()> {
-    // Identity scoping, resolved once at startup. Catalog uses
-    // `$LAIT_HOME` as the self-contained identity boundary.
-    let identity = crate::config::identity_dir()?;
-    let self_contained = std::env::var_os("LAIT_HOME").is_some();
+pub async fn run(
+    port: u16,
+    open: bool,
+    json: bool,
+    selection: crate::config::Selection,
+) -> Result<()> {
+    // Identity scoping, resolved once at startup from the invocation's own
+    // selection rather than from a process-wide environment.
+    let identity = selection.identity_dir()?;
+    let self_contained = selection.self_contained();
     let agents_base = crate::registry::agents_base(&crate::config::config_root()?);
 
     // Loopback only. Not `0.0.0.0`: that would hand the LAN an unauthenticated-
@@ -124,15 +132,15 @@ pub async fn run(port: u16, open: bool, json: bool) -> Result<()> {
     let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, port)))
         .await
         .with_context(|| {
-            format!("bind 127.0.0.1:{port} (is another `lait serve` already running?)")
+            format!("bind 127.0.0.1:{port} (is another `lait` already serving here?)")
         })?;
     let bound = listener.local_addr().context("read bound address")?;
 
     let token = mint_token()?;
-    crate::cli::ensure_lait_daemon()
+    crate::host_client::ensure_lait_daemon(&selection)
         .await
         .context("start Lait daemon")?;
-    let daemon = Client::current()?;
+    let daemon = Client::for_selection(&selection)?;
     let (doorbells, _) = tokio::sync::broadcast::channel(256);
     // Created before anything that has to watch it. Every long-lived response
     // and every background task selects on this one channel.
@@ -141,6 +149,7 @@ pub async fn run(port: u16, open: bool, json: bool) -> Result<()> {
         guard: Guard::new(token.clone(), bound.port()),
         directory: Catalog::new(identity, agents_base, self_contained),
         daemon: daemon.clone(),
+        selection,
         doorbells: doorbells.clone(),
         cookie: cookie_name(bound.port()),
         stop: stop.clone(),
@@ -173,7 +182,7 @@ pub async fn run(port: u16, open: bool, json: bool) -> Result<()> {
             serde_json::json!({ "url": url, "token": token, "port": bound.port() })
         );
     } else {
-        println!("lait serve — your spaces at:\n  {url}");
+        println!("lait — your spaces at:\n  {url}");
         println!("(loopback only; this link carries a one-time token for this run)");
     }
     if open {
@@ -310,6 +319,11 @@ async fn shutdown_signal() {
 const ROUTES: &[Route] = &[
     Route::open("/", Method::Get),
     Route::open("/api/spaces", Method::Get),
+    // Daemon-scoped, and it has to be: founding a Space, entering one from an
+    // invite, and reading node-local settings all happen before there is a
+    // space id to put in a path. Every other `/api` route is `/api/spaces/{id}`
+    // and therefore unreachable at the only moment these matter.
+    Route::open("/api/host/rpc", Method::Post),
     Route::open("/api/spaces/{id}/rpc", Method::Post),
     Route::open("/api/spaces/{id}/worlds/{world}/rpc", Method::Post),
     Route::open("/api/events", Method::Get),
@@ -372,6 +386,7 @@ fn handler(route: &Route) -> Option<axum::routing::MethodRouter<Arc<App>>> {
     Some(match (route.path, route.method) {
         ("/", _) => get(index),
         ("/api/spaces", _) => get(list_spaces),
+        ("/api/host/rpc", _) => post(host_rpc),
         ("/api/spaces/{id}/rpc", _) => post(rpc),
         ("/api/spaces/{id}/worlds/{world}/rpc", _) => post(world_rpc),
         ("/api/events", _) => get(events),
@@ -519,7 +534,7 @@ fn refuse(r: Refusal) -> Response {
 }
 
 /// Errors go out in the same envelope `--json` emits, so a browser client and a
-/// CLI client are reading one contract rather than two.
+/// MCP client are reading one contract rather than two.
 fn err_json(message: &str, error_kind: ErrorKind) -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "kind": "error",
@@ -573,7 +588,7 @@ async fn list_spaces(State(app): State<Arc<App>>) -> Response {
 
 #[derive(Deserialize)]
 struct RpcQuery {
-    /// The client has already asked [`crate::cli::destructive_question`] and been
+    /// The client has already asked [`crate::host_client::destructive_question`] and been
     /// told yes. See [`rpc`].
     #[serde(default)]
     confirm: bool,
@@ -600,16 +615,15 @@ struct RpcQuery {
 ///    observability they were scoped in for; a *write* would be signed by the agent
 ///    and land under its name. If you are a member of that space, write through
 ///    your own node and sign as yourself.
-/// 3. **Destructive verbs keep the CLI's question.** `confirm_destructive` is a TTY
-///    affordance: it refuses under `--json` because a pipe cannot be asked. A browser
-///    can — it has a modal — so rather than bypass the gate or inherit the pipe's
-///    refusal, the question comes back as a `409 confirm_required` and the UI asks
-///    it. The string is `cli::destructive_question`'s, not a paraphrase, so the two
-///    surfaces cannot disagree about what is dangerous.
+/// 3. **Destructive verbs have to be asked about.** The browser is the only surface
+///    left that can ask, and it can — it has a modal — so the question comes back
+///    as a `409 confirm_required` and the UI puts it to the user. The string is
+///    `host_client::destructive_question`'s, not a paraphrase, so no two surfaces
+///    can disagree about what is dangerous.
 ///
 /// Gate 3 protects against an *accident*, not an attacker: anything that can POST
-/// `delete` can also POST `?confirm=1`. That is the same guarantee the CLI's prompt
-/// gives, and it is worth being honest that it is the whole of it.
+/// `delete` can also POST `?confirm=1`. It is worth being honest that this is the
+/// whole of it.
 async fn world_rpc(
     State(app): State<Arc<App>>,
     Path((id, world)): Path<(String, String)>,
@@ -650,26 +664,27 @@ async fn world_rpc(
                 .into_response();
         }
     };
-    if let StationIdentity::Agent { name } = &resolved.identity {
-        if invocation.access() != world_interface::ClientAccess::Query {
-            return (
-                StatusCode::FORBIDDEN,
-                err_json(
-                    &format!(
-                        "{name}'s space is read-only here — a write would be signed as {name}. \
-                         Open the same space through your own node to write as yourself."
-                    ),
-                    ErrorKind::Error,
-                ),
-            )
-                .into_response();
+    // `access()` is the class the package computed from the request it just
+    // parsed, so asking costs no second decode on the call path.
+    if invocation.access() != world_interface::ClientAccess::Query {
+        if let Some(refusal) = borrowed_key_refusal(&app.directory, &resolved, "a write") {
+            return refusal;
         }
     }
     let scope = crate::daemon::ClientScope::pinned(resolved.address.orbit.clone());
-    let host = crate::cli::PackageClientHost::new(&resolved.home, scope, None);
+    // The address comes off the catalog the route already resolved: a World
+    // call must not re-scan the store root to learn the Orbit it was addressed
+    // to.
+    let host = crate::host_client::PackageClientHost::new(
+        &resolved.home,
+        resolved.address.clone(),
+        scope,
+        None,
+        app.selection.clone(),
+    );
     if !q.confirm {
-        // The same package-resolved question the CLI prompts with, so the modal
-        // and the terminal cannot describe the same danger differently.
+        // The package-resolved question, resolved once, so no two surfaces
+        // can describe the same danger differently.
         match package.confirmation(&host, &invocation).await {
             Ok(Some(question)) => {
                 return (
@@ -691,18 +706,8 @@ async fn world_rpc(
             }
         }
     }
-    match package
-        .execute(
-            &host,
-            invocation,
-            world_interface::PresentationOptions {
-                json: true,
-                color: false,
-            },
-        )
-        .await
-    {
-        Ok(output) => Json(output.value).into_response(),
+    match package.execute(&host, invocation).await {
+        Ok(value) => Json(value).into_response(),
         Err(error) => (
             StatusCode::BAD_REQUEST,
             err_json(&error.to_string(), ErrorKind::Error),
@@ -751,6 +756,138 @@ async fn socket_editor_rpc(
     (status, body)
 }
 
+/// The host plane: `POST /api/host/rpc`.
+///
+/// Every other `/api` route is `/api/spaces/{id}/…`, which is unanswerable at
+/// the one moment this matters — founding a Space, or entering one from an
+/// invite, is precisely the state in which there is no space id to name. So the
+/// route is daemon-scoped, and the daemon is identity-scoped, which is the same
+/// scope the token on this server already stands for.
+///
+/// The credential story is unchanged: this is registered in `ROUTES` like
+/// everything else, so it is inside `gate` — same Origin check, same token,
+/// same refusals. What is narrowed is the *vocabulary*: only host-plane
+/// requests pass, because `ControlRoute::Daemon` also carries `Stop`, and a
+/// page able to send that could shut down the server answering it.
+async fn host_rpc(
+    State(app): State<Arc<App>>,
+    Query(q): Query<RpcQuery>,
+    Json(input): Json<serde_json::Value>,
+) -> Response {
+    let req = match serde_json::from_value::<Request>(input) {
+        Ok(request) => request,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                err_json(&format!("bad request: {error}"), ErrorKind::Error),
+            )
+                .into_response();
+        }
+    };
+    if !policy::is_host_plane(&req) {
+        return (
+            StatusCode::BAD_REQUEST,
+            err_json(
+                "this endpoint answers host-plane requests only — a Space request \
+                 goes to POST /api/spaces/{id}/rpc",
+                ErrorKind::Error,
+            ),
+        )
+            .into_response();
+    }
+    if !q.confirm {
+        if let Some(question) = crate::host_client::destructive_question(&req) {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "kind": "confirm_required",
+                    "question": question,
+                })),
+            )
+                .into_response();
+        }
+    }
+    // No probe ahead of the call: the send is the probe. See
+    // `host_client::request_daemon` — the healthy path is one round trip, and
+    // a daemon that is not there is discovered by the failure it causes.
+    match crate::host_client::host_request(&app.daemon, &app.selection, req).await {
+        Ok(response) => Json(response).into_response(),
+        Err(error) => daemon_failure(&error),
+    }
+}
+
+/// The refusal an act gets when this daemon would have to sign it with a key it
+/// merely hosts, or `None` when the key would be the caller's own.
+///
+/// **Custody, not standing.** This is not a judgement about what kind of member
+/// owns the Station, and it does not become redundant when a sponsored agent
+/// holds write standing — it is not about standing at all. A Station whose
+/// binding carries its own identity directory is signed with *that* seed
+/// (`orbits::router` loads the seed from `resolved.identity_dir`), so a write
+/// routed here on behalf of whoever holds this server's token would go out over
+/// the agent's signature. Mechanics checks the *signer's* grants and the signer
+/// would be the agent, so it approves; nothing behind this route asks the
+/// question again. This is the only place it is asked, and the answer must be no
+/// however wide anybody's grants become — the same rule
+/// `orbits::bootstrap::admit` states for host requests.
+///
+/// It must never refuse a read: reading a hosted identity's board *authors*
+/// nothing in the Space, and that is the whole reason it is browsable here.
+/// Note the narrower claim — placement still loads that identity's seed to
+/// stand its Station up (`orbits::router`), so reading brings the key onto the
+/// wire even though it commits nothing. The fence is about authorship, not
+/// about keeping the seed unread; a host that wanted the stronger property
+/// would have to refuse placement, not refuse writes.
+///
+/// `Catalog::signs_with_own_seed` is the one spelling of the question, so the
+/// enum shape stops being a proxy for it on four separate routes.
+fn borrowed_key_refusal(
+    directory: &Catalog,
+    resolved: &ResolvedOrbit,
+    act: &str,
+) -> Option<Response> {
+    if directory.signs_with_own_seed(resolved) {
+        return None;
+    }
+    let holder = match &resolved.identity {
+        StationIdentity::Agent { name } => name.clone(),
+        StationIdentity::Own => resolved.home.display().to_string(),
+    };
+    Some(
+        (
+            StatusCode::FORBIDDEN,
+            err_json(
+                &format!(
+                    "{holder}'s space is read-only here — {act} would be signed as {holder}. \
+                     Open the same space through your own node to write as yourself."
+                ),
+                ErrorKind::Error,
+            ),
+        )
+            .into_response(),
+    )
+}
+
+/// A failure that never became a `Response`.
+///
+/// `503` when the daemon could not be reached at all (the caller may retry),
+/// `400` otherwise. The split comes off the typed failure rather than the
+/// message text, for the same reason exit codes do.
+fn daemon_failure(error: &anyhow::Error) -> Response {
+    let unreachable = error
+        .downcast_ref::<crate::host_client::Failure>()
+        .is_some_and(|failure| failure.code == 3)
+        || error
+            .downcast_ref::<crate::control::ForeignDaemon>()
+            .is_some();
+    let status = if unreachable {
+        StatusCode::SERVICE_UNAVAILABLE
+    } else {
+        StatusCode::BAD_REQUEST
+    };
+    (status, err_json(&format!("{error:#}"), ErrorKind::Error)).into_response()
+}
+
 async fn rpc(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,
@@ -789,24 +926,14 @@ async fn rpc(
             .into_response();
     }
 
-    if let StationIdentity::Agent { name } = &resolved.identity {
-        if !policy::is_read(&req) {
-            return (
-                StatusCode::FORBIDDEN,
-                err_json(
-                    &format!(
-                        "{name}'s space is read-only here — a write would be signed as {name}. \
-                         Open the same space through your own node to write as yourself."
-                    ),
-                    ErrorKind::Error,
-                ),
-            )
-                .into_response();
+    if !policy::is_read(&req) {
+        if let Some(refusal) = borrowed_key_refusal(&app.directory, &resolved, "a write") {
+            return refusal;
         }
     }
 
     if !q.confirm {
-        if let Some(question) = crate::cli::destructive_question(&req) {
+        if let Some(question) = crate::host_client::destructive_question(&req) {
             return (
                 StatusCode::CONFLICT,
                 Json(serde_json::json!({
@@ -819,20 +946,10 @@ async fn rpc(
     }
 
     let route = crate::control::station_route(resolved.address);
-    if let Err(error) = crate::cli::ensure_lait_daemon().await {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            err_json(&error.to_string(), ErrorKind::Error),
-        )
-            .into_response();
-    }
-    match app.daemon.request(route, &req, None).await {
+    let envelope = crate::control::ClientRequest::routed(req, route, None);
+    match crate::host_client::request_daemon(&app.daemon, &app.selection, &envelope).await {
         Ok(resp) => Json(resp).into_response(),
-        Err(e) => (
-            StatusCode::BAD_REQUEST,
-            err_json(&e.to_string(), ErrorKind::Error),
-        )
-            .into_response(),
+        Err(error) => daemon_failure(&error),
     }
 }
 
@@ -939,6 +1056,7 @@ mod tests {
             guard: Guard::new(token.into(), 7717),
             directory: Catalog::new(nowhere.clone(), nowhere.clone(), true),
             daemon: Client::at(nowhere),
+            selection: crate::config::Selection::default(),
             doorbells: tokio::sync::broadcast::channel(1).0,
             cookie: cookie_name(7717),
             stop: tokio::sync::watch::channel(false).0,
@@ -1104,6 +1222,171 @@ mod tests {
         );
     }
 
+    const HOSTED_TOKEN: &str = "hosted";
+
+    /// A server whose catalog holds one Orbit that signs with a seed this daemon
+    /// merely hosts, plus that Orbit's local id.
+    ///
+    /// The setup has to actually *resolve* as a hosted identity, or every fence
+    /// test below would pass by never reaching a fence. The assertion on
+    /// `borrowed_key_refusal` is that check, made once, before any route runs.
+    fn hosted_identity_server() -> (Router, String) {
+        let agents = std::path::PathBuf::from("/agents-for-tests");
+        let store = agents.join("scout");
+        let entry = crate::orbits::Entry {
+            space: mechanics::ids::SpaceId::from_digest([7; 16]).to_string(),
+            name: "Scout".into(),
+            path: store.display().to_string(),
+            origin: crate::orbits::Origin::Joined,
+            host_nick: String::new(),
+            last_opened: 0,
+            projects: vec![],
+        };
+        let directory = Catalog::with_entries(
+            std::path::PathBuf::from("/identity-for-tests"),
+            agents,
+            false,
+            vec![entry],
+        );
+        // Custody is what the routes read, not the enum shape beside it.
+        let resolved = directory
+            .resolve(crate::daemon::LocalOrbitId::for_store(&store).as_str())
+            .expect("the agent's Orbit is visible to the human's directory");
+        assert!(
+            borrowed_key_refusal(&directory, &resolved, "a write").is_some(),
+            "this Station signs with a seed the daemon merely hosts",
+        );
+
+        let orbit = resolved.address.orbit.as_str().to_string();
+        let router = router(Arc::new(App {
+            guard: Guard::new(HOSTED_TOKEN.into(), 7717),
+            directory,
+            daemon: Client::at(std::path::PathBuf::from("/nonexistent-for-tests")),
+            selection: crate::config::Selection::default(),
+            doorbells: tokio::sync::broadcast::channel(1).0,
+            cookie: cookie_name(7717),
+            stop: tokio::sync::watch::channel(false).0,
+            content_permits: content::ContentStreamPermits::new(),
+            socket: socket::Hub::new(),
+        }));
+        (router, orbit)
+    }
+
+    /// A credentialled POST, so each fence case below is refused by the fence and
+    /// not by the gate in front of it.
+    fn hosted_post(uri: String, body: Body) -> HttpRequest<Body> {
+        HttpRequest::builder()
+            .method("POST")
+            // No `confirm`: custody is settled before the destructive question is
+            // even asked, which is the ordering that matters — a signature is not
+            // something a prompt can license.
+            .uri(uri)
+            .header("host", "127.0.0.1:7717")
+            .header("authorization", format!("Bearer {HOSTED_TOKEN}"))
+            .header("content-type", "application/json")
+            .body(body)
+            .expect("request")
+    }
+
+    /// A hosted identity's Station is browsable and never writable through this
+    /// server, over real HTTP, on **every** route that could sign.
+    ///
+    /// **The failure these pin:** the write would be routed to a Station whose
+    /// binding carries its own seed, so it would go out over *that* identity's
+    /// signature — and Mechanics, which checks the signer's standing, would
+    /// approve it, because the signer holds write standing. These routes are the
+    /// only places the custody question is asked, so deleting a check forges a
+    /// signature rather than merely widening a permission. They answer before any
+    /// daemon is contacted, which is also why these tests need none.
+    #[tokio::test]
+    async fn a_control_write_to_a_hosted_identitys_station_is_refused() {
+        let (router, orbit) = hosted_identity_server();
+        let body = serde_json::to_string(&Request::KeyRotate).expect("encode a write verb");
+        let response = router
+            .oneshot(hosted_post(
+                format!("/api/spaces/{orbit}/rpc"),
+                Body::from(body),
+            ))
+            .await
+            .expect("route");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    /// Declaring presence is a publication, so it is refused for an identity
+    /// this daemon merely hosts.
+    ///
+    /// **The failure this pins:** `Watching` was classified as a read, and it is
+    /// not one — carets, a typing flag, presence and the *uncommitted text* of a
+    /// preview are published into the Space by the Station that signs for it. On
+    /// a hosted Orbit that route let anything holding this server's token put
+    /// attacker-chosen text into somebody else's Space under their name. The
+    /// browser's own presence never came this way: `GET /api/session` declares
+    /// it, and asks custody first.
+    #[tokio::test]
+    async fn declaring_presence_on_a_hosted_identitys_station_is_refused() {
+        let (router, orbit) = hosted_identity_server();
+        let body = serde_json::to_string(&Request::Watching {
+            issues: vec!["iss_deadbeef".into()],
+            carets: vec![],
+            typing: vec![],
+            previews: vec![],
+        })
+        .expect("encode a declaration");
+        let response = router
+            .oneshot(hosted_post(
+                format!("/api/spaces/{orbit}/rpc"),
+                Body::from(body),
+            ))
+            .await
+            .expect("route");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn a_world_write_to_a_hosted_identitys_station_is_refused() {
+        let (router, orbit) = hosted_identity_server();
+        // A command-class Issues call: the package classifies it, and the route
+        // asks custody the moment the class is not `Query`. A read on the same
+        // route must still be served, which is the point of the pair below.
+        let response = router
+            .clone()
+            .oneshot(hosted_post(
+                format!("/api/spaces/{orbit}/worlds/issues/rpc"),
+                Body::from(r#"{"cmd":"issue_start","reff":"ENG-1"}"#),
+            ))
+            .await
+            .expect("route");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        // The read is not refused by custody — it gets as far as the daemon that
+        // is not there, which is a different failure and the one we want.
+        let read = router
+            .oneshot(hosted_post(
+                format!("/api/spaces/{orbit}/worlds/issues/rpc"),
+                Body::from(r#"{"cmd":"board"}"#),
+            ))
+            .await
+            .expect("route");
+        assert_ne!(
+            read.status(),
+            StatusCode::FORBIDDEN,
+            "looking at a hosted identity's board signs nothing",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_content_upload_to_a_hosted_identitys_station_is_refused() {
+        let (router, orbit) = hosted_identity_server();
+        let response = router
+            .oneshot(hosted_post(
+                format!("/api/spaces/{orbit}/content?len=4"),
+                Body::from("data"),
+            ))
+            .await
+            .expect("route");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
     #[test]
     fn query_param_finds_only_an_exact_key() {
         assert_eq!(query_param("token=abc", "token"), Some("abc".into()));
@@ -1119,7 +1402,7 @@ mod tests {
 
     /// The precedence bug this exists to prevent, reproduced at the unit level.
     ///
-    /// Cookies ignore the port, so a previous `lait serve` run leaves a stale
+    /// Cookies ignore the port, so a previous run leaves a stale
     /// `lait_token_*` in the jar for `127.0.0.1`. If the cookie were consulted
     /// before the query, clicking a freshly-printed URL would 401 — and stay
     /// 401ing, because the page cannot clear an HttpOnly cookie it cannot read.
@@ -1174,6 +1457,7 @@ mod gate_coverage {
             guard: Guard::new(TOKEN.into(), 7717),
             directory: Catalog::new(nowhere.clone(), nowhere.clone(), true),
             daemon: Client::at(nowhere),
+            selection: crate::config::Selection::default(),
             doorbells: tokio::sync::broadcast::channel(1).0,
             cookie: cookie_name(7717),
             stop: tokio::sync::watch::channel(false).0,
@@ -1336,6 +1620,7 @@ mod gate_coverage {
             guard: Guard::new(TOKEN.into(), 7717),
             directory: Catalog::new(nowhere.clone(), nowhere.clone(), true),
             daemon: Client::at(nowhere),
+            selection: crate::config::Selection::default(),
             doorbells: doorbells.clone(),
             cookie: cookie_name(7717),
             stop: stop.clone(),

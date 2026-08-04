@@ -2,7 +2,7 @@
 /**
  * `npm run dev` — the whole loop, one command.
  *
- * It used to be three steps and a copy-paste: run `lait serve`, find the token in
+ * It used to be three steps and a copy-paste: run the engine, find the token in
  * the URL it prints, then `LAIT_TOKEN=<that> npm run dev` in a second terminal. Every
  * one of those steps is mechanical, which is exactly the kind of thing that should
  * not be a person's job — and the only place it was written down was a comment inside
@@ -68,7 +68,10 @@ function startEngine(bin, port) {
     const selector = process.env.LAIT_ORBIT
       ? ["--orbit", process.env.LAIT_ORBIT]
       : [];
-    const child = spawn(bin, [...selector, "serve", "--port", port, "--json"], {
+    // Bare `lait` IS the serve mode: the engine has no command surface, so the
+    // flags are the whole invocation. The first stdout line is still the
+    // `{url, token, port}` readiness object parsed below.
+    const child = spawn(bin, [...selector, "--port", port, "--json"], {
       cwd: REPO,
       stdio: ["ignore", "pipe", "inherit"],
     });
@@ -76,11 +79,11 @@ function startEngine(bin, port) {
     child.on("error", (e) =>
       fail(new Error(`could not run ${bin}: ${e.message}`)),
     );
-    // The common failure by a mile: a `lait serve` you forgot is still running, so
+    // The common failure by a mile: a head you forgot is still running, so
     // the bind fails. The engine already says so on stderr (which we inherit); this
     // just makes sure we don't hang waiting for a line that will never come.
     child.on("exit", (code) =>
-      fail(new Error(`lait serve exited (${code}) before it was ready`)),
+      fail(new Error(`lait exited (${code}) before it was ready`)),
     );
 
     const lines = createInterface({ input: child.stdout });
@@ -95,11 +98,11 @@ function startEngine(bin, port) {
         return;
       }
       if (info?.kind === "error") {
-        fail(new Error(info.message || "lait serve failed to start"));
+        fail(new Error(info.message || "lait failed to start"));
         return;
       }
       if (!info?.token || typeof info.port !== "number") {
-        fail(new Error("lait serve returned an invalid readiness reply"));
+        fail(new Error("lait returned an invalid readiness reply"));
         return;
       }
       lines.close();
@@ -147,7 +150,7 @@ async function main() {
 
   /**
    * An already-set `LAIT_TOKEN` means you are driving your own engine — a daemon
-   * under a debugger, a space on a odd port, `lait serve` in another terminal you
+   * under a debugger, a space on a odd port, a head in another terminal you
    * want to keep. Spawning a second one over the top of that would be this script
    * deciding it knows better. Use what you were given and start vite.
    */

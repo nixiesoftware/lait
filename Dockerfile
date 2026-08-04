@@ -30,7 +30,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 
 COPY --from=build /src/target/release/lait /usr/local/bin/lait
 
-# A self-contained node home (identity + git-backed store) lives here; mount a
+# A self-contained node home (identity + content-addressed store) lives here; mount a
 # volume so the seed keeps its identity and adopted space across restarts.
 ENV LAIT_HOME=/data
 RUN mkdir -p /data && chown lait:lait /data
@@ -38,9 +38,7 @@ VOLUME ["/data"]
 USER lait
 
 # Run as an always-on seed: never idle-shuts-down, so it stays reachable to
-# serve sync and backfill encrypted history to peers. Adopt a space once with
-#   docker exec <container> lait seed add <room-ticket>
-# (or `lait connect <ticket>`), then `lait members add <this-node-id>` from an
-# admin so the seed can hold the space's history. Get the id with:
-#   docker exec <container> lait id
+# serve sync and backfill encrypted history to peers. Adopt a space, and admit
+# this node, from any head pointed at the same identity — there is no command
+# surface to type at (`--seed` is a no-op kept because this line is deployed).
 CMD ["lait", "daemon", "--seed"]

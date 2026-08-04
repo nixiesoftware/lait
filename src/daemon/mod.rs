@@ -12,6 +12,6 @@ pub(crate) mod scope;
 pub(crate) mod transport_hub;
 
 pub use crate::orbits::OrbitDoorbell;
-pub(crate) use host::run_lait_daemon;
+pub use host::run_lait_daemon;
 pub use host::{Client, Daemon, OrbitSubscription};
 pub(crate) use scope::{ClientScope, LocalOrbitId, OrbitAddress};

@@ -2,7 +2,7 @@
   "name": "lait",
   "displayName": "Lait",
   "version": "0.2.2",
-  "description": "A local-first, peer-to-peer issue tracker built on iroh + Loro CRDTs with a git-backed store. Exposes the full issue surface (create/edit/move/assign/label/comment, boards, lists, activity) over MCP.",
+  "description": "A local-first, peer-to-peer issue tracker built on iroh + Loro CRDTs with a durable content-addressed store. Exposes the full issue surface (create/edit/move/assign/label/comment, boards, lists, activity) over MCP.",
   "author": {
     "name": "onnixi",
     "email": "omar@onnixi.com"

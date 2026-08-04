@@ -75,6 +75,7 @@ import { NewProject } from "./ui/NewProject";
 import { Palette } from "./ui/Palette";
 import { Shortcuts } from "./ui/Shortcuts";
 import { Specs } from "./ui/Specs";
+import { Welcome } from "./ui/Welcome";
 import { catalogColor } from "./ui/colors";
 import * as ask from "./ui/dialogs";
 import { DialogHost } from "./ui/dialogs";
@@ -136,6 +137,10 @@ export function App() {
    * machine-local store handle used by RPC. */
   const [routeSpace, setRouteSpace] = useState<string | null>(initialRoute.spaceId);
   const [current, setCurrent] = useState<string | null>(null);
+  // Asked for the founding surface while other spaces already exist. Without
+  // it the only way to reach `Welcome` would be having no store at all, which
+  // makes founding a second space impossible from the app.
+  const [founding, setFounding] = useState(false);
   const [selection, setSelection] = useState<string | null>(initialRoute.issue);
   /** The open Spec on the Specs register. A document, not a row: there is no
    *  cursor-versus-open distinction to make, so one piece of state says both. */
@@ -182,9 +187,9 @@ export function App() {
   const [checked, setChecked] = useState<ReadonlySet<string>>(new Set());
   const [bulkProgress, setBulkProgress] = useState<BulkProgress | null>(null);
   const bulkOperation = useRef<((reff: string) => Promise<unknown>) | null>(null);
-  /** Which project's board is on screen. `null` = let the daemon's chain pick
-   *  (branch key → `project.default` → the only project), same as a bare
-   *  `lait issues board`. */
+  /** Which project's board is on screen. `null` = let the daemon pick, which at
+   *  this call site means the only project there is — no branch hint reaches it
+   *  and no default is configured for it. */
   const [project, setProject] = useState<string | null>(initialRoute.project);
   /** The picker a keybinding has asked for. Also an overlay: it owns the keymap. */
   const [field, setField] = useState<IssueField | null>(null);
@@ -406,12 +411,23 @@ export function App() {
     saveDisplay(display, displayScopeRef.current);
   }, [display]);
 
-  const loadSpacesRaw = useCallback(async () => {
+  // `prefer` names a space that did not exist when this render started — the
+  // one just founded or entered. The route ref cannot carry it: it is written
+  // during render, so a caller that sets it and re-reads the catalog in the same
+  // tick reads the value from before.
+  const loadSpacesRaw = useCallback(async (prefer?: string) => {
     try {
       const { spaces } = await fetchSpaces();
       setSpaces(spaces);
       setError(null);
       setCurrent((cur) => {
+        if (prefer) {
+          const landed = resolveLocalSpace(prefer, spaces);
+          if (landed) {
+            setRouteSpace(landed.space);
+            return landed.id;
+          }
+        }
         if (cur) return cur;
         const requested = routeSpaceRef.current;
         if (requested) {
@@ -573,7 +589,9 @@ export function App() {
         // On a rebaseline the space list is exactly as suspect as the board: a
         // daemon that restarted may have changed its own name, projects, or
         // whether it is up at all.
-        if (rebaseline || d.dirty_catalog.length) void loadSpaces();
+        if (rebaseline || d.invalidations.some((entry) => entry.planes.length > 0)) {
+          void loadSpaces();
+        }
       },
       [current, loadBoard, loadSpaces, projectStore],
     ),
@@ -1727,23 +1745,27 @@ export function App() {
           // should land you where you were in the list, not at the top of it.
           className="group/list flex min-w-0 min-h-0 flex-1 flex-col"
         >
-          {!current ? (
+          {/* Nothing to open, and the only surface that can change that. A
+              machine with no store lands here on its first run, so this is
+              where the app has to be able to found or enter a Space — there is
+              no command surface left to do it from. */}
+          {!current && (founding || (!routeSpace && spaces.length === 0)) ? (
+            <Welcome
+              onArrived={(space) => {
+                setFounding(false);
+                void loadSpacesRaw(space);
+              }}
+            />
+          ) : !current ? (
             <EmptyState
               icon={<PanelLeft className="size-icon-lg" />}
-              title={
-                routeSpace
-                  ? "This space is not on this device"
-                  : spaces.length
-                    ? "Choose a local space"
-                    : "No local spaces yet"
-              }
+              title={routeSpace ? "This space is not on this device" : "Choose a local space"}
               body={
                 routeSpace
-                  ? `The link names ${routeSpace}, but no matching local replica is available. Join or restore the space on this device, then refresh.`
-                  : spaces.length
-                    ? "Select a space from the sidebar to open its local replica."
-                    : "Create or join a space with the lait CLI, then refresh this viewer."
+                  ? `The link names ${routeSpace}, but no matching local replica is available. Enter the space from an invite on this device, then refresh.`
+                  : "Select a space from the sidebar to open its local replica."
               }
+              action={<Button onClick={() => setFounding(true)}>Start a space</Button>}
             />
           ) : missingProject ? (
             <EmptyState

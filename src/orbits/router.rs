@@ -167,7 +167,7 @@ impl Placement {
         let mode = match control::probe(&resolved.home).await {
             control::Probe::Healthy => PlacementMode::Attached,
             control::Probe::Foreign { why, replaceable } => {
-                return Err(crate::cli::ForeignDaemon {
+                return Err(crate::control::ForeignDaemon {
                     home: resolved.home.clone(),
                     why,
                     replaceable,
@@ -191,7 +191,7 @@ impl Placement {
                                     )
                                 }
                                 control::Probe::Foreign { why, replaceable } => {
-                                    return Err(crate::cli::ForeignDaemon {
+                                    return Err(crate::control::ForeignDaemon {
                                         home: resolved.home.clone(),
                                         why,
                                         replaceable,
@@ -218,7 +218,7 @@ impl Placement {
     ) -> Result<PlacementMode> {
         if !crate::orbital::space_store_present(&resolved.home) {
             return Err(anyhow!(
-                "no space at {} — found one with `lait init`, or join one with `lait join <link>`",
+                "no space at {} — found one from the local app, or enter one from an invite",
                 resolved.home.display()
             ));
         }
@@ -441,6 +441,15 @@ async fn wait_until_control_ready(
 /// one activation while requests for different Orbits proceed concurrently.
 type OrbitSlot<T> = Arc<Mutex<Option<Arc<T>>>>;
 
+/// An Orbit held out of service: vacant, and unable to be filled while this
+/// lives. Dropping it lets the next routed request place the Orbit again.
+pub struct SlotVacancy<T> {
+    _slot: tokio::sync::OwnedMutexGuard<Option<Arc<T>>>,
+}
+
+/// The vacancy an exclusive store operation runs inside.
+pub type OrbitVacancy = SlotVacancy<Placement>;
+
 struct OrbitOccupancy<T> {
     slots: StdMutex<HashMap<LocalOrbitId, OrbitSlot<T>>>,
 }
@@ -483,6 +492,32 @@ impl<T> OrbitOccupancy<T> {
         let placement = Arc::new(place().await?);
         *occupied = Some(placement.clone());
         Ok(placement)
+    }
+
+    /// Empty one Orbit's slot, hand back whatever occupied it, and keep the slot
+    /// empty until the returned guard is dropped.
+    ///
+    /// The lock is held by the guard rather than released at the handoff,
+    /// because a placement that has left the slot is not yet gone: it is
+    /// draining, and until it finishes it still holds the store lock the next
+    /// placement would need. `get_or_try_place` waits on this same lock, so
+    /// nothing can occupy the Orbit in the meantime — neither during the drain
+    /// nor during whatever exclusive work the caller does next.
+    ///
+    /// The slot is created if absent for the same reason: an Orbit nobody has
+    /// placed yet must be held vacant too, or the first request to arrive
+    /// places one behind the caller's back.
+    async fn vacate(&self, orbit: &LocalOrbitId) -> (SlotVacancy<T>, Option<Arc<T>>) {
+        let slot = {
+            let mut slots = self.slots.lock_recovering();
+            slots
+                .entry(orbit.clone())
+                .or_insert_with(|| Arc::new(Mutex::new(None)))
+                .clone()
+        };
+        let mut occupied = slot.lock_owned().await;
+        let previous = occupied.take();
+        (SlotVacancy { _slot: occupied }, previous)
     }
 
     async fn placements(&self) -> Vec<Arc<T>> {
@@ -742,6 +777,26 @@ impl Router {
         Ok(resolved)
     }
 
+    /// Stop one Orbit's placement and hold the Orbit vacant, so an exclusive
+    /// store operation can have the lock this process was holding.
+    ///
+    /// Exclusion lasts as long as the returned guard, not as long as this call:
+    /// the operation that follows needs the Orbit to stay empty while it runs,
+    /// and a routed request arriving mid-operation is the ordinary case, not the
+    /// unlucky one. Dropping the guard re-opens the Orbit and the next request
+    /// places it lazily, exactly as if it had never been placed.
+    ///
+    /// An attached placement is another process's to stop, so this only forgets
+    /// it — the operation that follows will say so in its own words rather than
+    /// have this one guess on its behalf.
+    pub async fn vacate(&self, orbit: &LocalOrbitId) -> Result<OrbitVacancy> {
+        let (vacancy, placement) = self.occupancy.vacate(orbit).await;
+        if let Some(placement) = placement {
+            placement.shutdown().await?;
+        }
+        Ok(vacancy)
+    }
+
     /// Stop and join every in-process placement. Externally attached
     /// compatibility daemons are left running.
     pub async fn shutdown(&self) -> Result<()> {
@@ -884,6 +939,59 @@ mod tests {
         assert!(placements
             .windows(2)
             .all(|pair| Arc::ptr_eq(&pair[0], &pair[1])));
+    }
+
+    /// The exclusion an exclusive store operation actually needs.
+    ///
+    /// Emptying the slot and unlocking it in the same breath narrows the race
+    /// without closing it: the drained placement is still letting go of the
+    /// store lock, and the operation that asked for the vacancy has not even
+    /// started. The next routed request would re-place the Orbit underneath
+    /// both.
+    #[tokio::test]
+    async fn a_vacancy_keeps_an_orbit_empty_for_as_long_as_it_is_held() {
+        let occupancy = Arc::new(OrbitOccupancy::<usize>::default());
+        let id = orbit("/vacated");
+        occupancy
+            .get_or_try_place(id.clone(), |_| true, || async { Ok::<_, ()>(1usize) })
+            .await
+            .unwrap();
+
+        let (vacancy, drained) = occupancy.vacate(&id).await;
+        assert_eq!(drained.as_deref(), Some(&1));
+
+        let placed = Arc::new(AtomicUsize::new(0));
+        let waiting = tokio::spawn({
+            let occupancy = occupancy.clone();
+            let id = id.clone();
+            let placed = placed.clone();
+            async move {
+                occupancy
+                    .get_or_try_place(
+                        id,
+                        |_| true,
+                        || async move {
+                            placed.fetch_add(1, Ordering::SeqCst);
+                            Ok::<_, ()>(2usize)
+                        },
+                    )
+                    .await
+                    .unwrap()
+            }
+        });
+
+        // Every chance to win the race the guard exists to lose.
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            placed.load(Ordering::SeqCst),
+            0,
+            "nothing may occupy the Orbit while the vacancy is held"
+        );
+
+        drop(vacancy);
+        assert_eq!(*waiting.await.unwrap(), 2, "and it re-places once released");
     }
 
     /// An attached placement whose doorbell pump has ended, the way a

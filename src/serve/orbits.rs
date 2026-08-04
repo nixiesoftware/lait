@@ -12,7 +12,7 @@ use serde::Serialize;
 use crate::control::{ControlRoute, Request, Response};
 use crate::daemon::{Client, LocalOrbitId, OrbitAddress};
 use crate::orbits::{self, Catalog, Entry, Presence, StationIdentity};
-use issues::ids::SpaceId;
+use mechanics::ids::SpaceId;
 
 /// One row of the browser's Orbit picker.
 #[derive(Debug, Clone, Serialize)]
@@ -26,7 +26,7 @@ pub struct SpaceRow {
     pub path: String,
     pub origin: String,
     pub last_opened: u64,
-    /// `up` | `idle` | `missing`, exactly as `lait orbits` reports it.
+    /// `up` | `idle` | `missing`, as the registry knows it.
     pub status: &'static str,
     pub identity: StationIdentity,
     pub projects: Vec<orbits::ProjectBrief>,

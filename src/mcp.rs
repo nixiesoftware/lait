@@ -23,9 +23,9 @@ use rmcp::{
 use serde::Deserialize;
 
 use crate::{
-    cli::{client_as_scoped, scope_for_home},
     control::{ErrorKind, Request, Response},
     daemon::ClientScope,
+    host_client::{client_as_scoped, scope_for_home},
 };
 
 /// The replica command tags (`Request` serde `cmd` values) an agent must be able
@@ -154,6 +154,8 @@ pub const MCP_TOOL_NAMES: &[&str] = &[
     "issues_baseline_resolve",
     "issues_issue_baseline",
     "issues_packet",
+    "issues_attach_file",
+    "issues_attachment_save",
     // Mechanics and shell.
     "member_add",
     "member_remove",
@@ -229,8 +231,11 @@ pub struct LaitMcp {
     /// every tool call is signed and attributed to the *agent*, not the human
     /// whose home hosts the daemon (Architecture B). `None` = the primary
     /// identity, the pre-B behavior. The human sponsors the agent once
-    /// (`lait members agent --new <name>`); MCP attaches as it thereafter.
+    /// (`Request::AgentAdd`, or Settings → Members); MCP attaches as it after.
     act_as: Option<String>,
+    /// Which identity's daemon this server talks to, carried from the
+    /// invocation rather than re-read from the environment per call.
+    selection: crate::config::Selection,
     /// Shell tools merged with the World packages' namespaced tools. The
     /// `tool_handler` attribute on the `ServerHandler` impl must name this field
     /// explicitly, because its default is the macro-generated
@@ -242,7 +247,7 @@ pub struct LaitMcp {
 
 #[tool_router]
 impl LaitMcp {
-    pub fn new(home: PathBuf) -> Self {
+    pub fn new(home: PathBuf, selection: crate::config::Selection) -> Self {
         // `$LAIT_AGENT` names the sponsored local agent identity this MCP server
         // acts as, so its work is attributed to the agent (Architecture B). Unset
         // → the primary identity (pre-B behavior).
@@ -254,6 +259,7 @@ impl LaitMcp {
             home,
             scope,
             act_as,
+            selection,
             tool_router,
         }
     }
@@ -262,7 +268,6 @@ impl LaitMcp {
         let registry = crate::world::client_packages();
         if registry
             .validate_reserved(
-                std::iter::empty::<&str>(),
                 Self::tool_router()
                     .list_all()
                     .iter()
@@ -298,7 +303,7 @@ impl LaitMcp {
     }
 
     /// Drive the daemon and return its `Response` as JSON text (the same
-    /// versioned DTO the CLI `--json` emits).
+    /// versioned DTO the local app's HTTP surface emits).
     ///
     /// Failures are mapped to **typed, actionable** MCP errors rather than an
     /// opaque `internal_error(blob)`: an authorization failure (`Denied`) — the
@@ -309,7 +314,14 @@ impl LaitMcp {
     /// message already names the next step; MCP just preserves the typing so the
     /// agent isn't told "internal error" for something it can act on.
     async fn run(&self, req: Request) -> Result<CallToolResult, McpError> {
-        let response = client_as_scoped(&self.home, req, &self.scope, self.act_as.as_deref()).await;
+        let response = client_as_scoped(
+            &self.home,
+            req,
+            &self.scope,
+            self.act_as.as_deref(),
+            &self.selection,
+        )
+        .await;
         Self::tool_result(response)
     }
 
@@ -326,35 +338,33 @@ impl LaitMcp {
                     None,
                 )
             })?;
-        let options = world_interface::PresentationOptions {
-            json: true,
-            color: false,
-        };
-        let host = crate::cli::PackageClientHost::new(
-            self.home.clone(),
-            self.scope.clone(),
+        // `for_home` derives the same pinned scope this server was constructed
+        // with; a second spelling of it here is a place for the two to drift.
+        let host = crate::host_client::PackageClientHost::for_home(
+            &self.home,
             self.act_as.clone(),
-        );
-        let output = package
-            .execute(&host, invocation, options)
+            self.selection.clone(),
+        )
+        .map_err(|error| McpError::invalid_request(format!("{error:#}"), None))?;
+        let value = package
+            .execute(&host, invocation)
             .await
             .map_err(|error| McpError::internal_error(error.to_string(), None))?;
-        if let Some(presentation) = output.presentation {
-            if let Some(failure) = presentation.failure {
-                let message = presentation
-                    .failure_message
-                    .unwrap_or_else(|| "product request failed".into());
-                return Err(match failure {
-                    world_interface::PresentationFailure::InvalidRequest => {
-                        McpError::invalid_request(message, None)
-                    }
-                    world_interface::PresentationFailure::Internal => {
-                        McpError::internal_error(message, None)
-                    }
-                });
-            }
+        // A product answer that reports a failure arrived intact — only its own
+        // package can say so, and which kind. Same typing rule as `tool_result`:
+        // anything the caller can act on is `invalid_request` and keeps the
+        // message that names the next step.
+        if let Some((failure, message)) = package.classify_failure(&value) {
+            return Err(match failure {
+                world_interface::Failure::Invalid | world_interface::Failure::Refusal => {
+                    McpError::invalid_request(message, None)
+                }
+                world_interface::Failure::Operation | world_interface::Failure::Interruption => {
+                    McpError::internal_error(message, None)
+                }
+            });
         }
-        let json = serde_json::to_string(&output.value)
+        let json = serde_json::to_string(&value)
             .map_err(|error| McpError::internal_error(error.to_string(), None))?;
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
@@ -403,9 +413,10 @@ impl LaitMcp {
     }
 
     #[tool(
-        description = "Sponsor an agent keypair (any human member). The agent can read/write \
-                       content but cannot manage membership or delete issues, and its standing \
-                       dies with the sponsor."
+        description = "Sponsor an agent keypair (any human member). The agent gets content \
+                       authority — the same standing an ordinary member writes with, including \
+                       closing and deleting issues — and never membership authority: it cannot \
+                       admit, remove, or re-role anyone. Its standing dies with the sponsor."
     )]
     async fn agent_add(
         &self,
@@ -448,7 +459,7 @@ impl LaitMcp {
 
     // ---- transport / presence ----
 
-    #[tool(description = "Show node + space status: id, nick, space, issue/project counts.")]
+    #[tool(description = "Show node + space status: id, nick, space, item/scope counts.")]
     async fn status(&self) -> Result<CallToolResult, McpError> {
         self.run(Request::Status).await
     }
@@ -486,7 +497,7 @@ impl LaitMcp {
     #[tool(
         description = "Connect to the bound space via a ticket for it and broadcast a request \
                        to be added. MCP runs against an already-bound store: a ticket for a \
-                       different space errors (join it with the CLI first)."
+                       different space errors (enter it from the local app first)."
     )]
     async fn join_room(
         &self,
@@ -545,9 +556,10 @@ impl ServerHandler for LaitMcp {
                  with your OWN identity — you do not rebuild or re-join per session; you \
                  attach. Start by calling whoami: it reports who you are (your actor + \
                  did:key), your role and capabilities, who sponsors you, and the space. If \
-                 whoami shows you are not yet a member, a human runs `lait agent add <your \
-                 device key>` once to sponsor you — then you hold write access and act as \
-                 yourself (your work is attributed to you, not the human). Do NOT treat \
+                 whoami shows you are not yet a member, ask a human to sponsor you from \
+                 Settings > Members in the local app (they run `lait`) — then you hold \
+                 write access and act as yourself (your work is attributed to you, not to \
+                 them). Do NOT treat \
                  onboarding as invite→connect; that is the peer-JOIN flow for a new node, \
                  not for you. {product_instructions} File and drive issues with the namespaced \
                  tools: create with issues_new, edit with issues_edit, use \
@@ -555,15 +567,17 @@ impl ServerHandler for LaitMcp {
                  issues_list/issues_board/issues_view. Refs are a short iss_ handle or a KEY-n alias \
                  (ENG-142); @me is you. Before acting on a 'close what's done' style request, \
                  call sync — it converges and refuses to let you author against a known-partial \
-                 view. Every tool returns the same versioned JSON DTO the CLI --json emits; \
+                 view. Every tool returns the same versioned JSON DTO the local app reads; \
                  a denied action tells you exactly what standing you lack and how to get it."
             ))
     }
 }
 
 /// Run the MCP server over stdio until the client disconnects.
-pub async fn run_mcp(home: &Path) -> Result<()> {
-    let service = LaitMcp::new(home.to_path_buf()).serve(stdio()).await?;
+pub async fn run_mcp(home: &Path, selection: crate::config::Selection) -> Result<()> {
+    let service = LaitMcp::new(home.to_path_buf(), selection)
+        .serve(stdio())
+        .await?;
     service.waiting().await?;
     Ok(())
 }
@@ -572,14 +586,14 @@ pub async fn run_mcp(home: &Path) -> Result<()> {
 mod scope_tests {
     use super::*;
     use crate::control::OrbitAddress;
-    use issues::ids::SpaceId;
+    use mechanics::ids::SpaceId;
 
     #[test]
     fn an_mcp_server_is_pinned_to_the_home_it_was_constructed_for() {
         let home = PathBuf::from("/tmp/lait-mcp-a");
         let sibling = PathBuf::from("/tmp/lait-mcp-b");
         let space = SpaceId::from_digest([9; 16]);
-        let mcp = LaitMcp::new(home.clone());
+        let mcp = LaitMcp::new(home.clone(), crate::config::Selection::default());
         let own = OrbitAddress::for_store(&home, space.clone());
         let other = OrbitAddress::for_store(&sibling, space);
 
@@ -589,7 +603,10 @@ mod scope_tests {
 
     #[test]
     fn the_live_router_composes_shell_and_namespaced_world_tools() {
-        let mcp = LaitMcp::new(PathBuf::from("/tmp/lait-mcp-tools"));
+        let mcp = LaitMcp::new(
+            PathBuf::from("/tmp/lait-mcp-tools"),
+            crate::config::Selection::default(),
+        );
         let names: Vec<_> = mcp
             .tool_router
             .list_all()

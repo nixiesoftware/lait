@@ -8,9 +8,11 @@
 //! while un-admitted, then — driven only by accepting the invite and Contact
 //! (orbital's automatic admission, no manual approve) — flips to all-pass. A
 //! single-node daemon proves the expected-space directory trap, and the Stop
-//! path is proven to reap the daemon even with a parked subscriber. The CLI
+//! path is proven to reap the daemon even with a parked subscriber. The
 //! decoy-store / wrong-directory guards shell the real binary because they are
-//! specifically about the pre-daemon store-resolution path.
+//! specifically about the pre-daemon store-resolution path — which now belongs
+//! to the launcher's `mcp` mode, the one mode that must bind an Orbit before it
+//! can speak.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -139,10 +141,10 @@ fn gate_state(v: &DiagnosisView, id: &str) -> GateState {
 fn diagnose_tracks_join_lifecycle_from_pending_to_all_pass() {
     let net = MemNet::new();
 
-    // Founder forms a space (found_space_cli seeds a default project, so the
+    // Founder forms a space (found_space seeds a default project, so the
     // synced gate has something to converge once the joiner is in).
     let founder_home = unique("life-a");
-    lait::orbital::found_space_cli(&founder_home, &FOUNDER_SEED, "Engineering").unwrap();
+    lait::orbital::found_space(&founder_home, &FOUNDER_SEED, "Engineering").unwrap();
     let founder_handle = spawn_daemon(founder_home.clone(), FOUNDER_SEED, net.clone());
 
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -234,12 +236,12 @@ fn diagnose_tracks_join_lifecycle_from_pending_to_all_pass() {
 /// The directory trap, made legible: `Diagnose { expected_space }` with a space
 /// that isn't the one this store is bound to fails the `space` gate, and that
 /// mismatch wins over every downstream gate — exactly the "you ran the command
-/// in the wrong folder" case the `join` tail catches.
+/// in the wrong folder" case the tail of an entry catches.
 #[test]
 fn diagnose_flags_expected_space_mismatch() {
     let net = MemNet::new();
     let home = unique("mm-a");
-    lait::orbital::found_space_cli(&home, &FOUNDER_SEED, "Mismatch Space").unwrap();
+    lait::orbital::found_space(&home, &FOUNDER_SEED, "Mismatch Space").unwrap();
     let handle = spawn_daemon(home.clone(), FOUNDER_SEED, net.clone());
 
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -286,7 +288,7 @@ fn diagnose_flags_expected_space_mismatch() {
 fn stop_kills_the_daemon_even_with_a_live_subscriber() {
     let net = MemNet::new();
     let home = unique("stop-a");
-    lait::orbital::found_space_cli(&home, &FOUNDER_SEED, "Stop Space").unwrap();
+    lait::orbital::found_space(&home, &FOUNDER_SEED, "Stop Space").unwrap();
     let handle = spawn_daemon(home.clone(), FOUNDER_SEED, net.clone());
 
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -315,13 +317,18 @@ fn stop_kills_the_daemon_even_with_a_live_subscriber() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
-/// The decoy-store guard: a read-only command run in a directory with no `.lait/`,
-/// when the registry knows of joined spaces, must refuse to create an empty store
-/// and instead point the user at the real one — exit non-zero, no `.lait/` left
-/// behind. This is the direct fix for "joined, but `lait issues projects` shows nothing"
-/// caused by running from the wrong folder.
+/// The decoy-store guard: a store-needing mode started in a directory with no
+/// `.lait/`, when the registry knows of joined spaces, must refuse to create an
+/// empty store and instead point at the real one — exit non-zero, no `.lait/`
+/// left behind. This is the direct fix for "joined, but the board is empty"
+/// caused by starting from the wrong folder.
+///
+/// `lait mcp` is the mode that carries it: it binds one Orbit before it can
+/// serve a tool, so it is the only one with a store to resolve. (The local app
+/// needs none — it is a picker over the whole catalog, and having no space yet
+/// is the state it exists to get you out of.)
 #[test]
-fn read_command_in_empty_dir_refuses_to_create_a_decoy_store() {
+fn the_mcp_head_in_an_empty_dir_refuses_to_create_a_decoy_store() {
     let cfg = unique("guard-cfg");
     let cwd = unique("guard-cwd");
 
@@ -342,7 +349,7 @@ fn read_command_in_empty_dir_refuses_to_create_a_decoy_store() {
     .unwrap();
 
     let out = Command::new(bin())
-        .args(["issues", "projects"])
+        .arg("mcp")
         .current_dir(&cwd)
         .env("LAIT_CONFIG_ROOT", &cfg)
         // Deliberately NO LAIT_HOME: force the git-style discovery path where the
@@ -350,11 +357,11 @@ fn read_command_in_empty_dir_refuses_to_create_a_decoy_store() {
         .env_remove("LAIT_HOME")
         .env_remove("LAIT_STORE")
         .output()
-        .expect("spawn `lait issues projects`");
+        .expect("spawn `lait mcp`");
 
     assert!(
         !out.status.success(),
-        "a read command with no local space must exit non-zero, got {:?}",
+        "a head with no local space must exit non-zero, got {:?}",
         out.status.code()
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -381,26 +388,30 @@ fn read_command_in_empty_dir_refuses_to_create_a_decoy_store() {
     let _ = std::fs::remove_dir_all(&cwd);
 }
 
-/// The same refusal holds with an EMPTY registry: a store-needing command in a
-/// bare directory never creates anything — it exits non-zero and points the user
-/// at the creation verbs (`lait init` / `lait join`).
+/// The same refusal holds with an EMPTY registry: a store-needing mode in a bare
+/// directory never creates anything — it exits non-zero and names the one way a
+/// space now comes into existence.
+///
+/// The verbs it used to name are gone, and the refusal has to move with them: a
+/// message pointing at a command nothing accepts any more would be a dead end,
+/// which is worse than the decoy store this guard was written to prevent.
 #[test]
-fn read_command_with_empty_registry_still_refuses_and_suggests_creation_verbs() {
+fn the_mcp_head_with_an_empty_registry_still_refuses_and_names_the_way_in() {
     let cfg = unique("guard0-cfg");
     let cwd = unique("guard0-cwd");
 
     let out = Command::new(bin())
-        .args(["issues", "projects"])
+        .arg("mcp")
         .current_dir(&cwd)
         .env("LAIT_CONFIG_ROOT", &cfg)
         .env_remove("LAIT_HOME")
         .env_remove("LAIT_STORE")
         .output()
-        .expect("spawn `lait issues projects`");
+        .expect("spawn `lait mcp`");
 
     assert!(
         !out.status.success(),
-        "a read command with no space anywhere must exit non-zero, got {:?}",
+        "a head with no space anywhere must exit non-zero, got {:?}",
         out.status.code()
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -409,8 +420,8 @@ fn read_command_with_empty_registry_still_refuses_and_suggests_creation_verbs() 
         "guard must explain why, got stderr: {stderr}"
     );
     assert!(
-        stderr.contains("lait init") && stderr.contains("lait join"),
-        "with nothing registered, the guard must suggest init/join, got stderr: {stderr}"
+        stderr.contains("run `lait`") && stderr.contains("join"),
+        "with nothing registered, the guard must name the local app and joining,          got stderr: {stderr}"
     );
     assert!(
         !cwd.join(".lait").exists(),
@@ -421,12 +432,12 @@ fn read_command_with_empty_registry_still_refuses_and_suggests_creation_verbs() 
     let _ = std::fs::remove_dir_all(&cwd);
 }
 
-/// `lait join` in a directory already bound to a DIFFERENT space is a hard error
-/// (exit 2) — never adopt, never wipe. This shells the real (orbital) binary
-/// because it is the pre-daemon store-resolution path. The invite is a real
+/// Entering a space into a directory already bound to a DIFFERENT one is a hard
+/// refusal — never adopt, never wipe. This drives the real binary's host plane
+/// because it is the pre-Station store-resolution path. The invite is a real
 /// orbital Coordinates link for another space.
 #[test]
-fn join_binary_refuses_a_directory_bound_to_another_space() {
+fn entering_refuses_a_directory_bound_to_another_space() {
     // A real orbital space A, whose founder-signed Coordinates link we mint
     // in-process (no daemon needed — the guard fires before any Contact).
     let a_home = unique("bind-a");
@@ -440,28 +451,31 @@ fn join_binary_refuses_a_directory_bound_to_another_space() {
         data_encoding::HEXLOWER.encode(&JOINER_SEED),
     )
     .unwrap();
-    lait::orbital::found_space_cli(&c_home, &JOINER_SEED, "Space C").unwrap();
+    lait::orbital::found_space(&c_home, &JOINER_SEED, "Space C").unwrap();
 
     let join_cfg = unique("bind-cfg-join");
-    let out = Command::new(bin())
-        .args(["join", &link])
-        .env("LAIT_HOME", &c_home)
-        .env("LAIT_CONFIG_ROOT", &join_cfg)
-        .output()
-        .expect("spawn `lait join`");
-
+    let head = crate::head::Head::start(&join_cfg, Some(&c_home));
+    let (status, refusal) = head.host(serde_json::json!({
+        "cmd": "host_space_enter",
+        "link": link,
+        "home": c_home.display().to_string(),
+    }));
     assert_eq!(
-        out.status.code(),
-        Some(2),
-        "joining into a store bound to another space must exit 2, stderr: {}",
-        String::from_utf8_lossy(&out.stderr)
+        status, 200,
+        "the refusal is an answer, not a transport failure"
     );
-    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        refusal["error_kind"], "not_found",
+        "a store bound elsewhere resolves to nothing for this invite: {refusal}"
+    );
     assert!(
-        stderr.contains("the invite is for"),
-        "the refusal must name the mismatch, got stderr: {stderr}"
+        refusal["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("the invite is for")),
+        "the refusal must name the mismatch: {refusal}"
     );
 
+    head.stop();
     let _ = std::fs::remove_dir_all(&a_home);
     let _ = std::fs::remove_dir_all(&c_home);
     let _ = std::fs::remove_dir_all(&join_cfg);
