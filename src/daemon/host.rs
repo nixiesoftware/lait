@@ -423,15 +423,26 @@ impl Listener {
             // identical until one of them speaks. A client's reuse window is a
             // quarter of this timeout, so a connection reaped here is one no
             // client still intends to use.
+            //
+            // Woken by the stop signal, because shutdown joins these tasks. A
+            // connection idling out its window is doing nothing, but it is
+            // still a task to join, and waiting for it would make every
+            // shutdown take the whole window.
+            let mut stopping = self.stopping.subscribe();
+            if *stopping.borrow_and_update() {
+                return Flow::Close;
+            }
             let mut bounded = (&mut reader).take(control::MAX_CONTROL_LINE_BYTES);
-            match tokio::time::timeout(
-                control::IDLE_CONNECTION_TIMEOUT,
-                bounded.read_line(&mut line),
-            )
-            .await
-            {
-                // EOF, a read error, or a client that stopped speaking: there
-                // is nothing to answer and nothing to keep open for.
+            let read = async {
+                tokio::select! {
+                    read = bounded.read_line(&mut line) => read,
+                    _ = stopping.changed() => Ok(0),
+                }
+            };
+            match tokio::time::timeout(control::IDLE_CONNECTION_TIMEOUT, read).await {
+                // EOF, a read error, a client that stopped speaking, or this
+                // daemon going away: there is nothing to answer and nothing to
+                // keep open for.
                 Ok(Ok(0)) | Ok(Err(_)) | Err(_) => return Flow::Close,
                 Ok(Ok(_)) => {}
             }

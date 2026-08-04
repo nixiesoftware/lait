@@ -228,6 +228,68 @@ fn framed_fake_daemon(
     (accepts, task)
 }
 
+/// A daemon that takes the request and then goes away without answering.
+///
+/// This is the shape a restart has from the client's side, and it does not
+/// announce itself the same way twice: a Unix socket still holding bytes we sent
+/// reports `ECONNRESET` on the read, a Windows pipe reports the write, and a
+/// clean close reports end-of-file. All three mean the same thing — nothing was
+/// answered, and since a request is dispatched only after being read in full,
+/// nothing ran.
+///
+/// Keying the re-send rule on end-of-file alone passed on Windows and macOS and
+/// failed on Linux, in a test that restarts its daemon. So this asserts the
+/// property rather than the spelling.
+#[tokio::test]
+async fn a_daemon_that_takes_the_request_and_vanishes_is_retried() {
+    let home = home("vanish");
+    let name = control::control_name(&home).expect("control name");
+    #[cfg(unix)]
+    let _ = std::fs::remove_file(lait::config::socket_path(&home));
+    let listener = ListenerOptions::new()
+        .name(name)
+        .create_tokio()
+        .expect("bind fake daemon");
+    let accepts = Arc::new(AtomicUsize::new(0));
+    let counter = accepts.clone();
+    let task = tokio::spawn(async move {
+        loop {
+            let Ok(stream) = listener.accept().await else {
+                return;
+            };
+            let seen = counter.fetch_add(1, Ordering::SeqCst);
+            let (read_half, mut write_half) = tokio::io::split(stream);
+            let mut reader = BufReader::new(read_half);
+            let mut line = String::new();
+            if reader.read_line(&mut line).await.is_err() {
+                continue;
+            }
+            // The first connection answers once and is then parked by the
+            // client. On its next request it reads the bytes and drops the
+            // stream — the daemon went away mid-flight.
+            if seen == 0 {
+                let _ = write_half.write_all(ok_line().as_bytes()).await;
+                let _ = write_half.flush().await;
+                let mut swallowed = String::new();
+                let _ = reader.read_line(&mut swallowed).await;
+                continue;
+            }
+            let _ = write_half.write_all(ok_line().as_bytes()).await;
+            let _ = write_half.flush().await;
+        }
+    });
+
+    control::send(&home, &ClientRequest::plain(Request::Id))
+        .await
+        .expect("first send");
+    let response = control::send(&home, &ClientRequest::plain(Request::Id))
+        .await
+        .expect("a daemon that vanished mid-request must be reconnected to, not reported");
+    assert!(matches!(response, Response::Ok { .. }));
+    assert_eq!(accepts.load(Ordering::SeqCst), 2);
+    task.abort();
+}
+
 /// The two timers must not race.
 ///
 /// The client's licence to re-send a request rests entirely on "a connection I

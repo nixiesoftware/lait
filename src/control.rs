@@ -2291,7 +2291,28 @@ async fn round_trip<T: Serialize>(
     match io.read_line(&mut response).await {
         Ok(0) => Err(Interrupted::Closed),
         Ok(_) => Ok(response),
-        Err(error) => Err(Interrupted::Failed(anyhow!("read response: {error}"))),
+        Err(error) => Err(unanswered("read response", &response, error)),
+    }
+}
+
+/// Classify a failed read by whether any of the answer had arrived.
+///
+/// **Not by the error code.** A connection the daemon has already closed does
+/// not announce itself the same way on every platform: a Windows pipe reports it
+/// on the write, a Unix socket that still holds bytes we sent reports
+/// `ECONNRESET` on the read, and a clean close reports end-of-file. Keying on
+/// any one of those spellings means the other two surface a reaped connection as
+/// a failed request — which is what happened, on Linux, to a test that restarts
+/// its daemon.
+///
+/// The fact that actually decides it is whether the daemon answered. Nothing
+/// received means nothing was answered, and since a request is only ever
+/// dispatched after being read in full, nothing was answered means nothing ran.
+fn unanswered(what: &str, received: &str, error: std::io::Error) -> Interrupted {
+    if received.is_empty() {
+        Interrupted::Closed
+    } else {
+        Interrupted::Failed(anyhow!("{what}: {error}"))
     }
 }
 
@@ -2422,7 +2443,7 @@ async fn framed_round_trip(
         match bounded.read_line(&mut header).await {
             Ok(0) => return Err(Interrupted::Closed),
             Ok(_) => {}
-            Err(error) => return Err(Interrupted::Failed(anyhow!("read World reply: {error}"))),
+            Err(error) => return Err(unanswered("read World reply", &header, error)),
         }
     }
     let reply: ReplyFrame = match serde_json::from_str(header.trim()) {
