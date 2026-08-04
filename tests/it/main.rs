@@ -18,6 +18,7 @@ mod commit_cost_baseline;
 mod content_ipc;
 mod control_classification;
 mod control_plane;
+mod control_pool;
 mod frost_interop;
 mod guided_join;
 mod head;

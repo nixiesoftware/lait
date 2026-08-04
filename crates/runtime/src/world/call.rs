@@ -373,6 +373,46 @@ impl Reply {
             Outcome::Error { error } => Err(error),
         }
     }
+
+    /// The reply's parts, for a transport that carries the payload *beside* its
+    /// header rather than inside it.
+    ///
+    /// [`Serialize`] puts the payload in the encoded form, which costs a base64
+    /// pass and a third more bytes — right for a format with no way to say
+    /// "bytes", wrong for a framed channel that can simply declare a length and
+    /// then write them. This is the seam that lets such a channel exist without
+    /// the payload's opacity leaking: the parts are still bytes to everyone who
+    /// touches them.
+    pub fn into_parts(self) -> (WorldId, String, u32, Result<Vec<u8>, Failure>) {
+        let outcome = match self.outcome {
+            Outcome::Ok { payload } => Ok(payload.into_bytes()),
+            Outcome::Error { error } => Err(error),
+        };
+        (self.world, self.operation, self.version, outcome)
+    }
+
+    /// Rebuild a reply a transport took apart. The inverse of
+    /// [`Reply::into_parts`], and it re-applies the payload bound rather than
+    /// trusting a length that arrived over a wire.
+    pub fn from_parts(
+        world: WorldId,
+        operation: String,
+        version: u32,
+        outcome: Result<Vec<u8>, Failure>,
+    ) -> Result<Self, Failure> {
+        let outcome = match outcome {
+            Ok(payload) => Outcome::Ok {
+                payload: OpaquePayload::new(payload)?,
+            },
+            Err(error) => Outcome::Error { error },
+        };
+        Ok(Self {
+            world,
+            operation,
+            version,
+            outcome,
+        })
+    }
 }
 
 /// Principal facts supplied to a World's application handler.

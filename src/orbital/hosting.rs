@@ -333,6 +333,16 @@ impl StationRunner {
     }
 }
 
+/// What a served request leaves behind on a standalone StationHost: a
+/// connection ready for the next one, or nothing.
+enum Served {
+    Next(
+        BufReader<tokio::io::ReadHalf<LocalStream>>,
+        tokio::io::WriteHalf<LocalStream>,
+    ),
+    Close,
+}
+
 impl StationHost {
     /// Open and activate the orbital stack for a home, then dock the routing
     /// Session. Refuses a pre-orbital home.
@@ -2565,28 +2575,85 @@ impl StationHost {
         }
     }
 
+    /// Serve a connection until the client leaves or an operation takes the
+    /// stream over.
+    ///
+    /// The same bargain the identity daemon makes, and it has to be the same:
+    /// clients park a connection for reuse without knowing which of the two is
+    /// behind it. A server that answered once and hung up would turn every
+    /// parked connection into a dead one, so every request after the first
+    /// would fail and be re-sent — slower than never pooling at all, and the
+    /// failure would show up as an intermittent read error on whichever
+    /// platform reports a reaped connection that way.
     async fn handle_conn(self: Arc<Self>, stream: LocalStream) {
-        let _activity = self.track_activity();
-
         let (read_half, write_half) = tokio::io::split(stream);
-        let mut reader = BufReader::new(read_half);
+        let (mut reader, mut writer) = (BufReader::new(read_half), write_half);
+        loop {
+            match self.clone().serve_one(reader, writer).await {
+                Served::Next(next_reader, next_writer) => {
+                    (reader, writer) = (next_reader, next_writer);
+                }
+                Served::Close => return,
+            }
+        }
+    }
+
+    /// One request, and what the connection does afterwards.
+    async fn serve_one(
+        self: Arc<Self>,
+        mut reader: BufReader<tokio::io::ReadHalf<LocalStream>>,
+        mut write_half: tokio::io::WriteHalf<LocalStream>,
+    ) -> Served {
         let mut line = String::new();
         {
             // Bounded for the same reason the daemon's is: a header is a
             // bounded thing, and an unbounded `read_line` is a memory attack
             // that needs no authorization.
+            //
+            // Timed for the same reason too: a parked connection is
+            // indistinguishable from an abandoned one until it speaks.
+            //
+            // And woken by the stop signal, because shutdown *waits* for these
+            // tasks to drain. A connection waiting out its idle window is doing
+            // nothing, but it is still a task, and leaving it to time out turns
+            // every shutdown into a two-minute one — which is exactly how this
+            // surfaced: "control connections did not drain during shutdown".
             use tokio::io::AsyncReadExt;
+            let mut stopping = self.stop_tx.subscribe();
+            if *stopping.borrow_and_update() {
+                return Served::Close;
+            }
             let mut bounded = (&mut reader).take(crate::control::MAX_CONTROL_LINE_BYTES);
-            if bounded.read_line(&mut line).await.is_err() {
-                return;
+            let read = async {
+                tokio::select! {
+                    read = bounded.read_line(&mut line) => read,
+                    _ = stopping.changed() => Ok(0),
+                }
+            };
+            match tokio::time::timeout(crate::control::IDLE_CONNECTION_TIMEOUT, read).await {
+                Ok(Ok(0)) | Ok(Err(_)) | Err(_) => return Served::Close,
+                Ok(Ok(_)) => {}
             }
         }
+        // Held for the request, not for the connection.
+        //
+        // `should_idle_shutdown` refuses while any connection is in flight, so
+        // taking this when the socket opened — which is what a one-request
+        // connection amounted to — would now mean a client that merely *parked*
+        // a connection kept this Station awake indefinitely. It is taken after
+        // a request has actually arrived and dropped when the request is done,
+        // which still spans a long upload or a subscription because those are
+        // awaited below.
+        let _activity = self.track_activity();
         let value = match serde_json::from_str::<serde_json::Value>(line.trim()) {
             Ok(value) => value,
             Err(error) => {
-                let _ =
-                    write_line(write_half, &Response::err(format!("bad request: {error}"))).await;
-                return;
+                let _ = write_line_half(
+                    &mut write_half,
+                    &Response::err(format!("bad request: {error}")),
+                )
+                .await;
+                return Served::Close;
             }
         };
         if value.get("content").is_some() {
@@ -2594,15 +2661,15 @@ impl StationHost {
             {
                 Ok(request) => request,
                 Err(error) => {
-                    let _ = write_line(
-                        write_half,
+                    let _ = write_line_half(
+                        &mut write_half,
                         &ContentReply::error(
                             ContentErrorCode::Invalid,
                             format!("bad content call: {error}"),
                         ),
                     )
                     .await;
-                    return;
+                    return Served::Close;
                 }
             };
             // `self` is cloned rather than moved: the activity guard taken at
@@ -2612,22 +2679,49 @@ impl StationHost {
             self.clone()
                 .serve_content(reader, write_half, request)
                 .await;
-            return;
+            return Served::Close;
         }
         if value.get("call").is_some() {
-            let crate::control::WorldClientRequest {
+            let crate::control::WorldCallFrame {
                 route,
                 act_as,
-                call,
+                call: header,
             } = match serde_json::from_value(value) {
                 Ok(request) => request,
                 Err(error) => {
-                    let _ = write_line(
-                        write_half,
+                    let _ = write_line_half(
+                        &mut write_half,
                         &Response::err(format!("bad World call: {error}")),
                     )
                     .await;
-                    return;
+                    return Served::Close;
+                }
+            };
+            // The payload follows the header, exactly as long as it said.
+            let want = match crate::control::refuse_oversized_payload(header.len) {
+                Ok(want) => want,
+                Err(error) => {
+                    let _ = write_line_half(&mut write_half, &Response::err(format!("{error:#}")))
+                        .await;
+                    return Served::Close;
+                }
+            };
+            let mut payload = vec![0u8; want];
+            {
+                use tokio::io::AsyncReadExt;
+                if reader.read_exact(&mut payload).await.is_err() {
+                    return Served::Close;
+                }
+            }
+            let call = match Call::new(header.world, header.operation, header.version, payload) {
+                Ok(call) => call,
+                Err(error) => {
+                    let _ = write_line_half(
+                        &mut write_half,
+                        &Response::err(format!("bad World call: {error}")),
+                    )
+                    .await;
+                    return Served::Close;
                 }
             };
             let reply = match route {
@@ -2652,8 +2746,9 @@ impl StationHost {
                     "World call requires an explicit World route",
                 ),
             };
-            let _ = write_line(write_half, &reply).await;
-            return;
+            let (frame, payload) = crate::control::frame_reply(reply);
+            let _ = write_framed(&mut write_half, &frame, &payload).await;
+            return Served::Close;
         }
         let crate::control::ClientRequest {
             route,
@@ -2663,8 +2758,10 @@ impl StationHost {
         } = match serde_json::from_value::<crate::control::ClientRequest>(value) {
             Ok(env) => env,
             Err(e) => {
-                let _ = write_line(write_half, &Response::err(format!("bad request: {e}"))).await;
-                return;
+                let _ =
+                    write_line_half(&mut write_half, &Response::err(format!("bad request: {e}")))
+                        .await;
+                return Served::Close;
             }
         };
         // Validate before handling either control-flow request. In particular,
@@ -2672,25 +2769,27 @@ impl StationHost {
         // subscription must not bypass the same Space-boundary check applied to
         // ordinary observation requests.
         if let Err(response) = self.validate_route(route.as_ref(), crate::control::classify(&req)) {
-            let _ = write_line(write_half, &response).await;
-            return;
+            let _ = write_line_half(&mut write_half, &response).await;
+            return Served::Close;
         }
         if let Request::Subscribe { .. } = req {
             self.stream_subscribe(write_half).await;
-            return;
+            return Served::Close;
         }
         if let Request::LiveSubscribe { issue } = req {
             self.stream_live(write_half, issue).await;
-            return;
+            return Served::Close;
         }
         // Stop is a real teardown request: answer, then signal the serve loop
         // to return (the caller decides whether to exit the process).
         let stop = matches!(req, Request::Stop);
         let resp = self.dispatch(route.as_ref(), req, act_as.as_deref());
-        let _ = write_line(write_half, &resp).await;
+        let _ = write_line_half(&mut write_half, &resp).await;
         if stop {
             self.begin_stop();
+            return Served::Close;
         }
+        Served::Next(reader, write_half)
     }
 
     /// Start the single Observation pump if it is not already running.
@@ -3186,11 +3285,18 @@ fn content_refusal(error: &runtime::plane::freight::content::Failure) -> Content
     ContentReply::error(code, message)
 }
 
-async fn write_line<T: serde::Serialize>(
-    mut write_half: tokio::io::WriteHalf<LocalStream>,
-    value: &T,
+/// A framed answer: the header line, then exactly the bytes it declared.
+async fn write_framed<T: serde::Serialize>(
+    write_half: &mut tokio::io::WriteHalf<LocalStream>,
+    header: &T,
+    payload: &[u8],
 ) -> std::io::Result<()> {
-    write_line_half(&mut write_half, value).await
+    let mut out = serde_json::to_string(header)
+        .unwrap_or_else(|_| "{\"kind\":\"error\",\"message\":\"encode failure\"}".to_string());
+    out.push('\n');
+    write_half.write_all(out.as_bytes()).await?;
+    write_half.write_all(payload).await?;
+    write_half.flush().await
 }
 
 async fn write_line_half<T: serde::Serialize>(

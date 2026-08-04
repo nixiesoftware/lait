@@ -6,9 +6,9 @@
 # reviewed like one, not discovered when a gate goes red on a refactor.
 
 [tiers]
-pr             1330
+pr             1335
 pr-platform    1014
-nightly        1357
+nightly        1362
 mutants        87
 
 [gates]
@@ -452,6 +452,11 @@ lait::it control_plane::every_subscriber_sees_the_same_frame_for_one_commit
 lait::it control_plane::explicit_routes_cannot_cross_space_or_world_boundaries
 lait::it control_plane::stale_since_after_restart_yields_reset
 lait::it control_plane::validate_then_commit_rings_no_doorbell
+lait::it control_pool::a_daemon_that_hangs_up_is_reconnected_to
+lait::it control_pool::a_daemon_that_takes_the_request_and_vanishes_is_retried
+lait::it control_pool::a_framed_call_survives_a_reaped_connection
+lait::it control_pool::one_connection_carries_many_requests
+lait::it control_pool::the_client_stops_reusing_long_before_the_daemon_hangs_up
 lait::it frost_interop::a_dkg_group_signature_verifies_as_ed25519
 lait::it frost_interop::a_trusted_dealer_group_signature_verifies_as_ed25519
 lait::it guided_join::diagnose_flags_expected_space_mismatch

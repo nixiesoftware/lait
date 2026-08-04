@@ -254,19 +254,27 @@ an already-live compatibility adapter; it does not place a vacant Orbit. Other
 verbs and routes reject this mode. The field is omitted for ordinary dispatch,
 preserving the existing envelope shape.
 
-Protocol v5 sends product mutations and queries as:
+Protocol v10 sends product mutations and queries as a framed pair — a header
+line, then exactly the bytes it declares:
 
 ```text
-WorldClientRequest {
-  route: world { orbit, space, world },
+{ route: world { orbit, space, world },
   act_as?,
-  call: WorldCall { world, operation, version, payload }
-}
-  -> WorldReply { world, operation, version, status, payload | error }
+  call: { world, operation, version, len } }\n
+<len bytes>
+  -> { world, operation, version, status: "ok", len }\n
+     <len bytes>
+  -> { world, operation, version, status: "error", error }\n
 ```
 
-The route and call repeat the World identity and must agree. `payload` is
-bounded, unpadded URL-safe base64 on the JSON wire and opaque to the host. The
+This is the shape v7 gave content, for the same reason: JSON has no way to say
+"bytes", so carrying them inside it costs a base64 pass and a third more wire in
+each direction. A declared length costs neither. An error carries no length,
+because the failure is the whole answer.
+
+The route and call repeat the World identity and must agree. The payload is
+bounded and opaque to the host, and is read in full before the call is
+dispatched — so a header that arrives without its payload runs nothing. The
 registered product handler decodes it and derives query/command access; the
 client cannot grant itself read-only treatment with a wire flag. Replies repeat
 the exact `(world, operation, version)` tuple so a product codec cannot accept a

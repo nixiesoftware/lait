@@ -16,8 +16,9 @@
 //! responses travel separately in opaque [`Call`] / [`Reply`]
 //! envelopes owned by installed client packages.
 
-use std::path::Path;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock, Mutex};
 
 pub use crate::daemon::scope::OrbitAddress;
 
@@ -31,6 +32,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 use crate::diagnose::DiagnosisView;
 use crate::dto::{MemberDto, MemberLogEntry, SeedDto};
+use runtime::poison::LockRecovering;
 use runtime::world::call::{Call, Reply};
 
 /// The identity-scoped local control service.
@@ -108,14 +110,24 @@ impl Endpoint {
 /// **v9:** doorbell invalidations are World-declared and grouped by World id.
 /// A v8 frame uses Issues-specific field names, so accepting it would silently
 /// lose row refreshes instead of producing a useful incompatibility error.
-pub const CONTROL_PROTOCOL_VERSION: u32 = 9;
+///
+/// **v10:** World calls are framed the way content already was — a header line
+/// declaring a byte length, then exactly those bytes — instead of base64'd into
+/// the header itself. The encoding was costing a third more bytes and two
+/// passes each way over every board, list, and comment on the channel. A v9
+/// process reads the payload that follows as a malformed second request, which
+/// is precisely why this cannot be tolerated across the boundary: the failure
+/// would not be a decode error, it would be a desynchronised connection.
+pub const CONTROL_PROTOCOL_VERSION: u32 = 10;
 
 /// The oldest control protocol a client still talks to. Raising this retires a
 /// version; the gap to [`CONTROL_PROTOCOL_VERSION`] is the mixed-version window.
 ///
-/// Protocol v9 is a deliberate compatibility cutoff: v8 doorbells cannot carry
-/// multiple Worlds and spell their invalidations in product-specific fields.
-pub const MIN_SUPPORTED_CONTROL_PROTOCOL: u32 = 9;
+/// Protocol v10 is a deliberate compatibility cutoff: a v9 process cannot read
+/// a framed World call, and connections are reused now, so a single
+/// misinterpreted payload would poison every request that followed it rather
+/// than failing once.
+pub const MIN_SUPPORTED_CONTROL_PROTOCOL: u32 = 10;
 
 /// Whether this build can talk to a daemon advertising control protocol `peer`.
 ///
@@ -795,6 +807,119 @@ impl WorldClientRequest {
             call,
         }
     }
+}
+
+/// The header of a framed World call: everything except the payload, which
+/// follows it as raw bytes.
+///
+/// [`WorldClientRequest`] still encodes the payload inside its JSON, because a
+/// [`Call`] must be serializable wherever one is written down. On *this*
+/// channel it is not written down, it is carried — and a channel that can
+/// declare a length has no reason to spend a base64 pass and a third more bytes
+/// to smuggle bytes through a format that cannot hold them.
+///
+/// The discriminant is unchanged: this still has a `call` field, which is what
+/// tells a reader it is looking at a World call rather than a control request.
+/// Only that field's shape moved, which is why it costs a protocol version.
+///
+/// This mirrors `ContentReply::ContentStream`, the other framed thing on this
+/// wire, deliberately: header line declaring a length, then exactly that many
+/// bytes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorldCallFrame {
+    pub route: ControlRoute,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub act_as: Option<String>,
+    pub call: CallFrame,
+}
+
+/// A [`Call`] with its payload replaced by that payload's length.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CallFrame {
+    pub world: replica::body::WorldId,
+    pub operation: String,
+    pub version: u32,
+    /// How many bytes follow the header line.
+    pub len: u64,
+}
+
+impl CallFrame {
+    /// Describe a call without moving its payload.
+    pub fn of(call: &Call) -> Self {
+        Self {
+            world: call.world().clone(),
+            operation: call.operation().to_string(),
+            version: call.version(),
+            len: call.payload().len() as u64,
+        }
+    }
+}
+
+/// A [`Reply`] with its payload replaced by that payload's length.
+///
+/// An error carries no bytes and declares no length — the failure *is* the
+/// answer, and a length of zero would be a second way to say so.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReplyFrame {
+    pub world: replica::body::WorldId,
+    pub operation: String,
+    pub version: u32,
+    #[serde(flatten)]
+    pub outcome: ReplyFrameOutcome,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ReplyFrameOutcome {
+    Ok {
+        len: u64,
+    },
+    Error {
+        error: runtime::world::call::Failure,
+    },
+}
+
+/// The framed form of a reply, and the bytes that follow it.
+pub fn frame_reply(reply: Reply) -> (ReplyFrame, Vec<u8>) {
+    let (world, operation, version, outcome) = reply.into_parts();
+    match outcome {
+        Ok(payload) => (
+            ReplyFrame {
+                world,
+                operation,
+                version,
+                outcome: ReplyFrameOutcome::Ok {
+                    len: payload.len() as u64,
+                },
+            },
+            payload,
+        ),
+        Err(error) => (
+            ReplyFrame {
+                world,
+                operation,
+                version,
+                outcome: ReplyFrameOutcome::Error { error },
+            },
+            Vec::new(),
+        ),
+    }
+}
+
+/// A declared payload length this channel will not allocate for.
+///
+/// Checked *before* the allocation, against the same ceiling the payload itself
+/// is bound by, so a header claiming more than a reply may ever contain is
+/// refused rather than believed.
+pub fn refuse_oversized_payload(len: u64) -> Result<usize> {
+    let ceiling = runtime::world::call::MAX_WORLD_REPLY_PAYLOAD;
+    if len > ceiling as u64 {
+        return Err(anyhow!(
+            "a World payload of {len} bytes was declared, past the {ceiling} this \
+             channel carries"
+        ));
+    }
+    usize::try_from(len).map_err(|_| anyhow!("a World payload of {len} bytes does not fit here"))
 }
 
 fn is_false(value: &bool) -> bool {
@@ -2035,8 +2160,305 @@ pub async fn request_as_routed(
 /// envelope once and lending it is what keeps the retry off the happy path's
 /// bill.
 pub async fn send(home: &Path, env: &ClientRequest) -> Result<Response> {
-    let stream = connect_bounded(home).await?;
-    exchange(stream, env).await
+    let line = exchange_pooled(home, env).await?;
+    serde_json::from_str(line.trim()).context("decode response")
+}
+
+/// How long the daemon leaves a connection open with nothing on it.
+///
+/// Read by both sides from here: the client's reuse window
+/// ([`MAX_IDLE_AGE`]) is deliberately a fraction of it, and a fraction of a
+/// number is only meaningful next to the number itself.
+pub const IDLE_CONNECTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// How long a connection may sit idle here before it is replaced rather than
+/// reused.
+///
+/// Well under [`IDLE_CONNECTION_TIMEOUT`], and the gap is the point. If the
+/// client could hand out a connection at the moment the daemon was reaping it,
+/// every such race would surface as a request whose re-send has to be judged —
+/// and that judgement is exactly what cannot be made safely from here. A
+/// connect is cheaper than a wrong answer to it.
+pub const MAX_IDLE_AGE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Idle connections one home keeps. Concurrent requests each need their own
+/// stream — nothing multiplexes on this wire — so this is the fan-out the pool
+/// absorbs before a request pays for a connect.
+const MAX_IDLE_PER_HOME: usize = 4;
+
+/// Control connections parked for reuse, keyed by the home they reach.
+///
+/// A head answers a browser that fans out — board, status, members, inbox, all
+/// at once, then again on the next doorbell — and each of those used to open
+/// its own socket. The daemon now serves many requests per connection, so the
+/// connection is worth keeping.
+///
+/// `std::sync::Mutex`, not tokio's: every critical section is one `Vec` push or
+/// pop with no await inside it, and an async mutex would add a scheduler hop to
+/// the path that exists to remove one.
+static IDLE_CONNECTIONS: LazyLock<Mutex<HashMap<PathBuf, Vec<Idle>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// One parked connection and when it was parked.
+struct Idle {
+    io: BufReader<Stream>,
+    since: std::time::Instant,
+}
+
+/// A connection to send on, and whether it has already carried a request.
+///
+/// That flag is the whole reason this is not just a connect: it is what
+/// licenses the one re-send below, and it must never be set on a connection
+/// this call opened itself.
+async fn checkout(home: &Path) -> Result<(BufReader<Stream>, bool)> {
+    match take_idle(home) {
+        Some(io) => Ok((io, true)),
+        None => Ok((BufReader::new(connect_bounded(home).await?), false)),
+    }
+}
+
+fn take_idle(home: &Path) -> Option<BufReader<Stream>> {
+    let mut pool = IDLE_CONNECTIONS.lock_recovering();
+    let parked = pool.get_mut(home)?;
+    while let Some(idle) = parked.pop() {
+        if idle.since.elapsed() < MAX_IDLE_AGE {
+            return Some(idle.io);
+        }
+        // Past the reuse window. Dropping it closes it, which is what we want:
+        // the daemon is about to do the same from its side.
+    }
+    None
+}
+
+/// Park a connection that answered cleanly. One that did not is dropped, because
+/// a stream whose framing may be mid-response poisons every request after it.
+fn checkin(home: &Path, io: BufReader<Stream>) {
+    let mut pool = IDLE_CONNECTIONS.lock_recovering();
+    let parked = pool.entry(home.to_path_buf()).or_default();
+    if parked.len() < MAX_IDLE_PER_HOME {
+        parked.push(Idle {
+            io,
+            since: std::time::Instant::now(),
+        });
+    }
+}
+
+/// Where a round trip stopped — which is the only question that matters when
+/// the connection was reused.
+enum Interrupted {
+    /// The request never landed. Nothing on the far side has seen it.
+    Undelivered(anyhow::Error),
+    /// The daemon closed without writing a byte.
+    Closed,
+    /// The daemon was written to and the read then failed. Whether it ran is
+    /// unknown, so this is never re-sent.
+    Failed(anyhow::Error),
+}
+
+impl Interrupted {
+    /// The error a caller sees. Only [`Interrupted::Undelivered`] becomes the
+    /// [`Undelivered`] type, because only it is a licence to re-send.
+    fn into_error(self) -> anyhow::Error {
+        match self {
+            Interrupted::Undelivered(error) => Undelivered(format!("{error:#}")).into(),
+            Interrupted::Closed => {
+                anyhow!("the daemon closed the connection without answering")
+            }
+            Interrupted::Failed(error) => error,
+        }
+    }
+}
+
+/// One request and one response on a connection the caller owns.
+async fn round_trip<T: Serialize>(
+    io: &mut BufReader<Stream>,
+    env: &T,
+) -> std::result::Result<String, Interrupted> {
+    let mut line = match serde_json::to_string(env) {
+        Ok(line) => line,
+        // Re-encoding will fail identically, but nothing was written, and the
+        // caller's licence is about the wire rather than about the retry.
+        Err(error) => return Err(Interrupted::Undelivered(anyhow!("encode request: {error}"))),
+    };
+    line.push('\n');
+    if let Err(error) = io.write_all(line.as_bytes()).await {
+        return Err(Interrupted::Undelivered(anyhow!("write request: {error}")));
+    }
+    if let Err(error) = io.flush().await {
+        return Err(Interrupted::Undelivered(anyhow!("flush request: {error}")));
+    }
+    let mut response = String::new();
+    match io.read_line(&mut response).await {
+        Ok(0) => Err(Interrupted::Closed),
+        Ok(_) => Ok(response),
+        Err(error) => Err(unanswered("read response", &response, error)),
+    }
+}
+
+/// Classify a failed read by whether any of the answer had arrived.
+///
+/// **Not by the error code.** A connection the daemon has already closed does
+/// not announce itself the same way on every platform: a Windows pipe reports it
+/// on the write, a Unix socket that still holds bytes we sent reports
+/// `ECONNRESET` on the read, and a clean close reports end-of-file. Keying on
+/// any one of those spellings means the other two surface a reaped connection as
+/// a failed request — which is what happened, on Linux, to a test that restarts
+/// its daemon.
+///
+/// The fact that actually decides it is whether the daemon answered. Nothing
+/// received means nothing was answered, and since a request is only ever
+/// dispatched after being read in full, nothing was answered means nothing ran.
+fn unanswered(what: &str, received: &str, error: std::io::Error) -> Interrupted {
+    if received.is_empty() {
+        Interrupted::Closed
+    } else {
+        Interrupted::Failed(anyhow!("{what}: {error}"))
+    }
+}
+
+/// A round trip on a pooled connection, with one re-send if a *reused* one was
+/// already gone.
+///
+/// The re-send is the same rule an HTTP client applies to a keep-alive
+/// connection, and it rests on the same fact: a connection this process parked
+/// and the daemon then closed never carried the request, so sending it again
+/// cannot repeat anything. A connection opened by *this* call gets no such
+/// licence — its failure is a real failure and is reported as one, exactly as
+/// before the pool existed.
+async fn exchange_pooled<T: Serialize>(home: &Path, env: &T) -> Result<String> {
+    let (mut io, reused) = checkout(home).await?;
+    match round_trip(&mut io, env).await {
+        Ok(line) => {
+            checkin(home, io);
+            return Ok(line);
+        }
+        Err(interrupted) => {
+            if !may_resend(reused, &interrupted) {
+                return Err(interrupted.into_error());
+            }
+        }
+    }
+    let mut io = BufReader::new(connect_bounded(home).await?);
+    let line = round_trip(&mut io, env)
+        .await
+        .map_err(Interrupted::into_error)?;
+    checkin(home, io);
+    Ok(line)
+}
+
+/// Whether this failure licenses sending the same request a second time.
+///
+/// The whole rule, in one place, because both pooled paths must answer it
+/// identically and because it is the only thing standing between a re-send and
+/// a repeated mutation.
+fn may_resend(reused: bool, interrupted: &Interrupted) -> bool {
+    reused
+        && matches!(
+            interrupted,
+            Interrupted::Undelivered(_) | Interrupted::Closed
+        )
+}
+
+/// One framed World call: header line, payload bytes, and the same in return.
+///
+/// Mirrors [`exchange_pooled`] — same pool, same one re-send under
+/// [`may_resend`] — and differs only in what crosses the wire between the
+/// newlines.
+async fn exchange_framed(
+    home: &Path,
+    frame: &WorldCallFrame,
+    payload: &[u8],
+) -> Result<(ReplyFrame, Vec<u8>)> {
+    let (mut io, reused) = checkout(home).await?;
+    match framed_round_trip(&mut io, frame, payload).await {
+        Ok(answer) => {
+            checkin(home, io);
+            return Ok(answer);
+        }
+        Err(interrupted) => {
+            if !may_resend(reused, &interrupted) {
+                return Err(interrupted.into_error());
+            }
+        }
+    }
+    let mut io = BufReader::new(connect_bounded(home).await?);
+    let answer = framed_round_trip(&mut io, frame, payload)
+        .await
+        .map_err(Interrupted::into_error)?;
+    checkin(home, io);
+    Ok(answer)
+}
+
+/// A framed call and its framed answer on a connection the caller owns.
+///
+/// **Nothing here may return early between the header and its bytes.** A
+/// connection is parked for reuse only on the `Ok` path, so a framing mistake
+/// costs one connection rather than every request that would have followed on
+/// it — which is the hazard that arrived the moment connections started being
+/// reused, and the reason the length is checked before it is believed.
+async fn framed_round_trip(
+    io: &mut BufReader<Stream>,
+    frame: &WorldCallFrame,
+    payload: &[u8],
+) -> std::result::Result<(ReplyFrame, Vec<u8>), Interrupted> {
+    use tokio::io::AsyncReadExt;
+
+    let mut line = match serde_json::to_string(frame) {
+        Ok(line) => line,
+        Err(error) => {
+            return Err(Interrupted::Undelivered(anyhow!(
+                "encode World call: {error}"
+            )))
+        }
+    };
+    line.push('\n');
+    if let Err(error) = io.write_all(line.as_bytes()).await {
+        return Err(Interrupted::Undelivered(anyhow!(
+            "write World call: {error}"
+        )));
+    }
+    if let Err(error) = io.write_all(payload).await {
+        // Undelivered, and the receiver is what makes that true rather than the
+        // ordering here: a World call is dispatched only after its declared
+        // bytes have been read in full, so a header that arrives without its
+        // payload is read, found short, and dropped. Nothing ran.
+        //
+        // Getting this wrong is not theoretical. Classifying it as delivered
+        // made every parked-connection reap on a *write* surface as a failed
+        // request — "the pipe is being closed" — because a first write into a
+        // closed pipe can succeed and only the second one reports it.
+        return Err(Interrupted::Undelivered(anyhow!(
+            "write World payload: {error}"
+        )));
+    }
+    if let Err(error) = io.flush().await {
+        return Err(Interrupted::Undelivered(anyhow!(
+            "flush World call: {error}"
+        )));
+    }
+
+    let mut header = String::new();
+    {
+        let mut bounded = (&mut *io).take(MAX_CONTROL_LINE_BYTES);
+        match bounded.read_line(&mut header).await {
+            Ok(0) => return Err(Interrupted::Closed),
+            Ok(_) => {}
+            Err(error) => return Err(unanswered("read World reply", &header, error)),
+        }
+    }
+    let reply: ReplyFrame = match serde_json::from_str(header.trim()) {
+        Ok(reply) => reply,
+        Err(error) => return Err(Interrupted::Failed(anyhow!("decode World reply: {error}"))),
+    };
+    let ReplyFrameOutcome::Ok { len } = reply.outcome else {
+        return Ok((reply, Vec::new()));
+    };
+    let len = refuse_oversized_payload(len).map_err(Interrupted::Failed)?;
+    let mut payload = vec![0u8; len];
+    if let Err(error) = io.read_exact(&mut payload).await {
+        return Err(Interrupted::Failed(anyhow!("read World payload: {error}")));
+    }
+    Ok((reply, payload))
 }
 
 /// Open the control channel, or give up saying so.
@@ -2077,12 +2499,8 @@ pub async fn request_routed_if_running(
     req: &Request,
     route: ControlRoute,
 ) -> Result<Response> {
-    let stream = connect_bounded(home).await?;
-    exchange(
-        stream,
-        &ClientRequest::routed_if_running(req.clone(), route),
-    )
-    .await
+    let line = exchange_pooled(home, &ClientRequest::routed_if_running(req.clone(), route)).await?;
+    serde_json::from_str(line.trim()).context("decode response")
 }
 
 /// Send one product-neutral World call through the identity-scoped daemon.
@@ -2105,15 +2523,18 @@ pub async fn call_world(
 /// call payload just to hold a spare for a retry it will almost certainly not
 /// need. See [`send`] for the same reasoning on the control path.
 pub async fn call_world_envelope(home: &Path, env: &WorldClientRequest) -> Result<Reply> {
-    let stream = connect_bounded(home).await?;
-    let line = exchange_raw(stream, env).await?;
-    serde_json::from_str(line.trim()).context("decode World reply")
-}
-
-/// Write one request and read one response on an already-open stream.
-async fn exchange(stream: Stream, env: &ClientRequest) -> Result<Response> {
-    let line = exchange_raw(stream, env).await?;
-    serde_json::from_str(line.trim()).context("decode response")
+    let frame = WorldCallFrame {
+        route: env.route.clone(),
+        act_as: env.act_as.clone(),
+        call: CallFrame::of(&env.call),
+    };
+    let (reply, payload) = exchange_framed(home, &frame, env.call.payload()).await?;
+    let outcome = match reply.outcome {
+        ReplyFrameOutcome::Ok { .. } => Ok(payload),
+        ReplyFrameOutcome::Error { error } => Err(error),
+    };
+    Reply::from_parts(reply.world, reply.operation, reply.version, outcome)
+        .map_err(|error| anyhow!("decode World reply: {error}"))
 }
 
 /// The same round trip, stopping at the raw response line.

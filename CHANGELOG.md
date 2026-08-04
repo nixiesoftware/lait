@@ -1,5 +1,43 @@
 # Changelog
 
+## Unreleased
+
+### The local control channel stops paying for what it carries
+
+Two changes to the head↔daemon hop, neither of them visible in the product
+except as latency.
+
+- **One connection carries many requests.** A head opened a socket, wrote one
+  line, read one line, and dropped it — per request. Measured on named pipes,
+  500 round trips: **63.4µs each with a connect per request, 13.8µs pooled**.
+  The connect was 4.6× the exchange it existed to carry. The daemon now serves
+  until the client leaves or an operation takes the stream over.
+- **World call payloads are framed, not base64'd.** JSON cannot hold bytes, so
+  every board, list, and comment crossing this channel was base64'd into its
+  header and parsed back out — a third more wire and two passes each way. The
+  header now declares a length and the bytes follow it, exactly as content has
+  worked since v7. Encode/decode cost for one call, by payload size:
+
+  | payload | v9 (base64) | v10 (framed) | wire |
+  |---|---|---|---|
+  | 1 KiB | 46.9µs | 12.8µs | −21% |
+  | 64 KiB | 2.19ms | 26.3µs | −25% |
+  | 1 MiB | 37.2ms | 200µs | −25% |
+
+**BREAKING (local wire):** `CONTROL_PROTOCOL_VERSION` 9 → 10, minimum also 10.
+A v9 daemon reads a framed payload as a malformed second request, and on a
+channel that now reuses connections that desynchronises everything after it
+rather than failing once — so it is refused rather than tolerated. Nothing on
+disk, on the peer wire, or in any World implementation moves; the launcher
+identifies an older daemon and takes over from it, as it already did.
+
+The re-send rule is the load-bearing part. A request is re-sent only when a
+connection *the client had parked* failed before answering — the daemon closed
+it while idle, so nothing was delivered. A connection opened by the call itself
+gets no such licence. What makes a half-written framed call undelivered is the
+receiver rather than the ordering: a World call is dispatched only after its
+declared bytes are read in full.
+
 ## v0.7.0 — lait is not a command surface
 
 > **The CLI is gone.** Not deprecated, not hidden behind a flag — deleted. `lait`
