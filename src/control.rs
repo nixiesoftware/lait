@@ -58,8 +58,8 @@ impl Endpoint {
     }
 }
 
-/// The control-plane protocol version this build **speaks** — CLI, web, and MCP
-/// ↔ daemon channel, exchanged in the [`Request::Hello`] handshake.
+/// The control-plane protocol version this build **speaks** — the head ↔ daemon
+/// channel, exchanged in the [`Request::Hello`] handshake.
 ///
 /// The third plane to get one. The sync plane has [`crate::sync::PROTOCOL_VERSION`]
 /// and the store has `dto::SCHEMA_VERSION`; the control channel had nothing, so a
@@ -127,13 +127,13 @@ pub fn check_control_protocol(peer: u32) -> Result<()> {
         return Err(anyhow!(
             "the daemon speaks control protocol v{peer}, older than the minimum \
              this build supports (v{MIN_SUPPORTED_CONTROL_PROTOCOL}); \
-             restart it with `lait shutdown`"
+             stop that daemon so this build can start its own"
         ));
     }
     if peer > CONTROL_PROTOCOL_VERSION {
         return Err(anyhow!(
             "the daemon speaks control protocol v{peer}, newer than this build's \
-             v{CONTROL_PROTOCOL_VERSION}; upgrade lait with `lait update`"
+             v{CONTROL_PROTOCOL_VERSION}; upgrade lait to that build"
         ));
     }
     Ok(())
@@ -241,7 +241,7 @@ pub enum Request {
     /// actor plane, and sponsor it with content authority. This is the seamless
     /// "sponsor once" flow for an agent on the same machine — no Contact round,
     /// no second daemon, no second store copy. Afterwards a client acts as it
-    /// via the `act_as` selector (e.g. `lait --as <name> …`, or MCP).
+    /// via the `act_as` selector (`$LAIT_AS`, or an MCP client's own binding).
     AgentProvision {
         /// The local name for this agent identity.
         name: String,
@@ -371,21 +371,21 @@ pub enum Request {
     /// Guided-join verifier (`docs/UI.md`, joining): project live
     /// node state into an ordered list of onboarding gates so a stalled joiner
     /// gets one legible blocker instead of a blank board. `expected_space`
-    /// (supplied by the `join` tail from the invite ticket) lets it catch a
-    /// directory/store mismatch; `None` for a standalone `doctor`.
+    /// (supplied by `HostSpaceEnter` from the invite ticket) lets it catch a
+    /// directory/store mismatch; `None` when nothing was expected.
     Diagnose {
         #[serde(default)]
         expected_space: Option<String>,
     },
     Id,
-    /// One-shot identity + standing + view-completeness report (`lait whoami`,
-    /// the MCP `whoami` tool). A read: the full version of `Id`'s actor line —
+    /// One-shot identity + standing + view-completeness report (the MCP
+    /// `whoami` tool, the viewer's own identity panel). A read: the full version of `Id`'s actor line —
     /// actor, `did:key`, role, capabilities, sponsor, space, and the **loud**
     /// partial-view signal — so neither a human nor an agent ever *infers* "who
     /// am I / what may I do / is my view complete."
     Whoami,
     /// Converge now and report what moved and what is still divergent — the
-    /// workflow verb that supersedes `connect <device-id>`. Surfaces missing-
+    /// request that supersedes a hand-aimed `Connect`. Surfaces missing-
     /// epoch / partial-read state **loudly** instead of silently showing fewer
     /// issues (the 141-vs-154 inference this initiative kills).
     Sync,
@@ -516,12 +516,159 @@ pub enum Request {
     /// twice — an invitation accepted, a file offered, a person's attention
     /// asked for.
     Signals,
-    /// Re-read the layered local settings (`lait config set` sends this
+    /// Re-read the layered local settings (`HostConfigSet` sends this
     /// best-effort so a daemon-read key like `user.nick` applies live instead
     /// of silently waiting for a restart). Transport-plane like `Stop` — not
     /// part of the MCP tool surface.
     ConfigReload,
     Stop,
+
+    // ---- the host plane: bootstrap, node-local state, orientation ----
+    //
+    // Every request below routes to [`ControlRoute::Daemon`], and every one of
+    // them can run before any Orbit exists. That is why they are here rather
+    // than behind a Station: the daemon is identity-scoped and is built from an
+    // identity directory (`daemon::run_lait_daemon`), so it is the only party
+    // that exists early enough to host formation — and, because it is the party
+    // that would otherwise be holding the store lock, the only one that can run
+    // formation and rebuild without racing itself for it.
+    //
+    // Paths are carried explicitly. The daemon's working directory is not the
+    // caller's, and a head serving several callers out of one process has no
+    // working directory worth consulting at all.
+    /// Found a new Space into an explicit store directory, and register the
+    /// resulting Orbit.
+    HostSpaceFound {
+        /// The store directory to form into, created if absent.
+        home: String,
+        /// The Space's display name.
+        name: String,
+        /// Optional `user.nick` written into the new store's config layer.
+        #[serde(default)]
+        nick: Option<String>,
+    },
+    /// Bootstrap a joiner's store from an invite link, and register the Orbit.
+    ///
+    /// The transport half remains [`Request::Connect`]: this readies the store
+    /// the joiner's Station will occupy, so the daemon only ever opens a
+    /// well-formed store already bound to the invite's Space.
+    HostSpaceEnter {
+        /// A Coordinates v1 invite link (or its bare ticket).
+        link: String,
+        /// The store directory to bootstrap into, created if absent.
+        home: String,
+        #[serde(default)]
+        nick: Option<String>,
+    },
+    /// Sign this machine's consent to join an existing actor, from a
+    /// `device invite` token (`<actor_id> <space_id>`).
+    ///
+    /// The one host request that touches no store: the machine running it has
+    /// no membership anywhere yet, which is the whole point of enrolment.
+    HostDeviceConsent {
+        token: String,
+    },
+    /// Every recognized local setting, with its effective value and origin.
+    HostConfigList {
+        /// The store whose layer participates; `None` reads the global layer
+        /// alone.
+        #[serde(default)]
+        home: Option<String>,
+    },
+    /// One local setting's effective value.
+    HostConfigGet {
+        key: String,
+        #[serde(default)]
+        home: Option<String>,
+    },
+    /// Write one local setting.
+    HostConfigSet {
+        key: String,
+        value: String,
+        /// Write the global layer instead of the store layer.
+        #[serde(default)]
+        global: bool,
+        #[serde(default)]
+        home: Option<String>,
+    },
+    /// Clear one local setting from the layer a write would target.
+    HostConfigUnset {
+        key: String,
+        #[serde(default)]
+        global: bool,
+        #[serde(default)]
+        home: Option<String>,
+    },
+    /// Deregister local Orbits from the catalog. Never touches a store.
+    HostOrbitForget {
+        /// A store path, a Space id, or a unique Space-id prefix.
+        selector: String,
+    },
+    /// Drop every registry row whose store is gone from disk.
+    HostOrbitPrune,
+    /// Rebuild one Orbit's implicit prior journal representation as an explicit
+    /// current generation.
+    ///
+    /// The daemon releases its own placement for that Orbit first. Run from a
+    /// client this was a store-lock race against whatever the daemon had open.
+    HostOrbitRebuild {
+        /// A local Orbit id, a store path, a Space id, or a display name.
+        orbit: String,
+    },
+    /// Register the lait MCP server in an agent client's config file.
+    ///
+    /// A head cannot answer this itself: writing the file that tells an agent
+    /// how to reach lait is bootstrapping, the same class as founding a Space
+    /// or signing device consent, and it must work before any store exists.
+    ///
+    /// `dir` is the project directory a project-scoped config lands in, carried
+    /// explicitly because the daemon's working directory is not the caller's.
+    HostInstallMcp {
+        /// `claude` | `cursor` | `windsurf` | `generic`.
+        client: crate::install::Client,
+        /// `user` | `project`; `None` takes the client's own default.
+        #[serde(default)]
+        scope: Option<crate::install::Scope>,
+        /// The server name to write under (`lait` unless overridden).
+        name: String,
+        /// The sponsored agent identity its work signs as; `None` derives one
+        /// from the client.
+        #[serde(default)]
+        agent: Option<String>,
+        /// Decline an agent identity, leaving the work signed by the human.
+        #[serde(default)]
+        no_agent: bool,
+        /// Return the would-be file contents instead of writing them.
+        #[serde(default)]
+        print: bool,
+        /// The project directory for a project-scoped config.
+        dir: String,
+    },
+    /// Replace the installed binary with the latest published release.
+    ///
+    /// Node maintenance, not a command: the daemon is the process that knows
+    /// which build it is running, and `self_update`'s atomic self-replace works
+    /// on a live executable (it renames rather than overwrites), so the swap
+    /// lands and takes effect at the next restart.
+    HostUpdate,
+    /// Stop this daemon once the reply is on the wire, so the next request
+    /// starts a fresh one.
+    ///
+    /// The only way a swapped binary or a raised control protocol takes effect
+    /// now that no terminal can stop anything: [`Request::HostUpdate`] renames
+    /// the executable out from under a live process, and
+    /// `check_control_protocol` tells a newer build to "stop that daemon so this
+    /// build can start its own". Every head stands a daemon back up on the first
+    /// send that finds nobody listening, so a stop *is* the restart.
+    ///
+    /// Deliberately not [`Request::Stop`], which the host plane refuses: `Stop`
+    /// reaches whatever process is on the other end of the socket, and a page
+    /// that could send it could kill the server answering it. This one is only
+    /// ever the daemon *under* a head, and that head survives to re-spawn it.
+    HostRestart,
+    /// Orientation: this identity, the Worlds this build hosts, and the local
+    /// Orbits and named identities that exist.
+    HostContext,
     /// Version handshake (see [`CONTROL_PROTOCOL_VERSION`]). The first thing a
     /// client sends, and the only request whose reply must stay decodable
     /// forever — it is what tells two mismatched builds *why* they can't talk
@@ -876,7 +1023,24 @@ pub fn classify(req: &Request) -> RequestOwner {
         | Request::ConfigReload
         | Request::Stop
         | Request::Hello { .. }
-        | Request::MemberAlias { .. } => Lifecycle,
+        | Request::MemberAlias { .. }
+        // The host plane is lifecycle by definition: node-local state and the
+        // two verbs that bring a Space into existence on this machine. None of
+        // them has a Station to be owned by — most run before one could exist.
+        | Request::HostSpaceFound { .. }
+        | Request::HostSpaceEnter { .. }
+        | Request::HostDeviceConsent { .. }
+        | Request::HostConfigList { .. }
+        | Request::HostConfigGet { .. }
+        | Request::HostConfigSet { .. }
+        | Request::HostConfigUnset { .. }
+        | Request::HostOrbitForget { .. }
+        | Request::HostOrbitPrune
+        | Request::HostOrbitRebuild { .. }
+        | Request::HostInstallMcp { .. }
+        | Request::HostUpdate
+        | Request::HostRestart
+        | Request::HostContext => Lifecycle,
     }
 }
 
@@ -985,6 +1149,48 @@ pub fn representative_requests() -> Vec<Request> {
         Request::Hello {
             protocol_version: 0,
         },
+        Request::HostSpaceFound {
+            home: s(),
+            name: s(),
+            nick: None,
+        },
+        Request::HostSpaceEnter {
+            link: s(),
+            home: s(),
+            nick: None,
+        },
+        Request::HostDeviceConsent { token: s() },
+        Request::HostConfigList { home: None },
+        Request::HostConfigGet {
+            key: s(),
+            home: None,
+        },
+        Request::HostConfigSet {
+            key: s(),
+            value: s(),
+            global: false,
+            home: None,
+        },
+        Request::HostConfigUnset {
+            key: s(),
+            global: false,
+            home: None,
+        },
+        Request::HostOrbitForget { selector: s() },
+        Request::HostOrbitPrune,
+        Request::HostOrbitRebuild { orbit: s() },
+        Request::HostInstallMcp {
+            client: crate::install::Client::Generic,
+            scope: None,
+            name: s(),
+            agent: None,
+            no_agent: false,
+            print: true,
+            dir: s(),
+        },
+        Request::HostUpdate,
+        Request::HostRestart,
+        Request::HostContext,
     ]
 }
 
@@ -1109,12 +1315,145 @@ pub enum Response {
         /// A short human summary of what the sync did/found.
         message: String,
     },
+    /// The answer to a host-plane request (`Request::Host*`).
+    Host(HostReply),
     Error {
         message: String,
         // Named `error_kind`, not `kind`: the enum's internal tag is `kind`
         // (`#[serde(tag = "kind")]`), so a variant field of that name collides.
         #[serde(default)]
         error_kind: ErrorKind,
+    },
+}
+
+/// What a host-plane request produced.
+///
+/// One `Response` arm rather than eleven. These are results of node-local
+/// operations, not projections of Space state, and giving each its own
+/// top-level variant would grow the surface every client matches on without
+/// letting any of them say anything new. The inner tag is `host`, so a client
+/// still branches on one string.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "host", rename_all = "snake_case")]
+pub enum HostReply {
+    /// A Space was founded and its Orbit registered.
+    Founded {
+        space: String,
+        /// The store directory it was formed into.
+        home: String,
+        /// This machine's device id in the new Space.
+        device: String,
+        name: String,
+        /// The initial scope the bundled World seeded, so a caller can name
+        /// where the first item will land.
+        project_key: String,
+        project_name: String,
+    },
+    /// A joiner's store was bootstrapped from an invite, and admission driven.
+    Entered {
+        space: String,
+        home: String,
+        device: String,
+        /// The approach Station `Connect` was driven against, and the one to
+        /// retry with when admission has not landed yet.
+        approach: String,
+        /// The inviter's nick from the ticket. May be empty.
+        host_nick: String,
+        /// False when the store already held this Space (a re-join).
+        fresh: bool,
+        /// Whether standing landed before the wait ran out. False is not a
+        /// failure — the inviter may simply be offline — but it is the
+        /// difference between "you're in" and "the board stays encrypted until
+        /// they come online", and a surface that cannot tell them apart shows a
+        /// blank board and calls it a space.
+        admitted: bool,
+        /// Whether the inviter answered at all.
+        contacted: bool,
+        /// The last refusal seen while it had not.
+        #[serde(default)]
+        last_error: Option<String>,
+    },
+    /// The hex consent blob to hand back to `device add`.
+    DeviceConsent { consent: String },
+    /// Effective local settings — the whole table, or one row for a `get`.
+    Config { rows: Vec<crate::config::ConfigRow> },
+    /// One completed settings write.
+    ConfigWritten {
+        write: crate::config::ConfigWrite,
+        /// Whether a running Station took the change live.
+        ///
+        /// `None` when nothing could have: the key is not daemon-read, or the
+        /// write targeted a layer with no Orbit behind it. The three-way answer
+        /// exists so a surface never promises a restart that is not pending —
+        /// a silent no-op is the failure this reports, and so is a warning
+        /// about one that cannot happen.
+        #[serde(default)]
+        applied: Option<bool>,
+    },
+    /// Registry rows deregistered by `HostOrbitForget`. Stores untouched.
+    Forgotten { entries: Vec<crate::orbits::Entry> },
+    /// Registry rows dropped by `HostOrbitPrune` because their store is gone.
+    Pruned { entries: Vec<crate::orbits::Entry> },
+    /// The generation a rebuild selected, and what it covered.
+    Rebuilt {
+        generation: String,
+        effects: u64,
+        bodies: u64,
+        receipts: u64,
+        /// Hex digest binding the rebuilt representation.
+        evidence: String,
+    },
+    /// An MCP client config was written (or, under `print`, rendered).
+    McpInstalled {
+        /// The config file this landed in — or would have.
+        path: String,
+        /// The file contents under `print`, else the human summary.
+        detail: String,
+        /// The client-specific caveat, when there is one. Carried rather than
+        /// written to stderr: under `print` nobody is reading our stderr, and
+        /// "this entry shadows the bundled plugin" is the whole reason the
+        /// client has to be named.
+        #[serde(default)]
+        note: Option<String>,
+        /// Whether an entry under this name already existed.
+        replaced: bool,
+        /// The agent identity the entry signs its work as, if any.
+        #[serde(default)]
+        agent: Option<String>,
+    },
+    /// The outcome of a self-update.
+    Updated {
+        /// The version this node was running.
+        from: String,
+        /// The version now on disk (equal to `from` when already current).
+        to: String,
+        /// False when the node was already on the latest release.
+        replaced: bool,
+    },
+    /// The daemon accepted the reply's own last instruction and is stopping.
+    Restarting {
+        /// The process that is going away, so an operator can confirm it did.
+        #[serde(default)]
+        pid: Option<u32>,
+    },
+    /// Orientation for the identity this daemon runs as.
+    Context {
+        /// The build answering, in the form releases are identified by
+        /// (`LAIT_VERSION_LONG`). This is the only place a running lait says
+        /// which binary it is, and support for two builds in the field starts
+        /// with being able to ask.
+        version: String,
+        identity_home: String,
+        /// Where a head should offer to put a new store when the person has no
+        /// opinion. A browser has no working directory to default to, so
+        /// without this every founding form starts with an empty path box.
+        spaces_root: String,
+        /// World ids this build hosts.
+        worlds: Vec<String>,
+        /// Named identities registered on this machine.
+        identities: Vec<String>,
+        /// Every durable local Orbit known to this identity.
+        orbits: Vec<crate::orbits::Entry>,
     },
 }
 
@@ -1194,7 +1533,7 @@ pub struct Doorbell {
     /// streamed: like every other plane this is a dirty *flag*, not the events.
     /// The presence plane rings independently of the replica dirty-set, so a
     /// peer coming online wakes a subscriber even when no doc moved.
-    /// `default` so a frame from a pre-plane daemon (stale across `lait update`)
+    /// `default` so a frame from a pre-plane daemon (stale across an update)
     /// still decodes because fields are add-only and absence means default.
     #[serde(default)]
     pub presence_advanced: bool,
@@ -1416,7 +1755,7 @@ pub struct StatusInfo {
     pub membership: String,
     /// Recovery shares this device holds that exist but cannot be used.
     ///
-    /// Structured, not preformatted: the CLI and web layers render it
+    /// Structured, not preformatted: each head renders it
     /// differently, and a rendered string would force one of them to parse
     /// prose. Persistent rather than recovery-only — an operator must be able to
     /// learn their founder share is unusable *before* the day they need it,
@@ -1491,6 +1830,39 @@ impl std::fmt::Display for ForeignDaemon {
 }
 
 impl std::error::Error for ForeignDaemon {}
+
+/// A request that provably never reached the daemon.
+///
+/// **The failure this prevents: applying a write twice.** A caller that stands a
+/// daemon up from a send failure has to decide whether to send again, and the
+/// only safe basis for that is *where* the failure happened, not whether a
+/// daemon happened to be listening a moment later. A connect that never opened
+/// carried no bytes, so re-sending applies the request once. A failure after the
+/// request line went in — the daemon applied the effect and then exited, taking
+/// the reply with it — is indistinguishable from a lost reply, and re-sending
+/// there applies it twice.
+///
+/// Only [`connect_bounded`] mints this, which is exactly the set of failures
+/// that happen before anything is written.
+#[derive(Debug)]
+pub struct Undelivered(String);
+
+impl std::fmt::Display for Undelivered {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Undelivered {}
+
+/// Whether `error` reports a request that never left this process.
+///
+/// Reads the type rather than the prose, and through `.context()`, for the same
+/// reason exit codes do: callers wrap freely and a wrapped undelivered is still
+/// undelivered.
+pub fn undelivered(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<Undelivered>().is_some()
+}
 
 /// Probe a home's control channel without spawning anything.
 ///
@@ -1597,10 +1969,7 @@ async fn probe_inner(home: &Path) -> Probe {
 /// Clients use the exact negotiated value to ensure the peer speaks the current
 /// generic World envelope.
 pub async fn peer_protocol_version(home: &Path) -> Result<u32> {
-    let name = control_name(home)?;
-    let stream = Stream::connect(name)
-        .await
-        .context("connect to daemon for protocol handshake")?;
+    let stream = connect_bounded(home).await?;
     let line = exchange_raw(
         stream,
         &ClientRequest::plain(Request::Hello {
@@ -1646,15 +2015,60 @@ pub async fn request_as_routed(
     route: Option<ControlRoute>,
     act_as: Option<&str>,
 ) -> Result<Response> {
+    send(
+        home,
+        &ClientRequest {
+            route,
+            if_running: false,
+            act_as: act_as.map(str::to_string),
+            request: req.clone(),
+        },
+    )
+    .await
+}
+
+/// Send an envelope the caller already owns.
+///
+/// Split out because a caller that may have to send the same request twice — a
+/// head that discovers, from the failure, that no daemon was listening — would
+/// otherwise have to clone the whole `Request` to keep a copy. Building the
+/// envelope once and lending it is what keeps the retry off the happy path's
+/// bill.
+pub async fn send(home: &Path, env: &ClientRequest) -> Result<Response> {
+    let stream = connect_bounded(home).await?;
+    exchange(stream, env).await
+}
+
+/// Open the control channel, or give up saying so.
+///
+/// **The failure this prevents:** connecting to a Windows named pipe with no
+/// free instance *parks* rather than erroring — the same fact
+/// [`probe`] is wrapped in a timeout for. Since the send is now the probe
+/// (nothing runs before it on the daemon path), an unbounded connect is a head
+/// that hangs forever instead of a request that fails in five seconds, and it
+/// hangs the axum handler or MCP tool call with it.
+///
+/// The *reply* is deliberately left unbounded. A host request legitimately
+/// holds the socket open for as long as its work takes — entering a Space waits
+/// out `ADMISSION_DEADLINE`, a self-update downloads a release — and a ceiling
+/// low enough to catch a wedged daemon would abort those instead. Diagnosing a
+/// daemon that answers the door and then says nothing stays [`probe`]'s job,
+/// which the error path already runs.
+///
+/// Every failure here is an [`Undelivered`], because nothing has been written
+/// yet — that type is what licenses a caller's re-send.
+async fn connect_bounded(home: &Path) -> Result<Stream> {
     let name = control_name(home)?;
-    let stream = Stream::connect(name).await.context("connect to daemon")?;
-    let env = ClientRequest {
-        route,
-        if_running: false,
-        act_as: act_as.map(str::to_string),
-        request: req.clone(),
-    };
-    exchange(stream, &env).await
+    match tokio::time::timeout(PROBE_TIMEOUT, Stream::connect(name)).await {
+        Ok(Ok(stream)) => Ok(stream),
+        Ok(Err(error)) => Err(Undelivered(format!("connect to daemon: {error}")).into()),
+        Err(_) => Err(Undelivered(format!(
+            "the Lait daemon is not answering (no connection within {}s) — it may be \
+             wedged or shutting down",
+            PROBE_TIMEOUT.as_secs()
+        ))
+        .into()),
+    }
 }
 
 /// Send a routed request that must not activate a vacant Orbit.
@@ -1663,8 +2077,7 @@ pub async fn request_routed_if_running(
     req: &Request,
     route: ControlRoute,
 ) -> Result<Response> {
-    let name = control_name(home)?;
-    let stream = Stream::connect(name).await.context("connect to daemon")?;
+    let stream = connect_bounded(home).await?;
     exchange(
         stream,
         &ClientRequest::routed_if_running(req.clone(), route),
@@ -1679,15 +2092,21 @@ pub async fn call_world(
     call: Call,
     act_as: Option<&str>,
 ) -> Result<Reply> {
-    let name = control_name(home)?;
-    let stream = Stream::connect(name)
-        .await
-        .context("connect to Lait daemon")?;
-    let line = exchange_raw(
-        stream,
+    call_world_envelope(
+        home,
         &WorldClientRequest::new(route, call, act_as.map(str::to_string)),
     )
-    .await?;
+    .await
+}
+
+/// Send a World envelope the caller already owns.
+///
+/// The World-call path is the latency-critical one, so it must never copy a
+/// call payload just to hold a spare for a retry it will almost certainly not
+/// need. See [`send`] for the same reasoning on the control path.
+pub async fn call_world_envelope(home: &Path, env: &WorldClientRequest) -> Result<Reply> {
+    let stream = connect_bounded(home).await?;
+    let line = exchange_raw(stream, env).await?;
     serde_json::from_str(line.trim()).context("decode World reply")
 }
 
@@ -1737,10 +2156,7 @@ pub async fn content_call(
     home: &Path,
     request: &ContentClientRequest,
 ) -> Result<(ContentReply, Vec<u8>)> {
-    let name = control_name(home)?;
-    let stream = Stream::connect(name)
-        .await
-        .context("connect to Lait daemon")?;
+    let stream = connect_bounded(home).await?;
     let (read_half, mut write_half) = tokio::io::split(stream);
     write_header(&mut write_half, request).await?;
     let mut reader = BufReader::new(read_half);
@@ -1783,10 +2199,7 @@ impl ContentUpload {
         act_as: Option<&str>,
         declared_len: u64,
     ) -> Result<Self> {
-        let name = control_name(home)?;
-        let stream = Stream::connect(name)
-            .await
-            .context("connect to Lait daemon")?;
+        let stream = connect_bounded(home).await?;
         let (read_half, mut write_half) = tokio::io::split(stream);
         write_header(
             &mut write_half,
@@ -2072,8 +2485,7 @@ pub async fn subscribe_routed(
     since: u64,
     route: Option<ControlRoute>,
 ) -> Result<Subscription> {
-    let name = control_name(home)?;
-    let mut stream = Stream::connect(name).await.context("connect to daemon")?;
+    let mut stream = connect_bounded(home).await?;
     let envelope = ClientRequest {
         route,
         if_running: false,
@@ -2098,8 +2510,7 @@ pub async fn subscribe_live_routed(
     route: ControlRoute,
     issue: Option<String>,
 ) -> Result<LiveSubscription> {
-    let name = control_name(home)?;
-    let mut stream = Stream::connect(name).await.context("connect to daemon")?;
+    let mut stream = connect_bounded(home).await?;
     let envelope = ClientRequest {
         route: Some(route),
         if_running: false,
@@ -2221,14 +2632,14 @@ mod tests {
         // A daemon newer than we understand: we must upgrade, so say so.
         let newer = check_control_protocol(CONTROL_PROTOCOL_VERSION + 1).unwrap_err();
         assert!(
-            newer.to_string().contains("lait update"),
+            newer.to_string().contains("upgrade lait"),
             "an out-of-window daemon must name the way out; got: {newer}",
         );
 
         // A daemon older than the window: it must be restarted onto this build.
         let older = check_control_protocol(MIN_SUPPORTED_CONTROL_PROTOCOL - 1).unwrap_err();
         assert!(
-            older.to_string().contains("lait shutdown"),
+            older.to_string().contains("stop that daemon"),
             "an out-of-window daemon must name the way out; got: {older}",
         );
     }

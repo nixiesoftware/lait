@@ -26,7 +26,7 @@ pub struct SpaceRow {
     pub path: String,
     pub origin: String,
     pub last_opened: u64,
-    /// `up` | `idle` | `missing`, exactly as `lait orbits` reports it.
+    /// `up` | `idle` | `missing`, as the registry knows it.
     pub status: &'static str,
     pub identity: StationIdentity,
     pub projects: Vec<orbits::ProjectBrief>,

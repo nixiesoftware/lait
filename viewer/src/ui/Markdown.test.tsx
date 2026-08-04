@@ -66,13 +66,13 @@ describe("Markdown", () => {
   });
 
   it("renders a fenced block as a figure, with its language and a copy button", () => {
-    const el = draw(<Markdown text={"```sh\nlait serve --json\n```"} />);
+    const el = draw(<Markdown text={"```sh\nlait --json\n```"} />);
     // `.prose-figure` is what the spacing rule selects. The block is a wrapper
     // now, not a bare <pre>, so `.prose > pre` walks straight past it and the
     // block silently takes the ordinary paragraph gap instead of a figure's.
     const figure = el.querySelector(".prose-figure");
     expect(figure).toBeTruthy();
-    expect(figure!.querySelector("pre")?.textContent).toBe("lait serve --json");
+    expect(figure!.querySelector("pre")?.textContent).toBe("lait --json");
     expect(figure!.textContent).toContain("sh");
     expect(el.querySelector('button[aria-label="Copy code"]')).toBeTruthy();
   });

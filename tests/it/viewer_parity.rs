@@ -1,13 +1,13 @@
 //! Viewer / installed-interface parity guard.
 //!
-//! `lait serve` accepts both the Issues-owned application protocol and root
-//! Space/daemon control. `viewer/src/types.ts` is a hand-written TypeScript
+//! The local app's head accepts both the Issues-owned application protocol and
+//! root Space/daemon control. `viewer/src/types.ts` is a hand-written TypeScript
 //! union of those installed interfaces, so this test checks it against both
 //! canonical Rust schemas.
 //!
 //! What makes that a correctness problem rather than a tidiness one: nothing in
 //! `src/` uses `deny_unknown_fields`, and it should not: add-only fields are what
-//! lets a newer client talk to a daemon that is stale across `lait update`. So a
+//! lets a newer client talk to a daemon that is stale across an update. So a
 //! field the TS invents is **silently dropped**, and the daemon does something
 //! plausible with the rest.
 //!
@@ -205,7 +205,7 @@ fn assign_is_add_not_remove() {
     assert!(fields.contains("add"), "assign's flag is `add`: {fields:?}");
     assert!(
         !fields.contains("remove"),
-        "assign has no `remove` — the CLI's `--remove` maps to `add: false` (cmdspec)",
+        "assign has no `remove` — clearing an assignee is `add: false`",
     );
 
     if let Some(src) = types_ts() {

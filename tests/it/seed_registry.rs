@@ -107,7 +107,7 @@ fn space_of(rt: &tokio::runtime::Runtime, home: &Path) -> String {
 fn seed_pin_lists_structured_and_survives_restart() {
     let net = MemNet::new();
     let home = temp_home("pin");
-    lait::orbital::found_space_cli(&home, &FOUNDER_SEED, "Seed Space").unwrap();
+    lait::orbital::found_space(&home, &FOUNDER_SEED, "Seed Space").unwrap();
     let handle = spawn_daemon(home.clone(), FOUNDER_SEED, net.clone());
 
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -192,7 +192,7 @@ fn seed_pin_lists_structured_and_survives_restart() {
 fn seed_add_and_remove_by_device_id() {
     let net = MemNet::new();
     let home = temp_home("byid");
-    lait::orbital::found_space_cli(&home, &FOUNDER_SEED, "Seed Space").unwrap();
+    lait::orbital::found_space(&home, &FOUNDER_SEED, "Seed Space").unwrap();
     let handle = spawn_daemon(home.clone(), FOUNDER_SEED, net.clone());
 
     let rt = tokio::runtime::Runtime::new().unwrap();

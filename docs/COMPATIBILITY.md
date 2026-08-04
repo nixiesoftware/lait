@@ -61,9 +61,11 @@ materializations. Its source generation and equivalence evidence are part of
 the canonical pointer body, and activation is serialized and compare-and-swap
 checked. This is the compatibility boundary for a representation rewrite: old
 bytes remain inactive rather than being destructively rewritten or taught to
-every future reader. `lait rebuild` is the application composition of the
-currently supported prior-to-current recipe and requires the Orbit to be
-vacant.
+every future reader. `HostOrbitRebuild` (`{"cmd":"host_orbit_rebuild"}` on the
+host plane) is the application composition of the currently supported
+prior-to-current recipe. The daemon releases its own placement for that Orbit
+first — the rebuild requires the Orbit to be vacant, and running it from a
+separate client was a store-lock race against whatever the daemon had open.
 
 The descriptor is the only row whose version is chosen by the record's content
 rather than by the build that wrote it. A descriptor emits 1 when it declares no

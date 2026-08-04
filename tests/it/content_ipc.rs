@@ -82,7 +82,7 @@ fn node(tag: &str) -> Node {
     let net = MemNet::new();
     let home = temp_home(tag);
     lait::orbital::form_space(&home, &FOUNDER_SEED, "Content Space").unwrap();
-    let space = lait::orbital::discover_space_id(&home).unwrap();
+    let space = lait::orbital::discover_space(&home).single().unwrap();
     let route = ControlRoute::Orbit {
         address: OrbitAddress::for_store(&home, space),
     };

@@ -38,14 +38,15 @@ daemon::Daemon
                                 └─ WorldHost
                                      └─ docked Sessions
 
-lait serve
-  └─ HTTP/SSE adapter -> daemon::Daemon
+lait (the local app)
+  └─ HTTP/SSE head -> daemon::Daemon
+       └─ WorldClientRegistry
+            ├─ host and Mechanics surfaces
+            └─ installed World client packages
 
-cwd CLI / pinned MCP
+lait mcp (pinned agent head)
   └─ WorldClientRegistry
-       ├─ shell/Mechanics surfaces
-       └─ installed World client packages
-            └─ explicit Orbit/World route -> daemon::Daemon
+       └─ explicit Orbit/World route -> daemon::Daemon
 ```
 
 An Orbit is one durable local participation in a Space. It persists whether it
@@ -58,45 +59,51 @@ an ontological state conversion. A StationHost is the sole product-side
 entrance to the Station occupying one Orbit. There is never a second live
 Station, Replica, or product store for the same local Orbit.
 
-CLI, web, and MCP clients use one local control protocol. They do not open the
-store or CRDT engine. An explicit control route addresses the process-level
-daemon, a local Orbit plus its expected Space, or a World reached through that
-Orbit. The CLI's cwd selects its default Orbit; MCP is pinned to its launch
-Orbit; neither inherits catalog-wide visibility.
+Web and MCP clients use one local control protocol. They do not open the store
+or CRDT engine. An explicit control route addresses the process-level daemon, a
+local Orbit plus its expected Space, or a World reached through that Orbit. The
+web head is a picker over the whole registered catalog under one identity; MCP
+is pinned to its launch Orbit and inherits no catalog-wide visibility.
 
-The `lait` CLI is the navigation shell for this graph, not the command-line
-identity of the bundled Issues World. Bare `lait` reports the selected identity,
-Orbit, Space, and installed Worlds. `--orbit` selects one durable local
-participation; `lait orbits` lists those local participations, while
-`lait worlds` lists the semantic packages installed in the application
-composition. Product commands live only below their World namespace, such as
-`lait issues ...`.
+**`lait` is a launcher, not a command surface.** It parses a mode, never a
+grammar: `lait daemon` is the identity-scoped host, `lait mcp` is the stdio head
+an agent speaks, `lait --version` answers the one question that must be
+answerable with nothing running, and bare `lait [--json] [--port N]
+[--orbit SEL] [--open]` starts the daemon and serves the HTTP head over it.
+Anything else is refused. `--orbit` selects one durable local participation by
+name, id, or path; without it the head is a picker over every registered Orbit.
+Navigation that used to be typed — listing local participations, listing the
+installed World packages, reading the selected identity and Space — is
+orientation the head answers (`Request::HostContext`) rather than output a shell
+prints. Every operation is a request one of the three modes carries; see
+[`SERVE.md`](./SERVE.md) for the planes.
 
-Command parsing produces a `ClientAction` whose terminal target is already
-`Daemon`, `Space`, or `World { world }`. Orbit resolution later completes that
-target into a wire `ControlRoute`; it does not reclassify product intent. The
-shell commands still carry the historical typed `Request`; installed product
-commands emit their package-owned opaque `WorldCall` directly. The typed
-product variants remain only for viewer, host-capability, and v3 daemon
-compatibility adapters.
+Requests arrive already classified. A head hands the registry a decoded value
+whose terminal target is `Daemon`, `Space`, or `World { world }`; Orbit
+resolution later completes that target into a wire `ControlRoute` without
+reclassifying product intent. Host and Mechanics requests carry the typed
+`Request`; installed product requests carry their package-owned opaque
+`WorldCall` directly.
 
-`WorldClientRegistry` composes one root CLI mount, collision-safe MCP prefix,
-explicit web adapter, opaque reply decoder, and local-operation executor per
-installed World. A parsed `ClientInvocation` carries package-owned access and
-confirmation metadata for the complete operation, including caller-local
-effects. The shell enforces that metadata and supplies an object-safe
-`ClientHost` for World calls and generic Space-authority facilities; it never
-matches a product host enum. The Issues package therefore owns
-`lait issues ...`, the `issues_*` MCP tools, and their response codec. Adding a
-Files World means registering another package with (for example) a `files`
-mount and `files_*` tools; it does not add another branch to the root CLI or MCP
-router. Duplicate Worlds, duplicate mounts, package-local tool names, and
-collisions with shell names fail during composition.
+`WorldClientRegistry` composes one mount name, a collision-safe MCP prefix, a
+web parser, an opaque reply decoder, and a local-operation executor per
+installed World. The mount is a bare namespace key — it prefixes the package's
+public MCP tool names and names its HTTP route segment. A parsed
+`ClientInvocation` carries package-owned access and confirmation metadata for
+the complete operation, including caller-local effects. The shell enforces that
+metadata and supplies an object-safe `ClientHost` for World calls and generic
+Space-authority facilities; it never matches a product host enum. The Issues
+package therefore owns the `issues` mount — `POST /api/spaces/{id}/worlds/issues/rpc`
+and the `issues_*` MCP tools — and their response codec. Adding a Files World
+means registering another package with (for example) a `files` mount and
+`files_*` tools; it does not add another branch to the head or the MCP router.
+Duplicate Worlds, duplicate mounts, package-local tool names, and collisions
+with shell names fail during composition.
 
-Trusted cwd and MCP adapters derive a pinned `ClientScope`; the web adapter
-applies catalog identity policy. Web Space control and product calls use
-disjoint endpoints; a product request names its World/package route before its
-payload is decoded. Each adapter constructs an explicit route and opens the
+The MCP adapter derives a pinned `ClientScope`; the web adapter applies catalog
+identity policy. Web Space control and product calls use disjoint endpoints; a
+product request names its World/package route before its payload is decoded.
+Each adapter constructs an explicit route and opens the
 identity-scoped daemon::Daemon endpoint. The daemon resolves the Orbit, validates
 its repeated Space expectation before activation, places or reuses its Station
 host, and dispatches to one terminal owner: lifecycle, Mechanics, Station,
@@ -115,8 +122,8 @@ without taking ownership, when a compatible historical per-home daemon already
 holds that Orbit. Both placement modes retain the per-home socket for Space
 control and Observation compatibility, but owned World calls dispatch directly
 to the in-process World host. An attached placement forwards the same opaque World
-call through that socket without translating its payload. CLI, MCP, and web
-requests enter through the one daemon::Daemon endpoint.
+call through that socket without translating its payload. Web and MCP requests
+enter through the one daemon::Daemon endpoint.
 
 Catalog listing remains passive. The web adapter asks daemon::Daemon for an
 `if_running` status; daemon::Daemon may inspect an already-live per-Orbit
@@ -193,11 +200,12 @@ runtime    Orbit/Station lifecycle, Contacts, Worlds, Sessions, observations
 runtime::world::call
            versioned opaque application calls and object-safe World handlers
 world-interface
-           composable CLI mounts, MCP descriptors, and namespace validation
+           package mount names, MCP descriptors, web parsers, and namespace
+           validation
 issues     IssuesWorld schemas, semantic model, product DTOs and identifiers
-issues-app Issues application protocol plus CLI and MCP client interfaces
-lait       orbital navigation shell, host-capability adapters, viewer, and
-           application composition
+issues-app Issues application protocol plus its web and MCP client interfaces
+lait       launcher, identity-scoped daemon, HTTP head, MCP head,
+           host-capability adapters, viewer, and application composition
 ```
 
 Dependencies point inward through these boundaries. Product concepts such as
@@ -338,12 +346,12 @@ initial-project policy, and crash-resumable signed `InitializeTracker` record.
 The sibling `products/issues-app` package owns the `issues.control` v1 codec,
 query/command classification, `IssueRouter` execution adapter, product response
 schema, host-capability vocabulary, role-to-authority planning, formation
-policy, status/inbox/doorbell projections, `lait issues` command tree, and all
-38 Issues MCP descriptors. It depends on the semantic package and generic
+policy, status/inbox/doorbell projections, the `issues` mount’s web parser, and
+all 38 Issues MCP descriptors. It depends on the semantic package and generic
 substrate/runtime/client interfaces, never back on `lait`.
 Most client operations become `WorldCall`s at parse time. Inbox watermark I/O,
-access assignment, git work-state behavior, attachment filesystem I/O, and
-implementation activation are explicit named host-capability calls: their
+access assignment, attachment filesystem I/O, and implementation activation are
+explicit named host-capability calls: their
 interface and asynchronous orchestration remain product-owned while the shell
 supplies generic World-call and Space-authority facilities that a semantic
 World must not hold.
@@ -354,11 +362,10 @@ into a package-owned `AccessPlan`; root control can only commit generic
 activation likewise carries an explicit World id. Neither root verb names an
 Issues role, project, or singleton bundled product.
 
-The client package also owns reply decoding and presentation. CLI and MCP pass
-the decoded product value to its presenter; the shell only writes the returned
-stdout/stderr and applies typed failure semantics. Product response variants,
-tables, boards, issue detail, inbox wording, ANSI styling, and JSON shape do not
-appear in root control or its renderer.
+The client package also owns reply decoding. The head and the MCP adapter carry
+the decoded product value out as JSON and apply typed failure semantics; they do
+not inspect it. Product response variants, boards, issue detail, inbox wording,
+and JSON shape do not appear in root control.
 
 A Session binds a local identity to one World at an active Station. Queries and
 mutations are authorized independently. Query results are computed from one
@@ -374,14 +381,13 @@ legitimate protected material opaquely.
 IssuesWorld (`com.lait.issues`) is the bundled reference World. It has no private
 architectural path unavailable to another conforming World.
 
-Root control contains no issue command or response variants. The viewer, CLI,
-and MCP construct the Issues-owned application protocol and carry it in an
-opaque `WorldCall`; attached StationHosts receive that same envelope. The web
+Root control contains no issue command or response variants. The viewer and MCP
+construct the Issues-owned application protocol and carry it in an opaque
+`WorldCall`; attached StationHosts receive that same envelope. The web
 viewer addresses `/worlds/issues/rpc`, so malformed product input cannot fall
 through into root control decoding. Local host capabilities are decoded and
-executed by the product package and may compose a World call with a
-working-tree, filesystem, caller-local state, or generic Space-authority
-facility. For example, inbox reads pass the caller-local watermark into an
+executed by the product package and may compose a World call with a filesystem,
+caller-local state, or generic Space-authority facility. For example, inbox reads pass the caller-local watermark into an
 Issues query and advance it only after a successful reply; the complete
 operation is therefore a command when `clear` is true. Protocol v6 makes the
 daemon boundary explicit on the wire.
@@ -456,6 +462,18 @@ is therefore a trust decision.
 Body encryption, custody secrets, and device private keys are local secret
 material. Lazy revocation cannot erase plaintext or keys already copied by a
 removed device. Detailed claims and non-goals live in `THREAT-MODEL.md`.
+
+The HTTP head adds one boundary that is not an authority question at all.
+A Station whose catalog binding carries its own identity directory signs with
+*that* seed — an agent's Orbit is the case that exists today — so a write routed
+into it through a head serving somebody else's token would go out over the
+agent's signature. Mechanics would authorize it, correctly: it evaluates the
+*signer's* grants, and a sponsored agent legitimately holds write standing. The
+head therefore refuses that write before it is signed, on custody grounds rather
+than on standing. `Catalog::signs_with_own_seed` is the single spelling of the
+question; `serve::borrowed_key_refusal` and `orbits::bootstrap::admit` are its
+two enforcement points. Reads are never refused — observing a hosted identity's
+board signs nothing. See `SERVE.md`.
 
 ## 9. Evolution rules
 

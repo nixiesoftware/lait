@@ -306,7 +306,9 @@ export function TrustPopover({
                   <Copy className="size-icon-xs" />
                   {diagnosticsCopied ? "Copied" : "Copy diagnosis"}
                 </Button>
-                <span className="text-mute text-xs">Run `lait doctor` before repair.</span>
+                <span className="text-mute text-xs">
+                  Repair from Settings → Devices &amp; recovery.
+                </span>
               </div>
             </section>
           )}

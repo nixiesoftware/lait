@@ -66,7 +66,6 @@ use axum::response::{IntoResponse, Response as HttpResponse};
 use serde::{Deserialize, Serialize};
 
 use crate::control::{Request, Response};
-use crate::orbits::StationIdentity;
 
 use super::{err_json, App, ErrorKind};
 
@@ -799,6 +798,16 @@ async fn declare_watching(app: &App, space: &str, watched: &[Watch]) {
     let Ok(resolved) = app.directory.resolve(space) else {
         return;
     };
+    // The whole declaration is withheld for an identity this daemon merely
+    // hosts, rather than trimmed down to presence: everything in it — the room,
+    // the carets, the typing flag, the uncommitted text — is published to the
+    // Space *as* that identity by the Station that signs for it, so even bare
+    // presence would be a claim that somebody else is here. Reading their board
+    // stays open (that is why it is browsable); saying things on their behalf
+    // does not. Same rule as `drain_signals` below, for the same reason.
+    if !app.directory.signs_with_own_seed(&resolved) {
+        return;
+    }
     let issues: Vec<String> = watched
         .iter()
         .filter(|question| question.space == space)
@@ -862,7 +871,10 @@ async fn drain_signals(app: &App, space: &str) {
     let Ok(resolved) = app.directory.resolve(space) else {
         return;
     };
-    if matches!(resolved.identity, StationIdentity::Agent { .. }) {
+    // Draining empties a queue addressed to whoever signs for this Station. When
+    // that is an identity this daemon merely hosts, the signals are not this
+    // session's to consume — reading them here is reading somebody else's post.
+    if !app.directory.signs_with_own_seed(&resolved) {
         return;
     }
     let route = crate::control::station_route(resolved.address);

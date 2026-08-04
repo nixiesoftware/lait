@@ -12,7 +12,7 @@
 //!   Until that trait moves, no out-of-tree World can supply its own, so the
 //!   binding has to be written by whoever owns both halves — which is this file.
 //! * the **package set** handed to the daemon and StationHost.
-//! * the **client registry** mounted by the CLI, MCP, and web surfaces.
+//! * the **client registry** mounted by every head.
 //!
 //! `tests/it/product_independence.rs` allowlists this file and nothing else in
 //! `src/**`. That is the invariant worth keeping: the count of files naming a

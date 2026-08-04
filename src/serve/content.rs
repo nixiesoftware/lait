@@ -15,7 +15,7 @@
 //!
 //! **The bytes never accumulate here.** A download is `read_range` called in a
 //! loop and written out as it arrives; an upload is forwarded to the daemon in
-//! pieces. `lait serve` is a translator, not a buffer, and an attachment that
+//! pieces. This head is a translator, not a buffer, and an attachment that
 //! fits in memory today is not a reason to write code that assumes it always
 //! will.
 //!
@@ -38,7 +38,6 @@ use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 
 use crate::control::{ContentCall, ContentErrorCode, ContentReply};
-use crate::orbits::StationIdentity;
 
 use super::{err_json, App, ErrorKind};
 
@@ -512,22 +511,12 @@ struct ContentStation {
 
 fn station(app: &App, id: &str, write: bool) -> Option<Result<ContentStation, Response>> {
     let resolved = app.directory.resolve(id).ok()?;
-    // An agent's space is readable here and never writable, for the same reason
-    // an ordinary write is refused: an upload through this surface would be
-    // sealed and signed as the agent, by a person who is not the agent.
+    // A hosted identity's space is readable here and never writable, for the
+    // same reason an ordinary write is refused: an upload through this surface
+    // would be sealed and signed as that identity, by a person who is not it.
     if write {
-        if let StationIdentity::Agent { name } = &resolved.identity {
-            return Some(Err((
-                StatusCode::FORBIDDEN,
-                err_json(
-                    &format!(
-                        "{name}'s space is read-only here — an upload would be signed as {name}. \
-                         Open the same space through your own node to write as yourself."
-                    ),
-                    ErrorKind::Error,
-                ),
-            )
-                .into_response()));
+        if let Some(refusal) = super::borrowed_key_refusal(&app.directory, &resolved, "an upload") {
+            return Some(Err(refusal));
         }
     }
     Some(Ok(ContentStation {
@@ -742,7 +731,7 @@ mod end_to_end {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         crate::orbital::form_space(&dir, &FOUNDER_SEED, "Serve Content").unwrap();
-        let space = crate::orbital::discover_space_id(&dir).unwrap();
+        let space = crate::orbital::discover_space(&dir).single().unwrap();
 
         let net = comms::mem::MemNet::new();
         let station_home = dir.clone();
@@ -778,6 +767,7 @@ mod end_to_end {
             projects: Vec::new(),
         };
         let app = Arc::new(App {
+            selection: crate::config::Selection::default(),
             guard: Guard::new(TOKEN.into(), 7717),
             directory: Catalog::with_entries(dir.clone(), dir.clone(), true, vec![entry]),
             daemon: Client::at(dir.clone()),

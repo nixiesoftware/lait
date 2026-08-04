@@ -67,7 +67,9 @@ fn issue_req(
     request: issues_app::IssuesRequest,
 ) -> IssueResponse {
     rt.block_on(async {
-        let space = lait::orbital::discover_space_id(home).expect("test Space");
+        let space = lait::orbital::discover_space(home)
+            .single()
+            .expect("test Space");
         let call = issues_app::encode_call(&request)?;
         let reply = lait::control::call_world(
             home,
@@ -159,7 +161,7 @@ fn restarted_joiner_daemon_reconverges_from_its_persisted_store() {
 
     // Founder: form, seed a project + first issue, mint an auto-approving invite.
     let founder_home = temp_home("founder");
-    lait::orbital::found_space_cli(&founder_home, &FOUNDER_SEED, "Restart Space").unwrap();
+    lait::orbital::found_space(&founder_home, &FOUNDER_SEED, "Restart Space").unwrap();
     let founder_handle = spawn_daemon(founder_home.clone(), FOUNDER_SEED, net.clone());
 
     let rt = tokio::runtime::Runtime::new().unwrap();

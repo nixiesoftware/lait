@@ -1,37 +1,35 @@
 #![allow(
     clippy::as_conversions,
     clippy::indexing_slicing,
-    clippy::string_slice,
-    reason = "host projections validate product identifiers and ASCII routes before fixed-layout access"
+    reason = "attachment sizes report a bounded length as u64; projection reads index serde_json::Value, whose Index impl yields Null rather than panicking"
 )]
 //! Typed host capabilities requested by Issues client interfaces.
 //!
-//! These operations need facilities outside a World Session (the working tree,
-//! local files, read watermarks, or Space authority). The product owns their
-//! vocabulary and validation; the navigation shell only supplies the facility.
+//! These operations need facilities outside a World Session — local files, read
+//! watermarks, Space authority, the reviewed-implementation switch. The product
+//! owns their vocabulary and validation; the navigation shell only supplies the
+//! facility.
 
 use std::path::Path;
-use std::process::{Command, Stdio};
 
+use runtime::world::call::Access;
 use serde_json::{json, Value};
 use world_interface::{
-    ClientAccess, ClientHost, ClientInvocation, ClientInvocationKind, ClientOutput, Failure,
-    HostAssignment, HostControlRequest, LocalInvocation, Presentation, PresentationFailure,
-    PresentationOptions,
+    ClientAccess, ClientHost, ClientInvocation, ClientInvocationKind, Failure, HostAssignment,
+    HostControlRequest, LocalInvocation,
 };
 
-use crate::cli::{
-    LOCAL_ACCESS, LOCAL_ATTACH, LOCAL_ATTACHMENT_GET, LOCAL_FOCUS, LOCAL_INBOX, LOCAL_NEW_START,
-    LOCAL_WORK_STATE, LOCAL_WORLD_UPGRADE,
-};
 use crate::IssuesRequest;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WorkStateAction {
-    Start,
-    Done,
-    Stop,
-}
+// The operation-name vocabulary of the local-invocation plane. It lives beside
+// [`decode`], the only code that interprets it: the names and the match that
+// reads them are one thing, and their previous home in a CLI parser was an
+// accident of which head happened to be written first.
+pub const LOCAL_INBOX: &str = "issues.inbox";
+pub const LOCAL_ATTACH: &str = "issues.attach";
+pub const LOCAL_ATTACHMENT_GET: &str = "issues.attachment_get";
+pub const LOCAL_ACCESS: &str = "issues.access";
+pub const LOCAL_WORLD_UPGRADE: &str = "issues.world_upgrade";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AccessRequest {
@@ -50,13 +48,6 @@ pub enum AccessRequest {
 
 #[derive(Debug, Clone)]
 pub enum IssuesHostRequest {
-    Focus,
-    NewStart(IssuesRequest),
-    WorkState {
-        action: WorkStateAction,
-        reff: String,
-        no_branch: bool,
-    },
     Inbox {
         clear: bool,
     },
@@ -81,12 +72,10 @@ impl IssuesHostRequest {
     /// command access or be mistaken for a read-only World query.
     pub fn access(&self) -> ClientAccess {
         match self {
-            Self::Focus
-            | Self::Inbox { clear: false }
-            | Self::Access(AccessRequest::List { .. }) => ClientAccess::Query,
-            Self::NewStart(_)
-            | Self::WorkState { .. }
-            | Self::Inbox { clear: true }
+            Self::Inbox { clear: false } | Self::Access(AccessRequest::List { .. }) => {
+                ClientAccess::Query
+            }
+            Self::Inbox { clear: true }
             | Self::WorldUpgrade
             | Self::Access(AccessRequest::Grant { .. } | AccessRequest::Revoke { .. })
             | Self::Attach { .. }
@@ -139,30 +128,6 @@ impl std::error::Error for AccessRefusal {}
 /// Decode one package-emitted local invocation at the product/host boundary.
 pub fn decode(operation: &str, input: Value) -> Result<IssuesHostRequest, Failure> {
     match operation {
-        LOCAL_FOCUS => Ok(IssuesHostRequest::Focus),
-        LOCAL_NEW_START => serde_json::from_value(input)
-            .map(IssuesHostRequest::NewStart)
-            .map_err(|error| Failure::new(format!("decode Issues new/start: {error}"))),
-        LOCAL_WORK_STATE => {
-            let action = match required(&input, "action")?.as_str() {
-                "start" => WorkStateAction::Start,
-                "done" => WorkStateAction::Done,
-                "stop" => WorkStateAction::Stop,
-                other => {
-                    return Err(Failure::new(format!(
-                        "unsupported Issues work-state action '{other}'"
-                    )));
-                }
-            };
-            Ok(IssuesHostRequest::WorkState {
-                action,
-                reff: required(&input, "reff")?,
-                no_branch: input
-                    .get("no_branch")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false),
-            })
-        }
         LOCAL_INBOX => Ok(IssuesHostRequest::Inbox {
             clear: input.get("clear").and_then(Value::as_bool).unwrap_or(false),
         }),
@@ -218,12 +183,20 @@ pub fn invocation(operation: &str, input: Value) -> Result<ClientInvocation, Fai
 }
 
 /// Construct one Issues World invocation with package-owned client policy.
+///
+/// The access class is read off the request this call is encoded from — the
+/// same [`IssuesRequest::access`] that `IssuesCallHandler::access` runs on the
+/// daemon's side of the boundary, so the head's copy and the daemon's cannot
+/// describe the same bytes differently. It is here for *head* policy only; the
+/// daemon's own classification is what authorization consults, and it is
+/// derived after the call arrives rather than taken from anything that
+/// travelled with it.
 pub fn world_invocation(request: IssuesRequest) -> Result<ClientInvocation, Failure> {
-    let access = match request.access() {
-        runtime::world::call::Access::Query => ClientAccess::Query,
-        runtime::world::call::Access::Command => ClientAccess::Command,
-    };
     let confirmation = request.destructive_question();
+    let access = match request.access() {
+        Access::Query => ClientAccess::Query,
+        Access::Command => ClientAccess::Command,
+    };
     let call = crate::encode_call(&request).map_err(|error| Failure::new(error.to_string()))?;
     Ok(ClientInvocation::world(call, access, confirmation))
 }
@@ -271,6 +244,12 @@ pub fn parse_web(input: Value) -> Result<ClientInvocation, Failure> {
                 "grant_id": required(&input, "grant_id")?,
             }),
         ),
+        // Admin-only and rare, but it must exist somewhere: a Space whose ledger
+        // pins an older implementation makes every write attest an
+        // implementation this build is not, and `hosting::open` warns about
+        // exactly that at every open. A warning naming a remedy no surface
+        // offers is worse than no warning.
+        "world_upgrade" => invocation(LOCAL_WORLD_UPGRADE, json!({})),
         _ => {
             let request: IssuesRequest = serde_json::from_value(input)
                 .map_err(|error| Failure::new(format!("bad Issues request: {error}")))?;
@@ -283,35 +262,25 @@ pub fn parse_web(input: Value) -> Result<ClientInvocation, Failure> {
 pub fn execute<'a>(
     host: &'a dyn ClientHost,
     local: LocalInvocation,
-    options: PresentationOptions,
-) -> world_interface::ClientFuture<'a, ClientOutput> {
+) -> world_interface::ClientFuture<'a, Value> {
     Box::pin(async move {
         let request = decode(&local.operation, local.input)?;
         match request {
-            IssuesHostRequest::Focus => run_focus(host, options).await,
-            IssuesHostRequest::NewStart(request) => run_new_start(host, request, options).await,
-            IssuesHostRequest::WorkState {
-                action,
-                reff,
-                no_branch,
-            } => run_work_state(host, action, reff, no_branch, options).await,
-            IssuesHostRequest::Inbox { clear } => run_inbox(host, clear, options).await,
+            IssuesHostRequest::Inbox { clear } => run_inbox(host, clear).await,
             IssuesHostRequest::WorldUpgrade => {
-                let value = host
-                    .call_control(HostControlRequest::WorldActivate {
-                        world: issues::contract::world_id(),
-                    })
-                    .await?;
-                Ok(control_output(value, options))
+                host.call_control(HostControlRequest::WorldActivate {
+                    world: issues::contract::world_id(),
+                })
+                .await
             }
-            IssuesHostRequest::Access(access) => run_access(host, access, options).await,
+            IssuesHostRequest::Access(access) => run_access(host, access).await,
             IssuesHostRequest::Attach {
                 reff,
                 file,
                 comment,
-            } => run_attach(host, reff, file, comment, options).await,
+            } => run_attach(host, reff, file, comment).await,
             IssuesHostRequest::AttachmentGet { reff, id, out } => {
-                run_attachment_get(host, reff, id, out, options).await
+                run_attachment_get(host, reff, id, out).await
             }
         }
     })
@@ -320,10 +289,10 @@ pub fn execute<'a>(
 /// Name what a destructive Issues command would destroy.
 ///
 /// `destructive_question` is built at parse time and can only echo the selector
-/// the user typed — and for `lait issues delete` that selector is usually a ref
-/// inferred from the git branch, which makes "delete T-1?" a question nobody can
-/// answer. Reading the title first is the difference between a prompt and a
-/// coin flip, so it happens before anyone is asked.
+/// the caller sent, which makes "delete T-1?" a question nobody can answer —
+/// nothing about a ref says which issue it is. Reading the title first is the
+/// difference between a prompt and a coin flip, so it happens before anyone is
+/// asked.
 ///
 /// Best-effort by construction: a failed read returns the declared question
 /// rather than blocking the confirmation on a lookup that only adds detail.
@@ -361,18 +330,11 @@ async fn call_issues(
         .map_err(|error| Failure::new(format!("decode Issues response: {error}")))
 }
 
-fn issues_output(response: &crate::IssuesResponse, options: PresentationOptions) -> ClientOutput {
-    ClientOutput::new(
-        serde_json::to_value(response).unwrap_or(Value::Null),
-        Some(crate::presentation::render(response, options)),
-    )
+fn issues_output(response: &crate::IssuesResponse) -> Value {
+    serde_json::to_value(response).unwrap_or(Value::Null)
 }
 
-async fn run_inbox(
-    host: &dyn ClientHost,
-    clear: bool,
-    options: PresentationOptions,
-) -> Result<ClientOutput, Failure> {
+async fn run_inbox(host: &dyn ClientHost, clear: bool) -> Result<Value, Failure> {
     let response = call_issues(
         host,
         IssuesRequest::Inbox {
@@ -384,164 +346,10 @@ async fn run_inbox(
         write_inbox_watermark(host.local_root(), now_seconds())
             .map_err(|error| Failure::new(format!("advance Issues inbox watermark: {error}")))?;
     }
-    Ok(issues_output(&response, options))
+    Ok(issues_output(&response))
 }
 
-async fn run_focus(
-    host: &dyn ClientHost,
-    options: PresentationOptions,
-) -> Result<ClientOutput, Failure> {
-    let inbox = call_issues(
-        host,
-        IssuesRequest::Inbox {
-            watermark: read_inbox_watermark(host.local_root()),
-        },
-    )
-    .await?;
-    if matches!(&inbox, crate::IssuesResponse::Error { .. }) {
-        return Ok(issues_output(&inbox, options));
-    }
-    let mine = call_issues(
-        host,
-        IssuesRequest::List {
-            project: None,
-            filter: crate::Filter {
-                mine: true,
-                status: None,
-                label: None,
-                milestone: None,
-                all: false,
-            },
-        },
-    )
-    .await?;
-    if matches!(&mine, crate::IssuesResponse::Error { .. }) {
-        return Ok(issues_output(&mine, options));
-    }
-
-    let value = json!({ "kind": "focus", "inbox": inbox, "mine": mine });
-    let stdout = if options.json {
-        format!(
-            "{}\n{}\n",
-            serde_json::to_string(&inbox).unwrap_or_else(|_| "{}".into()),
-            serde_json::to_string(&mine).unwrap_or_else(|_| "{}".into())
-        )
-    } else {
-        let mut text = String::new();
-        if let crate::IssuesResponse::Inbox {
-            entries, unread, ..
-        } = &inbox
-        {
-            if *unread > 0 {
-                let heads: Vec<_> = entries
-                    .iter()
-                    .take(3)
-                    .map(|entry| format!("{} {}", inbox_line_verb(entry), entry.reff))
-                    .collect();
-                text.push_str(&format!("Inbox ({unread}): {}\n", heads.join(" · ")));
-            }
-        }
-        match &mine {
-            crate::IssuesResponse::List { rows } if rows.is_empty() => text.push_str(
-                "nothing assigned to you — grab something: `lait issues ls`, or file one: \
-                 `lait issues new \"...\"`\n",
-            ),
-            crate::IssuesResponse::List { rows } => {
-                for row in rows {
-                    text.push_str(&format!(
-                        "  {}  {:<10}  {}\n",
-                        row.reff, row.status, row.title
-                    ));
-                }
-            }
-            _ => {}
-        }
-        text
-    };
-    Ok(ClientOutput::new(
-        value,
-        Some(Presentation {
-            stdout,
-            stderr: String::new(),
-            exit_code: 0,
-            failure: None,
-            failure_message: None,
-        }),
-    ))
-}
-
-async fn run_new_start(
-    host: &dyn ClientHost,
-    request: IssuesRequest,
-    options: PresentationOptions,
-) -> Result<ClientOutput, Failure> {
-    let response = call_issues(host, request).await?;
-    match response {
-        crate::IssuesResponse::Ref { reff } => {
-            let prefix = reff.clone();
-            let mut output =
-                run_work_state(host, WorkStateAction::Start, reff, false, options).await?;
-            if !options.json {
-                if let Some(presentation) = output.presentation.as_mut() {
-                    presentation.stdout.insert_str(0, &format!("{prefix}\n"));
-                }
-            }
-            Ok(output)
-        }
-        other => Ok(issues_output(&other, options)),
-    }
-}
-
-async fn run_work_state(
-    host: &dyn ClientHost,
-    action: WorkStateAction,
-    reff: String,
-    no_branch: bool,
-    options: PresentationOptions,
-) -> Result<ClientOutput, Failure> {
-    let request = match action {
-        WorkStateAction::Start => IssuesRequest::IssueStart { reff },
-        WorkStateAction::Done => IssuesRequest::IssueDone { reff },
-        WorkStateAction::Stop => IssuesRequest::IssueStop { reff },
-    };
-    let starting = matches!(action, WorkStateAction::Start);
-    let response = call_issues(host, request).await?;
-    let crate::IssuesResponse::Issue(issue) = &response else {
-        return Ok(issues_output(&response, options));
-    };
-    if options.json {
-        return Ok(issues_output(&response, options));
-    }
-
-    let mut stdout = format!("{}\n", workstate_line(issue));
-    let mut stderr = String::new();
-    if starting {
-        stdout = format!("{}  · you\n", workstate_line(issue));
-        if !no_branch {
-            match checkout_issue_branch(issue) {
-                Some(Ok(message)) => stdout.push_str(&format!("{message}\n")),
-                Some(Err(message)) => stderr.push_str(&format!("({message})\n")),
-                None => {}
-            }
-        }
-    }
-    Ok(ClientOutput::new(
-        serde_json::to_value(&response).unwrap_or(Value::Null),
-        Some(Presentation {
-            stdout,
-            stderr,
-            exit_code: 0,
-            failure: None,
-            failure_message: None,
-        }),
-    ))
-}
-
-async fn run_access(
-    host: &dyn ClientHost,
-    access: AccessRequest,
-    options: PresentationOptions,
-) -> Result<ClientOutput, Failure> {
+async fn run_access(host: &dyn ClientHost, access: AccessRequest) -> Result<Value, Failure> {
     let control = match access {
         AccessRequest::List { actor } => HostControlRequest::AssignmentList { actor },
         AccessRequest::Revoke { grant_id } => HostControlRequest::AssignmentRevoke { grant_id },
@@ -552,7 +360,7 @@ async fn run_access(
         } => {
             let response = call_issues(host, IssuesRequest::AccessPlan { role, project }).await?;
             let crate::IssuesResponse::AccessPlan { assignments } = response else {
-                return Ok(issues_output(&response, options));
+                return Ok(issues_output(&response));
             };
             HostControlRequest::AssignmentGrant {
                 actor,
@@ -567,8 +375,7 @@ async fn run_access(
             }
         }
     };
-    let value = host.call_control(control).await?;
-    Ok(control_output(value, options))
+    host.call_control(control).await
 }
 
 async fn run_attach(
@@ -576,16 +383,15 @@ async fn run_attach(
     reff: String,
     path: String,
     comment: Option<String>,
-    options: PresentationOptions,
-) -> Result<ClientOutput, Failure> {
+) -> Result<Value, Failure> {
     // Two steps, and the order is the contract: the content is committed
     // first, then the issue names it. The substrate refuses a declaration whose
     // descriptor is not committed, so doing it the other way round does not
     // race — it simply fails.
     //
     // The file is never read into this process. `call_content` streams it, so
-    // `lait issues attach` on a gigabyte costs a gigabyte of disk and a
-    // quarter-megabyte of memory.
+    // attaching a gigabyte costs a gigabyte of disk and a quarter-megabyte of
+    // memory.
     let name = Path::new(&path)
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
@@ -616,7 +422,7 @@ async fn run_attach(
         },
     )
     .await?;
-    Ok(issues_output(&response, options))
+    Ok(issues_output(&response))
 }
 
 /// Where `attachment get` writes, given what the caller asked for and what the
@@ -628,8 +434,8 @@ async fn run_attach(
 /// write triggered by a local user running an ordinary read command, and the
 /// CLI's own output invites exactly that command.
 ///
-/// `--out` passes through untouched. That one the caller typed, and a caller
-/// naming a directory of their own is the feature.
+/// An explicit `out` passes through untouched. That one the caller typed, and a
+/// caller naming a directory of their own is the feature.
 fn destination_for(out: Option<String>, stored_name: &str) -> String {
     out.unwrap_or_else(|| world_interface::destination::sanitize_display_name(stored_name))
 }
@@ -639,8 +445,7 @@ async fn run_attachment_get(
     reff: String,
     id: String,
     out: Option<String>,
-    options: PresentationOptions,
-) -> Result<ClientOutput, Failure> {
+) -> Result<Value, Failure> {
     let response = call_issues(host, IssuesRequest::AttachmentGet { reff, id }).await?;
     let crate::IssuesResponse::Attachment {
         name,
@@ -649,7 +454,7 @@ async fn run_attachment_get(
         ..
     } = response
     else {
-        return Ok(issues_output(&response, options));
+        return Ok(issues_output(&response));
     };
     let destination = destination_for(out, &name);
     // Which era this record is from decides how it is saved, and both are
@@ -684,193 +489,12 @@ async fn run_attachment_get(
             ))
         }
     };
-    let message = format!("saved {written} bytes to {destination}");
-    let value = json!({ "kind": "ok", "message": message });
-    let stdout = if options.json {
-        format!(
-            "{}\n",
-            serde_json::to_string(&value).unwrap_or_else(|_| "{}".into())
-        )
-    } else {
-        format!("{message}\n")
-    };
-    Ok(ClientOutput::new(
-        value,
-        Some(Presentation {
-            stdout,
-            stderr: String::new(),
-            exit_code: 0,
-            failure: None,
-            failure_message: None,
-        }),
-    ))
-}
-
-fn control_output(value: Value, options: PresentationOptions) -> ClientOutput {
-    let kind = value.get("kind").and_then(Value::as_str);
-    let error_message = (kind == Some("error"))
-        .then(|| {
-            value
-                .get("message")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-        })
-        .flatten();
-    let (exit_code, failure) = match value.get("error_kind").and_then(Value::as_str) {
-        Some("not_found") => (2, Some(PresentationFailure::InvalidRequest)),
-        Some("denied") => (1, Some(PresentationFailure::InvalidRequest)),
-        Some("error") => (1, Some(PresentationFailure::Internal)),
-        _ => (0, None),
-    };
-    let (stdout, stderr) = if options.json {
-        (
-            format!(
-                "{}\n",
-                serde_json::to_string(&value).unwrap_or_else(|_| "{}".into())
-            ),
-            String::new(),
-        )
-    } else if let Some(message) = &error_message {
-        (String::new(), format!("error: {message}\n"))
-    } else if kind == Some("assignments") {
-        let mut text = String::new();
-        let rows = value
-            .get("rows")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        if rows.is_empty() {
-            text.push_str("(no effective assignments)\n");
-        }
-        for row in rows {
-            let grant = row
-                .get("grant_id")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            let scope = row
-                .get("resource")
-                .and_then(Value::as_array)
-                .map(|segments| {
-                    segments
-                        .iter()
-                        .filter_map(Value::as_str)
-                        .collect::<Vec<_>>()
-                        .join("/")
-                })
-                .filter(|scope| !scope.is_empty())
-                .unwrap_or_else(|| "space".into());
-            text.push_str(&format!(
-                "{}  {:<24} {:<28} {}\n",
-                &grant[..12.min(grant.len())],
-                row.get("capability")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default(),
-                scope,
-                row.get("actor").and_then(Value::as_str).unwrap_or_default()
-            ));
-        }
-        (text, String::new())
-    } else {
-        (
-            format!(
-                "{}\n",
-                value.get("message").and_then(Value::as_str).unwrap_or("ok")
-            ),
-            String::new(),
-        )
-    };
-    ClientOutput::new(
-        value,
-        Some(Presentation {
-            stdout,
-            stderr,
-            exit_code,
-            failure,
-            failure_message: error_message,
-        }),
-    )
-}
-
-fn workstate_line(issue: &issues::dto::IssueView) -> String {
-    let handle = issue.key_alias.as_deref().unwrap_or(&issue.reff);
-    format!("{handle}  {}  {}", issue.title, issue.status)
-}
-
-fn checkout_issue_branch(issue: &issues::dto::IssueView) -> Option<Result<String, String>> {
-    let in_repo = Command::new("git")
-        .args(["rev-parse", "--is-inside-work-tree"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false);
-    if !in_repo {
-        return None;
-    }
-    let name = branch_name_for(issue);
-    let created = Command::new("git")
-        .args(["switch", "-c", &name])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false);
-    let switched = created
-        || Command::new("git")
-            .args(["switch", &name])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map(|status| status.success())
-            .unwrap_or(false);
-    Some(if switched {
-        Ok(format!(
-            "{} branch '{name}'",
-            if created {
-                "switched to new"
-            } else {
-                "switched to"
-            }
-        ))
-    } else {
-        Err(format!(
-            "could not create/switch branch '{name}' — continue manually"
-        ))
-    })
-}
-
-fn branch_name_for(issue: &issues::dto::IssueView) -> String {
-    let handle = issue
-        .key_alias
-        .clone()
-        .unwrap_or_else(|| issue.reff.clone())
-        .to_ascii_lowercase();
-    let mut slug = String::new();
-    for character in issue.title.to_ascii_lowercase().chars() {
-        if slug.len() >= 40 {
-            break;
-        }
-        if character.is_ascii_alphanumeric() {
-            slug.push(character);
-        } else if !slug.ends_with('-') && !slug.is_empty() {
-            slug.push('-');
-        }
-    }
-    let slug = slug.trim_matches('-');
-    if slug.is_empty() {
-        handle
-    } else {
-        format!("{handle}-{slug}")
-    }
-}
-
-fn inbox_line_verb(entry: &issues::dto::InboxEntry) -> String {
-    let who = entry.actor_nick.clone().unwrap_or_else(|| "someone".into());
-    match entry.kind.as_str() {
-        "assigned" => format!("{who} assigned you"),
-        "comment" => format!("{who} commented on"),
-        _ => format!("{who} moved"),
-    }
+    Ok(json!({
+        "kind": "ok",
+        "message": format!("saved {written} bytes to {destination}"),
+        "path": destination,
+        "size": written,
+    }))
 }
 
 fn mime_for(name: &str) -> String {
@@ -919,8 +543,8 @@ pub fn plan_access_grant(
         .unwrap_or_default();
     if !conflicts.is_empty() {
         return Err(AccessRefusal::Invalid(format!(
-            "role `{role}` has {} concurrent revision heads — resolve them with \
-             `lait issues role resolve` before assigning",
+            "role `{role}` has {} concurrent revision heads — resolve them under \
+             Settings → Workflow (or with the `issues_role_resolve` tool) before assigning",
             conflicts.len()
         )));
     }
@@ -1052,19 +676,19 @@ mod tests {
     }
 
     #[test]
-    fn decodes_work_state_at_the_product_boundary() {
+    fn decodes_a_local_file_attach_at_the_product_boundary() {
         let request = decode(
-            LOCAL_WORK_STATE,
-            json!({"action": "start", "reff": "ENG-7", "no_branch": true}),
+            LOCAL_ATTACH,
+            json!({"reff": "ENG-7", "file": "notes.txt", "comment": "see this"}),
         )
         .unwrap();
         assert!(matches!(
             request,
-            IssuesHostRequest::WorkState {
-                action: WorkStateAction::Start,
+            IssuesHostRequest::Attach {
                 ref reff,
-                no_branch: true,
-            } if reff == "ENG-7"
+                ref file,
+                comment: Some(ref comment),
+            } if reff == "ENG-7" && file == "notes.txt" && comment == "see this"
         ));
     }
 
@@ -1081,6 +705,28 @@ mod tests {
 
         let clear = parse_web(json!({"cmd": "inbox", "clear": true})).unwrap();
         assert_eq!(clear.access(), ClientAccess::Command);
+    }
+
+    /// A head that serves reads only has to be able to tell a read from a
+    /// write, and every World request classifies itself — otherwise "refuse
+    /// what is not provably a query" refuses the entire product.
+    #[test]
+    fn a_world_call_classifies_itself_for_head_policy() {
+        let read = parse_web(json!({"cmd": "issue_view", "reff": "ENG-1"})).unwrap();
+        assert_eq!(read.access(), ClientAccess::Query);
+        let board = parse_web(json!({"cmd": "board"})).unwrap();
+        assert_eq!(board.access(), ClientAccess::Query);
+
+        let write = parse_web(json!({"cmd": "issue_start", "reff": "ENG-1"})).unwrap();
+        assert_eq!(write.access(), ClientAccess::Command);
+    }
+
+    /// The startup warning about an inactive implementation names an operation;
+    /// the operation has to be reachable from a head that is still shipped.
+    #[test]
+    fn world_upgrade_is_reachable_from_the_web_surface() {
+        let upgrade = parse_web(json!({"cmd": "world_upgrade"})).unwrap();
+        assert_eq!(upgrade.access(), ClientAccess::Command);
     }
 
     #[test]

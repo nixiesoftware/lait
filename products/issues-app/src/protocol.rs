@@ -664,6 +664,44 @@ pub enum IssuesErrorKind {
     Retry,
 }
 
+impl IssuesErrorKind {
+    /// How a head that speaks a typed protocol should classify this answer.
+    ///
+    /// The distinction is whether the caller can act on it. A missing thing or
+    /// a refused write is the caller's problem and names its own remedy — the
+    /// first wall a freshly-sponsored agent hits is `Denied`, and its message
+    /// says what standing is missing. Reporting either as an internal fault
+    /// throws that message away and leaves the caller nothing to do.
+    pub const fn failure(self) -> world_interface::Failure {
+        match self {
+            Self::NotFound => world_interface::Failure::Invalid,
+            Self::Denied => world_interface::Failure::Refusal,
+            Self::Error | Self::Retry => world_interface::Failure::Operation,
+        }
+    }
+}
+
+/// Read a failure out of an Issues answer that was delivered successfully.
+///
+/// Both shapes a client operation can answer with — an [`IssuesResponse`] and
+/// the host's control JSON — tag themselves the same way, so this is one peek
+/// at two fields rather than a decode of either. That matters: it runs on every
+/// answer, and nearly every answer is fine.
+pub fn classify_failure(value: &Value) -> Option<(world_interface::Failure, String)> {
+    let kind = match value.get("error_kind").and_then(Value::as_str)? {
+        "not_found" => IssuesErrorKind::NotFound,
+        "denied" => IssuesErrorKind::Denied,
+        "retry" => IssuesErrorKind::Retry,
+        _ => IssuesErrorKind::Error,
+    };
+    let message = value
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or("the Issues request failed")
+        .to_string();
+    Some((kind.failure(), message))
+}
+
 impl IssuesResponse {
     pub fn err(message: impl Into<String>) -> Self {
         Self::Error {

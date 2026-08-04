@@ -14,7 +14,6 @@ viewer/dist/
 /docs/HARDENING.md
 /docs/ROADMAP.md
 /docs/SCHEMA.md
-/docs/SERVE.md
 /docs/RELEASE-SIGNING-RUNBOOK.local.md
 
 # The coverage manifest check writes this beside the committed file so CI can

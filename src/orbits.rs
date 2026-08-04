@@ -2,26 +2,27 @@
 //!
 //! A small global index, `spaces.json` under [`crate::config::config_root`],
 //! mapping each **store path** to the space it holds. Written at every
-//! chokepoint a space becomes bound to a path — `lait init` (founding),
-//! `lait join` (bootstrapping), and every successful daemon open — so founders
-//! and joiners alike are observable via `lait orbits` and addressable via
-//! `--orbit`. It carries **no secrets and no trust** (the signed ACL still gates
+//! chokepoint a space becomes bound to a path — `HostSpaceFound` (founding),
+//! `HostSpaceEnter` (bootstrapping), and every successful daemon open — so
+//! founders and joiners alike are listed by `GET /api/spaces` and addressable
+//! via `--orbit`. It carries **no secrets and no trust** (the signed ACL still gates
 //! every op); it is pure navigation state: the `name` and `projects` fields are
 //! advisory snapshots refreshed on open, a corrupt/absent file degrades to "no
 //! known spaces", and nothing here is ever a source of truth.
 //!
 //! A v0.5.x `workspaces.json` beside this file is simply not read, and is not
 //! migrated. That is the right outcome precisely because this is navigation
-//! state: the registry rebuilds itself on the next `init`, `join`, or daemon
+//! state: the registry rebuilds itself on the next founding, entry, or daemon
 //! open, so a migration would buy nothing that opening a store once does not.
 
+pub mod bootstrap;
 mod catalog;
 mod router;
 
 pub use catalog::Catalog;
 pub(crate) use catalog::{ResolvedOrbit, StationIdentity};
 pub(crate) use router::ContentPlacement;
-pub use router::{Hosting, OrbitDoorbell, Placement, Router};
+pub use router::{Hosting, OrbitDoorbell, OrbitVacancy, Placement, Router, SlotVacancy};
 
 use std::path::{Path, PathBuf};
 
@@ -34,9 +35,9 @@ use crate::config::config_root;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum Origin {
-    /// Founded here via `lait init` (this node minted the genesis).
+    /// Founded here (this node minted the genesis).
     Founded,
-    /// Bootstrapped from someone else's invite via `lait join`.
+    /// Bootstrapped from someone else's invite.
     #[default]
     Joined,
 }
@@ -84,7 +85,7 @@ pub struct Entry {
 }
 
 /// Filesystem-level status of a registered entry. Whether a daemon is *up* is
-/// a live control-channel probe, done by the CLI layer (it needs async).
+/// a live control-channel probe, done by the client layer (it needs async).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Presence {
     /// The path holds a formed/entered Space store.
@@ -200,6 +201,143 @@ pub fn prune() -> Result<Vec<Entry>> {
         save(&kept)?;
     }
     Ok(removed)
+}
+
+/// Why a selector did not name exactly one local Orbit.
+///
+/// Typed, because the CLI used to answer the ambiguous case by printing the
+/// candidates and calling `process::exit(2)` from inside a resolver. A head
+/// that serves many callers out of one process cannot exit, and a browser
+/// cannot read a line written to its server's stderr — so the candidates are
+/// carried in the value and the surface decides what to do with them.
+#[derive(Debug)]
+pub enum Unresolved {
+    /// A path-shaped selector that holds no space store.
+    NoStoreAt { selector: String },
+    /// Nothing in the registry matches.
+    NoMatch {
+        selector: String,
+        known: Vec<String>,
+    },
+    /// More than one entry matches.
+    Ambiguous {
+        selector: String,
+        candidates: Vec<String>,
+    },
+    /// Exactly one entry matches, but its store is gone from disk.
+    Missing { selector: String, path: String },
+}
+
+impl std::fmt::Display for Unresolved {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Unresolved::NoStoreAt { selector } => write!(
+                f,
+                "no initialized space store at '{selector}' (or under '{selector}/.lait')"
+            ),
+            Unresolved::NoMatch { selector, known } => write!(
+                f,
+                "no Orbit matches '{selector}' — known: {}",
+                if known.is_empty() {
+                    "(none)".to_string()
+                } else {
+                    known.join(", ")
+                }
+            ),
+            Unresolved::Ambiguous {
+                selector,
+                candidates,
+            } => write!(
+                f,
+                "Orbit selector '{selector}' is ambiguous:\n  {}",
+                candidates.join("\n  ")
+            ),
+            Unresolved::Missing { selector, path } => write!(
+                f,
+                "Orbit '{selector}' is registered at {path} but the store is gone \
+                 — prune the registry"
+            ),
+        }
+    }
+}
+impl std::error::Error for Unresolved {}
+
+/// Resolve a selector to one durable local Orbit's store path: a filesystem
+/// path, an `orb_` id prefix, a `ws_` Space id prefix, or a case-insensitive
+/// display-name match.
+///
+/// Two entries may legitimately participate in the same Space, so an ambiguous
+/// selector is an answer with candidates rather than a guess.
+pub fn select(selector: &str) -> std::result::Result<PathBuf, Unresolved> {
+    // Path form: explicit separators or an existing directory. Accept either
+    // the `.lait` dir itself or its parent.
+    if selector.contains('/') || selector.contains('\\') || Path::new(selector).is_dir() {
+        let candidate = Path::new(selector);
+        if crate::orbital::space_store_present(candidate) {
+            return Ok(candidate.to_path_buf());
+        }
+        let nested = candidate.join(".lait");
+        if crate::orbital::space_store_present(&nested) {
+            return Ok(nested);
+        }
+        return Err(Unresolved::NoStoreAt {
+            selector: selector.to_string(),
+        });
+    }
+
+    let entries = list();
+    let matches: Vec<&Entry> = if selector.starts_with("orb_") {
+        entries
+            .iter()
+            .filter(|e| {
+                crate::daemon::LocalOrbitId::for_store(Path::new(&e.path))
+                    .as_str()
+                    .starts_with(selector)
+            })
+            .collect()
+    } else if selector.starts_with("ws_") {
+        entries
+            .iter()
+            .filter(|e| e.space == selector || e.space.starts_with(selector))
+            .collect()
+    } else {
+        entries
+            .iter()
+            .filter(|e| e.name.eq_ignore_ascii_case(selector))
+            .collect()
+    };
+
+    match matches.as_slice() {
+        [only] => {
+            if presence(only) == Presence::Missing {
+                return Err(Unresolved::Missing {
+                    selector: selector.to_string(),
+                    path: only.path.clone(),
+                });
+            }
+            Ok(PathBuf::from(&only.path))
+        }
+        [] => Err(Unresolved::NoMatch {
+            selector: selector.to_string(),
+            known: entries
+                .iter()
+                .map(|e| {
+                    if e.name.is_empty() {
+                        e.space.clone()
+                    } else {
+                        e.name.clone()
+                    }
+                })
+                .collect(),
+        }),
+        many => Err(Unresolved::Ambiguous {
+            selector: selector.to_string(),
+            candidates: many
+                .iter()
+                .map(|e| format!("{} ({})", e.space, e.path))
+                .collect(),
+        }),
+    }
 }
 
 #[cfg(test)]

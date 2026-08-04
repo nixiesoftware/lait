@@ -113,7 +113,8 @@ function Shell({
 }
 
 /** Multiple heads = concurrent edits nobody has resolved; edits are blocked
- *  until `lait issues workflow set --expect-head` (or the role equivalent) picks one. */
+ *  until somebody picks one. `fix` names the surface that can, because a note
+ *  naming no surface is a dead end. */
 function ConflictNote({ heads, fix }: { heads: string[]; fix: string }) {
   if (heads.length === 0) return null;
   return (
@@ -121,7 +122,7 @@ function ConflictNote({ heads, fix }: { heads: string[]; fix: string }) {
       <AlertTriangle className="mt-0.5 size-icon-sm shrink-0" />
       <span>
         {heads.length} concurrent revisions are unresolved — ordinary edits are blocked until an
-        admin runs <code className="font-mono text-xs">{fix}</code>.
+        admin resolves them from {fix}.
       </span>
     </p>
   );
@@ -166,7 +167,7 @@ export function WorkflowDialog({
         <>
           <ConflictNote
             heads={wf.conflict_heads}
-            fix="lait issues workflow set --expect-head …"
+            fix="Settings → Workflow"
           />
           {wf.revision && (
             <>
@@ -212,8 +213,7 @@ export function WorkflowDialog({
               </section>
               <p className="text-mute text-xs">
                 Revision <code className="font-mono">{wf.revision.revision_id.slice(0, 12)}…</code>{" "}
-                — editable via{" "}
-                <code className="font-mono">lait issues workflow set</code>.
+                — editable from Settings → Workflow.
               </p>
             </>
           )}
@@ -263,7 +263,7 @@ export function RolesDialog({ spaceId, onClose }: { spaceId: string; onClose: ()
           {role.revision?.body.description && (
             <p className="text-dim mt-1 text-sm">{role.revision.body.description}</p>
           )}
-          <ConflictNote heads={role.conflict_heads} fix="lait issues role resolve …" />
+          <ConflictNote heads={role.conflict_heads} fix="the issues_role_resolve tool" />
           <ul className="mt-2 flex flex-wrap gap-1">
             {(role.revision?.body.capabilities ?? []).map((c) => (
               <li
@@ -278,8 +278,8 @@ export function RolesDialog({ spaceId, onClose }: { spaceId: string; onClose: ()
       ))}
       {roles && (
         <p className="text-mute text-xs">
-          Custom roles are managed via{" "}
-          <code className="font-mono">lait issues role create/edit</code>.
+          Custom roles are authored with the <code className="font-mono">issues_role_create</code>{" "}
+          and <code className="font-mono">issues_role_edit</code> tools.
         </p>
       )}
     </Shell>

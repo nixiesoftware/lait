@@ -1,15 +1,20 @@
 # Product surfaces
 
-lait has three product surfaces: CLI, local web, and MCP. They are clients of
-the same daemon and use the same command and projection contract. No surface
+lait has two product surfaces: the local web app and MCP. They are clients of
+the same daemon and use the same request and projection contract. No surface
 opens Replica or Engine independently; product work reaches a World through a
 docked Session.
 
+There is no third one. `lait` is a launcher — `lait daemon`, `lait mcp`, and
+bare `lait` (the app, and the daemon under it) — not a command surface, and
+nothing about the product is reachable by typing a verb at a shell.
+
 ## 1. Product model
 
-A space is a local replica of a shared issue tracker. Run `lait init` to found one
-or `lait join` to create a replica from an invite. Other commands require an
-existing space and never create one as a side effect.
+A space is a local replica of a shared issue tracker. The app's Welcome screen
+founds one (`host_space_found`) or creates a replica from an invite
+(`host_space_enter`), both on the host plane. Nothing else creates a space as a
+side effect; every other request requires one to exist.
 
 Within a space:
 
@@ -20,43 +25,35 @@ Within a space:
 - reads use Manifest-pinned local projections; Contact and convergence happen
   through the active Station.
 
-## 2. CLI
+## 2. The request contract
 
-The CLI favors flat verbs for daily issue work and nouns for registries and
-administration. Run `lait --help` or `lait <command> --help` for the exact current
-grammar; generated help is the command reference.
+Every surface sends the same JSON requests and reads the same versioned
+response DTOs, so this section describes both of them at once. The daily issue
+vocabulary is `issue_new`, `list`, `issue_view`, `issue_edit`, `issue_start`,
+`issue_done`, `issue_stop`, `comment`, `board` — over HTTP on the World plane
+(`POST /api/spaces/{id}/worlds/issues/rpc`), or as the `issues_*` tools over
+MCP. The mount name (`issues`) is what makes those two spellings one namespace.
 
-Common flows:
+`reff` resolution happens in the daemon. Full ids, unique prefixes, and friendly
+aliases resolve through one grammar. Ambiguity returns candidates; clients do
+not guess.
 
-```text
-lait init
-lait issues new "Fix the import path"
-lait issues ls
-lait issues show <ref>
-lait issues edit <ref>
-lait issues start <ref>
-lait issues done <ref>
-lait issues comment <ref> "Reproduced on Windows"
-lait issues board
-```
+Error behaviour is classified by type, not by matching message text. The JSON
+contract is what surfaces agree on; wording may improve without breaking it.
 
-`<ref>` resolution happens in the daemon. Full ids, unique prefixes, friendly
-aliases, and supported contextual forms resolve through one grammar. Ambiguity
-returns candidates; clients do not guess.
-
-`--json` returns versioned response DTOs suitable for scripts. Error behavior is
-classified by type, not by matching message text. Human output may improve
-without changing the JSON contract.
-
-Destructive or security-sensitive operations can require explicit confirmation.
-Non-interactive clients must use the documented confirmation mechanism rather
-than relying on a prompt.
+Destructive or security-sensitive operations require explicit confirmation. The
+head answers them `409 confirm_required` carrying the question, and the caller
+re-sends with `?confirm=1`; the browser draws that as a modal. The question
+string comes from one place, so no two surfaces can disagree about what is
+dangerous. This guards against an accident, not an attacker — anything that can
+send the request can also send the confirmation.
 
 ## 3. Web
 
-`lait serve` starts a loopback-only web application that can list locally known
+Bare `lait` starts a loopback-only web application that lists locally known
 spaces through the local daemon control layer. It is a local client, not an iroh
-peer and not a space member.
+peer and not a space member. It is also the *default* mode: running the binary
+with no arguments is how a person opens the product.
 
 The server uses a per-run bearer capability and origin/rebinding checks. A
 browser may list navigation metadata without activating every Space. Attaching
@@ -64,20 +61,30 @@ to a row starts or reuses only the Station placed in that local Orbit, under the
 correct local identity. Rows use local Orbit ids because two local stores may
 participate in the same Space. The web process owns no Station: it sends routed
 requests and receives catalog doorbells through the same identity-scoped
-daemon::Daemon endpoint as CLI and MCP.
+`daemon::Daemon` endpoint the MCP head uses.
 
 The web application provides issue lists, boards, detail, inbox, activity,
-members, filters, and command actions. Server-side semantics such as reference
-resolution, authorization, project selection, and filtering remain in the
-daemon; the browser does not reimplement them.
+members, devices and recovery, labels, workflow, access, filters, and actions.
+Server-side semantics such as reference resolution, authorization, project
+selection, and filtering remain in the daemon; the browser does not reimplement
+them.
 
-Actor/device management is not yet fully represented in the web members view.
-Use the CLI for device enrollment, revocation, and recovery until parity lands.
+Requests are split across three planes by scope, and the split is structural
+rather than stylistic: bootstrap has no space id to name, so it cannot ride a
+space-scoped route. `POST /api/host/rpc` carries formation, device consent,
+local config, the Orbit registry, MCP install, update/restart, and orientation;
+`POST /api/spaces/{id}/rpc` carries generic Space authority;
+`POST /api/spaces/{id}/worlds/{world}/rpc` carries the product. Full route
+table, credential posture, and the custody fence: [`SERVE.md`](./SERVE.md).
+
+A head that would have to sign with a key it merely hosts refuses the write
+rather than performing it. That refusal is about custody, not about anyone's
+standing, and it never applies to a read.
 
 ## 4. MCP
 
-`lait mcp` exposes the daemon command surface as MCP tools for agents. MCP uses
-the same request and response types as other clients and remains pinned to the
+`lait mcp` exposes the daemon request surface as MCP tools for agents. MCP uses
+the same request and response types as the web head and remains pinned to the
 Orbit selected at launch even though the daemon knows the wider local catalog.
 A parity test guards the intentional tool mapping.
 
@@ -112,20 +119,23 @@ Different projects in one Space may use different behavioral RBAC. They remain
 inside one membership and encryption boundary; projects requiring distinct
 read confidentiality belong in distinct Spaces.
 
-The member surface shows actors. Device commands manage the keys behind the
-current actor:
+The member surface shows actors. Settings → **Devices & recovery** manages the
+keys behind the current actor, and the enrolment round-trip spans two machines:
 
-- `device invite` creates an enrollment token;
-- `device accept` runs on the new device without a daemon and produces consent;
-- `device add` binds that consent and seals held content keys;
-- `device revoke` removes a device and rotates when possible;
-- `device ls` lists the current actor's devices;
-- `recover` resets the actor to the current device using the offline actor
-  recovery key.
+- `device_invite` (Space plane) creates an enrolment token;
+- `host_device_consent` (**host** plane) runs on the *new* machine and signs its
+  consent — it is on the host plane precisely because that machine has no
+  membership anywhere yet, so there is no space id it could name;
+- `device_add` (Space plane) binds that consent and seals held content keys;
+- `device_revoke` removes a device and rotates when possible;
+- `device_list` lists the current actor's devices.
 
-Space recovery and custody are separate from actor device recovery. Their
-commands operate on the space recovery authority and require explicit
-expected targets before a device contributes sensitive material.
+Space recovery and custody are separate from actor device recovery.
+`space_custody_export` and `space_custody_import` operate on the space recovery
+authority and require explicit expected targets before a device contributes
+sensitive material. The Devices & recovery panel reads its warnings — share
+missing, unreadable, backup unverified — straight off the reported recovery
+status rather than inferring them.
 
 ## 7. Joining
 
@@ -139,9 +149,11 @@ on the joiner's first contact with a member — there is no approval queue.
 Unadmitted nodes may perform the bounded bootstrap Contact needed for redemption
 but cannot dock an Issues Session or read protected Bodies.
 
-`lait doctor` reports onboarding gates in order: Space, Station, admission,
-peer reachability, convergence, and key/custody health where applicable. It distinguishes
-waiting from failure instead of presenting an empty board as success.
+`diagnose` reports onboarding gates in order: Space, Station, admission, peer
+reachability, convergence, and key/custody health where applicable. It
+distinguishes waiting from failure instead of presenting an empty board as
+success. The app runs it while a join is settling, which is why entering from an
+invite says what it is waiting for rather than showing an empty board.
 
 ## 8. Presence and names
 
@@ -231,7 +243,7 @@ and says how many in the reply: a caret superseded by the next caret has lost
 nothing, while an invitation dropped to make room for a ping is gone. What has
 not been seen yet is what somebody is about to act on.
 
-A browser does not read either of them. `lait serve` reads them on the browser's
+A browser does not read either of them. The head reads them on the browser's
 behalf and pushes the answers down the `/api/session` WebSocket, which carries
 three lanes:
 
@@ -266,8 +278,8 @@ for as long as it is in it, and stops when it leaves.
 
 A drain delivered to a client is a drain the daemon no longer holds. A client
 that decodes one and does not keep it has destroyed it — for its own later reads,
-for `lait signals` at a terminal, and for every other reader there is. Holding it
-is not optional, and neither is bounding what is held: a client that has lost the
+for every other tab, and for every other reader there is. Holding it is not
+optional, and neither is bounding what is held: a client that has lost the
 oldest of them says how many, exactly as the daemon does.
 
 ## 9. Comments, workflow conflicts, and partial state
@@ -300,5 +312,7 @@ incompatible, or unintelligible daemon is reported distinctly from an absent
 daemon. Clients do not spawn over a process they cannot safely identify.
 
 The exact control-channel compatibility rules are in
-[`PROTOCOL.md`](./PROTOCOL.md). Exact command spelling comes from generated CLI
-help, avoiding a second handwritten command table that can drift.
+[`PROTOCOL.md`](./PROTOCOL.md). Exact request spelling comes from the typed
+`control::Request` enum and each package's MCP descriptors — the two things the
+wire is generated from — rather than from a second handwritten table that can
+drift.

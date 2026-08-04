@@ -5,7 +5,8 @@
 //! E2EE convergence at the Station level. This proves the SAME flow through the
 //! product's front door: a founder daemon forms and serves a Space, a joiner
 //! bootstraps its store from the founder's invite link (`orbital::enter_space`,
-//! the `lait join` heir) and serves its own daemon, then the two daemons drive
+//! the engine half of `HostSpaceEnter`) and serves its own daemon, then the two
+//! daemons drive
 //! Contact over the socket (`Connect`) until the joiner is admitted and reads
 //! the founder's sealed issue. Nothing here touches the legacy node.
 
@@ -65,7 +66,9 @@ fn issue_req(
     request: issues_app::IssuesRequest,
 ) -> IssueResponse {
     rt.block_on(async {
-        let space = lait::orbital::discover_space_id(home).expect("test Space");
+        let space = lait::orbital::discover_space(home)
+            .single()
+            .expect("test Space");
         let call = issues_app::encode_call(&request)?;
         let reply = lait::control::call_world(
             home,
@@ -343,7 +346,7 @@ fn two_station_hosts_join_admit_and_converge_over_the_socket() {
     let _ = std::fs::remove_dir_all(&joiner_home);
 }
 
-/// The `lait join` contract: the joiner drives Contact to the inviter's
+/// The entering contract: the joiner drives Contact to the inviter's
 /// approach Station and the inviter's driver **reciprocates on its own** to
 /// redeem the admission — no manual admin-side Connect. This is what makes an
 /// auto-approving invite "just work" from the joiner's side alone.
@@ -354,7 +357,7 @@ fn the_inviter_reciprocates_so_a_joiner_side_only_connect_admits() {
     let net = MemNet::new();
 
     let founder_home = temp_home("recip-founder");
-    lait::orbital::found_space_cli(&founder_home, &F_SEED, "Reciprocal Space").unwrap();
+    lait::orbital::found_space(&founder_home, &F_SEED, "Reciprocal Space").unwrap();
     let founder_handle = spawn_daemon(founder_home.clone(), F_SEED, net.clone());
 
     let client = tokio::runtime::Runtime::new().unwrap();
@@ -417,7 +420,7 @@ fn members_promote_and_demote_over_the_socket() {
     let net = MemNet::new();
 
     let founder_home = temp_home("role-founder");
-    lait::orbital::found_space_cli(&founder_home, &F_SEED, "Role Space").unwrap();
+    lait::orbital::found_space(&founder_home, &F_SEED, "Role Space").unwrap();
     let founder_handle = spawn_daemon(founder_home.clone(), F_SEED, net.clone());
     let client = tokio::runtime::Runtime::new().unwrap();
     wait_online(&client, &founder_home);

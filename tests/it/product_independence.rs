@@ -16,7 +16,7 @@
 //! It parses rather than greps, for the same reason `semantic_type_names.rs`
 //! does: `#[cfg(test)]` fixtures legitimately name the bundled product (a test
 //! needs *some* World to test with), and a line scan cannot tell a fixture from
-//! a production dependency. Ask for `lait doctor` and you should not get an
+//! a production dependency. Ask for a `Diagnose` and you should not get an
 //! answer that depends on the Issues crate; ask for a test fixture and of course
 //! you should.
 

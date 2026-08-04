@@ -73,6 +73,9 @@ export function Members({
 
   const isAdmin = members?.some((m) => m.me && m.role === "admin") ?? false;
 
+  /** The busy key for the one action that belongs to no row. */
+  const SPONSOR = "agent:new";
+
   const act = async (id: string, fn: () => Promise<unknown>) => {
     setBusy(id);
     try {
@@ -202,6 +205,41 @@ export function Members({
           </ul>}
         </section>
 
+        {/* Any member may sponsor — sponsorship is not an admin power, and the
+            engine refuses it only for someone whose own admission has not
+            landed. `install_mcp` writes "sponsor it once from the members view"
+            into an agent's config file, so this is the view it names. */}
+        {!readOnly && (
+          <section>
+            <h2 className="text-mute mb-2 text-2xs font-semibold tracking-wider uppercase">
+              Agents
+            </h2>
+            <p className="text-dim mb-3 text-sm">
+              An agent is a member with its own key. Sponsoring one here mints that key on this
+              machine and gives it write access, so its work is signed as itself and never as you.
+              Its standing ends when yours does.
+            </p>
+            <Button
+              disabled={busy === SPONSOR}
+              onClick={() =>
+                void act(SPONSOR, async () => {
+                  const name = await ask.prompt({
+                    title: "Sponsor an agent",
+                    body: "The local name its identity is kept under, and the one an MCP client passes as LAIT_AGENT.",
+                    label: "Name",
+                    defaultValue: "claude",
+                  });
+                  if (!name?.trim()) return;
+                  await rpc(spaceId, { cmd: "agent_provision", name: name.trim() });
+                })
+              }
+            >
+              <Bot className="size-icon-sm" />
+              Sponsor an agent
+            </Button>
+          </section>
+        )}
+
         {isAdmin && !readOnly && (
           <Invite spaceId={spaceId} ticket={ticket} setTicket={setTicket} onError={onError} />
         )}
@@ -303,12 +341,13 @@ const INVITE_TTLS = [
 /**
  * The invite surface.
  *
- * `invite --json` returns the bare **link body**; the `lait://join/…` link is
- * derived from it. The capability always auto-admits — the joiner runs
- * `lait join <link>` and is in; accepting the invite is the approval. The
- * options are the capability's own knobs (`Request::Invite`): the admitted
- * role rides in the signed evidence, `reusable` admits a whole team until
- * expiry, and the TTL bounds how long the link can admit anyone.
+ * `Request::Invite` returns the bare **link body**; the `lait://join/…` link is
+ * derived from it here. The capability always auto-admits — the joiner pastes
+ * that link into Welcome's **Use an invite**, which sends `host_space_enter`,
+ * and they are in; accepting the invite is the approval. The options are the
+ * capability's own knobs: the admitted role rides in the signed evidence,
+ * `reusable` admits a whole team until expiry, and the TTL bounds how long the
+ * link can admit anyone.
  */
 function Invite({
   spaceId,
@@ -420,10 +459,12 @@ function Invite({
               )}
               <div className="flex min-w-0 flex-1 flex-col gap-2">
                 <p className="text-dim text-sm">
-                  They run this and they’re in — accepting the invite is the approval.
+                  They open lait and paste this into{" "}
+                  <span className="text-fg font-medium">Use an invite</span> — accepting the invite
+                  is the approval.
                 </p>
                 <code className="bg-bg border-line block truncate rounded-surface border p-2 text-xs">
-                  lait join {link}
+                  {link}
                 </code>
                 <div className="flex gap-2">
                   <Button
@@ -473,10 +514,11 @@ function mailto(link: string): string {
     "You've been invited to a lait space.",
     "",
     "1. Install lait:  https://github.com/Nixie-Tech-LLC/lait",
-    "2. Join:",
-    `   lait join ${link}`,
+    "2. Run lait to open the app, choose \"Use an invite\", and paste this link:",
+    `   ${link}`,
     "",
-    "That's it — it creates your store and syncs you in.",
+    "That creates your encrypted store on your own machine and reaches me to",
+    "approve you — the board stays sealed until that lands.",
   ].join("\n");
   return `mailto:?subject=${encodeURIComponent("Join my lait space")}&body=${encodeURIComponent(body)}`;
 }

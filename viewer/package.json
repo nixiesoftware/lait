@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
-  "description": "lait's web client — a keyboard-first board over the local control plane. Builds into src/serve/assets, which lait serve embeds.",
+  "description": "lait's web client — a keyboard-first board over the local control plane. Builds into src/serve/assets, which the lait binary embeds and serves.",
   "scripts": {
     "dev": "node scripts/dev.mjs",
     "dev:vite": "vite",

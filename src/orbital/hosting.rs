@@ -26,7 +26,7 @@
 //! lifecycle concerns. There is no catch-all refusal.
 
 use runtime::poison::LockRecovering;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -63,7 +63,12 @@ fn discover_space(home: &Path) -> Result<SpaceId> {
     let root = orbital_store_root(home);
     let mut found = None;
     for entry in std::fs::read_dir(&root)
-        .with_context(|| format!("no orbital store at {} — run `lait init`", root.display()))?
+        .with_context(|| {
+            format!(
+                "no orbital store at {} — found a Space here first",
+                root.display()
+            )
+        })?
         .flatten()
     {
         if let Some(name) = entry.file_name().to_str() {
@@ -76,7 +81,12 @@ fn discover_space(home: &Path) -> Result<SpaceId> {
             }
         }
     }
-    found.ok_or_else(|| anyhow!("no Space under {} — run `lait init`", root.display()))
+    found.ok_or_else(|| {
+        anyhow!(
+            "no Space under {} — found a Space here first",
+            root.display()
+        )
+    })
 }
 
 /// The sole product-side entrance to one active Space.
@@ -477,8 +487,9 @@ impl StationHost {
         // The implementation self-check. Receipts pin whichever implementation
         // id is ACTIVE in the ledger — not this build's — so a build whose
         // descriptor has moved on would silently attest an implementation it
-        // is not. Say so at open; `lait issues world-upgrade` (admin) activates this
-        // build's id.
+        // is not. Say so at open; an admin activates this build's id with the
+        // World's own upgrade operation (`{"cmd":"world_upgrade"}` on the
+        // Issues RPC route).
         {
             use runtime::world::AuthorityView;
             let device = mechanics::actor::device_from_seed(&device_seed);
@@ -785,7 +796,7 @@ impl StationHost {
                 return Reply::error(
                     call,
                     Code::Unavailable,
-                    "not admitted to this space yet — run `lait connect` to reach an admin \
+                    "not admitted to this space yet — reach an admin from the local app \
                      and complete admission before using this World",
                 );
             }
@@ -812,7 +823,7 @@ impl StationHost {
                     call,
                     Code::Denied,
                     "this agent identity holds no standing in the space yet — a human member \
-                     must sponsor it (`lait members agent <key>`) before it can author. \
+                     must sponsor it from the members view before it can author. \
                      Nothing was changed.",
                 ),
             }
@@ -972,7 +983,7 @@ impl StationHost {
             Some(name) => load_agent_seed(&self.home, name).map_err(|e| {
                 Response::denied(format!(
                     "no local agent identity '{name}' on this node — provision one with \
-                     `lait members agent --new {name}` (it self-incepts + is sponsored in \
+                     sponsoring `{name}` from the members view (it self-incepts + is sponsored in \
                      one step), then act as it: {e}"
                 ))
             }),
@@ -1497,7 +1508,7 @@ impl StationHost {
     }
 
     /// The one-shot identity + standing + view-completeness projection
-    /// (`lait whoami`, the MCP `whoami` tool). Every fact resolved once: actor,
+    /// (the MCP `whoami` tool, the viewer's identity panel). Every fact resolved once: actor,
     /// device, `did:key`, space, role, capabilities, sponsor, and the loud
     /// partial-view signal — so "who am I / what may I do / is my view complete"
     /// is a glance, never a deduction (`docs/plans/09` §3.4).
@@ -1558,14 +1569,10 @@ impl StationHost {
     /// step. Afterwards a client acts as it via `--as <name>` / MCP.
     fn agent_provision(&self, name: &str) -> Response {
         // The name becomes a directory under the home; keep it a plain segment.
-        if name.is_empty()
-            || name.contains(['/', '\\'])
-            || name.contains("..")
-            || name.contains(':')
-        {
-            return Response::err(
-                "an agent name must be a plain identifier (no path separators or '..')",
-            );
+        // Said here so the refusal names the verb, and enforced again wherever
+        // the name is joined into a path.
+        if !is_plain_agent_name(name) {
+            return Response::err(AGENT_NAME_RULE);
         }
         // Only a human member may sponsor; surface it before minting a seed.
         if !self.mechanics.am_i_member() {
@@ -1923,7 +1930,7 @@ impl StationHost {
             (None, false) => {
                 return Response::err(format!(
                     "no member here matches '{who}' — name one by its full actor id or a \
-                     prefix of it (`lait members` lists them)"
+                     prefix of it (the members view lists them)"
                 ))
             }
         };
@@ -2036,8 +2043,8 @@ impl StationHost {
         let loaded = match load_seeds(&self.home) {
             Ok(seeds) => seeds,
             // "You have pinned nothing" and "your seed file is broken" are
-            // different answers to `lait seed list`, and only one of them is
-            // actionable.
+            // different answers to `Request::SeedList`, and only one of them
+            // is actionable.
             Err(error) => return Response::err(error),
         };
         let seeds = loaded
@@ -2308,7 +2315,7 @@ impl StationHost {
         // to dial, or a Coordinates link — whose signed approach routes are
         // taught to the transport first, so the dial resolves even after the
         // peer's addresses changed. Coordinates *entry* (store bootstrap)
-        // stays `lait join`'s job.
+        // stays `HostSpaceEnter`'s job.
         let link = link.trim();
         let station = match mechanics::ids::DeviceId::parse(link).and_then(|d| Key::from_device(&d))
         {
@@ -3027,15 +3034,36 @@ fn now_secs() -> u64 {
 /// Where a co-located sponsored agent's identity seed lives: `agents/<name>/
 /// secret.key` under the daemon's home. Per-agent, tiny (64 hex bytes), beside
 /// the one shared store — Architecture B: N signing identities, O(1) storage.
-fn agent_seed_path(home: &Path, name: &str) -> PathBuf {
-    home.join("agents").join(name).join("secret.key")
+fn agent_seed_path(home: &Path, name: &str) -> Result<PathBuf> {
+    if !is_plain_agent_name(name) {
+        return Err(anyhow!("{AGENT_NAME_RULE}"));
+    }
+    Ok(home.join("agents").join(name).join("secret.key"))
 }
+
+/// Whether an agent name is a single path segment.
+///
+/// The name is wire-supplied — `act_as` carries it from a client — and it
+/// becomes a directory under this home, so it is checked wherever it is joined
+/// into a path and not only where an agent is created. Provisioning validated
+/// it; loading did not, and loading is the site a client can aim.
+fn is_plain_agent_name(name: &str) -> bool {
+    // Asked structurally rather than by substring: a plain name is exactly one
+    // ordinary path component. Spelling this as a character blocklist let "."
+    // through — it holds no separator and no "..", yet names the parent
+    // directory, so a seed path built from it escapes the agents base.
+    let mut parts = Path::new(name).components();
+    matches!(parts.next(), Some(Component::Normal(_))) && parts.next().is_none()
+}
+
+const AGENT_NAME_RULE: &str =
+    "an agent name must be a plain identifier (no path separators or '..')";
 
 /// Create (first call) or load a co-located agent identity seed under `home`.
 /// The seed is the agent's identity — self-certifying, reconstructable, and
 /// persisted outside any working-directory sandbox (§10 finding 1).
 fn load_or_create_agent_seed(home: &Path, name: &str) -> Result<[u8; 32]> {
-    let path = agent_seed_path(home, name);
+    let path = agent_seed_path(home, name)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -3050,7 +3078,7 @@ fn load_or_create_agent_seed(home: &Path, name: &str) -> Result<[u8; 32]> {
 
 /// Load an existing co-located agent identity seed; errors if none is provisioned.
 fn load_agent_seed(home: &Path, name: &str) -> Result<[u8; 32]> {
-    let path = agent_seed_path(home, name);
+    let path = agent_seed_path(home, name)?;
     let hex = std::fs::read_to_string(&path)
         .with_context(|| format!("no agent identity '{name}' provisioned"))?;
     let raw = data_encoding::HEXLOWER_PERMISSIVE

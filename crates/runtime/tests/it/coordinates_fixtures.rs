@@ -108,9 +108,9 @@ fn link_roundtrips() {
 
 #[test]
 fn the_advertised_link_forms_all_parse() {
-    // GOV-8: `lait invite` advertises lait://join/<ticket>; join must accept
-    // exactly what invite prints — plus the bare ticket, terminal-wrapped
-    // copies (interior newlines), and mixed case.
+    // GOV-8: an invite advertises lait://join/<ticket>; entering must accept
+    // exactly what inviting rendered — plus the bare ticket, wrapped copies
+    // (interior newlines), and mixed case.
     let coords = valid_coordinates();
     let ticket = coords.render();
     let prefixed = format!("lait://join/{ticket}");

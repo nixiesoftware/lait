@@ -9,9 +9,9 @@
  * caches across a page load, never persists, and treats an empty answer as the
  * truth rather than as a failure to load.
  *
- * **The daemon may not know the request.** A tab left open across `lait update`
- * can be talking to a build whose control plane predates `live`, which answers
- * `bad request: unknown variant`. That is not an error worth showing anybody:
+ * **The daemon may not know the request.** A tab left open across a
+ * `host_update` + `host_restart` can be talking to a build whose control plane
+ * predates `live`, which answers `bad request: unknown variant`. That is not an error worth showing anybody:
  * the correct response is to stop asking and let every surface draw without
  * presence. `unavailable` is that state, and it is held rather than thrown.
  *

@@ -28,8 +28,8 @@ pub fn packages() -> WorldPackages {
     crate::composition::bundled_packages()
 }
 
-/// Built once per process: a registry is a fixed property of the build, and the
-/// CLI, MCP, and web surfaces all resolve mounts against the same one.
+/// Built once per process: a registry is a fixed property of the build, and
+/// every head resolves mounts against the same one.
 static CLIENT_PACKAGES: LazyLock<WorldClientRegistry> =
     LazyLock::new(crate::composition::bundled_client_packages);
 

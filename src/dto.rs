@@ -44,8 +44,8 @@ pub struct MemberDto {
     pub alias: String,
 }
 
-/// The one-shot "who am I, and am I whole?" projection (`lait whoami`, the MCP
-/// `whoami` tool). Answers the three questions that cost us a full multi-node
+/// The one-shot "who am I, and am I whole?" projection (the MCP `whoami` tool,
+/// the viewer's identity panel). Answers the three questions that cost us a full multi-node
 /// session by inference — *which identity, what may it do, is its view
 /// complete* — as a glance, never a deduction. The observability half of the
 /// Agent Experience initiative (`docs/plans/09`).
@@ -96,7 +96,7 @@ pub struct WhoamiDto {
     pub divergence: Vec<String>,
 }
 
-/// One rendered row of the membership audit log (`lait members log`): the signed
+/// One rendered row of the membership audit log (`Request::MemberLog`): the signed
 /// ACL DAG replayed in causal order with each operation's verdict.
 /// This is **cryptographic provenance** (who was authorized to do what),
 /// distinct from the advisory activity feed.

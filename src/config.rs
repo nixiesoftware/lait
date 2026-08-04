@@ -7,11 +7,12 @@
 //! `$LAIT_HOME` collapses both into one self-contained dir (tests, `--home`,
 //! advanced setups).
 //!
-//! Discovery **never creates a store**: spaces come into being only through
-//! the two explicit verbs (`lait init` founds, `lait join` bootstraps from a
-//! ticket) via [`store_dir_for_init`]. Every other command resolves an existing
-//! store or fails with [`NoStoreHere`] — the silent decoy-store auto-create (and
-//! the directory-trap guard rail it required) is gone by design.
+//! Discovery **never creates a store**: spaces come into being only through the
+//! two host-plane formation requests (`HostSpaceFound` founds, `HostSpaceEnter`
+//! bootstraps from an invite) via [`store_dir_for_init`]. Everything else
+//! resolves an existing store or fails with [`NoStoreHere`] — the silent
+//! decoy-store auto-create (and the directory-trap guard rail it required) is
+//! gone by design.
 //!
 //! Settings are git-style layered key/value maps ([`Settings`]): a global
 //! `config.json` under the config root and a per-store `config.json` inside
@@ -67,14 +68,28 @@ fn find_store_dir(start: &Path) -> Option<PathBuf> {
     None
 }
 
-/// Canonicalize a path so the CLI and the daemon it spawns hash the *same* store
+/// Canonicalize a path so a head and the daemon it spawns hash the *same* store
 /// path (the control channel + single-instance lock are keyed on it). Falls back
 /// to the input if canonicalization fails (e.g. the dir was just created).
-fn canonical(p: &Path) -> PathBuf {
-    match fs::canonicalize(p) {
-        Ok(c) => strip_extended_prefix(c),
-        Err(_) => p.to_path_buf(),
-    }
+///
+/// Reachable from the host plane because admission is keyed on the same digest:
+/// a caller-supplied spelling of a served store must resolve to the Orbit that
+/// store is registered under, or a custody check aimed at it misses.
+pub(crate) fn canonical(p: &Path) -> PathBuf {
+    resolved(p).unwrap_or_else(|| p.to_path_buf())
+}
+
+/// The directory a spelling actually names, or `None` when the filesystem
+/// cannot say.
+///
+/// [`canonical`]'s fallback is a convenience for a path that is about to exist.
+/// A check that decides *whose* directory this is cannot take it: a spelling
+/// with a component that does not exist resolves to nothing, and comparing the
+/// spelling instead compares a string that need not describe the directory the
+/// write will land in — `<somewhere>/nope/../agents/scout` is not under
+/// `agents/` as text, and is exactly that directory on disk.
+pub(crate) fn resolved(p: &Path) -> Option<PathBuf> {
+    fs::canonicalize(p).ok().map(strip_extended_prefix)
 }
 
 /// On Windows, `fs::canonicalize` returns an extended-length `\\?\C:\…` path.
@@ -111,9 +126,165 @@ fn ensure_store_gitignore(store: &Path) {
     }
 }
 
-/// Typed "no space store here" error, so callers (the app dispatcher) can
-/// tell "nothing to bind" apart from real I/O failures and print the guided
-/// error (`lait init` / `lait join` / `--orbit`) instead of a bare failure.
+/// What an invocation explicitly selected, carried as a value.
+///
+/// `--home` and `--orbit` used to be applied by writing `$LAIT_HOME` /
+/// `$LAIT_STORE` back into this process, which made the selection a property of
+/// the process rather than of the call. A long-lived head serves many
+/// identities out of one process, so a selection stored that way is every
+/// tenant's selection; the last caller to write it wins for everybody.
+///
+/// [`Selection::default`] is the ambient one — whatever the environment and the
+/// cwd already say — which is what the daemon and `serve` come up with.
+#[derive(Debug, Clone, Default)]
+pub struct Selection {
+    /// A self-contained identity+store directory (`--home`).
+    pub identity: Option<PathBuf>,
+    /// An already-resolved store directory (`--orbit`).
+    pub store: Option<PathBuf>,
+}
+
+impl Selection {
+    /// A selection that pins one self-contained identity directory.
+    pub fn for_identity(identity: impl Into<PathBuf>) -> Self {
+        Self {
+            identity: Some(identity.into()),
+            store: None,
+        }
+    }
+
+    /// Where this invocation's selection came from, for orientation readouts.
+    pub fn source(&self) -> &'static str {
+        if self.identity.is_some() {
+            "--home"
+        } else if self.store.is_some() {
+            "--orbit"
+        } else if std::env::var_os("LAIT_HOME").is_some() {
+            "LAIT_HOME"
+        } else if std::env::var_os("LAIT_STORE").is_some() {
+            "LAIT_STORE"
+        } else if self.existing_home().is_some() {
+            "cwd"
+        } else {
+            "none"
+        }
+    }
+
+    /// The self-contained home as it was *spelled*, before the filesystem has a
+    /// say. Only the questions that are about the selection itself — was one
+    /// made, and where did it come from — may use this.
+    fn named_home(&self) -> Option<PathBuf> {
+        self.identity
+            .clone()
+            .or_else(|| std::env::var_os("LAIT_HOME").map(PathBuf::from))
+    }
+
+    /// The self-contained home this selection binds, if any: the explicit
+    /// `--home`, else an ambient `$LAIT_HOME`.
+    ///
+    /// `None` is the ordinary per-user identity, and the distinction is what a
+    /// daemon spawn needs: passing the shared config root as `--home` would
+    /// collapse the global catalog into one self-contained identity.
+    ///
+    /// Canonicalized, because a store's [`crate::daemon::LocalOrbitId`] is a
+    /// digest of the path it is registered under and formation registers the
+    /// canonical spelling. A `--home` given relatively, through a symlink
+    /// (`/tmp` is `/private/tmp` on macOS) or as an 8.3 short name would be the
+    /// same directory under a different id: the catalog drops the row as
+    /// belonging to another identity and the store this node just formed
+    /// answers "no such local Orbit" to its own next command. Every other
+    /// branch here already canonicalizes for the same reason.
+    pub fn self_contained_home(&self) -> Option<PathBuf> {
+        self.named_home().map(|dir| canonical(&dir))
+    }
+
+    /// The self-contained home, created first so its canonical spelling is
+    /// knowable at all — `fs::canonicalize` of a directory that does not exist
+    /// yet fails, and a first founding would otherwise register a path no later
+    /// call derives.
+    fn prepared_self_contained_home(&self) -> Result<Option<PathBuf>> {
+        let Some(dir) = self.named_home() else {
+            return Ok(None);
+        };
+        fs::create_dir_all(&dir).with_context(|| format!("create home {}", dir.display()))?;
+        Ok(Some(canonical(&dir)))
+    }
+
+    /// Whether this selection is a self-contained identity home (identity key
+    /// beside its store) rather than the shared per-user identity.
+    pub fn self_contained(&self) -> bool {
+        self.named_home().is_some()
+    }
+
+    /// The directory holding this selection's identity `secret.key`.
+    pub fn identity_dir(&self) -> Result<PathBuf> {
+        match self.prepared_self_contained_home()? {
+            Some(dir) => Ok(dir),
+            None => config_root(),
+        }
+    }
+
+    /// The private runtime home of this selection's Lait daemon.
+    pub fn daemon_home(&self) -> Result<PathBuf> {
+        let dir = self.identity_dir()?.join("daemon");
+        fs::create_dir_all(&dir)
+            .with_context(|| format!("create Lait daemon home {}", dir.display()))?;
+        Ok(dir)
+    }
+
+    /// The store this selection WOULD bind if it already exists — never
+    /// creating one.
+    pub fn existing_home(&self) -> Option<PathBuf> {
+        if let Some(dir) = self.self_contained_home() {
+            return Some(dir);
+        }
+        if let Some(store) = &self.store {
+            return Some(canonical(store));
+        }
+        if let Some(p) = std::env::var_os("LAIT_STORE") {
+            return Some(canonical(&PathBuf::from(p)));
+        }
+        let cwd = std::env::current_dir().ok()?;
+        find_store_dir(&cwd).map(|s| canonical(&s))
+    }
+
+    /// Resolve the **existing** space store for this selection, never creating
+    /// one. A discovery miss is a typed [`NoStoreHere`].
+    pub fn resolve_existing_store(&self) -> Result<PathBuf> {
+        if let Some(dir) = self.prepared_self_contained_home()? {
+            return Ok(dir);
+        }
+        if let Some(store) = &self.store {
+            fs::create_dir_all(store)?;
+            return Ok(canonical(store));
+        }
+        if let Some(p) = std::env::var_os("LAIT_STORE") {
+            let dir = PathBuf::from(p);
+            fs::create_dir_all(&dir)?;
+            return Ok(canonical(&dir));
+        }
+        let cwd = std::env::current_dir().context("get current dir")?;
+        match find_store_dir(&cwd) {
+            Some(s) => Ok(canonical(&s)),
+            None => Err(anyhow::Error::new(NoStoreHere { cwd })),
+        }
+    }
+
+    /// The store directory a creation verb will populate under `dir`: this
+    /// selection's self-contained home if it has one, else `<dir>/.lait`.
+    pub fn store_dir_for_init(&self, dir: &Path) -> Result<PathBuf> {
+        if let Some(home) = self.prepared_self_contained_home()? {
+            ensure_store_gitignore(&home);
+            return Ok(home);
+        }
+        store_dir_under(dir)
+    }
+}
+
+/// Typed "no space store here" error, so a head can tell "nothing to bind"
+/// apart from real I/O failures and answer with the guided next step (found a
+/// space, enter one from an invite, or point at an existing store with
+/// `--orbit`) instead of a bare failure.
 #[derive(Debug)]
 pub struct NoStoreHere {
     /// The directory discovery started from.
@@ -132,20 +303,20 @@ impl std::error::Error for NoStoreHere {}
 
 /// Resolve the **existing** space store for this invocation — never
 /// creating one. Precedence:
-///   1. an explicit named identity (`resume`/`--as`) — a self-contained home
+///   1. an explicit named identity (`$LAIT_AS`) — a self-contained home
 ///      under the identity registry (created on demand: it is an identity
 ///      container, not a space).
 ///   2. `$LAIT_HOME` — explicit, self-contained override (identity + store
-///      in one dir): `--home`, tests, advanced setups.
-///   3. `$LAIT_STORE` — pin set by the CLI for the daemon it spawns (and by
-///      `--orbit`), so both bind the exact store the CLI resolved, independent
-///      of cwd.
+///      in one dir): `lait daemon --home`, tests, advanced setups.
+///   3. `$LAIT_STORE` — the pin a launcher passes to the daemon it spawns (and
+///      what `--orbit` resolves to), so both bind the exact store the launcher
+///      chose, independent of cwd.
 ///   4. git-style discovery: walk up from the cwd for a `.lait/`.
 ///
 /// A discovery miss is a typed [`NoStoreHere`] error — stores are only born in
-/// [`store_dir_for_init`] (`lait init` / `lait join`). The identity key is
-/// resolved separately ([`identity_dir`]) — global by default, so one identity
-/// spans every repo-bound store.
+/// [`store_dir_for_init`], which only the two formation requests reach. The
+/// identity key is resolved separately ([`identity_dir`]) — global by default,
+/// so one identity spans every repo-bound store.
 pub fn resolve_existing_store(explicit: Option<&str>) -> Result<PathBuf> {
     if let Some(name) = explicit {
         let (reg, _) = registry()?;
@@ -153,46 +324,35 @@ pub fn resolve_existing_store(explicit: Option<&str>) -> Result<PathBuf> {
         fs::create_dir_all(&home)?;
         return Ok(home);
     }
-    if let Some(p) = std::env::var_os("LAIT_HOME") {
-        let dir = PathBuf::from(p);
-        fs::create_dir_all(&dir)?;
-        return Ok(dir);
-    }
-    if let Some(p) = std::env::var_os("LAIT_STORE") {
-        let dir = PathBuf::from(p);
-        fs::create_dir_all(&dir)?;
-        return Ok(canonical(&dir));
-    }
-    let cwd = std::env::current_dir().context("get current dir")?;
-    match find_store_dir(&cwd) {
-        Some(s) => Ok(canonical(&s)),
-        None => Err(anyhow::Error::new(NoStoreHere { cwd })),
-    }
+    Selection::default().resolve_existing_store()
 }
 
 /// Create (or reuse) the `.lait/` store dir under `dir` — the raw creation
-/// primitive, ignoring `$LAIT_HOME` (used by `join --dir`, where the explicit
-/// argument must win).
+/// primitive, ignoring `$LAIT_HOME` so that a caller-named directory wins over
+/// an ambient one.
 pub fn store_dir_under(dir: &Path) -> Result<PathBuf> {
-    let store = dir.join(STORE_DIR);
-    fs::create_dir_all(&store).with_context(|| format!("create store dir {}", store.display()))?;
-    let store = canonical(&store);
+    prepare_store_dir(&dir.join(STORE_DIR))
+}
+
+/// Create (or reuse) an **exact** store directory and drop its `.gitignore`.
+///
+/// The form a formation request takes: by the time a path crosses the daemon
+/// boundary the caller has already decided which directory becomes the store,
+/// and appending `.lait` to it a second time would put the store somewhere
+/// nobody asked for.
+pub fn prepare_store_dir(store: &Path) -> Result<PathBuf> {
+    fs::create_dir_all(store).with_context(|| format!("create store dir {}", store.display()))?;
+    let store = canonical(store);
     ensure_store_gitignore(&store);
     Ok(store)
 }
 
-/// The store directory a creation verb (`init`/`join`) will populate: an
-/// explicit `$LAIT_HOME` if set, else `<dir>/.lait`. Creates the directory and
+/// The store directory a formation request will populate: an explicit
+/// `$LAIT_HOME` if set, else `<dir>/.lait`. Creates the directory and
 /// drops the store `.gitignore`. Together with [`store_dir_under`], the ONLY
 /// paths that bring a store into existence.
 pub fn store_dir_for_init(dir: &Path) -> Result<PathBuf> {
-    if let Some(p) = std::env::var_os("LAIT_HOME") {
-        let d = PathBuf::from(p);
-        fs::create_dir_all(&d)?;
-        ensure_store_gitignore(&d);
-        return Ok(d);
-    }
-    store_dir_under(dir)
+    Selection::default().store_dir_for_init(dir)
 }
 
 /// The directory holding this node's identity `secret.key`. A self-contained
@@ -200,12 +360,7 @@ pub fn store_dir_for_init(dir: &Path) -> Result<PathBuf> {
 /// **global** (under [`config_root`]) so one identity spans every repo-bound
 /// store — like one `git` `user.email` across many repos.
 pub fn identity_dir() -> Result<PathBuf> {
-    if let Some(p) = std::env::var_os("LAIT_HOME") {
-        let dir = PathBuf::from(p);
-        fs::create_dir_all(&dir)?;
-        return Ok(dir);
-    }
-    config_root()
+    Selection::default().identity_dir()
 }
 
 /// Private runtime home of the identity-scoped Lait daemon.
@@ -216,24 +371,31 @@ pub fn identity_dir() -> Result<PathBuf> {
 /// lease. A self-contained `$LAIT_HOME` therefore still gets one daemon without
 /// colliding with the Station occupying that same directory.
 pub fn lait_daemon_home() -> Result<PathBuf> {
-    let dir = identity_dir()?.join("daemon");
-    fs::create_dir_all(&dir)
-        .with_context(|| format!("create Lait daemon home {}", dir.display()))?;
-    Ok(dir)
+    Selection::default().daemon_home()
 }
 
 /// The store this invocation WOULD bind if it already exists — WITHOUT creating
 /// one. For commands like `update` that must not spawn a stray `.lait/` just
 /// to look for a running daemon.
 pub fn existing_home() -> Option<PathBuf> {
-    if let Some(p) = std::env::var_os("LAIT_HOME") {
-        return Some(PathBuf::from(p));
+    Selection::default().existing_home()
+}
+
+/// Where a head offers to put a store when nobody has said where.
+///
+/// A terminal defaulted to its working directory. A browser has none, and an
+/// empty path box is a founding form nobody can complete — so the node names a
+/// directory it can always write, under the same config root every other piece
+/// of node-local state lives in (and which `$LAIT_CONFIG_ROOT` relocates, so a
+/// test never proposes the developer's real one). Creates nothing: the caller
+/// picks a name, and formation makes the directory.
+pub fn spaces_root() -> PathBuf {
+    match config_root() {
+        Ok(root) => root.join("spaces"),
+        // A config root we cannot even name is a failure the *next* request
+        // reports properly; a suggestion is not the place to raise it.
+        Err(_) => PathBuf::from("spaces"),
     }
-    if let Some(p) = std::env::var_os("LAIT_STORE") {
-        return Some(canonical(&PathBuf::from(p)));
-    }
-    let cwd = std::env::current_dir().ok()?;
-    find_store_dir(&cwd).map(|s| canonical(&s))
 }
 
 /// Names of all registered identities.
@@ -274,8 +436,8 @@ pub fn home_hash(home: &Path) -> String {
 /// to `bind()` and never comes online ("daemon did not come online in time").
 /// When the natural in-home path would be too long, fall back to a short, stable
 /// path in the temp dir derived from a hash of the home. Both the daemon and the
-/// CLI client resolve this the same way (same binary, same home), so they agree
-/// on where to bind/connect.
+/// client resolve this the same way (same binary, same home), so they agree on
+/// where to bind/connect.
 #[cfg(unix)]
 pub fn socket_path(home: &Path) -> PathBuf {
     let direct = home.join("control.sock");
@@ -525,7 +687,7 @@ mod tests {
             p.display()
         );
 
-        // Deterministic: daemon and CLI must resolve the same long home identically.
+        // Deterministic: daemon and client must resolve the same long home identically.
         assert_eq!(socket_path(&long), socket_path(&long));
     }
 }
@@ -559,25 +721,25 @@ pub fn load_or_create_identity(home: &Path) -> Result<[u8; 32]> {
     }
 }
 
-// ---- layered local settings (`lait config`) ----
+// ---- layered local settings (the `HostConfig*` requests) ----
 
 /// Which layers a config key may be written to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyLayers {
     /// Both the global and the per-store file (store wins on read).
     GlobalAndStore,
-    /// Per-store only (`--global` is rejected).
+    /// Per-store only (a `global` write is rejected).
     StoreOnly,
 }
 
-/// One row of the closed key table: `lait config` refuses names not listed
+/// One row of the closed key table: a settings write refuses names not listed
 /// here (typo safety — git's anything-goes is a support trap for a tool this
 /// young). Add a row to introduce a key.
 #[derive(Debug, Clone, Copy)]
 pub struct KeySpec {
     pub name: &'static str,
     pub layers: KeyLayers,
-    /// Whether a running daemon consumes this key (⇒ `config set` sends a
+    /// Whether a running daemon consumes this key (⇒ `HostConfigSet` sends a
     /// best-effort `ConfigReload` so the change is never a silent no-op).
     pub daemon_read: bool,
     pub help: &'static str,
@@ -682,7 +844,7 @@ pub struct Settings {
 
 impl Settings {
     /// Load both layers for a store. `home = None` loads only the global layer
-    /// (e.g. `lait config --global` outside any space).
+    /// (a settings request that names no store).
     pub fn load(home: Option<&Path>) -> Self {
         let global = global_config_path()
             .map(|p| ConfigMap::load(&p))
@@ -710,6 +872,168 @@ impl Settings {
     pub fn default_project(&self) -> Option<String> {
         self.get("project.default").map(str::to_string)
     }
+}
+
+// ---- `config` as values (`get` / `set` / `unset` / `list`) ----
+//
+// The bodies used to live in the CLI dispatcher, where every answer was a
+// `println!` and every refusal a `process::exit`. Neither survives a head that
+// has to render the same facts into JSON, a browser, or an agent transcript, so
+// the layer policy and the key table live here — beside the files they read —
+// and the surface only formats what they return.
+
+/// Which of the two settings files a value came from, or the built-in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigOrigin {
+    Store,
+    Global,
+    Default,
+}
+
+/// One effective setting: its value and the layer that supplied it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigRow {
+    pub key: String,
+    /// `None` when the key is unset at every layer and has no built-in.
+    pub value: Option<String>,
+    pub origin: ConfigOrigin,
+    pub help: String,
+}
+
+/// Which file a write landed in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigLayer {
+    Store,
+    Global,
+}
+
+/// The record of one completed `set`/`unset`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigWrite {
+    pub key: String,
+    /// The new value, or `None` for an `unset`.
+    pub value: Option<String>,
+    pub layer: ConfigLayer,
+    /// Whether a running daemon consumes this key, so the caller knows a
+    /// reload has to be pushed for the change to take effect before restart.
+    pub daemon_read: bool,
+}
+
+/// A key that resolved to nothing at all — no layer, no built-in.
+///
+/// Typed rather than a message, because "unset" is the one config outcome a
+/// caller acts on differently (a `NotFound` on the wire, an empty field in a
+/// browser); string-matching a sentence for that is how the two drift apart.
+#[derive(Debug)]
+pub struct ConfigUnset {
+    pub key: String,
+    /// True when the key was absent from the layer a write targeted, as opposed
+    /// to absent everywhere.
+    pub in_layer: bool,
+}
+
+impl std::fmt::Display for ConfigUnset {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.in_layer {
+            write!(f, "'{}' was not set in that layer", self.key)
+        } else {
+            write!(f, "'{}' is unset", self.key)
+        }
+    }
+}
+impl std::error::Error for ConfigUnset {}
+
+fn row_for(spec: &KeySpec, settings: &Settings) -> ConfigRow {
+    let (value, origin) = match (
+        settings.store.get(spec.name),
+        settings.global.get(spec.name),
+    ) {
+        (Some(v), _) => (Some(v.to_string()), ConfigOrigin::Store),
+        (None, Some(v)) => (Some(v.to_string()), ConfigOrigin::Global),
+        (None, None) => ((spec.built_in)(), ConfigOrigin::Default),
+    };
+    ConfigRow {
+        key: spec.name.to_string(),
+        value,
+        origin,
+        help: spec.help.to_string(),
+    }
+}
+
+/// Every recognized key with its effective value and origin. `home` is the
+/// store layer; `None` reads the global layer alone.
+pub fn config_list(home: Option<&Path>) -> Vec<ConfigRow> {
+    let settings = Settings::load(home);
+    KEYS.iter().map(|spec| row_for(spec, &settings)).collect()
+}
+
+/// One key's effective value. A key that is unset everywhere and has no
+/// built-in is [`ConfigUnset`], not an empty string.
+pub fn config_get(home: Option<&Path>, key: &str) -> Result<ConfigRow> {
+    let spec = key_spec(key)?;
+    let row = row_for(spec, &Settings::load(home));
+    if row.value.is_none() {
+        return Err(anyhow::Error::new(ConfigUnset {
+            key: key.to_string(),
+            in_layer: false,
+        }));
+    }
+    Ok(row)
+}
+
+/// The file a write for `key` targets, applying the key's layer policy.
+fn write_target(home: Option<&Path>, key: &str, global: bool) -> Result<(PathBuf, ConfigLayer)> {
+    let spec = key_spec(key)?;
+    if global && spec.layers == KeyLayers::StoreOnly {
+        anyhow::bail!("'{key}' is a per-store key — it has no global layer to write");
+    }
+    if global {
+        return Ok((global_config_path()?, ConfigLayer::Global));
+    }
+    let home = home
+        .ok_or_else(|| anyhow!("no space named — name the store to write, or write it globally"))?;
+    Ok((store_config_path(home), ConfigLayer::Store))
+}
+
+/// Write one setting into the store layer (or the global layer with `global`).
+pub fn config_set(
+    home: Option<&Path>,
+    key: &str,
+    value: &str,
+    global: bool,
+) -> Result<ConfigWrite> {
+    let (path, layer) = write_target(home, key, global)?;
+    let mut map = ConfigMap::load(&path);
+    map.set(key, value);
+    map.save(&path)?;
+    Ok(ConfigWrite {
+        key: key.to_string(),
+        value: Some(value.to_string()),
+        layer,
+        daemon_read: key_spec(key)?.daemon_read,
+    })
+}
+
+/// Clear one setting from the layer a write would target. A key that was not
+/// set in that layer is [`ConfigUnset`] — nothing is written.
+pub fn config_unset(home: Option<&Path>, key: &str, global: bool) -> Result<ConfigWrite> {
+    let (path, layer) = write_target(home, key, global)?;
+    let mut map = ConfigMap::load(&path);
+    if !map.unset(key) {
+        return Err(anyhow::Error::new(ConfigUnset {
+            key: key.to_string(),
+            in_layer: true,
+        }));
+    }
+    map.save(&path)?;
+    Ok(ConfigWrite {
+        key: key.to_string(),
+        value: None,
+        layer,
+        daemon_read: key_spec(key)?.daemon_read,
+    })
 }
 
 fn whoami_fallback() -> String {

@@ -2,10 +2,10 @@
 @import "./tokens.generated.css";
 
 /* ── Typefaces ───────────────────────────────────────────────────────────
-   Self-hosted and embedded, never fetched. `lait serve` runs on loopback and
-   the binary carries its own assets, so a webfont CDN would make local-first
-   typography depend on the network — the one thing this app is built not to
-   need. These files ship inside the executable.
+   Self-hosted and embedded, never fetched. Bare `lait` runs the HTTP head on
+   loopback and the binary carries its own assets, so a webfont CDN would make
+   local-first typography depend on the network — the one thing this app is
+   built not to need. These files ship inside the executable.
 
    Only the latin ranges and the weight axis are included. Fontsource's full
    Inter is 1.9 MB across every subset (cyrillic, greek, vietnamese) and every

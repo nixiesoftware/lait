@@ -217,8 +217,8 @@ authorization.
 
 ## 10. Local control channel
 
-CLI, web, and MCP clients enter one local protocol. A request carries an
-explicit control route:
+Web and MCP clients enter one local protocol. A request carries an explicit
+control route:
 
 - `daemon` for the process-level catalog and daemon lifecycle;
 - `space { orbit, space }` for Mechanics, Station, observations, and lifecycle
@@ -240,11 +240,12 @@ daemon::Daemon endpoint requires an explicit route. A version handshake precedes
 requests. The production request classifier assigns every historical typed
 request exactly one terminal owner; there is no wildcard product fallback.
 
-The CLI calls its selector `--orbit` because it chooses the local durable
-participation used to reach a Space. Its parser fixes the terminal target in a
-`ClientAction` before resolving the selected Orbit. The route is therefore an
-output of command parsing plus local navigation, not an inference repeated by
-the daemon from product payload shape.
+The launcher calls its selector `--orbit` because it chooses the local durable
+participation used to reach a Space. A head fixes the terminal target from the
+route the request arrived on — `/api/host/rpc`, `/api/spaces/{orbit}/rpc`, or
+`/api/spaces/{orbit}/worlds/{mount}/rpc` — before resolving the selected Orbit.
+The route is therefore an output of addressing plus local navigation, not an
+inference repeated by the daemon from product payload shape.
 
 The optional `if_running: true` envelope field is reserved for passive,
 explicitly Space-routed status, identity display, and configuration reload.
@@ -280,9 +281,9 @@ attachment. The issue-tracker application emits
 `com.lait.issues` / `issues.control` v1; daemon::Daemon does not infer or hardcode
 either value.
 
-Product client packages decode `WorldReply.payload`, own presentation for CLI
-and MCP, parse their explicit web route, and execute named local operations
-through generic host facilities. The browser sends Space control to
+Product client packages decode `WorldReply.payload`, own their MCP descriptors,
+parse their explicit web route, and execute named local operations through
+generic host facilities. The browser sends Space control to
 `/api/spaces/{orbit}/rpc` and product input to
 `/api/spaces/{orbit}/worlds/{mount}/rpc`; there is no decode fallback between
 those namespaces. Root control treats World request and reply payloads as opaque

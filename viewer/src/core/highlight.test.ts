@@ -10,10 +10,10 @@ import { highlight, isHighlightable } from "./highlight";
  */
 describe("highlight", () => {
   it("colours a known language with both themes on every token", async () => {
-    const lines = await highlight("$ lait serve --json", "bash");
+    const lines = await highlight("$ lait --json", "bash");
     expect(lines).not.toBeNull();
     const tokens = lines!.flat();
-    expect(tokens.map((t) => t.content).join("")).toBe("$ lait serve --json");
+    expect(tokens.map((t) => t.content).join("")).toBe("$ lait --json");
     // `defaultColor: false` is what keeps a theme flip from needing a
     // re-tokenise: no inline `color`, both variables present, CSS decides.
     for (const token of tokens) {

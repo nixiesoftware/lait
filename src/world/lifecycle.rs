@@ -11,9 +11,18 @@ use anyhow::Result;
 use runtime::{plane::Activation, world::Catalog, Runtime};
 
 use crate::orbital::{
-    discover_space_id, orbital_store_root, unsupported_store_at, BootstrapContext, InitialScope,
-    SpaceAuthority, WorldPackages,
+    discover_space, orbital_store_root, unsupported_store_at, BootstrapContext, InitialScope,
+    SpaceAuthority, SpaceStore, WorldPackages,
 };
+
+/// A home bound to more than one Space. Resuming formation there would pick one
+/// arbitrarily, and forming beside them would add a third.
+fn ambiguous_home(home: &Path) -> anyhow::Error {
+    anyhow::anyhow!(
+        "{} holds more than one orbital Space; a home binds one",
+        home.display()
+    )
+}
 
 fn world_registry(packages: &WorldPackages) -> Result<Catalog> {
     packages
@@ -66,14 +75,15 @@ fn form_space_with_scopes(
         return Err(anyhow::anyhow!("{error}"));
     }
     let root = orbital_store_root(home);
-    let (mechanics, coordinates) = match discover_space_id(home) {
-        Some(space) => {
+    let (mechanics, coordinates) = match discover_space(home) {
+        SpaceStore::One(space) => {
             let mechanics = SpaceAuthority::open(&root, &space, device_seed)?;
             let coordinates =
                 mechanics.mint_coordinates(device_seed, display_name, vec![], None)?;
             (mechanics, coordinates)
         }
-        None => SpaceAuthority::form(&root, device_seed, display_name, vec![])?,
+        SpaceStore::Absent => SpaceAuthority::form(&root, device_seed, display_name, vec![])?,
+        SpaceStore::Several => return Err(ambiguous_home(home)),
     };
 
     let packages = crate::world::packages();
@@ -134,14 +144,15 @@ fn form_space_with_fault(
         return Err(anyhow::anyhow!("{error}"));
     }
     let root = orbital_store_root(home);
-    let (mechanics, coordinates) = match discover_space_id(home) {
-        Some(space) => {
+    let (mechanics, coordinates) = match discover_space(home) {
+        SpaceStore::One(space) => {
             let mechanics = SpaceAuthority::open(&root, &space, device_seed)?;
             let coordinates =
                 mechanics.mint_coordinates(device_seed, display_name, vec![], None)?;
             (mechanics, coordinates)
         }
-        None => SpaceAuthority::form(&root, device_seed, display_name, vec![])?,
+        SpaceStore::Absent => SpaceAuthority::form(&root, device_seed, display_name, vec![])?,
+        SpaceStore::Several => return Err(ambiguous_home(home)),
     };
 
     seed_founder_policy(&mechanics)?;
@@ -176,7 +187,7 @@ fn form_space_with_fault(
     Ok((mechanics, coordinates))
 }
 
-pub fn found_space_cli(
+pub fn found_space(
     home: &Path,
     device_seed: &[u8; 32],
     display_name: &str,
@@ -295,7 +306,9 @@ mod tests {
                 "fault interrupts formation"
             );
 
-            let space = crate::orbital::discover_space_id(&home).expect("Space store");
+            let space = crate::orbital::discover_space(&home)
+                .single()
+                .expect("Space store");
             let interrupted = read_bootstrap_record(&home, &space);
             match fault {
                 Fault::BeforeRecord => assert!(interrupted.is_none()),

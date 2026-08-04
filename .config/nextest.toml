@@ -145,7 +145,7 @@ filter = '''
     + (binary_id(lait::it) & test(guided_join::))
     + (binary_id(lait::it) & test(seed_registry::))
     + (binary_id(lait::it) & test(control_plane::))
-    + (binary_id(lait::it) & test(cli_safety::))
+    + (binary_id(lait::it) & test(launcher_safety::))
     + (binary_id(runtime::it) & test(contact_iroh::))
     + (package(comms) & kind(test))
 '''
@@ -232,8 +232,7 @@ default-filter = '''
         + (binary_id(lait::it) & test(control_classification::))
         + (binary_id(lait::it) & test(live_control::))
         + (binary_id(lait::it) & test(restart_reconnect::))
-        + (binary_id(lait::it) & test(cli_safety::))
-        + (binary_id(lait::it) & test(cli_surfaces::))
+        + (binary_id(lait::it) & test(launcher_safety::))
         + (binary_id(lait::it) & test(seed_registry::))
         + (binary_id(lait::it) & test(station_lifecycle::))
         + (binary_id(lait::it) & test(content_ipc::))
@@ -292,7 +291,7 @@ filter = '''
     + (binary_id(lait::it) & test(guided_join::))
     + (binary_id(lait::it) & test(seed_registry::))
     + (binary_id(lait::it) & test(control_plane::))
-    + (binary_id(lait::it) & test(cli_safety::))
+    + (binary_id(lait::it) & test(launcher_safety::))
     + (binary_id(runtime::it) & test(contact_iroh::))
     + (package(comms) & kind(test))
 '''

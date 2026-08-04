@@ -1,15 +1,23 @@
-//! `lait install-mcp`: register the MCP server with an agent's config in
-//! one explicit step, instead of hand-editing JSON. Merges into the target
-//! client's `mcpServers` block without clobbering other servers.
+//! Register the lait MCP server with an agent's config in one explicit step,
+//! instead of hand-editing JSON. Merges into the target client's `mcpServers`
+//! block without clobbering other servers.
+//!
+//! Reached as [`crate::control::Request::HostInstallMcp`]. It has to live on the
+//! host plane rather than in a head: a head cannot write the file that tells an
+//! agent how to reach it, and the write must work before any store exists.
 
-use std::{fs, path::PathBuf};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{anyhow, Context, Result};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
 /// MCP-speaking agent whose config we know how to write.
-#[derive(Clone, Copy, Debug, clap::ValueEnum)]
-#[value(rename_all = "snake_case")]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
 pub enum Client {
     /// Claude Code (`.mcp.json` project, `~/.claude.json` user).
     Claude,
@@ -44,8 +52,8 @@ impl Client {
 }
 
 /// Where to write the config: shared across a machine, or local to a project.
-#[derive(Clone, Copy, Debug, clap::ValueEnum)]
-#[value(rename_all = "snake_case")]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
 pub enum Scope {
     User,
     Project,
@@ -66,12 +74,15 @@ fn default_scope(client: Client) -> Scope {
 }
 
 /// Resolve the config file for a client + scope.
-fn config_path(client: Client, scope: Scope) -> Result<PathBuf> {
-    let cwd = std::env::current_dir().context("get current dir")?;
+///
+/// `project` is passed in rather than read from `current_dir()`: this runs in
+/// the identity's daemon, whose working directory has nothing to do with the
+/// project the caller means.
+fn config_path(client: Client, scope: Scope, project: &Path) -> Result<PathBuf> {
     Ok(match (client, scope) {
-        (Client::Generic, _) | (Client::Claude, Scope::Project) => cwd.join(".mcp.json"),
+        (Client::Generic, _) | (Client::Claude, Scope::Project) => project.join(".mcp.json"),
         (Client::Claude, Scope::User) => home()?.join(".claude.json"),
-        (Client::Cursor, Scope::Project) => cwd.join(".cursor").join("mcp.json"),
+        (Client::Cursor, Scope::Project) => project.join(".cursor").join("mcp.json"),
         (Client::Cursor, Scope::User) => home()?.join(".cursor").join("mcp.json"),
         (Client::Windsurf, _) => home()?
             .join(".codeium")
@@ -84,13 +95,13 @@ fn config_path(client: Client, scope: Scope) -> Result<PathBuf> {
 ///
 /// Deliberately portable: `lait` off PATH rather than a snapshot of
 /// `current_exe()`, and no `$LAIT_HOME` capture. The server then discovers its
-/// Orbit exactly as the CLI does — walking up from the client's working
+/// Orbit the way every head does — walking up from the client's working
 /// directory for a `.lait/` — so one entry serves every space on the machine
 /// and never needs repointing.
 ///
 /// Both of the things this *stopped* doing were silent-failure generators. A
 /// pinned absolute path goes stale the moment the binary moves or the control
-/// protocol advances (the daemon handshake then refuses a CLI whose version
+/// protocol advances (the daemon handshake then refuses a client whose version
 /// string is unchanged). A captured `$LAIT_HOME` outlives the shell that set
 /// it, and because a home is created on demand it resolves to a freshly-made
 /// empty directory — reported as "no local Orbit here", which reads like a
@@ -125,8 +136,24 @@ fn advice(client: Client, name: &str) -> Option<String> {
     }
 }
 
+/// What an install produced, for whichever surface asked for it.
+pub struct Installed {
+    /// The config file this landed in — or, under `print`, would have.
+    pub path: PathBuf,
+    /// The `mcpServers` entry that would be written under `print`, else the
+    /// human summary.
+    pub detail: String,
+    /// The client-specific caveat, when there is one.
+    pub note: Option<String>,
+    /// Whether an entry under this name already existed. Always `false` under
+    /// `print`, which never opens the file.
+    pub replaced: bool,
+    /// The agent identity the written entry signs its work as.
+    pub agent: Option<String>,
+}
+
 /// Register (or update) the lait MCP server in `client`'s config. With
-/// `print`, returns the would-be file contents instead of writing.
+/// `print`, returns the entry that would be written — and touches nothing.
 pub fn install_mcp(
     client: Client,
     scope: Option<Scope>,
@@ -134,9 +161,10 @@ pub fn install_mcp(
     agent: Option<&str>,
     no_agent: bool,
     print: bool,
-) -> Result<String> {
+    project: &Path,
+) -> Result<Installed> {
     let scope = scope.unwrap_or_else(|| default_scope(client));
-    let path = config_path(client, scope)?;
+    let path = config_path(client, scope, project)?;
     // The named client picks its own agent identity; `--agent` overrides it and
     // `--no-agent` declines one, leaving the work signed by the human.
     let agent = if no_agent {
@@ -144,6 +172,26 @@ pub fn install_mcp(
     } else {
         agent.or_else(|| client.agent_name())
     };
+    let note = advice(client, name);
+
+    // `print` answers "what would you write", and the answer is the entry — not
+    // the file. Merging into the file first and returning the result handed the
+    // caller the whole of whatever config already sat at `path`, and `path` is
+    // caller-directed: `project` is deliberately unadmitted, because this verb
+    // targets an editor's project directory, which need not hold a store this
+    // daemon serves. A dry run that reads is a read primitive for any JSON file
+    // this process can open. The entry below is built from the request alone, so
+    // it discloses nothing the caller did not already send.
+    if print {
+        let entry = json!({ "mcpServers": { name: server_entry(agent) } });
+        return Ok(Installed {
+            path,
+            detail: serde_json::to_string_pretty(&entry)? + "\n",
+            note,
+            replaced: false,
+            agent: agent.map(ToString::to_string),
+        });
+    }
 
     let mut root: Value = if path.exists() {
         let data = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
@@ -167,20 +215,12 @@ pub fn install_mcp(
     servers.insert(name.to_string(), server_entry(agent));
 
     let pretty = serde_json::to_string_pretty(&root)? + "\n";
-    if print {
-        // stdout stays the file and nothing else, so `--print` remains pipeable;
-        // the caveat still has to reach a human previewing the change.
-        if let Some(note) = advice(client, name) {
-            eprintln!("{note}\n");
-        }
-        return Ok(pretty);
-    }
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
     fs::write(&path, &pretty).with_context(|| format!("write {}", path.display()))?;
 
-    let mut msg = format!(
+    let mut detail = format!(
         "{} MCP server '{}' in {}\nRestart your agent (or reload its MCP servers) to pick it up.",
         if existed { "updated" } else { "added" },
         name,
@@ -189,20 +229,26 @@ pub fn install_mcp(
     match agent {
         // Naming an agent is the whole of Architecture B from the config side;
         // the identity itself is still a deliberate, human-sponsored act.
-        Some(a) => msg.push_str(&format!(
-            "\n\nWork will be attributed to the agent identity '{a}'. Provision it once with:\n  \
-             lait members agent --new {a}"
-        )),
-        None => msg.push_str(
-            "\n\nWork will be attributed to you, not to the agent. Pass --agent <name> to sign \
-             its work\nas a sponsored identity of its own.",
+        Some(a) => {
+            use std::fmt::Write;
+            let _ = write!(
+                detail,
+                "\n\nWork will be attributed to the agent identity '{a}'. Sponsor it once from \
+                 Settings > Members in the local app (run `lait`)."
+            );
+        }
+        None => detail.push_str(
+            "\n\nWork will be attributed to you, not to the agent. Name an agent to sign its \
+             work\nas a sponsored identity of its own.",
         ),
     }
-    if let Some(note) = advice(client, name) {
-        msg.push_str("\n\n");
-        msg.push_str(&note);
-    }
-    Ok(msg)
+    Ok(Installed {
+        path,
+        detail,
+        note,
+        replaced: existed,
+        agent: agent.map(ToString::to_string),
+    })
 }
 
 #[cfg(test)]
@@ -269,6 +315,56 @@ mod tests {
                 "{name} must be a plain lowercase identifier"
             );
         }
+    }
+
+    /// A dry run must not be a way to read.
+    ///
+    /// **The failure this prevents:** the target directory is caller-directed
+    /// and deliberately unadmitted — this verb aims at an editor's project,
+    /// which need not hold a store this daemon serves — so a `print` that merged
+    /// the file at that path into its answer handed back any JSON this process
+    /// could open, to anything holding the loopback token.
+    #[test]
+    fn printing_never_returns_the_file_it_would_have_written() {
+        let dir = std::env::temp_dir().join(format!("lait-mcp-print-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("project dir");
+        let planted =
+            r#"{"mcpServers":{"other":{"command":"another-binary"}},"authToken":"not-yours"}"#;
+        fs::write(dir.join(".mcp.json"), planted).expect("plant a config");
+
+        let printed = install_mcp(
+            Client::Generic,
+            Some(Scope::Project),
+            "lait",
+            Some("scout"),
+            false,
+            true,
+            &dir,
+        )
+        .expect("print");
+
+        assert_eq!(printed.path, dir.join(".mcp.json"));
+        assert!(
+            !printed.detail.contains("not-yours") && !printed.detail.contains("another-binary"),
+            "print disclosed the file it would touch: {}",
+            printed.detail
+        );
+        // What it does answer is the entry, in full — built from the request, so
+        // it says nothing back the caller did not already send.
+        let entry: Value = serde_json::from_str(&printed.detail).expect("print answers JSON");
+        assert_eq!(entry["mcpServers"]["lait"]["command"], json!("lait"));
+        assert_eq!(
+            entry["mcpServers"]["lait"]["env"]["LAIT_AGENT"],
+            json!("scout")
+        );
+        assert_eq!(
+            fs::read_to_string(dir.join(".mcp.json")).expect("read back"),
+            planted,
+            "print must write nothing"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// Claude Code ships the server in its plugin, so a written entry shadows

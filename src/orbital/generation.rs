@@ -7,7 +7,7 @@ use std::sync::Arc;
 use anyhow::{anyhow, Context, Result};
 use fs2::FileExt;
 
-use super::{discover_space_id, orbital_store_root, SpaceAuthority};
+use super::{discover_space, orbital_store_root, SpaceAuthority, SpaceStore};
 
 /// The verified generation selected by a rebuild.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,7 +24,15 @@ pub struct Rebuild {
 /// representation operation: it authors no Space authority effect and changes
 /// no World implementation.
 pub fn rebuild_prior(home: &Path, device_seed: &[u8; 32]) -> Result<Rebuild> {
-    let space = discover_space_id(home).ok_or_else(|| anyhow!("no orbital Space in this home"))?;
+    let space = match discover_space(home) {
+        SpaceStore::One(space) => space,
+        SpaceStore::Absent => return Err(anyhow!("no orbital Space in this home")),
+        SpaceStore::Several => {
+            return Err(anyhow!(
+                "this home holds more than one orbital Space; a rebuild has no way to pick one"
+            ))
+        }
+    };
     let orbit = orbital_store_root(home).join(space.as_str());
     let active = runtime::generation::Active::read(&orbit)
         .map_err(|error| anyhow!("read active generation: {error}"))?;

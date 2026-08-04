@@ -652,7 +652,19 @@ export interface SpacesReply {
   spaces: SpaceRow[];
 }
 
-/** An agent's space is observable, not operable — writes are refused server-side. */
+/**
+ * Whether this surface may write to a space: no, when the write would be signed
+ * with a key this node merely hosts.
+ *
+ * **Custody, not standing.** It is deliberately sourced from the identity the
+ * Station signs with and not from the holder's grants, and it does not become
+ * stale when a sponsored agent gains write standing — a write to an agent's
+ * Station goes out over the *agent's* signature whatever anybody's grants say,
+ * which is why the server refuses it (`serve::borrowed_key_refusal`). Re-sourcing
+ * this from reported standing would make the viewer offer buttons the server is
+ * required to refuse. Writing as yourself means opening that space through your
+ * own node.
+ */
 export const isReadOnly = (s: SpaceRow): boolean => s.identity.kind === "agent";
 
 // ---- the doorbell (delivery layer — world-opaque) --------------------------
@@ -838,7 +850,26 @@ export type Request =
   | { cmd: "inbox"; clear?: boolean }
   | { cmd: "member_add"; who: string; admin?: boolean; as_name?: string | null }
   | { cmd: "member_remove"; who: string }
+  /** Mint (or reuse) a co-located agent's seed, self-incept it, and sponsor it
+   *  with write standing — the one-step form. `agent_add` sponsors a key that
+   *  already exists somewhere else; this creates the identity too, which is what
+   *  `install_mcp` tells people to come here for. */
+  | { cmd: "agent_provision"; name: string }
   | { cmd: "key_rotate" }
+  /** Reply is `text` — `"<actor_id> <space_id>"`, the token the other machine
+   *  signs with `host_device_consent`. */
+  | { cmd: "device_invite" }
+  /** The hex consent blob that machine handed back. Completes enrolment. */
+  | { cmd: "device_add"; consent: string }
+  | { cmd: "device_revoke"; device: string }
+  /** Reply is `text` — this actor's devices, one per line. */
+  | { cmd: "device_list" }
+  /** Write this holder's recovery share to a passphrase-sealed file at `path`,
+   *  a path on the machine running the daemon. */
+  | { cmd: "space_custody_export"; path: string; passphrase: string }
+  /** Read a share back in — the documented remedy for the "share unreadable" /
+   *  "backup unverified" warning the status panel draws. */
+  | { cmd: "space_custody_import"; path: string; passphrase: string; force: boolean }
   | { cmd: "members" }
   | { cmd: "member_log" }
   | { cmd: "member_alias"; who: string; name: string }
@@ -899,10 +930,17 @@ export type SpaceRequest = Extract<
     cmd:
       | "member_add"
       | "member_remove"
+      | "agent_provision"
       | "key_rotate"
       | "members"
       | "member_log"
       | "member_alias"
+      | "device_invite"
+      | "device_add"
+      | "device_revoke"
+      | "device_list"
+      | "space_custody_export"
+      | "space_custody_import"
       | "status"
       | "diagnose"
       | "id"
@@ -918,6 +956,88 @@ export type SpaceRequest = Extract<
 >;
 
 export type WorldRequest = Exclude<Request, SpaceRequest>;
+
+/**
+ * The host plane: `POST /api/host/rpc`, `control.rs`'s `Request::Host*`.
+ *
+ * Its own union because it is the one plane that answers when there is nothing
+ * to answer *about* — no Orbit, no store, no membership. Everything else in this
+ * file is addressed to `/api/spaces/{id}/…`, which is unreachable at the only
+ * moment founding and entering matter. `serve/policy.rs::is_host_plane` is the
+ * gate; a `cmd` missing from it is refused there, not here.
+ */
+export type HostRequest =
+  /** `home` is the exact store directory, on the machine running the daemon —
+   *  not a directory to put a `.lait` inside. */
+  | { cmd: "host_space_found"; home: string; name: string; nick?: string | null }
+  /** Bootstraps the store from an invite link *and* drives admission before it
+   *  answers, so `admitted` distinguishes "you're in" from "the board stays
+   *  encrypted until they come online". */
+  | { cmd: "host_space_enter"; link: string; home: string; nick?: string | null }
+  /** Sign this machine's consent to join an existing actor. Store-free: the
+   *  machine running it holds no membership anywhere yet. */
+  | { cmd: "host_device_consent"; token: string }
+  | { cmd: "host_context" }
+  | { cmd: "host_orbit_forget"; selector: string }
+  | { cmd: "host_orbit_prune" }
+  | { cmd: "host_orbit_rebuild"; orbit: string }
+  | { cmd: "host_update" }
+  /** Stops the daemon under this server once the reply is out. The server
+   *  survives and stands a fresh one up on its next request — which is how a
+   *  swapped binary or a raised control protocol takes effect. */
+  | { cmd: "host_restart" };
+
+/** `control.rs` `HostReply`, tagged by `host` inside a `kind: "host"` response. */
+export type HostReply =
+  | {
+      host: "founded";
+      space: string;
+      home: string;
+      device: string;
+      name: string;
+      project_key: string;
+      project_name: string;
+    }
+  | {
+      host: "entered";
+      space: string;
+      home: string;
+      device: string;
+      approach: string;
+      host_nick: string;
+      fresh: boolean;
+      admitted: boolean;
+      contacted: boolean;
+      last_error?: string | null;
+    }
+  | { host: "device_consent"; consent: string }
+  | { host: "forgotten"; entries: OrbitEntry[] }
+  | { host: "pruned"; entries: OrbitEntry[] }
+  | { host: "rebuilt"; generation: string; effects: number; bodies: number; receipts: number; evidence: string }
+  | { host: "updated"; from: string; to: string; replaced: boolean }
+  | { host: "restarting"; pid?: number | null }
+  | {
+      host: "context";
+      /** The build answering — the only place a running lait says which one. */
+      version: string;
+      identity_home: string;
+      /** Where to offer to put a new store. A browser has no working directory. */
+      spaces_root: string;
+      worlds: string[];
+      identities: string[];
+      orbits: OrbitEntry[];
+    };
+
+/** One row of the local Orbit registry (`orbits::Entry`). */
+export interface OrbitEntry {
+  space: string;
+  name: string;
+  path: string;
+  origin: string;
+  host_nick: string;
+  last_opened: number;
+  projects: { key: string; name: string }[];
+}
 
 /**
  * `control.rs` `Response`, internally tagged by `kind`.
@@ -983,4 +1103,6 @@ export type Response =
   /** `dropped` counts what the daemon's queue lost for want of room, oldest
    *  first — a signal is not superseded by the next one the way progress is. */
   | { kind: "signals"; signals: SignalEntry[]; dropped: number }
+  /** Every host-plane answer, under one `kind` and its own `host` tag. */
+  | ({ kind: "host" } & HostReply)
   | { kind: "error"; message: string; error_kind: "error" | "not_found" };

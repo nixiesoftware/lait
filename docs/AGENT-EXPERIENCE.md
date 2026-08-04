@@ -1,10 +1,63 @@
 # Agent Experience — status and design
 
 lait treats an agent as a **member whose identity is sponsored** — not a separate
-actor class. There are no `agent-*` verbs: grants, roles, removal, attribution,
-and space selection are the *same* member machinery for humans and agents. This
-document records what has shipped and the design for the two remaining
-optimizations. The full design docket is `docs/plans/09` (untracked).
+actor class. There is no agent-specific vocabulary: grants, roles, removal,
+attribution, and space selection are the *same* member machinery for humans and
+agents. This document records what has shipped and the design for the two
+remaining optimizations. The full design docket is `docs/plans/09` (untracked).
+
+## Sponsoring an agent
+
+Two steps, and only the first is a decision.
+
+**1 — sponsor the identity.** In the app: **Settings → Members -> Sponsor an
+agent**, name it, done. That sends `{"cmd":"agent_provision","name":"<name>"}`
+to `POST /api/spaces/{id}/rpc`. It mints the agent's seed under this store,
+self-incepts it into the shared actor plane (the co-located analogue of a
+joiner's inception arriving over Contact — no round trip, because the agent is
+on this machine), sponsors it with the default content grant, and grants it the
+contributor role's scoped capabilities. Idempotent: re-provisioning a known,
+sponsored agent returns its actor.
+
+**2 — point the agent's client at it.** `POST /api/host/rpc` with
+`{"cmd":"host_install_mcp","client":"claude","name":"lait","dir":"<project>"}`
+merges a `lait` entry into that client's `mcpServers`, preserving any others.
+Naming the client also names the agent identity — `claude`, `cursor`,
+`windsurf` — so the entry carries `LAIT_AGENT=<name>` and the agent's work signs
+as itself. `client: "generic"` derives no name, so pass `agent` explicitly;
+`no_agent: true` declines one and leaves the work signed by the human. `print:
+true` returns the would-be file contents instead of writing them. Or write
+`.mcp.json` by hand — the binding is `{"command": "lait", "args": ["mcp"],
+"env": {"LAIT_AGENT": "<name>"}}`.
+
+The order does not matter. Installing the config first is fine; the agent's
+first request simply fails until its identity is sponsored, and it is told so.
+
+### The custody rule
+
+A sponsored agent is **not** read-only, and nothing about it is second-class. It
+holds `Standing::Write` (`crates/mechanics/src/acl.rs`), so through its own node
+— `lait mcp`, which *is* that node — it files, comments, starts, closes, and
+deletes issues exactly as any contributor does.
+
+What the HTTP head refuses is narrower and is not about the agent at all. A
+Station whose catalog binding carries its own identity directory signs with
+*that* seed, so a write routed into an agent-held Orbit by a head serving
+somebody else's token would go out **over the agent's signature**. Mechanics
+would approve it — it evaluates the signer's grants, the signer would be the
+agent, and the agent holds write standing — and nothing behind that route asks
+again. So the head asks once, at the door, and refuses:
+
+> `{agent}'s space is read-only here — a write would be signed as {agent}.
+> Open the same space through your own node to write as yourself.`
+
+This is **custody, not standing**. It does not become redundant as anybody's
+grants widen; the answer must stay no however wide they become, because the
+question is "whose key is about to be spent", not "is this act permitted". It
+never refuses a *read*: observing a hosted identity's board signs nothing, and
+that is the whole reason an agent's space is browsable from the app. The single
+predicate is `Catalog::signs_with_own_seed`; the single refusal is
+`serve::borrowed_key_refusal`. Never silently sign as somebody else.
 
 ## Shipped
 
@@ -69,10 +122,10 @@ special case.
   integration-test load, so a developer's shell `$LAIT_HOME` (pointing at their
   live node) can never poison a run — it previously collided a spawned test
   daemon with the live node's lock.
-- **`resume`/`profiles`** are the named-handle selection mechanism; a named
-  identity's secret lives under `config_root()` (the platform config dir),
-  *outside* a working-directory sandbox — the answer to deterministic-seed
-  reconstruction for the common "reset my working dir" case.
+- **Named identities** are the selection mechanism; a named identity's secret
+  lives under `config_root()` (the platform config dir), *outside* a
+  working-directory sandbox — the answer to deterministic-seed reconstruction for
+  the common "reset my working dir" case.
 
 ## Runtime — the multi-tenant daemon (Architecture B), shipped
 
@@ -87,13 +140,14 @@ are signing clients of it.** This is the seamless bar, and it is live:
 - **The `act_as` selector.** The control envelope (`control::ClientRequest`) is a
   `Request` plus an optional `act_as`, flattened and skip-when-`None`, so a
   request with no selector is byte-identical to the bare request — the wire stays
-  backward-compatible. A client picks the identity with `LAIT_AS=<name>` (CLI) or
-  `LAIT_AGENT=<name>` (MCP); the daemon signs as that local agent.
-- **One-step provisioning.** `lait members agent --new <name>` mints the agent's
-  seed under the home, **self-incepts it into the shared store's actor plane**
-  (no Contact round — the co-located analogue of a joiner's inception arriving
-  over the wire), sponsors it with content authority, **and** grants it the
-  contributor role's scoped capabilities (`space.contributor` +
+  backward-compatible. An MCP head picks the identity with `LAIT_AGENT=<name>`,
+  which `host_install_mcp` writes into the client config for you; the daemon
+  signs as that local agent.
+- **One-step provisioning.** `agent_provision` (Settings → Members -> Sponsor an
+  agent) mints the agent's seed under the home, **self-incepts it into the shared
+  store's actor plane** (no Contact round — the co-located analogue of a joiner's
+  inception arriving over the wire), sponsors it with content authority, **and**
+  grants it the contributor role's scoped capabilities (`space.contributor` +
   `space.issue.read`) so it can actually read the catalog and write. The ACL
   write grant is content authority; the scoped capabilities are the separate
   policy plane a functional contributor also needs — a sponsored member gets
@@ -105,7 +159,7 @@ are signing clients of it.** This is the seamless bar, and it is live:
   supersedes it. (For genuinely separate nodes — a laptop and a phone — dedup is
   a future storage optimization, not an attribution or lifecycle requirement.)
 
-Proven end to end (`tests/agent_experience.rs`, and a recorded live run): the
+Proven end to end (`tests/it/agent_experience.rs`, and a recorded live run): the
 human sponsors `scout` once; `whoami` as scout shows a distinct actor + `did:key`
 + write standing + read/contributor caps + the sponsor link; scout files,
 comments on, and starts an issue; the activity log attributes scout's work to
@@ -114,7 +168,7 @@ daemon, no restart.
 
 ### Deterministic seed across a *fully* reset sandbox
 
-`resume` persists a named identity's seed under `config_root()`, outside a
+A named identity's seed is persisted under `config_root()`, outside a
 working-directory sandbox. For a sandbox that wipes the config dir too,
 deterministic reconstruction needs the seed derived from a stable name **plus a
 machine/user secret that lives outside the sandbox** (an OS keyring or an

@@ -1,9 +1,9 @@
 //! The process-backed StationHost serves the product control surface over the
 //! real IPC control socket through the orbital Runtime.
 //!
-//! Formation happens via `SpaceAuthority::form` (the `lait init` heir); the
-//! StationHost then serves `control::Request`/`Response` exactly as the CLI/
-//! serve/MCP clients speak it. This drives the issue family end to end
+//! Formation happens via `SpaceAuthority::form`, the engine half of
+//! `HostSpaceFound`; the StationHost then serves `control::Request`/`Response`
+//! exactly as the local app and MCP heads speak it. This drives the issue family end to end
 //! (project/new/view/list/board/comment) plus status and invite over the wire,
 //! with an in-memory transport (no network sockets).
 
@@ -62,7 +62,9 @@ fn issue_req(
     request: issues_app::IssuesRequest,
 ) -> IssueResponse {
     rt.block_on(async {
-        let space = lait::orbital::discover_space_id(home).expect("test Space");
+        let space = lait::orbital::discover_space(home)
+            .single()
+            .expect("test Space");
         let call = issues_app::encode_call(&request)?;
         let reply = lait::control::call_world(
             home,
@@ -98,12 +100,13 @@ fn poll_until<T>(timeout: Duration, mut check: impl FnMut() -> Option<T>) -> Opt
 fn the_station_host_serves_the_issue_surface_over_the_control_socket() {
     // The daemon runs on a dedicated OS thread with its own runtime (it holds a
     // blocking control accept loop); the test drives it with a separate client
-    // runtime, exactly as the real CLI/daemon split works.
+    // runtime, exactly as the real head/daemon split works.
     let home = temp_home();
     let net = MemNet::new();
 
-    // Formation: the `lait init` heir. Also seed the orbital identity file the
-    // daemon reads, so the daemon and formation share one device seed.
+    // Formation, the engine half of `HostSpaceFound`. Also seed the orbital
+    // identity file the daemon reads, so the daemon and formation share one
+    // device seed.
     std::fs::create_dir_all(&home).unwrap();
     write_identity(&home, &FOUNDER_SEED);
     lait::orbital::form_space(&home, &FOUNDER_SEED, "Station Host Space").unwrap();
@@ -213,8 +216,8 @@ fn the_station_host_serves_the_issue_surface_over_the_control_socket() {
     assert_eq!(view.comments[0].body, "a socket comment");
 
     // The space-wide activity feed serves through daemon dispatch (this pins
-    // the classification/routing defect where `lait issues activity` was refused with
-    // "request not routed to the issues world"): the created issue and the
+    // the classification/routing defect where an activity request was refused
+    // with "request not routed to the issues world"): the created issue and the
     // comment appear as feed rows, and re-pulling from the returned cursor
     // yields nothing new.
     let resp = issue_req(
@@ -344,7 +347,7 @@ fn the_station_host_serves_the_issue_surface_over_the_control_socket() {
 }
 
 /// Write the orbital identity seed where the Station runner's `load_or_create_identity`
-/// expects it (the same file the real `lait init` provisions).
+/// expects it (the same file founding a Space provisions).
 fn write_identity(home: &Path, seed: &[u8; 32]) {
     // The runner reads config::identity_dir(); a $LAIT_HOME-scoped run collapses
     // it onto `home`, so the seed file lives at `home/secret.key`.

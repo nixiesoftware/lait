@@ -3,10 +3,10 @@
 //! socket with an in-memory transport (no network sockets). See
 //! `docs/PROTOCOL.md`.
 //!
-//! Formation is `orbital::form_space` (the `lait init` heir); the StationHost
-//! then serves `control::Request`/`Response` — including the `Subscribe`
-//! doorbell stream sourced from the Station's `ObservationStream` — exactly as
-//! the CLI/serve/MCP clients speak it. Two behaviors are proven: a wildly stale
+//! Formation is `orbital::form_space`, the engine half of `HostSpaceFound`;
+//! the StationHost then serves `control::Request`/`Response` — including the
+//! `Subscribe` doorbell stream sourced from the Station's `ObservationStream` —
+//! exactly as the local app and MCP heads speak it. Two behaviors are proven: a wildly stale
 //! `since` still rebaselines with a `Reset` first frame and a later live edit
 //! rings a real (non-reset) doorbell; and a rejected write (validate-then-commit)
 //! rings nothing at all.
@@ -62,7 +62,9 @@ fn req(rt: &tokio::runtime::Runtime, home: &Path, r: Request) -> Response {
 }
 
 async fn issues_request(home: &Path, request: issues_app::IssuesRequest) -> Result<IssueResponse> {
-    let space = lait::orbital::discover_space_id(home).expect("test Space");
+    let space = lait::orbital::discover_space(home)
+        .single()
+        .expect("test Space");
     let call = issues_app::encode_call(&request)?;
     let reply = lait::control::call_world(
         home,
@@ -152,7 +154,7 @@ fn explicit_routes_cannot_cross_space_or_world_boundaries() {
     let net = MemNet::new();
     let home = temp_home("routes");
     lait::orbital::form_space(&home, &FOUNDER_SEED, "Route Space").unwrap();
-    let space = lait::orbital::discover_space_id(&home).unwrap();
+    let space = lait::orbital::discover_space(&home).single().unwrap();
     let address = OrbitAddress::for_store(&home, space.clone());
     let handle = spawn_daemon(home.clone(), FOUNDER_SEED, net);
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -577,8 +579,8 @@ fn doorbell_names_the_dirty_project_and_doc() {
 /// Two subscribers, one commit, identical frames.
 ///
 /// The dirty-set is computed once per Observation and fanned out, not recomputed
-/// per subscriber. That is an efficiency win today — a viewer and a `lait watch`
-/// used to cost two full catalog reads per commit — and a correctness
+/// per subscriber. That is an efficiency win today — two open viewers used to
+/// cost two full catalog reads per commit — and a correctness
 /// requirement the moment the translation holds any state carried between rings:
 /// two subscribers each advancing one shared baseline would leave the second
 /// seeing nothing changed.

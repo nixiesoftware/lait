@@ -4,8 +4,8 @@
 //! *gates*, so a stalled joiner gets one legible line naming what's blocking them
 //! instead of a blank board. Kept deliberately free of I/O, ANSI, and daemon
 //! types: it takes primitive inputs and returns a [`DiagnosisView`] DTO, so the
-//! exact same logic backs CLI `doctor`, the `join` tail, and the MCP `doctor`
-//! tool, and is unit-tested without a running node. The active StationHost
+//! exact same logic backs the `Diagnose` request, the tail of an entry, and
+//! the MCP `doctor` tool, and is unit-tested without a running node. The active StationHost
 //! gathers the inputs; everything downstream renders the DTO.
 
 use serde::{Deserialize, Serialize};
@@ -111,9 +111,9 @@ pub struct DiagnoseInput<'a> {
     pub items: usize,
     /// Aggregate container count reported by installed Worlds.
     pub scopes: usize,
-    /// The space the caller *intended* to be in — supplied by the `join` tail
-    /// (from the invite ticket) so a directory/store mismatch is caught. `None`
-    /// for a standalone `doctor`, which can't know intent.
+    /// The space the caller *intended* to be in — supplied by the tail of an
+    /// entry (from the invite ticket) so a directory/store mismatch is caught.
+    /// `None` for a standalone diagnosis, which can't know intent.
     pub expected_space: Option<&'a str>,
     /// Recovery shares present on this device that cannot be used. Borrowed as a
     /// slice so the struct stays `Copy`.
@@ -133,8 +133,8 @@ pub fn diagnose(input: DiagnoseInput<'_>) -> DiagnosisView {
     let is_member = matches!(input.membership, "admin" | "member");
 
     // 1. space — the directory trap made legible. Only fails when the caller
-    //    told us which space it expected (the `join` tail) and we bound a
-    //    different one; a standalone doctor has no intent to compare against.
+    //    told us which space it expected (the tail of an entry) and we bound a
+    //    different one; a standalone diagnosis has no intent to compare.
     let space = match input.expected_space {
         Some(exp) if input.space != Some(exp) => DiagnosisGate::new(
             "space",
@@ -142,7 +142,7 @@ pub fn diagnose(input: DiagnoseInput<'_>) -> DiagnosisView {
             GateState::Fail,
             format!(
                 "this directory is space {bound}, but the invite is for {exp} \
-                 — you're in a different store; cd to where you ran `lait join`, or target it with `-w`"
+                 — you're in a different store; open the one you joined from the local app"
             ),
         ),
         _ => DiagnosisGate::new(
@@ -326,7 +326,7 @@ fn summarize(blocked: Option<&DiagnosisGate>, scopes: usize, items: usize) -> St
             format!("you're in — {scopes} scope(s), {items} item(s) synced. get to work.")
         }
         Some("space") => "wrong directory: this store is a different space than the invite. \
-             cd to where you ran `lait join`, or run `lait orbits`."
+             open the one you joined from the local app's space picker."
             .to_string(),
         Some("membership") => {
             "waiting for an admin to approve your join — the board is still encrypted.".to_string()

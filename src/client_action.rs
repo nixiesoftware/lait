@@ -1,7 +1,7 @@
-//! Product-neutral CLI dispatch intent.
+//! Product-neutral client dispatch intent.
 //!
-//! Parsing a command determines its orbital destination. Space/daemon commands
-//! carry [`Request`]; product packages emit opaque World calls.
+//! Decoding a client's call determines its orbital destination. Space and daemon
+//! calls carry [`Request`]; product packages emit opaque World calls.
 
 use crate::{
     control::{ControlRoute, Request},

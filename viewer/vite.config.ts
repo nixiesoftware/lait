@@ -11,7 +11,7 @@ import tailwindcss from "@tailwindcss/vite";
  * reproducible with no external toolchain. So the bundle cannot be built during
  * `cargo build` (that would need npm) and cannot live in `viewer/` (that never
  * reaches crates.io). Committing the built output under `src/` is what keeps
- * `lait serve` a single self-contained binary for people who install from source.
+ * `lait` a single self-contained binary for people who install from source.
  *
  * The tradeoff is honest: build output in git, kept fresh by `npm run build` and
  * guarded by CI diffing a rebuild.

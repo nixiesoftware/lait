@@ -1215,7 +1215,7 @@ impl SpaceAuthority {
             if !held.contains(&e.id) {
                 lines.push(format!(
                     "authorized key epoch gen {} ({}) is not sealed to this device — \
-                     content under it is invisible here; run `lait sync`",
+                     content under it is invisible here; sync with a peer first",
                     e.gen,
                     data_encoding::HEXLOWER.encode(&e.id),
                 ));
@@ -1314,7 +1314,7 @@ impl SpaceAuthority {
             None if ActorId::parse(actor_str).is_some() => {
                 return Err(anyhow!(
                     "that actor's identity is not known locally yet — has the joiner \
-                     reached this node? (`lait connect` from their side carries it)"
+                     reached this node? (a Contact from their side carries it)"
                 ))
             }
             None => {
@@ -1381,6 +1381,9 @@ impl SpaceAuthority {
     ///
     /// Refuses to demote the last admin, and to promote an agent (agents hold
     /// no membership authority by construction). Idempotent per layer.
+    ///
+    /// The agent refusal is one of the three things a re-granting feature would
+    /// have to change; `mechanics::acl::sponsored_agent_grants` lists them all.
     pub fn member_set_role(&self, actor_str: &str, admin: bool) -> Result<ActorId> {
         // Phase 1 (locked): resolve, gate, flip ACL standing, and collect the
         // admin-capability grant ids to revoke on demotion.
@@ -1718,7 +1721,7 @@ impl SpaceAuthority {
             let agent = inner.resolve_actor(key).ok_or_else(|| {
                 anyhow!(
                     "that agent's identity is not known here yet — the agent must reach this \
-                     node once so its self-inception lands (run `lait connect` from the agent's \
+                     node once so its self-inception lands (a Contact from the agent's \
                      side, or share an invite it connects with); then `members agent <key>` \
                      sponsors it"
                 )

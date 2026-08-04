@@ -69,7 +69,7 @@ fn issues_semantics_and_client_application_are_separate_packages() {
         .into_iter()
         .map(|source| read(&source))
         .collect();
-    for forbidden in ["crate::control", "crate::daemon", "crate::cmdspec"] {
+    for forbidden in ["crate::control", "crate::daemon", "crate::host_client"] {
         assert!(
             !application_source.contains(forbidden),
             "root-shell dependency `{forbidden}` leaked into issues-app"
