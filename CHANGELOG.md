@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased — lait is not a command surface
+## v0.7.0 — lait is not a command surface
 
 > **The CLI is gone.** Not deprecated, not hidden behind a flag — deleted. `lait`
 > is now a launcher that picks one of three processes and starts it, and every
@@ -18,6 +18,20 @@
 > grammar left to parse: no `init`, `join`, `invite`, `issues …`, `members`,
 > `orbits`, `config`, `serve`, `watch`, `status`, `doctor`, `rebuild`,
 > `install-mcp`, `update`, `completions`, or `man`.
+
+### Upgrading into it
+
+Run `lait update` on v0.6.3 — the old binary's verb still works, and it is the
+last one you type. From here, upgrading is node maintenance: `host_update` on
+the host plane swaps the binary and `host_restart` makes the swap take effect,
+or re-run the installer from the README.
+
+Nothing on disk changes: the store manifest, the Contact generation, and the
+Issues World's reviewed implementation are all where v0.6.3 left them, so an
+existing Space opens as it is and peers on v0.6.3 still converge. The **control
+protocol** moves 8 → 9 with no mixed-version window, which only matters to the
+daemon left running under your old binary — the launcher identifies it as older,
+takes it over, and carries on. That needs nothing from you.
 
 ### Where everything went
 
