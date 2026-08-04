@@ -37,7 +37,7 @@ jobs:
     # is not job time. This job downloads two assets and pushes one file, so the
     # fleet buys it nothing, while an always-available runner buys it the one
     # property that matters: the tap moves when the release does.
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 10
     # Only a manual dispatch, or a successful Release run for a version tag.
     if: >-

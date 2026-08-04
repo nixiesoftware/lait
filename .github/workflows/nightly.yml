@@ -72,7 +72,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [namespace-profile-nixiesoftware, macos-latest, windows-latest]
+        os: [namespace-profile-nixiesoftware, macos-latest, blacksmith-4vcpu-windows-2025]
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
@@ -123,7 +123,7 @@ jobs:
   # Depth rather than breadth: the same tests, given enough budget to explore.
   deep:
     name: deep (corpus knobs up)
-    runs-on: namespace-profile-nixiesoftware
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -218,7 +218,7 @@ jobs:
   # decision to take once there is a baseline to hold.
   mutants:
     name: mutation (shard ${{ matrix.shard }})
-    runs-on: namespace-profile-nixiesoftware
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 90
     strategy:
       fail-fast: false
@@ -299,7 +299,7 @@ jobs:
   # libFuzzer link that cannot happen there.
   fuzz:
     name: fuzz (${{ matrix.target }})
-    runs-on: namespace-profile-nixiesoftware
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 45
     strategy:
       fail-fast: false
@@ -383,7 +383,7 @@ jobs:
   # a colleague's fresh process starts where yours did.
   determinism:
     name: whole-stack determinism
-    runs-on: namespace-profile-nixiesoftware
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3

@@ -98,7 +98,7 @@ jobs:
   publish:
     name: publish rolling `dev` prerelease
     needs: build
-    runs-on: namespace-profile-nixiesoftware
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     permissions:
       contents: write
     steps:
