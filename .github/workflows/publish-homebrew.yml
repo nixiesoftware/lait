@@ -28,15 +28,18 @@ permissions:
 jobs:
   homebrew:
     name: push formula to tap
-    # GitHub-hosted, deliberately, while every other job in this repo is on the
-    # self-hosted fleet. On v0.7.0 the fleet took the Scoop, SBOM, and signature
-    # publishes and never took this one; the run sat queued for the better part
-    # of an hour, so the tap kept serving v0.6.3 and `brew upgrade` had nothing
-    # to find. A job that never starts is indistinguishable from a job with
-    # nothing to do — and `timeout-minutes` cannot rescue it, because queue time
-    # is not job time. This job downloads two assets and pushes one file, so the
-    # fleet buys it nothing, while an always-available runner buys it the one
-    # property that matters: the tap moves when the release does.
+    # On v0.7.0 the old fleet took the Scoop, SBOM, and signature publishes and
+    # never took this one; the run sat queued for the better part of an hour, so
+    # the tap kept serving v0.6.3 and `brew upgrade` had nothing to find. This
+    # job was moved to a GitHub-hosted runner for that reason, and moved back
+    # when the fleet migrated — the queueing was a property of the old fleet, not
+    # of the job.
+    #
+    # The reasoning survives the move, because the failure mode does: a job that
+    # never starts is indistinguishable from a job with nothing to do, and
+    # `timeout-minutes` cannot catch it, since queue time is not job time. If a
+    # release ever ships with the tap left behind again, this is the first line
+    # to change.
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 10
     # Only a manual dispatch, or a successful Release run for a version tag.

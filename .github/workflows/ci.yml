@@ -373,6 +373,18 @@ jobs:
           git config user.email "nixie-runners[bot]@users.noreply.github.com"
           git add ci/coverage-manifest.txt
           git commit -m 'test: refresh the coverage manifest'
+          # `actions/checkout` persists the DEFAULT token as an
+          # `http.…extraheader` in `.git/config`, and that header authenticates
+          # the request even when the push URL carries its own credential — so
+          # this push went out as `github-actions[bot]`, which has no write
+          # permission here, and was refused with a 403 while the App token sat
+          # unused. Dropping the header is what lets the URL's credential be the
+          # one that counts.
+          #
+          # Not `persist-credentials: false` on the checkout: the fetch two
+          # lines up relies on those same persisted credentials, and read access
+          # is all it needs.
+          git config --unset-all http.https://github.com/.extraheader || true
           git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:${BRANCH}"
           echo "::notice::refreshed the coverage manifest on ${BRANCH} — pull before pushing again."
 
