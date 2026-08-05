@@ -1,5 +1,27 @@
 # Changelog
 
+## v0.7.6 — a node had two answers to "is anyone there"
+
+> **Upgrading:** `host_update` then `host_restart` on the host plane, or re-run
+> the installer. Nothing moves on disk, on the peer wire, or in the control
+> protocol. `status.online_peers` may now report fewer peers than it did — the
+> old number counted peers that had not been heard from in hours.
+
+`diagnose` argued with itself, inside a single sentence: *"1 peer online, but
+none will be dialed"*. The count came from `status`, which filtered on the
+latched reachability flag; the verdict came from `who`, which v0.7.4 corrected
+to also require having been heard from recently. Both read the same registry and
+disagreed.
+
+That was the previous release's fix left half-applied. `who` stopped trusting a
+flag that a successful Contact sets and nothing decays; `online_peers` went on
+trusting it. On the space this was found on, `who` reported both peers away or
+offline while `status` reported one online.
+
+One function answers it now, used by both — a single rule in a single place,
+rather than two call sites that happen to agree, so correcting one can no longer
+leave the other behind.
+
 ## v0.7.5 — a refused Contact says what it refused
 
 > **Upgrading:** `host_update` then `host_restart` on the host plane, or re-run

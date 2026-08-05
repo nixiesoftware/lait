@@ -35,7 +35,7 @@ resolver = "2"
 
 [package]
 name = "lait"
-version = "0.7.5"
+version = "0.7.6"
 edition = "2021"
 # MSRV: driven by iroh 1.0.0-rc.1, which requires rustc 1.91.
 rust-version = "1.91"

@@ -1,6 +1,6 @@
 [package]
 name = "mechanics"
-version = "0.7.5"
+version = "0.7.6"
 edition = "2021"
 rust-version = "1.91"
 description = "The lait kernel: identity, trust regimes, and derivation rules — the roots lait grows from, depending on no scaffold (no CRDT engine, no transport)."
