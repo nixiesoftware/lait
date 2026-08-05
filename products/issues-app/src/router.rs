@@ -506,6 +506,14 @@ impl<'a> IssueRouter<'a> {
                  human member to grant it write access, and a \
                  view-only member needs an admin to grant it; nothing was changed",
             ),
+            // NOT a standing problem, and it must not be phrased as one: this
+            // state cost a debugging day partly because an admin holding every
+            // grant was told they lacked write standing.
+            SessionFailure::Rejected(Rejection::NoActiveImplementation) => Response::denied(
+                "no World implementation is active at this space's frontier, so no \
+                 write can be authorized for anyone — an admin runs `world_upgrade` \
+                 to activate this build's; nothing was changed",
+            ),
             SessionFailure::Rejected(Rejection::Conflict)
             | SessionFailure::Conflict(SessionConflict::Body) => {
                 Response::err("that change conflicts with the current state")

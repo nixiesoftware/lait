@@ -42,6 +42,14 @@ pub enum Rejection {
     UnsupportedSchema,
     UnsupportedSchemaVersion,
     Denied,
+    /// No World implementation is active at the pinned frontier, so no receipt
+    /// can be minted for anyone — the space's problem, not the caller's
+    /// standing. Its own variant because it was being reported as `Denied`,
+    /// and the surface above then told an admin with full write grants that
+    /// they "lack write standing" — a message that sends them to fix the wrong
+    /// thing. The remedy is `world_upgrade`, and only a message that names the
+    /// cause can name the remedy.
+    NoActiveImplementation,
     Conflict,
     LimitExceeded,
     StateCorrupt,

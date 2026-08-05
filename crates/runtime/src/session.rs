@@ -913,7 +913,7 @@ impl Session {
         let implementation_id = self
             .authority
             .active_implementation(&self.world_id, &action.header.authority_frontier)
-            .ok_or(Rejection::Denied)?;
+            .ok_or(Rejection::NoActiveImplementation)?;
         let parent_manifest_root = inner.replica.manifest_root();
         let ctx = replica::transaction::CommitContext {
             space: &self.space,
