@@ -1,6 +1,6 @@
 [package]
 name = "runtime"
-version = "0.7.2"
+version = "0.7.3"
 edition = "2021"
 rust-version = "1.91"
 description = "LAIT orbital lifecycle: Runtime, Orbit, Station, World hosting, Dock/Session, Contact policy, and Observation publication. Exposes no CRDT, iroh, stream, file, key, ciphertext, mutex, or product request types."

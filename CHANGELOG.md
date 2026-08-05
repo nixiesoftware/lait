@@ -1,5 +1,63 @@
 # Changelog
 
+## v0.7.3 — a dev machine catches its own stale builds up
+
+> **Upgrading:** `host_update` then `host_restart` on the host plane, or re-run
+> the installer.
+>
+> **This release breaks compatibility with v0.7.2 and earlier stores and peers.**
+> `ActivateWorldImplementation` — the authority effect recording which World
+> implementation a Space runs — now carries the activated descriptor's declared
+> version beside its id. That is a durable authority-op shape change with no
+> migration, so a fleet moves together. A space founded on v0.7.2 opens and reads
+> on this build, but do not expect a mixed fleet to converge.
+
+Two things on a development machine go stale silently, and neither had a signal,
+let alone a repair. They are the same shape: something is still running, or still
+in force, from a build that is no longer the one on disk.
+
+### The Space's active World implementation
+
+Receipts pin whichever implementation id is **active in the ledger** — not this
+build's — so a build whose descriptor has moved on silently attests an
+implementation it is not. The check for that existed and reported through the
+daemon log; the remedy it named, `world_upgrade`, was reachable only by raw HTTP
+to the Issues world route, absent from the app and from MCP.
+
+An admin node whose declared version is **strictly ahead** now activates its own
+at open and takes the Space with it. Strictly, and only ahead: activating on any
+difference would make each restart a coin toss between whichever boxes happen to
+be up, and every flip invalidates writes pinned to the id it replaced. The
+declared version gives one total order every node agrees on, so a fleet converges
+on the newest build rather than the last-started one.
+
+Rollback stays available and stays explicit — `world_upgrade` on an older build
+still activates it, because that is an instruction rather than an incidental
+restart, and it is an MCP tool now.
+
+A node that is *behind* writes nothing, so the new `implementation` gate in
+`diagnose` is the only place that disagreement surfaces. It **warns and never
+blocks**: a drifted node reads and writes perfectly well, and telling somebody
+they are locked out of a board on their screen would be a lie.
+
+### The daemon itself
+
+A rebuilt binary leaves the previous build's daemon holding the home, answering
+every request while running code that is no longer on disk. The protocol
+handshake could not see it — both builds speak the same protocol — so it was
+reused. `Hello` now carries a build fingerprint and the launcher compares it,
+stopping a superseded daemon and starting its own.
+
+The rule is deliberately narrow: **the same executable path, restamped**. A
+different path is never stale, because a client is not always the binary it would
+spawn. Age alone is not enough either, or two binaries run in turn would each
+evict the other's daemon at startup and neither would stay up.
+
+### Also
+
+- `fix(ci)`: the manifest job's corrected-file fallback was unreachable — a
+  failed push halted the job before the upload that exists for exactly that case.
+
 ## v0.7.2 — a window could lose every way to reach its own spaces
 
 > **Upgrading:** `host_update` then `host_restart` on the host plane, or re-run
