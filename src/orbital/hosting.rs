@@ -116,6 +116,14 @@ fn neighbor_is_online(n: &runtime::neighbor::State, now_secs: u64) -> bool {
 /// rather than noisy.
 const PRESENCE_FRESH_SECS: u64 = 90;
 
+/// How many Neighbors one explicit `sync` will dial.
+///
+/// A bound rather than a policy: Contact is serial here and a request somebody
+/// is waiting on must not grow without limit with the size of the swarm. What
+/// it drops it says it dropped — a silent cap on a convergence verb would be
+/// the same class of lie this function was just fixed for.
+const SYNC_MAX_PEERS: usize = 8;
+
 /// Where this build stands against the Space, for one World.
 ///
 /// `active` is `None` only before any activation has been incorporated — a
@@ -1537,21 +1545,74 @@ impl StationHost {
     /// short issue count (`docs/plans/09` §3.4). It supersedes `connect
     /// <device-id>` as the "am I caught up?" verb.
     fn sync(&self) -> Response {
+        // Converge, then report — in that order, because this request is named
+        // for the first half and used to do only the second. It read the local
+        // epoch keyring, found nothing missing, and answered "converged — this
+        // view is complete" without having spoken to anybody. On a replica
+        // holding zero items beside a peer holding 244 that is not a summary,
+        // it is a wrong answer — and it survived a day of debugging because it
+        // is also the answer you get when everything is fine.
+        //
+        // Contact is a pull: only the dialer incorporates. So converging *is*
+        // dialing, and a sync that dials nobody cannot have converged anything.
+        // Bounded, and explicit — somebody asked for this, it is not an ambient
+        // sweep — and one unreachable peer is reported rather than raised,
+        // because the other peers and the local answer both still stand.
+        let neighbors = self.station.neighbors();
+        let mut peers_reached = 0usize;
+        let mut peers_failed: Vec<String> = Vec::new();
+        let mut advanced = false;
+        for neighbor in neighbors.iter().take(SYNC_MAX_PEERS) {
+            let id = neighbor.station.as_device().to_string();
+            let short = id.get(..12).unwrap_or(id.as_str()).to_string();
+            match self.station.contact(&neighbor.station) {
+                Ok(outcome) => {
+                    peers_reached += 1;
+                    advanced |= outcome.convergence.advanced();
+                }
+                Err(failure) => peers_failed.push(format!("{short}: {failure:?}")),
+            }
+        }
+        let dropped = neighbors.len().saturating_sub(SYNC_MAX_PEERS);
+
         let divergence = self.mechanics.view_divergence();
         let whole = divergence.is_empty();
-        let message = if whole {
-            "converged — this view is complete (every authorized epoch key is held)".to_string()
+        // `whole` keeps its meaning — every authorized epoch key is held — and
+        // stops being *reported* as though it meant "up to date with your
+        // peers". The two are independent, and this whole exercise was spent
+        // believing otherwise.
+        let keys = if whole {
+            "every authorized epoch key is held".to_string()
         } else {
             format!(
-                "view is PARTIAL — {} authorized epoch key(s) not yet sealed to this \
-                 device; content under them is invisible until they sync",
+                "{} authorized epoch key(s) not yet sealed to this device; content under                  them is invisible until they sync",
                 divergence.len()
             )
         };
+        let contact = if neighbors.is_empty() {
+            "no known peers to converge with".to_string()
+        } else if peers_reached == 0 {
+            format!(
+                "reached none of {} known peer(s), so nothing could arrive: {}",
+                neighbors.len(),
+                peers_failed.join("; ")
+            )
+        } else if advanced {
+            format!("reached {peers_reached} peer(s), new material incorporated")
+        } else {
+            format!("reached {peers_reached} peer(s), already up to date with them")
+        };
+        let mut message = format!("{contact}; {keys}");
+        if dropped > 0 {
+            message.push_str(&format!(" ({dropped} further peer(s) not contacted)"));
+        }
         Response::Sync {
             whole,
             divergence,
             message,
+            peers_reached,
+            peers_failed,
+            advanced,
         }
     }
 
