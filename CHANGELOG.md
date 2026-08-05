@@ -1,26 +1,54 @@
 # Changelog
 
-## v0.7.6 — a node had two answers to "is anyone there"
+## v0.7.6 — the instruments stop lying
 
 > **Upgrading:** `host_update` then `host_restart` on the host plane, or re-run
 > the installer. Nothing moves on disk, on the peer wire, or in the control
-> protocol. `status.online_peers` may now report fewer peers than it did — the
-> old number counted peers that had not been heard from in hours.
+> protocol. Two things change what they report: `status.online_peers` may show
+> fewer peers than before, and `sync` now contacts your peers before answering,
+> so it takes as long as a Contact round rather than returning instantly.
 
-`diagnose` argued with itself, inside a single sentence: *"1 peer online, but
-none will be dialed"*. The count came from `status`, which filtered on the
-latched reachability flag; the verdict came from `who`, which v0.7.4 corrected
-to also require having been heard from recently. Both read the same registry and
-disagreed.
+Four diagnostics that reported health they had not established. Each was found
+by being wrong about a real fault, and together they are why that fault took a
+day to corner: every instrument agreed the node was fine.
 
-That was the previous release's fix left half-applied. `who` stopped trusting a
-flag that a successful Contact sets and nothing decays; `online_peers` went on
-trusting it. On the space this was found on, `who` reported both peers away or
-offline while `status` reported one online.
+### `sync` reported converging without doing any
 
-One function answers it now, used by both — a single rule in a single place,
-rather than two call sites that happen to agree, so correcting one can no longer
-leave the other behind.
+It documents itself as "converge now — the request that supersedes a hand-aimed
+`Connect`". It contacted nobody: it read the local epoch keyring, found nothing
+missing, and answered "converged — this view is complete". That is what a
+replica holding zero items returned, repeatedly, beside a peer holding 244.
+
+Contact is a pull — only the dialer incorporates — so converging *is* dialing,
+and a sync that dials nobody has converged nothing. It now dials (bounded, and
+it says when it drops peers) and reports how many were reached, which failed and
+why, and whether anything arrived. `whole` keeps its meaning — every authorized
+epoch key is held — and stops being phrased as though it meant "up to date with
+your peers".
+
+### `Binding` was a sink, not a reason
+
+`contact: Convergence("Illegitimate(Binding)")` is where a peer's material dies,
+and `Binding` did not mean a binding check had failed. It was where every
+string-described refusal inside contact validation ended up — thirteen distinct
+causes reported identically, each having written a description that was then
+discarded. The refusal now carries it.
+
+### The daemon log could not receive anything
+
+`daemon.log` is 0 bytes on a healthy node and always has been. The spawner hands
+the log file to the child's stderr and nulls its stdout; the tracing subscriber
+wrote to stdout. Some sixty `warn!`/`error!` sites went to the null device,
+including the implementation-drift check that names its own remedy and the store
+watchdog. The file the error messages point operators at was structurally
+incapable of holding anything.
+
+### A node had two answers to "is anyone there"
+
+`diagnose` argued with itself inside one sentence: *"1 peer online, but none will
+be dialed"*. The count came from `status`, filtering on a latched reachability
+flag; the verdict came from `who`, which v0.7.4 corrected to require recency.
+One function answers it now, used by both.
 
 ## v0.7.5 — a refused Contact says what it refused
 
