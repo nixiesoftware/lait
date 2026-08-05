@@ -1,5 +1,31 @@
 # Changelog
 
+## v0.7.5 — a refused Contact says what it refused
+
+> **Upgrading:** `host_update` then `host_restart` on the host plane, or re-run
+> the installer. Nothing moves on disk, on the peer wire, or in the control
+> protocol. A refusal that used to read `Convergence` now reads
+> `Convergence("…")` with the reason inside.
+
+`contact: Convergence` was the entire diagnostic. A receipt that would not
+verify, an implementation the Space does not have active, a key epoch this node
+cannot open, a malformed manifest, a Body that failed its check — every one of
+them collapsed to that single word, and nothing logged the cause either, because
+it was discarded before any tracing could see it.
+
+The distinctions matter exactly there and nowhere else. A node in this state
+connects, transfers, and keeps nothing: it looks reachable, it reports a peer,
+its dial succeeds, and its store stays empty. There was no way, from inside the
+process or outside it, to learn any more than the word.
+
+The refusal now carries its cause and logs it at the point it happens, so
+`connect` reports it inline and an operator reading the daemon afterwards does
+not have to have been holding the connection open when it failed.
+
+This diagnoses; it changes no behaviour. A replica that refuses everything it is
+sent is a real fault, and the point of this release is to find out what it is
+rather than to keep guessing.
+
 ## v0.7.4 — say why a Neighbor is not being dialed
 
 > **Upgrading:** `host_update` then `host_restart` on the host plane, or re-run
