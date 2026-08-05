@@ -1,5 +1,51 @@
 # Changelog
 
+## v0.7.8 — checkpoint commitments outlive builds
+
+> **Upgrading:** `host_update` then `host_restart` on the host plane, or re-run
+> the installer.
+>
+> **This release breaks receipt verification with every prior version, and it
+> is the last release that can.** Spaces with history from v0.7.7 or earlier
+> cannot onboard fresh replicas — re-found them on this build (existing
+> replicas keep reading their own stores). What you get for the break: the
+> commitment can never again drift with a build, so this class of failure is
+> closed permanently, not patched for one instance.
+
+### The root of the `Binding(Checkpoint)` refusals
+
+v1 checkpoint commitments hashed the materialized checkpoint **including the
+replayed state** — deterministic across nodes, but only across nodes running
+the same build. The state is a Rust struct whose serialized bytes move whenever
+any field inside it changes shape, and one such change made every receipt
+minted before it unverifiable by every build after it. A fully upgraded fleet
+could not onboard a fresh replica to a space with pre-change history: the
+replica joined, incorporated the authority, and refused every transaction —
+deterministically, forever. Reproduced on demand with a space founded and
+written by released v0.7.2.
+
+Commitments are v2 and **closure-only** now: semantics, frontier, and the
+sorted hash-sets of signature-covered effects — facts every build reconstructs
+identically from the same ledger. The replayed interpretation is excluded on
+purpose: two correct builds may interpret one closure differently (that is what
+a schema migration is), and the verifier independently re-resolves the actor
+and re-evaluates the demand against its own replay regardless. A test pins the
+property both ways.
+
+### Three lies found in the blast radius
+
+- **Replay silently dropped signature-verified ops it could not decode**,
+  which is how a space's implementation activations vanished while three
+  surfaces reported it healthy. The skip survives — failing closed would brick
+  every store the moment a shape moves — but it warns, per op, where the
+  daemon log can carry it.
+- **"you lack write standing"** was rendered for a space with no active
+  implementation, sending an admin who held every grant to fix the wrong
+  thing. That state has its own rejection now, and the message names the
+  remedy: `world_upgrade`.
+- **The drift gate read "nothing is active" as "this build matches the
+  space".** It warns now, naming both possible readings and the remedy.
+
 ## v0.7.7 — the convergence path carries its causes, structurally
 
 > **Upgrading:** `host_update` then `host_restart` on the host plane, or re-run
