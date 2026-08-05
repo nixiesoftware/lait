@@ -1,5 +1,56 @@
 # Changelog
 
+## v0.7.2 — a window could lose every way to reach its own spaces
+
+> **Upgrading:** `host_update` then `host_restart` on the host plane, or re-run
+> the installer. Nothing moves on disk, on the peer wire, in any World
+> implementation, or in the local control protocol — this release is the browser
+> surface and the bundle the binary embeds. An existing Space opens as it is and
+> v0.7.0/v0.7.1 peers still converge.
+
+### Three ways the shell dropped navigation and left nothing to bring it back
+
+There is no command surface to fall back to, so each of these was terminal for
+whatever it hid.
+
+- **Founding and entering had one door, and opening a space shut it.** Both were
+  reachable only from the empty state — which is precisely what having a space
+  open replaces — and a single space auto-selects. So the app that had just
+  opened a space could no longer create a second, and *someone invited to a
+  second space had nowhere to paste the link*. The space menu is on screen
+  whatever you have open, so **Add space** lives there now. One entry rather
+  than one per verb: founding and entering are two answers to the same errand,
+  and the surface behind it already asks which with a tab strip.
+- **A registry row whose store was gone could not be removed.**
+  `host_orbit_forget` and `host_orbit_prune` were declared in the viewer's
+  request union with no caller anywhere, so a `missing` row drew a red dot
+  naming a remedy nothing could send and sat in the switcher for good. Both are
+  now in the menu, behind confirmations that state what they do and do not
+  touch — neither goes near the store on disk.
+- **A narrow window hid the rail and the toggle that opens it.** `Show sidebar`
+  was gated on the panel's own collapse state, and the rail is hidden by CSS at
+  the breakpoint — `display: none` is invisible to the layout library, which
+  goes on reporting the width it had. The shell believed the rail was on screen
+  while you were looking at a window with none, and ⌘B was the only way in.
+
+### The shell sheds the right panel first
+
+Fixing the last of those exposed the shedding order as backwards. At 955px the
+shell dropped *all* navigation while holding a pinned 340px project console —
+which left the issue list narrower than keeping both would have. The console is
+a view of the project already on screen and every row in it is reachable from
+that project's own pages; the rail is the only navigation there is.
+
+| Width | Workspace rail | Project console |
+|---|---|---|
+| ≥ 961px | panel | shown (unchanged) |
+| 769–960px | **panel** — was: gone | hidden |
+| ≤ 768px | drawer, with the toggle that opens it | hidden |
+
+In that middle band you now get navigation back *and* a wider list — at 955px it
+goes from 615px to ~774px. The console's toggle leaves with the console, because
+a control whose only effect is invisible is the same defect in miniature.
+
 ## v0.7.1 — the control channel stops paying for what it carries
 
 > **Upgrading:** `host_update` then `host_restart` on the host plane, or re-run

@@ -1,6 +1,6 @@
 [package]
 name = "lait-issues"
-version = "0.7.1"
+version = "0.7.2"
 edition = "2021"
 rust-version = "1.91"
 description = "LAIT's canonical IssuesWorld product: schemas, semantic model, DTOs, and product identifiers"
