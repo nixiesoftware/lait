@@ -1185,18 +1185,32 @@ impl Station {
         }
         let driver = self.driver.lock_recovering();
         let Some(tx) = driver.as_ref() else {
-            return Err(crate::plane::contact::Failure::Unreachable);
+            // Not a wire failure at all, and it used to be indistinguishable
+            // from one: no driver means the Station is dormant or was never
+            // activated with a transport, and no amount of retrying the peer
+            // will change that.
+            return Err(crate::plane::contact::Failure::Unreachable(
+                "no Contact driver is running for this Station".into(),
+            ));
         };
         let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(1);
         tx.send(crate::contact_driver::DriverCmd::Contact {
             station: neighbor.clone(),
             reply: reply_tx,
         })
-        .map_err(|_| crate::plane::contact::Failure::Unreachable)?;
+        .map_err(|_| {
+            crate::plane::contact::Failure::Unreachable(
+                "the Contact driver went away mid-request".into(),
+            )
+        })?;
         drop(driver);
         reply_rx
             .recv_timeout(self.contact_deadline + Duration::from_secs(5))
-            .map_err(|_| crate::plane::contact::Failure::Unreachable)?
+            .map_err(|_| {
+                crate::plane::contact::Failure::Unreachable(
+                    "the Contact driver did not answer within its deadline".into(),
+                )
+            })?
     }
 
     /// Drain the tracked task set within `deadline`. Returns the join results of

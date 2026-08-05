@@ -161,6 +161,13 @@ jobs:
         shell: bash
         run: bash ci/portability-guard.sh
 
+      # A ratchet, not a ban — see the script's header. The convergence path
+      # lost the same diagnostic four separate times to `map_err(|_| …)` at a
+      # seam; this stops a fifth from arriving unreviewed.
+      - name: Error-context guard (convergence path keeps its causes)
+        shell: bash
+        run: bash ci/error-context-guard.sh
+
       - name: Smoke run (P0 tracker flow)
         shell: bash
         run: bash ci/smoke-p0.sh linux
