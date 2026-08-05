@@ -1,5 +1,45 @@
 # Changelog
 
+## v0.7.7 — the convergence path carries its causes, structurally
+
+> **Upgrading:** `host_update` then `host_restart` on the host plane, or re-run
+> the installer. Nothing moves on disk, on the peer wire, or in the control
+> protocol. Contact failure strings gain detail; no field changes shape.
+
+The same defect was fixed four times in four releases: an error that named its
+cause crossed a seam through `map_err(|_| …)` into a unit variant and arrived
+as one word. Receipt verification, contact validation, the `Convergence`
+wrapper, the daemon log — each fix found the next collapse underneath. This
+release stops treating them as coincidences.
+
+### The earliest collapse, removed
+
+`transaction: AuthorityUnverified` — the cause the live failing pair produces —
+was itself a collapse. Mechanics names which of fourteen receipt fields failed
+to bind; the seam above it was an enum with exactly one unit variant, typed in
+advance to carry nothing. The refusal now carries the field-level reason the
+whole chain existed to deliver, and the seam loses `Copy` to do it — a `Copy`
+refusal is a refusal that has decided it will never have anything to say.
+
+### The contact path carries causes by construction
+
+`Unreachable`, `Transport`, `Admission`, `Protocol`, `Holdings` and `Deadline`
+each take their reason now, so a bare construction no longer compiles. Every
+step of a Contact names its phase: a failed dial reports the transport's own
+error, a timeout says which step lapsed, a violated frame rule says which rule.
+Two latent finds along the way: an undecodable Accept is usually a *Refusal*
+the initiator never tried to read — it does now, and `UnsupportedVersion`
+carries the generation to upgrade to — and the serve side was discarding its
+own admission refusals even from its local records.
+
+### A ratchet keeps it so
+
+`ci/error-context-guard.sh` holds a per-file budget of `map_err(|_| …)` sites
+on the convergence path, enforced in CI. A new discard site fails with the
+question to ask of it; converting sites invites lowering the budget so the gain
+locks. A budget rather than a ban, because discarding is sometimes honest — a
+timeout carries nothing.
+
 ## v0.7.6 — the instruments stop lying
 
 > **Upgrading:** `host_update` then `host_restart` on the host plane, or re-run

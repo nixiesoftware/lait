@@ -1,6 +1,6 @@
 [package]
 name = "comms"
-version = "0.7.6"
+version = "0.7.7"
 edition = "2021"
 rust-version = "1.91"
 description = "The lait network adapter: lait's peer-to-peer seam, with iroh as the contractor behind it. The ONLY crate that names iroh."

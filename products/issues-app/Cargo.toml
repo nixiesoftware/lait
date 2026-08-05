@@ -1,6 +1,6 @@
 [package]
 name = "lait-issues-app"
-version = "0.7.6"
+version = "0.7.7"
 edition = "2021"
 rust-version = "1.91"
 description = "Client interfaces and application protocol for LAIT's bundled Issues World"
