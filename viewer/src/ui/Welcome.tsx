@@ -21,8 +21,23 @@ import { InlineError } from "./AppState";
  * working directory is not the person's and nothing is created implicitly. The
  * node proposes one (`host_context.spaces_root`) so the path box is never empty.
  */
-export function Welcome({ onArrived }: { onArrived: (space: string) => void }) {
-  const [mode, setMode] = useState<"found" | "enter">("found");
+export function Welcome({
+  onArrived,
+  initialMode = "found",
+  onCancel,
+}: {
+  onArrived: (space: string) => void;
+  /** Which tab to open on. A caller that already knows the answer — an empty
+   *  state naming a space this device does not hold — should not make someone
+   *  pick it again; the generic "Add space" entry has no such knowledge and
+   *  takes the default. */
+  initialMode?: "found" | "enter";
+  /** Provided only when there is somewhere to go back to. On a machine with no
+   *  store there is not, and a cancel button that strands you is worse than
+   *  none. */
+  onCancel?: (() => void) | undefined;
+}) {
+  const [mode, setMode] = useState<"found" | "enter">(initialMode);
   const [context, setContext] = useState<Extract<HostReply, { host: "context" }> | null>(null);
   const [name, setName] = useState("");
   const [link, setLink] = useState("");
@@ -97,7 +112,9 @@ export function Welcome({ onArrived }: { onArrived: (space: string) => void }) {
     <div className="min-h-0 flex-1 overflow-y-auto">
       <div className="mx-auto flex max-w-lg flex-col gap-5 p-8">
         <header>
-          <h1 className="text-lg font-semibold">Start a space</h1>
+          <h1 className="text-lg font-semibold">
+            {mode === "found" ? "Start a space" : "Enter a space"}
+          </h1>
           <p className="text-dim mt-1 text-sm">
             A space is an encrypted store on this machine. Found one, or enter one you were invited
             to — nothing is created until you say so.
@@ -172,6 +189,11 @@ export function Welcome({ onArrived }: { onArrived: (space: string) => void }) {
           <Button variant="primary" disabled={!ready || busy} loading={busy} onClick={() => void submit()}>
             {mode === "found" ? "Found it" : "Enter"}
           </Button>
+          {onCancel && (
+            <Button disabled={busy} onClick={onCancel}>
+              Cancel
+            </Button>
+          )}
           {waiting && busy && (
             <span className="text-dim flex items-center gap-1.5 text-sm">
               <Loader2 className="size-icon-xs animate-spin" />

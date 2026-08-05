@@ -7,7 +7,9 @@ import {
   ChevronRight,
   Cog,
   Copy,
+  EyeOff,
   Folder,
+  FolderPlus,
   Inbox,
   FolderKanban,
   GanttChart,
@@ -15,6 +17,7 @@ import {
   Search,
   Star,
   StarOff,
+  Trash2,
   UserRound,
 } from "lucide-react";
 
@@ -55,6 +58,9 @@ export function Sidebar({
   onApplySavedView,
   onToggleFavorite,
   onCreateProject,
+  onAddSpace,
+  onForgetSpace,
+  onPruneSpaces,
 }: {
   spaces: SpaceRow[];
   current: string | null;
@@ -76,6 +82,14 @@ export function Sidebar({
   onApplySavedView: (view: SavedView) => void;
   onToggleFavorite: (key: string) => void;
   onCreateProject: () => void;
+  /** Open the formation surface — founding and entering from an invite both.
+   *  Here rather than only on the empty state, which a selected space replaces;
+   *  see `App.tsx`'s formation gate. */
+  onAddSpace: () => void;
+  /** Deregister one Orbit row. Navigation state only — never the store. */
+  onForgetSpace: (id: string) => void;
+  /** Drop every row whose store is gone. */
+  onPruneSpaces: () => void;
 }) {
   const space = spaces.find((s) => s.id === current) ?? null;
   const agent = space?.identity.kind === "agent" ? space.identity.name : null;
@@ -127,6 +141,9 @@ export function Sidebar({
           onPick={onPickSpace}
           onSearch={onSearch}
           onOpenSettings={() => onGo("settings")}
+          onAddSpace={onAddSpace}
+          onForgetSpace={onForgetSpace}
+          onPruneSpaces={onPruneSpaces}
         />
       </div>
 
@@ -207,6 +224,9 @@ function SpaceSwitcher({
   onPick,
   onSearch,
   onOpenSettings,
+  onAddSpace,
+  onForgetSpace,
+  onPruneSpaces,
 }: {
   spaces: SpaceRow[];
   current: string | null;
@@ -214,9 +234,16 @@ function SpaceSwitcher({
   onPick: (id: string) => void;
   onSearch: () => void;
   onOpenSettings: () => void;
+  onAddSpace: () => void;
+  onForgetSpace: (id: string) => void;
+  onPruneSpaces: () => void;
 }) {
   const selected = spaces.find((s) => s.id === current) ?? null;
   const title = (currentName?.trim() || selected?.name) || selected?.space || "Choose a space";
+  // A row whose store is gone. It has no remedy anywhere else in the app: the
+  // registry is only ever *written* by founding and entering, so nothing else
+  // clears one and it sits in the switcher for good.
+  const unavailable = spaces.filter((s) => s.status === "missing").length;
   return (
     <div className="flex min-w-0 flex-1 items-center gap-0.5">
       <DropdownMenu.Root>
@@ -283,6 +310,33 @@ function SpaceSwitcher({
                   </MenuSubContent>
                 </MenuSub>
               </>
+            )}
+            {/* One entry, not one per formation verb: founding and entering are
+                two answers to "add a space", and the surface behind this already
+                asks which with a tab strip. It lives here because this is the
+                one control on screen whatever you have open — the empty state
+                that used to hold it is precisely what having a space open
+                replaces. */}
+            <MenuSeparator />
+            <MenuItem onSelect={onAddSpace}>
+              <FolderPlus className="size-icon-sm" /> Add space
+            </MenuItem>
+            {/* Registry upkeep. Both are navigation state and neither touches a
+                store, which is what makes them safe to offer next to the verbs
+                that create one. */}
+            {(selected || unavailable > 0) && <MenuSeparator />}
+            {selected && (
+              <MenuItem onSelect={() => onForgetSpace(selected.id)}>
+                <EyeOff className="size-icon-sm" /> Forget this space
+              </MenuItem>
+            )}
+            {unavailable > 0 && (
+              <MenuItem onSelect={onPruneSpaces}>
+                <Trash2 className="size-icon-sm" />
+                {unavailable === 1
+                  ? "Remove 1 unavailable space"
+                  : `Remove ${unavailable} unavailable spaces`}
+              </MenuItem>
             )}
           </MenuContent>
         </DropdownMenu.Portal>

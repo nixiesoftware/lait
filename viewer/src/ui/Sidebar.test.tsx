@@ -48,6 +48,9 @@ describe("Sidebar navigation", () => {
           onApplySavedView={vi.fn()}
           onToggleFavorite={vi.fn()}
           onCreateProject={vi.fn()}
+          onAddSpace={vi.fn()}
+          onForgetSpace={vi.fn()}
+          onPruneSpaces={vi.fn()}
         /></TooltipProvider>,
       );
     });
@@ -109,6 +112,9 @@ describe("Sidebar navigation", () => {
           onApplySavedView={vi.fn()}
           onToggleFavorite={vi.fn()}
           onCreateProject={vi.fn()}
+          onAddSpace={vi.fn()}
+          onForgetSpace={vi.fn()}
+          onPruneSpaces={vi.fn()}
         /></TooltipProvider>,
       );
     });
@@ -122,6 +128,113 @@ describe("Sidebar navigation", () => {
     expect(trigger).toBeTruthy();
     expect(trigger?.getAttribute("aria-haspopup")).toBe("menu");
   });
+
+  /**
+   * Adding a space lives here and nowhere else.
+   *
+   * It used to be reachable only from the empty state, which a selected space
+   * replaces — so with one space open there was no way to found a second or, far
+   * worse, to paste an invite to one. This is the regression test for that: the
+   * menu is on screen whatever you have open, so the verb has to be on it.
+   */
+  it("offers adding a space, and prunes only when a row is missing", () => {
+    const onAddSpace = vi.fn();
+    const onForgetSpace = vi.fn();
+    const onPruneSpaces = vi.fn();
+    // A fresh mount per scenario. Reusing one root leaves the menu's own
+    // open/closed state (and the modal pointer-events lock) behind from the
+    // previous item click, and the next open silently toggles back shut.
+    const render = (rows: SpaceRow[]) => {
+      if (root) act(() => root?.unmount());
+      host?.remove();
+      host = document.createElement("div");
+      document.body.append(host);
+      root = createRoot(host);
+      act(() => {
+        root?.render(
+          <TooltipProvider><Sidebar
+            spaces={rows}
+            current={space.id}
+            projects={[project]}
+            currentProject={null}
+            view="inbox"
+            unread={0}
+            favoriteProjects={[]}
+            savedViews={[]}
+            onPickSpace={vi.fn()}
+            onSearch={vi.fn()}
+            onOpenProjectView={vi.fn()}
+            onGo={vi.fn()}
+            onMyIssues={vi.fn()}
+            onApplySavedView={vi.fn()}
+            onToggleFavorite={vi.fn()}
+            onCreateProject={vi.fn()}
+            onAddSpace={onAddSpace}
+            onForgetSpace={onForgetSpace}
+            onPruneSpaces={onPruneSpaces}
+          /></TooltipProvider>,
+        );
+      });
+      openSpaceMenu();
+    };
+
+    render([space]);
+    menuItem("Add space").click();
+    expect(onAddSpace).toHaveBeenCalledOnce();
+
+    // One entry, not two: founding and entering are the same errand, and the
+    // surface behind it asks which with its own tab strip.
+    render([space]);
+    expect(menuLabels()).not.toContain("Found a space");
+    expect(menuLabels()).not.toContain("Use an invite");
+
+    // Forgetting names the row it acts on, so the caller never has to guess
+    // which space a menu on a shared trigger meant.
+    render([space]);
+    menuItem("Forget this space").click();
+    expect(onForgetSpace).toHaveBeenCalledWith(space.id);
+
+    // No missing row, nothing to prune — an always-present "remove unavailable"
+    // reads as a delete for the spaces that are fine.
+    render([space]);
+    // Anchored against an open menu, or the absence below proves only that
+    // nothing rendered at all.
+    expect(menuLabels()).toContain("Add space");
+    expect(menuLabels()).not.toContain("Remove 1 unavailable space");
+
+    render([space, { ...space, id: "gone-hash", space: "ws_gone", name: "Gone", status: "missing" }]);
+    menuItem("Remove 1 unavailable space").click();
+    expect(onPruneSpaces).toHaveBeenCalledOnce();
+  });
+
+  /**
+   * Radix opens on `pointerdown`, not `click` — a bare `.click()` does nothing.
+   * A `MouseEvent` typed `pointerdown` because jsdom ships no `PointerEvent`;
+   * the trigger reads only `button` and `ctrlKey`, which this carries.
+   */
+  function openSpaceMenu() {
+    const trigger = host!.querySelector<HTMLElement>('[aria-label="Space menu"]')!;
+    act(() => {
+      trigger.dispatchEvent(
+        new MouseEvent("pointerdown", { bubbles: true, button: 0, ctrlKey: false }),
+      );
+    });
+  }
+
+  /** Menu items render in a portal, so they are on `document`, not in `host`. */
+  function menuLabels(): string[] {
+    return [...document.querySelectorAll('[role="menuitem"]')].map((item) =>
+      (item.textContent ?? "").trim(),
+    );
+  }
+
+  function menuItem(label: string): { click: () => void } {
+    const item = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find(
+      (candidate) => (candidate.textContent ?? "").trim() === label,
+    );
+    expect(item, `menu item "${label}" — found ${JSON.stringify(menuLabels())}`).toBeTruthy();
+    return { click: () => act(() => item?.click()) };
+  }
 
   function click(label: string) {
     const button = [...host!.querySelectorAll("button")].find(
