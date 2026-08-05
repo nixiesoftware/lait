@@ -325,7 +325,10 @@ fn adversarial_stagings_are_rejected_whole() {
         .push((tx_id, body(9), stray.bodies[0].2.clone()));
     assert!(matches!(
         b.validate_contact(&stray, &WriterAuthorized, &mut incorporator),
-        Err(replica::transaction::commit::Failure::Illegitimate(_))
+        Err(
+            replica::transaction::commit::Failure::IllegitimateContact { .. }
+                | replica::transaction::commit::Failure::Illegitimate(_)
+        )
     ));
 
     // An omitted manifest index node.
@@ -333,7 +336,10 @@ fn adversarial_stagings_are_rejected_whole() {
     omitted.manifest_nodes.clear();
     assert!(matches!(
         b.validate_contact(&omitted, &WriterAuthorized, &mut incorporator),
-        Err(replica::transaction::commit::Failure::Illegitimate(_))
+        Err(
+            replica::transaction::commit::Failure::IllegitimateContact { .. }
+                | replica::transaction::commit::Failure::Illegitimate(_)
+        )
     ));
 
     // A tampered payload byte.
@@ -342,7 +348,10 @@ fn adversarial_stagings_are_rejected_whole() {
     tampered.bodies[0].2[last] ^= 0xff;
     assert!(matches!(
         b.validate_contact(&tampered, &WriterAuthorized, &mut incorporator),
-        Err(replica::transaction::commit::Failure::Illegitimate(_))
+        Err(
+            replica::transaction::commit::Failure::IllegitimateContact { .. }
+                | replica::transaction::commit::Failure::Illegitimate(_)
+        )
     ));
 
     // An authority view that refuses the signer rejects root and transactions.
@@ -354,7 +363,10 @@ fn adversarial_stagings_are_rejected_whole() {
     }
     assert!(matches!(
         b.validate_contact(&staged, &DenyAll, &mut incorporator),
-        Err(replica::transaction::commit::Failure::Illegitimate(_))
+        Err(
+            replica::transaction::commit::Failure::IllegitimateContact { .. }
+                | replica::transaction::commit::Failure::Illegitimate(_)
+        )
     ));
 
     // Nothing reached the engine through any of it.
@@ -574,4 +586,28 @@ fn configured_limits_persist_so_restart_cannot_raise_capacity() {
         replica::transaction::commit::Failure::QuotaExceeded
     );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A refused Contact must carry *why*, all the way to the string a caller sees.
+///
+/// `Invalid` is `Copy` and coarse, and `From<String> for Invalid` discards the
+/// description — so thirteen distinct refusals inside `validate_contact` all
+/// arrived as `Illegitimate(Binding)`, and `Binding` did not even mean a binding
+/// check had failed. It was the sink every string-described refusal fell into.
+///
+/// The Contact path renders this with `format!("{failure:?}")` and hands it to
+/// the caller, so Debug carrying the reason is not a nicety here — it is the
+/// entire delivery mechanism. A node refusing everything a peer sends reports
+/// this string and nothing else.
+#[test]
+fn a_refused_contact_carries_its_reason_into_the_string_a_caller_sees() {
+    let failure = replica::transaction::commit::Failure::IllegitimateContact {
+        kind: replica::transaction::commit::Invalid::Binding,
+        reason: "payload outside the advertised manifest".to_string(),
+    };
+    let rendered = format!("{failure:?}");
+    assert!(
+        rendered.contains("payload outside the advertised manifest"),
+        "the reason must survive Debug, which is how the Contact path ships it: {rendered}"
+    );
 }

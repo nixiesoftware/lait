@@ -317,13 +317,13 @@ fn duplicate_transaction_ids_with_different_bytes_reject() {
     let mut b = keyed_replica();
     let err = incorporate_all(&mut b, &staged).unwrap_err();
     match err {
-        crate::transaction::commit::Failure::Illegitimate(_) => {
+        crate::transaction::commit::Failure::IllegitimateContact { .. } => {
             // Either the equivocation gate (same id, different bytes) or the
             // canonical decoder (the tampered record no longer decodes as a
             // transaction and lands in the authority lane, leaving a payload
             // without a provided transaction) must refuse the staging.
         }
-        other => panic!("expected Illegitimate, got {other:?}"),
+        other => panic!("expected a Contact refusal carrying its reason, got {other:?}"),
     }
     assert!(b.body_keys().is_empty());
 }
@@ -336,8 +336,9 @@ fn manifest_entries_neither_held_nor_transferred_reject() {
     let mut b = keyed_replica();
     let err = incorporate_all(&mut b, &staged).unwrap_err();
     match err {
-        crate::transaction::commit::Failure::Illegitimate(_) => {}
-        other => panic!("expected Illegitimate, got {other:?}"),
+        crate::transaction::commit::Failure::IllegitimateContact { .. }
+        | crate::transaction::commit::Failure::Illegitimate(_) => {}
+        other => panic!("expected a Contact refusal carrying its reason, got {other:?}"),
     }
     assert!(b.body_keys().is_empty(), "nothing adopted under the root");
 }
@@ -380,8 +381,9 @@ fn authority_bytes_cannot_ride_the_transaction_lane() {
     let mut c = keyed_replica();
     let err = incorporate_all(&mut c, &staged2).unwrap_err();
     match err {
-        crate::transaction::commit::Failure::Illegitimate(_) => {}
-        other => panic!("expected Illegitimate, got {other:?}"),
+        crate::transaction::commit::Failure::IllegitimateContact { .. }
+        | crate::transaction::commit::Failure::Illegitimate(_) => {}
+        other => panic!("expected a Contact refusal carrying its reason, got {other:?}"),
     }
 }
 

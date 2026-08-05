@@ -993,6 +993,7 @@ impl Session {
                 // Illegitimate is an incorporation-path error; a local commit
                 // never produces it, but the match stays exhaustive.
                 replica::transaction::commit::Failure::Illegitimate(_)
+                | replica::transaction::commit::Failure::IllegitimateContact { .. }
                 | replica::transaction::commit::Failure::Engine(_)
                 | replica::transaction::commit::Failure::Integrity(_)
                 | replica::transaction::commit::Failure::Body(_)
