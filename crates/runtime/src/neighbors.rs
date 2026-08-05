@@ -595,6 +595,10 @@ impl NeighborRegistry {
                     _ => Reachability::Unknown,
                 },
                 last_seen_ms: e.last_seen_ms,
+                pending: e.pending,
+                next_attempt_ms: e.next_attempt_ms,
+                route_lease_expires_ms: e.routes.iter().map(|r| r.expires_at_ms).max().unwrap_or(0),
+                failures: e.failures,
             })
             .collect()
     }

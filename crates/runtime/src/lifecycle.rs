@@ -1308,6 +1308,20 @@ pub struct Neighbor {
     /// When this Neighbor was last heard from (ms since the unix epoch,
     /// receiver-local; 0 = never observed live). Advisory.
     pub last_seen_ms: u64,
+    // The scheduler's own inputs, carried out so somebody can ask *why* a
+    // Neighbor is not being dialed. `NeighborRegistry::eligible` reads exactly
+    // these three; without them a stalled node is indistinguishable from an
+    // idle one from the outside, which is precisely the state that took six
+    // rounds of manual probing to identify once.
+    /// Whether anything has queued a Contact with this Neighbor.
+    pub pending: bool,
+    /// Backoff floor: no attempt before this (ms since the unix epoch).
+    pub next_attempt_ms: u64,
+    /// The furthest route-lease expiry held for this Neighbor (0 = no route).
+    /// An expired lease suppresses dialing even when the backoff is due.
+    pub route_lease_expires_ms: u64,
+    /// Consecutive failed Contacts. Drives the backoff.
+    pub failures: u32,
 }
 
 /// Advisory reachability of a Neighbor.

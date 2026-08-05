@@ -6,9 +6,9 @@
 # reviewed like one, not discovered when a gate goes red on a refactor.
 
 [tiers]
-pr             1342
-pr-platform    1021
-nightly        1369
+pr             1344
+pr-platform    1023
+nightly        1371
 mutants        87
 
 [gates]
@@ -217,6 +217,7 @@ lait daemon::transport_hub::tests::scoped_shutdown_and_slow_openers_do_not_take_
 lait daemon::transport_hub::tests::shutting_a_space_down_stops_routing_connections_to_it
 lait diagnose::tests::a_blocked_joiner_still_reports_custody_separately
 lait diagnose::tests::a_degraded_share_warns_without_blocking_onboarding
+lait diagnose::tests::a_node_that_will_not_dial_says_so_instead_of_waiting
 lait diagnose::tests::a_pending_rekey_warns_on_the_same_gate
 lait diagnose::tests::a_ready_holder_does_not_warn
 lait diagnose::tests::all_pass_when_member_online_and_synced
@@ -227,6 +228,7 @@ lait diagnose::tests::implementation_drift_warns_without_blocking
 lait diagnose::tests::matching_expected_space_passes
 lait diagnose::tests::member_online_but_unsynced_blocks_on_synced
 lait diagnose::tests::no_drift_is_silent
+lait diagnose::tests::peers_online_but_undialable_is_still_reported
 lait diagnose::tests::pending_joiner_blocks_on_membership_and_skips_sync
 lait diagnose::tests::solo_founder_is_not_blocked
 lait diagnose::tests::space_mismatch_is_the_first_blocker

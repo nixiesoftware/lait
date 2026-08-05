@@ -125,6 +125,16 @@ pub struct DiagnoseInput<'a> {
     /// This device's custody standing for the recovery authority. Borrowed so
     /// the struct stays `Copy`.
     pub local_custody: Option<&'a mechanics::recovery::Custody>,
+    /// Known Neighbors that the Contact scheduler would dial right now.
+    ///
+    /// Distinct from `online_peers`, and the distinction is the point: a peer
+    /// can be *known* and even look reachable while nothing will ever dial it
+    /// again. A node in that state has stopped converging and every other gate
+    /// still passes, which is exactly how it goes unnoticed.
+    pub dialable_peers: usize,
+    /// Why the scheduler is not dialing, when nothing is dialable — already
+    /// worded by the daemon, which holds the registry this is read from.
+    pub peer_blocked_by: Option<&'a str>,
     /// Worlds where this build's implementation is not the Space's active one,
     /// already rendered — the daemon knows the ids and versions, and this layer
     /// only has to decide whether the drift blocks. Empty is the ordinary case
@@ -195,12 +205,32 @@ pub fn diagnose(input: DiagnoseInput<'_>) -> DiagnosisView {
     //    the real wall. A founder, or an already-synced member, isn't blocked by an
     //    empty room — they can work locally — so peer is informational (Skip), not a
     //    contradictory second blocker next to a passing `synced` gate.
+    // Known-but-unreachable is its own answer. A node whose peers are all
+    // undialable is not "waiting for someone to come online" — it has stopped
+    // asking, and saying "no peer online" invites the person to wait for a
+    // thing that will not happen.
     let peer = if input.online_peers > 0 {
         DiagnosisGate::new(
             "peer",
             "peer",
             GateState::Pass,
-            format!("{} online", peers_phrase(input.online_peers)),
+            match input.peer_blocked_by {
+                Some(why) => format!(
+                    "{} online, but none will be dialed — {why}",
+                    peers_phrase(input.online_peers)
+                ),
+                None => format!("{} online", peers_phrase(input.online_peers)),
+            },
+        )
+    } else if input.dialable_peers == 0 && input.peer_blocked_by.is_some() && is_member {
+        DiagnosisGate::new(
+            "peer",
+            "peer",
+            GateState::Warn,
+            format!(
+                "no peer will be dialed — {}. this node has stopped converging;                  `connect` to a peer forces one now",
+                input.peer_blocked_by.unwrap_or_default()
+            ),
         )
     } else if is_admin {
         DiagnosisGate::new(
@@ -397,6 +427,8 @@ mod tests {
             rekey_pending: None,
             local_custody: None,
             implementation_drift: &[],
+            dialable_peers: 1,
+            peer_blocked_by: None,
         }
     }
 
@@ -482,6 +514,40 @@ mod tests {
 
     fn gate<'a>(v: &'a DiagnosisView, id: &str) -> &'a DiagnosisGate {
         v.gates.iter().find(|g| g.id == id).expect("gate present")
+    }
+
+    /// A node that has stopped dialing must not read as "waiting for someone".
+    ///
+    /// This is the state that hid for a full day: every other gate passed, the
+    /// peer gate said "no peer online", and the honest reading of that is "wait
+    /// and it will fix itself" — which it never would, because nothing was
+    /// going to dial again.
+    #[test]
+    fn a_node_that_will_not_dial_says_so_instead_of_waiting() {
+        let mut i = input();
+        i.online_peers = 0;
+        i.dialable_peers = 0;
+        i.peer_blocked_by = Some("not pending — no Contact is queued");
+        let v = diagnose(i);
+        let g = gate(&v, "peer");
+        assert_eq!(g.state, GateState::Warn);
+        assert!(g.detail.contains("stopped converging"), "{}", g.detail);
+        assert!(g.detail.contains("not pending"), "{}", g.detail);
+    }
+
+    /// Peers *look* present and still nothing dials them — the exact shape of
+    /// the reachability latch. The gate passes (you are not blocked) but must
+    /// not stay silent about it.
+    #[test]
+    fn peers_online_but_undialable_is_still_reported() {
+        let mut i = input();
+        i.online_peers = 2;
+        i.dialable_peers = 0;
+        i.peer_blocked_by = Some("route lease expired");
+        let v = diagnose(i);
+        let g = gate(&v, "peer");
+        assert_eq!(g.state, GateState::Pass);
+        assert!(g.detail.contains("none will be dialed"), "{}", g.detail);
     }
 
     #[test]

@@ -94,6 +94,14 @@ fn discover_space(home: &Path) -> Result<SpaceId> {
 /// This is a logical boundary, not an OS-process claim. The current
 /// The compatibility-process adapter gives it a per-home control listener; a general
 /// Lait daemon can instead hold several instances and route by Space id.
+/// How recently a Neighbor must have been heard from to count as *online*.
+///
+/// Presence is advisory, so this is a display threshold and nothing gates on
+/// it. Generous against the ambient beacon cadence — a healthy Neighbor is
+/// heard from far inside this — which is what makes crossing it meaningful
+/// rather than noisy.
+const PRESENCE_FRESH_SECS: u64 = 90;
+
 /// Where this build stands against the Space, for one World.
 ///
 /// `active` is `None` only before any activation has been incorporated — a
@@ -1646,23 +1654,62 @@ impl StationHost {
             .into_iter()
             .map(|n| {
                 let id = n.station.as_device().to_string();
-                let online = n.reachability == runtime::neighbor::Reachability::Reachable;
-                let state = match n.reachability {
-                    runtime::neighbor::Reachability::Reachable => "online",
-                    runtime::neighbor::Reachability::Unreachable => "offline",
-                    runtime::neighbor::Reachability::Unknown => "away",
-                };
                 let last_seen_secs = if n.last_seen_ms == 0 {
-                    0
+                    u64::MAX
                 } else {
                     now.saturating_sub(n.last_seen_ms / 1_000)
+                };
+                // Reachability is a *latch*: `record_success` sets it and
+                // nothing decays it, so a Station contacted once reported
+                // itself online indefinitely — one was still "online" twenty-six
+                // hours after its last Contact. Recency has to be part of the
+                // answer, or the field means "was reachable once", which is not
+                // a thing anybody asks.
+                let heard_recently = last_seen_secs <= PRESENCE_FRESH_SECS;
+                let reachable = n.reachability == runtime::neighbor::Reachability::Reachable;
+                let online = reachable && heard_recently;
+                let state = if online {
+                    "online"
+                } else if n.reachability == runtime::neighbor::Reachability::Unreachable {
+                    "offline"
+                } else {
+                    // Believed reachable but not heard from lately, or never
+                    // classified: `away` is the honest middle, and it is the
+                    // state this used to skip straight past.
+                    "away"
+                };
+                // Mirror `NeighborRegistry::eligible`, in its order, so the
+                // reason a Neighbor is not dialed is readable from outside the
+                // process instead of inferred from its silence.
+                let now_ms = now.saturating_mul(1_000);
+                let due_in_secs = n.next_attempt_ms.saturating_sub(now_ms) / 1_000;
+                let route_lease_secs = n.route_lease_expires_ms.saturating_sub(now_ms) / 1_000;
+                let blocked_by = if !n.pending {
+                    Some(
+                        "not pending — no Contact is queued. Cleared on the last success and \
+                         re-armed only by a beacon advertising news, a local commit, or a \
+                         newly learned route"
+                            .to_string(),
+                    )
+                } else if n.next_attempt_ms > now_ms {
+                    Some(format!("backoff — {due_in_secs}s to go, after {} failure(s)", n.failures))
+                } else if n.route_lease_expires_ms <= now_ms {
+                    Some("route lease expired — no unexpired route, which suppresses dialing on its own".to_string())
+                } else {
+                    None
                 };
                 crate::control::PresenceEntry {
                     nick: aliases.get(&id).cloned().unwrap_or_default(),
                     id,
                     state: state.to_string(),
                     online,
-                    last_seen_secs,
+                    last_seen_secs: if last_seen_secs == u64::MAX { 0 } else { last_seen_secs },
+                    dialable: blocked_by.is_none(),
+                    blocked_by,
+                    pending: n.pending,
+                    due_in_secs,
+                    route_lease_secs,
+                    failures: n.failures,
                 }
             })
             .collect()
@@ -2046,6 +2093,21 @@ impl StationHost {
                 )
             })
             .collect();
+        // Read from the same projection `who` serves, so the gate and the peer
+        // list can never disagree about whether this node is still dialing.
+        let peers = self.who();
+        let dialable = peers.iter().filter(|p| p.dialable).count();
+        let peer_blocked_by: Option<String> = (dialable == 0)
+            .then(|| {
+                peers
+                    .iter()
+                    .find_map(|p| p.blocked_by.clone())
+                    .map(|why| match peers.len() {
+                        1 => why,
+                        n => format!("{why} (and {} other peer(s) likewise)", n - 1),
+                    })
+            })
+            .flatten();
         let view = crate::diagnose::diagnose(crate::diagnose::DiagnoseInput {
             space: Some(space.as_str()),
             name: "",
@@ -2058,6 +2120,8 @@ impl StationHost {
             rekey_pending: None,
             local_custody: Some(&recovery.custody),
             implementation_drift: &drift,
+            dialable_peers: dialable,
+            peer_blocked_by: peer_blocked_by.as_deref(),
         });
         Response::Diagnosis(Box::new(view))
     }
