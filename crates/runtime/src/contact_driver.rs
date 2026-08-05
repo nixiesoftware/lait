@@ -595,7 +595,13 @@ async fn contact_neighbor(ctx: &DriverContext, station: &Key) -> Result<ContactO
                     ctx.options.authority.source.as_ref(),
                 )
             })
-            .map_err(|_| Failure::Convergence)
+            .map_err(|failure| {
+                // The one place the cause exists. Logged as well as returned:
+                // the caller sees it inline, and an operator reading the daemon
+                // afterwards does not have to have been holding the connection.
+                tracing::warn!(?failure, peer = %station, "contact material was refused");
+                Failure::Convergence(format!("{failure:?}"))
+            })
     };
     // ---- One Contact, one published change. -------------------------------
     //
@@ -705,7 +711,7 @@ async fn initiate(
     let published = ctx
         .core
         .with_replica(|replica| Ok(replica.published_root()))
-        .map_err(|_| Failure::Convergence)?;
+        .map_err(|failure| Failure::Convergence(format!("{failure:?}")))?;
     let holdings_root = published.map(|r| r.0).unwrap_or([0u8; 32]);
 
     // The declaration is sent whenever this replica holds anything, and equal
@@ -722,7 +728,7 @@ async fn initiate(
     let held = ctx
         .core
         .with_replica(|replica| Ok(replica.head_commitments()))
-        .map_err(|_| Failure::Convergence)?;
+        .map_err(|failure| Failure::Convergence(format!("{failure:?}")))?;
     let holdings_bytes = crate::plane::contact::encode_holdings(&held);
     let holdings_count = held.len() as u32;
     let holdings_digest = if held.is_empty() {
@@ -1007,7 +1013,7 @@ async fn serve_contact(
                 let manifest = replica.export_manifest(&commit_ctx)?;
                 Ok((material, manifest))
             })
-            .map_err(|_| Failure::Convergence)?
+            .map_err(|failure| Failure::Convergence(format!("{failure:?}")))?
     } else {
         (Vec::new(), (Vec::new(), Vec::new()))
     };

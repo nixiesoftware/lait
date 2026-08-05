@@ -56,7 +56,18 @@ pub enum Failure {
     Protocol,
     Signing,
     Holdings,
-    Convergence,
+    /// Staged material was received but could not be made durable — a receipt
+    /// that would not verify, an implementation the Space does not have active,
+    /// a key epoch this node cannot open, a malformed manifest, a Body that
+    /// failed its check.
+    ///
+    /// The cause is carried because it is the only thing anyone wants. This
+    /// used to be a bare variant built with `map_err(|_| …)`, which discarded
+    /// every one of those distinctions at the one point where they differ — and
+    /// nothing logged it either, so a node that connected, transferred, and
+    /// refused everything reported the single word "Convergence" and there was
+    /// no way, from inside or outside the process, to learn any more.
+    Convergence(String),
     Deadline,
     Interrupted,
     PeerAborted(u16),
