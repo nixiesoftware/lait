@@ -1775,6 +1775,34 @@ pub struct PresenceEntry {
     pub state: String,
     pub online: bool,
     pub last_seen_secs: u64,
+    /// Whether the Contact scheduler would dial this Neighbor right now.
+    ///
+    /// The rest of this struct says whether a peer *seems* to be there; this
+    /// says whether we will ever go and ask. They are different questions, and
+    /// conflating them is how a node with no connectivity reads as healthy: a
+    /// peer can look reachable, hold a fresh presence row, and still be one no
+    /// scheduler will ever dial again.
+    #[serde(default)]
+    pub dialable: bool,
+    /// When `dialable` is false, which of `eligible`'s three conditions failed —
+    /// in its own words, so the answer does not have to be reconstructed from
+    /// the numbers below.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_by: Option<String>,
+    /// Whether anything has queued a Contact. Cleared on success, and re-armed
+    /// only by a newsworthy Beacon, a local commit, or a newly learned route.
+    #[serde(default)]
+    pub pending: bool,
+    /// Seconds until the backoff floor lifts; 0 when it already has.
+    #[serde(default)]
+    pub due_in_secs: u64,
+    /// Seconds of route lease remaining; 0 means expired, which suppresses
+    /// dialing on its own.
+    #[serde(default)]
+    pub route_lease_secs: u64,
+    /// Consecutive failed Contacts.
+    #[serde(default)]
+    pub failures: u32,
 }
 
 /// What a transient item is about — the wire mirror of
