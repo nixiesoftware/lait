@@ -1,5 +1,48 @@
 # Changelog
 
+## v0.7.4 — say why a Neighbor is not being dialed
+
+> **Upgrading:** `host_update` then `host_restart` on the host plane, or re-run
+> the installer. Nothing moves on disk, on the peer wire, or in the control
+> protocol. `who` gains fields; every existing one keeps its meaning except
+> `online`, which is corrected below.
+
+A node can stop converging entirely and look perfectly healthy. This release
+does not fix that — it makes it visible, which it was not.
+
+### Why it hides
+
+Contact is a **pull**: only the dialer incorporates what it receives, so a node
+that never dials never receives. Eligibility to dial requires a queued Contact,
+an elapsed backoff, and an unexpired route lease — and a *successful* Contact
+clears the queued mark. Only a beacon advertising news, a local commit, or a
+newly learned route re-arms it. A node that reads and does not write therefore
+falls out of the schedule and stays out, while every diagnostic gate passes.
+
+None of that left the process. The Neighbor projection carried station,
+reachability and last-seen, and dropped the three fields the scheduler actually
+reads. From outside, a stalled node and an idle one were the same picture.
+
+### What you can see now
+
+`who` answers the question directly. Each peer carries **`dialable`** and, when
+false, **`blocked_by`** in the scheduler's own words — not pending, or backoff
+with the failure count, or an expired route lease — plus the `pending`,
+`due_in_secs`, `route_lease_secs` and `failures` behind it.
+
+`diagnose` reads the same projection, so the peer gate and the peer list cannot
+disagree, and it now distinguishes *"nobody is here yet"* from *"nobody will be
+dialed"*. The second is a warning that names the blocker, because waiting will
+not clear it.
+
+### `online` no longer latches
+
+Reachability was set on a successful Contact and never decayed, so a Station
+contacted once reported itself online indefinitely — one read `online`
+twenty-six hours after its last Contact. `online` now also requires having been
+heard from recently; believed-reachable but long unheard is `away`, the state
+this used to skip straight past.
+
 ## v0.7.3 — a dev machine catches its own stale builds up
 
 > **Upgrading:** `host_update` then `host_restart` on the host plane, or re-run
