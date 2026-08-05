@@ -110,6 +110,7 @@ fn ledger_with_impl(fx: &Fx, dir: &PathBuf, impl_id: [u8; 32]) -> Authority {
         AclAction::ActivateWorldImplementation {
             world: WORLD.into(),
             implementation_id: impl_id,
+            implementation_version: 1,
         },
     );
     ledger.commit_batch(&[activate.encode()], &[]).unwrap();

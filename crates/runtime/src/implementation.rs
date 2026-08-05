@@ -600,6 +600,30 @@ mod tests {
         Implementation::from_registration(&registration(schemas), 1, [3u8; 32], [4u8; 32])
     }
 
+    /// Bumping the declared version must move the id.
+    ///
+    /// The whole catch-up story rests on this: the id is what a Space records
+    /// and compares, and the version is what orders two of them. If a version
+    /// bump left the id alone, two builds that disagree about their contract
+    /// would look identical to every node, and a fleet would silently run
+    /// mixed. Asserted rather than assumed, because the encoding is the only
+    /// thing that makes it true and encodings get edited.
+    #[test]
+    fn the_declared_version_is_part_of_the_identity() {
+        let schemas = [schema("notes.note", 1)];
+        let mut a = descriptor(&schemas);
+        let mut b = descriptor(&schemas);
+        b.implementation_version = a.implementation_version + 1;
+        assert_ne!(
+            a.id().unwrap(),
+            b.id().unwrap(),
+            "a version bump must produce a different implementation id"
+        );
+        // …and nothing else moved: same version, same id.
+        a.implementation_version = b.implementation_version;
+        assert_eq!(a.id().unwrap(), b.id().unwrap());
+    }
+
     fn scope(name: &str, max_key_bytes: u32) -> ScopeSchema {
         ScopeSchema {
             name: SchemaId::parse(name).unwrap(),

@@ -125,6 +125,11 @@ pub struct DiagnoseInput<'a> {
     /// This device's custody standing for the recovery authority. Borrowed so
     /// the struct stays `Copy`.
     pub local_custody: Option<&'a mechanics::recovery::Custody>,
+    /// Worlds where this build's implementation is not the Space's active one,
+    /// already rendered — the daemon knows the ids and versions, and this layer
+    /// only has to decide whether the drift blocks. Empty is the ordinary case
+    /// and the ordinary case must stay silent, or the gate becomes furniture.
+    pub implementation_drift: &'a [String],
 }
 
 /// Project daemon state into the ordered gate list (pure — the validation core).
@@ -255,6 +260,34 @@ pub fn diagnose(input: DiagnoseInput<'_>) -> DiagnosisView {
         )
     };
 
+    // 5b. implementation — this build against the Space's active World.
+    //
+    //     After `synced`, because a joiner mid-backfill has not seen the
+    //     founder's activation yet and would otherwise be told its build is
+    //     wrong when it is merely early. Warns rather than blocks: writes still
+    //     land, they just attest the implementation the Space has in force
+    //     rather than this one, and telling somebody they are "blocked" from a
+    //     board they can read and write would be a lie.
+    //
+    //     This gate is the whole reason a node that is *behind* stays silent on
+    //     the wire — it writes no activation, so this is the only place the
+    //     disagreement surfaces at all.
+    let implementation = if input.implementation_drift.is_empty() {
+        DiagnosisGate::new(
+            "implementation",
+            "implementation",
+            GateState::Pass,
+            "this build matches the space",
+        )
+    } else {
+        DiagnosisGate::new(
+            "implementation",
+            "implementation",
+            GateState::Warn,
+            input.implementation_drift.join("; "),
+        )
+    };
+
     // 6. keys — custody health. Last, and never blocking: these are urgent to
     //    fix but say nothing about whether you are onboarded. A joiner mid-setup
     //    must not be told they are blocked because a founder share is stranded.
@@ -298,7 +331,15 @@ pub fn diagnose(input: DiagnoseInput<'_>) -> DiagnosisView {
         DiagnosisGate::new("keys", "keys", GateState::Warn, key_notes.join("; "))
     };
 
-    let gates = vec![space, daemon, membership, peer, synced, keys];
+    let gates = vec![
+        space,
+        daemon,
+        membership,
+        peer,
+        synced,
+        implementation,
+        keys,
+    ];
     let blocked = gates.iter().find(|g| g.state.is_blocking());
     let blocked_on = blocked.map(|g| g.id.clone());
     let summary = summarize(blocked, input.scopes, input.items);
@@ -355,6 +396,7 @@ mod tests {
             degraded_recovery: &[],
             rekey_pending: None,
             local_custody: None,
+            implementation_drift: &[],
         }
     }
 
@@ -440,6 +482,30 @@ mod tests {
 
     fn gate<'a>(v: &'a DiagnosisView, id: &str) -> &'a DiagnosisGate {
         v.gates.iter().find(|g| g.id == id).expect("gate present")
+    }
+
+    #[test]
+    fn implementation_drift_warns_without_blocking() {
+        // Warn, not Wait/Fail: a drifted node reads and writes perfectly well —
+        // its writes attest the Space's active implementation rather than its
+        // own. Blocking here would tell somebody they are locked out of a board
+        // that is on their screen.
+        let mut i = input();
+        let drift = ["com.lait.issues: this build is v3, the space runs v2".to_string()];
+        i.implementation_drift = &drift;
+        let v = diagnose(i);
+        assert_eq!(gate(&v, "implementation").state, GateState::Warn);
+        assert!(gate(&v, "implementation").detail.contains("v3"));
+        assert_eq!(
+            v.blocked_on, None,
+            "drift is reported, never a blocker — the board still works"
+        );
+    }
+
+    #[test]
+    fn no_drift_is_silent() {
+        let v = diagnose(input());
+        assert_eq!(gate(&v, "implementation").state, GateState::Pass);
     }
 
     #[test]
@@ -574,11 +640,25 @@ mod tests {
     fn gate_ordering_is_stable() {
         let v = diagnose(input());
         let ids: Vec<&str> = v.gates.iter().map(|g| g.id.as_str()).collect();
-        //  is LAST on purpose: the first five are the onboarding sequence a
-        // joiner walks, and custody health is orthogonal to it.
+        // `keys` is LAST on purpose: the first five are the onboarding sequence
+        // a joiner walks, and custody health is orthogonal to it.
+        //
+        // `implementation` sits after `synced` for a reason of the same kind. A
+        // joiner mid-backfill has not incorporated the founder's activation
+        // yet, so asking "does this build match?" before "has anything arrived?"
+        // would report a mismatch against a Space this node has not finished
+        // reading. Answer the arrival question first.
         assert_eq!(
             ids,
-            ["space", "daemon", "membership", "peer", "synced", "keys"]
+            [
+                "space",
+                "daemon",
+                "membership",
+                "peer",
+                "synced",
+                "implementation",
+                "keys"
+            ]
         );
     }
 }

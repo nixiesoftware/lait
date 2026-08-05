@@ -141,6 +141,17 @@ impl WorldPackage {
         }
     }
 
+    /// The version this package's World declares for itself.
+    ///
+    /// Read off the descriptor rather than taken as a second constructor
+    /// argument, for the same reason `Implementation::from_registration` reads
+    /// it off the registration: a version passed alongside the implementation
+    /// is a second source of truth that can disagree with the one the id was
+    /// hashed over, and the disagreement would be invisible.
+    pub fn reviewed_version(&self) -> u32 {
+        self.implementation.descriptor().implementation_version.0
+    }
+
     pub fn with_control(mut self, control: Arc<dyn Handler>) -> Self {
         self.control = Some(control);
         self
@@ -213,7 +224,18 @@ impl WorldPackages {
             .map(|package| package.reviewed_implementation)
     }
 
-    pub fn founder_policies(&self) -> anyhow::Result<Vec<(WorldId, [u8; 32], Vec<FounderGrant>)>> {
+    /// The reviewed id *and* the version its descriptor declares — the pair a
+    /// catch-up needs to decide whether this build is ahead of the Space.
+    pub fn reviewed_state(&self, world: &WorldId) -> Option<([u8; 32], u32)> {
+        self.packages
+            .iter()
+            .find(|package| package.world_id() == world)
+            .map(|package| (package.reviewed_implementation, package.reviewed_version()))
+    }
+
+    pub fn founder_policies(
+        &self,
+    ) -> anyhow::Result<Vec<(WorldId, [u8; 32], u32, Vec<FounderGrant>)>> {
         self.packages
             .iter()
             .filter_map(|package| {
@@ -222,6 +244,7 @@ impl WorldPackages {
                         (
                             package.world.clone(),
                             package.reviewed_implementation,
+                            package.reviewed_version(),
                             grants,
                         )
                     })
@@ -291,6 +314,7 @@ impl WorldPackages {
             hosts.push((
                 package.world.clone(),
                 package.reviewed_implementation,
+                package.reviewed_version(),
                 package.control.clone(),
                 package.projector.clone(),
             ));
@@ -302,10 +326,10 @@ impl WorldPackages {
             WorldRouter::new(
                 hosts
                     .into_iter()
-                    .map(|(world, reviewed, control, projector)| {
+                    .map(|(world, reviewed, version, control, projector)| {
                         (
                             world.clone(),
-                            WorldHost::new(world, reviewed, control, projector),
+                            WorldHost::new(world, reviewed, version, control, projector),
                         )
                     })
                     .collect(),
@@ -321,6 +345,10 @@ impl WorldPackages {
 pub struct WorldHost {
     world: WorldId,
     reviewed_implementation: [u8; 32],
+    /// The version the reviewed descriptor declares. Carried beside the id
+    /// because a `WorldHost` never sees the `World` itself, so it cannot go
+    /// back to the descriptor to ask.
+    reviewed_version: u32,
     control: Option<Arc<dyn Handler>>,
     projector: Option<Arc<dyn ObservationProjector>>,
     primary_session: Mutex<Option<Session>>,
@@ -339,11 +367,13 @@ impl WorldHost {
     fn new(
         world: WorldId,
         reviewed_implementation: [u8; 32],
+        reviewed_version: u32,
         control: Option<Arc<dyn Handler>>,
         projector: Option<Arc<dyn ObservationProjector>>,
     ) -> Self {
         Self {
             world,
+            reviewed_version,
             reviewed_implementation,
             control,
             projector,
@@ -358,6 +388,11 @@ impl WorldHost {
 
     pub fn reviewed_implementation(&self) -> &[u8; 32] {
         &self.reviewed_implementation
+    }
+
+    /// The version this build declares for the World it hosts.
+    pub fn reviewed_version(&self) -> u32 {
+        self.reviewed_version
     }
 
     pub fn control(&self) -> Option<&dyn Handler> {
@@ -438,6 +473,17 @@ impl WorldRouter {
         self.hosts
             .iter()
             .map(|(world, host)| (world, host.reviewed_implementation()))
+    }
+
+    /// Every hosted World's reviewed id with the version beside it.
+    pub fn reviewed_states(&self) -> impl Iterator<Item = (&WorldId, [u8; 32], u32)> {
+        self.hosts.iter().map(|(world, host)| {
+            (
+                world,
+                *host.reviewed_implementation(),
+                host.reviewed_version(),
+            )
+        })
     }
 
     pub fn ensure_primary(

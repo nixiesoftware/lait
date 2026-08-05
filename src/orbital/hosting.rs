@@ -94,6 +94,27 @@ fn discover_space(home: &Path) -> Result<SpaceId> {
 /// This is a logical boundary, not an OS-process claim. The current
 /// The compatibility-process adapter gives it a per-home control listener; a general
 /// Lait daemon can instead hold several instances and route by Space id.
+/// Where this build stands against the Space, for one World.
+///
+/// `active` is `None` only before any activation has been incorporated — a
+/// joiner whose backfill has not reached the founder's activation yet. That is
+/// a *waiting* state, not a mismatch, and the two must not be confused: one
+/// resolves itself and the other needs somebody to act.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ImplementationDrift {
+    /// What this build declares.
+    pub ours: mechanics::membership::ActiveImplementation,
+    /// What the Space has in force.
+    pub active: Option<mechanics::membership::ActiveImplementation>,
+}
+
+impl ImplementationDrift {
+    /// Whether this build and the Space agree.
+    pub fn matched(&self) -> bool {
+        self.active.is_some_and(|active| active.id == self.ours.id)
+    }
+}
+
 pub struct StationHost {
     /// The durable local Orbit occupied by this host's Station.
     address: OrbitAddress,
@@ -494,34 +515,28 @@ impl StationHost {
             let _ = worlds.ensure_primary(&station, &world, &identity);
         }
 
-        // The implementation self-check. Receipts pin whichever implementation
-        // id is ACTIVE in the ledger — not this build's — so a build whose
-        // descriptor has moved on would silently attest an implementation it
-        // is not. Say so at open; an admin activates this build's id with the
-        // World's own upgrade operation (`{"cmd":"world_upgrade"}` on the
-        // Issues RPC route).
-        {
-            use runtime::world::AuthorityView;
-            let device = mechanics::actor::device_from_seed(&device_seed);
-            if let Some(principal) = mechanics.resolve(&device) {
-                for (world, ours) in worlds.reviewed_implementations() {
-                    let active =
-                        mechanics.active_implementation(world, &principal.authority_frontier);
-                    if active != Some(*ours) {
-                        tracing::warn!(
-                            "this build's {} World implementation ({}) is not the space's \
-                             active one ({}) — writes will attest the active implementation; \
-                             an admin should activate this build's reviewed implementation",
-                            world,
-                            data_encoding::HEXLOWER.encode(&ours[..8]),
-                            active
-                                .map(|a| data_encoding::HEXLOWER.encode(&a[..8]))
-                                .unwrap_or_else(|| "none".into()),
-                        );
-                    }
-                }
-            }
-        }
+        // The implementation self-check, and the catch-up it authorizes.
+        //
+        // Receipts pin whichever implementation id is ACTIVE in the ledger —
+        // not this build's — so a build whose descriptor has moved on would
+        // silently attest an implementation it is not. On a fleet of dev
+        // machines that is the normal state, not an exception, so this does not
+        // merely complain: an admin node whose declared version is *ahead* of
+        // the Space takes the Space with it.
+        //
+        // Strictly ahead, and only ahead. Activating unconditionally would make
+        // every restart a coin toss between whichever dev boxes happen to be
+        // up — each would re-point the Space at itself, and every flip
+        // invalidates writes pinned to the id it replaced. Comparing the
+        // declared version instead gives one total order that every node agrees
+        // on, so the fleet converges on the newest build rather than the
+        // last-started one. A node that is behind writes nothing and is
+        // reported by the `implementation` gate in `diagnose` instead.
+        //
+        // Rollback stays available and stays explicit: `world_upgrade` on an
+        // older build still activates it, because that is a deliberate
+        // instruction rather than an incidental restart.
+        Self::reconcile_implementations(&mechanics, &worlds);
 
         // Before the Station moves into the struct, and before anything can be
         // delivered: a receiver only holds what arrives after it exists.
@@ -1217,9 +1232,10 @@ impl StationHost {
                     return Response::not_found(format!("World '{world}' is not hosted"));
                 };
                 let ours = *host.reviewed_implementation();
+                let version = host.reviewed_version();
                 match self
                     .mechanics
-                    .activate_implementation(world_id.as_str(), ours)
+                    .activate_implementation(world_id.as_str(), ours, version)
                 {
                     Ok(()) => Response::Ok {
                         message: Some(format!(
@@ -1799,6 +1815,7 @@ impl StationHost {
         match req {
             Request::Hello { .. } => Response::Hello {
                 protocol_version: crate::control::CONTROL_PROTOCOL_VERSION,
+                build: Some(crate::control::BuildFingerprint::here()),
             },
             Request::ConfigReload => Response::Ok { message: None },
             Request::Stop => Response::Ok {
@@ -1993,6 +2010,42 @@ impl StationHost {
         };
         let degraded = self.mechanics.degraded_recovery();
         let recovery = self.mechanics.recovery_status();
+        // Same reader the open-time catch-up used, so the gate cannot describe a
+        // different situation than the one the daemon acted on. A World whose
+        // activation simply has not arrived yet is not drift — `synced` above
+        // already speaks for that node.
+        // Only an admin can activate, so only an admin may be promised a
+        // catch-up. Telling a member its node "will take the space forward"
+        // describes something that cannot happen and sends them to wait for it.
+        let admin = self.mechanics.am_i_admin();
+        let drift: Vec<String> = Self::implementation_drift(&self.mechanics, &self.worlds)
+            .into_iter()
+            .filter(|(_, drift)| drift.active.is_some() && !drift.matched())
+            .map(|(world, drift)| {
+                let active = drift.active.unwrap_or(drift.ours);
+                format!(
+                    "{world}: this build is v{} ({}), the space runs v{} ({}) — {}",
+                    drift.ours.version,
+                    data_encoding::HEXLOWER.encode(&drift.ours.id[..8]),
+                    active.version,
+                    data_encoding::HEXLOWER.encode(&active.id[..8]),
+                    match (drift.ours.version.cmp(&active.version), admin) {
+                        (std::cmp::Ordering::Greater, true) =>
+                            "this node takes the space forward on its next restart",
+                        (std::cmp::Ordering::Greater, false) =>
+                            "this node is ahead but cannot activate — ask an admin to \
+                             update, or to run world_upgrade on a node running this build",
+                        (std::cmp::Ordering::Equal, _) =>
+                            "same version, different descriptor — neither can order the \
+                             other, so one of them has to bump its version",
+                        (std::cmp::Ordering::Less, true) =>
+                            "update this node, or run world_upgrade here to move the \
+                             space back to this build deliberately",
+                        (std::cmp::Ordering::Less, false) => "update this node",
+                    }
+                )
+            })
+            .collect();
         let view = crate::diagnose::diagnose(crate::diagnose::DiagnoseInput {
             space: Some(space.as_str()),
             name: "",
@@ -2004,6 +2057,7 @@ impl StationHost {
             degraded_recovery: &degraded,
             rekey_pending: None,
             local_custody: Some(&recovery.custody),
+            implementation_drift: &drift,
         });
         Response::Diagnosis(Box::new(view))
     }
@@ -2284,6 +2338,98 @@ impl StationHost {
                 }
             }
             Err(e) => Response::err(format!("{e}")),
+        }
+    }
+
+    /// This node's standing relative to the Space, per hosted World.
+    ///
+    /// One reader for two callers — the catch-up below and the `implementation`
+    /// gate in `diagnose` — so what the daemon acts on and what the gate reports
+    /// can never be two different opinions.
+    pub(crate) fn implementation_drift(
+        mechanics: &SpaceAuthority,
+        worlds: &WorldRouter,
+    ) -> Vec<(replica::body::WorldId, ImplementationDrift)> {
+        worlds
+            .reviewed_states()
+            .map(|(world, id, version)| {
+                (
+                    world.clone(),
+                    ImplementationDrift {
+                        ours: mechanics::membership::ActiveImplementation { id, version },
+                        active: mechanics.active_implementation_state(world.as_str()),
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// Bring the Space's active World implementations up to this build's, where
+    /// this build is strictly newer and this node may say so.
+    ///
+    /// Runs once at open, before anything docks. Reports through
+    /// [`implementation_drift`] either way, which is what the `implementation`
+    /// gate in `diagnose` reads — a node that is behind must still be able to
+    /// say so, and saying so is all it does.
+    fn reconcile_implementations(mechanics: &SpaceAuthority, worlds: &WorldRouter) {
+        let admin = mechanics.am_i_admin();
+        for (world, drift) in Self::implementation_drift(mechanics, worlds) {
+            let ours = drift.ours;
+            let short = |id: &[u8; 32]| data_encoding::HEXLOWER.encode(&id[..8]);
+            match drift.active {
+                // Nothing activated yet. Formation does that, so reaching here
+                // means a store whose founder activation has not arrived — a
+                // joiner mid-backfill. Its own build is not the answer to that.
+                None => tracing::debug!(
+                    "no active {world} implementation yet — waiting for the Space's own"
+                ),
+                Some(active) if active.id == ours.id => {}
+                Some(active) if !admin => tracing::warn!(
+                    "this build's {world} implementation (v{}, {}) is not the Space's active \
+                     one (v{}, {}) — writes attest the active implementation. This node is not \
+                     an admin, so it cannot activate its own; ask one to run world_upgrade.",
+                    ours.version,
+                    short(&ours.id),
+                    active.version,
+                    short(&active.id),
+                ),
+                Some(active) if ours.version > active.version => {
+                    match mechanics.activate_implementation(world.as_str(), ours.id, ours.version) {
+                        Ok(()) => tracing::info!(
+                            "took the Space's {world} implementation forward: v{} ({}) -> v{} ({})",
+                            active.version,
+                            short(&active.id),
+                            ours.version,
+                            short(&ours.id),
+                        ),
+                        Err(error) => tracing::warn!(
+                            "could not activate this build's {world} implementation \
+                             (v{}, {}): {error}",
+                            ours.version,
+                            short(&ours.id),
+                        ),
+                    }
+                }
+                // Behind, or level-but-different. Level-but-different is the
+                // interesting one: same declared version, different descriptor,
+                // which means two builds disagree about what v{n} *is*. Neither
+                // may take the Space, because there is no order between them —
+                // somebody has to bump a version.
+                Some(active) => tracing::warn!(
+                    "this build's {world} implementation (v{}, {}) is {} the Space's active one \
+                     (v{}, {}) — writes attest the active implementation. Update this node, or \
+                     run world_upgrade here to make the Space match it deliberately.",
+                    ours.version,
+                    short(&ours.id),
+                    if ours.version == active.version {
+                        "a different descriptor at the same version as"
+                    } else {
+                        "older than"
+                    },
+                    active.version,
+                    short(&active.id),
+                ),
+            }
         }
     }
 

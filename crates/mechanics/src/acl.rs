@@ -240,7 +240,26 @@ pub enum AclAction {
     ActivateWorldImplementation {
         world: String,
         implementation_id: [u8; 32],
+        /// The activated descriptor's own `implementation_version`.
+        ///
+        /// Redundant with the id — the id is a hash *over* a descriptor that
+        /// already contains this number — and recorded anyway, because the id
+        /// is opaque and a hash cannot be compared for recency. A node holding
+        /// only the active id cannot tell whether its own build is ahead of the
+        /// Space or behind it, which is the one question an automatic catch-up
+        /// has to answer before it writes. Ordering is *not* enforced here:
+        /// rollback is a legitimate explicit activation, so the ledger keeps
+        /// last-authorized-in-topo-order-wins and the monotonic rule lives
+        /// where the decision is made.
+        implementation_version: u32,
     },
+}
+
+/// What a World's activation put in force.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActiveImplementation {
+    pub id: [u8; 32],
+    pub version: u32,
 }
 
 /// The Mechanics-owned meta-capability that manages policy: grants,
@@ -273,7 +292,7 @@ pub struct PolicyPass {
     pub revoked_grants: BTreeSet<[u8; 32]>,
     pub delegations: BTreeMap<[u8; 32], Assignment>,
     pub revoked_delegations: BTreeSet<[u8; 32]>,
-    pub implementations: BTreeMap<String, [u8; 32]>,
+    pub implementations: BTreeMap<String, ActiveImplementation>,
 }
 
 impl PolicyPass {
@@ -751,6 +770,18 @@ impl AclState {
 
     /// The active implementation id for a World, if one was activated.
     pub fn active_implementation(&self, world: &str) -> Option<[u8; 32]> {
+        self.policy
+            .implementations
+            .get(world)
+            .map(|active| active.id)
+    }
+
+    /// The active implementation's id *and* declared version.
+    ///
+    /// The id alone answers "does this build match?"; only the pair answers
+    /// "and if not, which way?" — which is what an automatic catch-up needs
+    /// before it is allowed to write an activation of its own.
+    pub fn active_implementation_state(&self, world: &str) -> Option<ActiveImplementation> {
         self.policy.implementations.get(world).copied()
     }
 
@@ -1217,11 +1248,19 @@ fn apply_authorized(
         AclAction::ActivateWorldImplementation {
             world,
             implementation_id,
+            implementation_version,
         } => {
-            // Deterministic last-authorized-in-topo-order wins.
-            policy
-                .implementations
-                .insert(world.clone(), *implementation_id);
+            // Deterministic last-authorized-in-topo-order wins. Rollback is an
+            // ordinary activation, so a lower version legitimately replaces a
+            // higher one here; monotonicity is a caller's policy, not the
+            // ledger's.
+            policy.implementations.insert(
+                world.clone(),
+                ActiveImplementation {
+                    id: *implementation_id,
+                    version: *implementation_version,
+                },
+            );
         }
     }
 }
@@ -1574,10 +1613,15 @@ fn materialize_authorized(
             AclAction::ActivateWorldImplementation {
                 world,
                 implementation_id,
+                implementation_version,
             } => {
-                policy
-                    .implementations
-                    .insert(world.clone(), *implementation_id);
+                policy.implementations.insert(
+                    world.clone(),
+                    ActiveImplementation {
+                        id: *implementation_id,
+                        version: *implementation_version,
+                    },
+                );
             }
         }
     }

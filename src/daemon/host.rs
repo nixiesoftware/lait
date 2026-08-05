@@ -565,6 +565,9 @@ impl Listener {
                 &mut write_half,
                 &Response::Hello {
                     protocol_version: CONTROL_PROTOCOL_VERSION,
+                    // Answered here, on the daemon's own connection path, so it
+                    // describes the process actually holding this home.
+                    build: Some(crate::control::BuildFingerprint::here()),
                 },
             )
             .await;

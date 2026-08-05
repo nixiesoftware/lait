@@ -167,6 +167,7 @@ pub const MCP_TOOL_NAMES: &[&str] = &[
     // transport / presence
     "status",
     "doctor",
+    "world_upgrade",
     "my_id",
     "invite_ticket",
     "join_room",
@@ -473,6 +474,20 @@ impl LaitMcp {
     async fn doctor(&self) -> Result<CallToolResult, McpError> {
         self.run(Request::Diagnose {
             expected_space: None,
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Make this build's World implementation the space's active one \
+                       (admin only). A node whose build is NEWER already does this by \
+                       itself at startup; this is the deliberate form, and the only way \
+                       to move the space BACK onto an older build. Check `doctor`'s \
+                       `implementation` gate first — it names both versions."
+    )]
+    async fn world_upgrade(&self) -> Result<CallToolResult, McpError> {
+        self.run(Request::WorldActivate {
+            world: crate::world::contract::world_id().as_str().to_string(),
         })
         .await
     }

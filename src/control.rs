@@ -120,6 +120,82 @@ impl Endpoint {
 /// would not be a decode error, it would be a desynchronised connection.
 pub const CONTROL_PROTOCOL_VERSION: u32 = 10;
 
+/// Which build a daemon is, for deciding whether to reuse it or take over.
+///
+/// Not a security claim and not an attestation — a daemon reports this about
+/// itself, and anything that can answer the control channel can say anything.
+/// It exists for exactly one situation: a developer rebuilt the binary and the
+/// daemon from the previous build is still holding the home. The protocol
+/// handshake cannot see that, because both builds speak the same protocol.
+///
+/// `built` is the executable's mtime, which is what actually moves on a rebuild.
+/// `version` alone would not: two local builds of the same commit — or of two
+/// different commits between releases — carry the same semver.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BuildFingerprint {
+    pub version: String,
+    /// The daemon's own executable path.
+    pub exe: String,
+    /// Unix seconds of that file's mtime, or 0 where it could not be read.
+    pub built: u64,
+}
+
+impl BuildFingerprint {
+    /// This process's own fingerprint, resolved once and then remembered.
+    ///
+    /// Sampled at first call — in practice startup — and never re-read, because
+    /// the question is *which build is this process running*, and that is fixed
+    /// the moment it is loaded. Asking the filesystem again later answers a
+    /// different question and answers it wrongly: replacing a binary under a
+    /// live daemon is the ordinary upgrade path (`host_update` renames the old
+    /// file aside and writes the new one in its place), and on Windows a running
+    /// process resolves its own path to the *current* name of the file it holds
+    /// open. A daemon that re-read it after such an upgrade would report
+    /// `lait.old` — a path no client will ever match — and the stale daemon it
+    /// is would become invisible at exactly the moment it started to matter.
+    pub fn here() -> Self {
+        static HERE: std::sync::OnceLock<BuildFingerprint> = std::sync::OnceLock::new();
+        HERE.get_or_init(|| {
+            let exe = std::env::current_exe().unwrap_or_default();
+            let built = std::fs::metadata(&exe)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            Self {
+                version: env!("LAIT_VERSION_SEMVER").to_string(),
+                exe: exe.display().to_string(),
+                built,
+            }
+        })
+        .clone()
+    }
+
+    /// Whether `self` is a build this one should displace.
+    ///
+    /// **The same executable, restamped.** That is the whole rule, and it is
+    /// narrow on purpose. It catches the situation this exists for — the binary
+    /// was rebuilt and the daemon from the previous build is still holding the
+    /// home, answering every request while running code that is no longer on
+    /// disk — and it catches nothing else.
+    ///
+    /// Two things it deliberately does *not* do. It does not act on a *different*
+    /// path: a client is not always the binary it would spawn (an integration
+    /// test is its own executable, and so is anything embedding this crate), so
+    /// treating "not me" as "stale" would have every such client evict a
+    /// perfectly good daemon it did not start. And it does not act on age alone
+    /// in either direction — without the path check, two binaries run in turn
+    /// would each evict the other's daemon at startup and a machine running both
+    /// would never keep one up.
+    ///
+    /// Everything it declines to displace is still *reused*, not refused: the
+    /// protocol already matched, so talking to it works.
+    pub fn supersedes(&self, other: &Self) -> bool {
+        self.exe == other.exe && self.built > other.built
+    }
+}
+
 /// The oldest control protocol a client still talks to. Raising this retires a
 /// version; the gap to [`CONTROL_PROTOCOL_VERSION`] is the mixed-version window.
 ///
@@ -1348,6 +1424,10 @@ pub enum Response {
     /// supported version exists.
     Hello {
         protocol_version: u32,
+        /// Which build is answering. Optional so the reply stays decodable by
+        /// every client that ever read it — the one promise this variant makes.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        build: Option<BuildFingerprint>,
     },
     Ok {
         message: Option<String>,
@@ -2063,7 +2143,32 @@ async fn probe_inner(home: &Path) -> Probe {
     match v.get("kind").and_then(|k| k.as_str()) {
         Some("hello") => match v.get("protocol_version").and_then(|p| p.as_u64()) {
             Some(peer) => match check_control_protocol(peer as u32) {
-                Ok(()) => Probe::Healthy,
+                // The protocol matches, so this daemon is talkable-to. The only
+                // remaining question is whether it is *ours* — a rebuilt binary
+                // leaves the previous build's daemon holding the home, and it
+                // answers every request perfectly while running code that is no
+                // longer on disk. That was invisible here until now.
+                Ok(()) => {
+                    let ours = BuildFingerprint::here();
+                    match v
+                        .get("build")
+                        .and_then(|b| serde_json::from_value::<BuildFingerprint>(b.clone()).ok())
+                    {
+                        Some(theirs) if ours.supersedes(&theirs) => Probe::Foreign {
+                            why: format!(
+                                "it is an older build of lait ({} from {}) than the one you \
+                                 ran ({} from {}) — stopping it so this build can serve",
+                                theirs.version, theirs.exe, ours.version, ours.exe
+                            ),
+                            replaceable: true,
+                        },
+                        // Same build, a newer one, or one that does not say:
+                        // reuse it. Talking works, and evicting a daemon we are
+                        // not ahead of is how two binaries run in turn come to
+                        // kill each other's on every start.
+                        _ => Probe::Healthy,
+                    }
+                }
                 Err(e) => Probe::Foreign {
                     why: format!("{e:#}"),
                     // Only take over from a daemon that is *behind* us.
@@ -3065,6 +3170,76 @@ mod tests {
         );
     }
 
+    fn build(version: &str, exe: &str, built: u64) -> BuildFingerprint {
+        BuildFingerprint {
+            version: version.into(),
+            exe: exe.into(),
+            built,
+        }
+    }
+
+    /// Only an *older* daemon is displaced.
+    ///
+    /// The failure this guards is not a wrong answer, it is a livelock: if
+    /// "different" were enough, two binaries run in turn would each evict the
+    /// other's daemon at startup and a machine running both would never keep one
+    /// up. Age gives a total order, so at most one direction ever acts.
+    #[test]
+    fn only_an_older_daemon_is_displaced() {
+        let new = build("0.7.2", "/t/lait", 200);
+        let old = build("0.7.2", "/t/lait", 100);
+        assert!(new.supersedes(&old), "a newer build takes over");
+        assert!(
+            !old.supersedes(&new),
+            "an older build must never evict a newer"
+        );
+        assert!(
+            !new.supersedes(&new),
+            "the same build is reused, not restarted"
+        );
+    }
+
+    /// Same age, different file, is *not* a takeover.
+    ///
+    /// Two binaries stamped the same second (a scripted rebuild does this) have
+    /// no order between them. Evicting on inequality alone would put exactly the
+    /// pair most likely to alternate into the livelock above.
+    #[test]
+    fn an_equal_timestamp_is_never_a_takeover() {
+        let a = build("0.7.2", "/t/a", 100);
+        let b = build("0.7.2", "/t/b", 100);
+        assert!(!a.supersedes(&b));
+        assert!(!b.supersedes(&a));
+    }
+
+    /// A client is not always the binary it would spawn.
+    ///
+    /// The integration-test harness is its own executable and spawns `lait` as
+    /// the daemon; anything embedding this crate is in the same position. Judging
+    /// a daemon stale because it is *a different file* would have every one of
+    /// those evict a daemon it did not start and has no quarrel with — which is
+    /// exactly what happened the first time this rule was written, and it took
+    /// the launcher-safety test down with it.
+    #[test]
+    fn a_different_executable_is_never_stale_however_new_we_are() {
+        let harness = build("0.7.2", "/t/lait-it.exe", 9_999);
+        let daemon = build("0.7.2", "/t/lait.exe", 1);
+        assert!(
+            !harness.supersedes(&daemon),
+            "a client that is a different binary must reuse the daemon, not evict it"
+        );
+    }
+
+    /// A rebuild of the same path at the same version still counts — which is
+    /// the entire point, and the case a version comparison alone would miss.
+    #[test]
+    fn a_rebuild_of_the_same_path_is_detected() {
+        let before = build("0.7.2-dev.abc", "/t/lait", 10);
+        let after = build("0.7.2-dev.abc", "/t/lait", 11);
+        assert_ne!(before, after);
+        assert!(after.supersedes(&before));
+    }
+
     /// The handshake's own shape is the one thing that can never be allowed to
     /// drift: `probe` reads `kind` and `protocol_version` out of raw JSON, so
     /// renaming either would silently turn every version mismatch back into the
@@ -3073,6 +3248,7 @@ mod tests {
     fn the_hello_reply_keeps_the_field_names_probe_reads_raw() {
         let json = serde_json::to_value(Response::Hello {
             protocol_version: CONTROL_PROTOCOL_VERSION,
+            build: None,
         })
         .unwrap();
         assert_eq!(json["kind"], "hello");

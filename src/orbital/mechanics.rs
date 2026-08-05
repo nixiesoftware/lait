@@ -1881,7 +1881,12 @@ impl SpaceAuthority {
     /// Activate a World implementation id for this Space — an admin-authored
     /// authority effect. Idempotent (re-activation of the same id is a no-op
     /// commit through the ledger's batch idempotency).
-    pub fn activate_implementation(&self, world: &str, implementation_id: [u8; 32]) -> Result<()> {
+    pub fn activate_implementation(
+        &self,
+        world: &str,
+        implementation_id: [u8; 32],
+        implementation_version: u32,
+    ) -> Result<()> {
         let mut inner = self.lock();
         if inner
             .acl()
@@ -1894,11 +1899,18 @@ impl SpaceAuthority {
             AclAction::ActivateWorldImplementation {
                 world: world.to_string(),
                 implementation_id,
+                implementation_version,
             },
             None,
             vec![],
             vec![],
         )
+    }
+
+    /// The implementation in force for `world` at this node's current frontier,
+    /// with the version that lets a caller order it against its own build.
+    pub fn active_implementation_state(&self, world: &str) -> Option<acl::ActiveImplementation> {
+        self.lock().acl().active_implementation_state(world)
     }
 
     /// Resolve an actor by its actor id or one of its device keys (the
