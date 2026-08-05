@@ -6,9 +6,9 @@
 # reviewed like one, not discovered when a gate goes red on a refactor.
 
 [tiers]
-pr             1335
-pr-platform    1014
-nightly        1362
+pr             1342
+pr-platform    1021
+nightly        1369
 mutants        87
 
 [gates]
@@ -187,8 +187,11 @@ lait config::tests::second_daemon_lock_fails_while_first_is_held
 lait config::tests::settings_store_layer_wins_over_global
 lait config::tests::socket_path_stays_under_the_unix_limit
 lait config::tests::the_lock_holder_stays_identifiable_while_it_holds_the_lock
+lait control::tests::a_different_executable_is_never_stale_however_new_we_are
 lait control::tests::a_drained_signal_says_how_many_were_lost
 lait control::tests::a_first_live_read_carries_no_generation_at_all
+lait control::tests::a_rebuild_of_the_same_path_is_detected
+lait control::tests::an_equal_timestamp_is_never_a_takeover
 lait control::tests::an_unchanged_live_view_is_its_own_kind
 lait control::tests::client_request_envelope_is_wire_backward_compatible
 lait control::tests::client_request_flatten_round_trips_with_route_selector_and_scalars
@@ -196,6 +199,7 @@ lait control::tests::control_protocol_window_accepts_supported_and_refuses_outsi
 lait control::tests::hello_serializes_as_the_cmd_a_pre_handshake_daemon_will_reject
 lait control::tests::live_rows_name_an_actor_and_tag_every_nested_union
 lait control::tests::only_a_daemon_behind_us_is_ever_replaceable
+lait control::tests::only_an_older_daemon_is_displaced
 lait control::tests::passive_dispatch_intent_is_explicit_and_round_trips
 lait control::tests::the_hello_reply_keeps_the_field_names_probe_reads_raw
 lait daemon::host::tests::host_rejects_a_stale_space_expectation_before_placement
@@ -219,8 +223,10 @@ lait diagnose::tests::all_pass_when_member_online_and_synced
 lait diagnose::tests::an_unbacked_indispensable_share_warns
 lait diagnose::tests::an_unidentified_group_is_not_claimed_to_be_the_recovery_key
 lait diagnose::tests::gate_ordering_is_stable
+lait diagnose::tests::implementation_drift_warns_without_blocking
 lait diagnose::tests::matching_expected_space_passes
 lait diagnose::tests::member_online_but_unsynced_blocks_on_synced
+lait diagnose::tests::no_drift_is_silent
 lait diagnose::tests::pending_joiner_blocks_on_membership_and_skips_sync
 lait diagnose::tests::solo_founder_is_not_blocked
 lait diagnose::tests::space_mismatch_is_the_first_blocker
@@ -1036,6 +1042,7 @@ runtime implementation::tests::policy_table_commitment_is_content_bound
 runtime implementation::tests::reordered_and_duplicate_schemas_reject
 runtime implementation::tests::roundtrip_empty_min_max_schema_sets
 runtime implementation::tests::sections_round_trip_alone_and_together
+runtime implementation::tests::the_declared_version_is_part_of_the_identity
 runtime implementation::tests::the_sectionless_encoding_is_byte_identical_to_what_shipped
 runtime implementation::tests::unknown_version_and_trailing_bytes_reject
 runtime internal_tests::admission_fixtures::a_capability_this_build_does_not_implement_is_not_echoed_back
