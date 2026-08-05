@@ -348,6 +348,15 @@ jobs:
 
       - name: Refresh the coverage manifest on the branch
         id: refresh
+        # A failed push must not take the job's remaining steps with it. The
+        # upload below is the documented fallback for "this run cannot push" —
+        # and it was unreachable, because a step that fails halts the job and
+        # every later step is skipped. So the one path that hands the corrected
+        # file to a human only ever ran when the push was *not attempted*
+        # (a fork, or no App secret), never when it was attempted and refused.
+        # The gate still fails: `Fail if the manifest was stale` is what fails
+        # it, and it runs after this.
+        continue-on-error: true
         if: steps.token.outcome == 'success'
         shell: bash
         env:

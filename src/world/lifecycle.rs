@@ -38,8 +38,8 @@ pub fn seed_founder_policy(mechanics: &SpaceAuthority) -> Result<()> {
 }
 
 fn seed_founder_policies(mechanics: &SpaceAuthority, packages: &WorldPackages) -> Result<()> {
-    for (world, implementation, grants) in packages.founder_policies()? {
-        mechanics.activate_implementation(world.as_str(), implementation)?;
+    for (world, implementation, version, grants) in packages.founder_policies()? {
+        mechanics.activate_implementation(world.as_str(), implementation, version)?;
         for grant in grants {
             mechanics.grant_self_capability(grant.capability, grant.resource, grant.salt)?;
         }
