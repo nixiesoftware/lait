@@ -7,7 +7,7 @@ import {
   Plus,
 } from "lucide-react";
 
-import { ConfirmRequired, LaitError, rpc, spaces as fetchSpaces } from "./api";
+import { ConfirmRequired, hostRpc, LaitError, rpc, spaces as fetchSpaces } from "./api";
 import { useDoorbell } from "./doorbell";
 import { runBounded, type BulkProgress } from "./core/bulk";
 import { groupRows, loadDisplay, saveDisplay, type DisplayState } from "./core/display";
@@ -24,6 +24,7 @@ import {
 } from "./core/registry";
 import {
   carriesFilter,
+  DEFAULT_ROUTE,
   formatRoute,
   loadLastRoute,
   parseRoute,
@@ -117,6 +118,51 @@ const DENSITY_PREFERENCE = "lait.density";
 const LAYOUT_PANEL_IDS = ["sidebar", "main", "detail"];
 
 /**
+ * The two widths at which the shell sheds a side panel, in the order it sheds
+ * them — and that order is the whole point.
+ *
+ * A window narrow enough for one panel is not narrow enough for none, and the
+ * two panels are not worth the same. The project console is a *view* of the
+ * project already on screen, and every row in it is reachable from the project's
+ * own pages; the workspace rail is the only navigation there is. So the console
+ * goes first and navigation survives to a much narrower window than it used to —
+ * this used to be backwards, dropping all navigation at 960px while holding a
+ * pinned 340px console that left the issue list narrower than it would have been
+ * with both.
+ *
+ * `RAIL_DRAWER_QUERY` is the twin of the `max-[768px]:` utilities on the rail,
+ * its separator and the drawer. It has to exist in both languages — Tailwind's
+ * arbitrary variants take a literal, and the shell has to *know* which mode it is
+ * in to draw the control that opens the drawer — so the number is written down
+ * once here and the utilities are the copies to keep in step. The console has no
+ * such twin: it is gated in JS alone, because the control that toggles it has to
+ * disappear with it.
+ */
+const CONSOLE_QUERY = "(max-width: 960px)";
+const RAIL_DRAWER_QUERY = "(max-width: 768px)";
+
+/**
+ * Track a media query as state.
+ *
+ * The shell cannot infer either threshold from what it already has. `Panel`'s
+ * `onResize` cannot see the rail go: it is hidden by CSS, and `display: none` is
+ * invisible to the layout library — it goes on reporting the same percentage it
+ * had, so a shell that asks only the panel believes the rail is on screen while
+ * the person is looking at a window with no navigation in it. That was the bug.
+ */
+function useMediaQuery(query: string): boolean {
+  const [matches, setMatches] = useState(() => window.matchMedia(query).matches);
+  useEffect(() => {
+    const media = window.matchMedia(query);
+    const sync = () => setMatches(media.matches);
+    sync();
+    media.addEventListener("change", sync);
+    return () => media.removeEventListener("change", sync);
+  }, [query]);
+  return matches;
+}
+
+/**
  * The shell.
  *
  * It owns state and supplies an [`AppApi`]; it does not own keys. Every gesture —
@@ -137,10 +183,13 @@ export function App() {
    * machine-local store handle used by RPC. */
   const [routeSpace, setRouteSpace] = useState<string | null>(initialRoute.spaceId);
   const [current, setCurrent] = useState<string | null>(null);
-  // Asked for the founding surface while other spaces already exist. Without
-  // it the only way to reach `Welcome` would be having no store at all, which
-  // makes founding a second space impossible from the app.
-  const [founding, setFounding] = useState(false);
+  // Asked for the formation surface while other spaces already exist, and which
+  // tab to open on. Without this the only way to reach `Welcome` would be having
+  // no store at all, which makes founding *or entering* a second space
+  // impossible from the app — and the second one is how an existing user accepts
+  // an invite. The switcher opens it on `found`; the tab strip does the rest,
+  // and only the unknown-space empty state has a reason to pre-select `enter`.
+  const [founding, setFounding] = useState<"found" | "enter" | null>(null);
   const [selection, setSelection] = useState<string | null>(initialRoute.issue);
   /** The open Spec on the Specs register. A document, not a row: there is no
    *  cursor-versus-open distinction to make, so one piece of state says both. */
@@ -181,6 +230,17 @@ export function App() {
    *  that — a collapsed rail leaves ⌘B as the sole way back, which is a
    *  keystroke you have to already know. */
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  /** …and the other way the rail leaves the screen, which this state could not
+   *  see: hidden by the drawer breakpoint rather than collapsed by a drag. */
+  const railIsDrawer = useMediaQuery(RAIL_DRAWER_QUERY);
+  /** Nothing on screen leads back to the rail. Both ways of losing it end here,
+   *  because the reason the toggle exists is the same either way. */
+  const railHidden = sidebarCollapsed || railIsDrawer;
+  /** Is there room for the project console beside everything else? When there
+   *  is not, the console does not render *and neither does the button that
+   *  toggles it* — a control whose only effect is invisible is the same defect
+   *  as a rail with nothing to bring it back. */
+  const consoleFits = !useMediaQuery(CONSOLE_QUERY);
   const [personalNavRevision, setPersonalNavRevision] = useState(0);
   /** Bulk-selection checks, by canonical ref. Distinct from `selection`: the
    *  focus is one row, the checks are a set, and `x` is the socket. */
@@ -291,6 +351,8 @@ export function App() {
   spacesRef.current = spaces;
   const routeSpaceRef = useRef(routeSpace);
   routeSpaceRef.current = routeSpace;
+  const currentRef = useRef(current);
+  currentRef.current = current;
 
   /** Apply browser history without waking a daemon or inventing local identity. */
   const applyRoute = useCallback((route: ViewerRoute) => {
@@ -343,7 +405,7 @@ export function App() {
   const sidebarBeforeSettings = useRef<boolean | null>(null);
   useEffect(() => {
     const panel = sidebar.current;
-    if (!panel || window.matchMedia("(max-width: 960px)").matches) return;
+    if (!panel || window.matchMedia(RAIL_DRAWER_QUERY).matches) return;
     if (view === "settings") {
       if (sidebarBeforeSettings.current === null) {
         sidebarBeforeSettings.current = panel.isCollapsed();
@@ -457,6 +519,79 @@ export function App() {
     }
   }, [projectStore]);
   const loadSpaces = useCallback(() => loadSpacesRaw(), [loadSpacesRaw]);
+
+  /**
+   * Leave the catalog with nothing selected.
+   *
+   * `loadSpacesRaw` keeps whatever `current` already holds — it has to, or every
+   * refresh would fight the person's choice — so a row that has just been
+   * deregistered has to be let go here, *before* the reload. Otherwise `current`
+   * names an id no longer in `spaces` and the shell renders a space that is not
+   * on the list.
+   */
+  const deselectSpace = useCallback(() => {
+    window.history.pushState(null, "", formatRoute(DEFAULT_ROUTE));
+    setRouteSpace(null);
+    setCurrent(null);
+    setProject(null);
+    setSelection(null);
+  }, []);
+
+  /**
+   * Deregister one Orbit row.
+   *
+   * Navigation state only: `host_orbit_forget` never touches the store, and the
+   * confirmation has to say so or it reads as a delete. What it does not say is
+   * how to get the row back, because for a founder there is no in-app way —
+   * entering re-registers a store that already holds its Space, but that needs
+   * an invite link, and founding refuses an occupied directory.
+   */
+  const forgetSpace = useCallback(async (id: string) => {
+    const row = spacesRef.current.find((space) => space.id === id);
+    if (!row) return;
+    const confirmed = await ask.confirm({
+      title: `Forget ${row.name || row.space}?`,
+      body: `This removes the space from the list on this device. The encrypted store at ${row.path} is left exactly as it is, and no other device is affected.`,
+      confirmText: "Forget",
+      danger: true,
+    });
+    if (!confirmed) return;
+    try {
+      await hostRpc({ cmd: "host_orbit_forget", selector: row.path });
+      if (currentRef.current === id) deselectSpace();
+      await loadSpacesRaw();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }, [deselectSpace, loadSpacesRaw]);
+
+  /** Drop every row whose store is gone — the one remedy for a `missing` row. */
+  const pruneSpaces = useCallback(async () => {
+    const gone = spacesRef.current.filter((space) => space.status === "missing");
+    if (gone.length === 0) return;
+    const confirmed = await ask.confirm({
+      title: gone.length === 1 ? "Remove 1 unavailable space?" : `Remove ${gone.length} unavailable spaces?`,
+      // No "and it comes back if the store returns": the registry is only ever
+      // written by founding and entering, so re-opening a store does not
+      // re-register it. Promising a remedy this app does not have is worse than
+      // saying nothing.
+      body: `${gone.map((space) => space.name || space.space).join(", ")} — ${
+        gone.length === 1 ? "the store this row names is" : "the store each row names is"
+      } already gone from this machine. Removing ${
+        gone.length === 1 ? "it" : "them"
+      } clears the list; there is nothing left at ${gone.length === 1 ? "that path" : "those paths"} to delete.`,
+      confirmText: "Remove",
+      danger: true,
+    });
+    if (!confirmed) return;
+    try {
+      await hostRpc({ cmd: "host_orbit_prune" });
+      if (gone.some((space) => space.id === currentRef.current)) deselectSpace();
+      await loadSpacesRaw();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }, [deselectSpace, loadSpacesRaw]);
 
   // The project is read through a ref by the doorbell handler and the sweep, which
   // must not re-subscribe every time it changes.
@@ -603,8 +738,6 @@ export function App() {
     [board],
   );
 
-  const currentRef = useRef(current);
-  currentRef.current = current;
   const rowsRef = useRef(rows);
   rowsRef.current = rows;
   const selRef = useRef(selection);
@@ -858,7 +991,7 @@ export function App() {
         setFilter(EMPTY_FILTER);
       },
       toggleSidebar: () => {
-        if (window.matchMedia("(max-width: 960px)").matches) {
+        if (window.matchMedia(RAIL_DRAWER_QUERY).matches) {
           setMobileNav((open) => !open);
           return;
         }
@@ -1199,7 +1332,10 @@ export function App() {
    * card opened the pane, a list row opened full width. One reading surface, so
    * there is nothing left to pick.
    */
-  const fullWidthDetail = detailVisible;
+  // `founding` wins for the same reason it does over `projectShell`: the branch
+  // that draws an open issue full width also hides the column the formation
+  // surface lives in, so asking for it from an open issue would blank the app.
+  const fullWidthDetail = detailVisible && founding === null;
 
   // The third panel survives so the layout keeps one topology for every view —
   // declaring it conditionally made the library rebalance the sidebar whenever it
@@ -1277,7 +1413,11 @@ export function App() {
 
   const activeProject =
     board?.project ?? projects.find((candidate) => candidate.key === project) ?? null;
-  const projectShell = isProjectView(view) && Boolean(project || activeProject);
+  // The formation surface is not a project face. Without `founding` here, asking
+  // for it from an open board would draw the project toolbar and the milestone
+  // rail around a form for a space that does not exist yet.
+  const projectShell =
+    founding === null && isProjectView(view) && Boolean(project || activeProject);
   // The open project's milestones, for the filter menu's Milestone facet. The
   // same resource the overview and the issue rail read — one fetch for all three.
   const milestones = useProjectMilestones(current ?? "", activeProject?.id).data ?? [];
@@ -1513,7 +1653,7 @@ export function App() {
         collapsedSize={0}
         groupResizeBehavior="preserve-pixel-size"
         onResize={(size) => setSidebarCollapsed(size.inPixels === 0)}
-        className="bg-sunken max-[960px]:hidden"
+        className="bg-sunken max-[768px]:hidden"
       >
         <Sidebar
           spaces={spaces}
@@ -1533,6 +1673,9 @@ export function App() {
           onApplySavedView={applySavedView}
           onToggleFavorite={toggleFavorite}
           onCreateProject={api.createProject}
+          onAddSpace={() => setFounding("found")}
+          onForgetSpace={(id) => void forgetSpace(id)}
+          onPruneSpaces={() => void pruneSpaces()}
         />
       </Panel>
 
@@ -1540,8 +1683,8 @@ export function App() {
       <Separator
         className={
           view === "settings"
-            ? "pointer-events-none invisible relative w-px max-[960px]:hidden"
-            : "bg-line data-[state=dragging]:bg-accent hover:bg-accent/60 relative w-px outline-none transition-colors max-[960px]:hidden"
+            ? "pointer-events-none invisible relative w-px max-[768px]:hidden"
+            : "bg-line data-[state=dragging]:bg-accent hover:bg-accent/60 relative w-px outline-none transition-colors max-[768px]:hidden"
         }
       >
         <span className="absolute inset-y-0 -left-[3px] w-[7px]" />
@@ -1566,11 +1709,16 @@ export function App() {
             // No standing leading control — the bar's first ink is the thing
             // you are looking at, and a permanent toggle was window furniture
             // sitting where the trail should start. It returns for exactly the
-            // one state that needs it: with the rail collapsed there is nothing
-            // on screen that brings it back, and ⌘B only helps someone who
-            // already knows. It leaves again the moment the rail is open.
+            // states that need it: with the rail off screen there is nothing
+            // that brings it back, and ⌘B only helps someone who already knows.
+            // It leaves again the moment the rail is open.
+            //
+            // `railHidden`, not `sidebarCollapsed`: a narrow window hides the
+            // rail with CSS, which the panel library never reports, so gating on
+            // the collapse alone left every window under the drawer breakpoint
+            // with no navigation and no way to ask for any.
             leading={
-              sidebarCollapsed ? (
+              railHidden ? (
                 <IconButton
                   label="Show sidebar"
                   chord="⌘B"
@@ -1692,8 +1840,10 @@ export function App() {
               )}
               {/* Last in the band, because it acts on the band's neighbour
                   rather than on the rows: everything to its left changes what
-                  the list shows, this changes whether the console is beside it. */}
-              {projectShell && (
+                  the list shows, this changes whether the console is beside it.
+                  Gone entirely when there is no room for the console, rather
+                  than left behind toggling something that cannot appear. */}
+              {projectShell && consoleFits && (
                 <IconButton
                   label={railOpen ? "Hide project panel" : "Show project panel"}
                   variant={railOpen ? "active" : "outline"}
@@ -1748,11 +1898,21 @@ export function App() {
           {/* Nothing to open, and the only surface that can change that. A
               machine with no store lands here on its first run, so this is
               where the app has to be able to found or enter a Space — there is
-              no command surface left to do it from. */}
-          {!current && (founding || (!routeSpace && spaces.length === 0)) ? (
+              no command surface left to do it from.
+
+              An explicit ask wins over a selected space. Gating this on
+              `!current` too is what used to make the surface unreachable the
+              moment anything was open: one space auto-selects, and the only
+              caller of `setFounding` was the empty state that a selected space
+              replaces. Someone invited to a *second* space then had nowhere to
+              paste the link. */}
+          {founding !== null || (!current && !routeSpace && spaces.length === 0) ? (
             <Welcome
+              initialMode={founding ?? "found"}
+              // Only when there is somewhere to go back to.
+              onCancel={spaces.length > 0 ? () => setFounding(null) : undefined}
               onArrived={(space) => {
-                setFounding(false);
+                setFounding(null);
                 void loadSpacesRaw(space);
               }}
             />
@@ -1765,7 +1925,13 @@ export function App() {
                   ? `The link names ${routeSpace}, but no matching local replica is available. Enter the space from an invite on this device, then refresh.`
                   : "Select a space from the sidebar to open its local replica."
               }
-              action={<Button onClick={() => setFounding(true)}>Start a space</Button>}
+              // A route naming a space this device does not hold is answered by
+              // entering it, not by founding a second one under the same name.
+              action={
+                <Button onClick={() => setFounding(routeSpace ? "enter" : "found")}>
+                  {routeSpace ? "Use an invite" : "Start a space"}
+                </Button>
+              }
             />
           ) : missingProject ? (
             <EmptyState
@@ -1949,7 +2115,11 @@ export function App() {
             />
           )}
         </div>
-        {projectShell && railOpen && activeProject && current && (
+        {/* `consoleFits` before `railOpen`: the preference says what you want
+            when there is room, not whether there is any. Keeping them separate
+            is what lets the console come straight back at its old width instead
+            of the window silently rewriting the setting on the way down. */}
+        {projectShell && consoleFits && railOpen && activeProject && current && (
           <aside className="border-line w-rail shrink-0 overflow-y-auto border-l p-3">
             <ProjectRail
               spaceId={current}
@@ -2012,10 +2182,10 @@ export function App() {
       )}
       <Dialog.Root open={mobileNav} onOpenChange={setMobileNav}>
         <Dialog.Portal>
-          <Dialog.Overlay className="ui-overlay fixed inset-0 z-40 hidden bg-black/45 backdrop-blur-[2px] max-[960px]:block" />
+          <Dialog.Overlay className="ui-overlay fixed inset-0 z-40 hidden bg-black/45 backdrop-blur-[2px] max-[768px]:block" />
           <Dialog.Content
             aria-describedby={undefined}
-            className="ui-drawer bg-sunken shadow-overlay fixed inset-y-0 left-0 z-40 hidden w-[min(320px,88vw)] pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)] outline-none max-[960px]:block"
+            className="ui-drawer bg-sunken shadow-overlay fixed inset-y-0 left-0 z-40 hidden w-[min(320px,88vw)] pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)] outline-none max-[768px]:block"
           >
             <Dialog.Title className="sr-only">Workspace navigation</Dialog.Title>
             <Sidebar
@@ -2056,6 +2226,19 @@ export function App() {
               onCreateProject={() => {
                 api.createProject();
                 setMobileNav(false);
+              }}
+              onAddSpace={() => {
+                setFounding("found");
+                setMobileNav(false);
+              }}
+              // The drawer closes on the *confirmation*, not on the click: the
+              // dialog is rendered outside it, and dismissing the drawer first
+              // takes the menu's focus context with it.
+              onForgetSpace={(id) => {
+                void forgetSpace(id).then(() => setMobileNav(false));
+              }}
+              onPruneSpaces={() => {
+                void pruneSpaces().then(() => setMobileNav(false));
               }}
             />
           </Dialog.Content>
