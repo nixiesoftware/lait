@@ -94,6 +94,20 @@ fn discover_space(home: &Path) -> Result<SpaceId> {
 /// This is a logical boundary, not an OS-process claim. The current
 /// The compatibility-process adapter gives it a per-home control listener; a general
 /// Lait daemon can instead hold several instances and route by Space id.
+/// Whether a Neighbor counts as *online*: believed reachable **and** heard from
+/// recently.
+///
+/// One function because two definitions produced a `doctor` line that argued
+/// with itself — "1 peer online, but none will be dialed" — the count coming
+/// from the latched reachability flag and the verdict from recency. A node's
+/// two answers to "is anyone there" must come from the same place or they drift
+/// the moment one is corrected.
+fn neighbor_is_online(n: &runtime::neighbor::State, now_secs: u64) -> bool {
+    n.reachability == runtime::neighbor::Reachability::Reachable
+        && n.last_seen_ms != 0
+        && now_secs.saturating_sub(n.last_seen_ms / 1_000) <= PRESENCE_FRESH_SECS
+}
+
 /// How recently a Neighbor must have been heard from to count as *online*.
 ///
 /// Presence is advisory, so this is a display threshold and nothing gates on
@@ -1665,9 +1679,7 @@ impl StationHost {
                 // hours after its last Contact. Recency has to be part of the
                 // answer, or the field means "was reachable once", which is not
                 // a thing anybody asks.
-                let heard_recently = last_seen_secs <= PRESENCE_FRESH_SECS;
-                let reachable = n.reachability == runtime::neighbor::Reachability::Reachable;
-                let online = reachable && heard_recently;
+                let online = neighbor_is_online(&n, now);
                 let state = if online {
                     "online"
                 } else if n.reachability == runtime::neighbor::Reachability::Unreachable {
@@ -1837,10 +1849,11 @@ impl StationHost {
 
     /// The one number both `status` and `who` report as "online".
     fn online_peers(&self) -> usize {
+        let now = now_secs();
         self.station
             .neighbors()
             .iter()
-            .filter(|n| n.reachability == runtime::neighbor::Reachability::Reachable)
+            .filter(|n| neighbor_is_online(n, now))
             .count()
     }
 
