@@ -92,6 +92,21 @@ pub enum Failure {
     /// Incoming material failed legitimacy validation (signature, signer
     /// authority, or payload binding). Nothing was incorporated.
     Illegitimate(Invalid),
+    /// The same, for Contact material, carrying **why**.
+    ///
+    /// `Invalid` is `Copy` and deliberately coarse, and `From<String> for
+    /// Invalid` throws the description away — so thirteen distinct refusals
+    /// inside `validate_contact` all surfaced as `Illegitimate(Binding)`, and
+    /// `Binding` did not even mean a binding check had failed. It was the sink
+    /// every string-described refusal fell into.
+    ///
+    /// That is the wall this variant exists to remove. A replica that refuses
+    /// everything a peer sends is otherwise indistinguishable from one that
+    /// refuses it for any of: a duplicated transaction id, a manifest that does
+    /// not parse, material offered without a manifest advertisement, a payload
+    /// outside the advertised manifest, a payload that does not match its signed
+    /// commitment, or a transaction from another Space.
+    IllegitimateContact { kind: Invalid, reason: String },
     /// The mechanics authorizer refused to produce an authorization receipt
     /// for a local commit — the demand was unsatisfied at the pinned
     /// frontier, or the implementation id was not active. Nothing committed.
@@ -2743,7 +2758,13 @@ impl Replica {
         authority: &dyn AuthoritySource,
         incorporator: &mut dyn crate::convergence::AuthorityIncorporator,
     ) -> Result<crate::convergence::ValidatedContactBundle, Failure> {
-        let illegit = |_: String| Failure::Illegitimate(Invalid::Binding);
+        // Carry the description instead of dropping it on the floor. Every
+        // caller below already writes one; until now `From<String> for Invalid`
+        // discarded it at the moment it became the only useful thing.
+        let illegit = |reason: String| Failure::IllegitimateContact {
+            kind: Invalid::Binding,
+            reason,
+        };
         // 1. Split the authority section.
         let mut transactions: Vec<(Transaction, Vec<u8>)> = Vec::new();
         let mut authority_material: Vec<Vec<u8>> = Vec::new();

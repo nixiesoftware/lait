@@ -1519,6 +1519,22 @@ pub enum Response {
         divergence: Vec<String>,
         /// A short human summary of what the sync did/found.
         message: String,
+        /// Peers this sync actually reached.
+        ///
+        /// `whole` answers a *local* question — does this device hold every
+        /// epoch key it is authorized for — and it answers `true` on a node
+        /// that has spoken to nobody, including one holding zero items. That
+        /// read as "you are up to date" for a full day of debugging while a
+        /// replica sat empty. These three fields are the other half: whether
+        /// anyone was asked, what they said, and whether anything arrived.
+        #[serde(default)]
+        peers_reached: usize,
+        /// Peers that could not be reached, each with the reason.
+        #[serde(default)]
+        peers_failed: Vec<String>,
+        /// Whether the round brought in material this node did not have.
+        #[serde(default)]
+        advanced: bool,
     },
     /// The answer to a host-plane request (`Request::Host*`).
     Host(HostReply),

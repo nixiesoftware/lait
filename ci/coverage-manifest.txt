@@ -6,9 +6,9 @@
 # reviewed like one, not discovered when a gate goes red on a refactor.
 
 [tiers]
-pr             1344
+pr             1345
 pr-platform    1023
-nightly        1371
+nightly        1372
 mutants        87
 
 [gates]
@@ -967,6 +967,7 @@ replica::it concurrent_heads::a_false_holdings_declaration_starves_only_the_clai
 replica::it concurrent_heads::a_local_commit_collapses_the_head_set
 replica::it concurrent_heads::concurrent_writers_converge_and_reserve_the_union
 replica::it concurrent_heads::merged_heads_survive_a_durable_restart
+replica::it quotas_and_bundle::a_refused_contact_carries_its_reason_into_the_string_a_caller_sees
 replica::it quotas_and_bundle::a_valid_staging_validates_and_incorporates_with_authority_first
 replica::it quotas_and_bundle::adversarial_stagings_are_rejected_whole
 replica::it quotas_and_bundle::body_count_quota_has_exact_boundaries

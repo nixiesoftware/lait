@@ -149,7 +149,22 @@ impl Mode {
                 Ok(())
             }
             Mode::Daemon { home } => {
+                // To **stderr**, because that is the only stream a spawned
+                // daemon still owns. `daemon_spawn` hands the log file to
+                // stderr and nulls stdout, and `fmt()` writes to stdout by
+                // default — so every line this subscriber produced went to the
+                // null device, and `daemon.log` could only ever receive a panic
+                // or a spawn refusal printed before this ran.
+                //
+                // It failed silently and it failed for everything: sixty-odd
+                // `warn!`/`error!` sites across the tree, including the
+                // implementation-drift check that names its own remedy and the
+                // store watchdog. Reading an empty `daemon.log` looked like a
+                // quiet node, which is the most misleading possible answer — the
+                // log the error messages point operators at was structurally
+                // incapable of holding anything.
                 tracing_subscriber::fmt()
+                    .with_writer(std::io::stderr)
                     .with_env_filter(
                         tracing_subscriber::EnvFilter::try_from_default_env()
                             .unwrap_or_else(|_| "lait=info,warn".into()),
