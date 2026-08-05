@@ -554,8 +554,10 @@ async fn contact_neighbor(ctx: &DriverContext, station: &Key) -> Result<ContactO
         ctx.options.transport.connect(peer, CONTACT_ALPN),
     )
     .await
-    .map_err(|_| Failure::Unreachable)?
-    .map_err(|_| Failure::Unreachable)?;
+    .map_err(|_| Failure::Unreachable("connect: no route answered within the deadline".into()))?
+    // The transport's own connect error is the one that says WHY a peer is
+    // unreachable -- no route, refused, TLS -- and it used to be discarded here.
+    .map_err(|e| Failure::Unreachable(format!("connect: {e:#}")))?;
 
     let (received, bytes_moved) = initiate(ctx, &mut *stream, station, deadline).await?;
     drop(stream); // dialer close: we have the transcript
@@ -689,20 +691,31 @@ async fn initiate(
     };
     step(deadline, progress, stream.send(&opening.encode()))
         .await
-        .map_err(|_| Failure::Unreachable)?
-        .map_err(|_| Failure::Transport)?;
+        .map_err(|_| Failure::Unreachable("open: no progress within the deadline".into()))?
+        .map_err(|e| Failure::Transport(format!("open: {e:#}")))?;
     let admission_bytes = step(deadline, progress, stream.recv())
         .await
-        .map_err(|_| Failure::Unreachable)?
-        .map_err(|_| Failure::Transport)?
-        .ok_or(Failure::Unreachable)?;
-    let accept = Accept::decode_canonical(&admission_bytes).map_err(|_| Failure::Admission)?;
+        .map_err(|_| Failure::Unreachable("accept: no reply within the deadline".into()))?
+        .map_err(|e| Failure::Transport(format!("accept: {e:#}")))?
+        .ok_or_else(|| Failure::Unreachable("accept: the peer closed the stream".into()))?;
+    // An undecodable Accept is usually a Refusal -- the peer answered, it said
+    // no, and which refusal is the one thing a turned-away caller can act on
+    // (`UnsupportedVersion` carries the generation to upgrade to).
+    let accept =
+        Accept::decode_canonical(&admission_bytes).map_err(|_| match Refusal::decode_canonical(
+            &admission_bytes,
+        ) {
+            Ok(refusal) => Failure::Admission(format!("the peer refused: {refusal:?}")),
+            Err(_) => Failure::Admission("the admission reply did not decode".into()),
+        })?;
     if accept.connection_id != connection_id
         || accept.connection_epoch != connection_epoch
         || accept.capability.plane != Plane::Contact
         || accept.capability.protocol_version != CONTACT_PROTOCOL
     {
-        return Err(Failure::Admission);
+        return Err(Failure::Admission(
+            "the accept did not echo this connection".into(),
+        ));
     }
     // The declaration is a root. It used to be every head this replica holds,
     // streamed as chunked frames after the hello; a root is 40 bytes whatever
@@ -751,8 +764,8 @@ async fn initiate(
     .ok_or_else(|| Failure::Signing)?;
     step(deadline, progress, stream.send(&hello.encode()))
         .await
-        .map_err(|_| Failure::Unreachable)?
-        .map_err(|_| Failure::Transport)?;
+        .map_err(|_| Failure::Unreachable("hello: no progress within the deadline".into()))?
+        .map_err(|e| Failure::Transport(format!("hello: {e:#}")))?;
     let mut holdings_sent = 0u64;
     if holdings_count > 0 {
         for (index, chunk) in holdings_bytes
@@ -767,8 +780,10 @@ async fn initiate(
             holdings_sent += frame.len() as u64;
             step(deadline, progress, stream.send(&frame))
                 .await
-                .map_err(|_| Failure::Unreachable)?
-                .map_err(|_| Failure::Transport)?;
+                .map_err(|_| {
+                    Failure::Unreachable("holdings: no progress within the deadline".into())
+                })?
+                .map_err(|e| Failure::Transport(format!("holdings: {e:#}")))?;
         }
         let end = ContactFrame::HoldingsEnd {
             count: holdings_count,
@@ -778,31 +793,40 @@ async fn initiate(
         holdings_sent += end.len() as u64;
         step(deadline, progress, stream.send(&end))
             .await
-            .map_err(|_| Failure::Unreachable)?
-            .map_err(|_| Failure::Transport)?;
+            .map_err(|_| {
+                Failure::Unreachable("holdings-end: no progress within the deadline".into())
+            })?
+            .map_err(|e| Failure::Transport(format!("holdings-end: {e:#}")))?;
     }
 
     let ack_bytes = step(deadline, progress, stream.recv())
         .await
-        .map_err(|_| Failure::Unreachable)?
-        .map_err(|_| Failure::Transport)?
-        .ok_or(Failure::Unreachable)?;
-    let ack = Proof::decode(&ack_bytes).map_err(|_| Failure::Protocol)?;
+        .map_err(|_| Failure::Unreachable("hello-ack: no reply within the deadline".into()))?
+        .map_err(|e| Failure::Transport(format!("hello-ack: {e:#}")))?
+        .ok_or_else(|| Failure::Unreachable("hello-ack: the peer closed the stream".into()))?;
+    let ack = Proof::decode(&ack_bytes)
+        .map_err(|_| Failure::Protocol("the hello ack did not decode".into()))?;
     // Bind the negotiated transport peer to the signed Station identity
     // BEFORE any staging is allocated.
-    ack.verify(&hello, responder)
-        .map_err(|_| Failure::Protocol)?;
+    ack.verify(&hello, responder).map_err(|_| {
+        Failure::Protocol("the hello ack did not bind the hello and the Station identity".into())
+    })?;
 
     let mut receiver = InitiatorReceiver::new(contact);
     let mut bytes_moved = (hello.encode().len() + ack_bytes.len()) as u64 + holdings_sent;
     loop {
         let frame = step(deadline, progress, stream.recv())
             .await
-            .map_err(|_| Failure::Deadline)?
-            .map_err(|_| Failure::Transport)?
-            .ok_or_else(|| Failure::Protocol)?;
+            .map_err(|_| Failure::Deadline("transfer: no frame within the deadline".into()))?
+            .map_err(|e| Failure::Transport(format!("transfer: {e:#}")))?
+            .ok_or_else(|| {
+                Failure::Protocol("transfer: the peer closed before the material ended".into())
+            })?;
         if frame.len() > MAX_FRAME {
-            return Err(Failure::Protocol);
+            return Err(Failure::Protocol(format!(
+                "a {}-byte frame exceeds the {MAX_FRAME}-byte maximum",
+                frame.len()
+            )));
         }
         bytes_moved += frame.len() as u64;
         match receiver.on_frame(&frame) {
@@ -812,8 +836,10 @@ async fn initiate(
                 bytes_moved += raw.len() as u64;
                 step(deadline, progress, stream.send(&raw))
                     .await
-                    .map_err(|_| Failure::Deadline)?
-                    .map_err(|_| Failure::Transport)?;
+                    .map_err(|_| {
+                        Failure::Deadline("transfer-ack: no progress within the deadline".into())
+                    })?
+                    .map_err(|e| Failure::Transport(format!("transfer-ack: {e:#}")))?;
                 let _ = step(deadline, progress, stream.finish()).await;
                 break;
             }
@@ -822,7 +848,9 @@ async fn initiate(
             }
         }
     }
-    let received = receiver.into_received().ok_or_else(|| Failure::Protocol)?;
+    let received = receiver.into_received().ok_or_else(|| {
+        Failure::Protocol("the transfer ended before the material was complete".into())
+    })?;
     Ok((received, bytes_moved))
 }
 
@@ -838,11 +866,12 @@ async fn serve_contact(
     let progress = ctx.options.progress_deadline;
     let opening_bytes = step(deadline, progress, stream.recv())
         .await
-        .map_err(|_| Failure::Unreachable)?
-        .map_err(|_| Failure::Transport)?
-        .ok_or(Failure::Unreachable)?;
+        .map_err(|_| Failure::Unreachable("open: the dialer went quiet".into()))?
+        .map_err(|e| Failure::Transport(format!("open: {e:#}")))?
+        .ok_or_else(|| Failure::Unreachable("open: the dialer closed the stream".into()))?;
     let transport_peer = Key::from_device(&from).ok_or(Failure::UnknownNeighbor)?;
-    let opening = Open::decode_canonical(&opening_bytes).map_err(|_| Failure::Protocol)?;
+    let opening = Open::decode_canonical(&opening_bytes)
+        .map_err(|_| Failure::Protocol("the open frame did not decode".into()))?;
     let opening_context = OpeningContext {
         space: &ctx.space,
         local_station: Key::from_key_bytes(ctx.station_key),
@@ -888,29 +917,40 @@ async fn serve_contact(
         Ok(accept) => accept,
         Err(refusal) => {
             let _ = step(deadline, progress, stream.send(&refusal.encode())).await;
-            return Err(Failure::Admission);
+            // The wire refusal stays deliberately coarse -- a turned-away peer
+            // must not learn more than "no". The LOCAL record does not share
+            // that constraint, and "refused whom, why" is exactly what an
+            // operator reading this side needs.
+            return Err(Failure::Admission(format!(
+                "refused the dialer: {refusal:?}"
+            )));
         }
     };
     step(deadline, progress, stream.send(&accept.encode()))
         .await
-        .map_err(|_| Failure::Unreachable)?
-        .map_err(|_| Failure::Transport)?;
+        .map_err(|_| Failure::Unreachable("accept: no progress within the deadline".into()))?
+        .map_err(|e| Failure::Transport(format!("accept: {e:#}")))?;
     let hello_bytes = step(deadline, progress, stream.recv())
         .await
-        .map_err(|_| Failure::Unreachable)?
-        .map_err(|_| Failure::Transport)?
-        .ok_or(Failure::Unreachable)?;
-    let hello = Offer::decode(&hello_bytes).map_err(|_| Failure::Protocol)?;
+        .map_err(|_| Failure::Unreachable("hello: the dialer went quiet".into()))?
+        .map_err(|e| Failure::Transport(format!("hello: {e:#}")))?
+        .ok_or_else(|| Failure::Unreachable("hello: the dialer closed the stream".into()))?;
+    let hello = Offer::decode(&hello_bytes)
+        .map_err(|_| Failure::Protocol("the hello frame did not decode".into()))?;
     if hello.contact.as_bytes() != opening.connection_id {
-        return Err(Failure::Protocol);
+        return Err(Failure::Protocol(
+            "the hello named a different connection".into(),
+        ));
     }
     // Bind the transport peer to the signed initiator identity BEFORE
     // allocating anything.
     hello
         .verify(&opening.hash(), &ctx.space_bytes, &transport_peer)
-        .map_err(|_| Failure::Protocol)?;
+        .map_err(|_| Failure::Protocol("the hello did not bind the open and the dialer".into()))?;
     if hello.responder_station != ctx.station_key {
-        return Err(Failure::Protocol);
+        return Err(Failure::Protocol(
+            "the hello addressed a different Station".into(),
+        ));
     }
     // Arm a reciprocal dial to the initiator: the responder only SERVES material
     // here, so a pull back is what redeems a joiner's admission and converges us.
@@ -942,22 +982,30 @@ async fn serve_contact(
         loop {
             let frame_bytes = step(deadline, progress, stream.recv())
                 .await
-                .map_err(|_| Failure::Unreachable)?
-                .map_err(|_| Failure::Transport)?
-                .ok_or(Failure::Unreachable)?;
-            let (frame_contact, frame) =
-                ContactFrame::decode(&frame_bytes).map_err(|_| Failure::Holdings)?;
+                .map_err(|_| Failure::Unreachable("holdings: the dialer went quiet".into()))?
+                .map_err(|e| Failure::Transport(format!("holdings: {e:#}")))?
+                .ok_or_else(|| {
+                    Failure::Unreachable("holdings: the dialer closed the stream".into())
+                })?;
+            let (frame_contact, frame) = ContactFrame::decode(&frame_bytes)
+                .map_err(|_| Failure::Holdings("a holdings frame did not decode".into()))?;
             if frame_contact != hello.contact {
-                return Err(Failure::Holdings);
+                return Err(Failure::Holdings(
+                    "a holdings frame named a different connection".into(),
+                ));
             }
             match frame {
                 ContactFrame::HoldingsChunk { index, bytes } => {
                     if index != next_index {
-                        return Err(Failure::Holdings);
+                        return Err(Failure::Holdings(format!(
+                            "holdings chunk {index} arrived where {next_index} was due"
+                        )));
                     }
                     next_index += 1;
                     if buf.len() + bytes.len() > crate::plane::contact::MAX_HOLDINGS_BYTES {
-                        return Err(Failure::Holdings);
+                        return Err(Failure::Holdings(
+                            "the holdings declaration exceeds its size bound".into(),
+                        ));
                     }
                     buf.extend_from_slice(&bytes);
                 }
@@ -966,17 +1014,26 @@ async fn serve_contact(
                         || digest != hello.holdings_digest
                         || crate::plane::contact::holdings_digest(&buf) != hello.holdings_digest
                     {
-                        return Err(Failure::Holdings);
+                        return Err(Failure::Holdings(
+                            "the holdings did not match their signed commitment".into(),
+                        ));
                     }
-                    let decoded = crate::plane::contact::decode_holdings(&buf)
-                        .map_err(|_| Failure::Holdings)?;
+                    let decoded = crate::plane::contact::decode_holdings(&buf).map_err(|_| {
+                        Failure::Holdings("the holdings declaration did not decode".into())
+                    })?;
                     if decoded.len() != hello.holdings_count as usize {
-                        return Err(Failure::Holdings);
+                        return Err(Failure::Holdings(
+                            "the holdings count did not match the declaration".into(),
+                        ));
                     }
                     held = decoded.into_iter().collect();
                     break;
                 }
-                _ => return Err(Failure::Holdings),
+                _ => {
+                    return Err(Failure::Holdings(
+                        "an unexpected frame arrived during the holdings declaration".into(),
+                    ))
+                }
             }
         }
     }
@@ -986,8 +1043,8 @@ async fn serve_contact(
         Proof::sign(&hello, nonce, &ctx.options.station_seed).ok_or_else(|| Failure::Signing)?;
     step(deadline, progress, stream.send(&ack.encode()))
         .await
-        .map_err(|_| Failure::Unreachable)?
-        .map_err(|_| Failure::Transport)?;
+        .map_err(|_| Failure::Unreachable("hello-ack: no progress within the deadline".into()))?
+        .map_err(|e| Failure::Transport(format!("hello-ack: {e:#}")))?;
 
     // Snapshot the served material under the writer lock. A Station whose
     // device holds no authoring standing at its own current frontier (an
@@ -1042,16 +1099,16 @@ async fn serve_contact(
         validator.record_sent(frame);
         step(deadline, progress, stream.send(frame))
             .await
-            .map_err(|_| Failure::Deadline)?
-            .map_err(|_| Failure::Transport)?;
+            .map_err(|_| Failure::Deadline("serve: no progress within the deadline".into()))?
+            .map_err(|e| Failure::Transport(format!("serve: {e:#}")))?;
     }
     // Await the TransferAck through the validator, then finish + wait_closed.
     loop {
         let frame = step(deadline, progress, stream.recv())
             .await
-            .map_err(|_| Failure::Deadline)?
-            .map_err(|_| Failure::Transport)?
-            .ok_or_else(|| Failure::Protocol)?;
+            .map_err(|_| Failure::Deadline("serve-ack: no reply within the deadline".into()))?
+            .map_err(|e| Failure::Transport(format!("serve-ack: {e:#}")))?
+            .ok_or_else(|| Failure::Protocol("serve: the dialer closed before acking".into()))?;
         match validator.on_frame(&frame) {
             Ok(AccepterEvent::Acked { .. }) => break,
             Ok(AccepterEvent::PeerAborted(code)) => return Err(Failure::PeerAborted(code)),
@@ -1078,16 +1135,19 @@ async fn serve_presence(
     let deadline = Instant::now() + ctx.options.progress_deadline;
     let probe_bytes = step(deadline, ctx.options.progress_deadline, stream.recv())
         .await
-        .map_err(|_| Failure::Unreachable)?
-        .map_err(|_| Failure::Transport)?
-        .ok_or(Failure::Unreachable)?;
-    let probe = PresenceProbe::decode(&probe_bytes).map_err(|_| Failure::Protocol)?;
+        .map_err(|_| Failure::Unreachable("probe: the prober went quiet".into()))?
+        .map_err(|e| Failure::Transport(format!("probe: {e:#}")))?
+        .ok_or_else(|| Failure::Unreachable("probe: the prober closed the stream".into()))?;
+    let probe = PresenceProbe::decode(&probe_bytes)
+        .map_err(|_| Failure::Protocol("the presence probe did not decode".into()))?;
     let prober = Key::from_device(&from).ok_or(Failure::UnknownNeighbor)?;
     probe
         .verify(&ctx.space_bytes, &prober)
-        .map_err(|_| Failure::Protocol)?;
+        .map_err(|_| Failure::Protocol("the presence probe signature did not verify".into()))?;
     if probe.responder_station != ctx.station_key {
-        return Err(Failure::Protocol);
+        return Err(Failure::Protocol(
+            "the probe addressed a different Station".into(),
+        ));
     }
     let mut nonce = [0u8; 32];
     getrandom::fill(&mut nonce).map_err(|_| Failure::Entropy)?;

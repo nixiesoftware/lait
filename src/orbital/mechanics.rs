@@ -2225,9 +2225,9 @@ impl replica::transaction::AuthoritySource for SpaceAuthority {
         // Remote historical authorization: verify the transaction's
         // authorization receipt against signed mechanics history at its
         // referenced frontier. No World callback runs.
-        let receipt = tx
-            .receipt()
-            .map_err(|_| replica::transaction::Refusal::Unauthorized)?;
+        let receipt = tx.receipt().map_err(|error| {
+            replica::transaction::Refusal::Unauthorized(format!("receipt decode: {error:?}"))
+        })?;
         let mut inner = self.lock();
         inner
             .ledger
@@ -2243,7 +2243,9 @@ impl replica::transaction::AuthoritySource for SpaceAuthority {
                     body_transaction_core_digest: &tx.core.digest(),
                 },
             )
-            .map_err(|_| replica::transaction::Refusal::Unauthorized)
+            .map_err(|invalid| {
+                replica::transaction::Refusal::Unauthorized(format!("receipt: {invalid:?}"))
+            })
     }
 }
 

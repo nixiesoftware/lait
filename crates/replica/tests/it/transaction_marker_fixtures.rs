@@ -170,10 +170,15 @@ fn structural_verify_is_not_an_authority_check() {
             false
         }
     }
-    assert_eq!(
-        tx.verify_authorized(&Nobody),
-        Err(Error::AuthorityUnverified)
-    );
+    // Matched on the variant with its reason intact: an unauthorized signer is
+    // now told apart from the thirteen other ways a receipt can fail to bind,
+    // which is the entire reason the reason is carried.
+    match tx.verify_authorized(&Nobody) {
+        Err(Error::AuthorityUnverified(reason)) => {
+            assert!(!reason.is_empty(), "the refusal must say why");
+        }
+        other => panic!("expected an authority refusal carrying its reason, got {other:?}"),
+    }
 
     // A view that authorizes the actual signer: accepted (the default
     // verify_transaction checks signer standing at the referenced frontier).

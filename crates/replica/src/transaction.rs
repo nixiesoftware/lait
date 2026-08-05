@@ -168,9 +168,9 @@ pub enum Error {
     ReceiptUnbound(ReceiptField),
     BadSignature,
     /// Structurally valid and correctly signed, but mechanics refused the
-    /// receipt against the referenced historical frontier. Produced only by
-    /// [`Transaction::verify_authorized`].
-    AuthorityUnverified,
+    /// receipt against the referenced historical frontier — carrying which
+    /// check refused it. Produced only by [`Transaction::verify_authorized`].
+    AuthorityUnverified(String),
     /// The referenced parent Manifest is not locally resolvable; retry once
     /// the exact material arrives. Never fall back to current state.
     ParentManifestUnavailable,
@@ -249,15 +249,25 @@ pub trait AuthoritySource {
         if self.signer_authorized(&tx.core.signer, &tx.core.authority_frontier) {
             Ok(())
         } else {
-            Err(Refusal::Unauthorized)
+            Err(Refusal::Unauthorized(
+                "the signer is not authorized at the referenced frontier".to_string(),
+            ))
         }
     }
 }
 
 /// Why historical transaction standing was refused.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Refusal {
-    Unauthorized,
+    /// The authority could not verify this transaction's receipt, and why.
+    ///
+    /// The reason is carried because this seam is where it was being lost. A
+    /// mechanics receipt check names which of fourteen fields failed to bind —
+    /// checkpoint, implementation, actor, evidence, demand digest — and a
+    /// single-variant enum on this side meant the caller could learn only that
+    /// *something* had. Four layers of `map_err(|_| …)` then reduced it to one
+    /// word at the far end, where somebody was reading it.
+    Unauthorized(String),
 }
 
 fn length_framed(domain: &[u8], body: &[u8]) -> Vec<u8> {
@@ -444,6 +454,6 @@ impl Transaction {
         self.verify()?;
         authority
             .verify_transaction(self)
-            .map_err(|_| Error::AuthorityUnverified)
+            .map_err(|Refusal::Unauthorized(reason)| Error::AuthorityUnverified(reason))
     }
 }

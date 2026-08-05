@@ -48,14 +48,21 @@ pub use crate::lifecycle::ContactOutcome as Outcome;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Failure {
     UnknownNeighbor,
-    Unreachable,
+    /// The peer could not be reached, or went quiet: which step, and — for a
+    /// failed dial — what the transport said about why.
+    Unreachable(String),
     Capacity,
     Entropy,
-    Transport,
-    Admission,
-    Protocol,
+    /// The wire failed mid-step: which step, and the transport's own error.
+    Transport(String),
+    /// The peer refused (or garbled) admission — carrying the refusal, which
+    /// is the one thing a turned-away caller can act on.
+    Admission(String),
+    /// The peer violated the frame protocol: which rule.
+    Protocol(String),
     Signing,
-    Holdings,
+    /// The holdings declaration failed its checks: which one.
+    Holdings(String),
     /// Staged material was received but could not be made durable — a receipt
     /// that would not verify, an implementation the Space does not have active,
     /// a key epoch this node cannot open, a malformed manifest, a Body that
@@ -68,7 +75,14 @@ pub enum Failure {
     /// refused everything reported the single word "Convergence" and there was
     /// no way, from inside or outside the process, to learn any more.
     Convergence(String),
-    Deadline,
+    /// A progress deadline lapsed mid-transfer: which step.
+    ///
+    /// Every carried string above exists for the same reason `Convergence`'s
+    /// does: these variants are what `sync` and `connect` print, and a bare
+    /// variant name at that surface is a wall. Three separate releases each
+    /// peeled one layer of discarded error off this path — the rule since is
+    /// that a variant a diagnostic can surface carries its cause.
+    Deadline(String),
     Interrupted,
     PeerAborted(u16),
 }

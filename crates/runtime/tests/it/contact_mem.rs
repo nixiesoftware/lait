@@ -454,7 +454,7 @@ fn an_unknown_neighbor_is_unreachable_and_dormancy_refuses_contact() {
     let station_b = orbit.open(Activation::offline()).unwrap();
     assert!(matches!(
         station_b.contact(&ghost),
-        Err(runtime::plane::contact::Failure::Unreachable)
+        Err(runtime::plane::contact::Failure::Unreachable(_))
     ));
     let _ = station_b.vacate().unwrap();
     let _ = std::fs::remove_dir_all(&root_b);
