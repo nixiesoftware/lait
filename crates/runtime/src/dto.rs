@@ -348,6 +348,7 @@ impl ErrorDto {
             E::UnsupportedSchema => "unsupported-schema",
             E::UnsupportedSchemaVersion => "unsupported-schema-version",
             E::Denied => "denied",
+            E::NoActiveImplementation => "no-active-implementation",
             E::Conflict => "conflict",
             E::LimitExceeded => "limit-exceeded",
             E::StateCorrupt => "world-state-corrupt",

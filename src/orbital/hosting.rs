@@ -2141,9 +2141,16 @@ impl StationHost {
         let admin = self.mechanics.am_i_admin();
         let drift: Vec<String> = Self::implementation_drift(&self.mechanics, &self.worlds)
             .into_iter()
-            .filter(|(_, drift)| drift.active.is_some() && !drift.matched())
+            // `!matched()` alone: `active: None` used to be filtered out here,
+            // so a store whose activation ops no longer decode reported "this
+            // build matches the space" while refusing every write.
+            .filter(|(_, drift)| !drift.matched())
             .map(|(world, drift)| {
-                let active = drift.active.unwrap_or(drift.ours);
+                let Some(active) = drift.active else {
+                    return format!(
+                        "{world}: no implementation is active at this node's frontier — every write is refused. If this store is still syncing, this clears itself; if it is synced, the ledger's activation ops predate an op-shape change and an admin runs world_upgrade"
+                    );
+                };
                 format!(
                     "{world}: this build is v{} ({}), the space runs v{} ({}) — {}",
                     drift.ours.version,
@@ -2515,11 +2522,17 @@ impl StationHost {
             let ours = drift.ours;
             let short = |id: &[u8; 32]| data_encoding::HEXLOWER.encode(&id[..8]);
             match drift.active {
-                // Nothing activated yet. Formation does that, so reaching here
-                // means a store whose founder activation has not arrived — a
-                // joiner mid-backfill. Its own build is not the answer to that.
-                None => tracing::debug!(
-                    "no active {world} implementation yet — waiting for the Space's own"
+                // Nothing is active at this node's frontier. Two very different
+                // states land here and the reconcile cannot tell them apart: a
+                // joiner whose founder activation has not arrived (waiting is
+                // right), and a store whose activation ops NO LONGER DECODE
+                // after a shape change — in which case every write is refused
+                // until an admin runs `world_upgrade`, and this line is the
+                // only place the daemon says so. Auto-activating would be wrong
+                // for the joiner, so it warns instead of acting; the diagnose
+                // gate carries the same warning to the surface.
+                None => tracing::warn!(
+                    "no active {world} implementation at this node's frontier — either the founder's activation has not synced yet, or the ledger's activation ops predate an op-shape change and no longer decode. Writes are refused in this state; if this store is synced, an admin runs world_upgrade"
                 ),
                 Some(active) if active.id == ours.id => {}
                 Some(active) if !admin => tracing::warn!(

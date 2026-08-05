@@ -377,13 +377,52 @@ impl FrontierBody {
 }
 
 /// BLAKE3 derive-key context for the checkpoint commitment.
-const CHECKPOINT_CONTEXT: &str = "lait.authority-checkpoint.v1";
+///
+/// v2, and the difference between v1 and v2 is a lesson paid for in full. v1
+/// committed to the whole [`CheckpointObject`] **including the replayed
+/// state**, on the reasoning that the replay is deterministic across nodes
+/// holding the same closure. It is — across nodes running the same *build*.
+/// It is not deterministic across builds: the state is a Rust struct whose
+/// postcard bytes move whenever any field anywhere inside it changes shape,
+/// and one such change (an authority op gaining a field) silently made every
+/// receipt ever minted before it unverifiable by every build after it. A fresh
+/// replica could join a space, incorporate its authority, and then refuse
+/// every transaction in it with `Binding(Checkpoint)` — forever, on a fully
+/// upgraded fleet, because the old receipts pin bytes no new build can ever
+/// recompute.
+const CHECKPOINT_CONTEXT: &str = "lait.authority-checkpoint.v2";
 
-/// The canonical commitment of one materialized checkpoint: every field of
-/// the object is deterministic across nodes holding the same effect closure
-/// (topo order, sorted sets, BTree maps), so the commitment is too.
+/// The canonical commitment of one materialized checkpoint: the **signed
+/// closure only**, never the replayed interpretation of it.
+///
+/// Everything hashed here is a sorted set of hashes of signature-covered
+/// canonical bytes — facts every build reconstructs identically from the same
+/// ledger, forever. The replayed state is deliberately excluded: two correct
+/// builds may legitimately interpret one closure differently (that is what a
+/// schema migration *is*), so a commitment over the interpretation pits the
+/// receipt against the reader's version rather than against the history it
+/// actually claims. What the commitment must pin is "this receipt was minted
+/// against exactly this closure" — and the closure is what it now pins.
+/// Whether the *signer was authorized* is not this hash's job either way:
+/// verification independently re-resolves the actor and re-evaluates the
+/// demand against its own replay of the same closure.
 fn checkpoint_commitment(cp: &CheckpointObject) -> [u8; 32] {
-    let bytes = postcard::to_stdvec(cp).expect("encode checkpoint");
+    #[derive(Serialize)]
+    struct ClosureCommitment<'a> {
+        semantics: u16,
+        frontier: &'a [u8],
+        effect_set: &'a [String],
+        actor_events: &'a [String],
+        space_events: &'a [String],
+    }
+    let input = ClosureCommitment {
+        semantics: cp.semantics,
+        frontier: &cp.frontier,
+        effect_set: &cp.effect_set,
+        actor_events: &cp.actor_events,
+        space_events: &cp.space_events,
+    };
+    let bytes = postcard::to_stdvec(&input).expect("encode checkpoint commitment");
     blake3::derive_key(CHECKPOINT_CONTEXT, &bytes)
 }
 
@@ -1821,6 +1860,52 @@ mod tests {
 
     fn seed(n: u8) -> [u8; 32] {
         [n; 32]
+    }
+
+    /// The checkpoint commitment is a function of the signed closure alone.
+    ///
+    /// This is the property whose absence broke every pre-existing receipt in
+    /// the wild: v1 hashed the replayed state, whose postcard bytes move with
+    /// any struct-shape change in any build, so a receipt could only ever be
+    /// verified by the build generation that minted it. Two checkpoints that
+    /// agree on the closure and disagree arbitrarily on the interpretation
+    /// must commit identically — build drift in the replay must be invisible
+    /// here, because history has to outlive builds.
+    #[test]
+    fn the_commitment_ignores_the_replayed_interpretation() {
+        let fx = fx();
+        let (replay, _) = crate::acl::replay_checkpointed(&fx.genesis, &[fx.founder_incept], &[]);
+        let closure = CheckpointObject {
+            semantics: LEDGER_SEMANTICS_VERSION,
+            frontier: vec![7u8; 32],
+            effect_set: vec!["aa".into(), "bb".into()],
+            actor_events: vec!["aa".into()],
+            space_events: vec![],
+            replay: replay.clone(),
+        };
+        let mut reinterpreted = CheckpointObject {
+            semantics: closure.semantics,
+            frontier: closure.frontier.clone(),
+            effect_set: closure.effect_set.clone(),
+            actor_events: closure.actor_events.clone(),
+            space_events: closure.space_events.clone(),
+            replay,
+        };
+        reinterpreted.replay.heads = vec!["something entirely different".into()];
+        reinterpreted.replay.verdicts = vec![("x".into(), true)];
+        assert_eq!(
+            checkpoint_commitment(&closure),
+            checkpoint_commitment(&reinterpreted),
+            "a replay difference reached the commitment — receipts are once again              verifiable only by the build generation that minted them"
+        );
+        // …and the closure itself still binds.
+        let mut other_closure = closure;
+        other_closure.effect_set.push("cc".into());
+        assert_ne!(
+            checkpoint_commitment(&other_closure),
+            checkpoint_commitment(&reinterpreted),
+            "the commitment must still distinguish different closures"
+        );
     }
 
     struct Fx {

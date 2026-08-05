@@ -901,6 +901,30 @@ pub fn replay_with_audit(
 /// replay provenance (verdict order, pass-1 continuation state, epoch mints,
 /// heads) required by the strict-descendant continuation path
 /// ([`replay_continue`]).
+
+/// Decode a signed op for replay, loudly when it cannot be.
+///
+/// A decode failure here is not noise to skip: the bytes are signature-verified
+/// authority material, so failing to decode them means this build's op shapes
+/// have moved past the ledger's — and every op silently dropped changes what
+/// the replay concludes. That is precisely how a space's implementation
+/// activations vanished after a shape change: the ops decoded as `None`, the
+/// replay proceeded without them, `active_implementation` answered nothing, and
+/// three separate surfaces reported the resulting state as healthy. The replay
+/// still proceeds (failing closed would brick every store the moment a shape
+/// moves), but it says so, once per offending op per replay, where the daemon
+/// log can carry it.
+fn decode_op_for_replay(hash: &str, so: &SignedOp) -> Option<AclOp> {
+    let decoded = postcard::from_bytes(&so.op).ok();
+    if decoded.is_none() {
+        tracing::warn!(
+            op = %hash,
+            "a signature-verified authority op did not decode under this build and is EXCLUDED from replay — the ledger predates an op-shape change; the replayed state is missing whatever this op did"
+        );
+    }
+    decoded
+}
+
 pub fn replay_checkpointed(
     genesis: &Genesis,
     actor_events: &[SignedEvent],
@@ -917,7 +941,7 @@ pub fn replay_checkpointed(
             continue;
         }
         let h = so.hash();
-        decoded.insert(h.clone(), postcard::from_bytes(&so.op).ok());
+        decoded.insert(h.clone(), decode_op_for_replay(&h, so));
         nodes.insert(h, so);
     }
 
@@ -1355,14 +1379,14 @@ pub fn replay_continue(
     for so in ops {
         let h = so.hash();
         if prior_set.contains(&h) {
-            decoded.insert(h.clone(), postcard::from_bytes(&so.op).ok());
+            decoded.insert(h.clone(), decode_op_for_replay(&h, so));
             nodes.insert(h, so);
             continue;
         }
         if !so.verify_sig(ACL_DOMAIN, ws.as_str()) {
             continue;
         }
-        decoded.insert(h.clone(), postcard::from_bytes(&so.op).ok());
+        decoded.insert(h.clone(), decode_op_for_replay(&h, so));
         nodes.insert(h.clone(), so);
         suffix.insert(h, so);
     }
