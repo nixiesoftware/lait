@@ -1,5 +1,28 @@
 # Changelog
 
+## v0.7.11 — the cursor catches up with the words
+
+> **Upgrading:** `host_update` then `host_restart` on the host plane, or re-run
+> the installer. Nothing changes on disk, on the peer wire, or in the control
+> protocol. This is a daemon-side correction to Live cursor resolution.
+
+A remote caret can arrive before the durable text operation it names. The
+receiver correctly declined to guess at that position, but its standing Live
+stream listened only for another transient update. When the text arrived
+without another caret packet, the unresolved cursor could remain missing even
+though both replicas had converged.
+
+### Cursor resolution now follows durable convergence
+
+- A scoped Live subscription re-reads its cursor anchors when the watched issue
+  body changes, even when the transient generation itself is unchanged.
+- Durable observations are filtered to the subscribed issue, so unrelated
+  document traffic does not redraw every open editor.
+- A lagged observation subscriber conservatively re-reads instead of risking a
+  permanently missed convergence event.
+- Regression tests cover watched and unrelated issue observations, unscoped
+  subscriptions, resets, and the out-of-order durable handoff.
+
 ## v0.7.10 — the cursor stays with the words
 
 > **Upgrading:** `host_update` then `host_restart` on the host plane, or re-run
