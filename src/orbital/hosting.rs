@@ -3261,16 +3261,23 @@ impl StationHost {
         }
     }
 
-    /// Stream the Live table on generation changes and on the exact derived
-    /// deadline where a row becomes uncertain or a partial marker clears.
+    /// Stream the Live table on transient generation changes, relevant durable
+    /// document changes, and the exact derived deadline where a row becomes
+    /// uncertain or a partial marker clears.
     async fn stream_live(
         self: &Arc<Self>,
         mut write_half: tokio::io::WriteHalf<LocalStream>,
         issue: Option<String>,
     ) {
         let handle = self.station.live();
-        // Subscribe before the first snapshot, closing the read/subscribe gap.
+        // Subscribe before the first snapshot, closing both read/subscribe
+        // gaps. Caret anchors name durable operation ids, so a transient can
+        // arrive before the corresponding Body observation. That observation
+        // must wake another read even though the transient generation itself
+        // has not changed.
         let mut generations = handle.subscribe_generation();
+        let mut observations = self.observations.fanout.subscribe();
+        self.ensure_doorbell_pump().await;
         let mut stop_rx = self.stop_tx.subscribe();
         loop {
             let (response, refresh_in) = self.live_snapshot(None, issue.as_deref());
@@ -3285,6 +3292,11 @@ impl StationHost {
                 }
                 changed = generations.changed() => {
                     if changed.is_err() {
+                        break;
+                    }
+                }
+                observed = next_live_body_observation(&mut observations, issue.as_deref()) => {
+                    if !observed {
                         break;
                     }
                 }
@@ -3318,6 +3330,42 @@ impl StationHost {
 /// against a Body id printed anywhere else.
 fn render_body(body: &[u8; 16]) -> String {
     replica::body::BodyId::from_bytes(*body).render()
+}
+
+/// Whether a durable observation can change anchor resolution in this Live
+/// subscription. The transient payload itself need not change when its
+/// previously missing operation ids arrive in the watched Body.
+fn doorbell_touches_live(frame: &Doorbell, issue: Option<&str>) -> bool {
+    if frame.reset {
+        return true;
+    }
+    let world = crate::world::contract::world_id();
+    frame
+        .invalidations
+        .iter()
+        .filter(|invalidation| invalidation.world == world)
+        .flat_map(|invalidation| invalidation.dirty.iter())
+        .any(|scope| match issue {
+            Some(issue) => scope.docs.iter().any(|doc| doc == issue),
+            None => !scope.docs.is_empty(),
+        })
+}
+
+/// Wait past unrelated observations until the watched Body changes. Lag means
+/// a relevant frame may have been dropped, so the only correct response is to
+/// re-read; closure means the observation pump is gone and the stream ends.
+async fn next_live_body_observation(
+    observations: &mut tokio::sync::broadcast::Receiver<Doorbell>,
+    issue: Option<&str>,
+) -> bool {
+    loop {
+        match observations.recv().await {
+            Ok(frame) if doorbell_touches_live(&frame, issue) => return true,
+            Ok(_) => continue,
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => return true,
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => return false,
+        }
+    }
 }
 
 fn live_scope(scope: &runtime::transient::Target) -> crate::control::LiveScope {
@@ -3761,6 +3809,7 @@ pub async fn run_station_process_with_packages(
 mod tests {
     use runtime::plane::live::LiveNarrow;
     use runtime::transient::Target;
+    use runtime::world::{DirtyScope, RoutedInvalidation};
 
     const BODY: [u8; 16] = [7u8; 16];
     const OTHER: [u8; 16] = [8u8; 16];
@@ -3850,6 +3899,59 @@ mod tests {
             crate::world::contract::issue_body_id(doc).as_bytes(),
             crate::world::contract::issue_body_id("ENG-12").as_bytes()
         );
+    }
+
+    fn observed_docs(docs: &[&str]) -> crate::control::Doorbell {
+        crate::control::Doorbell {
+            invalidations: vec![RoutedInvalidation {
+                world: crate::world::contract::world_id(),
+                dirty: vec![DirtyScope {
+                    kind: "project".into(),
+                    id: "prj_test".into(),
+                    label: None,
+                    docs: docs.iter().map(|doc| (*doc).to_string()).collect(),
+                }],
+                planes: Vec::new(),
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_live_issue_wakes_when_its_durable_body_arrives() {
+        let frame = observed_docs(&["iss_other", "iss_watched"]);
+        assert!(super::doorbell_touches_live(&frame, Some("iss_watched")));
+        assert!(!super::doorbell_touches_live(&frame, Some("iss_absent")));
+    }
+
+    #[test]
+    fn an_unscoped_live_stream_wakes_for_any_issue_body_or_reset() {
+        assert!(super::doorbell_touches_live(
+            &observed_docs(&["iss_any"]),
+            None
+        ));
+        assert!(super::doorbell_touches_live(
+            &crate::control::Doorbell {
+                reset: true,
+                ..Default::default()
+            },
+            Some("iss_watched")
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_live_body_wait_ignores_other_issues_before_the_watched_one() {
+        let (send, mut receive) = tokio::sync::broadcast::channel(4);
+        send.send(observed_docs(&["iss_other"])).unwrap();
+        send.send(observed_docs(&["iss_watched"])).unwrap();
+
+        let woke = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            super::next_live_body_observation(&mut receive, Some("iss_watched")),
+        )
+        .await
+        .expect("the watched issue observation should wake the Live stream");
+        assert!(woke);
     }
 }
 #[cfg(test)]
