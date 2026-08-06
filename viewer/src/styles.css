@@ -560,10 +560,17 @@
    the whole reason we could take Astryx's context menu instead of keeping a
    Radix package for one surface.
 
+   `:not([popover])` is load-bearing. ContextMenu renders a fragment — the
+   trigger wrapper AND the menu — so once the wrapper is `display: contents` the
+   menu becomes a direct child of the `<ul>` too. Without the guard this rule
+   hits it as well, and `display: contents` overrides the `display: none` that
+   keeps a closed popover closed: every row renders its own menu inline,
+   expanded, forever. It looks exactly like the list has gone mad.
+
    Scoped to the issue collections rather than written as a global `div`
    escape hatch: it is a statement about these lists, not a licence.
    ------------------------------------------------------------------------- */
-[data-issue-collection] > div {
+[data-issue-collection] > div:not([popover]) {
   display: contents;
 }
 
