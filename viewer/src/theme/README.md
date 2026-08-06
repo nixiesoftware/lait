@@ -336,6 +336,70 @@ would have to own something it has no way to know:
 - **`ui/icons.tsx`.** Priority bars and the status ring are data encoded as
   shape. No lucide or Astryx equivalent, by design.
 
+## The className sweep, and why Tailwind stays
+
+Measured before deciding: **3,795 class occurrences, 465 distinct**. Of those,
+**74 across 40 sites sit on an Astryx component** — 2%. The rest are on lait's
+own markup, and they are two things: layout (`flex`, `gap-2`, `min-w-0`,
+`truncate`) and lait's own tokens (`size-icon-sm`, `text-mute`, `border-line`,
+`rounded-surface`).
+
+So "drop Tailwind" was the wrong goal and this file said so too early. Those
+tokens ARE the design system — the pinned icon axis, the control ladder, the
+mark sizes, the OKLCH ramp, a thousand lines of deliberate derivation in
+`styles.css`. Removing Tailwind means re-expressing all of it in StyleX and
+rewriting 3,700 call sites for no gain. Astryx's own migration guide asks only
+to "remove legacy Tailwind classes from each completed surface, **keeping only
+token-backed layout utilities**", and `tailwind-theme.css` exists precisely so
+the two read one palette. They do.
+
+What the sweep actually found, in the 74:
+
+- Three `text-danger` on ghost Buttons — that IS the `danger` variant, which the
+  theme already defines. The class was doing half its job.
+- `rounded-full` on a Button — the theme gives every button a pill now.
+- `size-ctl-md` on two IconButtons — an Astryx IconButton at `size="sm"`
+  already measures 28px. Restating a default is a thing to chase when the
+  ladder moves.
+- `hover:bg-danger/10 hover:text-danger` on the bulk-bar delete — that pair is
+  the `danger` variant spelled out.
+- One `className=""`.
+
+Everything else is legitimate: `ml-auto` and friends position a control in its
+parent's flow, which is the call site's business, not the design system's.
+
+Also removed: the `ui-overlay` and `ui-drawer` **exit animations**. They fired
+on `[data-state="closed"]`, which only Radix ever wrote, and Radix no longer
+drives a dialog or a drawer. `.ui-surface`'s exit stays — the issue row's
+context menu still writes it.
+
+## The open-menu highlight, and a lesson about measuring
+
+A `Combobox` or `DatePicker` trigger darkens while its menu is open. That rode
+on `data-[state=open]` — Radix's attribute, which Astryx does not write — so it
+had been dead since the popover migration.
+
+`controlTrigger` now takes an `open` variant, and both components already hold
+that state in React, so the styling comes from us rather than from guessing at
+whose attribute wins. The resting fill moved into a compound variant too, so a
+trigger only ever carries one background class.
+
+**The lesson is in how long that took.** `getComputedStyle` on the trigger
+returned the resting colour no matter what — through a class, through an
+`!important` class, through an inline style, and finally through a hard-coded
+literal. A literal red also read back as the page background, which is not a
+cascade phenomenon at all: the element is anchored to a top-layer popover, and
+Chrome served a stale computed style for it.
+
+Everything downstream of that was wasted: layer-order archaeology, a
+`tailwind-merge` theory, an `!important` that made things worse. A single
+zoomed screenshot of the trigger — closed, then open — settled it in one step
+and showed the very first fix had worked.
+
+**Verify a visual change by looking at it.** `getComputedStyle` is a fine tool
+for tokens and geometry; it is not trustworthy for an element in or anchored to
+the top layer.
+
 ## What is unresolved
 
 1. **`astryx theme build` silently drops tokens (0.3.0).** Given 106 tokens it

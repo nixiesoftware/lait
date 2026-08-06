@@ -238,7 +238,7 @@ export function DatePicker({
       <button
         type="button"
         aria-label={ariaLabel}
-        className={cn(controlTrigger({ tone, size }), !value && "text-mute", className)}
+        className={cn(controlTrigger({ tone, size, open }), !value && "text-mute", className)}
       >
         {face ?? (
           <>

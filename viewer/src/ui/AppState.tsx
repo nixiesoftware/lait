@@ -112,20 +112,18 @@ export function InlineError({
       {onRetry && (
         <Button
           onClick={onRetry}
-          className="text-danger"
           icon={<RefreshCw className="size-icon-xs" />}
           label={retryLabel}
-          variant="ghost"
+          variant="danger"
           size="sm"
         />
       )}
       {onCopy && (
         <Button
           onClick={onCopy}
-          className="text-danger"
           icon={<Copy className="size-icon-xs" />}
           label="Copy details"
-          variant="ghost"
+          variant="danger"
           size="sm"
         />
       )}

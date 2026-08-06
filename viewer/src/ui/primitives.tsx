@@ -369,25 +369,48 @@ export const controlTrigger = cva(
          *  and the breadcrumb switcher. Fully rounded: a hover fill is the only
          *  shape it has, so a pill reads as deliberate where a rounded box reads
          *  as something that appeared under the pointer. */
-        quiet:
-          "hover:bg-hover data-[state=open]:bg-active -mx-1 min-w-0 rounded-full px-1.5 text-left",
+        quiet: "hover:bg-hover -mx-1 min-w-0 rounded-full px-1.5 text-left",
         /** A standing control with a border. Stays a box — a border makes the
          *  shape explicit rather than only appearing on hover, and a pilled
          *  border starts reading as a tag rather than a control. */
-        outline:
-          "border-line bg-bg hover:border-line-strong hover:bg-hover data-[state=open]:bg-active rounded-control border px-2",
+        outline: "border-line hover:border-line-strong hover:bg-hover rounded-control border px-2",
         /** Inside a floating bar. It lifts on hover: the bar is the one surface
          *  that is over the work rather than part of it, so its controls answer
          *  the pointer with elevation instead of only a fill. */
-        pill: "bg-active/60 text-dim hover:bg-hover hover:text-fg data-[state=open]:bg-active rounded-full px-2.5",
+        pill: "text-dim hover:bg-hover hover:text-fg rounded-full px-2.5",
         /** No box at all — the child already is one, and no state may paint one
          *  either: a glyph on a row answers the pointer and the open menu by
          *  getting *lighter*, never by growing a fill or dimming away. Pair
          *  with `size="none"`: the chip carries its own height. */
-        bare: "min-w-0 rounded-full transition-[filter] hover:brightness-125 data-[state=open]:brightness-125",
+        bare: "min-w-0 rounded-full transition-[filter] hover:brightness-125",
       },
+      /**
+       * The menu is open, and the trigger has to say so.
+       *
+       * This used to ride on `data-[state=open]` — Radix's attribute, written
+       * onto its own Trigger. Astryx's popover writes `aria-expanded` onto the
+       * button instead, and re-pointing the selector at that got the rule
+       * generated but not applied: in the popover's own subtree the variant
+       * lost, while the identical markup cloned onto `<body>` won. Rather than
+       * keep guessing at whose attribute wins where, the state comes from us —
+       * `Combobox` and `DatePicker` already hold it in React, so styling from a
+       * boolean is both simpler and honest about who knows.
+       */
+      open: { true: "", false: "" },
     },
-    defaultVariants: { tone: "outline", size: "md" },
+    compoundVariants: [
+      // The resting fill lives here rather than on the tone, so a trigger only
+      // ever carries ONE background class.
+      { tone: "outline", open: false, class: "bg-bg" },
+      { tone: "pill", open: false, class: "bg-active/60" },
+      { tone: "quiet", open: true, class: "bg-active" },
+      { tone: "outline", open: true, class: "bg-active" },
+      { tone: "pill", open: true, class: "bg-active" },
+      // The bare tone paints no fill in any state — a glyph on a row answers
+      // the open menu by getting lighter, never by growing a box.
+      { tone: "bare", open: true, class: "brightness-125" },
+    ],
+    defaultVariants: { tone: "outline", size: "md", open: false },
   },
 );
 

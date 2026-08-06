@@ -77,7 +77,6 @@ export function BulkBar({
       {/* Dismiss leads: the first thing you want from a mode is the way out. */}
       <IconButton
         label="Clear selection"
-        className="size-ctl-md"
         onClick={onClear}
         variant="ghost"
         size="sm"
@@ -115,7 +114,6 @@ export function BulkBar({
           </span>
           {!progress.pending && progress.failures.length > 0 && (
             <Button
-              className="rounded-full"
               onClick={onRetryFailures}
               icon={<RotateCcw className="size-icon-xs" />}
               label="Retry failed"
@@ -196,10 +194,9 @@ export function BulkBar({
           rather than sitting behind a rule that says "past here be dragons". */}
       <IconButton
         label="Delete selected"
-        className="hover:bg-danger/10 hover:text-danger size-ctl-md"
         isDisabled={pending}
         onClick={onDelete}
-        variant="ghost"
+        variant="danger"
         size="sm"
         tooltip="Delete selected"
         icon={<Trash2 className="size-icon-sm" />}

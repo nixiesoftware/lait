@@ -4,7 +4,7 @@ import { Command } from "cmdk";
 import { Check, Plus } from "lucide-react";
 
 import { cmdkFilter } from "../core/fuzzy";
-import { cn, controlTrigger, type ControlSize, type ControlTone, crumbGlyph } from "./primitives";
+import { cn, controlTrigger, crumbGlyph, type ControlSize, type ControlTone } from "./primitives";
 
 /**
  * A pill that opens a searchable menu — the tracker's workhorse control.
@@ -180,7 +180,7 @@ export function Combobox(props: Props) {
     return (
       <span
         className={cn(
-          controlTrigger({ tone, size }),
+          controlTrigger({ tone, size, open: isOpen }),
           "text-dim",
           className,
         )}
@@ -298,7 +298,11 @@ export function Combobox(props: Props) {
         )
       }
     >
-      <button type="button" aria-label={label} className={cn(controlTrigger({ tone, size }), className)}>
+      <button
+        type="button"
+        aria-label={label}
+        className={cn(controlTrigger({ tone, size, open: isOpen }), className)}
+      >
         {content}
       </button>
     </Popover>

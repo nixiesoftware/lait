@@ -414,6 +414,53 @@ describe("colour tokens are generated, not authored", () => {
 });
 
 /**
+ * Guards the CASCADE LAYER ORDER, which is load-bearing and not enforced by
+ * the thing that declares it.
+ *
+ * `styles.css` opens with an explicit
+ * `@layer reset, theme, base, astryx-base, astryx-theme, astryx-density,
+ * components, utilities;` — and that statement does NOT survive into the
+ * built stylesheet. Tailwind rewrites it away, so at runtime precedence falls
+ * back to FIRST APPEARANCE order, which currently happens to match what we
+ * asked for.
+ *
+ * That is luck, and it is the fragile kind: an `@import` added in the wrong
+ * place silently reorders the layers, and the failure is a design system
+ * quietly losing to a reset — no error, no stack, just the wrong colour
+ * somewhere nobody is looking. This asserts the order the browser will
+ * actually use.
+ *
+ * It reads the committed build output rather than the source, for the same
+ * reason `tokens.generated.css` is checked in: the artefact is the thing that
+ * ships. A `styles.css` edit without a rebuild is what this catches second.
+ */
+describe("cascade layers land in the intended order", () => {
+  it("orders reset below Astryx below our theme below Tailwind's utilities", () => {
+    const css = readFileSync(join(SRC_DIR, "../../src/serve/assets/index.css"), "utf8");
+    const seen: string[] = [];
+    for (const m of css.matchAll(/@layer\s+([a-z-]+)\s*\{/g)) {
+      const name = m[1]!;
+      if (!seen.includes(name)) seen.push(name);
+    }
+    // `properties` is Tailwind's own @property shim and always leads.
+    const ours = seen.filter((n) => n !== "properties");
+    expect(
+      ours,
+      "Layer order is by first appearance — the explicit @layer statement in " +
+        "styles.css is stripped by Tailwind. If this fails, an import moved.",
+    ).toEqual([
+      "reset",
+      "theme",
+      "base",
+      "astryx-base",
+      "astryx-theme",
+      "astryx-density",
+      "utilities",
+    ]);
+  });
+});
+
+/**
  * Rungs actually referenced in source for a given axis. A rung used here but
  * missing from the token block compiles to nothing at all — Tailwind emits no
  * utility for an undefined named entry — so the element silently falls back to

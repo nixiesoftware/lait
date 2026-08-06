@@ -2031,7 +2031,6 @@ function Relations({
                 if (!subDraft.trim()) setSubDraft(null);
               }}
               aria-label="New sub-issue title"
-              className=""
             />
           )}
         </Disclosure>

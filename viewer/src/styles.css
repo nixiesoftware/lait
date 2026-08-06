@@ -549,34 +549,26 @@
 .ui-drawer { animation: ui-drawer-in 180ms var(--ease-out) both; }
 .ui-detail { animation: ui-detail-in 160ms var(--ease-out) both; }
 
-/* Exits. A surface that fades in and then vanishes reads as a glitch, not a
-   close. Radix keeps its Content/Overlay mounted while `data-state="closed"` as
-   long as a CSS animation is running on it, so the `[data-state="closed"]`
-   variant *is* the close animation — no JS, and it only ever engages on the
-   Radix-driven surfaces (dialogs, popovers, menus, the drawer). The manually
-   mounted overlays (palette, search, shortcuts) carry no `data-state`, so they
-   keep their enter-only behaviour and unmount instantly, as before. The
-   class+attribute selector outranks the bare `.ui-*` enter rule, so on close the
-   exit wins without touching the entrance. Exits run a touch quicker than
-   entrances — leaving should feel lighter than arriving. */
-@keyframes ui-overlay-out {
-  from { opacity: 1; }
-  to { opacity: 0; }
-}
+/* Exits, and what is left of them.
+   A surface that fades in and then vanishes reads as a glitch, not a close.
+   Radix kept its Content mounted while `data-state="closed"` as long as a CSS
+   animation was running, so `[data-state="closed"]` WAS the close animation —
+   no JS, and it engaged on every Radix-driven surface.
 
+   Astryx drives its overlays through the native popover API and sets no
+   `data-state`, so of the three exits only `.ui-surface` still fires — on the
+   issue row's context menu, the one surface still on Radix. The overlay and
+   drawer exits went with the dialogs that used to carry them; keeping the
+   keyframes for a selector nothing matches is how a stylesheet grows a museum.
+
+   Exits run a touch quicker than entrances — leaving should feel lighter than
+   arriving. */
 @keyframes ui-surface-out {
   from { opacity: 1; scale: 1; }
   to { opacity: 0; scale: 0.985; }
 }
 
-@keyframes ui-drawer-out {
-  from { translate: 0 0; opacity: 1; }
-  to { translate: -16px 0; opacity: 0; }
-}
-
-.ui-overlay[data-state="closed"] { animation: ui-overlay-out 120ms var(--ease-out) both; }
 .ui-surface[data-state="closed"] { animation: ui-surface-out 130ms var(--ease-out) both; }
-.ui-drawer[data-state="closed"] { animation: ui-drawer-out 150ms var(--ease-out) both; }
 
 /* ---------------------------------------------------------------------------
    Prose.
