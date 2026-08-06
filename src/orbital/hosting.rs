@@ -1991,7 +1991,9 @@ impl StationHost {
             counts_unavailable: counts.is_none(),
             items,
             scopes,
-            membership: if self.mechanics.am_i_member() {
+            membership: if self.mechanics.am_i_admin() {
+                "admin".into()
+            } else if self.mechanics.am_i_member() {
                 "member".into()
             } else {
                 "pending".into()

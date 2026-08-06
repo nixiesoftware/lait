@@ -39,7 +39,7 @@ import { loadRailOpen, saveRailOpen } from "./core/railState";
 import { loadSavedViews, type SavedView } from "./core/savedViews";
 import { SPEC_KIND_LABEL } from "./core/specs";
 import { Activity } from "./ui/Activity";
-import { classifyFailure, EmptyState, InlineError, recoveryForError, TrustPopover } from "./ui/AppState";
+import { classifyFailure, EmptyState, InlineError, recoveryForError, StandingNotice, TrustPopover } from "./ui/AppState";
 import { Board } from "./ui/Board";
 import { BulkBar } from "./ui/BulkBar";
 import { Calendar } from "./ui/Calendar";
@@ -106,6 +106,7 @@ import {
   type SpaceRow,
   type SpecKind,
   type StatusInfo,
+  type WhoamiInfo,
   type WorkflowState,
 } from "./types";
 import "./commands";
@@ -312,6 +313,13 @@ export function App() {
       [current, projectStore],
     ),
   );
+  const standingResource = useProjectRegistry(
+    current ? projectKeys.standing(current) : "project:none/standing",
+    useCallback(
+      () => current ? projectStore.ensureStanding(current) : Promise.resolve(null as never),
+      [current, projectStore],
+    ),
+  );
   const labels = labelsResource.data ?? [];
   const projects = projectsResource.data ?? [];
   const statusInfo = (statusResource.data ?? null) as StatusInfo | null;
@@ -420,7 +428,27 @@ export function App() {
   }, [view]);
 
   const space = spaces.find((s) => s.id === current) ?? null;
-  const readOnly = space ? isReadOnly(space) : false;
+  const standing = (standingResource.data ?? null) as WhoamiInfo | null;
+  /** Custody: this surface signs with a key it merely hosts (an agent's). */
+  const custodyReadOnly = space ? isReadOnly(space) : false;
+  /**
+   * Standing: this node's own actor holds no write standing. `null` standing
+   * (not yet resolved, or the probe failed) deliberately does NOT gate —
+   * flashing a locked UI at a founder while whoami is in flight would be its
+   * own lie; an actual denial still refuses at the engine.
+   */
+  const standingReadOnly = !custodyReadOnly && standing !== null && !standing.can_write;
+  const readOnly = custodyReadOnly || standingReadOnly;
+
+  // Safety net under the doorbell: a write refused for standing means our
+  // cached standing may be stale (a revocation we haven't re-probed), so
+  // re-resolve it — the gate then flips instead of every further affordance
+  // failing one by one.
+  useEffect(() => {
+    if (error && current && classifyFailure(error) === "authorization") {
+      void projectStore.ensureStanding(current, true).catch(() => undefined);
+    }
+  }, [error, current, projectStore]);
   const missingProject =
     isProjectView(view) &&
     project !== null &&
@@ -1861,6 +1889,15 @@ export function App() {
             </Toolbar>
           )}
         </div>
+
+        {standingReadOnly && standing && current && (
+          <StandingNotice
+            standing={standing}
+            onRefresh={() =>
+              void projectStore.ensureStanding(current, true).catch(() => undefined)
+            }
+          />
+        )}
 
         {error && (
           <InlineError

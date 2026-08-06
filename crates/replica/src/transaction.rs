@@ -39,7 +39,7 @@ pub use crate::replica::{
 
 /// Typed failures produced while committing or incorporating a transaction.
 pub mod commit {
-    pub use crate::replica::{Defect, Failure, Invalid, Refusal};
+    pub use crate::replica::{Defect, Failure, Invalid};
 }
 
 pub use crate::algebra::MAX_OPS_PER_TRANSACTION;
@@ -321,7 +321,9 @@ impl Transaction {
     ) -> Result<Self, mechanics::authorization::Refusal> {
         let core = Core {
             version: 1,
-            space: space_bytes(request.space).ok_or(mechanics::authorization::Refusal::Denied)?,
+            space: space_bytes(request.space).ok_or(mechanics::authorization::Refusal::Denied(
+                mechanics::authorization::DenialReason::Internal("space id is not valid bytes"),
+            ))?,
             parent_manifest_root: request.parent_manifest_root,
             replica_frontier: request.replica_frontier,
             authority_frontier: request.authority_frontier,

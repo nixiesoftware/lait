@@ -18,7 +18,7 @@ use mechanics::authorization::{
 use mechanics::ids::{ActorId, SpaceId, SystemUlidSource};
 use mechanics::membership::{self as acl, AclAction, AclOp, Standing};
 use mechanics::space::Genesis;
-use mechanics::space::{Authority, Effect, Invalid, Refusal};
+use mechanics::space::{Authority, DenialReason, Effect, Invalid, Refusal};
 
 const WORLD: &str = "com.lait.issues";
 static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -255,7 +255,7 @@ fn require_all_any_witness_selection_and_historical_evaluation() {
             impl_id,
             &needs_admin
         )),
-        Err(Refusal::Denied)
+        Err(Refusal::Denied(DenialReason::DemandUnsatisfied))
     ));
 
     // A project-scoped Require is satisfied for p1 but denied for p2 (exact
@@ -285,7 +285,7 @@ fn require_all_any_witness_selection_and_historical_evaluation() {
             impl_id,
             &edit_p2
         )),
-        Err(Refusal::Denied)
+        Err(Refusal::Denied(DenialReason::DemandUnsatisfied))
     ));
     cleanup(&dir);
 }
@@ -377,7 +377,7 @@ fn historical_grant_then_removal_evaluated_at_each_frontier() {
             impl_id,
             &demand
         )),
-        Err(Refusal::Denied)
+        Err(Refusal::Denied(DenialReason::DemandUnsatisfied))
     ));
     cleanup(&dir);
 }
@@ -406,7 +406,7 @@ fn implementation_pin_refuses_unapproved_id() {
             impl_id,
             &demand
         )),
-        Err(Refusal::Denied)
+        Err(Refusal::Denied(DenialReason::DemandUnsatisfied))
     ));
     // A wrong implementation id refuses before demand evaluation.
     assert!(matches!(

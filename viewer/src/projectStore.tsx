@@ -37,6 +37,7 @@ import type {
   SpecState,
   SpecView,
   StatusInfo,
+  WhoamiInfo,
   WorldRequest,
 } from "./types";
 
@@ -68,6 +69,7 @@ export const projectKeys = {
   members: (space: string) => `${prefix(space)}members`,
   projects: (space: string) => `${prefix(space)}projects`,
   status: (space: string) => `${prefix(space)}status`,
+  standing: (space: string) => `${prefix(space)}standing`,
 };
 
 /**
@@ -752,6 +754,18 @@ export class ProjectViewerStore {
       // Status names the space and counts its projects, members and issues —
       // the issue count from the row index, the member count from authority.
     }, { catalog: ["space", "projects", "docs"], authority: true }, force);
+  }
+
+  ensureStanding(space: string, force = false): Promise<WhoamiInfo> {
+    return this.load(projectKeys.standing(space), async () => {
+      const result = await this.spaceRpc(space, { cmd: "whoami" });
+      if (result.kind !== "whoami") throw new Error("Expected whoami response");
+      return result;
+      // Standing is pure authority-plane state: a grant, promotion, or
+      // revocation arriving over sync rings `authority_advanced` and this
+      // re-resolves — which is how a member gated as view-only unlocks the
+      // moment their grant lands, without a reload.
+    }, { authority: true }, force);
   }
 
   ensureIssueDetail(space: string, reff: string): void {

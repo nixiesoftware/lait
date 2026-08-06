@@ -80,7 +80,11 @@ impl replica::transaction::TransactionAuthorizer for MechAuthorizer<'_> {
         core: &replica::transaction::Core,
     ) -> Result<Vec<u8>, mechanics::authorization::Refusal> {
         use runtime::world::AuthorityView;
-        let actor = mechanics::ids::ActorId::parse(&core.actor).ok_or("actor")?;
+        let actor = mechanics::ids::ActorId::parse(&core.actor).ok_or(
+            mechanics::authorization::Refusal::Denied(
+                mechanics::authorization::DenialReason::Internal("actor id does not parse"),
+            ),
+        )?;
         let device = mechanics::ids::DeviceId::from_key_bytes(&core.signer);
         self.mech.authorize_mutation(
             &self.mech.space(),

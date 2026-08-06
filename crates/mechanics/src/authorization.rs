@@ -10,7 +10,9 @@ pub use crate::demand::{
     MAX_NAME_BYTES, MAX_REQUIRE_LEAVES, MAX_RESOURCE_BYTES, MAX_RESOURCE_SEGMENTS,
     MAX_SEGMENT_BYTES,
 };
-pub use crate::ledger::{AuthorizationRequest, ReceiptExpectations, Refusal, SealedKeyRecord};
+pub use crate::ledger::{
+    AuthorizationRequest, DenialReason, ReceiptExpectations, Refusal, SealedKeyRecord,
+};
 
 pub mod receipt {
     pub use crate::ledger::{Invalid, ReceiptField};

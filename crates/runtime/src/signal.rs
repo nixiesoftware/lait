@@ -354,13 +354,14 @@ impl SignalPolicy {
             SignalDemand::Session => Ok(()),
             SignalDemand::World { world, demand } => {
                 self.world_is_live(world)?;
-                if self
+                // A could-not-evaluate error refuses like a denial at this
+                // peer boundary: an unevaluable demand must not admit.
+                match self
                     .authority
                     .evaluate_read(&self.actor, &self.frontier, demand)
                 {
-                    Ok(())
-                } else {
-                    Err(Refusal::Denied)
+                    Ok(true) => Ok(()),
+                    Ok(false) | Err(_) => Err(Refusal::Denied),
                 }
             }
         }
@@ -417,13 +418,13 @@ impl SignalPolicy {
         // refuses empty input, so a registered signal schema always states one.
         // A fallback here would be a second, more permissive answer to a
         // question registration has already refused to leave open.
-        if self
+        // As in `permits`: an unevaluable demand refuses like a denial here.
+        match self
             .authority
             .evaluate_read(&self.actor, &self.frontier, &declared.demand)
         {
-            Ok(())
-        } else {
-            Err(Refusal::Denied)
+            Ok(true) => Ok(()),
+            Ok(false) | Err(_) => Err(Refusal::Denied),
         }
     }
 
@@ -438,14 +439,12 @@ impl SignalPolicy {
         if !self.worlds.contains(world) {
             return Err(Refusal::NotRegistered);
         }
-        if self
-            .authority
-            .active_implementation(world, &self.frontier)
-            .is_none()
-        {
-            return Err(Refusal::NotRegistered);
+        // An unanswerable ledger refuses like a missing activation at this
+        // peer boundary: this build cannot vouch for the interpretation.
+        match self.authority.active_implementation(world, &self.frontier) {
+            Ok(Some(_)) => Ok(()),
+            Ok(None) | Err(_) => Err(Refusal::NotRegistered),
         }
-        Ok(())
     }
 }
 

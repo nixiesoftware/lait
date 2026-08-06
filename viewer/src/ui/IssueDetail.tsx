@@ -2854,8 +2854,20 @@ function Description({
   }, [draftKey.spaceId, draftKey.reff, draft, value]);
 
   if (readOnly) {
+    // A draft typed before the gate flipped (standing revoked mid-edit, or
+    // writes that never landed) must not silently vanish behind the
+    // read-only face — it survives in local storage, and saying so is the
+    // difference between "kept" and "lost".
+    const heldDraft = loadDraft(draftKey.spaceId, draftKey.reff, "description");
     return (
       <div className="min-h-ctl-xl py-2">
+        {heldDraft && heldDraft !== value && (
+          <p className="text-warn mb-2 text-xs">
+            You have unsaved local edits to this description from before write
+            access was gated — they’re kept on this device and can be copied
+            out, but won’t be written until you hold write access again.
+          </p>
+        )}
         {value ? <Markdown text={value} /> : <span className="text-mute">No description</span>}
       </div>
     );

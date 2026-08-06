@@ -17,11 +17,39 @@ import type { HostRequest, Response, SpaceRequest, SpacesReply, WorldRequest } f
 /** A refusal from the engine, carrying its own words. */
 export class LaitError extends Error {
   readonly status: number;
-  constructor(message: string, status: number) {
+  /**
+   * The engine's own classification of the failure (`error_kind`:
+   * `"denied" | "not_found" | "retry" | "error"`), `null` when the reply
+   * carried none (transport failures, host-plane errors).
+   */
+  readonly errorKind: string | null;
+  constructor(message: string, status: number, errorKind: string | null = null) {
     super(message);
     this.name = "LaitError";
     this.status = status;
+    this.errorKind = errorKind;
+    if (errorKind) rememberKind(message, errorKind);
   }
+}
+
+/**
+ * Message → engine `error_kind`, for classification sites that only hold the
+ * message string. Most error paths reduce a `LaitError` to `e.message` before
+ * it reaches the recovery UI, so the typed kind rides in this bounded side
+ * table instead of a regex guessing it back out of the words. Safe because a
+ * given message string only ever arrives tagged with one kind (the engine
+ * writes both fields together).
+ */
+const KNOWN_KINDS = new Map<string, string>();
+function rememberKind(message: string, kind: string): void {
+  if (KNOWN_KINDS.size > 64) {
+    const oldest = KNOWN_KINDS.keys().next().value;
+    if (oldest !== undefined) KNOWN_KINDS.delete(oldest);
+  }
+  KNOWN_KINDS.set(message, kind);
+}
+export function errorKindOf(message: string): string | null {
+  return KNOWN_KINDS.get(message) ?? null;
 }
 
 /**
@@ -126,7 +154,11 @@ async function send<R extends Response = Response>(
     throw new ConfirmRequired(String(body.question ?? "Are you sure?"));
   }
   if (!r.ok || body?.kind === "error") {
-    throw new LaitError(String(body?.message ?? `HTTP ${r.status}`), r.status);
+    throw new LaitError(
+      String(body?.message ?? `HTTP ${r.status}`),
+      r.status,
+      typeof body?.error_kind === "string" ? body.error_kind : null,
+    );
   }
   if (!body) throw new LaitError("no reply", r.status);
   return body as R;

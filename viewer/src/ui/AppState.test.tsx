@@ -101,6 +101,58 @@ describe("application state vocabulary", () => {
     expect(classifyFailure("queued pending synchronization")).toBe("pending-sync");
   });
 
+  // The engine's denial messages, verbatim — every one must classify as
+  // authorization (a title of "Change not allowed", never the generic
+  // "Something didn’t finish" + Retry that made a standing denial look like a
+  // transient fault). These are the regex fallback; a message that arrived
+  // through the API layer is classified by its `error_kind` tag first.
+  it("classifies the engine's denial wording as authorization", () => {
+    expect(classifyFailure(
+      "this device isn't recognized as a member of this space at its current "
+      + "local view — if you were just invited or promoted, that change may not "
+      + "have synced to this node yet (run sync and retry); otherwise ask an "
+      + "admin to admit or re-admit you; nothing was changed",
+    )).toBe("authorization");
+    expect(classifyFailure(
+      "you don't hold the capability this change demands — a view-only member "
+      + "needs an admin to grant write access, a sponsored agent needs its human "
+      + "sponsor to grant it, and a scoped member may be writing outside the "
+      + "projects their grant covers; nothing was changed",
+    )).toBe("authorization");
+    expect(classifyFailure(
+      "you can't read this — your grants don't cover this query's scope; an "
+      + "admin can widen them",
+    )).toBe("authorization");
+    // The old collapsed message, still emitted by not-yet-upgraded daemons.
+    expect(classifyFailure(
+      "you lack write standing in this space — a sponsored agent needs a human "
+      + "member to grant it write access, and a view-only member needs an admin "
+      + "to grant it; nothing was changed",
+    )).toBe("authorization");
+    expect(recoveryForError("you lack write standing in this space")).toEqual({
+      title: "Change not allowed",
+      retryLabel: "Refresh",
+    });
+  });
+
+  it("keeps a ledger evaluation failure out of the permissions vocabulary", () => {
+    const message =
+      "this node could not evaluate authority state (MissingHistory) — a local "
+      + "ledger problem, not a permissions problem; run sync (or doctor) and "
+      + "retry; nothing was changed";
+    expect(classifyFailure(message)).toBe("authority-unavailable");
+    expect(recoveryForError(message).title).toBe("Authority state unavailable");
+  });
+
+  it("lets the engine's error_kind tag outrank every message regex", async () => {
+    const { LaitError } = await import("../api");
+    // Wording that matches no denial regex still classifies as authorization
+    // once a LaitError has carried its `error_kind` through the API layer.
+    const worded = "completely novel refusal wording with zero keyword overlap";
+    void new LaitError(worded, 403, "denied");
+    expect(classifyFailure(worded)).toBe("authorization");
+  });
+
   function render(node: React.ReactNode) {
     host = document.createElement("div");
     document.body.append(host);

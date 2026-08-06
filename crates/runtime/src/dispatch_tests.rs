@@ -75,7 +75,9 @@ impl AuthorityView for SeedAuthority {
     ) -> Result<Vec<u8>, mechanics::authorization::Refusal> {
         let writer = mechanics::actor::device_from_seed(&WRITER_SEED);
         if device != &writer {
-            return Err("device holds no write authority".into());
+            return Err(mechanics::authorization::Refusal::Denied(
+                mechanics::authorization::DenialReason::DemandUnsatisfied,
+            ));
         }
         PermissiveAuthority.authorize_mutation(
             space,
@@ -319,7 +321,12 @@ fn authorization_is_checked_per_request() {
             payload: b"x".to_vec(),
         },
     );
-    assert_eq!(denied, Err(SessionFailure::Rejected(Rejection::Denied)));
+    assert_eq!(
+        denied,
+        Err(SessionFailure::Rejected(Rejection::Denied(
+            crate::world::DeniedCause::DemandUnsatisfied
+        )))
+    );
 }
 
 #[test]

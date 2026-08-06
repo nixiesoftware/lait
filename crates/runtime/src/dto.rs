@@ -347,7 +347,9 @@ impl ErrorDto {
             E::InvalidRequest => "invalid-request",
             E::UnsupportedSchema => "unsupported-schema",
             E::UnsupportedSchemaVersion => "unsupported-schema-version",
-            E::Denied => "denied",
+            // One stable public code for every denial cause — consumers key
+            // recovery UX off "denied"; the message carries the remedy.
+            E::Denied(_) => "denied",
             E::NoActiveImplementation => "no-active-implementation",
             E::Conflict => "conflict",
             E::LimitExceeded => "limit-exceeded",
