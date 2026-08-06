@@ -414,6 +414,44 @@ describe("colour tokens are generated, not authored", () => {
 });
 
 /**
+ * `--color-accent` is the one token name BOTH vocabularies declare.
+ *
+ * Tailwind's `@theme` block in `tokens.generated.css` defines it so our own
+ * utilities exist (`bg-accent`, `ring-accent/50`, `border-accent/30`), and the
+ * Astryx theme defines it so Astryx's components resolve it. Both read
+ * `familyPairs().accent` from `tool/palette.mjs`, so they agree by
+ * construction — but only while both keep doing that, and nothing else in the
+ * codebase says so out loud.
+ *
+ * A divergence here is invisible: the app would render two slightly different
+ * blues, ours on our markup and theirs on theirs, and every screenshot would
+ * look fine on its own.
+ */
+describe("the accent both systems name", () => {
+  it("is the same colour in the Tailwind theme and the Astryx theme", () => {
+    const tailwind = readFileSync(join(SRC_DIR, "tokens.generated.css"), "utf8");
+    const astryx = readFileSync(join(SRC_DIR, "theme/laitTheme.ts"), "utf8");
+
+    // Both sides hold two `oklch(...)` calls — nested parens, so pull the calls
+    // out rather than trying to split the pair.
+    const line = /--color-accent:[^;]+;/.exec(tailwind)?.[0] ?? "";
+    const fromTailwind = [...line.matchAll(/oklch\([^)]*\)/g)].map((m) => m[0]);
+    const astryxLine = /"--color-accent":[^\]]+\]/.exec(astryx)?.[0] ?? "";
+    const fromAstryx = [...astryxLine.matchAll(/oklch\([^)]*\)/g)].map((m) => m[0]);
+
+    expect(fromTailwind, "no --color-accent pair in tokens.generated.css").toHaveLength(2);
+    expect(fromAstryx, "no --color-accent pair in laitTheme.ts").toHaveLength(2);
+
+    expect(
+      fromTailwind,
+      "The two vocabularies disagree about the accent. Both should come from " +
+        "familyPairs().accent in tool/palette.mjs — re-run `npm run tokens` " +
+        "and `npm run tokens:astryx`.",
+    ).toEqual(fromAstryx);
+  });
+});
+
+/**
  * Guards the CASCADE LAYER ORDER, which is load-bearing and not enforced by
  * the thing that declares it.
  *

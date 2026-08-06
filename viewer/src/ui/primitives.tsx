@@ -60,28 +60,6 @@ const twMerge = extendTailwindMerge({
   },
 });
 
-/**
- * How far a floating surface sits from the thing that opened it.
- *
- * A number rather than a token because Radix takes `sideOffset` as a prop, not
- * a class — but the reason for naming it is the same as every other axis: one
- * value per CATEGORY of surface, so "move the menus further out" is one edit
- * instead of a hunt through call sites. These were five loose literals across
- * six files, and two popovers had drifted 2px off the shared default with no
- * stated reason.
- */
-export const OverlayGap = {
-  /** Anchored panels: popovers, pickers, date pickers, filters. */
-  panel: 4,
-  /** Dropdown menus. Same as `panel` today, split out so the menu family can
-   *  be retuned without touching every popover. */
-  menu: 4,
-  /** Tooltips. Deliberately looser: a tip carries no border-to-border
-   *  relationship with its trigger, so it needs the extra breathing room to
-   *  read as a label about the control rather than part of it. */
-  tip: 6,
-} as const;
-
 export function cn(...parts: ClassValue[]): string {
   return twMerge(clsx(parts));
 }
@@ -121,7 +99,6 @@ export function Badge({
   return <span className={cn(badge({ tone }), className)} {...props} />;
 }
 
-/** An actual interactive pill: reactions and removable/filter chips only. */
 /**
  * A label, as it appears on an issue.
  *
@@ -310,12 +287,6 @@ export function ChipButton({
 }
 
 /**
- * Shared trigger geometry for controls that open a popover. Opening a menu is
- * behaviour, not a visual role: property values should remain quiet, while a
- * standalone composer/filter control needs a visible boundary. Neither is a
- * semantic pill; true tags and reactions get their own primitive.
- */
-/**
  * The leading glyph slot of a breadcrumb crumb.
  *
  * Objects keep the mark the rest of the app gives them — a project is an 8px
@@ -387,14 +358,14 @@ export const controlTrigger = cva(
       /**
        * The menu is open, and the trigger has to say so.
        *
-       * This used to ride on `data-[state=open]` — Radix's attribute, written
-       * onto its own Trigger. Astryx's popover writes `aria-expanded` onto the
-       * button instead, and re-pointing the selector at that got the rule
-       * generated but not applied: in the popover's own subtree the variant
-       * lost, while the identical markup cloned onto `<body>` won. Rather than
-       * keep guessing at whose attribute wins where, the state comes from us —
-       * `Combobox` and `DatePicker` already hold it in React, so styling from a
-       * boolean is both simpler and honest about who knows.
+       * This used to ride on `data-[state=open]`, which Radix wrote onto its own
+       * Trigger and Astryx does not write at all — so the highlight was dead
+       * from the popover migration until someone looked at it.
+       *
+       * Astryx does set `aria-expanded`, and an attribute selector would work.
+       * The state comes from us anyway: `Combobox` and `DatePicker` already hold
+       * it in React, and a component styling itself from its own state needs no
+       * agreement with anyone about which attribute appears where.
        */
       open: { true: "", false: "" },
     },

@@ -23,6 +23,8 @@ import {
   IconButton,
   Link,
   Popover,
+  ContextMenu,
+  DropdownMenuItem,
   SegmentedControl,
   SegmentedControlItem,
   Heading,
@@ -235,6 +237,39 @@ function Proof() {
           <div style={{ marginTop: 8 }}>
             <DatePicker value={due} onChange={setDue} />
           </div>
+        </div>
+
+        {/* The row context menu, in the shape IssueList uses it: Astryx wraps
+            the trigger in a div, and `[data-issue-collection] > div { display:
+            contents }` takes that wrapper out of layout AND the a11y tree so
+            the <li> is a direct child of the <ul> again. */}
+        <div style={{ marginTop: 24 }}>
+          <Text size="sm" color="secondary">
+            Context menu on a list row — right-click a row
+          </Text>
+          <ul data-issue-collection style={{ marginTop: 8, display: "flex", flexDirection: "column" }}>
+            {ISSUES.slice(0, 3).map(([ref, title]) => (
+              <ContextMenu
+                key={ref}
+                menuContent={
+                  <>
+                    <DropdownMenuItem label="Open focused" onClick={() => {}} />
+                    <DropdownMenuItem label="Copy link" onClick={() => {}} />
+                  </>
+                }
+              >
+                <li
+                  data-proof-row
+                  style={{ display: "flex", gap: 12, padding: "6px 8px", alignItems: "center" }}
+                >
+                  <Text size="sm" color="secondary">
+                    {ref}
+                  </Text>
+                  <Text size="sm">{title}</Text>
+                </li>
+              </ContextMenu>
+            ))}
+          </ul>
         </div>
 
         <div style={{ marginTop: 20 }}>

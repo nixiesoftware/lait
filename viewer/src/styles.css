@@ -545,6 +545,28 @@
 }
 
 .ui-overlay { animation: ui-overlay-in 140ms var(--ease-out) both; }
+/* ---------------------------------------------------------------------------
+   The context menu's trigger wrapper, made transparent.
+
+   Astryx's `ContextMenu` wraps whatever you give it in a `<div>` and offers no
+   `asChild`. Our trigger is an issue row — an `<li>` that has to stay a direct
+   child of its `<ul>`, because a wrapper between the two breaks the list
+   semantics screen readers navigate by, and because the row is a flex child of
+   the list's own layout.
+
+   `display: contents` answers both at once: the element generates no box, so
+   the row is laid out by the `<ul>` exactly as before, AND it is not exposed to
+   the accessibility tree, so the row's a11y parent is the list again. This is
+   the whole reason we could take Astryx's context menu instead of keeping a
+   Radix package for one surface.
+
+   Scoped to the issue collections rather than written as a global `div`
+   escape hatch: it is a statement about these lists, not a licence.
+   ------------------------------------------------------------------------- */
+[data-issue-collection] > div {
+  display: contents;
+}
+
 .ui-surface { animation: ui-surface-in 160ms var(--ease-out) both; }
 .ui-drawer { animation: ui-drawer-in 180ms var(--ease-out) both; }
 .ui-detail { animation: ui-detail-in 160ms var(--ease-out) both; }

@@ -1,10 +1,31 @@
-# The Astryx spike
+# The design system
 
-Branch `spike/astryx`. One question: **does lait's palette survive Astryx, or
-does adopting Astryx mean adopting Meta's colour?**
+lait's UI is Astryx (`@astryxdesign/core`), themed from lait's own palette.
+**Zero Radix packages. One component system.**
 
-Answer: it survives, intact and in OKLCH. Everything below is what the spike
-actually established, including the parts that did not go well.
+It started as a spike with one question — *does lait's palette survive Astryx,
+or does adopting Astryx mean adopting Meta's colour?* — and the answer was yes,
+intact and in OKLCH, so it became the rewrite. Everything below is what that
+established, including the parts that did not go well.
+
+## What is still ours, and why
+
+Astryx is the system. Five things extend it rather than being replaced by it,
+each because Astryx would otherwise have to own something it cannot know:
+
+| ours | why it stays |
+|---|---|
+| `Kbd` | our keybinding registry formats chords; Astryx's `Kbd` wants its own grammar |
+| `LabelChip` / `LabelChips` / `LabelDots` | label colour comes from the space's catalog, per label |
+| `Avatar` | colour and fallback derive from a device key |
+| `ui/icons.tsx` | priority bars and the status ring are data encoded as shape |
+| `controlTrigger` / `interactiveRow` / `navigationItem` | the recipes for rows, cells and triggers that are not Buttons |
+
+Everything else — buttons, fields, dialogs, popovers, menus, tooltips, badges,
+checkboxes, switches — is Astryx, extended through the theme where lait's
+vocabulary is larger than theirs (`urgent`/`high`/`medium`/`low`, `danger`,
+lait's neutral-inverse `primary`, the pill radius, the nine categorical hues on
+lait's curve).
 
 ## What was built
 
@@ -311,15 +332,36 @@ Two things it cost, both worth knowing:
   Icon or a Badge, so the status dot moved *out* of the trigger to sit beside
   it. Arguably better — a status is not something you click.
 
-**`react-context-menu` — stays.** One usage: the issue row's menu, and it is a
-real incompatibility rather than remaining work. Astryx's `ContextMenu` renders
-`<div onContextMenu>{children}<span/></div>` — it wraps its trigger and has no
-`asChild`. lait's trigger is the row `<li>`, and the existing comment already
-says why that matters: "a wrapper element here would sit between the `<ul>` and
-its items and break the list semantics screen readers navigate by." Astryx's
-`Popover` has `anchorRef` for sibling mode; `ContextMenu` does not. Taking the
-menu would mean either an unstyled `div` inside the `<ul>` or hand-rolling
-roving focus on a Popover. The list wins.
+**`react-context-menu` — gone too, and this was the interesting one.**
+
+Astryx's `ContextMenu` renders `<div onContextMenu>{children}<span/></div>`. It
+wraps its trigger and has no `asChild`. Our trigger is the issue row's `<li>`,
+and a wrapper between the `<ul>` and its items breaks both the list semantics
+screen readers navigate by AND the row's own flex layout, which the list owns.
+
+`display: contents` answers both at once. The element generates no box, so the
+row is laid out by the `<ul>` exactly as before, and it is **not exposed to the
+accessibility tree**, so the row's a11y parent is the list again. One CSS rule,
+scoped to `[data-issue-collection] > div` rather than written as a global `div`
+escape hatch — it is a statement about these lists, not a licence.
+
+Verified by reading the accessibility tree, not by inspecting the DOM:
+
+```
+list
+ listitem          <- direct child; the wrapper is not in the tree
+  "ENG-142" ...
+ menu "Context menu"
+```
+
+One imperfection worth naming: the menu surface is a sibling of the rows inside
+the list, so a `list` contains something that is not a `listitem`. That is
+Astryx's structure and it is the lesser problem — the parent relationship the
+rows depend on is intact.
+
+The four submenus, two separators and nine items moved to compound mode:
+`DropdownMenuSubMenu`, `Divider`, `DropdownMenuItem` with `endContent` for the
+trailing check marks.
 
 ## Deliberately NOT migrated
 

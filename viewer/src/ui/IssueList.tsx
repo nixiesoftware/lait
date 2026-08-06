@@ -30,17 +30,8 @@ import {
   type IssueMutators,
 } from "./fields";
 import { PriorityIcon, StatusIcon } from "./icons";
-import {
-  ContextMenu,
-  ContextMenuContent,
-  ContextMenuItem,
-  ContextMenuSeparator,
-  ContextMenuSub,
-  ContextMenuSubContent,
-  ContextMenuSubTrigger,
-  GroupHeader,
-} from "./layout";
-import { Button, CheckboxInput, IconButton } from "@astryxdesign/core";
+import { GroupHeader } from "./layout";
+import { Button, CheckboxInput, ContextMenu, Divider, DropdownMenuItem, DropdownMenuSubMenu, IconButton } from "@astryxdesign/core";
 import { interactiveRow } from "./primitives";
 import { dueLabel, dueTone } from "./time";
 
@@ -195,7 +186,7 @@ export function IssueList({
               title="Deleted"
               count={deleted.length}
             />
-            <ul>
+            <ul data-issue-collection>
               {deleted.map((row) => (
                 <IssueRow
                   key={row.reff}
@@ -423,26 +414,130 @@ function IssueRow({
     }
   }, [selected]);
 
+  // The row's verbs, as Astryx menu entries. Extracted from the JSX because a
+  // 120-line prop value buries the row it belongs to.
+  const menu = (
+    <>
+      <DropdownMenuItem
+        label="Open focused"
+        icon={<ExternalLink className="size-icon-sm" />}
+        onClick={() => onOpen(row.reff)}
+      />
+      <DropdownMenuItem
+        label="Copy link"
+        icon={<Copy className="size-icon-sm" />}
+        onClick={() => {
+          const url = new URL(window.location.href);
+          url.searchParams.set("issue", row.reff);
+          url.searchParams.set("focus", "1");
+          void navigator.clipboard.writeText(url.toString());
+        }}
+      />
+      {/* The properties, as fly-outs — Linear's context menu, and the
+          keyboard-free route to the same writes the chips make. Each row marks
+          the current value; picking it again is a no-op, not a toggle, matching
+          the chips' pickers. */}
+      {!locked && (
+        <>
+          <Divider />
+          <DropdownMenuSubMenu label="Status" icon={<SignalHigh className="size-icon-sm" />}>
+            {states.map((s) => (
+              <DropdownMenuItem
+                key={s.id}
+                label={s.name}
+                icon={<StatusIcon category={s.category} color={catalogColor(s.color)} />}
+                endContent={s.id === row.status ? <Check className="size-icon-xs" /> : undefined}
+                onClick={() => {
+                  if (s.id !== row.status) mutators.setStatus(row.reff, s.id);
+                }}
+              />
+            ))}
+          </DropdownMenuSubMenu>
+          <DropdownMenuSubMenu label="Assignee" icon={<UserRound className="size-icon-sm" />}>
+            {members.length === 0 && <DropdownMenuItem label="No members yet" isDisabled />}
+            {members.map((m) => (
+              <DropdownMenuItem
+                key={m.key}
+                label={memberName(m.key, m)}
+                icon={<Avatar deviceKey={m.key} alias={m.alias} me={m.me} size="sm" />}
+                endContent={
+                  row.assignees.includes(m.key) ? <Check className="size-icon-xs" /> : undefined
+                }
+                onClick={() =>
+                  mutators.toggleAssignee(row.reff, m.key, !row.assignees.includes(m.key))
+                }
+              />
+            ))}
+          </DropdownMenuSubMenu>
+          <DropdownMenuSubMenu label="Priority" icon={<PriorityIcon priority={row.priority} />}>
+            {[...PRIORITY_ORDER].reverse().map((p) => (
+              <DropdownMenuItem
+                key={p}
+                label={<span className="capitalize">{p === "none" ? "No priority" : p}</span>}
+                icon={<PriorityIcon priority={p} />}
+                endContent={p === row.priority ? <Check className="size-icon-xs" /> : undefined}
+                onClick={() => {
+                  if (p !== row.priority) mutators.setPriority(row.reff, p);
+                }}
+              />
+            ))}
+          </DropdownMenuSubMenu>
+          <DropdownMenuSubMenu label="Labels" icon={<Tag className="size-icon-sm" />}>
+            {labels.length === 0 && <DropdownMenuItem label="No labels yet" isDisabled />}
+            {labels.map((l) => {
+              const on = (row.label_names ?? []).includes(l.name);
+              return (
+                <DropdownMenuItem
+                  key={l.id}
+                  label={<span className="capitalize">{l.name}</span>}
+                  icon={
+                    <span
+                      className="size-mark-sm shrink-0 rounded-full"
+                      style={{ background: catalogColor(l.color) }}
+                    />
+                  }
+                  endContent={on ? <Check className="size-icon-xs" /> : undefined}
+                  onClick={() => mutators.toggleLabel(row.reff, l.name, !on)}
+                />
+              );
+            })}
+          </DropdownMenuSubMenu>
+          <Divider />
+        </>
+      )}
+      {!readOnly && (
+        <DropdownMenuItem
+          label={checked ? "Remove from selection" : "Add to selection"}
+          icon={<CheckSquare className="size-icon-sm" />}
+          onClick={() => onToggleCheck(row.reff, false)}
+        />
+      )}
+    </>
+  );
+
   return (
-    <ContextMenu.Root
+    // Astryx's ContextMenu wraps its trigger in a `<div>` and offers no
+    // `asChild`, which would put that div between the `<ul>` and its `<li>`s and
+    // break the list semantics screen readers navigate by. `display: contents`
+    // on it — see `[data-issue-collection] > div` in `styles.css` — takes the
+    // wrapper out of BOTH layout and the accessibility tree, so the row is a
+    // direct child of the list again in the only two senses that matter.
+    <ContextMenu
       onOpenChange={(open) => {
         // Selecting, not opening: a right click asks "what can I do to this
         // one", so the row has to become the row the menu is about. Left click
         // additionally calls `onOpen`, and doing that here would answer the
         // question by navigating away from it.
         //
-        // Selection rather than DOM focus, deliberately. Radix moves focus into
-        // the menu on open and hands it back to the trigger on close; forcing
-        // focus onto the row would fight it and cost the menu its keyboard
+        // Selection rather than DOM focus, deliberately: the menu moves focus
+        // into itself on open and hands it back on close, and forcing focus
+        // onto the row would fight that and cost the menu its keyboard
         // navigation. `aria-current` and the active fill are what "this one"
         // needs to look like.
         if (open) onSelect(row.reff);
       }}
+      menuContent={menu}
     >
-      {/* The whole row is the trigger. `asChild` keeps it an `<li>` — a wrapper
-          element here would sit between the `<ul>` and its items and break the
-          list semantics screen readers navigate by. */}
-      <ContextMenu.Trigger asChild>
     <li
       ref={el}
       className={clsxish([
@@ -452,10 +547,12 @@ function IssueRow({
         // and when the two were level the list had no figure and ground.
         "group/row flex h-ctl-xl items-center gap-2 px-4",
         checked && !selected && "bg-accent/5 shadow-[inset_2px_0_var(--color-accent)]",
-        // Radix marks its trigger while the menu is up. Matching the selected
-        // fill means the row reads as the subject of the menu on the very first
-        // frame, rather than after the selection round-trips through the app.
-        "data-[state=open]:bg-active data-[state=open]:text-fg",
+        // The open-menu fill used to come from `data-[state=open]`, which Radix
+        // wrote onto its trigger. Astryx's ContextMenu wraps the row instead of
+        // becoming it, so nothing marks the `<li>` any more — and nothing needs
+        // to: `onOpenChange` selects the row on open, so `selected` above is
+        // already the fill, one render later. The attribute rule was doing the
+        // same job a frame earlier and is now doing nothing at all.
         // A row whose body hasn't synced yet is real but not yet trustworthy;
         // say so quietly rather than rendering it as settled (UI.md §3.3).
         row.provisional && "opacity-60",
@@ -627,134 +724,7 @@ function IssueRow({
       )}
 
     </li>
-      </ContextMenu.Trigger>
-      <ContextMenu.Portal>
-        <ContextMenuContent>
-          <ContextMenuItem onSelect={() => onOpen(row.reff)}>
-            <ExternalLink className="size-icon-sm" />
-            Open focused
-          </ContextMenuItem>
-          <ContextMenuItem
-            onSelect={() => {
-              const url = new URL(window.location.href);
-              url.searchParams.set("issue", row.reff);
-              url.searchParams.set("focus", "1");
-              void navigator.clipboard.writeText(url.toString());
-            }}
-          >
-            <Copy className="size-icon-sm" />
-            Copy link
-          </ContextMenuItem>
-          {/* The properties, as fly-outs — Linear's context menu, and the
-              keyboard-free route to the same writes the chips make. Each row
-              marks the current value; picking it again is a no-op, not a
-              toggle, matching the chips' pickers. */}
-          {!locked && (
-            <>
-              <ContextMenuSeparator />
-              <ContextMenuSub>
-                <ContextMenuSubTrigger>
-                  <SignalHigh className="size-icon-sm" />
-                  Status
-                </ContextMenuSubTrigger>
-                <ContextMenuSubContent>
-                  {states.map((s) => (
-                    <ContextMenuItem
-                      key={s.id}
-                      onSelect={() => {
-                        if (s.id !== row.status) mutators.setStatus(row.reff, s.id);
-                      }}
-                    >
-                      <StatusIcon category={s.category} color={catalogColor(s.color)} />
-                      <span className="flex-1">{s.name}</span>
-                      {s.id === row.status && <Check className="size-icon-xs" />}
-                    </ContextMenuItem>
-                  ))}
-                </ContextMenuSubContent>
-              </ContextMenuSub>
-              <ContextMenuSub>
-                <ContextMenuSubTrigger>
-                  <UserRound className="size-icon-sm" />
-                  Assignee
-                </ContextMenuSubTrigger>
-                <ContextMenuSubContent>
-                  {members.length === 0 && (
-                    <ContextMenuItem disabled>No members yet</ContextMenuItem>
-                  )}
-                  {members.map((m) => (
-                    <ContextMenuItem
-                      key={m.key}
-                      onSelect={() =>
-                        mutators.toggleAssignee(row.reff, m.key, !row.assignees.includes(m.key))
-                      }
-                    >
-                      <Avatar deviceKey={m.key} alias={m.alias} me={m.me} size="sm" />
-                      <span className="flex-1 truncate">{memberName(m.key, m)}</span>
-                      {row.assignees.includes(m.key) && <Check className="size-icon-xs" />}
-                    </ContextMenuItem>
-                  ))}
-                </ContextMenuSubContent>
-              </ContextMenuSub>
-              <ContextMenuSub>
-                <ContextMenuSubTrigger>
-                  <PriorityIcon priority={row.priority} />
-                  Priority
-                </ContextMenuSubTrigger>
-                <ContextMenuSubContent>
-                  {[...PRIORITY_ORDER].reverse().map((p) => (
-                    <ContextMenuItem
-                      key={p}
-                      className="capitalize"
-                      onSelect={() => {
-                        if (p !== row.priority) mutators.setPriority(row.reff, p);
-                      }}
-                    >
-                      <PriorityIcon priority={p} />
-                      <span className="flex-1">{p === "none" ? "No priority" : p}</span>
-                      {p === row.priority && <Check className="size-icon-xs" />}
-                    </ContextMenuItem>
-                  ))}
-                </ContextMenuSubContent>
-              </ContextMenuSub>
-              <ContextMenuSub>
-                <ContextMenuSubTrigger>
-                  <Tag className="size-icon-sm" />
-                  Labels
-                </ContextMenuSubTrigger>
-                <ContextMenuSubContent>
-                  {labels.length === 0 && (
-                    <ContextMenuItem disabled>No labels yet</ContextMenuItem>
-                  )}
-                  {labels.map((l) => {
-                    const on = (row.label_names ?? []).includes(l.name);
-                    return (
-                      <ContextMenuItem
-                        key={l.id}
-                        onSelect={() => mutators.toggleLabel(row.reff, l.name, !on)}
-                      >
-                        <span
-                          className="size-mark-sm shrink-0 rounded-full"
-                          style={{ background: catalogColor(l.color) }}
-                        />
-                        <span className="flex-1 truncate capitalize">{l.name}</span>
-                        {on && <Check className="size-icon-xs" />}
-                      </ContextMenuItem>
-                    );
-                  })}
-                </ContextMenuSubContent>
-              </ContextMenuSub>
-              <ContextMenuSeparator />
-            </>
-          )}
-          {!readOnly && (
-            <ContextMenuItem onSelect={() => onToggleCheck(row.reff, false)}>
-              <CheckSquare className="size-icon-sm" />
-              {checked ? "Remove from selection" : "Add to selection"}
-            </ContextMenuItem>
-          )}
-        </ContextMenuContent>
-      </ContextMenu.Portal>
-    </ContextMenu.Root>
+    </ContextMenu>
   );
 }
 
