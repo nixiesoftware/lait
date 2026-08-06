@@ -55,13 +55,14 @@ local-artifacts-jobs = ["./build-binaries"]
 # The custom build job attests its own archives, so it needs id-token +
 # attestations write (cargo-dist sets these on the job that calls the workflow).
 github-custom-job-permissions = { "build-binaries" = { contents = "read", "id-token" = "write", attestations = "write" } }
-# Run the jobs dist owns (plan / global artifacts / host / announce) on Blacksmith
-# runners instead of GitHub-hosted ones. This has to live here rather than being
-# hand-edited into release.yml: `dist plan` diffs the generated workflow against
-# this config and fails ("has out of date contents") if release.yml's `runs-on:`
-# doesn't match. The `host` key tells dist the runner is x86-64 Linux, since it
-# can't infer that from a Blacksmith label.
-github-custom-runners = { global = { runner = "blacksmith-4vcpu-ubuntu-2204", host = "x86_64-unknown-linux-gnu" } }
+# Run the jobs dist owns (plan / global artifacts / host / announce) on
+# GitHub-hosted runners — free on a public repo, and immune to a third-party
+# minute pool running dry mid-release (v0.7.9 sat queued for three hours on
+# Blacksmith with all five binaries already built). This has to live here rather
+# than being hand-edited into release.yml: `dist plan` diffs the generated
+# workflow against this config and fails ("has out of date contents") if
+# release.yml's `runs-on:` doesn't match.
+github-custom-runners = { global = { runner = "ubuntu-latest", host = "x86_64-unknown-linux-gnu" } }
 
 # SLSA build provenance: cargo-dist wires `actions/attest-build-provenance` into
 # the release, producing a cryptographic attestation that each artifact was built
