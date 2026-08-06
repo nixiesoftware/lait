@@ -308,7 +308,9 @@ impl runtime::world::AuthorityView for FlipAuthority {
         // composition's demand evaluation does — never in the World callback.
         let writer = mechanics::actor::device_from_seed(&WRITER_SEED);
         if device != &writer {
-            return Err("device holds no write authority".into());
+            return Err(mechanics::authorization::Refusal::Denied(
+                mechanics::authorization::DenialReason::DemandUnsatisfied,
+            ));
         }
         PermissiveAuthority.authorize_mutation(
             space,
@@ -495,7 +497,9 @@ fn bodies_authority_restart_idempotency_and_observation() {
             "entry",
             serde_json::json!({"op":"set","k":"x","v":"y"}),
         ),
-        Err(SessionFailure::Rejected(Rejection::Denied))
+        Err(SessionFailure::Rejected(Rejection::Denied(
+            runtime::world::DeniedCause::DemandUnsatisfied
+        )))
     );
 
     // Authority change between signing and submit commits nothing.

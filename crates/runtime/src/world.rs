@@ -41,7 +41,11 @@ pub enum Rejection {
     InvalidRequest,
     UnsupportedSchema,
     UnsupportedSchemaVersion,
-    Denied,
+    /// The principal was refused, and the cause says *why* — because each
+    /// cause names a different remedy, and a collapsed "denied" phrased every
+    /// one of them as "you lack write standing" (including read refusals and
+    /// members whose grant simply had not synced to their node yet).
+    Denied(DeniedCause),
     /// No World implementation is active at the pinned frontier, so no receipt
     /// can be minted for anyone — the space's problem, not the caller's
     /// standing. Its own variant because it was being reported as `Denied`,
@@ -54,6 +58,29 @@ pub enum Rejection {
     LimitExceeded,
     StateCorrupt,
     ContractViolation,
+}
+
+/// Why a [`Rejection::Denied`] was denied. The distinctions matter because the
+/// remedies differ: syncing, asking an admin for a grant, retrying, and
+/// widening a scoped grant are four different actions, and only a cause that
+/// survives to the rendering surface can name the right one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeniedCause {
+    /// This device does not resolve to a member at the evaluated view —
+    /// admission not yet converged to this node, membership revoked, or a
+    /// grant that has not arrived here yet. The remedy starts with sync, not
+    /// with asking for a (possibly already-given) grant.
+    NotAMember,
+    /// The signed action's principal is not the docked identity (an identity
+    /// or sponsorship change raced between signing and committing). Retry.
+    PrincipalMismatch,
+    /// The actor is a member, but no capability grant satisfies this change's
+    /// demand at the pinned frontier — view-only standing, an ungranted
+    /// sponsored agent, or a scoped grant that does not cover this resource.
+    DemandUnsatisfied,
+    /// A READ demand was refused — never a write-standing problem, and it must
+    /// not be phrased as one.
+    ReadRefused,
 }
 
 impl std::fmt::Display for Rejection {
@@ -134,12 +161,18 @@ pub trait AuthorityView: Send + Sync {
     /// treats every implementation as active (fixtures without a policy
     /// history); the orbital composition overrides it with the ledger's
     /// activation state, refusing an unapproved id.
+    ///
+    /// `Ok(None)` means *no activation exists* at that frontier; `Err` means
+    /// the ledger **could not answer** (missing history, durable failure) —
+    /// two different situations with two different remedies, and rendering the
+    /// second as the first once sent an admin to run `world_upgrade` against a
+    /// ledger that was simply failing to read.
     fn active_implementation(
         &self,
         _world: &WorldId,
         _authority_frontier: &AuthorityFrontier,
-    ) -> Option<[u8; 32]> {
-        Some([0u8; 32])
+    ) -> Result<Option<[u8; 32]>, String> {
+        Ok(Some([0u8; 32]))
     }
 
     /// Produce canonical [`mechanics::authorization::AuthorizationReceipt`] bytes for
@@ -171,7 +204,11 @@ pub trait AuthorityView: Send + Sync {
             actor: actor.as_str().to_string(),
             device: device
                 .key_bytes()
-                .ok_or(mechanics::authorization::Refusal::Denied)?,
+                .ok_or(mechanics::authorization::Refusal::Denied(
+                    mechanics::authorization::DenialReason::Internal(
+                        "device key bytes unavailable",
+                    ),
+                ))?,
             authority_frontier: authority_frontier.as_bytes().to_vec(),
             authority_checkpoint_commitment: [0u8; 32],
             policy_evidence_digest: mechanics::authorization::policy_evidence_digest(&[]),
@@ -191,13 +228,17 @@ pub trait AuthorityView: Send + Sync {
     /// Whether `actor` satisfies a read `demand` at `authority_frontier`. The
     /// default permits every read (fixtures); the orbital composition
     /// evaluates the demand against signed history.
+    ///
+    /// `Err` means the demand **could not be evaluated** (a malformed demand
+    /// or a ledger that cannot materialize the frontier) — a local-state
+    /// problem that is not a denial and must not be rendered as one.
     fn evaluate_read(
         &self,
         _actor: &ActorId,
         _authority_frontier: &AuthorityFrontier,
         _demand: &[u8],
-    ) -> bool {
-        true
+    ) -> Result<bool, String> {
+        Ok(true)
     }
 }
 
@@ -249,9 +290,12 @@ impl LocalIdentity {
         request: crate::action::RequestId,
         intent: Intent,
     ) -> Result<crate::action::SignedWorldAction, crate::world::Rejection> {
+        // `resolve_for_signing` also returns `None` for a device that is not
+        // the docked principal — folded into `NotAMember` because from the
+        // caller's seat both read as "this identity has no standing here".
         let resolution = session
             .resolve_for_signing(&self.device)
-            .ok_or(crate::world::Rejection::Denied)?;
+            .ok_or(crate::world::Rejection::Denied(DeniedCause::NotAMember))?;
         let header = crate::action::WorldActionHeader {
             request,
             space: session.space_id().clone(),

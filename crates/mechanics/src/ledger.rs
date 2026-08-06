@@ -445,35 +445,52 @@ pub struct AuthorizationRequest<'a> {
 /// never a receipt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Refusal {
-    /// The demand is unsatisfied, the device resolves to no actor at the
-    /// frontier, or the resolved actor differs from the claimed one.
-    Denied,
+    /// Standing was evaluated and found wanting. The reason names *which*
+    /// question failed, because each sends the caller to a different remedy —
+    /// a collapsed "denied" once told an admin holding every grant that they
+    /// lacked write standing.
+    Denied(DenialReason),
     /// The claimed implementation id is not active at the pinned frontier.
     ImplementationNotActive,
     /// The demand bytes are malformed/non-canonical.
     Demand(crate::demand::Invalid),
     /// Frontier resolution failed (missing history, malformed frontier, or a
-    /// durable failure).
+    /// durable failure). Never a standing problem.
     Ledger(Failure),
 }
 
-impl From<String> for Refusal {
-    fn from(diagnostic: String) -> Self {
-        tracing::warn!(%diagnostic, "Authorization was refused");
-        Self::Denied
-    }
-}
-
-impl From<&str> for Refusal {
-    fn from(diagnostic: &str) -> Self {
-        Self::from(diagnostic.to_owned())
-    }
+/// Which standing question a [`Refusal::Denied`] failed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DenialReason {
+    /// The device resolves to no actor at the pinned frontier — admission not
+    /// yet incorporated here, or membership revoked.
+    DeviceUnbound,
+    /// The device's actor differs from the claimed one.
+    ActorMismatch,
+    /// The actor resolved, but no capability grant satisfies the demand at the
+    /// pinned frontier — the true "no standing for this change".
+    DemandUnsatisfied,
+    /// An internal precondition failed (malformed key or space bytes). Carried
+    /// under `Denied` because every caller treats it as a refusal, but it must
+    /// never be phrased as a grants problem.
+    Internal(&'static str),
 }
 
 impl std::fmt::Display for Refusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Refusal::Denied => write!(f, "demand unsatisfied"),
+            Refusal::Denied(DenialReason::DeviceUnbound) => {
+                write!(f, "the device resolves to no actor at the pinned frontier")
+            }
+            Refusal::Denied(DenialReason::ActorMismatch) => {
+                write!(f, "the device belongs to a different actor than claimed")
+            }
+            Refusal::Denied(DenialReason::DemandUnsatisfied) => {
+                write!(f, "demand unsatisfied — no capability grant covers it")
+            }
+            Refusal::Denied(DenialReason::Internal(what)) => {
+                write!(f, "internal precondition failed: {what}")
+            }
             Refusal::ImplementationNotActive => {
                 write!(f, "implementation not active at the pinned frontier")
             }
@@ -1293,9 +1310,9 @@ impl Authority {
             .plane
             .actor_of_device(&device)
             .cloned()
-            .ok_or(Refusal::Denied)?;
+            .ok_or(Refusal::Denied(DenialReason::DeviceUnbound))?;
         if actor.as_str() != request.actor {
-            return Err(Refusal::Denied);
+            return Err(Refusal::Denied(DenialReason::ActorMismatch));
         }
         // The implementation id must be active at the pinned frontier.
         match cp.replay.state.active_implementation(request.world) {
@@ -1306,7 +1323,7 @@ impl Authority {
             .replay
             .state
             .evaluate_demand(&actor, &demand)
-            .ok_or(Refusal::Denied)?;
+            .ok_or(Refusal::Denied(DenialReason::DemandUnsatisfied))?;
         Ok(crate::demand::AuthorizationReceipt {
             space: self.genesis.space_id.as_str().to_string(),
             world: request.world.to_string(),

@@ -590,6 +590,31 @@ export interface StatusInfo {
   recovery?: RecoveryState | null;
 }
 
+/**
+ * `dto.rs` `WhoamiDto` — identity + standing + view completeness, one shot.
+ *
+ * This is **standing** (what this node's actor may do), as distinct from
+ * `isReadOnly`'s custody question (whose key this surface signs with). The
+ * viewer uses it to gate write affordances honestly instead of letting every
+ * one of them be discovered dead at RPC time.
+ */
+export interface WhoamiInfo {
+  actor?: string | null;
+  device: string;
+  space?: string | null;
+  /** `admin` | `member` | `viewer`, or `none` when not a member yet. */
+  role: string;
+  member: boolean;
+  can_write: boolean;
+  capabilities?: string[];
+  policy_admin: boolean;
+  /** Sponsoring actor id when this identity is a sponsored agent. */
+  sponsor?: string | null;
+  name?: string | null;
+  partial_view: boolean;
+  divergence?: string[];
+}
+
 export type RecoveryIoKind =
   | "not_found"
   | "interrupted"
@@ -874,6 +899,8 @@ export type Request =
   | { cmd: "member_log" }
   | { cmd: "member_alias"; who: string; name: string }
   | { cmd: "status" }
+  /** Identity + standing + view-completeness, one shot — `dto.rs` `WhoamiDto`. */
+  | { cmd: "whoami" }
   | { cmd: "diagnose"; expected_space?: string | null }
   | { cmd: "id" }
   | { cmd: "invite"; role?: string | null; reusable?: boolean; ttl_hours?: number | null }
@@ -942,6 +969,7 @@ export type SpaceRequest = Extract<
       | "space_custody_export"
       | "space_custody_import"
       | "status"
+      | "whoami"
       | "diagnose"
       | "id"
       | "invite"
@@ -1077,6 +1105,7 @@ export type Response =
   /** A ref resolved to several — a first-class outcome (exit 2), never an error. */
   | { kind: "candidates"; candidates: Candidate[]; near_miss_for: string | null }
   | ({ kind: "status" } & StatusInfo)
+  | ({ kind: "whoami" } & WhoamiInfo)
   | { kind: "diagnosis"; [k: string]: unknown }
   | { kind: "text"; text: string }
   /** Named, not flattened: a `SpecView` has a `kind` of its own, and a spread

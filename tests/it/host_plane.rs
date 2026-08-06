@@ -65,8 +65,8 @@ fn a_fresh_identity_with_no_store_forms_a_space_and_is_then_reachable() {
     assert_eq!(status, 200, "status: {info}");
     assert_eq!(info["kind"], "status");
     assert_eq!(
-        info["membership"], "member",
-        "the founder must hold standing in the Space it just formed: {info}"
+        info["membership"], "admin",
+        "the founder must hold ADMIN standing in the Space it just formed: {info}"
     );
     let (status, me) = head.space(&orbit, serde_json::json!({ "cmd": "whoami" }));
     assert_eq!(status, 200, "whoami: {me}");
@@ -236,7 +236,7 @@ fn a_self_contained_home_is_the_same_orbit_on_the_next_request() {
         "the store this node just formed must still be addressable: {info}"
     );
     assert_eq!(
-        info["membership"], "member",
+        info["membership"], "admin",
         "a self-contained home must reach the Orbit it formed: {info}"
     );
 

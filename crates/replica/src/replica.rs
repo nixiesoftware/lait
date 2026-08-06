@@ -108,9 +108,13 @@ pub enum Failure {
     /// commitment, or a transaction from another Space.
     IllegitimateContact { kind: Invalid, reason: String },
     /// The mechanics authorizer refused to produce an authorization receipt
-    /// for a local commit — the demand was unsatisfied at the pinned
-    /// frontier, or the implementation id was not active. Nothing committed.
-    Unauthorized(Refusal),
+    /// for a local commit. The refusal is carried whole because its variants
+    /// name entirely different problems — a real standing denial, an inactive
+    /// implementation, a malformed demand (a World bug), or a ledger that
+    /// could not evaluate at all — and a caller that cannot see which will
+    /// phrase every one of them as "you lack write standing". Nothing
+    /// committed.
+    Unauthorized(mechanics::authorization::Refusal),
     /// A referenced parent Manifest is not locally reconstructable; retry once
     /// the exact material arrives. Never falls back to current state.
     ParentManifestUnavailable,
@@ -173,11 +177,6 @@ impl From<String> for Invalid {
     fn from(_: String) -> Self {
         Self::Binding
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Refusal {
-    Authorization,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -333,7 +332,11 @@ pub struct StaticAuthorizer {
 impl TransactionAuthorizer for StaticAuthorizer {
     fn authorize(&self, core: &Core) -> Result<Vec<u8>, mechanics::authorization::Refusal> {
         let space = std::str::from_utf8(&core.space)
-            .map_err(|_| mechanics::authorization::Refusal::Denied)?
+            .map_err(|_| {
+                mechanics::authorization::Refusal::Denied(
+                    mechanics::authorization::DenialReason::Internal("space bytes are not UTF-8"),
+                )
+            })?
             .to_string();
         let demand = mechanics::authorization::AuthorizationDemand::decode_canonical(&core.demand)
             .map_err(mechanics::authorization::Refusal::Demand)?;
@@ -1989,7 +1992,7 @@ impl Replica {
                 ctx.signer,
                 |core| auth.authorizer.authorize(core),
             )
-            .map_err(|_| Failure::Unauthorized(Refusal::Authorization))?;
+            .map_err(Failure::Unauthorized)?;
             let tx_id = tx.id();
             // Stamp the resolved transaction id into every touched record.
             for key in &touched {

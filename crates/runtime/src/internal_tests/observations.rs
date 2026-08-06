@@ -149,7 +149,9 @@ impl runtime::world::AuthorityView for WriterOnly {
         // composition's demand evaluation does — never in the World callback.
         let writer = mechanics::actor::device_from_seed(&WRITER_SEED);
         if device != &writer {
-            return Err("device holds no write authority".into());
+            return Err(mechanics::authorization::Refusal::Denied(
+                mechanics::authorization::DenialReason::DemandUnsatisfied,
+            ));
         }
         PermissiveAuthority.authorize_mutation(
             space,
@@ -246,7 +248,12 @@ fn first_use_resets_then_each_durable_commit_publishes_exactly_once() {
     let world_id = WorldId::parse("dev.example.kv").unwrap();
     let denied_session = station.dock(&world_id, &reader).unwrap();
     let denied = denied_session.submit(action(&denied_session, &reader, RequestId::mint(), "x=y"));
-    assert_eq!(denied, Err(SessionFailure::Rejected(Rejection::Denied)));
+    assert_eq!(
+        denied,
+        Err(SessionFailure::Rejected(Rejection::Denied(
+            crate::world::DeniedCause::DemandUnsatisfied
+        )))
+    );
     assert!(stream.try_next().unwrap().is_none());
 
     // An idempotent replay publishes nothing either.

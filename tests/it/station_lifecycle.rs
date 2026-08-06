@@ -131,13 +131,14 @@ fn the_station_host_serves_the_issue_surface_over_the_control_socket() {
     });
     assert!(online.is_some(), "the StationHost never answered Status");
 
-    // Status reports the founder as a member of the formed Space.
+    // Status reports the founder's real standing — admin, not a flattened
+    // "member" (the documented contract is `admin | member | pending`).
     let status = req(&client_rt, &home, Request::Status);
     let Response::Status(info) = status else {
         panic!("expected Status");
     };
     assert!(info.space.is_some());
-    assert_eq!(info.membership, "member");
+    assert_eq!(info.membership, "admin");
 
     // Create a project.
     let resp = issue_req(

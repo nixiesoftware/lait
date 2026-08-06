@@ -19,7 +19,9 @@ use issues::dto::{BoardView, GraphView, IssueView, LabelDto, ProjectDto, Row};
 use issues::ids::{DocId, LabelId, ProjectId, SystemUlidSource, UlidSource};
 use runtime::world::call::{Access, Call, Code, Context, Failure, Handler, Nudge, Reply};
 use runtime::world::{Conflict as SessionConflict, Failure as SessionFailure};
-use runtime::{world::Intent, world::Query, world::Rejection, world::RequestId, Session};
+use runtime::{
+    world::DeniedCause, world::Intent, world::Query, world::Rejection, world::RequestId, Session,
+};
 use serde::de::DeserializeOwned;
 
 use crate::{
@@ -501,11 +503,44 @@ impl<'a> IssueRouter<'a> {
 
     fn effect_err(e: SessionFailure) -> Response {
         match e {
-            SessionFailure::Rejected(Rejection::Denied) => Response::denied(
-                "you lack write standing in this space — a sponsored agent needs a \
-                 human member to grant it write access, and a \
-                 view-only member needs an admin to grant it; nothing was changed",
-            ),
+            // Each denial cause names its own remedy. The collapsed form told
+            // a member whose grant had not synced yet to ask an admin for a
+            // grant they already held, and rendered read refusals and ledger
+            // failures in write-standing words.
+            SessionFailure::Rejected(Rejection::Denied(DeniedCause::NotAMember)) => {
+                Response::denied(
+                    "this device isn't recognized as a member of this space at its current \
+                     local view — if you were just invited or promoted, that change may not \
+                     have synced to this node yet (run sync and retry); otherwise ask an \
+                     admin to admit or re-admit you; nothing was changed",
+                )
+            }
+            SessionFailure::Rejected(Rejection::Denied(DeniedCause::DemandUnsatisfied)) => {
+                Response::denied(
+                    "you don't hold the capability this change demands — a view-only \
+                     member needs an admin to grant write access, a sponsored agent needs \
+                     its human sponsor to grant it, and a scoped member may be writing \
+                     outside the projects their grant covers; nothing was changed",
+                )
+            }
+            SessionFailure::Rejected(Rejection::Denied(DeniedCause::PrincipalMismatch)) => {
+                Response::denied(
+                    "your identity changed between signing and committing this change — \
+                     retry; nothing was changed",
+                )
+            }
+            SessionFailure::Rejected(Rejection::Denied(DeniedCause::ReadRefused)) => {
+                Response::denied(
+                    "you can't read this — your grants don't cover this query's scope; \
+                     an admin can widen them",
+                )
+            }
+            // NOT a denial: authority state could not be evaluated at all.
+            SessionFailure::AuthorityUnavailable(detail) => Response::err(format!(
+                "this node could not evaluate authority state ({detail}) — a local \
+                 ledger problem, not a permissions problem; run sync (or doctor) and \
+                 retry; nothing was changed"
+            )),
             // NOT a standing problem, and it must not be phrased as one: this
             // state cost a debugging day partly because an admin holding every
             // grant was told they lacked write standing.
@@ -2338,6 +2373,68 @@ fn parse_due(text: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::parse_due;
+
+    /// Every denial cause renders its own remedy, and non-standing failures
+    /// never wear standing words — the collapsed "you lack write standing"
+    /// message once sent a member whose grant hadn't synced to ask an admin
+    /// for a grant they already held, and rendered ledger failures the same
+    /// way (the class of dishonesty that cost a full debugging day).
+    #[test]
+    fn each_denial_cause_names_its_own_remedy() {
+        use super::{DeniedCause, IssueRouter, Rejection, SessionFailure};
+        let message = |failure: SessionFailure| -> String {
+            match IssueRouter::effect_err(failure) {
+                crate::protocol::IssuesResponse::Error { message, .. } => message,
+                other => panic!("expected an error response, got {other:?}"),
+            }
+        };
+
+        let not_member = message(SessionFailure::Rejected(Rejection::Denied(
+            DeniedCause::NotAMember,
+        )));
+        assert!(not_member.contains("may not have synced"), "{not_member}");
+
+        let unsatisfied = message(SessionFailure::Rejected(Rejection::Denied(
+            DeniedCause::DemandUnsatisfied,
+        )));
+        assert!(unsatisfied.contains("scoped member"), "{unsatisfied}");
+
+        let read = message(SessionFailure::Rejected(Rejection::Denied(
+            DeniedCause::ReadRefused,
+        )));
+        assert!(
+            !read.contains("write standing") && read.contains("read"),
+            "a read refusal must not wear write words: {read}"
+        );
+
+        let ledger = message(SessionFailure::AuthorityUnavailable(
+            "MissingHistory".into(),
+        ));
+        assert!(
+            ledger.contains("not a permissions problem") && ledger.contains("MissingHistory"),
+            "{ledger}"
+        );
+    }
+
+    /// The typed causes keep the one stable public `error_kind`: heads key
+    /// recovery UX off `denied`, whatever the message says.
+    #[test]
+    fn every_denial_cause_keeps_the_denied_error_kind() {
+        use super::{DeniedCause, IssueRouter, Rejection, SessionFailure};
+        for cause in [
+            DeniedCause::NotAMember,
+            DeniedCause::PrincipalMismatch,
+            DeniedCause::DemandUnsatisfied,
+            DeniedCause::ReadRefused,
+        ] {
+            match IssueRouter::effect_err(SessionFailure::Rejected(Rejection::Denied(cause))) {
+                crate::protocol::IssuesResponse::Error { error_kind, .. } => {
+                    assert_eq!(error_kind, crate::protocol::IssuesErrorKind::Denied);
+                }
+                other => panic!("expected an error response, got {other:?}"),
+            }
+        }
+    }
 
     #[test]
     fn due_dates_parse_as_utc_midnight_and_unix_passthrough() {

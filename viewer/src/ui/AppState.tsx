@@ -15,7 +15,8 @@ import {
   X,
 } from "lucide-react";
 
-import type { SpaceRow, StatusInfo } from "../types";
+import { errorKindOf } from "../api";
+import type { SpaceRow, StatusInfo, WhoamiInfo } from "../types";
 import { Button, cn, OverlayGap, PopoverContent } from "./primitives";
 
 export type ApplicationStateKind =
@@ -129,6 +130,54 @@ export function InlineError({
   );
 }
 
+/**
+ * The standing gate's face: this node's actor can't write here, so the write
+ * affordances are off — said up front, instead of every button being
+ * discovered dead at RPC time. Copy distinguishes "not admitted yet" from
+ * "admitted view-only", because the remedies differ (wait for sync vs. ask an
+ * admin). Rendered only when the gate is standing (never for agent-custody
+ * rows, whose read-only face is about whose key signs, not grants).
+ */
+export function StandingNotice({
+  standing,
+  onRefresh,
+}: {
+  standing: WhoamiInfo;
+  onRefresh?: () => void;
+}) {
+  const pending = !standing.member;
+  return (
+    <div
+      className="border-warn/25 bg-warn/5 text-warn flex items-center gap-2 border-b px-3 py-2 text-sm"
+      role="status"
+      data-standing-gate={pending ? "pending" : "view-only"}
+    >
+      <ShieldCheck className="size-icon-sm shrink-0" />
+      <span className="min-w-0 flex-1">
+        {pending ? (
+          <>
+            <strong className="mr-1">Waiting for admission.</strong>
+            Your membership hasn’t been sealed on this device yet — it completes
+            once a peer is online. Reading is fine; writing unlocks itself.
+          </>
+        ) : (
+          <>
+            <strong className="mr-1">View-only.</strong>
+            Your role here doesn’t hold write access. If an admin just granted
+            it, it syncs in on its own; otherwise ask an admin.
+          </>
+        )}
+      </span>
+      {onRefresh && (
+        <Button variant="ghost" onClick={onRefresh} className="text-warn">
+          <RefreshCw className="size-icon-xs" />
+          Re-check
+        </Button>
+      )}
+    </div>
+  );
+}
+
 export type FailureKind =
   | "offline"
   | "incompatible"
@@ -142,11 +191,22 @@ export type FailureKind =
   | "corrupt"
   | "rejected"
   | "pending-sync"
+  | "authority-unavailable"
   | "unknown";
 
 export function classifyFailure(message: string): FailureKind {
+  // The engine tags every World error with a typed `error_kind`; when this
+  // message arrived through the API layer, that tag wins over any regex —
+  // a denial stayed "unknown" for as long as its wording drifted from the
+  // patterns below.
+  switch (errorKindOf(message)) {
+    case "denied": return "authorization";
+    case "not_found": return "invalid-reference";
+    case "retry": return "conflict";
+  }
   if (/read.?only/i.test(message)) return "read-only";
-  if (/permission|unauthori|forbidden/i.test(message)) return "authorization";
+  if (/could not evaluate authority state|ledger problem/i.test(message)) return "authority-unavailable";
+  if (/permission|unauthori|forbidden|standing|not admitted|admit or re-admit|grant/i.test(message)) return "authorization";
   if (/version|schema|implementation mismatch|incompatible|upgrade required/i.test(message)) return "incompatible";
   if (/connect|daemon|network|fetch|offline/i.test(message)) return "offline";
   if (/not found|unknown (issue|project|reference)|invalid ref/i.test(message)) return "invalid-reference";
@@ -177,6 +237,7 @@ export function recoveryForError(message: string): {
     case "corrupt": return { title: "Stored data needs attention", retryLabel: "Refresh" };
     case "rejected": return { title: "Change rejected", retryLabel: "Retry" };
     case "pending-sync": return { title: "Change is pending", retryLabel: "Refresh" };
+    case "authority-unavailable": return { title: "Authority state unavailable", retryLabel: "Retry" };
     default: return { title: "Something didn’t finish", retryLabel: "Retry" };
   }
 }

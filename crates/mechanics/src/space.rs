@@ -63,7 +63,7 @@ impl std::fmt::Display for Randomness {
 impl std::error::Error for Randomness {}
 
 pub use crate::genesis::Genesis;
-pub use crate::ledger::{generation, Authority, Effect, Failure, Invalid, Refusal};
+pub use crate::ledger::{generation, Authority, DenialReason, Effect, Failure, Invalid, Refusal};
 
 /// Domain separator for the space-id derivation.
 const SPACE_DOMAIN: &[u8] = b"lait/space/1";

@@ -2145,13 +2145,15 @@ impl runtime::world::AuthorityView for SpaceAuthority {
         &self,
         world: &replica::body::WorldId,
         authority_frontier: &AuthorityFrontier,
-    ) -> Option<[u8; 32]> {
+    ) -> Result<Option<[u8; 32]>, String> {
+        // A ledger error is carried, not flattened into "no activation" — the
+        // flattened form told an admin to run `world_upgrade` against a ledger
+        // that was simply failing to read.
         let mut inner = self.lock();
         inner
             .ledger
             .active_implementation_at(authority_frontier.as_bytes(), world.as_str())
-            .ok()
-            .flatten()
+            .map_err(|e| format!("activation state at the pinned frontier: {e}"))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2177,7 +2179,11 @@ impl runtime::world::AuthorityView for SpaceAuthority {
                 actor: actor.as_str(),
                 device: device
                     .key_bytes()
-                    .ok_or(mechanics::authorization::Refusal::Denied)?,
+                    .ok_or(mechanics::authorization::Refusal::Denied(
+                        mechanics::authorization::DenialReason::Internal(
+                            "device key bytes unavailable",
+                        ),
+                    ))?,
                 authority_frontier: authority_frontier.as_bytes(),
                 parent_manifest_root,
                 implementation_id,
@@ -2194,16 +2200,18 @@ impl runtime::world::AuthorityView for SpaceAuthority {
         actor: &ActorId,
         authority_frontier: &AuthorityFrontier,
         demand: &[u8],
-    ) -> bool {
-        let parsed = match mechanics::authorization::AuthorizationDemand::decode_canonical(demand) {
-            Ok(d) => d,
-            Err(_) => return false,
-        };
+    ) -> Result<bool, String> {
+        // Failure to evaluate is not a denial: a malformed demand is a World
+        // bug and an unmaterializable frontier is a ledger problem, and both
+        // once rendered as "you lack write standing" on a read.
+        let parsed = mechanics::authorization::AuthorizationDemand::decode_canonical(demand)
+            .map_err(|e| format!("the read demand does not decode (a World bug): {e}"))?;
         let mut inner = self.lock();
-        match inner.ledger.state_at(authority_frontier.as_bytes()) {
-            Ok(view) => view.acl.evaluate_demand(actor, &parsed).is_some(),
-            Err(_) => false,
-        }
+        let view = inner
+            .ledger
+            .state_at(authority_frontier.as_bytes())
+            .map_err(|e| format!("authority state at the pinned frontier: {e}"))?;
+        Ok(view.acl.evaluate_demand(actor, &parsed).is_some())
     }
 }
 

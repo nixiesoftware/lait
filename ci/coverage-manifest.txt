@@ -6,9 +6,9 @@
 # reviewed like one, not discovered when a gate goes red on a refactor.
 
 [tiers]
-pr             1346
-pr-platform    1024
-nightly        1373
+pr             1348
+pr-platform    1026
+nightly        1375
 mutants        87
 
 [gates]
@@ -429,6 +429,8 @@ lait-issues-app protocol::tests::live_text_commands_keep_unicode_scalar_coordina
 lait-issues-app protocol::tests::request_classification_is_package_owned
 lait-issues-app protocol::tests::spec_replies_do_not_collide_with_the_response_tag
 lait-issues-app router::tests::due_dates_parse_as_utc_midnight_and_unix_passthrough
+lait-issues-app router::tests::each_denial_cause_names_its_own_remedy
+lait-issues-app router::tests::every_denial_cause_keeps_the_denied_error_kind
 lait-issues-app tests::a_denied_answer_is_the_callers_problem_not_an_internal_fault
 lait-issues-app tests::every_public_tool_keeps_its_issues_prefix
 lait-issues::it package_boundary::semantic_package_has_no_shell_or_process_dependency

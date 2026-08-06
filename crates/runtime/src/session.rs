@@ -38,8 +38,8 @@ use replica::frontier::ReplicaFrontier;
 use serde::{Deserialize, Serialize};
 
 use crate::world::{
-    AuthorityView, Context, Effect, Intent, Limits, PrincipalFacts, Projection, Query, Rejection,
-    World,
+    AuthorityView, Context, DeniedCause, Effect, Intent, Limits, PrincipalFacts, Projection, Query,
+    Rejection, World,
 };
 
 /// A concurrency or idempotency conflict observed while a Session commits.
@@ -63,6 +63,12 @@ pub enum Failure {
     Persistence,
     Reset,
     CallbackPanicked,
+    /// Authority state could not be evaluated at all — the ledger failed to
+    /// materialize the pinned frontier (missing history, malformed frontier,
+    /// or a durable failure). A local-state problem, never a standing denial:
+    /// rendering it as "denied" once sent a fully-granted member to ask an
+    /// admin for a grant they already held.
+    AuthorityUnavailable(String),
 }
 
 impl From<Rejection> for Failure {
@@ -640,7 +646,7 @@ impl Session {
         let resolution = self
             .authority
             .resolve(&self.principal.device)
-            .ok_or(Rejection::Denied)?;
+            .ok_or(Rejection::Denied(DeniedCause::NotAMember))?;
         Ok(PrincipalFacts {
             actor: resolution.actor,
             device: self.principal.device.clone(),
@@ -850,7 +856,7 @@ impl Session {
         // signer must BE the docked principal.
         let principal = self.fresh_principal()?;
         if action.header.actor != principal.actor || action.header.device != principal.device {
-            return Err(Rejection::Denied.into());
+            return Err(Rejection::Denied(DeniedCause::PrincipalMismatch).into());
         }
         // Idempotency: an identical replay returns the original committed
         // result before the World runs again; a conflicting reuse is refused.
@@ -901,7 +907,7 @@ impl Session {
         let current = self
             .authority
             .resolve(&principal.device)
-            .ok_or(Rejection::Denied)?;
+            .ok_or(Rejection::Denied(DeniedCause::NotAMember))?;
         if current.authority_frontier != action.header.authority_frontier {
             return Err(Failure::Conflict(Conflict::AuthorityChanged));
         }
@@ -910,10 +916,14 @@ impl Session {
         if effect.demand.is_empty() {
             return Err(Rejection::ContractViolation.into());
         }
-        let implementation_id = self
+        let implementation_id = match self
             .authority
             .active_implementation(&self.world_id, &action.header.authority_frontier)
-            .ok_or(Rejection::NoActiveImplementation)?;
+        {
+            Ok(Some(id)) => id,
+            Ok(None) => return Err(Rejection::NoActiveImplementation.into()),
+            Err(detail) => return Err(Failure::AuthorityUnavailable(detail)),
+        };
         let parent_manifest_root = inner.replica.manifest_root();
         let ctx = replica::transaction::CommitContext {
             space: &self.space,
@@ -982,10 +992,41 @@ impl Session {
                 | replica::transaction::commit::Failure::OpaqueQuotaExceeded => {
                     Failure::Rejected(Rejection::LimitExceeded)
                 }
-                // The mechanics authorizer refused: the demand was unsatisfied
-                // at the pinned frontier (a real Denied, not a bug).
-                replica::transaction::commit::Failure::Unauthorized(_) => {
-                    Failure::Rejected(Rejection::Denied)
+                // The mechanics authorizer refused. Its variants name entirely
+                // different problems, and each maps to its own truth — the
+                // collapsed form rendered a ledger failure and a World bug as
+                // "you lack write standing".
+                replica::transaction::commit::Failure::Unauthorized(refusal) => {
+                    use mechanics::authorization::{DenialReason, Refusal};
+                    match refusal {
+                        Refusal::Denied(DenialReason::DemandUnsatisfied) => {
+                            Failure::Rejected(Rejection::Denied(DeniedCause::DemandUnsatisfied))
+                        }
+                        Refusal::Denied(DenialReason::DeviceUnbound) => {
+                            Failure::Rejected(Rejection::Denied(DeniedCause::NotAMember))
+                        }
+                        Refusal::Denied(DenialReason::ActorMismatch) => {
+                            Failure::Rejected(Rejection::Denied(DeniedCause::PrincipalMismatch))
+                        }
+                        Refusal::Denied(DenialReason::Internal(what)) => {
+                            tracing::warn!(what, "authorizer internal precondition failed");
+                            Failure::Persistence
+                        }
+                        // The session pre-checked activation at this exact
+                        // frontier; kept as defense in depth.
+                        Refusal::ImplementationNotActive => {
+                            Failure::Rejected(Rejection::NoActiveImplementation)
+                        }
+                        // The World staged a malformed demand — its bug, not
+                        // the caller's standing.
+                        Refusal::Demand(invalid) => {
+                            tracing::warn!(?invalid, "the World staged a malformed demand");
+                            Failure::Rejected(Rejection::ContractViolation)
+                        }
+                        Refusal::Ledger(failure) => {
+                            Failure::AuthorityUnavailable(format!("{failure:?}"))
+                        }
+                    }
                 }
                 replica::transaction::commit::Failure::ParentManifestUnavailable => {
                     Failure::Conflict(Conflict::Body)
@@ -1055,12 +1096,14 @@ impl Session {
         if projection.demand.is_empty() {
             return Err(Rejection::ContractViolation.into());
         }
-        if !self.authority.evaluate_read(
+        match self.authority.evaluate_read(
             &principal.actor,
             &principal.authority_frontier,
             &projection.demand,
         ) {
-            return Err(Rejection::Denied.into());
+            Ok(true) => {}
+            Ok(false) => return Err(Rejection::Denied(DeniedCause::ReadRefused).into()),
+            Err(detail) => return Err(Failure::AuthorityUnavailable(detail)),
         }
         // Runtime — not the World — stamps the projection's source frontier: the
         // snapshot it was derived from is the one held for this call.
