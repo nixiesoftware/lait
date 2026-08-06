@@ -1,3 +1,4 @@
+import { Chord } from "@lait/ui";
 import { Command } from "cmdk";
 import { AlertTriangle, Clock3, Search } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
@@ -9,7 +10,7 @@ import { indexBy } from "../core/performance";
 import type { ProjectDto, Row, WorkflowState } from "../types";
 import { catalogColor } from "./colors";
 import { PriorityIcon, StatusIcon } from "./icons";
-import { Kbd } from "./primitives";
+
 import { useReturnFocus } from "./useReturnFocus";
 
 export function rememberIssue(spaceId: string, reff: string): void {
@@ -140,7 +141,7 @@ export function IssueSearch({
             placeholder="Search issues by title, reference, project, or status…"
             className="placeholder:text-mute min-w-0 flex-1 bg-transparent py-3 text-lg outline-none"
           />
-          <Kbd>Esc</Kbd>
+          <Chord>Esc</Chord>
         </div>
         <Command.List className="overflow-y-auto p-2">
           {results.length === 0 && (

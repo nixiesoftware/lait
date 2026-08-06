@@ -443,17 +443,3 @@ export const navigationItem = cva(
     defaultVariants: { selected: false, size: "md" },
   },
 );
-
-/** A key hint. One spelling, everywhere it appears. */
-export function Kbd({ children, className }: { children: React.ReactNode; className?: string }) {
-  return (
-    <kbd
-      className={cn(
-        "border-line-strong bg-bg text-dim rounded-mark border px-1 font-mono text-2xs leading-4",
-        className,
-      )}
-    >
-      {children}
-    </kbd>
-  );
-}

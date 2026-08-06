@@ -1,3 +1,4 @@
+import { Chord } from "@lait/ui";
 import { Dialog, Divider, DropdownMenu, DropdownMenuItem, Switch } from "@astryxdesign/core";
 import { useEffect, useState } from "react";
 import { LayoutTemplate, Trash2, X } from "lucide-react";
@@ -22,7 +23,7 @@ import { Combobox } from "./Picker";
 import { DatePicker } from "./DatePicker";
 import { NewLabelDialog } from "./NewLabel";
 import { Button, IconButton } from "@astryxdesign/core";
-import { Kbd } from "./primitives";
+
 import { short } from "./time";
 
 /**
@@ -432,7 +433,7 @@ export function NewIssue({
               />
             )}
             <span className="ml-auto flex items-center gap-2">
-              <Kbd>↵</Kbd>
+              <Chord>↵</Chord>
               <Button
                 isDisabled={!title.trim()}
                 isLoading={busy}

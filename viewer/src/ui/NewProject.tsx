@@ -1,10 +1,11 @@
+import { Chord } from "@lait/ui";
 import { useState } from "react";
 import { X } from "lucide-react";
 
 import { rpc } from "../api";
 import { ColorPicker } from "./ColorPicker";
 import { Button, Dialog, IconButton, TextInput } from "@astryxdesign/core";
-import { Kbd } from "./primitives";
+
 
 /**
  * The project composer.
@@ -131,7 +132,7 @@ export function NewProject({
         </div>
 
         <footer className="border-line flex items-center justify-end gap-2 border-t p-3">
-          <Kbd>↵</Kbd>
+          <Chord>↵</Chord>
           <Button
             type="submit"
             isDisabled={!ready}

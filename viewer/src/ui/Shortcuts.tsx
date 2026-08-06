@@ -1,10 +1,11 @@
+import { Chord } from "@lait/ui";
 import { useMemo } from "react";
 import { X } from "lucide-react";
 
 import { formatBinding } from "../core/keys";
 import { registry, type Bound, type Ctx } from "../core/registry";
 import { IconButton } from "@astryxdesign/core";
-import { Kbd } from "./primitives";
+
 
 /**
  * The `?` overlay — the registry's second projection.
@@ -71,7 +72,7 @@ export function Shortcuts({ ctx, onClose }: { ctx: Ctx; onClose: () => void }) {
                     <span className="flex-1">{b.command.title}</span>
                     <span className="flex gap-1">
                       {b.bindings.map((k, i) => (
-                        <Kbd key={i}>{formatBinding(k, { glyphs: true })}</Kbd>
+                        <Chord key={i}>{formatBinding(k, { glyphs: true })}</Chord>
                       ))}
                     </span>
                   </li>

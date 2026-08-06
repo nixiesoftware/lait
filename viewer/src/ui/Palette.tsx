@@ -1,10 +1,11 @@
+import { Chord } from "@lait/ui";
 import { Command } from "cmdk";
 import { useMemo } from "react";
 
 import { cmdkFilter } from "../core/fuzzy";
 import { formatBinding } from "../core/keys";
 import { registry, type Ctx } from "../core/registry";
-import { Kbd } from "./primitives";
+
 import { useReturnFocus } from "./useReturnFocus";
 
 /**
@@ -79,7 +80,7 @@ export function Palette({ ctx, onClose }: { ctx: Ctx; onClose: () => void }) {
                   <span className="flex-1">{b.command.title}</span>
                   <span className="flex gap-1">
                     {b.bindings.map((k, i) => (
-                      <Kbd key={i}>{formatBinding(k, { glyphs: true })}</Kbd>
+                      <Chord key={i}>{formatBinding(k, { glyphs: true })}</Chord>
                     ))}
                   </span>
                 </Command.Item>
