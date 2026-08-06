@@ -1,5 +1,35 @@
 # Changelog
 
+## v0.7.10 — the cursor stays with the words
+
+> **Upgrading:** `host_update` then `host_restart` on the host plane, or re-run
+> the installer. Nothing changes on disk, on the peer wire, or in the control
+> protocol. This is a viewer-only correction to transient collaboration
+> rendering.
+
+Remote viewers could show the first typed character and then lose the text,
+caret, and selection until the durable document stream caught up. Fast typing
+made the failure look like a flashing or jumping cursor even though the
+liveness indicators remained current.
+
+### Previews stay on a revision the receiver can draw
+
+- Cumulative typing previews no longer leak a stale result revision when a
+  second splice is folded into the first.
+- An acknowledged local character no longer moves the next preview onto a base
+  revision the remote viewer may not have received yet. The preview stays on
+  its receiver-known base for the whole typing run, then hands off cleanly to
+  the durable document.
+
+### Carets and selections survive the handoff
+
+- The active end of a selection is now the displayed caret position during
+  both optimistic and settled preview phases.
+- Selections remain highlighted when they cross unchanged text and newly
+  inserted preview text, including rapid cursor movement and drag selection.
+- Regression tests cover intermediate acknowledgements, selection spans, and
+  caret placement inside and outside optimistic insertions.
+
 ## v0.7.9 — a denial names its cause
 
 > **Upgrading:** `host_update` then `host_restart` on the host plane, or re-run
