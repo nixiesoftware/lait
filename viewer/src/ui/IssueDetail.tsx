@@ -46,7 +46,7 @@ import {
   type NameResolver,
 } from "../core/activity";
 import { codeUnitSpan } from "../core/anchor";
-import { extendTextSplice, textRevision, textSplice } from "../core/textPreview";
+import { continueTextPreview, textRevision } from "../core/textPreview";
 import {
   awarenessReadyFor,
   caretPhrase,
@@ -2913,11 +2913,14 @@ function Description({
         saveDraft(draftKey.spaceId, draftKey.reff, "description", markdown);
 
         const prior = preview.current;
-        const cumulative = prior
-          && prior.base === settledRevision.current
-          && prior.result === change.previousRevision
-          ? extendTextSplice(prior, splice) ?? textSplice(settledText.current, markdown)
-          : textSplice(settledText.current, markdown);
+        const cumulative = continueTextPreview(
+          prior,
+          change.previousRevision,
+          settledRevision.current,
+          settledText.current,
+          markdown,
+          splice,
+        );
         const held = latestAwareness.current;
         if (cumulative && new TextEncoder().encode(cumulative.insert).byteLength <= 2 * 1024) {
           const inserted = Array.from(cumulative.insert).length;
@@ -2927,7 +2930,6 @@ function Description({
           const focus = held.markdown === markdown ? held.focus : anchor;
           preview.current = {
             field: "description",
-            base: settledRevision.current,
             result: change.resultRevision,
             ...cumulative,
             anchor,
