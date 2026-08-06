@@ -1,5 +1,54 @@
 # Changelog
 
+## v0.7.9 — a denial names its cause
+
+> **Upgrading:** `host_update` then `host_restart` on the host plane, or re-run
+> the installer. Nothing moves on disk, on the peer wire, or in the control
+> protocol; the public `error_kind` code for every denial stays `denied`.
+> Denial and read-refusal message texts change; three `status` responses that
+> reported a founder as `member` now say `admin`, as documented.
+
+One string rendered every denial: *"you lack write standing in this space — a
+sponsored agent needs a human member to grant it write access, and a view-only
+member needs an admin to grant it; nothing was changed."* Nine producers
+funneled into it — including **read refusals**, **ledger evaluation failures**,
+and **members whose grant had not synced to their node yet** — so the message
+routinely named the wrong remedy, and the viewer (matching none of its words)
+titled it "Something didn't finish" with a Retry button that could not help.
+It clustered on rapid edits because the collaborative editor submits per
+keystroke-batch and nothing gated the affordances up front.
+
+### The engine distinguishes what it refused
+
+- A mechanics denial carries **which standing question failed**: the device
+  resolves to no actor, the actor differs from the claimed one, or the demand
+  evaluated unsatisfied. The commit path's last `map_err(|_| …)` sink carries
+  the whole refusal through (error-context ratchet 39 → 38).
+- `Rejection::Denied` carries a cause — not-a-member, principal mismatch,
+  demand unsatisfied, or read refused — and the router renders one remedy per
+  cause: *sync first* for standing that may not have arrived, scoped-grant
+  wording for members writing outside their grant, read wording for reads.
+- A ledger that **could not evaluate** authority state is
+  `AuthorityUnavailable` — "a local ledger problem, not a permissions
+  problem" — never a denial. Same for activation state: "no activation" and
+  "the ledger failed to answer" no longer share the `world_upgrade` message.
+- A malformed demand is the World's contract violation, not the caller's
+  standing.
+
+### The viewer tells you before you type
+
+- The viewer finally calls `whoami`: write affordances gate on **real
+  standing**, refreshed by the `authority_advanced` doorbell and re-probed
+  after any authorization failure. Custody gating (agent rows) is untouched,
+  and unresolved standing never gates — no locked-UI flash for founders.
+- A banner distinguishes *"waiting for admission"* from *"view-only — ask an
+  admin"*, and a standing-gated editor points at a surviving local draft
+  instead of silently hiding typed text.
+- Failures classify by the engine's `error_kind` tag before any message
+  regex: denials title themselves **"Change not allowed"**, ledger failures
+  get **"Authority state unavailable"**, and the generic "Something didn't
+  finish" is reserved for the genuinely unknown.
+
 ## v0.7.8 — checkpoint commitments outlive builds
 
 > **Upgrading:** `host_update` then `host_restart` on the host plane, or re-run
