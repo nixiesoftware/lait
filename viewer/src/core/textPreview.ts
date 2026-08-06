@@ -54,7 +54,39 @@ export function extendTextSplice(cumulative: TextSplice, next: TextSplice): Text
   const relative = next.index - cumulative.index;
   if (relative < 0 || relative + next.delete > inserted.length) return null;
   inserted.splice(relative, next.delete, ...Array.from(next.insert));
-  return { ...cumulative, insert: inserted.join("") };
+  // Spell the TextSplice out instead of spreading. Callers may pass a richer
+  // preview object structurally; leaking its old `result` revision into this
+  // return value lets a later spread overwrite the revision of the new text.
+  return {
+    index: cumulative.index,
+    delete: cumulative.delete,
+    insert: inserted.join(""),
+  };
+}
+
+/** Keep a lossy preview on the same receiver-known base through a typing run.
+ *
+ * A local splice may become durable before the peer's normal document stream
+ * delivers it. Rebasing the very next preview onto that newly acknowledged
+ * text makes the preview temporarily inapplicable at the peer, so its text and
+ * caret blink out while the durable stream catches up. The previous preview's
+ * result identifies the transaction's actual start document; when those match,
+ * extending it preserves the older, already drawable base across acknowledgements.
+ */
+export function continueTextPreview(
+  previous: (TextSplice & { base: string; result: string }) | null,
+  previousRevision: string,
+  settledRevision: string,
+  settled: string,
+  current: string,
+  next: TextSplice,
+): (TextSplice & { base: string }) | null {
+  if (previous?.result === previousRevision) {
+    const extended = extendTextSplice(previous, next);
+    if (extended !== null) return { base: previous.base, ...extended };
+  }
+  const rebased = textSplice(settled, current);
+  return rebased === null ? null : { base: settledRevision, ...rebased };
 }
 
 /** A fast 128-bit equality token for exact serialized Markdown revisions.

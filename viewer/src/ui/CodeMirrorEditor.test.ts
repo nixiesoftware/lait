@@ -154,6 +154,87 @@ describe("source-native collaborative Markdown coordinates", () => {
     parent.remove();
   });
 
+  it("keeps an optimistic selection highlighted across base and inserted text", () => {
+    const base = "abcd";
+    const result = "abXYcd";
+    const preview = {
+      actor: "alice",
+      name: "Alice",
+      color: "red",
+      base: textRevision(base),
+      result: textRevision(result),
+      index: 2,
+      delete: 0,
+      insert: "XY",
+      anchor: 1,
+      focus: 5,
+    };
+    const state = EditorState.create({ doc: base });
+    const decorations = collaborationDecorations(state, [], [preview]);
+    const parent = document.createElement("div");
+    document.body.append(parent);
+    const editor = new EditorView({
+      parent,
+      state: EditorState.create({
+        doc: base,
+        extensions: [EditorView.decorations.of(decorations)],
+      }),
+    });
+
+    expect([...parent.querySelectorAll(".remote-selection")].map((node) => node.textContent))
+      .toEqual(["b", "XY", "c"]);
+    expect(parent.querySelector(".remote-preview-insert .remote-caret")).toBeNull();
+    expect(parent.querySelectorAll(".remote-caret")).toHaveLength(1);
+    editor.destroy();
+    parent.remove();
+  });
+
+  it("draws the active end of a selection inside optimistic and settled previews", () => {
+    const base = "abcd";
+    const result = "abXYcd";
+    const preview = {
+      actor: "alice",
+      name: "Alice",
+      color: "red",
+      base: textRevision(base),
+      result: textRevision(result),
+      index: 2,
+      delete: 0,
+      insert: "XY",
+      anchor: 2,
+      focus: 4,
+    };
+    const optimistic = collaborationDecorations(EditorState.create({ doc: base }), [], [preview]);
+    const optimisticParent = document.createElement("div");
+    document.body.append(optimisticParent);
+    const optimisticEditor = new EditorView({
+      parent: optimisticParent,
+      state: EditorState.create({
+        doc: base,
+        extensions: [EditorView.decorations.of(optimistic)],
+      }),
+    });
+    expect(optimisticParent.querySelector(".remote-selection")?.textContent).toBe("XY");
+    expect(optimisticParent.querySelector(".remote-preview-insert .remote-caret")).not.toBeNull();
+    optimisticEditor.destroy();
+    optimisticParent.remove();
+
+    const settled = collaborationDecorations(EditorState.create({ doc: result }), [], [preview]);
+    const settledParent = document.createElement("div");
+    document.body.append(settledParent);
+    const settledEditor = new EditorView({
+      parent: settledParent,
+      state: EditorState.create({
+        doc: result,
+        extensions: [EditorView.decorations.of(settled)],
+      }),
+    });
+    expect(settledParent.querySelector(".remote-selection")?.textContent).toBe("XY");
+    expect(settledParent.querySelectorAll(".remote-caret")).toHaveLength(1);
+    settledEditor.destroy();
+    settledParent.remove();
+  });
+
   it("preserves exact Markdown source—including syntax and character references", () => {
     const source = "## Reproduction\n\n- `code` and &#x20; stay byte-identical";
     const state = EditorState.create({ doc: source });

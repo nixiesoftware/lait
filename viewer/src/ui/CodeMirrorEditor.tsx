@@ -178,37 +178,72 @@ class PreviewWidget extends WidgetType {
 
   eq(other: PreviewWidget): boolean {
     return this.preview.actor === other.preview.actor
+      && this.preview.name === other.preview.name
+      && this.preview.color === other.preview.color
       && this.preview.insert === other.preview.insert
       && this.preview.anchor === other.preview.anchor
-      && this.preview.index === other.preview.index;
+      && this.preview.focus === other.preview.focus
+      && this.preview.index === other.preview.index
+      && this.preview.delete === other.preview.delete
+      && this.preview.uncertain === other.preview.uncertain;
   }
 
   toDOM(): HTMLElement {
     const inserted = Array.from(this.preview.insert);
-    const relativeCaret = this.preview.anchor === undefined
+    const caret = this.preview.focus ?? this.preview.anchor;
+    const relativeCaret = caret === undefined
       ? null
-      : this.preview.anchor - this.preview.index;
+      : caret - this.preview.index;
     const caretInside = relativeCaret !== null
       && relativeCaret >= 0
       && relativeCaret <= inserted.length;
+    const selection = previewInsertedSelection(this.preview);
     const root = document.createElement("span");
     root.className = "remote-preview-insert";
     root.style.setProperty("--remote-color", this.preview.color);
     root.dataset.remoteActor = this.preview.actor;
     root.setAttribute("aria-hidden", "true");
-    if (!caretInside) {
-      root.textContent = this.preview.insert;
-      return root;
+
+    const points = new Set([0, inserted.length]);
+    if (caretInside) points.add(relativeCaret);
+    if (selection !== null) {
+      points.add(selection.from);
+      points.add(selection.to);
     }
-    root.append(document.createTextNode(inserted.slice(0, relativeCaret).join("")));
-    root.append(remoteCaret(this.preview));
-    root.append(document.createTextNode(inserted.slice(relativeCaret).join("")));
+    const ordered = [...points].sort((a, b) => a - b);
+    for (let index = 0; index < ordered.length; index += 1) {
+      const from = ordered[index]!;
+      if (caretInside && from === relativeCaret) root.append(remoteCaret(this.preview));
+      const to = ordered[index + 1];
+      if (to === undefined || to === from) continue;
+      const text = document.createTextNode(inserted.slice(from, to).join(""));
+      if (selection !== null && from >= selection.from && to <= selection.to) {
+        const selected = document.createElement("span");
+        selected.className = "remote-selection";
+        selected.append(text);
+        root.append(selected);
+      } else {
+        root.append(text);
+      }
+    }
     return root;
   }
 
   ignoreEvent(): boolean {
     return true;
   }
+}
+
+function previewInsertedSelection(
+  preview: RemoteTextPreview,
+): { from: number; to: number } | null {
+  if (preview.anchor === undefined || preview.focus === undefined) return null;
+  const start = Math.min(preview.anchor, preview.focus) - preview.index;
+  const end = Math.max(preview.anchor, preview.focus) - preview.index;
+  const inserted = Array.from(preview.insert).length;
+  const from = Math.max(0, Math.min(inserted, start));
+  const to = Math.max(0, Math.min(inserted, end));
+  return to > from ? { from, to } : null;
 }
 
 function remoteCaret(
@@ -263,9 +298,14 @@ export function collaborationDecorations(
     const display = projected.preview;
     if (projected.phase === "settled") {
       if (display.anchor === undefined) continue;
+      const anchor = codeUnitOffset(text, display.anchor);
+      const focus = display.focus === undefined ? anchor : codeUnitOffset(text, display.focus);
+      if (focus !== anchor) {
+        decorations.push(remoteSelection(display.color, anchor, focus));
+      }
       decorations.push(
         Decoration.widget({ widget: new CaretWidget(display), side: -1 })
-          .range(codeUnitOffset(text, display.anchor)),
+          .range(focus),
       );
       continue;
     }
@@ -275,6 +315,13 @@ export function collaborationDecorations(
     decorations.push(
       Decoration.widget({ widget: new PreviewWidget(display), side: -2 }).range(from),
     );
+    for (const [selectionFrom, selectionTo] of previewBaseSelectionRanges(display)) {
+      decorations.push(remoteSelection(
+        display.color,
+        codeUnitOffset(text, selectionFrom),
+        codeUnitOffset(text, selectionTo),
+      ));
+    }
     const caretBase = previewCaretBaseOffset(display);
     if (caretBase !== null) {
       decorations.push(
@@ -288,12 +335,7 @@ export function collaborationDecorations(
     const anchor = codeUnitOffset(text, cursor.anchor);
     const focus = cursor.focus === undefined ? anchor : codeUnitOffset(text, cursor.focus);
     if (focus !== anchor) {
-      decorations.push(
-        Decoration.mark({
-          class: "remote-selection",
-          attributes: { style: `--remote-color: ${cursor.color}` },
-        }).range(Math.min(anchor, focus), Math.max(anchor, focus)),
-      );
+      decorations.push(remoteSelection(cursor.color, anchor, focus));
     }
     decorations.push(
       Decoration.widget({ widget: new CaretWidget(cursor), side: -1 }).range(focus),
@@ -302,12 +344,42 @@ export function collaborationDecorations(
   return Decoration.set(decorations, true);
 }
 
-function previewCaretBaseOffset(preview: RemoteTextPreview): number | null {
-  if (preview.anchor === undefined) return null;
+function remoteSelection(color: string, anchor: number, focus: number) {
+  return Decoration.mark({
+    class: "remote-selection",
+    attributes: { style: `--remote-color: ${color}` },
+  }).range(Math.min(anchor, focus), Math.max(anchor, focus));
+}
+
+/** Selection segments that remain in the base document around the optimistic
+ * replacement. The inserted segment is painted inside PreviewWidget. */
+function previewBaseSelectionRanges(preview: RemoteTextPreview): Array<[number, number]> {
+  if (preview.anchor === undefined || preview.focus === undefined) return [];
+  const start = Math.min(preview.anchor, preview.focus);
+  const end = Math.max(preview.anchor, preview.focus);
+  if (start === end) return [];
   const inserted = Array.from(preview.insert).length;
-  if (preview.anchor < preview.index) return preview.anchor;
-  if (preview.anchor > preview.index + inserted) {
-    return preview.anchor - inserted + preview.delete;
+  const insertEnd = preview.index + inserted;
+  const ranges: Array<[number, number]> = [];
+  const prefixEnd = Math.min(end, preview.index);
+  if (prefixEnd > start) ranges.push([start, prefixEnd]);
+  const suffixStart = Math.max(start, insertEnd);
+  if (end > suffixStart) {
+    ranges.push([
+      suffixStart - inserted + preview.delete,
+      end - inserted + preview.delete,
+    ]);
+  }
+  return ranges;
+}
+
+function previewCaretBaseOffset(preview: RemoteTextPreview): number | null {
+  const caret = preview.focus ?? preview.anchor;
+  if (caret === undefined) return null;
+  const inserted = Array.from(preview.insert).length;
+  if (caret < preview.index) return caret;
+  if (caret > preview.index + inserted) {
+    return caret - inserted + preview.delete;
   }
   return null;
 }
