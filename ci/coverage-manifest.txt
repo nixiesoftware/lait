@@ -6,9 +6,9 @@
 # reviewed like one, not discovered when a gate goes red on a refactor.
 
 [tiers]
-pr             1348
-pr-platform    1026
-nightly        1375
+pr             1351
+pr-platform    1029
+nightly        1378
 mutants        87
 
 [gates]
@@ -253,7 +253,10 @@ lait orbital::hosting::nudge_delivery::actor_matching_is_equality_and_not_a_pref
 lait orbital::hosting::nudge_delivery::an_actor_with_nobody_here_reaches_nobody_and_is_not_an_error
 lait orbital::hosting::nudge_delivery::several_nudges_each_find_their_own_actor
 lait orbital::hosting::nudge_delivery::two_devices_of_one_person_each_hear_once
+lait orbital::hosting::tests::a_live_body_wait_ignores_other_issues_before_the_watched_one
+lait orbital::hosting::tests::a_live_issue_wakes_when_its_durable_body_arrives
 lait orbital::hosting::tests::an_issue_is_named_by_its_doc_id_and_an_alias_names_nothing
+lait orbital::hosting::tests::an_unscoped_live_stream_wakes_for_any_issue_body_or_reset
 lait orbital::hosting::tests::narrowing_to_an_issue_admits_nothing_about_another_body
 lait orbital::hosting::tests::narrowing_to_an_issue_keeps_every_scope_over_its_body
 lait orbital::worlds::tests::call_handlers_are_owned_by_the_registered_package
