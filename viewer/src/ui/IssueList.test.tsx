@@ -7,7 +7,6 @@ import type { RowGroup } from "../core/display";
 import type { Row, WorkflowState } from "../types";
 import type { IssueMutators } from "./fields";
 import { IssueList } from "./IssueList";
-import { TooltipProvider } from "./primitives";
 
 const noopMutators: IssueMutators = {
   setStatus: () => undefined,
@@ -42,7 +41,14 @@ describe("IssueList semantics", () => {
     const item = host!.querySelector("li[aria-current=true]") as HTMLLIElement;
     expect(item.tabIndex).toBe(0);
     expect(host!.querySelector('[role="listbox"], [role="option"]')).toBeNull();
-    expect(host!.querySelector('[role="checkbox"][aria-label="Select LIST-1"]')).toBeTruthy();
+    // A native <input type="checkbox">, not Radix's <button role="checkbox">:
+    // Astryx renders the real control, so the role is implicit and the element
+    // participates in forms. The accessible name comes from a visually-hidden
+    // <label for>, which is the mechanism worth asserting — not an aria-label
+    // we happened to pass.
+    const box = host!.querySelector<HTMLInputElement>('input[type="checkbox"]');
+    expect(box).toBeTruthy();
+    expect(host!.querySelector(`label[for="${box!.id}"]`)?.textContent).toBe("Select LIST-1");
     act(() => item.click());
     expect(onOpen).toHaveBeenLastCalledWith(current.reff);
     onOpen.mockClear();
@@ -88,12 +94,10 @@ describe("IssueList semantics", () => {
     document.body.append(host);
     root = createRoot(host);
     act(() => root?.render(
-      <TooltipProvider>
         <Harness />
-      </TooltipProvider>,
     ));
 
-    const checks = [...host.querySelectorAll<HTMLButtonElement>('[role="checkbox"]')];
+    const checks = [...host.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')];
     act(() => checks[0]!.click());
     act(() => checks[2]!.dispatchEvent(new MouseEvent("click", { bubbles: true, shiftKey: true })));
     expect(toggled.mock.calls.map(([reff]) => reff)).toEqual(rows.map((item) => item.reff));
@@ -106,7 +110,6 @@ describe("IssueList semantics", () => {
     document.body.append(host);
     root = createRoot(host);
     act(() => root?.render(
-      <TooltipProvider>
         <IssueList
           groups={[{ key: "backlog", kind: "status", label: "Backlog", rows, state }]}
           deleted={[]}
@@ -125,7 +128,6 @@ describe("IssueList semantics", () => {
           readOnly={false}
           filtered={false}
         />
-      </TooltipProvider>,
     ));
 
     // The `⋯` is gone: it cost a permanent slot at the end of every line to
@@ -147,7 +149,6 @@ describe("IssueList semantics", () => {
     document.body.append(host);
     root = createRoot(host);
     act(() => root?.render(
-      <TooltipProvider>
         <IssueList
           groups={[{ key: "backlog", kind: "status", label: "Backlog", rows: [labelled], state }]}
           deleted={[]}
@@ -166,10 +167,18 @@ describe("IssueList semantics", () => {
           readOnly={false}
           filtered={false}
         />
-      </TooltipProvider>,
     ));
 
-    const rowText = host.querySelector("li[data-issue-ref]")?.textContent ?? "";
+    // Only what the row SHOWS. Astryx renders tooltip and popover content into
+    // the DOM up front and reveals it through the native popover API, so a bare
+    // `textContent` now includes the label legend hiding in the overflow chip's
+    // tooltip — which is exactly the text this test is asserting is not on the
+    // row. Strip the top-layer surfaces and the question goes back to being
+    // "what can you read".
+    const li = host.querySelector("li[data-issue-ref]")!;
+    const visible = li.cloneNode(true) as HTMLElement;
+    visible.querySelectorAll("[popover]").forEach((el) => el.remove());
+    const rowText = visible.textContent ?? "";
     expect(rowText).toContain("infra");
     expect(rowText).toContain("perf");
     // The third would start competing with the title for truncation budget, and
@@ -189,7 +198,6 @@ describe("IssueList semantics", () => {
     document.body.append(host);
     root = createRoot(host);
     act(() => root?.render(
-      <TooltipProvider>
         <IssueList
           groups={groups}
           deleted={[]}
@@ -208,7 +216,6 @@ describe("IssueList semantics", () => {
           readOnly={false}
           filtered={false}
         />
-      </TooltipProvider>,
     ));
   }
 });

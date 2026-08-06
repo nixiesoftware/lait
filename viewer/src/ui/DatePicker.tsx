@@ -1,16 +1,8 @@
 import { useState } from "react";
-import * as Popover from "@radix-ui/react-popover";
 import { Calendar, ChevronLeft, ChevronRight, X } from "lucide-react";
 
-import {
-  Button,
-  cn,
-  controlTrigger,
-  type ControlSize,
-  type ControlTone,
-  IconButton,
-  PopoverContent,
-} from "./primitives";
+import { IconButton, Popover } from "@astryxdesign/core";
+import { cn, controlTrigger, navigationItem, type ControlSize, type ControlTone } from "./primitives";
 
 /**
  * A date picker that belongs to the design system — the one control that used to
@@ -133,37 +125,35 @@ export function DatePicker({
   ];
 
   return (
-    <Popover.Root
-      open={open}
+    <Popover
+      isOpen={open}
       onOpenChange={(o) => {
         setOpen(o);
         // Re-centre on the current value each time it opens — you almost always
-        // want to start from the date that's set, not wherever you last browsed.
+        // want to start from the date that is set, not wherever you last browsed.
         if (o) setView(startOfMonth(value ? parseInput(value) : todayUtc()));
       }}
-    >
-      <Popover.Trigger
-        aria-label={ariaLabel}
-        className={cn(controlTrigger({ tone, size }), !value && "text-mute", className)}
-      >
-        {face ?? (
-          <>
-            <Calendar className="text-mute size-icon-sm shrink-0" />
-            <span>{value ? labelFor(value) : placeholder}</span>
-          </>
-        )}
-      </Popover.Trigger>
-      <PopoverContent align="start" className="w-64 p-2">
+      alignment="start"
+      // Gated, for the same reason as Picker: Astryx keeps popover content in
+      // the DOM whether or not it is showing, and a 42-cell month grid on every
+      // due-date chip in a list is a lot of cells nobody asked for.
+      content={
+        !open ? null : (
+        <div className="w-64 p-2">
         <div className="mb-1 flex flex-col gap-0.5">
           {quick.map((q) => (
-            <Button
+            // A menu row, not a Button: full-width, flat, left-aligned. Astryx's
+            // Button would make it a pill with its own padding, which is the
+            // wrong shape for a list of choices stacked in a popover.
+            <button
               key={q.label}
+              type="button"
               onClick={() => pick(q.value)}
-              className="w-full justify-between"
+              className={cn(navigationItem(), "justify-between")}
             >
               {q.label}
               {q.value === null && selected && <X className="text-mute size-icon-xs" />}
-            </Button>
+            </button>
           ))}
         </div>
 
@@ -172,9 +162,11 @@ export function DatePicker({
             <IconButton
               label="Previous month"
               onClick={() => setView(addMonths(view, -1))}
-            >
-              <ChevronLeft className="size-icon-sm" />
-            </IconButton>
+              variant="ghost"
+              size="sm"
+              tooltip="Previous month"
+              icon={<ChevronLeft className="size-icon-sm" />}
+            />
             <span className="text-sm font-medium">
               {view.toLocaleDateString(undefined, {
                 timeZone: "UTC",
@@ -185,9 +177,11 @@ export function DatePicker({
             <IconButton
               label="Next month"
               onClick={() => setView(addMonths(view, 1))}
-            >
-              <ChevronRight className="size-icon-sm" />
-            </IconButton>
+              variant="ghost"
+              size="sm"
+              tooltip="Next month"
+              icon={<ChevronRight className="size-icon-sm" />}
+            />
           </div>
 
           <div className="grid grid-cols-7 gap-0.5">
@@ -202,10 +196,15 @@ export function DatePicker({
               const isSelected = iso === selected;
               const isToday = iso === toInput(today);
               return (
-                <Button
+                // NOT an Astryx Button. A day cell is a 28px square in a
+                // seven-column grid; Astryx's Button brings `padding: 8px 12px`
+                // and a pill radius, which leaves ~3px of content box and clips
+                // the digit. `Button` means "an action with a label" — this is a
+                // grid cell that happens to be pressable.
+                <button
                   key={iso}
+                  type="button"
                   onClick={() => pick(iso)}
-                  size="icon"
                   aria-label={cell.toLocaleDateString(undefined, {
                     timeZone: "UTC",
                     weekday: "long",
@@ -215,7 +214,7 @@ export function DatePicker({
                   })}
                   aria-pressed={isSelected}
                   className={cn(
-                    "size-ctl-md text-sm tabular-nums",
+                    "size-ctl-md rounded-control text-sm tabular-nums",
                     isSelected
                       ? "bg-accent text-accent-fg"
                       : inMonth
@@ -225,12 +224,29 @@ export function DatePicker({
                   )}
                 >
                   {cell.getUTCDate()}
-                </Button>
+                </button>
               );
             })}
           </div>
         </div>
-      </PopoverContent>
-    </Popover.Root>
+        </div>
+        )
+      }
+    >
+      {/* Astryx requires the trigger children to contain a real button; Radix's
+          Popover.Trigger used to render one for us. */}
+      <button
+        type="button"
+        aria-label={ariaLabel}
+        className={cn(controlTrigger({ tone, size }), !value && "text-mute", className)}
+      >
+        {face ?? (
+          <>
+            <Calendar className="text-mute size-icon-sm shrink-0" />
+            <span>{value ? labelFor(value) : placeholder}</span>
+          </>
+        )}
+      </button>
+    </Popover>
   );
 }

@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>lait × astryx — theme spike</title>
+  </head>
+  <body>
+    <!-- Spike only: `?light` forces the light branch before first paint, so we
+         are testing the palette rather than Chrome's re-invalidation of
+         light-dark() inside a var() chain when color-scheme changes live. -->
+    <script>
+      if (location.search.includes("light")) document.documentElement.dataset.theme = "light";
+    </script>
+    <div id="root"></div>
+    <script type="module" src="/src/theme/proof.tsx"></script>
+  </body>
+</html>

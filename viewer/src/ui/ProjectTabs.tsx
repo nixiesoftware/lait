@@ -1,5 +1,5 @@
 import { isIssueMode, PROJECT_VIEW_LABEL, type ProjectView } from "../core/registry";
-import { Button } from "./primitives";
+import { Button } from "@astryxdesign/core";
 
 /** The faces a project offers as tabs. Board and Calendar are absent on purpose:
  *  they are LAYOUTS of Issues, chosen beside grouping and ordering, so they live
@@ -49,13 +49,13 @@ export function ProjectTabs({
         return (
           <Button
             key={tab}
-            size="md"
-            variant={current ? "active" : "outline"}
             aria-current={current ? "page" : undefined}
             onClick={() => onPick(tab)}
-          >
-            {PROJECT_VIEW_LABEL[tab]}
-          </Button>
+            label={`${PROJECT_VIEW_LABEL[tab]}`}
+            variant={current ? "active" : "secondary"}
+            elevation={current ? "none" : "low"}
+            size="md"
+          />
         );
       })}
     </nav>

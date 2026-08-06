@@ -6,7 +6,6 @@ import type { MilestoneDto, ProjectDto } from "../types";
 import { WorldViewStoreProvider } from "../core/worldViewReact";
 import { ProjectViewerStore, ProjectViewerStoreProvider } from "../projectStore";
 import { ProjectOverview } from "./ProjectOverview";
-import { TooltipProvider } from "./primitives";
 
 const rpcMock = vi.hoisted(() => vi.fn());
 const spaceRpcMock = vi.hoisted(() => vi.fn());
@@ -70,7 +69,6 @@ describe("ProjectOverview", () => {
         <WorldViewStoreProvider store={store.resources}>
           <ProjectViewerStoreProvider store={store}>
             <StrictMode>
-              <TooltipProvider>
                 <ProjectOverview
                   spaceId="local"
                   project={project}
@@ -78,7 +76,6 @@ describe("ProjectOverview", () => {
                   readOnly
                   onError={vi.fn()}
                 />
-              </TooltipProvider>
             </StrictMode>
           </ProjectViewerStoreProvider>
         </WorldViewStoreProvider>,
@@ -129,7 +126,6 @@ describe("ProjectOverview", () => {
       root?.render(
         <WorldViewStoreProvider store={store.resources}>
           <ProjectViewerStoreProvider store={store}>
-            <TooltipProvider>
               <ProjectOverview
                 spaceId="local"
                 project={project}
@@ -137,7 +133,6 @@ describe("ProjectOverview", () => {
                 readOnly
                 onError={vi.fn()}
               />
-            </TooltipProvider>
           </ProjectViewerStoreProvider>
         </WorldViewStoreProvider>,
       );

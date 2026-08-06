@@ -6,7 +6,6 @@ import type { MilestoneDto, ProjectDto } from "../types";
 import { WorldViewStoreProvider } from "../core/worldViewReact";
 import { ProjectViewerStore, ProjectViewerStoreProvider } from "../projectStore";
 import { ProjectRail } from "./ProjectRail";
-import { TooltipProvider } from "./primitives";
 
 const rpcMock = vi.hoisted(() => vi.fn());
 const spaceRpcMock = vi.hoisted(() => vi.fn());
@@ -63,7 +62,6 @@ describe("ProjectRail", () => {
       root?.render(
         <WorldViewStoreProvider store={store.resources}>
           <ProjectViewerStoreProvider store={store}>
-            <TooltipProvider>
               <ProjectRail
                 spaceId="local"
                 project={project}
@@ -74,7 +72,6 @@ describe("ProjectRail", () => {
                 onError={vi.fn()}
                 onOpenMilestone={onOpenMilestone}
               />
-            </TooltipProvider>
           </ProjectViewerStoreProvider>
         </WorldViewStoreProvider>,
       );
@@ -175,13 +172,16 @@ describe("ProjectRail", () => {
     // pass through the trigger and assert against an empty menu.
     const menuFor = async (name: string) => {
       const trigger = row(`Milestone actions for ${name}`);
+      // A real click, not `pointerdown`: Astryx's trigger opens on click.
       await act(async () => {
-        trigger?.dispatchEvent(
-          new MouseEvent("pointerdown", { bubbles: true, button: 0, detail: 1 }),
-        );
+        (trigger as HTMLElement)?.click();
         await new Promise((resolve) => setTimeout(resolve, 0));
       });
-      const items = [...document.querySelectorAll('[role="menuitem"]')].map((i) => i.textContent);
+      // Scoped through `aria-controls`. Astryx keeps every menu's items in the
+      // DOM and reveals the open one through the native popover API, so a
+      // document-wide query returns every milestone's menu at once.
+      const panel = document.getElementById(trigger?.getAttribute("aria-controls") ?? "");
+      const items = [...(panel?.querySelectorAll('[role="menuitem"]') ?? [])].map((i) => i.textContent);
       await act(async () => {
         document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
         await new Promise((resolve) => setTimeout(resolve, 0));

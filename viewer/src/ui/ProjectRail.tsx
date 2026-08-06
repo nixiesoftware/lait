@@ -1,6 +1,5 @@
 import { useState } from "react";
 import { MoreHorizontal, Plus, UserPlus } from "lucide-react";
-import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 
 import { rpc } from "../api";
 import { useProjectMilestones, useProjectViewerStore } from "../projectStore";
@@ -10,8 +9,9 @@ import { Avatar, memberName } from "./Avatar";
 import { DatePicker } from "./DatePicker";
 import { Combobox } from "./Picker";
 import { MilestoneIcon } from "./icons";
-import { MenuContent, MenuItem, RailCard, RailRow } from "./layout";
-import { Button, cn, IconButton, Input } from "./primitives";
+import { RailCard, RailRow } from "./layout";
+import { Button, DropdownMenu, DropdownMenuItem, IconButton, TextInput } from "@astryxdesign/core";
+import { cn } from "./primitives";
 
 /** unix seconds -> YYYY-MM-DD (UTC), the wire format the engine + DatePicker share. */
 function toInput(secs: number | null | undefined): string | null {
@@ -278,9 +278,11 @@ function Milestones({
           <IconButton
             label="Add milestone"
             onClick={() => setComposing((open) => !open)}
-          >
-            <Plus className="size-icon-sm" />
-          </IconButton>
+            variant="ghost"
+            size="sm"
+            tooltip="Add milestone"
+            icon={<Plus className="size-icon-sm" />}
+          />
         )
       }
     >
@@ -341,12 +343,14 @@ function Milestones({
 
       {!readOnly && composing && (
         <div className="border-line mt-1 flex flex-col gap-1.5 border-t pt-2">
-          <Input
-            autoFocus
+          <TextInput
+            label="Milestone name"
+            isLabelHidden
+            hasAutoFocus
             size="sm"
             value={draft}
             placeholder="Milestone name…"
-            onChange={(e) => setDraft(e.target.value)}
+            onChange={setDraft}
             onKeyDown={(e) => {
               if (e.key === "Enter" && draft.trim()) void add();
               if (e.key === "Escape") setComposing(false);
@@ -362,14 +366,13 @@ function Milestones({
               onChange={setTarget}
             />
             <Button
+              className="ml-auto"
+              isDisabled={!draft.trim() || adding}
+              onClick={() => void add()}
+              label="Add"
               variant="primary"
               size="sm"
-              className="ml-auto"
-              disabled={!draft.trim() || adding}
-              onClick={() => void add()}
-            >
-              Add
-            </Button>
+            />
           </div>
         </div>
       )}
@@ -467,23 +470,29 @@ function MilestoneRow({
         // Always drawn, never hover-revealed. This rail is a console: a verb that
         // only exists once you have found it is a verb you have to already know
         // about, and the cost of showing it is one muted glyph per row.
-        <DropdownMenu.Root>
-          <DropdownMenu.Trigger asChild>
-            <IconButton
-              label={`Milestone actions for ${m.name}`}
-              className="text-mute hover:text-fg mr-0.5 shrink-0"
-            >
-              <MoreHorizontal className="size-icon-sm" />
-            </IconButton>
-          </DropdownMenu.Trigger>
-          <MenuContent align="end">
-            {onMoveUp && <MenuItem onSelect={onMoveUp}>Move up</MenuItem>}
-            {onMoveDown && <MenuItem onSelect={onMoveDown}>Move down</MenuItem>}
-            <MenuItem danger onSelect={onRemove}>
-              Remove milestone
-            </MenuItem>
-          </MenuContent>
-        </DropdownMenu.Root>
+        <DropdownMenu
+          alignment="end"
+          hasChevron={false}
+          button={{
+            label: `Milestone actions for ${m.name}`,
+            className: "text-mute hover:text-fg mr-0.5 shrink-0",
+            variant: "ghost",
+            size: "sm",
+            isIconOnly: true,
+            tooltip: `Milestone actions for ${m.name}`,
+            icon: <MoreHorizontal className="size-icon-sm" />,
+          }}
+        >
+          {onMoveUp && <DropdownMenuItem label="Move up" onClick={onMoveUp} />}
+          {onMoveDown && <DropdownMenuItem label="Move down" onClick={onMoveDown} />}
+          {/* Astryx's menu item has no destructive tone, and `label` is a
+              ReactNode — so the tone rides on the label rather than becoming a
+              generated variant for one item. */}
+          <DropdownMenuItem
+            label={<span className="text-danger">Remove milestone</span>}
+            onClick={onRemove}
+          />
+        </DropdownMenu>
       )}
     </li>
   );

@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from "react";
-import * as Popover from "@radix-ui/react-popover";
 import { ArrowLeft, Check, ChevronRight, ListFilter, Milestone, Tag, UserRound } from "lucide-react";
 
 import {
@@ -20,7 +19,8 @@ import {
 import { Avatar, memberName } from "./Avatar";
 import { catalogColor } from "./colors";
 import { PriorityIcon, StatusIcon } from "./icons";
-import { cn, IconButton, PopoverContent } from "./primitives";
+import { IconButton, Popover } from "@astryxdesign/core";
+import { cn } from "./primitives";
 
 /** Toggle one id in a multi-select filter axis. */
 const toggle = (list: readonly string[], id: string): string[] =>
@@ -123,277 +123,277 @@ export function FilterMenu({
   const matches = (text: string) => text.toLowerCase().includes(query.trim().toLowerCase());
 
   return (
-    <Popover.Root open={open} onOpenChange={onOpenChange}>
-      <Popover.Trigger asChild>
-        <IconButton label="Filter" chord="/" variant={active ? "active" : "outline"}>
-          <ListFilter className="size-icon-sm" />
-        </IconButton>
-      </Popover.Trigger>
-      <PopoverContent
-        align="end"
-        className="w-72 p-0"
-        onKeyDown={(event) => {
-          if (event.key !== "Escape") return;
-          // Inside a facet, Escape is "back", not "give up on the whole filter".
-          if (facet) {
-            event.preventDefault();
-            event.stopPropagation();
-            setFacet(null);
-            return;
-          }
-          onChange(restore.current);
-        }}
-      >
-        {facet === null ? (
-          <div className="flex flex-col">
-            {/* Text leads because it is the one filter with no menu to open —
-                you are already typing by the time the panel has settled. */}
-            <div className="border-line flex items-center gap-2 border-b px-3 py-2">
-              <ListFilter className="text-mute size-icon-sm shrink-0" aria-hidden />
-              <input
-                ref={input}
-                value={filter.text}
-                placeholder="Filter issues…"
-                onChange={(e) => onChange({ ...filter, text: e.target.value })}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    e.stopPropagation();
-                    e.currentTarget.blur();
-                  }
-                }}
-                className="placeholder:text-mute min-w-0 flex-1 bg-transparent text-sm outline-none"
-                aria-label="Filter issues"
-              />
-            </div>
-            <p className="text-mute px-3 pt-2 pb-1 text-2xs">
-              spaces for AND, <span className="font-mono">|</span> for OR,{" "}
-              <span className="font-mono">-</span> to exclude
-            </p>
-
-            <div className="flex flex-col p-1">
-              {/* The coarse cut, first, because it is the one you make before
-                  any of the others — and the only reason the facets below need
-                  a Status row at all is the cut this cannot express. These write
-                  the same `filter.status` that row does. */}
-              {STATUS_SLICES.map((preset) => (
-                <Value
-                  key={preset.id}
-                  icon={
-                    <StatusIcon
-                      category={preset.categories?.[0] ?? "done"}
-                      color={
-                        preset.categories === null
-                          ? "var(--color-mute)"
-                          : "var(--color-dim)"
-                      }
-                    />
-                  }
-                  label={preset.label}
-                  selected={slice === preset.id}
-                  onClick={() => onChange({ ...filter, status: sliceStatusIds(preset, states) })}
+    <Popover
+      isOpen={open}
+      onOpenChange={onOpenChange}
+      alignment="end"
+      content={
+        <div className="w-72 p-0">
+          {facet === null ? (
+            <div className="flex flex-col">
+              {/* Text leads because it is the one filter with no menu to open —
+                  you are already typing by the time the panel has settled. */}
+              <div className="border-line flex items-center gap-2 border-b px-3 py-2">
+                <ListFilter className="text-mute size-icon-sm shrink-0" aria-hidden />
+                <input
+                  ref={input}
+                  value={filter.text}
+                  placeholder="Filter issues…"
+                  onChange={(e) => onChange({ ...filter, text: e.target.value })}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.stopPropagation();
+                      e.currentTarget.blur();
+                    }
+                  }}
+                  className="placeholder:text-mute min-w-0 flex-1 bg-transparent text-sm outline-none"
+                  aria-label="Filter issues"
                 />
-              ))}
-              <div className="border-line my-1 border-t" />
-              <Row
-                icon={<UserRound className="size-icon-sm" />}
-                label="Mine"
-                onClick={() => onChange({ ...filter, mine: !filter.mine })}
-                trailing={
-                  <span
-                    role="switch"
-                    aria-checked={filter.mine}
-                    className={cn(
-                      "flex h-4 w-7 shrink-0 items-center rounded-full p-0.5 transition-colors",
-                      filter.mine ? "bg-accent" : "bg-active",
-                    )}
-                  >
-                    <span
-                      className={cn(
-                        "bg-bg size-3 rounded-full transition-transform",
-                        filter.mine && "translate-x-3",
-                      )}
-                    />
-                  </span>
-                }
-              />
-              <Facet
-                name="Status"
-                icon={<StatusIcon category="backlog" color="var(--color-mute)" />}
-                count={counts.status}
-                onOpen={() => setFacet("status")}
-              />
-              <Facet
-                name="Priority"
-                icon={<PriorityIcon priority="none" />}
-                count={counts.priority}
-                onOpen={() => setFacet("priority")}
-              />
-              {members.length > 0 && (
-                <Facet
-                  name="Assignee"
-                  icon={<UserRound className="size-icon-sm" />}
-                  count={counts.assignees}
-                  onOpen={() => setFacet("assignees")}
-                />
-              )}
-              {labels.length > 0 && (
-                <Facet
-                  name="Label"
-                  icon={<Tag className="size-icon-sm" />}
-                  count={counts.label}
-                  value={filter.label ?? undefined}
-                  swatch={label ? catalogColor(label.color) : undefined}
-                  onOpen={() => setFacet("label")}
-                />
-              )}
-              {milestones.length > 0 && (
-                <Facet
-                  name="Milestone"
-                  icon={<Milestone className="size-icon-sm" />}
-                  count={counts.milestone}
-                  value={milestoneName}
-                  onOpen={() => setFacet("milestone")}
-                />
-              )}
-            </div>
-
-            {active && (
-              <div className="border-line flex items-center gap-2 border-t px-3 py-2">
-                <span className="text-mute text-2xs tabular-nums" aria-live="polite">
-                  {resultCount} of {totalCount} · AND across facets
-                </span>
-                <button
-                  className="text-dim hover:text-fg ml-auto text-xs"
-                  onClick={() => onChange(EMPTY_FILTER)}
-                >
-                  Clear all
-                </button>
               </div>
-            )}
-          </div>
-        ) : (
-          <div className="flex flex-col">
-            <div className="border-line flex items-center gap-1 border-b px-2 py-1.5">
-              <IconButton label="Back to filters" onClick={() => setFacet(null)}>
-                <ArrowLeft className="size-icon-sm" />
-              </IconButton>
-              <span className="text-fg text-sm font-medium">{FACET_NAME[facet]}</span>
-              {counts[facet] > 0 && (
-                <button
-                  className="text-dim hover:text-fg ml-auto text-xs"
-                  onClick={() => onChange(clearFacet(filter, facet))}
-                >
-                  Clear
-                </button>
+              <p className="text-mute px-3 pt-2 pb-1 text-2xs">
+                spaces for AND, <span className="font-mono">|</span> for OR,{" "}
+                <span className="font-mono">-</span> to exclude
+              </p>
+
+              <div className="flex flex-col p-1">
+                {/* The coarse cut, first, because it is the one you make before
+                    any of the others — and the only reason the facets below need
+                    a Status row at all is the cut this cannot express. These write
+                    the same `filter.status` that row does. */}
+                {STATUS_SLICES.map((preset) => (
+                  <Value
+                    key={preset.id}
+                    icon={
+                      <StatusIcon
+                        category={preset.categories?.[0] ?? "done"}
+                        color={
+                          preset.categories === null
+                            ? "var(--color-mute)"
+                            : "var(--color-dim)"
+                        }
+                      />
+                    }
+                    label={preset.label}
+                    selected={slice === preset.id}
+                    onClick={() => onChange({ ...filter, status: sliceStatusIds(preset, states) })}
+                  />
+                ))}
+                <div className="border-line my-1 border-t" />
+                <Row
+                  icon={<UserRound className="size-icon-sm" />}
+                  label="Mine"
+                  onClick={() => onChange({ ...filter, mine: !filter.mine })}
+                  trailing={
+                    <span
+                      role="switch"
+                      aria-checked={filter.mine}
+                      className={cn(
+                        "flex h-4 w-7 shrink-0 items-center rounded-full p-0.5 transition-colors",
+                        filter.mine ? "bg-accent" : "bg-active",
+                      )}
+                    >
+                      <span
+                        className={cn(
+                          "bg-bg size-3 rounded-full transition-transform",
+                          filter.mine && "translate-x-3",
+                        )}
+                      />
+                    </span>
+                  }
+                />
+                <Facet
+                  name="Status"
+                  icon={<StatusIcon category="backlog" color="var(--color-mute)" />}
+                  count={counts.status}
+                  onOpen={() => setFacet("status")}
+                />
+                <Facet
+                  name="Priority"
+                  icon={<PriorityIcon priority="none" />}
+                  count={counts.priority}
+                  onOpen={() => setFacet("priority")}
+                />
+                {members.length > 0 && (
+                  <Facet
+                    name="Assignee"
+                    icon={<UserRound className="size-icon-sm" />}
+                    count={counts.assignees}
+                    onOpen={() => setFacet("assignees")}
+                  />
+                )}
+                {labels.length > 0 && (
+                  <Facet
+                    name="Label"
+                    icon={<Tag className="size-icon-sm" />}
+                    count={counts.label}
+                    value={filter.label ?? undefined}
+                    swatch={label ? catalogColor(label.color) : undefined}
+                    onOpen={() => setFacet("label")}
+                  />
+                )}
+                {milestones.length > 0 && (
+                  <Facet
+                    name="Milestone"
+                    icon={<Milestone className="size-icon-sm" />}
+                    count={counts.milestone}
+                    value={milestoneName}
+                    onOpen={() => setFacet("milestone")}
+                  />
+                )}
+              </div>
+
+              {active && (
+                <div className="border-line flex items-center gap-2 border-t px-3 py-2">
+                  <span className="text-mute text-2xs tabular-nums" aria-live="polite">
+                    {resultCount} of {totalCount} · AND across facets
+                  </span>
+                  <button
+                    className="text-dim hover:text-fg ml-auto text-xs"
+                    onClick={() => onChange(EMPTY_FILTER)}
+                  >
+                    Clear all
+                  </button>
+                </div>
               )}
             </div>
-            <div className="border-line border-b px-3 py-2">
-              <input
-                autoFocus
-                value={query}
-                placeholder={`${FACET_NAME[facet]}…`}
-                onChange={(e) => setQuery(e.target.value)}
-                className="placeholder:text-mute w-full bg-transparent text-sm outline-none"
-                aria-label={`Search ${FACET_NAME[facet]}`}
-              />
-            </div>
-            <div className="max-h-overlay-md overflow-y-auto p-1">
-              {facet === "status" &&
-                states
-                  .filter((s) => matches(s.name))
-                  .map((s) => (
-                    <Value
-                      key={s.id}
-                      icon={<StatusIcon category={s.category} color={catalogColor(s.color)} />}
-                      label={s.name}
-                      selected={filter.status.includes(s.id)}
-                      onClick={() => onChange({ ...filter, status: toggle(filter.status, s.id) })}
-                    />
-                  ))}
-              {facet === "priority" &&
-                [...PRIORITY_ORDER]
-                  .reverse()
-                  .filter((p) => matches(p))
-                  .map((p) => (
-                    <Value
-                      key={p}
-                      icon={<PriorityIcon priority={p} />}
-                      label={p}
-                      className="capitalize"
-                      selected={filter.priority.includes(p)}
-                      onClick={() => onChange({ ...filter, priority: toggle(filter.priority, p) })}
-                    />
-                  ))}
-              {facet === "assignees" &&
-                members
-                  .filter((m) => matches(memberName(m.key, m)) || matches(m.key))
-                  .map((m) => (
-                    <Value
-                      key={m.key}
-                      icon={<Avatar deviceKey={m.key} alias={m.alias} me={m.me} size="sm" />}
-                      label={memberName(m.key, m)}
-                      selected={filter.assignees.includes(m.key)}
-                      onClick={() =>
-                        onChange({ ...filter, assignees: toggle(filter.assignees, m.key) })
-                      }
-                    />
-                  ))}
-              {/* Single-valued because `Filter.label` is: the daemon resolves one
-                  name to one `LabelId`. Offering multi-select here would be
-                  promising an intersection the `Request` cannot carry. */}
-              {facet === "label" &&
-                labels
-                  .filter((l) => matches(l.name))
-                  .map((l) => (
-                    <Value
-                      key={l.id}
-                      swatch={catalogColor(l.color)}
-                      label={l.name}
-                      selected={filter.label === l.name}
-                      onClick={() =>
-                        onChange({ ...filter, label: filter.label === l.name ? null : l.name })
-                      }
-                    />
-                  ))}
-              {/* Single-valued like `label`, but for a different reason: an issue
-                  targets one milestone, so an intersection of two would always be
-                  empty. The No-milestone bucket leads, because "what has nobody
-                  scoped yet" is the question this list is usually opened to ask. */}
-              {facet === "milestone" && (
-                <>
-                  {matches("No milestone") && (
-                    <Value
-                      icon={<Milestone className="text-mute size-icon-sm" />}
-                      label="No milestone"
-                      selected={filter.milestone === ""}
-                      onClick={() =>
-                        onChange({ ...filter, milestone: filter.milestone === "" ? null : "" })
-                      }
-                    />
-                  )}
-                  {milestones
-                    .filter((m) => matches(m.name))
+          ) : (
+            <div className="flex flex-col">
+              <div className="border-line flex items-center gap-1 border-b px-2 py-1.5">
+                <IconButton
+                  label="Back to filters"
+                  onClick={() => setFacet(null)}
+                  variant="ghost"
+                  size="sm"
+                  tooltip="Back to filters"
+                  icon={<ArrowLeft className="size-icon-sm" />}
+                />
+                <span className="text-fg text-sm font-medium">{FACET_NAME[facet]}</span>
+                {counts[facet] > 0 && (
+                  <button
+                    className="text-dim hover:text-fg ml-auto text-xs"
+                    onClick={() => onChange(clearFacet(filter, facet))}
+                  >
+                    Clear
+                  </button>
+                )}
+              </div>
+              <div className="border-line border-b px-3 py-2">
+                <input
+                  autoFocus
+                  value={query}
+                  placeholder={`${FACET_NAME[facet]}…`}
+                  onChange={(e) => setQuery(e.target.value)}
+                  className="placeholder:text-mute w-full bg-transparent text-sm outline-none"
+                  aria-label={`Search ${FACET_NAME[facet]}`}
+                />
+              </div>
+              <div className="max-h-overlay-md overflow-y-auto p-1">
+                {facet === "status" &&
+                  states
+                    .filter((s) => matches(s.name))
+                    .map((s) => (
+                      <Value
+                        key={s.id}
+                        icon={<StatusIcon category={s.category} color={catalogColor(s.color)} />}
+                        label={s.name}
+                        selected={filter.status.includes(s.id)}
+                        onClick={() => onChange({ ...filter, status: toggle(filter.status, s.id) })}
+                      />
+                    ))}
+                {facet === "priority" &&
+                  [...PRIORITY_ORDER]
+                    .reverse()
+                    .filter((p) => matches(p))
+                    .map((p) => (
+                      <Value
+                        key={p}
+                        icon={<PriorityIcon priority={p} />}
+                        label={p}
+                        className="capitalize"
+                        selected={filter.priority.includes(p)}
+                        onClick={() => onChange({ ...filter, priority: toggle(filter.priority, p) })}
+                      />
+                    ))}
+                {facet === "assignees" &&
+                  members
+                    .filter((m) => matches(memberName(m.key, m)) || matches(m.key))
                     .map((m) => (
                       <Value
-                        key={m.id}
-                        icon={<Milestone className="text-mute size-icon-sm" />}
-                        label={m.name}
-                        selected={filter.milestone === m.id}
+                        key={m.key}
+                        icon={<Avatar deviceKey={m.key} alias={m.alias} me={m.me} size="sm" />}
+                        label={memberName(m.key, m)}
+                        selected={filter.assignees.includes(m.key)}
                         onClick={() =>
-                          onChange({
-                            ...filter,
-                            milestone: filter.milestone === m.id ? null : m.id,
-                          })
+                          onChange({ ...filter, assignees: toggle(filter.assignees, m.key) })
                         }
                       />
                     ))}
-                </>
-              )}
+                {/* Single-valued because `Filter.label` is: the daemon resolves one
+                    name to one `LabelId`. Offering multi-select here would be
+                    promising an intersection the `Request` cannot carry. */}
+                {facet === "label" &&
+                  labels
+                    .filter((l) => matches(l.name))
+                    .map((l) => (
+                      <Value
+                        key={l.id}
+                        swatch={catalogColor(l.color)}
+                        label={l.name}
+                        selected={filter.label === l.name}
+                        onClick={() =>
+                          onChange({ ...filter, label: filter.label === l.name ? null : l.name })
+                        }
+                      />
+                    ))}
+                {/* Single-valued like `label`, but for a different reason: an issue
+                    targets one milestone, so an intersection of two would always be
+                    empty. The No-milestone bucket leads, because "what has nobody
+                    scoped yet" is the question this list is usually opened to ask. */}
+                {facet === "milestone" && (
+                  <>
+                    {matches("No milestone") && (
+                      <Value
+                        icon={<Milestone className="text-mute size-icon-sm" />}
+                        label="No milestone"
+                        selected={filter.milestone === ""}
+                        onClick={() =>
+                          onChange({ ...filter, milestone: filter.milestone === "" ? null : "" })
+                        }
+                      />
+                    )}
+                    {milestones
+                      .filter((m) => matches(m.name))
+                      .map((m) => (
+                        <Value
+                          key={m.id}
+                          icon={<Milestone className="text-mute size-icon-sm" />}
+                          label={m.name}
+                          selected={filter.milestone === m.id}
+                          onClick={() =>
+                            onChange({
+                              ...filter,
+                              milestone: filter.milestone === m.id ? null : m.id,
+                            })
+                          }
+                        />
+                      ))}
+                  </>
+                )}
+              </div>
             </div>
-          </div>
-        )}
-      </PopoverContent>
-    </Popover.Root>
+          )}
+        </div>
+      }
+    >
+      <IconButton
+        label="Filter"
+        variant={active ? "active" : "secondary"}
+        elevation={active ? "none" : "low"}
+        size="sm"
+        tooltip="Filter  /"
+        icon={<ListFilter className="size-icon-sm" />}
+      />
+    </Popover>
   );
 }
 

@@ -3,7 +3,6 @@ import { createRoot } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { BulkBar } from "./BulkBar";
-import { TooltipProvider } from "./primitives";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean })
   .IS_REACT_ACT_ENVIRONMENT = true;
@@ -30,7 +29,9 @@ describe("BulkBar", () => {
     }, retry);
 
     expect(host!.textContent).toContain("2 succeeded · 1 failed");
-    const status = host!.querySelector('[role="status"]');
+    // Not `[role="status"]` any more: Astryx's buttons publish their own live
+    // regions, so the bar now has three and document order is theirs to change.
+    const status = host!.querySelector("[data-bulk-progress]");
     expect(status?.getAttribute("title")).toContain("VIEW-3: Read-only");
     act(() => [...host!.querySelectorAll("button")]
       .find((button) => button.textContent?.includes("Retry failed"))?.click());
@@ -47,7 +48,12 @@ describe("BulkBar", () => {
     }, vi.fn());
 
     expect(host!.textContent).toContain("1/3 complete");
-    expect(host!.querySelector('button[aria-label="Delete selected"]')?.hasAttribute("disabled")).toBe(true);
+    // `aria-disabled`, not `disabled`. Astryx uses the ARIA form whenever the
+    // control carries a tooltip, so the button stays focusable and can still
+    // explain why it is unavailable — the opposite of what a bare `disabled`
+    // gives a keyboard user.
+    const del = host!.querySelector('button[aria-label="Delete selected"]');
+    expect(del?.getAttribute("aria-disabled")).toBe("true");
   });
 
   function render(progress: React.ComponentProps<typeof BulkBar>["progress"], retry: () => void) {
@@ -56,7 +62,6 @@ describe("BulkBar", () => {
     root = createRoot(host);
     act(() =>
       root?.render(
-        <TooltipProvider>
           <BulkBar
             count={3}
             progress={progress}
@@ -72,7 +77,6 @@ describe("BulkBar", () => {
             onRetryFailures={retry}
             onClear={() => undefined}
           />
-        </TooltipProvider>,
       ),
     );
   }

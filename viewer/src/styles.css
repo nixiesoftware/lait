@@ -1,5 +1,41 @@
-@import "tailwindcss";
+/* ── Cascade order ───────────────────────────────────────────────────────
+   The order Astryx documents for Tailwind coexistence (`astryx docs
+   migration`), with one addition. Declared up front so precedence is a
+   decision rather than a consequence of import order; earliest layer loses.
+
+     reset             Astryx's reset.
+     theme, base       Tailwind's variables and preflight.
+     astryx-base       Astryx component styles.
+     astryx-theme      Our token overrides (`src/theme/lait.css`).
+     astryx-density    OURS. Comfortable's geometry delta, and the reason it
+                       sits here: it overrides tokens `astryx-theme` sets, so
+                       it has to follow it. See `tool/geometry.mjs`.
+     components,
+     utilities         Tailwind last, so surfaces that are still Tailwind keep
+                       winning while they are still Tailwind. This is the line
+                       that shrinks as the migration lands: when the last
+                       utility class goes, so do these two.
+
+   Tailwind is imported in its three parts rather than as `tailwindcss`,
+   because the bare import cannot be assigned to layers this precisely.
+
+   `@layer` statements may precede `@import`; nothing else may. */
+@layer reset, theme, base, astryx-base, astryx-theme, astryx-density, components, utilities;
+
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/preflight.css" layer(base);
+@import "@astryxdesign/core/reset.css";
+@import "@astryxdesign/core/astryx.css";
+@import "./theme/lait.css";
+@import "./theme/geometry.generated.css";
+/* The bridge: exposes Astryx's tokens as Tailwind theme variables, so a
+   not-yet-migrated surface can write `bg-surface` and get the SAME colour a
+   migrated Astryx component gets. Without it the two halves of the app read
+   from two palettes during the migration, which is the failure mode that makes
+   incremental migrations look worse than the thing they replace. */
+@import "@astryxdesign/core/tailwind-theme.css";
 @import "./tokens.generated.css";
+@import "tailwindcss/utilities.css" layer(utilities);
 
 /* ── Typefaces ───────────────────────────────────────────────────────────
    Self-hosted and embedded, never fetched. Bare `lait` runs the HTTP head on

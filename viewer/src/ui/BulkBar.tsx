@@ -8,7 +8,7 @@ import { catalogColor } from "./colors";
 import { DatePicker } from "./DatePicker";
 import { PriorityIcon, StatusIcon } from "./icons";
 import { Combobox } from "./Picker";
-import { Button, IconButton } from "./primitives";
+import { Button, IconButton } from "@astryxdesign/core";
 
 /**
  * The bulk-action bar — appears while any issue carries a check (`x`), floats
@@ -77,13 +77,13 @@ export function BulkBar({
       {/* Dismiss leads: the first thing you want from a mode is the way out. */}
       <IconButton
         label="Clear selection"
-        chord="Esc"
-        variant="pill"
         className="size-ctl-md"
         onClick={onClear}
-      >
-        <X className="size-icon-sm" />
-      </IconButton>
+        variant="ghost"
+        size="sm"
+        tooltip="Clear selection  Esc"
+        icon={<X className="size-icon-sm" />}
+      />
       {/* The count is the only text in the bar, so it gets the space a divider
           used to take — a gap reads as a break without drawing one. */}
       <span className="mr-1.5 shrink-0 text-sm font-medium tabular-nums">{count} selected</span>
@@ -98,6 +98,11 @@ export function BulkBar({
             }
             role="status"
             aria-live="polite"
+            // Astryx's buttons publish their own `role="status"` live regions
+            // for loading and disabled announcements, so this is no longer the
+            // only one in the bar. The hook names OUR progress line so a test
+            // is not asserting on document order between two design systems.
+            data-bulk-progress=""
             title={progress.failures
               .map((failure) => `${failure.label}: ${failure.message}`)
               .join("\n")}
@@ -109,10 +114,14 @@ export function BulkBar({
                 : `${progress.total} complete`}
           </span>
           {!progress.pending && progress.failures.length > 0 && (
-            <Button variant="ghost" className="rounded-full" onClick={onRetryFailures}>
-              <RotateCcw className="size-icon-xs" />
-              Retry failed
-            </Button>
+            <Button
+              className="rounded-full"
+              onClick={onRetryFailures}
+              icon={<RotateCcw className="size-icon-xs" />}
+              label="Retry failed"
+              variant="ghost"
+              size="sm"
+            />
           )}
         </>
       )}
@@ -187,13 +196,14 @@ export function BulkBar({
           rather than sitting behind a rule that says "past here be dragons". */}
       <IconButton
         label="Delete selected"
-        variant="pill"
         className="hover:bg-danger/10 hover:text-danger size-ctl-md"
-        disabled={pending}
+        isDisabled={pending}
         onClick={onDelete}
-      >
-        <Trash2 className="size-icon-sm" />
-      </IconButton>
+        variant="ghost"
+        size="sm"
+        tooltip="Delete selected"
+        icon={<Trash2 className="size-icon-sm" />}
+      />
       </div>
     </div>
   );

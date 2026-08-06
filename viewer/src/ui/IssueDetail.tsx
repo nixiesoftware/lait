@@ -1,6 +1,4 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
-import * as Popover from "@radix-ui/react-popover";
 import {
   AlertTriangle,
   ArchiveRestore,
@@ -98,17 +96,9 @@ import type {
 import { DatePicker } from "./DatePicker";
 import { NewLabelDialog } from "./NewLabel";
 import { Combobox, type Option } from "./Picker";
-import { Button, ChipButton, cn, IconButton, Input, LabelChip, PopoverContent } from "./primitives";
-import {
-  Disclosure,
-  HeaderActions,
-  MenuContent,
-  MenuItem,
-  MenuSeparator,
-  RailRow,
-  RailSection,
-  Toast,
-} from "./layout";
+import { Button, Divider, DropdownMenu, DropdownMenuItem, IconButton, Popover, TextInput } from "@astryxdesign/core";
+import { ChipButton, LabelChip, cn, interactiveRow } from "./primitives";
+import { Disclosure, HeaderActions, RailRow, RailSection, Toast } from "./layout";
 import * as ask from "./dialogs";
 import { dueToInput, dueTone, short, when } from "./time";
 
@@ -363,12 +353,24 @@ export function IssueDetail({
           the overflow both need state that lives in here, so they travel up to
           the header rather than dragging the state down to it. */}
       <HeaderActions>
-        <IconButton label="Previous issue" onClick={onPrevious} disabled={!onPrevious}>
-          <ChevronLeft className="size-icon-sm" />
-        </IconButton>
-        <IconButton label="Next issue" onClick={onNext} disabled={!onNext}>
-          <ChevronRight className="size-icon-sm" />
-        </IconButton>
+        <IconButton
+          label="Previous issue"
+          onClick={() => onPrevious?.()}
+          isDisabled={!onPrevious}
+          variant="ghost"
+          size="sm"
+          tooltip="Previous issue"
+          icon={<ChevronLeft className="size-icon-sm" />}
+        />
+        <IconButton
+          label="Next issue"
+          onClick={() => onNext?.()}
+          isDisabled={!onNext}
+          variant="ghost"
+          size="sm"
+          tooltip="Next issue"
+          icon={<ChevronRight className="size-icon-sm" />}
+        />
         <IssueOverflow
           issueRef={issue.key_alias ?? issue.reff}
           active={state?.category === "active"}
@@ -386,9 +388,14 @@ export function IssueDetail({
           onRestore={() => void send(() => rpc(spaceId, { cmd: "issue_restore", reff: issue.reff }))}
           onDelete={() => onDelete(issue.reff)}
         />
-        <IconButton label="Close issue" chord="Esc" onClick={onClose}>
-          <X className="size-icon-sm" />
-        </IconButton>
+        <IconButton
+          label="Close issue"
+          onClick={onClose}
+          variant="ghost"
+          size="sm"
+          tooltip="Close issue  Esc"
+          icon={<X className="size-icon-sm" />}
+        />
       </HeaderActions>
 
       <div className="issue-detail-body flex flex-col gap-4 p-4">
@@ -404,15 +411,15 @@ export function IssueDetail({
         )}
         {undoWork && (
           <Toast action={<Button
-              variant="ghost"
-              onClick={() => {
+                           onClick={() => {
                 const action = undoWork.action;
                 setUndoWork(null);
                 void runWorkAction(action, false);
               }}
-            >
-              Undo
-            </Button>}>
+                           label="Undo"
+                           variant="ghost"
+                           size="sm"
+                         />}>
             {undoWork.message}
           </Toast>
         )}
@@ -424,11 +431,11 @@ export function IssueDetail({
               if its outcome is not what you intended, reapply the field above as a new explicit change.
             </span>
             <Button
-              variant="ghost"
               onClick={() => document.getElementById("issue-activity")?.scrollIntoView({ block: "start" })}
-            >
-              Review history
-            </Button>
+              label="Review history"
+              variant="ghost"
+              size="sm"
+            />
           </div>
         )}
         {issue.provisional && (
@@ -750,13 +757,16 @@ export function IssueDetail({
           <RailSection title="Project">
           {graph?.parent && (
             <RailRow label="Parent">
-              <Button
+                // A row, not an action. Astryx's Button adds its own padding and a
+                // pill radius, which fight the row's `px-1` and its flat shape.
+                <button
+                type="button"
                 onClick={() => onNavigate(graph.parent!.reff)}
-                className="-mx-1 min-w-0 justify-start px-1 text-left"
+                className={cn(interactiveRow(), "-mx-1 min-w-0 justify-start px-1 text-left")}
               >
                 <GitMerge className="text-mute size-icon-sm shrink-0" />
                 <span className="min-w-0 truncate font-medium">{graph.parent.title}</span>
-              </Button>
+              </button>
             </RailRow>
           )}
 
@@ -1033,18 +1043,21 @@ export function IssueDetail({
               <IconButton
                 label="Attach a file"
                 onClick={() => document.getElementById("issue-attach")?.click()}
-              >
-                <Paperclip className="size-icon-sm" />
-              </IconButton>
+                variant="ghost"
+                size="sm"
+                tooltip="Attach a file"
+                icon={<Paperclip className="size-icon-sm" />}
+              />
               <IconButton
                 label={commentError ? "Retry comment" : "Comment"}
-                chord="Ctrl/⌘ ↵"
-                disabled={!comment.trim()}
-                loading={commentPending}
+                isDisabled={!comment.trim()}
+                isLoading={commentPending}
                 onClick={() => void submitComment()}
-              >
-                <ArrowUp className="size-icon-sm" />
-              </IconButton>
+                variant="ghost"
+                size="sm"
+                tooltip={`${commentError ? "Retry comment" : "Comment"}  ${"Ctrl/⌘ ↵"}`}
+                icon={<ArrowUp className="size-icon-sm" />}
+              />
             </div>
           </div>
         )}
@@ -1169,38 +1182,40 @@ function SpecPacket({
           </code>
         )}
         {offerBinding && (
-          <DropdownMenu.Root open={binding} onOpenChange={setBinding}>
-            <DropdownMenu.Trigger asChild>
-              <Button size="md" variant="outline" className="ml-auto">
-                {packet?.baseline ? "Change baseline" : "Bind a baseline"}
-              </Button>
-            </DropdownMenu.Trigger>
-            <DropdownMenu.Portal>
-              <MenuContent align="end">
-                {issuedBaselines.map((candidate) => (
-                  <MenuItem
-                    key={candidate.baseline}
-                    onSelect={() =>
-                      bind({ baseline: candidate.baseline, revision: candidate.issued[0]! })
-                    }
-                  >
-                    <span className="flex-1">{candidate.body.name}</span>
-                    {/* The exact revision, because that is what gets pinned —
-                        not the baseline, and not whatever it becomes later. */}
-                    <code className="text-mute text-2xs">{short(candidate.issued[0]!)}</code>
-                  </MenuItem>
-                ))}
-                {packet?.baseline && (
-                  <>
-                    <MenuSeparator />
-                    <MenuItem danger onSelect={() => bind(null)}>
-                      Clear binding
-                    </MenuItem>
-                  </>
-                )}
-              </MenuContent>
-            </DropdownMenu.Portal>
-          </DropdownMenu.Root>
+          <DropdownMenu
+            isMenuOpen={binding}
+            onOpenChange={setBinding}
+            alignment="end"
+            button={{
+              className: "ml-auto",
+              label: packet?.baseline ? "Change baseline" : "Bind a baseline",
+              variant: "secondary",
+              elevation: "low",
+              size: "md",
+            }}
+          >
+            {issuedBaselines.map((candidate) => (
+              <DropdownMenuItem
+                key={candidate.baseline}
+                label={candidate.body.name}
+                onClick={() =>
+                  bind({ baseline: candidate.baseline, revision: candidate.issued[0]! })
+                }
+                // The exact revision, because that is what gets pinned — not the
+                // baseline, and not whatever it becomes later.
+                endContent={<code className="text-mute text-2xs">{short(candidate.issued[0]!)}</code>}
+              />
+            ))}
+            {packet?.baseline && (
+              <>
+                <Divider />
+                <DropdownMenuItem
+                  label={<span className="text-danger">Clear binding</span>}
+                  onClick={() => bind(null)}
+                />
+              </>
+            )}
+          </DropdownMenu>
         )}
       </div>
       {offerBinding && !packet?.baseline && (
@@ -1337,32 +1352,50 @@ function IssueOverflow({
   onDelete: () => void;
 }) {
   return (
-    <DropdownMenu.Root>
-      <DropdownMenu.Trigger asChild>
-        <IconButton label="More issue actions"><MoreHorizontal className="size-icon-sm" /></IconButton>
-      </DropdownMenu.Trigger>
-      <DropdownMenu.Portal>
-        <MenuContent align="end" className="min-w-52">
-          <MenuItem onSelect={onCopyLink}><Link2 className="size-icon-sm" /> Copy issue link</MenuItem>
-          <MenuItem onSelect={() => void navigator.clipboard.writeText(issueRef)}><Copy className="size-icon-sm" /> Copy reference</MenuItem>
-          {!locked && !tombstone && (
-            <>
-              <MenuItem disabled={pending} onSelect={onDuplicate}><CopyPlus className="size-icon-sm" /> Duplicate issue</MenuItem>
-              <MenuItem disabled={pending} onSelect={onRelate}><Link2 className="size-icon-sm" /> Add relation</MenuItem>
-              <MenuItem disabled={pending} onSelect={onAddSubIssue}><CornerDownRight className="size-icon-sm" /> Add sub-issue</MenuItem>
-              <MenuItem disabled={pending} onSelect={onAttach}><Paperclip className="size-icon-sm" /> Attach a file</MenuItem>
-              <MenuItem disabled={pending} onSelect={onAssign}><UserPlus className="size-icon-sm" /> Assign issue</MenuItem>
-              <MenuItem disabled={pending} onSelect={onMove}><MoveRight className="size-icon-sm" /> Move to project</MenuItem>
-            </>
-          )}
-          {active && !locked && <MenuItem disabled={pending} onSelect={onStop}><CircleDot className="size-icon-sm" /> Stop work</MenuItem>}
-          {!locked && <DropdownMenu.Separator className="bg-line my-1 h-px" />}
-          {!locked && (tombstone
-            ? <MenuItem onSelect={onRestore}><ArchiveRestore className="size-icon-sm" /> Restore issue</MenuItem>
-            : <MenuItem danger onSelect={onDelete}><Trash2 className="size-icon-sm" /> Delete issue</MenuItem>)}
-        </MenuContent>
-      </DropdownMenu.Portal>
-    </DropdownMenu.Root>
+    <DropdownMenu
+      alignment="end"
+      hasChevron={false}
+      menuWidth={208}
+      button={{
+        label: "More issue actions",
+        variant: "ghost",
+        size: "sm",
+        isIconOnly: true,
+        tooltip: "More issue actions",
+        icon: <MoreHorizontal className="size-icon-sm" />,
+      }}
+    >
+      <DropdownMenuItem label="Copy issue link" icon={<Link2 className="size-icon-sm" />} onClick={onCopyLink} />
+      <DropdownMenuItem
+        label="Copy reference"
+        icon={<Copy className="size-icon-sm" />}
+        onClick={() => void navigator.clipboard.writeText(issueRef)}
+      />
+      {!locked && !tombstone && (
+        <>
+          <DropdownMenuItem label="Duplicate issue" icon={<CopyPlus className="size-icon-sm" />} isDisabled={pending} onClick={onDuplicate} />
+          <DropdownMenuItem label="Add relation" icon={<Link2 className="size-icon-sm" />} isDisabled={pending} onClick={onRelate} />
+          <DropdownMenuItem label="Add sub-issue" icon={<CornerDownRight className="size-icon-sm" />} isDisabled={pending} onClick={onAddSubIssue} />
+          <DropdownMenuItem label="Attach a file" icon={<Paperclip className="size-icon-sm" />} isDisabled={pending} onClick={onAttach} />
+          <DropdownMenuItem label="Assign issue" icon={<UserPlus className="size-icon-sm" />} isDisabled={pending} onClick={onAssign} />
+          <DropdownMenuItem label="Move to project" icon={<MoveRight className="size-icon-sm" />} isDisabled={pending} onClick={onMove} />
+        </>
+      )}
+      {active && !locked && (
+        <DropdownMenuItem label="Stop work" icon={<CircleDot className="size-icon-sm" />} isDisabled={pending} onClick={onStop} />
+      )}
+      {!locked && <Divider />}
+      {!locked &&
+        (tombstone ? (
+          <DropdownMenuItem label="Restore issue" icon={<ArchiveRestore className="size-icon-sm" />} onClick={onRestore} />
+        ) : (
+          <DropdownMenuItem
+            label={<span className="text-danger">Delete issue</span>}
+            icon={<Trash2 className="size-icon-sm" />}
+            onClick={onDelete}
+          />
+        ))}
+    </DropdownMenu>
   );
 }
 
@@ -1384,12 +1417,18 @@ function FollowToggle({
   return (
     <Button
       type="button"
-      variant={following ? "active" : "ghost"}
-      disabled={readOnly || meKey == null}
+      variant={following ? "secondary" : "ghost"}
+      size="sm"
+      isDisabled={readOnly || meKey == null}
       onClick={() => onToggle(!following)}
-      title={following ? "Stop receiving this issue's activity" : "Receive this issue's activity in your inbox"}
+      label={following ? "Following" : "Follow"}
+      icon={following ? <BellOff className="size-icon-sm" /> : <Bell className="size-icon-sm" />}
+      tooltip={
+        following
+          ? "Stop receiving this issue's activity"
+          : "Receive this issue's activity in your inbox"
+      }
     >
-      {following ? <BellOff className="size-icon-sm" /> : <Bell className="size-icon-sm" />}
       {following ? "Following" : "Follow"}
       {others > 0 && <span className="text-mute">+{others}</span>}
     </Button>
@@ -1621,11 +1660,13 @@ function Attachments({
                 action: (
                   <IconButton
                     label="Attach a file"
-                    disabled={busy}
+                    isDisabled={busy}
                     onClick={() => fileRef.current?.click()}
-                  >
-                    <Paperclip className="size-icon-sm" />
-                  </IconButton>
+                    variant="ghost"
+                    size="sm"
+                    tooltip="Attach a file"
+                    icon={<Paperclip className="size-icon-sm" />}
+                  />
                 ),
               })}
         >
@@ -1640,9 +1681,14 @@ function Attachments({
               <span className="text-mute shrink-0 text-xs">
                 {Math.max(1, Math.round(att.size / 1024))} KiB
               </span>
-              <IconButton label={`Download ${att.name}`} onClick={() => void download(att)}>
-                <Download className="size-icon-sm" />
-              </IconButton>
+              <IconButton
+                label={`Download ${att.name}`}
+                onClick={() => void download(att)}
+                variant="ghost"
+                size="sm"
+                tooltip={`Download ${att.name}`}
+                icon={<Download className="size-icon-sm" />}
+              />
               {!readOnly && (
                 <IconButton
                   label={`Remove ${att.name}`}
@@ -1651,9 +1697,11 @@ function Attachments({
                       onError(e instanceof Error ? e.message : String(e)),
                     )
                   }
-                >
-                  <Trash2 className="size-icon-sm" />
-                </IconButton>
+                  variant="ghost"
+                  size="sm"
+                  tooltip={`Remove ${att.name}`}
+                  icon={<Trash2 className="size-icon-sm" />}
+                />
               )}
             </li>
           ))}
@@ -1931,9 +1979,14 @@ function Relations({
             ? {}
             : {
                 action: (
-                  <IconButton label="Add sub-issue" onClick={() => setSubDraft("")}>
-                    <Plus className="size-icon-sm" />
-                  </IconButton>
+                  <IconButton
+                    label="Add sub-issue"
+                    onClick={() => setSubDraft("")}
+                    variant="ghost"
+                    size="sm"
+                    tooltip="Add sub-issue"
+                    icon={<Plus className="size-icon-sm" />}
+                  />
                 ),
               })}
         >
@@ -1962,11 +2015,13 @@ function Relations({
             />
           ))}
           {subDraft !== null && (
-            <Input
-              autoFocus
+            <TextInput
+              label="Sub-issue title"
+              isLabelHidden
+              hasAutoFocus
               value={subDraft}
               placeholder="Sub-issue title…  (Enter creates, Esc closes)"
-              onChange={(e) => setSubDraft(e.target.value)}
+              onChange={setSubDraft}
               onKeyDown={(e) => {
                 e.stopPropagation();
                 if (e.key === "Enter" && subDraft.trim()) createSub(subDraft.trim());
@@ -1994,9 +2049,11 @@ function Relations({
                     id="issue-add-relation"
                     label="Add relation"
                     onClick={() => setAdding(true)}
-                  >
-                    <Plus className="size-icon-sm" />
-                  </IconButton>
+                    variant="ghost"
+                    size="sm"
+                    tooltip="Add relation"
+                    icon={<Plus className="size-icon-sm" />}
+                  />
                 ),
               })}
         >
@@ -2030,9 +2087,14 @@ function Relations({
                 options={(candidates ?? []).map(issueOption)}
                 onPick={relate}
               />
-              <IconButton label="Cancel" onClick={() => setAdding(false)}>
-                <X className="size-icon-sm" />
-              </IconButton>
+              <IconButton
+                label="Cancel"
+                onClick={() => setAdding(false)}
+                variant="ghost"
+                size="sm"
+                tooltip="Cancel"
+                icon={<X className="size-icon-sm" />}
+              />
             </div>
           )}
         </Disclosure>
@@ -2087,9 +2149,12 @@ function RelRow({
     // inside fills it — so lighting the row rather than the label is what makes
     // a run of them read as a list you can walk.
     <div className="group/rel hover:bg-hover -mx-1 flex items-center gap-2 rounded-control px-1 py-0.5 text-sm transition-colors">
-      <Button
+      {/* A row, not an action — see the note on the parent row above. */}
+      <button
+        type="button"
         onClick={() => onNavigate(row.reff)}
-        className="min-w-0 flex-1 shrink justify-start px-1 text-left"
+        aria-label={row.title}
+        className={cn(interactiveRow(), "min-w-0 flex-1 shrink justify-start px-1 text-left")}
       >
         <span className="flex size-icon-xs shrink-0 items-center justify-center">{icon}</span>
         {kind && (
@@ -2106,18 +2171,20 @@ function RelRow({
           {row.key_alias ?? row.reff}
         </span>
         <span className="min-w-0 flex-1 truncate font-medium">{row.title}</span>
-      </Button>
+      </button>
       {trailing && <span className="shrink-0">{trailing}</span>}
+      {/* Revealed on row hover/focus: the affordance is there when wanted and
+          the list stays quiet the rest of the time. */}
       {onRemove && (
         <IconButton
           label="Remove relation"
+          tooltip="Remove relation"
           onClick={onRemove}
-          // Revealed on row hover/focus: the affordance is there when wanted and
-          // the list stays quiet the rest of the time.
           className="opacity-0 group-hover/rel:opacity-100 focus-visible:opacity-100"
-        >
-          <X className="size-icon-xs" />
-        </IconButton>
+          variant="ghost"
+          size="sm"
+          icon={<X className="size-icon-xs" />}
+        />
       )}
     </div>
   );
@@ -2305,12 +2372,12 @@ function Timeline({
       {entries.length === 0 && <p className="text-mute text-sm">Nothing yet.</p>}
       {entries.length > visibleCount && (
         <Button
-          variant="ghost"
           onClick={() => setVisibleCount((count) => count + 40)}
           className="self-start"
-        >
-          Show {Math.min(40, entries.length - visibleCount)} earlier changes
-        </Button>
+          label={`Show ${Math.min(40, entries.length - visibleCount)} earlier changes`}
+          variant="ghost"
+          size="sm"
+        />
       )}
 
       {visibleEntries.map((entry) =>
@@ -2501,46 +2568,61 @@ function CommentBlock({
         {canAct && (
           /* Anchored in the header, so revealing them never reflows the thread. */
           <span className="ml-auto flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover/comment:opacity-100 focus-within:opacity-100 has-[[data-state=open]]:opacity-100">
-            <Popover.Root open={picking} onOpenChange={setPicking}>
-              <Popover.Trigger asChild>
-                <IconButton aria-label="Add reaction" label="Add reaction">
-                  <SmilePlus className="size-icon-sm" />
-                </IconButton>
-              </Popover.Trigger>
-              <PopoverContent align="end" className="flex gap-0.5 p-1">
-                {REACTION_EMOJIS.map((emoji) => (
-                  <Button
-                    key={emoji}
-                    onClick={() => {
-                      setPicking(false);
-                      if (c.id) onReact(c.id, emoji, true);
-                    }}
-                    aria-label={`React ${emoji}`}
-                    size="icon"
-                    className="text-base"
-                  >
-                    {emoji}
-                  </Button>
-                ))}
-              </PopoverContent>
-            </Popover.Root>
-            <DropdownMenu.Root>
-              <DropdownMenu.Trigger asChild>
-                <IconButton label="Comment actions">
-                  <MoreHorizontal className="size-icon-sm" />
-                </IconButton>
-              </DropdownMenu.Trigger>
-              <DropdownMenu.Portal>
-                <MenuContent align="end" className="min-w-44">
-                  <MenuItem onSelect={() => onCopyLink(c.id!)}>
-                    <Link2 className="size-icon-sm" /> Copy link
-                  </MenuItem>
-                  <MenuItem onSelect={() => onCreateFromComment(c.body)}>
-                    <CopyPlus className="size-icon-sm" /> New issue from comment
-                  </MenuItem>
-                </MenuContent>
-              </DropdownMenu.Portal>
-            </DropdownMenu.Root>
+            <Popover
+              isOpen={picking}
+              onOpenChange={setPicking}
+              alignment="end"
+              content={
+                <div className="flex gap-0.5 p-1">
+                  {REACTION_EMOJIS.map((emoji) => (
+                    <Button
+                      key={emoji}
+                      onClick={() => {
+                        setPicking(false);
+                        if (c.id) onReact(c.id, emoji, true);
+                      }}
+                      aria-label={`React ${emoji}`}
+                      className="text-base"
+                      label={emoji}
+                      variant="ghost"
+                      size="sm"
+                    />
+                  ))}
+                </div>
+              }
+            >
+              <IconButton
+                label="Add reaction"
+                variant="ghost"
+                size="sm"
+                tooltip="Add reaction"
+                icon={<SmilePlus className="size-icon-sm" />}
+              />
+            </Popover>
+            <DropdownMenu
+              alignment="end"
+              hasChevron={false}
+              menuWidth={176}
+              button={{
+                label: "Comment actions",
+                variant: "ghost",
+                size: "sm",
+                isIconOnly: true,
+                tooltip: "Comment actions",
+                icon: <MoreHorizontal className="size-icon-sm" />,
+              }}
+            >
+              <DropdownMenuItem
+                label="Copy link"
+                icon={<Link2 className="size-icon-sm" />}
+                onClick={() => onCopyLink(c.id!)}
+              />
+              <DropdownMenuItem
+                label="New issue from comment"
+                icon={<CopyPlus className="size-icon-sm" />}
+                onClick={() => onCreateFromComment(c.body)}
+              />
+            </DropdownMenu>
           </span>
         )}
       </div>
@@ -2610,18 +2692,21 @@ function ReplyComposer({
         label="Attach a file"
         onClick={() => document.getElementById("issue-attach")?.click()}
         className="self-end"
-      >
-        <Paperclip className="size-icon-sm" />
-      </IconButton>
+        variant="ghost"
+        size="sm"
+        tooltip="Attach a file"
+        icon={<Paperclip className="size-icon-sm" />}
+      />
       <IconButton
         label="Reply"
-        chord="Ctrl/⌘ ↵"
-        disabled={!draft.trim()}
+        isDisabled={!draft.trim()}
         onClick={submit}
         className="self-end"
-      >
-        <ArrowUp className="size-icon-sm" />
-      </IconButton>
+        variant="ghost"
+        size="sm"
+        tooltip="Reply  Ctrl/⌘ ↵"
+        icon={<ArrowUp className="size-icon-sm" />}
+      />
     </div>
   );
 }

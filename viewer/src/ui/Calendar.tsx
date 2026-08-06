@@ -5,7 +5,7 @@ import { ChevronLeft, ChevronRight } from "lucide-react";
 import type { BoardView, Row, WorkflowState } from "../types";
 import { tsToDate } from "../types";
 import { fromRowControl, PriorityChip, StatusChip, type IssueMutators } from "./fields";
-import { Button, IconButton } from "./primitives";
+import { Button, IconButton } from "@astryxdesign/core";
 
 /**
  * The calendar view — the same filtered query as the list and board, placed on a
@@ -83,20 +83,31 @@ export function Calendar({
       <Toolbar className="gap-2">
         <h2 className="text-sm font-semibold tabular-nums">{monthLabel}</h2>
         <div className="ml-2 flex items-center gap-0.5">
-          <IconButton label="Previous month" onClick={() => step(-1)}>
-            <ChevronLeft className="size-icon-md" />
-          </IconButton>
-          <IconButton label="Next month" onClick={() => step(1)}>
-            <ChevronRight className="size-icon-md" />
-          </IconButton>
+          <IconButton
+            label="Previous month"
+            onClick={() => step(-1)}
+            variant="ghost"
+            size="sm"
+            tooltip="Previous month"
+            icon={<ChevronLeft className="size-icon-md" />}
+          />
+          <IconButton
+            label="Next month"
+            onClick={() => step(1)}
+            variant="ghost"
+            size="sm"
+            tooltip="Next month"
+            icon={<ChevronRight className="size-icon-md" />}
+          />
         </div>
         <Button
           onClick={toThisMonth}
-          variant="outline"
           className="ml-1"
-        >
-          Today
-        </Button>
+          label="Today"
+          variant="secondary"
+          elevation="low"
+          size="sm"
+        />
         <span className="text-mute ml-auto text-xs">
           {rows.length - undated.length} scheduled · {undated.length} undated
         </span>

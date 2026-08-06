@@ -1,9 +1,9 @@
-import * as Popover from "@radix-ui/react-popover";
 import { Calendar, List, SlidersHorizontal, SquareKanban } from "lucide-react";
 
 import type { DisplayState, GroupBy, OrderBy } from "../core/display";
 import { ISSUE_MODES, ISSUE_MODE_LABEL, type IssueMode } from "../core/registry";
-import { Button, cn, IconButton, PopoverContent } from "./primitives";
+import { Button, IconButton, Popover } from "@astryxdesign/core";
+import { cn } from "./primitives";
 
 /** The layout switcher's glyphs. Same icons the sidebar gives the destination,
  *  so a board is drawn as a board wherever it is named. */
@@ -46,13 +46,12 @@ export function DisplayOptions({
     display.group !== "status" || display.order !== "board" || display.deleted;
 
   return (
-    <Popover.Root open={open} onOpenChange={onOpenChange}>
-      <Popover.Trigger asChild>
-        <IconButton label="Display options" chord="⇧V" variant={changed ? "active" : "outline"}>
-          <SlidersHorizontal className="size-icon-sm" />
-        </IconButton>
-      </Popover.Trigger>
-      <PopoverContent align="end" className="flex w-64 flex-col gap-3 p-3">
+    <Popover
+      isOpen={open}
+      onOpenChange={onOpenChange}
+      alignment="end"
+      content={
+        <div className="flex w-64 flex-col gap-3 p-3">
           {/* Layout leads, because everything under it is read in its terms:
               grouping means columns on a board and headers in a list, and on a
               calendar it means nothing at all. */}
@@ -138,8 +137,18 @@ export function DisplayOptions({
             <Choice label="Compact" active={density === "compact"} onClick={() => onDensityChange("compact")} />
             <Choice label="Comfortable" active={density === "comfortable"} onClick={() => onDensityChange("comfortable")} />
           </Axis>
-      </PopoverContent>
-    </Popover.Root>
+        </div>
+      }
+    >
+      <IconButton
+        label="Display options"
+        variant={changed ? "active" : "secondary"}
+        elevation={changed ? "none" : "low"}
+        size="sm"
+        tooltip="Display options  ⇧V"
+        icon={<SlidersHorizontal className="size-icon-sm" />}
+      />
+    </Popover>
   );
 }
 
@@ -165,12 +174,13 @@ function Choice({
 }) {
   return (
     <Button
-      variant={active ? "active" : "outline"}
       aria-pressed={active}
-      disabled={disabled ?? false}
+      isDisabled={disabled ?? false}
       onClick={onClick}
-    >
-      {label}
-    </Button>
+      label={`${label}`}
+      variant={active ? "active" : "secondary"}
+      elevation={active ? "none" : "low"}
+      size="sm"
+    />
   );
 }

@@ -1,4 +1,3 @@
-import * as Popover from "@radix-ui/react-popover";
 import { useState } from "react";
 import {
   AlertTriangle,
@@ -17,7 +16,8 @@ import {
 
 import { errorKindOf } from "../api";
 import type { SpaceRow, StatusInfo, WhoamiInfo } from "../types";
-import { Button, cn, OverlayGap, PopoverContent } from "./primitives";
+import { Button, Popover } from "@astryxdesign/core";
+import { cn } from "./primitives";
 
 export type ApplicationStateKind =
   | "loading"
@@ -110,19 +110,32 @@ export function InlineError({
         {message}
       </span>
       {onRetry && (
-        <Button variant="ghost" onClick={onRetry} className="text-danger">
-          <RefreshCw className="size-icon-xs" />
-          {retryLabel}
-        </Button>
+        <Button
+          onClick={onRetry}
+          className="text-danger"
+          icon={<RefreshCw className="size-icon-xs" />}
+          label={retryLabel}
+          variant="ghost"
+          size="sm"
+        />
       )}
       {onCopy && (
-        <Button variant="ghost" onClick={onCopy} className="text-danger">
-          <Copy className="size-icon-xs" />
-          Copy details
-        </Button>
+        <Button
+          onClick={onCopy}
+          className="text-danger"
+          icon={<Copy className="size-icon-xs" />}
+          label="Copy details"
+          variant="ghost"
+          size="sm"
+        />
       )}
       {onDismiss && (
-        <Button variant="ghost" onClick={onDismiss} className="text-danger" aria-label="Dismiss error">
+        <Button
+          onClick={onDismiss}
+          className="text-danger"
+          label="Dismiss error"
+          variant="ghost"
+          size="sm">
           <X className="size-icon-xs" />
         </Button>
       )}
@@ -169,10 +182,14 @@ export function StandingNotice({
         )}
       </span>
       {onRefresh && (
-        <Button variant="ghost" onClick={onRefresh} className="text-warn">
-          <RefreshCw className="size-icon-xs" />
-          Re-check
-        </Button>
+        <Button
+          onClick={onRefresh}
+          className="text-warn"
+          icon={<RefreshCw className="size-icon-xs" />}
+          label="Re-check"
+          variant="ghost"
+          size="sm"
+        />
       )}
     </div>
   );
@@ -269,20 +286,10 @@ export function TrustPopover({
   const agent = space?.identity.kind === "agent" ? space.identity.name : null;
 
   return (
-    <Popover.Root>
-      <Popover.Trigger
-        className={cn(
-          "hover:bg-hover flex h-ctl-sm min-w-6 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-control px-2 text-xs",
-          healthy ? "text-dim" : "text-warn",
-        )}
-        aria-label="Local and peer status"
-      >
-        <span className={cn("size-mark-xs rounded-full", healthy ? "bg-ok" : "bg-warn animate-pulse")} />
-        <span className="max-[1200px]:hidden">
-          {trustSummary(liveness, localReady, peers, degraded)}
-        </span>
-      </Popover.Trigger>
-      <PopoverContent align="end" sideOffset={OverlayGap.panel} className="w-80 p-3">
+    <Popover
+      alignment="end"
+      content={
+        <div className="w-80 p-3">
           <div className="mb-3 flex items-center gap-2">
             <ShieldCheck className="text-accent size-icon-md" />
             <div>
@@ -357,16 +364,16 @@ export function TrustPopover({
               </ul>
               <div className="mt-2 flex items-center gap-2">
                 <Button
-                  variant="ghost"
                   onClick={() => {
                     void navigator.clipboard.writeText(recoveryDiagnostics(status));
                     setDiagnosticsCopied(true);
                     window.setTimeout(() => setDiagnosticsCopied(false), 1600);
                   }}
-                >
-                  <Copy className="size-icon-xs" />
-                  {diagnosticsCopied ? "Copied" : "Copy diagnosis"}
-                </Button>
+                  icon={<Copy className="size-icon-xs" />}
+                  label={diagnosticsCopied ? "Copied" : "Copy diagnosis"}
+                  variant="ghost"
+                  size="sm"
+                />
                 <span className="text-mute text-xs">
                   Repair from Settings → Devices &amp; recovery.
                 </span>
@@ -385,9 +392,19 @@ export function TrustPopover({
             Acting as {agent ? <strong className="text-fg">agent {agent}</strong> : <strong className="text-fg">your local actor</strong>}
             {status?.membership ? ` · ${status.membership}` : ""}
           </div>
-          <Popover.Arrow className="fill-line-strong" />
-      </PopoverContent>
-    </Popover.Root>
+        </div>
+      }
+    >
+      <button type="button" className={cn(
+          "hover:bg-hover flex h-ctl-sm min-w-6 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-control px-2 text-xs",
+          healthy ? "text-dim" : "text-warn",
+        )} aria-label="Local and peer status">
+        <span className={cn("size-mark-xs rounded-full", healthy ? "bg-ok" : "bg-warn animate-pulse")} />
+        <span className="max-[1200px]:hidden">
+          {trustSummary(liveness, localReady, peers, degraded)}
+        </span>
+      </button>
+    </Popover>
   );
 }
 

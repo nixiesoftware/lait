@@ -40,7 +40,8 @@ import {
   ContextMenuSubTrigger,
   GroupHeader,
 } from "./layout";
-import { Button, Checkbox, IconButton, interactiveRow } from "./primitives";
+import { Button, CheckboxInput, IconButton } from "@astryxdesign/core";
+import { interactiveRow } from "./primitives";
 import { dueLabel, dueTone } from "./time";
 
 /**
@@ -223,7 +224,13 @@ export function IssueList({
             kind={deletedMode ? "empty" : filtered ? "filtered-empty" : "empty"}
             title={deletedMode ? "No deleted issues" : filtered ? "No matching issues" : "No issues yet"}
             body={deletedMode ? "Deleted issues will appear here so they can be inspected or restored." : filtered ? "Clear or adjust the current filters to see more." : "Create the first issue in this project."}
-            action={!deletedMode && !filtered && !readOnly && states[0] ? <Button variant="primary" onClick={() => onCreate(states[0]!.id)}><Plus className="size-icon-sm" /> New issue</Button> : undefined}
+            action={!deletedMode && !filtered && !readOnly && states[0] ? <Button
+                                                                            onClick={() => onCreate(states[0]!.id)}
+                                                                            icon={<Plus className="size-icon-sm" />}
+                                                                            label="New issue"
+                                                                            variant="primary"
+                                                                            size="sm"
+                                                                          /> : undefined}
             className="min-h-60"
           />
         )}
@@ -312,9 +319,11 @@ function Group({
               onClick={() => setCollapsed((value) => !value)}
               aria-expanded={!collapsed}
               className="absolute"
-            >
-              <ChevronRight className={`size-icon-xs transition-transform ${collapsed ? "" : "rotate-90"}`} />
-            </IconButton>
+              variant="ghost"
+              size="sm"
+              tooltip={`${collapsed ? "Expand" : "Collapse"} ${title}`}
+              icon={<ChevronRight className={`size-icon-xs transition-transform ${collapsed ? "" : "rotate-90"}`} />}
+            />
           </span>
         }
         icon={<GroupIcon group={group} members={members} />}
@@ -329,9 +338,11 @@ function Group({
             <IconButton
               label={`New issue in ${group.state.name}`}
               onClick={() => onCreate(group.state!.id)}
-            >
-              <Plus className="size-icon-sm" />
-            </IconButton>
+              variant="ghost"
+              size="sm"
+              tooltip={`New issue in ${group.state.name}`}
+              icon={<Plus className="size-icon-sm" />}
+            />
           ) : undefined
         }
       />
@@ -476,16 +487,20 @@ function IssueRow({
           exactly the same geometry when the checkbox appears. */}
       <span data-row-control="" className="flex size-icon-md shrink-0 items-center justify-center">
         {!readOnly && (
-          <Checkbox
-            checked={checked}
-            onCheckedChange={() => onToggleCheck(row.reff, false)}
-            onClick={(event) => {
-              if ((event.nativeEvent as MouseEvent).shiftKey) {
-                event.preventDefault();
-                onToggleCheck(row.reff, true);
-              }
-            }}
-            aria-label={`Select ${row.key_alias ?? row.reff}`}
+          <CheckboxInput
+            label={`Select ${row.key_alias ?? row.reff}`}
+            isLabelHidden
+            size="sm"
+            value={checked}
+            // One handler, not a click/change pair. This used to `preventDefault`
+            // in `onClick` to stop Radix's button firing its own toggle after the
+            // shift-range had already been applied. Astryx renders a real
+            // `<input type="checkbox">`, whose change event is not cancellable
+            // that way — it fired anyway and double-toggled the anchor row. The
+            // shift test belongs in the one handler that sees the event.
+            onChange={(_checked, event) =>
+              onToggleCheck(row.reff, (event.nativeEvent as MouseEvent).shiftKey)
+            }
             className={clsxish([
               !anyChecked && !checked &&
                 "opacity-0 transition-opacity group-hover/row:opacity-100 focus-visible:opacity-100",

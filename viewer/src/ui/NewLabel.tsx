@@ -1,8 +1,7 @@
 import { useState } from "react";
-import * as Dialog from "@radix-ui/react-dialog";
 
 import { ColorPicker } from "./ColorPicker";
-import { Button } from "./primitives";
+import { Button, Dialog, DialogHeader } from "@astryxdesign/core";
 
 /**
  * The colour step for a label the picker is about to mint.
@@ -25,30 +24,30 @@ export function NewLabelDialog({
 }) {
   const [color, setColor] = useState("blue");
   return (
-    <Dialog.Root open onOpenChange={(o) => !o && onCancel()}>
-      <Dialog.Portal>
-        <Dialog.Overlay className="ui-overlay fixed inset-0 z-50 bg-black/45 backdrop-blur-[2px]" />
-        <Dialog.Content
-          className="ui-surface border-line-strong bg-raised shadow-overlay fixed top-1/2 left-1/2 z-50 w-[min(360px,92vw)] -translate-x-1/2 -translate-y-1/2 rounded-surface border p-4"
-          aria-describedby={undefined}
-        >
-          <Dialog.Title className="font-semibold">New label</Dialog.Title>
-          <p className="text-dim mt-1 text-sm">
-            Pick a colour for <span className="text-fg font-medium">{name}</span>.
-          </p>
-          <div className="mt-3">
-            <ColorPicker value={color} onChange={setColor} />
-          </div>
-          <div className="mt-4 flex justify-end gap-2">
-            <Button size="md" variant="outline" onClick={onCancel}>
-              Cancel
-            </Button>
-            <Button size="md" variant="primary" onClick={() => onCreate(name, color)}>
-              Create label
-            </Button>
-          </div>
-        </Dialog.Content>
-      </Dialog.Portal>
-    </Dialog.Root>
+    <Dialog isOpen onOpenChange={(o) => !o && onCancel()} width={360} purpose="form">
+      <DialogHeader
+        title="New label"
+        subtitle={`Pick a colour for ${name}.`}
+        onOpenChange={(o) => !o && onCancel()}
+      />
+      <div className="p-4">
+        <ColorPicker value={color} onChange={setColor} />
+        <div className="mt-4 flex justify-end gap-2">
+          <Button
+            onClick={onCancel}
+            label="Cancel"
+            variant="secondary"
+            elevation="low"
+            size="md"
+          />
+          <Button
+            onClick={() => onCreate(name, color)}
+            label="Create label"
+            variant="primary"
+            size="md"
+          />
+        </div>
+      </div>
+    </Dialog>
   );
 }

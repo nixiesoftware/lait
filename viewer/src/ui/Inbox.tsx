@@ -1,4 +1,3 @@
-import * as Popover from "@radix-ui/react-popover";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AtSign, CheckCheck, Inbox as InboxIcon, MessageSquare, RotateCcw, Settings2, SignalHigh, Timer } from "lucide-react";
 
@@ -13,7 +12,8 @@ import {
 import type { InboxEntry } from "../types";
 import { ApplicationState, EmptyState, LoadingState } from "./AppState";
 import { Combobox } from "./Picker";
-import { Button, Checkbox, IconButton, InlineAction, interactiveRow, OverlayGap, PopoverContent } from "./primitives";
+import { Button, CheckboxInput, IconButton, Link, Popover } from "@astryxdesign/core";
+import { interactiveRow } from "./primitives";
 import { short, when } from "./time";
 
 /**
@@ -102,7 +102,13 @@ export function Inbox({
           kind="retry"
           title="Inbox unavailable"
           body={error}
-          action={<Button onClick={() => void load(false)}><RotateCcw className="size-icon-sm" />Retry</Button>}
+          action={<Button
+                    onClick={() => void load(false)}
+                    icon={<RotateCcw className="size-icon-sm" />}
+                    label="Retry"
+                    variant="ghost"
+                    size="sm"
+                  />}
         />
       );
     }
@@ -170,31 +176,31 @@ export function Inbox({
           <Button
             onClick={() => void load(true)}
             className="ml-auto"
-          >
-            <CheckCheck className="size-icon-sm" />
-            Mark {unreadCount === 1 ? "notification" : `all ${unreadCount} notifications`} read
-          </Button>
+            icon={<CheckCheck className="size-icon-sm" />}
+            label={`Mark ${unreadCount === 1 ? "notification" : `all ${unreadCount} notifications`} read`}
+            variant="ghost"
+            size="sm"
+          />
         )}
-        <Popover.Root>
-          <Popover.Trigger asChild>
-            <Button className="ml-auto" aria-label="Inbox preferences">
-              <Settings2 className="size-icon-sm" /> Preferences
-            </Button>
-          </Popover.Trigger>
-          <PopoverContent align="end" sideOffset={OverlayGap.panel} className="w-64 p-3">
+        <Popover
+          alignment="end"
+          content={
+            <div className="w-64 p-3">
               <h2 className="mb-1 text-sm font-medium">Inbox preferences</h2>
               <p className="text-mute mb-3 text-xs">Local controls for what is shown on this device. The daemon still delivers the complete feed.</p>
               {(["assigned", "comment", "status"] as InboxKind[]).map((kind) => (
-                <label key={kind} className="hover:bg-hover flex min-h-ctl-lg items-center gap-2 rounded-control px-1.5 text-sm">
-                  <Checkbox
-                    checked={preferences.kinds[kind]}
-                    onCheckedChange={(checked) => savePreferences({
+                <CheckboxInput
+                  key={kind}
+                  label={causeLabel(kind)}
+                  value={preferences.kinds[kind]}
+                  onChange={(checked) =>
+                    savePreferences({
                       ...preferences,
-                      kinds: { ...preferences.kinds, [kind]: checked === true },
-                    })}
-                  />
-                  {causeLabel(kind)}
-                </label>
+                      kinds: { ...preferences.kinds, [kind]: checked },
+                    })
+                  }
+                  className="hover:bg-hover flex min-h-ctl-lg items-center gap-2 rounded-control px-1.5 text-sm"
+                />
               ))}
               <div className="bg-line my-2 h-px" />
               <span className="text-mute block text-xs">Group notifications</span>
@@ -214,9 +220,30 @@ export function Inbox({
                   }
                 />
               </div>
-              {snoozedCount > 0 && <InlineAction onClick={() => savePreferences({ ...preferences, snoozed: {} })} className="mt-3">Restore {snoozedCount} snoozed</InlineAction>}
-          </PopoverContent>
-        </Popover.Root>
+              {/* A text action inside prose is a Link, not a button wearing a
+                  variant that removes its capsule — which is all lait's
+                  `inline` variant ever was. */}
+              {snoozedCount > 0 && (
+                <Link
+                  onClick={() => savePreferences({ ...preferences, snoozed: {} })}
+                  className="mt-3"
+                  isStandalone
+                >
+                  Restore {snoozedCount} snoozed
+                </Link>
+              )}
+            </div>
+          }
+        >
+          <Button
+            className="ml-auto"
+            aria-label="Inbox preferences"
+            icon={<Settings2 className="size-icon-sm" />}
+            label="Preferences"
+            variant="ghost"
+            size="sm"
+          />
+        </Popover>
       </div>
 
       {entries.length === 0 ? (
@@ -289,12 +316,19 @@ export function Inbox({
                   setReadState(e, !isUnread(e, i));
                 }}
                 aria-label={`${isUnread(e, i) ? "Mark read" : "Mark unread on this device"}: ${e.title}`}
-              >
-                {isUnread(e, i) ? "Mark read" : "Mark unread"}
-              </Button>
-              <IconButton label={`Snooze for one hour: ${e.title}`} onClick={(event) => { event.stopPropagation(); snooze(e); }} className="opacity-0 group-hover:opacity-100 group-focus-within:opacity-100">
-                <Timer className="size-icon-sm" />
-              </IconButton>
+                label={isUnread(e, i) ? "Mark read" : "Mark unread"}
+                variant="ghost"
+                size="sm"
+              />
+              <IconButton
+                label={`Snooze for one hour: ${e.title}`}
+                onClick={(event) => { event.stopPropagation(); snooze(e); }}
+                className="opacity-0 group-hover:opacity-100 group-focus-within:opacity-100"
+                variant="ghost"
+                size="sm"
+                tooltip={`Snooze for one hour: ${e.title}`}
+                icon={<Timer className="size-icon-sm" />}
+              />
             </li>
               ))}
               </ul>

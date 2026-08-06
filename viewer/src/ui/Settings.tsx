@@ -25,7 +25,8 @@ import { StatusIcon } from "./icons";
 import { Breadcrumbs, DestinationCrumb, SurfaceHeader, WorkspaceCrumb } from "./layout";
 import { Members } from "./Members";
 import { Combobox } from "./Picker";
-import { Button, cn, IconButton, Input, navigationItem, Textarea } from "./primitives";
+import { Button, IconButton, TextArea, TextInput } from "@astryxdesign/core";
+import { cn, navigationItem } from "./primitives";
 
 type Tab = "general" | "members" | "devices" | "labels" | "workflow" | "access";
 
@@ -115,9 +116,14 @@ export function Settings({
           about to administer. */}
       <SurfaceHeader
         leading={
-          <IconButton label="Back to app" onClick={onExit}>
-            <ArrowLeft className="size-icon-md" />
-          </IconButton>
+          <IconButton
+            label="Back to app"
+            onClick={onExit}
+            variant="ghost"
+            size="sm"
+            tooltip="Back to app"
+            icon={<ArrowLeft className="size-icon-md" />}
+          />
         }
         trail={
           <Breadcrumbs
@@ -263,32 +269,45 @@ function GeneralPanel({
     <>
       <Section title="Space name" hint="A mutable display label. The space's identity (below) never changes.">
         <div className="flex items-center gap-2">
-          <Input
+          <TextInput
+            label="Space name"
+            isLabelHidden
             value={name}
-            disabled={readOnly}
-            onChange={(e) => setName(e.target.value)}
+            isDisabled={readOnly}
+            onChange={setName}
             className="max-w-sm"
-            aria-label="Space name"
           />
-          <Button variant="primary" size="md" disabled={!dirty || readOnly} loading={saving} onClick={() => void save()}>
-            Update
-          </Button>
+          <Button
+            isDisabled={!dirty || readOnly}
+            isLoading={saving}
+            onClick={() => void save()}
+            label="Update"
+            variant="primary"
+            size="md"
+          />
         </div>
       </Section>
       <Section title="Description" hint="A short overview of what this space is for. Shared with everyone in the space.">
         <div className="flex max-w-lg flex-col items-start gap-2">
-          <Textarea
+          <TextArea
+            label="Description"
+            isLabelHidden
             value={description}
-            disabled={readOnly}
+            isDisabled={readOnly}
             rows={3}
             placeholder="What is this space for? Goals, scope, links…"
-            onChange={(e) => setDescription(e.target.value)}
+            onChange={setDescription}
             aria-label="Space description"
           />
           {!readOnly && (
-            <Button variant="primary" size="md" disabled={!descDirty} loading={savingDesc} onClick={() => void saveDescription()}>
-              Save description
-            </Button>
+            <Button
+              isDisabled={!descDirty}
+              isLoading={savingDesc}
+              onClick={() => void saveDescription()}
+              label="Save description"
+              variant="primary"
+              size="md"
+            />
           )}
         </div>
       </Section>
@@ -387,8 +406,7 @@ function DevicesPanel({
                 {!readOnly && !line.includes("(this device)") && (
                   <IconButton
                     label="Revoke this device"
-                    variant="danger"
-                    disabled={busy !== ""}
+                    isDisabled={busy !== ""}
                     onClick={() =>
                       void act("revoke", async () => {
                         const device = line.trim().split(/\s+/)[0] ?? "";
@@ -405,9 +423,11 @@ function DevicesPanel({
                         return reply.kind === "ok" ? reply.message : null;
                       })
                     }
-                  >
-                    <Trash2 className="size-icon-sm" />
-                  </IconButton>
+                    variant="danger"
+                    size="sm"
+                    tooltip="Revoke this device"
+                    icon={<Trash2 className="size-icon-sm" />}
+                  />
                 )}
               </li>
             ))}
@@ -425,9 +445,8 @@ function DevicesPanel({
               <div className="flex items-center gap-2">
                 <span className="flex-1">Mint an enrolment token on this machine.</span>
                 <Button
-                  size="md"
-                  loading={busy === "invite"}
-                  disabled={busy !== ""}
+                  isLoading={busy === "invite"}
+                  isDisabled={busy !== ""}
                   onClick={() =>
                     void act("invite", async () => {
                       const reply = await spaceRpc(spaceId, { cmd: "device_invite" });
@@ -435,10 +454,11 @@ function DevicesPanel({
                       return null;
                     })
                   }
-                >
-                  <KeyRound className="size-icon-sm" />
-                  Mint token
-                </Button>
+                  icon={<KeyRound className="size-icon-sm" />}
+                  label="Mint token"
+                  variant="ghost"
+                  size="md"
+                />
               </div>
               {token && (
                 <code className="border-line bg-raised mt-2 block rounded-surface border p-2 font-mono text-xs break-all">
@@ -454,9 +474,8 @@ function DevicesPanel({
               <div className="flex items-center gap-2">
                 <span className="flex-1">Paste the signed consent it hands back.</span>
                 <Button
-                  size="md"
-                  loading={busy === "add"}
-                  disabled={busy !== ""}
+                  isLoading={busy === "add"}
+                  isDisabled={busy !== ""}
                   onClick={() =>
                     void act("add", async () => {
                       const consent = await ask.prompt({
@@ -473,9 +492,10 @@ function DevicesPanel({
                       return reply.kind === "ok" ? reply.message : null;
                     })
                   }
-                >
-                  Add device
-                </Button>
+                  label="Add device"
+                  variant="ghost"
+                  size="md"
+                />
               </div>
             </li>
           </ol>
@@ -488,24 +508,25 @@ function DevicesPanel({
           hint="Your share of this space's recovery authority, sealed with a passphrase. Export it somewhere you will still have when this machine is gone; import it when the status panel says the share is missing or unreadable."
         >
           <div className="flex max-w-lg flex-col gap-2">
-            <Input
+            <TextInput
+              label="Custody file path"
+              isLabelHidden
               value={custodyPath}
               placeholder="Path on the machine running lait"
-              aria-label="Custody file path"
-              onChange={(e) => setCustodyPath(e.target.value)}
+              onChange={setCustodyPath}
             />
-            <Input
+            <TextInput
               type="password"
+              label="Custody passphrase"
+              isLabelHidden
               value={passphrase}
               placeholder="Passphrase"
-              aria-label="Custody passphrase"
-              onChange={(e) => setPassphrase(e.target.value)}
+              onChange={setPassphrase}
             />
             <div className="flex items-center gap-2">
               <Button
-                size="md"
-                loading={busy === "export"}
-                disabled={busy !== "" || !custodyPath.trim() || passphrase === ""}
+                isLoading={busy === "export"}
+                isDisabled={busy !== "" || !custodyPath.trim() || passphrase === ""}
                 onClick={() =>
                   void act("export", async () => {
                     const reply = await spaceRpc(spaceId, {
@@ -517,13 +538,16 @@ function DevicesPanel({
                     return reply.kind === "ok" ? reply.message : null;
                   })
                 }
-              >
-                Export share
-              </Button>
+                label="Export share"
+                variant="ghost"
+                size="md"
+              />
               <Button
                 size="md"
-                loading={busy === "import"}
-                disabled={busy !== "" || !custodyPath.trim() || passphrase === ""}
+                variant="ghost"
+                label="Import share"
+                isLoading={busy === "import"}
+                isDisabled={busy !== "" || !custodyPath.trim() || passphrase === ""}
                 onClick={() =>
                   void act("import", async () => {
                     const reply = await spaceRpc(spaceId, {
@@ -616,9 +640,7 @@ function LabelsPanel({
               <span className="min-w-0 flex-1 truncate text-sm">{l.name}</span>
               {!readOnly && (
                 <span className="flex items-center gap-0.5 opacity-0 group-hover/label:opacity-100 focus-within:opacity-100">
-                  <Button variant="ghost" onClick={() => setEditing(l.id)}>
-                    Edit
-                  </Button>
+                  <Button onClick={() => setEditing(l.id)} label="Edit" variant="ghost" size="sm" />
                   <IconButton
                     label={`Delete ${l.name}`}
                     onClick={() =>
@@ -633,9 +655,11 @@ function LabelsPanel({
                           if (ok) void send(() => rpc(spaceId, { cmd: "label_delete", label: l.id }));
                         })
                     }
-                  >
-                    <Trash2 className="size-icon-sm" />
-                  </IconButton>
+                    variant="ghost"
+                    size="sm"
+                    tooltip={`Delete ${l.name}`}
+                    icon={<Trash2 className="size-icon-sm" />}
+                  />
                 </span>
               )}
             </li>
@@ -660,18 +684,31 @@ function LabelsPanel({
             />
             <ColorPicker value={newColor} onChange={setNewColor} />
             <div className="flex justify-end gap-2">
-              <Button variant="outline" onClick={() => setCreating(false)}>
-                Cancel
-              </Button>
-              <Button variant="primary" disabled={!newName.trim()} onClick={create}>
-                Create label
-              </Button>
+              <Button
+                onClick={() => setCreating(false)}
+                label="Cancel"
+                variant="secondary"
+                elevation="low"
+                size="sm"
+              />
+              <Button
+                isDisabled={!newName.trim()}
+                onClick={create}
+                label="Create label"
+                variant="primary"
+                size="sm"
+              />
             </div>
           </div>
         ) : (
-          <Button variant="outline" className="mt-3" onClick={() => setCreating(true)}>
-            New label
-          </Button>
+          <Button
+            className="mt-3"
+            onClick={() => setCreating(true)}
+            label="New label"
+            variant="secondary"
+            elevation="low"
+            size="sm"
+          />
         ))}
     </Section>
   );
@@ -703,12 +740,14 @@ function LabelEditor({
       />
       <ColorPicker value={color} onChange={setColor} />
       <div className="flex justify-end gap-2">
-        <Button variant="outline" onClick={onCancel}>
-          Cancel
-        </Button>
-        <Button variant="primary" disabled={!name.trim()} onClick={() => onSave(name.trim(), color)}>
-          Save
-        </Button>
+        <Button onClick={onCancel} label="Cancel" variant="secondary" elevation="low" size="sm" />
+        <Button
+          isDisabled={!name.trim()}
+          onClick={() => onSave(name.trim(), color)}
+          label="Save"
+          variant="primary"
+          size="sm"
+        />
       </div>
     </li>
   );
@@ -890,15 +929,21 @@ function WorkflowPanel({
               </p>
               <div className="flex gap-2">
                 <Button
-                  variant="outline"
-                  disabled={!dirty}
+                  isDisabled={!dirty}
                   onClick={() => setDraft(wf.revision!.body.states.map((s) => ({ ...s })))}
-                >
-                  Reset
-                </Button>
-                <Button variant="primary" disabled={!dirty} loading={saving} onClick={() => void save()}>
-                  Save workflow
-                </Button>
+                  label="Reset"
+                  variant="secondary"
+                  elevation="low"
+                  size="sm"
+                />
+                <Button
+                  isDisabled={!dirty}
+                  isLoading={saving}
+                  onClick={() => void save()}
+                  label="Save workflow"
+                  variant="primary"
+                  size="sm"
+                />
               </div>
             </div>
           )}
@@ -1148,15 +1193,14 @@ function AccessPanel({
               onPick={(id) => setGrantProject(id === "" ? null : id)}
             />
             <Button
+              isDisabled={!grantActor || !grantRole || busy}
+              isLoading={busy}
+              onClick={() => void grant()}
+              icon={<ShieldPlus className="size-icon-sm" />}
+              label="Grant"
               variant="primary"
               size="md"
-              disabled={!grantActor || !grantRole || busy}
-              loading={busy}
-              onClick={() => void grant()}
-            >
-              <ShieldPlus className="size-icon-sm" />
-              Grant
-            </Button>
+            />
           </div>
         )}
 
@@ -1180,13 +1224,14 @@ function AccessPanel({
                     {!readOnly && (
                       <IconButton
                         label={`Revoke ${row.capability}`}
-                        variant="danger"
-                        disabled={busy}
+                        isDisabled={busy}
                         className="ml-auto"
                         onClick={() => revoke(row)}
-                      >
-                        <X className="size-icon-sm" />
-                      </IconButton>
+                        variant="danger"
+                        size="sm"
+                        tooltip={`Revoke ${row.capability}`}
+                        icon={<X className="size-icon-sm" />}
+                      />
                     )}
                   </li>
                 ))}

@@ -1,8 +1,6 @@
 import { useEffect, useState } from "react";
-import * as AlertDialog from "@radix-ui/react-alert-dialog";
-import * as Dialog from "@radix-ui/react-dialog";
 
-import { Button, Input } from "./primitives";
+import { AlertDialog, Button, Dialog, DialogHeader, TextInput } from "@astryxdesign/core";
 
 /**
  * Ask the user something, using our components.
@@ -16,12 +14,13 @@ import { Button, Input } from "./primitives";
  * reads the same as the `window.prompt` it replaces, so the call sites stayed
  * simple and nothing had to be restructured into dialog state to gain a dialog.
  *
- * Radix does the parts that are tedious and invisible until they're wrong: focus
+ * Astryx does the parts that are tedious and invisible until they're wrong: focus
  * trap, restore-focus-on-close, Escape, `aria-modal`, and scroll locking.
  * `AlertDialog` for confirmations rather than `Dialog`, because it is the
  * semantically different one — it interrupts, it demands a choice, and it does not
  * close on an outside click, which is precisely what you want between someone and
- * a destructive verb.
+ * a destructive verb. Its `title`/`description`/`actionLabel` are required props,
+ * so the a11y wiring is not something a call site can forget.
  */
 
 interface PromptReq {
@@ -95,81 +94,73 @@ export function DialogHost() {
 
   if (req.kind === "confirm") {
     return (
-      <AlertDialog.Root open onOpenChange={(o) => !o && settle(false)}>
-        <AlertDialog.Portal>
-          <AlertDialog.Overlay className="ui-overlay fixed inset-0 z-50 bg-black/45 backdrop-blur-[2px]" />
-          <AlertDialog.Content className="ui-surface border-line-strong bg-raised shadow-overlay fixed top-1/2 left-1/2 z-50 w-[min(440px,92vw)] -translate-x-1/2 -translate-y-1/2 rounded-surface border p-4">
-            <AlertDialog.Title className="text-lg font-semibold">{req.title}</AlertDialog.Title>
-            {req.body && (
-              <AlertDialog.Description className="text-dim mt-2">{req.body}</AlertDialog.Description>
-            )}
-            <div className="mt-4 flex justify-end gap-2">
-              <AlertDialog.Cancel asChild>
-                <Button size="md" variant="outline">
-                  Cancel
-                </Button>
-              </AlertDialog.Cancel>
-              <AlertDialog.Action asChild>
-                <Button
-                  size="md"
-                  variant={req.danger ? "destructive" : "primary"}
-                  onClick={() => settle(true)}
-                >
-                  {req.confirmText ?? "Confirm"}
-                </Button>
-              </AlertDialog.Action>
-            </div>
-          </AlertDialog.Content>
-        </AlertDialog.Portal>
-      </AlertDialog.Root>
+      <AlertDialog
+        isOpen
+        onOpenChange={(open) => !open && settle(false)}
+        title={req.title}
+        description={req.body ?? ""}
+        actionLabel={req.confirmText ?? "Confirm"}
+        actionVariant={req.danger ? "destructive" : "primary"}
+        onAction={() => settle(true)}
+      />
     );
   }
 
   const empty = value.trim() === "" && !req.allowEmpty;
 
   return (
-    <Dialog.Root open onOpenChange={(o) => !o && settle(null)}>
-      <Dialog.Portal>
-        <Dialog.Overlay className="ui-overlay fixed inset-0 z-50 bg-black/45 backdrop-blur-[2px]" />
-        <Dialog.Content className="ui-surface border-line-strong bg-raised shadow-overlay fixed top-[18vh] left-1/2 z-50 w-[min(480px,92vw)] -translate-x-1/2 rounded-surface border">
-          <form
-            onSubmit={(e) => {
-              e.preventDefault();
-              if (!empty) settle(req.allowEmpty ? value : value.trim());
-            }}
-          >
-            <div className="border-line border-b p-4">
-              <Dialog.Title className="font-semibold">{req.title}</Dialog.Title>
-              {req.body && (
-                <Dialog.Description className="text-dim mt-1 text-sm">{req.body}</Dialog.Description>
-              )}
-            </div>
-            <div className="p-4">
-              {req.label && <label className="text-mute mb-1 block text-2xs uppercase">{req.label}</label>}
-              <Input
-                autoFocus
-                value={value}
-                placeholder={req.placeholder}
-                onChange={(e) => setValue(e.target.value)}
-                // Radix closes on Escape; stopping propagation keeps the app's
-                // global keymap from also acting on the same keystroke.
-                onKeyDown={(e) => e.stopPropagation()}
-                className="w-full"
-              />
-            </div>
-            <div className="border-line flex justify-end gap-2 border-t p-3">
-              <Dialog.Close asChild>
-                <Button size="md" variant="outline" type="button">
-                  Cancel
-                </Button>
-              </Dialog.Close>
-              <Button size="md" variant="primary" type="submit" disabled={empty}>
-                {req.confirmText ?? "Save"}
-              </Button>
-            </div>
-          </form>
-        </Dialog.Content>
-      </Dialog.Portal>
-    </Dialog.Root>
+    <Dialog
+      isOpen
+      onOpenChange={(open) => !open && settle(null)}
+      width={480}
+      // `form`, not `info`: a half-typed answer should survive a stray click on
+      // the backdrop. Escape still closes, which is the behaviour a prompt
+      // replacing `window.prompt` has to keep.
+      purpose="form"
+    >
+      <DialogHeader
+        title={req.title}
+        {...(req.body ? { subtitle: req.body } : {})}
+        onOpenChange={(open) => !open && settle(null)}
+      />
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (!empty) settle(req.allowEmpty ? value : value.trim());
+        }}
+      >
+        <div className="p-4">
+          <TextInput
+            label={req.label ?? "Answer"}
+            isLabelHidden={!req.label}
+            hasAutoFocus
+            value={value}
+            {...(req.placeholder ? { placeholder: req.placeholder } : {})}
+            onChange={setValue}
+            // The dialog closes on Escape itself; stopping propagation keeps the
+            // app's global keymap from also acting on the same keystroke.
+            onKeyDown={(e) => e.stopPropagation()}
+            width="100%"
+          />
+        </div>
+        <div className="border-line flex justify-end gap-2 border-t p-3">
+          <Button
+            type="button"
+            label="Cancel"
+            variant="secondary"
+            elevation="low"
+            size="md"
+            onClick={() => settle(null)}
+          />
+          <Button
+            type="submit"
+            isDisabled={empty}
+            label={req.confirmText ?? "Save"}
+            variant="primary"
+            size="md"
+          />
+        </div>
+      </form>
+    </Dialog>
   );
 }

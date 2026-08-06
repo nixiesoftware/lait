@@ -1,13 +1,12 @@
+import { Dialog, Divider, DropdownMenu, DropdownMenuItem, Switch } from "@astryxdesign/core";
 import { useEffect, useState } from "react";
-import * as Dialog from "@radix-ui/react-dialog";
-import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { LayoutTemplate, Trash2, X } from "lucide-react";
 
 import { rpc } from "../api";
 import { clearDraft, loadDraft, saveDraft } from "../core/drafts";
 import { loadTemplates, removeTemplate, saveTemplate, type IssueTemplate } from "../core/templates";
 import * as ask from "./dialogs";
-import { MenuContent, MenuItem } from "./layout";
+
 import {
   PRIORITY_ORDER,
   type LabelDto,
@@ -22,7 +21,8 @@ import { PriorityIcon, StatusIcon } from "./icons";
 import { Combobox } from "./Picker";
 import { DatePicker } from "./DatePicker";
 import { NewLabelDialog } from "./NewLabel";
-import { Button, IconButton, Kbd, Switch } from "./primitives";
+import { Button, IconButton } from "@astryxdesign/core";
+import { Kbd } from "./primitives";
 import { short } from "./time";
 
 /**
@@ -189,65 +189,73 @@ export function NewIssue({
 
   return (
     <>
-    <Dialog.Root open onOpenChange={(o) => !o && onClose()}>
-      <Dialog.Portal>
-        <Dialog.Overlay className="ui-overlay fixed inset-0 z-50 bg-black/45 backdrop-blur-[2px]" />
-        <Dialog.Content
-          className="ui-surface border-line-strong bg-raised shadow-overlay fixed top-[12vh] left-1/2 z-50 flex w-[min(640px,94vw)] -translate-x-1/2 flex-col rounded-surface border"
-          // The title lives in the body as the composer's own input, so the
-          // accessible name is given here rather than rendered twice.
-          aria-describedby={undefined}
-        >
+    {/* The title lives in the body as the composer's own input, so the header
+        names the dialog rather than rendering a second title. `purpose="form"`
+        keeps a stray backdrop click from discarding a half-written issue. */}
+    <Dialog isOpen onOpenChange={(o) => !o && onClose()} width={640} purpose="form">
           <header className="flex items-center gap-2 px-4 pt-3">
             <span className="border-line text-dim rounded-mark border px-1.5 py-px font-mono text-2xs">
               {projectKey}
             </span>
             <span className="text-mute">›</span>
-            <Dialog.Title className="text-dim text-sm">New issue</Dialog.Title>
-            <DropdownMenu.Root open={templateMenu} onOpenChange={setTemplateMenu}>
-              <DropdownMenu.Trigger asChild>
-                <IconButton label="Templates" className="ml-auto">
-                  <LayoutTemplate className="size-icon-md" />
-                </IconButton>
-              </DropdownMenu.Trigger>
-              <DropdownMenu.Portal>
-                <MenuContent align="end" className="w-56">
-                  <DropdownMenu.Label className="text-mute px-2 py-1 text-2xs font-semibold uppercase">
-                    Templates
-                  </DropdownMenu.Label>
-                  {templates.length === 0 && (
-                    <p className="text-mute px-2 py-1 text-xs">None yet — fill the fields, then save.</p>
-                  )}
-                  {templates.map((t) => (
-                    <div key={t.id} className="hover:bg-hover flex items-center rounded-control">
-                      <button
-                        onClick={() => applyTemplate(t)}
-                        className="min-w-0 flex-1 truncate px-2 py-1.5 text-left text-sm"
-                      >
-                        {t.name}
-                      </button>
-                      <IconButton
-                        label={`Delete template ${t.name}`}
-                        className="mr-0.5"
-                        onClick={() => setTemplates(removeTemplate(canonicalSpaceId, t.id))}
-                      >
-                        <Trash2 className="size-icon-sm" />
-                      </IconButton>
-                    </div>
-                  ))}
-                  <DropdownMenu.Separator className="bg-line my-1 h-px" />
-                  <MenuItem onSelect={() => void saveAsTemplate()} disabled={!title.trim()}>
-                    <LayoutTemplate className="size-icon-sm" />
-                    Save current as template…
-                  </MenuItem>
-                </MenuContent>
-              </DropdownMenu.Portal>
-            </DropdownMenu.Root>
-            <Dialog.Close asChild>
-              <IconButton label="Close" chord="Esc">
-                <X className="size-icon-md" />
-              </IconButton>
-            </Dialog.Close>
+            <h2 className="text-dim text-sm">New issue</h2>
+            <DropdownMenu
+              isMenuOpen={templateMenu}
+              onOpenChange={setTemplateMenu}
+              alignment="end"
+              hasChevron={false}
+              menuWidth={224}
+              button={{
+                label: "Templates",
+                className: "ml-auto",
+                variant: "ghost",
+                size: "sm",
+                isIconOnly: true,
+                tooltip: "Templates",
+                icon: <LayoutTemplate className="size-icon-md" />,
+              }}
+            >
+              <div className="text-mute px-2 py-1 text-2xs font-semibold uppercase">Templates</div>
+              {templates.length === 0 && (
+                <p className="text-mute px-2 py-1 text-xs">None yet — fill the fields, then save.</p>
+              )}
+              {/* Not a DropdownMenuItem: a template row carries a second verb
+                  (delete) on its trailing edge, and an item is one action. */}
+              {templates.map((t) => (
+                <div key={t.id} className="hover:bg-hover flex items-center rounded-control">
+                  <button
+                    onClick={() => applyTemplate(t)}
+                    className="min-w-0 flex-1 truncate px-2 py-1.5 text-left text-sm"
+                  >
+                    {t.name}
+                  </button>
+                  <IconButton
+                    label={`Delete template ${t.name}`}
+                    className="mr-0.5"
+                    onClick={() => setTemplates(removeTemplate(canonicalSpaceId, t.id))}
+                    variant="ghost"
+                    size="sm"
+                    tooltip={`Delete template ${t.name}`}
+                    icon={<Trash2 className="size-icon-sm" />}
+                  />
+                </div>
+              ))}
+              <Divider />
+              <DropdownMenuItem
+                label="Save current as template…"
+                icon={<LayoutTemplate className="size-icon-sm" />}
+                isDisabled={!title.trim()}
+                onClick={() => void saveAsTemplate()}
+              />
+            </DropdownMenu>
+            <IconButton
+              label="Close"
+              onClick={onClose}
+              variant="ghost"
+              size="sm"
+              tooltip="Close  Esc"
+              icon={<X className="size-icon-md" />}
+            />
           </header>
 
           <div className="flex flex-col gap-1 px-4 pt-2">
@@ -407,12 +415,10 @@ export function NewIssue({
                     : "Draft saves on this device"}
             </span>
             <div className="text-mute flex items-center gap-2 text-sm">
-              <Switch id="create-more" checked={again} onCheckedChange={setAgain} />
-              <label htmlFor="create-more">Create more</label>
+              <Switch label="Create more" value={again} onChange={setAgain} size="sm" />
             </div>
             {(title || body) && !busy && (
               <Button
-                variant="ghost"
                 onClick={() => {
                   clearDraft(canonicalSpaceId, draftSubject, "new-title");
                   clearDraft(canonicalSpaceId, draftSubject, "new-body");
@@ -420,20 +426,24 @@ export function NewIssue({
                   setBody("");
                   onClose();
                 }}
-              >
-                Discard draft
-              </Button>
+                label="Discard draft"
+                variant="ghost"
+                size="sm"
+              />
             )}
             <span className="ml-auto flex items-center gap-2">
               <Kbd>↵</Kbd>
-              <Button variant="primary" size="md" disabled={!title.trim()} loading={busy} onClick={() => void create()}>
-                {busy ? "Creating…" : "Create issue"}
-              </Button>
+              <Button
+                isDisabled={!title.trim()}
+                isLoading={busy}
+                onClick={() => void create()}
+                label={busy ? "Creating…" : "Create issue"}
+                variant="primary"
+                size="md"
+              />
             </span>
           </footer>
-        </Dialog.Content>
-      </Dialog.Portal>
-    </Dialog.Root>
+    </Dialog>
     {newLabel !== null && (
       <NewLabelDialog
         name={newLabel}

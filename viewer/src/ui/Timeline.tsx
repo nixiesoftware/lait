@@ -1,10 +1,11 @@
+import { cn, interactiveRow } from "./primitives";
 import { useMemo } from "react";
 
 import type { ProjectDto } from "../types";
 import { tsToDate } from "../types";
 import { catalogColor } from "./colors";
 import { EmptyState } from "./AppState";
-import { Button } from "./primitives";
+import { Button } from "@astryxdesign/core";
 
 /**
  * The timeline / roadmap view — projects as horizontal bars across months.
@@ -87,21 +88,30 @@ export function Timeline({
             const width = Math.max(1.5, pct(e) - left);
             return (
               <div key={p.id} className="flex items-center gap-2">
-                <Button
+                {/* A row, not an action: Astryx's Button would add padding and a
+                    pill radius to a flat 48-wide label. */}
+                <button
+                  type="button"
                   onClick={() => onOpenProject(p.key)}
-                  className="w-48 justify-start truncate px-1 text-left"
+                  aria-label={p.name}
+                  className={cn(interactiveRow(), "w-48 justify-start truncate px-1 text-left")}
                 >
                   <span
                     className="size-mark-md shrink-0 rounded-full"
                     style={{ background: catalogColor(p.color) }}
                   />
                   <span className="truncate">{p.name}</span>
-                </Button>
+                </button>
                 <div className="relative h-6 flex-1">
-                  <Button
+                  {/* The bar IS the graphic — a coloured span you can click. It
+                      is not a Button, and giving it one's padding, radius and
+                      focus ring was always going to fight `h-5 p-0`. */}
+                  <button
+                    type="button"
                     onClick={() => onOpenProject(p.key)}
+                    aria-label={p.name}
                     title={`${p.name}${p.start_date == null ? " (no start)" : ""}${p.target_date == null ? " (no target)" : ""}`}
-                    className="absolute top-0.5 h-5 p-0"
+                    className="absolute top-0.5 h-5 rounded-mark p-0"
                     style={{
                       left: `${left}%`,
                       width: `${width}%`,
@@ -125,14 +135,12 @@ export function Timeline({
                 <Button
                   key={p.id}
                   onClick={() => onOpenProject(p.key)}
-                  variant="outline"
-                >
-                  <span
-                    className="size-mark-md rounded-full"
-                    style={{ background: catalogColor(p.color) }}
-                  />
-                  {p.name}
-                </Button>
+                  icon={<span className="size-mark-md rounded-full" style={{ background: catalogColor(p.color) }} />}
+                  label={p.name}
+                  variant="secondary"
+                  elevation="low"
+                  size="sm"
+                />
               ))}
             </div>
           </div>

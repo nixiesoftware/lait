@@ -16,9 +16,9 @@ import { Markdown } from "./Markdown";
 import { MarkdownEditor } from "./MarkdownEditor";
 import { Combobox } from "./Picker";
 import { MilestoneIcon } from "./icons";
-import { Button, cn, IconButton, PopoverContent } from "./primitives";
+import { Button, IconButton, Popover } from "@astryxdesign/core";
+import { cn } from "./primitives";
 import { when } from "./time";
-import * as Popover from "@radix-ui/react-popover";
 
 /** The health signals a project update can carry — Linear's on-track palette. */
 const HEALTH: Record<string, { label: string; tone: string }> = {
@@ -70,25 +70,27 @@ export function ProjectOverview({
           <div className="min-w-0 max-w-[35rem]">
             <div className="mb-4 flex items-center gap-2">
               {!readOnly ? (
-                <Popover.Root>
-                  <Popover.Trigger asChild>
-                    <button
-                      aria-label="Project colour"
-                      className="hover:ring-line-strong rounded-mark p-0.5 hover:ring-1"
-                    >
-                      <span
-                        className="block size-mark-xl rounded-mark"
-                        style={{ background: catalogColor(project.color) }}
+                <Popover
+                  alignment="start"
+                  content={
+                    <div className="p-2">
+                      <ColorPicker
+                        value={project.color}
+                        onChange={(color) => void edit({ color })}
                       />
-                    </button>
-                  </Popover.Trigger>
-                  <PopoverContent align="start" className="p-2">
-                    <ColorPicker
-                      value={project.color}
-                      onChange={(color) => void edit({ color })}
+                    </div>
+                  }
+                >
+                  <button
+                    aria-label="Project colour"
+                    className="hover:ring-line-strong rounded-mark p-0.5 hover:ring-1"
+                  >
+                    <span
+                      className="block size-mark-xl rounded-mark"
+                      style={{ background: catalogColor(project.color) }}
                     />
-                  </PopoverContent>
-                </Popover.Root>
+                  </button>
+                </Popover>
               ) : (
                 <span
                   className="block size-mark-xl rounded-mark"
@@ -117,13 +119,15 @@ export function ProjectOverview({
                 <IconButton
                   label={project.archived ? "Restore project" : "Archive project"}
                   onClick={() => void edit({ archived: !project.archived })}
-                >
-                  {project.archived ? (
+                  variant="ghost"
+                  size="sm"
+                  tooltip={project.archived ? "Restore project" : "Archive project"}
+                  icon={project.archived ? (
                     <ArchiveRestore className="size-icon-sm" />
                   ) : (
                     <Archive className="size-icon-sm" />
                   )}
-                </IconButton>
+                />
               )}
             </div>
             <Description
@@ -423,15 +427,14 @@ function Updates({
               onPick={setHealth}
             />
             <Button
+              className="ml-auto"
+              isDisabled={!draft.trim() || posting}
+              isLoading={posting}
+              onClick={() => void post()}
+              label="Post update"
               variant="primary"
               size="md"
-              className="ml-auto"
-              disabled={!draft.trim() || posting}
-              loading={posting}
-              onClick={() => void post()}
-            >
-              Post update
-            </Button>
+            />
           </div>
         </div>
       )}

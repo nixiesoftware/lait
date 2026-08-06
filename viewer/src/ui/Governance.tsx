@@ -1,12 +1,11 @@
 import { useEffect, useState } from "react";
-import * as Dialog from "@radix-ui/react-dialog";
 import { AlertTriangle, ArrowRight, ShieldCheck, X } from "lucide-react";
 
 import { rpc } from "../api";
 import type { StatusCategory } from "../types";
 import { catalogColor } from "./colors";
 import { StatusIcon } from "./icons";
-import { IconButton } from "./primitives";
+import { Dialog, IconButton } from "@astryxdesign/core";
 
 /**
  * The governance viewers — a project's workflow and the space's roles, read-only.
@@ -90,25 +89,20 @@ function Shell({
   children: React.ReactNode;
 }) {
   return (
-    <Dialog.Root open onOpenChange={(o) => !o && onClose()}>
-      <Dialog.Portal>
-        <Dialog.Overlay className="ui-overlay fixed inset-0 z-50 bg-black/45 backdrop-blur-[2px]" />
-        <Dialog.Content
-          aria-describedby={undefined}
-          className="ui-surface border-line-strong bg-raised shadow-overlay fixed top-[10vh] left-1/2 z-50 flex max-h-[75vh] w-[min(560px,94vw)] -translate-x-1/2 flex-col overflow-hidden rounded-surface border"
-        >
-          <header className="border-line flex shrink-0 items-center gap-2 border-b px-4 py-3">
-            <Dialog.Title className="font-semibold">{title}</Dialog.Title>
-            <Dialog.Close asChild>
-              <IconButton label="Close" chord="Esc" className="ml-auto">
-                <X className="size-icon-md" />
-              </IconButton>
-            </Dialog.Close>
-          </header>
-          <div className="flex flex-col gap-4 overflow-y-auto p-4">{children}</div>
-        </Dialog.Content>
-      </Dialog.Portal>
-    </Dialog.Root>
+    <Dialog isOpen onOpenChange={(o) => !o && onClose()} width={560} purpose="form">
+      <header className="border-line flex shrink-0 items-center gap-2 border-b px-4 py-3">
+        <h2 className="font-semibold">{title}</h2>
+        <IconButton
+            label="Close"
+            className="ml-auto"
+            variant="ghost"
+            size="sm"
+            tooltip="Close  Esc"
+            icon={<X className="size-icon-md" />}
+          />
+      </header>
+      <div className="flex flex-col gap-4 overflow-y-auto p-4">{children}</div>
+    </Dialog>
   );
 }
 

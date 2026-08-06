@@ -3,7 +3,8 @@ import { X } from "lucide-react";
 
 import { formatBinding } from "../core/keys";
 import { registry, type Bound, type Ctx } from "../core/registry";
-import { IconButton, Kbd } from "./primitives";
+import { IconButton } from "@astryxdesign/core";
+import { Kbd } from "./primitives";
 
 /**
  * The `?` overlay — the registry's second projection.
@@ -38,9 +39,14 @@ export function Shortcuts({ ctx, onClose }: { ctx: Ctx; onClose: () => void }) {
       >
         <header className="border-line flex items-center border-b px-4 py-3">
           <h2 className="flex-1 text-lg font-semibold">Keyboard shortcuts</h2>
-          <IconButton label="Close" chord="Esc" onClick={onClose}>
-            <X className="size-icon-md" />
-          </IconButton>
+          <IconButton
+            label="Close"
+            onClick={onClose}
+            variant="ghost"
+            size="sm"
+            tooltip="Close  Esc"
+            icon={<X className="size-icon-md" />}
+          />
         </header>
 
         {registry.warnings.length > 0 && (

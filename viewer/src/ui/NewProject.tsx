@@ -1,10 +1,10 @@
 import { useState } from "react";
-import * as Dialog from "@radix-ui/react-dialog";
 import { X } from "lucide-react";
 
 import { rpc } from "../api";
 import { ColorPicker } from "./ColorPicker";
-import { Button, FieldLabel, IconButton, Input, Kbd } from "./primitives";
+import { Button, Dialog, IconButton, TextInput } from "@astryxdesign/core";
+import { Kbd } from "./primitives";
 
 /**
  * The project composer.
@@ -72,83 +72,77 @@ export function NewProject({
   };
 
   return (
-    <Dialog.Root open onOpenChange={(o) => !o && onClose()}>
-      <Dialog.Portal>
-        <Dialog.Overlay className="ui-overlay fixed inset-0 z-50 bg-black/45 backdrop-blur-[2px]" />
-        <Dialog.Content
-          className="ui-surface border-line-strong bg-raised shadow-overlay fixed top-[18vh] left-1/2 z-50 w-[min(440px,92vw)] -translate-x-1/2 rounded-surface border"
-          aria-describedby={undefined}
-        >
-          <form
-            onSubmit={(e) => {
-              e.preventDefault();
-              void create();
+    <Dialog isOpen onOpenChange={(o) => !o && onClose()} width={440} purpose="form">
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          void create();
+        }}
+      >
+        <header className="border-line flex items-center gap-2 border-b p-4">
+          <h2 className="font-semibold">New project</h2>
+          <IconButton
+              label="Close"
+              className="ml-auto"
+              variant="ghost"
+              size="sm"
+              tooltip="Close  Esc"
+              icon={<X className="size-icon-md" />}
+            />
+        </header>
+
+        <div className="flex flex-col gap-3 p-4">
+          <TextInput
+            label="Name"
+            hasAutoFocus
+            value={name}
+            placeholder="Engineering"
+            onChange={setName}
+            onKeyDown={(e) => e.stopPropagation()}
+          />
+
+          <TextInput
+            label="Key"
+            value={derived}
+            placeholder="ENG"
+            onChange={(value) => {
+              setManual(true);
+              setKey(value);
             }}
-          >
-            <header className="border-line flex items-center gap-2 border-b p-4">
-              <Dialog.Title className="font-semibold">New project</Dialog.Title>
-              <Dialog.Close asChild>
-                <IconButton label="Close" chord="Esc" className="ml-auto">
-                  <X className="size-icon-md" />
-                </IconButton>
-              </Dialog.Close>
-            </header>
+            onKeyDown={(e) => e.stopPropagation()}
+            className="font-mono uppercase"
+            description={
+              upper
+                ? `Issues here will be ${upper}-1, ${upper}-2…`
+                : "Becomes the KEY in KEY-1 — 1–8 letters"
+            }
+            {...(problem !== null ? { status: { type: "error" as const, message: problem } } : {})}
+          />
 
-            <div className="flex flex-col gap-3 p-4">
-              <FieldLabel>
-                <span>Name</span>
-                <Input
-                  autoFocus
-                  value={name}
-                  placeholder="Engineering"
-                  onChange={(e) => setName(e.target.value)}
-                  onKeyDown={(e) => e.stopPropagation()}
-                />
-              </FieldLabel>
+          <div className="flex flex-col gap-1.5">
+            <span className="text-mute text-2xs uppercase">Color</span>
+            <ColorPicker value={color} onChange={setColor} />
+          </div>
+          {failure && (
+            <p className="border-danger/25 bg-danger/5 text-danger rounded-surface border p-2 text-xs" role="alert">
+              Project not created. Your name and key are still here: {failure}
+            </p>
+          )}
+        </div>
 
-              <FieldLabel>
-                <span>Key</span>
-                <Input
-                  value={derived}
-                  placeholder="ENG"
-                  onChange={(e) => {
-                    setManual(true);
-                    setKey(e.target.value);
-                  }}
-                  onKeyDown={(e) => e.stopPropagation()}
-                  className="font-mono uppercase"
-                  aria-invalid={problem !== null}
-                  aria-describedby="project-key-guidance"
-                />
-                <span id="project-key-guidance" className={`text-xs ${problem ? "text-danger" : "text-mute"}`}>
-                  {problem ??
-                    (upper
-                      ? `Issues here will be ${upper}-1, ${upper}-2…`
-                      : "Becomes the KEY in KEY-1 — 1–8 letters")}
-                </span>
-              </FieldLabel>
-
-              <div className="flex flex-col gap-1.5">
-                <span className="text-mute text-2xs uppercase">Color</span>
-                <ColorPicker value={color} onChange={setColor} />
-              </div>
-              {failure && (
-                <p className="border-danger/25 bg-danger/5 text-danger rounded-surface border p-2 text-xs" role="alert">
-                  Project not created. Your name and key are still here: {failure}
-                </p>
-              )}
-            </div>
-
-            <footer className="border-line flex items-center justify-end gap-2 border-t p-3">
-              <Kbd>↵</Kbd>
-              <Button size="md" variant="primary" type="submit" disabled={!ready} loading={busy}>
-                {busy ? "Creating…" : "Create project"}
-              </Button>
-            </footer>
-          </form>
-        </Dialog.Content>
-      </Dialog.Portal>
-    </Dialog.Root>
+        <footer className="border-line flex items-center justify-end gap-2 border-t p-3">
+          <Kbd>↵</Kbd>
+          <Button
+            type="submit"
+            isDisabled={!ready}
+            isLoading={busy}
+            label={busy ? "Creating…" : "Create project"}
+            variant="primary"
+            size="md"
+          />
+        </footer>
+      </form>
+    </Dialog>
   );
 }
 

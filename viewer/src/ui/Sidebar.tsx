@@ -1,5 +1,4 @@
 import { useState } from "react";
-import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import {
   ArrowLeftRight,
   Bookmark,
@@ -29,15 +28,9 @@ import {
 import type { SavedView } from "../core/savedViews";
 import type { ProjectDto, SpaceRow } from "../types";
 import { catalogColor } from "./colors";
-import {
-  MenuContent,
-  MenuItem,
-  MenuSeparator,
-  MenuSub,
-  MenuSubContent,
-  MenuSubTrigger,
-} from "./layout";
-import { Badge, cn, IconButton, navigationItem } from "./primitives";
+
+import { Badge, Divider, DropdownMenu, DropdownMenuItem, DropdownMenuSubMenu, IconButton } from "@astryxdesign/core";
+import { cn, navigationItem } from "./primitives";
 
 /** Linear-shaped navigation over lait's local identities and projects. */
 export function Sidebar({
@@ -179,9 +172,14 @@ export function Sidebar({
         onToggle={toggleProjects}
         action={
           !agent && (
-            <IconButton label="New project" onClick={onCreateProject}>
-              <Plus className="size-icon-xs" />
-            </IconButton>
+            <IconButton
+              label="New project"
+              onClick={onCreateProject}
+              variant="ghost"
+              size="sm"
+              tooltip="New project"
+              icon={<Plus className="size-icon-xs" />}
+            />
           )
         }
       />
@@ -246,104 +244,124 @@ function SpaceSwitcher({
   const unavailable = spaces.filter((s) => s.status === "missing").length;
   return (
     <div className="flex min-w-0 flex-1 items-center gap-0.5">
-      <DropdownMenu.Root>
-        {/* One line, because it has to sit on the header's baseline.
-            The second line said "Member · 8 people" — a role that does not change
-            and a headcount nobody navigates by, costing 12px of every screen and,
-            more to the point, making the sidebar's first row a different height
-            from the work area's. Both are `h-bar-lg` now, so the space and the thing
-            you are looking at read across at the same level. Membership itself
-            has better homes: the status dot, the agent banner below, and the
-            members tab in Settings. */}
-        <DropdownMenu.Trigger
-          className="hover:bg-hover data-[state=open]:bg-active -mx-1 flex h-ctl-md min-w-0 flex-1 items-center gap-1.5 rounded-full px-1.5 outline-none"
-          aria-label="Space menu"
-        >
-          <span className="bg-active flex size-ctl-xs shrink-0 items-center justify-center rounded-mark">
-            {selected?.identity.kind === "agent" ? <Bot className="text-mute size-icon-xs" /> : <Folder className="text-mute size-icon-xs" />}
-          </span>
-          <strong className="min-w-0 flex-1 truncate text-left text-sm">{title}</strong>
-          {selected && <StatusDot status={selected.status} />}
-        </DropdownMenu.Trigger>
-        {/* Verbs first, replicas behind a submenu.
-            This used to inline every local space and hang "Workspace settings"
-            off the bottom, so the one row you open the menu for was the row a
-            scrollbar hid — and with each space captioned "Your local actor" the
-            list read as repetition rather than choice. It was also a
-            `<details>` pretending to be a menu: no roving focus, no Escape, no
-            flipping when it met the bottom of the window. */}
-        <DropdownMenu.Portal>
-          <MenuContent align="start" className="min-w-56">
-            <MenuItem onSelect={onOpenSettings}>
-              <Cog className="size-icon-sm" /> Workspace settings
-            </MenuItem>
-            <MenuItem
-              disabled={!selected}
-              onSelect={() => selected && void navigator.clipboard.writeText(selected.space)}
+      {/* One line, because it has to sit on the header's baseline.
+          The second line said "Member · 8 people" — a role that does not change
+          and a headcount nobody navigates by, costing 12px of every screen and,
+          more to the point, making the sidebar's first row a different height
+          from the work area's. Both are `h-bar-lg` now, so the space and the thing
+          you are looking at read across at the same level.
+
+          The trigger's composite face — mark, title, status dot — flattens into
+          Button props: `icon` takes the mark, `label` the title. The status dot
+          moves OUT of the trigger and sits beside it, because `endContent` is
+          typed to an Icon or a Badge and ours is neither. It reads the same and
+          it is no longer inside the control's hit area, which is arguably
+          better: a status is not something you click.
+
+          Verbs first, replicas behind a submenu. This used to inline every
+          local space and hang "Workspace settings" off the bottom, so the one
+          row you open the menu for was the row a scrollbar hid. */}
+      <DropdownMenu
+        alignment="start"
+        hasChevron={false}
+        menuWidth={224}
+        button={{
+          label: title,
+          "aria-label": "Space menu",
+          className:
+            "hover:bg-hover -mx-1 flex h-ctl-md min-w-0 flex-1 items-center gap-1.5 rounded-full px-1.5",
+          variant: "ghost",
+          size: "sm",
+          icon:
+            selected?.identity.kind === "agent" ? (
+              <Bot className="text-mute size-icon-xs" />
+            ) : (
+              <Folder className="text-mute size-icon-xs" />
+            ),
+        }}
+      >
+        <DropdownMenuItem
+          label="Workspace settings"
+          icon={<Cog className="size-icon-sm" />}
+          onClick={onOpenSettings}
+        />
+        <DropdownMenuItem
+          label="Copy space ID"
+          icon={<Copy className="size-icon-sm" />}
+          isDisabled={!selected}
+          onClick={() => selected && void navigator.clipboard.writeText(selected.space)}
+        />
+        {spaces.length > 1 && (
+          <>
+            <Divider />
+            <DropdownMenuSubMenu
+              label="Switch space"
+              icon={<ArrowLeftRight className="size-icon-sm" />}
             >
-              <Copy className="size-icon-sm" /> Copy space ID
-            </MenuItem>
-            {spaces.length > 1 && (
-              <>
-                <MenuSeparator />
-                <MenuSub>
-                  <MenuSubTrigger>
-                    <ArrowLeftRight className="size-icon-sm" /> Switch space
-                  </MenuSubTrigger>
-                  <MenuSubContent>
-                    {spaces.map((space) => (
-                      <MenuItem
-                        key={`${space.id}-${space.identity.kind === "agent" ? space.identity.name : "own"}`}
-                        onSelect={() => onPick(space.id)}
-                        className={cn(space.id === current && "text-fg")}
-                      >
-                        {space.identity.kind === "agent" ? <Bot className="size-icon-sm shrink-0" /> : <Folder className="size-icon-sm shrink-0" />}
-                        <span className="min-w-0 flex-1 truncate">{space.name || space.space}</span>
-                        {/* An agent replica is a different *identity* on the same
-                            data, which is the only thing worth saying twice. */}
-                        {space.identity.kind === "agent" && (
-                          <span className="text-mute shrink-0 text-2xs">{space.identity.name}</span>
-                        )}
-                        <StatusDot status={space.status} />
-                      </MenuItem>
-                    ))}
-                  </MenuSubContent>
-                </MenuSub>
-              </>
-            )}
-            {/* One entry, not one per formation verb: founding and entering are
-                two answers to "add a space", and the surface behind this already
-                asks which with a tab strip. It lives here because this is the
-                one control on screen whatever you have open — the empty state
-                that used to hold it is precisely what having a space open
-                replaces. */}
-            <MenuSeparator />
-            <MenuItem onSelect={onAddSpace}>
-              <FolderPlus className="size-icon-sm" /> Add space
-            </MenuItem>
-            {/* Registry upkeep. Both are navigation state and neither touches a
-                store, which is what makes them safe to offer next to the verbs
-                that create one. */}
-            {(selected || unavailable > 0) && <MenuSeparator />}
-            {selected && (
-              <MenuItem onSelect={() => onForgetSpace(selected.id)}>
-                <EyeOff className="size-icon-sm" /> Forget this space
-              </MenuItem>
-            )}
-            {unavailable > 0 && (
-              <MenuItem onSelect={onPruneSpaces}>
-                <Trash2 className="size-icon-sm" />
-                {unavailable === 1
-                  ? "Remove 1 unavailable space"
-                  : `Remove ${unavailable} unavailable spaces`}
-              </MenuItem>
-            )}
-          </MenuContent>
-        </DropdownMenu.Portal>
-      </DropdownMenu.Root>
-      <IconButton label="Search issues" chord="Q" onClick={onSearch}>
-        <Search className="size-icon-md" />
-      </IconButton>
+              {spaces.map((space) => (
+                <DropdownMenuItem
+                  key={`${space.id}-${space.identity.kind === "agent" ? space.identity.name : "own"}`}
+                  onClick={() => onPick(space.id)}
+                  icon={
+                    space.identity.kind === "agent" ? (
+                      <Bot className="size-icon-sm shrink-0" />
+                    ) : (
+                      <Folder className="size-icon-sm shrink-0" />
+                    )
+                  }
+                  label={space.name || space.space}
+                  // An agent replica is a different *identity* on the same data,
+                  // which is the only thing worth saying twice.
+                  {...(space.identity.kind === "agent"
+                    ? { description: space.identity.name }
+                    : {})}
+                  endContent={<StatusDot status={space.status} />}
+                />
+              ))}
+            </DropdownMenuSubMenu>
+          </>
+        )}
+        {/* One entry, not one per formation verb: founding and entering are two
+            answers to "add a space", and the surface behind this already asks
+            which with a tab strip. */}
+        <Divider />
+        <DropdownMenuItem
+          label="Add space"
+          icon={<FolderPlus className="size-icon-sm" />}
+          onClick={onAddSpace}
+        />
+        {/* Registry upkeep. Both are navigation state and neither touches a
+            store, which is what makes them safe to offer next to the verbs that
+            create one. */}
+        {(selected || unavailable > 0) && <Divider />}
+        {selected && (
+          <DropdownMenuItem
+            label="Forget this space"
+            icon={<EyeOff className="size-icon-sm" />}
+            onClick={() => onForgetSpace(selected.id)}
+          />
+        )}
+        {unavailable > 0 && (
+          <DropdownMenuItem
+            label={
+              unavailable === 1
+                ? "Remove 1 unavailable space"
+                : `Remove ${unavailable} unavailable spaces`
+            }
+            icon={<Trash2 className="size-icon-sm" />}
+            onClick={onPruneSpaces}
+          />
+        )}
+      </DropdownMenu>
+      {selected && <StatusDot status={selected.status} />}
+      <IconButton
+        label="Search issues"
+        onClick={onSearch}
+        variant="ghost"
+        size="sm"
+        tooltip="Search issues  Q"
+        icon={<Search className="size-icon-md" />}
+      />
     </div>
   );
 }
@@ -396,9 +414,11 @@ function ProjectRow({
             active ? "bg-active hover:bg-hover" : "bg-hover",
           )}
           onClick={() => onToggleFavorite(project.key)}
-        >
-          {favorited ? <StarOff className="size-icon-xs" /> : <Star className="size-icon-xs" />}
-        </IconButton>
+          variant="ghost"
+          size="sm"
+          tooltip={favorited ? `Remove ${project.name} from favorites` : `Add ${project.name} to favorites`}
+          icon={favorited ? <StarOff className="size-icon-xs" /> : <Star className="size-icon-xs" />}
+        />
       </div>
     </div>
   );
@@ -476,7 +496,7 @@ function NavItem({ icon, label, active, badge, compact, onClick }: { icon: React
     >
       <span className="text-mute [&>svg]:size-icon-sm">{icon}</span>
       <span className="min-w-0 flex-1 truncate">{label}</span>
-      {!!badge && <Badge tone="accent" className="justify-center tabular-nums">{badge}</Badge>}
+      {!!badge && <Badge variant="blue" label={badge} className="justify-center tabular-nums" />}
     </button>
   );
 }

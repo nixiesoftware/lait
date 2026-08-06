@@ -6,7 +6,6 @@ import { WorldViewStoreProvider } from "../core/worldViewReact";
 import { ProjectViewerStore, ProjectViewerStoreProvider } from "../projectStore";
 import type { AssignmentDto, SpecKind, SpecRevision, SpecState, SpecView } from "../types";
 import { Specs } from "./Specs";
-import { TooltipProvider } from "./primitives";
 
 const rpcMock = vi.hoisted(() => vi.fn());
 const spaceRpcMock = vi.hoisted(() => vi.fn());
@@ -102,7 +101,6 @@ describe("Specs", () => {
       root?.render(
         <WorldViewStoreProvider store={store.resources}>
           <ProjectViewerStoreProvider store={store}>
-            <TooltipProvider>
               <Specs
                 spaceId="local"
                 project="PLAT"
@@ -118,7 +116,6 @@ describe("Specs", () => {
                 onError={vi.fn()}
                 {...props}
               />
-            </TooltipProvider>
           </ProjectViewerStoreProvider>
         </WorldViewStoreProvider>,
       );
@@ -230,14 +227,21 @@ describe("Specs", () => {
     });
   });
 
-  /** Radix opens a dropdown on `pointerdown`, not on click. */
+  /**
+   * Astryx opens a dropdown on click, and keeps every menu's items in the DOM —
+   * revealing the open one through the native popover API. So the trigger gets
+   * a real click, and the items are read through its `aria-controls` rather
+   * than from the whole document.
+   */
   async function openMenu(el: HTMLElement, label: string) {
     const trigger = el.querySelector<HTMLElement>(`[aria-label='${label}']`);
     expect(trigger).toBeTruthy();
     await act(async () => {
-      trigger!.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0 }));
+      trigger!.click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
     });
-    return [...document.querySelectorAll("[role='menuitem']")];
+    const panel = document.getElementById(trigger!.getAttribute("aria-controls") ?? "");
+    return [...(panel?.querySelectorAll("[role='menuitem']") ?? [])];
   }
 
   it("offers the transitions this head can take, and gates issuing on the grant", async () => {
@@ -249,8 +253,11 @@ describe("Specs", () => {
       // contributor sees the verb and what it would take — not an absence.
       expect.stringContaining("Needs spec.issue"),
     ]);
-    expect(items[0]?.getAttribute("data-disabled")).toBeNull();
-    expect(items[1]?.getAttribute("data-disabled")).not.toBeNull();
+    // `aria-disabled`, not Radix's `data-disabled`: Astryx keeps the item
+    // focusable so a screen reader can still reach it and hear why it is
+    // unavailable, which is the reason the row states its missing capability.
+    expect(items[0]?.getAttribute("aria-disabled")).toBeNull();
+    expect(items[1]?.getAttribute("aria-disabled")).toBe("true");
   });
 
   it("unlocks issuing for an actor holding the project grant", async () => {
@@ -261,7 +268,10 @@ describe("Specs", () => {
     );
     const issue = (await openMenu(el, "Lifecycle: Draft"))[1];
     expect(issue?.textContent).toBe("Issue");
-    expect(issue?.getAttribute("data-disabled")).toBeNull();
+    // The point of this test: holding the grant UNGATES the row. Asserting on
+    // Radix's `data-disabled` would now pass whatever happened, because Astryx
+    // never writes that attribute — it uses `aria-disabled`.
+    expect(issue?.getAttribute("aria-disabled")).toBeNull();
   });
 
   it("keeps the issued revision visible while a draft successor is open", async () => {

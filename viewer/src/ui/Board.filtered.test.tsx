@@ -6,7 +6,6 @@ import { DEFAULT_DISPLAY } from "../core/display";
 import type { BoardView } from "../types";
 import { Board } from "./Board";
 import type { IssueMutators } from "./fields";
-import { TooltipProvider } from "./primitives";
 
 const noopMutators: IssueMutators = {
   setStatus: () => undefined,
@@ -51,7 +50,6 @@ describe("Board filtered-empty state", () => {
     root = createRoot(host);
     act(() =>
       root?.render(
-        <TooltipProvider>
           <Board
             board={board}
             display={DEFAULT_DISPLAY}
@@ -70,7 +68,6 @@ describe("Board filtered-empty state", () => {
             onClearFilter={() => undefined}
             {...props}
           />
-        </TooltipProvider>,
       ),
     );
   }

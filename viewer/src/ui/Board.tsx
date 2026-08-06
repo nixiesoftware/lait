@@ -1,6 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
-import { GroupHeader, MenuContent, MenuItem } from "./layout";
+import { GroupHeader } from "./layout";
 import { CalendarClock, FilterX, Gauge, Info, MoreHorizontal, Plus } from "lucide-react";
 
 import { loadBoardScroll, saveBoardScroll } from "../core/boardState";
@@ -21,7 +20,8 @@ import {
   type IssueMutators,
 } from "./fields";
 import { PriorityIcon, ProgressRing, StatusIcon } from "./icons";
-import { Button, cn, IconButton } from "./primitives";
+import { Button, DropdownMenu, DropdownMenuItem, IconButton } from "@astryxdesign/core";
+import { cn } from "./primitives";
 import { dueLabel, dueTone } from "./time";
 
 const DUE_TONE = { overdue: "text-danger", soon: "text-warn", later: "text-mute" } as const;
@@ -105,9 +105,13 @@ export function Board({
         title="No matching issues"
         body="Every issue in this project is hidden by the current filter."
         action={
-          <Button variant="primary" onClick={onClearFilter}>
-            <FilterX className="size-icon-sm" /> Clear filter
-          </Button>
+          <Button
+            onClick={onClearFilter}
+            icon={<FilterX className="size-icon-sm" />}
+            label="Clear filter"
+            variant="primary"
+            size="sm"
+          />
         }
         className="min-h-60"
       />
@@ -496,34 +500,41 @@ function Column({
               <IconButton
                 label={`New issue in ${col.state.name}`}
                 onClick={() => onCreate(col.state.id)}
-              >
-                <Plus className="size-icon-sm" />
-              </IconButton>
+                variant="ghost"
+                size="sm"
+                tooltip={`New issue in ${col.state.name}`}
+                icon={<Plus className="size-icon-sm" />}
+              />
             )}
-            <DropdownMenu.Root>
-              <DropdownMenu.Trigger asChild>
-                <IconButton label={`${col.state.name} column actions`}>
-                  <MoreHorizontal className="size-icon-sm" />
-                </IconButton>
-              </DropdownMenu.Trigger>
-              <DropdownMenu.Portal>
-                <MenuContent align="end">
-                  {!readOnly && (
-                    <MenuItem onSelect={() => onCreate(col.state.id)}>
-                      <Plus className="size-icon-sm" />
-                      New issue
-                    </MenuItem>
-                  )}
-                  <MenuItem
-                    disabled={!rows[0]}
-                    onSelect={() => rows[0] && onSelect(rows[0].reff)}
-                  >
-                    Open first issue
-                    <span className="text-mute ml-auto tabular-nums">{rows.length}</span>
-                  </MenuItem>
-                </MenuContent>
-              </DropdownMenu.Portal>
-            </DropdownMenu.Root>
+            {/* Compound mode — `items` omitted. The data form has no
+                `endContent`, and the count belongs on the trailing edge where
+                every other tally in the app sits. */}
+            <DropdownMenu
+              alignment="end"
+              hasChevron={false}
+              button={{
+                label: `${col.state.name} column actions`,
+                variant: "ghost",
+                size: "sm",
+                isIconOnly: true,
+                icon: <MoreHorizontal className="size-icon-sm" />,
+                tooltip: `${col.state.name} column actions`,
+              }}
+            >
+              {!readOnly && (
+                <DropdownMenuItem
+                  label="New issue"
+                  icon={<Plus className="size-icon-sm" />}
+                  onClick={() => onCreate(col.state.id)}
+                />
+              )}
+              <DropdownMenuItem
+                label="Open first issue"
+                isDisabled={!rows[0]}
+                onClick={() => rows[0] && onSelect(rows[0].reff)}
+                endContent={<span className="text-mute tabular-nums">{rows.length}</span>}
+              />
+            </DropdownMenu>
           </>
         }
       />

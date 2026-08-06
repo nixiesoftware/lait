@@ -7,7 +7,6 @@ import { WorldViewStoreProvider } from "../core/worldViewReact";
 import { liveKey, type LiveState } from "../live";
 import { projectKeys, ProjectViewerStore, ProjectViewerStoreProvider } from "../projectStore";
 import { IssueDetail } from "./IssueDetail";
-import { TooltipProvider } from "./primitives";
 
 const rpcMock = vi.hoisted(() => vi.fn());
 const spaceRpcMock = vi.hoisted(() => vi.fn());
@@ -97,7 +96,6 @@ describe("IssueDetail loading", () => {
         <WorldViewStoreProvider store={store.resources}>
           <ProjectViewerStoreProvider store={store}>
             <StrictMode>
-              <TooltipProvider>
                 <IssueDetail
             spaceId="local"
             canonicalSpaceId="ws_test"
@@ -116,7 +114,6 @@ describe("IssueDetail loading", () => {
             onNavigate={() => undefined}
             onClose={() => undefined}
                 />
-              </TooltipProvider>
             </StrictMode>
           </ProjectViewerStoreProvider>
         </WorldViewStoreProvider>,
@@ -206,7 +203,6 @@ describe("IssueDetail live rail", () => {
         <WorldViewStoreProvider store={store.resources}>
           <ProjectViewerStoreProvider store={store}>
             <StrictMode>
-              <TooltipProvider>
                 <IssueDetail
                   spaceId="local"
                   canonicalSpaceId="ws_test"
@@ -225,7 +221,6 @@ describe("IssueDetail live rail", () => {
                   onNavigate={() => undefined}
                   onClose={() => undefined}
                 />
-              </TooltipProvider>
             </StrictMode>
           </ProjectViewerStoreProvider>
         </WorldViewStoreProvider>,

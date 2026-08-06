@@ -4,7 +4,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { ProjectDto, SpaceRow } from "../types";
 import { Sidebar } from "./Sidebar";
-import { TooltipProvider } from "./primitives";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean })
   .IS_REACT_ACT_ENVIRONMENT = true;
@@ -31,7 +30,7 @@ describe("Sidebar navigation", () => {
 
     act(() => {
       root?.render(
-        <TooltipProvider><Sidebar
+        <Sidebar
           spaces={[space]}
           current={space.id}
           projects={[project]}
@@ -51,8 +50,7 @@ describe("Sidebar navigation", () => {
           onAddSpace={vi.fn()}
           onForgetSpace={vi.fn()}
           onPruneSpaces={vi.fn()}
-        /></TooltipProvider>,
-      );
+        />      );
     });
 
     click("Projects");
@@ -95,7 +93,7 @@ describe("Sidebar navigation", () => {
 
     act(() => {
       root?.render(
-        <TooltipProvider><Sidebar
+        <Sidebar
           spaces={[space]}
           current={space.id}
           projects={[project]}
@@ -115,14 +113,18 @@ describe("Sidebar navigation", () => {
           onAddSpace={vi.fn()}
           onForgetSpace={vi.fn()}
           onPruneSpaces={vi.fn()}
-        /></TooltipProvider>,
-      );
+        />      );
     });
 
     // Closed, it says nothing but the space it is on: the old `<details>` kept
     // the whole replica list — and "Workspace settings" below it — in the DOM.
     expect(host.querySelector("details")).toBeNull();
-    expect(host.textContent).not.toContain("Workspace settings");
+    // Astryx keeps the menu's items in the DOM and reveals them through the
+    // native popover API, so "closed" is no longer "absent". What still has to
+    // be true is that nothing leaks onto the sidebar itself.
+    const chrome = host.cloneNode(true) as HTMLElement;
+    chrome.querySelectorAll("[popover]").forEach((el) => el.remove());
+    expect(chrome.textContent).not.toContain("Workspace settings");
 
     const trigger = host.querySelector<HTMLElement>('[aria-label="Space menu"]');
     expect(trigger).toBeTruthy();
@@ -152,7 +154,7 @@ describe("Sidebar navigation", () => {
       root = createRoot(host);
       act(() => {
         root?.render(
-          <TooltipProvider><Sidebar
+          <Sidebar
             spaces={rows}
             current={space.id}
             projects={[project]}
@@ -172,8 +174,7 @@ describe("Sidebar navigation", () => {
             onAddSpace={onAddSpace}
             onForgetSpace={onForgetSpace}
             onPruneSpaces={onPruneSpaces}
-          /></TooltipProvider>,
-        );
+          />        );
       });
       openSpaceMenu();
     };

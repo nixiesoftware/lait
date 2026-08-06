@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from "react";
-import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { AlertTriangle, ChevronDown, History, Plus } from "lucide-react";
 
 import {
@@ -47,11 +46,12 @@ import type {
 } from "../types";
 import { ApplicationState } from "./AppState";
 import * as ask from "./dialogs";
-import { GroupHeader, MenuContent, MenuItem } from "./layout";
+import { GroupHeader } from "./layout";
 import { Markdown } from "./Markdown";
 import { MarkdownEditor } from "./MarkdownEditor";
 import { NewSpecDialog } from "./NewSpec";
-import { Button, IconButton, Input, Textarea, cn, interactiveRow } from "./primitives";
+import { Button, DropdownMenu, DropdownMenuItem, IconButton, TextArea, TextInput } from "@astryxdesign/core";
+import { cn, interactiveRow } from "./primitives";
 import { short, when } from "./time";
 
 /**
@@ -244,9 +244,13 @@ function Register({
         body="A spec is what the work is meant to satisfy — a goal, a requirement, a design, a record of what was decided."
         action={
           !readOnly && project ? (
-            <Button variant="primary" onClick={() => onCompose("any")}>
-              <Plus className="size-icon-sm" /> New spec
-            </Button>
+            <Button
+              onClick={() => onCompose("any")}
+              icon={<Plus className="size-icon-sm" />}
+              label="New spec"
+              variant="primary"
+              size="sm"
+            />
           ) : undefined
         }
         className="min-h-60"
@@ -307,9 +311,11 @@ function Register({
                 <IconButton
                   label={`New ${SPEC_KIND_LABEL[kind].toLowerCase()}`}
                   onClick={() => onCompose(kind)}
-                >
-                  <Plus className="size-icon-sm" />
-                </IconButton>
+                  variant="ghost"
+                  size="sm"
+                  tooltip={`New ${SPEC_KIND_LABEL[kind].toLowerCase()}`}
+                  icon={<Plus className="size-icon-sm" />}
+                />
               ) : undefined
             }
           />
@@ -329,9 +335,14 @@ function Register({
           set is something you do once there is something to put in it. */}
       {!readOnly && project && specs.data.some((row) => row.issued.length === 1) && (
         <div className="px-4 py-3">
-          <Button size="md" variant="outline" onClick={onComposeBaseline}>
-            <Plus className="size-icon-sm" /> New baseline
-          </Button>
+          <Button
+            onClick={onComposeBaseline}
+            icon={<Plus className="size-icon-sm" />}
+            label="New baseline"
+            variant="secondary"
+            elevation="low"
+            size="md"
+          />
         </div>
       )}
     </div>
@@ -478,8 +489,6 @@ function BaselineReader({
             <span className="ml-auto text-mute text-xs">{SPEC_STATE_LABEL[view.state]}</span>
             {!locked && view.state !== "issued" && canIssue && (
               <Button
-                size="md"
-                variant="primary"
                 onClick={() => {
                   void (async () => {
                     const ok = await ask.confirm({
@@ -495,9 +504,10 @@ function BaselineReader({
                     }
                   })();
                 }}
-              >
-                Issue set
-              </Button>
+                label="Issue set"
+                variant="primary"
+                size="md"
+              />
             )}
           </div>
           <h1 className="text-2xl leading-tight font-semibold tracking-tight">{view.body.name}</h1>
@@ -615,14 +625,24 @@ function BaselineReader({
                       </li>
                     ))}
                   </ul>
-                  <Button size="md" variant="outline" className="mt-2" onClick={() => setAdding(false)}>
-                    Done
-                  </Button>
+                  <Button
+                    className="mt-2"
+                    onClick={() => setAdding(false)}
+                    label="Done"
+                    variant="secondary"
+                    elevation="low"
+                    size="md"
+                  />
                 </div>
               ) : (
-                <Button size="md" variant="outline" onClick={() => setAdding(true)}>
-                  <Plus className="size-icon-sm" /> Add an issued revision
-                </Button>
+                <Button
+                  onClick={() => setAdding(true)}
+                  icon={<Plus className="size-icon-sm" />}
+                  label="Add an issued revision"
+                  variant="secondary"
+                  elevation="low"
+                  size="md"
+                />
               )}
             </div>
           )}
@@ -830,19 +850,14 @@ function Resolve({
             </label>
           ))}
         </fieldset>
-        <label className="flex flex-col gap-1 text-xs">
-          <span className="text-mute text-2xs font-semibold tracking-wider uppercase">Title</span>
-          <Input value={title} onChange={(event) => setTitle(event.target.value)} />
-        </label>
-        <label className="flex flex-col gap-1 text-xs">
-          <span className="text-mute text-2xs font-semibold tracking-wider uppercase">Body</span>
-          <Textarea
-            value={text}
-            rows={10}
-            onChange={(event) => setText(event.target.value)}
-            className="font-mono text-2xs"
-          />
-        </label>
+        <TextInput label="Title" value={title} onChange={setTitle} />
+        <TextArea
+          label="Body"
+          value={text}
+          rows={10}
+          onChange={setText}
+          className="font-mono text-2xs"
+        />
         <label className="text-dim flex items-start gap-2 text-xs">
           <input
             type="checkbox"
@@ -853,17 +868,14 @@ function Resolve({
           I have read all {heads.length} heads and this draft accounts for them.
         </label>
         <div className="flex justify-end gap-2">
-          <Button size="md" variant="outline" onClick={onCancel}>
-            Cancel
-          </Button>
+          <Button onClick={onCancel} label="Cancel" variant="secondary" elevation="low" size="md" />
           <Button
-            size="md"
-            variant="primary"
-            disabled={!acknowledged || !title.trim()}
+            isDisabled={!acknowledged || !title.trim()}
             onClick={() => onCommit({ ...base.body, title: title.trim(), text })}
-          >
-            Create resolution draft
-          </Button>
+            label="Create resolution draft"
+            variant="primary"
+            size="md"
+          />
         </div>
       </div>
     </section>
@@ -919,9 +931,14 @@ function Compare({
         {base !== from && (
           <span className="text-mute text-2xs">· their common ancestor</span>
         )}
-        <Button size="md" variant="outline" className="ml-auto" onClick={onClose}>
-          Close
-        </Button>
+        <Button
+          className="ml-auto"
+          onClick={onClose}
+          label="Close"
+          variant="secondary"
+          elevation="low"
+          size="md"
+        />
       </header>
       <div className="flex flex-col gap-3 p-3 text-xs">
         {unchanged && <p className="text-mute">Nothing differs between these two revisions.</p>}
@@ -1107,33 +1124,38 @@ function Lifecycle({
   }
 
   return (
-    <DropdownMenu.Root>
-      <DropdownMenu.Trigger asChild>
-        <Button size="md" variant="outline" aria-label={`Lifecycle: ${word}`}>
-          {word}
-          <ChevronDown className="size-icon-xs" />
-        </Button>
-      </DropdownMenu.Trigger>
-      <DropdownMenu.Portal>
-        <MenuContent align="end">
-          {moves.map((move) => {
-            const allowed = holds(move.capability, view, grants, admin);
-            return (
-              <MenuItem
-                key={move.to}
-                disabled={!allowed}
-                onSelect={() => onPick(move)}
-              >
-                <span className="flex-1">{move.label}</span>
-                {!allowed && (
-                  <span className="text-mute text-2xs">Needs {move.capability}</span>
-                )}
-              </MenuItem>
-            );
-          })}
-        </MenuContent>
-      </DropdownMenu.Portal>
-    </DropdownMenu.Root>
+    <DropdownMenu
+      alignment="end"
+      // The chevron is Astryx's now — it drew one for every menu trigger, and a
+      // second hand-placed one beside it read as two affordances.
+      // `label` is both the visible text and the accessible name in Astryx, and
+      // those differ here: the pill reads "Draft", the control is "Lifecycle:
+      // Draft". `aria-label` carries the longer one.
+      button={{
+        label: word,
+        "aria-label": `Lifecycle: ${word}`,
+        variant: "secondary",
+        elevation: "low",
+        size: "md",
+      }}
+    >
+      {moves.map((move) => {
+        const allowed = holds(move.capability, view, grants, admin);
+        return (
+          <DropdownMenuItem
+            key={move.to}
+            label={move.label}
+            isDisabled={!allowed}
+            onClick={() => onPick(move)}
+            endContent={
+              allowed ? undefined : (
+                <span className="text-mute text-2xs">Needs {move.capability}</span>
+              )
+            }
+          />
+        );
+      })}
+    </DropdownMenu>
   );
 }
 
@@ -1336,9 +1358,13 @@ function SpecReader({
               Reading revision <code title={past.revision}>{short(past.revision)}</code>, written{" "}
               {when(past.body.ts)}. This is a record — the document is elsewhere.
             </span>
-            <Button size="md" variant="outline" onClick={() => setViewing(null)}>
-              Back to current
-            </Button>
+            <Button
+              onClick={() => setViewing(null)}
+              label="Back to current"
+              variant="secondary"
+              elevation="low"
+              size="md"
+            />
           </div>
         )}
 
@@ -1370,18 +1396,21 @@ function SpecReader({
                 <span className="mt-2 flex gap-2">
                   {view.heads.length === 2 && (
                     <Button
-                      size="md"
-                      variant="outline"
                       onClick={() =>
                         setComparing({ from: view.heads[0]!, to: view.heads[1]! })
                       }
-                    >
-                      Compare heads
-                    </Button>
+                      label="Compare heads"
+                      variant="secondary"
+                      elevation="low"
+                      size="md"
+                    />
                   )}
-                  <Button size="md" variant="primary" onClick={() => setResolving(true)}>
-                    Resolve…
-                  </Button>
+                  <Button
+                    onClick={() => setResolving(true)}
+                    label="Resolve…"
+                    variant="primary"
+                    size="md"
+                  />
                 </span>
               )}
             </span>

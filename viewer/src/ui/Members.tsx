@@ -17,7 +17,7 @@ import type { MemberDto, MemberLogEntry } from "../types";
 import { Avatar, memberName } from "./Avatar";
 import * as ask from "./dialogs";
 import { Combobox } from "./Picker";
-import { Button, IconButton } from "./primitives";
+import { Button, IconButton } from "@astryxdesign/core";
 import { EmptyState, InlineError, LoadingState } from "./AppState";
 
 /**
@@ -144,7 +144,7 @@ export function Members({
                   <span className="flex shrink-0 gap-1">
                     <IconButton
                       label="Set a local name"
-                      disabled={busy === m.key}
+                      isDisabled={busy === m.key}
                       onClick={() =>
                         void act(m.key, async () => {
                           const name = await ask.prompt({
@@ -158,14 +158,19 @@ export function Members({
                           await rpc(spaceId, { cmd: "member_alias", who: m.key, name: name.trim() });
                         })
                       }
-                    >
-                      <Pencil className="size-icon-sm" />
-                    </IconButton>
+                      variant="ghost"
+                      size="sm"
+                      tooltip="Set a local name"
+                      icon={<Pencil className="size-icon-sm" />}
+                    />
                     {!m.me && (
                       <IconButton
                         label="Remove (rotates the space key)"
+                        tooltip="Remove (rotates the space key)"
                         variant="danger"
-                        disabled={busy === m.key}
+                        size="sm"
+                        icon={<X className="size-icon-sm" />}
+                        isDisabled={busy === m.key}
                         onClick={() =>
                           void act(m.key, async () => {
                             try {
@@ -194,9 +199,7 @@ export function Members({
                             }
                           })
                         }
-                      >
-                        <X className="size-icon-sm" />
-                      </IconButton>
+                      />
                     )}
                   </span>
                 )}
@@ -220,7 +223,7 @@ export function Members({
               Its standing ends when yours does.
             </p>
             <Button
-              disabled={busy === SPONSOR}
+              isDisabled={busy === SPONSOR}
               onClick={() =>
                 void act(SPONSOR, async () => {
                   const name = await ask.prompt({
@@ -233,10 +236,11 @@ export function Members({
                   await rpc(spaceId, { cmd: "agent_provision", name: name.trim() });
                 })
               }
-            >
-              <Bot className="size-icon-sm" />
-              Sponsor an agent
-            </Button>
+              icon={<Bot className="size-icon-sm" />}
+              label="Sponsor an agent"
+              variant="ghost"
+              size="sm"
+            />
           </section>
         )}
 
@@ -442,10 +446,15 @@ function Invite({
               </label>
             </div>
             <p className="text-mute text-xs">Invite links are access capabilities. Share them only with intended recipients and revoke exposed links promptly.</p>
-            <Button variant="outline" size="md" onClick={() => void mint()} className="w-fit">
-              <UserPlus className="size-icon-sm" />
-              Create invite link
-            </Button>
+            <Button
+              onClick={() => void mint()}
+              className="w-fit"
+              icon={<UserPlus className="size-icon-sm" />}
+              label="Create invite link"
+              variant="secondary"
+              elevation="low"
+              size="md"
+            />
           </>
         ) : (
           <>
@@ -468,17 +477,24 @@ function Invite({
                 </code>
                 <div className="flex gap-2">
                   <Button
-                    variant="outline"
+                    variant="secondary"
+                    elevation="low"
+                    size="sm"
                     onClick={() => {
                       void navigator.clipboard.writeText(link).then(() => {
                         setCopied(true);
                         window.setTimeout(() => setCopied(false), 1500);
                       });
                     }}
-                  >
-                    {copied ? <Check className="size-icon-sm" /> : <Copy className="size-icon-sm" />}
-                    {copied ? "Copied" : "Copy link"}
-                  </Button>
+                    icon={
+                      copied ? (
+                        <Check className="size-icon-sm" />
+                      ) : (
+                        <Copy className="size-icon-sm" />
+                      )
+                    }
+                    label={copied ? "Copied" : "Copy link"}
+                  />
                   <a
                     href={mailto(link)}
                     className="border-line-strong hover:bg-hover flex items-center gap-1.5 rounded-control border px-2 py-1 text-sm"
@@ -487,17 +503,21 @@ function Invite({
                     Email it
                   </a>
                   <Button
-                    variant="danger"
                     onClick={() => void revoke()}
-                    title="The daemon refuses any future redemption of this link"
-                  >
-                    <ShieldAlert className="size-icon-sm" />
-                    Revoke
-                  </Button>
-                  <Button onClick={() => setTicket(null)} className="ml-auto">
-                    <KeyRound className="size-icon-sm" />
-                    New link
-                  </Button>
+                    tooltip="The daemon refuses any future redemption of this link"
+                    icon={<ShieldAlert className="size-icon-sm" />}
+                    label="Revoke"
+                    variant="danger"
+                    size="sm"
+                  />
+                  <Button
+                    onClick={() => setTicket(null)}
+                    className="ml-auto"
+                    icon={<KeyRound className="size-icon-sm" />}
+                    label="New link"
+                    variant="ghost"
+                    size="sm"
+                  />
                 </div>
               </div>
             </div>

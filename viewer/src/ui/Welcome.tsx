@@ -3,7 +3,8 @@ import { FolderPlus, Link2, Loader2 } from "lucide-react";
 
 import { hostRpc } from "../api";
 import type { HostReply } from "../types";
-import { Button, FieldLabel, Input } from "./primitives";
+import { Button, TextInput } from "@astryxdesign/core";
+
 import { InlineError } from "./AppState";
 
 /**
@@ -142,57 +143,58 @@ export function Welcome({
         </div>
 
         {mode === "found" ? (
-          <FieldLabel>
-            <span>Name</span>
-            <Input
-              autoFocus
-              value={name}
-              placeholder="Engineering"
-              onChange={(e) => setName(e.target.value)}
-            />
-          </FieldLabel>
+          <TextInput
+            label="Name"
+            hasAutoFocus
+            value={name}
+            placeholder="Engineering"
+            onChange={setName}
+          />
         ) : (
-          <FieldLabel>
-            <span>Invite link</span>
-            <Input
-              autoFocus
-              value={link}
-              placeholder="lait://…"
-              onChange={(e) => setLink(e.target.value)}
-            />
-          </FieldLabel>
+          <TextInput
+            label="Invite link"
+            hasAutoFocus
+            value={link}
+            placeholder="lait://…"
+            onChange={setLink}
+          />
         )}
 
-        <FieldLabel>
-          <span>Store directory</span>
-          <span className="text-mute text-xs">
-            On the machine running lait. It holds the encrypted replica.
-          </span>
-          <Input
-            value={target}
-            placeholder={context ? context.spaces_root : "Loading…"}
-            onChange={(e) => {
-              setPinnedHome(true);
-              setHome(e.target.value);
-            }}
-          />
-        </FieldLabel>
+        {/* The helper line is `description`, not a second span: Astryx's field
+            owns label, description and status, so it places and associates them
+            for the screen reader instead of us stacking three siblings. */}
+        <TextInput
+          label="Store directory"
+          description="On the machine running lait. It holds the encrypted replica."
+          value={target}
+          placeholder={context ? context.spaces_root : "Loading…"}
+          onChange={(value) => {
+            setPinnedHome(true);
+            setHome(value);
+          }}
+        />
 
-        <FieldLabel>
-          <span>Your name in this space</span>
-          <Input value={nick} placeholder="ada (optional)" onChange={(e) => setNick(e.target.value)} />
-        </FieldLabel>
+        <TextInput
+          label="Your name in this space"
+          value={nick}
+          placeholder="ada (optional)"
+          onChange={setNick}
+          isOptional
+        />
 
         {error && <InlineError message={error} onDismiss={() => setError("")} />}
 
         <div className="flex items-center gap-3">
-          <Button variant="primary" disabled={!ready || busy} loading={busy} onClick={() => void submit()}>
-            {mode === "found" ? "Found it" : "Enter"}
-          </Button>
+          <Button
+            isDisabled={!ready || busy}
+            isLoading={busy}
+            onClick={() => void submit()}
+            label={mode === "found" ? "Found it" : "Enter"}
+            variant="primary"
+            size="sm"
+          />
           {onCancel && (
-            <Button disabled={busy} onClick={onCancel}>
-              Cancel
-            </Button>
+            <Button isDisabled={busy} onClick={onCancel} label="Cancel" variant="ghost" size="sm" />
           )}
           {waiting && busy && (
             <span className="text-dim flex items-center gap-1.5 text-sm">

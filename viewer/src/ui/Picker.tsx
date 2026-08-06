@@ -1,17 +1,10 @@
+import { Popover } from "@astryxdesign/core";
 import { useState } from "react";
-import * as Popover from "@radix-ui/react-popover";
 import { Command } from "cmdk";
 import { Check, Plus } from "lucide-react";
 
 import { cmdkFilter } from "../core/fuzzy";
-import {
-  cn,
-  controlTrigger,
-  type ControlSize,
-  type ControlTone,
-  crumbGlyph,
-  PopoverContent,
-} from "./primitives";
+import { cn, controlTrigger, type ControlSize, type ControlTone, crumbGlyph } from "./primitives";
 
 /**
  * A pill that opens a searchable menu — the tracker's workhorse control.
@@ -201,11 +194,18 @@ export function Combobox(props: Props) {
     props.multi === true ? props.selected.includes(id) : props.value?.id === id;
 
   return (
-    <Popover.Root open={isOpen} onOpenChange={setOpen}>
-      <Popover.Trigger aria-label={label} className={cn(controlTrigger({ tone, size }), className)}>
-        {content}
-      </Popover.Trigger>
-      <PopoverContent align="start" className={cn("overflow-hidden p-0", wide ? "w-80" : "w-60")}>
+    <Popover
+      isOpen={isOpen}
+      onOpenChange={setOpen}
+      alignment="start"
+      // Gated on `isOpen`, unlike every other popover in the app. Astryx renders
+      // popover content into the DOM whether or not it is showing — it reveals
+      // it through the native popover API rather than by mounting — and a
+      // Combobox is the one control an issue row carries five of. Ungated, a
+      // list of 200 rows would mount a thousand cmdk instances nobody opened.
+      content={
+        !isOpen ? null : (
+        <div className={cn("overflow-hidden p-0", wide ? "w-80" : "w-60")}>
           <Command filter={cmdkFilter} loop>
             <Command.Input
               autoFocus
@@ -294,7 +294,13 @@ export function Combobox(props: Props) {
                 )}
             </Command.List>
           </Command>
-      </PopoverContent>
-    </Popover.Root>
+        </div>
+        )
+      }
+    >
+      <button type="button" aria-label={label} className={cn(controlTrigger({ tone, size }), className)}>
+        {content}
+      </button>
+    </Popover>
   );
 }

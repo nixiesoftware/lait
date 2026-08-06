@@ -1,11 +1,28 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 
+import { registerIcons } from "@astryxdesign/core/Icon";
+
 import { App } from "./App";
 import { contribute, registry } from "./core/registry";
 import { WorldViewStoreProvider } from "./core/worldViewReact";
 import { ProjectViewerStore, ProjectViewerStoreProvider } from "./projectStore";
+import { laitIcons } from "./theme/icons";
 import "./styles.css";
+
+/**
+ * Astryx resolves `<Icon icon="funnel" />` through a registry, not an import,
+ * so whoever fills it decides what every Astryx component's chrome looks like.
+ * Fill it with lucide before the first render and the migrated surfaces draw
+ * from the same set the rest of the app already uses.
+ *
+ * Global rather than `defineTheme({icons})` on purpose: `laitTheme.ts` is
+ * generated and compiled by `astryx theme build`, and putting JSX in that path
+ * means the icon set is only as portable as the CLI's loader. The theme's own
+ * registry still wins where a theme declares one — ours does not, so this is
+ * the only source.
+ */
+registerIcons(laitIcons);
 
 /**
  * The seam, reachable from outside the bundle.

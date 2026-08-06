@@ -9,7 +9,8 @@ import type { ActivityEvent, MemberDto } from "../types";
 import { EmptyState, LoadingState } from "./AppState";
 import { memberName } from "./Avatar";
 import { when } from "./time";
-import { Button, interactiveRow } from "./primitives";
+import { Button } from "@astryxdesign/core";
+import { interactiveRow } from "./primitives";
 
 /**
  * The space feed.
@@ -100,9 +101,10 @@ export function Activity({
         <li className="border-line/60 border-b p-2 text-center">
           <Button
             onClick={() => setVisibleCount((count) => count + 80)}
-          >
-            Show {Math.min(80, scopedEvents.length - visibleCount)} older changes
-          </Button>
+            label={`Show ${Math.min(80, scopedEvents.length - visibleCount)} older changes`}
+            variant="ghost"
+            size="sm"
+          />
         </li>
       )}
       {/* Newest first: the feed answers "what just happened", not "what happened". */}

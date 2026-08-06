@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Group, Panel, Separator, useDefaultLayout, usePanelRef } from "react-resizable-panels";
-import * as Dialog from "@radix-ui/react-dialog";
 import {
   PanelLeft,
   PanelRight,
@@ -81,7 +80,10 @@ import { catalogColor } from "./ui/colors";
 import * as ask from "./ui/dialogs";
 import { DialogHost } from "./ui/dialogs";
 import { Combobox } from "./ui/Picker";
-import { Button, IconButton, TooltipProvider } from "./ui/primitives";
+import { Dialog, Theme } from "@astryxdesign/core";
+
+import { laitTheme } from "./theme/lait";
+import { Button, IconButton } from "@astryxdesign/core";
 import { Sidebar } from "./ui/Sidebar";
 import {
   applyFilter,
@@ -270,6 +272,13 @@ export function App() {
   const detailPanel = usePanelRef();
   const [density, setDensity] = useState<DensityPreference>(() => loadDensity());
   /**
+   * Appearance now lives in state because Astryx's `<Theme mode>` is the input
+   * that drives it. Density deliberately does NOT: it is a cascade layer keyed
+   * off `[data-density]`, so it costs one attribute write and no React render.
+   * See `tool/generate-astryx-theme.mjs`.
+   */
+  const [theme, setThemeState] = useState<ThemePreference>(() => loadTheme());
+  /**
    * The layout Issues were last drawn in.
    *
    * It has to outlive the route, or "remembering" it would only work while you
@@ -335,7 +344,8 @@ export function App() {
   const liveProjects = useMemo(() => projects.filter((p) => !p.archived), [projects]);
 
   useEffect(() => {
-    applyTheme(loadTheme());
+    // Appearance is applied by `<Theme mode>`, not from here. Density still is:
+    // it is a plain attribute and nothing else owns it.
     applyDensity(loadDensity());
   }, []);
 
@@ -1217,7 +1227,10 @@ export function App() {
       openDisplay: () => setDisplayOpen(true),
       openWorkflow: () => setModal("workflow"),
       openRoles: () => setModal("roles"),
-      setTheme: (theme) => applyTheme(theme),
+      setTheme: (theme) => {
+        setThemeState(theme);
+        persistTheme(theme);
+      },
     }),
     [
       applyRoute,
@@ -1656,13 +1669,18 @@ export function App() {
           kind="unavailable"
           title="Issue not found in this local project"
           body={`${selection} is not present in the current local projection. It may belong to another project, still be arriving, or not exist on this replica.`}
-          action={<Button onClick={() => api.select(null)}>Clear selection</Button>}
+          action={<Button
+                    onClick={() => api.select(null)}
+                    label="Clear selection"
+                    variant="ghost"
+                    size="sm"
+                  />}
         />
       )
     ) : null;
 
   return (
-    <TooltipProvider>
+    <Theme theme={laitTheme} mode={theme}>
     <HeaderSlotProvider>
     <Group
       orientation="horizontal"
@@ -1746,17 +1764,18 @@ export function App() {
             // the collapse alone left every window under the drawer breakpoint
             // with no navigation and no way to ask for any.
             leading={
+              // Its own space, so it reads as chrome acting on the window
+              // rather than the first crumb of the trail.
               railHidden ? (
                 <IconButton
                   label="Show sidebar"
-                  chord="⌘B"
-                  // Its own space, so it reads as chrome acting on the window
-                  // rather than the first crumb of the trail.
+                  tooltip="Show sidebar  ⌘B"
                   className="mr-2"
                   onClick={api.toggleSidebar}
-                >
-                  <PanelLeft className="size-icon-sm" />
-                </IconButton>
+                  variant="ghost"
+                  size="sm"
+                  icon={<PanelLeft className="size-icon-sm" />}
+                />
               ) : undefined
             }
             trail={<Breadcrumbs items={trail} />}
@@ -1854,17 +1873,29 @@ export function App() {
               )}
 
               {projectShell && !readOnly && current && (view === "list" || view === "board" || view === "calendar") && (
-                <IconButton label="New issue" chord="C" variant="outline" onClick={() => run("issue.create")}>
-                  <Plus className="size-icon-sm" />
-                </IconButton>
+                <IconButton
+                  label="New issue"
+                  onClick={() => run("issue.create")}
+                  variant="secondary"
+                  elevation="low"
+                  size="sm"
+                  tooltip="New issue  C"
+                  icon={<Plus className="size-icon-sm" />}
+                />
               )}
               {/* No chord: `C` is the issue composer's everywhere, and a key that
                   makes a different kind of document depending on which tab is
                   lit is worse than a key that only makes issues. */}
               {projectShell && !readOnly && current && view === "specs" && !openSpec && !openBaseline && (
-                <IconButton label="New spec" variant="outline" onClick={() => setComposingSpec("any")}>
-                  <Plus className="size-icon-sm" />
-                </IconButton>
+                <IconButton
+                  label="New spec"
+                  onClick={() => setComposingSpec("any")}
+                  variant="secondary"
+                  elevation="low"
+                  size="sm"
+                  tooltip="New spec"
+                  icon={<Plus className="size-icon-sm" />}
+                />
               )}
               {/* Last in the band, because it acts on the band's neighbour
                   rather than on the rows: everything to its left changes what
@@ -1874,16 +1905,18 @@ export function App() {
               {projectShell && consoleFits && (
                 <IconButton
                   label={railOpen ? "Hide project panel" : "Show project panel"}
-                  variant={railOpen ? "active" : "outline"}
                   onClick={() =>
                     setRailOpen((was) => {
                       saveRailOpen(!was);
                       return !was;
                     })
                   }
-                >
-                  <PanelRight className="size-icon-sm" />
-                </IconButton>
+                  variant={railOpen ? "active" : "secondary"}
+                  elevation={railOpen ? "none" : "low"}
+                  size="sm"
+                  tooltip={railOpen ? "Hide project panel" : "Show project panel"}
+                  icon={<PanelRight className="size-icon-sm" />}
+                />
               )}
               </span>
             </Toolbar>
@@ -1965,9 +1998,12 @@ export function App() {
               // A route naming a space this device does not hold is answered by
               // entering it, not by founding a second one under the same name.
               action={
-                <Button onClick={() => setFounding(routeSpace ? "enter" : "found")}>
-                  {routeSpace ? "Use an invite" : "Start a space"}
-                </Button>
+                <Button
+                  onClick={() => setFounding(routeSpace ? "enter" : "found")}
+                  label={routeSpace ? "Use an invite" : "Start a space"}
+                  variant="ghost"
+                  size="sm"
+                />
               }
             />
           ) : missingProject ? (
@@ -1977,11 +2013,19 @@ export function App() {
               body={`${project} is not available in the current replica. Choose another project from the sidebar or wait for catalog data to arrive.`}
               action={
                 projects[0] ? (
-                  <Button onClick={() => api.goto("overview", projects[0]!.key)}>
-                    Choose {projects[0].name}
-                  </Button>
+                  <Button
+                    onClick={() => api.goto("overview", projects[0]!.key)}
+                    label={`Choose ${projects[0].name}`}
+                    variant="ghost"
+                    size="sm"
+                  />
                 ) : (
-                  <Button onClick={api.refresh}>Refresh projects</Button>
+                  <Button
+                    onClick={api.refresh}
+                    label="Refresh projects"
+                    variant="ghost"
+                    size="sm"
+                  />
                 )
               }
             />
@@ -2148,7 +2192,12 @@ export function App() {
               kind="unavailable"
               title="This view is unavailable"
               body="The local projection could not be loaded."
-              action={<Button onClick={api.refresh}>Retry loading</Button>}
+              action={<Button
+                        onClick={api.refresh}
+                        label="Retry loading"
+                        variant="ghost"
+                        size="sm"
+                      />}
             />
           )}
         </div>
@@ -2217,14 +2266,18 @@ export function App() {
           }}
         />
       )}
-      <Dialog.Root open={mobileNav} onOpenChange={setMobileNav}>
-        <Dialog.Portal>
-          <Dialog.Overlay className="ui-overlay fixed inset-0 z-40 hidden bg-black/45 backdrop-blur-[2px] max-[768px]:block" />
-          <Dialog.Content
-            aria-describedby={undefined}
-            className="ui-drawer bg-sunken shadow-overlay fixed inset-y-0 left-0 z-40 hidden w-[min(320px,88vw)] pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)] outline-none max-[768px]:block"
-          >
-            <Dialog.Title className="sr-only">Workspace navigation</Dialog.Title>
+      {/* A drawer, not a centred modal: pinned to the inline start and both
+          block edges, which is what `position` expresses. It is only ever
+          opened by a control that is itself hidden above 768px. */}
+      <Dialog
+        isOpen={mobileNav}
+        onOpenChange={setMobileNav}
+        width="min(320px, 88vw)"
+        maxHeight="100vh"
+        position={{ start: 0, top: 0, bottom: 0 }}
+        className="ui-drawer bg-sunken pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
+      >
+            <h2 className="sr-only">Workspace navigation</h2>
             <Sidebar
               spaces={spaces}
               current={current}
@@ -2278,9 +2331,7 @@ export function App() {
                 void pruneSpaces().then(() => setMobileNav(false));
               }}
             />
-          </Dialog.Content>
-        </Dialog.Portal>
-      </Dialog.Root>
+      </Dialog>
       {checked.size > 0 && !readOnly && current && (
         <BulkBar
           count={checked.size}
@@ -2382,7 +2433,7 @@ export function App() {
       )}
     </Group>
     </HeaderSlotProvider>
-    </TooltipProvider>
+    </Theme>
   );
 }
 
@@ -2395,9 +2446,19 @@ function loadTheme(): ThemePreference {
   }
 }
 
-function applyTheme(theme: ThemePreference): void {
-  if (theme === "system") delete document.documentElement.dataset.theme;
-  else document.documentElement.dataset.theme = theme;
+/**
+ * Persist the appearance choice. It does NOT touch the DOM any more.
+ *
+ * Astryx's `<Theme>` syncs `data-theme` onto `<html>` itself when it is the
+ * root theme, and it wins — anything we wrote here would be overwritten on its
+ * next render. So the attribute has one owner, `mode` is the input, and this
+ * function is reduced to the half that was always ours: remembering.
+ *
+ * The three states line up exactly: Astryx's `ThemeMode` is
+ * `'light' | 'dark' | 'system'`, and `system` follows the OS the same way our
+ * missing-attribute case did.
+ */
+function persistTheme(theme: ThemePreference): void {
   try {
     if (theme === "system") localStorage.removeItem(THEME_PREFERENCE);
     else localStorage.setItem(THEME_PREFERENCE, theme);

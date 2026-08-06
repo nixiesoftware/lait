@@ -6,7 +6,6 @@ import { createPortal } from "react-dom";
 
 import { cn, crumbGlyph, OverlayGap } from "./primitives";
 import * as ContextMenu from "@radix-ui/react-context-menu";
-import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import {
   Activity,
   Bot,
@@ -637,36 +636,6 @@ export function Toast({
   );
 }
 
-export function MenuContent({
-  className,
-  ...props
-}: React.ComponentProps<typeof DropdownMenu.Content>) {
-  return (
-    <DropdownMenu.Content
-      sideOffset={OverlayGap.menu}
-      className={cn("ui-surface border-line-strong bg-raised shadow-overlay z-50 min-w-48 rounded-surface border p-1 text-sm", className)}
-      {...props}
-    />
-  );
-}
-
-export function MenuItem({
-  danger,
-  className,
-  ...props
-}: React.ComponentProps<typeof DropdownMenu.Item> & { danger?: boolean }) {
-  return (
-    <DropdownMenu.Item
-      className={cn(
-        "flex h-ctl-md cursor-default select-none items-center gap-2 rounded-control px-2 outline-none data-[highlighted]:bg-active data-[disabled]:opacity-50",
-        danger ? "text-danger" : "text-dim",
-        className,
-      )}
-      {...props}
-    />
-  );
-}
-
 /**
  * The same menu, opened by the right button.
  *
@@ -763,13 +732,6 @@ export function ContextMenuSeparator({
   return <ContextMenu.Separator className={cn("bg-line my-1 h-px", className)} {...props} />;
 }
 
-export function MenuSeparator({
-  className,
-  ...props
-}: React.ComponentProps<typeof DropdownMenu.Separator>) {
-  return <DropdownMenu.Separator className={cn("bg-line my-1 h-px", className)} {...props} />;
-}
-
 /**
  * A menu row that opens another menu.
  *
@@ -778,46 +740,3 @@ export function MenuSeparator({
  * a scrollbar. One row that admits there is more behind it keeps the menu the
  * size of its verbs.
  */
-export const MenuSub = DropdownMenu.Sub;
-
-export function MenuSubTrigger({
-  className,
-  children,
-  ...props
-}: React.ComponentProps<typeof DropdownMenu.SubTrigger>) {
-  return (
-    <DropdownMenu.SubTrigger
-      className={cn(
-        "text-dim flex h-ctl-md cursor-default select-none items-center gap-2 rounded-control px-2 outline-none data-[highlighted]:bg-active data-[state=open]:bg-active",
-        className,
-      )}
-      {...props}
-    >
-      {children}
-      <ChevronRight className="text-mute ml-auto size-icon-xs shrink-0" aria-hidden />
-    </DropdownMenu.SubTrigger>
-  );
-}
-
-export function MenuSubContent({
-  className,
-  ...props
-}: React.ComponentProps<typeof DropdownMenu.SubContent>) {
-  return (
-    <DropdownMenu.Portal>
-      <DropdownMenu.SubContent
-        sideOffset={OverlayGap.menu}
-        className={cn(
-          "ui-surface border-line-strong bg-raised shadow-overlay z-50 max-h-overlay-lg min-w-52 overflow-y-auto rounded-surface border p-1 text-sm",
-          className,
-        )}
-        {...props}
-      />
-    </DropdownMenu.Portal>
-  );
-}
-
-/** The keyboard route to a menu row, parked at the right edge. */
-export function MenuShortcut({ children }: { children: React.ReactNode }) {
-  return <span className="text-mute ml-auto pl-6 text-2xs tabular-nums">{children}</span>;
-}
