@@ -19,6 +19,7 @@ mod content_ipc;
 mod control_classification;
 mod control_plane;
 mod control_pool;
+mod daemon_reaping;
 mod frost_interop;
 mod guided_join;
 mod head;

@@ -71,6 +71,15 @@ const PUMP_BACKOFF_CEILING: Duration = Duration::from_secs(30);
 /// anything — least of all that the host is gone.
 const SUBSCRIBE_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// How long shutdown waits to exclude placements before it proceeds regardless.
+///
+/// The read side of `lifecycle` is held for the whole of a lazy placement —
+/// transport build included, which has its own multi-second waits — so a stop
+/// that arrives mid-placement can queue behind it for far longer than any
+/// shutdown should take. This bounds that wait; exceeding it is reported, not
+/// obeyed.
+const LIFECYCLE_DEADLINE: Duration = Duration::from_secs(5);
+
 /// Clears the placement's reachability flag however the pump ends — return,
 /// panic, or abort.
 struct ReachabilityGuard(Arc<AtomicBool>);
@@ -800,7 +809,21 @@ impl Router {
     /// Stop and join every in-process placement. Externally attached
     /// compatibility daemons are left running.
     pub async fn shutdown(&self) -> Result<()> {
-        let _lifecycle = self.lifecycle.write().await;
+        // The lifecycle guard excludes placements while we tear down — but the
+        // read side is held across a whole lazy placement, which includes a
+        // transport build that can sit for tens of seconds. Waiting for it
+        // without a bound is how a stop that races a first board load becomes a
+        // daemon that never exits. Past the deadline, shut down anyway: a
+        // placement still arriving is a placement whose Station will be torn
+        // down by the process leaving, and an unbounded wait here is worse than
+        // an unsynchronised one.
+        let lifecycle = tokio::time::timeout(LIFECYCLE_DEADLINE, self.lifecycle.write()).await;
+        if lifecycle.is_err() {
+            tracing::warn!(
+                seconds = LIFECYCLE_DEADLINE.as_secs(),
+                "a placement was still in flight at shutdown — draining without the lifecycle guard"
+            );
+        }
         if self.shutting_down.swap(true, Ordering::AcqRel) {
             return Ok(());
         }

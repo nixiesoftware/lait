@@ -206,6 +206,14 @@ impl Head {
             .to_string()
     }
 
+    /// Is the head still up?
+    ///
+    /// `try_wait` polls rather than blocks, and reaps if the head has already
+    /// gone — which matters to any test whose subject is process reaping.
+    pub fn is_running(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(None))
+    }
+
     /// Stop the head, then the daemon it started.
     pub fn stop(mut self) {
         let _ = self.child.kill();

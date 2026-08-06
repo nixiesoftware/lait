@@ -223,6 +223,20 @@ windows-sys = { version = "0.61", features = [
 [target.'cfg(target_vendor = "apple")'.dev-dependencies]
 libc = "0.2"
 
+# Signals, at both ends of the process. std resets **only** SIGPIPE across
+# spawn/exec — it deliberately preserves the signal mask and every other
+# `SIG_IGN` — so a daemon inherits whatever its launch chain was carrying: a
+# shell's background-job `SIG_IGN` for SIGINT/SIGQUIT, or a blocked SIGTERM from
+# any ancestor that masked one. A daemon that inherits a blocked SIGTERM cannot
+# be stopped by SIGTERM at all, which is indistinguishable from a hang. And at
+# the other end, tokio never unregisters a signal handler, so a daemon past its
+# shutdown has an installed-but-dead SIGTERM handler that swallows the signal
+# instead of terminating. `process::reset_signal_environment` and
+# `process::restore_default_termination_signals` fix those two ends, and neither
+# is expressible through std.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 mechanics = { path = "crates/mechanics", features = ["fault-injection"] }
 replica = { path = "crates/replica", features = ["fault-injection"] }

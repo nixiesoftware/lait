@@ -253,6 +253,11 @@ pub async fn ensure_lait_daemon(selection: &crate::config::Selection) -> Result<
     for _ in 0..100 {
         tokio::time::sleep(Duration::from_millis(200)).await;
         if matches!(client.probe().await, control::Probe::Healthy) {
+            // Ours to start, ours to reap. Dropping the handle here instead
+            // would leave the daemon's eventual exit uncollected, and a head
+            // that outlives its daemon would keep the corpse listed for its own
+            // lifetime — see `DaemonChild::reap`.
+            child.reap();
             return Ok(());
         }
         // A daemon that has already exited is never going to answer. Without this
@@ -280,6 +285,9 @@ pub async fn ensure_lait_daemon(selection: &crate::config::Selection) -> Result<
             return Err(daemon_exited_error(status, &log_path));
         }
     }
+    // Giving up on the wait is not giving up on the corpse: a daemon that never
+    // answered is exactly the one most likely to exit on its own later.
+    child.reap();
     Err(Failure::unreachable(format!(
         "Lait daemon did not come online within 20s — it is running but not answering.\n\
          see {log}, or run `lait daemon` in the foreground to watch it start.",

@@ -244,6 +244,7 @@ impl Listener {
         }
 
         self.begin_stop();
+        Phase::DrainingConnections.enter();
         tokio::time::timeout(Duration::from_secs(10), async {
             while let Some(result) = connections.join_next().await {
                 if let Err(error) = result {
@@ -874,12 +875,14 @@ impl Runner {
 
     pub(crate) async fn run(self) -> Result<()> {
         let serve_result = self.daemon.clone().serve(&self.home).await;
+        Phase::DrainingPlacements.enter();
         let shutdown_result = self
             .daemon
             .router
             .shutdown()
             .await
             .context("drain Station placements");
+        Phase::Done.enter();
         #[cfg(unix)]
         let _ = std::fs::remove_file(crate::config::socket_path(&self.home));
         serve_result?;
@@ -910,12 +913,139 @@ pub async fn run_lait_daemon(
     let stop = runner.stop_handle();
     let signal = tokio::spawn(async move {
         shutdown_signal().await;
+        watchdog();
         stop.stop();
+        // A second signal is an instruction not to wait for the ladder at all.
+        shutdown_signal().await;
+        tracing::warn!("second shutdown signal — leaving without finishing the drain");
+        exit_now();
     });
     let result = runner.run().await;
     signal.abort();
     let _ = signal.await;
+    // The listener is gone, so from here tokio's still-installed handler would
+    // swallow SIGTERM rather than end us. Whatever remains — the runtime's own
+    // teardown, a blocking task that has not noticed — stays interruptible the
+    // ordinary way.
+    crate::process::restore_default_termination_signals();
     result
+}
+
+/// How far shutdown got, published for the one observer that can still read it.
+///
+/// A daemon wedged in its drain is silent by construction: the rung it is stuck
+/// on is the rung that never returns, so it never logs. That left a real hang —
+/// alive, idle, every worker parked, deaf to SIGTERM — with no evidence at all
+/// beyond a stack sample of a stripped release binary. This is the breadcrumb
+/// that turns the next one into a one-line diagnosis: the watchdog reads it from
+/// its own thread and names the stage it interrupted.
+///
+/// An atom rather than anything richer because the reader is a bare OS thread
+/// running while the runtime may be unable to schedule anything at all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+enum Phase {
+    Serving = 0,
+    DrainingConnections = 1,
+    DrainingPlacements = 2,
+    Done = 3,
+}
+
+static SHUTDOWN_PHASE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+impl Phase {
+    fn enter(self) {
+        SHUTDOWN_PHASE.store(self as u8, std::sync::atomic::Ordering::Relaxed);
+        // Arm the hard stop on the *first* sign of shutdown, whatever started
+        // it. A signal is only one of the ways this daemon stops: a head taking
+        // over sends `Request::Stop`, and the accept loop can break on its own.
+        // Those paths never reach the signal task, so arming only there left the
+        // commonest wedge uncovered — and once the signal task is aborted the
+        // registered SIGTERM handler stays installed and inert, so a process
+        // wedged after that point cannot be signalled down at all.
+        if matches!(self, Phase::DrainingConnections | Phase::DrainingPlacements) {
+            watchdog();
+        }
+    }
+
+    fn current() -> &'static str {
+        match SHUTDOWN_PHASE.load(std::sync::atomic::Ordering::Relaxed) {
+            0 => "still serving — the stop never reached the accept loop",
+            1 => "draining control connections",
+            2 => "draining Station placements (Orbit teardown, peer goodbye, transport close)",
+            _ => "finished draining — stuck after the last rung",
+        }
+    }
+}
+
+/// How long the graceful drain gets before the hard stop takes over.
+///
+/// Well above what a real shutdown costs (a node with a placed Station and a
+/// live peer measures in single-digit seconds), because the drain is worth
+/// finishing: it is what sends the signed dormancy beacon that stops peers
+/// treating this node as reachable. The deadline is the backstop for a rung
+/// that never returns, not a schedule the ordinary path is meant to meet.
+const DEADLINE: Duration = Duration::from_secs(30);
+
+/// Arm the hard stop behind the graceful one, on a plain OS thread.
+///
+/// Deliberately not a runtime task. Shutdown is a ladder of drains, and the
+/// failure this guards against — a rung that never returns, a worker pinned by
+/// a blocking call, a runtime that cannot schedule — is precisely the state in
+/// which a `tokio::time::timeout` would never be polled. A thread parked in
+/// `sleep` is answerable to nobody's scheduler.
+///
+/// Armed from more than one place — a signal, and the drain itself — so the
+/// deadline is the *first* arming and later calls are no-ops. Re-arming would
+/// let a shutdown that crawls from rung to rung extend its own deadline forever.
+///
+/// `LAIT_SHUTDOWN_DEADLINE_SECS` overrides it; `0` disables the hard stop, for
+/// anyone who would rather have a hung daemon to debug than a clean exit.
+fn watchdog() {
+    static ARMED: std::sync::Once = std::sync::Once::new();
+    ARMED.call_once(arm_watchdog);
+}
+
+fn arm_watchdog() {
+    let deadline = std::env::var("LAIT_SHUTDOWN_DEADLINE_SECS")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .map_or(DEADLINE, Duration::from_secs);
+    if deadline.is_zero() {
+        return;
+    }
+    // A watchdog we could not start is not worth refusing to shut down over.
+    let _ = std::thread::Builder::new()
+        .name("lait-shutdown-watchdog".into())
+        .spawn(move || {
+            std::thread::sleep(deadline);
+            tracing::error!(
+                seconds = deadline.as_secs(),
+                stage = Phase::current(),
+                "graceful shutdown did not finish within its deadline — leaving anyway"
+            );
+            exit_now();
+        });
+}
+
+/// Leave now, skipping every remaining drain and destructor.
+///
+/// Safe to do at all only because durability never depended on this path: the
+/// journal is fsync/rename disciplined and crash-tested against a mid-commit
+/// abort, the store lock is an `flock` the kernel drops on exit, and the next
+/// daemon unlinks a stale socket before it binds. What is genuinely lost is the
+/// courtesy — the dormancy beacon peers use to stop calling — which is why this
+/// is the deadline's job and not the shutdown's.
+///
+/// Exit status `0`: the process was asked to stop and it stopped. The daemon's
+/// non-zero codes are a startup contract read by the head that spawned it, and
+/// a shutdown that took too long is not a failure to start.
+#[allow(
+    clippy::exit,
+    reason = "the deadline behind graceful shutdown: its whole purpose is to leave when the ordinary path will not"
+)]
+fn exit_now() -> ! {
+    std::process::exit(0)
 }
 
 async fn shutdown_signal() {

@@ -64,6 +64,25 @@ impl DaemonChild {
     pub fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
         imp::try_wait(self)
     }
+
+    /// Give up the handle to a reaper, so the daemon's *exit* is collected
+    /// whenever it comes.
+    ///
+    /// The daemon outlives the spawn call, so nothing here waits for it — and
+    /// on unix "nothing waits for it" is the whole bug. A child whose parent
+    /// never `wait`s becomes a zombie the instant it exits: still listed by
+    /// `ps`, still answering `kill -0`, immune to `kill -9` (there is nothing
+    /// left to signal), and cleared only when the parent itself dies. A head
+    /// that outlives the daemon it started therefore turns every ordinary
+    /// daemon shutdown into a process that looks unkillable — which is exactly
+    /// how this surfaced, as "SIGTERM does nothing, and neither does SIGKILL".
+    ///
+    /// Reaping is not stopping: this only collects the exit status, whenever it
+    /// arrives. A daemon told to keep running keeps running, and one that
+    /// outlives *this* process is reparented and reaped by init as usual.
+    pub fn reap(self) {
+        imp::reap(self);
+    }
 }
 
 #[cfg(not(windows))]
@@ -96,6 +115,21 @@ mod imp {
 
     pub fn try_wait(c: &mut DaemonChild) -> io::Result<Option<ExitStatus>> {
         c.child.try_wait()
+    }
+
+    /// A plain OS thread, not a runtime task: `wait` is a blocking syscall, and
+    /// the reaper has to outlive whatever runtime happened to be up when the
+    /// daemon was spawned. It parks in the kernel until the daemon exits, which
+    /// for a healthy daemon is the rest of this process's life.
+    pub fn reap(c: DaemonChild) {
+        let mut child = c.child;
+        // A reaper we could not start is not worth failing a spawn over: the
+        // daemon is up, and the cost is the zombie we had before.
+        let _ = std::thread::Builder::new()
+            .name("lait-daemon-reaper".into())
+            .spawn(move || {
+                let _ = child.wait();
+            });
     }
 }
 
@@ -250,6 +284,10 @@ mod imp {
         let proc = unsafe { OwnedHandle::from_raw_handle(pi.hProcess as RawHandle) };
         Ok(DaemonChild { proc })
     }
+
+    /// Nothing to reap: Windows has no zombie, and the process object goes when
+    /// the last handle to it closes — which is this drop.
+    pub fn reap(_c: DaemonChild) {}
 
     pub fn try_wait(c: &mut DaemonChild) -> io::Result<Option<ExitStatus>> {
         let h = c.proc.as_raw_handle() as HANDLE;

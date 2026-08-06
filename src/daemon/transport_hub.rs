@@ -29,6 +29,18 @@ const SPACE_INCOMING_BUFFER: usize = 16;
 const MAX_PENDING_OPENERS: usize = 64;
 const OPENING_FRAME_DEADLINE: Duration = Duration::from_secs(5);
 
+/// Shutdown bounds. Every rung of the drain owns a deadline; these three were
+/// the exceptions, and an exception is all it takes — a stop that never returns
+/// is a daemon that no signal can end, because the shutdown it is waiting for
+/// has already been asked for.
+///
+/// Each is generous enough that the ordinary path never meets it (a real close
+/// is sub-second) and short enough that the whole ladder still fits inside the
+/// daemon's own hard-stop deadline.
+const SLOT_CLAIM_DEADLINE: Duration = Duration::from_secs(5);
+const TRANSPORT_CLOSE_DEADLINE: Duration = Duration::from_secs(5);
+const PUMP_JOIN_DEADLINE: Duration = Duration::from_secs(5);
+
 type SpaceBytes = [u8; 29];
 type HubSlot = Arc<Mutex<Option<Arc<IdentityTransportHub>>>>;
 
@@ -121,7 +133,22 @@ impl TransportFactory for TransportHubFactory {
             .map(|(_, slot)| slot)
             .collect();
         for slot in slots {
-            if let Some(hub) = slot.lock().await.take() {
+            // The same mutex is held across `inner.build(...)`, which binds an
+            // endpoint and can wait on a relay — so a shutdown racing a first
+            // placement would queue behind that build with no bound at all. A
+            // slot we cannot claim in time is one whose hub is still being
+            // built; leaving it to the process exit is the lesser harm.
+            let claimed = match tokio::time::timeout(SLOT_CLAIM_DEADLINE, slot.lock()).await {
+                Ok(mut guard) => guard.take(),
+                Err(_) => {
+                    tracing::warn!(
+                        seconds = SLOT_CLAIM_DEADLINE.as_secs(),
+                        "an identity transport slot was still building at shutdown — skipping it"
+                    );
+                    None
+                }
+            };
+            if let Some(hub) = claimed {
                 hub.shutdown().await;
             }
         }
@@ -315,17 +342,46 @@ impl IdentityTransportHub {
         for target in targets {
             target.stopping.send_replace(true);
         }
-        self.transport.shutdown().await;
+        // Closing the endpoint is a courtesy to peers, not an obligation to
+        // this process: it waits on the wire, and a peer that has gone away
+        // without saying so makes that wait one nobody bounds. Every other rung
+        // of the drain has a deadline; this one used to be the exception, and
+        // an exception is all it takes for a daemon to become unkillable.
+        if tokio::time::timeout(TRANSPORT_CLOSE_DEADLINE, self.transport.shutdown())
+            .await
+            .is_err()
+        {
+            tracing::warn!(
+                seconds = TRANSPORT_CLOSE_DEADLINE.as_secs(),
+                "the identity transport did not close in time — leaving it to the process exit"
+            );
+        }
         // Both pumps. `session_task` was spawned and stored and never awaited,
         // which is a task outliving the hub that owns it — the kind of leak
         // that only shows up as a Station that will not stop.
+        //
+        // Bounded by `abort`-then-join, never by a timeout around the join:
+        // dropping a `JoinHandle` *detaches* the task rather than stopping it,
+        // so a bare `timeout(handle)` would reintroduce exactly the leak the
+        // paragraph above describes. Aborting first makes the join terminal.
         let tasks = [
             self.accept_task.lock_recovering().take(),
             self.session_task.lock_recovering().take(),
         ];
-        for task in tasks.into_iter().flatten() {
-            if let Err(error) = task.await {
-                tracing::debug!(%error, "identity transport pump failed");
+        for mut task in tasks.into_iter().flatten() {
+            match tokio::time::timeout(PUMP_JOIN_DEADLINE, &mut task).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => tracing::debug!(%error, "identity transport pump failed"),
+                Err(_) => {
+                    tracing::warn!(
+                        seconds = PUMP_JOIN_DEADLINE.as_secs(),
+                        "an identity transport pump did not stop on its own — aborting it"
+                    );
+                    task.abort();
+                    // Terminal: an aborted task's join resolves, so this cannot
+                    // be the thing that hangs.
+                    let _ = task.await;
+                }
             }
         }
     }

@@ -76,8 +76,10 @@ const USAGE: &str = "lait is not a command surface — it is three processes:\n\
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    // Before anything can spawn: our stdio stays ours.
+    // Before anything can spawn: our stdio stays ours, and our signals are ours
+    // rather than whatever the launching chain happened to be carrying.
     lait::process::disinherit_stdio();
+    lait::process::reset_signal_environment();
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let mode = match Mode::parse(&argv) {
         Ok(mode) => mode,
