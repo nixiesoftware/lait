@@ -42,7 +42,7 @@ permissions:
 jobs:
   winget:
     name: submit to winget-pkgs
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.conclusion == 'success' &&

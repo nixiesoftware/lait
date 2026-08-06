@@ -40,7 +40,7 @@ jobs:
     # `timeout-minutes` cannot catch it, since queue time is not job time. If a
     # release ever ships with the tap left behind again, this is the first line
     # to change.
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     # Only a manual dispatch, or a successful Release run for a version tag.
     if: >-
