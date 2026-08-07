@@ -21,8 +21,42 @@ export interface ViewerRoute {
   /** The open Baseline. A separate key rather than a second meaning for `spec`:
    *  they are different nouns and a link should say which one it opens. */
   baseline?: string;
+  /**
+   * The composer, expanded out of its dialog and onto the page.
+   *
+   * NOT a `View`. The union in `registry.ts` is the set of *destinations* — the
+   * sidebar lists them, the command registry projects them, and every surface
+   * switches on them. An unsaved draft is none of those: it is the Issues view
+   * with a composer standing in front of it, which is exactly what `issue` is
+   * for an issue. So it rides as a flag on the route the way `?issue=` does,
+   * and `view` stays `list`.
+   *
+   * It is a path segment rather than a query parameter because it is a place
+   * you can be sent, and because `/issues/new` is the address a reader would
+   * guess. `formatRoute` only ever emits it under a project: the composer needs
+   * a project key to file into, so a workspace-scoped draft has no meaning.
+   */
+  composing?: boolean;
+  /**
+   * The open Settings sub-page.
+   *
+   * Settings already wrote `?tab=` and already read it back on mount, and it
+   * still did not work: this formatter is the sole author of the address, and
+   * anything it does not know about is erased on the next render. So a settings
+   * sub-page was linkable in the address bar and gone on reload.
+   *
+   * Same shape as `spec` and `baseline` — a sub-selection that only exists
+   * under one view, so it is parsed and emitted only there. `general` is the
+   * default and stays out of the URL, so the plain `/settings` address means
+   * what it always did.
+   */
+  tab?: string;
   filter?: FilterState;
 }
+
+/** The Settings sub-pages that have an address. Mirrors `Settings.tsx`'s `Tab`;
+ *  an unknown value falls back to `general` rather than rendering nothing. */
+const SETTINGS_TABS = new Set(["members", "devices", "labels", "workflow", "access"]);
 
 export const DEFAULT_ROUTE: ViewerRoute = {
   spaceId: null,
@@ -64,6 +98,11 @@ export function parseRoute(location: Pick<Location, "pathname" | "search">): Vie
   const candidate = parts[2];
   const projectCandidate = candidate === "projects" && parts[3] ? clean(parts[3]) : null;
   const projectViewCandidate = projectCandidate ? projectView(parts[4]) : null;
+  // `/projects/:key/issues/new` — the trailing segment is the only one the
+  // grammar takes after a project view, and only after `issues`. Anything else
+  // there is not a route we wrote, so it is ignored rather than guessed at.
+  const composing =
+    projectCandidate !== null && projectViewCandidate === "list" && parts[5] === "new";
   // Members used to be a root destination. It now lives inside workspace
   // settings; old bookmarks still land in Settings instead of a project list.
   const view =
@@ -93,6 +132,8 @@ export function parseRoute(location: Pick<Location, "pathname" | "search">): Vie
   const issue = displaysIssue(view) ? clean(query.get("issue")) : null;
   const spec = view === "specs" ? clean(query.get("spec")) : null;
   const baseline = view === "specs" ? clean(query.get("baseline")) : null;
+  const tabParam = view === "settings" ? clean(query.get("tab")) : null;
+  const tab = tabParam && SETTINGS_TABS.has(tabParam) ? tabParam : null;
 
   return {
     spaceId: parts[1],
@@ -101,6 +142,8 @@ export function parseRoute(location: Pick<Location, "pathname" | "search">): Vie
     issue,
     ...(spec ? { spec } : {}),
     ...(baseline ? { baseline } : {}),
+    ...(composing ? { composing: true } : {}),
+    ...(tab ? { tab } : {}),
     ...(carriesFilter(view) && isActive(filter) ? { filter } : {}),
   };
 }
@@ -109,7 +152,10 @@ export function formatRoute(route: ViewerRoute): string {
   if (!route.spaceId) return "/";
 
   const query = new URLSearchParams();
-  if (route.issue && displaysIssue(route.view)) {
+  // Not while composing: the draft page stands in front of the rows, so an
+  // `?issue=` beside it would claim two things are open at once. The selection
+  // underneath is cursor position, and cursor position is not addressable.
+  if (route.issue && displaysIssue(route.view) && !route.composing) {
     query.set("issue", route.issue);
   }
   if (route.spec && route.view === "specs") {
@@ -117,6 +163,9 @@ export function formatRoute(route: ViewerRoute): string {
   }
   if (route.baseline && route.view === "specs") {
     query.set("baseline", route.baseline);
+  }
+  if (route.tab && route.view === "settings" && SETTINGS_TABS.has(route.tab)) {
+    query.set("tab", route.tab);
   }
   if (carriesFilter(route.view) && route.filter && isActive(route.filter)) {
     if (route.filter.text.trim()) query.set("q", route.filter.text.trim());
@@ -128,10 +177,13 @@ export function formatRoute(route: ViewerRoute): string {
     if (route.filter.milestone !== null) query.set("milestone", route.filter.milestone);
   }
 
-  const path =
-    route.project && isProjectDestination(route.view)
-      ? `/spaces/${encodeURIComponent(route.spaceId)}/projects/${encodeURIComponent(route.project)}/${projectSegment(route.view)}`
-      : `/spaces/${encodeURIComponent(route.spaceId)}/${route.view}`;
+  const underProject = route.project && isProjectDestination(route.view);
+  // The composer only has an address under a project's Issues: it files into a
+  // project key, so there is nowhere else for the segment to hang.
+  const draft = underProject && route.composing && route.view === "list" ? "/new" : "";
+  const path = underProject
+    ? `/spaces/${encodeURIComponent(route.spaceId)}/projects/${encodeURIComponent(route.project!)}/${projectSegment(route.view)}${draft}`
+    : `/spaces/${encodeURIComponent(route.spaceId)}/${route.view}`;
   const search = query.toString();
   return search ? `${path}?${search}` : path;
 }
@@ -144,6 +196,8 @@ export function sameRoute(a: ViewerRoute, b: ViewerRoute): boolean {
     a.issue === b.issue &&
     (a.spec ?? null) === (b.spec ?? null) &&
     (a.baseline ?? null) === (b.baseline ?? null) &&
+    (a.composing ?? false) === (b.composing ?? false) &&
+    (a.tab ?? null) === (b.tab ?? null) &&
     JSON.stringify(a.filter ?? EMPTY_FILTER) === JSON.stringify(b.filter ?? EMPTY_FILTER)
   );
 }

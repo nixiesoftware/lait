@@ -223,6 +223,82 @@ describe("viewer routes", () => {
     expect(resolveLocalSpace("ws_shared", [older, agent])).toBe(older);
   });
 
+  it("addresses the composer as a segment under a project's issues", () => {
+    const route = {
+      spaceId: "ws_alpha",
+      project: "EXEC",
+      view: "list" as const,
+      issue: null,
+      composing: true,
+    };
+    const href = formatRoute(route);
+
+    expect(href).toBe("/spaces/ws_alpha/projects/EXEC/issues/new");
+    expect(parseRoute(new URL(href, "http://lait.local"))).toEqual(route);
+  });
+
+  it("drops the open issue while composing, because only one thing is in front", () => {
+    expect(
+      formatRoute({
+        spaceId: "ws_alpha",
+        project: "EXEC",
+        view: "list",
+        issue: "iss_7",
+        composing: true,
+      }),
+    ).toBe("/spaces/ws_alpha/projects/EXEC/issues/new");
+  });
+
+  it("has no composer without a project to file into", () => {
+    expect(
+      formatRoute({ spaceId: "ws_alpha", project: null, view: "list", issue: null, composing: true }),
+    ).toBe("/spaces/ws_alpha/list");
+    expect(
+      formatRoute({ spaceId: "ws_alpha", project: "EXEC", view: "board", issue: null, composing: true }),
+    ).toBe("/spaces/ws_alpha/projects/EXEC/board");
+  });
+
+  it("ignores a trailing segment the grammar never writes", () => {
+    expect(
+      parseRoute({ pathname: "/spaces/ws_alpha/projects/EXEC/issues/edit", search: "" }).composing,
+    ).toBeUndefined();
+    expect(
+      parseRoute({ pathname: "/spaces/ws_alpha/projects/EXEC/board/new", search: "" }).composing,
+    ).toBeUndefined();
+  });
+
+  it("tells a composing route apart from the list it stands in front of", () => {
+    const list = { spaceId: "ws_alpha", project: "EXEC", view: "list" as const, issue: null };
+    expect(sameRoute(list, { ...list, composing: true })).toBe(false);
+    expect(sameRoute(list, { ...list, composing: false })).toBe(true);
+  });
+
+  it("keeps a settings sub-page in the address, so it survives a reload", () => {
+    const route = {
+      spaceId: "ws_alpha",
+      project: null,
+      view: "settings" as const,
+      issue: null,
+      tab: "members",
+    };
+    const href = formatRoute(route);
+
+    expect(href).toBe("/spaces/ws_alpha/settings?tab=members");
+    expect(parseRoute(new URL(href, "http://lait.local"))).toEqual(route);
+  });
+
+  it("has no sub-page outside settings, and none for the default one", () => {
+    expect(
+      formatRoute({ spaceId: "ws_alpha", project: null, view: "inbox", issue: null, tab: "members" }),
+    ).toBe("/spaces/ws_alpha/inbox");
+    expect(
+      parseRoute({ pathname: "/spaces/ws_alpha/settings", search: "?tab=general" }).tab,
+    ).toBeUndefined();
+    expect(
+      parseRoute({ pathname: "/spaces/ws_alpha/settings", search: "?tab=nonsense" }).tab,
+    ).toBeUndefined();
+  });
+
   it("restores the last canonical workspace without storing a local handle", () => {
     localStorage.clear();
     const route = { spaceId: "ws_shared", project: "WEB", view: "board" as const, issue: "iss_1" };
