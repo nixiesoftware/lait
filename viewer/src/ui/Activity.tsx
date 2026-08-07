@@ -2,10 +2,10 @@ import { useEffect, useMemo, useState } from "react";
 import { Activity as ActivityIcon, AlertTriangle } from "lucide-react";
 
 import { rpc } from "../api";
-import { describeChanges, describeEvent, type NameResolver } from "../core/activity";
+import { describeEventRich, type EventPhraseContext, type NameResolver } from "../core/activity";
 import { groupActivity } from "../core/inbox";
 import { boundedTail, indexBy } from "../core/performance";
-import type { ActivityEvent, MemberDto } from "../types";
+import type { ActivityEvent, MemberDto, WorkflowState } from "../types";
 import { EmptyState, LoadingState } from "./AppState";
 import { memberName } from "./Avatar";
 import { when } from "./time";
@@ -33,6 +33,7 @@ import { interactiveRow } from "./primitives";
 export function Activity({
   spaceId,
   members,
+  states,
   revision,
   projectDocIds,
   projectName,
@@ -41,6 +42,9 @@ export function Activity({
 }: {
   spaceId: string;
   members: MemberDto[];
+  /** For naming the states a change moved between. Without these the feed
+   *  prints the engine's ids — `in_progress`, not "In Progress". */
+  states: WorkflowState[];
   revision: number;
   projectDocIds?: ReadonlySet<string>;
   projectName?: string;
@@ -55,6 +59,16 @@ export function Activity({
   );
   const resolveName: NameResolver = (key) =>
     memberName(key, memberByKey.get(key));
+  /** The same context the issue history builds. Held in one object so the two
+   *  feeds cannot drift into resolving different halves of the same event. */
+  const phraseCtx: EventPhraseContext = useMemo(
+    () => ({
+      resolveName,
+      stateName: (id) => states.find((state) => state.id === id)?.name ?? null,
+    }),
+    // `resolveName` closes over `memberByKey`, which is the real dependency.
+    [memberByKey, states],
+  );
   const scopedEvents = useMemo(
     () => projectDocIds
       ? events?.filter((event) => event.doc_id !== null && projectDocIds.has(event.doc_id)) ?? null
@@ -126,7 +140,7 @@ export function Activity({
           <span className="min-w-0 flex-1">
             {group.events.map((event, index) => (
               <span key={event.seq} className={index ? "mt-1 block" : "block"}>
-                <Line event={event} resolveName={resolveName} />
+                <Line event={event} ctx={phraseCtx} />
               </span>
             ))}
           </span>
@@ -148,9 +162,22 @@ export function Activity({
   );
 }
 
-function Line({ event, resolveName }: { event: ActivityEvent; resolveName: NameResolver }) {
-  const { actor, phrase } = describeEvent(event, resolveName);
-  const changes = describeChanges(event);
+/**
+ * One event, in the words a person would use.
+ *
+ * `describeEventRich`, not `describeEvent` + `describeChanges`. Both renderers
+ * have always been here and the issue history picked the right one; the space
+ * feed picked the raw pair, so it printed the protocol at you:
+ * `status: backlog → in_progress`, `duedate: — → Aug 21, 2026`, and — under a
+ * line that already said "you added an assignee" — the 64-hex device key of
+ * you. The rich renderer says "moved from Backlog to In Progress" and
+ * "assigned you", from the same event and the same member list.
+ *
+ * No separate `changes` span any more: the rich phrase already *is* the
+ * changes, so appending them printed everything twice.
+ */
+function Line({ event, ctx }: { event: ActivityEvent; ctx: EventPhraseContext }) {
+  const { actor, phrase } = describeEventRich(event, ctx);
   return (
     <span>
       {/* No name when we have no honest one — see core/activity.ts. */}
@@ -161,7 +188,6 @@ function Line({ event, resolveName }: { event: ActivityEvent; resolveName: NameR
       {(event.kind === "created" || event.kind === "commented") && event.text && (
         <span className="text-mute ml-2 text-xs">{event.text}</span>
       )}
-      {changes && <span className="text-mute ml-2 text-xs">{changes}</span>}
     </span>
   );
 }

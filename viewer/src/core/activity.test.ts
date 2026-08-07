@@ -197,6 +197,33 @@ describe("rich phrasing", () => {
     expect(describeEventRich(e, ctx).phrase).toBe("assigned bob");
   });
 
+  it("says themselves when the assignee key IS the actor's", () => {
+    // The resolver answers "you" for your own key, so without this the feed
+    // read "you assigned you" — which is grammatical and not what anyone says.
+    const keyed = ev({
+      kind: "assigned",
+      actor: BOB,
+      changes: [{ field: "assignees", from: null, to: BOB }],
+    });
+    expect(describeEventRich(keyed, ctx).phrase).toBe("assigned themselves");
+
+    const edited = ev({
+      kind: "edited",
+      actor: BOB,
+      changes: [{ field: "assignees", from: null, to: BOB }],
+    });
+    expect(describeEventRich(edited, ctx).phrase).toBe("assigned themselves");
+  });
+
+  it("still names someone else, whoever did the assigning", () => {
+    const e = ev({
+      kind: "assigned",
+      actor: "act_someone_else",
+      changes: [{ field: "assignees", from: null, to: BOB }],
+    });
+    expect(describeEventRich(e, ctx).phrase).toBe("assigned bob");
+  });
+
   it("phrases the WorkState self-assignment rider alongside the move", () => {
     const e = ev({
       kind: "started",

@@ -119,7 +119,7 @@ export const EDIT_KINDS: ReadonlySet<string> = new Set(["edited", "started", "fi
  * change, with one exception: a description edit travels as `— → —` (the daemon
  * doesn't ship the two texts), and that is still a real edit worth a clause.
  */
-function editClause(c: FieldChange, ctx: EventPhraseContext): string | null {
+function editClause(c: FieldChange, ctx: EventPhraseContext, actorKey?: string | null): string | null {
   const state = (id: string) => ctx.stateName?.(id) ?? id;
   if (c.field === "description") return "updated the description";
   if ((c.from ?? "—") === (c.to ?? "—")) return null;
@@ -147,9 +147,14 @@ function editClause(c: FieldChange, ctx: EventPhraseContext): string | null {
     case "estimate":
       return c.to ? `set the estimate to ${c.to}` : "removed the estimate";
     case "assignees": {
-      // The WorkState self-assignment rider ("@me"), or a future keyed change.
+      // The WorkState self-assignment rider ("@me"), a key that IS the actor's,
+      // or someone else's. The middle case is the one that used to read badly:
+      // the resolver answers "you" for your own key, so a self-assignment came
+      // out as "you assigned you" — grammatical, and not what anyone says.
       const who = (k: string) =>
-        k === "@me" ? "themselves" : (ctx.resolveName?.(k) ?? shortId(k));
+        k === "@me" || (actorKey !== null && actorKey !== undefined && k === actorKey)
+          ? "themselves"
+          : (ctx.resolveName?.(k) ?? shortId(k));
       return c.to ? `assigned ${who(c.to)}` : c.from ? `unassigned ${who(c.from)}` : null;
     }
     default:
@@ -180,7 +185,7 @@ export function describeEventRich(
     if (e.kind === "created") return "created the issue";
     if (EDIT_KINDS.has(e.kind)) {
       const clauses = e.changes
-        .map((c) => editClause(c, ctx))
+        .map((c) => editClause(c, ctx, e.actor))
         .filter((s): s is string => s !== null);
       return clauses.length > 0 ? clauses.join(", ") : plain;
     }
@@ -190,7 +195,11 @@ export function describeEventRich(
         const names = e.changes
           .map((c) => (e.kind === "assigned" ? c.to : c.from))
           .filter((k): k is string => !!k)
-          .map((k) => (k === "@me" ? "themselves" : (ctx.resolveName?.(k) ?? shortId(k))));
+          .map((k) =>
+            k === "@me" || (e.actor !== null && k === e.actor)
+              ? "themselves"
+              : (ctx.resolveName?.(k) ?? shortId(k)),
+          );
         if (names.length === 0) return plain;
         return `${e.kind} ${names.join(", ")}`;
       }
