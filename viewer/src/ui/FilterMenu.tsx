@@ -20,7 +20,7 @@ import { Avatar, memberName } from "./Avatar";
 import { catalogColor } from "./colors";
 import { PriorityIcon, StatusIcon } from "./icons";
 import { IconButton, Popover } from "@astryxdesign/core";
-import { cn } from "./primitives";
+import { cn, toolbarIconControl } from "./primitives";
 
 /** Toggle one id in a multi-select filter axis. */
 const toggle = (list: readonly string[], id: string): string[] =>
@@ -387,9 +387,10 @@ export function FilterMenu({
     >
       <IconButton
         label="Filter"
-        variant={active ? "active" : "secondary"}
+        variant={active ? "active" : "ghost"}
         elevation={active ? "none" : "low"}
         size="sm"
+        className={toolbarIconControl}
         tooltip="Filter  /"
         icon={<ListFilter className="size-icon-sm" />}
       />

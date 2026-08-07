@@ -315,6 +315,38 @@ export const crumbGlyph = "flex size-icon-md shrink-0 items-center justify-cente
 export const railGlyph = "flex size-icon-sm shrink-0 items-center justify-center";
 
 /**
+ * The toolbar band's controls sit ONE RUNG DOWN from Astryx's floor.
+ *
+ * Astryx's smallest `Button` is 28px at 13px text — `sm` in its vocabulary,
+ * which lands on lait's `ctl-md`. Its scale is shifted a rung against ours, so
+ * "the smallest button" still fills a 32px bar edge to edge and the band reads
+ * as packed rather than composed.
+ *
+ * The fix is not a taller bar. A smaller control is what BUYS the padding: in
+ * the same 32px band, 24px controls leave 4px above and below where 28px left
+ * 2px — double the air for no extra header at all. A taller bar would have
+ * bought the same room and charged the page for it. The type drops with the
+ * height rather than after it, because a 13px label in a 24px pill is the
+ * cramped half of the problem.
+ *
+ * WHY A CALL-SITE RECIPE AND NOT A THEME OVERRIDE. `defineTheme` accepts
+ * `size:sm` keys, so this could be one line of theme — but it would move EVERY
+ * `sm` button in the app, including the ones sitting beside lait's own 28px
+ * `ctl-md` controls, and trade one mismatch for a dozen. This is a statement
+ * about a band, so it is worn by the band's controls.
+ *
+ * WHY NOT A CSS SCOPE ON THE BAND. `[data-toolbar] button` was the obvious
+ * shape and is a trap: Astryx renders popover content INLINE, so the filter
+ * panel and the display menu are DOM descendants of the toolbar. A descendant
+ * rule would shrink every row inside those menus too.
+ */
+export const toolbarControl = "h-ctl-sm text-sm";
+
+/** The same rung for the band's square controls, which need the width stated
+ *  too or Astryx keeps them 28px wide and they stop being circles. */
+export const toolbarIconControl = "size-ctl-sm text-sm";
+
+/**
  * One menu row — for the rows Astryx does not draw for us.
  *
  * `DropdownMenuItem` covers the verb menus, but the searchable pickers are

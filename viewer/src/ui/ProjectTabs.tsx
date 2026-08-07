@@ -1,5 +1,6 @@
 import { isIssueMode, PROJECT_VIEW_LABEL, type ProjectView } from "../core/registry";
 import { Button } from "@astryxdesign/core";
+import { cn, toolbarControl } from "./primitives";
 
 /** The faces a project offers as tabs. Board and Calendar are absent on purpose:
  *  they are LAYOUTS of Issues, chosen beside grouping and ordering, so they live
@@ -58,9 +59,16 @@ export function ProjectTabs({
             aria-current={current ? "page" : undefined}
             onClick={() => onPick(tab)}
             label={`${PROJECT_VIEW_LABEL[tab]}`}
-            variant={current ? "active" : "secondary"}
-            elevation={current ? "none" : "low"}
+            // Only the CURRENT tab gets a surface. Every tab used to carry
+            // `secondary` + `elevation="low"` — a fill and a 1px drop shadow —
+            // so the strip was four raised chips and "selected" was a small
+            // shift in fill between them. Inverting it does the work the size
+            // change could not: one lit pill against three pieces of text reads
+            // at a glance, and the band stops competing with the rows under it.
+            variant={current ? "active" : "ghost"}
+            elevation="none"
             size="sm"
+            className={cn(toolbarControl, !current && "text-dim")}
           />
         );
       })}

@@ -112,6 +112,7 @@ import {
   type WorkflowState,
 } from "./types";
 import "./commands";
+import { toolbarIconControl } from "./ui/primitives";
 
 type Modal = "palette" | "issueSearch" | "shortcuts" | "workflow" | "roles" | null;
 type ThemePreference = "system" | "light" | "dark";
@@ -1876,9 +1877,10 @@ export function App() {
                 <IconButton
                   label="New issue"
                   onClick={() => run("issue.create")}
-                  variant="secondary"
-                  elevation="low"
+                  variant="ghost"
+                  elevation="none"
                   size="sm"
+                  className={toolbarIconControl}
                   tooltip="New issue  C"
                   icon={<Plus className="size-icon-sm" />}
                 />
@@ -1890,9 +1892,10 @@ export function App() {
                 <IconButton
                   label="New spec"
                   onClick={() => setComposingSpec("any")}
-                  variant="secondary"
-                  elevation="low"
+                  variant="ghost"
+                  elevation="none"
                   size="sm"
+                  className={toolbarIconControl}
                   tooltip="New spec"
                   icon={<Plus className="size-icon-sm" />}
                 />
@@ -1911,9 +1914,10 @@ export function App() {
                       return !was;
                     })
                   }
-                  variant={railOpen ? "active" : "secondary"}
-                  elevation={railOpen ? "none" : "low"}
+                  variant={railOpen ? "active" : "ghost"}
+                  elevation="none"
                   size="sm"
+                  className={toolbarIconControl}
                   tooltip={railOpen ? "Hide project panel" : "Show project panel"}
                   icon={<PanelRight className="size-icon-sm" />}
                 />

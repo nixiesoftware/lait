@@ -89,6 +89,12 @@ export function Toolbar({
         // as a boundary between two things rather than a header for one.
         "flex shrink-0 items-center gap-1 px-2",
         className,
+        // 32px, unchanged — the AIR came from the controls, not from here.
+        // They were 28px in this band and left 2px above and below, which is
+        // why it read as packed; at 24px (`toolbarControl`) the same 32px band
+        // gives 4px. Double the padding for no extra header, which is the whole
+        // point: a shorter control buys breathing room a taller bar would have
+        // charged the page for.
         "h-bar-sm",
       )}
     >

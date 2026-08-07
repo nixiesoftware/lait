@@ -3,7 +3,7 @@ import { Calendar, List, SlidersHorizontal, SquareKanban } from "lucide-react";
 import type { DisplayState, GroupBy, OrderBy } from "../core/display";
 import { ISSUE_MODES, ISSUE_MODE_LABEL, type IssueMode } from "../core/registry";
 import { Button, IconButton, Popover } from "@astryxdesign/core";
-import { cn } from "./primitives";
+import { cn, toolbarIconControl } from "./primitives";
 
 /** The layout switcher's glyphs. Same icons the sidebar gives the destination,
  *  so a board is drawn as a board wherever it is named. */
@@ -142,9 +142,10 @@ export function DisplayOptions({
     >
       <IconButton
         label="Display options"
-        variant={changed ? "active" : "secondary"}
+        variant={changed ? "active" : "ghost"}
         elevation={changed ? "none" : "low"}
         size="sm"
+        className={toolbarIconControl}
         tooltip="Display options  ⇧V"
         icon={<SlidersHorizontal className="size-icon-sm" />}
       />
