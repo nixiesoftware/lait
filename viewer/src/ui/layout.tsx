@@ -1,23 +1,16 @@
 import { createContext, useContext, useId, useMemo, useState } from "react";
 
-import type { ProjectView } from "../core/registry";
 import { loadRailCollapsed, saveRailCollapsed } from "../core/railState";
 import { createPortal } from "react-dom";
 
 import { cn, crumbGlyph } from "./primitives";
 import {
-  Activity,
   Bot,
-  Calendar,
   ChevronRight,
-  FileText,
   Folder,
   FolderKanban,
   GanttChart,
-  House,
   Inbox,
-  List,
-  SquareKanban,
   UserRound,
 } from "lucide-react";
 
@@ -376,18 +369,6 @@ export function DestinationCrumb({ icon, label }: { icon?: React.ReactNode; labe
     </>
   );
 }
-
-/** One icon per project face, so the sidebar's tree names them the way the rest
- *  of the app draws them. */
-export const PROJECT_VIEW_ICON: Record<ProjectView, React.ReactElement> = {
-  overview: <House />,
-  list: <List />,
-  board: <SquareKanban />,
-  calendar: <Calendar />,
-  timeline: <GanttChart />,
-  activity: <Activity />,
-  specs: <FileText />,
-};
 
 /** One icon per destination, shared by the sidebar and the header crumb so the two
  *  can't drift apart. */

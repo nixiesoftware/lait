@@ -45,29 +45,33 @@ export type View =
  *  the same filtered query, drawn four ways. A strict subset of `View`. */
 export const WORK_VIEWS = ["list", "board", "calendar", "timeline"] as const;
 export type WorkView = (typeof WORK_VIEWS)[number];
-export function isWorkView(v: View): v is WorkView {
-  return (WORK_VIEWS as readonly string[]).includes(v);
-}
-
 /** Surfaces owned by one project home. Workspace destinations must never retain
  * one of these routes without a canonical project key. */
 export const PROJECT_VIEWS = ["overview", "list", "board", "calendar", "timeline", "activity", "specs"] as const;
 export type ProjectView = (typeof PROJECT_VIEWS)[number];
 
 /**
- * The four layouts of a project's issues — one query, drawn four ways.
+ * The layouts of a project's issues the switcher offers — one query, drawn
+ * three ways.
  *
  * They are still routes, because a board is a place you can send someone. They
  * are not *destinations*: the nav offers "Issues" once and the layout is chosen
  * beside grouping and ordering, with the other things that decide how the same
  * rows are drawn rather than which rows they are.
  *
- * `timeline` is the fourth and it reads the same rows as the other three — but
- * it also needs the project's edge set, which none of them ask for. That is a
- * difference in what a layout *fetches*, not in which rows it is drawing, so it
- * stays a mode rather than becoming a destination of its own.
+ * `timeline` reads the same rows as the other two but also needs the project's
+ * edge set, which neither of them asks for. That is a difference in what a
+ * layout *fetches*, not in which rows it draws, so it is a mode rather than a
+ * destination of its own.
+ *
+ * **`calendar` is deliberately absent.** It is withdrawn from the picker, not
+ * deleted: `/projects/:key/calendar` still routes and still renders, so old
+ * links and any saved view holding that mode keep working. What it no longer
+ * is, is a layout `isIssueMode` recognises — so a calendar URL does not light
+ * the Issues tab and is not remembered as the layout to return to, which is
+ * the right behaviour for a mode you can no longer choose.
  */
-export const ISSUE_MODES = ["list", "board", "calendar", "timeline"] as const;
+export const ISSUE_MODES = ["list", "board", "timeline"] as const;
 export type IssueMode = (typeof ISSUE_MODES)[number];
 export function isIssueMode(v: View): v is IssueMode {
   return (ISSUE_MODES as readonly string[]).includes(v);
@@ -78,18 +82,12 @@ export function isIssueMode(v: View): v is IssueMode {
 export const ISSUE_MODE_LABEL: Record<IssueMode, string> = {
   list: "List",
   board: "Board",
-  calendar: "Calendar",
   timeline: "Timeline",
 };
 
 /** The faces the sidebar tree lists, and the hops the trail can name. Board and
  *  Calendar are layouts of Issues, so they collapse into it. */
 export const PROJECT_NAV_VIEWS = ["overview", "list", "specs", "activity"] as const;
-
-/** The nav face a route belongs to: a board is somewhere inside Issues. */
-export function navViewFor(v: ProjectView): ProjectView {
-  return isIssueMode(v) ? "list" : v;
-}
 
 /** What each project view is called, wherever it is offered — the sidebar's
  *  project tree and the header trail name the same faces. */

@@ -1,4 +1,4 @@
-import { Calendar, GanttChart, List, SlidersHorizontal, SquareKanban } from "lucide-react";
+import { GanttChart, List, SlidersHorizontal, SquareKanban } from "lucide-react";
 
 import type { DisplayState, GroupBy, OrderBy } from "../core/display";
 import { ISSUE_MODES, ISSUE_MODE_LABEL, type IssueMode } from "../core/registry";
@@ -7,7 +7,7 @@ import { cn, toolbarIconControl } from "./primitives";
 
 /** The layout switcher's glyphs. Same icons the sidebar gives the destination,
  *  so a board is drawn as a board wherever it is named. */
-const MODE_ICON = { list: List, board: SquareKanban, calendar: Calendar, timeline: GanttChart } as const;
+const MODE_ICON = { list: List, board: SquareKanban, timeline: GanttChart } as const;
 
 /**
  * The display-options popover — Linear's `Shift+V` surface, reduced to the axes

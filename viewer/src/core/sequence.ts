@@ -316,18 +316,3 @@ function longestChain(
   }
   return chain.reverse();
 }
-
-/**
- * Group a wave's nodes by milestone, in the order the milestones are given.
- *
- * The lanes are the project's milestones — its intended sequence, spec to
- * completion — and the columns are the sequence the graph actually forces.
- * Reading them together is the point of the view: an issue sitting in an early
- * milestone but a late wave is a plan the dependencies do not support.
- *
- * `null` collects issues with no milestone, and always sorts last: it is a
- * holding pen, not a stage of the work.
- */
-export function laneOf(node: SequenceNode): string | null {
-  return node.row.milestone ?? null;
-}
