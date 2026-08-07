@@ -26,8 +26,10 @@ import {
   Plus,
   RefreshCw,
   SmilePlus,
+  Stamp,
   Tag,
   Trash2,
+  Unlink,
   UserMinus,
   UserPlus,
   X,
@@ -1198,6 +1200,10 @@ function SpecPacket({
               <DropdownMenuItem
                 key={candidate.baseline}
                 label={candidate.body.name}
+                // The same stamp the Spec lifecycle uses for `issued` — these
+                // candidates are exactly the issued baselines, so the glyph is
+                // already spoken for.
+                icon={<Stamp className="size-icon-sm" />}
                 onClick={() =>
                   bind({ baseline: candidate.baseline, revision: candidate.issued[0]! })
                 }
@@ -1211,6 +1217,7 @@ function SpecPacket({
                 <Divider />
                 <DropdownMenuItem
                   label={<span className="text-danger">Clear binding</span>}
+                  icon={<Unlink className="size-icon-sm text-danger" />}
                   onClick={() => bind(null)}
                 />
               </>

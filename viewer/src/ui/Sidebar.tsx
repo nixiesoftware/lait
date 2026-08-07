@@ -6,6 +6,7 @@ import {
   ChevronRight,
   Cog,
   Copy,
+  ExternalLink,
   EyeOff,
   Folder,
   FolderPlus,
@@ -29,7 +30,7 @@ import type { SavedView } from "../core/savedViews";
 import type { ProjectDto, SpaceRow } from "../types";
 import { catalogColor } from "./colors";
 
-import { Badge, Divider, DropdownMenu, DropdownMenuItem, DropdownMenuSubMenu, IconButton } from "@astryxdesign/core";
+import { Badge, ContextMenu, Divider, DropdownMenu, DropdownMenuItem, DropdownMenuSubMenu, IconButton } from "@astryxdesign/core";
 import { cn, navigationItem } from "./primitives";
 
 /** Linear-shaped navigation over lait's local identities and projects. */
@@ -392,7 +393,42 @@ function ProjectRow({
   onPick: (key: string) => void;
   onToggleFavorite: (key: string) => void;
 }) {
+  // The row's verbs. Only the two this row already wires plus the link — a menu
+  // that offered "Project settings" would be promising plumbing that does not
+  // exist here, and a dead entry is worse than an absent one.
+  //
+  // No `display: contents` escape hatch, unlike the issue surfaces: this row is
+  // not a list item and its container is not a flex row, so Astryx's trigger
+  // wrapper costs nothing here. The hatch is for the cases that need it.
+  const menu = (
+    <>
+      <DropdownMenuItem
+        label="Open project"
+        icon={<ExternalLink className="size-icon-sm" />}
+        onClick={() => onPick(project.key)}
+      />
+      <DropdownMenuItem
+        label="Copy link"
+        icon={<Copy className="size-icon-sm" />}
+        onClick={() => {
+          const url = new URL(window.location.href);
+          url.searchParams.set("project", project.key);
+          void navigator.clipboard.writeText(url.toString());
+        }}
+      />
+      <Divider />
+      <DropdownMenuItem
+        label={favorited ? "Remove from favorites" : "Add to favorites"}
+        icon={
+          favorited ? <StarOff className="size-icon-sm" /> : <Star className="size-icon-sm" />
+        }
+        onClick={() => onToggleFavorite(project.key)}
+      />
+    </>
+  );
+
   return (
+    <ContextMenu menuContent={menu}>
     <div className="mb-0.5">
       <div className="group/project relative flex items-center">
         <button
@@ -421,6 +457,7 @@ function ProjectRow({
         />
       </div>
     </div>
+    </ContextMenu>
   );
 }
 

@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { GroupHeader } from "./layout";
-import { CalendarClock, FilterX, Gauge, Info, MoreHorizontal, Plus } from "lucide-react";
+import { ArrowRight, CalendarClock, FilterX, Gauge, Info, MoreHorizontal, Plus } from "lucide-react";
 
 import { loadBoardScroll, saveBoardScroll } from "../core/boardState";
 import { groupRows, type DisplayState, type RowGroup } from "../core/display";
@@ -20,7 +20,8 @@ import {
   type IssueMutators,
 } from "./fields";
 import { PriorityIcon, ProgressRing, StatusIcon } from "./icons";
-import { Button, DropdownMenu, DropdownMenuItem, IconButton } from "@astryxdesign/core";
+import { IssueMenuItems } from "./IssueMenu";
+import { Button, ContextMenu, DropdownMenu, DropdownMenuItem, IconButton } from "@astryxdesign/core";
 import { cn } from "./primitives";
 import { dueLabel, dueTone } from "./time";
 
@@ -530,6 +531,7 @@ function Column({
               )}
               <DropdownMenuItem
                 label="Open first issue"
+                icon={<ArrowRight className="size-icon-sm" />}
                 isDisabled={!rows[0]}
                 onClick={() => rows[0] && onSelect(rows[0].reff)}
                 endContent={<span className="text-mute tabular-nums">{rows.length}</span>}
@@ -674,9 +676,40 @@ function Card({
     }
   }, [selected]);
 
+  // The same verbs the list row carries — see `IssueMenu`. A card and a row are
+  // two pictures of one issue, so the right click over either offers the same
+  // things. The board has no multi-select, so `selection` is omitted rather than
+  // passed empty: the row is absent, not disabled.
+  const menu = (
+    <IssueMenuItems
+      reff={row.reff}
+      status={row.status}
+      priority={row.priority}
+      assignees={row.assignees}
+      labelNames={row.label_names ?? []}
+      states={columns.map((c) => c.state)}
+      members={members}
+      labels={labels}
+      mutators={mutators}
+      locked={locked}
+      onOpen={onSelect}
+    />
+  );
+
   return (
     <>
       {gap === "before" && <DropLine />}
+      {/* `display: contents` on the wrapper — see `[data-board-collection] > div`
+          in `styles.css`. The column is a flex container, so without it the
+          cards stop being its flex items and the gap between them collapses. */}
+      <ContextMenu
+        // Right click asks "what can I do to this one", so the card becomes the
+        // selected card first. Same reasoning as the list row.
+        onOpenChange={(open) => {
+          if (open) onSelect(row.reff);
+        }}
+        menuContent={menu}
+      >
       <li
         ref={el}
         data-issue-ref={row.reff}
@@ -841,6 +874,7 @@ function Card({
           />
         </div>
       </li>
+      </ContextMenu>
       {gap === "after" && <DropLine />}
     </>
   );

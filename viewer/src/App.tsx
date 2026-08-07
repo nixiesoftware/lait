@@ -2144,6 +2144,8 @@ export function App() {
           ) : shown && view === "calendar" ? (
             <Calendar
               board={shown}
+              members={members}
+              labels={labels}
               onSelect={(reff) => {
                 api.select(reff);
                 setDetail(true);

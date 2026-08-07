@@ -4,7 +4,7 @@ import { Command } from "cmdk";
 import { Check, Plus } from "lucide-react";
 
 import { cmdkFilter } from "../core/fuzzy";
-import { cn, controlTrigger, crumbGlyph, type ControlSize, type ControlTone } from "./primitives";
+import { cn, controlTrigger, crumbGlyph, menuRow, type ControlSize, type ControlTone } from "./primitives";
 
 /**
  * A pill that opens a searchable menu — the tracker's workhorse control.
@@ -21,11 +21,11 @@ import { cn, controlTrigger, crumbGlyph, type ControlSize, type ControlTone } fr
  * 1. It makes every picker keyboard-complete — `s` `d` `o` `n` `↵` sets Done without
  *    the hand leaving the keys, which is the whole point of this client.
  * 2. `cmdk` drives its list from the input's focus. Hiding the input below some
- *    threshold means Radix focuses the popover content instead, and the keydown
+ *    threshold means the popover focuses its own content instead, and the keydown
  *    never reaches `Command`'s handler — arrow keys silently stop working on
  *    exactly the small menus that looked too simple to break.
  *
- * Radix's Popover owns focus trapping, escape, outside-click, and collision
+ * Astryx's Popover owns focus trapping, escape, outside-click, and collision
  * flipping; `cmdk` owns roving focus, `aria-activedescendant`, and scroll-into-view.
  * The *ranking* stays ours (`cmdkFilter`), so the palette and every picker agree on
  * what "matches" means.
@@ -212,7 +212,7 @@ export function Combobox(props: Props) {
               value={query}
               onValueChange={setQuery}
               placeholder={`${label}…`}
-              className="border-line placeholder:text-mute w-full border-b bg-transparent px-3 py-2 text-sm outline-none"
+              className="border-line placeholder:text-mute w-full border-b bg-transparent px-3 py-2 text-base outline-none"
             />
             <Command.List className="max-h-overlay-md overflow-y-auto p-1">
               {/* The create row replaces "no matches" when creating is possible:
@@ -244,12 +244,10 @@ export function Combobox(props: Props) {
                       setOpen(false);
                     }
                   }}
-                  // The highlight is colour alone: rows rest at `dim`, the
-                  // pointed-at one lifts to `bright`, and the surface is never
-                  // painted — no fill, no pill. The lift needs the resting rows
-                  // dim to have anywhere to go, which is why the two halves are
-                  // one decision.
-                  className="text-dim data-[selected=true]:text-bright flex cursor-default items-center gap-2 rounded-control px-2 py-1 text-sm outline-none transition-colors"
+                  // `menuRow` — the same row the verb menus draw. See its note
+                  // in `primitives.tsx` for why the highlight is a fill rather
+                  // than the colour-lift this used to be.
+                  className={menuRow}
                 >
                   {o.icon}
                   {o.swatch && <span className={swatch} style={{ background: o.swatch }} />}
@@ -284,7 +282,7 @@ export function Combobox(props: Props) {
                       setQuery("");
                       if (props.multi !== true) setOpen(false);
                     }}
-                    className="text-dim data-[selected=true]:text-bright flex cursor-default items-center gap-2 rounded-control px-2 py-1 text-sm outline-none transition-colors"
+                    className={menuRow}
                   >
                     <Plus className="size-icon-xs shrink-0" />
                     <span className="min-w-0 flex-1 truncate">

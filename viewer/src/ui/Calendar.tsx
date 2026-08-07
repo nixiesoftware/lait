@@ -2,10 +2,11 @@ import { Toolbar } from "./layout";
 import { useMemo, useState } from "react";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 
-import type { BoardView, Row, WorkflowState } from "../types";
+import type { BoardView, LabelDto, MemberDto, Row, WorkflowState } from "../types";
 import { tsToDate } from "../types";
 import { fromRowControl, PriorityChip, StatusChip, type IssueMutators } from "./fields";
-import { Button, IconButton } from "@astryxdesign/core";
+import { Button, ContextMenu, IconButton } from "@astryxdesign/core";
+import { IssueMenuItems } from "./IssueMenu";
 
 /**
  * The calendar view — the same filtered query as the list and board, placed on a
@@ -19,11 +20,17 @@ import { Button, IconButton } from "@astryxdesign/core";
  */
 export function Calendar({
   board,
+  members,
+  labels,
   onSelect,
   mutators,
   readOnly,
 }: {
   board: BoardView;
+  /** The ACL and the label catalog — the entry's right-click menu offers both
+   *  as fly-outs, exactly as the list row and the board card do. */
+  members: MemberDto[];
+  labels: LabelDto[];
   onSelect: (reff: string) => void;
   /** In-place field writes — the entry's priority/status chips resolve here. */
   mutators: IssueMutators;
@@ -144,13 +151,38 @@ export function Calendar({
               >
                 {day.getUTCDate()}
               </span>
-              <div className="flex min-h-0 flex-col gap-0.5 overflow-y-auto">
+              <div data-calendar-entries className="flex min-h-0 flex-col gap-0.5 overflow-y-auto">
                 {dayRows.map((r) => (
-                  // A div wearing button semantics, not a `<button>`: the
-                  // priority and status chips inside are buttons of their own,
-                  // and buttons do not nest.
-                  <div
+                  // The same verbs the list row and the board card carry — see
+                  // `IssueMenu`. A calendar has no multi-select, so `selection`
+                  // is omitted. `display: contents` on the wrapper keeps the
+                  // entries as flex items of the day's stack; see
+                  // `[data-calendar-entries] > div` in `styles.css`.
+                  <ContextMenu
                     key={r.reff}
+                    onOpenChange={(open) => {
+                      if (open) onSelect(r.reff);
+                    }}
+                    menuContent={
+                      <IssueMenuItems
+                        reff={r.reff}
+                        status={r.status}
+                        priority={r.priority}
+                        assignees={r.assignees}
+                        labelNames={r.label_names ?? []}
+                        states={states}
+                        members={members}
+                        labels={labels}
+                        mutators={mutators}
+                        locked={readOnly || r.provisional || r.tombstone}
+                        onOpen={onSelect}
+                      />
+                    }
+                  >
+                  {/* A div wearing button semantics, not a `<button>`: the
+                      priority and status chips inside are buttons of their own,
+                      and buttons do not nest. */}
+                  <div
                     role="button"
                     tabIndex={0}
                     data-issue-ref={r.reff}
@@ -183,6 +215,7 @@ export function Calendar({
                     />
                     <span className="min-w-0 flex-1 truncate font-medium">{r.title}</span>
                   </div>
+                  </ContextMenu>
                 ))}
               </div>
             </div>

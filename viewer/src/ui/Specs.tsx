@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { AlertTriangle, ChevronDown, History, Plus } from "lucide-react";
+import { AlertTriangle, Ban, ChevronDown, Eye, History, PencilLine, Plus, Stamp } from "lucide-react";
 
 import {
   authorityPhrase,
@@ -42,6 +42,7 @@ import type {
   SpecReference,
   SpecRel,
   SpecRevision,
+  SpecState,
   SpecView,
 } from "../types";
 import { ApplicationState } from "./AppState";
@@ -1098,6 +1099,23 @@ function Rail({
  * nothing at all — and issuing is deliberately not ordinary contribution, so
  * that question is one people will have.
  */
+/**
+ * One glyph per lifecycle state, so a transition names its destination the way
+ * a status menu names a status.
+ *
+ * Keyed by the state being moved TO, not by the verb: "Issue" and "Issued" are
+ * the same fact seen from either side of the move, and a reader who learns the
+ * stamp on the menu row should recognise it on the pill afterwards. That is the
+ * same rule the project swatch follows — one object, one mark, whichever
+ * surface you meet it on.
+ */
+const SPEC_STATE_ICON: Record<SpecState, React.ReactNode> = {
+  draft: <PencilLine className="size-icon-sm" />,
+  review: <Eye className="size-icon-sm" />,
+  issued: <Stamp className="size-icon-sm" />,
+  withdrawn: <Ban className="size-icon-sm" />,
+};
+
 function Lifecycle({
   view,
   state,
@@ -1145,6 +1163,7 @@ function Lifecycle({
           <DropdownMenuItem
             key={move.to}
             label={move.label}
+            icon={SPEC_STATE_ICON[move.to]}
             isDisabled={!allowed}
             onClick={() => onPick(move)}
             endContent={

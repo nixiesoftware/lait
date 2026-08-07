@@ -304,6 +304,36 @@ export function ChipButton({
 export const crumbGlyph = "flex size-icon-md shrink-0 items-center justify-center";
 
 /**
+ * One menu row — for the rows Astryx does not draw for us.
+ *
+ * `DropdownMenuItem` covers the verb menus, but the searchable pickers are
+ * `cmdk` and the small panels are hand-built, so a third of the menu rows in
+ * the app are ours to paint. They used to be painted differently: resting at
+ * `text-dim` with a colour-only highlight and no fill, against Astryx's
+ * full-contrast row with a surface wash. Two menus opened from controls a
+ * centimetre apart disagreed about what a menu row IS, which is the kind of
+ * thing nobody files and everybody feels.
+ *
+ * Every number here is measured off a live `.astryx-dropdown-menu-item`, not
+ * chosen: 13px (`--font-size-base`), `6px 8px`, `gap: 8px`, `radius: 8px`,
+ * text at `--color-text-primary`, highlight at `--color-tint-hover`. The
+ * tripwire in `designSystem.test.ts` re-measures them, so this comment cannot
+ * quietly become false.
+ *
+ * WHY THE RESTING ROW IS FULL CONTRAST. The old dim-at-rest/bright-on-point
+ * pairing reads as *disabled* when the row carries a coloured glyph beside it
+ * — "In Progress" next to a saturated blue status ring looked switched off.
+ * The fill does the pointing now, so the text does not have to.
+ *
+ * `data-[selected=true]` is `cmdk`'s highlight, which it sets for BOTH arrow
+ * keys and pointer move; `hover:` covers the hand-built rows that have no
+ * `cmdk` underneath them. Both resolve to the same token, so a row cannot be
+ * highlighted two different ways.
+ */
+export const menuRow =
+  "flex w-full cursor-default items-center gap-2 rounded-control px-2 py-1.5 text-left text-base text-fg outline-none transition-colors hover:bg-hover focus-visible:bg-hover data-[selected=true]:bg-hover";
+
+/**
  * Trigger geometry, decomposed.
  *
  * This was seven `variant`s, which is what happens when one axis has to encode

@@ -452,6 +452,70 @@ describe("the accent both systems name", () => {
 });
 
 /**
+ * `menuRow` copies a measurement off `.astryx-dropdown-menu-item`, and a copied
+ * measurement is a fact with no owner.
+ *
+ * Two thirds of the app's menu rows are Astryx's (`DropdownMenuItem`); the rest
+ * are ours — `cmdk` in the pickers, hand-built rows in the small panels. They
+ * have to look identical, and the only thing making them identical is that
+ * `menuRow` restates Astryx's numbers in Tailwind's vocabulary. Nothing in the
+ * type system connects the two, and an Astryx minor that re-rungs its menu row
+ * would leave ours behind without a single test going red.
+ *
+ * This cannot compare against Astryx's compiled CSS — StyleX emits atomic
+ * classes with generated names, so there is nothing stable to read. What it CAN
+ * do is hold `menuRow` to the values recorded when it was written, so the drift
+ * shows up as a deliberate edit here rather than as two menus that quietly stop
+ * matching. If Astryx moves, this test is the checklist of what to re-measure.
+ */
+describe("our menu row and Astryx's", () => {
+  it("still states the measurements it was built from", () => {
+    const primitives = readFileSync(join(SRC_DIR, "ui/primitives.tsx"), "utf8");
+    const recipe = /export const menuRow =\s*"([^"]+)"/.exec(primitives)?.[1] ?? "";
+
+    expect(recipe, "menuRow is no longer a single string literal").not.toBe("");
+
+    // Measured off a live `.astryx-dropdown-menu-item`: 13px, 6px/8px padding,
+    // 8px gap, 8px radius, primary text, tint-hover highlight.
+    for (const cls of [
+      "text-base", // --font-size-base: 13px
+      "py-1.5", // 6px
+      "px-2", // 8px
+      "gap-2", // 8px
+      "rounded-control", // 8px
+      "text-fg", // --color-text-primary
+      "hover:bg-hover", // --color-tint-hover
+      "data-[selected=true]:bg-hover", // cmdk's highlight, same token
+    ]) {
+      expect(
+        recipe,
+        `menuRow lost \`${cls}\`. It mirrors .astryx-dropdown-menu-item — if ` +
+          "Astryx changed, re-measure and update BOTH this list and the recipe; " +
+          "if it did not, this is the drift the test exists to catch.",
+      ).toContain(cls);
+    }
+  });
+
+  it("points the Astryx side at the same hover token", () => {
+    const astryx = readFileSync(join(SRC_DIR, "theme/laitTheme.ts"), "utf8");
+    const block = /"dropdown-menu-item":\s*\{[\s\S]*?\n {4}\}/.exec(astryx)?.[0] ?? "";
+
+    expect(
+      block,
+      "The dropdown-menu-item override is gone from laitTheme.ts, so Astryx's " +
+        "menu rows are back on their built-in blue-cast overlay while ours use " +
+        "--color-tint-hover. Re-run `npm run tokens:astryx`.",
+    ).not.toBe("");
+
+    // Both states, or arrowing and pointing disagree — see the note in the
+    // generator: Astryx drives keyboard nav with roving tabindex + :focus-visible.
+    expect(block).toContain(":hover");
+    expect(block).toContain(":focus-visible");
+    expect([...block.matchAll(/var\(--color-tint-hover\)/g)]).toHaveLength(2);
+  });
+});
+
+/**
  * Guards the CASCADE LAYER ORDER, which is load-bearing and not enforced by
  * the thing that declares it.
  *

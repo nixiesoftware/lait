@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { MoreHorizontal, Plus, UserPlus } from "lucide-react";
+import { ArrowDown, ArrowUp, MoreHorizontal, Plus, Trash2, UserPlus } from "lucide-react";
 
 import { rpc } from "../api";
 import { useProjectMilestones, useProjectViewerStore } from "../projectStore";
@@ -483,13 +483,28 @@ function MilestoneRow({
             icon: <MoreHorizontal className="size-icon-sm" />,
           }}
         >
-          {onMoveUp && <DropdownMenuItem label="Move up" onClick={onMoveUp} />}
-          {onMoveDown && <DropdownMenuItem label="Move down" onClick={onMoveDown} />}
+          {onMoveUp && (
+            <DropdownMenuItem
+              label="Move up"
+              icon={<ArrowUp className="size-icon-sm" />}
+              onClick={onMoveUp}
+            />
+          )}
+          {onMoveDown && (
+            <DropdownMenuItem
+              label="Move down"
+              icon={<ArrowDown className="size-icon-sm" />}
+              onClick={onMoveDown}
+            />
+          )}
           {/* Astryx's menu item has no destructive tone, and `label` is a
               ReactNode — so the tone rides on the label rather than becoming a
-              generated variant for one item. */}
+              generated variant for one item. The icon takes the same colour so
+              the row reads as one destructive thing rather than a red word
+              beside a neutral glyph. */}
           <DropdownMenuItem
             label={<span className="text-danger">Remove milestone</span>}
+            icon={<Trash2 className="size-icon-sm text-danger" />}
             onClick={onRemove}
           />
         </DropdownMenu>

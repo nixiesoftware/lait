@@ -195,6 +195,16 @@ export const laitTheme = defineTheme({
         "padding": "0"
       }
     },
+    "dropdown-menu-item": {
+      "base": {
+        ":hover": {
+          "backgroundColor": "var(--color-tint-hover)"
+        },
+        ":focus-visible": {
+          "backgroundColor": "var(--color-tint-hover)"
+        }
+      }
+    },
     "statusdot": {
       "variant:urgent": {
         "backgroundColor": "light-dark(oklch(0.581 0.18 22), oklch(0.631 0.145 22))"

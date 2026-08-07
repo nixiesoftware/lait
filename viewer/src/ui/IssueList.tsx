@@ -1,22 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import {
-  CalendarPlus,
-  Check,
-  CheckSquare,
-  ChevronRight,
-  Copy,
-  ExternalLink,
-  Plus,
-  SignalHigh,
-  Tag,
-  Trash2,
-  UserRound,
-} from "lucide-react";
+import { CalendarPlus, ChevronRight, Plus, Trash2 } from "lucide-react";
 
 import type { RowGroup } from "../core/display";
 import { indexBy } from "../core/performance";
 import type { LabelDto, MemberDto, Row, WorkflowState } from "../types";
-import { PRIORITY_ORDER } from "../types";
 import { Avatar, memberName } from "./Avatar";
 import { ApplicationState } from "./AppState";
 import { catalogColor } from "./colors";
@@ -30,8 +17,9 @@ import {
   type IssueMutators,
 } from "./fields";
 import { PriorityIcon, StatusIcon } from "./icons";
+import { IssueMenuItems } from "./IssueMenu";
 import { GroupHeader } from "./layout";
-import { Button, CheckboxInput, ContextMenu, Divider, DropdownMenuItem, DropdownMenuSubMenu, IconButton } from "@astryxdesign/core";
+import { Button, CheckboxInput, ContextMenu, IconButton } from "@astryxdesign/core";
 import { interactiveRow } from "./primitives";
 import { dueLabel, dueTone } from "./time";
 
@@ -414,105 +402,23 @@ function IssueRow({
     }
   }, [selected]);
 
-  // The row's verbs, as Astryx menu entries. Extracted from the JSX because a
-  // 120-line prop value buries the row it belongs to.
+  // The row's verbs. The definition lives in `IssueMenu` because the board
+  // opens the same menu over the same issue — see the note there.
   const menu = (
-    <>
-      <DropdownMenuItem
-        label="Open focused"
-        icon={<ExternalLink className="size-icon-sm" />}
-        onClick={() => onOpen(row.reff)}
-      />
-      <DropdownMenuItem
-        label="Copy link"
-        icon={<Copy className="size-icon-sm" />}
-        onClick={() => {
-          const url = new URL(window.location.href);
-          url.searchParams.set("issue", row.reff);
-          url.searchParams.set("focus", "1");
-          void navigator.clipboard.writeText(url.toString());
-        }}
-      />
-      {/* The properties, as fly-outs — Linear's context menu, and the
-          keyboard-free route to the same writes the chips make. Each row marks
-          the current value; picking it again is a no-op, not a toggle, matching
-          the chips' pickers. */}
-      {!locked && (
-        <>
-          <Divider />
-          <DropdownMenuSubMenu label="Status" icon={<SignalHigh className="size-icon-sm" />}>
-            {states.map((s) => (
-              <DropdownMenuItem
-                key={s.id}
-                label={s.name}
-                icon={<StatusIcon category={s.category} color={catalogColor(s.color)} />}
-                endContent={s.id === row.status ? <Check className="size-icon-xs" /> : undefined}
-                onClick={() => {
-                  if (s.id !== row.status) mutators.setStatus(row.reff, s.id);
-                }}
-              />
-            ))}
-          </DropdownMenuSubMenu>
-          <DropdownMenuSubMenu label="Assignee" icon={<UserRound className="size-icon-sm" />}>
-            {members.length === 0 && <DropdownMenuItem label="No members yet" isDisabled />}
-            {members.map((m) => (
-              <DropdownMenuItem
-                key={m.key}
-                label={memberName(m.key, m)}
-                icon={<Avatar deviceKey={m.key} alias={m.alias} me={m.me} size="sm" />}
-                endContent={
-                  row.assignees.includes(m.key) ? <Check className="size-icon-xs" /> : undefined
-                }
-                onClick={() =>
-                  mutators.toggleAssignee(row.reff, m.key, !row.assignees.includes(m.key))
-                }
-              />
-            ))}
-          </DropdownMenuSubMenu>
-          <DropdownMenuSubMenu label="Priority" icon={<PriorityIcon priority={row.priority} />}>
-            {[...PRIORITY_ORDER].reverse().map((p) => (
-              <DropdownMenuItem
-                key={p}
-                label={<span className="capitalize">{p === "none" ? "No priority" : p}</span>}
-                icon={<PriorityIcon priority={p} />}
-                endContent={p === row.priority ? <Check className="size-icon-xs" /> : undefined}
-                onClick={() => {
-                  if (p !== row.priority) mutators.setPriority(row.reff, p);
-                }}
-              />
-            ))}
-          </DropdownMenuSubMenu>
-          <DropdownMenuSubMenu label="Labels" icon={<Tag className="size-icon-sm" />}>
-            {labels.length === 0 && <DropdownMenuItem label="No labels yet" isDisabled />}
-            {labels.map((l) => {
-              const on = (row.label_names ?? []).includes(l.name);
-              return (
-                <DropdownMenuItem
-                  key={l.id}
-                  label={<span className="capitalize">{l.name}</span>}
-                  icon={
-                    <span
-                      className="size-mark-sm shrink-0 rounded-full"
-                      style={{ background: catalogColor(l.color) }}
-                    />
-                  }
-                  endContent={on ? <Check className="size-icon-xs" /> : undefined}
-                  onClick={() => mutators.toggleLabel(row.reff, l.name, !on)}
-                />
-              );
-            })}
-          </DropdownMenuSubMenu>
-          <Divider />
-        </>
-      )}
-      {!readOnly && (
-        <DropdownMenuItem
-          label={checked ? "Remove from selection" : "Add to selection"}
-          icon={<CheckSquare className="size-icon-sm" />}
-          onClick={() => onToggleCheck(row.reff, false)}
-        />
-      )}
-    </>
+    <IssueMenuItems
+      reff={row.reff}
+      status={row.status}
+      priority={row.priority}
+      assignees={row.assignees}
+      labelNames={row.label_names ?? []}
+      states={states}
+      members={members}
+      labels={labels}
+      mutators={mutators}
+      locked={locked}
+      onOpen={onOpen}
+      {...(readOnly ? {} : { selection: { checked, onToggle: (r: string) => onToggleCheck(r, false) } })}
+    />
   );
 
   return (

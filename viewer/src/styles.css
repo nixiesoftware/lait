@@ -567,10 +567,18 @@
    keeps a closed popover closed: every row renders its own menu inline,
    expanded, forever. It looks exactly like the list has gone mad.
 
-   Scoped to the issue collections rather than written as a global `div`
-   escape hatch: it is a statement about these lists, not a licence.
+   The board needs it for a SECOND reason on top of the a11y one: its column is
+   `flex-col gap-2.5`, so an un-neutralised wrapper would swallow the cards into
+   one flex item and the gap between them would vanish. `display: contents`
+   restores both — the cards are the list's children again for the accessibility
+   tree AND for flex layout.
+
+   Scoped to the two collections rather than written as a global `div` escape
+   hatch: it is a statement about these lists, not a licence.
    ------------------------------------------------------------------------- */
-[data-issue-collection] > div:not([popover]) {
+[data-issue-collection] > div:not([popover]),
+[data-board-collection] > div:not([popover]),
+[data-calendar-entries] > div:not([popover]) {
   display: contents;
 }
 
