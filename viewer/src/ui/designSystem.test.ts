@@ -624,3 +624,62 @@ function rungsUsed(axis: "icon" | "mark" | "ctl" | "bar"): string[] {
   }
   return [...seen].sort();
 }
+
+/**
+ * `interactiveRow` brings NO layout — "content layout remains the caller's
+ * concern" is the first line of its own doc — so a caller that wants its
+ * children in a row has to say `flex` itself.
+ *
+ * Three call sites did not, and the failure is silent: the element still
+ * renders, still hovers, still focuses. It just lays its children out as inline
+ * content, because a `<button>` is inline-block. A sub-issue row put its status
+ * glyph on one line and ran the key straight into the title on the next —
+ * "EXEC-28exec::Package composition" — and nothing threw.
+ *
+ * They arrived that way in the Astryx migration: each used to wrap lait's own
+ * `Button`, whose recipe carried `inline-flex … gap-1.5`, and the migration
+ * swapped it for a bare `<button>` + this recipe. The `justify-start` left
+ * behind in every one of those class strings is the fingerprint — it does
+ * nothing at all outside a flex box.
+ *
+ * Scoped to `interactiveRow` deliberately. The broad version of this test —
+ * "any alignment utility needs a flex in the same string" — flags seven call
+ * sites that are all correct, because the box legitimately comes from the
+ * recipe being composed with (`Toolbar`, `navigationItem`, `Badge`, Astryx's
+ * `Button`). `interactiveRow` is the only recipe in the codebase that brings
+ * none, which is exactly what makes it the only one worth policing.
+ */
+describe("interactiveRow callers declare their own layout", () => {
+  it("no alignment utility beside interactiveRow() without a flex box", () => {
+    const offenders: string[] = [];
+    // Whole CLASS TOKENS, not substrings. `\bflex\b` looks right and is not:
+    // it matches inside `flex-1`, which is a flex-GROW utility and says nothing
+    // about display — the first cut of this test passed the very bug it was
+    // written for because of it.
+    const ALIGNS = (t: string) => /^(justify|items|gap)-/.test(t);
+    const BOXES = new Set(["flex", "inline-flex", "grid", "inline-grid"]);
+
+    for (const file of tsxFiles(SRC_DIR)) {
+      const name = file.split(/[\\/]/).pop() ?? "";
+      if (name.endsWith(".test.tsx")) continue;
+      const src = readFileSync(file, "utf8");
+
+      for (const m of src.matchAll(/cn\(\s*interactiveRow\([^)]*\)([\s\S]{0,300}?)\)/g)) {
+        const rest = m[1] ?? "";
+        const tokens = rest.split(/[\s"',]+/).filter(Boolean);
+        if (tokens.some(ALIGNS) && !tokens.some((t) => BOXES.has(t))) {
+          const line = src.slice(0, m.index).split("\n").length;
+          offenders.push(`${name}:${line}  ${rest.replace(/\s+/g, " ").trim().slice(0, 80)}`);
+        }
+      }
+    }
+
+    expect(
+      offenders,
+      "These compose `interactiveRow()` with alignment utilities but never\n" +
+        "declare a flex box. `interactiveRow` brings no layout, and a `<button>`\n" +
+        "is inline-block — the children will stack and run together.\n\n" +
+        offenders.join("\n"),
+    ).toEqual([]);
+  });
+});

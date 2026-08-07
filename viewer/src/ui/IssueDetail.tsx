@@ -764,7 +764,10 @@ export function IssueDetail({
                 <button
                 type="button"
                 onClick={() => onNavigate(graph.parent!.reff)}
-                className={cn(interactiveRow(), "-mx-1 min-w-0 justify-start px-1 text-left")}
+                className={cn(
+                  interactiveRow(),
+                  "-mx-1 flex min-w-0 items-center gap-1.5 justify-start px-1 text-left",
+                )}
               >
                 <GitMerge className="text-mute size-icon-sm shrink-0" />
                 <span className="min-w-0 truncate font-medium">{graph.parent.title}</span>
@@ -2179,7 +2182,18 @@ function RelRow({
         type="button"
         onClick={() => onNavigate(row.reff)}
         aria-label={row.title}
-        className={cn(interactiveRow(), "min-w-0 flex-1 shrink justify-start px-1 text-left")}
+        // `flex items-center gap-1.5` is NOT decoration. `interactiveRow` is
+        // deliberately layout-agnostic — "content layout remains the caller's
+        // concern" — and this row used to get its flex context from lait's own
+        // `Button`, which the Astryx migration replaced with a bare `<button>`.
+        // A `<button>` is inline-block, so without this the glyph fell onto its
+        // own line and the key ran into the title with no space: "EXEC-28exec::
+        // Package composition". `justify-start` below was the tell — it does
+        // nothing outside a flex container.
+        className={cn(
+          interactiveRow(),
+          "flex min-w-0 flex-1 shrink items-center gap-1.5 justify-start px-1 text-left",
+        )}
       >
         <span className="flex size-icon-xs shrink-0 items-center justify-center">{icon}</span>
         {kind && (

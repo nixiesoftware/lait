@@ -94,7 +94,14 @@ export function Timeline({
                   type="button"
                   onClick={() => onOpenProject(p.key)}
                   aria-label={p.name}
-                  className={cn(interactiveRow(), "w-48 justify-start truncate px-1 text-left")}
+                  // Same missing flex as the sub-issue rows: `interactiveRow`
+                  // brings no layout, so the swatch and the name were stacking
+                  // inside an inline-block button instead of sitting on one
+                  // line. `justify-start` was already here doing nothing.
+                  className={cn(
+                    interactiveRow(),
+                    "flex w-48 items-center gap-1.5 justify-start truncate px-1 text-left",
+                  )}
                 >
                   <span
                     className="size-mark-md shrink-0 rounded-full"
