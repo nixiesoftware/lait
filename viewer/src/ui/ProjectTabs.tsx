@@ -27,10 +27,16 @@ const TABS: readonly ProjectView[] = ["overview", "activity", "list", "specs"];
  * but not "this project, Issues, scoped to M1, console open". The strip does, so
  * the strip has it back and the trail stops at the project.
  *
- * The pills are the toolbar's own — the same `Button` at the same rung the
- * status slices use, one rule apart. They sit in one band beside 28px icon
- * circles, and a tab drawn any other way reads as a different class of control
- * on the same bar rather than the same control choosing a different thing.
+ * The pills are the toolbar's own — the same `Button`, the same
+ * `variant`/`elevation` pairing, and the same SIZE RUNG as everything else on
+ * the bar. A tab drawn any other way reads as a different class of control on
+ * the same bar rather than the same control choosing a different thing.
+ *
+ * That rung is `sm`, which is what the filter icon and the display controls at
+ * the tail already are. The tabs were `md` — the one thing on the band a step
+ * up from its neighbours, which is precisely the "different class of control"
+ * this paragraph exists to forbid. Shrinking them was the rule catching up with
+ * itself, not a new opinion about size.
  */
 export function ProjectTabs({
   view,
@@ -54,7 +60,7 @@ export function ProjectTabs({
             label={`${PROJECT_VIEW_LABEL[tab]}`}
             variant={current ? "active" : "secondary"}
             elevation={current ? "none" : "low"}
-            size="md"
+            size="sm"
           />
         );
       })}
