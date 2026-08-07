@@ -1,6 +1,6 @@
 import { isIssueMode, PROJECT_VIEW_LABEL, type ProjectView } from "../core/registry";
 import { Button } from "@astryxdesign/core";
-import { cn, toolbarControl } from "./primitives";
+import { toolbarControl } from "./primitives";
 
 /** The faces a project offers as tabs. Board and Calendar are absent on purpose:
  *  they are LAYOUTS of Issues, chosen beside grouping and ordering, so they live
@@ -59,16 +59,19 @@ export function ProjectTabs({
             aria-current={current ? "page" : undefined}
             onClick={() => onPick(tab)}
             label={`${PROJECT_VIEW_LABEL[tab]}`}
-            // Only the CURRENT tab gets a surface. Every tab used to carry
-            // `secondary` + `elevation="low"` — a fill and a 1px drop shadow —
-            // so the strip was four raised chips and "selected" was a small
-            // shift in fill between them. Inverting it does the work the size
-            // change could not: one lit pill against three pieces of text reads
-            // at a glance, and the band stops competing with the rows under it.
-            variant={current ? "active" : "ghost"}
-            elevation="none"
+            // Both states are CHIPS: a resting tab is filled and faintly
+            // raised, the current one is filled brighter and flattened. The
+            // edge is doing real work — it is what says these four are
+            // controls rather than a row of words — so it stays, and the
+            // difference between selected and not is carried by fill and
+            // elevation together rather than by one of them alone.
+            //
+            // A ghost resting state was tried and removed: it read as text,
+            // and the strip lost its footing on the band.
+            variant={current ? "active" : "secondary"}
+            elevation={current ? "none" : "low"}
             size="sm"
-            className={cn(toolbarControl, !current && "text-dim")}
+            className={toolbarControl}
           />
         );
       })}

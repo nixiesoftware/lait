@@ -142,7 +142,7 @@ export function DisplayOptions({
     >
       <IconButton
         label="Display options"
-        variant={changed ? "active" : "ghost"}
+        variant={changed ? "active" : "secondary"}
         elevation={changed ? "none" : "low"}
         size="sm"
         className={toolbarIconControl}

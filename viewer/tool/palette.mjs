@@ -37,11 +37,34 @@ export const HUE = {
 // at. Highlight-by-colour (no fill) needs somewhere brighter than the resting
 // text to go: pure white in dark, and the same distance past `fg` toward black
 // in light. Both ends shed their chroma, as the extremes always do here.
+// DARK'S PAGE SITS WHERE THE BOARD CANVAS USED TO.
+//
+// The board drew its canvas on `raised` (0.1881) while every other view drew on
+// `bg` (0.1505), and the board was the one that looked right — a page that dark
+// is not a surface, it is an absence, and every panel on it had to fight to
+// prove it was there. So `bg` takes 0.1881 and the rungs above it move up to
+// keep their spacing.
+//
+// The STEPS are preserved, not the values: sunken sits a short step under the
+// page as before, `raised` keeps a lift so a card still reads as a card, and
+// hover/active/line climb with them. `raised` is 0.040 over the page —
+// deliberately a hair MORE than the 0.038 it had before, because the first
+// attempt at this lift left only 0.027 and made floating panels harder to see,
+// which was the opposite of the point. Text rungs do NOT move — lifting the
+// surfaces already costs a little contrast, and lifting the ink with them would
+// spend the rest.
+//
+// The board itself is pinned to `bg` at the call site now (`Board.tsx`), so the
+// surface that was pointed at is the surface that shipped, rather than
+// something lighter wearing its name.
+//
+// Light mode is untouched. It never had this problem: a shadow on a white page
+// is visible, so its panels never depended on lightness alone.
 export const NEUTRAL = {
   dark: {
-    sunken: [0.1354, 0.005], bg: [0.1505, 0.004], raised: [0.1881, 0.006],
-    hover: [0.22, 0.010], active: [0.2466, 0.013], line: [0.2716, 0.013],
-    lineStrong: [0.3286, 0.016], mute: [0.6203, 0.016], dim: [0.7089, 0.014],
+    sunken: [0.1650, 0.005], bg: [0.1881, 0.006], raised: [0.2280, 0.008],
+    hover: [0.2560, 0.010], active: [0.2820, 0.013], line: [0.3100, 0.013],
+    lineStrong: [0.3650, 0.016], mute: [0.6203, 0.016], dim: [0.7089, 0.014],
     fg: [0.9349, 0.004], bright: [1, 0],
   },
   light: {

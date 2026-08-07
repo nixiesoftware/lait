@@ -26,21 +26,21 @@ export const laitTheme = defineTheme({
 
   tokens: {
     // Surfaces — our sunken < bg < raised ladder, mapped onto Astryx's roles
-    "--color-background-muted": ["oklch(0.968 0.003 286)", "oklch(0.135 0.005 286)"],
-    "--color-background-body": ["oklch(0.985 0.001 286)", "oklch(0.15 0.004 286)"],
-    "--color-background-surface": ["oklch(1 0 0)", "oklch(0.188 0.006 286)"],
-    "--color-background-card": ["oklch(1 0 0)", "oklch(0.188 0.006 286)"],
-    "--color-background-popover": ["oklch(1 0 0)", "oklch(0.188 0.006 286)"],
+    "--color-background-muted": ["oklch(0.968 0.003 286)", "oklch(0.165 0.005 286)"],
+    "--color-background-body": ["oklch(0.985 0.001 286)", "oklch(0.188 0.006 286)"],
+    "--color-background-surface": ["oklch(1 0 0)", "oklch(0.228 0.008 286)"],
+    "--color-background-card": ["oklch(1 0 0)", "oklch(0.228 0.008 286)"],
+    "--color-background-popover": ["oklch(1 0 0)", "oklch(0.228 0.008 286)"],
     "--color-background-inverted": ["oklch(0.206 0.006 286)", "oklch(0.935 0.004 286)"],
 
     // Interaction — see note: the overlay-* alphas stay Astryx's on purpose
-    "--color-tint-hover": ["oklch(0.962 0.003 286)", "oklch(0.22 0.01 286)"],
-    "--color-skeleton": ["oklch(0.962 0.003 286)", "oklch(0.22 0.01 286)"],
-    "--color-track": ["oklch(0.926 0.005 286)", "oklch(0.272 0.013 286)"],
+    "--color-tint-hover": ["oklch(0.962 0.003 286)", "oklch(0.256 0.01 286)"],
+    "--color-skeleton": ["oklch(0.962 0.003 286)", "oklch(0.256 0.01 286)"],
+    "--color-track": ["oklch(0.926 0.005 286)", "oklch(0.31 0.013 286)"],
 
     // Lines
-    "--color-border": ["oklch(0.926 0.005 286)", "oklch(0.272 0.013 286)"],
-    "--color-border-emphasized": ["oklch(0.866 0.01 286)", "oklch(0.329 0.016 286)"],
+    "--color-border": ["oklch(0.926 0.005 286)", "oklch(0.31 0.013 286)"],
+    "--color-border-emphasized": ["oklch(0.866 0.01 286)", "oklch(0.365 0.016 286)"],
 
     // Text and icons — dim is the secondary voice, mute the tertiary
     "--color-text-primary": ["oklch(0.206 0.006 286)", "oklch(0.935 0.004 286)"],
@@ -105,8 +105,8 @@ export const laitTheme = defineTheme({
     "--color-background-pink": "color-mix(in oklch, var(--color-text-pink) 12%, var(--color-background-body))",
     "--color-text-gray": ["oklch(0.478 0.016 286)", "oklch(0.709 0.014 286)"],
     "--color-icon-gray": ["oklch(0.478 0.016 286)", "oklch(0.709 0.014 286)"],
-    "--color-border-gray": ["oklch(0.926 0.005 286)", "oklch(0.272 0.013 286)"],
-    "--color-background-gray": ["oklch(0.968 0.003 286)", "oklch(0.135 0.005 286)"],
+    "--color-border-gray": ["oklch(0.926 0.005 286)", "oklch(0.31 0.013 286)"],
+    "--color-background-gray": ["oklch(0.968 0.003 286)", "oklch(0.165 0.005 286)"],
 
     // Radius — mark/control/surface land on inner/element/container
     "--radius-inner": "4px",
@@ -131,14 +131,14 @@ export const laitTheme = defineTheme({
         "borderRadius": "var(--radius-full)"
       },
       "variant:secondary": {
-        "backgroundColor": "var(--color-background-body)",
+        "backgroundColor": "var(--color-background-surface)",
         "color": "var(--color-text-primary)",
         ":hover": {
           "backgroundColor": "var(--color-tint-hover)"
         }
       },
       "variant:active": {
-        "backgroundColor": "light-dark(oklch(0.947 0.004 286), oklch(0.247 0.013 286))",
+        "backgroundColor": "light-dark(oklch(0.947 0.004 286), oklch(0.282 0.013 286))",
         "color": "var(--color-text-primary)",
         "boxShadow": "0 0 0 0.5px light-dark(rgb(0 0 0 / 0.09), rgb(255 255 255 / 0.1))"
       },
@@ -163,14 +163,14 @@ export const laitTheme = defineTheme({
         "borderRadius": "var(--radius-full)"
       },
       "variant:secondary": {
-        "backgroundColor": "var(--color-background-body)",
+        "backgroundColor": "var(--color-background-surface)",
         "color": "var(--color-text-primary)",
         ":hover": {
           "backgroundColor": "var(--color-tint-hover)"
         }
       },
       "variant:active": {
-        "backgroundColor": "light-dark(oklch(0.947 0.004 286), oklch(0.247 0.013 286))",
+        "backgroundColor": "light-dark(oklch(0.947 0.004 286), oklch(0.282 0.013 286))",
         "color": "var(--color-text-primary)",
         "boxShadow": "0 0 0 0.5px light-dark(rgb(0 0 0 / 0.09), rgb(255 255 255 / 0.1))"
       },

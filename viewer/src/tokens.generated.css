@@ -7,13 +7,13 @@
  * `--color-accent-fg` is not here: it is the one colour that is a decision
  * rather than a position on a ramp — white on a solid, chosen for contrast. */
 @theme {
-  --color-sunken: light-dark(oklch(0.968 0.003 286), oklch(0.135 0.005 286));
-  --color-bg: light-dark(oklch(0.985 0.001 286), oklch(0.15 0.004 286));
-  --color-raised: light-dark(oklch(1 0 0), oklch(0.188 0.006 286));
-  --color-hover: light-dark(oklch(0.962 0.003 286), oklch(0.22 0.01 286));
-  --color-active: light-dark(oklch(0.947 0.004 286), oklch(0.247 0.013 286));
-  --color-line: light-dark(oklch(0.926 0.005 286), oklch(0.272 0.013 286));
-  --color-line-strong: light-dark(oklch(0.866 0.01 286), oklch(0.329 0.016 286));
+  --color-sunken: light-dark(oklch(0.968 0.003 286), oklch(0.165 0.005 286));
+  --color-bg: light-dark(oklch(0.985 0.001 286), oklch(0.188 0.006 286));
+  --color-raised: light-dark(oklch(1 0 0), oklch(0.228 0.008 286));
+  --color-hover: light-dark(oklch(0.962 0.003 286), oklch(0.256 0.01 286));
+  --color-active: light-dark(oklch(0.947 0.004 286), oklch(0.282 0.013 286));
+  --color-line: light-dark(oklch(0.926 0.005 286), oklch(0.31 0.013 286));
+  --color-line-strong: light-dark(oklch(0.866 0.01 286), oklch(0.365 0.016 286));
   --color-mute: light-dark(oklch(0.556 0.017 286), oklch(0.62 0.016 286));
   --color-dim: light-dark(oklch(0.478 0.016 286), oklch(0.709 0.014 286));
   --color-fg: light-dark(oklch(0.206 0.006 286), oklch(0.935 0.004 286));

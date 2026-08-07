@@ -165,13 +165,16 @@ export function Board({
   };
 
   return (
-    // The canvas takes `raised` — the elevation ladder's lightest rung — so the
-    // sunken columns read as wells cut into it, Linear's figure-and-ground.
+    // The canvas is the PAGE. It used to take `raised`, one rung above every
+    // other view's background, and that was the tell: the board looked right and
+    // the rest of the app looked hollow. The ladder moved instead — dark's `bg`
+    // now sits where this canvas sat — so the board keeps exactly the surface it
+    // had while every other view joins it, and this stops being a special case.
     // Spacing on the 4px rhythm: a 16px margin around the board, columns 12px
     // apart — the seam between wells stays narrower than the shore around them.
     <div
       ref={scrollRef}
-      className="bg-raised flex min-h-0 flex-1 gap-3 overflow-x-auto p-4"
+      className="bg-bg flex min-h-0 flex-1 gap-3 overflow-x-auto p-4"
       aria-label="Issue board"
       tabIndex={0}
       onScroll={(event) => saveBoardScroll(board.project.id, event.currentTarget.scrollLeft)}

@@ -15,7 +15,8 @@
     "tokens": "node tool/generate-tokens.mjs",
     "tokens:check": "node tool/generate-tokens.mjs --check",
     "naming-gate": "node scripts/naming-gate.mjs",
-    "tokens:astryx": "node tool/generate-astryx-theme.mjs"
+    "tokens:astryx": "node tool/generate-astryx-theme.mjs && npm run theme:build",
+    "theme:build": "astryx theme build src/theme/laitTheme.ts --out src/theme/lait.css"
   },
   "dependencies": {
     "@astryxdesign/core": "0.3.0",

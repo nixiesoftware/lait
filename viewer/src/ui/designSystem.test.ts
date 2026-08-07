@@ -496,6 +496,51 @@ describe("our menu row and Astryx's", () => {
     }
   });
 
+  /**
+   * `laitTheme.ts` is not what the browser reads. `src/theme/lait.css` is, and
+   * it is a SEPARATE build step (`astryx theme build`) whose output is
+   * committed.
+   *
+   * That gap silently ate a day's worth of theme work: the generator was re-run,
+   * `laitTheme.ts` held the new overrides, every test that read it passed, and
+   * the running app kept serving a `lait.css` from hours earlier. Nothing was
+   * wrong except that the artifact the page loads had never been rebuilt.
+   *
+   * So the test reads the CSS, not the source. If an override is in the theme
+   * and not in the stylesheet, the stylesheet is stale — run `npm run
+   * tokens:astryx`, which now chains both steps.
+   */
+  it("the built stylesheet carries the overrides, not just the theme source", () => {
+    const css = readFileSync(join(SRC_DIR, "theme/lait.css"), "utf8");
+
+    for (const [what, needle] of [
+      ["the menu row's hover token", ".astryx-dropdown-menu-item:hover"],
+      ["the menu row's focus token", ".astryx-dropdown-menu-item:focus-visible"],
+      ["the popover's hairline", ".astryx-popover"],
+      ["the pill radius", ".astryx-button"],
+    ] as const) {
+      expect(
+        css,
+        `${what} is missing from src/theme/lait.css. The theme source and the ` +
+          "stylesheet have diverged — run `npm run tokens:astryx`.",
+      ).toContain(needle);
+    }
+
+    // The one that actually rotted: a token whose value must track palette.mjs.
+    const body = /--color-background-body:\s*light-dark\(([^)]*\)),\s*([^)]*\))\)/.exec(css);
+    expect(body, "no --color-background-body in the built stylesheet").not.toBeNull();
+
+    const theme = readFileSync(join(SRC_DIR, "theme/laitTheme.ts"), "utf8");
+    const fromTheme = /"--color-background-body":\s*\[([^\]]*)\]/.exec(theme)?.[1] ?? "";
+    const darkFromTheme = [...fromTheme.matchAll(/oklch\([^)]*\)/g)].map((m) => m[0])[1];
+
+    expect(
+      body?.[2],
+      "The stylesheet's page background disagrees with the theme's. This is the " +
+        "stale-artifact failure: `npm run tokens:astryx`.",
+    ).toBe(darkFromTheme);
+  });
+
   it("points the Astryx side at the same hover token", () => {
     const astryx = readFileSync(join(SRC_DIR, "theme/laitTheme.ts"), "utf8");
     const block = /"dropdown-menu-item":\s*\{[\s\S]*?\n {4}\}/.exec(astryx)?.[0] ?? "";

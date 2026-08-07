@@ -582,6 +582,31 @@
   display: contents;
 }
 
+/* ---------------------------------------------------------------------------
+   A FLOATING SHEET GETS AN EDGE.
+
+   Astryx separates popovers and menus from the page with a drop shadow alone.
+   In light mode that reads. In dark it does not: the shadow is
+   `rgba(0, 0, 0, 0.2)` painted on a dark page, so the only thing holding the
+   sheet off the background is one step of lightness — and a menu over a dark
+   surface reads as a hole rather than as something on top.
+
+   WHY THIS IS NOT A THEME OVERRIDE. It should be. `defineTheme` takes a
+   `popover` key and we already use it for padding. But `.astryx-popover` and
+   `.astryx-dropdown-menu` sit TWO boxes inside the element that actually paints
+   the fill, the 12px radius and the shadow — and that element carries no stable
+   class, only StyleX atomics. A border set through the theme key draws a
+   rectangle inside the panel instead of around it. Verified by walking the tree:
+   the sheet is the popover's first child, the classed box is its grandchild.
+
+   So the selector names the sheet the only way it can be named — by what it
+   contains. `:has()` is doing real work here and there is no shorter spelling.
+   --------------------------------------------------------------------------- */
+[popover] > div:has(> .astryx-popover),
+[popover] > div:has(> .astryx-dropdown-menu) {
+  border: 1px solid var(--color-line);
+}
+
 .ui-surface { animation: ui-surface-in 160ms var(--ease-out) both; }
 .ui-drawer { animation: ui-drawer-in 180ms var(--ease-out) both; }
 .ui-detail { animation: ui-detail-in 160ms var(--ease-out) both; }
