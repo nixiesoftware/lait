@@ -1430,6 +1430,21 @@ function FollowToggle({
       type="button"
       variant={following ? "secondary" : "ghost"}
       size="sm"
+      // The rail's geometry, measured off its own rows rather than guessed:
+      // every other control here is `padding: 0`, `margin: 0`, with a 6px gap
+      // between glyph and label. Astryx's Button brings 12px of padding and an
+      // 8px gap, which put this row 14px right of the column — the one thing on
+      // the rail that lined up with nothing.
+      //
+      // The gap is half the fix. Zeroing the padding alone still left the label
+      // 2px out, because the 8px gap pushes it past where a 6px one lands; both
+      // numbers have to match or the row only looks aligned at the glyph.
+      //
+      // No inset for the `following` fill, deliberately. That looked like a
+      // trade until the neighbours were measured — their hover fills hug their
+      // text exactly the same way, so a padded pill here would have been the
+      // odd one out rather than the polished one.
+      className="mx-0 gap-1.5 px-0"
       isDisabled={readOnly || meKey == null}
       onClick={() => onToggle(!following)}
       label={following ? "Following" : "Follow"}
