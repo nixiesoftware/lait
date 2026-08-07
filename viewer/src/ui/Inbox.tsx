@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { AtSign, CheckCheck, Inbox as InboxIcon, MessageSquare, RotateCcw, Settings2, SignalHigh, Timer } from "lucide-react";
+import { AtSign, Check, CheckCheck, Circle, Inbox as InboxIcon, MessageSquare, RotateCcw, Settings2, SignalHigh, Timer } from "lucide-react";
 
 import { rpc } from "../api";
 import {
@@ -15,6 +15,11 @@ import { Combobox } from "./Picker";
 import { Button, CheckboxInput, IconButton, Link, Popover } from "@astryxdesign/core";
 import { interactiveRow } from "./primitives";
 import { short, when } from "./time";
+
+/** Both row actions answer the pointer the same way. Stated once so they cannot
+ *  drift into two treatments again. `focus-within` is load-bearing: these are
+ *  reachable by keyboard (`m`, `s`) and must be visible when they are. */
+const ROW_ACTION = "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100";
 
 /**
  * The inbox — changes addressed to *you*.
@@ -295,6 +300,15 @@ export function Inbox({
                 isUnread(e, i) ? "bg-accent/5" : "",
               ].join(" ")}
             >
+              {/* Unread, said once and plainly. The row tint alone was carrying
+                  it, and a 5%-accent wash is not a state you can point at. */}
+              <span
+                aria-hidden
+                className={[
+                  "mt-2 size-mark-sm shrink-0 rounded-full",
+                  isUnread(e, i) ? "bg-accent" : "bg-transparent",
+                ].join(" ")}
+              />
               <span className="mt-0.5 shrink-0">
                 <KindIcon kind={e.kind} />
               </span>
@@ -311,21 +325,41 @@ export function Inbox({
                   {e.detail}
                 </span>
               </span>
-              <time className="text-mute shrink-0 text-xs">{when(e.ts)}</time>
-              <Button
+              {/* Right-aligned in a fixed slot, so a column of times reads as a
+                  column. It used to sit against a text button whose width
+                  changed with the row's own state — "Mark read" is 87px and
+                  "Mark unread" is 103px — so every timestamp landed at one of
+                  two different offsets and the column jittered down the page. */}
+              <time className="text-mute w-14 shrink-0 text-right text-xs">{when(e.ts)}</time>
+              {/* An icon on the same hover reveal as Snooze, not a standing
+                  worded button.
+                  Of a row's two actions this is the lesser one, and it was the
+                  only thing on the row that always shouted: ninety pixels of
+                  text on every row, while the action you are more likely to
+                  want was invisible until you pointed at it. One treatment for
+                  both, and the unread *state* is carried by the row's tint and
+                  the dot beside its kind — which is what makes hiding the
+                  control safe rather than merely quieter. */}
+              <IconButton
                 onClick={(event) => {
                   event.stopPropagation();
                   setReadState(e, !isUnread(e, i));
                 }}
-                aria-label={`${isUnread(e, i) ? "Mark read" : "Mark unread on this device"}: ${e.title}`}
-                label={isUnread(e, i) ? "Mark read" : "Mark unread"}
+                label={`${isUnread(e, i) ? "Mark read" : "Mark unread on this device"}: ${e.title}`}
+                tooltip={isUnread(e, i) ? "Mark read  M" : "Mark unread  M"}
+                className={ROW_ACTION}
+                // `Circle`, not `Dot`: lucide's Dot is a 2px mark that all but
+                // disappears in a 28px button, and the glyph has to read as a
+                // control. An outline circle is the unread mark this row draws
+                // when it IS unread, which is what the action restores.
+                icon={isUnread(e, i) ? <Check className="size-icon-sm" /> : <Circle className="size-icon-xs" />}
                 variant="ghost"
                 size="sm"
               />
               <IconButton
                 label={`Snooze for one hour: ${e.title}`}
                 onClick={(event) => { event.stopPropagation(); snooze(e); }}
-                className="opacity-0 group-hover:opacity-100 group-focus-within:opacity-100"
+                className={ROW_ACTION}
                 variant="ghost"
                 size="sm"
                 tooltip={`Snooze for one hour: ${e.title}`}
