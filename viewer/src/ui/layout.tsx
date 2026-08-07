@@ -89,13 +89,16 @@ export function Toolbar({
         // as a boundary between two things rather than a header for one.
         "flex shrink-0 items-center gap-1 px-2",
         className,
-        // 32px, unchanged — the AIR came from the controls, not from here.
-        // They were 28px in this band and left 2px above and below, which is
-        // why it read as packed; at 24px (`toolbarControl`) the same 32px band
-        // gives 4px. Double the padding for no extra header, which is the whole
-        // point: a shorter control buys breathing room a taller bar would have
-        // charged the page for.
-        "h-bar-sm",
+        // 36px around 24px controls (`toolbarControl`) — 6px above and below.
+        //
+        // The history is worth keeping, because it is two different moves. The
+        // controls came down first: at 28px in a 32px band they left 2px, which
+        // is why the strip read as packed, and dropping them to 24px bought 4px
+        // without charging the page for a taller header. This is the second
+        // move and it does buy the height — one rung, `sm` → `md`, for the last
+        // 2px on each edge. A named rung rather than a `py`, so the bar stays
+        // on the ladder that exists to keep every band in the app agreeing.
+        "h-bar-md",
       )}
     >
       {children}

@@ -114,6 +114,9 @@ export const laitTheme = defineTheme({
     "--radius-container": "12px",
     "--radius-page": "16px",
 
+    // Elevation — `low` is a chip's lift, not a card's
+    "--shadow-low": "0px 1px 1px light-dark(rgba(0, 0, 0, 0.04), rgba(0, 0, 0, 0.18)), 0px 1px 2px light-dark(rgba(0, 0, 0, 0.05), rgba(0, 0, 0, 0.14))",
+
     // Type sizes — explicit, not a generated ratio: our ladder is bent
     "--font-size-2xs": "10px",
     "--font-size-xs": "11px",

@@ -193,7 +193,17 @@ describe("control heights speak one vocabulary", () => {
 
   it("the ladder is the only control-height vocabulary in use", () => {
     expect(rungsUsed("ctl")).toEqual(["lg", "md", "sm", "xl", "xs"]);
-    expect(rungsUsed("bar")).toEqual(["lg", "md", "sm"]);
+    // `bar-sm` (32) is declared and currently unread: the toolbar band moved up
+    // to `md` (36) to give its 24px controls 6px above and below.
+    //
+    // Declared is not the same as available. Tailwind emits an `@theme`
+    // variable only where something reads it, so losing its last reader took
+    // `--spacing-bar-sm` out of the built stylesheet entirely — `lait.rungs()`
+    // in a live page lists `bar-md` and `bar-lg` and no `sm`. The declaration
+    // survives in `styles.css` as the place "why 32" is written down, which is
+    // worth keeping, but nothing can `var()` it until a reader brings it back.
+    // This assertion is what will say so when one does.
+    expect(rungsUsed("bar")).toEqual(["lg", "md"]);
   });
 });
 

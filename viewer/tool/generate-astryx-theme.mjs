@@ -214,6 +214,30 @@ set("--radius-element", "8px");
 set("--radius-container", "12px");
 set("--radius-page", "16px");
 
+// ── Elevation ────────────────────────────────────────────────────────────
+// `low` is the ONLY elevation this app raises anything with, and every one of
+// its callers is a chip: the project tabs, the display and filter pills, a
+// dialog's Cancel, a calendar's today. Astryx's default is built for a card —
+// `0 1px 1px` over `0 2px 8px` at 10% — and on a 24px pill that second layer is
+// a soft halo twice the height of the thing casting it, which reads as blur
+// rather than as lift.
+//
+// So it is retuned rather than dropped: the edge still has to say the chip is
+// off the bar, it just has to say it in the space a chip occupies. Half the
+// offset, a quarter of the blur, roughly half the light-mode alpha. Dark keeps
+// more alpha because a shadow on a near-black surface has less to work with —
+// the same asymmetry the popover hairline note explains.
+//
+// One token, because one token is what all of them read. There is no chip in
+// the app that wants the old halo, and a per-call-site override would be the
+// drift this ladder exists to prevent.
+section("Elevation — `low` is a chip's lift, not a card's");
+set(
+  "--shadow-low",
+  "0px 1px 1px light-dark(rgba(0, 0, 0, 0.04), rgba(0, 0, 0, 0.18)), " +
+    "0px 1px 2px light-dark(rgba(0, 0, 0, 0.05), rgba(0, 0, 0, 0.14))",
+);
+
 // ── Type sizes ───────────────────────────────────────────────────────────
 // The five rungs the tracker uses, at COMPACT. NOT `typography.scale`: Astryx
 // generates a geometric ladder from `{ base, ratio }` and ours is deliberately
