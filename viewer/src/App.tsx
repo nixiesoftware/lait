@@ -9,7 +9,7 @@ import {
 import { ConfirmRequired, hostRpc, LaitError, rpc, spaces as fetchSpaces } from "./api";
 import { useDoorbell } from "./doorbell";
 import { runBounded, type BulkProgress } from "./core/bulk";
-import { groupRows, loadDisplay, saveDisplay, type DisplayState } from "./core/display";
+import { filterNotice, groupRows, loadDisplay, saveDisplay, type DisplayState } from "./core/display";
 import {
   contribute,
   registry,
@@ -104,6 +104,7 @@ import {
 import {
   isReadOnly,
   type BoardPos,
+  type BoardView,
   type Row,
   type SpaceRow,
   type SpecKind,
@@ -112,7 +113,7 @@ import {
   type WorkflowState,
 } from "./types";
 import "./commands";
-import { toolbarIconControl } from "./ui/primitives";
+import { toolbarControl, toolbarIconControl } from "./ui/primitives";
 
 type Modal = "palette" | "issueSearch" | "shortcuts" | "workflow" | "roles" | null;
 type ThemePreference = "system" | "light" | "dark";
@@ -476,6 +477,26 @@ export function App() {
 
   /** The list's arrangement (the board renders columns straight off `shown`). */
   const groups = useMemo(() => (shown ? groupRows(shown, display) : []), [shown, display]);
+
+  /**
+   * How many live issues the filter is holding back.
+   *
+   * Both numbers were already computed, inline, for the filter popover's "N of
+   * M" line — which meant the one place the count appeared was inside the
+   * control you had to open to suspect it. A filter hiding 3 of 12 was
+   * otherwise silent: the list just looked like a list. We already treat the
+   * *fully* emptied case as worth a whole empty state ("a board emptied by a
+   * leftover filter is never a silent blank"); this is the same trap one notch
+   * quieter, and the honest version of that rule covers both.
+   */
+  const liveCount = (view: BoardView | null) =>
+    view?.columns.reduce(
+      (count, column) => count + column.rows.filter((row) => !row.tombstone).length,
+      0,
+    ) ?? 0;
+  const resultCount = liveCount(shown);
+  const totalCount = liveCount(board);
+  const notice = filterNotice(totalCount, resultCount);
 
   // Motion follows what is *visible*, in the order it is visible: on the list,
   // j/k walks the display *groups*; on the board — which always lays out by
@@ -1837,14 +1858,8 @@ export function App() {
                   open={filterOpen}
                   onOpenChange={setFilterOpen}
                   focusToken={focusToken}
-                  resultCount={shown?.columns.reduce(
-                    (count, column) => count + column.rows.filter((row) => !row.tombstone).length,
-                    0,
-                  ) ?? 0}
-                  totalCount={board?.columns.reduce(
-                    (count, column) => count + column.rows.filter((row) => !row.tombstone).length,
-                    0,
-                  ) ?? 0}
+                  resultCount={resultCount}
+                  totalCount={totalCount}
                   onChange={setFilter}
                 />
               )}
@@ -2205,6 +2220,24 @@ export function App() {
                         size="sm"
                       />}
             />
+          )}
+          {/* What the filter is holding back, under the rows it thinned.
+              Only when some issues DID survive: at zero the surfaces draw a
+              whole empty state with the same escape in it, and two answers to
+              one question is worse than either. */}
+          {projectShell && issueMode && notice.show && (
+            <p className="text-mute flex shrink-0 items-center justify-center gap-2 py-2 text-sm">
+              <span>
+                {notice.hidden} issue{notice.hidden === 1 ? "" : "s"} hidden by filters
+              </span>
+              <Button
+                onClick={() => api.clearFilter()}
+                label="Clear filters"
+                variant="ghost"
+                size="sm"
+                className={toolbarControl}
+              />
+            </p>
           )}
         </div>
         {/* `consoleFits` before `railOpen`: the preference says what you want

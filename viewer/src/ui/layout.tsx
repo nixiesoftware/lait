@@ -538,16 +538,36 @@ export function RailCard({
 
 export function RailRow({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    // `title` restores the term to the pointer. It is the same string as the
-    // `<dt>`, so the tooltip and the screen reader agree by construction.
+    // THE TERM IS VISIBLE. It used to be `sr-only`, so the rail was a column of
+    // values with nothing naming them: `Backlog` and `Medium` survive that
+    // because they say what they are, but an avatar, a date, or an empty `Set
+    // lead` does not — you had to already know what the row was to read it.
+    // Linear names every property beside its value and that is the whole reason
+    // its rail scans; ours had the string all along and was hiding it.
+    //
+    // That the label was *meant* to be visible is written elsewhere in the file:
+    // the Typing row's comment reads "the row's own label says Typing, so the
+    // value is the names and nothing else". It was describing a rail nobody
+    // could see.
+    //
+    // `title` still carries the term to the pointer, for the rows where the
+    // column truncates.
+    //
     // The vertical padding is the ONLY space between two rows — each row is a
     // 28px control, so `py` is doubled into the gap between neighbours. Kept
     // non-zero rather than removed: a wrapped run of labels overflows the 28px
     // minimum, and at zero the first and last chip sit flush against the rows
     // above and below. 2px is the least that still reads as a gap between two
     // adjacent hover pills.
-    <div className="issue-property group/prop flex min-h-ctl-md items-center gap-2 py-0.5" title={label}>
-      <dt className="sr-only">{label}</dt>
+    <div className="issue-property group/prop flex min-h-ctl-md items-start gap-2 py-0.5" title={label}>
+      {/* Fixed width, so every value in a section starts at one x — that column
+          IS the readability, and a label sized to its own text would stagger
+          them. `min-h`/`items-center` keep the term on the first line when the
+          value wraps (a run of labels, a stack of carets) rather than drifting
+          to the middle of a tall row. */}
+      <dt className="text-mute flex min-h-ctl-md w-20 shrink-0 items-center truncate text-sm">
+        {label}
+      </dt>
       <dd className="min-w-0 flex-1">{children}</dd>
     </div>
   );

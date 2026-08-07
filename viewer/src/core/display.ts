@@ -146,3 +146,21 @@ function order(rows: Row[], by: OrderBy): Row[] {
       return [...rows].sort((a, b) => a.title.localeCompare(b.title));
   }
 }
+
+/**
+ * What a filter is holding back, and whether to say so.
+ *
+ * A predicate rather than an inline `&&` because its failure mode is silence:
+ * if this ever stops returning `show`, nothing breaks, nothing throws, and the
+ * list simply goes back to under-reporting itself — which is the exact bug the
+ * notice exists to fix. A function can be held to it by a test; a condition
+ * buried in JSX cannot.
+ *
+ * `show` is false at zero survivors ON PURPOSE. The surfaces already draw a
+ * whole filtered-empty state there, with the same escape hatch in it, and two
+ * answers to one question is worse than either alone.
+ */
+export function filterNotice(total: number, shown: number): { hidden: number; show: boolean } {
+  const hidden = Math.max(0, total - shown);
+  return { hidden, show: hidden > 0 && shown > 0 };
+}

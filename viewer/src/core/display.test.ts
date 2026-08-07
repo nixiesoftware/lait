@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { DEFAULT_DISPLAY, groupRows } from "./display";
+import { DEFAULT_DISPLAY, filterNotice, groupRows } from "./display";
 import type { BoardView, Row } from "../types";
 
 const row = (over: Partial<Row> & { reff: string }): Row => ({
@@ -74,5 +74,26 @@ describe("groupRows", () => {
     saveDisplay({ group: "none", order: "board", deleted: true }, "ws/PRJ/list");
     expect(loadDisplay("ws/PRJ/list")).toEqual({ group: "none", order: "board", deleted: true });
     expect(loadDisplay("ws/PRJ/board")).toMatchObject({ group: "priority", order: "title" });
+  });
+});
+
+describe("filterNotice", () => {
+  it("counts what the filter held back", () => {
+    expect(filterNotice(12, 9)).toEqual({ hidden: 3, show: true });
+  });
+
+  it("says nothing when the filter hid nothing", () => {
+    expect(filterNotice(12, 12)).toEqual({ hidden: 0, show: false });
+  });
+
+  // The empty case belongs to the filtered-empty state, which offers the same
+  // "clear" action. Two notices answering one question is worse than either.
+  it("defers to the empty state when the filter hid everything", () => {
+    expect(filterNotice(12, 0)).toEqual({ hidden: 12, show: false });
+  });
+
+  // A stale total must never render "-2 issues hidden".
+  it("never reports a negative count", () => {
+    expect(filterNotice(3, 5)).toEqual({ hidden: 0, show: false });
   });
 });
