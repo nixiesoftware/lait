@@ -5,6 +5,7 @@ import { registerIcons } from "@astryxdesign/core/Icon";
 
 import { App } from "./App";
 import { contribute, registry } from "./core/registry";
+import type { Inspect } from "./dev/inspect";
 import { WorldViewStoreProvider } from "./core/worldViewReact";
 import { ProjectViewerStore, ProjectViewerStoreProvider } from "./projectStore";
 import { laitIcons } from "./theme/icons";
@@ -44,11 +45,29 @@ registerIcons(laitIcons);
  */
 declare global {
   interface Window {
-    lait: { contribute: typeof contribute; registry: typeof registry };
+    lait: { contribute: typeof contribute; registry: typeof registry } & Partial<Inspect>;
   }
 }
 
 window.lait = { contribute, registry };
+
+/**
+ * The measuring tools, on the same handle and only in dev.
+ *
+ * `import.meta.env.DEV` is replaced with a literal `false` at build time, so
+ * this branch — and the dynamic import inside it — are eliminated before the
+ * bundle reaches `src/serve/assets/` and gets embedded in the binary. A shipped
+ * `lait` has no debug surface; the type is `Partial` because that absence is
+ * the truth about the shipped object, not a convenience.
+ *
+ * Why they live here at all: driving this app from outside means either taking
+ * pictures of it or asking it questions, and pictures cost about four hundred
+ * times what an answer does. See `dev/inspect.ts` for the four defect classes
+ * that turned out to be numbers all along.
+ */
+if (import.meta.env.DEV) {
+  void import("./dev/inspect").then(({ inspect }) => Object.assign(window.lait, inspect));
+}
 
 const root = document.getElementById("root");
 if (!root) throw new Error("#root missing from index.html");

@@ -50,6 +50,45 @@ load avoids the in-eval history problem). The hook lives in `viewer/src/App.tsx`
 (search `lait:nav`); Settings and Projects add their own listeners. It is inert in
 normal use — nothing dispatches it.
 
+### Ask the page, don't photograph it
+
+A screenshot costs ~20k tokens and answers *"does this look right"*. Almost
+nothing you need to know is that question — the last design walk found four
+defect classes and every one of them was a number. `window.lait` carries the
+tools that return those numbers, in dev builds only (`viewer/src/dev/inspect.ts`,
+loaded behind `import.meta.env.DEV`, absent from the embedded bundle):
+
+```js
+lait.where()                                  // url, viewport, theme, open dialog
+lait.look(sel, { within, all })               // geometry + the styles that matter
+lait.tree(sel = "#root", depth = 4)           // structure, no utility-class noise
+lait.text(sel = "#root")                      // visible text, collapsed
+lait.rungs()                                  // the ladder as it resolves at runtime
+lait.go(detail)                               // dispatch `lait:nav` (see above)
+```
+
+`look` is the one you want. It deduplicates — eight identical tabs report once
+as `8×` — drops matches that render nothing (a board answers `.astryx-button`
+with 407 elements, 399 of them collapsed menus), and resolves a measurement to
+its rung, so `36px` comes back as `bar-md`. It prints the properties the walk
+found broken: explicit `width`/`max-width`, four-sided padding, `gap`, and
+`justify-content`/`align-items` on every flex container even at their initial
+values. Values nobody set are omitted; `{ all: true }` prints everything.
+
+Budget a screenshot for the genuinely visual call — *is that shadow a halo, is
+this cramped* — and measure for everything else.
+
+Two traps, both learned the hard way:
+
+- **`lait.go` does not wait, and you must not make it.** Awaiting frames inside
+  the eval holds its execution context open across the re-render that `App.tsx`
+  defers specifically to avoid — the same detachment as a synthetic click, from
+  the other side. It cost a 45s CDP timeout on a navigation that had already
+  succeeded. Dispatch in one call, ask `lait.where()` in the next.
+- **A zero box does not mean hidden, and `checkVisibility()` does not either.**
+  The app shell's root is `display: contents`; both tests prune it and take the
+  whole tree with it. `rendered()` in `inspect.ts` asks `display` directly.
+
 Start a head and get its URL/token: `lait --json` → one line, `{url, token, port}`,
 printed *before* the listener accepts. `--port 0` takes an ephemeral port when
 7717 may be busy. The token is the Bearer credential for every `/api` route.
