@@ -28,6 +28,27 @@ export type StatusCategory = "backlog" | "active" | "done";
 /** Priority order, low → high. Mirrors the Rust enum's `Ord`. */
 export const PRIORITY_ORDER: readonly Priority[] = ["none", "low", "medium", "high", "urgent"];
 
+/**
+ * The words a menu uses for a priority.
+ *
+ * `none` is a real engine value, not an absence, and three surfaces had three
+ * answers for what to call it in a list: the composer and the issue rail both
+ * offered the literal `none`, and the row chip offered "No priority". A menu
+ * row is the reader's, not the protocol's — so the map is here, beside the
+ * order it is read in, and every picker projects it.
+ *
+ * Sentence case, because the *trigger* capitalises the same value: a menu that
+ * offers "low" and a chip that then says "Low" are describing one thing in two
+ * voices.
+ */
+export const PRIORITY_LABEL: Record<Priority, string> = {
+  none: "No priority",
+  low: "Low",
+  medium: "Medium",
+  high: "High",
+  urgent: "Urgent",
+};
+
 /** Board badge: `·U/H/M/L·`. */
 export const PRIORITY_BADGE: Record<Priority, string> = {
   none: "-",

@@ -2,7 +2,7 @@ import { useState } from "react";
 import { UserRound } from "lucide-react";
 
 import type { LabelDto, MemberDto, Priority, Row, WorkflowState } from "../types";
-import { PRIORITY_ORDER } from "../types";
+import { PRIORITY_LABEL, PRIORITY_ORDER } from "../types";
 import { Avatar, AvatarStack, memberName, stackFor } from "./Avatar";
 import { catalogColor } from "./colors";
 import { DatePicker } from "./DatePicker";
@@ -165,7 +165,7 @@ export function PriorityChip({
         // Highest first: the list you scan top-down starts where the urgency does.
         options={[...PRIORITY_ORDER].reverse().map((p) => ({
           id: p,
-          label: p === "none" ? "No priority" : p,
+          label: PRIORITY_LABEL[p],
           icon: <PriorityIcon priority={p} />,
         }))}
         onPick={(id) => {

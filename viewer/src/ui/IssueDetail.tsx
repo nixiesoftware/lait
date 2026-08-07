@@ -70,6 +70,7 @@ import {
   type LinkDto,
   type Priority,
   type Row,
+  PRIORITY_LABEL,
   PRIORITY_ORDER,
   tsToDate,
   type ActivityEvent,
@@ -573,7 +574,7 @@ export function IssueDetail({
               // urgency does.
               options={[...PRIORITY_ORDER].reverse().map((p) => ({
                 id: p,
-                label: p,
+                label: PRIORITY_LABEL[p],
                 icon: <PriorityIcon priority={p} />,
               }))}
               onPick={(id) =>
@@ -2051,6 +2052,7 @@ function Relations({
               value={subDraft}
               placeholder="Sub-issue title…  (Enter creates, Esc closes)"
               onChange={setSubDraft}
+              width="100%"
               onKeyDown={(e) => {
                 e.stopPropagation();
                 if (e.key === "Enter" && subDraft.trim()) createSub(subDraft.trim());
