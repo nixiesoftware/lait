@@ -304,6 +304,17 @@ export function ChipButton({
 export const crumbGlyph = "flex size-icon-md shrink-0 items-center justify-center";
 
 /**
+ * The same slot at the issue rail's measure.
+ *
+ * The rail's rows lead with `icon-sm` (14px) glyphs, not the breadcrumb's 16px,
+ * so a mark lined up against them needs a 14px box or its label lands 2px right
+ * of the column — the error you cannot see but can feel. Stated beside
+ * `crumbGlyph` rather than derived from it, because the two answer to different
+ * neighbours and a shared base would invite "fixing" one by moving the other.
+ */
+export const railGlyph = "flex size-icon-sm shrink-0 items-center justify-center";
+
+/**
  * One menu row — for the rows Astryx does not draw for us.
  *
  * `DropdownMenuItem` covers the verb menus, but the searchable pickers are

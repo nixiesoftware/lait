@@ -4,7 +4,7 @@ import { Command } from "cmdk";
 import { Check, Plus } from "lucide-react";
 
 import { cmdkFilter } from "../core/fuzzy";
-import { cn, controlTrigger, crumbGlyph, menuRow, type ControlSize, type ControlTone } from "./primitives";
+import { cn, controlTrigger, crumbGlyph, menuRow, railGlyph, type ControlSize, type ControlTone } from "./primitives";
 
 /**
  * A pill that opens a searchable menu — the tracker's workhorse control.
@@ -97,11 +97,23 @@ type Props = {
 } & Mode & {
   tone?: ControlTone;
   size?: ControlSize;
-  /** Put the swatch in a fixed-width glyph slot. A breadcrumb needs every
-   *  crumb's text to start at the same offset whatever mark precedes it — that
-   *  is a layout contract, not a look, which is why it survives as its own prop
-   *  rather than being inferred from a tone. */
-  swatchSlot?: boolean;
+  /**
+   * Put the swatch in a fixed-width glyph slot, and say how wide.
+   *
+   * A column of rows needs every label to start at the same offset whatever
+   * mark precedes it — that is a layout contract, not a look, which is why it
+   * survives as its own prop rather than being inferred from a tone. A bare
+   * swatch is `mark-sm` (8px) against neighbours carrying `icon-sm` (14px)
+   * glyphs, so without a slot its label sits 6px left of the column and reads
+   * as a hanging indent.
+   *
+   * The WIDTH is the caller's because the slot has to match the glyphs it is
+   * lining up with, and those differ by surface: the breadcrumb sets 16px
+   * (`md`, what `crumbGlyph` draws), the issue rail 14px (`sm`). Passing the
+   * wrong one is a 2px error nobody sees, which is exactly why it should be
+   * stated at the call site rather than guessed here.
+   */
+  swatchSlot?: "sm" | "md";
 };
 
 /** The options, under a section label when one is asked for. cmdk's group
@@ -165,7 +177,7 @@ export function Combobox(props: Props) {
       {single?.icon}
       {triggerSwatch &&
         (swatchSlot ? (
-          <span className={crumbGlyph}>{triggerSwatch}</span>
+          <span className={swatchSlot === "sm" ? railGlyph : crumbGlyph}>{triggerSwatch}</span>
         ) : (
           triggerSwatch
         ))}

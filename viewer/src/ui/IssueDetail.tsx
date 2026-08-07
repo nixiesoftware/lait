@@ -777,6 +777,10 @@ export function IssueDetail({
               tone="quiet"
               label="Project"
               swatchShape="square"
+              // 14px slot, so `Beacon` starts on the same column as `Backlog`
+              // and `Add label`. Without it the 8px swatch pulls the label 6px
+              // left and the rail grows a hanging indent on one row.
+              swatchSlot="sm"
               disabled={locked}
               open={pickerOpen("project")}
               onOpenChange={setPicker("project")}

@@ -1535,7 +1535,7 @@ export function App() {
               control: true,
               content: (
                 <Combobox
-                  tone="quiet" size="sm" swatchSlot
+                  tone="quiet" size="sm" swatchSlot="md"
                   label="Project"
                   swatchShape="square"
                   className="max-w-[min(32cqw,240px)] font-medium"
