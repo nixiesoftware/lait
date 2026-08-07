@@ -1545,10 +1545,29 @@ export function App() {
     }
     return counts;
   }, [board]);
-  const projectDocIds = useMemo(
-    () => new Set(board?.columns.flatMap((column) => column.rows.map((row) => row.doc_id)) ?? []),
-    [board],
-  );
+  /**
+   * The project's issues, by doc id, carrying the name a person calls them.
+   *
+   * A Set of doc ids used to be enough because its only reader filtered the
+   * activity feed down to this project. It is a Map now because that feed also
+   * has to *name* what it filtered: its rows led with the raw `iss_01JVD0B…`,
+   * truncated into a 20-unit column, where every other surface in the app says
+   * EXEC-9 — an identifier that was neither readable nor, at that width,
+   * copyable.
+   *
+   * The board is a complete source for this and not a partial one: `Activity`
+   * only renders under a board, so every event it can draw belongs to a doc the
+   * board holds. Deleted rows are folded in for the same reason — an issue's
+   * history outlives the issue, and a tombstoned row still has a name.
+   */
+  const projectIssues = useMemo(() => {
+    const byDoc = new Map<string, string | null>();
+    for (const row of board?.columns.flatMap((column) => column.rows) ?? []) {
+      byDoc.set(row.doc_id, row.key_alias);
+    }
+    for (const row of deletedRows) byDoc.set(row.doc_id, row.key_alias);
+    return byDoc;
+  }, [board, deletedRows]);
 
   /**
    * The header trail names *what you are looking at* and its containers — never
@@ -2205,7 +2224,7 @@ export function App() {
               members={members}
               states={states}
               revision={revision}
-              projectDocIds={projectDocIds}
+              projectIssues={projectIssues}
               projectName={board.project.name}
               onError={setError}
               onOpen={(reff) => {

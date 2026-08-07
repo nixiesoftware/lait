@@ -35,7 +35,7 @@ export function Activity({
   members,
   states,
   revision,
-  projectDocIds,
+  projectIssues,
   projectName,
   onError,
   onOpen,
@@ -46,7 +46,9 @@ export function Activity({
    *  prints the engine's ids — `in_progress`, not "In Progress". */
   states: WorkflowState[];
   revision: number;
-  projectDocIds?: ReadonlySet<string>;
+  /** The project's issues by doc id, each with the name a person calls it.
+   *  Scopes the feed to this project *and* names what it scoped. */
+  projectIssues?: ReadonlyMap<string, string | null>;
   projectName?: string;
   onError: (m: string) => void;
   onOpen: (reff: string) => void;
@@ -65,15 +67,19 @@ export function Activity({
     () => ({
       resolveName,
       stateName: (id) => states.find((state) => state.id === id)?.name ?? null,
+      // Names a link or parent target — "marked this issue as blocking EXEC-3"
+      // rather than a truncated doc id. The issue history has always supplied
+      // this; the feed passed only half the context.
+      issueLabel: (docId) => projectIssues?.get(docId) ?? null,
     }),
     // `resolveName` closes over `memberByKey`, which is the real dependency.
-    [memberByKey, states],
+    [memberByKey, states, projectIssues],
   );
   const scopedEvents = useMemo(
-    () => projectDocIds
-      ? events?.filter((event) => event.doc_id !== null && projectDocIds.has(event.doc_id)) ?? null
+    () => projectIssues
+      ? events?.filter((event) => event.doc_id !== null && projectIssues.has(event.doc_id)) ?? null
       : events,
-    [events, projectDocIds],
+    [events, projectIssues],
   );
 
   useEffect(() => {
@@ -134,8 +140,17 @@ export function Activity({
           tabIndex={0}
           className={`${interactiveRow({ size: "lg" })} flex items-start gap-3 px-4 py-2.5`}
         >
-          <span className="text-mute w-20 shrink-0 truncate font-mono text-xs tabular-nums">
-            {e.reff}
+          {/* The name a person calls this issue. The engine's `ActivityEvent`
+              carries no key alias — only `reff` and `doc_id` — so the board
+              supplies it, which it can do completely: this feed only renders
+              under a board, so every event it can draw belongs to a doc the
+              board holds. Falls back to the ref when a doc has left the
+              projection entirely, which is honest rather than blank. */}
+          <span
+            className="text-mute w-20 shrink-0 truncate font-mono text-xs tabular-nums"
+            title={e.reff}
+          >
+            {(e.doc_id && projectIssues?.get(e.doc_id)) || e.reff}
           </span>
           <span className="min-w-0 flex-1">
             {group.events.map((event, index) => (
