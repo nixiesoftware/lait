@@ -30,6 +30,15 @@ import { cn, navigationItem } from "./primitives";
 
 type Tab = "general" | "members" | "devices" | "labels" | "workflow" | "access";
 
+const TABS: readonly Tab[] = ["general", "members", "devices", "labels", "workflow", "access"];
+
+/** Narrow a route value to a sub-page. The route already refuses names it does
+ *  not know, so this is the second half of one contract rather than a second
+ *  list — but it is the half TypeScript can see. */
+function isTab(value: string | null | undefined): value is Tab {
+  return value !== null && value !== undefined && (TABS as readonly string[]).includes(value);
+}
+
 /**
  * The settings surface — the place a space is administered like an application.
  *
@@ -47,6 +56,8 @@ export function Settings({
   projects,
   readOnly,
   revision,
+  tab: routeTab,
+  onTabChange,
   onError,
   onExit,
 }: {
@@ -58,44 +69,41 @@ export function Settings({
   readOnly: boolean;
   /** Bumped by the doorbell; re-reads the panels that fetch. */
   revision: number;
+  /** The sub-page, from the route. `null` is General. */
+  tab: string | null;
+  /** Report a sub-page change so the address can follow. Writing the URL here
+   *  did not survive: `App` re-formats it from the route on every render. */
+  onTabChange: (tab: string | null) => void;
   onError: (message: string) => void;
   /** Leave settings and return to the app — the workspace sidebar is collapsed
    *  while this page is open, so this is the way back. */
   onExit: () => void;
 }) {
-  // Read the initial tab from `?tab=` so a settings sub-page is deep-linkable
-  // (and reliably reachable by a headless driver via `open`, no click needed).
-  const [tab, setTabState] = useState<Tab>(() => {
-    if (window.location.pathname.split("/").filter(Boolean).at(-1) === "members") return "members";
-    const t = new URLSearchParams(window.location.search).get("tab");
-    return t === "members" || t === "devices" || t === "labels" || t === "workflow" || t === "access"
-      ? t
-      : "general";
-  });
-  const setTab = (next: Tab) => {
-    setTabState(next);
-    const url = new URL(window.location.href);
-    if (next === "general") url.searchParams.delete("tab");
-    else url.searchParams.set("tab", next);
-    window.history.replaceState(null, "", `${url.pathname}${url.search}`);
-  };
+  /**
+   * The sub-page comes from the route, not from `window.location` read here.
+   *
+   * It used to be local state seeded from `?tab=`, which wrote the parameter on
+   * every change and read it back on mount — and still lost it, because `App`
+   * re-formats the whole address from `ViewerRoute` and `formatRoute` had never
+   * heard of `tab`. So `/settings?tab=members` put you on General, and the one
+   * thing the parameter existed for — a linkable, reloadable sub-page, and a
+   * driver that can `open` one without clicking — did not work.
+   *
+   * `/members` stays honoured as a legacy path.
+   */
+  const legacyMembersPath =
+    window.location.pathname.split("/").filter(Boolean).at(-1) === "members";
+  const tab: Tab = isTab(routeTab) ? routeTab : legacyMembersPath ? "members" : "general";
+  const setTab = (next: Tab) => onTabChange(next === "general" ? null : next);
   // Reliable driver hook: `lait:nav { tab }` selects a sub-page without a click.
   useEffect(() => {
     const onNav = (event: Event) => {
       const t = (event as CustomEvent).detail?.tab;
-      if (
-        t === "general" ||
-        t === "members" ||
-        t === "devices" ||
-        t === "labels" ||
-        t === "workflow" ||
-        t === "access"
-      )
-        setTab(t);
+      if (isTab(t)) onTabChange(t === "general" ? null : t);
     };
     window.addEventListener("lait:nav", onNav as EventListener);
     return () => window.removeEventListener("lait:nav", onNav as EventListener);
-  }, []);
+  }, [onTabChange]);
   const tabs: { id: Tab; label: string; icon: React.ReactNode }[] = [
     { id: "general", label: "General", icon: <SlidersHorizontal className="size-icon-sm" /> },
     { id: "members", label: "Members", icon: <Users className="size-icon-sm" /> },
@@ -268,14 +276,25 @@ function GeneralPanel({
   return (
     <>
       <Section title="Space name" hint="A mutable display label. The space's identity (below) never changes.">
-        <div className="flex items-center gap-2">
+        {/* `width` on the field, measure on the wrapper.
+            Astryx's inputs size to their content, so `max-w-sm` was capping
+            something that was already 148px — and in a `flex items-center` row
+            nothing stretched it back. The editable name ended up a third the
+            width of the read-only identity below it, which is the wrong way
+            round for the two fields on this page. */}
+        {/* `max-w-lg`, the same measure the description below uses. Editable
+            fields on one page share one width or the page reads as assembled;
+            Identity keeps the section's full width because a 64-hex id you copy
+            is a different kind of field and needs the room. */}
+        <div className="flex max-w-lg items-center gap-2">
           <TextInput
             label="Space name"
             isLabelHidden
             value={name}
             isDisabled={readOnly}
             onChange={setName}
-            className="max-w-sm"
+            className="flex-1"
+            width="100%"
           />
           <Button
             isDisabled={!dirty || readOnly}
@@ -288,7 +307,10 @@ function GeneralPanel({
         </div>
       </Section>
       <Section title="Description" hint="A short overview of what this space is for. Shared with everyone in the space.">
-        <div className="flex max-w-lg flex-col items-start gap-2">
+        {/* `items-start` is what kept the textarea at its intrinsic width — it
+            is here so the button below does not stretch, so the button gets its
+            own row instead and the column stretches as a column should. */}
+        <div className="flex max-w-lg flex-col gap-2">
           <TextArea
             label="Description"
             isLabelHidden
@@ -298,16 +320,19 @@ function GeneralPanel({
             placeholder="What is this space for? Goals, scope, links…"
             onChange={setDescription}
             aria-label="Space description"
+            width="100%"
           />
           {!readOnly && (
-            <Button
-              isDisabled={!descDirty}
-              isLoading={savingDesc}
-              onClick={() => void saveDescription()}
-              label="Save description"
-              variant="primary"
-              size="md"
-            />
+            <div className="flex">
+              <Button
+                isDisabled={!descDirty}
+                isLoading={savingDesc}
+                onClick={() => void saveDescription()}
+                label="Save description"
+                variant="primary"
+                size="md"
+              />
+            </div>
           )}
         </div>
       </Section>
@@ -514,6 +539,7 @@ function DevicesPanel({
               value={custodyPath}
               placeholder="Path on the machine running lait"
               onChange={setCustodyPath}
+              width="100%"
             />
             <TextInput
               type="password"
@@ -522,6 +548,7 @@ function DevicesPanel({
               value={passphrase}
               placeholder="Passphrase"
               onChange={setPassphrase}
+              width="100%"
             />
             <div className="flex items-center gap-2">
               <Button
@@ -568,9 +595,7 @@ function DevicesPanel({
                     return reply.kind === "ok" ? reply.message : null;
                   })
                 }
-              >
-                Import share
-              </Button>
+              />
             </div>
             {note && <p className="text-dim text-sm">{note}</p>}
           </div>

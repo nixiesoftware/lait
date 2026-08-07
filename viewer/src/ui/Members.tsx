@@ -99,11 +99,18 @@ export function Members({
   return (
     <div className={embedded ? undefined : "min-h-0 flex-1 overflow-y-auto"}>
       <div className={embedded ? "flex flex-col gap-6" : "mx-auto flex max-w-2xl flex-col gap-6 p-6"}>
+        {/* Sentence case, like every other section on this page.
+            These four headings were the app's rail vocabulary — `text-2xs`
+            micro-caps, which is what labels a *group of rows* in the sidebar or
+            the issue rail. Settings is a page of sections, and its other five
+            tabs all render `Section`'s `text-base font-semibold` with a hint
+            under it. Members had the same structure and a different voice, so
+            one page spoke two. */}
         <section>
-          <h2 className="text-mute mb-2 text-2xs font-semibold tracking-wider uppercase">
+          <h2 className="text-base font-semibold">
             Members · {members.length}
           </h2>
-          <p className="text-dim mb-3 text-sm">People and agents with verified access to this encrypted space. Names are private labels on this device.</p>
+          <p className="text-mute mt-0.5 mb-3 text-sm">People and agents with verified access to this encrypted space. Names are private labels on this device.</p>
           {members.length === 0 ? (
             <EmptyState title="No verified members" body="The local replica does not currently contain a readable membership graph." />
           ) : <ul className="border-line divide-line divide-y rounded-surface border">
@@ -214,10 +221,10 @@ export function Members({
             into an agent's config file, so this is the view it names. */}
         {!readOnly && (
           <section>
-            <h2 className="text-mute mb-2 text-2xs font-semibold tracking-wider uppercase">
+            <h2 className="text-base font-semibold">
               Agents
             </h2>
-            <p className="text-dim mb-3 text-sm">
+            <p className="text-mute mt-0.5 mb-3 text-sm">
               An agent is a member with its own key. Sponsoring one here mints that key on this
               machine and gives it write access, so its work is signed as itself and never as you.
               Its standing ends when yours does.
@@ -294,7 +301,7 @@ function MemberLog({ entries, members }: { entries: MemberLogEntry[]; members: M
 
   return (
     <section>
-      <h2 className="text-mute mb-2 text-2xs font-semibold tracking-wider uppercase">
+      <h2 className="text-base font-semibold">
         Access log · {entries.length}
       </h2>
       <ul className="border-line divide-line divide-y rounded-surface border">
@@ -413,7 +420,7 @@ function Invite({
 
   return (
     <section>
-      <h2 className="text-mute mb-2 text-2xs font-semibold tracking-wider uppercase">Invite</h2>
+      <h2 className="text-base font-semibold">Invite</h2>
       <div className="border-line flex flex-col gap-3 rounded-surface border p-3">
         {!link ? (
           <>
