@@ -1,8 +1,8 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { GroupHeader } from "./layout";
-import { ArrowRight, CalendarClock, FilterX, Gauge, Info, MoreHorizontal, Plus } from "lucide-react";
+import { ArrowRight, CalendarClock, EyeOff, FilterX, Gauge, Info, MoreHorizontal, Plus } from "lucide-react";
 
-import { loadBoardScroll, saveBoardScroll } from "../core/boardState";
+import { loadBoardScroll, loadHiddenColumns, saveBoardScroll, saveHiddenColumns } from "../core/boardState";
 import { groupRows, type DisplayState, type RowGroup } from "../core/display";
 import type { BoardColumn, BoardPos, BoardView, LabelDto, MemberDto, Row } from "../types";
 import { AvatarStack, memberName, stackFor } from "./Avatar";
@@ -21,8 +21,8 @@ import {
 } from "./fields";
 import { PriorityIcon, ProgressRing, StatusIcon } from "./icons";
 import { IssueMenuItems } from "./IssueMenu";
-import { Button, ContextMenu, DropdownMenu, DropdownMenuItem, IconButton } from "@astryxdesign/core";
-import { cn } from "./primitives";
+import { Button, ContextMenu, Divider, DropdownMenu, DropdownMenuItem, IconButton } from "@astryxdesign/core";
+import { cn, navigationItem } from "./primitives";
 import { dueLabel, dueTone } from "./time";
 
 const DUE_TONE = { overdue: "text-danger", soon: "text-warn", later: "text-mute" } as const;
@@ -142,6 +142,31 @@ export function Board({
   const [over, setOver] = useState<{ col: string; pos: BoardPos } | null>(null);
   const [announcement, setAnnouncement] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
+  /**
+   * Statuses this board is not drawing.
+   *
+   * Local and per project — see `boardState`. A hidden column is a tidy-up of
+   * one person's screen, not a change to the workflow, so it never leaves this
+   * machine and never touches the catalog.
+   */
+  const [hidden, setHidden] = useState<string[]>(() => loadHiddenColumns(board.project.id));
+  useLayoutEffect(() => setHidden(loadHiddenColumns(board.project.id)), [board.project.id]);
+  const setHiddenFor = (next: string[]) => {
+    saveHiddenColumns(board.project.id, next);
+    setHidden(next);
+  };
+  const hide = (id: string, name: string) => {
+    setHiddenFor([...hidden.filter((h) => h !== id), id]);
+    setAnnouncement(`Hid the ${name} column`);
+  };
+  const restore = (id: string, name: string) => {
+    setHiddenFor(hidden.filter((h) => h !== id));
+    setAnnouncement(`Restored the ${name} column`);
+  };
+  // A hidden column whose status left the workflow is not "hidden", it is gone;
+  // resolving against the live columns keeps the panel from listing ghosts.
+  const hiddenColumns = board.columns.filter((c) => hidden.includes(c.state.id));
+  const shownColumns = board.columns.filter((c) => !hidden.includes(c.state.id));
 
   useLayoutEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollLeft = loadBoardScroll(board.project.id);
@@ -180,10 +205,15 @@ export function Board({
       onScroll={(event) => saveBoardScroll(board.project.id, event.currentTarget.scrollLeft)}
     >
       <p className="sr-only" aria-live="polite">{announcement}</p>
-      {board.columns.map((col) => (
+      {shownColumns.map((col) => (
         <Column
           key={col.state.id}
           col={col}
+          onHide={() => hide(col.state.id, col.state.name)}
+          // The last column cannot be hidden: an empty board has nothing to
+          // restore FROM, and the panel that would offer the way back is the
+          // thing that just disappeared with it.
+          canHide={shownColumns.length > 1}
           members={members}
           labels={labels}
           selection={selection}
@@ -207,6 +237,38 @@ export function Board({
           readOnly={readOnly}
         />
       ))}
+      {hiddenColumns.length > 0 && (
+        <aside
+          aria-label="Hidden columns"
+          className="border-line flex w-40 shrink-0 flex-col gap-1 border-l pl-3"
+        >
+          <h3 className="text-mute px-1 text-2xs font-semibold tracking-wider uppercase">
+            Hidden columns
+          </h3>
+          {/* Each one names its status and restores on click. A hidden column
+              that could only come back through a settings screen somewhere else
+              is a column you have lost, which is why the way back sits on the
+              board beside the gap it left. */}
+          {hiddenColumns.map((col) => (
+            <button
+              key={col.state.id}
+              type="button"
+              onClick={() => restore(col.state.id, col.state.name)}
+              title={`Restore the ${col.state.name} column`}
+              className={cn(
+                navigationItem({ size: "sm" }),
+                "text-dim hover:text-fg justify-start",
+              )}
+            >
+              <StatusIcon category={col.state.category} color={catalogColor(col.state.color)} />
+              <span className="min-w-0 flex-1 truncate text-left">{col.state.name}</span>
+              <span className="text-mute tabular-nums">
+                {col.rows.filter((r) => !r.tombstone).length}
+              </span>
+            </button>
+          ))}
+        </aside>
+      )}
     </div>
   );
 }
@@ -451,6 +513,8 @@ function Column({
   onLoadChildren,
   columns,
   readOnly,
+  onHide,
+  canHide,
 }: {
   col: BoardColumn;
   members: MemberDto[];
@@ -461,6 +525,11 @@ function Column({
   over: BoardPos | null;
   onSelect: (reff: string) => void;
   onCreate: (status: string) => void;
+  /** Take this status off the board — local to this machine, see `boardState`. */
+  onHide: () => void;
+  /** False for the last visible column; hiding it would leave nothing to
+   *  restore from, because the panel offering the way back would go with it. */
+  canHide: boolean;
   onDragStart: (reff: string) => void;
   onDragEnd: () => void;
   onOver: (pos: BoardPos) => void;
@@ -538,6 +607,16 @@ function Column({
                 isDisabled={!rows[0]}
                 onClick={() => rows[0] && onSelect(rows[0].reff)}
                 endContent={<span className="text-mute tabular-nums">{rows.length}</span>}
+              />
+              <Divider />
+              <DropdownMenuItem
+                label="Hide column"
+                icon={<EyeOff className="size-icon-sm" />}
+                isDisabled={!canHide}
+                onClick={onHide}
+                {...(canHide
+                  ? {}
+                  : { tooltip: "The last column cannot be hidden" })}
               />
             </DropdownMenu>
           </>

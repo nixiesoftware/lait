@@ -2,7 +2,7 @@ import { Calendar, List, SlidersHorizontal, SquareKanban } from "lucide-react";
 
 import type { DisplayState, GroupBy, OrderBy } from "../core/display";
 import { ISSUE_MODES, ISSUE_MODE_LABEL, type IssueMode } from "../core/registry";
-import { Button, IconButton, Popover } from "@astryxdesign/core";
+import { Button, IconButton, Popover, Switch } from "@astryxdesign/core";
 import { cn, toolbarIconControl } from "./primitives";
 
 /** The layout switcher's glyphs. Same icons the sidebar gives the destination,
@@ -120,23 +120,28 @@ export function DisplayOptions({
             ))}
           </Axis>
 
-          <Axis label="Issue mode">
-            <Choice
-              label="Active"
-              active={!display.deleted}
-              onClick={() => onChange({ ...display, deleted: false })}
-            />
-            <Choice
-              label="Deleted"
-              active={display.deleted}
-              onClick={() => onChange({ ...display, deleted: true })}
-            />
-          </Axis>
+          {/* TWO-VALUED AXES ARE SWITCHES, NOT PAIRS OF PILLS.
+              A pill pair asks you to read both labels and work out which is lit;
+              a switch states one fact and shows whether it holds. The pills also
+              cost a whole row each in a 256px panel for a choice with two
+              answers. Group and Order keep theirs — they have four and three
+              options, and a switch cannot say "Priority".
 
-          <Axis label="Density">
-            <Choice label="Compact" active={density === "compact"} onClick={() => onDensityChange("compact")} />
-            <Choice label="Comfortable" active={density === "comfortable"} onClick={() => onDensityChange("comfortable")} />
-          </Axis>
+              The label is the ON side in both cases, so the control reads as a
+              sentence: "Show deleted" off means you are looking at live issues. */}
+          <Toggle
+            label="Show deleted"
+            hint="The recovery list, not a filter"
+            value={display.deleted}
+            onChange={(on) => onChange({ ...display, deleted: on })}
+          />
+
+          <Toggle
+            label="Comfortable density"
+            hint="Looser rows and a larger type ladder"
+            value={density === "comfortable"}
+            onChange={(on) => onDensityChange(on ? "comfortable" : "compact")}
+          />
         </div>
       }
     >
@@ -150,6 +155,44 @@ export function DisplayOptions({
         icon={<SlidersHorizontal className="size-icon-sm" />}
       />
     </Popover>
+  );
+}
+
+/**
+ * One fact, and whether it holds.
+ *
+ * `description` carries what the pill pair used to carry by having two names:
+ * with "Active | Deleted" on screen you could infer that deleted was a mode
+ * rather than a filter, and a bare "Show deleted" cannot say that alone.
+ *
+ * Astryx's own `labelPosition`/`labelSpacing`/`description` rather than a
+ * hand-built row around a bare switch — the first cut wrapped it in a flex box
+ * with its own `<span>` label AND passed `label` for the accessible name, which
+ * rendered the words twice. The component already lays this out; it just had to
+ * be asked.
+ */
+function Toggle({
+  label,
+  hint,
+  value,
+  onChange,
+}: {
+  label: string;
+  hint: string;
+  value: boolean;
+  onChange: (on: boolean) => void;
+}) {
+  return (
+    <Switch
+      label={label}
+      description={hint}
+      labelPosition="start"
+      labelSpacing="spread"
+      width="100%"
+      value={value}
+      onChange={onChange}
+      size="sm"
+    />
   );
 }
 
