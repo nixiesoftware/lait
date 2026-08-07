@@ -116,6 +116,7 @@ pub const MCP_TOOL_NAMES: &[&str] = &[
     "issues_unlink",
     "issues_parent",
     "issues_graph",
+    "issues_project_graph",
     "issues_view",
     "issues_list",
     "issues_board",

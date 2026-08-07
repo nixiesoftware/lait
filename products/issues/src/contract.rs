@@ -1193,6 +1193,14 @@ pub enum IssueQuery {
         doc: String,
         me: Option<String>,
     },
+    /// A whole project's structure at once — every direct edge and parent link
+    /// between its live issues. `Graph` answers this one issue at a time, which
+    /// a detail rail wants and a chart cannot use: laying a project out by
+    /// dependency depth needs the edges together, and per-issue is N round
+    /// trips for a graph the catalog holds whole.
+    ProjectGraph {
+        project: String,
+    },
     History {
         doc: String,
     },

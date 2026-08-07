@@ -606,6 +606,7 @@ impl<'a> IssueRouter<'a> {
                 | Request::IssueDone { .. }
                 | Request::IssueStop { .. }
                 | Request::IssueGraph { .. }
+                | Request::ProjectGraph { .. }
                 | Request::IssueView { .. }
                 | Request::List { .. }
                 | Request::Board { .. }
@@ -1085,6 +1086,15 @@ impl<'a> IssueRouter<'a> {
                     })
                     .map_err(Self::effect_err)?;
                 Ok((Response::Graph(Box::new(view)), false))
+            }
+            Request::ProjectGraph { project } => {
+                let id = snapshot.resolve_project(&project).ok_or_else(|| {
+                    Response::not_found(format!("no project matches {project:?}"))
+                })?;
+                let view: issues::dto::ProjectGraphView = self
+                    .query(&IssueQuery::ProjectGraph { project: id })
+                    .map_err(Self::effect_err)?;
+                Ok((Response::ProjectGraph(Box::new(view)), false))
             }
             Request::History { reff } => {
                 let doc = self.resolve(&snapshot, &reff)?;

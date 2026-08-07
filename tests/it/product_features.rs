@@ -1088,3 +1088,120 @@ fn a_follower_hears_about_an_issue_they_are_not_assigned() {
     let _ = std::fs::remove_dir_all(&founder_home);
     let _ = std::fs::remove_dir_all(&member_home);
 }
+
+/// `ProjectGraph` answers a whole project's structure in one call.
+///
+/// `IssueGraph` already returns one issue's neighbourhood, which is what a
+/// detail rail wants and what a chart cannot use: laying a project out by
+/// dependency depth needs every edge at once, and asking per issue is N round
+/// trips for a graph the catalog holds whole. This pins the scoping rules that
+/// make the one-call answer safe to draw — both ends live, both ends in this
+/// project — because a connector to a row the client cannot see is a line to
+/// nowhere.
+#[test]
+fn project_graph_answers_one_project_whole() {
+    let net = MemNet::new();
+    let home = temp_home("graph");
+    lait::orbital::form_space(&home, &FOUNDER_SEED, "Graph Space").unwrap();
+    let handle = spawn_daemon(home.clone(), FOUNDER_SEED, net.clone());
+    let client = tokio::runtime::Runtime::new().unwrap();
+    wait_online(&client, &home);
+
+    for (name, key) in [("Engine", "eng"), ("Design", "dsn")] {
+        ok(
+            &client,
+            &home,
+            issues_app::IssuesRequest::ProjectNew {
+                name: name.into(),
+                key: key.into(),
+                color: None,
+            },
+        );
+    }
+
+    let a = new_issue(&client, &home, "eng", "first");
+    let b = new_issue(&client, &home, "eng", "second");
+    let c = new_issue(&client, &home, "eng", "third");
+    let gone = new_issue(&client, &home, "eng", "deleted later");
+    let foreign = new_issue(&client, &home, "dsn", "another project");
+
+    let link = |from: &str, kind: &str, to: &str| {
+        ok(
+            &client,
+            &home,
+            issues_app::IssuesRequest::IssueLink {
+                reff: from.into(),
+                kind: kind.into(),
+                target: to.into(),
+            },
+        );
+    };
+    link(&a, "blocks", &b);
+    link(&b, "blocks", &c);
+    // Kept: a non-`blocks` edge still belongs to the project's structure, and
+    // deciding it says nothing about order is the client's call, not the wire's.
+    link(&a, "relates", &c);
+    // Dropped by scoping, each for its own reason.
+    link(&a, "blocks", &gone);
+    link(&a, "blocks", &foreign);
+    ok(
+        &client,
+        &home,
+        issues_app::IssuesRequest::IssueDelete { reff: gone.clone() },
+    );
+
+    let IssueResponse::ProjectGraph(view) = ok(
+        &client,
+        &home,
+        issues_app::IssuesRequest::ProjectGraph {
+            project: "eng".into(),
+        },
+    ) else {
+        panic!("expected ProjectGraph");
+    };
+
+    let kinds: Vec<&str> = view.edges.iter().map(|e| e.kind.as_str()).collect();
+    assert_eq!(
+        kinds.iter().filter(|k| **k == "blocks").count(),
+        2,
+        "a tombstoned end and a cross-project end are both dropped: {:?}",
+        view.edges
+    );
+    assert_eq!(kinds.iter().filter(|k| **k == "relates").count(), 1);
+    assert_eq!(view.edges.len(), 3);
+
+    // A second call must serialize identically — the catalog's edge set is a
+    // BTreeSet, so the projection is ordered without a sort of its own, and a
+    // client that re-renders on every poll would otherwise never settle.
+    let IssueResponse::ProjectGraph(again) = ok(
+        &client,
+        &home,
+        issues_app::IssuesRequest::ProjectGraph {
+            project: "eng".into(),
+        },
+    ) else {
+        panic!("expected ProjectGraph");
+    };
+    assert_eq!(view.edges, again.edges, "the edge order is not stable");
+
+    // The other project sees only its own structure — which here is none.
+    let IssueResponse::ProjectGraph(design) = ok(
+        &client,
+        &home,
+        issues_app::IssuesRequest::ProjectGraph {
+            project: "dsn".into(),
+        },
+    ) else {
+        panic!("expected ProjectGraph");
+    };
+    assert!(
+        design.edges.is_empty(),
+        "an edge reaching into dsn is not dsn's: {:?}",
+        design.edges
+    );
+    let _ = foreign;
+
+    let _ = req(&client, &home, Request::Stop);
+    let _ = handle.join();
+    let _ = std::fs::remove_dir_all(&home);
+}

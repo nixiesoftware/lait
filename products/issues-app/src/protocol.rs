@@ -193,6 +193,10 @@ pub enum IssuesRequest {
     IssueGraph {
         reff: String,
     },
+    /// A whole project's dependency graph in one reply — see `ProjectGraphView`.
+    ProjectGraph {
+        project: String,
+    },
     IssueStart {
         reff: String,
     },
@@ -562,6 +566,7 @@ pub enum IssuesResponse {
     },
     Board(Box<issues::dto::BoardView>),
     Graph(Box<issues::dto::GraphView>),
+    ProjectGraph(Box<issues::dto::ProjectGraphView>),
     Activity {
         events: Vec<issues::dto::ActivityEvent>,
         last: u64,
@@ -739,6 +744,7 @@ impl IssuesRequest {
             Inbox { .. }
             | AccessPlan { .. }
             | IssueGraph { .. }
+            | ProjectGraph { .. }
             | IssueView { .. }
             | List { .. }
             | Board { .. }

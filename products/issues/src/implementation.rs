@@ -4395,6 +4395,50 @@ impl World for IssuesWorld {
                     .collect();
                 Ok(projection(serde_json::to_vec(&rows).expect("milestones")))
             }
+            IssueQuery::ProjectGraph { project } => {
+                if !catalog.projects.contains_key(&project) {
+                    return Err(Rejection::InvalidRequest);
+                }
+                // "Live issue of this project" is the whole filter, applied to
+                // both ends of every edge. An edge to a tombstoned issue, or one
+                // reaching into another project, cannot be drawn on this
+                // project's chart — and shipping it would only make the client
+                // re-derive a fact the catalog already holds.
+                let mine = |doc: &String| -> bool {
+                    !catalog.tombstones.contains(doc)
+                        && snap.issues.get(doc).is_some_and(|i| i.project == project)
+                };
+                let edges: Vec<crate::dto::GraphEdgeDto> = catalog
+                    .edges
+                    .iter()
+                    .filter(|(from, _, to)| mine(from) && mine(to))
+                    .map(|(from, kind, to)| crate::dto::GraphEdgeDto {
+                        from: from.clone(),
+                        kind: kind.clone(),
+                        to: to.clone(),
+                    })
+                    .collect();
+                let parents: Vec<(String, String)> = catalog
+                    .parents
+                    .iter()
+                    .filter(|(child, parent)| mine(child) && mine(parent))
+                    .map(|(child, parent)| (child.clone(), parent.clone()))
+                    .collect();
+                // `catalog.edges` is a BTreeSet and `parents` a BTreeMap, so both
+                // arrive sorted and this projection is deterministic without a
+                // sort of its own — which matters, because an identical graph
+                // must serialize identically or every client re-renders on a
+                // poll that changed nothing.
+                let view = crate::dto::ProjectGraphView {
+                    schema_version: VIEW_SCHEMA_VERSION,
+                    project: project.clone(),
+                    edges,
+                    parents,
+                };
+                Ok(projection(
+                    serde_json::to_vec(&view).expect("project graph"),
+                ))
+            }
             IssueQuery::Cycles { project } => {
                 if !catalog.projects.contains_key(&project) {
                     return Err(Rejection::InvalidRequest);

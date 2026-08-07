@@ -268,6 +268,13 @@ struct SpecArgs {
     spec: String,
 }
 
+/// Unlike [`ProjectArgs`], the project is required: a dependency graph is a
+/// property of one project, and there is no sensible whole-space default.
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ProjectGraphArgs {
+    project: String,
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 struct SpecNewArgs {
     project: String,
@@ -399,6 +406,11 @@ pub fn tools() -> Vec<McpTool> {
         tool::<LinkArgs>("unlink", "Remove an issue link.", issue_unlink),
         tool::<ParentArgs>("parent", "Set or clear an issue parent.", issue_parent),
         tool::<RefArgs>("graph", "Read an issue graph neighborhood.", issue_graph),
+        tool::<ProjectGraphArgs>(
+            "project_graph",
+            "Read a project's whole dependency graph — every blocks/relates edge and parent link between its live issues, in one call. Use this to work out what is unblocked and in what order work has to happen; `graph` answers the same question for a single issue.",
+            project_graph,
+        ),
         tool::<RefArgs>("view", "Read a full issue.", issue_view),
         tool::<ListArgs>("list", "List issue rows.", list),
         tool::<BoardArgs>("board", "Render a project board.", board),
@@ -694,6 +706,11 @@ fn issue_parent(input: Value) -> Result<ClientInvocation, Failure> {
 fn issue_graph(input: Value) -> Result<ClientInvocation, Failure> {
     let a: RefArgs = args(input)?;
     world(IssuesRequest::IssueGraph { reff: a.reff })
+}
+
+fn project_graph(input: Value) -> Result<ClientInvocation, Failure> {
+    let a: ProjectGraphArgs = args(input)?;
+    world(IssuesRequest::ProjectGraph { project: a.project })
 }
 
 fn issue_view(input: Value) -> Result<ClientInvocation, Failure> {
@@ -1177,7 +1194,7 @@ mod tests {
     #[test]
     fn tools_are_package_local_and_emit_world_calls() {
         let tools = tools();
-        assert_eq!(tools.len(), 58);
+        assert_eq!(tools.len(), 59);
         assert!(tools.iter().all(|tool| !tool.name().starts_with("issues_")));
         let invocation = tools
             .iter()

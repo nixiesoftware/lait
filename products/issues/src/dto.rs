@@ -738,6 +738,45 @@ pub struct GraphView {
     pub blocked_by: Vec<Row>,
 }
 
+/// One structural edge between two issues of a project.
+///
+/// Doc ids, not refs. A ref is an alias and a rename moves it; the client joins
+/// these against rows it already holds, which carry `doc_id` for exactly this.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GraphEdgeDto {
+    pub from: String,
+    /// `blocks` | `relates` | `duplicates`.
+    pub kind: String,
+    pub to: String,
+}
+
+/// A project's whole structure in one reply (reply to `ProjectGraph`).
+///
+/// `IssueGraph` answers the same question one issue at a time, which is the
+/// right shape for a detail rail and the wrong one for a chart: drawing a
+/// project's *sequence* needs every edge at once, and asking per issue is N
+/// round trips for a graph the catalog already holds whole.
+///
+/// Scoped to one project and to live issues, because an edge with a
+/// tombstoned or foreign end cannot be drawn and shipping it would only make
+/// the client filter what the catalog already knows.
+///
+/// No transitive closure here, deliberately — unlike `GraphView::blocked_by`,
+/// which computes one because a single issue wants to know everything standing
+/// in its way. Given the direct edges the client can derive reachability itself,
+/// and a transitive edge set drawn as connectors is unreadable: it draws the
+/// shortcut across a chain as though it were a separate constraint.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectGraphView {
+    pub schema_version: u32,
+    /// The project's id, echoed so a late reply can be matched to its request.
+    pub project: String,
+    /// Direct edges whose ends are both live issues of this project.
+    pub edges: Vec<GraphEdgeDto>,
+    /// `(child, parent)` for the sub-issue tree, same scoping as `edges`.
+    pub parents: Vec<(String, String)>,
+}
+
 /// A disambiguation candidate when a reference resolves to multiple issues.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Candidate {
