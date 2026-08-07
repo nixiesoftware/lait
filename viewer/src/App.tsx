@@ -199,6 +199,11 @@ export function App() {
   /** The open Spec on the Specs register. A document, not a row: there is no
    *  cursor-versus-open distinction to make, so one piece of state says both. */
   const [openSpec, setOpenSpec] = useState<string | null>(initialRoute.spec ?? null);
+  /** The open Settings sub-page. Held here rather than inside `Settings`
+   *  because this component is the sole author of the address, and anything it
+   *  does not carry is erased on the next render — which is exactly what was
+   *  happening to the `?tab=` that Settings wrote for itself. */
+  const [settingsTab, setSettingsTab] = useState<string | null>(initialRoute.tab ?? null);
   /** The Spec composer: a kind to seed it with, `"any"` to let it ask. */
   const [composingSpec, setComposingSpec] = useState<SpecKind | "any" | null>(null);
   /** The open Baseline. Its own state rather than a second meaning for
@@ -218,8 +223,17 @@ export function App() {
   const [detail, setDetail] = useState(true);
   const [view, setView] = useState<View>(initialRoute.view);
   const [unread, setUnread] = useState(0);
-  /** The composer, and the column it was opened from (null = closed). */
-  const [composing, setComposing] = useState<{ status?: string } | null>(null);
+  /**
+   * The composer, and the column it was opened from (null = closed).
+   *
+   * `page` is the expanded form — the draft as the work area rather than a
+   * sheet over it. It is the one part of this state that is addressable, so it
+   * round-trips through the route; `status` is not, because "the column you
+   * clicked `+` on" is a gesture, not a place.
+   */
+  const [composing, setComposing] = useState<{ status?: string; page?: boolean } | null>(
+    initialRoute.composing ? { page: true } : null,
+  );
   const [composingProject, setComposingProject] = useState(false);
   const [filter, setFilter] = useState<FilterState>(initialRoute.filter ?? EMPTY_FILTER);
   const [filterOpen, setFilterOpen] = useState(false);
@@ -383,9 +397,14 @@ export function App() {
     setView(route.view);
     setSelection(route.issue);
     setOpenSpec(route.spec ?? null);
+    setSettingsTab(route.tab ?? null);
     setOpenBaseline(route.baseline ?? null);
     setFilter(route.filter ?? EMPTY_FILTER);
     setDetail(route.issue !== null);
+    // Back out of an expanded draft, or into one. Only the page form is
+    // addressable, so a history hop can never open or close the *sheet* —
+    // which is right: a modal is not somewhere you were.
+    setComposing(route.composing ? { page: true } : null);
   }, []);
 
   useEffect(() => {
@@ -408,7 +427,9 @@ export function App() {
       view,
       issue: detail ? selection : null,
       ...(openSpec ? { spec: openSpec } : {}),
+      ...(settingsTab ? { tab: settingsTab } : {}),
       ...(openBaseline ? { baseline: openBaseline } : {}),
+      ...(composing?.page ? { composing: true } : {}),
       filter,
     };
     const href = formatRoute(route);
@@ -416,7 +437,7 @@ export function App() {
       window.history.replaceState(null, "", href);
     }
     saveLastRoute(route);
-  }, [routeSpace, project, view, selection, detail, openSpec, openBaseline, filter]);
+  }, [routeSpace, project, view, selection, detail, openSpec, openBaseline, filter, composing?.page, settingsTab]);
 
   // Settings is a page state, not a panel: its own left rail owns the hierarchy,
   // so the workspace sidebar steps aside while it's open and returns as you left
@@ -1369,6 +1390,11 @@ export function App() {
     current &&
     routeSpace &&
     board &&
+    // An expanded draft IS the work area, so it displaces the open issue rather
+    // than stacking with it. `formatRoute` makes the same call — it drops
+    // `?issue=` while composing — and the two have to agree or a reload lands
+    // somewhere the app was not.
+    !composing?.page &&
     (view === "list" || view === "board" || view === "calendar"),
   );
   // Keep one panel topology for every view. The old two-id declaration mounted a
@@ -1395,10 +1421,10 @@ export function App() {
    * card opened the pane, a list row opened full width. One reading surface, so
    * there is nothing left to pick.
    */
-  // `founding` wins for the same reason it does over `projectShell`: the branch
-  // that draws an open issue full width also hides the column the formation
-  // surface lives in, so asking for it from an open issue would blank the app.
-  const fullWidthDetail = detailVisible && founding === null;
+  // No `founding` guard any more: the formation surface returns above this,
+  // instead of sharing the work area with it. Both this and `projectShell` used
+  // to have to know about a form that was rendered inside them; neither does.
+  const fullWidthDetail = detailVisible;
 
   // The third panel survives so the layout keeps one topology for every view —
   // declaring it conditionally made the library rebalance the sidebar whenever it
@@ -1460,6 +1486,36 @@ export function App() {
     setSelection(reff);
     setDetail(true);
   };
+  /**
+   * The composer's two sizes, and what Back means between them.
+   *
+   * Expanding **pushes**: the draft page is an address, so arriving at it is a
+   * navigation and Back undoes it. Because `applyRoute` reads `composing` off
+   * the route, Back lands on the pre-expand entry with the composer closed —
+   * "go back to what I was looking at", which is what Back is for.
+   *
+   * Collapsing **replaces**: it is a change of frame, not a second destination.
+   * Pushing it would put two entries for one draft in the history and make Back
+   * re-expand something you just shrank.
+   */
+  const composerHref = (composingPage: boolean) =>
+    formatRoute({
+      spaceId: routeSpace,
+      project: board?.project.key ?? project,
+      view: "list",
+      issue: null,
+      ...(composingPage ? { composing: true } : {}),
+      filter,
+    });
+  const expandComposer = () => {
+    window.history.pushState(null, "", composerHref(true));
+    setComposing((c) => ({ ...c, page: true }));
+  };
+  /** Leave the page — to the sheet (`collapse`) or to the board. */
+  const leaveComposerPage = (collapse: boolean) => {
+    window.history.replaceState(null, "", composerHref(false));
+    setComposing(collapse ? {} : null);
+  };
   const applySavedView = (saved: SavedView) => {
     const nextView = saved.view ?? "list";
     window.history.pushState(null, "", formatRoute({ spaceId: routeSpace, project, view: nextView, issue: null, filter: saved.filter }));
@@ -1476,11 +1532,7 @@ export function App() {
 
   const activeProject =
     board?.project ?? projects.find((candidate) => candidate.key === project) ?? null;
-  // The formation surface is not a project face. Without `founding` here, asking
-  // for it from an open board would draw the project toolbar and the milestone
-  // rail around a form for a space that does not exist yet.
-  const projectShell =
-    founding === null && isProjectView(view) && Boolean(project || activeProject);
+  const projectShell = isProjectView(view) && Boolean(project || activeProject);
   // The open project's milestones, for the filter menu's Milestone facet. The
   // same resource the overview and the issue rail read — one fetch for all three.
   const milestones = useProjectMilestones(current ?? "", activeProject?.id).data ?? [];
@@ -1700,6 +1752,37 @@ export function App() {
         />
       )
     ) : null;
+
+  /**
+   * There is no space, or you asked to add one — so there is nothing to frame.
+   *
+   * Rendered *instead of* the shell rather than inside it. The formation
+   * surface used to sit in the work area with the sidebar still offering
+   * Inbox, My issues, Projects, Roadmap and a "PROJECTS 0" tree: a full
+   * navigation model for a workspace that does not exist yet, wrapped around
+   * the one surface whose whole message is that it does not exist yet.
+   *
+   * `founding` is an explicit ask and wins over a selected space, which is why
+   * the two conditions are separate: gating the second on `!current` too is
+   * what once made this unreachable the moment anything was open.
+   */
+  const forming = founding !== null || (!current && !routeSpace && spaces.length === 0);
+  if (forming) {
+    return (
+      <Theme theme={laitTheme} mode={theme}>
+        <Welcome
+          initialMode={founding ?? "found"}
+          // Only when there is somewhere to go back to. On a machine with no
+          // store there is not, and a way out that strands you is worse than none.
+          onCancel={spaces.length > 0 ? () => setFounding(null) : undefined}
+          onArrived={(space) => {
+            setFounding(null);
+            void loadSpacesRaw(space);
+          }}
+        />
+      </Theme>
+    );
+  }
 
   return (
     <Theme theme={laitTheme} mode={theme}>
@@ -1995,15 +2078,24 @@ export function App() {
               caller of `setFounding` was the empty state that a selected space
               replaces. Someone invited to a *second* space then had nowhere to
               paste the link. */}
-          {founding !== null || (!current && !routeSpace && spaces.length === 0) ? (
-            <Welcome
-              initialMode={founding ?? "found"}
-              // Only when there is somewhere to go back to.
-              onCancel={spaces.length > 0 ? () => setFounding(null) : undefined}
-              onArrived={(space) => {
-                setFounding(null);
-                void loadSpacesRaw(space);
-              }}
+          {composing?.page && current && routeSpace && board ? (
+            /* The draft, as the work area. Ahead of the view chain because it
+               stands in for whichever view is underneath, and after the
+               space-availability states because a draft you cannot file is not
+               a page worth drawing. */
+            <NewIssue
+              spaceId={current}
+              canonicalSpaceId={routeSpace}
+              projectKey={board.project.key}
+              projects={liveProjects}
+              states={states}
+              labels={labels}
+              members={members}
+              presentation="page"
+              onClose={() => leaveComposerPage(false)}
+              onCollapse={() => leaveComposerPage(true)}
+              onError={setError}
+              onCreated={setToast}
             />
           ) : !current ? (
             <EmptyState
@@ -2064,6 +2156,8 @@ export function App() {
               projects={projects}
               readOnly={readOnly}
               revision={revision}
+              tab={settingsTab}
+              onTabChange={setSettingsTab}
               onError={setError}
               onExit={() => api.goto("list")}
             />
@@ -2109,6 +2203,7 @@ export function App() {
             <Activity
               spaceId={current}
               members={members}
+              states={states}
               revision={revision}
               projectDocIds={projectDocIds}
               projectName={board.project.name}
@@ -2244,7 +2339,11 @@ export function App() {
             when there is room, not whether there is any. Keeping them separate
             is what lets the console come straight back at its old width instead
             of the window silently rewriting the setting on the way down. */}
-        {projectShell && consoleFits && railOpen && activeProject && current && (
+        {/* Not beside an expanded draft. The rail describes the *project* —
+            lead, milestones, progress — and none of it is a property of the
+            issue you are writing, so next to a composer it is a second column
+            of properties competing with the row that actually files. */}
+        {projectShell && consoleFits && railOpen && activeProject && current && !composing?.page && (
           <aside className="border-line w-rail shrink-0 overflow-y-auto border-l p-3">
             <ProjectRail
               spaceId={current}
@@ -2277,7 +2376,9 @@ export function App() {
         className="ui-detail overflow-hidden"
       />
 
-      {composing && current && routeSpace && board && (
+      {/* The sheet only. The expanded form is not an overlay — it is the work
+          area, and it is rendered up there in the content chain. */}
+      {composing && !composing.page && current && routeSpace && board && (
         <NewIssue
           spaceId={current}
           canonicalSpaceId={routeSpace}
@@ -2288,6 +2389,7 @@ export function App() {
           members={members}
           defaultStatus={composing.status}
           onClose={() => setComposing(null)}
+          onExpand={expandComposer}
           onError={setError}
           onCreated={setToast}
         />
@@ -2315,8 +2417,9 @@ export function App() {
         maxHeight="100vh"
         position={{ start: 0, top: 0, bottom: 0 }}
         className="ui-drawer bg-sunken pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
+        aria-labelledby="mobile-nav-heading"
       >
-            <h2 className="sr-only">Workspace navigation</h2>
+            <h2 id="mobile-nav-heading" className="sr-only">Workspace navigation</h2>
             <Sidebar
               spaces={spaces}
               current={current}

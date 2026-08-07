@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { FolderPlus, Link2, Loader2 } from "lucide-react";
+import { ArrowLeft, FolderPlus, Link2, Loader2 } from "lucide-react";
 
 import { hostRpc } from "../api";
 import type { HostReply } from "../types";
@@ -110,13 +110,53 @@ export function Welcome({
   const ready = target.trim() !== "" && (mode === "found" ? name.trim() !== "" : link.trim() !== "");
 
   return (
-    <div className="min-h-0 flex-1 overflow-y-auto">
-      <div className="mx-auto flex max-w-lg flex-col gap-5 p-8">
-        <header>
-          <h1 className="text-lg font-semibold">
+    /**
+     * The whole window, not a panel inside it.
+     *
+     * This used to render in the work area with the shell still around it — a
+     * sidebar offering Inbox, My issues, Projects and Roadmap, and a tree
+     * headed "PROJECTS 0 · No projects yet". Every one of those is a
+     * destination that cannot exist yet: the surface whose entire job is "there
+     * is no space here" was framed by a navigation tree for a space. It read as
+     * a page you had arrived at rather than the one thing there was to do.
+     *
+     * So it takes the viewport. There is no chrome because there is nothing yet
+     * to navigate, and the two things that are not this form — the way back,
+     * and which build you are running — sit in the corners where they cannot be
+     * mistaken for part of it.
+     */
+    <div className="bg-bg fixed inset-0 z-50 flex flex-col overflow-y-auto">
+      {/* Corner affordances, on their own row so the form below stays optically
+          centred rather than being pushed down by them. */}
+      <div className="flex shrink-0 items-start justify-between p-4">
+        {onCancel ? (
+          <Button
+            isDisabled={busy}
+            onClick={onCancel}
+            label="Back"
+            icon={<ArrowLeft className="size-icon-sm" />}
+            variant="ghost"
+            size="sm"
+          />
+        ) : (
+          <span />
+        )}
+        {context && (
+          <span className="text-mute text-xs">
+            lait {context.version}
+          </span>
+        )}
+      </div>
+
+      <div className="flex min-h-0 flex-1 items-center justify-center px-6 pb-16">
+      <div className="flex w-full max-w-[26rem] flex-col gap-5">
+        {/* Centred, because there is nothing to the left of it to align to. The
+            fields below stay left-aligned: a label is read down a column. */}
+        <header className="text-center">
+          <h1 className="text-xl font-semibold">
             {mode === "found" ? "Start a space" : "Enter a space"}
           </h1>
-          <p className="text-dim mt-1 text-sm">
+          <p className="text-dim mt-1.5 text-sm">
             A space is an encrypted store on this machine. Found one, or enter one you were invited
             to — nothing is created until you say so.
           </p>
@@ -142,74 +182,98 @@ export function Welcome({
           ))}
         </div>
 
-        {mode === "found" ? (
-          <TextInput
-            label="Name"
-            hasAutoFocus
-            value={name}
-            placeholder="Engineering"
-            onChange={setName}
-          />
-        ) : (
-          <TextInput
-            label="Invite link"
-            hasAutoFocus
-            value={link}
-            placeholder="lait://…"
-            onChange={setLink}
-          />
-        )}
+        {/* The fields are a card and the commit is not.
+            One is the thing you fill in, the other is the thing you do with it,
+            and drawing the boundary between them is what stops a form of four
+            stacked controls reading as five. `width="100%"` on each: Astryx's
+            inputs size to their content, so without it they collapse to a
+            ~150px stub inside a 416px column. */}
+        <div className="border-line bg-raised flex flex-col gap-4 rounded-surface border p-4">
+          {mode === "found" ? (
+            <TextInput
+              label="Name"
+              hasAutoFocus
+              value={name}
+              placeholder="Engineering"
+              onChange={setName}
+              width="100%"
+            />
+          ) : (
+            <TextInput
+              label="Invite link"
+              hasAutoFocus
+              value={link}
+              placeholder="lait://…"
+              onChange={setLink}
+              width="100%"
+            />
+          )}
 
-        {/* The helper line is `description`, not a second span: Astryx's field
-            owns label, description and status, so it places and associates them
-            for the screen reader instead of us stacking three siblings. */}
-        <TextInput
-          label="Store directory"
-          description="On the machine running lait. It holds the encrypted replica."
-          value={target}
-          placeholder={context ? context.spaces_root : "Loading…"}
-          onChange={(value) => {
-            setPinnedHome(true);
-            setHome(value);
-          }}
-        />
+          {/* The helper line is `description`, not a second span: Astryx's field
+              owns label, description and status, so it places and associates them
+              for the screen reader instead of us stacking three siblings. */}
+          <TextInput
+            label="Store directory"
+            description="On the machine running lait. It holds the encrypted replica."
+            value={target}
+            placeholder={context ? context.spaces_root : "Loading…"}
+            onChange={(value) => {
+              setPinnedHome(true);
+              setHome(value);
+            }}
+            width="100%"
+          />
 
-        <TextInput
-          label="Your name in this space"
-          value={nick}
-          placeholder="ada (optional)"
-          onChange={setNick}
-          isOptional
-        />
+          <TextInput
+            label="Your name in this space"
+            value={nick}
+            placeholder="ada (optional)"
+            onChange={setNick}
+            isOptional
+            width="100%"
+          />
+        </div>
 
         {error && <InlineError message={error} onDismiss={() => setError("")} />}
 
-        <div className="flex items-center gap-3">
-          <Button
-            isDisabled={!ready || busy}
-            isLoading={busy}
-            onClick={() => void submit()}
-            label={mode === "found" ? "Found it" : "Enter"}
-            variant="primary"
-            size="sm"
-          />
-          {onCancel && (
-            <Button isDisabled={busy} onClick={onCancel} label="Cancel" variant="ghost" size="sm" />
-          )}
-          {waiting && busy && (
-            <span className="text-dim flex items-center gap-1.5 text-sm">
-              <Loader2 className="size-icon-xs animate-spin" />
-              {waiting}
-            </span>
-          )}
-        </div>
+        {/* Full width, under the card. There is exactly one thing to do here,
+            so it does not need to be found — and a commit that spans the form
+            it commits says so without a word. Cancel is not beside it: it went
+            to the corner, because an escape hatch sitting next to the action is
+            a thing to mis-click, not a thing to reach for. */}
+        <Button
+          isDisabled={!ready || busy}
+          isLoading={busy}
+          onClick={() => void submit()}
+          label={mode === "found" ? "Found it" : "Enter"}
+          variant="primary"
+          size="md"
+          className="w-full"
+        />
 
-        {context && (
-          <p className="text-mute text-xs">
-            lait {context.version} · identity at {context.identity_home}
-          </p>
+        {waiting && busy && (
+          <span className="text-dim flex items-center justify-center gap-1.5 text-sm">
+            <Loader2 className="size-icon-xs animate-spin" />
+            {waiting}
+          </span>
         )}
+
       </div>
+      </div>
+
+      {/* Where the identity actually lives — a fact about this machine, not a
+          field of this form, so it sits in the opposite corner from the build
+          it belongs with. Truncated with the whole path on the title, because a
+          store root can be long enough to wrap twice and it is diagnostic
+          information, not something anyone reads across. */}
+      {context && (
+        <p
+          className="text-mute shrink-0 truncate p-4 text-xs"
+          title={context.identity_home}
+        >
+          identity at {context.identity_home}
+        </p>
+      )}
     </div>
   );
 }
