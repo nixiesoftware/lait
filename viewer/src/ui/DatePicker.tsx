@@ -1,8 +1,12 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Calendar, ChevronLeft, ChevronRight, X } from "lucide-react";
 
 import { IconButton, Popover } from "@astryxdesign/core";
 import { cn, controlTrigger, navigationItem, type ControlSize, type ControlTone } from "./primitives";
+
+/** The month grid's measure. Stated once, because the Popover needs the number
+ *  to position with and the flip test needs the same number to reason about. */
+const PANEL_WIDTH = 256;
 
 /**
  * A date picker that belongs to the design system — the one control that used to
@@ -92,6 +96,20 @@ export function DatePicker({
   face?: React.ReactNode;
 }) {
   const [open, setOpen] = useState(false);
+  /**
+   * Which edge the calendar hangs from. Astryx's Popover does not flip, so a
+   * Due date chip in the issue rail put a 256px grid against the window's right
+   * edge and had it squeezed. Measured on open, for the same reasons set out in
+   * `Picker.tsx` — the trigger moves, and a keybinding can open this.
+   */
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const [flipped, setFlipped] = useState(false);
+  useEffect(() => {
+    if (!open) return;
+    const rect = triggerRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    setFlipped(rect.left + PANEL_WIDTH > window.innerWidth - 8);
+  }, [open]);
   const [view, setView] = useState<Date>(() =>
     startOfMonth(value ? parseInput(value) : todayUtc()),
   );
@@ -133,13 +151,20 @@ export function DatePicker({
         // want to start from the date that is set, not wherever you last browsed.
         if (o) setView(startOfMonth(value ? parseInput(value) : todayUtc()));
       }}
-      alignment="start"
+      // Hangs from whichever edge has room, for the same reason and by the same
+      // measurement as `Picker` — see the note there. This one sits in the issue
+      // rail as Due date, which is exactly where the window runs out.
+      alignment={flipped ? "end" : "start"}
+      // On the Popover, not on the content: Astryx caps the panel at
+      // `max-width: 100%`, so a width stated on the child is a width the
+      // positioner never sees.
+      width={PANEL_WIDTH}
       // Gated, for the same reason as Picker: Astryx keeps popover content in
       // the DOM whether or not it is showing, and a 42-cell month grid on every
       // due-date chip in a list is a lot of cells nobody asked for.
       content={
         !open ? null : (
-        <div className="w-64 p-2">
+        <div className="p-2">
         <div className="mb-1 flex flex-col gap-0.5">
           {quick.map((q) => (
             // A menu row, not a Button: full-width, flat, left-aligned. Astryx's
@@ -236,6 +261,7 @@ export function DatePicker({
       {/* Astryx requires the trigger children to contain a real button; Radix's
           Popover.Trigger used to render one for us. */}
       <button
+        ref={triggerRef}
         type="button"
         aria-label={ariaLabel}
         className={cn(controlTrigger({ tone, size, open }), !value && "text-mute", className)}

@@ -184,8 +184,10 @@ export function Inbox({
         )}
         <Popover
           alignment="end"
+          // Stated here, not on the content — see the note in `Picker.tsx`.
+          width={256}
           content={
-            <div className="w-64 p-3">
+            <div className="p-3">
               <h2 className="mb-1 text-sm font-medium">Inbox preferences</h2>
               <p className="text-mute mb-3 text-xs">Local controls for what is shown on this device. The daemon still delivers the complete feed.</p>
               {(["assigned", "comment", "status"] as InboxKind[]).map((kind) => (

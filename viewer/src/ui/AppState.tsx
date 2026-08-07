@@ -286,8 +286,12 @@ export function TrustPopover({
   return (
     <Popover
       alignment="end"
+      // The width belongs to the Popover, not to the content: Astryx sizes the
+      // panel before this renders and caps it at `max-width: 100%`, so a width
+      // stated on the child overflows the shell instead of setting it.
+      width={320}
       content={
-        <div className="w-80 p-3">
+        <div className="p-3">
           <div className="mb-3 flex items-center gap-2">
             <ShieldCheck className="text-accent size-icon-md" />
             <div>

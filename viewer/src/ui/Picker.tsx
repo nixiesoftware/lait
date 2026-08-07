@@ -1,5 +1,5 @@
 import { Popover } from "@astryxdesign/core";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Command } from "cmdk";
 import { Check, Plus } from "lucide-react";
 
@@ -165,6 +165,39 @@ export function Combobox(props: Props) {
     if (!o) setQuery("");
   };
 
+  /**
+   * Which edge the menu hangs from, decided by where the trigger actually is.
+   *
+   * Astryx's Popover does not flip. Given `alignment="start"` it will place the
+   * panel from the trigger's inline start whatever is in the way, and its
+   * `max-width: 100%` then squeezes the panel into whatever room is left — so
+   * against the window's right edge you get a narrowed sheet flush to the glass
+   * with no border on that side.
+   *
+   * That is the issue rail's every picker, and the last board column's, and any
+   * row chip far enough right. It is not a property of those surfaces, so it is
+   * not something their call sites should each have to remember: it is a
+   * property of *this trigger, right now*, which is what makes it the
+   * component's job.
+   *
+   * Measured on open rather than on render — a rail can be resized and a row can
+   * scroll under the pointer between one open and the next — and on `isOpen`
+   * rather than inside `setOpen`, because a keybinding can open a picker
+   * without going through it.
+   */
+  const panelWidth = wide ? 320 : 240;
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const [alignEnd, setAlignEnd] = useState(false);
+  useEffect(() => {
+    if (!isOpen) return;
+    const rect = triggerRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    // `8` is a breathing gap, not a magic number: a panel that lands exactly on
+    // the viewport edge has no room left to paint the hairline that separates it
+    // from the page, which is the visible half of this bug.
+    setAlignEnd(rect.left + panelWidth > window.innerWidth - 8);
+  }, [isOpen, panelWidth]);
+
   const single = props.multi !== true ? props.value : null;
   // In a breadcrumb the swatch sits in the trail's shared glyph slot, so a
   // project that is a picker starts its name at the same offset as a project
@@ -209,7 +242,27 @@ export function Combobox(props: Props) {
     <Popover
       isOpen={isOpen}
       onOpenChange={setOpen}
-      alignment="start"
+      alignment={alignEnd ? "end" : "start"}
+      /**
+       * The width belongs to the POPOVER, not to the content inside it.
+       *
+       * Astryx sizes the panel before our content exists and defaults it to
+       * `auto` — which, against a viewport edge, resolves to "whatever room is
+       * left" under a `max-width: 100%`. A fixed width stated on the child then
+       * has nothing to push back against: it simply overflows the shell and
+       * gets clipped.
+       *
+       * That is why the issue rail's pickers lost their right border. The
+       * trigger sits ~200px from the window edge, Astryx sized the panel to
+       * 197px, and a 240px menu was drawn inside it — no rounding, no edge, and
+       * the panel unable to flip because the number it would need to flip
+       * *around* was never given to it.
+       *
+       * Told the width up front, the positioner can do its job. Every Popover
+       * in the app had this the wrong way round; the rail is just where it
+       * showed first.
+       */
+      width={panelWidth}
       // Gated on `isOpen`, unlike every other popover in the app. Astryx renders
       // popover content into the DOM whether or not it is showing — it reveals
       // it through the native popover API rather than by mounting — and a
@@ -217,7 +270,7 @@ export function Combobox(props: Props) {
       // list of 200 rows would mount a thousand cmdk instances nobody opened.
       content={
         !isOpen ? null : (
-        <div className={cn("overflow-hidden p-0", wide ? "w-80" : "w-60")}>
+        <div className="overflow-hidden p-0">
           <Command filter={cmdkFilter} loop>
             <Command.Input
               autoFocus
@@ -309,6 +362,7 @@ export function Combobox(props: Props) {
       }
     >
       <button
+        ref={triggerRef}
         type="button"
         aria-label={label}
         className={cn(controlTrigger({ tone, size, open: isOpen }), className)}

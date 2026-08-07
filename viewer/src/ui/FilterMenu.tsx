@@ -127,8 +127,10 @@ export function FilterMenu({
       isOpen={open}
       onOpenChange={onOpenChange}
       alignment="end"
+      // Stated here, not on the content — see the note in `Picker.tsx`.
+      width={288}
       content={
-        <div className="w-72 p-0">
+        <div className="p-0">
           {facet === null ? (
             <div className="flex flex-col">
               {/* Text leads because it is the one filter with no menu to open —

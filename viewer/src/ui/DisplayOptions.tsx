@@ -50,8 +50,10 @@ export function DisplayOptions({
       isOpen={open}
       onOpenChange={onOpenChange}
       alignment="end"
+      // Stated here, not on the content — see the note in `Picker.tsx`.
+      width={256}
       content={
-        <div className="flex w-64 flex-col gap-3 p-3">
+        <div className="flex flex-col gap-3 p-3">
           {/* Layout leads, because everything under it is read in its terms:
               grouping means columns on a board and headers in a list, and on a
               calendar it means nothing at all. */}

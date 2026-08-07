@@ -26,8 +26,10 @@ export function SavedViews({ space, project, view, filter, display, onApply, onC
   return (
     <Popover
       alignment="end"
+      // Stated here, not on the content — see the note in `Picker.tsx`.
+      width={288}
       content={
-        <div className="w-72 p-2">
+        <div className="p-2">
           <div className="mb-2 px-1">
             <p className="font-semibold">Saved views</p>
             <p className="text-mute text-xs">Private to this browser and local space.</p>
@@ -62,6 +64,7 @@ export function SavedViews({ space, project, view, filter, display, onApply, onC
               onKeyDown={(event) => event.key === "Enter" && create()}
               placeholder="Name this view…"
               className="min-w-0 flex-1"
+              width="100%"
             />
             <Button
               isDisabled={!name.trim()}
