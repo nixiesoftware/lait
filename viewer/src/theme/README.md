@@ -224,8 +224,9 @@ is not defined` — gating fixed those too.
 
 **Deleted:** `PopoverContent`, `Checkbox`, `Switch` from `primitives.tsx`, and
 the `@radix-ui/react-popover`, `-checkbox`, `-switch` and `-alert-dialog`
-dependencies. Still Radix: `dialog` (the create flows), `dropdown-menu`,
-`context-menu`, `tooltip`.
+dependencies. Still Radix *at this point in the migration*: `dialog` (the create
+flows), `dropdown-menu`, `context-menu`, `tooltip` — all four went in the pass
+below, and no Radix import survives in `src/`.
 
 ## Three regressions the mapping caused, and where they were fixed
 
@@ -469,6 +470,123 @@ the top layer.
    `label`; `StatusDot` requires `label` for accessibility at the *type* level.
    This is the constrained-API property working as intended, and it means a
    migration is a rewrite of call sites, not a find-and-replace of imports.
+6. **`Popover` does not flip.** Given `alignment="start"` it places the panel
+   from the trigger's inline start whatever is in the way, and its
+   `max-width: 100%` then squeezes it into whatever room is left — so against
+   the window's right edge you get a narrowed sheet flush to the glass with no
+   border on that side. `Combobox` and `DatePicker` measure the trigger on open
+   and choose the edge themselves; every other popover in the app is
+   hand-pinned to `alignment="end"` because its trigger happens to live on the
+   right. If upstream grows collision flipping, all of that comes out.
+7. **`DialogHeader` has no theming key.** `astryx component DialogHeader`
+   documents props and, alone among the components we override, no theming
+   table at all — so the inset it needs once the sheet stops providing one has
+   to be written in `styles.css` against `.astryx-layout-header`. Same shape as
+   the popover's hairline: the rule is writable, the theme has nowhere to write
+   it.
+
+## Walking the surfaces the rewrite never looked at
+
+Everything above was written while the migration was happening. This section is
+what a second pass found by *opening* each surface in a browser — seventeen of
+them had been rewritten mechanically in one commit and never operated since.
+
+**Almost every defect was a constraint stated on the wrong box.** That is worth
+naming as a class, because each one looked like a different bug:
+
+- **Width on the content, not the popover.** `Popover` takes a `width`; all
+  seven call sites set it on the child `<div>`. Astryx sizes the panel before
+  that child exists, defaults to `auto`, and caps it at `max-width: 100%` — so
+  against a viewport edge a 240px menu was drawn inside a 197px panel and
+  clipped. Every picker in the issue rail lost its right border this way. Five
+  call sites had already been hand-worked-around with `alignment="end"`, which
+  is why it only ever showed up in the rail.
+- **Width on the wrapper, not the field.** Astryx inputs size to their content,
+  so a `max-w-sm` on a parent caps something that is already 148px, and in a
+  `flex items-center` row nothing stretches it back. Fifteen of seventeen text
+  fields in the app had no `width`; some *looked* right only because they sat in
+  a stretching flex column — correct by accident, one `items-start` from
+  collapsing.
+- **Padding on the sheet, not the region.** `.astryx-dialog` insets by 16px and
+  every dialog states its own `p-4` per region, so a `border-t` between two
+  regions stopped 16px short at both ends. A divider that does not reach the
+  walls is decoration, not structure.
+- **`justify-content` named by nobody.** `.astryx-button` centres its label,
+  which is right for a control that wraps its label and wrong for one stretched
+  across a sidebar. `flex items-center` does not undo it — neither utility names
+  the property — so the space selector's name floated into the middle of the row
+  while every row beneath it started at the same left edge.
+
+The migration's own note above — *"not everything pressable is a Button"* —
+predicted this class and caught only the instances it happened to see. The
+general form is: **Astryx components own layout properties our call sites do not
+name, and a Tailwind class that does not name the same property never argues
+with them.**
+
+### What a mechanical rewrite leaves behind
+
+Three close buttons — `NewProject`, `NewSpec`, `Governance` — had no `onClick`
+at all, and each sits inside a `<form>`, so with no `type="button"` they were
+submit buttons in waiting. Escape still worked, which is why nobody noticed.
+That is the signature of code that compiles and was never operated.
+
+The same shape at the model layer: `core/activity.ts` has always had two
+renderers, and the issue history picked `describeEventRich` while the space feed
+picked the raw `describeEvent` + `describeChanges` pair. So Activity printed
+`status: backlog → in_progress`, `duedate: — → Aug 21, 2026`, and — under a line
+that already said "you added an assignee" — the 64-hex device key of you. The
+good renderer was three imports away the whole time.
+
+### Two things that looked like defects and were not
+
+Both were caught by checking before changing, and both are worth recording so
+the next pass does not "fix" them:
+
+- **The micro-caps section heading** (`UPDATES`, `STATES`, `PROPERTIES`) is used
+  in eighteen places and is the app's vocabulary for *a label over a group of
+  rows*. Settings was the exception — it has a `Section` with a hint, which five
+  of its six tabs used and Members did not — and that is the only place the
+  heading needed changing.
+- **The bulk bar's bare trash icon** looked inconsistent beside five outlined
+  pills, until the comment above it turned out to argue the case better than the
+  objection did: it earns its red on hover rather than sitting behind a rule
+  saying "past here be dragons". Every control in that bar measures 28px with a
+  pill radius. The bar was already right.
+
+### The generator was a binary blob
+
+`tool/generate-astryx-theme.mjs` held three literal NUL bytes as ordered-comment
+markers, so git classified the file that decides every colour in the app as
+binary: `git diff` reported `Bin 28104 -> 30408 bytes`, `git log -p` showed
+nothing, and grep matched nothing without `-a` — which is how a reader concludes
+the components block is not in the generator at all. They are `\0` escapes now.
+`--check` proves the emitted theme is byte-identical, so there was never a cost
+to the escape and a real one to the byte.
+
+### What moved out of the design system's hands
+
+Two surfaces stopped being styling problems and became structural ones:
+
+- **The composer got an address.** `/projects/:key/issues/new`, as
+  `ViewerRoute.composing` rather than a new `View` — the union in `registry.ts`
+  is the set of destinations the sidebar lists, and an unsaved draft is not one.
+  It also exposed that the draft only ever persisted title and body, so closing
+  the composer silently dropped the status, priority, labels, assignees, due
+  date and project you had set.
+- **Welcome takes the viewport.** It used to render in the work area with the
+  shell around it — a sidebar offering Inbox, My issues, Projects and Roadmap
+  and a tree headed "PROJECTS 0", which is a full navigation model for a
+  workspace that does not exist yet, wrapped around the one surface whose whole
+  message is that it does not exist yet.
+
+### Still unseen
+
+`Inbox`'s populated rows are the one thing in the walk that was read and never
+looked at. `IssueQuery::Inbox` selects on *your* actor — assignee or follower —
+and then drops any event whose writing **device** is yours, so a single-device
+space cannot populate it however many actors it has. Rendering it needs a second
+device; the cheapest is a co-located agent (`AgentProvision`), and
+`tests/it/agent_experience.rs` already drives exactly that.
 
 ## Versions
 
