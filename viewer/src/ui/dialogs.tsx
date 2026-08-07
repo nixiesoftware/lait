@@ -143,7 +143,7 @@ export function DialogHost() {
             width="100%"
           />
         </div>
-        <div className="border-line flex justify-end gap-2 border-t p-3">
+        <footer className="border-line flex items-center justify-end gap-2 border-t px-4 py-3">
           <Button
             type="button"
             label="Cancel"
@@ -159,7 +159,7 @@ export function DialogHost() {
             variant="primary"
             size="md"
           />
-        </div>
+        </footer>
       </form>
     </Dialog>
   );

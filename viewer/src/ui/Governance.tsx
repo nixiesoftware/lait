@@ -82,26 +82,47 @@ function demandPhrase(d: DemandWire): string {
 function Shell({
   title,
   onClose,
+  footer,
   children,
 }: {
   title: string;
   onClose: () => void;
+  /** Pinned below the scroll, like every other dialog's footer. What it holds
+   *  — which revision this is and where to change it — is the one line you
+   *  need *while* reading the policy, and inside the scroll it was only
+   *  visible after you had read all of it. */
+  footer?: React.ReactNode;
   children: React.ReactNode;
 }) {
   return (
-    <Dialog isOpen onOpenChange={(o) => !o && onClose()} width={560} purpose="form">
+    <Dialog
+      isOpen
+      onOpenChange={(o) => !o && onClose()}
+      width={560}
+      purpose="form"
+      aria-labelledby="governance-heading"
+    >
       <header className="border-line flex shrink-0 items-center gap-2 border-b px-4 py-3">
-        <h2 className="font-semibold">{title}</h2>
+        <h2 id="governance-heading" className="font-semibold">{title}</h2>
+        {/* It had no `onClick` at all — the third dialog in this pass with a
+            close button that did nothing. Escape still worked, which is why it
+            went unnoticed. */}
         <IconButton
             label="Close"
             className="ml-auto"
+            onClick={onClose}
             variant="ghost"
             size="sm"
             tooltip="Close  Esc"
             icon={<X className="size-icon-md" />}
           />
       </header>
-      <div className="flex flex-col gap-4 overflow-y-auto p-4">{children}</div>
+      <div className="flex min-h-0 flex-col gap-4 overflow-y-auto p-4">{children}</div>
+      {footer && (
+        <footer className="border-line text-mute shrink-0 border-t px-4 py-3 text-xs">
+          {footer}
+        </footer>
+      )}
     </Dialog>
   );
 }
@@ -154,7 +175,18 @@ export function WorkflowDialog({
     wf?.revision?.body.states.find((s) => s.state_id === id)?.name ?? id;
 
   return (
-    <Shell title={`Workflow — ${projectKey}`} onClose={onClose}>
+    <Shell
+      title={`Workflow — ${projectKey}`}
+      onClose={onClose}
+      footer={
+        wf?.revision ? (
+          <>
+            Revision <code className="font-mono">{wf.revision.revision_id.slice(0, 12)}…</code> —
+            editable from Settings → Workflow.
+          </>
+        ) : null
+      }
+    >
       {error && <p className="text-danger text-sm">{error}</p>}
       {!wf && !error && <p className="text-mute text-sm">Loading…</p>}
       {wf && (
@@ -205,10 +237,6 @@ export function WorkflowDialog({
                   ))}
                 </ul>
               </section>
-              <p className="text-mute text-xs">
-                Revision <code className="font-mono">{wf.revision.revision_id.slice(0, 12)}…</code>{" "}
-                — editable from Settings → Workflow.
-              </p>
             </>
           )}
         </>

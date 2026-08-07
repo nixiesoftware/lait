@@ -32,22 +32,26 @@ export function NewLabelDialog({
       />
       <div className="p-4">
         <ColorPicker value={color} onChange={setColor} />
-        <div className="mt-4 flex justify-end gap-2">
-          <Button
-            onClick={onCancel}
-            label="Cancel"
-            variant="secondary"
-            elevation="low"
-            size="md"
-          />
-          <Button
-            onClick={() => onCreate(name, color)}
-            label="Create label"
-            variant="primary"
-            size="md"
-          />
-        </div>
       </div>
+      {/* A real footer, like every other dialog's: its own region with a rule
+          above it, rather than a right-aligned row floating at the bottom of
+          the body's padding. The rule reaches the walls now that the sheet
+          carries no inset of its own, so it can do the job a rule is for. */}
+      <footer className="border-line flex items-center justify-end gap-2 border-t px-4 py-3">
+        <Button
+          onClick={onCancel}
+          label="Cancel"
+          variant="secondary"
+          elevation="low"
+          size="md"
+        />
+        <Button
+          onClick={() => onCreate(name, color)}
+          label="Create label"
+          variant="primary"
+          size="md"
+        />
+      </footer>
     </Dialog>
   );
 }

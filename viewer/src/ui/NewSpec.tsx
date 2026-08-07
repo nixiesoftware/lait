@@ -37,7 +37,13 @@ export function NewSpecDialog({
   const empty = title.trim() === "";
 
   return (
-    <Dialog isOpen onOpenChange={(o) => !o && onCancel()} width={520} purpose="form">
+    <Dialog
+      isOpen
+      onOpenChange={(o) => !o && onCancel()}
+      width={520}
+      purpose="form"
+      aria-labelledby="new-spec-heading"
+    >
       <form
         className="flex min-h-0 flex-col"
         onSubmit={(event) => {
@@ -46,7 +52,7 @@ export function NewSpecDialog({
         }}
       >
         <div className="border-line border-b p-4">
-          <h2 className="font-semibold">New spec in {projectName}</h2>
+          <h2 id="new-spec-heading" className="font-semibold">New spec in {projectName}</h2>
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto p-2">
           {SPEC_KINDS.map((option) => (
@@ -79,10 +85,11 @@ export function NewSpecDialog({
             width="100%"
           />
         </div>
-        <div className="border-line flex justify-end gap-2 border-t p-3">
+        <footer className="border-line flex items-center justify-end gap-2 border-t px-4 py-3">
           <Button
               type="button"
               label="Cancel"
+              onClick={onCancel}
               variant="secondary"
               elevation="low"
               size="md"
@@ -91,10 +98,11 @@ export function NewSpecDialog({
             type="submit"
             isDisabled={empty}
             label="Create spec"
+            tooltip="Create spec  ⏎"
             variant="primary"
             size="md"
           />
-        </div>
+        </footer>
       </form>
     </Dialog>
   );

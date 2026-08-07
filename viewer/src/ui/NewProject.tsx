@@ -1,4 +1,3 @@
-import { Chord } from "@lait/ui";
 import { useState } from "react";
 import { X } from "lucide-react";
 
@@ -73,7 +72,13 @@ export function NewProject({
   };
 
   return (
-    <Dialog isOpen onOpenChange={(o) => !o && onClose()} width={440} purpose="form">
+    <Dialog
+      isOpen
+      onOpenChange={(o) => !o && onClose()}
+      width={440}
+      purpose="form"
+      aria-labelledby="new-project-heading"
+    >
       <form
         onSubmit={(e) => {
           e.preventDefault();
@@ -81,10 +86,16 @@ export function NewProject({
         }}
       >
         <header className="border-line flex items-center gap-2 border-b p-4">
-          <h2 className="font-semibold">New project</h2>
+          <h2 id="new-project-heading" className="font-semibold">New project</h2>
+          {/* `type="button"` as well as `onClick`: this sits inside the form,
+              and a button in a form with no type is a submit button. Without
+              both, Close either did nothing (it had no handler at all) or
+              created the project. */}
           <IconButton
+              type="button"
               label="Close"
               className="ml-auto"
+              onClick={onClose}
               variant="ghost"
               size="sm"
               tooltip="Close  Esc"
@@ -100,6 +111,7 @@ export function NewProject({
             placeholder="Engineering"
             onChange={setName}
             onKeyDown={(e) => e.stopPropagation()}
+            width="100%"
           />
 
           <TextInput
@@ -112,6 +124,7 @@ export function NewProject({
             }}
             onKeyDown={(e) => e.stopPropagation()}
             className="font-mono uppercase"
+            width="100%"
             description={
               upper
                 ? `Issues here will be ${upper}-1, ${upper}-2…`
@@ -131,13 +144,17 @@ export function NewProject({
           )}
         </div>
 
-        <footer className="border-line flex items-center justify-end gap-2 border-t p-3">
-          <Chord>↵</Chord>
+        {/* `px-4` to line the commit up with the fields above it, and no ⏎
+            badge: it was the app's only `<kbd>` outside a menu row, and the
+            form already submits on Enter. The shortcut lives on the tooltip,
+            where a hint belongs. */}
+        <footer className="border-line flex items-center justify-end gap-2 border-t px-4 py-3">
           <Button
             type="submit"
             isDisabled={!ready}
             isLoading={busy}
             label={busy ? "Creating…" : "Create project"}
+            tooltip="Create project  ⏎"
             variant="primary"
             size="md"
           />
