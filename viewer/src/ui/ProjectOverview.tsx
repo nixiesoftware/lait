@@ -426,6 +426,13 @@ function Updates({
               ]}
               onPick={setHealth}
             />
+            {/* `sm`, to stand 28px like the picker beside it.
+                Astryx's `md` button is 32px and our control ladder's `md` is
+                28, so a `size="md"` on each put two controls of the same
+                nominal size in one row at two different heights. Where those
+                two vocabularies meet in a single row, the row's height is the
+                one that has to win — the composer can keep a 32px commit
+                because its footer is a region away from the pill row. */}
             <Button
               className="ml-auto"
               isDisabled={!draft.trim() || posting}
@@ -433,7 +440,7 @@ function Updates({
               onClick={() => void post()}
               label="Post update"
               variant="primary"
-              size="md"
+              size="sm"
             />
           </div>
         </div>

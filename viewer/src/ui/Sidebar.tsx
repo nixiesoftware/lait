@@ -269,8 +269,17 @@ function SpaceSwitcher({
         button={{
           label: title,
           "aria-label": "Space menu",
+          // `justify-start` is load-bearing, not decoration. `.astryx-button`
+          // sets `justify-content: center`, which is right for a control that
+          // wraps its label and wrong for one stretched to a sidebar's width:
+          // the name floats into the middle of a 205px row while Inbox, My
+          // issues, Projects and Roadmap all start at the same left edge, and
+          // it reads as the selector having grown a huge horizontal padding.
+          // The padding is 6px and always was. `flex items-center` alone does
+          // not undo it — neither utility names `justify-content`, so Astryx's
+          // rule stands unopposed.
           className:
-            "hover:bg-hover -mx-1 flex h-ctl-md min-w-0 flex-1 items-center gap-1.5 rounded-full px-1.5",
+            "hover:bg-hover -mx-1 flex h-ctl-md min-w-0 flex-1 items-center justify-start gap-1.5 rounded-full px-1.5",
           variant: "ghost",
           size: "sm",
           icon:

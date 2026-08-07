@@ -851,13 +851,14 @@ function Resolve({
             </label>
           ))}
         </fieldset>
-        <TextInput label="Title" value={title} onChange={setTitle} />
+        <TextInput label="Title" value={title} onChange={setTitle} width="100%" />
         <TextArea
           label="Body"
           value={text}
           rows={10}
           onChange={setText}
           className="font-mono text-2xs"
+          width="100%"
         />
         <label className="text-dim flex items-start gap-2 text-xs">
           <input

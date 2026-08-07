@@ -351,6 +351,7 @@ function Milestones({
             value={draft}
             placeholder="Milestone name…"
             onChange={setDraft}
+            width="100%"
             onKeyDown={(e) => {
               if (e.key === "Enter" && draft.trim()) void add();
               if (e.key === "Escape") setComposing(false);
