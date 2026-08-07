@@ -364,6 +364,38 @@ export interface LinkDto {
  * reparents can't converge to a cycle); `blocked_by` is the transitive set of open
  * issues that block this one, computed by the daemon (not just direct `blocks` edges).
  */
+/** One structural edge between two issues — `dto.rs` `GraphEdgeDto`.
+ *
+ *  Doc ids, not refs: a ref is an alias and a rename moves it, while every
+ *  `Row` already carries `doc_id` for exactly this join. */
+export interface GraphEdgeDto {
+  from: string;
+  /** `blocks` | `relates` | `duplicates`. */
+  kind: string;
+  to: string;
+}
+
+/**
+ * A project's whole structure — `dto.rs` `ProjectGraphView`.
+ *
+ * `issue_graph` answers the same question one issue at a time, which is what a
+ * detail rail wants and what a chart cannot use: laying a project out by
+ * dependency depth needs every edge together, and per-issue is N round trips
+ * for a graph the catalog holds whole.
+ *
+ * Direct edges only — no transitive closure, unlike `GraphView.blocked_by`.
+ * Reachability is derivable from these, and a transitive set drawn as
+ * connectors is unreadable: it draws the shortcut across a chain as though it
+ * were a separate constraint.
+ */
+export interface ProjectGraphView {
+  schema_version: number;
+  project: string;
+  edges: GraphEdgeDto[];
+  /** `[child, parent]` for the sub-issue tree. */
+  parents: [string, string][];
+}
+
 export interface GraphView {
   schema_version: number;
   reff: string;
@@ -852,6 +884,8 @@ export type Request =
   | { cmd: "board"; project?: string | null; project_hint?: string | null }
   | { cmd: "history"; reff: string }
   | { cmd: "issue_graph"; reff: string }
+  /** A whole project's structure at once. Reply is `project_graph`. */
+  | { cmd: "project_graph"; project: string }
   | { cmd: "project_new"; name: string; key: string; color?: string | null }
   | { cmd: "project_list" }
   | {
@@ -1103,6 +1137,7 @@ export type Response =
   | { kind: "list"; rows: Row[] }
   | ({ kind: "board" } & BoardView)
   | ({ kind: "graph" } & GraphView)
+  | ({ kind: "project_graph" } & ProjectGraphView)
   | { kind: "activity"; events: ActivityEvent[]; last: number }
   | { kind: "inbox"; entries: InboxEntry[]; unread: number }
   | { kind: "projects"; projects: ProjectDto[] }

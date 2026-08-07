@@ -51,18 +51,23 @@ export function isWorkView(v: View): v is WorkView {
 
 /** Surfaces owned by one project home. Workspace destinations must never retain
  * one of these routes without a canonical project key. */
-export const PROJECT_VIEWS = ["overview", "list", "board", "calendar", "activity", "specs"] as const;
+export const PROJECT_VIEWS = ["overview", "list", "board", "calendar", "timeline", "activity", "specs"] as const;
 export type ProjectView = (typeof PROJECT_VIEWS)[number];
 
 /**
- * The three layouts of a project's issues — one query, drawn three ways.
+ * The four layouts of a project's issues — one query, drawn four ways.
  *
  * They are still routes, because a board is a place you can send someone. They
  * are not *destinations*: the nav offers "Issues" once and the layout is chosen
  * beside grouping and ordering, with the other things that decide how the same
  * rows are drawn rather than which rows they are.
+ *
+ * `timeline` is the fourth and it reads the same rows as the other three — but
+ * it also needs the project's edge set, which none of them ask for. That is a
+ * difference in what a layout *fetches*, not in which rows it is drawing, so it
+ * stays a mode rather than becoming a destination of its own.
  */
-export const ISSUE_MODES = ["list", "board", "calendar"] as const;
+export const ISSUE_MODES = ["list", "board", "calendar", "timeline"] as const;
 export type IssueMode = (typeof ISSUE_MODES)[number];
 export function isIssueMode(v: View): v is IssueMode {
   return (ISSUE_MODES as readonly string[]).includes(v);
@@ -74,6 +79,7 @@ export const ISSUE_MODE_LABEL: Record<IssueMode, string> = {
   list: "List",
   board: "Board",
   calendar: "Calendar",
+  timeline: "Timeline",
 };
 
 /** The faces the sidebar tree lists, and the hops the trail can name. Board and
@@ -92,6 +98,7 @@ export const PROJECT_VIEW_LABEL: Record<ProjectView, string> = {
   list: "Issues",
   board: "Board",
   calendar: "Calendar",
+  timeline: "Timeline",
   activity: "Activity",
   specs: "Specs",
 };

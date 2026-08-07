@@ -193,16 +193,20 @@ describe("control heights speak one vocabulary", () => {
 
   it("the ladder is the only control-height vocabulary in use", () => {
     expect(rungsUsed("ctl")).toEqual(["lg", "md", "sm", "xl", "xs"]);
-    // `bar-sm` (32) is declared and currently unread: the toolbar band moved up
-    // to `md` (36) to give its 24px controls 6px above and below.
+    // `lg` (44) is the header and sidebar; `md` (36) the toolbar and the
+    // timeline's scale. `bar-sm` (32) is declared in `styles.css` and read by
+    // nothing today.
     //
-    // Declared is not the same as available. Tailwind emits an `@theme`
-    // variable only where something reads it, so losing its last reader took
-    // `--spacing-bar-sm` out of the built stylesheet entirely — `lait.rungs()`
-    // in a live page lists `bar-md` and `bar-lg` and no `sm`. The declaration
-    // survives in `styles.css` as the place "why 32" is written down, which is
-    // worth keeping, but nothing can `var()` it until a reader brings it back.
-    // This assertion is what will say so when one does.
+    // That is a normal state for a rung, not a defect, but it has a consequence
+    // worth writing down once: Tailwind emits an `@theme` variable only where
+    // something reads it, so an unread rung is not merely unused — it is absent
+    // from the built stylesheet, and `var(--spacing-bar-sm)` would resolve to
+    // nothing. The declaration survives as the place "why 32" is recorded, and
+    // a surface that later wants a band shorter than a toolbar should reach for
+    // the rung rather than invent an `h-8`.
+    //
+    // This list will move as bands come and go. Update it; that is the job. It
+    // exists so the movement is deliberate rather than discovered later.
     expect(rungsUsed("bar")).toEqual(["lg", "md"]);
   });
 });

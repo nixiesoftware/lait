@@ -246,16 +246,16 @@ function decode(value: string): string {
 /** Project-home destinations carry structural project identity; workspace
  * destinations must never inherit stale project state. */
 function isProjectDestination(view: View): boolean {
-  return view === "overview" || view === "list" || view === "board" || view === "calendar" || view === "activity" || view === "specs";
+  return view === "overview" || view === "list" || view === "board" || view === "calendar" || view === "timeline" || view === "activity" || view === "specs";
 }
 
 /** Whether this view draws rows a filter can narrow. */
 export function carriesFilter(view: View): boolean {
-  return view === "list" || view === "board" || view === "calendar";
+  return view === "list" || view === "board" || view === "calendar" || view === "timeline";
 }
 
 function displaysIssue(view: View): boolean {
-  return view === "list" || view === "board" || view === "calendar";
+  return view === "list" || view === "board" || view === "calendar" || view === "timeline";
 }
 
 function projectSegment(view: View): string {
@@ -268,6 +268,7 @@ function projectView(segment: string | undefined): View | null {
   return segment === "overview" ||
     segment === "board" ||
     segment === "calendar" ||
+    segment === "timeline" ||
     segment === "activity" ||
     segment === "specs"
     ? segment

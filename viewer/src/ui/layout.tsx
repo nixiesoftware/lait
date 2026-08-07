@@ -384,6 +384,7 @@ export const PROJECT_VIEW_ICON: Record<ProjectView, React.ReactElement> = {
   list: <List />,
   board: <SquareKanban />,
   calendar: <Calendar />,
+  timeline: <GanttChart />,
   activity: <Activity />,
   specs: <FileText />,
 };

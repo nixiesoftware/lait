@@ -43,6 +43,7 @@ import { Board } from "./ui/Board";
 import { BulkBar } from "./ui/BulkBar";
 import { Calendar } from "./ui/Calendar";
 import { Timeline } from "./ui/Timeline";
+import { ProjectTimeline } from "./ui/ProjectTimeline";
 import { DisplayOptions } from "./ui/DisplayOptions";
 import { FilterMenu } from "./ui/FilterMenu";
 import type { IssueMutators } from "./ui/fields";
@@ -97,6 +98,7 @@ import {
   projectKeys,
   useProjectBoard,
   useProjectMilestones,
+  useProjectGraph,
   useProjectRegistry,
   useProjectViewerStore,
   useSpec,
@@ -1536,6 +1538,10 @@ export function App() {
   // The open project's milestones, for the filter menu's Milestone facet. The
   // same resource the overview and the issue rail read — one fetch for all three.
   const milestones = useProjectMilestones(current ?? "", activeProject?.id).data ?? [];
+  // The project's edge set, for the timeline's sequence chart. Only that view
+  // reads it, but the hook has to be called unconditionally — and it costs
+  // nothing when no project is open, which is exactly when it resolves empty.
+  const projectGraph = useProjectGraph(current ?? "", activeProject?.id).data ?? null;
   const projectCounts = useMemo(() => {
     const counts = { backlog: 0, active: 0, done: 0, total: 0 };
     for (const column of board?.columns ?? []) {
@@ -2285,6 +2291,25 @@ export function App() {
               }}
               mutators={issueMutators}
               readOnly={readOnly}
+            />
+          ) : shown && view === "timeline" && activeProject ? (
+            /* Two different charts share this route, and which one you get is
+               decided by whether a project is open. At the workspace it is the
+               roadmap: projects as bars on a time axis, from the start and
+               target dates a project carries. Inside a project it is the
+               sequence chart, because an ISSUE has no start date to place on
+               such an axis — and what it has instead is the dependency graph.
+               Same word, "timeline", for the same question at two scales:
+               what happens in what order. */
+            <ProjectTimeline
+              board={shown}
+              graph={projectGraph}
+              milestones={milestones}
+              projectName={shown.project.name}
+              onSelect={(reff) => {
+                api.select(reff);
+                setDetail(true);
+              }}
             />
           ) : view === "timeline" ? (
             <Timeline

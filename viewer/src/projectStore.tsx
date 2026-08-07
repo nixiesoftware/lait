@@ -20,6 +20,7 @@ import type {
   LabelDto,
   MemberDto,
   MilestoneDto,
+  ProjectGraphView,
   ProjectDto,
   ProjectUpdateDto,
   Response,
@@ -54,6 +55,7 @@ export const projectKeys = {
   graph: (space: string, reff: string) => `${prefix(space)}graph:${part(reff)}`,
   history: (space: string, reff: string) => `${prefix(space)}history:${part(reff)}`,
   milestones: (space: string, project: string) => `${prefix(space)}milestones:${part(project)}`,
+  projectGraph: (space: string, project: string) => `${prefix(space)}projectgraph:${part(project)}`,
   specs: (space: string, project: string | null) => `${prefix(space)}specs:${part(project)}`,
   spec: (space: string, spec: string) => `${prefix(space)}spec:${part(spec)}`,
   specHistory: (space: string, spec: string) => `${prefix(space)}spec-history:${part(spec)}`,
@@ -410,6 +412,30 @@ export class ProjectViewerStore {
     }, { activity: true }, force);
     this.resources.evict(`${prefix(space)}history:`, 50, new Set([key]));
     return promise;
+  }
+
+  /**
+   * A project's dependency graph, whole, in one request.
+   *
+   * `ensureGraph` is the per-issue neighbourhood and stays that way — a detail
+   * rail asks about one issue and should not pay for the project. This is the
+   * chart's query: the sequence view lays every issue out by dependency depth,
+   * which cannot be computed from a neighbourhood at a time.
+   *
+   * Depends on the project's issues as well as its relations, and the issues
+   * dependency is the load-bearing one: an edge is dropped by the engine when
+   * either end is tombstoned or moves project, so a delete this component never
+   * sees still changes the answer.
+   */
+  ensureProjectGraph(space: string, project: string, force = false): Promise<ProjectGraphView> {
+    return this.load(projectKeys.projectGraph(space, project), async () => {
+      const result = await this.rpc(space, { cmd: "project_graph", project });
+      if (result.kind !== "project_graph") throw new Error("Expected project_graph response");
+      return result;
+    }, {
+      catalog: ["relations"],
+      issues: { scopeId: project },
+    }, force);
   }
 
   ensureMilestones(space: string, project: string, force = false): Promise<MilestoneDto[]> {
@@ -1101,6 +1127,31 @@ export function useProjectRegistry<T>(
  * `null` — the project is not known yet — parks on a shared empty key instead of
  * asking the daemon about a project that isn't there.
  */
+/**
+ * The open project's dependency graph, for the timeline.
+ *
+ * Fetched by the same rule as milestones — only when a project is actually
+ * open, and keyed on its id so switching projects does not read the last one's
+ * edges. Returns an empty view rather than null when there is no project, so
+ * the chart's "no dependencies" path and its "no project" path stay distinct.
+ */
+export function useProjectGraph(
+  space: string,
+  projectId: string | null | undefined,
+): ResourceSnapshot<ProjectGraphView> {
+  const store = useProjectViewerStore();
+  return useWorldResource<ProjectGraphView>(
+    projectKeys.projectGraph(space, projectId ?? "_unknown"),
+    useCallback(
+      () =>
+        projectId
+          ? store.ensureProjectGraph(space, projectId)
+          : Promise.resolve({ schema_version: 0, project: "", edges: [], parents: [] }),
+      [projectId, space, store],
+    ),
+  );
+}
+
 export function useProjectMilestones(
   space: string,
   projectId: string | null | undefined,
