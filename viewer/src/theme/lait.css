@@ -259,6 +259,10 @@
     padding: 0;
   }
 
+  .astryx-dialog {
+    --astryx-dialog-padding: 0;
+  }
+
   .astryx-dropdown-menu-item:hover {
     background-color: var(--color-tint-hover);
   }

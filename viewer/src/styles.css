@@ -608,6 +608,33 @@
 }
 
 /* ---------------------------------------------------------------------------
+   A DIALOG HEADER STATES ITS OWN INSET, BECAUSE THE SHEET NO LONGER DOES.
+
+   `.astryx-dialog` shipped 16px of padding and the theme now zeroes it — the
+   sheet is a surface, its regions decide their own insets, and a `border-t`
+   between two of them has to reach the walls to read as structure rather than
+   decoration. That is the same argument as `popover`, and it is right for the
+   five dialogs whose headers are ours.
+
+   It is wrong for `DialogHeader`, which had no padding of its own and was
+   living on the sheet's. Zeroed, its title and close button sit flush against
+   the wall.
+
+   WHY THIS IS NOT A THEME OVERRIDE. `defineTheme` has no `dialog-header` key —
+   `npx astryx component DialogHeader` documents props and no theming table at
+   all, unlike every component we do override. `.astryx-layout-header` is a
+   stable class on the element that needs the padding, so the rule can be
+   written; there is just nowhere in the theme to write it.
+
+   The value matches what the sheet used to give it, so nothing moves for the
+   two call sites that use the component. `hasDivider` keeps drawing the rule,
+   and now it runs wall to wall like every other divider in a dialog.
+   --------------------------------------------------------------------------- */
+.astryx-dialog .astryx-layout-header {
+  padding: 16px;
+}
+
+/* ---------------------------------------------------------------------------
    A RAIL VALUE MUST BE ABLE TO SHRINK.
 
    Astryx's `Popover` wraps its trigger in an `inline-flex` div, and an
