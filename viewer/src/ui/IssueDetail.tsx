@@ -727,6 +727,21 @@ export function IssueDetail({
                 // matching what we send rather than translating at the boundary.
                 selected={issue.label_names}
                 emptyText={labels.length ? "No matches" : "No labels yet"}
+                // This control is two things wearing one component, and the
+                // compact strip only wants one of them. With no labels it IS
+                // the Labels property — the chip that names the field and
+                // opens the picker. With labels already on, it is a bare `+`
+                // for adding another, and in a row of eight named chips a lone
+                // `+` between "Engine" and the project reads as punctuation
+                // nobody can parse. Linear has no such control: you click the
+                // labels chip.
+                //
+                // So the strip hides it in the second case only, and the class
+                // is what lets CSS tell the cases apart — they are the same
+                // element in the same position, distinguishable by nothing a
+                // selector can reach. Nothing is lost with it: `b` opens the
+                // same picker, and the rail keeps the `+`.
+                {...(issue.label_names.length > 0 ? { className: "label-add-more" } : {})}
                 face={
                   issue.label_names.length === 0 ? (
                     <>
@@ -1464,12 +1479,18 @@ function FollowToggle({
       // In a row of eight reference chips it read as the only thing you were
       // being asked to do.
       //
-      // `dim` only while it is off. Following flips the variant to `secondary`,
-      // and that fill is the "on" signal — dimming the label under it would
-      // take back what the fill just said.
+      // `mute` only while it is off — the same grey every other unfilled
+      // property wears, because not following IS the unset state and the row
+      // now says so in one voice: values in white, prompts in grey. Following
+      // flips the variant to `secondary`, and that fill is the "on" signal, so
+      // the label goes back to inheriting rather than being dimmed under it.
+      //
+      // `!important` is load-bearing and not decoration: the strip's chip rule
+      // is unlayered and would otherwise paint this `fg` along with the real
+      // values, which is exactly the thing being distinguished.
       className={cn(
         "mx-0 gap-1.5 px-0 !text-sm !font-normal",
-        !following && "!text-dim",
+        !following && "!text-mute",
       )}
       isDisabled={readOnly || meKey == null}
       onClick={() => onToggle(!following)}

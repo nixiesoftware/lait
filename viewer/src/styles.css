@@ -1128,11 +1128,20 @@
 
   .issue-detail-properties {
     flex-flow: row wrap;
-    /* Rows no tighter than columns. At `2px` the strip's own `py-0.5` brought
-       the row pitch to 34px on a 28px chip — 6px between rows against 8px
-       between chips, so a wrapped run read as one block of pills rather than
-       as two rows of them. Matching the two makes the wrap legible as a wrap. */
-    gap: 4px 8px;
+    /* 6px, and rows no tighter than columns. Two separate corrections that
+       have to be made together:
+
+       The columns came down from 8. With an outline and a fill each, the chips
+       hold themselves apart on their own — 8px of air on top of that read as a
+       list of separate controls rather than one row of properties, which is
+       what Linear's tighter run gets right.
+
+       The rows match at 6, which they did not before: at `2px` the strip's own
+       `py-0.5` put the pitch at 34px on a 28px chip — 6px between rows against
+       8px between chips, so a wrapped run read as one block of pills instead
+       of two rows of them. `2px` here plus that same `py-0.5` on both sides is
+       the 6 the columns now use. */
+    gap: 2px 6px;
   }
 
   .issue-detail-properties .rail-section,
@@ -1163,6 +1172,88 @@
     border: 1px solid var(--color-line);
     border-radius: 9999px;
     padding-inline: 8px;
+    /* The popover's fill, which is `raised` — the same token
+       `--color-background-popover` points at, so a chip and the menu it opens
+       stand on the page by the same amount. An outline alone left them reading
+       as holes cut in the body; a floating sheet gets a fill and an edge here
+       for the reason `styles.css` already gives popovers one. */
+    background-color: var(--color-raised);
+    /* One rung shorter than a rail control. `ctl-md` is 28px, which is the
+       right target for something you point at in a column with room around it;
+       with a fill behind it and eight of them shoulder to shoulder, that much
+       vertical padding around 12px text read as slack. `ctl-sm` is 24 — and it
+       is also `LabelChip`'s own height, so the label stopped needing to be
+       stretched to join the row and now simply fits it. */
+    min-height: var(--spacing-ctl-sm);
+    height: var(--spacing-ctl-sm);
+    /* A chip that HOLDS something reads at the body's white; a chip that is
+       still a prompt stays `mute`, which it sets on its own span inside (see
+       `EmptyValue`) and which survives this because it is the nearer rule.
+       The row was `dim` throughout, so a status you had set and a label you
+       had not sat at one weight — dim against mute is 0.709 against 0.62, a
+       tenth of a step, and a binary cannot ride on that. `fg` against `mute`
+       is most of the ramp, and it is the split Linear's row makes: the values
+       in white, the empty fields grey. */
+    color: var(--color-fg);
+  }
+
+  /* Hover has to be restated because the base fill above would otherwise win
+     it. `hover:bg-hover` is a Tailwind utility and these rules are unlayered,
+     so they beat it outright — and a chip that does not answer the pointer is
+     a chip nobody knows is a control. `hover` is one step lighter than
+     `raised` (0.256 against 0.228 in dark), which is the step it was always
+     making from transparent. */
+  .issue-detail-properties .issue-property > dd > div > button:hover,
+  .issue-detail-properties
+    .issue-property
+    > dd
+    > span
+    > div
+    > button:not([data-tone="bare"]):hover,
+  .issue-detail-properties .issue-property > dd > button:hover {
+    background-color: var(--color-hover);
+  }
+
+  /* The bare `+` that adds a SECOND label. See the note at its call site: with
+     no labels the same control is the Labels chip and has to stay, so the
+     class — not the position — is what distinguishes them.
+
+     The WRAPPER goes, not the button. Astryx puts its trigger inside a
+     positioning div, and hiding only the button left that div in the flow as a
+     zero-width flex child — which still collects a gap on each side, so the
+     one place the `+` used to be measured 12px against the row's 6. `:has()`
+     names the box by what it contains, the same trick the popover hairline
+     above needs for the same reason. */
+  .issue-detail-properties .issue-property > dd > span > div:has(> .label-add-more) {
+    display: none;
+  }
+
+  /* One rung down, and only in the strip. At `icon-sm` (14px) the glyphs were
+     half the height of a 28px chip and, eight chips wide, the row read as a
+     run of pictures with words after them. `icon-xs` puts them at 12px against
+     12px text — the ratio the rail's own rows use, where the glyph sits beside
+     a value rather than leading a pill.
+
+     The `mark` sizes are left alone. A label's dot and a project's dot are
+     already 8px, and a dot that shrinks stops being a dot. */
+  .issue-detail-properties .issue-property .size-icon-sm {
+    width: var(--spacing-icon-xs);
+    height: var(--spacing-icon-xs);
+  }
+
+  /* The priority mark comes down a rung too, but only one. It is the row's
+     single FILLED glyph — a solid rounded square where everything else is a
+     line — and a filled shape reads heavier than an outline at the same size,
+     so it was the chunkiest thing in the row at 16px. It stops at 14 rather
+     than 12 for the same reason: taken to the line icons' size it would start
+     to read as a smudge instead of a mark.
+
+     The avatar is deliberately not here. A face is not an icon; 16px is about
+     where one stops being recognisable, and an assignee you cannot identify is
+     worse than an assignee whose chip is two pixels tall. */
+  .issue-detail-properties .issue-property .size-icon-md {
+    width: var(--spacing-icon-sm);
+    height: var(--spacing-icon-sm);
   }
 
   /* A label is already a chip, so it does not get given one.
@@ -1191,7 +1282,7 @@
     > div
     > button[data-tone="bare"]
     > * {
-    min-height: var(--spacing-ctl-md);
+    min-height: var(--spacing-ctl-sm);
     /* And the row's VOICE, which is the last thing that broke rank. A
        `LabelChip` is `text-fg` with its border mixed 34% from the label's own
        colour — deliberate, and right in the rail, where a label is a value you
@@ -1209,8 +1300,12 @@
        colour — `LabelChip` is `font-medium`, and 500 against the row's 400 was
        still enough on its own to make the label the loudest word in it. */
     border-color: var(--color-line) !important;
-    color: var(--color-dim);
+    color: var(--color-fg);
     font-weight: 400;
+    /* And the same fill as its neighbours — the last thing that would have
+       kept it looking cut out of the page while the eight chips around it sat
+       on one. */
+    background-color: var(--color-raised);
   }
 
   /* An unset chip names its FIELD here, where nothing else does. See
