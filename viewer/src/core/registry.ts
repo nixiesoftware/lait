@@ -143,6 +143,19 @@ export interface AppApi {
   closePalette(): void;
   toggleShortcuts(): void;
   toggleSidebar(): void;
+  /**
+   * Read an issue, and record having opened it as a place you were.
+   *
+   * The counterpart to `select`, and the pair is deliberate: `select` moves the
+   * cursor and rewrites the address in place, this one *navigates*. Every
+   * surface that opens a row goes through here so Back means the same thing
+   * whichever one you came from.
+   */
+  openIssue(reff: string): void;
+  /** Close the open issue, returning to the surface it was opened over. */
+  closeIssue(): void;
+  /** Peek at the selected issue, or put down the one being read. The two halves
+   *  are `openIssue`/`closeIssue`, so Space and a click leave the same history. */
   toggleDetail(): void;
   /** The one navigation verb. `project` names the destination's project when
    *  the caller knows it; omitted keeps the current one, `null` clears it. */

@@ -17,6 +17,7 @@ import {
   type Ctx,
   isIssueMode,
   isProjectView,
+  PROJECT_VIEW_LABEL,
   type IssueMode,
   type IssueField,
   type View,
@@ -32,6 +33,7 @@ import {
   saveLastRoute,
   type ViewerRoute,
 } from "./core/route";
+import { leave, push, replace } from "./core/history";
 import { useKeys } from "./core/useKeys";
 import { neighbourState, workTarget } from "./core/workflow";
 import { loadFavoriteProjects, toggleFavoriteProject } from "./core/personalNav";
@@ -226,8 +228,15 @@ export function App() {
    * width, in the work area. `selection` says *which* row is under the cursor;
    * this says whether we are reading it. Arrowing down a list moves the former
    * without touching the latter.
+   *
+   * It starts from the route, not from `true`. A bare `true` was survivable only
+   * because nothing selects a row on its own: the moment anything did — a board
+   * refresh repairing the cursor, a list restoring your place — the bit would
+   * already be set and the address effect would write `?issue=` for a row you
+   * had merely landed near, putting you inside an issue you never opened. The
+   * route already answers the question, so it answers it here too.
    */
-  const [detail, setDetail] = useState(true);
+  const [detail, setDetail] = useState(initialRoute.issue !== null);
   const [view, setView] = useState<View>(initialRoute.view);
   const [unread, setUnread] = useState(0);
   /**
@@ -482,6 +491,14 @@ export function App() {
   // `?issue=` means *this issue is open*, so it rides on `detail`, not on
   // `selection` alone: a highlighted row you have not opened is cursor position,
   // not a destination, and reloading its address must not put you inside it.
+  //
+  // This is the *reconciler*, not a navigation verb. Every real navigation has
+  // already written its own address by the time this runs — which is why the
+  // comparison below is normally equal and nothing happens. What it must never
+  // do is discard the entry's state: `replace` carries `history.state` through,
+  // because a bare `replaceState(null, …)` here was wiping the marker that says
+  // an entry was pushed to show a document, and a cursor move one row down
+  // would leave the close button with nothing to go back to.
   useEffect(() => {
     const route = {
       spaceId: routeSpace,
@@ -495,10 +512,7 @@ export function App() {
       ...(composing?.page ? { composing: true } : {}),
       filter,
     };
-    const href = formatRoute(route);
-    if (`${window.location.pathname}${window.location.search}` !== href) {
-      window.history.replaceState(null, "", href);
-    }
+    replace(formatRoute(route));
     saveLastRoute(route);
   }, [routeSpace, project, team, view, selection, detail, openSpec, openBaseline, filter, composing?.page, settingsTab]);
 
@@ -674,7 +688,7 @@ export function App() {
    * on the list.
    */
   const deselectSpace = useCallback(() => {
-    window.history.pushState(null, "", formatRoute(DEFAULT_ROUTE));
+    push(formatRoute(DEFAULT_ROUTE));
     setRouteSpace(null);
     setCurrent(null);
     setProject(null);
@@ -1056,13 +1070,79 @@ export function App() {
     [],
   );
 
+  /**
+   * Open an issue: read it, and make having opened it a place you were.
+   *
+   * The distinction this draws against `select` is the whole point. A cursor
+   * moving down a list replaces — an arrow key is not a destination — but
+   * *opening* the row it lands on is, and until now the two went through the
+   * same code and got the same treatment. So the list you opened from was
+   * overwritten rather than kept: Overview → Issues → open a row → Back landed
+   * on Overview, with no way to reach the list you were actually reading. The
+   * entry is marked `issue` so `closeIssue` can return to that list rather than
+   * push a second copy of it in front.
+   *
+   * The address is built from the one in the bar, not from this component's
+   * state, because callers legitimately hop and open in the same tick — the
+   * issue search picks a *different* project's issue — and `setProject` has not
+   * flushed by the time we get here. `goto` has already written the
+   * destination; this only adds the issue to it.
+   *
+   * Hoisted out of `api` because three of its members need it: a picker opened
+   * by keyboard reveals the issue it is editing, and Space peeks at one — both
+   * are this navigation and not a quieter cousin of it.
+   */
+  const openIssue = useCallback(
+    (reff: string) => {
+      if (routeSpace && reff) {
+        rememberIssue(routeSpace, reff);
+        setPersonalNavRevision((revision) => revision + 1);
+      }
+      push(formatRoute({ ...parseRoute(window.location), issue: reff }), "issue");
+      setSelection(reff);
+      setDetail(true);
+    },
+    [routeSpace],
+  );
+
+  /**
+   * Close the open issue, landing back on the surface it was opened over.
+   *
+   * `leave` goes Back when the entry is one `openIssue` pushed, which is both
+   * the correct history and the correct *view*: `applyRoute` restores the
+   * layout, filter and cursor the previous entry recorded. It answers false for
+   * a deep link straight into an issue — nothing is behind that but the page
+   * load — and then the address effect writes the surface in place, which is
+   * the honest answer rather than a fabricated hop.
+   */
+  const closeIssue = useCallback(() => {
+    if (leave("issue")) return;
+    setSelection(null);
+    setDetail(false);
+  }, []);
+
   const api: AppApi = useMemo(
     () => ({
       openPalette: () => setModal("palette"),
       openIssueSearch: () => setModal("issueSearch"),
       closePalette: () => setModal(null),
       toggleShortcuts: () => setModal((m) => (m === "shortcuts" ? null : "shortcuts")),
-      toggleDetail: () => setDetail((d) => !d),
+      openIssue,
+      closeIssue,
+      /**
+       * Space: peek at the selected row, or put down the one you are reading.
+       *
+       * Both halves are the navigation verbs rather than a bare `setDetail`.
+       * Peeking used to flip the bit and let the address effect replace, so
+       * Space spent the list's history entry exactly the way a click did — and
+       * then Space again could not give it back, because there was nothing
+       * behind the entry to return to.
+       */
+      toggleDetail: () => {
+        if (!selection) return;
+        if (detail) closeIssue();
+        else openIssue(selection);
+      },
       /**
        * The one navigation verb: go to a view, optionally naming the project.
        *
@@ -1088,11 +1168,7 @@ export function App() {
         // name drops the `mine` authorization filter so its board doesn't come up
         // mysteriously empty. Other facets (status/label/…) ride along.
         const scoped = toProject && filter.mine ? { ...filter, mine: false } : filter;
-        window.history.pushState(
-          null,
-          "",
-          formatRoute({ spaceId: routeSpace, project: nextProject, view: v, issue: null, filter: scoped }),
-        );
+        push(formatRoute({ spaceId: routeSpace, project: nextProject, view: v, issue: null, filter: scoped }));
         setProject(nextProject);
         // A team scope does not follow you out of the team. A project scope
         // does — deliberately, so switching layouts keeps you where you are —
@@ -1124,9 +1200,7 @@ export function App() {
        */
       gotoTeam: (toTeam, toView) => {
         const nextView = toView ?? (isTeamDestination(view) ? view : "list");
-        window.history.pushState(
-          null,
-          "",
+        push(
           formatRoute({
             spaceId: routeSpace,
             project: null,
@@ -1157,9 +1231,7 @@ export function App() {
         const next = { ...filter, milestone };
         const nextView = carriesFilter(view) ? view : "list";
         const nextProject = toProject ?? project;
-        window.history.pushState(
-          null,
-          "",
+        push(
           formatRoute({
             spaceId: routeSpace,
             project: nextProject,
@@ -1179,9 +1251,7 @@ export function App() {
         setFocusToken((t) => t + 1);
       },
       clearFilter: () => {
-        window.history.replaceState(
-          null,
-          "",
+        replace(
           formatRoute({ spaceId: routeSpace, project, view, issue: selection, filter: EMPTY_FILTER }),
         );
         setFilter(EMPTY_FILTER);
@@ -1218,7 +1288,7 @@ export function App() {
         const picked = spacesRef.current.find((space) => space.id === id);
         if (!picked) return;
         const next = { spaceId: picked.space, project: null, view: "projects" as const, issue: null };
-        window.history.pushState(null, "", formatRoute(next));
+        push(formatRoute(next));
         setRouteSpace(picked.space);
         setCurrent(picked.id);
         setProject(null);
@@ -1226,9 +1296,12 @@ export function App() {
         setSelection(null);
       },
       // A picker needs its subject visible: opening the assignee menu over a pane
-      // you closed is a menu with no context.
+      // you closed is a menu with no context. Revealing it is `openIssue` and
+      // not a bare `setDetail`, or pressing `a` on a list row would put you
+      // inside the issue by spending the list's history entry — the same way
+      // clicking the row used to.
       openField: (f) => {
-        setDetail(true);
+        if (selection) openIssue(selection);
         setField(f);
       },
 
@@ -1392,7 +1465,10 @@ export function App() {
     }),
     [
       applyRoute,
+      closeIssue,
       current,
+      detail,
+      openIssue,
       routeSpace,
       project,
       view,
@@ -1587,23 +1663,77 @@ export function App() {
 
   const run = (id: string) => void registry.get(id)?.run(ctx);
   const openMyIssues = () => {
-    window.history.pushState(
-      null,
-      "",
-      formatRoute({ spaceId: routeSpace, project: null, view: "my-issues", issue: null }),
-    );
+    push(formatRoute({ spaceId: routeSpace, project: null, view: "my-issues", issue: null }));
     setProject(null);
     setView("my-issues");
     setSelection(null);
     setFilter(EMPTY_FILTER);
   };
+  /**
+   * Follow an issue out of a workspace surface — the Inbox, My issues, search.
+   *
+   * Two hops, not one. It used to push a single entry that changed the project,
+   * the view and the open document all at once, so Back from an issue reached
+   * from the Inbox returned to the Inbox while Back from the same issue reached
+   * from the list returned to the list — the same gesture meaning two different
+   * things depending on which door you came through. Landing on the project's
+   * Issues on the way puts you where every other route to that issue puts you,
+   * and the Inbox is still one more Back away.
+   */
   const openRecentIssue = (reff: string) => {
     const key = /^([A-Z][A-Z0-9]*)-\d+$/.exec(reff)?.[1] ?? project;
-    window.history.pushState(null, "", formatRoute({ spaceId: routeSpace, project: key, view: "list", issue: reff, filter }));
-    setProject(key);
-    setView("list");
-    setSelection(reff);
-    setDetail(true);
+    api.goto("list", key);
+    api.openIssue(reff);
+  };
+  /**
+   * A Spec, and a Baseline, opened out of the register.
+   *
+   * The same rule as an issue and for the same reason: the register is a
+   * surface, the document stands over it, and the register is where Back
+   * should land. `null` closes, so these are the close path too — and closing
+   * goes back rather than pushing a second copy of the register in front of the
+   * document.
+   *
+   * A Baseline carries its own marker even though it shares the "spec" kind:
+   * both open over the same register and both should return to it, and one
+   * marker for one surface is the thing the marker is actually about.
+   */
+  const openSpecDoc = (spec: string | null) => {
+    if (spec === null) {
+      if (leave("spec")) return;
+      setOpenSpec(null);
+      return;
+    }
+    push(formatRoute({ ...parseRoute(window.location), view: "specs", spec }), "spec");
+    setOpenSpec(spec);
+  };
+  const openBaselineDoc = (baseline: string | null) => {
+    if (baseline === null) {
+      if (leave("spec")) return;
+      setOpenBaseline(null);
+      return;
+    }
+    push(formatRoute({ ...parseRoute(window.location), view: "specs", baseline }), "spec");
+    setOpenBaseline(baseline);
+  };
+  /**
+   * A Settings sub-page is a destination, not a panel.
+   *
+   * It has an address — `?tab=` round-trips through the route, so it is
+   * linkable and survives a reload — and anything with an address that you
+   * arrive at by clicking is somewhere you went. It was the one such thing left
+   * writing its address by replacement, so Back from Settings › Members skipped
+   * every tab you had opened and left the page entirely.
+   */
+  const openSettingsTab = (tab: string | null) => {
+    // Deleted rather than spread over: `tab` is optional-and-absent in the
+    // grammar, so assigning `undefined` is not the same as not carrying it, and
+    // returning to General would otherwise inherit the tab it left.
+    const next: ViewerRoute = { ...parseRoute(window.location), view: "settings" };
+    delete next.tab;
+    if (tab) next.tab = tab;
+    push(formatRoute(next));
+    setSettingsTab(tab);
   };
   /**
    * The composer's two sizes, and what Back means between them.
@@ -1627,17 +1757,17 @@ export function App() {
       filter,
     });
   const expandComposer = () => {
-    window.history.pushState(null, "", composerHref(true));
+    push(composerHref(true));
     setComposing((c) => ({ ...c, page: true }));
   };
   /** Leave the page — to the sheet (`collapse`) or to the board. */
   const leaveComposerPage = (collapse: boolean) => {
-    window.history.replaceState(null, "", composerHref(false));
+    replace(composerHref(false));
     setComposing(collapse ? {} : null);
   };
   const applySavedView = (saved: SavedView) => {
     const nextView = saved.view ?? "list";
-    window.history.pushState(null, "", formatRoute({ spaceId: routeSpace, project, view: nextView, issue: null, filter: saved.filter }));
+    push(formatRoute({ spaceId: routeSpace, project, view: nextView, issue: null, filter: saved.filter }));
     setView(nextView);
     setSelection(null);
     setFilter(saved.filter);
@@ -1841,7 +1971,35 @@ export function App() {
       ];
 
 
+  /**
+   * The register a document was opened out of, between the project and the
+   * document itself.
+   *
+   * This is the one place the "faces belong to the strip, not the trail" rule
+   * has to give, and it gives because the strip is *gone*: a document takes the
+   * whole work area, tab strip included, so the moment you open an issue the
+   * only thing naming the surface underneath disappears with it. The trail was
+   * then reading `Timeline Demo › TD-34 Public launch`, which says an issue
+   * hangs off a project — true of the data, but not of where you are, and it
+   * left the list you came from with nothing on screen pointing at it.
+   *
+   * "Issues" for all four layouts, exactly as the strip labels them: Board,
+   * Calendar and Timeline are drawings of the issues, not different nouns, and
+   * the crumb returns you to the one you were drawing them in. It carries no
+   * glyph — the project ahead of it has a colour swatch and the issue after it
+   * has a key, and a third mark in a three-crumb trail is noise.
+   *
+   * Navigating it is `closeIssue`, not a `goto`: the surface is behind you in
+   * the history, so this is the same "go back to the list" the ✕ performs, and
+   * routing both through one verb is what stops them from meaning two things.
+   */
   if (openRow) {
+    trail.push({
+      key: "issues",
+      content: <DestinationCrumb label={PROJECT_VIEW_LABEL.list} />,
+      onNavigate: api.closeIssue,
+      optional: true,
+    });
     trail.push({
       key: openRow.reff,
       content: <IssueCrumb id={openRow.key_alias ?? openRow.reff} title={openRow.title} />,
@@ -1849,6 +2007,12 @@ export function App() {
   }
 
   if (readingSpec) {
+    trail.push({
+      key: "specs",
+      content: <DestinationCrumb label={PROJECT_VIEW_LABEL.specs} />,
+      onNavigate: () => openSpecDoc(null),
+      optional: true,
+    });
     trail.push({
       key: readingSpec.spec,
       content: <SpecCrumb kind={SPEC_KIND_LABEL[readingSpec.kind]} title={readingSpec.title} />,
@@ -1886,12 +2050,9 @@ export function App() {
           // than opening a Spec inside an issue.
           onOpenSpec={(spec) => {
             api.goto("specs");
-            setOpenSpec(spec);
+            openSpecDoc(spec);
           }}
-          onClose={() => {
-            api.select(null);
-            setDetail(false);
-          }}
+          onClose={api.closeIssue}
           {...(rows.findIndex((row) => row.reff === selection) > 0
             ? {
                 onPrevious: () =>
@@ -1912,7 +2073,7 @@ export function App() {
           title="Issue not found in this local project"
           body={`${selection} is not present in the current local projection. It may belong to another project, still be arriving, or not exist on this replica.`}
           action={<Button
-                    onClick={() => api.select(null)}
+                    onClick={api.closeIssue}
                     label="Clear selection"
                     variant="ghost"
                     size="sm"
@@ -2330,7 +2491,7 @@ export function App() {
               readOnly={readOnly}
               revision={revision}
               tab={settingsTab}
-              onTabChange={setSettingsTab}
+              onTabChange={openSettingsTab}
               onError={setError}
               onExit={() => api.goto("list")}
             />
@@ -2371,8 +2532,8 @@ export function App() {
               members={members}
               composing={composingSpec}
               onCompose={setComposingSpec}
-              onOpen={setOpenSpec}
-              onOpenBaseline={setOpenBaseline}
+              onOpen={openSpecDoc}
+              onOpenBaseline={openBaselineDoc}
               onError={setError}
             />
           ) : view === "activity" && board ? (
@@ -2386,8 +2547,7 @@ export function App() {
               onError={setError}
               onOpen={(reff) => {
                 api.goto("list");
-                api.select(reff);
-                setDetail(true);
+                api.openIssue(reff);
               }}
             />
           ) : shown && view === "board" ? (
@@ -2398,10 +2558,7 @@ export function App() {
               labels={labels}
               selection={selection}
               optimistic={optimistic}
-              onSelect={(reff) => {
-                api.select(reff);
-                setDetail(true);
-              }}
+              onSelect={api.openIssue}
               onCreate={(status) => setComposing({ status })}
               onDrop={dropCard}
               filtered={isActive(filter)}
@@ -2436,10 +2593,7 @@ export function App() {
               board={shown}
               members={members}
               labels={labels}
-              onSelect={(reff) => {
-                api.select(reff);
-                setDetail(true);
-              }}
+              onSelect={api.openIssue}
               mutators={issueMutators}
               readOnly={readOnly}
             />
@@ -2469,10 +2623,7 @@ export function App() {
               project={shown.project}
               filtered={isActive(filter)}
               selection={selection}
-              onSelect={(reff) => {
-                api.select(reff);
-                setDetail(true);
-              }}
+              onSelect={api.openIssue}
             />
           ) : view === "timeline" ? (
             <Roadmap
@@ -2510,10 +2661,7 @@ export function App() {
               // Open the row that was acted on, not whatever happened to be
               // selected: Enter and the row menu reach here without a preceding
               // click, so selection may still be a row above.
-              onOpen={(reff) => {
-                api.select(reff);
-                setDetail(true);
-              }}
+              onOpen={api.openIssue}
               onCreate={(status) => setComposing({ status })}
               mutators={issueMutators}
               readOnly={readOnly}
@@ -2755,8 +2903,7 @@ export function App() {
           onOpen={(row) => {
             const destination = projects.find((candidate) => candidate.id === row.project_id);
             api.goto("list", destination?.key ?? board.project.key);
-            setDetail(true);
-            api.select(row.reff);
+            api.openIssue(row.reff);
           }}
         />
       )}
