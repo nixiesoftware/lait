@@ -857,8 +857,21 @@
   min-height: inherit;
 }
 
+/* ONE DOCUMENT, TWO RENDERERS, ONE TYPOGRAPHY.
+   ─────────────────────────────────────────────
+   An issue body is typeset twice — by `Markdown.tsx` when you are reading it
+   and by CodeMirror when you are editing it — and the two had drifted on every
+   value that matters. `.prose` sets 15px at 1.65 and says why ("13px over a
+   700px measure ran to ~97ch"); the editor inherited 13px from the shell and
+   nobody noticed, so the description you *write* was a step smaller and tighter
+   than the description you *read*, and smaller than any comparable tracker's.
+
+   The sizes below are `.prose`'s, not approximations of them. A heading that
+   changes size when you click into it is the same defect one level up. */
 .codemirror-markdown .cm-content {
   min-height: inherit;
+  font-size: 0.9375rem;
+  line-height: 1.65;
 }
 
 .codemirror-markdown .cm-md-heading {
@@ -867,19 +880,33 @@
   letter-spacing: -0.015em;
 }
 
+/* CodeMirror's `defaultHighlightStyle` underlines `tags.heading`, and we load
+   it for the colours it gives fenced code. That underline is a code-editor
+   convention showing up in the middle of prose: measured, the heading's text
+   span carried `text-decoration: underline` from a generated class (`ͼ6`) that
+   nothing in this file could name, which is why the rule targets the child of
+   our own heading line instead. No renderer of this document underlines a
+   heading — `Markdown.tsx` does not, and neither does any tracker. */
+.codemirror-markdown .cm-md-heading span {
+  text-decoration: none;
+}
+
 .codemirror-markdown .cm-md-h1 {
-  font-size: 1.75rem;
+  font-size: 1.5rem;
   line-height: 1.3;
+  letter-spacing: -0.011em;
 }
 
 .codemirror-markdown .cm-md-h2 {
-  font-size: 1.4rem;
-  line-height: 1.35;
+  font-size: 1.1875rem;
+  line-height: 1.3;
+  letter-spacing: -0.008em;
 }
 
 .codemirror-markdown .cm-md-h3 {
-  font-size: 1.15rem;
-  line-height: 1.45;
+  font-size: 1rem;
+  line-height: 1.3;
+  letter-spacing: normal;
 }
 
 .codemirror-markdown .cm-md-strong {
@@ -890,12 +917,22 @@
   font-style: italic;
 }
 
+/* The reading view's chip, to the value. `Markdown.tsx` states the reasoning
+   and the editor was contradicting all of it: it padded the chip VERTICALLY,
+   which is the one thing that comment forbids in as many words — "padding the
+   block vertically grows the line box, so a paragraph carrying inline code was
+   visibly more leaded than the plain one under it". It also sat at 45% tint
+   against the renderer's 60, at `0.88em` against `0.875`, inherited the body's
+   colour instead of taking `fg`, and reached for `--radius-sm`, which is
+   Astryx's token and not one of the four roles this app chooses corners from.
+   Same document, same chip. */
 .codemirror-markdown .cm-md-inline-code {
-  border-radius: var(--radius-sm);
-  background: color-mix(in oklab, var(--color-active) 45%, transparent);
-  padding: 0.08em 0.25em;
+  border-radius: var(--radius-mark);
+  background: color-mix(in oklab, var(--color-active) 60%, transparent);
+  color: var(--color-fg);
+  padding: 0 0.25em;
   font-family: var(--font-mono);
-  font-size: 0.88em;
+  font-size: 0.875em;
 }
 
 .codemirror-markdown .cm-md-code-block {
