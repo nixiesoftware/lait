@@ -166,8 +166,15 @@ export function Sidebar({
       {/* The same band `SurfaceHeader` draws, so the space and the surface it is
           showing sit on one line across the whole window. It carries no bottom
           border: the rule under the work area's header separates that header
-          from its content, and the sidebar has no content to separate it from. */}
-      <div className="flex h-bar-lg shrink-0 items-center gap-0.5 px-2">
+          from its content, and the sidebar has no content to separate it from.
+
+          `px-3` here and on the body below, up from `px-2`. Every row already
+          holds its own 8px, so at an 8px wall the glyphs sat 16px in and the
+          hover fills ran to within 8px of the edge — close enough that the rail
+          read as a list pressed against the window rather than one set into it.
+          12px is the step that separates them, and it is the same wall the
+          drawer now stands the whole column against. */}
+      <div className="flex h-bar-lg shrink-0 items-center gap-0.5 px-3">
         <SpaceSwitcher
           spaces={spaces}
           current={current}
@@ -181,7 +188,7 @@ export function Sidebar({
         />
       </div>
 
-      <div className="flex min-h-0 flex-1 flex-col px-2 pb-2">
+      <div className="flex min-h-0 flex-1 flex-col px-3 pb-2">
       {agent && (
         <div className="border-line bg-bg text-dim mx-1 mt-2 flex items-start gap-2 rounded-surface border p-2 text-xs">
           <Bot className="mt-0.5 size-icon-sm shrink-0" />
@@ -411,24 +418,41 @@ function SpaceSwitcher({
         button={{
           label: title,
           "aria-label": "Space menu",
-          // `justify-start` is load-bearing, not decoration. `.astryx-button`
+          // Sized to the name, and standing in the same column as the rows
+          // below it.
+          //
+          // It used to be `flex-1`, which stretched the trigger across the rail
+          // — so the hover fill ran the full width for a control whose content
+          // is one folder glyph and a word, and the fill was the only thing on
+          // the rail claiming that much room. `min-w-0` without the grow keeps
+          // the truncation: a long space name still shortens rather than
+          // pushing the dot and the search button off the end.
+          //
+          // `justify-start` stays and is still load-bearing. `.astryx-button`
           // sets `justify-content: center`, which is right for a control that
-          // wraps its label and wrong for one stretched to a sidebar's width:
-          // the name floats into the middle of a 205px row while Inbox, My
-          // issues, Projects and Roadmap all start at the same left edge, and
-          // it reads as the selector having grown a huge horizontal padding.
-          // The padding is 6px and always was. `flex items-center` alone does
-          // not undo it — neither utility names `justify-content`, so Astryx's
-          // rule stands unopposed.
+          // wraps its label and wrong for one that may be shrunk by a narrow
+          // rail: the truncated name would centre itself in what is left. No
+          // utility here names `justify-content`, so Astryx's rule stands
+          // unopposed without it.
+          //
+          // The geometry is `navigationItem`'s — `gap-2 px-2`, no negative
+          // margin — rather than the `gap-1.5 px-1.5 -mx-1` it carried. Those
+          // differences were visible: the folder glyph sat 6px left of the
+          // Inbox glyph directly beneath it, so the rail's first row started in
+          // a different column from every other row.
           className:
-            "hover:bg-hover -mx-1 flex h-ctl-md min-w-0 flex-1 items-center justify-start gap-1.5 rounded-row px-1.5",
+            "hover:bg-hover flex h-ctl-md min-w-0 items-center justify-start gap-2 rounded-row px-2",
           variant: "ghost",
           size: "sm",
+          // `icon-sm`, which is what `NavItem` draws. At `icon-xs` the glyph was
+          // 12px centred in Astryx's 16px icon slot, so it began 2px right of
+          // every glyph under it — the two pixels that keep a column from
+          // reading as a column.
           icon:
             selected?.identity.kind === "agent" ? (
-              <Bot className="text-mute size-icon-xs" />
+              <Bot className="text-mute size-icon-sm" />
             ) : (
-              <Folder className="text-mute size-icon-xs" />
+              <Folder className="text-mute size-icon-sm" />
             ),
         }}
       >
@@ -505,15 +529,21 @@ function SpaceSwitcher({
           />
         )}
       </DropdownMenu>
-      {selected && <StatusDot status={selected.status} />}
-      <IconButton
-        label="Search issues"
-        onClick={onSearch}
-        variant="ghost"
-        size="sm"
-        tooltip="Search issues  Q"
-        icon={<Search className="size-icon-md" />}
-      />
+      {/* Pinned right by `ml-auto`, which the trigger's `flex-1` used to do for
+          them by taking all the slack itself. Now that it takes only what its
+          name needs, the free space has to be claimed by the thing that wants
+          to be at the far end. */}
+      <span className="ml-auto flex shrink-0 items-center gap-0.5">
+        {selected && <StatusDot status={selected.status} />}
+        <IconButton
+          label="Search issues"
+          onClick={onSearch}
+          variant="ghost"
+          size="sm"
+          tooltip="Search issues  Q"
+          icon={<Search className="size-icon-md" />}
+        />
+      </span>
     </div>
   );
 }

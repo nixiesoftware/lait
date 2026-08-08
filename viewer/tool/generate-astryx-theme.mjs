@@ -475,6 +475,20 @@ const components = {
    * not a `data-highlighted` attribute — so overriding `:hover` alone leaves
    * arrowing through a menu painted blue while pointing at it paints grey.
    */
+  /**
+   * The menu panel's wall, one step out from Astryx's.
+   *
+   * 4px put a row's hover fill 4px from the panel edge, which on a 12px-radius
+   * sheet is close enough that the fill's own corner fights the panel's — the
+   * row reads as pressed against the wall rather than set inside it. 6px is the
+   * same inset the rail and the pickers now use, so a menu, a combobox list and
+   * the sidebar all hold their rows off the edge by the same amount.
+   *
+   * It is a theme key rather than a call-site class because it has to reach
+   * every menu, including the ones Astryx composes internally (a submenu's
+   * panel is not something we render).
+   */
+  "dropdown-menu": { base: { padding: "6px" } },
   "dropdown-menu-item": {
     base: {
       ":hover": { backgroundColor: "var(--color-tint-hover)" },

@@ -2804,14 +2804,29 @@ export function App() {
       )}
       {/* A drawer, not a centred modal: pinned to the inline start and both
           block edges, which is what `position` expresses. It is only ever
-          opened by a control that is itself hidden above 768px. */}
+          opened by a control that is itself hidden above 768px.
+
+          `!h-auto` is what makes the second of those edges mean anything.
+          `Dialog` is `height: fit-content` by design — its own docs say "the
+          actual height will be the height of its content" — so the drawer
+          stopped under the last nav row and left the bottom of the window
+          showing the dimmed list through it. A fixed box with both block insets
+          set and `height: auto` stretches; `fit-content` was the one thing
+          stopping it. So this does not impose a height, it stops overriding the
+          one `position` already asked for.
+
+          The edge is `border-r`, and it earns its place for the same reason the
+          popover hairline in `styles.css` does: the drawer's fill is one step
+          of lightness off the scrimmed page behind it, which in dark mode is
+          nearly nothing, and a panel that slides over the content has to say
+          where it ends. */}
       <Dialog
         isOpen={mobileNav}
         onOpenChange={setMobileNav}
         width="min(320px, 88vw)"
-        maxHeight="100vh"
+        maxHeight="100dvh"
         position={{ start: 0, top: 0, bottom: 0 }}
-        className="ui-drawer bg-sunken pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
+        className="ui-drawer border-line bg-sunken !h-auto border-r pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
         aria-labelledby="mobile-nav-heading"
       >
             <h2 id="mobile-nav-heading" className="sr-only">Workspace navigation</h2>

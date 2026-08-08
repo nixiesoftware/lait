@@ -203,6 +203,11 @@ export const laitTheme = defineTheme({
         "padding": "0"
       }
     },
+    "dropdown-menu": {
+      "base": {
+        "padding": "6px"
+      }
+    },
     "dropdown-menu-item": {
       "base": {
         ":hover": {

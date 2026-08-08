@@ -157,7 +157,7 @@ export function FilterMenu({
                 <span className="font-mono">-</span> to exclude
               </p>
 
-              <div className="flex flex-col p-1">
+              <div className="flex flex-col p-1.5">
                 {/* The coarse cut, first, because it is the one you make before
                     any of the others — and the only reason the facets below need
                     a Status row at all is the cut this cannot express. These write
@@ -289,7 +289,7 @@ export function FilterMenu({
                   aria-label={`Search ${FACET_NAME[facet]}`}
                 />
               </div>
-              <div className="max-h-overlay-md overflow-y-auto p-1">
+              <div className="max-h-overlay-md overflow-y-auto p-1.5">
                 {facet === "status" &&
                   states
                     .filter((s) => matches(s.name))

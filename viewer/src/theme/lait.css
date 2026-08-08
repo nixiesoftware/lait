@@ -264,6 +264,11 @@
     --astryx-dialog-padding: 0;
   }
 
+  .astryx-dropdown-menu {
+    padding: 6px;
+    --_dropdown-menu-padding: 6px;
+  }
+
   .astryx-dropdown-menu-item:hover {
     background-color: var(--color-tint-hover);
   }

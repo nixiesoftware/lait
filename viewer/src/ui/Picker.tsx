@@ -279,7 +279,7 @@ export function Combobox(props: Props) {
               placeholder={`${label}…`}
               className="border-line placeholder:text-mute w-full border-b bg-transparent px-3 py-2 text-base outline-none"
             />
-            <Command.List className="max-h-overlay-md overflow-y-auto p-1">
+            <Command.List className="max-h-overlay-md overflow-y-auto p-1.5">
               {/* The create row replaces "no matches" when creating is possible:
                   an empty result with a dead end and an empty result with a way
                   forward are different answers. */}
