@@ -224,6 +224,7 @@ export function Combobox(props: Props) {
   if (disabled) {
     return (
       <span
+        data-tone={tone}
         className={cn(
           controlTrigger({ tone, size, open: isOpen }),
           "text-dim",
@@ -361,10 +362,19 @@ export function Combobox(props: Props) {
         )
       }
     >
+      {/* `data-tone` makes the recipe's choice addressable from CSS, which a
+          class string cannot be: `controlTrigger` compiles to a different set
+          of utilities per tone and none of them is stable enough to select on.
+          The issue rail's compact strip needs exactly this — it paints a chip
+          around every trigger except `bare`, whose whole contract is that its
+          child already IS the chip, and without the attribute the only way to
+          tell them apart was their position in the DOM, which for the label row
+          is identical either way. */}
       <button
         ref={triggerRef}
         type="button"
         aria-label={label}
+        data-tone={tone}
         className={cn(controlTrigger({ tone, size, open: isOpen }), className)}
       >
         {content}

@@ -1157,12 +1157,60 @@
   }
 
   .issue-detail-properties .issue-property > dd > div > button,
-  .issue-detail-properties .issue-property > dd > span > div > button,
+  .issue-detail-properties .issue-property > dd > span > div > button:not([data-tone="bare"]),
   .issue-detail-properties .issue-property > dd > button {
     margin-inline: 0;
     border: 1px solid var(--color-line);
     border-radius: 9999px;
     padding-inline: 8px;
+  }
+
+  /* A label is already a chip, so it does not get given one.
+     ─────────────────────────────────────────────────────────
+     Every label in the row is its own trigger at `tone="bare"`, whose entire
+     contract is that it draws no box because its child is one — and the rule
+     above was drawing one anyway. Measured, that nested a 24px `LabelChip`
+     with its own border inside a 26px bordered button: a pill inside a pill,
+     two rings a pixel apart, and the only item in the row not 28px tall.
+
+     What it does need is the row's height, which is the one thing it cannot
+     get on its own: `LabelChip` is pinned at 24px on purpose (Linear's
+     measure, and it is also drawn in list rows and on board cards, where 24
+     is right). Here it stands among 28px chips, so the trigger stretches it —
+     the chip keeps its own border and its label colour, which is the part
+     that carries meaning, and gains only the height that makes the row one
+     row. */
+  .issue-detail-properties .issue-property > dd > span > div > button[data-tone="bare"] {
+    margin-inline: 0;
+  }
+
+  .issue-detail-properties
+    .issue-property
+    > dd
+    > span
+    > div
+    > button[data-tone="bare"]
+    > * {
+    min-height: var(--spacing-ctl-md);
+    /* And the row's VOICE, which is the last thing that broke rank. A
+       `LabelChip` is `text-fg` with its border mixed 34% from the label's own
+       colour — deliberate, and right in the rail, where a label is a value you
+       are reading. In the strip it sat among eight `dim` chips on a
+       `--color-line` hairline and was the brightest, most saturated thing in
+       the row: the least urgent property shouting over the status.
+
+       Linear's row is the argument. Their `Bug` chip is the same neutral pill
+       as every other, and the colour lives entirely in the dot. Ours keeps the
+       dot — untouched below, so the label is still identifiable at a glance —
+       and gives up only the tint it was spending on the frame.
+
+       `!important` on the border because `labelSurface()` writes it inline;
+       there is no other way to reach it from here. Weight goes with the
+       colour — `LabelChip` is `font-medium`, and 500 against the row's 400 was
+       still enough on its own to make the label the loudest word in it. */
+    border-color: var(--color-line) !important;
+    color: var(--color-dim);
+    font-weight: 400;
   }
 
   /* An unset chip names its FIELD here, where nothing else does. See
