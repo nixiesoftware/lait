@@ -1072,10 +1072,17 @@ export function IssueDetail({
           </div>
         )}
 
-        <footer className="text-mute border-line mt-2 border-t pt-3 text-xs">
-          Opened by {nameOf(issue.created_by, memberOf(issue.created_by))} ·{" "}
-          {when(issue.created_at)}
-        </footer>
+        {/* No provenance footer. It said "Opened by you · 21h ago" under a rule
+            of its own, roughly 160px below an Activity entry reading "you
+            created the issue · 21h ago" — the same fact, from the same event,
+            twice on one screen, and the weaker telling of the two: the feed
+            carries the actor's avatar, sits in the order things happened, and
+            is where you would look for it.
+
+            The rule it drew was the worse half. A `border-t` is structure —
+            it says the thing below is a different kind of thing from the thing
+            above — and this one was separating the comment box from a restated
+            line, so the document ended on a division that divided nothing. */}
       </div>
       {newLabel !== null && (
         <NewLabelDialog

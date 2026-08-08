@@ -368,12 +368,23 @@ export function IssueCrumb({ id, title }: { id: string; title?: string | undefin
   return (
     <>
       <span className="text-mute shrink-0 tabular-nums">{id}</span>
-      {/* Wraps rather than running the width of the bar and ending in an
-          ellipsis. A title is the sentence that says what the issue *is*, and a
-          single line of it cut at the window edge is the half you can already
-          guess; two lines usually reach the end. It still clamps, because a bar
-          that grows with its content is a bar whose contents move. */}
-      {title && <span className="line-clamp-2 min-w-0">{title}</span>}
+      {/* One line, truncated — the reverse of what this used to argue.
+
+          It wrapped to two, on the grounds that a title is the sentence saying
+          what the issue *is* and half of it cut at the window edge is the half
+          you can already guess. That reasoning holds for a title standing
+          alone. This one never does: the document's own H1 is forty pixels
+          below it with the whole string in it, so the bar was spending a second
+          line to repeat something already on screen in full.
+
+          And it could not afford the line. The bar is `h-bar-lg` — a fixed 44px
+          that the tab strip, the surface headers and the sidebar's first row
+          all share — so the second line did not make the bar taller, it filled
+          it: 32px of text in 44px of bar, six pixels of air top and bottom
+          against the 10 every other row on that band gets. The trail's job here
+          is to say where you are, and `EXEC-1 Descriptor passing for the…`
+          says it. */}
+      {title && <span className="min-w-0 truncate">{title}</span>}
     </>
   );
 }

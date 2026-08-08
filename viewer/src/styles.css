@@ -1086,9 +1086,40 @@
    chip; a fourth shape simply would not match, which is a visible failure
    rather than a wrong one. */
 @container (max-width: 919px) {
+  /* The document's insets, which the narrow layout had never been given.
+     `.issue-detail-body` ships `gap-4 p-4` — right for a 400px strip, and the
+     wide rule below already says why it is wrong for a document, in the same
+     words this fixes here: "the title started 16px under the header bar". At
+     any width the title is the page's first and largest thing and it was
+     pressed against a fixed 44px bar with 16px between them.
+
+     Three numbers, each the narrow answer to a question the wide block asks:
+
+     - 24px on top, not its 40. The title needs to clear the bar; a pane this
+       narrow cannot also afford a margin.
+     - 16px at the sides, unchanged. Horizontal room is the scarce thing here
+       and the measure is already short — this is the one inset the wide layout
+       triples and this one must not.
+     - 96px at the bottom, its number exactly. "A body ends where its last line
+       ends, and a scroll that stops dead on the composer reads as truncation"
+       is true of a 620px column and a 1300px one alike, and it costs nothing
+       when the content does not scroll.
+
+     And 20px of rhythm, one step up from 16 — the same move the wide rule
+     makes at 24, so the title, the properties, the description and the
+     timeline read as separate movements rather than a stack of rows. */
+  .issue-detail-body {
+    gap: 20px;
+    padding: 24px 16px 96px;
+  }
+
   .issue-detail-properties {
     flex-flow: row wrap;
-    gap: 2px 8px;
+    /* Rows no tighter than columns. At `2px` the strip's own `py-0.5` brought
+       the row pitch to 34px on a 28px chip — 6px between rows against 8px
+       between chips, so a wrapped run read as one block of pills rather than
+       as two rows of them. Matching the two makes the wrap legible as a wrap. */
+    gap: 4px 8px;
   }
 
   .issue-detail-properties .rail-section,
